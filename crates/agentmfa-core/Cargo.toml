@@ -1,0 +1,58 @@
+[package]
+name = "agentmfa-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AgentMFA broker core: secret store, policy, approvals, audit, and the agent-facing daemon"
+
+[dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+base64 = { workspace = true }
+percent-encoding = { workspace = true }
+dirs = { workspace = true }
+tempfile = { workspace = true }
+getrandom = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+tracing = { workspace = true }
+
+tokio = { workspace = true }
+axum = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+tower = { workspace = true }
+url = { workspace = true }
+reqwest = { workspace = true }
+futures = { workspace = true }
+tokio-tungstenite = { workspace = true }
+
+postgres-protocol = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
+webpki-roots = { workspace = true }
+md-5 = { workspace = true }
+
+ssh-key = { workspace = true }
+rsa = { workspace = true }
+signature = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+libc = "0.2"
+core-foundation = "0.10"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio-postgres = { workspace = true }
+# Test-only key generation for the SSH agent tests (OsRng via ssh-key's
+# re-exported rand_core).
+ssh-key = { workspace = true, features = ["getrandom"] }

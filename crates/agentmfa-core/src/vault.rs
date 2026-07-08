@@ -1,0 +1,337 @@
+//! Secret value storage (DESIGN.md §3).
+//!
+//! Each secret's sensitive material is one Keychain item, keyed by the
+//! secret's stable UUID (service `com.aka.desktop`). Everything that is
+//! *not* a secret value lives in `index.json` (see `store`); the vault
+//! stores values and nothing else.
+//!
+//! Backends:
+//! - `MacKeychainVault` (macOS): the real thing, via the `keyring` crate.
+//! - `FileVault`: dev fallback for non-macOS builds, a `0600` JSON file,
+//!   *not encrypted*, loudly not for production.
+//! - `MemoryVault`: tests.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+use zeroize::Zeroizing;
+
+use crate::error::CoreError;
+use crate::types::SecretValue;
+
+/// The secret's non-sensitive Keychain attributes. Each item carries the
+/// secret's name and creation date so a fresh install on a second Mac can
+/// rebuild an index from synced items ("import N synced secrets",
+/// DESIGN.md §3).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultAttrs {
+    pub name: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Whether the item was created `kSecAttrSynchronizable` (rides iCloud
+    /// Keychain). The synchronizable attribute is effectively fixed at
+    /// creation, so toggling the setting migrates items (§3).
+    pub sync: bool,
+}
+
+/// The read path (`get`, and `migrate_sync` which reads) is `async`:
+/// network-backed vaults (Vault, cloud secret managers, just-in-time
+/// issuance) are read-bound, and the broker fetches values post-approval
+/// from async context. Writes stay synchronous — they are UI-driven CRUD
+/// against a local store today; revisit if a network backend needs them.
+#[async_trait::async_trait]
+pub trait SecretVault: Send + Sync {
+    /// Create or replace the item for `id`. `attrs.sync` selects the
+    /// synchronizable attribute at (re)creation time.
+    fn set(&self, id: &Uuid, attrs: &VaultAttrs, value: &SecretValue) -> Result<(), CoreError>;
+
+    /// Fetch the value. Called as late as possible — after approval, or for
+    /// the audited reveal-prefix read — and dropped immediately (§3).
+    async fn get(&self, id: &Uuid) -> Result<SecretValue, CoreError>;
+
+    fn delete(&self, id: &Uuid) -> Result<(), CoreError>;
+
+    /// Update the non-sensitive attributes (rename keeps the Keychain label
+    /// in sync so synced items are self-describing on another Mac).
+    fn set_attrs(&self, id: &Uuid, attrs: &VaultAttrs) -> Result<(), CoreError>;
+
+    /// Re-create the item with a different `sync` attribute (read → delete →
+    /// re-create, §3). Default impl works for every backend.
+    ///
+    /// The synchronizable attribute is fixed at creation, so the delete is
+    /// unavoidable — but a failure re-creating the item under the new
+    /// attribute would otherwise lose the value outright. If the re-create
+    /// fails we put the item back under its previous attribute (the sync flag
+    /// inverted) so a transient Keychain error can't destroy a secret; the
+    /// original error is still returned.
+    async fn migrate_sync(&self, id: &Uuid, attrs: &VaultAttrs) -> Result<(), CoreError> {
+        let value = self.get(id).await?;
+        self.delete(id)?;
+        if let Err(e) = self.set(id, attrs, &value) {
+            let restore = VaultAttrs {
+                sync: !attrs.sync,
+                ..attrs.clone()
+            };
+            if let Err(re) = self.set(id, &restore, &value) {
+                tracing::error!("vault migrate_sync restore failed for {id}: {re}");
+            }
+            return Err(e);
+        }
+        Ok(())
+    }
+}
+
+/* ------------------------------- macOS ---------------------------------- */
+
+/// The macOS Keychain backend (service `com.aka.desktop`, account = the
+/// secret's UUID), via the `keyring` crate.
+///
+/// Documented divergence from DESIGN.md §3: the `keyring` crate's
+/// apple-native backend targets the file-based login keychain and does not
+/// expose `kSecUseDataProtectionKeychain`, `kSecAttrSynchronizable`, or
+/// `SecAccessControl`. AgentMFA still gates broker-side reads with the
+/// shell's native re-auth hook before calling `get`; moving iCloud sync and
+/// per-item ACLs into the Data Protection keychain needs direct
+/// Security.framework calls plus the `keychain-access-groups` entitlement.
+#[cfg(target_os = "macos")]
+pub struct MacKeychainVault {
+    service: String,
+    /// Attribute sidecar (name/created/sync) kept next to the index so the
+    /// UI can enumerate without touching the Keychain.
+    attrs: Mutex<HashMap<Uuid, VaultAttrs>>,
+}
+
+#[cfg(target_os = "macos")]
+impl MacKeychainVault {
+    pub const SERVICE: &'static str = "com.aka.desktop";
+
+    pub fn new() -> Self {
+        Self {
+            service: Self::SERVICE.to_string(),
+            attrs: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn entry(&self, id: &Uuid) -> Result<keyring::Entry, CoreError> {
+        keyring::Entry::new(&self.service, &id.to_string())
+            .map_err(|e| CoreError::Vault(e.to_string()))
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Default for MacKeychainVault {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[async_trait::async_trait]
+impl SecretVault for MacKeychainVault {
+    fn set(&self, id: &Uuid, attrs: &VaultAttrs, value: &SecretValue) -> Result<(), CoreError> {
+        self.entry(id)?
+            .set_password(value)
+            .map_err(|e| CoreError::Vault(e.to_string()))?;
+        self.attrs.lock().unwrap().insert(*id, attrs.clone());
+        Ok(())
+    }
+
+    async fn get(&self, id: &Uuid) -> Result<SecretValue, CoreError> {
+        // Security.framework calls block; keep them off the async workers.
+        let service = self.service.clone();
+        let account = id.to_string();
+        let looked_up = tokio::task::spawn_blocking(move || {
+            keyring::Entry::new(&service, &account)
+                .map_err(|e| CoreError::Vault(e.to_string()))?
+                .get_password()
+                .map_err(|e| match e {
+                    // Distinguish "absent" from real Keychain errors, so
+                    // callers (e.g. the integrity key's create-on-first-run)
+                    // can branch.
+                    keyring::Error::NoEntry => CoreError::SecretNotFound,
+                    other => CoreError::Vault(other.to_string()),
+                })
+        })
+        .await
+        .map_err(|e| CoreError::Vault(format!("keychain task: {e}")))??;
+        Ok(Zeroizing::new(looked_up))
+    }
+
+    fn delete(&self, id: &Uuid) -> Result<(), CoreError> {
+        self.entry(id)?
+            .delete_credential()
+            .map_err(|e| CoreError::Vault(e.to_string()))?;
+        self.attrs.lock().unwrap().remove(id);
+        Ok(())
+    }
+
+    fn set_attrs(&self, id: &Uuid, attrs: &VaultAttrs) -> Result<(), CoreError> {
+        self.attrs.lock().unwrap().insert(*id, attrs.clone());
+        Ok(())
+    }
+}
+
+/* ----------------------------- dev fallback ------------------------------ */
+
+/// File-backed vault for non-macOS development builds.
+///
+/// **Not encrypted.** A `0600` JSON file standing in for the Keychain so the
+/// daemon and UI can be developed and integration-tested on Linux. The real
+/// product ships with [`MacKeychainVault`]; this backend logs a warning at
+/// construction.
+pub struct FileVault {
+    path: PathBuf,
+    state: Mutex<FileVaultState>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct FileVaultState {
+    items: HashMap<Uuid, FileVaultItem>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct FileVaultItem {
+    attrs: VaultAttrs,
+    value: String,
+}
+
+impl FileVault {
+    pub fn open(path: PathBuf) -> Result<Self, CoreError> {
+        tracing::warn!(
+            "FileVault in use ({}): dev-only fallback, secret values are NOT encrypted at rest",
+            path.display()
+        );
+        let state = match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => FileVaultState::default(),
+            Err(e) => return Err(e.into()),
+        };
+        Ok(Self {
+            path,
+            state: Mutex::new(state),
+        })
+    }
+
+    fn persist(&self, state: &FileVaultState) -> Result<(), CoreError> {
+        let bytes = serde_json::to_vec_pretty(state)?;
+        crate::paths::write_private_atomic(&self.path, &bytes)?;
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl SecretVault for FileVault {
+    fn set(&self, id: &Uuid, attrs: &VaultAttrs, value: &SecretValue) -> Result<(), CoreError> {
+        let mut state = self.state.lock().unwrap();
+        state.items.insert(
+            *id,
+            FileVaultItem {
+                attrs: attrs.clone(),
+                value: value.to_string(),
+            },
+        );
+        self.persist(&state)
+    }
+
+    async fn get(&self, id: &Uuid) -> Result<SecretValue, CoreError> {
+        let state = self.state.lock().unwrap();
+        state
+            .items
+            .get(id)
+            .map(|item| Zeroizing::new(item.value.clone()))
+            .ok_or(CoreError::SecretNotFound)
+    }
+
+    fn delete(&self, id: &Uuid) -> Result<(), CoreError> {
+        let mut state = self.state.lock().unwrap();
+        state.items.remove(id).ok_or(CoreError::SecretNotFound)?;
+        self.persist(&state)
+    }
+
+    fn set_attrs(&self, id: &Uuid, attrs: &VaultAttrs) -> Result<(), CoreError> {
+        let mut state = self.state.lock().unwrap();
+        let item = state.items.get_mut(id).ok_or(CoreError::SecretNotFound)?;
+        item.attrs = attrs.clone();
+        self.persist(&state)
+    }
+}
+
+/* -------------------------------- tests ---------------------------------- */
+
+/// In-memory vault for unit tests.
+#[derive(Default)]
+pub struct MemoryVault {
+    items: Mutex<HashMap<Uuid, (VaultAttrs, String)>>,
+}
+
+impl MemoryVault {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn len(&self) -> usize {
+        self.items.lock().unwrap().len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    /// Test helper: inspect an item's sync attribute.
+    pub fn sync_flag(&self, id: &Uuid) -> Option<bool> {
+        self.items.lock().unwrap().get(id).map(|(a, _)| a.sync)
+    }
+}
+
+#[async_trait::async_trait]
+impl SecretVault for MemoryVault {
+    fn set(&self, id: &Uuid, attrs: &VaultAttrs, value: &SecretValue) -> Result<(), CoreError> {
+        self.items
+            .lock()
+            .unwrap()
+            .insert(*id, (attrs.clone(), value.to_string()));
+        Ok(())
+    }
+
+    async fn get(&self, id: &Uuid) -> Result<SecretValue, CoreError> {
+        self.items
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|(_, v)| Zeroizing::new(v.clone()))
+            .ok_or(CoreError::SecretNotFound)
+    }
+
+    fn delete(&self, id: &Uuid) -> Result<(), CoreError> {
+        self.items
+            .lock()
+            .unwrap()
+            .remove(id)
+            .ok_or(CoreError::SecretNotFound)?;
+        Ok(())
+    }
+
+    fn set_attrs(&self, id: &Uuid, attrs: &VaultAttrs) -> Result<(), CoreError> {
+        let mut items = self.items.lock().unwrap();
+        let item = items.get_mut(id).ok_or(CoreError::SecretNotFound)?;
+        item.0 = attrs.clone();
+        Ok(())
+    }
+}
+
+/// The platform-default vault: Keychain on macOS, the dev file vault
+/// elsewhere.
+pub fn platform_vault(
+    paths: &crate::paths::Paths,
+) -> Result<std::sync::Arc<dyn SecretVault>, CoreError> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = paths;
+        Ok(std::sync::Arc::new(MacKeychainVault::new()))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(std::sync::Arc::new(FileVault::open(
+            paths.dev_vault_file(),
+        )?))
+    }
+}

@@ -1,0 +1,371 @@
+//! Structured audit log (DESIGN.md §8).
+//!
+//! Every pairing, policy decision, and brokered call, plus vault-touching
+//! UI actions like reveal/copy, is appended to
+//! `~/Library/Application Support/agentmfa/audit.jsonl` and surfaced in the
+//! activity view. Secret values never appear in it.
+
+use std::collections::BTreeMap;
+use std::fs::OpenOptions;
+use std::io::Write as _;
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::types::{ConfirmationMethod, DecisionContext, DecisionSurface};
+use crate::Result;
+
+/// Schema version written on every new entry. Entries with no `v` field
+/// predate versioning and read back as version 1.
+///
+/// History: v1 — unversioned entries (typed columns only, machine facts
+/// sometimes embedded in `text`/`detail` prose); v2 — adds `v` and the
+/// structured `fields` map; every fact an aggregator would query lives in
+/// a typed column or `fields`, and `text`/`detail` are presentation only.
+pub const AUDIT_SCHEMA_VERSION: u32 = 2;
+
+fn schema_v1() -> u32 {
+    1
+}
+
+/// One audit entry. `kind` is the stable machine key; `text`/`detail` are
+/// the human strings the activity view renders.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditEntry {
+    /// Schema version (see [`AUDIT_SCHEMA_VERSION`]).
+    #[serde(default = "schema_v1")]
+    pub v: u32,
+    pub ts: DateTime<Utc>,
+    pub kind: AuditKind,
+    /// Human-readable summary ("claude-code requested github").
+    pub text: String,
+    /// Optional second line ("GET api.github.com/user/repos").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    /// Matching rule for rule-based allows (§8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<Uuid>,
+    /// Decision attribution (§8): the deciding principal (absent for the
+    /// local machine's single user), the surface the decision came from,
+    /// and how the high-consequence confirmation was satisfied (absent
+    /// when no confirmation was required).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approver: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<DecisionSurface>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation: Option<ConfirmationMethod>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Session byte counts for WS/PG sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_up: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_down: Option<u64>,
+    /// Structured machine-readable facts that have no dedicated column:
+    /// counts, old/new names, methods, targets. Anything a future
+    /// aggregator would query belongs here (or in a typed column above),
+    /// never only in `text`/`detail` prose.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fields: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditKind {
+    // Pairing lifecycle
+    PairRequested,
+    Paired,
+    PairDenied,
+    TokenRevoked,
+    PeerIdentityMismatch,
+    // Requests + decisions
+    Requested,
+    AllowedOnce,
+    AutoAllowed,
+    Denied,
+    ApprovalTimeout,
+    Abandoned,
+    Listed,
+    // Rules
+    RuleSaved,
+    RuleRemoved,
+    // Upstream execution / sessions
+    HttpExecuted,
+    SessionOpened,
+    SessionClosed,
+    /// One SSH signature issued (or refused) by the agent adapter (§4.4).
+    SshSigned,
+    // Vault + config actions from the UI
+    SecretAdded,
+    SecretUpdated,
+    SecretDeleted,
+    SecretRevealed,
+    SecretCopied,
+    ConnectionAdded,
+    ConnectionUpdated,
+    ConnectionDeleted,
+    SettingsChanged,
+    // Rate limiting / budgets
+    RateLimited,
+}
+
+impl AuditKind {
+    /// Icon used by the activity view (mirrors the mockup's vocabulary).
+    pub fn icon(&self) -> &'static str {
+        match self {
+            AuditKind::PairRequested | AuditKind::Paired => "🔗",
+            AuditKind::PairDenied | AuditKind::TokenRevoked => "🔒",
+            AuditKind::PeerIdentityMismatch => "🚫",
+            AuditKind::Requested => "📨",
+            AuditKind::AllowedOnce => "✅",
+            AuditKind::AutoAllowed => "⚡",
+            AuditKind::Denied => "⛔",
+            AuditKind::ApprovalTimeout => "⏱",
+            AuditKind::Abandoned => "🚪",
+            AuditKind::Listed => "📄",
+            AuditKind::RuleSaved => "📜",
+            AuditKind::RuleRemoved => "🗑",
+            AuditKind::HttpExecuted => "🌐",
+            AuditKind::SessionOpened => "📥",
+            AuditKind::SessionClosed => "📤",
+            AuditKind::SshSigned => "🔏",
+            AuditKind::SecretAdded => "➕",
+            AuditKind::SecretUpdated => "✏️",
+            AuditKind::SecretDeleted => "🗑",
+            AuditKind::SecretRevealed => "👁",
+            AuditKind::SecretCopied => "📋",
+            AuditKind::ConnectionAdded => "🔌",
+            AuditKind::ConnectionUpdated => "✏️",
+            AuditKind::ConnectionDeleted => "🗑",
+            AuditKind::SettingsChanged => "💳",
+            AuditKind::RateLimited => "🛑",
+        }
+    }
+}
+
+impl AuditEntry {
+    pub fn new(kind: AuditKind, text: impl Into<String>) -> Self {
+        Self {
+            v: AUDIT_SCHEMA_VERSION,
+            ts: Utc::now(),
+            kind,
+            text: text.into(),
+            detail: None,
+            agent: None,
+            connection: None,
+            outcome: None,
+            rule_id: None,
+            approver: None,
+            surface: None,
+            confirmation: None,
+            duration_ms: None,
+            bytes_up: None,
+            bytes_down: None,
+            fields: BTreeMap::new(),
+        }
+    }
+    /// Attach a structured fact (see the `fields` doc).
+    pub fn field(mut self, key: &str, value: impl Into<serde_json::Value>) -> Self {
+        self.fields.insert(key.to_string(), value.into());
+        self
+    }
+    /// Attach decision attribution: who decided and from which surface.
+    pub fn context(mut self, ctx: &DecisionContext) -> Self {
+        self.approver = ctx.approver.clone();
+        self.surface = Some(ctx.surface);
+        self
+    }
+    pub fn confirmation(mut self, method: ConfirmationMethod) -> Self {
+        self.confirmation = Some(method);
+        self
+    }
+    pub fn detail(mut self, d: impl Into<String>) -> Self {
+        self.detail = Some(d.into());
+        self
+    }
+    pub fn agent(mut self, a: impl Into<String>) -> Self {
+        self.agent = Some(a.into());
+        self
+    }
+    pub fn connection(mut self, c: impl Into<String>) -> Self {
+        self.connection = Some(c.into());
+        self
+    }
+    pub fn outcome(mut self, o: impl Into<String>) -> Self {
+        self.outcome = Some(o.into());
+        self
+    }
+    pub fn rule(mut self, id: Uuid) -> Self {
+        self.rule_id = Some(id);
+        self
+    }
+    pub fn duration_ms(mut self, ms: u64) -> Self {
+        self.duration_ms = Some(ms);
+        self
+    }
+    pub fn bytes(mut self, up: u64, down: u64) -> Self {
+        self.bytes_up = Some(up);
+        self.bytes_down = Some(down);
+        self
+    }
+}
+
+/// Observer callback notified on every appended entry.
+type AuditListener = Box<dyn Fn(&AuditEntry) + Send + Sync>;
+
+/// Append-only jsonl writer plus a tail reader for the activity view.
+pub struct AuditLog {
+    path: PathBuf,
+    file: Mutex<std::fs::File>,
+    /// Observers (the UI event bridge) notified on every append.
+    listeners: Mutex<Vec<AuditListener>>,
+}
+
+impl AuditLog {
+    pub fn open(path: PathBuf) -> Result<Self> {
+        if let Some(dir) = path.parent() {
+            crate::paths::create_private_dir(dir)?;
+        }
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        Ok(Self {
+            path,
+            file: Mutex::new(file),
+            listeners: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Register an observer called (synchronously) for every appended entry.
+    pub fn subscribe(&self, f: impl Fn(&AuditEntry) + Send + Sync + 'static) {
+        self.listeners.lock().unwrap().push(Box::new(f));
+    }
+
+    pub fn append(&self, entry: AuditEntry) {
+        {
+            let mut file = self.file.lock().unwrap();
+            match serde_json::to_string(&entry) {
+                Ok(line) => {
+                    if let Err(e) = writeln!(file, "{line}") {
+                        tracing::error!("audit append failed: {e}");
+                    }
+                }
+                Err(e) => tracing::error!("audit serialize failed: {e}"),
+            }
+        }
+        for listener in self.listeners.lock().unwrap().iter() {
+            listener(&entry);
+        }
+    }
+
+    /// Newest-first tail for the activity view. Unparseable lines are
+    /// skipped (the log survives partial writes).
+    pub fn recent(&self, limit: usize) -> Vec<AuditEntry> {
+        let Ok(contents) = std::fs::read_to_string(&self.path) else {
+            return Vec::new();
+        };
+        let mut entries: Vec<AuditEntry> = contents
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        entries.reverse();
+        entries.truncate(limit);
+        entries
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn append_and_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = AuditLog::open(dir.path().join("audit.jsonl")).unwrap();
+        log.append(
+            AuditEntry::new(AuditKind::PairRequested, "Pair request from claude-code")
+                .agent("claude-code"),
+        );
+        log.append(
+            AuditEntry::new(AuditKind::Requested, "claude-code requested github")
+                .agent("claude-code")
+                .connection("github")
+                .detail("GET api.github.com/user/repos"),
+        );
+        let recent = log.recent(10);
+        assert_eq!(recent.len(), 2);
+        // newest first
+        assert_eq!(recent[0].kind, AuditKind::Requested);
+        assert_eq!(recent[0].connection.as_deref(), Some("github"));
+        assert_eq!(recent[1].kind, AuditKind::PairRequested);
+    }
+
+    #[test]
+    fn listeners_fire() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let log = AuditLog::open(dir.path().join("audit.jsonl")).unwrap();
+        let count = Arc::new(AtomicUsize::new(0));
+        let c2 = count.clone();
+        log.subscribe(move |_| {
+            c2.fetch_add(1, Ordering::SeqCst);
+        });
+        log.append(AuditEntry::new(AuditKind::SecretAdded, "Secret added: X"));
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn schema_is_versioned_and_legacy_entries_read_as_v1() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let log = AuditLog::open(path.clone()).unwrap();
+        log.append(
+            AuditEntry::new(AuditKind::SecretUpdated, "Secret updated: X")
+                .field("renamed_from", "X_OLD")
+                .field("templates_rewritten", 2),
+        );
+        // A pre-versioning line: no `v`, no `fields`.
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .and_then(|mut f| {
+                writeln!(
+                    f,
+                    r#"{{"ts":"2026-01-01T00:00:00Z","kind":"secret_added","text":"Secret added: Y"}}"#
+                )
+            })
+            .unwrap();
+        let recent = log.recent(10);
+        assert_eq!(recent[0].v, 1, "legacy entry defaults to v1");
+        assert!(recent[0].fields.is_empty());
+        assert_eq!(recent[1].v, AUDIT_SCHEMA_VERSION);
+        assert_eq!(recent[1].fields["renamed_from"], "X_OLD");
+        assert_eq!(recent[1].fields["templates_rewritten"], 2);
+    }
+
+    #[test]
+    fn corrupt_lines_are_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let log = AuditLog::open(path.clone()).unwrap();
+        log.append(AuditEntry::new(AuditKind::SecretAdded, "ok"));
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .and_then(|mut f| writeln!(f, "{{not json"))
+            .unwrap();
+        log.append(AuditEntry::new(AuditKind::SecretDeleted, "also ok"));
+        assert_eq!(log.recent(10).len(), 2);
+    }
+}

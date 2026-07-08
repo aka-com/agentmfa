@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AgentMFA</title>
+  <link rel="stylesheet" href="/vendor/tippy.css">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <!-- The chrome (main window / approval window) is chosen from
+       location.hash by app.js, so both Tauri windows share one file. -->
+  <div id="root"></div>
+  <div id="toasts" class="toasts"></div>
+  <!-- Tooltip library (Tippy.js on Popper, self-hosted for the 'self'-only
+       CSP). Popper must load first — it defines window.Popper, which Tippy
+       consumes; Tippy then exposes window.tippy for app.js. -->
+  <script src="/vendor/popper.min.js"></script>
+  <script src="/vendor/tippy.umd.min.js"></script>
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

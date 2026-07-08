@@ -1,0 +1,18 @@
+[package]
+name = "agentmfa-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AgentMFA command line: skill file generator and dev harness"
+
+[[bin]]
+name = "agentmfa"
+path = "src/main.rs"
+
+[dependencies]
+agentmfa-core = { workspace = true }
+clap = { workspace = true }
+dirs = { workspace = true }
+tokio = { workspace = true }
+tracing-subscriber = { workspace = true }
+zeroize = { workspace = true }

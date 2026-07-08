@@ -1,0 +1,14 @@
+{
+  "name": "agentmfa",
+  "private": true,
+  "scripts": {
+    "build": "bash scripts/build.sh",
+    "start": "cargo run --manifest-path src-tauri/Cargo.toml --bin agentmfa-app",
+    "release": "bash scripts/release.sh",
+    "test": "cargo test --workspace",
+    "clippy": "cargo clippy --workspace --all-targets"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

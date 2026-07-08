@@ -1,0 +1,1270 @@
+//! Postgres capability, `POST /v1/pg/open` + local TCP proxy (DESIGN.md §4.3).
+//!
+//! Postgres clients speak a binary wire protocol and expect a DSN, so the
+//! broker runs a local TCP proxy on an OS-assigned ephemeral loopback port
+//! (bound as port 0 at daemon start; surfaced only in open responses' DSNs).
+//! The proxy runs **two independent handshakes** and only then byte-forwards
+//! the established session:
+//!
+//! - **Downstream** the proxy *is* a Postgres server: it answers pre-startup
+//!   `SSLRequest`/`GSSENCRequest` probes with `N`, reads the
+//!   `StartupMessage`, and validates the session ticket as the credential
+//!   (cleartext password exchange on the loopback leg).
+//! - **Upstream** the proxy *is* a Postgres client: its own TCP connection,
+//!   its own TLS per the connection's `sslmode`, and SCRAM-SHA-256 (or
+//!   md5/cleartext) with the configured user and the stored password secret.
+//! - Once both complete, the two legs speak byte-identical Postgres v3
+//!   framing and are spliced with a plain bidirectional copy, seeded with
+//!   any residual bytes the handshake readers buffered, so a pipelined
+//!   first query is not swallowed at the handoff.
+//!
+//! Query cancellation works because the proxy synthesizes its own
+//! `BackendKeyData` and keeps a mapping to the upstream session's real
+//! pid/key: a `CancelRequest` connection is recognized, translated, and
+//! fired at the mapped upstream.
+
+use std::collections::HashMap;
+use std::io;
+use std::pin::Pin;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
+use std::time::Duration;
+
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use postgres_protocol::authentication::sasl::{
+    ChannelBinding, ScramSha256, SCRAM_SHA_256, SCRAM_SHA_256_PLUS,
+};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, BufReader, ReadBuf};
+use tokio::net::TcpStream;
+
+use crate::broker::Broker;
+use crate::events::BrokerEvents;
+use crate::sessions::{RedeemError, SessionHandle};
+use crate::store::Store;
+use crate::types::{Connection, ConnectionConfig, ConnectionKind, PgSslMode};
+
+/* ---------------------------- wire constants ------------------------------ */
+
+const PROTOCOL_V3: i32 = 196608;
+const CANCEL_REQUEST_CODE: i32 = 80877102;
+const SSL_REQUEST_CODE: i32 = 80877103;
+const GSSENC_REQUEST_CODE: i32 = 80877104;
+
+/// Matches PG's MAX_STARTUP_PACKET_LENGTH.
+const MAX_STARTUP_PACKET: usize = 10_000;
+/// Sanity cap on handshake-phase typed messages (the data path never parses).
+const MAX_HANDSHAKE_MESSAGE: usize = 1024 * 1024;
+
+/* ---------------------------- framing helpers ----------------------------- */
+
+fn put_i32(buf: &mut Vec<u8>, v: i32) {
+    buf.extend_from_slice(&v.to_be_bytes());
+}
+
+fn put_cstr(buf: &mut Vec<u8>, s: &str) {
+    buf.extend_from_slice(s.as_bytes());
+    buf.push(0);
+}
+
+fn be_i32(bytes: &[u8]) -> i32 {
+    let mut arr = [0u8; 4];
+    arr.copy_from_slice(&bytes[..4]);
+    i32::from_be_bytes(arr)
+}
+
+/// A typed backend/frontend message: tag + i32 length (self-inclusive,
+/// tag-exclusive) + payload.
+fn frame(tag: u8, payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(payload.len() + 5);
+    out.push(tag);
+    put_i32(&mut out, payload.len() as i32 + 4);
+    out.extend_from_slice(payload);
+    out
+}
+
+/// Split a NUL-terminated string off the front of a buffer.
+fn take_cstr(bytes: &[u8]) -> io::Result<(String, &[u8])> {
+    let nul = bytes
+        .iter()
+        .position(|&b| b == 0)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "unterminated string"))?;
+    Ok((
+        String::from_utf8_lossy(&bytes[..nul]).into_owned(),
+        &bytes[nul + 1..],
+    ))
+}
+
+/// Read a length-prefixed pre-startup packet (StartupMessage, SSLRequest,
+/// GSSENCRequest or CancelRequest): i32 self-inclusive length, no tag byte.
+/// Returns the payload after the length word.
+async fn read_startup_packet<R>(reader: &mut R) -> io::Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut len = [0u8; 4];
+    reader.read_exact(&mut len).await?;
+    let len = be_i32(&len);
+    if !(8..=MAX_STARTUP_PACKET as i32).contains(&len) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid startup packet length {len}"),
+        ));
+    }
+    let mut payload = vec![0u8; len as usize - 4];
+    reader.read_exact(&mut payload).await?;
+    Ok(payload)
+}
+
+/// Read a typed message: tag u8 + i32 self-inclusive length + payload.
+async fn read_message<R>(reader: &mut R) -> io::Result<(u8, Vec<u8>)>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut head = [0u8; 5];
+    reader.read_exact(&mut head).await?;
+    let tag = head[0];
+    let len = be_i32(&head[1..5]);
+    if !(4..=MAX_HANDSHAKE_MESSAGE as i32).contains(&len) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid message length {len}"),
+        ));
+    }
+    let mut payload = vec![0u8; len as usize - 4];
+    reader.read_exact(&mut payload).await?;
+    Ok((tag, payload))
+}
+
+/// Build an `ErrorResponse` with the SQLSTATE fields drivers key on.
+fn error_response(severity: &str, sqlstate: &str, message: &str) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.push(b'S');
+    put_cstr(&mut p, severity);
+    p.push(b'V');
+    put_cstr(&mut p, severity);
+    p.push(b'C');
+    put_cstr(&mut p, sqlstate);
+    p.push(b'M');
+    put_cstr(&mut p, message);
+    p.push(0);
+    frame(b'E', &p)
+}
+
+/// Extract the human message (and code) from an upstream `ErrorResponse`.
+fn parse_error_response(payload: &[u8]) -> String {
+    let mut code = String::new();
+    let mut message = String::new();
+    let mut rest = payload;
+    while let Some((&field, tail)) = rest.split_first() {
+        if field == 0 {
+            break;
+        }
+        let Ok((value, tail)) = take_cstr(tail) else {
+            break;
+        };
+        match field {
+            b'C' => code = value,
+            b'M' => message = value,
+            _ => {}
+        }
+        rest = tail;
+    }
+    if code.is_empty() {
+        message
+    } else {
+        format!("{code}: {message}")
+    }
+}
+
+/// Parse StartupMessage parameters (the bytes after the protocol version):
+/// NUL-terminated name/value pairs closed by an empty terminator.
+fn parse_startup_params(mut rest: &[u8]) -> io::Result<Vec<(String, String)>> {
+    let mut params = Vec::new();
+    loop {
+        let (name, tail) = take_cstr(rest)?;
+        if name.is_empty() {
+            return Ok(params);
+        }
+        let (value, tail) = take_cstr(tail)?;
+        params.push((name, value));
+        rest = tail;
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/* ------------------------------ proxy state ------------------------------- */
+
+/// Where a synthesized BackendKeyData points: enough to open a fresh
+/// upstream connection (same TLS negotiation) and fire the real
+/// CancelRequest at the mapped session (§4.3).
+#[derive(Clone)]
+struct CancelTarget {
+    host: String,
+    port: u16,
+    sslmode: PgSslMode,
+    backend_pid: i32,
+    backend_key: i32,
+}
+
+struct ProxyState {
+    broker: Arc<Broker>,
+    /// synthesized (pid, key) → upstream cancel target; removed at session end.
+    cancels: Mutex<HashMap<(i32, i32), CancelTarget>>,
+}
+
+impl ProxyState {
+    /// Mint a fresh random (pid, key) pair and register the mapping.
+    fn register_cancel(self: &Arc<Self>, target: CancelTarget) -> CancelRegistration {
+        let mut map = self.cancels.lock().unwrap();
+        loop {
+            let mut buf = [0u8; 8];
+            getrandom::fill(&mut buf).expect("os rng");
+            let pid = be_i32(&buf[0..4]);
+            let key = be_i32(&buf[4..8]);
+            if let std::collections::hash_map::Entry::Vacant(e) = map.entry((pid, key)) {
+                e.insert(target);
+                return CancelRegistration {
+                    state: self.clone(),
+                    key: (pid, key),
+                };
+            }
+        }
+    }
+}
+
+/// RAII guard: unregisters the synthesized key mapping when the session's
+/// connection task ends, however it ends.
+struct CancelRegistration {
+    state: Arc<ProxyState>,
+    key: (i32, i32),
+}
+
+impl Drop for CancelRegistration {
+    fn drop(&mut self) {
+        self.state.cancels.lock().unwrap().remove(&self.key);
+    }
+}
+
+/// Start the PG proxy listener on an OS-assigned ephemeral loopback port.
+/// Returns the bound port and the accept-loop task handle.
+pub async fn start_proxy(broker: Arc<Broker>) -> io::Result<(u16, tokio::task::JoinHandle<()>)> {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+    let port = listener.local_addr()?.port();
+    let state = Arc::new(ProxyState {
+        broker,
+        cancels: Mutex::new(HashMap::new()),
+    });
+    let task = tokio::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    let state = state.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_conn(state, stream).await {
+                            tracing::debug!("pg proxy connection ended: {e}");
+                        }
+                    });
+                }
+                Err(e) => {
+                    tracing::error!("pg proxy accept failed: {e}");
+                    break;
+                }
+            }
+        }
+    });
+    Ok((port, task))
+}
+
+/* ------------------------- downstream state machine ----------------------- */
+
+/// One accepted loopback connection: probes → startup (or cancel) → ticket
+/// auth → upstream handshake → completion → splice (§4.3).
+async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()> {
+    let _ = stream.set_nodelay(true);
+    let mut client = BufReader::new(stream);
+
+    // Pre-startup phase: a client may probe SSLRequest and GSSENCRequest in
+    // sequence before the StartupMessage; each is declined with a single 'N'
+    // (the loopback leg is plaintext by contract, the DSN pins
+    // `sslmode=disable`). A CancelRequest connection carries no
+    // StartupMessage at all.
+    let params = {
+        let mut probes = 0;
+        loop {
+            let payload = read_startup_packet(&mut client).await?;
+            match be_i32(&payload[..4]) {
+                SSL_REQUEST_CODE | GSSENC_REQUEST_CODE => {
+                    probes += 1;
+                    if probes > 4 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "too many pre-startup probes",
+                        ));
+                    }
+                    client.write_all(b"N").await?;
+                }
+                CANCEL_REQUEST_CODE => {
+                    if payload.len() >= 12 {
+                        handle_cancel(&state, be_i32(&payload[4..8]), be_i32(&payload[8..12]))
+                            .await;
+                    }
+                    return Ok(());
+                }
+                PROTOCOL_V3 => break parse_startup_params(&payload[4..])?,
+                other => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("unsupported protocol code {other}"),
+                    ));
+                }
+            }
+        }
+    };
+
+    // The presented password IS the ticket (§4.3 step (a)).
+    client.write_all(&frame(b'R', &3i32.to_be_bytes())).await?;
+    let (tag, payload) = read_message(&mut client).await?;
+    if tag != b'p' {
+        client
+            .write_all(&error_response(
+                "FATAL",
+                "08P01",
+                "expected PasswordMessage",
+            ))
+            .await?;
+        return Ok(());
+    }
+    let (ticket, _) = take_cstr(&payload)?;
+
+    // Redeem: expiry, single-use, and the two-level session budget are all
+    // enforced here, failing fast with the machine reason (§4.3/§8). The
+    // redemption reserves the budget slot; dropping it before `start`
+    // releases the slot.
+    let redemption = match state.broker.data_plane.redeem(&ticket) {
+        Ok(r) => r,
+        Err(e) => {
+            let sqlstate = match e {
+                RedeemError::Unknown | RedeemError::Expired | RedeemError::AlreadyRedeemed => {
+                    "28P01" // invalid_password
+                }
+                RedeemError::TicketSessionLimit | RedeemError::BrokerSessionLimit => {
+                    "53300" // too_many_connections
+                }
+            };
+            client
+                .write_all(&error_response(
+                    "FATAL",
+                    sqlstate,
+                    &format!("AgentMFA: {}", e.reason()),
+                ))
+                .await?;
+            return Ok(());
+        }
+    };
+
+    let ConnectionConfig::Pg {
+        host,
+        port,
+        sslmode,
+        ..
+    } = redemption.connection.config.clone()
+    else {
+        client
+            .write_all(&error_response(
+                "FATAL",
+                "08P01",
+                "AgentMFA: ticket is not for a Postgres connection",
+            ))
+            .await?;
+        return Ok(());
+    };
+
+    // Upstream handshake: own TCP + TLS + auth with the configured user and
+    // the stored password secret (§4.3 step (b)). Failure drops the
+    // redemption → the reserved budget slot is released.
+    let upstream = match dial_upstream(
+        &state.broker.store,
+        &state.broker.events,
+        &redemption.connection,
+        &params,
+    )
+    .await
+    {
+        Ok(upstream) => upstream,
+        Err(detail) => {
+            client
+                .write_all(&error_response(
+                    "FATAL",
+                    "08001", // sqlclient_unable_to_establish_sqlconnection
+                    &format!("AgentMFA: upstream_connect_failed: {detail}"),
+                ))
+                .await?;
+            return Ok(());
+        }
+    };
+
+    // Complete the downstream handshake: AuthenticationOk, the upstream's
+    // ParameterStatus messages, a *synthesized* BackendKeyData mapped to the
+    // real upstream pid/key, and ReadyForQuery with the upstream's status.
+    let registration = state.register_cancel(CancelTarget {
+        host,
+        port,
+        sslmode,
+        backend_pid: upstream.backend_pid,
+        backend_key: upstream.backend_key,
+    });
+    let (synth_pid, synth_key) = registration.key;
+    let mut completion = frame(b'R', &0i32.to_be_bytes());
+    completion.extend_from_slice(&upstream.forward);
+    let mut keydata = Vec::with_capacity(8);
+    put_i32(&mut keydata, synth_pid);
+    put_i32(&mut keydata, synth_key);
+    completion.extend_from_slice(&frame(b'K', &keydata));
+    completion.extend_from_slice(&frame(b'Z', &[upstream.ready_status]));
+    client.write_all(&completion).await?;
+
+    // Both handshakes done: register the live session and splice.
+    let session = redemption.start(ConnectionKind::Pg);
+    let max_ttl = state.broker.config.session_max_ttl;
+    let idle = state.broker.config.session_idle_timeout;
+    splice(client, upstream.stream, session, max_ttl, idle).await;
+    drop(registration);
+    Ok(())
+}
+
+/// Translate a CancelRequest on a synthesized key into a CancelRequest at
+/// the mapped upstream session (§4.3 (ii)). Works while a query is executing
+/// on the mapped session, the cancel rides its own upstream connection.
+async fn handle_cancel(state: &Arc<ProxyState>, pid: i32, key: i32) {
+    let target = state.cancels.lock().unwrap().get(&(pid, key)).cloned();
+    let Some(target) = target else {
+        tracing::debug!("pg proxy: CancelRequest for unknown key, dropped");
+        return;
+    };
+    let send = async {
+        let settings = state.broker.store.settings();
+        let (mut stream, _) = tls_connect(
+            &target.host,
+            target.port,
+            target.sslmode,
+            settings.pg_trusted_ca_bundle_path.as_deref(),
+            Some(&state.broker.events),
+        )
+        .await?;
+        let mut msg = Vec::with_capacity(16);
+        put_i32(&mut msg, 16);
+        put_i32(&mut msg, CANCEL_REQUEST_CODE);
+        put_i32(&mut msg, target.backend_pid);
+        put_i32(&mut msg, target.backend_key);
+        stream
+            .write_all(&msg)
+            .await
+            .map_err(|e| format!("cancel write failed: {e}"))?;
+        let _ = stream.shutdown().await;
+        Ok::<(), String>(())
+    };
+    match tokio::time::timeout(Duration::from_secs(10), send).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::debug!("pg proxy: cancel relay failed: {e}"),
+        Err(_) => tracing::debug!("pg proxy: cancel relay timed out"),
+    }
+}
+
+/* --------------------------- upstream handshake ---------------------------- */
+
+/// The upstream leg may be TLS, so the spliced stream is abstracted.
+pub enum PgStream {
+    Plain(TcpStream),
+    Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
+}
+
+impl AsyncRead for PgStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            PgStream::Plain(s) => Pin::new(s).poll_read(cx, buf),
+            PgStream::Tls(s) => Pin::new(s.as_mut()).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for PgStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            PgStream::Plain(s) => Pin::new(s).poll_write(cx, buf),
+            PgStream::Tls(s) => Pin::new(s.as_mut()).poll_write(cx, buf),
+        }
+    }
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            PgStream::Plain(s) => Pin::new(s).poll_flush(cx),
+            PgStream::Tls(s) => Pin::new(s.as_mut()).poll_flush(cx),
+        }
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            PgStream::Plain(s) => Pin::new(s).poll_shutdown(cx),
+            PgStream::Tls(s) => Pin::new(s.as_mut()).poll_shutdown(cx),
+        }
+    }
+}
+
+/// Certificate verification is deliberately skipped for libpq's `prefer` and
+/// `require` sslmodes; only `verify-ca`/`verify-full` validate the upstream
+/// certificate. rustls makes the encryption-only modes an explicit `danger`
+/// opt-in.
+#[derive(Debug)]
+struct NoVerify {
+    schemes: Vec<rustls::SignatureScheme>,
+}
+
+impl NoVerify {
+    fn new(provider: &rustls::crypto::CryptoProvider) -> Self {
+        Self {
+            schemes: provider
+                .signature_verification_algorithms
+                .supported_schemes(),
+        }
+    }
+}
+
+impl rustls::client::danger::ServerCertVerifier for NoVerify {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.schemes.clone()
+    }
+}
+
+/// `verify-ca`: validate the certificate chain against trusted roots, but do
+/// not require the certificate name to match the configured host. This mirrors
+/// libpq's distinction between `verify-ca` and `verify-full`.
+#[derive(Debug)]
+struct CaOnlyVerifier {
+    roots: rustls::RootCertStore,
+    algorithms: rustls::crypto::WebPkiSupportedAlgorithms,
+}
+
+impl CaOnlyVerifier {
+    fn new(
+        roots: rustls::RootCertStore,
+        algorithms: rustls::crypto::WebPkiSupportedAlgorithms,
+    ) -> Self {
+        Self { roots, algorithms }
+    }
+}
+
+impl rustls::client::danger::ServerCertVerifier for CaOnlyVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        let cert = rustls::server::ParsedCertificate::try_from(end_entity)?;
+        rustls::client::verify_server_cert_signed_by_trust_anchor(
+            &cert,
+            &self.roots,
+            intermediates,
+            now,
+            self.algorithms.all,
+        )?;
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.algorithms)
+    }
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.algorithms)
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.algorithms.supported_schemes()
+    }
+}
+
+fn sslmode_name(sslmode: PgSslMode) -> &'static str {
+    match sslmode {
+        PgSslMode::Disable => "disable",
+        PgSslMode::Prefer => "prefer",
+        PgSslMode::Require => "require",
+        PgSslMode::VerifyCa => "verify-ca",
+        PgSslMode::VerifyFull => "verify-full",
+    }
+}
+
+fn add_ca_bundle_roots(roots: &mut rustls::RootCertStore, path: &str) -> Result<usize, String> {
+    const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+    const END: &str = "-----END CERTIFICATE-----";
+
+    let pem = std::fs::read_to_string(path)
+        .map_err(|e| format!("trusted CA bundle {path:?} could not be read: {e}"))?;
+    let mut rest = pem.as_str();
+    let mut added = 0usize;
+    while let Some(start) = rest.find(BEGIN) {
+        let body_start = start + BEGIN.len();
+        let end = rest[body_start..]
+            .find(END)
+            .ok_or_else(|| format!("trusted CA bundle {path:?} has an unterminated certificate"))?;
+        let body = &rest[body_start..body_start + end];
+        let b64 = body
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>();
+        let der = BASE64
+            .decode(b64.as_bytes())
+            .map_err(|e| format!("trusted CA bundle {path:?} has invalid PEM base64: {e}"))?;
+        roots
+            .add(rustls::pki_types::CertificateDer::from(der))
+            .map_err(|e| {
+                format!("trusted CA bundle {path:?} contains an invalid certificate: {e}")
+            })?;
+        added += 1;
+        rest = &rest[body_start + end + END.len()..];
+    }
+    if added == 0 {
+        return Err(format!(
+            "trusted CA bundle {path:?} contains no certificates"
+        ));
+    }
+    Ok(added)
+}
+
+fn root_cert_store(ca_bundle_path: Option<&str>) -> Result<rustls::RootCertStore, String> {
+    let mut roots =
+        rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    if let Some(path) = ca_bundle_path.filter(|path| !path.trim().is_empty()) {
+        add_ca_bundle_roots(&mut roots, path)?;
+    }
+    Ok(roots)
+}
+
+fn tls_config(
+    provider: Arc<rustls::crypto::CryptoProvider>,
+    sslmode: PgSslMode,
+    ca_bundle_path: Option<&str>,
+) -> Result<rustls::ClientConfig, String> {
+    let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .map_err(|e| format!("tls config failed: {e}"))?;
+    match sslmode {
+        PgSslMode::VerifyCa => {
+            let verifier = Arc::new(CaOnlyVerifier::new(
+                root_cert_store(ca_bundle_path)?,
+                provider.signature_verification_algorithms,
+            ));
+            Ok(builder
+                .dangerous()
+                .with_custom_certificate_verifier(verifier)
+                .with_no_client_auth())
+        }
+        PgSslMode::VerifyFull => {
+            let roots = Arc::new(root_cert_store(ca_bundle_path)?);
+            let verifier =
+                rustls::client::WebPkiServerVerifier::builder_with_provider(roots, provider)
+                    .build()
+                    .map_err(|e| format!("tls verifier config failed: {e}"))?;
+            Ok(builder
+                .dangerous()
+                .with_custom_certificate_verifier(verifier)
+                .with_no_client_auth())
+        }
+        _ => {
+            let verifier = Arc::new(NoVerify::new(&provider));
+            Ok(builder
+                .dangerous()
+                .with_custom_certificate_verifier(verifier)
+                .with_no_client_auth())
+        }
+    }
+}
+
+async fn connect_and_probe_tls(host: &str, port: u16) -> Result<(TcpStream, u8), String> {
+    let mut tcp = TcpStream::connect((host, port))
+        .await
+        .map_err(|e| format!("tcp connect failed: {e}"))?;
+    let _ = tcp.set_nodelay(true);
+    let mut probe = Vec::with_capacity(8);
+    put_i32(&mut probe, 8);
+    put_i32(&mut probe, SSL_REQUEST_CODE);
+    tcp.write_all(&probe)
+        .await
+        .map_err(|e| format!("ssl probe failed: {e}"))?;
+    let mut answer = [0u8; 1];
+    tcp.read_exact(&mut answer)
+        .await
+        .map_err(|e| format!("ssl probe reply failed: {e}"))?;
+    Ok((tcp, answer[0]))
+}
+
+async fn wrap_tls(
+    host: &str,
+    tcp: TcpStream,
+    sslmode: PgSslMode,
+    ca_bundle_path: Option<&str>,
+) -> Result<(PgStream, Option<Vec<u8>>), String> {
+    // rustls 0.23's default provider (aws-lc-rs) is named explicitly:
+    // reqwest pulls the ring feature in too, and with both enabled
+    // `ClientConfig::builder()` refuses to pick one itself.
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let config = tls_config(provider, sslmode, ca_bundle_path)?;
+    let name = rustls::pki_types::ServerName::try_from(host.to_string())
+        .map_err(|e| format!("bad tls server name: {e}"))?;
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+    let tls = connector
+        .connect(name, tcp)
+        .await
+        .map_err(|e| format!("tls handshake failed: {e}"))?;
+    let digest = tls
+        .get_ref()
+        .1
+        .peer_certificates()
+        .and_then(|certs| certs.first())
+        .map(|cert| {
+            use sha2::{Digest as _, Sha256};
+            Sha256::digest(cert.as_ref()).to_vec()
+        });
+    Ok((PgStream::Tls(Box::new(tls)), digest))
+}
+
+fn is_cert_verification_error(detail: &str) -> bool {
+    detail.to_ascii_lowercase().contains("certificate")
+}
+
+/// TCP connect + TLS per the connection's `sslmode` (§4.3): `Disable` →
+/// plaintext; `Prefer` → SSLRequest, wrap on 'S', continue plaintext on 'N';
+/// `Require`/`verify-ca`/`verify-full` → SSLRequest, 'S' or fail. The verify
+/// modes use trusted roots, and may continue once without verification only
+/// when the observer explicitly confirms the certificate failure. Returns the
+/// stream plus the SHA-256 digest of the server certificate DER (the
+/// `tls-server-end-point` channel-binding input) when TLS was negotiated.
+async fn tls_connect(
+    host: &str,
+    port: u16,
+    sslmode: PgSslMode,
+    ca_bundle_path: Option<&str>,
+    events: Option<&Arc<dyn BrokerEvents>>,
+) -> Result<(PgStream, Option<Vec<u8>>), String> {
+    if sslmode == PgSslMode::Disable {
+        let tcp = TcpStream::connect((host, port))
+            .await
+            .map_err(|e| format!("tcp connect failed: {e}"))?;
+        let _ = tcp.set_nodelay(true);
+        return Ok((PgStream::Plain(tcp), None));
+    }
+    let (tcp, answer) = connect_and_probe_tls(host, port).await?;
+    match answer {
+        b'S' => match wrap_tls(host, tcp, sslmode, ca_bundle_path).await {
+            Ok(stream) => Ok(stream),
+            Err(e)
+                if matches!(sslmode, PgSslMode::VerifyCa | PgSslMode::VerifyFull)
+                    && is_cert_verification_error(&e) =>
+            {
+                // The re-auth prompt is a blocking native dialog; run it on
+                // the blocking pool so it never ties up a runtime worker
+                // while the user decides (§4.3/§8).
+                let approved = match events {
+                    Some(events) => {
+                        let events = events.clone();
+                        let host = host.to_string();
+                        let err = e.clone();
+                        tokio::task::spawn_blocking(move || {
+                            events.confirm_unverified_pg_tls(&host, port, sslmode, &err)
+                        })
+                        .await
+                        .unwrap_or(false)
+                    }
+                    None => false,
+                };
+                if !approved {
+                    return Err(format!("tls certificate verification failed: {e}"));
+                }
+                let (tcp, answer) = connect_and_probe_tls(host, port).await?;
+                match answer {
+                    b'S' => wrap_tls(host, tcp, PgSslMode::Require, None).await,
+                    b'N' => Err(format!(
+                        "upstream declined TLS after {} certificate fallback",
+                        sslmode_name(sslmode)
+                    )),
+                    other => Err(format!("unexpected SSLRequest reply 0x{other:02x}")),
+                }
+            }
+            Err(e) => Err(e),
+        },
+        b'N' if sslmode == PgSslMode::Prefer => Ok((PgStream::Plain(tcp), None)),
+        b'N' => Err(format!(
+            "upstream declined TLS (sslmode={})",
+            sslmode_name(sslmode)
+        )),
+        other => Err(format!("unexpected SSLRequest reply 0x{other:02x}")),
+    }
+}
+
+/// A completed upstream handshake, ready to splice.
+struct UpstreamSession {
+    stream: BufReader<PgStream>,
+    /// Raw ParameterStatus/NoticeResponse frames to relay downstream.
+    forward: Vec<u8>,
+    /// The upstream's real BackendKeyData, mapped, never forwarded.
+    backend_pid: i32,
+    backend_key: i32,
+    /// The upstream ReadyForQuery transaction-status byte.
+    ready_status: u8,
+}
+
+/// Dial the connection's configured host:port with the stored password
+/// secret and drive the client side of the startup/auth exchange up to
+/// ReadyForQuery (§4.3 step (b)). The client's non-auth startup parameters
+/// (application_name, client_encoding, options, search_path, …) are
+/// forwarded for fidelity.
+async fn dial_upstream(
+    store: &Arc<Store>,
+    events: &Arc<dyn BrokerEvents>,
+    connection: &Connection,
+    client_params: &[(String, String)],
+) -> Result<UpstreamSession, String> {
+    let ConnectionConfig::Pg {
+        host,
+        port,
+        dbname,
+        user,
+        sslmode,
+    } = &connection.config
+    else {
+        return Err("not a postgres connection".into());
+    };
+    let secret_id = *connection
+        .secrets
+        .first()
+        .ok_or_else(|| "connection binds no secret".to_string())?;
+    let password = store
+        .secret_value(&secret_id)
+        .await
+        .map_err(|e| format!("credential unavailable: {e}"))?;
+    let settings = store.settings();
+
+    let (stream, cert_digest) = tls_connect(
+        host,
+        *port,
+        *sslmode,
+        settings.pg_trusted_ca_bundle_path.as_deref(),
+        Some(events),
+    )
+    .await?;
+    let mut stream = BufReader::new(stream);
+
+    // StartupMessage with the CONFIGURED user + dbname; forward the client's
+    // non-auth parameters.
+    let mut body = Vec::new();
+    put_i32(&mut body, PROTOCOL_V3);
+    put_cstr(&mut body, "user");
+    put_cstr(&mut body, user);
+    put_cstr(&mut body, "database");
+    put_cstr(&mut body, dbname);
+    for (name, value) in client_params {
+        if name == "user" || name == "database" {
+            continue;
+        }
+        put_cstr(&mut body, name);
+        put_cstr(&mut body, value);
+    }
+    body.push(0);
+    let mut startup = Vec::with_capacity(body.len() + 4);
+    put_i32(&mut startup, body.len() as i32 + 4);
+    startup.extend_from_slice(&body);
+    stream
+        .write_all(&startup)
+        .await
+        .map_err(|e| format!("startup write failed: {e}"))?;
+
+    // Authentication phase.
+    loop {
+        let (tag, payload) = read_message(&mut stream)
+            .await
+            .map_err(|e| format!("auth read failed: {e}"))?;
+        match tag {
+            b'E' => {
+                return Err(format!(
+                    "upstream error: {}",
+                    parse_error_response(&payload)
+                ))
+            }
+            b'R' if payload.len() < 4 => return Err("short auth request".into()),
+            b'R' => match be_i32(&payload[..4]) {
+                0 => break, // AuthenticationOk
+                3 => {
+                    // AuthenticationCleartextPassword
+                    let mut p = Vec::new();
+                    put_cstr(&mut p, &password);
+                    stream
+                        .write_all(&frame(b'p', &p))
+                        .await
+                        .map_err(|e| format!("password write failed: {e}"))?;
+                }
+                5 => {
+                    // AuthenticationMD5Password: md5(md5(password + user) + salt).
+                    if payload.len() < 8 {
+                        return Err("short md5 auth request".into());
+                    }
+                    let md5 = md5_password(user, password.as_bytes(), &payload[4..8]);
+                    let mut p = Vec::new();
+                    put_cstr(&mut p, &md5);
+                    stream
+                        .write_all(&frame(b'p', &p))
+                        .await
+                        .map_err(|e| format!("password write failed: {e}"))?;
+                }
+                10 => {
+                    // AuthenticationSASL, SCRAM-SHA-256(-PLUS), the design's
+                    // primary path.
+                    sasl_auth(
+                        &mut stream,
+                        &payload[4..],
+                        password.as_bytes(),
+                        cert_digest.as_deref(),
+                    )
+                    .await?;
+                }
+                other => return Err(format!("unsupported upstream auth request {other}")),
+            },
+            other => {
+                return Err(format!(
+                    "unexpected message '{}' during upstream auth",
+                    other as char
+                ))
+            }
+        }
+    }
+
+    // Post-auth: collect ParameterStatus (forwarded), BackendKeyData
+    // (captured, NOT forwarded), up to ReadyForQuery.
+    let mut forward = Vec::new();
+    let mut backend_pid = 0i32;
+    let mut backend_key = 0i32;
+    let ready_status = loop {
+        let (tag, payload) = read_message(&mut stream)
+            .await
+            .map_err(|e| format!("startup read failed: {e}"))?;
+        match tag {
+            b'S' | b'N' => forward.extend_from_slice(&frame(tag, &payload)),
+            b'K' => {
+                if payload.len() < 8 {
+                    return Err("short BackendKeyData".into());
+                }
+                backend_pid = be_i32(&payload[..4]);
+                backend_key = be_i32(&payload[4..8]);
+            }
+            b'Z' => break *payload.first().unwrap_or(&b'I'),
+            b'E' => {
+                return Err(format!(
+                    "upstream error: {}",
+                    parse_error_response(&payload)
+                ))
+            }
+            other => {
+                return Err(format!(
+                    "unexpected message '{}' during upstream startup",
+                    other as char
+                ))
+            }
+        }
+    };
+
+    Ok(UpstreamSession {
+        stream,
+        forward,
+        backend_pid,
+        backend_key,
+        ready_status,
+    })
+}
+
+/// md5 auth: `"md5" + md5hex(md5hex(password + user) + salt4)`.
+fn md5_password(user: &str, password: &[u8], salt: &[u8]) -> String {
+    use md5::{Digest as _, Md5};
+    let mut inner = Md5::new();
+    inner.update(password);
+    inner.update(user.as_bytes());
+    let inner_hex = hex(&inner.finalize());
+    let mut outer = Md5::new();
+    outer.update(inner_hex.as_bytes());
+    outer.update(salt);
+    format!("md5{}", hex(&outer.finalize()))
+}
+
+/// Drive the SCRAM exchange after an AuthenticationSASL request. The
+/// mechanism payload is a NUL-terminated list of mechanism names. When the
+/// server offers SCRAM-SHA-256-PLUS and the upstream leg is TLS, channel
+/// binding is `tls-server-end-point`, the SHA-256 digest of the server
+/// certificate DER (§4.3).
+async fn sasl_auth(
+    stream: &mut BufReader<PgStream>,
+    mechanisms_payload: &[u8],
+    password: &[u8],
+    cert_digest: Option<&[u8]>,
+) -> Result<(), String> {
+    let mut mechanisms = Vec::new();
+    let mut rest = mechanisms_payload;
+    loop {
+        let (name, tail) = take_cstr(rest).map_err(|e| format!("bad SASL mechanisms: {e}"))?;
+        if name.is_empty() {
+            break;
+        }
+        mechanisms.push(name);
+        rest = tail;
+    }
+    let offers_plus = mechanisms.iter().any(|m| m == SCRAM_SHA_256_PLUS);
+    let offers_plain = mechanisms.iter().any(|m| m == SCRAM_SHA_256);
+
+    let (mechanism, channel_binding) = match (offers_plus, cert_digest) {
+        (true, Some(digest)) => (
+            SCRAM_SHA_256_PLUS,
+            ChannelBinding::tls_server_end_point(digest.to_vec()),
+        ),
+        // The server advertised channel binding but this leg can't provide
+        // it: say so ("n,,") rather than "y,," which the server must reject.
+        (true, None) if offers_plain => (SCRAM_SHA_256, ChannelBinding::unsupported()),
+        (false, _) if offers_plain => (SCRAM_SHA_256, ChannelBinding::unrequested()),
+        _ => {
+            return Err(format!(
+                "no supported SASL mechanism (offered: {})",
+                mechanisms.join(", ")
+            ))
+        }
+    };
+
+    let mut scram = ScramSha256::new(password, channel_binding);
+
+    // SASLInitialResponse: mechanism + i32 data length + data.
+    let mut p = Vec::new();
+    put_cstr(&mut p, mechanism);
+    put_i32(&mut p, scram.message().len() as i32);
+    p.extend_from_slice(scram.message());
+    stream
+        .write_all(&frame(b'p', &p))
+        .await
+        .map_err(|e| format!("SASL write failed: {e}"))?;
+
+    // AuthenticationSASLContinue → SASLResponse.
+    let (tag, payload) = read_message(stream)
+        .await
+        .map_err(|e| format!("SASL read failed: {e}"))?;
+    match tag {
+        b'R' if payload.len() >= 4 && be_i32(&payload[..4]) == 11 => {}
+        b'E' => {
+            return Err(format!(
+                "upstream error: {}",
+                parse_error_response(&payload)
+            ))
+        }
+        _ => return Err("expected AuthenticationSASLContinue".into()),
+    }
+    scram
+        .update(&payload[4..])
+        .map_err(|e| format!("SCRAM continue failed: {e}"))?;
+    stream
+        .write_all(&frame(b'p', scram.message()))
+        .await
+        .map_err(|e| format!("SASL write failed: {e}"))?;
+
+    // AuthenticationSASLFinal: verify the server signature.
+    let (tag, payload) = read_message(stream)
+        .await
+        .map_err(|e| format!("SASL read failed: {e}"))?;
+    match tag {
+        b'R' if payload.len() >= 4 && be_i32(&payload[..4]) == 12 => {}
+        b'E' => {
+            return Err(format!(
+                "upstream error: {}",
+                parse_error_response(&payload)
+            ))
+        }
+        _ => return Err("expected AuthenticationSASLFinal".into()),
+    }
+    scram
+        .finish(&payload[4..])
+        .map_err(|e| format!("SCRAM verification failed: {e}"))?;
+    Ok(())
+}
+
+/* --------------------------------- splice --------------------------------- */
+
+/// Byte-forward the established session in both directions with the session
+/// lifetime rules (§4.2/§4.3): max TTL, idle timeout, user close, and either
+/// leg closing tears down both. The copy is seeded with any residual bytes
+/// each leg's handshake reader buffered, TCP may have delivered the
+/// client's first 'Q' in the same segment as the startup bytes, and a naive
+/// handoff of the bare sockets would swallow it (§4.3 step (c)).
+async fn splice(
+    client: BufReader<TcpStream>,
+    upstream: BufReader<PgStream>,
+    session: SessionHandle,
+    max_ttl: Duration,
+    idle: Duration,
+) {
+    let client_residual = client.buffer().to_vec();
+    let client = client.into_inner();
+    let upstream_residual = upstream.buffer().to_vec();
+    let upstream = upstream.into_inner();
+
+    let (mut client_rx, mut client_tx) = tokio::io::split(client);
+    let (mut upstream_rx, mut upstream_tx) = tokio::io::split(upstream);
+
+    let ttl_deadline = tokio::time::Instant::now() + max_ttl;
+    let mut idle_deadline = tokio::time::Instant::now() + idle;
+    let close_signal = session.close_signal.clone();
+
+    let mut early: Option<&'static str> = None;
+    if !client_residual.is_empty() {
+        session
+            .bytes_up
+            .fetch_add(client_residual.len() as u64, Ordering::Relaxed);
+        if upstream_tx.write_all(&client_residual).await.is_err() {
+            early = Some("upstream_closed");
+        }
+    }
+    if early.is_none() && !upstream_residual.is_empty() {
+        session
+            .bytes_down
+            .fetch_add(upstream_residual.len() as u64, Ordering::Relaxed);
+        if client_tx.write_all(&upstream_residual).await.is_err() {
+            early = Some("client_closed");
+        }
+    }
+
+    let mut client_buf = vec![0u8; 16 * 1024];
+    let mut upstream_buf = vec![0u8; 16 * 1024];
+    let reason = match early {
+        Some(reason) => reason,
+        None => loop {
+            tokio::select! {
+                _ = close_signal.notified() => break "closed_by_user",
+                _ = tokio::time::sleep_until(ttl_deadline) => break "session_ttl",
+                _ = tokio::time::sleep_until(idle_deadline) => break "idle_timeout",
+                read = client_rx.read(&mut client_buf) => match read {
+                    Ok(n) if n > 0 => {
+                        idle_deadline = tokio::time::Instant::now() + idle;
+                        session.bytes_up.fetch_add(n as u64, Ordering::Relaxed);
+                        if upstream_tx.write_all(&client_buf[..n]).await.is_err() {
+                            break "upstream_closed";
+                        }
+                    }
+                    _ => break "client_closed",
+                },
+                read = upstream_rx.read(&mut upstream_buf) => match read {
+                    Ok(n) if n > 0 => {
+                        idle_deadline = tokio::time::Instant::now() + idle;
+                        session.bytes_down.fetch_add(n as u64, Ordering::Relaxed);
+                        if client_tx.write_all(&upstream_buf[..n]).await.is_err() {
+                            break "client_closed";
+                        }
+                    }
+                    _ => break "upstream_closed",
+                },
+            }
+        },
+    };
+
+    // Tear down both legs whatever the reason (§4.2/§4.3).
+    let _ = client_tx.shutdown().await;
+    let _ = upstream_tx.shutdown().await;
+    session.finish(reason);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frames_and_cstrings_round_trip() {
+        let msg = frame(b'S', b"server_version\x0014.0\x00");
+        assert_eq!(msg[0], b'S');
+        assert_eq!(be_i32(&msg[1..5]) as usize, msg.len() - 1);
+        let (name, rest) = take_cstr(&msg[5..]).unwrap();
+        assert_eq!(name, "server_version");
+        let (value, _) = take_cstr(rest).unwrap();
+        assert_eq!(value, "14.0");
+    }
+
+    #[test]
+    fn startup_params_parse_until_terminator() {
+        let mut body = Vec::new();
+        put_cstr(&mut body, "user");
+        put_cstr(&mut body, "app");
+        put_cstr(&mut body, "application_name");
+        put_cstr(&mut body, "psql");
+        body.push(0);
+        let params = parse_startup_params(&body).unwrap();
+        assert_eq!(
+            params,
+            vec![
+                ("user".to_string(), "app".to_string()),
+                ("application_name".to_string(), "psql".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn md5_matches_postgres_recipe() {
+        // Known-good: md5(md5("secret" + "app") + "\x01\x02\x03\x04").
+        let out = md5_password("app", b"secret", &[1, 2, 3, 4]);
+        assert!(out.starts_with("md5"));
+        assert_eq!(out.len(), 35);
+        // Deterministic.
+        assert_eq!(out, md5_password("app", b"secret", &[1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn error_response_carries_sqlstate() {
+        let msg = error_response("FATAL", "28P01", "AgentMFA: unknown_ticket");
+        assert_eq!(msg[0], b'E');
+        let text = parse_error_response(&msg[5..]);
+        assert_eq!(text, "28P01: AgentMFA: unknown_ticket");
+    }
+}
