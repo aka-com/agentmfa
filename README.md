@@ -39,7 +39,7 @@ AgentMFA is a secrets manager for agents. Make API calls, open database and WebS
   - **WebSocket** — the agent gets a short-lived `ws://127.0.0.1:…` bridge URL usable by any stock WS client.
   - **Postgres** — the agent gets a password-less DSN + one-time ticket; unmodified `psql` works, while the broker speaks TLS + SCRAM upstream.
   - **SSH** — the agent gets an `SSH_AUTH_SOCK` path; unmodified `ssh`/`git`/`rsync` work, while the broker holds the private key and signs — but only a login as the connection's pinned user, and nothing else.
-- **Identity-pinned pairing.** Connected agents are pinned to their code-signing identity, so processes can't exfiltrate a token from disk.
+- **Identity-pinned pairing.** Connected agents are pinned to their code-signing identity, or to a best-effort local executable fingerprint for unsigned/ad-hoc peers, so a copied token is not generally reusable by another process.
 - **Local activity log.** Pairing, approval, denial, and upstream events are shown in the app's Activity view for review, but the log is not a tamper-evident audit ledger.
 - **Free and open source.** MIT licensed desktop application for individuals and small teams; contact us for enterprise support.
 
@@ -126,7 +126,7 @@ cargo run -p agentmfa-cli -- skill --write    # → .claude/skills/agentmfa/SKIL
 1. Reuse the token stored at `~/.agentmfa/tokens/<name>` if `GET /v1/whoami`
    accepts it; otherwise `POST /v1/pair {"agent_name": "claude-code"}` — the
    user approves; the response is a 30-day bearer token, pinned to the
-   agent's code-signing identity, plus the `store_at` path to keep it in.
+   agent's peer identity, plus the `store_at` path to keep it in.
 2. `GET /v1/connections` — discover the named connections it may use (targets
    only; never secret names or values) and whether each one `will_prompt`
    or is already `auto_allowed`.
@@ -162,9 +162,12 @@ Documented differences from DESIGN.md:
   direct Security.framework calls plus the `keychain-access-groups`
   entitlement.
 - **Peer identity.** `peer.rs` implements the audit-token + `SecCode`
-  code-signature check on macOS; non-macOS dev builds pin the peer UID
-  instead (there is no code-signature oracle) and mark the identity
-  `dev-unverified`.
+  code-signature check on macOS. Unsigned/ad-hoc macOS peers are important
+  because they have no signing anchor; AgentMFA binds them to local
+  executable metadata (uid, path, file id, and executable SHA-256 when
+  available) and displays that weaker identity explicitly. Non-macOS dev
+  builds pin the peer UID instead (there is no code-signature oracle) and
+  mark the identity `dev-unverified`.
 - **Touch ID / clipboard.** `auth.rs` and `clipboard.rs` use
   LocalAuthentication and `NSPasteboard` on macOS; on other platforms the
   gate is a loud no-op and the concealed-clipboard write is skipped (both are

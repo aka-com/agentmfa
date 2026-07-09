@@ -93,7 +93,7 @@ one first:
             -H "Content-Type: application/json" \
             -d '{{"agent_name": "<your-name>"}}'
        → 200 {{"token": "amfa_…", "agent": "<your-name>",
-               "identity": "<the code-signing identity the token is pinned to>",
+               "identity": "<the peer identity the token is pinned to>",
                "expires_after_days": {token_days},
                "store_at": "{tokens}/<your-name>"}}
 
@@ -102,9 +102,11 @@ one first:
    directory already exists), or in your own credential store, and send it
    on every subsequent call as `Authorization: Bearer <token>`.
 
-The token is pinned to your process's code-signing identity: a copy
-lifted from disk is useless to a differently-signed process. Tokens last
-{token_days} days, refreshed on use.
+The token is pinned to your process's peer identity: normally its
+code-signing identity, or a best-effort local executable fingerprint when
+the process is unsigned/ad-hoc. A copy lifted from disk is not generally
+usable from a different pinned identity. Tokens last {token_days} days,
+refreshed on use.
 
 **Several instances under one name share the stored token.** Pairing
 again replaces the name's previous token; a call failing with
@@ -252,7 +254,7 @@ connection names.
   re-paired; re-read the token at the response's `store_at`, do not pair
   again.
 - `401 {{"reason": "peer_identity_mismatch"}}`: the token is pinned to a
-  different code-signing identity than yours; re-pair.
+  different peer identity than yours; re-pair.
 - `404 {{"reason": "unknown_connection"}}`: no such connection; the detail
   lists the configured names.
 - `409 {{"reason": "request_id_mismatch"}}`: you reused a request_id with a

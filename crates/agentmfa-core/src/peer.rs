@@ -9,6 +9,9 @@
 //!   signing identifier and Team ID. Validity alone proves little, the
 //!   check is anchored at pairing time, when the token is pinned to the
 //!   identity observed here.
+//!   Unsigned/ad-hoc peers have no signing anchor; they are pinned to
+//!   best-effort local executable metadata instead (uid, path, file id, and
+//!   executable hash when available).
 //! - **elsewhere (dev builds)**: no code-signature oracle exists; the
 //!   identity is the peer UID (`SO_PEERCRED`), a documented dev divergence.
 
@@ -28,7 +31,12 @@ pub fn resolve_peer(stream: &UnixStream) -> PeerIdentity {
             Ok(cred) => PeerIdentity::DevUnverified { uid: cred.uid() },
             Err(e) => {
                 tracing::warn!("peer_cred failed: {e}");
-                PeerIdentity::Unsigned
+                PeerIdentity::Unsigned {
+                    uid: None,
+                    executable_path: None,
+                    file_id: None,
+                    executable_sha256: None,
+                }
             }
         }
     }
@@ -41,7 +49,10 @@ mod macos {
     use core_foundation::data::CFData;
     use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
     use core_foundation::string::{CFString, CFStringRef};
+    use sha2::{Digest as _, Sha256};
+    use std::ffi::CStr;
     use std::os::fd::AsRawFd;
+    use std::os::unix::fs::MetadataExt;
 
     // <sys/un.h>, options at the SOL_LOCAL level.
     const SOL_LOCAL: libc::c_int = 0;
@@ -91,6 +102,20 @@ mod macos {
         ) -> OSStatus;
     }
 
+    #[link(name = "bsm")]
+    extern "C" {
+        fn audit_token_to_pid(token: AuditToken) -> libc::pid_t;
+    }
+
+    #[link(name = "proc")]
+    extern "C" {
+        fn proc_pidpath(
+            pid: libc::c_int,
+            buffer: *mut libc::c_void,
+            buffersize: u32,
+        ) -> libc::c_int;
+    }
+
     fn peer_audit_token(stream: &UnixStream) -> Option<AuditToken> {
         let fd = stream.as_raw_fd();
         let mut token = AuditToken { val: [0; 8] };
@@ -112,9 +137,59 @@ mod macos {
         }
     }
 
+    fn peer_uid(stream: &UnixStream) -> Option<u32> {
+        let fd = stream.as_raw_fd();
+        let mut uid = 0 as libc::uid_t;
+        let mut gid = 0 as libc::gid_t;
+        let rc = unsafe { libc::getpeereid(fd, &mut uid, &mut gid) };
+        if rc == 0 {
+            Some(uid as u32)
+        } else {
+            tracing::warn!("getpeereid failed (rc={rc})");
+            None
+        }
+    }
+
+    fn executable_path_for_pid(pid: libc::pid_t) -> Option<String> {
+        let mut buf = vec![0u8; 4096];
+        let len = unsafe { proc_pidpath(pid, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32) };
+        if len <= 0 {
+            return None;
+        }
+        let cstr = CStr::from_bytes_until_nul(&buf).ok()?;
+        Some(cstr.to_string_lossy().into_owned())
+    }
+
+    fn file_id(path: &str) -> Option<String> {
+        let meta = std::fs::metadata(path).ok()?;
+        Some(format!("dev:{} ino:{}", meta.dev(), meta.ino()))
+    }
+
+    fn executable_sha256(path: &str) -> Option<String> {
+        let bytes = std::fs::read(path).ok()?;
+        let digest = Sha256::digest(&bytes);
+        Some(digest.iter().map(|b| format!("{b:02x}")).collect())
+    }
+
+    fn unsigned_identity(stream: &UnixStream, token: Option<AuditToken>) -> PeerIdentity {
+        let uid = peer_uid(stream);
+        let executable_path = token
+            .map(|token| unsafe { audit_token_to_pid(token) })
+            .filter(|pid| *pid > 0)
+            .and_then(executable_path_for_pid);
+        let file_id = executable_path.as_deref().and_then(file_id);
+        let executable_sha256 = executable_path.as_deref().and_then(executable_sha256);
+        PeerIdentity::Unsigned {
+            uid,
+            executable_path,
+            file_id,
+            executable_sha256,
+        }
+    }
+
     pub(super) fn resolve(stream: &UnixStream) -> PeerIdentity {
         let Some(token) = peer_audit_token(stream) else {
-            return PeerIdentity::Unsigned;
+            return unsigned_identity(stream, None);
         };
         // SAFETY: plain FFI into Security.framework with owned CF objects.
         unsafe {
@@ -132,7 +207,7 @@ mod macos {
             );
             if status != 0 || code.is_null() {
                 tracing::warn!("SecCodeCopyGuestWithAttributes failed ({status})");
-                return PeerIdentity::Unsigned;
+                return unsigned_identity(stream, Some(token));
             }
             // Ensure release on all paths.
             struct Release(SecCodeRef);
@@ -148,14 +223,14 @@ mod macos {
             if SecCodeCheckValidity(code, K_SEC_CS_DEFAULT_FLAGS, std::ptr::null()) != 0 {
                 // Invalid or ad-hoc/unsigned, the pairing dialog calls this
                 // out loudly (§6).
-                return PeerIdentity::Unsigned;
+                return unsigned_identity(stream, Some(token));
             }
 
             let mut info: CFDictionaryRef = std::ptr::null();
             let status =
                 SecCodeCopySigningInformation(code, K_SEC_CS_SIGNING_INFORMATION, &mut info);
             if status != 0 || info.is_null() {
-                return PeerIdentity::Unsigned;
+                return unsigned_identity(stream, Some(token));
             }
             let info: CFDictionary<CFString, CFType> =
                 CFDictionary::wrap_under_create_rule(info as *mut _);
@@ -172,7 +247,7 @@ mod macos {
                     signing_id,
                     team_id: get_string(kSecCodeInfoTeamIdentifier),
                 },
-                None => PeerIdentity::Unsigned,
+                None => unsigned_identity(stream, Some(token)),
             }
         }
     }

@@ -196,8 +196,7 @@ impl Connection {
     }
 }
 
-/// The peer's code-signing identity, pinned to a pair token at pairing time
-/// (DESIGN.md §8).
+/// The peer identity pinned to a pair token at pairing time (DESIGN.md §8).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PeerIdentity {
@@ -206,8 +205,18 @@ pub enum PeerIdentity {
         signing_id: String,
         team_id: Option<String>,
     },
-    /// Ad-hoc / unsigned peer, the pairing dialog calls this out loudly.
-    Unsigned,
+    /// Ad-hoc / unsigned peer. There is no code-signing anchor, so the token
+    /// is pinned to best-effort local executable metadata instead.
+    Unsigned {
+        #[serde(default)]
+        uid: Option<u32>,
+        #[serde(default)]
+        executable_path: Option<String>,
+        #[serde(default)]
+        file_id: Option<String>,
+        #[serde(default)]
+        executable_sha256: Option<String>,
+    },
     /// Non-macOS dev builds have no code-signature oracle; the pin is the
     /// peer UID only. Documented divergence, not a production path.
     DevUnverified { uid: u32 },
@@ -225,7 +234,29 @@ impl PeerIdentity {
                 signing_id,
                 team_id: None,
             } => signing_id.clone(),
-            PeerIdentity::Unsigned => "Unsigned, no pinned identity".into(),
+            PeerIdentity::Unsigned {
+                uid,
+                executable_path,
+                executable_sha256,
+                ..
+            } => {
+                let mut parts = Vec::new();
+                if let Some(path) = executable_path {
+                    parts.push(path.clone());
+                }
+                if let Some(uid) = uid {
+                    parts.push(format!("uid {uid}"));
+                }
+                if let Some(hash) = executable_sha256 {
+                    let preview = &hash[..hash.len().min(12)];
+                    parts.push(format!("sha256 {preview}…"));
+                }
+                if parts.is_empty() {
+                    "Unsigned/ad-hoc, no local fingerprint (legacy)".into()
+                } else {
+                    format!("Unsigned/ad-hoc · {}", parts.join(" · "))
+                }
+            }
             PeerIdentity::DevUnverified { uid } => format!("Dev build: uid {uid} (unverified)"),
         }
     }
@@ -439,5 +470,35 @@ mod tests {
             serde_json::from_str::<PgSslMode>("\"verify-full\"").unwrap(),
             PgSslMode::VerifyFull
         );
+    }
+
+    #[test]
+    fn unsigned_peer_identity_accepts_legacy_records() {
+        let identity: PeerIdentity = serde_json::from_str(r#"{"kind":"unsigned"}"#).unwrap();
+        assert_eq!(
+            identity,
+            PeerIdentity::Unsigned {
+                uid: None,
+                executable_path: None,
+                file_id: None,
+                executable_sha256: None,
+            }
+        );
+        assert!(identity.display().contains("legacy"));
+    }
+
+    #[test]
+    fn unsigned_peer_identity_displays_local_fingerprint() {
+        let identity = PeerIdentity::Unsigned {
+            uid: Some(501),
+            executable_path: Some("/Applications/Unsigned Agent.app/Contents/MacOS/agent".into()),
+            file_id: Some("dev:1 ino:2".into()),
+            executable_sha256: Some("0123456789abcdef".repeat(4)),
+        };
+
+        let display = identity.display();
+        assert!(display.contains("Unsigned/ad-hoc"));
+        assert!(display.contains("uid 501"));
+        assert!(display.contains("sha256 0123456789ab"));
     }
 }

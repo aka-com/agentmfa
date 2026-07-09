@@ -439,7 +439,7 @@ function renderApproval() {
   const scopeRow = (req.kind === 'pg' || req.kind === 'ws' || req.kind === 'ssh') && conn && conn.multi_connect
     ? `<div class="ap-row"><span>Scope</span><span>All connects within the 60 s ticket window · up to 60 sessions</span></div>` : '';
   const identityRow = isPair
-    ? `<div class="ap-row"><span>Identity</span><code title="The issued token is pinned to this code-signing identity">${esc(req.identity || 'Unsigned, no pinned identity')}</code></div>` : '';
+    ? `<div class="ap-row"><span>Identity</span><code title="The issued token is pinned to this peer identity">${esc(req.identity || 'Unsigned/ad-hoc, no local fingerprint')}</code></div>` : '';
 
   let inherit = '';
   if (isPair && req.inherited && req.inherited.length) {

@@ -172,7 +172,12 @@ impl FromRequestParts<AppState> for Authed {
             .extensions
             .get::<ConnectInfo<PeerInfo>>()
             .map(|ci| ci.0.identity.clone())
-            .unwrap_or(PeerIdentity::Unsigned);
+            .unwrap_or(PeerIdentity::Unsigned {
+                uid: None,
+                executable_path: None,
+                file_id: None,
+                executable_sha256: None,
+            });
         let token = parts
             .headers
             .get(axum::http::header::AUTHORIZATION)
@@ -487,13 +492,13 @@ async fn post_pair(
             None => err(StatusCode::INTERNAL_SERVER_ERROR, ErrorReason::BrokerShutdown),
         },
         Ok(Parked::Replay(outcome)) => outcome_response(outcome),
-        // Same name, differently-signed peer, while a prompt is pending: a
+        // Same name, different peer identity, while a prompt is pending: a
         // second racing prompt would be confusing at best, so ask the agent
         // to come back once the first resolves.
         Err(ParkError::RequestIdMismatch) => err_detail(
             StatusCode::CONFLICT,
             ErrorReason::PairingAlreadyPending,
-            "a pairing for this name from a differently-signed process is \
+            "a pairing for this name from a different peer identity is \
              awaiting the user; retry after it resolves",
         ),
     }

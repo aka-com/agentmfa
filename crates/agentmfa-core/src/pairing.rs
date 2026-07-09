@@ -3,8 +3,8 @@
 //! `POST /v1/pair {"agent_name": …}` triggers a user approval and returns a
 //! random 256-bit bearer token, stored hashed. Tokens have a 30-day TTL
 //! refreshed on use, are revocable from the UI, and are pinned to the
-//! code-signing identity observed at pairing: any later call presenting the
-//! token from a differently-signed peer is rejected and audited.
+//! peer identity observed at pairing: any later call presenting the token
+//! from a different peer identity is rejected and audited.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -273,7 +273,7 @@ mod tests {
                 }
             )
             .is_ok());
-        // A differently-signed peer presenting a lifted token is rejected.
+        // A different peer identity presenting a lifted token is rejected.
         assert_eq!(
             r.verify(
                 &token,
@@ -286,7 +286,16 @@ mod tests {
             TokenError::IdentityMismatch
         );
         assert_eq!(
-            r.verify(&token, &PeerIdentity::Unsigned).unwrap_err(),
+            r.verify(
+                &token,
+                &PeerIdentity::Unsigned {
+                    uid: Some(501),
+                    executable_path: Some("/tmp/unsigned-tool".into()),
+                    file_id: Some("dev:1 ino:2".into()),
+                    executable_sha256: Some("a".repeat(64)),
+                }
+            )
+            .unwrap_err(),
             TokenError::IdentityMismatch
         );
     }
