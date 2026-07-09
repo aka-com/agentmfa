@@ -45,7 +45,7 @@ const db = {
   ],
   sessions: [],
   activity: [],
-  settings: { icloud_sync: true, reauth_on_read: true, hide_secret_prefixes: true, pg_trusted_ca_bundle_path: null, menu_bar_hides_dock: false },
+  settings: { reauth_on_read: true, hide_secret_prefixes: true, pg_trusted_ca_bundle_path: null, menu_bar_hides_dock: false },
   queue: [],
 };
 function mkSecret(name, value) {
@@ -190,7 +190,6 @@ async function mockInvoke(cmd, args = {}) {
     case 'remove_rule': db.rules = db.rules.filter((r) => r.id !== args.id); audit('🗑', 'Auto-allow removed'); return true;
     case 'revoke_agent': db.agents = db.agents.filter((a) => a.name !== args.name); audit('🔒', `Pair token revoked: ${args.name}`); return true;
     case 'close_session': db.sessions = db.sessions.filter((s) => s.id !== args.id); emit('amfa://sessions-changed', {}); return true;
-    case 'set_icloud_sync': db.settings.icloud_sync = args.on; return db.secrets.length;
     case 'set_reauth_on_read': db.settings.reauth_on_read = args.on; return;
     case 'set_hide_secret_prefixes':
       db.settings.hide_secret_prefixes = args.on;

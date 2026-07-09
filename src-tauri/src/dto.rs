@@ -218,7 +218,6 @@ impl From<&AuditEntry> for ActivityDto {
 
 #[derive(Serialize)]
 pub struct SettingsDto {
-    pub icloud_sync: bool,
     pub reauth_on_read: bool,
     pub hide_secret_prefixes: bool,
     pub pg_trusted_ca_bundle_path: Option<String>,

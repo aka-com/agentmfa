@@ -84,9 +84,6 @@ impl StateIntegrity {
                     &VaultAttrs {
                         name: KEY_NAME.into(),
                         created_at: chrono::Utc::now(),
-                        // Deliberately device-local: the sealed files are
-                        // per-machine, so the key syncing would buy nothing.
-                        sync: false,
                     },
                     &Zeroizing::new(hex),
                 )?;

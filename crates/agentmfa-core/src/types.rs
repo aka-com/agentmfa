@@ -352,8 +352,6 @@ impl DecisionContext {
 /// User settings (DESIGN.md §3/§9).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Settings {
-    /// "Sync secrets via iCloud Keychain", default on.
-    pub icloud_sync: bool,
     /// "Require OS authentication to read secrets", default on. The macOS
     /// app gates each broker-side vault read with LocalAuthentication.
     pub reauth_on_read: bool,
@@ -376,7 +374,6 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            icloud_sync: true,
             reauth_on_read: true,
             hide_secret_prefixes: true,
             pg_trusted_ca_bundle_path: None,

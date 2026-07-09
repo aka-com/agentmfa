@@ -23,7 +23,7 @@ const state = {
   sessions: [],
   activity: [],
   queue: [],
-  settings: { icloud_sync: true, reauth_on_read: true, hide_secret_prefixes: true, pg_trusted_ca_bundle_path: null, menu_bar_hides_dock: false },
+  settings: { reauth_on_read: true, hide_secret_prefixes: true, pg_trusted_ca_bundle_path: null, menu_bar_hides_dock: false },
   reveal: {},            // secretId -> prefix string (transient)
   // sheet / confirm state
   sheet: null,           // {kind:'add-secret'|'edit-secret'|'add-conn'|'edit-conn'|'settings', ...}
@@ -31,7 +31,6 @@ const state = {
   sheetErrors: {},       // field key -> inline validation message
   connType: 'api',
   confirm: null,         // {kind, id/name}
-  syncConfirm: false,    // 'on' | 'off' | false
   alwaysOpen: false,
   reqDetailOpen: null,   // approval payload disclosure override
   revokeInheritedRules: false,
@@ -424,18 +423,6 @@ function connSheet(editing) {
 function settingsSheet() {
   const s = state.settings;
   const pgCaPath = state.draft.pgCaBundlePath ?? s.pg_trusted_ca_bundle_path ?? '';
-  let confirm = '';
-  if (state.syncConfirm) {
-    const on = state.syncConfirm === 'on';
-    const head = on ? 'Turn on iCloud Keychain sync?' : 'Turn off iCloud Keychain sync?';
-    const body = on
-      ? 'Every secret is rewritten in the Keychain as a synchronizable item that rides iCloud Keychain to your other Macs.'
-      : 'Every secret is rewritten as a this-device-only item. iCloud propagates the deletion, so the synced copies are removed from your other Macs. After this, the secrets exist only on this Mac.';
-    confirm = `<div class="sync-confirm"><span class="sc-head">${head}</span>${body}
-      <div style="margin-top:8px;display:flex;gap:8px;justify-content:flex-end">
-        <button class="btn sm" data-act="sync-confirm-no">Cancel</button>
-        <button class="btn sm primary" data-act="sync-confirm-yes">${on ? 'Turn on sync' : 'Turn off sync'}</button></div></div>`;
-  }
   const reauthRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Require OS authentication to read secrets</div>
       <div class="st-sub">Authenticate before reveal, copy, or agent credential injection.</div></div>
       <button class="switch ${s.reauth_on_read ? 'on' : ''}" data-act="toggle-reauth" role="checkbox" aria-checked="${s.reauth_on_read ? 'true' : 'false'}"></button></div>`;
@@ -459,10 +446,7 @@ function settingsSheet() {
     </details>`;
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
     <div class="sheet wide"><h3>Settings</h3>
-    <div class="set-row"><div class="set-txt"><div class="st-title">Sync secrets via iCloud Keychain</div>
-      <div class="st-sub">Allows secrets to sync to your other devices.</div></div>
-      <button class="switch ${s.icloud_sync ? 'on' : ''}" data-act="toggle-sync" role="checkbox" aria-checked="${s.icloud_sync ? 'true' : 'false'}" aria-label="Sync secrets via iCloud Keychain"></button></div>
-    ${confirm}${reauthRow}${prefixRow}${dockRow}${pgTls}
+    ${reauthRow}${prefixRow}${dockRow}${pgTls}
     <div class="sheet-actions"><button class="btn primary" data-act="sheet-cancel">Done</button></div></div>`;
 }
 
@@ -737,7 +721,6 @@ function closeSheet() {
   state.sheet = null;
   state.draft = {};
   state.sheetErrors = {};
-  state.syncConfirm = false;
   render();
 }
 
@@ -841,18 +824,6 @@ document.addEventListener('click', async (e) => {
     case 'confirm-cancel': state.confirm = null; render(); break;
 
     case 'sheet-cancel': closeSheet(); break;
-    case 'toggle-sync':
-      state.syncConfirm = state.syncConfirm ? false : (state.settings.icloud_sync ? 'off' : 'on'); render(); break;
-    case 'sync-confirm-no': state.syncConfirm = false; render(); break;
-    case 'sync-confirm-yes': {
-      const on = state.syncConfirm === 'on';
-      await run(async () => {
-        const migrated = await invoke('set_icloud_sync', { on });
-        toast(on ? `💳 Sync turned on (migrated ${migrated} secret(s))` : `💳 Sync turned off`);
-      });
-      state.syncConfirm = false; await refresh('settings');
-      break;
-    }
     case 'toggle-reauth':
       {
         const on = !state.settings.reauth_on_read;
@@ -1017,7 +988,6 @@ async function boot() {
     state.draft = {};
     state.sheetErrors = {};
     state.confirm = null;
-    state.syncConfirm = false;
     render();
   });
 }

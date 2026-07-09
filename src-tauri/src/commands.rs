@@ -119,7 +119,6 @@ pub fn get_queue(state: State<AppState>) -> Vec<ApprovalDto> {
 pub fn get_settings(state: State<AppState>) -> SettingsDto {
     let s = state.broker.settings();
     SettingsDto {
-        icloud_sync: s.icloud_sync,
         reauth_on_read: s.reauth_on_read,
         hide_secret_prefixes: s.hide_secret_prefixes,
         pg_trusted_ca_bundle_path: s.pg_trusted_ca_bundle_path,
@@ -349,15 +348,6 @@ pub fn close_session(state: State<AppState>, id: u64) -> CmdResult<bool> {
 /* ------------------------------ settings --------------------------------- */
 
 #[tauri::command]
-pub async fn set_icloud_sync(state: State<'_, AppState>, on: bool) -> CmdResult<usize> {
-    state
-        .broker
-        .ui_change_icloud_sync(on)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
 pub fn set_reauth_on_read(state: State<AppState>, on: bool) -> CmdResult<()> {
     state
         .broker
@@ -455,7 +445,6 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         remove_rule,
         revoke_agent,
         close_session,
-        set_icloud_sync,
         set_reauth_on_read,
         set_hide_secret_prefixes,
         set_menu_bar_hides_dock,

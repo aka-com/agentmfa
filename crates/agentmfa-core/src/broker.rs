@@ -673,39 +673,6 @@ impl Broker {
         self.store.settings()
     }
 
-    pub async fn ui_change_icloud_sync(&self, on: bool) -> Result<usize> {
-        let confirmation = self.confirm_action(&format!(
-            "Turn iCloud Keychain sync {}",
-            if on { "on" } else { "off" }
-        ))?;
-        let migrated = self.store.set_icloud_sync(on).await?;
-        self.audit.append(
-            AuditEntry::new(
-                AuditKind::SettingsChanged,
-                format!(
-                    "iCloud Keychain sync turned {}",
-                    if on { "on" } else { "off" }
-                ),
-            )
-            .detail(if on {
-                format!(
-                    "Migrated {migrated} secret{}",
-                    if migrated == 1 { "" } else { "s" }
-                )
-            } else {
-                format!(
-                    "Migrated {migrated} secret{} · synced copies removed from other Macs",
-                    if migrated == 1 { "" } else { "s" }
-                )
-            })
-            .field("setting", "icloud_sync")
-            .field("enabled", on)
-            .field("secrets_migrated", migrated)
-            .confirmation(confirmation),
-        );
-        Ok(migrated)
-    }
-
     pub fn ui_change_reauth_on_read(&self, on: bool) -> Result<()> {
         let confirmation = if on {
             None

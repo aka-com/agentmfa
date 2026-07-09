@@ -482,16 +482,9 @@ async fn sensitive_settings_fail_closed_before_mutating() {
     assert_eq!(broker.settings().pg_trusted_ca_bundle_path, None);
     assert_eq!(events.confirms.load(Ordering::SeqCst), 2);
 
-    assert!(matches!(
-        broker.ui_change_icloud_sync(false).await,
-        Err(CoreError::NotConfirmed)
-    ));
-    assert!(broker.settings().icloud_sync);
-    assert_eq!(events.confirms.load(Ordering::SeqCst), 3);
-
     // Re-enabling the stricter read gate is not security-reducing.
     broker.ui_change_reauth_on_read(true).unwrap();
-    assert_eq!(events.confirms.load(Ordering::SeqCst), 3);
+    assert_eq!(events.confirms.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
@@ -506,9 +499,7 @@ async fn sensitive_settings_record_confirmation() {
     broker
         .ui_change_pg_trusted_ca_bundle_path(Some("/tmp/pg-ca.pem".into()))
         .unwrap();
-    broker.ui_change_icloud_sync(false).await.unwrap();
-
-    assert_eq!(events.confirms.load(Ordering::SeqCst), 3);
+    assert_eq!(events.confirms.load(Ordering::SeqCst), 2);
     let recent = broker.audit.recent(10);
     let confirmed_settings = recent
         .iter()
@@ -517,7 +508,7 @@ async fn sensitive_settings_record_confirmation() {
                 && entry.confirmation == Some(ConfirmationMethod::Waived)
         })
         .count();
-    assert_eq!(confirmed_settings, 3, "{recent:?}");
+    assert_eq!(confirmed_settings, 2, "{recent:?}");
 }
 
 #[tokio::test]

@@ -88,16 +88,10 @@ npm run release    # the above, then notarize, staple, and validate
 
 Configure `bundle.macOS.signingIdentity` (or let `scripts/build.sh` auto-detect the machine's one Developer ID identity), keep `hardenedRuntime` enabled, and give `scripts/release.sh` notary credentials via `NOTARYTOOL_KEYCHAIN_PROFILE` (from `xcrun notarytool store-credentials`) or `APPLE_ID`/`APPLE_PASSWORD`/`APPLE_TEAM_ID`. Release artifacts must be Developer ID signed, notarized, and stapled before distribution — `npm run release` is that flow.
 
-The intended Data Protection Keychain backend also needs a macOS entitlement file referenced by `bundle.macOS.entitlements`:
-
-```xml
-<key>keychain-access-groups</key>
-<array>
-  <string>TEAMID.com.aka.desktop</string>
-</array>
-```
-
-Replace `TEAMID` with the signing team's App Identifier Prefix and keep the bundle identifier (`com.aka.desktop`) stable. The current `keyring` backend compiles without this entitlement, but real Data Protection Keychain support for iCloud sync and per-item access control should ship with it.
+Keep the bundle identifier (`com.aka.desktop`) stable so release builds retain a
+consistent Keychain identity. The current `keyring` backend targets the login
+keychain. Keychain-enforced per-item access control would require a future
+Security.framework backend and corresponding signing entitlements.
 
 ## Try it without the desktop app
 
@@ -166,15 +160,15 @@ and a multi-connect ticket may open multiple sessions under that one decision.
   broker classifies as high consequence without a core-owned native OS
   authentication sheet.
 
-Documented differences from DESIGN.md:
+Implementation notes:
 
 - **Keychain backend.** `vault.rs` uses the `keyring` crate's apple-native
   backend, which targets the login keychain and does not expose the Data
-  Protection keychain's `kSecAttrSynchronizable` / `SecAccessControl`.
+  Protection keychain's `SecAccessControl` policies.
   Native reauthentication on read is enforced by the broker before
-  app-initiated vault reads; true Keychain-enforced sync/per-item ACL semantics
-  still require direct Security.framework calls plus the `keychain-access-groups`
-  entitlement.
+  app-initiated vault reads; true Keychain-enforced per-item ACL semantics
+  require direct Security.framework calls and corresponding signing
+  entitlements.
 - **Peer identity.** `peer.rs` implements the audit-token + `SecCode`
   code-signature check on macOS. Unsigned/ad-hoc macOS peers are important
   because they have no signing anchor; AgentMFA binds them to local
@@ -229,8 +223,8 @@ AgentMFA persistence
 |   |   `-- secret metadata, connection configs, settings
 |   |       - secret ids/names/timestamps only
 |   |       - connection targets/templates/secret UUID refs
-|   |       - settings: iCloud sync, reauth, hide prefixes,
-|   |         pg CA bundle path, menu bar Dock behavior
+|   |       - settings: reauth, hide prefixes, pg CA bundle path,
+|   |         menu bar Dock behavior
 |   |
 |   |-- rules.json                                  0600, atomic, HMAC-sealed
 |   |   `-- standing "always allow" rules:

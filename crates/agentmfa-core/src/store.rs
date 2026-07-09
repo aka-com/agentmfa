@@ -157,13 +157,11 @@ impl Store {
             created_at: now,
             updated_at: now,
         };
-        let sync = state.settings().icloud_sync;
         self.vault.set(
             &meta.id,
             &VaultAttrs {
                 name: meta.name.clone(),
                 created_at: now,
-                sync,
             },
             &value,
         )?;
@@ -231,15 +229,12 @@ impl Store {
             (secret.clone(), secret.created_at)
         };
         self.persist(&next)?;
-        // Keep the Keychain label in sync so synced items stay
-        // self-describing on another Mac (§3).
-        let sync = state.settings().icloud_sync;
+        // Keep the Keychain label aligned with the index.
         if let Err(error) = self.vault.set_attrs(
             id,
             &VaultAttrs {
                 name: new_name.to_string(),
                 created_at,
-                sync,
             },
         ) {
             if let Err(rollback) = self.persist(&state) {
@@ -254,7 +249,6 @@ impl Store {
     /// Replace a secret's value (the Edit sheet's write-only field, §9).
     pub fn replace_secret_value(&self, id: &Uuid, value: SecretValue) -> Result<SecretMeta> {
         let mut state = self.state.lock().unwrap();
-        let sync = state.settings().icloud_sync;
         let mut next = state.clone();
         let secret = next
             .secrets
@@ -269,7 +263,6 @@ impl Store {
             &VaultAttrs {
                 name: meta.name.clone(),
                 created_at: meta.created_at,
-                sync,
             },
             &value,
         ) {
@@ -558,77 +551,6 @@ impl Store {
 
     pub fn settings(&self) -> Settings {
         self.state.lock().unwrap().settings()
-    }
-
-    /// Toggle iCloud Keychain sync. Flipping it migrates every secret in the
-    /// vault (read → delete → re-create with the new attribute, §3). Returns
-    /// how many items were migrated.
-    pub async fn set_icloud_sync(&self, on: bool) -> Result<usize> {
-        // Snapshot under the lock, migrate without holding it (vault reads
-        // may suspend), then commit the setting. A secret added mid-toggle
-        // keeps its creation-time sync attribute — acceptable for a
-        // single-user UI action.
-        let metas = {
-            let state = self.state.lock().unwrap();
-            if state.settings().icloud_sync == on {
-                return Ok(0);
-            }
-            state.secrets.clone()
-        };
-        // Migrate every secret to the new sync attribute. If any migration
-        // fails partway, roll the already-migrated items back to the old
-        // attribute so we never leave the vault half-flipped with `settings`
-        // disagreeing about it — the toggle is all-or-nothing. The setting is
-        // only committed once every item migrated.
-        let mut migrated: Vec<&SecretMeta> = Vec::new();
-        for meta in &metas {
-            let attrs = VaultAttrs {
-                name: meta.name.clone(),
-                created_at: meta.created_at,
-                sync: on,
-            };
-            match self.vault.migrate_sync(&meta.id, &attrs).await {
-                Ok(()) => migrated.push(meta),
-                Err(e) => {
-                    for m in &migrated {
-                        let old = VaultAttrs {
-                            name: m.name.clone(),
-                            created_at: m.created_at,
-                            sync: !on,
-                        };
-                        if let Err(re) = self.vault.migrate_sync(&m.id, &old).await {
-                            tracing::error!("icloud sync rollback failed for {}: {re}", m.id);
-                        }
-                    }
-                    return Err(e);
-                }
-            }
-        }
-        let error = {
-            let mut state = self.state.lock().unwrap();
-            let mut settings = state.settings();
-            settings.icloud_sync = on;
-            let mut next = state.clone();
-            next.settings = Some(settings);
-            match self.persist(&next) {
-                Ok(()) => {
-                    *state = next;
-                    return Ok(metas.len());
-                }
-                Err(error) => error,
-            }
-        };
-        for meta in &metas {
-            let old = VaultAttrs {
-                name: meta.name.clone(),
-                created_at: meta.created_at,
-                sync: !on,
-            };
-            if let Err(rollback) = self.vault.migrate_sync(&meta.id, &old).await {
-                tracing::error!("icloud sync rollback failed for {}: {rollback}", meta.id);
-            }
-        }
-        Err(error)
     }
 
     pub fn set_reauth_on_read(&self, on: bool) -> Result<()> {
@@ -1338,109 +1260,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sync_toggle_migrates_vault_items_and_keeps_reauth() {
-        let (store, vault, _dir) = store().await;
-        let a = store.add_secret("A_KEY", val("a")).unwrap();
-        assert_eq!(vault.sync_flag(&a.id), Some(true)); // default on
-        assert!(store.settings().reauth_on_read);
-        assert_eq!(store.set_icloud_sync(false).await.unwrap(), 1);
-        assert_eq!(vault.sync_flag(&a.id), Some(false));
-        store.set_reauth_on_read(false).unwrap();
-        assert!(!store.settings().reauth_on_read);
-        store.set_reauth_on_read(true).unwrap();
-        // Turning sync back on keeps read-time re-auth enabled.
-        assert_eq!(store.set_icloud_sync(true).await.unwrap(), 1);
-        let s = store.settings();
-        assert!(s.icloud_sync && s.reauth_on_read);
-        assert_eq!(vault.sync_flag(&a.id), Some(true));
-        store.set_reauth_on_read(false).unwrap();
-        assert!(!store.settings().reauth_on_read);
-    }
-
-    /// A vault that fails the `set` for one specific `(id, sync)` exactly
-    /// once, delegating everything else to an inner `MemoryVault` — to
-    /// simulate a Keychain op failing partway through a sync migration.
-    struct FlakyVault {
-        inner: MemoryVault,
-        fail_once: Mutex<Option<(Uuid, bool)>>,
-    }
-
-    impl FlakyVault {
-        fn new() -> Self {
-            Self {
-                inner: MemoryVault::new(),
-                fail_once: Mutex::new(None),
-            }
-        }
-        fn arm(&self, id: Uuid, sync: bool) {
-            *self.fail_once.lock().unwrap() = Some((id, sync));
-        }
-        fn sync_flag(&self, id: &Uuid) -> Option<bool> {
-            self.inner.sync_flag(id)
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl SecretVault for FlakyVault {
-        fn set(&self, id: &Uuid, attrs: &VaultAttrs, value: &SecretValue) -> Result<()> {
-            {
-                let mut fail = self.fail_once.lock().unwrap();
-                if *fail == Some((*id, attrs.sync)) {
-                    *fail = None;
-                    return Err(CoreError::Vault("simulated keychain failure".into()));
-                }
-            }
-            self.inner.set(id, attrs, value)
-        }
-        async fn get(&self, id: &Uuid) -> Result<SecretValue> {
-            self.inner.get(id).await
-        }
-        fn delete(&self, id: &Uuid) -> Result<()> {
-            self.inner.delete(id)
-        }
-        fn set_attrs(&self, id: &Uuid, attrs: &VaultAttrs) -> Result<()> {
-            self.inner.set_attrs(id, attrs)
-        }
-    }
-
-    #[tokio::test]
-    async fn sync_migration_failure_rolls_back_and_loses_no_values() {
-        let dir = tempfile::tempdir().unwrap();
-        let vault = Arc::new(FlakyVault::new());
-        let store = Store::open(Paths::under(dir.path()), vault.clone())
-            .await
-            .unwrap();
-        let a = store.add_secret("A_KEY", val("a")).unwrap();
-        let b = store.add_secret("B_KEY", val("b")).unwrap();
-        let c = store.add_secret("C_KEY", val("c")).unwrap();
-        // Secrets default to sync=on; toggling off migrates each to sync=off.
-        // Make B's re-create under sync=off fail once, midway through.
-        vault.arm(b.id, false);
-
-        let err = store.set_icloud_sync(false).await.unwrap_err();
-        assert!(matches!(err, CoreError::Vault(_)));
-
-        // The setting is not flipped (all-or-nothing).
-        assert!(store.settings().icloud_sync);
-        // Every item is back on the original attribute — A was migrated then
-        // rolled back, B was restored by migrate_sync, C was never touched.
-        assert_eq!(vault.sync_flag(&a.id), Some(true));
-        assert_eq!(vault.sync_flag(&b.id), Some(true));
-        assert_eq!(vault.sync_flag(&c.id), Some(true));
-        // No value was lost anywhere.
-        assert_eq!(&*store.secret_value(&a.id).await.unwrap(), "a");
-        assert_eq!(&*store.secret_value(&b.id).await.unwrap(), "b");
-        assert_eq!(&*store.secret_value(&c.id).await.unwrap(), "c");
-
-        // With no armed failure the toggle now succeeds cleanly.
-        assert_eq!(store.set_icloud_sync(false).await.unwrap(), 3);
-        assert!(!store.settings().icloud_sync);
-        assert_eq!(vault.sync_flag(&a.id), Some(false));
-        assert_eq!(vault.sync_flag(&b.id), Some(false));
-        assert_eq!(vault.sync_flag(&c.id), Some(false));
-    }
-
-    #[tokio::test]
     async fn failed_index_writes_do_not_change_active_state() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::under(dir.path());
@@ -1490,10 +1309,6 @@ mod tests {
 
         assert!(store.set_hide_secret_prefixes(false).is_err());
         assert!(store.settings().hide_secret_prefixes);
-
-        assert!(store.set_icloud_sync(false).await.is_err());
-        assert!(store.settings().icloud_sync);
-        assert_eq!(vault.sync_flag(&spare.id), Some(true));
 
         assert!(store.delete_secret(&spare.id).is_err());
         assert!(store.secret_by_id(&spare.id).is_ok());

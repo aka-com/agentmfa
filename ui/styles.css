@@ -382,8 +382,6 @@ code, .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Conso
 .switch.on { background: #34c759; }
 .switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.25); transition: left .18s ease; }
 .switch.on::after { left: 16px; }
-.sync-confirm { margin: 10px 0 4px; padding: 10px 12px; background: var(--amber-wash); border: 1px solid var(--amber-border); border-radius: 9px; font-size: 12px; line-height: 1.5; color: var(--amber-ink); }
-.sync-confirm .sc-head { display: block; font-weight: 700; margin-bottom: 4px; }
 .set-collapse { border-bottom: 1px solid var(--line-soft); padding: 8px 2px; }
 .set-collapse summary { cursor: pointer; font-size: 13px; font-weight: 600; list-style-position: inside; }
 .set-panel { padding: 9px 0 2px; }

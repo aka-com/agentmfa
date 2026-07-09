@@ -9,7 +9,7 @@
 //! this gate in the Rust core before it takes effect.
 //!
 //! The read-time secret setting uses this same `LAContext` gate before
-//! broker-side vault reads, so it works whether or not iCloud sync is on.
+//! broker-side vault reads.
 
 /// Prompt for the native OS confirmation with `reason` shown to the user.
 /// Returns Ok(()) only when the user authenticated. Non-macOS builds fail

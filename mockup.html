@@ -224,14 +224,6 @@ code, .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Conso
   transition: left .18s ease;
 }
 .switch.on::after { left: 16px; }
-/* toggling sync migrates every Keychain item, so it is always confirmed before applying (§3) */
-.sync-confirm {
-  margin: 10px 0 4px; padding: 10px 12px;
-  background: rgba(255,190,50,.15); border: 1px solid rgba(200,140,20,.35);
-  border-radius: 9px;
-  font-size: 12px; line-height: 1.5; color: #7a5410;
-}
-.sync-confirm .sc-head { display: block; font-weight: 700; margin-bottom: 4px; }
 .set-collapse { border-bottom: 1px solid rgba(0,0,0,.06); padding: 8px 2px; }
 .set-collapse summary { cursor: pointer; font-size: 13px; font-weight: 600; list-style-position: inside; }
 .set-panel { padding: 9px 0 2px; }
@@ -1121,8 +1113,7 @@ var store = {
   addConnOpen: false,
   editConn: null,           // connection name being edited (reuses the Add form)
   settingsOpen: false,
-  settings: { sync: true, reauth: false, pgCaBundlePath: '' },  // §3: sync default on; re-auth only while sync is off
-  syncConfirm: false,       // enabling sync while re-auth is active awaits confirmation
+  settings: { reauth: true, pgCaBundlePath: '' },
   connType: 'api',
   connNewSecret: false,     // "+ New secret…" chosen in the connection dialog
   draft: {},                // dialog inputs preserved across re-renders
@@ -1527,42 +1518,14 @@ function addConnSheetHTML() {
     '</div>';
 }
 
-// Settings (DESIGN.md §9): Keychain sync, re-auth-on-read, and advanced
-// Postgres TLS trust configuration.
+// Settings (DESIGN.md §9): re-auth-on-read and advanced Postgres TLS trust.
 function settingsSheetHTML() {
   var s = store.settings;
   var caPath = store.draft.pgCaBundlePath != null ? store.draft.pgCaBundlePath : (s.pgCaBundlePath || '');
-  var syncRow = '<div class="set-row"><div class="set-txt">' +
-    '<div class="st-title">Sync secrets via iCloud Keychain</div>' +
-    '<div class="st-sub">Allows secrets to sync to your other devices.</div></div>' +
-    '<button class="switch' + (s.sync ? ' on' : '') + '" role="switch" aria-checked="' + s.sync + '" title="Sync secrets via iCloud Keychain" data-act="toggle-sync"></button></div>';
-  var confirm = '';
-  if (store.syncConfirm) {
-    var turningOn = store.syncConfirm === 'on';
-    var dropsReauth = turningOn && s.reauth;
-    var head = turningOn ? 'Turn on iCloud Keychain sync?' : 'Turn off iCloud Keychain sync?';
-    var body = 'Every secret is rewritten in the Keychain (read → delete → re-create) as ' +
-      (turningOn
-        ? 'a synchronizable item that rides iCloud Keychain to your other Macs.'
-        : 'a this-device-only item. iCloud propagates the deletion, so the synced copies are removed from your other Macs — after this, the secrets exist only on this Mac.');
-    var extra = dropsReauth
-      ? ' Synced items can’t carry a per-item OS authentication rule, so the re-authentication requirement is removed and secrets are downgraded to “accessible when unlocked”.'
-      : '';
-    confirm = '<div class="sync-confirm"><span class="sc-head">' + (dropsReauth ? '⚠ ' : '') + head + '</span>' +
-      body + extra +
-      '<div style="margin-top:8px; display:flex; gap:8px; justify-content:flex-end">' +
-      '<button class="btn sm" data-act="sync-confirm-no">Cancel</button>' +
-      '<button class="btn sm ' + (dropsReauth ? 'danger' : 'primary') + '" data-act="sync-confirm-yes">' +
-      (dropsReauth ? 'Remove re-auth &amp; turn on sync' : turningOn ? 'Turn on sync' : 'Turn off sync') +
-      '</button></div></div>';
-  }
-  var reauthRow = '';
-  if (!s.sync) {
-    reauthRow = '<div class="set-row"><div class="set-txt">' +
-      '<div class="st-title">Require OS authentication to read secrets</div>' +
-      '<div class="st-sub">Re-authenticate each time a secret value is about to be used. Only available while iCloud sync is off.</div></div>' +
-      '<button class="switch' + (s.reauth ? ' on' : '') + '" role="switch" aria-checked="' + s.reauth + '" title="Require OS authentication to read secrets" data-act="toggle-reauth"></button></div>';
-  }
+  var reauthRow = '<div class="set-row"><div class="set-txt">' +
+    '<div class="st-title">Require OS authentication to read secrets</div>' +
+    '<div class="st-sub">Authenticate before reveal, copy, or agent credential injection.</div></div>' +
+    '<button class="switch' + (s.reauth ? ' on' : '') + '" role="switch" aria-checked="' + s.reauth + '" title="Require OS authentication to read secrets" data-act="toggle-reauth"></button></div>';
   var pgTls = '<details class="set-collapse"' + (caPath ? ' open' : '') + '>' +
     '<summary>Postgres TLS</summary>' +
     '<div class="set-panel">' +
@@ -1573,7 +1536,7 @@ function settingsSheetHTML() {
     '<button class="btn sm primary" data-act="save-pg-ca-bundle">Save</button></div>' +
     '</div></details>';
   return '<div class="sheet-backdrop" data-act="settings-close"></div>' +
-    '<div class="sheet"><h3>Settings</h3>' + syncRow + confirm + reauthRow + pgTls +
+    '<div class="sheet"><h3>Settings</h3>' + reauthRow + pgTls +
     '<div class="sheet-actions"><button class="btn primary" data-act="settings-close">Done</button></div>' +
     '</div>';
 }
@@ -2782,7 +2745,6 @@ function applyState(k) {
   store.editConn = null;
   store.connNewSecret = false;
   store.settingsOpen = false;
-  store.syncConfirm = false;
   store.approvalOpen = false;
   store.osPrompt = null;
   store.alwaysOpen = false;
@@ -3074,39 +3036,11 @@ document.addEventListener('click', function (e) {
     case 'open-settings':
       store.settingsMenuOpen = false;
       store.settingsOpen = true;
-      store.syncConfirm = false;
       renderApp();
       break;
     case 'settings-close':
       store.settingsOpen = false;
-      store.syncConfirm = false;
       store.draft = {};
-      renderApp();
-      break;
-    case 'toggle-sync':
-      // migrating every Keychain item is not a casual flip — always confirm first;
-      // clicking the switch again while the confirmation is up cancels it
-      store.syncConfirm = store.syncConfirm ? false : (store.settings.sync ? 'off' : 'on');
-      renderApp();
-      break;
-    case 'sync-confirm-yes':
-      if (store.syncConfirm === 'off') {
-        store.settings.sync = false;
-        audit('💳', 'iCloud Keychain sync turned off', 'Migrated ' + store.secrets.length + ' secrets · synced copies removed from other Macs');
-        toast('💳 Sync off — secrets now exist only on this Mac');
-      } else {
-        var droppedReauth = store.settings.reauth;
-        store.settings.reauth = false;
-        store.settings.sync = true;
-        audit('💳', 'iCloud Keychain sync turned on',
-          (droppedReauth ? 'OS authentication requirement removed · migrated ' : 'Migrated ') + store.secrets.length + ' secrets');
-        toast(droppedReauth ? '💳 Sync on — OS authentication requirement removed' : '💳 Sync on — secrets will appear on your other Macs');
-      }
-      store.syncConfirm = false;
-      renderApp();
-      break;
-    case 'sync-confirm-no':
-      store.syncConfirm = false;
       renderApp();
       break;
     case 'toggle-reauth':
@@ -3242,7 +3176,7 @@ document.addEventListener('keydown', function (e) {
     } else if (store.osPrompt) {
       store.osPrompt = null; toast('🔒 OS authentication canceled — nothing changed'); renderApp();
     } else if (store.settingsOpen) {
-      store.settingsOpen = false; store.syncConfirm = false; renderApp();
+      store.settingsOpen = false; renderApp();
     } else if (store.addSecretOpen) {
       store.addSecretOpen = false; store.draft = {}; renderApp();
     } else if (store.editSecret) {

@@ -23,29 +23,21 @@ use zeroize::Zeroizing;
 use crate::error::CoreError;
 use crate::types::SecretValue;
 
-/// The secret's non-sensitive Keychain attributes. Each item carries the
-/// secret's name and creation date so a fresh install on a second Mac can
-/// rebuild an index from synced items ("import N synced secrets",
-/// DESIGN.md §3).
+/// The secret's non-sensitive Keychain attributes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultAttrs {
     pub name: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
-    /// Whether the item was created `kSecAttrSynchronizable` (rides iCloud
-    /// Keychain). The synchronizable attribute is effectively fixed at
-    /// creation, so toggling the setting migrates items (§3).
-    pub sync: bool,
 }
 
-/// The read path (`get`, and `migrate_sync` which reads) is `async`:
+/// The read path (`get`) is `async`:
 /// network-backed vaults (Vault, cloud secret managers, just-in-time
 /// issuance) are read-bound, and the broker fetches values post-approval
 /// from async context. Writes stay synchronous — they are UI-driven CRUD
 /// against a local store today; revisit if a network backend needs them.
 #[async_trait::async_trait]
 pub trait SecretVault: Send + Sync {
-    /// Create or replace the item for `id`. `attrs.sync` selects the
-    /// synchronizable attribute at (re)creation time.
+    /// Create or replace the item for `id`.
     fn set(&self, id: &Uuid, attrs: &VaultAttrs, value: &SecretValue) -> Result<(), CoreError>;
 
     /// Fetch the value. Called as late as possible — after approval, or for
@@ -54,34 +46,8 @@ pub trait SecretVault: Send + Sync {
 
     fn delete(&self, id: &Uuid) -> Result<(), CoreError>;
 
-    /// Update the non-sensitive attributes (rename keeps the Keychain label
-    /// in sync so synced items are self-describing on another Mac).
+    /// Update the non-sensitive attributes.
     fn set_attrs(&self, id: &Uuid, attrs: &VaultAttrs) -> Result<(), CoreError>;
-
-    /// Re-create the item with a different `sync` attribute (read → delete →
-    /// re-create, §3). Default impl works for every backend.
-    ///
-    /// The synchronizable attribute is fixed at creation, so the delete is
-    /// unavoidable — but a failure re-creating the item under the new
-    /// attribute would otherwise lose the value outright. If the re-create
-    /// fails we put the item back under its previous attribute (the sync flag
-    /// inverted) so a transient Keychain error can't destroy a secret; the
-    /// original error is still returned.
-    async fn migrate_sync(&self, id: &Uuid, attrs: &VaultAttrs) -> Result<(), CoreError> {
-        let value = self.get(id).await?;
-        self.delete(id)?;
-        if let Err(e) = self.set(id, attrs, &value) {
-            let restore = VaultAttrs {
-                sync: !attrs.sync,
-                ..attrs.clone()
-            };
-            if let Err(re) = self.set(id, &restore, &value) {
-                tracing::error!("vault migrate_sync restore failed for {id}: {re}");
-            }
-            return Err(e);
-        }
-        Ok(())
-    }
 }
 
 /* ------------------------------- macOS ---------------------------------- */
@@ -93,17 +59,15 @@ const MAC_KEYCHAIN_SERVICE: &str = "com.aka.desktop";
 /// so `agentmfa serve --root ...` cannot create or rotate production vault
 /// state.
 ///
-/// Documented divergence from DESIGN.md §3: the `keyring` crate's
-/// apple-native backend targets the file-based login keychain and does not
-/// expose `kSecUseDataProtectionKeychain`, `kSecAttrSynchronizable`, or
-/// `SecAccessControl`. AgentMFA still gates broker-side reads with the
-/// shell's native re-auth hook before calling `get`; moving iCloud sync and
-/// per-item ACLs into the Data Protection keychain needs direct
-/// Security.framework calls plus the `keychain-access-groups` entitlement.
+/// The `keyring` crate's apple-native backend targets the file-based login
+/// keychain and does not expose `kSecUseDataProtectionKeychain` or
+/// `SecAccessControl`. AgentMFA still gates broker-side reads with the shell's
+/// native re-auth hook before calling `get`. Keychain-enforced per-item ACLs
+/// require direct Security.framework calls and the appropriate entitlement.
 #[cfg(target_os = "macos")]
 pub struct MacKeychainVault {
     service: String,
-    /// Attribute sidecar (name/created/sync) kept next to the index so the
+    /// Attribute sidecar (name/created) kept next to the index so the
     /// UI can enumerate without touching the Keychain.
     attrs: Mutex<HashMap<Uuid, VaultAttrs>>,
 }
@@ -298,10 +262,6 @@ impl MemoryVault {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
-    /// Test helper: inspect an item's sync attribute.
-    pub fn sync_flag(&self, id: &Uuid) -> Option<bool> {
-        self.items.lock().unwrap().get(id).map(|(a, _)| a.sync)
-    }
 }
 
 #[async_trait::async_trait]
@@ -418,7 +378,6 @@ mod tests {
         let attrs = VaultAttrs {
             name: "API_KEY".into(),
             created_at: chrono::Utc::now(),
-            sync: false,
         };
         vault
             .set(&id, &attrs, &Zeroizing::new("secret".to_string()))
