@@ -121,7 +121,9 @@ again replaces the name's previous token; a call failing with
 `401 {{"reason": "token_superseded"}}` means another instance re-paired:
 re-read the token file and retry rather than pairing again (which would
 break that instance in turn). Concurrent pairings from identically-signed
-processes are merged into one prompt and receive the same token.
+processes are merged into one prompt and receive the same token. Re-pairing or
+user-initiated disconnect also invalidates outstanding data-plane capabilities
+and closes live WebSocket, Postgres, and SSH connections for that agent name.
 
 ## 2. Discover what you may ask for
 

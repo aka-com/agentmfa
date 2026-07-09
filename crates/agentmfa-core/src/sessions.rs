@@ -54,7 +54,7 @@ struct TicketEntry {
     payload: TicketPayload,
     secret_read_authorization: Option<crate::authorization::SecretReadAuthorization>,
     grant: Option<crate::authorization::GrantAuthorization>,
-    grant_revoked: bool,
+    invalidated: bool,
 }
 
 /// One live bridged/proxied session, as shown in the live-sessions band.
@@ -205,7 +205,7 @@ impl DataPlane {
                 payload,
                 secret_read_authorization: crate::authorization::current(),
                 grant: crate::authorization::current_grant(),
-                grant_revoked: false,
+                invalidated: false,
             },
         );
         value
@@ -218,7 +218,7 @@ impl DataPlane {
         Self::sweep(&self.inner, &mut state);
         let global_active = state.sessions.len();
         let entry = state.tickets.get_mut(value).ok_or(RedeemError::Unknown)?;
-        if entry.grant_revoked || entry.grant.as_ref().is_some_and(|grant| !grant.is_active()) {
+        if entry.invalidated || entry.grant.as_ref().is_some_and(|grant| !grant.is_active()) {
             return Err(RedeemError::Expired);
         }
         if entry.issued.elapsed() > self.inner.ticket_ttl {
@@ -283,7 +283,7 @@ impl DataPlane {
                 .as_ref()
                 .is_some_and(|grant| &grant.id == grant_id)
             {
-                ticket.grant_revoked = true;
+                ticket.invalidated = true;
                 if let TicketPayload::Ws { pending_upstream } = &mut ticket.payload {
                     *pending_upstream = None;
                 }
@@ -293,6 +293,36 @@ impl DataPlane {
             .sessions
             .values()
             .filter(|session| session.grant_id.as_ref() == Some(grant_id))
+            .map(|session| session.close.clone())
+            .collect();
+        let count = sessions.len();
+        drop(state);
+        for close in sessions {
+            close.notify_waiters();
+        }
+        count
+    }
+
+    /// Invalidate every unredeemed capability and close every live transport
+    /// issued to an agent, regardless of whether it came from one-time,
+    /// temporary, or saved access. Disconnecting or re-pairing an agent must
+    /// not leave an older token generation's data-plane capabilities usable.
+    pub fn close_agent(&self, agent: &str) -> usize {
+        let mut state = self.inner.state.lock().unwrap();
+        for ticket in state
+            .tickets
+            .values_mut()
+            .filter(|ticket| ticket.agent == agent)
+        {
+            ticket.invalidated = true;
+            if let TicketPayload::Ws { pending_upstream } = &mut ticket.payload {
+                *pending_upstream = None;
+            }
+        }
+        let sessions: Vec<_> = state
+            .sessions
+            .values()
+            .filter(|session| session.info.agent == agent)
             .map(|session| session.close.clone())
             .collect();
         let count = sessions.len();
@@ -601,6 +631,29 @@ mod tests {
             .expect("live session should receive grant revocation");
         assert_eq!(expect_err(plane.redeem(&ticket)), RedeemError::Expired);
         session.finish("grant_revoked");
+    }
+
+    #[tokio::test]
+    async fn agent_disconnect_blocks_all_tickets_and_signals_live_sessions() {
+        let (plane, _dir) = plane(Duration::from_secs(60), 60, 300);
+        // No grant context: this represents a ticket issued through one-time
+        // or saved access, which must still die with the paired agent.
+        let ticket = plane.issue("codex", &ws_connection(true), TicketPayload::Pg);
+        let other_ticket = plane.issue("claude", &ws_connection(true), TicketPayload::Pg);
+        let session = plane.redeem(&ticket).unwrap().start(ConnectionKind::Pg);
+        let closed = session.close_signal.clone();
+        let notified = closed.notified();
+        assert_eq!(plane.close_agent("codex"), 1);
+        tokio::time::timeout(Duration::from_secs(1), notified)
+            .await
+            .expect("live session should receive agent disconnect");
+        assert_eq!(expect_err(plane.redeem(&ticket)), RedeemError::Expired);
+        let other_session = plane
+            .redeem(&other_ticket)
+            .expect("another agent's ticket should stay active")
+            .start(ConnectionKind::Pg);
+        session.finish("agent_disconnected");
+        other_session.finish("test_complete");
     }
 
     #[tokio::test]

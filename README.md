@@ -221,6 +221,13 @@ applies to the session-open call. Traffic inside an authorized live session is
 not approved individually. A transport issued under a grant is capped by the
 grant's remaining lifetime, and grant expiry or revocation closes it.
 
+Disconnecting or re-pairing an agent invalidates all of that agent's
+outstanding data-plane capabilities and closes its open WebSocket, Postgres,
+and SSH connections, including connections opened through one-time or saved
+access. Saved "use without asking" permissions remain dormant for a
+disconnected name unless the user removes them or chooses **Require approval
+again** while reconnecting it.
+
 ## Conformance
 
 - The **core** owns the Keychain, the daemon, the policy engine, and the audit log.

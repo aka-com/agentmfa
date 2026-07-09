@@ -782,19 +782,21 @@ impl Broker {
         self.pairing.list()
     }
 
-    /// Revoke invalidates the token immediately; standing rules are kept
-    /// (visible and removable on the Connections tab) and re-disclosed if
-    /// the name pairs again (§9).
+    /// Disconnect invalidates the token and every issued data-plane
+    /// capability immediately. Standing rules are kept (visible and removable
+    /// on the Connections tab) and re-disclosed if the name pairs again (§9).
     pub fn ui_revoke_agent(&self, name: &str) -> Result<bool> {
         let removed = self.pairing.revoke(name)?;
         if removed {
             self.revoke_access_grants_for_agent(name, "agent revoked");
+            let sessions_closed = self.data_plane.close_agent(name);
             self.audit.append(
                 AuditEntry::new(
                     AuditKind::TokenRevoked,
                     format!("Agent disconnected: {name}"),
                 )
-                .agent(name.to_string()),
+                .agent(name.to_string())
+                .field("sessions_closed", sessions_closed),
             );
             self.events.agents_changed();
         }

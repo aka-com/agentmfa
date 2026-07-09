@@ -196,7 +196,14 @@ async function mockInvoke(cmd, args = {}) {
     }
     case 'remove_rule': db.rules = db.rules.filter((r) => r.id !== args.id); audit('🔒', 'Approval required again'); return true;
     case 'remove_grant': db.grants = db.grants.filter((g) => g.id !== args.id); audit('🛑', 'Temporary access ended'); return true;
-    case 'revoke_agent': db.agents = db.agents.filter((a) => a.name !== args.name); audit('🔒', `Agent disconnected: ${args.name}`); return true;
+    case 'revoke_agent':
+      db.agents = db.agents.filter((a) => a.name !== args.name);
+      db.grants = db.grants.filter((g) => g.agent !== args.name);
+      db.sessions = db.sessions.filter((s) => s.agent !== args.name);
+      audit('🔒', `Agent disconnected: ${args.name}`);
+      emit('amfa://agents-changed', {});
+      emit('amfa://sessions-changed', {});
+      return true;
     case 'close_session': db.sessions = db.sessions.filter((s) => s.id !== args.id); emit('amfa://sessions-changed', {}); return true;
     case 'set_reauth_on_read': db.settings.reauth_on_read = args.on; return;
     case 'set_hide_secret_prefixes':
@@ -218,6 +225,26 @@ async function mockInvoke(cmd, args = {}) {
       if (req && req.kind === 'pair' && args.revokeInheritedRules) {
         db.rules = db.rules.filter((r) => r.agent !== req.agent);
         audit('🔒', `Approval required again: ${req.agent}`);
+      }
+      if (req && req.kind === 'pair' && args.decision === 'allow_once') {
+        db.grants = db.grants.filter((g) => g.agent !== req.agent);
+        db.sessions = db.sessions.filter((s) => s.agent !== req.agent);
+        const existing = db.agents.find((agent) => agent.name === req.agent);
+        if (existing) {
+          existing.paired_at = now();
+          existing.last_used = existing.paired_at;
+        } else {
+          db.agents.push({
+            name: req.agent,
+            program: req.pairing_identity.program,
+            verification: req.pairing_identity.verification,
+            identity: req.pairing_identity.technical,
+            paired_at: now(),
+            last_used: now(),
+          });
+        }
+        emit('amfa://agents-changed', {});
+        emit('amfa://sessions-changed', {});
       }
       if (req && args.decision === 'allow_session' && req.connection) {
         db.grants = db.grants.filter((g) =>

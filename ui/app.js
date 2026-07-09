@@ -62,6 +62,13 @@ async function load(key, cmd, args) {
 async function loadSettings() {
   try { state.settings = await invoke('get_settings'); } catch (e) { console.error(e); }
 }
+async function refreshAccessViews() {
+  await Promise.all([
+    load('connections', 'list_connections'),
+    load('agents', 'list_agents'),
+  ]);
+  render();
+}
 
 /* --------------------------------- render -------------------------------- */
 // Rebuilding #root from scratch would drop anything the DOM holds that state
@@ -101,7 +108,7 @@ function pendingBannerHTML() {
 function globalSectionsHTML() {
   let out = '';
   if (!state.agents.length) {
-    out += `<div class="agent-onboarding"><div class="onboarding-copy"><b>Connect your first agent</b>
+    out += `<div class="agent-onboarding"><div class="onboarding-copy"><b>Connect an agent</b>
       <span>Copy a short setup message into your coding agent. AgentMFA will ask you to confirm when it connects.</span></div>
       <button class="btn primary sm" data-act="copy-agent-setup">Copy setup instructions</button>
       <details><summary>What connecting allows</summary><p>The agent can see connection names and destinations and ask AgentMFA to use them. Saved secret values are never sent to the agent.</p></details></div>`;
@@ -206,10 +213,10 @@ const accessRowsHTML = (c) => {
   });
   const ongoing = c.rules.map((r) =>
     `<div class="access-row"><div class="access-copy"><b>${esc(r.agent)}</b>
-      <span>${esc(accessDescription(c, 'full'))} without asking</span></div>
+      <span>${esc(accessDescription(c, 'full'))}${state.agents.some((agent) => agent.name === r.agent) ? ' without asking' : ' if reconnected'}</span></div>
       <button class="btn ghost sm" aria-label="Require approval again for ${escAttr(r.agent)}" data-act="del-rule" data-id="${r.id}">Require approval</button></div>`);
   const rows = temporary.concat(ongoing);
-  return rows.length ? `<div class="access-list"><div class="access-head">Who can use this?</div>${rows.join('')}</div>` : '';
+  return rows.length ? `<div class="access-list"><div class="access-head">Agent access</div>${rows.join('')}</div>` : '';
 };
 const liveCount = (c) => state.sessions.filter((s) => s.connection === c.name).length;
 const connActionsHTML = (c) =>
@@ -911,7 +918,7 @@ document.addEventListener('click', async (e) => {
       break;
     case 'del-rule':
       await run(() => invoke('remove_rule', { id }));
-      toast('🔒 Approval will be required again'); await refresh('connections');
+      toast('🔒 Approval will be required again'); await refreshAccessViews();
       break;
     case 'del-grant':
       await run(() => invoke('remove_grant', { id }));
@@ -1081,21 +1088,25 @@ async function boot() {
     if (mode !== 'approval' && state.tab === 'activity' && !state.sheet && !state.menuOpen) render();
   }, 60000);
   // Access sessions are in-memory and expire without a persisted state
-  // change. Refresh their chips/countdowns so expiry disappears promptly.
+  // change. Refresh access rows and agent summaries so expiry disappears
+  // promptly everywhere it is presented.
   setInterval(() => {
-    if (mode !== 'approval' && !state.sheet && !state.menuOpen) refresh('connections');
+    if (mode !== 'approval' && !state.sheet && !state.menuOpen) refreshAccessViews();
   }, 30000);
   // Live updates from the core.
   await listen('amfa://queue-changed', (ev) => { state.queue = ev.payload || []; render(); });
   await listen('amfa://sessions-changed', () => refresh('sessions'));
   await listen('amfa://agents-changed', async () => {
-    const before = new Set(state.agents.map((agent) => agent.name));
+    const before = new Map(state.agents.map((agent) => [agent.name, agent.paired_at]));
     await load('agents', 'list_agents');
     render();
-    const connected = state.agents.find((agent) => !before.has(agent.name));
+    const connected = state.agents.find((agent) =>
+      !before.has(agent.name) || before.get(agent.name) !== agent.paired_at);
     if (connected) toast(`🔗 ${connected.name} is connected and can now ask to use your connections`);
   });
-  await listen('amfa://rules-changed', () => refresh('connections'));
+  await listen('amfa://rules-changed', () => {
+    if (mode !== 'approval') refreshAccessViews();
+  });
   await listen('amfa://activity-appended', (ev) => receiveActivity(ev.payload));
   await listen('amfa://open-settings', () => {
     state.sheet = { kind: 'settings' };

@@ -457,10 +457,12 @@ async fn post_pair(
             match broker.pairing.pair(&name, identity) {
                 Ok((token, agent)) => {
                     broker.revoke_access_grants_for_agent(&name, "agent re-paired");
+                    let sessions_closed = broker.data_plane.close_agent(&name);
                     broker.audit.append(
                         AuditEntry::new(AuditKind::Paired, format!("Agent connected: {name}"))
                             .agent(name.clone())
-                            .outcome("paired"),
+                            .outcome("paired")
+                            .field("prior_sessions_closed", sessions_closed),
                     );
                     broker.events.agents_changed();
                     ExecOutcome {

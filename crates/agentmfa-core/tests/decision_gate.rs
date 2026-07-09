@@ -17,10 +17,11 @@ use agentmfa_core::error::CoreError;
 use agentmfa_core::events::BrokerEvents;
 use agentmfa_core::paths::Paths;
 use agentmfa_core::policy::PolicyEngine;
+use agentmfa_core::sessions::{RedeemError, TicketPayload};
 use agentmfa_core::store::ConnectionSpec;
 use agentmfa_core::types::{
-    ConfirmationMethod, Connection, ConnectionConfig, DecisionContext, DecisionSurface,
-    PeerIdentity,
+    ConfirmationMethod, Connection, ConnectionConfig, ConnectionKind, DecisionContext,
+    DecisionSurface, PeerIdentity,
 };
 use agentmfa_core::vault::MemoryVault;
 use chrono::Utc;
@@ -274,8 +275,27 @@ async fn pairing_revocation_is_immediate_without_confirmation() {
         .pairing
         .pair("claude-code", PeerIdentity::DevUnverified { uid: 501 })
         .unwrap();
+    let conn = add_github(&broker);
+    let ticket = broker
+        .data_plane
+        .issue("claude-code", &conn, TicketPayload::Pg);
+    let session = broker
+        .data_plane
+        .redeem(&ticket)
+        .unwrap()
+        .start(ConnectionKind::Pg);
+    let close = session.close_signal.clone();
+    let notified = close.notified();
 
     assert!(broker.ui_revoke_agent("claude-code").unwrap());
+    tokio::time::timeout(std::time::Duration::from_secs(1), notified)
+        .await
+        .expect("disconnect should close live data-plane sessions");
+    assert!(matches!(
+        broker.data_plane.redeem(&ticket),
+        Err(RedeemError::Expired)
+    ));
+    session.finish("agent_disconnected");
     assert!(broker.paired_agents().is_empty());
     assert_eq!(events.confirms.load(Ordering::SeqCst), 0);
     let revoked = broker
