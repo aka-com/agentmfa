@@ -55,10 +55,10 @@ pub trait BrokerEvents: Send + Sync {
         None
     }
 
-    /// A high-consequence configuration action — creating/editing/deleting
-    /// a connection or deleting a secret — is about to take effect. Same
-    /// contract as [`Self::confirm_decision`]: the core demands it, `None`
-    /// aborts, and the default fails closed (§8).
+    /// A high-consequence configuration action — creating/deleting a
+    /// connection, changing its capability, or deleting a secret — is about
+    /// to take effect. Same contract as [`Self::confirm_decision`]: the core
+    /// demands it, `None` aborts, and the default fails closed (§8).
     fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
         None
     }

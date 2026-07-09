@@ -1,9 +1,10 @@
 //! Core-owned OS confirmation (DESIGN.md §8).
 //!
 //! High-consequence commands, approving a pairing or a mutating request,
-//! saving an "Always allow…" rule, creating/editing a connection, complete
-//! only after a native LocalAuthentication (Touch ID / account password)
-//! sheet that the webview cannot render, forge, or dismiss. The webview
+//! saving an "Always allow…" rule, creating a connection, or changing a
+//! connection's capability complete only after a native LocalAuthentication
+//! (Touch ID / account password) sheet that the webview cannot render, forge,
+//! or dismiss. The webview
 //! *requests* the decision through a Tauri command, but the command runs
 //! this gate in the Rust core before it takes effect.
 //!

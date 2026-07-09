@@ -337,6 +337,130 @@ async fn config_actions_confirm_and_record_the_method() {
 }
 
 #[tokio::test]
+async fn connection_renames_skip_confirmation_but_capability_changes_do_not() {
+    let events = Arc::new(GateEvents {
+        allow: true,
+        confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    let conn = add_github(&broker);
+
+    let renamed = broker
+        .ui_update_connection(
+            &conn.id,
+            ConnectionSpec {
+                name: "github-renamed".into(),
+                config: conn.config.clone(),
+                secrets: conn.secrets.clone(),
+                multi_connect: conn.multi_connect,
+            },
+        )
+        .unwrap();
+    assert_eq!(events.confirms.load(Ordering::SeqCst), 0);
+    let renamed_entry = broker
+        .audit
+        .recent(5)
+        .into_iter()
+        .find(|entry| entry.kind == agentmfa_core::audit::AuditKind::ConnectionUpdated)
+        .unwrap();
+    assert_eq!(renamed_entry.confirmation, None);
+    assert_eq!(renamed_entry.fields["capability_changed"], false);
+
+    let ConnectionConfig::Api {
+        scheme,
+        port,
+        template,
+        ..
+    } = renamed.config.clone()
+    else {
+        panic!("expected API connection")
+    };
+    broker
+        .ui_update_connection(
+            &renamed.id,
+            ConnectionSpec {
+                name: renamed.name.clone(),
+                config: ConnectionConfig::Api {
+                    host: "api.enterprise.github.com".into(),
+                    scheme,
+                    port,
+                    template,
+                },
+                secrets: renamed.secrets.clone(),
+                multi_connect: renamed.multi_connect,
+            },
+        )
+        .unwrap();
+    assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
+    let changed_entry = broker
+        .audit
+        .recent(5)
+        .into_iter()
+        .find(|entry| entry.kind == agentmfa_core::audit::AuditKind::ConnectionUpdated)
+        .unwrap();
+    assert_eq!(
+        changed_entry.confirmation,
+        Some(ConfirmationMethod::Waived)
+    );
+    assert_eq!(changed_entry.fields["capability_changed"], true);
+}
+
+#[tokio::test]
+async fn secret_binding_and_session_scope_changes_require_confirmation() {
+    let events = Arc::new(GateEvents {
+        allow: true,
+        confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    let first = broker
+        .store
+        .add_secret("WS_TOKEN", Zeroizing::new("first".into()))
+        .unwrap();
+    let second = broker
+        .store
+        .add_secret("WS_TOKEN_NEXT", Zeroizing::new("second".into()))
+        .unwrap();
+    let conn = broker
+        .store
+        .add_connection(ConnectionSpec {
+            name: "events".into(),
+            config: ConnectionConfig::Ws {
+                url: "wss://events.example.com".into(),
+                template: None,
+            },
+            secrets: vec![first.id],
+            multi_connect: true,
+        })
+        .unwrap();
+
+    let rebound = broker
+        .ui_update_connection(
+            &conn.id,
+            ConnectionSpec {
+                name: conn.name.clone(),
+                config: conn.config.clone(),
+                secrets: vec![second.id],
+                multi_connect: conn.multi_connect,
+            },
+        )
+        .unwrap();
+    assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
+
+    broker
+        .ui_update_connection(
+            &rebound.id,
+            ConnectionSpec {
+                name: rebound.name.clone(),
+                config: rebound.config.clone(),
+                secrets: rebound.secrets.clone(),
+                multi_connect: false,
+            },
+        )
+        .unwrap();
+    assert_eq!(events.confirms.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
 async fn sensitive_settings_fail_closed_before_mutating() {
     let events = Arc::new(GateEvents {
         allow: false,

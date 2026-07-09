@@ -4,7 +4,8 @@
 //! - there is **no** command that returns a stored secret value; reveal
 //!   returns only the short prefix, copy writes core-side to the clipboard;
 //! - high-consequence commands (approving a pairing or a mutating request,
-//!   saving an "Always allow…" rule, creating/editing a connection) are
+//!   saving an "Always allow…" rule, creating a connection, or changing a
+//!   connection's capability) are
 //!   gated by the **core itself**: the broker demands the native OS
 //!   confirmation through the `BrokerEvents` hooks (implemented over
 //!   [`crate::auth::confirm`] in this shell) before any effect happens —
@@ -290,8 +291,8 @@ pub fn add_connection(state: State<AppState>, input: ConnectionInput) -> CmdResu
         .map_err(|e| e.to_string())
 }
 
-/// Editing a connection is likewise core-gated (§8); a target change drops
-/// the connection's standing rules (§9).
+/// Security-relevant connection edits are core-gated (§8); metadata-only
+/// edits are not. A target change drops the connection's standing rules (§9).
 #[tauri::command]
 pub fn edit_connection(
     state: State<AppState>,

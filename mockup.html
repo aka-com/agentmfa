@@ -2574,29 +2574,20 @@ function saveConnection(osConfirmed) {
     nameEl.classList.add('err'); nameEl.focus();
     toast('⚠ A connection named ' + name + ' already exists'); return;
   }
-  // a connection binds a secret to a destination — creating or editing one
-  // completes only via the native OS confirmation (DESIGN.md §8/§9). Validation
-  // runs first so Touch ID is never spent on a rejected form.
-  if (!osConfirmed) {
-    requireOSConfirm(
-      editing ? 'Save changes to connection “' + editing.name + '”' : 'Add connection “' + name + '”',
-      function () { saveConnection(true); });
-    return;
-  }
   function g(id) {
     var el = document.getElementById(id);
     return el ? el.value.trim() : '';
   }
   var chosen = (d.connSecrets && d.connSecrets.length) ? d.connSecrets : ['__new__'];
   var secretNames = [];
+  var pendingSecrets = [];
   chosen.forEach(function (n) {
     if (n === '__new__') {
       n = g('c-newname') || 'NEW_SECRET';
       var exists = store.secrets.filter(function (s) { return s.name === n; }).length;
       if (!exists) {
         var newValEl = document.getElementById('c-newvalue');
-        store.secrets.push({ name: n, value: (newValEl && newValEl.value) || 'demo-secret-value' });
-        audit('➕', 'Secret added: ' + n);
+        pendingSecrets.push({ name: n, value: (newValEl && newValEl.value) || 'demo-secret-value' });
       }
     }
     if (secretNames.indexOf(n) === -1) secretNames.push(n);
@@ -2617,13 +2608,31 @@ function saveConnection(osConfirmed) {
   } else {
     meta = { url: g('f-url') || 'wss://example.com/socket' };
   }
+  var nextMulti = t !== 'api' && (t === 'ssh' || d.connMulti !== false);
+  var currentMulti = editing && editing.type !== 'api' && editing.multi !== false;
+  var capabilityChanged = !editing || editing.type !== t ||
+    JSON.stringify(editing.meta) !== JSON.stringify(meta) ||
+    editing.secrets.join('\u0000') !== secretNames.join('\u0000') ||
+    currentMulti !== nextMulti;
+  // New connections and capability changes bind credentials to destinations,
+  // so they require native confirmation. A name-only edit is metadata and does not.
+  if (!osConfirmed && capabilityChanged) {
+    requireOSConfirm(
+      editing ? 'Change security settings for connection “' + editing.name + '”' : 'Add connection “' + name + '”',
+      function () { saveConnection(true); });
+    return;
+  }
+  pendingSecrets.forEach(function (secret) {
+    store.secrets.push(secret);
+    audit('➕', 'Secret added: ' + secret.name);
+  });
   if (editing) {
     var oldName = editing.name;
     var oldTarget = connTarget(editing);
     editing.name = name;
     editing.secrets = secretNames;
     editing.meta = meta;
-    if (t !== 'api') editing.multi = t === 'ssh' || d.connMulti !== false;
+    if (t !== 'api') editing.multi = nextMulti;
     // standing rules key on the connection's stable id (§7) — a rename needs
     // no rule rewrite, and a later connection recycling the old name inherits nothing
     // a rule was granted for a destination — if the target changed, drop the rules (§9)
@@ -2642,7 +2651,7 @@ function saveConnection(osConfirmed) {
     return;
   }
   var conn = { id: 'c' + (connIdSeq++), name: name, type: t, secrets: secretNames, meta: meta };
-  if (t !== 'api') conn.multi = t === 'ssh' || d.connMulti !== false;
+  if (t !== 'api') conn.multi = nextMulti;
   store.connections.push(conn);
   store.addConnOpen = false;
   store.connNewSecret = false;

@@ -513,6 +513,32 @@ impl Store {
         Ok((updated, target_changed))
     }
 
+    /// Rename a connection without accepting or rewriting any capability
+    /// fields. This is the metadata-only update path used when native
+    /// authentication is intentionally skipped.
+    pub fn rename_connection(&self, id: &Uuid, name: String) -> Result<Connection> {
+        validate_connection_name(&name)?;
+        let mut state = self.state.lock().unwrap();
+        if state
+            .connections
+            .iter()
+            .any(|connection| connection.name == name && &connection.id != id)
+        {
+            return Err(CoreError::ConnectionNameTaken(name));
+        }
+        let mut next = state.clone();
+        let connection = next
+            .connections
+            .iter_mut()
+            .find(|connection| &connection.id == id)
+            .ok_or(CoreError::ConnectionNotFound)?;
+        connection.name = name;
+        connection.updated_at = Utc::now();
+        let renamed = connection.clone();
+        self.commit(&mut state, next)?;
+        Ok(renamed)
+    }
+
     /// Delete a connection. The caller (policy layer) deletes its rules,
     /// rules die with their connection (DESIGN.md §7).
     pub fn delete_connection(&self, id: &Uuid) -> Result<Connection> {

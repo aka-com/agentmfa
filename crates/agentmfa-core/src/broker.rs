@@ -18,8 +18,8 @@ use crate::ratelimit::{KeyedLimiter, PairingLimiter, WindowLimiter};
 use crate::sessions::{DataPlane, SessionInfo};
 use crate::store::{ConnectionSpec, Store};
 use crate::types::{
-    ConfirmationMethod, Connection, DecisionContext, PairedAgent, Rule, SecretMeta, SecretValue,
-    Settings,
+    ConfirmationMethod, Connection, ConnectionKind, DecisionContext, PairedAgent, Rule, SecretMeta,
+    SecretValue, Settings,
 };
 use crate::Result;
 
@@ -475,14 +475,31 @@ impl Broker {
         Ok(conn)
     }
 
-    /// Update a connection; when the pinned target changes, its standing
-    /// rules are dropped, a rule granted for one destination must not
-    /// silently cover another (§9).
+    /// Update a connection. Name-only edits are metadata and do not require
+    /// native authentication; changes to configuration, secret bindings, or
+    /// session scope do. When the pinned target changes, its standing rules
+    /// are dropped, a rule granted for one destination must not silently cover
+    /// another (§9).
     pub fn ui_update_connection(&self, id: &Uuid, spec: ConnectionSpec) -> Result<Connection> {
         let old = self.store.connection_by_id(id)?;
-        let confirmation =
-            self.confirm_action(&format!("Save changes to connection “{}”", spec.name))?;
-        let (conn, target_changed) = self.store.update_connection(id, spec)?;
+        let effective_multi_connect =
+            spec.config.kind() != ConnectionKind::Api && spec.multi_connect;
+        let explicit_secrets_changed =
+            old.kind() != ConnectionKind::Api && old.secrets != spec.secrets;
+        let capability_changed = old.config != spec.config
+            || explicit_secrets_changed
+            || old.multi_connect != effective_multi_connect;
+        let (confirmation, conn, target_changed) = if capability_changed {
+            let confirmation = self.confirm_action(&format!(
+                "Change security settings for connection “{}”",
+                spec.name
+            ))?;
+            let (conn, target_changed) = self.store.update_connection(id, spec)?;
+            (Some(confirmation), conn, target_changed)
+        } else {
+            let conn = self.store.rename_connection(id, spec.name)?;
+            (None, conn, false)
+        };
         let mut dropped = 0;
         if target_changed {
             dropped = self.policy.remove_rules_for_connection(id)?;
@@ -516,8 +533,11 @@ impl Broker {
         ))
         .field("target", conn.target())
         .field("target_changed", target_changed)
-        .field("rules_removed", dropped)
-        .confirmation(confirmation);
+        .field("capability_changed", capability_changed)
+        .field("rules_removed", dropped);
+        if let Some(confirmation) = confirmation {
+            entry = entry.confirmation(confirmation);
+        }
         if old.name != conn.name {
             entry = entry
                 .field("renamed_from", old.name.clone())
