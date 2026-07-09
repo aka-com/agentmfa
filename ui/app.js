@@ -93,7 +93,7 @@ function render() {
 
 function pendingBannerHTML() {
   if (!state.queue.length) return '';
-  return `<div class="pending-banner"><span>⏳ ${state.queue.length} approval${state.queue.length > 1 ? 's' : ''} pending</span>
+  return `<div class="pending-banner"><span>⏳ ${state.queue.length} request${state.queue.length > 1 ? 's' : ''} waiting</span>
     <button class="btn sm" data-act="open-approval">Review</button></div>`;
 }
 
@@ -117,14 +117,14 @@ function globalSectionsHTML() {
     }).join('');
   }
   if (state.sessions.length) {
-    out += '<div class="live-head">Live sessions</div>' + state.sessions.map((s) => {
+    out += '<div class="live-head">Open connections</div>' + state.sessions.map((s) => {
       const t = TYPES[s.type];
       // who holds the session matters as much as what it's connected to
       const who = s.agent ? `${esc(s.agent)} → ${esc(s.connection)}` : esc(s.connection);
       if (state.confirm && state.confirm.kind === 'close-session' && state.confirm.id === s.id) {
         return `<div class="live-row"><span class="badge ${t.cls}">${t.label}</span>
           <div class="live-txt"><div class="c-name">${who}</div>
-          <div class="s-sub">Close this live session?</div></div>
+          <div class="s-sub">Close this connection now?</div></div>
           <button class="btn sm" data-act="confirm-cancel">Cancel</button>
           <button class="btn sm danger" data-act="close-session-confirm" data-id="${s.id}">Close</button></div>`;
       }
@@ -182,12 +182,26 @@ function secretsHTML() {
 }
 
 /* ---- connections tab ---- */
-const ruleChipsHTML = (c) => c.rules.map((r) =>
-  `<div class="allow-chip">⚡ ${esc(r.agent)}<button title="Remove auto-allow" aria-label="Remove auto-allow for ${escAttr(r.agent)}" data-act="del-rule" data-id="${r.id}">✕</button></div>`).join('');
-const grantChipsHTML = (c) => (c.grants || []).map((g) => {
-  const mins = Math.max(1, Math.ceil((new Date(g.expires_at).getTime() - Date.now()) / 60000));
-  return `<div class="allow-chip">⏳ ${esc(g.agent)} · ${esc(g.scope)} · ${mins}m<button title="Revoke access session" aria-label="Revoke access session for ${escAttr(g.agent)}" data-act="del-grant" data-id="${g.id}">✕</button></div>`;
-}).join('');
+function accessDescription(connection, scope) {
+  if (scope === 'read') return 'Can fetch data';
+  if (connection.type === 'api') return 'Can make any request';
+  return 'Can open and use this connection';
+}
+
+const accessRowsHTML = (c) => {
+  const temporary = (c.grants || []).map((g) => {
+    const mins = Math.max(1, Math.ceil((new Date(g.expires_at).getTime() - Date.now()) / 60000));
+    return `<div class="access-row"><div class="access-copy"><b>${esc(g.agent)}</b>
+      <span>${esc(accessDescription(c, g.scope))} · ${mins} min left</span></div>
+      <button class="btn ghost sm" aria-label="End temporary access for ${escAttr(g.agent)}" data-act="del-grant" data-id="${g.id}">End now</button></div>`;
+  });
+  const ongoing = c.rules.map((r) =>
+    `<div class="access-row"><div class="access-copy"><b>${esc(r.agent)}</b>
+      <span>${esc(accessDescription(c, 'full'))} without asking</span></div>
+      <button class="btn ghost sm" aria-label="Require approval again for ${escAttr(r.agent)}" data-act="del-rule" data-id="${r.id}">Require approval</button></div>`);
+  const rows = temporary.concat(ongoing);
+  return rows.length ? `<div class="access-list"><div class="access-head">Who can use this?</div>${rows.join('')}</div>` : '';
+};
 const liveCount = (c) => state.sessions.filter((s) => s.connection === c.name).length;
 const connActionsHTML = (c) =>
   `<button class="icon-btn" title="Edit connection" aria-label="Edit connection ${escAttr(c.name)}" data-act="edit-conn" data-id="${c.id}">${ICONS.pencil}</button>
@@ -207,7 +221,7 @@ function connectionsHTML() {
       return `<div class="conn-card confirm-card">
         <div class="cc-top"><span class="badge ${t.cls}">${t.label}</span>
           <span class="c-name" title="${escAttr(c.name)}">${esc(c.name)}</span></div>
-        <div class="cc-confirm">Delete this connection?${c.rules.length ? ' Its auto-allow rules are removed too.' : ''}</div>
+        <div class="cc-confirm">Delete this connection?${c.rules.length ? ' Affected agents will need approval again.' : ''}</div>
         <div class="cc-foot"><button class="btn sm" data-act="confirm-cancel">Cancel</button>
           <button class="btn sm danger" data-act="del-conn-confirm" data-id="${c.id}">Delete</button></div></div>`;
     }
@@ -217,7 +231,8 @@ function connectionsHTML() {
         <span class="c-name" title="${escAttr(c.name)}">${esc(c.name)}</span>
         ${liveCount(c) ? '<span class="cc-live">● live</span>' : ''}</div>
       <div class="cc-target" title="${escAttr(c.target)}">${esc(c.target)}</div>
-      <div class="cc-chips">${chips}${grantChipsHTML(c)}${ruleChipsHTML(c)}</div>
+      <div class="cc-chips">${chips}</div>
+      ${accessRowsHTML(c)}
       <div class="cc-foot">${connActionsHTML(c)}</div></div>`;
   }).join('') + `</div>`;
 }
@@ -406,8 +421,8 @@ function connSheet(editing) {
     if (t !== 'ssh') {
       fields += `<div class="f-row"><label style="display:flex;align-items:center;gap:7px;cursor:pointer">
         <input type="checkbox" id="c-multi" ${d.multiConnect !== false ? 'checked' : ''} style="width:auto">
-        <span>Allow multiple client connections per approval</span></label>
-        <div class="rule-note">Pools and reconnecting clients may redeem the session ticket any number of times within its 60s window, under the one approval.</div></div>`;
+        <span>Let tools reconnect for 60 seconds after opening</span></label>
+        <div class="rule-note">Useful for connection pools and tools that reconnect automatically.</div></div>`;
     }
   } else {
     fields += `<div class="f-row"><label>Injection template</label>
@@ -415,7 +430,7 @@ function connSheet(editing) {
       <div class="rule-note">References secrets by name in <code>{{ … }}</code>. API connections may compose several (e.g. <code>base64(USER ":" PASS)</code>).</div></div>`;
   }
   if (editing && conn && conn.rules.length) {
-    fields += `<div class="rule-note">Changing the target resets this connection’s auto-allow rules.</div>`;
+    fields += `<div class="rule-note">Changing the destination makes affected agents ask for approval again.</div>`;
   }
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
     <div class="sheet wide"><h3>${editing ? 'Edit connection' : 'Add connection'}</h3>${fields}
@@ -427,8 +442,8 @@ function connSheet(editing) {
 function settingsSheet() {
   const s = state.settings;
   const pgCaPath = state.draft.pgCaBundlePath ?? s.pg_trusted_ca_bundle_path ?? '';
-  const reauthRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Require OS authentication to read secrets</div>
-      <div class="st-sub">Authenticate before reveal, copy, or agent credential injection.</div></div>
+  const reauthRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Confirm before using saved secrets</div>
+      <div class="st-sub">Use OS authentication before showing, copying, or sending a saved credential.</div></div>
       <button class="switch ${s.reauth_on_read ? 'on' : ''}" data-act="toggle-reauth" role="checkbox" aria-checked="${s.reauth_on_read ? 'true' : 'false'}"></button></div>`;
   const prefixRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Hide secret prefixes</div>
       <div class="st-sub">Remove the reveal-prefix eye from the secrets list; values stay copy-only.</div></div>
@@ -457,11 +472,60 @@ function settingsSheet() {
 /* ----------------------------- approval window --------------------------- */
 let countdownTimer = null;
 
+function durationLabel(seconds) {
+  if (seconds % 60 === 0) {
+    const minutes = seconds / 60;
+    return `${minutes} minute${minutes === 1 ? '' : 's'}`;
+  }
+  return `${seconds} seconds`;
+}
+
+function approvalHeading(req) {
+  const name = req.connection ? req.connection.name : 'AgentMFA';
+  if (req.kind === 'pair') return 'Approval required';
+  if (req.kind === 'http' && req.http && !req.http.mutating) {
+    return `${req.agent} wants to fetch data from ${name}`;
+  }
+  if (req.kind === 'http') return `${req.agent} wants to make a request through ${name}`;
+  if (req.kind === 'ssh') return `${req.agent} wants to sign in through ${name}`;
+  return `${req.agent} wants to connect to ${name}`;
+}
+
+function temporaryAccessExplanation(req) {
+  const connection = req.connection ? req.connection.name : 'this connection';
+  const access = req.temporary_access || { scope: 'full', duration_seconds: 900 };
+  const duration = durationLabel(access.duration_seconds);
+  if (access.scope === 'read') {
+    return {
+      duration,
+      text: `For ${duration}, ${req.agent} can fetch data from ${connection} without asking again. Requests that may make changes will still ask.`,
+    };
+  }
+  if (req.kind === 'http') {
+    return {
+      duration,
+      text: `For ${duration}, ${req.agent} can make any request through ${connection} without asking again, including changes and deletes.`,
+    };
+  }
+  return {
+    duration,
+    text: `For ${duration}, ${req.agent} can open and use ${connection} without asking again. Activity inside an open connection is not reviewed individually.`,
+  };
+}
+
+function ongoingAccessExplanation(req) {
+  const connection = req.connection ? req.connection.name : 'this connection';
+  if (req.kind === 'http') {
+    return `${req.agent} will be able to make any request through ${connection} without asking again, including changes and deletes.`;
+  }
+  return `${req.agent} will be able to open and use ${connection} without asking again. Activity inside an open connection is not reviewed individually.`;
+}
+
 function renderApproval() {
   const req = state.queue[0];
   const el = root();
   if (!req) {
-    el.innerHTML = `<div class="surface approval"><div class="ap-empty">No pending approvals.</div></div>`;
+    el.innerHTML = `<div class="surface approval"><div class="ap-empty">No requests waiting.</div></div>`;
     return;
   }
   const conn = req.connection;
@@ -474,7 +538,7 @@ function renderApproval() {
   const connectionRow = conn ? `<div class="ap-row"><span>Connection</span><span>${connCell}</span></div>` : '';
   const targetRow = conn ? `<div class="ap-row"><span>Target</span><code>${esc(conn.target)}</code></div>` : '';
   const scopeRow = (req.kind === 'pg' || req.kind === 'ws' || req.kind === 'ssh') && conn && conn.multi_connect
-    ? `<div class="ap-row"><span>Scope</span><span>All connects within the 60 s ticket window · up to 60 sessions</span></div>` : '';
+    ? `<div class="ap-row"><span>Reconnects</span><span>Allowed for 60 seconds after this connection is opened</span></div>` : '';
   const identityRow = isPair
     ? `<div class="ap-row"><span>Identity</span><code title="The issued token is pinned to this peer identity">${esc(req.identity || 'Unsigned/ad-hoc, no local fingerprint')}</code></div>` : '';
 
@@ -492,49 +556,42 @@ function renderApproval() {
   let always = '';
   if (!isPair) {
     const box = state.alwaysOpen
-      ? `<div class="always-box"><div class="f-row"><label>Auto-allow rule <span class="stub-badge">policy engine v1 stub</span></label>
-        <div class="rule-line"><code>${esc(req.agent)}</code> → <code>${esc(req.connection ? req.connection.name : '')}</code></div>
-        <div class="rule-note">Future requests on this connection are approved automatically. Remove it anytime from the Connections tab. Saving requires OS authentication.</div></div>
-        <button class="btn primary sm" data-act="always-save">Save rule &amp; allow</button></div>` : '';
-    always = { btn: `<button class="btn ghost sm" data-act="always-toggle">Always allow…</button>`, box };
+      ? `<div class="always-box"><div class="f-row"><label>Use without asking</label>
+        <div class="rule-note">${esc(ongoingAccessExplanation(req))} You can require approval again from the Connections tab.</div></div>
+        <button class="btn primary sm" data-act="always-save">Don’t ask again</button></div>` : '';
+    always = { btn: `<button class="btn ghost sm" data-act="always-toggle">Don’t ask again…</button>`, box };
   }
 
-  const sessionScope = req.http && !req.http.mutating ? 'read access' : 'full access';
-  const sessionWarning = req.http
-    ? (req.http.mutating
-      ? `Additional requests to this connection, including writes and deletes, will proceed without review.`
-      : `Additional GET and HEAD requests to this connection will proceed without review; writes still require approval.`)
-    : `Additional sessions may be opened without review; traffic inside them is unrestricted.`;
+  const temporary = isPair ? null : temporaryAccessExplanation(req);
   const sessionNote = !isPair
-    ? `<div class="rule-note ap-grant-note">Allows ${sessionScope} for 15 minutes. ${sessionWarning}</div>` : '';
+    ? `<div class="ap-access-summary"><b>If you allow for ${esc(temporary.duration)}</b><p>${esc(temporary.text)}</p></div>` : '';
 
   // The window is fixed-size and non-resizable, so the variable-height
   // middle (rows, payload, inherited-permissions list) scrolls; Deny/Allow
   // can never be pushed out of reach.
   el.innerHTML = `<div class="surface approval">
     <div class="ap-head"><div class="ap-icon">🔐</div>
-      <div><div class="ap-title">Approval required</div></div></div>
+      <div><div class="ap-title">${esc(approvalHeading(req))}</div></div></div>
     <div class="ap-scroll">
     <div class="ap-rows">
       <div class="ap-row"><span>Agent</span><b>${esc(req.agent)}</b></div>
       ${identityRow}
       ${connectionRow}
       ${targetRow}
-      <div class="ap-row"><span>Action</span><code>${esc(req.action)}</code></div>
+      <div class="ap-row"><span>This request</span><code>${esc(req.action)}</code></div>
       ${scopeRow}
       <div class="ap-row"><span>Approve within</span><span><span class="ap-countdown${cd.s === 0 ? ' expired' : cd.s <= COUNTDOWN_LOW_S ? ' low' : ''}" id="ap-countdown">${cd.text}</span></span></div>
     </div>
     ${detail}${inherit}
     ${sessionNote}
+    ${always ? `<div class="ap-ongoing-action">${always.btn}</div>${always.box}` : ''}
     </div>
     <div class="ap-buttons">
       <button class="btn deny" data-act="decide-deny" data-id="${req.id}">Deny</button>
-      ${isPair ? '' : `<button class="btn ghost sm" data-act="decide-once" data-id="${req.id}">Allow once</button>`}
-      ${always ? always.btn : ''}
+      ${isPair ? '' : `<button class="btn ghost sm" data-act="decide-once" data-id="${req.id}">This request only</button>`}
       <span class="spacer"></span>
-      <button class="btn primary" data-act="decide-allow" data-id="${req.id}">${isPair ? 'Approve pairing' : 'Allow 15 minutes'}</button></div>
-    ${always ? always.box : ''}
-    ${state.queue.length > 1 ? `<div class="aw-queue">${state.queue.length - 1} more pending</div>` : ''}
+      <button class="btn primary" data-act="decide-allow" data-id="${req.id}">${isPair ? 'Approve pairing' : `Allow for ${esc(temporary.duration)}`}</button></div>
+    ${state.queue.length > 1 ? `<div class="aw-queue">${state.queue.length - 1} more request${state.queue.length > 2 ? 's' : ''} waiting</div>` : ''}
   </div>`;
   armCountdown();
 }
@@ -543,7 +600,7 @@ function requestDetailHTML(req) {
   if (req.kind !== 'http' || !req.http) return '';
   const h = req.http;
   const shown = state.reqDetailOpen === null ? h.mutating : state.reqDetailOpen;
-  const head = `<div class="req-detail-head"><button class="btn ghost sm" data-act="req-detail-toggle">${shown ? '▾' : '▸'} Request payload${h.mutating ? `<span class="mut-tag">${esc(h.method)}</span>` : ''}</button></div>`;
+  const head = `<div class="req-detail-head"><button class="btn ghost sm" data-act="req-detail-toggle">${shown ? '▾' : '▸'} Technical request details${h.mutating ? `<span class="mut-tag">${esc(h.method)}</span>` : ''}</button></div>`;
   if (!shown) return head;
   const hdrs = h.headers && h.headers.length
     ? h.headers.map(([k, v]) => `<div class="rd-line"><span class="rd-k">${esc(k)}:</span> ${esc(String(v))}</div>`).join('')
@@ -821,11 +878,11 @@ document.addEventListener('click', async (e) => {
       break;
     case 'del-rule':
       await run(() => invoke('remove_rule', { id }));
-      toast('🗑 Auto-allow removed'); await refresh('connections');
+      toast('🔒 Approval will be required again'); await refresh('connections');
       break;
     case 'del-grant':
       await run(() => invoke('remove_grant', { id }));
-      toast('🛑 Access session revoked'); await refresh('all');
+      toast('🛑 Temporary access ended'); await refresh('all');
       break;
 
     case 'revoke-ask': state.confirm = { kind: 'revoke-agent', name }; render(); break;
@@ -837,7 +894,7 @@ document.addEventListener('click', async (e) => {
     case 'close-session-ask': state.confirm = { kind: 'close-session', id: Number(id) }; render(); break;
     case 'close-session-confirm':
       if (await run(() => invoke('close_session', { id: Number(id) }))) {
-        state.confirm = null; toast('⏹ Session closed'); await refresh('sessions');
+        state.confirm = null; toast('⏹ Connection closed'); await refresh('sessions');
       }
       break;
     case 'confirm-cancel': state.confirm = null; render(); break;
@@ -847,7 +904,7 @@ document.addEventListener('click', async (e) => {
       {
         const on = !state.settings.reauth_on_read;
         await run(() => invoke('set_reauth_on_read', { on }));
-        toast(on ? '💳 OS authentication required to read secrets' : '💳 OS authentication requirement removed');
+        toast(on ? '💳 Confirmation required before using saved secrets' : '💳 Extra confirmation removed');
       }
       await refresh('settings');
       break;

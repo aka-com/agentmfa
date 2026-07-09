@@ -835,7 +835,7 @@ async fn run_policied(
         broker.audit.append(
             AuditEntry::new(
                 AuditKind::AutoAllowed,
-                format!("Access session: {} → {}", agent.name, conn.name),
+                format!("Temporary access used: {} → {}", agent.name, conn.name),
             )
             .agent(agent.name.clone())
             .connection(conn.name.clone())
@@ -860,7 +860,7 @@ async fn run_policied(
             let rule = broker.policy.matching_rule(&agent.name, &conn.id);
             let mut entry = AuditEntry::new(
                 AuditKind::AutoAllowed,
-                format!("Auto-approved: {} → {}", agent.name, conn.name),
+                format!("Used without asking: {} → {}", agent.name, conn.name),
             )
             .agent(agent.name.clone())
             .connection(conn.name.clone())
@@ -943,7 +943,7 @@ async fn post_ws_open(
         );
     };
 
-    let action = format!("Open WebSocket bridge → {}", conn.target());
+    let action = format!("Connect to WebSocket → {}", conn.target());
     broker.audit.append(
         AuditEntry::new(
             AuditKind::Requested,
@@ -1079,7 +1079,7 @@ async fn post_ssh_open(
         host_key_fingerprint.clone(),
     );
 
-    let action = format!("Open SSH agent → {}", conn.target());
+    let action = format!("Sign in with SSH → {}", conn.target());
     broker.audit.append(
         AuditEntry::new(
             AuditKind::Requested,
@@ -1203,7 +1203,7 @@ async fn post_pg_open(
     };
     let dbname = dbname.clone();
 
-    let action = format!("Open Postgres session → {}", conn.target());
+    let action = format!("Connect to Postgres → {}", conn.target());
     broker.audit.append(
         AuditEntry::new(
             AuditKind::Requested,

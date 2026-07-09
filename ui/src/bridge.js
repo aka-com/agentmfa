@@ -39,6 +39,7 @@ const db = {
   ],
   connections: [],
   rules: [],
+  grants: [],
   agents: [
     { name: 'claude-code', identity: 'com.anthropic.claude-code · Team 6XN7K9RPQ2',
       token_preview: 'amfa_7f3a9…', paired_at: now(), rule_count: 0 },
@@ -70,9 +71,11 @@ function seedConnections() {
 }
 seedFixtures();
 // Illustrative broker state so the standalone dev page exercises every layout
-// affordance: an auto-allow rule, a live session, and a run of activity.
+// affordance: ongoing access, temporary access, an open connection, and activity.
 function seedFixtures() {
   db.rules.push({ id: uid(), agent: 'claude-code', connection_id: db.connections[0].id });
+  db.grants.push({ id: uid(), agent: 'claude-code', connection_id: db.connections[1].id,
+    scope: 'full', expires_at: new Date(Date.now() + 11 * 60000).toISOString() });
   db.sessions.push({ id: 1, type: 'ws', agent: 'claude-code', connection: 'market-feed', detail: 'wss://stream.example.com/feed' });
   // Spread across a day so the relative/absolute timestamp split is visible.
   const t = (min) => new Date(Date.now() - min * 60000).toISOString();
@@ -80,12 +83,12 @@ function seedFixtures() {
     ['⛔', 'Denied: claude-code', 'POST api.github.com/repos/aka/aka/dispatches', 2],
     ['📋', 'Secret copied: GITHUB_API_KEY', null, 6],
     ['📤', 'WebSocket bridge closed', 'market-feed', 14],
-    ['📥', 'WebSocket bridge opened', 'market-feed', 35],
-    ['⚡', 'Auto-approved: claude-code → github', null, 90],
+    ['📥', 'WebSocket connection opened', 'market-feed', 35],
+    ['⚡', 'Used without asking: claude-code → github', null, 90],
     ['📨', 'claude-code requested github', 'GET api.github.com/user/repos', 180],
-    ['📤', 'Postgres session closed', 'Ticket window elapsed', 400],
-    ['📥', 'Postgres session opened', 'prod-db → app_production', 402],
-    ['✅', 'Allowed once: claude-code', 'Open Postgres session → app@db.internal.aka.com:5432/app_production', 1500],
+    ['📤', 'Postgres connection closed', 'Ticket window elapsed', 400],
+    ['📥', 'Postgres connection opened', 'prod-db → app_production', 402],
+    ['✅', 'Allowed this request: claude-code', 'Connect to Postgres → app@db.internal.aka.com:5432/app_production', 1500],
     ['🔗', 'Agent paired: claude-code', null, 3000],
   ].forEach(([icon, text, detail, min]) =>
     db.activity.push({ icon, text, detail: detail || null, at: t(min) }));
@@ -99,6 +102,7 @@ function connDto(c) {
     id: c.id, name: c.name, type: c.type, target: connTarget(c),
     secret_names: c.secret_names, multi_connect: c.multi_connect,
     rules: db.rules.filter((r) => r.connection_id === c.id).map((r) => ({ id: r.id, agent: r.agent })),
+    grants: db.grants.filter((g) => g.connection_id === c.id).map((g) => ({ ...g })),
     host: c.host || null, scheme: c.scheme || null, port: c.port || null, template: c.template || null,
     dbname: c.dbname || null, user: c.user || null, host_key_fingerprint: c.host_key_fingerprint || null,
     sslmode: c.sslmode || null, url: c.url || null,
@@ -187,7 +191,8 @@ async function mockInvoke(cmd, args = {}) {
       db.connections = db.connections.filter((x) => x.id !== args.id);
       db.rules = db.rules.filter((r) => r.connection_id !== args.id); audit('🗑', `Connection deleted: ${c.name}`); return;
     }
-    case 'remove_rule': db.rules = db.rules.filter((r) => r.id !== args.id); audit('🗑', 'Auto-allow removed'); return true;
+    case 'remove_rule': db.rules = db.rules.filter((r) => r.id !== args.id); audit('🔒', 'Approval required again'); return true;
+    case 'remove_grant': db.grants = db.grants.filter((g) => g.id !== args.id); audit('🛑', 'Temporary access ended'); return true;
     case 'revoke_agent': db.agents = db.agents.filter((a) => a.name !== args.name); audit('🔒', `Pair token revoked: ${args.name}`); return true;
     case 'close_session': db.sessions = db.sessions.filter((s) => s.id !== args.id); emit('amfa://sessions-changed', {}); return true;
     case 'set_reauth_on_read': db.settings.reauth_on_read = args.on; return;
@@ -209,7 +214,14 @@ async function mockInvoke(cmd, args = {}) {
       const req = db.queue.find((r) => r.id === args.id);
       if (req && req.kind === 'pair' && args.revokeInheritedRules) {
         db.rules = db.rules.filter((r) => r.agent !== req.agent);
-        audit('🗑', `Auto-allow permissions revoked: ${req.agent}`);
+        audit('🔒', `Approval required again: ${req.agent}`);
+      }
+      if (req && args.decision === 'allow_session' && req.connection) {
+        db.grants = db.grants.filter((g) =>
+          !(g.agent === req.agent && g.connection_id === req.connection.id));
+        db.grants.push({ id: uid(), agent: req.agent, connection_id: req.connection.id,
+          scope: req.temporary_access.scope,
+          expires_at: new Date(Date.now() + req.temporary_access.duration_seconds * 1000).toISOString() });
       }
       db.queue = db.queue.filter((r) => r.id !== args.id); emit('amfa://queue-changed', db.queue.slice()); return;
     }
@@ -248,6 +260,7 @@ if (!tauri && typeof window !== 'undefined') {
       received_at: now(), deadline: new Date(Date.now() + ttlMs).toISOString(),
       identity: kind === 'pair' ? 'com.anthropic.claude-code · Team 6XN7K9RPQ2' : null,
       inherited, http,
+      temporary_access: kind === 'pair' ? null : { scope: post ? 'full' : 'read', duration_seconds: 900 },
     };
     db.queue = [req]; emit('amfa://queue-changed', db.queue.slice());
   };

@@ -105,11 +105,12 @@ pub fn list_activity(state: State<AppState>, limit: Option<usize>) -> Vec<Activi
 
 #[tauri::command]
 pub fn get_queue(state: State<AppState>) -> Vec<ApprovalDto> {
+    let duration = state.broker.config.access_grant_ttl.as_secs();
     state
         .broker
         .approvals_queue()
         .into_iter()
-        .map(ApprovalDto::from)
+        .map(|request| ApprovalDto::new(request, duration))
         .collect()
 }
 
@@ -326,10 +327,7 @@ pub fn remove_rule(state: State<AppState>, id: String) -> CmdResult<bool> {
 #[tauri::command]
 pub fn remove_grant(state: State<AppState>, id: String) -> CmdResult<bool> {
     let id = parse_id(&id)?;
-    state
-        .broker
-        .ui_remove_grant(&id)
-        .map_err(|e| e.to_string())
+    state.broker.ui_remove_grant(&id).map_err(|e| e.to_string())
 }
 
 /* ----------------------------- paired agents ----------------------------- */

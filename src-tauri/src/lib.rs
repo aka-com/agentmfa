@@ -236,12 +236,13 @@ pub fn run() {
 
                 let paths = Paths::default_locations()?;
                 let vault = platform_vault(&paths)?;
-                let events = events::observer(handle.clone());
+                let config = BrokerConfig::default();
+                let events = events::observer(handle.clone(), config.access_grant_ttl.as_secs());
 
                 let broker: Arc<Broker> = runtime.block_on(Broker::new(
                     paths,
                     vault,
-                    BrokerConfig::default(),
+                    config,
                     events,
                 ))?;
 

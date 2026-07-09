@@ -27,11 +27,15 @@ pub const APPROVAL_WINDOW: &str = "approval";
 
 pub struct TauriEvents {
     app: AppHandle,
+    access_duration_seconds: u64,
 }
 
 impl TauriEvents {
-    pub fn new(app: AppHandle) -> Self {
-        Self { app }
+    pub fn new(app: AppHandle, access_duration_seconds: u64) -> Self {
+        Self {
+            app,
+            access_duration_seconds,
+        }
     }
 
     fn update_tray_badge(&self, count: usize) {
@@ -58,11 +62,52 @@ impl TauriEvents {
             }
         }
     }
+
+    fn access_duration(&self) -> String {
+        if self.access_duration_seconds % 60 == 0 {
+            let minutes = self.access_duration_seconds / 60;
+            format!("{minutes} minute{}", if minutes == 1 { "" } else { "s" })
+        } else {
+            format!("{} seconds", self.access_duration_seconds)
+        }
+    }
+
+    fn connection_name<'a>(&self, request: &'a ApprovalRequest) -> &'a str {
+        request
+            .connection
+            .as_ref()
+            .map(|connection| connection.name.as_str())
+            .unwrap_or("this connection")
+    }
+
+    fn request_summary(&self, request: &ApprovalRequest) -> String {
+        let connection = self.connection_name(request);
+        match request.kind {
+            ApprovalKind::Pair => format!("{} wants to connect to AgentMFA", request.agent),
+            ApprovalKind::Http if request.http.as_ref().is_some_and(|http| !http.mutating) => {
+                format!("{} wants to fetch data from {connection}", request.agent)
+            }
+            ApprovalKind::Http => {
+                format!(
+                    "{} wants to make a request through {connection}",
+                    request.agent
+                )
+            }
+            ApprovalKind::Ssh => format!("{} wants to sign in through {connection}", request.agent),
+            ApprovalKind::Pg | ApprovalKind::Ws => {
+                format!("{} wants to connect to {connection}", request.agent)
+            }
+        }
+    }
 }
 
 impl BrokerEvents for TauriEvents {
     fn queue_changed(&self, queue: &[ApprovalRequest]) {
-        let dtos: Vec<ApprovalDto> = queue.iter().cloned().map(ApprovalDto::from).collect();
+        let dtos: Vec<ApprovalDto> = queue
+            .iter()
+            .cloned()
+            .map(|request| ApprovalDto::new(request, self.access_duration_seconds))
+            .collect();
         self.update_tray_badge(queue.len());
         self.set_approval_visible(!queue.is_empty());
         let _ = self.app.emit(EVT_QUEUE, &dtos);
@@ -77,7 +122,7 @@ impl BrokerEvents for TauriEvents {
             .notification()
             .builder()
             .title("AgentMFA")
-            .body(&request.notification)
+            .body(self.request_summary(request))
             .show();
     }
 
@@ -110,30 +155,42 @@ impl BrokerEvents for TauriEvents {
         decision: UiDecision,
     ) -> Option<ConfirmationMethod> {
         let reason = match decision {
-            UiDecision::AlwaysAllow => format!(
-                "Save standing rule: always allow {} → {}",
-                request.agent,
-                request
-                    .connection
-                    .as_ref()
-                    .map(|c| c.name.as_str())
-                    .unwrap_or("—")
-            ),
+            UiDecision::AlwaysAllow => {
+                let connection = self.connection_name(request);
+                match request.kind {
+                    ApprovalKind::Http => format!(
+                        "Let {} make any request through {} without asking again",
+                        request.agent, connection
+                    ),
+                    ApprovalKind::Pair => format!("Connect {} to AgentMFA", request.agent),
+                    ApprovalKind::Pg | ApprovalKind::Ws | ApprovalKind::Ssh => format!(
+                        "Let {} open and use {} without asking again",
+                        request.agent, connection
+                    ),
+                }
+            }
             UiDecision::AllowSession => {
-                let scope = request
-                    .http
-                    .as_ref()
-                    .map(|http| if http.mutating { "full" } else { "read" })
-                    .unwrap_or("full");
-                format!(
-                    "Allow {scope} access for 15 minutes: {} → {}",
-                    request.agent,
-                    request
-                        .connection
-                        .as_ref()
-                        .map(|connection| connection.name.as_str())
-                        .unwrap_or("—")
-                )
+                let connection = self.connection_name(request);
+                let duration = self.access_duration();
+                match request.kind {
+                    ApprovalKind::Http
+                        if request.http.as_ref().is_some_and(|http| !http.mutating) =>
+                    {
+                        format!(
+                            "Let {} fetch data from {} for {}",
+                            request.agent, connection, duration
+                        )
+                    }
+                    ApprovalKind::Http => format!(
+                        "Let {} make any request through {} for {}",
+                        request.agent, connection, duration
+                    ),
+                    ApprovalKind::Pg | ApprovalKind::Ws | ApprovalKind::Ssh => format!(
+                        "Let {} open and use {} for {}",
+                        request.agent, connection, duration
+                    ),
+                    ApprovalKind::Pair => format!("Connect {} to AgentMFA", request.agent),
+                }
             }
             _ => match request.kind {
                 ApprovalKind::Pair => format!("Approve pairing of “{}”", request.agent),
@@ -182,6 +239,6 @@ impl BrokerEvents for TauriEvents {
 }
 
 /// Convenience for the shell to construct the observer as a trait object.
-pub fn observer(app: AppHandle) -> Arc<dyn BrokerEvents> {
-    Arc::new(TauriEvents::new(app))
+pub fn observer(app: AppHandle, access_duration_seconds: u64) -> Arc<dyn BrokerEvents> {
+    Arc::new(TauriEvents::new(app, access_duration_seconds))
 }

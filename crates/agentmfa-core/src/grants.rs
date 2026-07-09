@@ -23,6 +23,13 @@ pub enum GrantScope {
 }
 
 impl GrantScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Full => "full",
+        }
+    }
+
     pub fn allows(self, required: Self) -> bool {
         self == Self::Full || required == Self::Read
     }

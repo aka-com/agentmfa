@@ -98,7 +98,7 @@ impl ConnectionDto {
             .map(|grant| GrantChip {
                 id: grant.id.to_string(),
                 agent: grant.agent,
-                scope: grant.scope.label().to_string(),
+                scope: grant.scope.as_str().to_string(),
                 expires_at: grant.expires_at.to_rfc3339(),
             })
             .collect();
@@ -255,14 +255,34 @@ pub struct ApprovalDto {
     #[serde(flatten)]
     pub request: ApprovalRequest,
     pub high_consequence: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temporary_access: Option<TemporaryAccessDto>,
 }
 
-impl From<ApprovalRequest> for ApprovalDto {
-    fn from(request: ApprovalRequest) -> Self {
+#[derive(Serialize, Clone)]
+pub struct TemporaryAccessDto {
+    pub scope: &'static str,
+    pub duration_seconds: u64,
+}
+
+impl ApprovalDto {
+    pub fn new(request: ApprovalRequest, access_duration_seconds: u64) -> Self {
         let high_consequence = request.is_high_consequence();
+        let temporary_access = if request.kind == agentmfa_core::approvals::ApprovalKind::Pair {
+            None
+        } else {
+            Some(TemporaryAccessDto {
+                scope: match request.http.as_ref() {
+                    Some(http) if !http.mutating => "read",
+                    _ => "full",
+                },
+                duration_seconds: access_duration_seconds,
+            })
+        };
         Self {
             request,
             high_consequence,
+            temporary_access,
         }
     }
 }

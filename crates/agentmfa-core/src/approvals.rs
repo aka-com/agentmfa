@@ -58,7 +58,7 @@ pub struct ApprovalRequest {
     /// None for pairing requests.
     pub connection: Option<ConnectionSummary>,
     /// Display line: "GET api.github.com/user/repos",
-    /// "Open Postgres session → app@db…".
+    /// "Connect to Postgres → app@db…".
     pub action: String,
     /// Doorbell body: "claude-code wants to use github, GET /user/repos".
     pub notification: String,

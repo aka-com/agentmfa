@@ -294,7 +294,7 @@ impl Broker {
                         self.audit.append(attributed(
                             AuditEntry::new(
                                 AuditKind::AllowedOnce,
-                                format!("Allowed once: {}", request.agent),
+                                format!("Allowed this request: {}", request.agent),
                             )
                             .agent(request.agent.clone())
                             .connection(
@@ -336,7 +336,7 @@ impl Broker {
                     self.audit.append(attributed(
                         AuditEntry::new(
                             AuditKind::RuleSaved,
-                            format!("Auto-allow saved: {} → {}", request.agent, conn.name),
+                            format!("{} can use {} without asking", request.agent, conn.name),
                         )
                         .agent(request.agent.clone())
                         .connection(conn.name.clone())
@@ -400,9 +400,13 @@ impl Broker {
                     AuditEntry::new(
                         AuditKind::GrantStarted,
                         format!(
-                            "{} started: {} → {}",
-                            scope.label(),
+                            "Temporary access started: {} can {} {}",
                             request.agent,
+                            if scope == GrantScope::Read {
+                                "fetch data from"
+                            } else {
+                                "use"
+                            },
                             conn.name
                         ),
                     )
@@ -673,7 +677,7 @@ impl Broker {
         self.audit.append(
             AuditEntry::new(
                 AuditKind::GrantRevoked,
-                format!("Access session revoked: {} → {connection}", grant.agent),
+                format!("Temporary access ended: {} → {connection}", grant.agent),
             )
             .agent(grant.agent)
             .connection(connection)
@@ -693,7 +697,7 @@ impl Broker {
         self.audit.append(
             AuditEntry::new(
                 AuditKind::GrantRevoked,
-                format!("Access sessions revoked: {agent}"),
+                format!("Temporary access ended: {agent}"),
             )
             .agent(agent.to_string())
             .detail(reason)
@@ -722,7 +726,7 @@ impl Broker {
             self.audit.append(
                 AuditEntry::new(
                     AuditKind::RuleRemoved,
-                    format!("Auto-allow removed: {} → {}", rule.agent, conn_name),
+                    format!("Approval required again: {} → {}", rule.agent, conn_name),
                 )
                 .agent(rule.agent.clone())
                 .rule(rule.id),
@@ -748,7 +752,7 @@ impl Broker {
         if removed > 0 {
             let mut entry = AuditEntry::new(
                 AuditKind::RuleRemoved,
-                format!("Auto-allow permissions revoked: {agent}"),
+                format!("Approval required again: {agent}"),
             )
             .agent(agent.to_string())
             .detail(format!(

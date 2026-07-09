@@ -34,7 +34,7 @@ pub enum TicketPayload {
     Ssh,
 }
 
-/// Session-audit label for a connection kind ("WebSocket session opened").
+/// User-facing audit label for a data-plane connection.
 fn kind_label(kind: ConnectionKind) -> &'static str {
     match kind {
         ConnectionKind::Ws => "WebSocket",
@@ -358,7 +358,11 @@ impl Redemption {
         inner.audit.append(
             AuditEntry::new(
                 AuditKind::SessionOpened,
-                format!("{} session opened: {}", kind_label(kind), info.connection),
+                format!(
+                    "{} connection opened: {}",
+                    kind_label(kind),
+                    info.connection
+                ),
             )
             .agent(info.agent.clone())
             .connection(info.connection.clone())
@@ -411,7 +415,7 @@ impl SessionHandle {
                 AuditEntry::new(
                     AuditKind::SessionClosed,
                     format!(
-                        "{} session closed: {}",
+                        "{} connection closed: {}",
                         kind_label(self.kind),
                         self.connection
                     ),
