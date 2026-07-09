@@ -632,7 +632,11 @@ impl Broker {
         self.store.settings()
     }
 
-    pub async fn ui_set_icloud_sync(&self, on: bool) -> Result<usize> {
+    pub async fn ui_change_icloud_sync(&self, on: bool) -> Result<usize> {
+        let confirmation = self.confirm_action(&format!(
+            "Turn iCloud Keychain sync {}",
+            if on { "on" } else { "off" }
+        ))?;
         let migrated = self.store.set_icloud_sync(on).await?;
         self.audit.append(
             AuditEntry::new(
@@ -655,23 +659,33 @@ impl Broker {
             })
             .field("setting", "icloud_sync")
             .field("enabled", on)
-            .field("secrets_migrated", migrated),
+            .field("secrets_migrated", migrated)
+            .confirmation(confirmation),
         );
         Ok(migrated)
     }
 
-    pub fn ui_set_reauth_on_read(&self, on: bool) -> Result<()> {
+    pub fn ui_change_reauth_on_read(&self, on: bool) -> Result<()> {
+        let confirmation = if on {
+            None
+        } else {
+            Some(self.confirm_action("Disable Touch ID requirement for reading secrets")?)
+        };
         self.store.set_reauth_on_read(on)?;
+        let mut entry = AuditEntry::new(
+            AuditKind::SettingsChanged,
+            format!(
+                "Touch ID requirement {}",
+                if on { "enabled" } else { "disabled" }
+            ),
+        );
+        if let Some(confirmation) = confirmation {
+            entry = entry.confirmation(confirmation);
+        }
         self.audit.append(
-            AuditEntry::new(
-                AuditKind::SettingsChanged,
-                format!(
-                    "Touch ID requirement {}",
-                    if on { "enabled" } else { "disabled" }
-                ),
-            )
-            .field("setting", "reauth_on_read")
-            .field("enabled", on),
+            entry
+                .field("setting", "reauth_on_read")
+                .field("enabled", on),
         );
         Ok(())
     }
@@ -704,7 +718,7 @@ impl Broker {
         Ok(())
     }
 
-    pub fn ui_set_pg_trusted_ca_bundle_path(&self, path: Option<String>) -> Result<()> {
+    pub fn ui_change_pg_trusted_ca_bundle_path(&self, path: Option<String>) -> Result<()> {
         let path = path.and_then(|p| {
             let trimmed = p.trim();
             if trimmed.is_empty() {
@@ -713,6 +727,10 @@ impl Broker {
                 Some(trimmed.to_string())
             }
         });
+        let confirmation = self.confirm_action(match &path {
+            Some(_) => "Change Postgres trusted CA bundle",
+            None => "Clear Postgres trusted CA bundle",
+        })?;
         self.store.set_pg_trusted_ca_bundle_path(path.clone())?;
         self.audit.append(
             AuditEntry::new(
@@ -721,7 +739,8 @@ impl Broker {
             )
             .detail(path.clone().unwrap_or_else(|| "cleared".to_string()))
             .field("setting", "pg_trusted_ca_bundle_path")
-            .field("path", path.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null)),
+            .field("path", path.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null))
+            .confirmation(confirmation),
         );
         Ok(())
     }

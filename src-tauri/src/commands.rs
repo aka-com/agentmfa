@@ -341,7 +341,7 @@ pub fn close_session(state: State<AppState>, id: u64) -> CmdResult<bool> {
 pub async fn set_icloud_sync(state: State<'_, AppState>, on: bool) -> CmdResult<usize> {
     state
         .broker
-        .ui_set_icloud_sync(on)
+        .ui_change_icloud_sync(on)
         .await
         .map_err(|e| e.to_string())
 }
@@ -350,7 +350,7 @@ pub async fn set_icloud_sync(state: State<'_, AppState>, on: bool) -> CmdResult<
 pub fn set_reauth_on_read(state: State<AppState>, on: bool) -> CmdResult<()> {
     state
         .broker
-        .ui_set_reauth_on_read(on)
+        .ui_change_reauth_on_read(on)
         .map_err(|e| e.to_string())
 }
 
@@ -377,7 +377,7 @@ pub fn set_pg_trusted_ca_bundle_path(
 ) -> CmdResult<()> {
     state
         .broker
-        .ui_set_pg_trusted_ca_bundle_path(path)
+        .ui_change_pg_trusted_ca_bundle_path(path)
         .map_err(|e| e.to_string())
 }
 
