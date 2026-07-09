@@ -837,57 +837,60 @@ async fn run_policied(
     required_scope: GrantScope,
     park: ParkRequest,
 ) -> Response {
-    if let Some(grant) = broker
-        .grants
-        .matching(&agent.token_hash, conn, required_scope)
-    {
-        broker.audit.append(
-            AuditEntry::new(
-                AuditKind::AutoAllowed,
-                format!("Temporary access used: {} → {}", agent.name, conn.name),
-            )
-            .agent(agent.name.clone())
-            .connection(conn.name.clone())
-            .outcome("access_session")
-            .field("grant_id", grant.summary.id.to_string())
-            .field("scope", format!("{:?}", grant.summary.scope).to_lowercase())
-            .field(
-                "approval_state",
-                crate::wire::ApprovalState::Executing.as_str(),
-            ),
-        );
-        return resolve_parked(
+    let parked = {
+        // Keep grant matching and prompt insertion in one short critical
+        // section. Session creation uses the same gate, so neither side can
+        // miss the other and leave behind a redundant prompt.
+        let _access = broker.access_gate.lock().unwrap();
+        if let Some(grant) = broker
+            .grants
+            .matching(&agent.token_hash, conn, required_scope)
+        {
+            broker.audit.append(
+                AuditEntry::new(
+                    AuditKind::AutoAllowed,
+                    format!("Temporary access used: {} → {}", agent.name, conn.name),
+                )
+                .agent(agent.name.clone())
+                .connection(conn.name.clone())
+                .outcome("access_session")
+                .field("grant_id", grant.summary.id.to_string())
+                .field("scope", format!("{:?}", grant.summary.scope).to_lowercase())
+                .field(
+                    "approval_state",
+                    crate::wire::ApprovalState::Executing.as_str(),
+                ),
+            );
             broker
                 .approvals
-                .run_preapproved(park, Some(grant.authorization)),
-        )
-        .await;
-    }
-
-    let parked = match broker.policy.evaluate(&agent.name, &conn.id) {
-        crate::types::Decision::Allow => {
-            let rule = broker.policy.matching_rule(&agent.name, &conn.id);
-            let mut entry = AuditEntry::new(
-                AuditKind::AutoAllowed,
-                format!("Used without asking: {} → {}", agent.name, conn.name),
-            )
-            .agent(agent.name.clone())
-            .connection(conn.name.clone())
-            .outcome("auto_allowed")
-            .field(
-                "approval_state",
-                crate::wire::ApprovalState::Executing.as_str(),
-            );
-            if let Some(rule) = rule {
-                entry = entry.rule(rule.id);
+                .run_preapproved(park, Some(grant.authorization))
+        } else {
+            match broker.policy.evaluate(&agent.name, &conn.id) {
+                crate::types::Decision::Allow => {
+                    let rule = broker.policy.matching_rule(&agent.name, &conn.id);
+                    let mut entry = AuditEntry::new(
+                        AuditKind::AutoAllowed,
+                        format!("Used without asking: {} → {}", agent.name, conn.name),
+                    )
+                    .agent(agent.name.clone())
+                    .connection(conn.name.clone())
+                    .outcome("auto_allowed")
+                    .field(
+                        "approval_state",
+                        crate::wire::ApprovalState::Executing.as_str(),
+                    );
+                    if let Some(rule) = rule {
+                        entry = entry.rule(rule.id);
+                    }
+                    broker.audit.append(entry);
+                    broker.approvals.run_preapproved(park, None)
+                }
+                crate::types::Decision::Deny => {
+                    return err(StatusCode::FORBIDDEN, ErrorReason::DeniedByPolicy);
+                }
+                crate::types::Decision::Prompt => broker.approvals.park(park),
             }
-            broker.audit.append(entry);
-            broker.approvals.run_preapproved(park, None)
         }
-        crate::types::Decision::Deny => {
-            return err(StatusCode::FORBIDDEN, ErrorReason::DeniedByPolicy);
-        }
-        crate::types::Decision::Prompt => broker.approvals.park(park),
     };
 
     resolve_parked(parked).await

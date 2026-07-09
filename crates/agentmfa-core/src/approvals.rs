@@ -246,6 +246,16 @@ pub struct Approvals {
     shared: Arc<Shared>,
 }
 
+/// Prompted executions claimed by one access-session decision. Claiming is
+/// separate from starting them so the broker can install the grant only
+/// after the selected prompt is guaranteed not to have timed out or been
+/// abandoned.
+pub(crate) struct SessionClaim {
+    primary: ApprovalRequest,
+    absorbed: Vec<ApprovalRequest>,
+    executions: Vec<(Uuid, Executor)>,
+}
+
 /* ------------------------------ public API ------------------------------- */
 
 /// What `park` needs from a capability handler.
@@ -536,6 +546,83 @@ impl Approvals {
         Some(request)
     }
 
+    /// Atomically claim the selected prompt and every other queued prompt
+    /// covered by the access session it is about to create. Once this
+    /// returns `Some`, timeout and waiter-abandonment paths see each claimed
+    /// request as executing and cannot withdraw it.
+    pub(crate) fn claim_session(
+        &self,
+        id: &Uuid,
+        covers: impl Fn(&ApprovalRequest) -> bool,
+    ) -> Option<SessionClaim> {
+        let (claim, snapshot) = {
+            let mut inner = self.shared.inner.lock().unwrap();
+            let selected = inner.pending.get(id)?;
+            if !matches!(selected.state, PendingState::Prompted { .. })
+                || selected.waiters.is_empty()
+            {
+                return None;
+            }
+
+            let mut claimed_ids = vec![*id];
+            claimed_ids.extend(inner.queue.iter().copied().filter(|queued_id| {
+                queued_id != id
+                    && inner.pending.get(queued_id).is_some_and(|entry| {
+                        matches!(entry.state, PendingState::Prompted { .. })
+                            && !entry.waiters.is_empty()
+                            && covers(&entry.request)
+                    })
+            }));
+
+            let mut primary = None;
+            let mut absorbed = Vec::new();
+            let mut executions = Vec::with_capacity(claimed_ids.len());
+            for claimed_id in &claimed_ids {
+                let entry = inner
+                    .pending
+                    .get_mut(claimed_id)
+                    .expect("queued approval disappeared while locked");
+                let executor = match std::mem::replace(&mut entry.state, PendingState::Executing) {
+                    PendingState::Prompted { executor } => executor,
+                    PendingState::Executing => unreachable!("claim filtered executing entries"),
+                };
+                let request = entry.request.clone();
+                if claimed_id == id {
+                    primary = Some(request);
+                } else {
+                    absorbed.push(request);
+                }
+                executions.push((*claimed_id, executor));
+            }
+            inner
+                .queue
+                .retain(|queued_id| !claimed_ids.contains(queued_id));
+            (
+                SessionClaim {
+                    primary: primary.expect("selected approval was claimed"),
+                    absorbed,
+                    executions,
+                },
+                queue_snapshot(&inner),
+            )
+        };
+        self.shared.events.queue_changed(&snapshot);
+        Some(claim)
+    }
+
+    /// Start every execution claimed by `claim` under the same grant-backed
+    /// secret-read authorization.
+    pub(crate) fn execute_session(
+        &self,
+        claim: SessionClaim,
+        authorization: crate::authorization::SecretReadAuthorization,
+    ) -> (ApprovalRequest, Vec<ApprovalRequest>) {
+        for (id, executor) in claim.executions {
+            self.spawn_completion(id, executor, true, Some(authorization.clone()));
+        }
+        (claim.primary, claim.absorbed)
+    }
+
     /// Run a rule-allowed request through the same machinery, no prompt,
     /// straight to Executing, so auto-allowed mutating retries coalesce
     /// and replay exactly like prompted ones (§4).
@@ -799,6 +886,71 @@ mod tests {
         assert_eq!(outcome.status, 200);
         assert_eq!(count.load(Ordering::SeqCst), 1);
         assert!(approvals.queue().is_empty());
+    }
+
+    #[tokio::test]
+    async fn session_claim_absorbs_covered_prompts_atomically() {
+        let (approvals, _dir) = approvals(Duration::from_secs(60));
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut covered_a = request("codex", "covered-a");
+        covered_a.agent_token_hash = Some("token-a".into());
+        let selected_id = covered_a.id;
+        let mut covered_b = request("codex", "covered-b");
+        covered_b.agent_token_hash = Some("token-a".into());
+        let covered_b_id = covered_b.id;
+        let uncovered = request("other", "uncovered");
+
+        let Parked::Wait(first) = approvals
+            .park(ParkRequest {
+                request: covered_a,
+                coalesce_key: None,
+                payload_hash: None,
+                retain_outcome: true,
+                executor: ok_executor(counter.clone()),
+            })
+            .unwrap()
+        else {
+            panic!()
+        };
+        let Parked::Wait(second) = approvals
+            .park(ParkRequest {
+                request: covered_b,
+                coalesce_key: None,
+                payload_hash: None,
+                retain_outcome: true,
+                executor: ok_executor(counter.clone()),
+            })
+            .unwrap()
+        else {
+            panic!()
+        };
+        let _uncovered = approvals
+            .park(ParkRequest {
+                request: uncovered,
+                coalesce_key: None,
+                payload_hash: None,
+                retain_outcome: true,
+                executor: ok_executor(counter.clone()),
+            })
+            .unwrap();
+
+        let claim = approvals
+            .claim_session(&selected_id, |queued| queued.action.starts_with("covered"))
+            .expect("selected prompt should be claimable");
+        assert!(approvals.get(&covered_b_id).is_some());
+        assert_eq!(approvals.queue().len(), 1);
+        assert!(approvals.claim_session(&covered_b_id, |_| true).is_none());
+
+        let authorization = crate::authorization::SecretReadAuthorization::for_grant(
+            Uuid::new_v4(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        let (primary, absorbed) = approvals.execute_session(claim, authorization);
+        assert_eq!(primary.id, selected_id);
+        assert_eq!(absorbed.len(), 1);
+        assert_eq!(first.wait().await.unwrap().status, 200);
+        assert_eq!(second.wait().await.unwrap().status, 200);
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

@@ -702,6 +702,55 @@ async fn access_session_defaults_to_read_then_upgrades_to_full_and_expires() {
 }
 
 #[tokio::test]
+async fn access_session_absorbs_already_queued_matching_prompts() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let up = upstream().await;
+    api_connection(&h, "github", up.port);
+    let token = h.pair("claude-code").await;
+    let auth = format!("Bearer {token}");
+
+    let mut calls = Vec::new();
+    for _ in 0..2 {
+        let socket = h.socket.clone();
+        let auth = auth.clone();
+        calls.push(tokio::spawn(async move {
+            uds_request(
+                &socket,
+                "POST",
+                "/v1/http",
+                &[("authorization", &auth)],
+                Some(json!({
+                    "connection": "github",
+                    "method": "GET",
+                    "path": "/user/repos"
+                })),
+            )
+            .await
+        }));
+    }
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if *h.queue_len.lock().unwrap() == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("both requests should be queued before approval");
+
+    h.decide_next(UiDecision::AllowSession).await;
+    for call in calls {
+        assert_eq!(call.await.unwrap().0, 200);
+    }
+    assert_eq!(*h.queue_len.lock().unwrap(), 0);
+    assert_eq!(h.broker.approvals_queue().len(), 0);
+    let connection = h.broker.store.connection_by_name("github").unwrap();
+    assert_eq!(h.broker.grants_for_connection(&connection).len(), 1);
+}
+
+#[tokio::test]
 async fn full_access_session_covers_repeated_session_opens_until_revoked() {
     let mut h = harness(BrokerConfig::default()).await;
     let password = h

@@ -3,6 +3,7 @@
 //! the shell (UI-facing Tauri commands, tests, dev harness) both drive it.
 
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use uuid::Uuid;
 
@@ -41,6 +42,10 @@ pub struct Broker {
     pub store: Arc<Store>,
     pub policy: Arc<NaivePolicyEngine>,
     pub grants: Arc<AccessGrants>,
+    /// Serializes the short "match-or-park" and "claim-and-create" sections
+    /// so a request cannot become a stale prompt while a session grant is
+    /// being installed.
+    pub(crate) access_gate: Mutex<()>,
     pub pairing: Arc<PairingRegistry>,
     pub approvals: Approvals,
     pub audit: Arc<AuditLog>,
@@ -132,6 +137,7 @@ impl Broker {
             store,
             policy,
             grants,
+            access_gate: Mutex::new(()),
             pairing,
             approvals,
             audit,
@@ -347,6 +353,7 @@ impl Broker {
                 self.apply_decision(id, UiDecision::AllowOnce, ctx, confirmation)
             }
             UiDecision::AllowSession => {
+                let _access = self.access_gate.lock().unwrap();
                 let Some(request) = self.approvals.get(id) else {
                     return Ok(None);
                 };
@@ -377,6 +384,23 @@ impl Broker {
                     Some(http) if !http.mutating => GrantScope::Read,
                     _ => GrantScope::Full,
                 };
+                let Some(claim) = self.approvals.claim_session(id, |queued| {
+                    queued.kind != ApprovalKind::Pair
+                        && queued.agent_token_hash.as_deref()
+                            == Some(current_agent.token_hash.as_str())
+                        && queued.connection.as_ref().is_some_and(|queued_connection| {
+                            queued_connection.id == summary.id
+                                && queued_connection.kind == summary.kind
+                                && queued_connection.target == summary.target
+                                && queued_connection.multi_connect == summary.multi_connect
+                        })
+                        && scope.allows(match queued.http.as_ref() {
+                            Some(http) if !http.mutating => GrantScope::Read,
+                            _ => GrantScope::Full,
+                        })
+                }) else {
+                    return Ok(None);
+                };
                 let created = self.grants.create(
                     &current_agent.name,
                     &current_agent.token_hash,
@@ -388,14 +412,9 @@ impl Broker {
                     self.data_plane.close_grant(replaced);
                 }
                 let grant = created.grant;
-                let approved = self
+                let (approved, absorbed) = self
                     .approvals
-                    .approve(id, true, Some(grant.authorization.clone()));
-                if approved.is_none() {
-                    self.grants.remove(&grant.summary.id);
-                    self.data_plane.close_grant(&grant.summary.id);
-                    return Ok(None);
-                }
+                    .execute_session(claim, grant.authorization.clone());
                 self.audit.append(attributed(
                     AuditEntry::new(
                         AuditKind::GrantStarted,
@@ -417,8 +436,26 @@ impl Broker {
                     .field("scope", format!("{:?}", scope).to_lowercase())
                     .field("expires_at", grant.summary.expires_at.to_rfc3339()),
                 ));
+                for request in absorbed {
+                    self.audit.append(attributed(
+                        AuditEntry::new(
+                            AuditKind::AutoAllowed,
+                            format!("Temporary access used: {} → {}", request.agent, conn.name),
+                        )
+                        .agent(request.agent)
+                        .connection(conn.name.clone())
+                        .detail(request.action)
+                        .outcome("access_session")
+                        .field("grant_id", grant.summary.id.to_string())
+                        .field("scope", format!("{:?}", scope).to_lowercase())
+                        .field(
+                            "approval_state",
+                            crate::wire::ApprovalState::Executing.as_str(),
+                        ),
+                    ));
+                }
                 self.events.rules_changed();
-                Ok(approved)
+                Ok(Some(approved))
             }
         }
     }
