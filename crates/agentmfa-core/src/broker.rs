@@ -168,7 +168,7 @@ impl Broker {
     }
 
     /// Apply the user's decision to a queued request. Auditing and rule
-    /// recording happen here, and so does the high-consequence gate: the
+    /// recording happen here, and so does the decision confirmation gate: the
     /// core demands the native confirmation through
     /// [`BrokerEvents::confirm_decision`] *before* the decision takes
     /// effect, so no shell can apply a gated decision without passing
@@ -205,9 +205,9 @@ impl Broker {
     }
 
     /// Whether — and how — the decision was confirmed. Deny is always one
-    /// click (§6); *Allow once* on a pairing or a mutating request, and
-    /// *Always allow…* in every case, complete only after the shell's
-    /// native confirmation. Fails closed when the shell refuses (§8).
+    /// click (§6); *Allow once* on a pairing or mutating request, every access
+    /// session, and *Always allow…* in every case complete only after the
+    /// shell's native confirmation. Fails closed when the shell refuses (§8).
     fn confirm_decision(
         &self,
         request: &ApprovalRequest,

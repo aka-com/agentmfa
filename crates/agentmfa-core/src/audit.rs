@@ -60,7 +60,7 @@ pub struct AuditEntry {
     pub rule_id: Option<Uuid>,
     /// Decision attribution (§8): the deciding principal (absent for the
     /// local machine's single user), the surface the decision came from,
-    /// and how the high-consequence confirmation was satisfied (absent
+    /// and how a required decision confirmation was satisfied (absent
     /// when no confirmation was required).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approver: Option<String>,

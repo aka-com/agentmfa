@@ -3,9 +3,9 @@
 //! Locked to the minimal set the UI needs. Crucially:
 //! - there is **no** command that returns a stored secret value; reveal
 //!   returns only the short prefix, copy writes core-side to the clipboard;
-//! - high-consequence commands (approving a pairing or a mutating request,
-//!   saving an "Always allow…" rule, creating a connection, or changing a
-//!   connection's capability) are
+//! - confirmation-gated commands (approving a pairing or mutating request,
+//!   starting an access session, saving an "Always allow…" rule, creating a
+//!   connection, or changing a connection's capability) are
 //!   gated by the **core itself**: the broker demands the native OS
 //!   confirmation through the `BrokerEvents` hooks (implemented over
 //!   [`crate::auth::confirm`] in this shell) before any effect happens —
@@ -397,11 +397,11 @@ pub enum DecisionInput {
     AlwaysAllow,
 }
 
-/// Apply a decision to a queued approval. Deny is always one click. Allow
-/// on a pairing or a mutating request — and Always allow in every case —
-/// complete only after the native OS confirmation, which the **core**
-/// demands via `BrokerEvents::confirm_decision` before the decision takes
-/// effect (§6/§8); this command only names the surface for attribution.
+/// Apply a decision to a queued approval. Deny is always one click. Allow once
+/// on a pairing or mutating request, every access session, and Always allow in
+/// every case complete only after the native OS confirmation, which the
+/// **core** demands via `BrokerEvents::confirm_decision` before the decision
+/// takes effect (§6/§8); this command only names the surface for attribution.
 #[tauri::command]
 pub fn decide(
     state: State<AppState>,

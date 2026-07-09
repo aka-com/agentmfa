@@ -33,10 +33,16 @@ AgentMFA is a secrets manager for agents. Make API calls, open database and WebS
 ## Features
 
 - **Secrets manager for agents.** Raw values live in macOS Keychain items. For
-  brokered use, they are fetched only after approval for an outgoing request
-  or connection. Explicit user copy is a separate, user-directed clipboard
+  brokered use, they are fetched only for a request authorized by an exact
+  approval, an active access session, or a standing rule. Explicit user copy
+  is a separate, user-directed clipboard operation.
+- **Authorization-gated access.** Every capability call must match an active
+  access session or pass policy. The default prompted approval creates a fixed
+  15-minute, in-memory access session: GET/HEAD starts read access, while a
+  mutating HTTP request or WebSocket/Postgres/SSH open starts full access.
+  *Allow once* and *Always allow…* remain available. Session traffic is
+  authorized when the session is opened, not per frame, query, or SSH
   operation.
-- **Policy-gated access.** Every capability call is evaluated by policy. The default approval creates a fixed 15-minute, in-memory access session: GET/HEAD starts read access, while a mutating HTTP request or WebSocket/Postgres/SSH open starts full access. *Allow once* and *Always allow…* remain available. Session traffic is authorized when the session is opened, not per frame, query, or SSH operation.
 - **Supports most agent workflows:** Injects credentials for HTTP, WebSocket, Postgres, and SSH.
   - **HTTP** — the agent supplies method/path/headers/body; the connection pins the host; redirects are only followed within that host.
   - **WebSocket** — the agent gets a short-lived `ws://127.0.0.1:…` bridge URL usable by any stock WS client.
@@ -96,7 +102,7 @@ conditionally clears it after 30 seconds.
   binding and host-bound authentication. Encrypted or unsupported private keys
   fail when the SSH capability is opened.
 - AgentMFA does not export durable secrets into an agent or child-process
-  environment; doing so would give the agent the value and bypass per-request
+  environment; doing so would give the agent the value and bypass broker
   mediation.
 - AgentMFA does not ship a built-in MCP server. The Unix-socket protocol is the
   enforcement surface; `/instructions` and the generated skill are the
@@ -182,7 +188,7 @@ cargo run -p agentmfa-cli -- skill --write    # → .claude/skills/agentmfa/SKIL
    agent's peer identity, plus the `store_at` path to keep it in.
 2. `GET /v1/connections` — discover the named connections it may use (targets
    only; never secret names or values) and whether each one `will_prompt`,
-   has read access, or is already `auto_allowed`.
+   is `read_auto_allowed`, or is already `auto_allowed`.
 3. Call a capability, naming a connection:
    - `POST /v1/http` — `{status, headers, body}`; the broker injects the
      credential, validates the path, and follows redirects only within the
@@ -198,23 +204,26 @@ cargo run -p agentmfa-cli -- skill --write    # → .claude/skills/agentmfa/SKIL
      automatically; forcing it with `PubkeyAuthentication=host-bound` is
      optional.
 
-Every capability call is evaluated by policy. A call that requires a prompt is
-surfaced as a **held-open request** and blocks until the user decides or the
+Every capability call is authorization-checked. A call that requires a prompt
+is surfaced as a **held-open request** and blocks until the user decides or the
 120 s timeout auto-denies. The primary decision creates a non-sliding,
 15-minute access session bound to the current pair-token generation, stable
 connection, and exact connection revision. Read access covers GET/HEAD; full
-access covers every HTTP method and new session opens. *Allow once* and a
-standing "always allow" rule remain available. For WebSocket, Postgres, and
-SSH, policy applies to the session-open call. Traffic inside an approved live
-session is not approved individually, and grant expiry or revocation closes
-live transports issued under that grant.
+access covers every HTTP method and new session opens. A later full-access
+approval replaces a read session and starts a new fixed 15-minute window;
+ordinary use never extends either window. *Allow once* and a standing "always
+allow" rule remain available. For WebSocket, Postgres, and SSH, authorization
+applies to the session-open call. Traffic inside an authorized live session is
+not approved individually. A transport issued under a grant is capped by the
+grant's remaining lifetime, and grant expiry or revocation closes it.
 
 ## Conformance
 
 - The **core** owns the Keychain, the daemon, the policy engine, and the audit log.
 - The **webview** gets metadata and explicitly requested short prefixes, never
-  full stored values, and cannot complete actions the broker classifies as
-  high consequence without a core-owned native OS authentication sheet.
+  full stored values, and cannot complete a high-consequence *Allow once*
+  decision, start an access session, save a standing rule, or make protected
+  configuration changes without a core-owned native OS authentication sheet.
 
 Implementation notes:
 
@@ -243,12 +252,14 @@ Implementation notes:
   key, session, and server host-key fingerprint. Unbound or mismatched signing
   requests fail closed. Compatible OpenSSH clients negotiate these extensions
   without requiring an explicit `PubkeyAuthentication=host-bound` option.
-- **HTTP consequence classification.** For confirmation and idempotency,
-  AgentMFA classifies `GET` and `HEAD` as read-like and every other accepted
-  method as potentially mutating. This is a method-based heuristic, not a
-  guarantee about upstream behavior: an API that performs an action through
-  `GET` will not receive the extra decision confirmation, while a harmless
-  `POST` will.
+- **HTTP consequence classification.** For access-session scope, idempotency,
+  and the extra confirmation on *Allow once*, AgentMFA classifies `GET` and
+  `HEAD` as read-like and every other accepted method as potentially mutating.
+  In the desktop app, starting an access session always requires native
+  confirmation, including for a read. The method classification is a
+  heuristic, not a guarantee about upstream behavior: an action performed
+  through `GET` can fit in read access, while a harmless `POST` requires full
+  access.
 - **Agent-visible redaction.** Exact matches of rendered credential material
   in relayed upstream responses **MUST** be redacted. Implementations **SHOULD**
   make a best effort to redact common components and reversible encodings, but
@@ -341,6 +352,7 @@ AgentMFA persistence
 |
 `-- in-memory only
     |-- approval queue
+    |-- fixed-lifetime access sessions and their authorization state
     |-- retained idempotency outcomes
     |-- WS/PG/SSH tickets and live sessions
     |-- rate-limit buckets

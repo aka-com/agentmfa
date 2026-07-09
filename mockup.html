@@ -3,9 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AgentMFA — Interactive Mockup</title>
+<title>AgentMFA — Historical Interactive Mockup</title>
 <!--
-  AgentMFA v1 — interactive design mockup.
+  Historical AgentMFA v1 interactive design mockup. This file is retained as
+  a visual-design artifact and does not define current authorization behavior.
+  The production UI lives in ui/; README.md and PROTOCOL.md are authoritative.
   Fully self-contained: inline CSS + vanilla JS, zero external requests.
   Open directly from file:// in any modern browser.
   The right pane simulates a real Claude Code terminal session driving the
@@ -859,6 +861,7 @@ code, .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Conso
 
 <!-- ====================== demo state switcher (not part of the app) ====================== -->
 <div class="statebar">
+  <span class="sb-label" style="color:#f0b36a">Historical prototype — authorization behavior is not current</span>
   <span class="sb-label">Mockup&nbsp;states&nbsp;▸</span>
   <button data-act="state" data-state="populated">Populated</button>
   <button data-act="state" data-state="empty">Empty</button>
@@ -988,7 +991,7 @@ var TYPES = {
 var SOCKET_PATH = '~/.agentmfa/broker.sock';
 var CURL = 'curl -s --unix-socket ~/.agentmfa/broker.sock';
 // the broker's /instructions text — what a real agent reads before pairing (§5b)
-var INSTRUCTIONS = 'AgentMFA: secrets stay in the macOS Keychain; the broker injects them\nupstream on your behalf. 1) POST /v1/pair {agent_name} to obtain a token;\nkeep it at ~/.agentmfa/tokens/<agent_name> (0600) — the token is pinned to\nyour code signature, so a lifted copy is useless to other binaries.\n2) GET /v1/connections to list what you may request. 3) Call /v1/http,\n/v1/ws/open or /v1/pg/open naming a connection. Send a unique request_id\non mutating calls — a retry re-sending it joins the same approval and\nexecutes exactly once. Every use requires user approval — raw secret\nvalues are never returned to you.';
+var INSTRUCTIONS = 'AgentMFA: secrets stay in the macOS Keychain; the broker injects them\nupstream on your behalf. 1) POST /v1/pair {agent_name} to obtain a token;\nkeep it at ~/.agentmfa/tokens/<agent_name> (0600) — the token is pinned to\nyour code signature, so a lifted copy is useless to other binaries.\n2) GET /v1/connections to list what you may request. 3) Call /v1/http,\n/v1/ws/open or /v1/pg/open naming a connection. Send a unique request_id\non mutating calls — a retry re-sending it joins the same approval and\nexecutes exactly once. A prompted approval normally starts a fixed 15-minute\naccess session; raw secret values are never returned to you.';
 var MANIFEST = {
   name: 'agentmfa',
   version: '1.0.0',
@@ -1494,8 +1497,8 @@ function addConnSheetHTML() {
     var multiOn = d.connMulti !== false;   // default checked
     fields += '<div class="f-row"><label style="display:flex;align-items:center;gap:7px;cursor:pointer">' +
       '<input type="checkbox" id="c-multi"' + (multiOn ? ' checked' : '') + ' style="width:auto">' +
-      '<span>Allow multiple client connections per approval</span></label>' +
-      '<div class="rule-note" style="margin:4px 0 0">Pools and reconnecting clients may redeem the session ticket any number of times within its 60 s window — all under the one approval, up to 60 concurrent sessions.</div></div>';
+      '<span>Allow multiple client connections per open</span></label>' +
+      '<div class="rule-note" style="margin:4px 0 0">Pools and reconnecting clients may redeem the session ticket any number of times within its 60 s window — all under the authorization that issued it, up to 60 concurrent sessions.</div></div>';
   }
   if (t === 'api') {
     var refs = chosen.map(function (n) { return n === '__new__' ? (d.newName || 'NEW_SECRET') : n; });

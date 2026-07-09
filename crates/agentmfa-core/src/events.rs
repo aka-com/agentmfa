@@ -38,10 +38,11 @@ pub trait BrokerEvents: Send + Sync {
         false
     }
 
-    /// A high-consequence decision — approving a pairing or a mutating
-    /// request, or saving an "Always allow…" rule — is about to take
-    /// effect. Product shells must run their native confirmation gate here
-    /// (the LocalAuthentication sheet on macOS) and report how it was
+    /// A confirmation-gated decision — approving a pairing or mutating
+    /// request exactly once, starting an access session, or saving an
+    /// "Always allow…" rule — is about to take effect. Product shells must run
+    /// their native confirmation gate here (the LocalAuthentication sheet on
+    /// macOS) and report how it was
     /// satisfied; `None` aborts the decision. The core calls this exactly
     /// once per decision, *before* any effect (rule save, execution)
     /// happens, so a shell cannot apply a gated decision without passing

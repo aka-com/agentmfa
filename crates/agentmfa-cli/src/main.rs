@@ -160,8 +160,9 @@ struct ConnAdd {
     /// (default: require; encrypted, no certificate verification).
     #[arg(long)]
     sslmode: Option<String>,
-    /// pg/ws: require a fresh approval per connect instead of allowing
-    /// any number of connects within one open's ticket window.
+    /// pg/ws: make each open capability single-use instead of allowing
+    /// multiple connects within its ticket window. This does not force a new
+    /// prompt while a matching access session or standing rule is active.
     #[arg(long)]
     single_connect: bool,
     /// Operate on a broker rooted here instead of the default layout.

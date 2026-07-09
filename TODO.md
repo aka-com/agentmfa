@@ -6,14 +6,15 @@ Add a consolidated **Security model and limitations** section to `README.md`
 covering the following product-level facts:
 
 - [ ] Explain that HTTP connections pin an origin, not an allowed set of paths
-  or operations. An approved or auto-allowed agent may use any accepted method
-  and path on that origin.
+  or operations. Full access and standing rules allow any accepted method and
+  path on that origin; read access allows GET/HEAD on any path.
 - [ ] Explain that Postgres statements, WebSocket frames, and SSH operations
   are not individually inspected or approved, and that a multi-connect ticket
   may establish several sessions under one decision.
 - [ ] Describe the v1 standing-rule scope: an agent name plus an entire stable
   connection, with no path, method, query, read-only, expiry, or deny-rule
-  constraints.
+  constraints. Distinguish it from a token-generation- and
+  connection-revision-bound, scoped 15-minute access session.
 - [ ] State that agent names are self-asserted and that pairing under an
   existing name inherits that name's standing rules.
 - [ ] Qualify identity pinning: interpreted runtimes may share a `node` or

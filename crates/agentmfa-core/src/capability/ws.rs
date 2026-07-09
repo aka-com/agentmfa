@@ -1,7 +1,7 @@
 //! WebSocket capability, `POST /v1/ws/open` + local bridge (DESIGN.md §4.2).
 //!
 //! WebSockets are long-lived, so instead of an envelope the broker acts as a
-//! local bridge: policy/approval runs once at open time; the broker dials
+//! local bridge: authorization is checked once at open time; the broker dials
 //! the connection's configured URL with the credential injected and hands
 //! back `ws://127.0.0.1:<port>/v1/ws/bridge/<ticket>`. The agent connects
 //! any stock WebSocket client to that URL and the broker pipes frames

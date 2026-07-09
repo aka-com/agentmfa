@@ -247,7 +247,9 @@ pub struct SettingsDto {
 
 /// The queued approval, as the approval window renders it. Serialized via
 /// serde on `ApprovalRequest` directly, but we add the `high_consequence`
-/// hint the UI uses to label the native-authentication-gated buttons.
+/// hint describing whether this request's exact *Allow once* decision needs
+/// native authentication. Access-session and standing-rule decisions are
+/// always gated independently of this hint.
 #[derive(Serialize, Clone)]
 pub struct ApprovalDto {
     #[serde(flatten)]

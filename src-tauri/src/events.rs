@@ -102,7 +102,7 @@ impl BrokerEvents for TauriEvents {
         crate::auth::confirm(&reason).is_ok()
     }
 
-    /// The core-demanded gate on high-consequence decisions (§8): the
+    /// The core-demanded gate on confirmation-required decisions (§8): the
     /// LocalAuthentication sheet, phrased for what is being decided.
     fn confirm_decision(
         &self,

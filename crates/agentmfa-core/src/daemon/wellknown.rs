@@ -68,7 +68,8 @@ AgentMFA holds this developer's secrets in the macOS Keychain and brokers
 their use. You never receive a secret value or even a secret name; you ask
 the broker to *use a named connection* (make an HTTP request through
 `github`, connect to `prod-db`) and the broker injects the credential on
-the upstream leg after asking the human for approval.
+the upstream leg only when an exact approval, active access session, or
+standing rule authorizes the request.
 
 The default approval creates a fixed {access_minutes}-minute in-memory access
 session. A read session covers HTTP GET/HEAD; a full session covers every HTTP
@@ -150,7 +151,9 @@ upstream timeout + margin); many client defaults are far lower.
 
 The primary human choice allows {access_minutes} minutes. A read request starts
 a read session; a mutating HTTP request or WS/PG/SSH open starts a full session.
-The human may instead allow only the exact request or save a standing rule.
+A full approval replaces an active read session and starts a new fixed full
+window; ordinary use never extends either window. The human may instead allow
+only the exact request or save a standing rule.
 
 Denials come back as `403` with a machine-readable reason:
 - `{{"reason": "denied_by_user"}}`: the human said no; don't retry, ask them.
@@ -198,15 +201,17 @@ raw 3xx.
     → 200 {{"ws_url": "ws://127.0.0.1:<port>/v1/ws/bridge/<ticket>",
             "expires_in_seconds": {ticket}}}
 
-Approval runs once, at open time. Connect any stock WebSocket client to
-`ws_url`; the broker dials the connection's configured upstream with the
-credential injected and pipes frames verbatim. The ticket expires
+Authorization is checked once, at open time. Connect any stock WebSocket
+client to `ws_url`; the broker dials the connection's configured upstream
+with the credential injected and pipes frames verbatim. The ticket expires
 `expires_in_seconds` after issue; on multi-connect connections (the
 default) it may be redeemed any number of times within that window, all
-under the one approval. Sessions carry a max TTL (1 h) and an idle timeout
-(5 min; protocol ping/pong counts as activity). A reconnect after the
-window needs a fresh open. An active full access session or standing rule lets
-that open proceed without another prompt.
+under the authorization that issued it. Sessions carry a configured max TTL
+(1 h) and an idle timeout (5 min; protocol ping/pong counts as activity). A
+grant-backed session is capped by the grant's remaining lifetime and closes if
+the grant expires or is revoked. A reconnect after the ticket window needs a
+fresh open. An active full access session or standing rule lets that open
+proceed without another prompt.
 
 ## 6. Postgres: POST /v1/pg/open
 
@@ -242,8 +247,9 @@ leg uses the connection's configured TLS. The default upstream
             "host_key_fingerprint": "SHA256:…",
             "expires_in_seconds": {ticket}}}
 
-Approval runs once, at open time. Point `SSH_AUTH_SOCK` at `auth_sock` and
-run any unmodified SSH client (`ssh`, `git`, `scp`, `rsync`, `ssh -L`):
+Authorization is checked once, at open time. Point `SSH_AUTH_SOCK` at
+`auth_sock` and run any unmodified SSH client (`ssh`, `git`, `scp`, `rsync`,
+`ssh -L`):
 
     SSH_AUTH_SOCK=<auth_sock> ssh -o IdentitiesOnly=yes \
       <user>@<host>
@@ -256,7 +262,9 @@ configured host-key fingerprint and will **only** sign host-bound public-key
 login as the pinned `user`; it signs nothing else. Ticket lifetime and multi-connect semantics
 match WebSocket and Postgres: the socket accepts connections for the
 {ticket} s window, and with multi-connect on (the default) as many SSH
-invocations as you need under the one approval. Compatible OpenSSH clients
+invocations as you need under the authorization that issued it. Live SSH
+connections are also capped by the remaining lifetime of an access grant.
+Compatible OpenSSH clients
 negotiate session binding and host-bound authentication automatically, so an
 explicit `-o PubkeyAuthentication=host-bound` is optional. Clients without
 those OpenSSH extensions fail closed because the broker refuses unbound or

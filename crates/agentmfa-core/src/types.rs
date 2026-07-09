@@ -315,7 +315,7 @@ pub enum DecisionSurface {
     Harness,
 }
 
-/// How a high-consequence decision's confirmation was satisfied (§8).
+/// How a confirmation-required decision was confirmed (§8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfirmationMethod {

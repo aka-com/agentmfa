@@ -113,9 +113,10 @@ pub struct HttpPayloadView {
 }
 
 impl ApprovalRequest {
-    /// Approvals that complete only behind the native OS confirmation:
-    /// pairing, and mutating HTTP requests (§6/§8). ("Always allow…" is
-    /// gated regardless of kind, the shell enforces that.)
+    /// Requests whose exact *Allow once* decision completes only behind the
+    /// native OS confirmation: pairing and mutating HTTP requests (§6/§8).
+    /// Starting an access session and saving "Always allow…" are gated for
+    /// every request kind; the broker enforces those decisions separately.
     pub fn is_high_consequence(&self) -> bool {
         match self.kind {
             ApprovalKind::Pair => true,

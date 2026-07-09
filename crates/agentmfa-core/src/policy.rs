@@ -1,7 +1,9 @@
 //! The policy engine, deliberately a stub in v1 (DESIGN.md §7).
 //!
-//! The interface is real; the brains are not. Decisions are Allow / Deny /
-//! Prompt; with no matching rule, everything prompts. "Always allow…"
+//! The interface is real; the brains are not. Within this persistent policy
+//! layer, decisions are Allow / Deny / Prompt and no matching rule prompts.
+//! The broker checks scoped, in-memory access grants before this layer.
+//! "Always allow…"
 //! stores a rule keyed by exact `(agent, connection_id)`, the connection's
 //! **stable id**, never its renamable name, so a new connection recycling
 //! an old name never inherits an old rule. There are no deny rules. The
