@@ -261,11 +261,8 @@ pub fn run() {
 
             windows::setup_tray(&handle)?;
 
-            // Regular windowed app: the main window is shown at launch
-            // (tauri.conf.json `visible: true`) with the default Regular
-            // activation policy, so it appears in the Dock and app switcher.
-            // The menu bar is opt-in — the user minimizes to it, and only
-            // then (and only if they enabled it) is the Dock icon hidden.
+            // The regular main window is shown at launch. The always-present
+            // tray icon toggles a separate compact dropdown window.
 
             // Closing the main window hides it and keeps the broker running
             // rather than quitting; reopen from the Dock or the tray.
@@ -276,6 +273,17 @@ pub fn run() {
                         api.prevent_close();
                         windows::ui_hide_main(handle.clone());
                     }
+                });
+            }
+            if let Some(win) = app.get_webview_window(windows::DROPDOWN) {
+                let handle = handle.clone();
+                win.on_window_event(move |event| match event {
+                    WindowEvent::Focused(false) => windows::hide_dropdown(&handle),
+                    WindowEvent::CloseRequested { api, .. } => {
+                        api.prevent_close();
+                        windows::hide_dropdown(&handle);
+                    }
+                    _ => {}
                 });
             }
 

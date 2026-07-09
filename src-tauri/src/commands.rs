@@ -34,6 +34,13 @@ pub struct AppState {
 }
 
 type CmdResult<T> = Result<T, String>;
+const ACTIVITY_VIEW_LIMIT: usize = 200;
+
+fn activity_view_limit(requested: Option<usize>) -> usize {
+    requested
+        .unwrap_or(ACTIVITY_VIEW_LIMIT)
+        .min(ACTIVITY_VIEW_LIMIT)
+}
 
 fn parse_id(id: &str) -> CmdResult<Uuid> {
     Uuid::parse_str(id).map_err(|_| "invalid id".to_string())
@@ -87,10 +94,11 @@ pub fn list_sessions(state: State<AppState>) -> Vec<SessionDto> {
 
 #[tauri::command]
 pub fn list_activity(state: State<AppState>, limit: Option<usize>) -> Vec<ActivityDto> {
+    let limit = activity_view_limit(limit);
     state
         .broker
         .audit
-        .recent(limit.unwrap_or(200))
+        .recent(limit)
         .iter()
         .map(ActivityDto::from)
         .collect()
@@ -452,6 +460,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         decide,
         crate::windows::ui_set_mode,
         crate::windows::ui_hide_main,
+        crate::windows::ui_hide_dropdown,
         crate::windows::ui_show_approval,
     ]
 }
@@ -469,5 +478,13 @@ mod tests {
         );
         let err = parse_pg_sslmode(Some("verify_none")).unwrap_err();
         assert!(err.contains("invalid pg sslmode"));
+    }
+
+    #[test]
+    fn activity_view_limit_is_bounded() {
+        assert_eq!(activity_view_limit(None), ACTIVITY_VIEW_LIMIT);
+        assert_eq!(activity_view_limit(Some(50)), 50);
+        assert_eq!(activity_view_limit(Some(usize::MAX)), ACTIVITY_VIEW_LIMIT);
+        assert_eq!(activity_view_limit(Some(0)), 0);
     }
 }

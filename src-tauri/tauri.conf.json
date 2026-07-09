@@ -36,6 +36,20 @@
         "skipTaskbar": true,
         "focus": true,
         "url": "index.html#approval"
+      },
+      {
+        "label": "dropdown",
+        "title": "AgentMFA",
+        "width": 430,
+        "height": 520,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "visible": false,
+        "skipTaskbar": true,
+        "focus": true,
+        "url": "index.html#dropdown"
       }
     ],
     "security": {

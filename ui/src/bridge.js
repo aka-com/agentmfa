@@ -15,6 +15,7 @@ export const listen = tauri ? tauri.event.listen : mockListen;
 /* ----------------------------- dev mock ---------------------------------- */
 
 const listeners = {};
+const MOCK_ACTIVITY_LIMIT = 200;
 function emit(event, payload) {
   (listeners[event] || []).forEach((cb) => cb({ event, payload }));
 }
@@ -88,6 +89,7 @@ function seedFixtures() {
 }
 function audit(icon, text, detail) {
   db.activity.unshift({ icon, text, detail: detail || null, at: new Date().toISOString() });
+  db.activity.length = Math.min(db.activity.length, MOCK_ACTIVITY_LIMIT);
 }
 function connDto(c) {
   return {
@@ -120,7 +122,7 @@ async function mockInvoke(cmd, args = {}) {
     case 'list_agents':
       return db.agents.map((a) => ({ ...a, rule_count: db.rules.filter((r) => r.agent === a.name).length }));
     case 'list_sessions': return db.sessions.slice();
-    case 'list_activity': return db.activity.slice(0, args.limit || 200);
+    case 'list_activity': return db.activity.slice(0, Math.min(args.limit ?? MOCK_ACTIVITY_LIMIT, MOCK_ACTIVITY_LIMIT));
     case 'get_queue': return db.queue.slice();
     case 'get_settings': return { ...db.settings };
     case 'add_secret': {
@@ -204,7 +206,7 @@ async function mockInvoke(cmd, args = {}) {
       }
       db.queue = db.queue.filter((r) => r.id !== args.id); emit('amfa://queue-changed', db.queue.slice()); return;
     }
-    case 'ui_set_mode': case 'ui_hide_main': case 'ui_show_approval': return;
+    case 'ui_set_mode': case 'ui_hide_main': case 'ui_hide_dropdown': case 'ui_show_approval': return;
     default: throw new Error(`mock: unknown command ${cmd}`);
   }
 }

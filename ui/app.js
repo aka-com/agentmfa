@@ -1,5 +1,5 @@
-// AgentMFA frontend. One file drives both Tauri windows (the main window and
-// the approval window), chosen from location.hash. Every mutation and
+// AgentMFA frontend. One file drives all Tauri windows (main, tray dropdown,
+// and approval), chosen from location.hash. Every mutation and
 // read goes through the Rust core via Tauri commands; the webview never
 // holds a secret value (DESIGN.md §2). When run outside Tauri (a plain
 // browser), a dev mock stands in for the core so the UI is developable
@@ -9,6 +9,7 @@ import { invoke, listen, mode } from '/src/bridge.js';
 import { ICONS, TYPES, esc, escAttr, toast, relTime, absTime } from '/src/util.js';
 
 const EDIT_SECRET_MASK = '••••••••••••';
+const ACTIVITY_RENDER_LIMIT = 200;
 
 // The left-nav tabs, in order — also the cycle order for Ctrl-Tab.
 const TABS = ['secrets', 'connections', 'activity'];
@@ -47,7 +48,9 @@ async function refresh(which = 'all') {
   if (which === 'all' || which === 'connections') jobs.push(load('connections', 'list_connections'));
   if (which === 'all' || which === 'agents') jobs.push(load('agents', 'list_agents'));
   if (which === 'all' || which === 'sessions') jobs.push(load('sessions', 'list_sessions'));
-  if (which === 'all' || which === 'activity') jobs.push(load('activity', 'list_activity'));
+  if (which === 'all' || which === 'activity') {
+    jobs.push(load('activity', 'list_activity', { limit: ACTIVITY_RENDER_LIMIT }));
+  }
   if (which === 'all' || which === 'queue') jobs.push(load('queue', 'get_queue'));
   if (which === 'all' || which === 'settings') jobs.push(loadSettings());
   await Promise.all(jobs);
@@ -75,6 +78,7 @@ function render() {
     : null;
 
   if (mode === 'approval') renderApproval();
+  else if (mode === 'dropdown') renderDropdown();
   else renderMainWindow();
 
   if (focusId) {
@@ -218,16 +222,42 @@ function connectionsHTML() {
 // Console.app-style rows: a mono timestamp gutter, then the emoji the core
 // already records for the entry, then the two-line anatomy (plain primary
 // line + smaller, fainter detail line).
+function activityRowHTML(a) {
+  return `<div class="act-row" data-tippy-content="${escAttr(absTime(a.at))}">
+    <span class="act-gutter">${esc(relTime(a.at))}</span>
+    <span class="act-ico">${a.icon}</span>
+    <span class="act-txt">${esc(a.text)}${a.detail ? `<div class="act-detail">${esc(a.detail)}</div>` : ''}</span></div>`;
+}
+
 function activityHTML() {
   if (!state.activity.length) {
     return `<div class="muted-note">No activity yet.<br>Pair an agent and make a request to get started.</div>`;
   }
-  return '<div class="act-list">' + state.activity.map((a) =>
-    `<div class="act-row" data-tippy-content="${escAttr(absTime(a.at))}">
-      <span class="act-gutter">${esc(relTime(a.at))}</span>
-      <span class="act-ico">${a.icon}</span>
-      <span class="act-txt">${esc(a.text)}${a.detail ? `<div class="act-detail">${esc(a.detail)}</div>` : ''}</span></div>`
-  ).join('') + '</div>';
+  return '<div class="act-list">' + state.activity
+    .slice(0, ACTIVITY_RENDER_LIMIT)
+    .map(activityRowHTML).join('') + '</div>';
+}
+
+async function receiveActivity(entry) {
+  if (!entry || !entry.at || !entry.text) {
+    await load('activity', 'list_activity', { limit: ACTIVITY_RENDER_LIMIT });
+    if (mode !== 'approval' && state.tab === 'activity' && !state.sheet && !state.menuOpen) render();
+    return;
+  }
+
+  const duplicate = state.activity.some((item) =>
+    item.at === entry.at && item.icon === entry.icon && item.text === entry.text && item.detail === entry.detail);
+  if (duplicate) return;
+  state.activity = [entry, ...state.activity].slice(0, ACTIVITY_RENDER_LIMIT);
+
+  if (mode === 'approval' || state.tab !== 'activity' || state.sheet || state.menuOpen) return;
+  const list = document.querySelector('.act-list');
+  if (!list) {
+    render();
+    return;
+  }
+  list.insertAdjacentHTML('afterbegin', activityRowHTML(entry));
+  while (list.children.length > ACTIVITY_RENDER_LIMIT) list.lastElementChild.remove();
 }
 
 function tabContentHTML() {
@@ -267,6 +297,24 @@ function renderMainWindow() {
         <div class="content">${tabContentHTML()}</div>
       </div>
     </div></div>${sheetsHTML()}`;
+}
+
+function renderDropdown() {
+  const tabs = TABS.map((tb) =>
+    `<button class="seg-btn ${state.tab === tb ? 'on' : ''}" data-act="tab" data-tab="${tb}">${cap(tb)}</button>`).join('');
+  const footer = state.tab === 'secrets'
+    ? '<div class="dd-footer"><button class="btn block" data-act="open-add-secret">＋ Add secret</button></div>'
+    : state.tab === 'connections'
+    ? '<div class="dd-footer"><button class="btn block" data-act="open-add-conn">＋ Add connection</button></div>' : '';
+  root().innerHTML = `<div class="surface dropdown-surface">
+    <div class="dd-head"><div class="dd-appicon">🔐</div>
+      <div class="dd-identity"><div class="dd-title">AgentMFA</div><div class="dd-sub"><span class="dot"></span>broker.sock</div></div>
+      <button class="icon-btn" title="Open as a window" aria-label="Open as a window" data-act="mode-window">${ICONS.window}</button>
+      <button class="icon-btn" title="Settings" aria-label="Settings" data-act="open-settings">${ICONS.gear}</button></div>
+    ${pendingBannerHTML()}${globalSectionsHTML()}
+    <div class="seg">${tabs}</div>
+    <div class="content dd-content">${tabContentHTML()}</div>
+    ${footer}</div>${sheetsHTML()}`;
 }
 
 /* --------------------------------- sheets -------------------------------- */
@@ -705,6 +753,7 @@ document.addEventListener('click', async (e) => {
   switch (act) {
     case 'tab': state.tab = btn.dataset.tab; state.confirm = null; render(); break;
     case 'mode-tray': state.menuOpen = false; run(() => invoke('ui_set_mode', { mode: 'tray' })); break;
+    case 'mode-window': run(() => invoke('ui_set_mode', { mode: 'window' })); break;
     case 'toggle-settings-menu': state.menuOpen = !state.menuOpen; render(); break;
     case 'open-settings': state.menuOpen = false; state.sheet = { kind: 'settings' }; render(); break;
 
@@ -888,7 +937,8 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     if (state.menuOpen) { state.menuOpen = false; render(); return; }
     if (state.sheet) { closeSheet(); return; }
-    if (state.confirm) { state.confirm = null; render(); }
+    if (state.confirm) { state.confirm = null; render(); return; }
+    if (mode === 'dropdown') invoke('ui_hide_dropdown');
   } else if (e.key === 'Enter' && e.target.tagName === 'INPUT') {
     if (state.sheet && (state.sheet.kind === 'add-secret' || state.sheet.kind === 'edit-secret')) { e.preventDefault(); saveSecret(); }
     else if (state.sheet && (state.sheet.kind === 'add-conn' || state.sheet.kind === 'edit-conn')) { e.preventDefault(); saveConn(); }
@@ -926,7 +976,7 @@ document.addEventListener('input', (e) => {
 
 /* --------------------------------- boot ---------------------------------- */
 async function boot() {
-  await refresh('all');
+  await refresh(mode === 'approval' ? 'queue' : 'all');
   // Hover tooltips (absolute timestamps on activity rows, etc.). Delegated
   // from #root so they survive re-renders; content is each element's
   // data-tippy-content. Vendored Tippy.js (self-hosted for the 'self' CSP).
@@ -947,6 +997,21 @@ async function boot() {
   await listen('amfa://sessions-changed', () => refresh('sessions'));
   await listen('amfa://agents-changed', () => refresh('agents'));
   await listen('amfa://rules-changed', () => refresh('connections'));
-  await listen('amfa://activity-appended', () => refresh('activity'));
+  await listen('amfa://activity-appended', (ev) => receiveActivity(ev.payload));
+  await listen('amfa://open-settings', () => {
+    state.sheet = { kind: 'settings' };
+    state.draft = {};
+    state.sheetErrors = {};
+    render();
+  });
+  await listen('amfa://dropdown-hidden', () => {
+    state.reveal = {};
+    state.sheet = null;
+    state.draft = {};
+    state.sheetErrors = {};
+    state.confirm = null;
+    state.syncConfirm = false;
+    render();
+  });
 }
 boot();

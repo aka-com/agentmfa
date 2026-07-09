@@ -6,8 +6,8 @@
 //! activity view. Secret values never appear in it.
 
 use std::collections::BTreeMap;
-use std::fs::OpenOptions;
-use std::io::Write as _;
+use std::fs::{File, OpenOptions};
+use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -18,6 +18,9 @@ use uuid::Uuid;
 
 use crate::types::{ConfirmationMethod, DecisionContext, DecisionSurface};
 use crate::Result;
+
+const TAIL_CHUNK_BYTES: usize = 16 * 1024;
+const MAX_AUDIT_LINE_BYTES: usize = 1024 * 1024;
 
 /// Schema version written on every new entry. Entries with no `v` field
 /// predate versioning and read back as version 1.
@@ -269,19 +272,70 @@ impl AuditLog {
     }
 
     /// Newest-first tail for the activity view. Unparseable lines are
-    /// skipped (the log survives partial writes).
+    /// skipped (the log survives partial writes). Reads backward and stops
+    /// after `limit` valid entries so refresh cost does not grow with the log.
     pub fn recent(&self, limit: usize) -> Vec<AuditEntry> {
-        let Ok(contents) = std::fs::read_to_string(&self.path) else {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let Ok(mut file) = File::open(&self.path) else {
             return Vec::new();
         };
-        let mut entries: Vec<AuditEntry> = contents
-            .lines()
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .collect();
-        entries.reverse();
-        entries.truncate(limit);
+        let Ok(mut position) = file.seek(SeekFrom::End(0)) else {
+            return Vec::new();
+        };
+
+        let mut entries = Vec::with_capacity(limit);
+        let mut chunk = vec![0u8; TAIL_CHUNK_BYTES];
+        let mut reversed_line = Vec::new();
+        let mut oversized = false;
+
+        while position > 0 && entries.len() < limit {
+            let read_len = position.min(TAIL_CHUNK_BYTES as u64) as usize;
+            position -= read_len as u64;
+            if file.seek(SeekFrom::Start(position)).is_err()
+                || file.read_exact(&mut chunk[..read_len]).is_err()
+            {
+                break;
+            }
+
+            for &byte in chunk[..read_len].iter().rev() {
+                if byte == b'\n' {
+                    push_reversed_entry(&mut entries, &mut reversed_line, oversized);
+                    oversized = false;
+                    if entries.len() == limit {
+                        break;
+                    }
+                } else if !oversized {
+                    if reversed_line.len() < MAX_AUDIT_LINE_BYTES {
+                        reversed_line.push(byte);
+                    } else {
+                        reversed_line.clear();
+                        oversized = true;
+                    }
+                }
+            }
+        }
+
+        if entries.len() < limit {
+            push_reversed_entry(&mut entries, &mut reversed_line, oversized);
+        }
         entries
     }
+}
+
+fn push_reversed_entry(
+    entries: &mut Vec<AuditEntry>,
+    reversed_line: &mut Vec<u8>,
+    oversized: bool,
+) {
+    if !oversized && !reversed_line.is_empty() {
+        reversed_line.reverse();
+        if let Ok(entry) = serde_json::from_slice(reversed_line) {
+            entries.push(entry);
+        }
+    }
+    reversed_line.clear();
 }
 
 #[cfg(test)]
@@ -367,5 +421,36 @@ mod tests {
             .unwrap();
         log.append(AuditEntry::new(AuditKind::SecretDeleted, "also ok"));
         assert_eq!(log.recent(10).len(), 2);
+    }
+
+    #[test]
+    fn tail_is_bounded_and_newest_first_for_large_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = AuditLog::open(dir.path().join("audit.jsonl")).unwrap();
+        for i in 0..1_000 {
+            log.append(AuditEntry::new(
+                AuditKind::Requested,
+                format!("request {i}"),
+            ));
+        }
+
+        let recent = log.recent(25);
+        assert_eq!(recent.len(), 25);
+        assert_eq!(recent.first().unwrap().text, "request 999");
+        assert_eq!(recent.last().unwrap().text, "request 975");
+        assert!(log.recent(0).is_empty());
+    }
+
+    #[test]
+    fn invalid_utf8_before_the_tail_does_not_hide_recent_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        std::fs::write(&path, [0xff, b'\n']).unwrap();
+        let log = AuditLog::open(path).unwrap();
+        log.append(AuditEntry::new(AuditKind::SecretAdded, "recent"));
+
+        let recent = log.recent(1);
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].text, "recent");
     }
 }

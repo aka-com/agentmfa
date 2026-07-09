@@ -1,3 +1,4 @@
+import AppWindow from '/vendor/lucide/esm/icons/app-window.mjs';
 import Check from '/vendor/lucide/esm/icons/check.mjs';
 import Copy from '/vendor/lucide/esm/icons/copy.mjs';
 import Eye from '/vendor/lucide/esm/icons/eye.mjs';
@@ -51,6 +52,7 @@ function iconHTML(iconNode, size, attrs = {}) {
 }
 
 export const LUCIDE_ICONS = {
+  window: iconHTML(AppWindow, 15),
   eye: iconHTML(Eye, 14),
   eyeOff: iconHTML(EyeOff, 14),
   copy: iconHTML(Copy, 14),

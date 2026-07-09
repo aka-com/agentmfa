@@ -9,6 +9,7 @@ const outRoot = join(repoRoot, 'ui/vendor/lucide/esm');
 const outIconsDir = join(outRoot, 'icons');
 
 const icons = [
+  'app-window',
   'check',
   'copy',
   'eye',

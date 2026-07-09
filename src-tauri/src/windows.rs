@@ -1,51 +1,164 @@
 //! Tray + window choreography (DESIGN.md §2).
 //!
-//! AgentMFA is a regular windowed app: the resizable **main window** is the
-//! primary surface and is present in the Dock and the app switcher. The menu
-//! bar is opt-in — the user minimizes to it (or closes the window, which
-//! keeps the broker running), and the always-present tray icon brings the
-//! window back. The **approval window** is its own small always-on-top
-//! window so it can appear even when the main window is hidden.
+//! AgentMFA has a resizable **main window**, an NSStatusItem-style **tray
+//! dropdown**, and a separate always-on-top **approval window**. The tray icon
+//! is always present and toggles the compact dropdown beneath its status item.
 //!
 //! Only when the user enables "hide the Dock icon when minimized to the menu
 //! bar" does retreating switch to the accessory activation policy; opening
 //! the window always restores the regular policy.
 
+use std::sync::Mutex;
+
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, Rect};
 
 pub const MAIN: &str = "main";
+pub const DROPDOWN: &str = "dropdown";
 pub const APPROVAL: &str = "approval";
+pub const EVT_DROPDOWN_HIDDEN: &str = "amfa://dropdown-hidden";
+pub const EVT_OPEN_SETTINGS: &str = "amfa://open-settings";
 
-/// Install the always-present tray icon (§2). Left-click brings the main
-/// window forward (from hidden or the menu bar); when the window is already
-/// up it stays the guaranteed entry point to pending approvals.
+const DROPDOWN_GAP: f64 = 6.0;
+static LAST_TRAY_ANCHOR: Mutex<Option<TrayAnchor>> = Mutex::new(None);
+
+#[derive(Clone, Copy, Debug)]
+struct TrayAnchor {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Bounds {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+/// Install the always-present tray icon (§2). Left-click toggles the compact
+/// dropdown; right-click exposes the conventional app menu.
 pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let icon = app
         .default_window_icon()
         .cloned()
         .expect("bundled default icon");
+    let open = MenuItem::with_id(app, "tray-open", "Open AgentMFA", true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, "tray-settings", "Settings…", true, None::<&str>)?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let quit = MenuItem::with_id(app, "tray-quit", "Quit AgentMFA", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open, &settings, &separator, &quit])?;
+
     TrayIconBuilder::with_id("main")
         .icon(icon)
         .icon_as_template(true) // render as a menu-bar template image
         .tooltip("AgentMFA")
-        .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click {
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "tray-open" => open_main(app),
+            "tray-settings" => {
+                show_dropdown(app);
+                let _ = app.emit_to(DROPDOWN, EVT_OPEN_SETTINGS, ());
+            }
+            "tray-quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| match event {
+            TrayIconEvent::Click {
+                rect,
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
                 ..
-            } = event
-            {
+            } => {
                 let app = tray.app_handle();
-                if window_visible(app, MAIN) {
-                    raise_pending_approval(app);
-                } else {
-                    open_main(app);
-                }
+                remember_tray_anchor(app, rect);
+                toggle_dropdown(app);
             }
+            TrayIconEvent::Click { rect, .. } => {
+                remember_tray_anchor(tray.app_handle(), rect);
+            }
+            _ => {}
         })
         .build(app)?;
     Ok(())
+}
+
+fn remember_tray_anchor(app: &AppHandle, rect: Rect) {
+    let scale = app
+        .get_webview_window(DROPDOWN)
+        .and_then(|window| window.scale_factor().ok())
+        .unwrap_or(1.0);
+    let position = rect.position.to_physical::<f64>(scale);
+    let size = rect.size.to_physical::<f64>(scale);
+    *LAST_TRAY_ANCHOR.lock().unwrap() = Some(TrayAnchor {
+        x: position.x,
+        y: position.y,
+        width: size.width,
+        height: size.height,
+    });
+}
+
+fn toggle_dropdown(app: &AppHandle) {
+    if window_visible(app, DROPDOWN) {
+        hide_dropdown(app);
+    } else {
+        show_dropdown(app);
+    }
+}
+
+fn show_dropdown(app: &AppHandle) {
+    let Some(window) = app.get_webview_window(DROPDOWN) else {
+        return;
+    };
+    if let Some(anchor) = *LAST_TRAY_ANCHOR.lock().unwrap() {
+        if let Ok(size) = window.outer_size() {
+            let monitor = app
+                .monitor_from_point(
+                    anchor.x + anchor.width / 2.0,
+                    anchor.y + anchor.height / 2.0,
+                )
+                .ok()
+                .flatten();
+            let bounds = monitor.map(|monitor| {
+                let work = monitor.work_area();
+                Bounds {
+                    x: work.position.x as f64,
+                    y: work.position.y as f64,
+                    width: work.size.width as f64,
+                    height: work.size.height as f64,
+                }
+            });
+            let (x, y) = dropdown_origin(anchor, size.width as f64, size.height as f64, bounds);
+            let _ = window.set_position(PhysicalPosition::new(x, y));
+        }
+    }
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
+fn dropdown_origin(
+    anchor: TrayAnchor,
+    window_width: f64,
+    window_height: f64,
+    bounds: Option<Bounds>,
+) -> (i32, i32) {
+    let mut x = anchor.x + anchor.width / 2.0 - window_width / 2.0;
+    let mut y = anchor.y + anchor.height + DROPDOWN_GAP;
+
+    if let Some(bounds) = bounds {
+        let right = bounds.x + bounds.width;
+        let bottom = bounds.y + bounds.height;
+        if anchor.y + anchor.height / 2.0 > bounds.y + bounds.height / 2.0 {
+            y = anchor.y - window_height - DROPDOWN_GAP;
+        }
+        x = x.clamp(bounds.x, (right - window_width).max(bounds.x));
+        y = y.clamp(bounds.y, (bottom - window_height).max(bounds.y));
+    }
+    (x.round() as i32, y.round() as i32)
 }
 
 fn window_visible(app: &AppHandle, label: &str) -> bool {
@@ -54,15 +167,20 @@ fn window_visible(app: &AppHandle, label: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn raise_pending_approval(app: &AppHandle) {
-    if let Some(win) = app.get_webview_window(APPROVAL) {
-        // The core shows/hides this on queue changes; nudge it forward on
-        // an explicit tray click too.
-        if win.is_visible().unwrap_or(false) {
-            let _ = win.show();
-            let _ = win.set_focus();
+/// Hide the compact dropdown and ask its webview to clear transient secret
+/// prefixes and unfinished modal state before the next open.
+pub fn hide_dropdown(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(DROPDOWN) {
+        if window.is_visible().unwrap_or(false) {
+            let _ = app.emit_to(DROPDOWN, EVT_DROPDOWN_HIDDEN, ());
+            let _ = window.hide();
         }
     }
+}
+
+#[tauri::command]
+pub fn ui_hide_dropdown(app: AppHandle) {
+    hide_dropdown(&app);
 }
 
 /// Bring the always-on-top approval window forward — the pending banner's
@@ -81,6 +199,7 @@ pub fn ui_show_approval(app: AppHandle) {
 /// activation policy. Restores the Dock icon if a prior menu-bar retreat
 /// had hidden it.
 fn open_main(app: &AppHandle) {
+    hide_dropdown(app);
     set_activation_policy(app, true);
     if let Some(win) = app.get_webview_window(MAIN) {
         let _ = win.show();
@@ -148,4 +267,55 @@ pub fn ui_set_mode(app: AppHandle, mode: String) -> Result<(), String> {
 #[tauri::command]
 pub fn ui_hide_main(app: AppHandle) {
     retreat_to_menu_bar(&app);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const WORK: Bounds = Bounds {
+        x: 0.0,
+        y: 24.0,
+        width: 1440.0,
+        height: 876.0,
+    };
+
+    #[test]
+    fn dropdown_is_centered_below_a_top_tray_item() {
+        let anchor = TrayAnchor {
+            x: 1200.0,
+            y: 0.0,
+            width: 24.0,
+            height: 24.0,
+        };
+        assert_eq!(dropdown_origin(anchor, 430.0, 520.0, Some(WORK)), (997, 30));
+    }
+
+    #[test]
+    fn dropdown_flips_above_a_bottom_tray_item() {
+        let anchor = TrayAnchor {
+            x: 700.0,
+            y: 900.0,
+            width: 24.0,
+            height: 24.0,
+        };
+        assert_eq!(
+            dropdown_origin(anchor, 430.0, 520.0, Some(WORK)),
+            (497, 374)
+        );
+    }
+
+    #[test]
+    fn dropdown_stays_inside_the_monitor_work_area() {
+        let anchor = TrayAnchor {
+            x: 1430.0,
+            y: 0.0,
+            width: 24.0,
+            height: 24.0,
+        };
+        assert_eq!(
+            dropdown_origin(anchor, 430.0, 520.0, Some(WORK)),
+            (1010, 30)
+        );
+    }
 }
