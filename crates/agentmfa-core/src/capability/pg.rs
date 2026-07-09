@@ -386,11 +386,14 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
     // Upstream handshake: own TCP + TLS + auth with the configured user and
     // the stored password secret (§4.3 step (b)). Failure drops the
     // redemption → the reserved budget slot is released.
-    let upstream = match dial_upstream(
-        &state.broker.store,
-        &state.broker.events,
-        &redemption.connection,
-        &params,
+    let upstream = match crate::authorization::scope_existing(
+        redemption.secret_read_authorization.clone(),
+        dial_upstream(
+            &state.broker.store,
+            &state.broker.events,
+            &redemption.connection,
+            &params,
+        ),
     )
     .await
     {

@@ -2,6 +2,7 @@
 //! in-process fake Postgres upstream (cleartext and SCRAM-SHA-256 server
 //! sides), and a real `tokio-postgres` client against the proxied DSN.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -35,6 +36,7 @@ const REAL_PG_PASSWORD: &str = "s3cr3t-pg-pass-77";
 
 struct TestEvents {
     prompts: mpsc::UnboundedSender<ApprovalRequest>,
+    secret_read_confirmations: Arc<AtomicUsize>,
 }
 
 impl BrokerEvents for TestEvents {
@@ -42,6 +44,8 @@ impl BrokerEvents for TestEvents {
         let _ = self.prompts.send(request.clone());
     }
     fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
+        self.secret_read_confirmations
+            .fetch_add(1, Ordering::SeqCst);
         true
     }
     fn confirm_decision(
@@ -65,6 +69,7 @@ struct Harness {
     broker: Arc<Broker>,
     daemon: daemon::DaemonHandle,
     prompts: mpsc::UnboundedReceiver<ApprovalRequest>,
+    secret_read_confirmations: Arc<AtomicUsize>,
     _dir: tempfile::TempDir,
 }
 
@@ -72,11 +77,15 @@ async fn harness(config: BrokerConfig) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let paths = Paths::under(dir.path());
     let (tx, rx) = mpsc::unbounded_channel();
+    let secret_read_confirmations = Arc::new(AtomicUsize::new(0));
     let broker = Broker::new(
         paths,
         Arc::new(MemoryVault::new()),
         config,
-        Arc::new(TestEvents { prompts: tx }),
+        Arc::new(TestEvents {
+            prompts: tx,
+            secret_read_confirmations: secret_read_confirmations.clone(),
+        }),
     )
     .await
     .unwrap();
@@ -85,6 +94,7 @@ async fn harness(config: BrokerConfig) -> Harness {
         broker,
         daemon,
         prompts: rx,
+        secret_read_confirmations,
         _dir: dir,
     }
 }
@@ -689,6 +699,11 @@ async fn multi_connect_allows_concurrent_clients_on_one_ticket() {
     tokio::spawn(conn2);
 
     assert_eq!(h.broker.sessions().len(), 2);
+    assert_eq!(
+        h.secret_read_confirmations.load(Ordering::SeqCst),
+        1,
+        "one approval ticket should require at most one credential-read confirmation"
+    );
     // Each session has its own authenticated upstream connection.
     assert_eq!(fake.state.startups.lock().unwrap().len(), 2);
     for c in [&c1, &c2] {

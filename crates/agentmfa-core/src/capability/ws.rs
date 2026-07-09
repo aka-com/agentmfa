@@ -149,7 +149,12 @@ async fn bridge_handler(
     // redemptions (multi-connect) dial their own (§4.2).
     let upstream = match redemption.payload_ws_upstream.take() {
         Some(upstream) => upstream,
-        None => match dial_upstream(&broker.store, &redemption.connection).await {
+        None => match crate::authorization::scope_existing(
+            redemption.secret_read_authorization.clone(),
+            dial_upstream(&broker.store, &redemption.connection),
+        )
+        .await
+        {
             Ok(upstream) => upstream,
             Err(e) => {
                 // Redemption drops → budget slot released.

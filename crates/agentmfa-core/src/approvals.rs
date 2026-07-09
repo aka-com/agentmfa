@@ -447,7 +447,7 @@ impl Approvals {
     /// User approved: run the single execution and fan the outcome out to
     /// every attached waiter. Returns the request, or None if it no longer
     /// exists (already decided, timed out, or abandoned).
-    pub fn approve(&self, id: &Uuid) -> Option<ApprovalRequest> {
+    pub(crate) fn approve(&self, id: &Uuid, decision_confirmed: bool) -> Option<ApprovalRequest> {
         let (request, snapshot, executor) = {
             let mut inner = self.shared.inner.lock().unwrap();
             let entry = inner.pending.get_mut(id)?;
@@ -467,7 +467,11 @@ impl Approvals {
             inner.queue.retain(|q| q != id);
             (request, queue_snapshot(&inner), executor)
         };
-        self.spawn_completion(*id, executor);
+        // Pairing mints an agent token and never reads a user credential. Do
+        // not let its confirmation authorize secret reads if that invariant
+        // is ever accidentally violated by a future executor.
+        let secret_read_confirmed = decision_confirmed && request.kind != ApprovalKind::Pair;
+        self.spawn_completion(*id, executor, secret_read_confirmed);
         self.shared.events.queue_changed(&snapshot);
         Some(request)
     }
@@ -520,17 +524,17 @@ impl Approvals {
                 id,
             )
         };
-        self.spawn_completion(id, executor);
+        self.spawn_completion(id, executor, false);
         Ok(Parked::Wait(handle))
     }
 
     /// The execution task: not tied to any waiter, so a disconnect cannot
     /// cancel a side effect already in flight (§4). On completion the
     /// outcome is fanned out and retained under the idempotency key.
-    fn spawn_completion(&self, id: Uuid, executor: Executor) {
+    fn spawn_completion(&self, id: Uuid, executor: Executor, secret_read_confirmed: bool) {
         let shared = self.shared.clone();
         self.shared.runtime.spawn(async move {
-            let outcome = executor.await;
+            let outcome = crate::authorization::scope(secret_read_confirmed, executor).await;
             let mut waiters;
             {
                 let mut inner = shared.inner.lock().unwrap();
@@ -688,7 +692,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(approvals.queue().len(), 1);
-        approvals.approve(&id).expect("pending");
+        approvals.approve(&id, false).expect("pending");
         let Parked::Wait(handle) = parked else {
             panic!()
         };
@@ -764,7 +768,7 @@ mod tests {
             Err(ParkError::RequestIdMismatch)
         ));
 
-        approvals.approve(&id).unwrap();
+        approvals.approve(&id, false).unwrap();
         let (Parked::Wait(h1), Parked::Wait(h2)) = (p1, p2) else {
             panic!()
         };
@@ -819,7 +823,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(approvals.queue().len(), 1);
-        approvals.approve(&id).unwrap();
+        approvals.approve(&id, false).unwrap();
         let (Parked::Wait(h1), Parked::Wait(h2)) = (p1, p2) else {
             panic!()
         };
@@ -888,7 +892,7 @@ mod tests {
         drop(parked); // agent disconnected
         assert!(approvals.queue().is_empty(), "prompt withdrawn");
         // Approving after abandonment is a no-op, never executed.
-        assert!(approvals.approve(&id).is_none());
+        assert!(approvals.approve(&id, false).is_none());
         assert_eq!(count.load(Ordering::SeqCst), 0);
     }
 
@@ -917,7 +921,7 @@ mod tests {
                 }),
             })
             .unwrap();
-        approvals.approve(&id).unwrap();
+        approvals.approve(&id, false).unwrap();
         // Waiter disconnects mid-execution; the side effect still completes.
         drop(parked);
         gate_tx.send(()).unwrap();

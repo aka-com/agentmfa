@@ -281,7 +281,7 @@ impl Broker {
                 Ok(request)
             }
             UiDecision::AllowOnce => {
-                let request = self.approvals.approve(id);
+                let request = self.approvals.approve(id, confirmation.is_some());
                 if let Some(request) = &request {
                     if request.kind != ApprovalKind::Pair {
                         self.audit.append(attributed(

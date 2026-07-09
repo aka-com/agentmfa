@@ -52,6 +52,7 @@ struct TicketEntry {
     redeemed: bool,
     active_sessions: usize,
     payload: TicketPayload,
+    secret_read_authorization: Option<crate::authorization::SecretReadAuthorization>,
 }
 
 /// One live bridged/proxied session, as shown in the live-sessions band.
@@ -115,6 +116,7 @@ pub struct Redemption {
     pub agent: String,
     pub connection: Connection,
     pub payload_ws_upstream: Option<crate::capability::ws::WsUpstream>,
+    pub(crate) secret_read_authorization: Option<crate::authorization::SecretReadAuthorization>,
     started: bool,
 }
 
@@ -197,6 +199,7 @@ impl DataPlane {
                 redeemed: false,
                 active_sessions: 0,
                 payload,
+                secret_read_authorization: crate::authorization::current(),
             },
         );
         value
@@ -234,6 +237,7 @@ impl DataPlane {
             agent: entry.agent.clone(),
             connection: entry.connection.clone(),
             payload_ws_upstream: pending,
+            secret_read_authorization: entry.secret_read_authorization.clone(),
             started: false,
         })
     }

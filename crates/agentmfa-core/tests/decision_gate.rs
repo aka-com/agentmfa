@@ -34,6 +34,27 @@ struct GateEvents {
     confirms: AtomicUsize,
 }
 
+struct UnifiedAuthEvents {
+    decision_confirms: AtomicUsize,
+    secret_read_confirms: AtomicUsize,
+}
+
+impl BrokerEvents for UnifiedAuthEvents {
+    fn confirm_secret_read(&self, _secret: &agentmfa_core::types::SecretMeta) -> bool {
+        self.secret_read_confirms.fetch_add(1, Ordering::SeqCst);
+        true
+    }
+
+    fn confirm_decision(
+        &self,
+        _request: &ApprovalRequest,
+        _decision: UiDecision,
+    ) -> Option<ConfirmationMethod> {
+        self.decision_confirms.fetch_add(1, Ordering::SeqCst);
+        Some(ConfirmationMethod::OsAuthentication)
+    }
+}
+
 impl BrokerEvents for GateEvents {
     fn confirm_decision(
         &self,
@@ -277,6 +298,61 @@ async fn non_mutating_allow_needs_no_confirmation() {
         panic!()
     };
     assert_eq!(handle.wait().await.unwrap().status, 200);
+}
+
+#[tokio::test]
+async fn confirmed_decision_authorizes_its_executor_secret_reads_only() {
+    let events = Arc::new(UnifiedAuthEvents {
+        decision_confirms: AtomicUsize::new(0),
+        secret_read_confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    let conn = add_github(&broker);
+    let request = http_request(&conn, true);
+    let id = request.id;
+    let executor_broker = broker.clone();
+    let parked = park_with_executor(
+        &broker,
+        request,
+        Box::pin(async move {
+            // Multiple credential reads in the same approved execution reuse
+            // the decision's native authentication.
+            executor_broker
+                .store
+                .secret_value_by_name("GITHUB_API_KEY")
+                .await
+                .unwrap();
+            executor_broker
+                .store
+                .secret_value_by_name("GITHUB_API_KEY")
+                .await
+                .unwrap();
+            ExecOutcome {
+                status: 200,
+                body: serde_json::json!({"ok": true}),
+            }
+        }),
+    );
+
+    broker
+        .decide(&id, UiDecision::AllowOnce, &ctx())
+        .unwrap()
+        .expect("pending");
+    let Parked::Wait(handle) = parked else {
+        panic!()
+    };
+    assert_eq!(handle.wait().await.unwrap().status, 200);
+    assert_eq!(events.decision_confirms.load(Ordering::SeqCst), 1);
+    assert_eq!(events.secret_read_confirms.load(Ordering::SeqCst), 0);
+
+    // The authorization is execution-scoped: an independent read still
+    // requires its own confirmation.
+    broker
+        .store
+        .secret_value_by_name("GITHUB_API_KEY")
+        .await
+        .unwrap();
+    assert_eq!(events.secret_read_confirms.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

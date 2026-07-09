@@ -377,13 +377,16 @@ impl Store {
             return Ok(());
         }
         let events = self.events.clone();
-        let confirmed = tokio::task::spawn_blocking(move || events.confirm_secret_read(&meta))
-            .await
-            .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))?;
-        if !confirmed {
-            return Err(CoreError::SecretReadNotAuthenticated);
-        }
-        Ok(())
+        crate::authorization::confirm_once(|| async move {
+            let confirmed = tokio::task::spawn_blocking(move || events.confirm_secret_read(&meta))
+                .await
+                .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))?;
+            if !confirmed {
+                return Err(CoreError::SecretReadNotAuthenticated);
+            }
+            Ok(())
+        })
+        .await
     }
 
     /// Names of connections referencing this secret (for the "Used by N

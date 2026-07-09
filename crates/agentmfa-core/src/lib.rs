@@ -12,6 +12,7 @@
 
 pub mod approvals;
 pub mod audit;
+mod authorization;
 pub mod broker;
 pub mod capability;
 pub mod config;
