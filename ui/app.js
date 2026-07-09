@@ -137,7 +137,7 @@ function globalSectionsHTML() {
 function secretsHTML() {
   if (!state.secrets.length) {
     return `<div class="empty"><div class="empty-ico">🔐</div><h3>No secrets yet</h3>
-      <p>A pure key-value store backed by the macOS Keychain.<br>Wire a secret to a destination in the Connections tab.</p>
+      <p>Store API keys, connection strings, and other credentials and secrets here.</p>
       <button class="btn primary" data-act="open-add-secret">＋ Add secret</button></div>`;
   }
   const rows = state.secrets.map((s) => {
@@ -191,7 +191,7 @@ const connActionsHTML = (c) =>
 function connectionsHTML() {
   if (!state.connections.length) {
     return `<div class="empty"><div class="empty-ico">🔌</div><h3>No connections yet</h3>
-      <p>Connect to APIs, databases, or streaming endpoints.</p>
+      <p>Connect to APIs, databases, remote servers, etc.</p>
       <button class="btn primary" data-act="open-add-conn">＋ Add connection</button></div>`;
   }
   return `<div class="conn-cards">` + state.connections.map((c) => {
@@ -294,12 +294,13 @@ function addSecretSheet(editing) {
   const s = editing ? state.secrets.find((x) => x.id === state.sheet.id) : null;
   const title = editing ? 'Edit secret' : 'Add secret';
   const valueLabel = editing ? 'New value' : 'Value';
-  const valuePlaceholder = editing ? '' : 'Your secret here';
+  const valuePlaceholder = editing ? '' : 'Your secret (saved in Keychain)';
+  const keychainNote = editing ? '<span class="keychain-note">🔒 Saved to macOS Keychain</span>' : '';
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
     <div class="sheet wide"><h3>${title}</h3>
     <div class="f-row"><label>Name</label><input id="f-name" class="${fieldCls('name')}" placeholder="e.g. STRIPE_API_KEY" value="${escAttr(d.name ?? (s ? s.name : ''))}">${fieldErr('name')}</div>
     <div class="f-row"><label>${valueLabel}</label><input id="f-value" class="${fieldCls('value')}" type="password" placeholder="${valuePlaceholder}" value="${escAttr(d.value ?? '')}">${fieldErr('value')}</div>
-    <div class="sheet-actions"><span class="keychain-note">🔒 Saved to macOS Keychain</span>
+    <div class="sheet-actions">${keychainNote}
       <button class="btn" data-act="sheet-cancel">Cancel</button>
       <button class="btn primary" data-act="save-secret">Save</button></div></div>`;
 }
@@ -314,7 +315,7 @@ function connSheet(editing) {
   };
   let fields = `<div class="f-row"><label>Name</label><input id="f-cname" class="${fieldCls('name')}" placeholder="e.g. github" value="${escAttr(d.name ?? '')}">${fieldErr('name')}</div>
     <div class="f-row"><label>Type${editing ? ': fixed after creation' : ''}</label>
-    <div class="seg in-form">${typeBtn('api', 'API key')}${typeBtn('pg', 'Postgres')}${typeBtn('ws', 'WebSocket')}${typeBtn('ssh', 'SSH')}</div></div>`;
+    <div class="seg in-form">${typeBtn('api', 'API key')}${typeBtn('pg', 'Postgres')}${typeBtn('ssh', 'SSH')}${typeBtn('ws', 'WebSocket')}</div></div>`;
   if (t === 'api') {
     fields += `<div class="f-row"><label>Host</label><input id="f-host" class="${fieldCls('host')}" placeholder="api.github.com" value="${escAttr(d.host ?? '')}">${fieldErr('host')}</div>`;
   } else if (t === 'ssh') {
@@ -325,11 +326,11 @@ function connSheet(editing) {
   } else if (t === 'pg') {
     const sslmode = d.sslmode || 'require';
     const sslOpts = [
-      ['prefer', 'Prefer'],
-      ['require', 'Require'],
-      ['verify-ca', 'Verify CA'],
-      ['verify-full', 'Verify full'],
       ['disable', 'Disable'],
+      ['prefer', 'Prefer (TLS optional)'],
+      ['require', 'Require (no CA or hostname verification)'],
+      ['verify-ca', 'Verify CA only (no hostname verification)'],
+      ['verify-full', 'Verify full'],
     ].map(([value, label]) =>
       `<option value="${value}" ${sslmode === value ? 'selected' : ''}>${label}</option>`).join('');
     fields += `<div class="f-2col">
@@ -346,9 +347,10 @@ function connSheet(editing) {
     const secretLabel = t === 'pg' ? 'Password secret'
       : t === 'ssh' ? 'Private key secret'
       : 'Token secret';
+    const hasSecrets = state.secrets.length > 0;
     const opts = state.secrets.map((s) =>
       `<option value="${escAttr(s.id)}" ${d.secretId === s.id ? 'selected' : ''}>${esc(s.name)}</option>`).join('');
-    fields += `<div class="f-row"><label>${secretLabel}</label><select id="c-secret">${opts || '<option disabled>No secrets, add one first</option>'}</select></div>`;
+    fields += `<div class="f-row"><label>${secretLabel}</label><select id="c-secret" ${hasSecrets ? '' : 'disabled'}>${hasSecrets ? opts : '<option>No secrets, add one first</option>'}</select></div>`;
     if (t !== 'ssh') {
       fields += `<div class="f-row"><label style="display:flex;align-items:center;gap:7px;cursor:pointer">
         <input type="checkbox" id="c-multi" ${d.multiConnect !== false ? 'checked' : ''} style="width:auto">

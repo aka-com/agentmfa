@@ -531,12 +531,30 @@ code, .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Conso
   color: #82828a; font-weight: 600; margin-bottom: 4px;
 }
 .f-row input, .f-row select {
-  width: 100%; padding: 6px 8px;
+  width: 100%; min-height: 32px; padding: 6px 8px;
   border: 1px solid rgba(0,0,0,.16); border-radius: 7px;
-  font-size: 13px; font-family: inherit; background: #fff; color: #1d1d1f;
+  font-size: 13px; font-family: inherit; background-color: #fff; color: #1d1d1f;
+}
+.f-row select {
+  -webkit-appearance: none; appearance: none;
+  padding-right: 34px; cursor: pointer; line-height: 18px;
+  background-image:
+    linear-gradient(45deg, transparent 50%, #6f6f77 50%),
+    linear-gradient(135deg, #6f6f77 50%, transparent 50%);
+  background-position:
+    calc(100% - 17px) calc(50% - 3px),
+    calc(100% - 11px) calc(50% - 3px);
+  background-repeat: no-repeat; background-size: 6px 6px;
 }
 .f-row input:focus, .f-row select:focus { outline: 2px solid rgba(10,124,255,.45); outline-offset: 0; border-color: #0a7cff; }
 .f-row input.err { border-color: #ff3b30; outline: 2px solid rgba(255,59,48,.35); }
+.f-row select:disabled {
+  color: #8b8b92; background-color: rgba(0,0,0,.035);
+  cursor: default; opacity: 1;
+  background-image:
+    linear-gradient(45deg, transparent 50%, #a0a0a8 50%),
+    linear-gradient(135deg, #a0a0a8 50%, transparent 50%);
+}
 .field-error { color: #d70015; font-size: 11.5px; font-weight: 600; margin-top: 4px; }
 .f-2col { display: flex; gap: 10px; }
 .f-2col .f-row { flex: 1; }
@@ -1236,8 +1254,7 @@ function secretsHTML() {
     return '<div class="empty">' +
       '<div class="empty-ico">🔐</div>' +
       '<h3>No secrets yet</h3>' +
-      '<p>A pure key-value store backed by the macOS Keychain.<br>' +
-      'Wire a secret to a destination in the Connections tab.</p>' +
+      '<p>Store API keys, connection strings, and other credentials and secrets here.</p>' +
       '</div>';
   }
   var rows = store.secrets.map(function (s) {
@@ -1371,9 +1388,8 @@ function addSecretSheetHTML() {
     '<div class="sheet"><h3>Add secret</h3>' +
     '<div class="f-row"><label>Name</label>' +
     '<input id="f-name" placeholder="e.g. STRIPE_API_KEY" value="' + escAttr(store.draft.secretName || '') + '"></div>' +
-    '<div class="f-row"><label>Value</label><input id="f-value" type="password" placeholder="Your secret here" value="' + escAttr(store.draft.secretValue || '') + '"></div>' +
+    '<div class="f-row"><label>Value</label><input id="f-value" type="password" placeholder="Your secret (saved in Keychain)" value="' + escAttr(store.draft.secretValue || '') + '"></div>' +
     '<div class="sheet-actions">' +
-    '<span class="keychain-note">🔒 Saved to macOS Keychain</span>' +
     '<button class="btn" data-act="add-secret-cancel">Cancel</button>' +
     '<button class="btn primary" data-act="add-secret-save">Save</button></div>' +
     '</div>';
@@ -1458,7 +1474,7 @@ function addConnSheetHTML() {
   if (store.connNewSecret) {
     fields += '<div class="f-2col">' +
       '<div class="f-row"><label>New secret name</label><input id="c-newname" placeholder="e.g. STRIPE_API_KEY" value="' + escAttr(d.newName || '') + '"></div>' +
-      '<div class="f-row"><label>Value</label><input id="c-newvalue" type="password" placeholder="Your secret here" value="' + escAttr(d.newValue || '') + '"></div></div>';
+      '<div class="f-row"><label>Value</label><input id="c-newvalue" type="password" placeholder="Your secret (saved in Keychain)" value="' + escAttr(d.newValue || '') + '"></div></div>';
   }
   // composing multiple secrets is only meaningful for an API injection template
   if (t === 'api' && store.secrets.length) {
