@@ -38,9 +38,16 @@ AgentMFA is a secrets manager for agents. Make API calls, open database and WebS
   - **HTTP** — the agent supplies method/path/headers/body; the connection pins the host; redirects are only followed within that host.
   - **WebSocket** — the agent gets a short-lived `ws://127.0.0.1:…` bridge URL usable by any stock WS client.
   - **Postgres** — the agent gets a password-less DSN + one-time ticket; unmodified `psql` works, while the broker opens the upstream leg itself. The default `sslmode=require` encrypts without certificate verification; use `verify-full` for CA and hostname verification.
-  - **SSH** — the agent gets an `SSH_AUTH_SOCK` path; `ssh`/`git`/`rsync` work with OpenSSH host-bound authentication, while the broker signs only for the connection's pinned user and server host key.
+  - **SSH** — the agent gets an `SSH_AUTH_SOCK` path; `ssh`/`git`/`rsync` work
+    with OpenSSH host-bound authentication, while the broker signs only for the
+    connection's pinned user and server host key. Compatible OpenSSH clients
+    negotiate this automatically; explicitly setting
+    `PubkeyAuthentication=host-bound` is not normally required.
 - **Identity-pinned pairing.** Pair tokens are checked against the code-signing identity observed during pairing, or a best-effort local executable fingerprint for unsigned/ad-hoc peers.
-- **Local activity log.** Pairing, approval, denial, and upstream events are shown in the app's Activity view for review, but the log is not a tamper-evident audit ledger.
+- **Local activity log.** Pairing, approval, denial, and upstream events are
+  emitted to the app's Activity view and appended to disk on a best-effort
+  basis. Persistence failures do not block broker operations, so history may
+  be incomplete; it is not a tamper-evident audit ledger.
 - **Free and open source.** MIT licensed desktop application for individuals and small teams; contact us for enterprise support.
 
 ## Developing
@@ -141,7 +148,9 @@ cargo run -p agentmfa-cli -- skill --write    # → .claude/skills/agentmfa/SKIL
    - `POST /v1/ssh/open` — an `auth_sock` path to point `SSH_AUTH_SOCK` at;
      `ssh`/`git`/`rsync` authenticate through the broker's ssh-agent using
      host-bound authentication, pinned to the configured user and server
-     host-key fingerprint.
+     host-key fingerprint. OpenSSH normally negotiates the host-bound mode
+     automatically; forcing it with `PubkeyAuthentication=host-bound` is
+     optional.
 
 Every capability call is evaluated by policy. A call that requires a prompt is
 surfaced as a **held-open request** and blocks until the user decides or the
@@ -153,17 +162,18 @@ and a multi-connect ticket may open multiple sessions under that one decision.
 ## Conformance
 
 - The **core** owns the Keychain, the daemon, the policy engine, and the audit log.
-- The **webview** gets masked metadata only and cannot complete high-consequence actions without a
-core-owned Touch ID sheet.
+- The **webview** gets masked metadata only and cannot complete actions the
+  broker classifies as high consequence without a core-owned native OS
+  authentication sheet.
 
 Documented differences from DESIGN.md:
 
 - **Keychain backend.** `vault.rs` uses the `keyring` crate's apple-native
   backend, which targets the login keychain and does not expose the Data
   Protection keychain's `kSecAttrSynchronizable` / `SecAccessControl`.
-  Touch-ID-on-read is enforced by the broker before app-initiated vault
-  reads; true Keychain-enforced sync/per-item ACL semantics still require
-  direct Security.framework calls plus the `keychain-access-groups`
+  Native reauthentication on read is enforced by the broker before
+  app-initiated vault reads; true Keychain-enforced sync/per-item ACL semantics
+  still require direct Security.framework calls plus the `keychain-access-groups`
   entitlement.
 - **Peer identity.** `peer.rs` implements the audit-token + `SecCode`
   code-signature check on macOS. Unsigned/ad-hoc macOS peers are important
@@ -172,13 +182,34 @@ Documented differences from DESIGN.md:
   available) and displays that weaker identity explicitly. Non-macOS dev
   builds pin the peer UID instead (there is no code-signature oracle) and
   mark the identity `dev-unverified`.
-- **Touch ID / clipboard.** `auth.rs` and `clipboard.rs` use
-  LocalAuthentication and `NSPasteboard` on macOS; on other platforms the
-  gate is a loud no-op and the concealed-clipboard write is skipped (both are
+- **Native authentication / clipboard.** `auth.rs` uses macOS
+  LocalAuthentication, which permits Touch ID with account-password fallback,
+  and `clipboard.rs` uses `NSPasteboard`. On other platforms the confirmation
+  gate fails closed and the concealed-clipboard write is skipped (both are
   macOS product features).
+- **SSH host binding.** The AgentMFA implementation requires OpenSSH
+  `session-bind@openssh.com` and signs only
+  `publickey-hostbound-v00@openssh.com` authentication for the configured user,
+  key, session, and server host-key fingerprint. Unbound or mismatched signing
+  requests fail closed. Compatible OpenSSH clients negotiate these extensions
+  without requiring an explicit `PubkeyAuthentication=host-bound` option.
+- **HTTP consequence classification.** For confirmation and idempotency,
+  AgentMFA classifies `GET` and `HEAD` as read-like and every other accepted
+  method as potentially mutating. This is a method-based heuristic, not a
+  guarantee about upstream behavior: an API that performs an action through
+  `GET` will not receive the extra decision confirmation, while a harmless
+  `POST` will.
+- **Agent-visible redaction.** Exact matches of rendered credential material
+  in relayed upstream responses **MUST** be redacted. Implementations **SHOULD**
+  make a best effort to redact common components and reversible encodings, but
+  arbitrary upstream transformations cannot be guaranteed. Broker-generated
+  responses and errors **MUST NOT** disclose stored secret names or values.
 - **Activity log.** Activity entries are a local product log, not a
-  tamper-evident audit ledger. Secret values are not written to the log, but
-  local UI-oriented entries may include user-facing secret names.
+  tamper-evident audit ledger. Appends are best effort: serialization or disk
+  failures are logged but do not fail the broker operation, and an event shown
+  live in the UI may therefore be absent after restart. Exact stored secret
+  values **MUST NOT** be written to activity entries, but local UI-oriented
+  entries may include user-facing secret names.
 - **On-disk integrity — closed; identity strength — deferred.** DESIGN.md
   §13.1 is implemented: `index.json`, `rules.json`, and `agents.json` are
   sealed with HMAC-SHA256 under a vault-held key and refuse to load on a

@@ -1,9 +1,9 @@
 //! Structured audit log (DESIGN.md §8).
 //!
-//! Every pairing, policy decision, and brokered call, plus vault-touching
-//! UI actions like reveal/copy, is appended to
-//! `~/Library/Application Support/agentmfa/audit.jsonl` and surfaced in the
-//! activity view. Secret values never appear in it.
+//! Pairing, policy decisions, brokered calls, and vault-touching UI actions
+//! like reveal/copy emit entries to the activity view and are appended to
+//! `~/Library/Application Support/agentmfa/audit.jsonl` on a best-effort
+//! basis. Append failures are logged but do not fail the associated operation.
 
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
@@ -254,6 +254,8 @@ impl AuditLog {
         self.listeners.lock().unwrap().push(Box::new(f));
     }
 
+    /// Notify live listeners even if durable persistence fails. The activity
+    /// log is an operator aid, not a transaction or tamper-evident ledger.
     pub fn append(&self, entry: AuditEntry) {
         {
             let mut file = self.file.lock().unwrap();

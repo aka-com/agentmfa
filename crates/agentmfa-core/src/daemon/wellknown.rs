@@ -233,7 +233,7 @@ Approval runs once, at open time. Point `SSH_AUTH_SOCK` at `auth_sock` and
 run any unmodified SSH client (`ssh`, `git`, `scp`, `rsync`, `ssh -L`):
 
     SSH_AUTH_SOCK=<auth_sock> ssh -o IdentitiesOnly=yes \
-      -o PubkeyAuthentication=host-bound <user>@<host>
+      <user>@<host>
     SSH_AUTH_SOCK=<auth_sock> git -C repo push
 
 The broker serves the ssh-agent protocol on that socket: it offers the one
@@ -243,9 +243,11 @@ configured host-key fingerprint and will **only** sign host-bound public-key
 login as the pinned `user`; it signs nothing else. Ticket lifetime and multi-connect semantics
 match WebSocket and Postgres: the socket accepts connections for the
 {ticket} s window, and with multi-connect on (the default) as many SSH
-invocations as you need under the one approval. The destination host is
-*not* cryptographically enforced by SSH auth; connect only to the host the
-connection names.
+invocations as you need under the one approval. Compatible OpenSSH clients
+negotiate session binding and host-bound authentication automatically, so an
+explicit `-o PubkeyAuthentication=host-bound` is optional. Clients without
+those OpenSSH extensions fail closed because the broker refuses unbound or
+host-key-mismatched signing requests.
 
 ## 8. Other errors
 
@@ -379,6 +381,8 @@ mod tests {
             "/v1/pg/open",
             "/v1/ssh/open",
             "SSH_AUTH_SOCK",
+            "session binding and host-bound authentication automatically",
+            "host-key-mismatched signing requests",
         ] {
             assert!(text.contains(needle), "instructions missing {needle:?}");
         }
