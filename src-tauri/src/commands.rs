@@ -216,7 +216,7 @@ fn default_true() -> bool {
 
 fn parse_pg_sslmode(value: Option<&str>) -> CmdResult<PgSslMode> {
     match value {
-        None => Ok(PgSslMode::Prefer),
+        None => Ok(PgSslMode::Require),
         Some("disable") => Ok(PgSslMode::Disable),
         Some("prefer") => Ok(PgSslMode::Prefer),
         Some("require") => Ok(PgSslMode::Require),
@@ -463,7 +463,7 @@ mod tests {
 
     #[test]
     fn pg_sslmode_rejects_unknown_values() {
-        assert_eq!(parse_pg_sslmode(None).unwrap(), PgSslMode::Prefer);
+        assert_eq!(parse_pg_sslmode(None).unwrap(), PgSslMode::Require);
         assert_eq!(
             parse_pg_sslmode(Some("verify-full")).unwrap(),
             PgSslMode::VerifyFull

@@ -58,9 +58,10 @@ pub enum PgSslMode {
     /// Plaintext upstream. Dev/local only.
     Disable,
     /// Try TLS, fall back to plaintext if the server declines.
-    #[default]
     Prefer,
-    /// TLS or fail.
+    /// TLS or fail. The connection is encrypted, but the certificate is not
+    /// validated; use `verify-ca` or `verify-full` for verified TLS.
+    #[default]
     Require,
     /// TLS, verify the certificate chain against trusted roots, ignore host name.
     VerifyCa,
@@ -462,6 +463,7 @@ mod tests {
 
     #[test]
     fn pg_sslmodes_match_libpq_names() {
+        assert_eq!(PgSslMode::default(), PgSslMode::Require);
         assert_eq!(
             serde_json::to_string(&PgSslMode::VerifyCa).unwrap(),
             "\"verify-ca\""

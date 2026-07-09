@@ -328,7 +328,7 @@ function connSheet(editing) {
     const sslOpts = [
       ['disable', 'Disable'],
       ['prefer', 'Prefer (TLS optional)'],
-      ['require', 'Require (no CA or hostname verification)'],
+      ['require', 'Require TLS (no certificate verification)'],
       ['verify-ca', 'Verify CA only (no hostname verification)'],
       ['verify-full', 'Verify full'],
     ].map(([value, label]) =>

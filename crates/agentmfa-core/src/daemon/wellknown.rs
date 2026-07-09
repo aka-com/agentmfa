@@ -212,10 +212,12 @@ in `ps`-visible argv and shell history:
     PGPASSWORD=<ticket> psql "<dsn>" -c "SELECT 1;"
 
 The broker's local proxy speaks real Postgres on the loopback leg and
-performs TLS + SCRAM upstream itself; you never see the real password or
+opens the upstream Postgres leg itself; you never see the real password or
 host. Ticket lifetime and multi-connect semantics are the same as
-WebSocket. `sslmode=disable` applies only to the loopback leg; the
-upstream leg uses the connection's configured TLS.
+WebSocket. `sslmode=disable` applies only to the loopback leg; the upstream
+leg uses the connection's configured TLS. The default upstream
+`sslmode=require` encrypts without certificate verification; use
+`verify-full` when CA and hostname verification are required.
 
 ## 7. SSH: POST /v1/ssh/open
 

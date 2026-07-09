@@ -37,7 +37,7 @@ AgentMFA is a secrets manager for agents. Make API calls, open database and WebS
 - **Supports most agent workflows:** Injects credentials for HTTP, WebSocket, Postgres, and SSH.
   - **HTTP** — the agent supplies method/path/headers/body; the connection pins the host; redirects are only followed within that host.
   - **WebSocket** — the agent gets a short-lived `ws://127.0.0.1:…` bridge URL usable by any stock WS client.
-  - **Postgres** — the agent gets a password-less DSN + one-time ticket; unmodified `psql` works, while the broker speaks TLS + SCRAM upstream.
+  - **Postgres** — the agent gets a password-less DSN + one-time ticket; unmodified `psql` works, while the broker opens the upstream leg itself. The default `sslmode=require` encrypts without certificate verification; use `verify-full` for CA and hostname verification.
   - **SSH** — the agent gets an `SSH_AUTH_SOCK` path; unmodified `ssh`/`git`/`rsync` work, while the broker holds the private key and signs — but only a login as the connection's pinned user, and nothing else.
 - **Identity-pinned pairing.** Connected agents are pinned to their code-signing identity, or to a best-effort local executable fingerprint for unsigned/ad-hoc peers, so a copied token is not generally reusable by another process.
 - **Local activity log.** Pairing, approval, denial, and upstream events are shown in the app's Activity view for review, but the log is not a tamper-evident audit ledger.

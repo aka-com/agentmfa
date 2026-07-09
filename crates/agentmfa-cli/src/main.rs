@@ -154,7 +154,7 @@ struct ConnAdd {
     #[arg(long)]
     secret: Option<String>,
     /// pg: disable | prefer | require | verify-ca | verify-full
-    /// (default: prefer).
+    /// (default: require; encrypted, no certificate verification).
     #[arg(long)]
     sslmode: Option<String>,
     /// pg/ws: require a fresh approval per connect instead of allowing
@@ -718,7 +718,7 @@ mod tests {
         match conn_config(&a).unwrap() {
             ConnectionConfig::Pg { port, sslmode, .. } => {
                 assert_eq!(port, 5432);
-                assert_eq!(sslmode, PgSslMode::default());
+                assert_eq!(sslmode, PgSslMode::Require);
             }
             other => panic!("wrong config: {other:?}"),
         }
