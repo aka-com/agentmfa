@@ -153,7 +153,25 @@ impl Broker {
             kind: conn.kind(),
             target: conn.target(),
             multi_connect: conn.multi_connect,
+            connection_updated_at: conn.updated_at,
         }
+    }
+
+    /// Reload the connection named by a prompt and require that its exact
+    /// revision still matches what the user reviewed.
+    fn approval_connection(&self, summary: &ConnectionSummary) -> Result<Connection> {
+        let conn = self
+            .store
+            .connection_by_id(&summary.id)
+            .map_err(|_| CoreError::ApprovalConnectionChanged)?;
+        if conn.updated_at != summary.connection_updated_at
+            || conn.kind() != summary.kind
+            || conn.target() != summary.target
+            || conn.multi_connect != summary.multi_connect
+        {
+            return Err(CoreError::ApprovalConnectionChanged);
+        }
+        Ok(conn)
     }
 
     /// The connections a pairing under `agent` would inherit promptless
@@ -323,6 +341,7 @@ impl Broker {
             }
             UiDecision::AlwaysAllow => {
                 // Save the standing rule first, then allow this request.
+                let _access = self.access_gate.lock().unwrap();
                 let Some(request) = self.approvals.get(id) else {
                     return Ok(None);
                 };
@@ -331,13 +350,7 @@ impl Broker {
                     return self.apply_decision(id, UiDecision::AllowOnce, ctx, confirmation);
                 }
                 if let Some(summary) = &request.connection {
-                    let conn = self.store.connection_by_id(&summary.id)?;
-                    if conn.kind() != summary.kind
-                        || conn.target() != summary.target
-                        || conn.multi_connect != summary.multi_connect
-                    {
-                        return Err(CoreError::ApprovalConnectionChanged);
-                    }
+                    let conn = self.approval_connection(summary)?;
                     let rule = self.policy.record_rule(&request.agent, conn.id)?;
                     self.audit.append(attributed(
                         AuditEntry::new(
@@ -373,13 +386,7 @@ impl Broker {
                     .connection
                     .as_ref()
                     .ok_or(CoreError::ApprovalConnectionChanged)?;
-                let conn = self.store.connection_by_id(&summary.id)?;
-                if conn.kind() != summary.kind
-                    || conn.target() != summary.target
-                    || conn.multi_connect != summary.multi_connect
-                {
-                    return Err(CoreError::ApprovalConnectionChanged);
-                }
+                let conn = self.approval_connection(summary)?;
                 let scope = match request.http.as_ref() {
                     Some(http) if !http.mutating => GrantScope::Read,
                     _ => GrantScope::Full,
@@ -393,6 +400,8 @@ impl Broker {
                                 && queued_connection.kind == summary.kind
                                 && queued_connection.target == summary.target
                                 && queued_connection.multi_connect == summary.multi_connect
+                                && queued_connection.connection_updated_at
+                                    == summary.connection_updated_at
                         })
                         && scope.allows(match queued.http.as_ref() {
                             Some(http) if !http.mutating => GrantScope::Read,
@@ -488,6 +497,7 @@ impl Broker {
         new_name: Option<&str>,
         new_value: Option<SecretValue>,
     ) -> Result<SecretMeta> {
+        let _access = self.access_gate.lock().unwrap();
         let mut meta = self.store.secret_by_id(id)?;
         let mut changes = Vec::new();
         let mut rename: Option<(String, String, usize)> = None;
@@ -609,16 +619,22 @@ impl Broker {
         let capability_changed = old.config != spec.config
             || explicit_secrets_changed
             || old.multi_connect != effective_multi_connect;
-        let (confirmation, conn, target_changed) = if capability_changed {
-            let confirmation = self.confirm_action(&format!(
+        let confirmation = if capability_changed {
+            Some(self.confirm_action(&format!(
                 "Change security settings for connection “{}”",
                 spec.name
-            ))?;
-            let (conn, target_changed) = self.store.update_connection(id, spec)?;
-            (Some(confirmation), conn, target_changed)
+            ))?)
         } else {
-            let conn = self.store.rename_connection(id, spec.name)?;
-            (None, conn, false)
+            None
+        };
+        let _access = self.access_gate.lock().unwrap();
+        if self.store.connection_by_id(id)?.updated_at != old.updated_at {
+            return Err(CoreError::ApprovalConnectionChanged);
+        }
+        let (conn, target_changed) = if capability_changed {
+            self.store.update_connection(id, spec)?
+        } else {
+            (self.store.rename_connection(id, spec.name)?, false)
         };
         let revoked_grants = self.grants.remove_for_connection(id);
         self.close_grants(&revoked_grants);
@@ -673,6 +689,10 @@ impl Broker {
     pub fn ui_delete_connection(&self, id: &Uuid) -> Result<Connection> {
         let conn = self.store.connection_by_id(id)?;
         let confirmation = self.confirm_action(&format!("Delete connection “{}”", conn.name))?;
+        let _access = self.access_gate.lock().unwrap();
+        if self.store.connection_by_id(id)?.updated_at != conn.updated_at {
+            return Err(CoreError::ApprovalConnectionChanged);
+        }
         let conn = self.store.delete_connection(id)?;
         let revoked_grants = self.grants.remove_for_connection(id);
         self.close_grants(&revoked_grants);

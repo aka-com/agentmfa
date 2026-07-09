@@ -144,6 +144,11 @@ pub struct ConnectionSummary {
     pub kind: ConnectionKind,
     pub target: String,
     pub multi_connect: bool,
+    /// Exact security-relevant connection revision presented by the prompt.
+    /// It stays internal because approval surfaces do not need to render it.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub connection_updated_at: DateTime<Utc>,
 }
 
 /// Agent-supplied headers plus a size-capped body preview, collapsed for
@@ -818,6 +823,7 @@ mod tests {
                 kind: ConnectionKind::Api,
                 target: "api.github.com".into(),
                 multi_connect: false,
+                connection_updated_at: now,
             }),
             action: action.into(),
             notification: format!("{agent} wants to use GitHub: {action}"),

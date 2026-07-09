@@ -128,6 +128,7 @@ fn http_request(conn: &Connection, mutating: bool) -> ApprovalRequest {
             kind: conn.kind(),
             target: conn.target(),
             multi_connect: conn.multi_connect,
+            connection_updated_at: conn.updated_at,
         }),
         action: format!("{method} api.github.com/x"),
         notification: String::new(),
@@ -421,6 +422,83 @@ async fn always_allow_confirms_once_and_attributes_the_audit_trail() {
         assert_eq!(entry.confirmation, Some(ConfirmationMethod::Waived));
         assert_eq!(entry.approver, None);
     }
+}
+
+#[tokio::test]
+async fn durable_decisions_refuse_a_same_target_connection_revision_change() {
+    let events = Arc::new(GateEvents {
+        allow: true,
+        confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events).await;
+    let mut conn = add_github(&broker);
+
+    let request = http_request(&conn, false);
+    let always_id = request.id;
+    let always_waiter = park(&broker, request);
+    conn = broker
+        .ui_update_connection(
+            &conn.id,
+            ConnectionSpec {
+                name: conn.name.clone(),
+                config: ConnectionConfig::Api {
+                    host: "api.github.com".into(),
+                    scheme: "https".into(),
+                    port: None,
+                    template: "X-Api-Key: {{GITHUB_API_KEY}}".into(),
+                },
+                secrets: vec![],
+                multi_connect: false,
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        broker.decide(&always_id, UiDecision::AlwaysAllow, &ctx()),
+        Err(CoreError::ApprovalConnectionChanged)
+    ));
+    assert!(broker.rules().is_empty());
+    broker.decide(&always_id, UiDecision::Deny, &ctx()).unwrap();
+    let Parked::Wait(always_waiter) = always_waiter else {
+        panic!()
+    };
+    assert_eq!(always_waiter.wait().await.unwrap().status, 403);
+
+    let (_, paired) = broker
+        .pairing
+        .pair("claude-code", PeerIdentity::DevUnverified { uid: 501 })
+        .unwrap();
+    let mut request = http_request(&conn, false);
+    request.agent_token_hash = Some(paired.token_hash);
+    let session_id = request.id;
+    let session_waiter = park(&broker, request);
+    broker
+        .ui_update_connection(
+            &conn.id,
+            ConnectionSpec {
+                name: conn.name.clone(),
+                config: ConnectionConfig::Api {
+                    host: "api.github.com".into(),
+                    scheme: "https".into(),
+                    port: None,
+                    template: "Authorization: token {{GITHUB_API_KEY}}".into(),
+                },
+                secrets: vec![],
+                multi_connect: false,
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        broker.decide(&session_id, UiDecision::AllowSession, &ctx()),
+        Err(CoreError::ApprovalConnectionChanged)
+    ));
+    assert!(broker.grants_for_connection(&conn).is_empty());
+    broker
+        .decide(&session_id, UiDecision::Deny, &ctx())
+        .unwrap();
+    let Parked::Wait(session_waiter) = session_waiter else {
+        panic!()
+    };
+    assert_eq!(session_waiter.wait().await.unwrap().status, 403);
 }
 
 #[tokio::test]

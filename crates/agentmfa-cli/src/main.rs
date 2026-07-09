@@ -14,6 +14,7 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use agentmfa_core::approvals::{ApprovalKind, ApprovalRequest};
 use agentmfa_core::broker::{Broker, UiDecision};
@@ -590,8 +591,9 @@ fn cmd_serve(root: Option<PathBuf>, auto_yes: bool) {
     if auto_yes {
         eprintln!("  ⚠ --yes: auto-approving every request (no human in the loop)");
     } else {
+        let access_duration = format_duration(broker.config.access_grant_ttl);
         eprintln!(
-            "  approve prompts below with: [a]llow 15 min · allow [o]nce · allow [f]orever · [d]eny"
+            "  approve prompts below with: [a]llow {access_duration} · allow [o]nce · allow [f]orever · [d]eny"
         );
     }
     eprintln!("  Ctrl-C to quit.\n");
@@ -601,7 +603,7 @@ fn cmd_serve(root: Option<PathBuf>, auto_yes: bool) {
         let decision = if auto_yes {
             UiDecision::AllowOnce
         } else {
-            prompt_decision(&request)
+            prompt_decision(&request, broker.config.access_grant_ttl)
         };
         // Auto-approve rebounds the pairing brake fairly; on a real denial
         // the core arms the cooldown itself.
@@ -612,7 +614,7 @@ fn cmd_serve(root: Option<PathBuf>, auto_yes: bool) {
     }
 }
 
-fn prompt_decision(req: &ApprovalRequest) -> UiDecision {
+fn prompt_decision(req: &ApprovalRequest, access_grant_ttl: Duration) -> UiDecision {
     eprintln!("── approval required ──────────────────────────────");
     eprintln!("  agent:   {}", req.agent);
     if req.kind == ApprovalKind::Pair {
@@ -669,16 +671,40 @@ fn prompt_decision(req: &ApprovalRequest) -> UiDecision {
             "o" | "once" => return UiDecision::AllowOnce,
             "f" | "forever" if req.kind != ApprovalKind::Pair => return UiDecision::AlwaysAllow,
             "d" | "deny" | "" => return UiDecision::Deny,
+            _ if req.kind == ApprovalKind::Pair => {
+                eprintln!("  ? enter a (allow pairing) or d (deny)")
+            }
             _ => eprintln!(
-                "  ? enter a (allow 15 min), o (allow once), f (allow forever), or d (deny)"
+                "  ? enter a (allow {}), o (allow once), f (allow forever), or d (deny)",
+                format_duration(access_grant_ttl)
             ),
         }
+    }
+}
+
+fn format_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds > 0 && seconds % 3_600 == 0 {
+        let hours = seconds / 3_600;
+        format!("{hours} hour{}", if hours == 1 { "" } else { "s" })
+    } else if seconds > 0 && seconds % 60 == 0 {
+        let minutes = seconds / 60;
+        format!("{minutes} minute{}", if minutes == 1 { "" } else { "s" })
+    } else {
+        format!("{seconds} second{}", if seconds == 1 { "" } else { "s" })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn access_duration_uses_the_configured_value() {
+        assert_eq!(format_duration(Duration::from_secs(90)), "90 seconds");
+        assert_eq!(format_duration(Duration::from_secs(15 * 60)), "15 minutes");
+        assert_eq!(format_duration(Duration::from_secs(60 * 60)), "1 hour");
+    }
 
     fn args(kind: ConnKind) -> ConnAdd {
         ConnAdd {
