@@ -213,6 +213,9 @@ impl SshSigner {
     /// Sign `data` honoring the SIGN_REQUEST `flags` (they select the RSA
     /// hash; ed25519 has one algorithm). Returns the SSH-encoded signature
     /// blob (`string alg` + `string sig`) the SIGN_RESPONSE carries.
+    ///
+    /// RSA signing can take long enough to matter on an async worker; callers
+    /// should run this through `sign_on_blocking_thread`.
     fn sign(&self, data: &[u8], flags: u32) -> Result<Vec<u8>, String> {
         let signature: Signature = match self.key.key_data() {
             KeypairData::Ed25519(_) => self
@@ -258,6 +261,16 @@ impl SshSigner {
         put_string(&mut body, comment.as_bytes());
         body
     }
+}
+
+async fn sign_on_blocking_thread(
+    signer: Arc<SshSigner>,
+    data: Vec<u8>,
+    flags: u32,
+) -> Result<Vec<u8>, String> {
+    tokio::task::spawn_blocking(move || signer.sign(&data, flags))
+        .await
+        .map_err(|e| format!("sign task failed: {e}"))?
 }
 
 /// The pinned user carried by a SIGN_REQUEST's userauth blob, when the blob
@@ -453,7 +466,7 @@ async fn serve(
                 session
                     .bytes_up
                     .fetch_add(payload.len() as u64 + 1, Ordering::Relaxed);
-                let response = handle_request(state, kind, &payload);
+                let response = handle_request(state, kind, &payload).await;
                 session
                     .bytes_down
                     .fetch_add(response.len() as u64, Ordering::Relaxed);
@@ -467,20 +480,18 @@ async fn serve(
 
 /// Answer one agent request. Unknown requests and refused signatures both
 /// return SSH_AGENT_FAILURE — the ssh client's cue to move on.
-fn handle_request(state: &Arc<AgentState>, kind: u8, payload: &[u8]) -> Vec<u8> {
+async fn handle_request(state: &Arc<AgentState>, kind: u8, payload: &[u8]) -> Vec<u8> {
     match kind {
-        SSH_AGENTC_REQUEST_IDENTITIES => {
-            frame(
-                SSH_AGENT_IDENTITIES_ANSWER,
-                &state.signer.identities_answer(&state.comment),
-            )
-        }
-        SSH_AGENTC_SIGN_REQUEST => sign_response(state, payload),
+        SSH_AGENTC_REQUEST_IDENTITIES => frame(
+            SSH_AGENT_IDENTITIES_ANSWER,
+            &state.signer.identities_answer(&state.comment),
+        ),
+        SSH_AGENTC_SIGN_REQUEST => sign_response(state, payload).await,
         _ => frame(SSH_AGENT_FAILURE, &[]),
     }
 }
 
-fn sign_response(state: &Arc<AgentState>, payload: &[u8]) -> Vec<u8> {
+async fn sign_response(state: &Arc<AgentState>, payload: &[u8]) -> Vec<u8> {
     let refuse = |reason: &str| -> Vec<u8> {
         state.broker.audit.append(
             AuditEntry::new(
@@ -512,8 +523,10 @@ fn sign_response(state: &Arc<AgentState>, payload: &[u8]) -> Vec<u8> {
             state.user
         ));
     }
+    let user = user.to_string();
+    let data = data.to_vec();
 
-    match state.signer.sign(data, flags) {
+    match sign_on_blocking_thread(state.signer.clone(), data, flags).await {
         Ok(sig_blob) => {
             state.broker.audit.append(
                 AuditEntry::new(
