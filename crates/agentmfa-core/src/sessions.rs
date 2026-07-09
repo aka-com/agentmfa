@@ -152,6 +152,7 @@ struct State {
     next_session: u64,
 }
 
+#[derive(Clone)]
 pub struct DataPlane {
     inner: Arc<DataPlaneInner>,
 }

@@ -217,11 +217,12 @@ access covers every HTTP method and new session opens. A later full-access
 approval replaces a read session and starts a new fixed 15-minute window;
 ordinary use never extends either window. *Allow once* and a standing "always
 allow" rule remain available. Compatible requests that were already waiting
-are covered by the newly approved session rather than prompting again. For
-WebSocket, Postgres, and SSH, authorization applies to the session-open call.
-Traffic inside an authorized live session is not approved individually. A
-transport issued under a grant is capped by the grant's remaining lifetime,
-and grant expiry or revocation closes it.
+are covered by the newly approved session rather than prompting again. Natural
+expiry is recorded in the activity log and removes the access indicator at
+the grant's deadline. For WebSocket, Postgres, and SSH, authorization applies
+to the session-open call. Traffic inside an authorized live session is not
+approved individually. A transport issued under a grant is capped by the
+grant's remaining lifetime, and grant expiry or revocation closes it.
 
 Disconnecting or re-pairing an agent invalidates all of that agent's
 outstanding data-plane capabilities and closes its open WebSocket, Postgres,

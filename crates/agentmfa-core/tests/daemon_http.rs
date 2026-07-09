@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agentmfa_core::approvals::ApprovalRequest;
+use agentmfa_core::audit::AuditKind;
 use agentmfa_core::broker::{Broker, UiDecision};
 use agentmfa_core::config::BrokerConfig;
 use agentmfa_core::daemon;
@@ -31,6 +32,7 @@ use zeroize::Zeroizing;
 struct TestEvents {
     prompts: mpsc::UnboundedSender<ApprovalRequest>,
     queue_len: Arc<Mutex<usize>>,
+    access_changes: Arc<AtomicUsize>,
 }
 
 impl BrokerEvents for TestEvents {
@@ -39,6 +41,9 @@ impl BrokerEvents for TestEvents {
     }
     fn queue_changed(&self, queue: &[ApprovalRequest]) {
         *self.queue_len.lock().unwrap() = queue.len();
+    }
+    fn rules_changed(&self) {
+        self.access_changes.fetch_add(1, Ordering::SeqCst);
     }
     fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
         true
@@ -66,6 +71,7 @@ struct Harness {
     socket: std::path::PathBuf,
     prompts: mpsc::UnboundedReceiver<ApprovalRequest>,
     queue_len: Arc<Mutex<usize>>,
+    access_changes: Arc<AtomicUsize>,
     _dir: tempfile::TempDir,
 }
 
@@ -75,9 +81,11 @@ async fn harness(mut config: BrokerConfig) -> Harness {
     let paths = Paths::under(dir.path());
     let (tx, rx) = mpsc::unbounded_channel();
     let queue_len = Arc::new(Mutex::new(0));
+    let access_changes = Arc::new(AtomicUsize::new(0));
     let events = Arc::new(TestEvents {
         prompts: tx,
         queue_len: queue_len.clone(),
+        access_changes: access_changes.clone(),
     });
     let broker = Broker::new(paths, Arc::new(MemoryVault::new()), config, events)
         .await
@@ -90,6 +98,7 @@ async fn harness(mut config: BrokerConfig) -> Harness {
         socket,
         prompts: rx,
         queue_len,
+        access_changes,
         _dir: dir,
     }
 }
@@ -315,6 +324,7 @@ async fn overlong_socket_path_is_diagnosed() {
     let events = Arc::new(TestEvents {
         prompts: tx,
         queue_len: Arc::new(Mutex::new(0)),
+        access_changes: Arc::new(AtomicUsize::new(0)),
     });
     let broker = Broker::new(
         paths,
@@ -683,8 +693,32 @@ async fn access_session_defaults_to_read_then_upgrades_to_full_and_expires() {
     assert_eq!(status, 200);
     assert!(h.prompts.try_recv().is_err());
 
-    // Expiry is fixed, not sliding. The next request prompts again.
+    // Expiry is fixed, not sliding. It is removed, audited distinctly, and
+    // tells access views to refresh at the deadline.
+    let access_changes_before_expiry = h.access_changes.load(Ordering::SeqCst);
     tokio::time::sleep(Duration::from_millis(3100)).await;
+    let connection = h.broker.store.connection_by_name("github").unwrap();
+    assert!(h.broker.grants_for_connection(&connection).is_empty());
+    assert!(h.access_changes.load(Ordering::SeqCst) > access_changes_before_expiry);
+    let expiry_entries: Vec<_> = h
+        .broker
+        .audit
+        .recent(20)
+        .into_iter()
+        .filter(|entry| entry.kind == AuditKind::GrantExpired)
+        .collect();
+    assert_eq!(expiry_entries.len(), 1);
+    assert_eq!(
+        expiry_entries[0].outcome.as_deref(),
+        Some("access_session_expired")
+    );
+    assert_eq!(expiry_entries[0].fields["reason"], "expired");
+    assert_eq!(expiry_entries[0].fields["scope"], "full");
+    assert!(expiry_entries[0].fields.contains_key("created_at"));
+    assert!(expiry_entries[0].fields.contains_key("expires_at"));
+
+    // The next request prompts again, and observing the expired state does
+    // not append a duplicate expiry entry.
     let socket = h.socket.clone();
     let auth_clone = auth.clone();
     let after_expiry = tokio::spawn(async move {
@@ -699,6 +733,15 @@ async fn access_session_defaults_to_read_then_upgrades_to_full_and_expires() {
     });
     h.decide_next(UiDecision::Deny).await;
     assert_eq!(after_expiry.await.unwrap().0, 403);
+    assert_eq!(
+        h.broker
+            .audit
+            .recent(20)
+            .into_iter()
+            .filter(|entry| entry.kind == AuditKind::GrantExpired)
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]

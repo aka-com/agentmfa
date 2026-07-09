@@ -50,6 +50,7 @@ struct AccessGrant {
     connection_id: Uuid,
     connection_updated_at: DateTime<Utc>,
     scope: GrantScope,
+    created_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
     deadline: Instant,
     authorization: SecretReadAuthorization,
@@ -61,6 +62,7 @@ pub struct AccessGrantSummary {
     pub agent: String,
     pub connection_id: Uuid,
     pub scope: GrantScope,
+    pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -73,6 +75,17 @@ pub(crate) struct GrantMatch {
 pub(crate) struct GrantCreated {
     pub(crate) grant: GrantMatch,
     pub(crate) replaced: Vec<Uuid>,
+    pub(crate) deadline: Instant,
+}
+
+pub(crate) enum GrantRemoval {
+    Revoked(AccessGrantSummary),
+    Expired(AccessGrantSummary),
+}
+
+pub(crate) struct GrantsRemoved {
+    pub(crate) revoked: Vec<Uuid>,
+    pub(crate) expired: Vec<AccessGrantSummary>,
 }
 
 #[derive(Default)]
@@ -98,20 +111,26 @@ impl AccessGrants {
         let id = Uuid::new_v4();
         let authorization = SecretReadAuthorization::for_grant(id, deadline);
         let mut grants = self.grants.lock().unwrap();
-        Self::sweep(&mut grants);
+        let instant_now = Instant::now();
+        let active = |grant: &&AccessGrant| instant_now < grant.deadline;
         let replaced = grants
             .iter()
+            .filter(active)
             .filter(|grant| grant.token_hash == token_hash && grant.connection_id == connection.id)
             .map(|grant| grant.id)
             .collect();
         for grant in grants
             .iter()
+            .filter(active)
             .filter(|grant| grant.token_hash == token_hash && grant.connection_id == connection.id)
         {
             grant.authorization.revoke_grant();
         }
-        grants
-            .retain(|grant| grant.token_hash != token_hash || grant.connection_id != connection.id);
+        grants.retain(|grant| {
+            instant_now >= grant.deadline
+                || grant.token_hash != token_hash
+                || grant.connection_id != connection.id
+        });
         let grant = AccessGrant {
             id,
             agent: agent.to_string(),
@@ -119,6 +138,7 @@ impl AccessGrants {
             connection_id: connection.id,
             connection_updated_at: connection.updated_at,
             scope,
+            created_at: now,
             expires_at: now
                 + chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::minutes(15)),
             deadline,
@@ -132,6 +152,7 @@ impl AccessGrants {
         GrantCreated {
             grant: matched,
             replaced,
+            deadline,
         }
     }
 
@@ -141,12 +162,12 @@ impl AccessGrants {
         connection: &Connection,
         required: GrantScope,
     ) -> Option<GrantMatch> {
-        let mut grants = self.grants.lock().unwrap();
-        Self::sweep(&mut grants);
+        let grants = self.grants.lock().unwrap();
         grants
             .iter()
             .find(|grant| {
-                grant.token_hash == token_hash
+                Instant::now() < grant.deadline
+                    && grant.token_hash == token_hash
                     && grant.connection_id == connection.id
                     && grant.connection_updated_at == connection.updated_at
                     && grant.scope.allows(required)
@@ -158,12 +179,12 @@ impl AccessGrants {
     }
 
     pub fn for_connection(&self, connection: &Connection) -> Vec<AccessGrantSummary> {
-        let mut grants = self.grants.lock().unwrap();
-        Self::sweep(&mut grants);
+        let grants = self.grants.lock().unwrap();
         grants
             .iter()
             .filter(|grant| {
-                grant.connection_id == connection.id
+                Instant::now() < grant.deadline
+                    && grant.connection_id == connection.id
                     && grant.connection_updated_at == connection.updated_at
             })
             .map(AccessGrant::summary)
@@ -171,43 +192,62 @@ impl AccessGrants {
     }
 
     pub fn count_for_agent(&self, agent: &str) -> usize {
-        let mut grants = self.grants.lock().unwrap();
-        Self::sweep(&mut grants);
-        grants.iter().filter(|grant| grant.agent == agent).count()
+        let grants = self.grants.lock().unwrap();
+        grants
+            .iter()
+            .filter(|grant| Instant::now() < grant.deadline && grant.agent == agent)
+            .count()
     }
 
-    pub(crate) fn remove(&self, id: &Uuid) -> Option<AccessGrantSummary> {
+    /// Remove a grant only once its fixed deadline has passed. The scheduled
+    /// broker expiry task and any late observer can race safely: exactly one
+    /// caller receives the summary and therefore emits the expiry event.
+    pub(crate) fn expire(&self, id: &Uuid) -> Option<AccessGrantSummary> {
         let mut grants = self.grants.lock().unwrap();
-        let position = grants.iter().position(|grant| &grant.id == id)?;
+        let position = grants
+            .iter()
+            .position(|grant| &grant.id == id && Instant::now() >= grant.deadline)?;
         let grant = grants.remove(position);
         grant.authorization.revoke_grant();
         Some(grant.summary())
     }
 
-    pub(crate) fn remove_for_agent(&self, agent: &str) -> Vec<Uuid> {
+    pub(crate) fn remove(&self, id: &Uuid) -> Option<GrantRemoval> {
+        let mut grants = self.grants.lock().unwrap();
+        let position = grants.iter().position(|grant| &grant.id == id)?;
+        let grant = grants.remove(position);
+        grant.authorization.revoke_grant();
+        let summary = grant.summary();
+        Some(if Instant::now() >= grant.deadline {
+            GrantRemoval::Expired(summary)
+        } else {
+            GrantRemoval::Revoked(summary)
+        })
+    }
+
+    pub(crate) fn remove_for_agent(&self, agent: &str) -> GrantsRemoved {
         self.remove_where(|grant| grant.agent == agent)
     }
 
-    pub(crate) fn remove_for_connection(&self, connection_id: &Uuid) -> Vec<Uuid> {
+    pub(crate) fn remove_for_connection(&self, connection_id: &Uuid) -> GrantsRemoved {
         self.remove_where(|grant| &grant.connection_id == connection_id)
     }
 
-    fn remove_where(&self, predicate: impl Fn(&AccessGrant) -> bool) -> Vec<Uuid> {
+    fn remove_where(&self, predicate: impl Fn(&AccessGrant) -> bool) -> GrantsRemoved {
         let mut grants = self.grants.lock().unwrap();
-        let removed = grants
-            .iter()
-            .filter(|grant| predicate(grant))
-            .map(|grant| grant.id)
-            .collect();
+        let now = Instant::now();
+        let mut revoked = Vec::new();
+        let mut expired = Vec::new();
         for grant in grants.iter().filter(|grant| predicate(grant)) {
             grant.authorization.revoke_grant();
+            if now >= grant.deadline {
+                expired.push(grant.summary());
+            } else {
+                revoked.push(grant.id);
+            }
         }
         grants.retain(|grant| !predicate(grant));
-        removed
-    }
-
-    fn sweep(grants: &mut Vec<AccessGrant>) {
-        grants.retain(|grant| Instant::now() < grant.deadline);
+        GrantsRemoved { revoked, expired }
     }
 }
 
@@ -218,6 +258,7 @@ impl AccessGrant {
             agent: self.agent.clone(),
             connection_id: self.connection_id,
             scope: self.scope,
+            created_at: self.created_at,
             expires_at: self.expires_at,
         }
     }
@@ -298,12 +339,22 @@ mod tests {
     }
 
     #[test]
-    fn expired_grants_do_not_match() {
+    fn expired_grants_do_not_match_and_are_removed_once() {
         let grants = AccessGrants::new();
         let conn = connection();
-        grants.create("codex", "token-a", &conn, GrantScope::Full, Duration::ZERO);
+        let created = grants.create("codex", "token-a", &conn, GrantScope::Full, Duration::ZERO);
         assert!(grants
             .matching("token-a", &conn, GrantScope::Read)
             .is_none());
+        let expired = grants
+            .expire(&created.grant.summary.id)
+            .expect("expired grant should be removed");
+        assert_eq!(expired.id, created.grant.summary.id);
+        assert!(grants.expire(&expired.id).is_none());
+
+        grants.create("codex", "token-a", &conn, GrantScope::Full, Duration::ZERO);
+        let removed = grants.remove_for_agent("codex");
+        assert!(removed.revoked.is_empty());
+        assert_eq!(removed.expired.len(), 1);
     }
 }

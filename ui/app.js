@@ -40,6 +40,7 @@ const state = {
 };
 
 const root = () => document.getElementById('root');
+let accessExpiryTimer = null;
 
 /* ------------------------------ data loading ----------------------------- */
 async function refresh(which = 'all') {
@@ -68,6 +69,21 @@ async function refreshAccessViews() {
     load('agents', 'list_agents'),
   ]);
   render();
+  scheduleAccessExpiryRefresh();
+}
+
+function scheduleAccessExpiryRefresh() {
+  if (accessExpiryTimer !== null) clearTimeout(accessExpiryTimer);
+  accessExpiryTimer = null;
+  const expiries = state.connections
+    .flatMap((connection) => (connection.grants || []).map((grant) => new Date(grant.expires_at).getTime()))
+    .filter((expiresAt) => Number.isFinite(expiresAt) && expiresAt > Date.now());
+  if (!expiries.length) return;
+  const delay = Math.max(0, Math.min(...expiries) - Date.now() + 50);
+  accessExpiryTimer = setTimeout(() => {
+    accessExpiryTimer = null;
+    if (mode !== 'approval') refreshAccessViews();
+  }, Math.min(delay, 2_147_483_647));
 }
 
 /* --------------------------------- render -------------------------------- */
@@ -205,12 +221,14 @@ function accessDescription(connection, scope) {
 }
 
 const accessRowsHTML = (c) => {
-  const temporary = (c.grants || []).map((g) => {
-    const mins = Math.max(1, Math.ceil((new Date(g.expires_at).getTime() - Date.now()) / 60000));
-    return `<div class="access-row"><div class="access-copy"><b>${esc(g.agent)}</b>
-      <span>${esc(accessDescription(c, g.scope))} · ${mins} min left</span></div>
-      <button class="btn ghost sm" aria-label="End temporary access for ${escAttr(g.agent)}" data-act="del-grant" data-id="${g.id}">End now</button></div>`;
-  });
+  const temporary = (c.grants || [])
+    .filter((g) => new Date(g.expires_at).getTime() > Date.now())
+    .map((g) => {
+      const mins = Math.max(1, Math.ceil((new Date(g.expires_at).getTime() - Date.now()) / 60000));
+      return `<div class="access-row"><div class="access-copy"><b>${esc(g.agent)}</b>
+        <span>${esc(accessDescription(c, g.scope))} · ${mins} min left</span></div>
+        <button class="btn ghost sm" aria-label="End temporary access for ${escAttr(g.agent)}" data-act="del-grant" data-id="${g.id}">End now</button></div>`;
+    });
   const ongoing = c.rules.map((r) =>
     `<div class="access-row"><div class="access-copy"><b>${esc(r.agent)}</b>
       <span>${esc(accessDescription(c, 'full'))}${state.agents.some((agent) => agent.name === r.agent) ? ' without asking' : ' if reconnected'}</span></div>
@@ -1072,6 +1090,7 @@ document.addEventListener('input', (e) => {
 /* --------------------------------- boot ---------------------------------- */
 async function boot() {
   await refresh(mode === 'approval' ? 'queue' : 'all');
+  if (mode !== 'approval') scheduleAccessExpiryRefresh();
   // Hover tooltips (absolute timestamps on activity rows, etc.). Delegated
   // from #root so they survive re-renders; content is each element's
   // data-tippy-content. Vendored Tippy.js (self-hosted for the 'self' CSP).

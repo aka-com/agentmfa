@@ -12,7 +12,7 @@ use crate::audit::{AuditEntry, AuditKind, AuditLog};
 use crate::config::BrokerConfig;
 use crate::error::CoreError;
 use crate::events::BrokerEvents;
-use crate::grants::{AccessGrantSummary, AccessGrants, GrantScope};
+use crate::grants::{AccessGrantSummary, AccessGrants, GrantRemoval, GrantScope};
 use crate::pairing::PairingRegistry;
 use crate::paths::Paths;
 use crate::policy::{NaivePolicyEngine, PolicyEngine as _};
@@ -46,6 +46,7 @@ pub struct Broker {
     /// so a request cannot become a stale prompt while a session grant is
     /// being installed.
     pub(crate) access_gate: Mutex<()>,
+    runtime: tokio::runtime::Handle,
     pub pairing: Arc<PairingRegistry>,
     pub approvals: Approvals,
     pub audit: Arc<AuditLog>,
@@ -75,6 +76,7 @@ impl Broker {
     ) -> Result<Arc<Self>> {
         paths.ensure()?;
         let audit = Arc::new(AuditLog::open(paths.audit_file())?);
+        let runtime = tokio::runtime::Handle::current();
         {
             let events = events.clone();
             audit.subscribe(move |entry| events.audit_appended(entry));
@@ -138,6 +140,7 @@ impl Broker {
             policy,
             grants,
             access_gate: Mutex::new(()),
+            runtime,
             pairing,
             approvals,
             audit,
@@ -417,6 +420,7 @@ impl Broker {
                     scope,
                     self.config.access_grant_ttl,
                 );
+                let grant_deadline = created.deadline;
                 for replaced in &created.replaced {
                     self.data_plane.close_grant(replaced);
                 }
@@ -445,6 +449,11 @@ impl Broker {
                     .field("scope", format!("{:?}", scope).to_lowercase())
                     .field("expires_at", grant.summary.expires_at.to_rfc3339()),
                 ));
+                self.schedule_grant_expiry(
+                    grant.summary.clone(),
+                    grant_deadline,
+                    conn.name.clone(),
+                );
                 for request in absorbed {
                     self.audit.append(attributed(
                         AuditEntry::new(
@@ -636,8 +645,9 @@ impl Broker {
         } else {
             (self.store.rename_connection(id, spec.name)?, false)
         };
-        let revoked_grants = self.grants.remove_for_connection(id);
-        self.close_grants(&revoked_grants);
+        let removed_grants = self.grants.remove_for_connection(id);
+        self.close_grants(&removed_grants.revoked);
+        self.record_expired_grants(removed_grants.expired, Some(old.name.clone()));
         let mut dropped = 0;
         if target_changed {
             dropped = self.policy.remove_rules_for_connection(id)?;
@@ -694,8 +704,9 @@ impl Broker {
             return Err(CoreError::ApprovalConnectionChanged);
         }
         let conn = self.store.delete_connection(id)?;
-        let revoked_grants = self.grants.remove_for_connection(id);
-        self.close_grants(&revoked_grants);
+        let removed_grants = self.grants.remove_for_connection(id);
+        self.close_grants(&removed_grants.revoked);
+        self.record_expired_grants(removed_grants.expired, Some(conn.name.clone()));
         let dropped = self.policy.remove_rules_for_connection(id)?;
         if dropped > 0 {
             self.events.rules_changed();
@@ -726,8 +737,15 @@ impl Broker {
     }
 
     pub fn ui_remove_grant(&self, id: &Uuid) -> Result<bool> {
-        let Some(grant) = self.grants.remove(id) else {
+        let Some(removal) = self.grants.remove(id) else {
             return Ok(false);
+        };
+        let grant = match removal {
+            GrantRemoval::Expired(grant) => {
+                self.record_expired_grants(vec![grant], None);
+                return Ok(true);
+            }
+            GrantRemoval::Revoked(grant) => grant,
         };
         self.data_plane.close_grant(id);
         let connection = self
@@ -749,12 +767,54 @@ impl Broker {
         Ok(true)
     }
 
+    fn schedule_grant_expiry(
+        &self,
+        grant: AccessGrantSummary,
+        deadline: std::time::Instant,
+        connection_name: String,
+    ) {
+        let grants = self.grants.clone();
+        let data_plane = self.data_plane.clone();
+        let audit = self.audit.clone();
+        let events = self.events.clone();
+        self.runtime.spawn(async move {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+            let Some(expired) = grants.expire(&grant.id) else {
+                return;
+            };
+            record_grant_expiry(&data_plane, &audit, &*events, expired, connection_name);
+        });
+    }
+
+    fn record_expired_grants(
+        &self,
+        grants: Vec<AccessGrantSummary>,
+        known_connection_name: Option<String>,
+    ) {
+        for grant in grants {
+            let connection_name = known_connection_name.clone().unwrap_or_else(|| {
+                self.store
+                    .connection_by_id(&grant.connection_id)
+                    .map(|connection| connection.name)
+                    .unwrap_or_else(|_| "(deleted connection)".into())
+            });
+            record_grant_expiry(
+                &self.data_plane,
+                &self.audit,
+                &*self.events,
+                grant,
+                connection_name,
+            );
+        }
+    }
+
     pub(crate) fn revoke_access_grants_for_agent(&self, agent: &str, reason: &str) {
         let removed = self.grants.remove_for_agent(agent);
-        if removed.is_empty() {
+        self.record_expired_grants(removed.expired, None);
+        if removed.revoked.is_empty() {
             return;
         }
-        self.close_grants(&removed);
+        self.close_grants(&removed.revoked);
         self.audit.append(
             AuditEntry::new(
                 AuditKind::GrantRevoked,
@@ -762,7 +822,7 @@ impl Broker {
             )
             .agent(agent.to_string())
             .detail(reason)
-            .field("grants_removed", removed.len()),
+            .field("grants_removed", removed.revoked.len()),
         );
         self.events.rules_changed();
     }
@@ -961,4 +1021,33 @@ impl Broker {
         );
         Ok(())
     }
+}
+
+fn record_grant_expiry(
+    data_plane: &DataPlane,
+    audit: &AuditLog,
+    events: &dyn BrokerEvents,
+    expired: AccessGrantSummary,
+    connection_name: String,
+) {
+    let transports_closed = data_plane.close_grant(&expired.id);
+    audit.append(
+        AuditEntry::new(
+            AuditKind::GrantExpired,
+            format!(
+                "Temporary access expired: {} → {connection_name}",
+                expired.agent
+            ),
+        )
+        .agent(expired.agent)
+        .connection(connection_name)
+        .outcome("access_session_expired")
+        .field("reason", "expired")
+        .field("grant_id", expired.id.to_string())
+        .field("scope", expired.scope.as_str())
+        .field("created_at", expired.created_at.to_rfc3339())
+        .field("expires_at", expired.expires_at.to_rfc3339())
+        .field("transports_closed", transports_closed),
+    );
+    events.rules_changed();
 }

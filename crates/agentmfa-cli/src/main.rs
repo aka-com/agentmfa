@@ -684,10 +684,10 @@ fn prompt_decision(req: &ApprovalRequest, access_grant_ttl: Duration) -> UiDecis
 
 fn format_duration(duration: Duration) -> String {
     let seconds = duration.as_secs();
-    if seconds > 0 && seconds % 3_600 == 0 {
+    if seconds > 0 && seconds.is_multiple_of(3_600) {
         let hours = seconds / 3_600;
         format!("{hours} hour{}", if hours == 1 { "" } else { "s" })
-    } else if seconds > 0 && seconds % 60 == 0 {
+    } else if seconds > 0 && seconds.is_multiple_of(60) {
         let minutes = seconds / 60;
         format!("{minutes} minute{}", if minutes == 1 { "" } else { "s" })
     } else {
