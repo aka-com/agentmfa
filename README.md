@@ -1,6 +1,9 @@
 # AgentMFA
 
-AgentMFA is a secrets manager for agents. Make API calls, open database and WebSocket connections, and authenticate SSH sessions — with unmodified tools like `curl`, `psql`, and `git` — without returning stored secret values to Claude, Codex, or other local agents.
+AgentMFA is a secrets manager for agents. Make API calls, open database and
+WebSocket connections, and authenticate SSH sessions — with unmodified tools
+like `curl`, `psql`, and `git` — without directly exposing stored secret values
+from the vault to Claude, Codex, or other local agents.
 
 ```
                         ┌────────────────────────────────────────────┐
@@ -71,12 +74,16 @@ transport, such as an API origin, Postgres database, WebSocket URL, or SSH
 host. The agent supplies the *what* — method, path, body, or session-open
 request — while the connection supplies the *where* and the credential.
 
-After policy and any required human approval, the Rust core reads the required
-secret from the Keychain as late as possible and uses it on the configured
-upstream connection. A full stored value is never returned through the agent
-API or rendered in full in the webview. Explicit user copy is the exception:
-the core writes the value to the macOS pasteboard as a concealed item and
-conditionally clears it after 30 seconds.
+After authorization and any required human approval, the Rust core reads the
+required secret from the Keychain as late as possible and uses it on the
+configured upstream connection. Broker-produced agent API fields never contain
+the full stored value, and the webview never renders it in full. Relayed HTTP
+responses are scrubbed for exact rendered credential material and common
+components, but an upstream service can transform or independently return
+sensitive data in a form the broker cannot recognize; response redaction is not
+an absolute non-disclosure boundary. Explicit user copy is the separate,
+user-directed exception: the core writes the value to the macOS pasteboard as a
+concealed item and conditionally clears it after 30 seconds.
 
 - The **core** owns Keychain access, connection configuration, policy,
   approvals, agent pairing, upstream clients, and activity events.
@@ -317,7 +324,7 @@ AgentMFA persistence
 |   |       no raw bearer token
 |   |
 |   |-- audit.jsonl                                 0600, append-only, not sealed
-|   |   `-- audit/event stream; no secret values
+|   |   `-- audit/event stream; no intentionally recorded stored values
 |   |
 |   `-- dev-vault.json                              non-macOS dev fallback only
 |       `-- unencrypted file vault: secret values + integrity key
