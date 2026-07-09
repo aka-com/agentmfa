@@ -779,7 +779,9 @@ mod tests {
     async fn store() -> (Store, Arc<MemoryVault>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let vault = Arc::new(MemoryVault::new());
-        let store = Store::open(Paths::under(dir.path()), vault.clone()).await.unwrap();
+        let store = Store::open(Paths::under(dir.path()), vault.clone())
+            .await
+            .unwrap();
         (store, vault, dir)
     }
 
@@ -806,7 +808,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let vault = Arc::new(MemoryVault::new());
         {
-            let store = Store::open(Paths::under(dir.path()), vault.clone()).await.unwrap();
+            let store = Store::open(Paths::under(dir.path()), vault.clone())
+                .await
+                .unwrap();
             store
                 .add_secret("GITHUB_API_KEY", val("ghp_secret"))
                 .unwrap();
@@ -820,7 +824,9 @@ mod tests {
             );
         }
         // Reopen: index survives; values stay in the vault.
-        let store = Store::open(Paths::under(dir.path()), vault.clone()).await.unwrap();
+        let store = Store::open(Paths::under(dir.path()), vault.clone())
+            .await
+            .unwrap();
         let names: Vec<_> = store.list_secrets().into_iter().map(|s| s.name).collect();
         assert_eq!(names, ["DATABASE_PASSWORD", "GITHUB_API_KEY"]);
         // Two user secrets plus the §13.1 integrity key.
@@ -835,7 +841,10 @@ mod tests {
         let meta = store
             .add_secret("GITHUB_API_KEY", val("ghp_9aXf2Qe7LmNoP3demoToken41c"))
             .unwrap();
-        assert_eq!(store.reveal_secret_prefix(&meta.id).await.unwrap(), "ghp_9a…");
+        assert_eq!(
+            store.reveal_secret_prefix(&meta.id).await.unwrap(),
+            "ghp_9a…"
+        );
         let short = store.add_secret("SHORT", val("abcd")).unwrap();
         assert_eq!(store.reveal_secret_prefix(&short.id).await.unwrap(), "ab…");
     }
@@ -1014,7 +1023,10 @@ mod tests {
     async fn ssh_binds_exactly_one_secret_and_validates_host() {
         let (store, _, _dir) = store().await;
         let key = store
-            .add_secret("DEPLOY_SSH_KEY", val("-----BEGIN OPENSSH PRIVATE KEY-----…"))
+            .add_secret(
+                "DEPLOY_SSH_KEY",
+                val("-----BEGIN OPENSSH PRIVATE KEY-----…"),
+            )
             .unwrap();
         let conn = store
             .add_connection(ConnectionSpec {
@@ -1148,7 +1160,10 @@ mod tests {
     async fn legacy_ssh_single_connect_is_normalized_on_open() {
         let (store, vault, dir) = store().await;
         let key = store
-            .add_secret("DEPLOY_SSH_KEY", val("-----BEGIN OPENSSH PRIVATE KEY-----…"))
+            .add_secret(
+                "DEPLOY_SSH_KEY",
+                val("-----BEGIN OPENSSH PRIVATE KEY-----…"),
+            )
             .unwrap();
         let conn = store
             .add_connection(ConnectionSpec {
@@ -1320,7 +1335,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let vault = Arc::new(MemoryVault::new());
         {
-            let store = Store::open(Paths::under(dir.path()), vault.clone()).await.unwrap();
+            let store = Store::open(Paths::under(dir.path()), vault.clone())
+                .await
+                .unwrap();
             store
                 .set_pg_trusted_ca_bundle_path(Some("  /etc/ssl/private/pg-ca.pem  ".into()))
                 .unwrap();
@@ -1329,7 +1346,9 @@ mod tests {
                 Some("/etc/ssl/private/pg-ca.pem")
             );
         }
-        let store = Store::open(Paths::under(dir.path()), vault.clone()).await.unwrap();
+        let store = Store::open(Paths::under(dir.path()), vault.clone())
+            .await
+            .unwrap();
         assert_eq!(
             store.settings().pg_trusted_ca_bundle_path.as_deref(),
             Some("/etc/ssl/private/pg-ca.pem")
@@ -1345,7 +1364,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let vault = Arc::new(MemoryVault::new());
         {
-            let store = Store::open(Paths::under(dir.path()), vault.clone()).await.unwrap();
+            let store = Store::open(Paths::under(dir.path()), vault.clone())
+                .await
+                .unwrap();
             store.add_secret("GITHUB_API_KEY", val("ghp")).unwrap();
             store
                 .add_connection(api_spec(
@@ -1372,11 +1393,7 @@ mod tests {
         let paths = Paths::under(dir.path());
         paths.ensure().unwrap();
         // A pre-§13.1 bare index.json, before any integrity key exists.
-        std::fs::write(
-            paths.index_file(),
-            br#"{"secrets": [], "connections": []}"#,
-        )
-        .unwrap();
+        std::fs::write(paths.index_file(), br#"{"secrets": [], "connections": []}"#).unwrap();
         let vault = Arc::new(MemoryVault::new());
         let store = Store::open(paths.clone(), vault).await.unwrap();
         assert!(store.list_secrets().is_empty());

@@ -203,7 +203,9 @@ async fn refused_confirmation_blocks_the_allow_but_not_deny() {
         .unwrap()
         .expect("still pending");
     assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
-    let Parked::Wait(handle) = parked else { panic!() };
+    let Parked::Wait(handle) = parked else {
+        panic!()
+    };
     let outcome = handle.wait().await.unwrap();
     assert_eq!(outcome.status, 403);
 }
@@ -271,7 +273,9 @@ async fn non_mutating_allow_needs_no_confirmation() {
         .unwrap()
         .expect("pending");
     assert_eq!(events.confirms.load(Ordering::SeqCst), 0);
-    let Parked::Wait(handle) = parked else { panic!() };
+    let Parked::Wait(handle) = parked else {
+        panic!()
+    };
     assert_eq!(handle.wait().await.unwrap().status, 200);
 }
 
@@ -295,7 +299,9 @@ async fn always_allow_confirms_once_and_attributes_the_audit_trail() {
     // the internal AlwaysAllow → AllowOnce step must not re-confirm.
     assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
     assert_eq!(broker.rules().len(), 1);
-    let Parked::Wait(handle) = parked else { panic!() };
+    let Parked::Wait(handle) = parked else {
+        panic!()
+    };
     assert_eq!(handle.wait().await.unwrap().status, 200);
 
     // Both decision entries carry the attribution and the confirmation.
@@ -319,7 +325,11 @@ async fn config_actions_confirm_and_record_the_method() {
     });
     let (broker, _dir) = broker_with(events.clone()).await;
     let conn = add_github(&broker);
-    assert_eq!(events.confirms.load(Ordering::SeqCst), 0, "store-level setup is not gated");
+    assert_eq!(
+        events.confirms.load(Ordering::SeqCst),
+        0,
+        "store-level setup is not gated"
+    );
 
     broker.ui_delete_connection(&conn.id).unwrap();
     assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
@@ -398,10 +408,7 @@ async fn connection_renames_skip_confirmation_but_capability_changes_do_not() {
         .into_iter()
         .find(|entry| entry.kind == agentmfa_core::audit::AuditKind::ConnectionUpdated)
         .unwrap();
-    assert_eq!(
-        changed_entry.confirmation,
-        Some(ConfirmationMethod::Waived)
-    );
+    assert_eq!(changed_entry.confirmation, Some(ConfirmationMethod::Waived));
     assert_eq!(changed_entry.fields["capability_changed"], true);
 }
 
@@ -519,10 +526,7 @@ async fn inherited_rules_are_removed_before_pairing_executes() {
     });
     let (broker, _dir) = broker_with(events.clone()).await;
     let conn = add_github(&broker);
-    broker
-        .policy
-        .record_rule("claude-code", conn.id)
-        .unwrap();
+    broker.policy.record_rule("claude-code", conn.id).unwrap();
     assert_eq!(broker.rules().len(), 1);
 
     let request = pair_request("claude-code", broker.inherited_for("claude-code"));
@@ -546,7 +550,9 @@ async fn inherited_rules_are_removed_before_pairing_executes() {
         .unwrap()
         .expect("pending");
 
-    let Parked::Wait(handle) = parked else { panic!() };
+    let Parked::Wait(handle) = parked else {
+        panic!()
+    };
     let outcome = handle.wait().await.unwrap();
     assert_eq!(outcome.status, 200);
     assert_eq!(outcome.body["rules_at_execution"], 0);

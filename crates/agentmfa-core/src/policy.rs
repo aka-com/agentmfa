@@ -166,7 +166,10 @@ mod tests {
     use super::*;
 
     fn integrity() -> Arc<StateIntegrity> {
-        Arc::new(futures::executor::block_on(StateIntegrity::open(&crate::vault::MemoryVault::new())).unwrap())
+        Arc::new(
+            futures::executor::block_on(StateIntegrity::open(&crate::vault::MemoryVault::new()))
+                .unwrap(),
+        )
     }
 
     fn engine() -> (NaivePolicyEngine, tempfile::TempDir) {

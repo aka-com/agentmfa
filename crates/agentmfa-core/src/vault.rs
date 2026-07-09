@@ -393,21 +393,14 @@ mod tests {
         let mut renamed = attrs.clone();
         renamed.name = "RENAMED_KEY".into();
         assert!(vault.set_attrs(&id, &renamed).is_err());
-        assert_eq!(
-            vault.state.lock().unwrap().items[&id].attrs.name,
-            "API_KEY"
-        );
+        assert_eq!(vault.state.lock().unwrap().items[&id].attrs.name, "API_KEY");
 
         assert!(vault.delete(&id).is_err());
         assert_eq!(&*vault.get(&id).await.unwrap(), "secret");
 
         let rejected = Uuid::new_v4();
         assert!(vault
-            .set(
-                &rejected,
-                &attrs,
-                &Zeroizing::new("rejected".to_string())
-            )
+            .set(&rejected, &attrs, &Zeroizing::new("rejected".to_string()))
             .is_err());
         assert!(matches!(
             vault.get(&rejected).await,

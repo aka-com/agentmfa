@@ -151,12 +151,7 @@ async fn harness(config: BrokerConfig) -> Harness {
 
 /// Store `key` as the connection's private-key secret and register a
 /// `prod-ssh` connection pinned to `user`.
-fn add_ssh_connection(
-    broker: &Broker,
-    key: &PrivateKey,
-    user: &str,
-    multi: bool,
-) -> PrivateKey {
+fn add_ssh_connection(broker: &Broker, key: &PrivateKey, user: &str, multi: bool) -> PrivateKey {
     let host_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
     let pem = key.to_openssh(LineEnding::LF).unwrap();
     broker
@@ -294,12 +289,7 @@ async fn assert_lists_identity(stream: &mut UnixStream, key: &PrivateKey) {
 
 /// Sign a userauth blob for `user`/`alg` with `flags`; return the raw
 /// SIGN_RESPONSE (type, body).
-async fn sign(
-    stream: &mut UnixStream,
-    key_blob: &[u8],
-    data: &[u8],
-    flags: u32,
-) -> (u8, Vec<u8>) {
+async fn sign(stream: &mut UnixStream, key_blob: &[u8], data: &[u8], flags: u32) -> (u8, Vec<u8>) {
     let mut body = Vec::new();
     put_string(&mut body, key_blob);
     put_string(&mut body, data);
@@ -337,7 +327,9 @@ fn verify_signature(public: &PublicKey, response_body: &[u8], data: &[u8]) {
     let (sig_blob, _) = take_string(response_body);
     let signature = Signature::try_from(sig_blob).expect("decode ssh signature");
     let key_data: &PublicKeyData = public.key_data();
-    key_data.verify(data, &signature).expect("signature verifies");
+    key_data
+        .verify(data, &signature)
+        .expect("signature verifies");
 }
 
 /* --------------------------------- tests ---------------------------------- */
@@ -490,10 +482,7 @@ async fn single_use_ssh_connection_is_rejected() {
                 host: "prod.example.com".into(),
                 port: 22,
                 user: "deploy".into(),
-                host_key_fingerprint: key
-                    .public_key()
-                    .fingerprint(HashAlg::Sha256)
-                    .to_string(),
+                host_key_fingerprint: key.public_key().fingerprint(HashAlg::Sha256).to_string(),
             },
             secrets: vec![secret.id],
             multi_connect: false,
@@ -548,7 +537,9 @@ async fn unparseable_key_fails_open() {
         .await
         .unwrap()
         .unwrap();
-    h.broker.decide(&prompt.id, UiDecision::AllowOnce, &ctx()).unwrap();
+    h.broker
+        .decide(&prompt.id, UiDecision::AllowOnce, &ctx())
+        .unwrap();
     let (status, body) = call.await.unwrap();
     assert_eq!(status, 502, "unparseable key must fail the open");
     assert_eq!(body["reason"], "ssh_agent_open_failed");

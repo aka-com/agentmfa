@@ -14,9 +14,7 @@
 
 use agentmfa_core::broker::{Broker, UiDecision};
 use agentmfa_core::store::ConnectionSpec;
-use agentmfa_core::types::{
-    ConnectionConfig, DecisionContext, DecisionSurface, PgSslMode,
-};
+use agentmfa_core::types::{ConnectionConfig, DecisionContext, DecisionSurface, PgSslMode};
 use serde::Deserialize;
 use tauri::State;
 use uuid::Uuid;
@@ -339,10 +337,7 @@ pub fn revoke_agent(state: State<AppState>, name: String) -> CmdResult<bool> {
 
 #[tauri::command]
 pub fn close_session(state: State<AppState>, id: u64) -> CmdResult<bool> {
-    state
-        .broker
-        .ui_close_session(id)
-        .map_err(|e| e.to_string())
+    state.broker.ui_close_session(id).map_err(|e| e.to_string())
 }
 
 /* ------------------------------ settings --------------------------------- */

@@ -316,9 +316,14 @@ async fn overlong_socket_path_is_diagnosed() {
         prompts: tx,
         queue_len: Arc::new(Mutex::new(0)),
     });
-    let broker = Broker::new(paths, Arc::new(MemoryVault::new()), BrokerConfig::default(), events)
-        .await
-        .unwrap();
+    let broker = Broker::new(
+        paths,
+        Arc::new(MemoryVault::new()),
+        BrokerConfig::default(),
+        events,
+    )
+    .await
+    .unwrap();
     let err = match daemon::serve(broker).await {
         Ok(_) => panic!("expected the overlong socket path to be refused"),
         Err(e) => e.to_string(),
@@ -485,7 +490,10 @@ async fn wrong_connection_type_names_the_right_endpoint() {
     assert_eq!(status, 400);
     assert_eq!(body["reason"], "wrong_connection_type");
     assert!(
-        body["detail"].as_str().unwrap().contains("use POST /v1/pg/open"),
+        body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("use POST /v1/pg/open"),
         "detail should name the right endpoint: {body}"
     );
 }
@@ -583,10 +591,7 @@ async fn http_get_prompts_executes_and_injects_credential() {
     let echoed: Value = serde_json::from_str(envelope["body"].as_str().unwrap()).unwrap();
     // Credential injected by the broker on the upstream leg, then redacted
     // from the agent-visible echoed response.
-    assert_eq!(
-        echoed["headers"]["authorization"],
-        "[REDACTED]"
-    );
+    assert_eq!(echoed["headers"]["authorization"], "[REDACTED]");
     // …and the agent's own headers merged in, with the query preserved.
     assert_eq!(echoed["headers"]["accept"], "application/vnd.github+json");
     assert_eq!(echoed["uri"], "/echo?x=1");
@@ -743,7 +748,9 @@ async fn always_allow_refuses_stale_connection_target() {
     assert_eq!(h.broker.rules().len(), 0);
     assert_eq!(h.broker.approvals_queue().len(), 1);
 
-    h.broker.decide(&prompt.id, UiDecision::AllowOnce, &ctx()).unwrap();
+    h.broker
+        .decide(&prompt.id, UiDecision::AllowOnce, &ctx())
+        .unwrap();
     let (status, _) = call.await.unwrap();
     assert_eq!(status, 200);
     assert_eq!(h.broker.rules().len(), 0);
@@ -1018,13 +1025,22 @@ async fn blocking_reauth_prompt_does_not_stall_the_daemon() {
     let token = {
         let s = socket.clone();
         let call = tokio::spawn(async move {
-            uds_request(&s, "POST", "/v1/pair", &[], Some(json!({"agent_name": "claude-code"}))).await
+            uds_request(
+                &s,
+                "POST",
+                "/v1/pair",
+                &[],
+                Some(json!({"agent_name": "claude-code"})),
+            )
+            .await
         });
         let prompt = tokio::time::timeout(Duration::from_secs(5), prompts.recv())
             .await
             .unwrap()
             .unwrap();
-        broker.decide(&prompt.id, UiDecision::AllowOnce, &ctx()).unwrap();
+        broker
+            .decide(&prompt.id, UiDecision::AllowOnce, &ctx())
+            .unwrap();
         call.await.unwrap().1["token"].as_str().unwrap().to_string()
     };
 
@@ -1046,7 +1062,9 @@ async fn blocking_reauth_prompt_does_not_stall_the_daemon() {
         .await
         .unwrap()
         .unwrap();
-    broker.decide(&prompt.id, UiDecision::AllowOnce, &ctx()).unwrap();
+    broker
+        .decide(&prompt.id, UiDecision::AllowOnce, &ctx())
+        .unwrap();
 
     // Observer on a plain OS thread (immune to a wedged runtime): once the
     // confirmation is blocking, an unrelated GET /v1/connections must still
@@ -1155,7 +1173,9 @@ async fn mutating_retries_coalesce_to_one_execution() {
     );
     assert_eq!(*h.queue_len.lock().unwrap(), 1);
 
-    h.broker.decide(&prompt.id, UiDecision::AllowOnce, &ctx()).unwrap();
+    h.broker
+        .decide(&prompt.id, UiDecision::AllowOnce, &ctx())
+        .unwrap();
     let ((s1, b1), (s2, b2)) = (call1.await.unwrap(), call2.await.unwrap());
     assert_eq!((s1, s2), (200, 200));
     assert_eq!(b1["status"], 204);
@@ -1263,7 +1283,9 @@ async fn mutating_request_id_is_scoped_to_connection() {
         "cross-connection request_id reuse must not add a second prompt"
     );
 
-    h.broker.decide(&prompt.id, UiDecision::AllowOnce, &ctx()).unwrap();
+    h.broker
+        .decide(&prompt.id, UiDecision::AllowOnce, &ctx())
+        .unwrap();
     let (status, body) = call.await.unwrap();
     assert_eq!(status, 200);
     assert_eq!(body["status"], 204);
@@ -1452,7 +1474,9 @@ async fn pairing_inheritance_is_disclosed() {
     assert_eq!(prompt.inherited[0].name, "github");
     assert_eq!(prompt.inherited[0].target, "127.0.0.1");
     assert!(prompt.identity.is_some());
-    h.broker.decide(&prompt.id, UiDecision::AllowOnce, &ctx()).unwrap();
+    h.broker
+        .decide(&prompt.id, UiDecision::AllowOnce, &ctx())
+        .unwrap();
     let (status, _) = call.await.unwrap();
     assert_eq!(status, 200);
 }
@@ -1603,7 +1627,9 @@ async fn concurrent_same_name_pairings_coalesce() {
     );
     assert_eq!(*h.queue_len.lock().unwrap(), 1);
 
-    h.broker.decide(&prompt.id, UiDecision::AllowOnce, &ctx()).unwrap();
+    h.broker
+        .decide(&prompt.id, UiDecision::AllowOnce, &ctx())
+        .unwrap();
     let ((s1, b1), (s2, b2)) = (call1.await.unwrap(), call2.await.unwrap());
     assert_eq!((s1, s2), (200, 200));
     assert_eq!(
@@ -1629,7 +1655,9 @@ async fn concurrent_same_name_pairings_coalesce() {
         .await
         .unwrap()
         .unwrap();
-    h.broker.decide(&prompt.id, UiDecision::AllowOnce, &ctx()).unwrap();
+    h.broker
+        .decide(&prompt.id, UiDecision::AllowOnce, &ctx())
+        .unwrap();
     let (s3, b3) = call3.await.unwrap();
     assert_eq!(s3, 200);
     assert_ne!(

@@ -403,10 +403,7 @@ fn conn_config(args: &ConnAdd) -> Result<ConnectionConfig, String> {
                 host: require("host", &args.host)?,
                 port: args.port.unwrap_or(22),
                 user: require("user", &args.user)?,
-                host_key_fingerprint: require(
-                    "host-key-fingerprint",
-                    &args.host_key_fingerprint,
-                )?,
+                host_key_fingerprint: require("host-key-fingerprint", &args.host_key_fingerprint)?,
             })
         }
     }
@@ -559,20 +556,13 @@ fn cmd_serve(root: Option<PathBuf>, auto_yes: bool) {
     };
 
     let (tx, rx) = std::sync::mpsc::channel::<ApprovalRequest>();
-    let events: Arc<dyn BrokerEvents> = Arc::new(CliEvents {
-        tx,
-        auto_yes,
-    });
+    let events: Arc<dyn BrokerEvents> = Arc::new(CliEvents { tx, auto_yes });
 
-    let broker: Arc<Broker> = match runtime.block_on(Broker::new(
-        paths,
-        vault,
-        BrokerConfig::default(),
-        events,
-    )) {
-        Ok(broker) => broker,
-        Err(e) => fail("could not start the broker", &e),
-    };
+    let broker: Arc<Broker> =
+        match runtime.block_on(Broker::new(paths, vault, BrokerConfig::default(), events)) {
+            Ok(broker) => broker,
+            Err(e) => fail("could not start the broker", &e),
+        };
     let daemon = match runtime.block_on(daemon::serve(broker.clone())) {
         Ok(daemon) => daemon,
         Err(e) => fail("could not serve the control plane", &e),
@@ -618,7 +608,6 @@ fn cmd_serve(root: Option<PathBuf>, auto_yes: bool) {
         }
     }
 }
-
 
 fn prompt_decision(req: &ApprovalRequest) -> UiDecision {
     eprintln!("── approval required ──────────────────────────────");
@@ -743,7 +732,10 @@ mod tests {
         a.url = Some("wss://stream.example.com/feed".into());
         assert!(conn_config(&a).unwrap_err().contains("--secret"));
         a.secret = Some("FEED_TOKEN".into());
-        assert!(matches!(conn_config(&a).unwrap(), ConnectionConfig::Ws { .. }));
+        assert!(matches!(
+            conn_config(&a).unwrap(),
+            ConnectionConfig::Ws { .. }
+        ));
         a.host = Some("stray".into());
         assert!(conn_config(&a).unwrap_err().contains("--host"));
     }
@@ -754,8 +746,7 @@ mod tests {
         a.host = Some("prod.example.com".into());
         a.user = Some("deploy".into());
         a.secret = Some("DEPLOY_KEY".into());
-        a.host_key_fingerprint =
-            Some("SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into());
+        a.host_key_fingerprint = Some("SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into());
         match conn_config(&a).unwrap() {
             ConnectionConfig::Ssh { port, .. } => assert_eq!(port, 22),
             other => panic!("wrong config: {other:?}"),

@@ -129,11 +129,10 @@ async fn echo_upstream() -> EchoUpstream {
                                 break;
                             }
                         }
-                        Message::Binary(b) => {
-                            if ws.send(Message::Binary(b)).await.is_err() {
-                                break;
-                            }
-                        }
+                        Message::Binary(b) => match ws.send(Message::Binary(b)).await {
+                            Ok(()) => {}
+                            Err(_) => break,
+                        },
                         Message::Ping(p) => {
                             let _ = ws.send(Message::Pong(p)).await;
                         }
@@ -533,7 +532,9 @@ async fn open_coalesces_on_request_id_and_replays_ticket() {
         .unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(h.prompts.try_recv().is_err());
-    h.broker.decide(&prompt.id, UiDecision::AllowOnce, &ctx()).unwrap();
+    h.broker
+        .decide(&prompt.id, UiDecision::AllowOnce, &ctx())
+        .unwrap();
 
     let ((s1, b1), (s2, b2)) = (call1.await.unwrap(), call2.await.unwrap());
     assert_eq!((s1, s2), (200, 200));

@@ -152,7 +152,8 @@ mod macos {
 
     fn executable_path_for_pid(pid: libc::pid_t) -> Option<String> {
         let mut buf = vec![0u8; 4096];
-        let len = unsafe { proc_pidpath(pid, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32) };
+        let len =
+            unsafe { proc_pidpath(pid, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32) };
         if len <= 0 {
             return None;
         }

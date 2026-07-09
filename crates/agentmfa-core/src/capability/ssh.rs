@@ -281,10 +281,7 @@ struct HostboundUserauth<'a> {
 }
 
 /// Parse the OpenSSH host-bound public-key request carried by SIGN_REQUEST.
-fn hostbound_userauth<'a>(
-    data: &'a [u8],
-    public_blob: &[u8],
-) -> Option<HostboundUserauth<'a>> {
+fn hostbound_userauth<'a>(data: &'a [u8], public_blob: &[u8]) -> Option<HostboundUserauth<'a>> {
     let mut r = Reader::new(data);
     let session_id = r.string()?;
     if r.u8()? != SSH_MSG_USERAUTH_REQUEST {
@@ -324,10 +321,7 @@ struct SessionBinding {
     session_id: Vec<u8>,
 }
 
-fn verify_session_bind(
-    payload: &[u8],
-    expected: Fingerprint,
-) -> Result<SessionBinding, String> {
+fn verify_session_bind(payload: &[u8], expected: Fingerprint) -> Result<SessionBinding, String> {
     let mut r = Reader::new(payload);
     if r.string() != Some(SESSION_BIND_EXTENSION) {
         return Err("unsupported agent extension".into());
@@ -624,11 +618,13 @@ async fn sign_response(
         return refuse(state, "userauth host key does not match session-bind");
     }
     if auth.user != state.user {
-        return refuse(state, &format!(
-            "userauth names {:?}, connection pins {:?}",
-            auth.user,
-            state.user
-        ));
+        return refuse(
+            state,
+            &format!(
+                "userauth names {:?}, connection pins {:?}",
+                auth.user, state.user
+            ),
+        );
     }
     let user = auth.user.to_string();
     let data = data.to_vec();
@@ -784,16 +780,8 @@ mod tests {
         assert_eq!(binding.host_key, host_key.public_key().to_bytes().unwrap());
 
         let other = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
-        assert!(verify_session_bind(
-            &session_bind(&other, session_id, 0),
-            expected
-        )
-        .is_err());
-        assert!(verify_session_bind(
-            &session_bind(&host_key, session_id, 1),
-            expected
-        )
-        .is_err());
+        assert!(verify_session_bind(&session_bind(&other, session_id, 0), expected).is_err());
+        assert!(verify_session_bind(&session_bind(&host_key, session_id, 1), expected).is_err());
     }
 
     #[test]

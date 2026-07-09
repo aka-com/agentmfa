@@ -91,8 +91,8 @@ impl PairingRegistry {
         // inside the window, so an active token never expires, while a busy
         // agent does not trigger a disk write per call.
         let refresh = std::cmp::min(ttl / 10, Duration::from_secs(3600));
-        let refresh_interval = chrono::Duration::from_std(refresh)
-            .unwrap_or_else(|_| chrono::Duration::seconds(3600));
+        let refresh_interval =
+            chrono::Duration::from_std(refresh).unwrap_or_else(|_| chrono::Duration::seconds(3600));
         Ok(Self {
             path,
             ttl,

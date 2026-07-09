@@ -839,7 +839,10 @@ mod tests {
                 executor: ok_executor(count.clone()),
             })
             .unwrap();
-        assert!(matches!(late, Parked::Wait(_)), "no replay after completion");
+        assert!(
+            matches!(late, Parked::Wait(_)),
+            "no replay after completion"
+        );
         assert_eq!(approvals.queue().len(), 1, "a fresh prompt was raised");
     }
 

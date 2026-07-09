@@ -240,7 +240,9 @@ impl Broker {
         };
         match decision {
             UiDecision::Deny => {
-                let request = self.approvals.deny(id, crate::wire::ErrorReason::DeniedByUser);
+                let request = self
+                    .approvals
+                    .deny(id, crate::wire::ErrorReason::DeniedByUser);
                 if let Some(request) = &request {
                     if request.kind == ApprovalKind::Pair {
                         // Pairing-prompt spam brake (§8).
@@ -550,8 +552,7 @@ impl Broker {
     /// Delete a connection; rules die with it (§7).
     pub fn ui_delete_connection(&self, id: &Uuid) -> Result<Connection> {
         let conn = self.store.connection_by_id(id)?;
-        let confirmation =
-            self.confirm_action(&format!("Delete connection “{}”", conn.name))?;
+        let confirmation = self.confirm_action(&format!("Delete connection “{}”", conn.name))?;
         let conn = self.store.delete_connection(id)?;
         let dropped = self.policy.remove_rules_for_connection(id)?;
         if dropped > 0 {
@@ -747,7 +748,11 @@ impl Broker {
             )
             .detail(path.clone().unwrap_or_else(|| "cleared".to_string()))
             .field("setting", "pg_trusted_ca_bundle_path")
-            .field("path", path.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null))
+            .field(
+                "path",
+                path.map(serde_json::Value::from)
+                    .unwrap_or(serde_json::Value::Null),
+            )
             .confirmation(confirmation),
         );
         Ok(())

@@ -38,12 +38,12 @@ use crate::capability::http::{
     HttpExecution, InjectionForm,
 };
 use crate::capability::SpooledBody;
-use crate::wire::ErrorReason;
 use crate::error::CoreError;
 use crate::pairing::{validate_agent_name, TokenError};
 use crate::policy::PolicyEngine as _;
 use crate::ratelimit::PairingBlock;
 use crate::types::{ConnectionConfig, ConnectionKind, Decision, PairedAgent, PeerIdentity};
+use crate::wire::ErrorReason;
 
 /* ------------------------------ plumbing --------------------------------- */
 
@@ -84,10 +84,7 @@ where
 {
     type Rejection = Response;
 
-    async fn from_request(
-        req: axum::extract::Request,
-        state: &S,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
         match Json::<T>::from_request(req, state).await {
             Ok(Json(value)) => Ok(ApiJson(value)),
             Err(rejection) => Err(err_detail(
@@ -153,7 +150,11 @@ fn err_unknown_connection(broker: &Arc<Broker>) -> Response {
     } else {
         format!("configured connections: {}", names.join(", "))
     };
-    err_detail(StatusCode::NOT_FOUND, ErrorReason::UnknownConnection, detail)
+    err_detail(
+        StatusCode::NOT_FOUND,
+        ErrorReason::UnknownConnection,
+        detail,
+    )
 }
 
 /// Bearer-token + identity-pin authentication (§8).
@@ -382,7 +383,9 @@ async fn post_pair(
     // said no, ask them before trying again" (§8).
     match broker.pairing_limiter.check() {
         Ok(()) => {}
-        Err(PairingBlock::Window(wait)) => return err_rate_limited(ErrorReason::PairingRateLimited, wait),
+        Err(PairingBlock::Window(wait)) => {
+            return err_rate_limited(ErrorReason::PairingRateLimited, wait)
+        }
         Err(PairingBlock::DeniedCooldown(wait)) => {
             return err_rate_limited(ErrorReason::PairingDeniedCooldown, wait)
         }
@@ -489,7 +492,10 @@ async fn post_pair(
     match parked {
         Ok(Parked::Wait(handle)) => match handle.wait().await {
             Some(outcome) => outcome_response(outcome),
-            None => err(StatusCode::INTERNAL_SERVER_ERROR, ErrorReason::BrokerShutdown),
+            None => err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorReason::BrokerShutdown,
+            ),
         },
         Ok(Parked::Replay(outcome)) => outcome_response(outcome),
         // Same name, different peer identity, while a prompt is pending: a
@@ -684,7 +690,11 @@ async fn post_http(
             match base64::engine::general_purpose::STANDARD.decode(b64) {
                 Ok(bytes) => bytes,
                 Err(e) => {
-                    return err_detail(StatusCode::BAD_REQUEST, ErrorReason::InvalidBody, e.to_string())
+                    return err_detail(
+                        StatusCode::BAD_REQUEST,
+                        ErrorReason::InvalidBody,
+                        e.to_string(),
+                    )
                 }
             }
         }
@@ -821,10 +831,15 @@ async fn run_policied(
     match parked {
         Ok(Parked::Wait(handle)) => match handle.wait().await {
             Some(outcome) => outcome_response(outcome),
-            None => err(StatusCode::INTERNAL_SERVER_ERROR, ErrorReason::BrokerShutdown),
+            None => err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorReason::BrokerShutdown,
+            ),
         },
         Ok(Parked::Replay(outcome)) => outcome_response(outcome),
-        Err(ParkError::RequestIdMismatch) => err(StatusCode::CONFLICT, ErrorReason::RequestIdMismatch),
+        Err(ParkError::RequestIdMismatch) => {
+            err(StatusCode::CONFLICT, ErrorReason::RequestIdMismatch)
+        }
     }
 }
 
@@ -865,7 +880,10 @@ async fn post_ws_open(
         );
     }
     let Some(&bridge_port) = broker.ws_bridge_port.get() else {
-        return err(StatusCode::INTERNAL_SERVER_ERROR, ErrorReason::BridgeNotRunning);
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorReason::BridgeNotRunning,
+        );
     };
 
     let action = format!("Open WebSocket bridge → {}", conn.target());
@@ -1116,7 +1134,10 @@ async fn post_pg_open(
         );
     }
     let Some(&proxy_port) = broker.pg_proxy_port.get() else {
-        return err(StatusCode::INTERNAL_SERVER_ERROR, ErrorReason::ProxyNotRunning);
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorReason::ProxyNotRunning,
+        );
     };
     let ConnectionConfig::Pg { dbname, .. } = &conn.config else {
         unreachable!()
@@ -1183,8 +1204,7 @@ async fn post_pg_open(
                 broker
                     .data_plane
                     .issue(&agent_name, &conn, crate::sessions::TicketPayload::Pg);
-            let dsn =
-                format!("postgres://ticket@127.0.0.1:{proxy_port}/{dbname}?sslmode=disable");
+            let dsn = format!("postgres://ticket@127.0.0.1:{proxy_port}/{dbname}?sslmode=disable");
             ExecOutcome {
                 status: 200,
                 body: json!({
