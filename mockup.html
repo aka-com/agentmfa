@@ -287,6 +287,7 @@ code, .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Conso
 }
 .b-api { background: #dcecff; color: #0b62d6; }
 .b-pg  { background: #dfeef4; color: #2b6a8f; }
+.b-ssh { background: #e2f3e6; color: #2c7a45; }
 .b-ws  { background: #efe4fb; color: #7d3fc0; }
 .val { white-space: nowrap; text-align: right; }
 .val code { font-size: 12px; letter-spacing: .04em; color: #3c3c42; }
@@ -989,6 +990,7 @@ var ICONS = {
 var TYPES = {
   api: { label: 'API', cls: 'b-api' },
   pg:  { label: 'PG',  cls: 'b-pg' },
+  ssh: { label: 'SSH', cls: 'b-ssh' },
   ws:  { label: 'WS',  cls: 'b-ws' }
 };
 var SOCKET_PATH = '~/.agentmfa/broker.sock';
@@ -1060,6 +1062,7 @@ function truncValue(v) {
 function connTarget(c) {
   if (c.type === 'api') return c.meta.host;
   if (c.type === 'pg') return c.meta.user + '@' + c.meta.host + ':' + c.meta.port + '/' + c.meta.dbname;
+  if (c.type === 'ssh') return c.meta.user + '@' + c.meta.host + ':' + c.meta.port;
   return c.meta.url;
 }
 function findConn(name) {
@@ -1332,7 +1335,7 @@ function connectionsHTML() {
       '<div class="empty-ico">🔌</div>' +
       '<h3>No connections yet</h3>' +
       '<p>A connection binds a secret to a destination — an API host,<br>' +
-      'a Postgres database, or a WebSocket URL.<br>' +
+      'a Postgres database, SSH host, or WebSocket URL.<br>' +
       'Agents request connections; they never see the secret.</p>' +
       '</div>';
   }
@@ -1430,7 +1433,7 @@ function addConnSheetHTML() {
   var chosen = (d.connSecrets && d.connSecrets.length)
     ? d.connSecrets.slice()
     : [(store.secrets[0] && store.secrets[0].name) || '__new__'];
-  // multi-secret composition is API-only; pg/ws bind exactly one secret (DESIGN.md §9)
+  // multi-secret composition is API-only; pg/ssh/ws bind exactly one secret (DESIGN.md §9)
   if (t !== 'api') chosen = chosen.slice(0, 1);
   store.connNewSecret = chosen[0] === '__new__';
   var fields = '';
@@ -1445,20 +1448,36 @@ function addConnSheetHTML() {
     return '<button type="button" class="seg-btn' + (t === val ? ' on' : '') + '" data-act="conn-type" data-type="' + val + '">' + label + '</button>';
   }
   fields += '<div class="f-row"><label>Type' + (editing ? ' — fixed after creation' : '') + '</label><div class="seg in-form">' +
-    typeBtn('api', 'API key') + typeBtn('pg', 'Postgres') + typeBtn('ws', 'WebSocket') +
+    typeBtn('api', 'API key') + typeBtn('pg', 'Postgres') + typeBtn('ssh', 'SSH') + typeBtn('ws', 'WebSocket') +
     '</div></div>';
   if (t === 'api') {
     fields += '<div class="f-row"><label>Host</label><input id="f-host" placeholder="api.github.com" value="' + escAttr(d.host || '') + '"></div>';
+  } else if (t === 'ssh') {
+    fields += '<div class="f-2col">' +
+      '<div class="f-row"><label>Host</label><input id="f-host" placeholder="prod.example.com" value="' + escAttr(d.host || '') + '"></div>' +
+      '<div class="f-row" style="flex:0 0 90px"><label>Port</label><input id="f-port" inputmode="numeric" value="' + escAttr(d.port || '22') + '"></div></div>';
+    fields += '<div class="f-row"><label>User</label><input id="f-user" placeholder="deploy" value="' + escAttr(d.user || '') + '"></div>';
   } else if (t === 'pg') {
+    var sslmode = d.sslmode || 'require';
+    var sslOpts = [
+      ['disable', 'Disable'],
+      ['prefer', 'Prefer (TLS optional)'],
+      ['require', 'Require TLS (no certificate verification)'],
+      ['verify-ca', 'Verify CA only (no hostname verification)'],
+      ['verify-full', 'Verify full']
+    ].map(function (option) {
+      return '<option value="' + option[0] + '"' + (sslmode === option[0] ? ' selected' : '') + '>' + option[1] + '</option>';
+    }).join('');
     fields += '<div class="f-2col">' +
       '<div class="f-row"><label>Host</label><input id="f-host" placeholder="db.internal.example.com" value="' + escAttr(d.host || '') + '"></div>' +
-      '<div class="f-row" style="flex:0 0 90px"><label>Port</label><input id="f-port" value="' + escAttr(d.port || '5432') + '"></div></div>';
+      '<div class="f-row" style="flex:0 0 90px"><label>Port</label><input id="f-port" inputmode="numeric" value="' + escAttr(d.port || '5432') + '"></div></div>';
     fields += '<div class="f-row"><label>Database</label><input id="f-db" placeholder="app_production" value="' + escAttr(d.db || '') + '"></div>';
     fields += '<div class="f-row"><label>User</label><input id="f-user" placeholder="app" value="' + escAttr(d.user || '') + '"></div>';
+    fields += '<div class="f-row"><label>TLS mode</label><select id="f-sslmode">' + sslOpts + '</select></div>';
   } else {
     fields += '<div class="f-row"><label>URL</label><input id="f-url" placeholder="wss://stream.example.com/feed" value="' + escAttr(d.url || '') + '"></div>';
   }
-  var secretLabel = t === 'pg' ? 'Password secret' : t === 'ws' ? 'Token secret' : 'Secret';
+  var secretLabel = t === 'pg' ? 'Password secret' : t === 'ssh' ? 'Private key secret' : t === 'ws' ? 'Token secret' : 'Secret';
   chosen.forEach(function (sel, i) {
     var opts = store.secrets.map(function (s) {
       return '<option value="' + escAttr(s.name) + '"' + (sel === s.name ? ' selected' : '') + '>' + esc(s.name) + '</option>';
@@ -1480,8 +1499,9 @@ function addConnSheetHTML() {
   if (t === 'api' && store.secrets.length) {
     fields += '<div class="f-row"><button type="button" class="btn ghost sm" data-act="conn-secret-add">＋ Add another secret</button></div>';
   }
-  // pg/ws session tickets can be multi-connect within their 60 s window (DESIGN.md §4.2/§4.3)
-  if (t !== 'api') {
+  // pg/ws session tickets can be multi-connect within their 60 s window (DESIGN.md §4.2/§4.3).
+  // SSH agent sockets always allow multiple signing operations, so there is no toggle.
+  if (t !== 'api' && t !== 'ssh') {
     var multiOn = d.connMulti !== false;   // default checked
     fields += '<div class="f-row"><label style="display:flex;align-items:center;gap:7px;cursor:pointer">' +
       '<input type="checkbox" id="c-multi"' + (multiOn ? ' checked' : '') + ' style="width:auto">' +
@@ -2592,7 +2612,11 @@ function saveConnection(osConfirmed) {
     meta = { host: g('f-host') || 'api.example.com', template: g('c-template') || defTpl };
   } else if (t === 'pg') {
     meta = { host: g('f-host') || 'localhost', port: g('f-port') || '5432',
-             dbname: g('f-db') || 'postgres', user: g('f-user') || 'postgres' };
+             dbname: g('f-db') || 'postgres', user: g('f-user') || 'postgres',
+             sslmode: g('f-sslmode') || 'require' };
+  } else if (t === 'ssh') {
+    meta = { host: g('f-host') || 'localhost', port: g('f-port') || '22',
+             user: g('f-user') || 'deploy' };
   } else {
     meta = { url: g('f-url') || 'wss://example.com/socket' };
   }
@@ -2602,7 +2626,7 @@ function saveConnection(osConfirmed) {
     editing.name = name;
     editing.secrets = secretNames;
     editing.meta = meta;
-    if (t !== 'api') editing.multi = d.connMulti !== false;
+    if (t !== 'api') editing.multi = t === 'ssh' || d.connMulti !== false;
     // standing rules key on the connection's stable id (§7) — a rename needs
     // no rule rewrite, and a later connection recycling the old name inherits nothing
     // a rule was granted for a destination — if the target changed, drop the rules (§9)
@@ -2621,7 +2645,7 @@ function saveConnection(osConfirmed) {
     return;
   }
   var conn = { id: 'c' + (connIdSeq++), name: name, type: t, secrets: secretNames, meta: meta };
-  if (t !== 'api') conn.multi = d.connMulti !== false;
+  if (t !== 'api') conn.multi = t === 'ssh' || d.connMulti !== false;
   store.connections.push(conn);
   store.addConnOpen = false;
   store.connNewSecret = false;
@@ -2688,6 +2712,7 @@ function captureSheetDrafts() {
     if (v('f-port') !== undefined) d.port = v('f-port');
     if (v('f-db') !== undefined) d.db = v('f-db');
     if (v('f-user') !== undefined) d.user = v('f-user');
+    if (v('f-sslmode') !== undefined) d.sslmode = v('f-sslmode');
     if (v('f-url') !== undefined) d.url = v('f-url');
     if (v('c-newname') !== undefined) d.newName = v('c-newname');
     if (v('c-newvalue') !== undefined) d.newValue = v('c-newvalue');
@@ -2987,7 +3012,7 @@ document.addEventListener('click', function (e) {
         connSecrets: ec.secrets.slice(),
         connMulti: ec.multi !== false,
         host: ec.meta.host, port: ec.meta.port, db: ec.meta.dbname,
-        user: ec.meta.user, url: ec.meta.url,
+        user: ec.meta.user, sslmode: ec.meta.sslmode, url: ec.meta.url,
         template: ec.meta.template, templateDirty: !!ec.meta.template
       };
       renderApp();
@@ -3003,7 +3028,7 @@ document.addEventListener('click', function (e) {
     case 'conn-type':
       captureSheetDrafts();
       store.connType = btn.dataset.type;
-      // pg/ws bind a single secret — drop any extra composed secrets on switch
+      // pg/ssh/ws bind a single secret — drop any extra composed secrets on switch
       if (store.connType !== 'api' && store.draft.connSecrets) {
         store.draft.connSecrets = store.draft.connSecrets.slice(0, 1);
       }
