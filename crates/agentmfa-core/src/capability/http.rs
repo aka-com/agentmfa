@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use http::{HeaderMap, HeaderName, HeaderValue, Method};
+use percent_encoding::percent_decode_str;
 use serde_json::json;
 use url::Url;
 use uuid::Uuid;
@@ -23,8 +24,8 @@ use crate::capability::SpooledBody;
 use crate::config::BrokerConfig;
 use crate::store::Store;
 use crate::template::Template;
-use crate::wire::ErrorReason;
 use crate::types::{Connection, ConnectionConfig};
+use crate::wire::ErrorReason;
 
 /// Machine-readable validation failure (wire: `400 {"reason": …}`).
 #[derive(Debug, PartialEq, Eq)]
@@ -167,6 +168,93 @@ enum RenderedInjection {
     Query(Zeroizing<String>),
 }
 
+/// Best-effort response scrubber for reflected credentials. This deliberately
+/// treats redaction material as sensitive and only exposes replacement text.
+struct Redactions {
+    needles: Vec<Zeroizing<String>>,
+}
+
+impl Redactions {
+    fn from_injection(injection: &RenderedInjection) -> Self {
+        let mut redactions = Self {
+            needles: Vec::new(),
+        };
+        match injection {
+            RenderedInjection::Header(name, value) => {
+                if let Ok(value) = value.to_str() {
+                    redactions.add(value);
+                    redactions.add(format!("{}: {value}", name.as_str()));
+                    for part in value.split(|c: char| c.is_ascii_whitespace()) {
+                        redactions.add_component(part);
+                    }
+                }
+            }
+            RenderedInjection::Query(fragment) => {
+                redactions.add(&**fragment);
+                if let Ok(decoded) = percent_decode_str(fragment).decode_utf8() {
+                    redactions.add(decoded.as_ref());
+                }
+                for pair in fragment.split('&') {
+                    if let Some((_, value)) = pair.split_once('=') {
+                        redactions.add_component(value);
+                        if let Ok(decoded) = percent_decode_str(value).decode_utf8() {
+                            redactions.add_component(decoded.as_ref());
+                        }
+                    }
+                }
+            }
+        }
+        redactions
+    }
+
+    fn add(&mut self, value: impl AsRef<str>) {
+        let value = value.as_ref();
+        if value.is_empty() || self.needles.iter().any(|needle| needle.as_str() == value) {
+            return;
+        }
+        self.needles.push(Zeroizing::new(value.to_string()));
+    }
+
+    fn add_component(&mut self, value: impl AsRef<str>) {
+        let value = value.as_ref();
+        if value.len() >= 4 {
+            self.add(value);
+        }
+    }
+
+    fn apply_to_string(&self, value: &str) -> String {
+        self.needles.iter().fold(value.to_string(), |acc, needle| {
+            acc.replace(needle.as_str(), "[REDACTED]")
+        })
+    }
+
+    fn apply_to_bytes(&self, value: &[u8]) -> Vec<u8> {
+        if self.needles.is_empty() {
+            return value.to_vec();
+        }
+        let mut out = value.to_vec();
+        for needle in &self.needles {
+            let needle = needle.as_bytes();
+            if needle.is_empty() {
+                continue;
+            }
+            let mut redacted = Vec::with_capacity(out.len());
+            let mut i = 0usize;
+            while i < out.len() {
+                if out[i..].starts_with(needle) {
+                    redacted.extend_from_slice(b"[REDACTED]");
+                    i += needle.len();
+                } else {
+                    redacted.push(out[i]);
+                    i += 1;
+                }
+            }
+            out = redacted;
+        }
+        out
+    }
+}
+
 /// Everything the executor needs, captured at submission time, the
 /// connection is snapshotted so a concurrent edit can't repoint what the
 /// user approved.
@@ -242,7 +330,11 @@ impl HttpExecution {
         // Render the credential as late as possible; values are zeroized on
         // drop (§3).
         let ConnectionConfig::Api { template, .. } = &self.connection.config else {
-            return broker_error(500, ErrorReason::WrongConnectionType, "not an api connection");
+            return broker_error(
+                500,
+                ErrorReason::WrongConnectionType,
+                "not an api connection",
+            );
         };
         let (scheme, host, port) = pinned_base(&self.connection.config).expect("api config");
 
@@ -250,6 +342,7 @@ impl HttpExecution {
             Ok(i) => i,
             Err(e) => return broker_error(502, ErrorReason::CredentialRenderFailed, e),
         };
+        let redactions = Redactions::from_injection(&injection);
 
         // Build the initial URL from parsed components, never string
         // concatenation (§4.1).
@@ -270,7 +363,11 @@ impl HttpExecution {
             || !current.username().is_empty()
             || current.password().is_some()
         {
-            return broker_error(400, ErrorReason::InvalidPath, "path escaped the pinned authority");
+            return broker_error(
+                400,
+                ErrorReason::InvalidPath,
+                "path escaped the pinned authority",
+            );
         }
         base.set_path("");
 
@@ -307,7 +404,9 @@ impl HttpExecution {
             if send_body && !self.body.is_empty() {
                 match self.body.bytes() {
                     Ok(bytes) => request = request.body(bytes),
-                    Err(e) => return broker_error(500, ErrorReason::BodyUnavailable, e.to_string()),
+                    Err(e) => {
+                        return broker_error(500, ErrorReason::BodyUnavailable, e.to_string())
+                    }
                 }
             }
 
@@ -319,10 +418,18 @@ impl HttpExecution {
                 // the credential in that URL, so the raw error string would
                 // leak the secret the broker exists to withhold (§1/§4.1).
                 Err(e) if e.is_timeout() => {
-                    return broker_error(504, ErrorReason::UpstreamTimeout, e.without_url().to_string())
+                    return broker_error(
+                        504,
+                        ErrorReason::UpstreamTimeout,
+                        e.without_url().to_string(),
+                    )
                 }
                 Err(e) => {
-                    return broker_error(502, ErrorReason::UpstreamError, e.without_url().to_string())
+                    return broker_error(
+                        502,
+                        ErrorReason::UpstreamError,
+                        e.without_url().to_string(),
+                    )
                 }
             };
 
@@ -373,10 +480,10 @@ impl HttpExecution {
                 // 3xx: return it to the agent instead of following,
                 // following would send the credential somewhere no
                 // connection was configured for (§4.1).
-                return relay_response(response, &self.config).await;
+                return relay_response(response, &self.config, &redactions).await;
             }
 
-            return relay_response(response, &self.config).await;
+            return relay_response(response, &self.config, &redactions).await;
         }
     }
 }
@@ -408,11 +515,16 @@ async fn render_injection(store: &Store, template_src: &str) -> Result<RenderedI
 
 /// Relay `{status, headers, body}` to the agent, size-capping the body and
 /// base64-encoding non-UTF-8 bodies (§4.1).
-async fn relay_response(response: reqwest::Response, config: &BrokerConfig) -> ExecOutcome {
+async fn relay_response(
+    response: reqwest::Response,
+    config: &BrokerConfig,
+    redactions: &Redactions,
+) -> ExecOutcome {
     let status = response.status().as_u16();
     let mut headers = serde_json::Map::new();
     for (name, value) in response.headers() {
-        let value_str = String::from_utf8_lossy(value.as_bytes()).into_owned();
+        let value_lossy = String::from_utf8_lossy(value.as_bytes());
+        let value_str = redactions.apply_to_string(value_lossy.as_ref());
         match headers.get_mut(name.as_str()) {
             Some(serde_json::Value::String(existing)) => {
                 *existing = format!("{existing}, {value_str}");
@@ -440,9 +552,12 @@ async fn relay_response(response: reqwest::Response, config: &BrokerConfig) -> E
             Ok(None) => break,
             // Same reasoning as the send path: keep any query-injected
             // credential in the URL out of the agent-visible error (§4.1).
-            Err(e) => return broker_error(502, ErrorReason::UpstreamError, e.without_url().to_string()),
+            Err(e) => {
+                return broker_error(502, ErrorReason::UpstreamError, e.without_url().to_string())
+            }
         }
     }
+    let body = redactions.apply_to_bytes(&body);
 
     let (body_value, encoding) = match String::from_utf8(body) {
         Ok(text) => (json!(text), "utf8"),
@@ -595,6 +710,54 @@ mod tests {
             Some(InjectionForm::Query)
         ));
         assert!(injection_form("no separator").is_none());
+    }
+
+    #[test]
+    fn redactions_cover_header_value_and_secret_component() {
+        let injection = RenderedInjection::Header(
+            HeaderName::from_static("authorization"),
+            HeaderValue::from_static("Bearer ghp_test_secret_value"),
+        );
+        let redactions = Redactions::from_injection(&injection);
+
+        assert_eq!(
+            redactions.apply_to_string("authorization=Bearer ghp_test_secret_value"),
+            "authorization=[REDACTED]"
+        );
+        assert_eq!(
+            redactions.apply_to_string("token ghp_test_secret_value reflected"),
+            "token [REDACTED] reflected"
+        );
+    }
+
+    #[test]
+    fn redactions_cover_query_fragment_and_decoded_value() {
+        let injection =
+            RenderedInjection::Query(Zeroizing::new("token=abc%20123&other=ok".to_string()));
+        let redactions = Redactions::from_injection(&injection);
+
+        assert_eq!(
+            redactions.apply_to_string("/echo?token=abc%20123&other=ok"),
+            "/echo?[REDACTED]"
+        );
+        assert_eq!(
+            redactions.apply_to_string("decoded abc 123"),
+            "decoded [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn redactions_cover_binary_body_bytes() {
+        let injection = RenderedInjection::Header(
+            HeaderName::from_static("authorization"),
+            HeaderValue::from_static("Bearer ghp_test_secret_value"),
+        );
+        let redactions = Redactions::from_injection(&injection);
+
+        assert_eq!(
+            redactions.apply_to_bytes(b"\x00ghp_test_secret_value\xff"),
+            b"\x00[REDACTED]\xff"
+        );
     }
 
     #[test]

@@ -581,17 +581,18 @@ async fn http_get_prompts_executes_and_injects_credential() {
     assert_eq!(envelope["status"], 200);
     assert_eq!(envelope["body_encoding"], "utf8");
     let echoed: Value = serde_json::from_str(envelope["body"].as_str().unwrap()).unwrap();
-    // Credential injected by the broker on the upstream leg…
+    // Credential injected by the broker on the upstream leg, then redacted
+    // from the agent-visible echoed response.
     assert_eq!(
         echoed["headers"]["authorization"],
-        "Bearer ghp_test_secret_value"
+        "[REDACTED]"
     );
     // …and the agent's own headers merged in, with the query preserved.
     assert_eq!(echoed["headers"]["accept"], "application/vnd.github+json");
     assert_eq!(echoed["uri"], "/echo?x=1");
-    // The raw secret never appears in the agent-visible envelope except via
-    // upstream echo (which is the upstream's own view).
+    // The raw secret never appears in the agent-visible envelope.
     assert!(envelope["headers"].get("authorization").is_none());
+    assert!(!envelope.to_string().contains("ghp_test_secret_value"));
 }
 
 #[tokio::test]
@@ -843,9 +844,10 @@ async fn same_host_redirect_followed_cross_host_returned_raw() {
     assert_eq!(envelope["status"], 200, "redirect should be followed");
     let echoed: Value = serde_json::from_str(envelope["body"].as_str().unwrap()).unwrap();
     assert_eq!(
-        echoed["headers"]["authorization"], "Bearer ghp_test_secret_value",
-        "credential must be re-rendered onto the followed hop"
+        echoed["headers"]["authorization"], "[REDACTED]",
+        "credential is re-rendered onto the followed hop but redacted from the relay"
     );
+    assert!(!envelope.to_string().contains("ghp_test_secret_value"));
 
     // Cross-host: returned to the agent as the raw 3xx.
     let socket = h.socket.clone();
