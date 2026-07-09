@@ -119,6 +119,22 @@ impl BrokerEvents for TauriEvents {
                     .map(|c| c.name.as_str())
                     .unwrap_or("—")
             ),
+            UiDecision::AllowSession => {
+                let scope = request
+                    .http
+                    .as_ref()
+                    .map(|http| if http.mutating { "full" } else { "read" })
+                    .unwrap_or("full");
+                format!(
+                    "Allow {scope} access for 15 minutes: {} → {}",
+                    request.agent,
+                    request
+                        .connection
+                        .as_ref()
+                        .map(|connection| connection.name.as_str())
+                        .unwrap_or("—")
+                )
+            }
             _ => match request.kind {
                 ApprovalKind::Pair => format!("Approve pairing of “{}”", request.agent),
                 _ => format!("Allow {}", request.action),

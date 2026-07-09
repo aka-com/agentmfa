@@ -119,6 +119,7 @@ fn http_request(conn: &Connection, mutating: bool) -> ApprovalRequest {
     ApprovalRequest {
         id: Uuid::new_v4(),
         agent: "claude-code".into(),
+        agent_token_hash: None,
         kind: ApprovalKind::Http,
         connection: Some(ConnectionSummary {
             id: conn.id,
@@ -150,6 +151,7 @@ fn pair_request(agent: &str, inherited: Vec<ConnectionSummary>) -> ApprovalReque
     ApprovalRequest {
         id: Uuid::new_v4(),
         agent: agent.into(),
+        agent_token_hash: None,
         kind: ApprovalKind::Pair,
         connection: None,
         action: format!("Pair new agent \"{agent}\" with AgentMFA"),

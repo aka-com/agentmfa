@@ -36,7 +36,7 @@ AgentMFA is a secrets manager for agents. Make API calls, open database and WebS
   brokered use, they are fetched only after approval for an outgoing request
   or connection. Explicit user copy is a separate, user-directed clipboard
   operation.
-- **Policy-gated access.** Every capability call is evaluated by policy. Prompted calls wait for *Allow once* or *Always allow…*; standing rules proceed without a prompt. Session traffic is authorized when the session is opened, not per frame, query, or SSH operation.
+- **Policy-gated access.** Every capability call is evaluated by policy. The default approval creates a fixed 15-minute, in-memory access session: GET/HEAD starts read access, while a mutating HTTP request or WebSocket/Postgres/SSH open starts full access. *Allow once* and *Always allow…* remain available. Session traffic is authorized when the session is opened, not per frame, query, or SSH operation.
 - **Supports most agent workflows:** Injects credentials for HTTP, WebSocket, Postgres, and SSH.
   - **HTTP** — the agent supplies method/path/headers/body; the connection pins the host; redirects are only followed within that host.
   - **WebSocket** — the agent gets a short-lived `ws://127.0.0.1:…` bridge URL usable by any stock WS client.
@@ -181,8 +181,8 @@ cargo run -p agentmfa-cli -- skill --write    # → .claude/skills/agentmfa/SKIL
    user approves; the response is a 30-day bearer token, pinned to the
    agent's peer identity, plus the `store_at` path to keep it in.
 2. `GET /v1/connections` — discover the named connections it may use (targets
-   only; never secret names or values) and whether each one `will_prompt`
-   or is already `auto_allowed`.
+   only; never secret names or values) and whether each one `will_prompt`,
+   has read access, or is already `auto_allowed`.
 3. Call a capability, naming a connection:
    - `POST /v1/http` — `{status, headers, body}`; the broker injects the
      credential, validates the path, and follows redirects only within the
@@ -200,10 +200,14 @@ cargo run -p agentmfa-cli -- skill --write    # → .claude/skills/agentmfa/SKIL
 
 Every capability call is evaluated by policy. A call that requires a prompt is
 surfaced as a **held-open request** and blocks until the user decides or the
-120 s timeout auto-denies; a standing "always allow" rule proceeds without a
-prompt. For WebSocket, Postgres, and SSH, policy applies to the session-open
-call. Traffic inside an approved live session is not approved individually,
-and a multi-connect ticket may open multiple sessions under that one decision.
+120 s timeout auto-denies. The primary decision creates a non-sliding,
+15-minute access session bound to the current pair-token generation, stable
+connection, and exact connection revision. Read access covers GET/HEAD; full
+access covers every HTTP method and new session opens. *Allow once* and a
+standing "always allow" rule remain available. For WebSocket, Postgres, and
+SSH, policy applies to the session-open call. Traffic inside an approved live
+session is not approved individually, and grant expiry or revocation closes
+live transports issued under that grant.
 
 ## Conformance
 

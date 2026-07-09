@@ -30,6 +30,9 @@ pub struct BrokerConfig {
     /// How much request body the approval window's payload view shows (§6).
     pub approval_body_preview: usize,
 
+    /// Fixed lifetime of an in-memory access session.
+    pub access_grant_ttl: Duration,
+
     /// Pair token TTL, refreshed on use (§8).
     pub token_ttl: Duration,
 
@@ -69,6 +72,7 @@ impl Default for BrokerConfig {
             spool_threshold: 2 * 1024 * 1024,
             max_redirects: 10,
             approval_body_preview: 4096,
+            access_grant_ttl: Duration::from_secs(15 * 60),
             token_ttl: Duration::from_secs(30 * 24 * 60 * 60),
             per_token_per_min: 60,
             discovery_per_min: 60,

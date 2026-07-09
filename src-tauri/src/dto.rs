@@ -43,6 +43,14 @@ pub struct RuleChip {
 }
 
 #[derive(Serialize)]
+pub struct GrantChip {
+    pub id: String,
+    pub agent: String,
+    pub scope: String,
+    pub expires_at: String,
+}
+
+#[derive(Serialize)]
 pub struct ConnectionDto {
     pub id: String,
     pub name: String,
@@ -54,6 +62,8 @@ pub struct ConnectionDto {
     pub multi_connect: bool,
     /// Standing auto-allow rules on this connection (the ⚡ chips).
     pub rules: Vec<RuleChip>,
+    /// Active, in-memory access sessions on this connection.
+    pub grants: Vec<GrantChip>,
     // Type-specific config, prefilled into the Edit sheet.
     pub host: Option<String>,
     pub scheme: Option<String>,
@@ -82,6 +92,16 @@ impl ConnectionDto {
                 agent: r.agent.clone(),
             })
             .collect();
+        let grants = broker
+            .grants_for_connection(conn)
+            .into_iter()
+            .map(|grant| GrantChip {
+                id: grant.id.to_string(),
+                agent: grant.agent,
+                scope: grant.scope.label().to_string(),
+                expires_at: grant.expires_at.to_rfc3339(),
+            })
+            .collect();
         let mut dto = ConnectionDto {
             id: conn.id.to_string(),
             name: conn.name.clone(),
@@ -90,6 +110,7 @@ impl ConnectionDto {
             secret_names,
             multi_connect: conn.multi_connect,
             rules,
+            grants,
             host: None,
             scheme: None,
             port: None,

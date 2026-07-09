@@ -167,8 +167,8 @@ async fn bridge_handler(
         },
     };
 
+    let max_ttl = redemption.max_ttl(broker.config.session_max_ttl);
     let session = redemption.start(ConnectionKind::Ws);
-    let max_ttl = broker.config.session_max_ttl;
     let idle = broker.config.session_idle_timeout;
     upgrade.on_upgrade(move |client| pipe(client, upstream, session, max_ttl, idle))
 }

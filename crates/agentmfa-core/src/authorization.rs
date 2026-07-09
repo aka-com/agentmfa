@@ -7,9 +7,12 @@
 //! carry the same authorization into deferred or repeated session dials.
 
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 use crate::{CoreError, Result};
 
@@ -22,6 +25,24 @@ enum ConfirmationState {
 #[derive(Clone)]
 pub(crate) struct SecretReadAuthorization {
     state: Arc<Mutex<ConfirmationState>>,
+    grant: Option<GrantAuthorization>,
+}
+
+#[derive(Clone)]
+pub(crate) struct GrantAuthorization {
+    pub(crate) id: Uuid,
+    pub(crate) expires_at: Instant,
+    revoked: Arc<AtomicBool>,
+}
+
+impl GrantAuthorization {
+    pub(crate) fn is_active(&self) -> bool {
+        !self.revoked.load(Ordering::Acquire) && Instant::now() < self.expires_at
+    }
+
+    fn revoke(&self) {
+        self.revoked.store(true, Ordering::Release);
+    }
 }
 
 impl SecretReadAuthorization {
@@ -32,6 +53,28 @@ impl SecretReadAuthorization {
             } else {
                 ConfirmationState::Pending
             })),
+            grant: None,
+        }
+    }
+
+    pub(crate) fn for_grant(id: Uuid, expires_at: Instant) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(ConfirmationState::Confirmed)),
+            grant: Some(GrantAuthorization {
+                id,
+                expires_at,
+                revoked: Arc::new(AtomicBool::new(false)),
+            }),
+        }
+    }
+
+    pub(crate) fn grant(&self) -> Option<GrantAuthorization> {
+        self.grant.clone()
+    }
+
+    pub(crate) fn revoke_grant(&self) {
+        if let Some(grant) = &self.grant {
+            grant.revoke();
         }
     }
 }
@@ -48,6 +91,17 @@ where
     CURRENT
         .scope(SecretReadAuthorization::new(confirmed), future)
         .await
+}
+
+/// Run under a particular authorization, used by active access grants.
+pub(crate) async fn scope_authorization<F>(
+    authorization: SecretReadAuthorization,
+    future: F,
+) -> F::Output
+where
+    F: Future,
+{
+    CURRENT.scope(authorization, future).await
 }
 
 /// Continue an execution authorization across a deferred data-plane dial.
@@ -69,6 +123,10 @@ pub(crate) fn current() -> Option<SecretReadAuthorization> {
     CURRENT.try_with(Clone::clone).ok()
 }
 
+pub(crate) fn current_grant() -> Option<GrantAuthorization> {
+    current().and_then(|authorization| authorization.grant())
+}
+
 /// Confirm at most once within the current execution authorization. With no
 /// execution scope (for example, a user-initiated copy), preserve the normal
 /// per-operation confirmation behavior.
@@ -80,6 +138,12 @@ where
     let Some(authorization) = current() else {
         return confirm().await;
     };
+    if authorization
+        .grant()
+        .is_some_and(|grant| !grant.is_active())
+    {
+        return Err(CoreError::SecretReadNotAuthenticated);
+    }
     let mut state = authorization.state.lock().await;
     match *state {
         ConfirmationState::Confirmed => return Ok(()),
@@ -126,5 +190,25 @@ mod tests {
         })
         .await;
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn revoked_grant_cannot_read_a_secret() {
+        let calls = AtomicUsize::new(0);
+        let authorization = SecretReadAuthorization::for_grant(
+            Uuid::new_v4(),
+            Instant::now() + std::time::Duration::from_secs(60),
+        );
+        authorization.revoke_grant();
+        scope_authorization(authorization, async {
+            let result = confirm_once(|| async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .await;
+            assert!(matches!(result, Err(CoreError::SecretReadNotAuthenticated)));
+        })
+        .await;
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 }

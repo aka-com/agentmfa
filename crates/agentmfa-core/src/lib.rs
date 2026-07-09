@@ -19,6 +19,7 @@ pub mod config;
 pub mod daemon;
 pub mod error;
 pub mod events;
+pub mod grants;
 pub mod integrity;
 pub mod pairing;
 pub mod paths;

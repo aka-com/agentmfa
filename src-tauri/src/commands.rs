@@ -323,6 +323,15 @@ pub fn remove_rule(state: State<AppState>, id: String) -> CmdResult<bool> {
     state.broker.ui_remove_rule(&id).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub fn remove_grant(state: State<AppState>, id: String) -> CmdResult<bool> {
+    let id = parse_id(&id)?;
+    state
+        .broker
+        .ui_remove_grant(&id)
+        .map_err(|e| e.to_string())
+}
+
 /* ----------------------------- paired agents ----------------------------- */
 
 #[tauri::command]
@@ -384,6 +393,7 @@ pub fn set_pg_trusted_ca_bundle_path(
 pub enum DecisionInput {
     Deny,
     AllowOnce,
+    AllowSession,
     AlwaysAllow,
 }
 
@@ -404,6 +414,7 @@ pub fn decide(
     let ui_decision = match decision {
         DecisionInput::Deny => UiDecision::Deny,
         DecisionInput::AllowOnce => UiDecision::AllowOnce,
+        DecisionInput::AllowSession => UiDecision::AllowSession,
         DecisionInput::AlwaysAllow => UiDecision::AlwaysAllow,
     };
     let ctx = DecisionContext::local(DecisionSurface::AppWindow);
@@ -438,6 +449,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         edit_connection,
         delete_connection,
         remove_rule,
+        remove_grant,
         revoke_agent,
         close_session,
         set_reauth_on_read,

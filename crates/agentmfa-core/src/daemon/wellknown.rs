@@ -33,6 +33,7 @@ pub fn manifest(config: &BrokerConfig, paths: &Paths) -> serde_json::Value {
         "auth_schemes": AuthScheme::ALL,
         "approval_modes": ApprovalMode::ALL,
         "approval_timeout_seconds": config.approval_timeout.as_secs(),
+        "access_grant_ttl_seconds": config.access_grant_ttl.as_secs(),
         // approval wait + upstream timeout + margin: machine-actionable, so
         // agents set a concrete client timeout instead of parsing prose (§4).
         "recommended_client_timeout_seconds": config.recommended_client_timeout.as_secs(),
@@ -59,6 +60,7 @@ pub fn instructions(config: &BrokerConfig, paths: &Paths) -> String {
     let client_timeout = config.recommended_client_timeout.as_secs();
     let ticket = config.ticket_ttl.as_secs();
     let token_days = config.token_ttl.as_secs() / 86400;
+    let access_minutes = config.access_grant_ttl.as_secs() / 60;
     format!(
         r#"# AgentMFA: broker instructions
 
@@ -67,6 +69,11 @@ their use. You never receive a secret value or even a secret name; you ask
 the broker to *use a named connection* (make an HTTP request through
 `github`, connect to `prod-db`) and the broker injects the credential on
 the upstream leg after asking the human for approval.
+
+The default approval creates a fixed {access_minutes}-minute in-memory access
+session. A read session covers HTTP GET/HEAD; a full session covers every HTTP
+method or new WebSocket/Postgres/SSH opens. Sessions are bound to this token
+generation and the exact connection configuration and never extend on use.
 
 Protocol: Agent Broker Protocol version {protocol_version} (the manifest's
 `protocol_version`; PROTOCOL.md is the spec).
@@ -120,7 +127,7 @@ processes are merged into one prompt and receive the same token.
     GET /v1/connections
     → [{{"name": "github", "type": "api", "target": "api.github.com",
          "endpoint": "/v1/http", "multi_connect": false,
-         "approval": "will_prompt"}}, …]
+         "approval": "will_prompt", "access_session": null}}, …]
 
 Connections name a destination. Secret names and values are never
 exposed. `endpoint` is where a call naming this connection goes (POST
@@ -129,7 +136,9 @@ repeatedly within its window; ws/pg can be configured either way, while
 ssh is always multi-connect because OpenSSH may use several agent
 connections during one login. `approval` is what a call costs right now:
 `will_prompt` blocks on a human decision (tell your user to expect the
-prompt), `auto_allowed` proceeds immediately under a standing rule.
+prompt), `read_auto_allowed` covers GET/HEAD under an active access session,
+and `auto_allowed` proceeds immediately under a full access session or a
+standing rule. When present, `access_session` gives its scope and expiry.
 
 ## 3. Approvals: set your client timeout first
 
@@ -138,6 +147,10 @@ respond until the human decides or the {approval} s approval timeout
 auto-denies it. Blocking on the call is the correct behavior. Set your HTTP
 client timeout to **at least {client_timeout} seconds** (approval wait +
 upstream timeout + margin); many client defaults are far lower.
+
+The primary human choice allows {access_minutes} minutes. A read request starts
+a read session; a mutating HTTP request or WS/PG/SSH open starts a full session.
+The human may instead allow only the exact request or save a standing rule.
 
 Denials come back as `403` with a machine-readable reason:
 - `{{"reason": "denied_by_user"}}`: the human said no; don't retry, ask them.
@@ -192,8 +205,8 @@ credential injected and pipes frames verbatim. The ticket expires
 default) it may be redeemed any number of times within that window, all
 under the one approval. Sessions carry a max TTL (1 h) and an idle timeout
 (5 min; protocol ping/pong counts as activity). A reconnect after the
-window needs a fresh open, and its own approval, unless a standing rule
-covers it.
+window needs a fresh open. An active full access session or standing rule lets
+that open proceed without another prompt.
 
 ## 6. Postgres: POST /v1/pg/open
 
@@ -284,6 +297,7 @@ host-key-mismatched signing requests.
         client_timeout = client_timeout,
         ticket = ticket,
         token_days = token_days,
+        access_minutes = access_minutes,
     )
 }
 
@@ -327,6 +341,7 @@ mod tests {
         assert_eq!(m["approval_modes"], serde_json::json!(["blocking"]));
         assert_eq!(m["transport"], "http-over-unix-socket");
         assert_eq!(m["approval_timeout_seconds"], 120);
+        assert_eq!(m["access_grant_ttl_seconds"], 900);
         assert_eq!(m["recommended_client_timeout_seconds"], 240);
         assert_eq!(m["token_ttl_days"], 30);
         assert_eq!(m["ticket_ttl_seconds"], 60);
@@ -375,6 +390,8 @@ mod tests {
             "invalid_json",
             "will_prompt",
             "auto_allowed",
+            "read_auto_allowed",
+            "15-minute",
             "\"endpoint\": \"/v1/http\"",
             "multi_connect",
             "/v1/ws/open",

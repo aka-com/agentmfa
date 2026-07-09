@@ -184,6 +184,10 @@ function secretsHTML() {
 /* ---- connections tab ---- */
 const ruleChipsHTML = (c) => c.rules.map((r) =>
   `<div class="allow-chip">⚡ ${esc(r.agent)}<button title="Remove auto-allow" aria-label="Remove auto-allow for ${escAttr(r.agent)}" data-act="del-rule" data-id="${r.id}">✕</button></div>`).join('');
+const grantChipsHTML = (c) => (c.grants || []).map((g) => {
+  const mins = Math.max(1, Math.ceil((new Date(g.expires_at).getTime() - Date.now()) / 60000));
+  return `<div class="allow-chip">⏳ ${esc(g.agent)} · ${esc(g.scope)} · ${mins}m<button title="Revoke access session" aria-label="Revoke access session for ${escAttr(g.agent)}" data-act="del-grant" data-id="${g.id}">✕</button></div>`;
+}).join('');
 const liveCount = (c) => state.sessions.filter((s) => s.connection === c.name).length;
 const connActionsHTML = (c) =>
   `<button class="icon-btn" title="Edit connection" aria-label="Edit connection ${escAttr(c.name)}" data-act="edit-conn" data-id="${c.id}">${ICONS.pencil}</button>
@@ -213,7 +217,7 @@ function connectionsHTML() {
         <span class="c-name" title="${escAttr(c.name)}">${esc(c.name)}</span>
         ${liveCount(c) ? '<span class="cc-live">● live</span>' : ''}</div>
       <div class="cc-target" title="${escAttr(c.target)}">${esc(c.target)}</div>
-      <div class="cc-chips">${chips}${ruleChipsHTML(c)}</div>
+      <div class="cc-chips">${chips}${grantChipsHTML(c)}${ruleChipsHTML(c)}</div>
       <div class="cc-foot">${connActionsHTML(c)}</div></div>`;
   }).join('') + `</div>`;
 }
@@ -495,6 +499,15 @@ function renderApproval() {
     always = { btn: `<button class="btn ghost sm" data-act="always-toggle">Always allow…</button>`, box };
   }
 
+  const sessionScope = req.http && !req.http.mutating ? 'read access' : 'full access';
+  const sessionWarning = req.http
+    ? (req.http.mutating
+      ? `Additional requests to this connection, including writes and deletes, will proceed without review.`
+      : `Additional GET and HEAD requests to this connection will proceed without review; writes still require approval.`)
+    : `Additional sessions may be opened without review; traffic inside them is unrestricted.`;
+  const sessionNote = !isPair
+    ? `<div class="rule-note ap-grant-note">Allows ${sessionScope} for 15 minutes. ${sessionWarning}</div>` : '';
+
   // The window is fixed-size and non-resizable, so the variable-height
   // middle (rows, payload, inherited-permissions list) scrolls; Deny/Allow
   // can never be pushed out of reach.
@@ -512,12 +525,14 @@ function renderApproval() {
       <div class="ap-row"><span>Approve within</span><span><span class="ap-countdown${cd.s === 0 ? ' expired' : cd.s <= COUNTDOWN_LOW_S ? ' low' : ''}" id="ap-countdown">${cd.text}</span></span></div>
     </div>
     ${detail}${inherit}
+    ${sessionNote}
     </div>
     <div class="ap-buttons">
       <button class="btn deny" data-act="decide-deny" data-id="${req.id}">Deny</button>
+      ${isPair ? '' : `<button class="btn ghost sm" data-act="decide-once" data-id="${req.id}">Allow once</button>`}
       ${always ? always.btn : ''}
       <span class="spacer"></span>
-      <button class="btn primary" data-act="decide-allow" data-id="${req.id}">${isPair ? 'Approve pairing' : 'Allow once'}</button></div>
+      <button class="btn primary" data-act="decide-allow" data-id="${req.id}">${isPair ? 'Approve pairing' : 'Allow 15 minutes'}</button></div>
     ${always ? always.box : ''}
     ${state.queue.length > 1 ? `<div class="aw-queue">${state.queue.length - 1} more pending</div>` : ''}
   </div>`;
@@ -808,6 +823,10 @@ document.addEventListener('click', async (e) => {
       await run(() => invoke('remove_rule', { id }));
       toast('🗑 Auto-allow removed'); await refresh('connections');
       break;
+    case 'del-grant':
+      await run(() => invoke('remove_grant', { id }));
+      toast('🛑 Access session revoked'); await refresh('all');
+      break;
 
     case 'revoke-ask': state.confirm = { kind: 'revoke-agent', name }; render(); break;
     case 'revoke-confirm':
@@ -877,7 +896,8 @@ document.addEventListener('click', async (e) => {
     case 'always-toggle': state.alwaysOpen = !state.alwaysOpen; render(); break;
 
     case 'decide-deny': await decide(id, 'deny'); break;
-    case 'decide-allow': await decide(id, 'allow_once'); break;
+    case 'decide-allow': await decide(id, mode === 'approval' && state.queue[0] && state.queue[0].kind !== 'pair' ? 'allow_session' : 'allow_once'); break;
+    case 'decide-once': await decide(id, 'allow_once'); break;
     case 'always-save': await decide(id, 'always_allow'); break;
     case 'open-approval': run(() => invoke('ui_show_approval')); break;
     default: break;
@@ -970,6 +990,11 @@ async function boot() {
   setInterval(() => {
     if (mode !== 'approval' && state.tab === 'activity' && !state.sheet && !state.menuOpen) render();
   }, 60000);
+  // Access sessions are in-memory and expire without a persisted state
+  // change. Refresh their chips/countdowns so expiry disappears promptly.
+  setInterval(() => {
+    if (mode !== 'approval' && !state.sheet && !state.menuOpen) refresh('connections');
+  }, 30000);
   // Live updates from the core.
   await listen('amfa://queue-changed', (ev) => { state.queue = ev.payload || []; render(); });
   await listen('amfa://sessions-changed', () => refresh('sessions'));

@@ -95,6 +95,8 @@ pub enum AuditKind {
     // Requests + decisions
     Requested,
     AllowedOnce,
+    GrantStarted,
+    GrantRevoked,
     AutoAllowed,
     Denied,
     ApprovalTimeout,
@@ -132,6 +134,8 @@ impl AuditKind {
             AuditKind::PeerIdentityMismatch => "🚫",
             AuditKind::Requested => "📨",
             AuditKind::AllowedOnce => "✅",
+            AuditKind::GrantStarted => "⏳",
+            AuditKind::GrantRevoked => "🛑",
             AuditKind::AutoAllowed => "⚡",
             AuditKind::Denied => "⛔",
             AuditKind::ApprovalTimeout => "⏱",

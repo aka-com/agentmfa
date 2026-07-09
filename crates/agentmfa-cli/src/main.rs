@@ -589,7 +589,9 @@ fn cmd_serve(root: Option<PathBuf>, auto_yes: bool) {
     if auto_yes {
         eprintln!("  ⚠ --yes: auto-approving every request (no human in the loop)");
     } else {
-        eprintln!("  approve prompts below with: [a]llow once · allow [f]orever · [d]eny");
+        eprintln!(
+            "  approve prompts below with: [a]llow 15 min · allow [o]nce · allow [f]orever · [d]eny"
+        );
     }
     eprintln!("  Ctrl-C to quit.\n");
 
@@ -654,17 +656,21 @@ fn prompt_decision(req: &ApprovalRequest) -> UiDecision {
         }
     }
     loop {
-        eprint!("  decide [a/f/d]: ");
+        eprint!("  decide [a/o/f/d]: ");
         let _ = std::io::stderr().flush();
         let mut line = String::new();
         if std::io::stdin().read_line(&mut line).is_err() || line.is_empty() {
             return UiDecision::Deny; // EOF → safe default
         }
         match line.trim() {
-            "a" | "allow" => return UiDecision::AllowOnce,
+            "a" | "allow" if req.kind == ApprovalKind::Pair => return UiDecision::AllowOnce,
+            "a" | "allow" => return UiDecision::AllowSession,
+            "o" | "once" => return UiDecision::AllowOnce,
             "f" | "forever" if req.kind != ApprovalKind::Pair => return UiDecision::AlwaysAllow,
             "d" | "deny" | "" => return UiDecision::Deny,
-            _ => eprintln!("  ? enter a (allow once), f (allow forever), or d (deny)"),
+            _ => eprintln!(
+                "  ? enter a (allow 15 min), o (allow once), f (allow forever), or d (deny)"
+            ),
         }
     }
 }

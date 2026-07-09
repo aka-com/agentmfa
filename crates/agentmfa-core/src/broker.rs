@@ -11,6 +11,7 @@ use crate::audit::{AuditEntry, AuditKind, AuditLog};
 use crate::config::BrokerConfig;
 use crate::error::CoreError;
 use crate::events::BrokerEvents;
+use crate::grants::{AccessGrantSummary, AccessGrants, GrantScope};
 use crate::pairing::PairingRegistry;
 use crate::paths::Paths;
 use crate::policy::{NaivePolicyEngine, PolicyEngine as _};
@@ -28,6 +29,8 @@ use crate::Result;
 pub enum UiDecision {
     Deny,
     AllowOnce,
+    /// Create a fixed-lifetime, in-memory access session, then allow.
+    AllowSession,
     /// Save the `(agent, connection)` standing rule, then allow (§7).
     AlwaysAllow,
 }
@@ -37,6 +40,7 @@ pub struct Broker {
     pub paths: Paths,
     pub store: Arc<Store>,
     pub policy: Arc<NaivePolicyEngine>,
+    pub grants: Arc<AccessGrants>,
     pub pairing: Arc<PairingRegistry>,
     pub approvals: Approvals,
     pub audit: Arc<AuditLog>,
@@ -83,6 +87,7 @@ impl Broker {
             paths.rules_file(),
             integrity.clone(),
         )?);
+        let grants = Arc::new(AccessGrants::new());
         let pairing = Arc::new(PairingRegistry::open(
             paths.agents_file(),
             config.token_ttl,
@@ -126,6 +131,7 @@ impl Broker {
             paths,
             store,
             policy,
+            grants,
             pairing,
             approvals,
             audit,
@@ -210,6 +216,7 @@ impl Broker {
         let required = match decision {
             UiDecision::Deny => false,
             UiDecision::AllowOnce => request.is_high_consequence(),
+            UiDecision::AllowSession => true,
             UiDecision::AlwaysAllow => true,
         };
         if !required {
@@ -281,7 +288,7 @@ impl Broker {
                 Ok(request)
             }
             UiDecision::AllowOnce => {
-                let request = self.approvals.approve(id, confirmation.is_some());
+                let request = self.approvals.approve(id, confirmation.is_some(), None);
                 if let Some(request) = &request {
                     if request.kind != ApprovalKind::Pair {
                         self.audit.append(attributed(
@@ -338,6 +345,76 @@ impl Broker {
                     self.events.rules_changed();
                 }
                 self.apply_decision(id, UiDecision::AllowOnce, ctx, confirmation)
+            }
+            UiDecision::AllowSession => {
+                let Some(request) = self.approvals.get(id) else {
+                    return Ok(None);
+                };
+                if request.kind == ApprovalKind::Pair {
+                    return self.apply_decision(id, UiDecision::AllowOnce, ctx, confirmation);
+                }
+                let token_hash = request
+                    .agent_token_hash
+                    .as_deref()
+                    .ok_or(CoreError::NotConfirmed)?;
+                let current_agent = self
+                    .pairing
+                    .get(&request.agent)
+                    .filter(|agent| agent.token_hash == token_hash)
+                    .ok_or(CoreError::NotConfirmed)?;
+                let summary = request
+                    .connection
+                    .as_ref()
+                    .ok_or(CoreError::ApprovalConnectionChanged)?;
+                let conn = self.store.connection_by_id(&summary.id)?;
+                if conn.kind() != summary.kind
+                    || conn.target() != summary.target
+                    || conn.multi_connect != summary.multi_connect
+                {
+                    return Err(CoreError::ApprovalConnectionChanged);
+                }
+                let scope = match request.http.as_ref() {
+                    Some(http) if !http.mutating => GrantScope::Read,
+                    _ => GrantScope::Full,
+                };
+                let created = self.grants.create(
+                    &current_agent.name,
+                    &current_agent.token_hash,
+                    &conn,
+                    scope,
+                    self.config.access_grant_ttl,
+                );
+                for replaced in &created.replaced {
+                    self.data_plane.close_grant(replaced);
+                }
+                let grant = created.grant;
+                let approved = self
+                    .approvals
+                    .approve(id, true, Some(grant.authorization.clone()));
+                if approved.is_none() {
+                    self.grants.remove(&grant.summary.id);
+                    self.data_plane.close_grant(&grant.summary.id);
+                    return Ok(None);
+                }
+                self.audit.append(attributed(
+                    AuditEntry::new(
+                        AuditKind::GrantStarted,
+                        format!(
+                            "{} started: {} → {}",
+                            scope.label(),
+                            request.agent,
+                            conn.name
+                        ),
+                    )
+                    .agent(request.agent.clone())
+                    .connection(conn.name.clone())
+                    .outcome("access_session_started")
+                    .field("grant_id", grant.summary.id.to_string())
+                    .field("scope", format!("{:?}", scope).to_lowercase())
+                    .field("expires_at", grant.summary.expires_at.to_rfc3339()),
+                ));
+                self.events.rules_changed();
+                Ok(approved)
             }
         }
     }
@@ -502,6 +579,8 @@ impl Broker {
             let conn = self.store.rename_connection(id, spec.name)?;
             (None, conn, false)
         };
+        let revoked_grants = self.grants.remove_for_connection(id);
+        self.close_grants(&revoked_grants);
         let mut dropped = 0;
         if target_changed {
             dropped = self.policy.remove_rules_for_connection(id)?;
@@ -554,6 +633,8 @@ impl Broker {
         let conn = self.store.connection_by_id(id)?;
         let confirmation = self.confirm_action(&format!("Delete connection “{}”", conn.name))?;
         let conn = self.store.delete_connection(id)?;
+        let revoked_grants = self.grants.remove_for_connection(id);
+        self.close_grants(&revoked_grants);
         let dropped = self.policy.remove_rules_for_connection(id)?;
         if dropped > 0 {
             self.events.rules_changed();
@@ -573,6 +654,61 @@ impl Broker {
 
     pub fn rules(&self) -> Vec<Rule> {
         self.policy.rules()
+    }
+
+    pub fn grants_for_connection(&self, connection: &Connection) -> Vec<AccessGrantSummary> {
+        self.grants.for_connection(connection)
+    }
+
+    pub fn ui_remove_grant(&self, id: &Uuid) -> Result<bool> {
+        let Some(grant) = self.grants.remove(id) else {
+            return Ok(false);
+        };
+        self.data_plane.close_grant(id);
+        let connection = self
+            .store
+            .connection_by_id(&grant.connection_id)
+            .map(|connection| connection.name)
+            .unwrap_or_else(|_| "(deleted connection)".into());
+        self.audit.append(
+            AuditEntry::new(
+                AuditKind::GrantRevoked,
+                format!("Access session revoked: {} → {connection}", grant.agent),
+            )
+            .agent(grant.agent)
+            .connection(connection)
+            .field("grant_id", id.to_string())
+            .field("scope", format!("{:?}", grant.scope).to_lowercase()),
+        );
+        self.events.rules_changed();
+        Ok(true)
+    }
+
+    pub(crate) fn revoke_access_grants_for_agent(&self, agent: &str, reason: &str) {
+        let removed = self.grants.remove_for_agent(agent);
+        if removed.is_empty() {
+            return;
+        }
+        self.close_grants(&removed);
+        self.audit.append(
+            AuditEntry::new(
+                AuditKind::GrantRevoked,
+                format!("Access sessions revoked: {agent}"),
+            )
+            .agent(agent.to_string())
+            .detail(reason)
+            .field("grants_removed", removed.len()),
+        );
+        self.events.rules_changed();
+    }
+
+    fn close_grants(&self, ids: &[Uuid]) {
+        for id in ids {
+            self.data_plane.close_grant(id);
+        }
+        if !ids.is_empty() {
+            self.events.rules_changed();
+        }
     }
 
     pub fn ui_remove_rule(&self, id: &Uuid) -> Result<bool> {
@@ -644,6 +780,7 @@ impl Broker {
     pub fn ui_revoke_agent(&self, name: &str) -> Result<bool> {
         let removed = self.pairing.revoke(name)?;
         if removed {
+            self.revoke_access_grants_for_agent(name, "agent revoked");
             self.audit.append(
                 AuditEntry::new(
                     AuditKind::TokenRevoked,

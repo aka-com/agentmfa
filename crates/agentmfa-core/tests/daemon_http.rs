@@ -540,10 +540,10 @@ async fn connections_listing_shows_targets_only() {
         json!([
             {"name": "github", "type": "api", "target": "127.0.0.1",
              "endpoint": "/v1/http", "multi_connect": false,
-             "approval": "will_prompt"},
+             "approval": "will_prompt", "access_session": null},
             {"name": "prod-db", "type": "pg", "target": "app@db.internal.aka.com:5432/app_production",
              "endpoint": "/v1/pg/open", "multi_connect": true,
-             "approval": "will_prompt"},
+             "approval": "will_prompt", "access_session": null},
         ])
     );
     // No secret names, ids, or templates anywhere in the response.
@@ -598,6 +598,183 @@ async fn http_get_prompts_executes_and_injects_credential() {
     // The raw secret never appears in the agent-visible envelope.
     assert!(envelope["headers"].get("authorization").is_none());
     assert!(!envelope.to_string().contains("ghp_test_secret_value"));
+}
+
+#[tokio::test]
+async fn access_session_defaults_to_read_then_upgrades_to_full_and_expires() {
+    let config = BrokerConfig {
+        access_grant_ttl: Duration::from_secs(3),
+        ..BrokerConfig::default()
+    };
+    let mut h = harness(config).await;
+    let up = upstream().await;
+    api_connection(&h, "github", up.port);
+    let token = h.pair("claude-code").await;
+    let auth = format!("Bearer {token}");
+
+    // The first read creates the default read access session.
+    let socket = h.socket.clone();
+    let auth_clone = auth.clone();
+    let first = tokio::spawn(async move {
+        uds_request(
+            &socket,
+            "POST",
+            "/v1/http",
+            &[("authorization", &auth_clone)],
+            Some(json!({"connection": "github", "method": "GET", "path": "/user/repos"})),
+        )
+        .await
+    });
+    h.decide_next(UiDecision::AllowSession).await;
+    assert_eq!(first.await.unwrap().0, 200);
+
+    // Another read is covered without a prompt.
+    let (status, _) = tokio::time::timeout(
+        Duration::from_secs(2),
+        uds_request(
+            &h.socket,
+            "POST",
+            "/v1/http",
+            &[("authorization", &auth)],
+            Some(json!({"connection": "github", "method": "GET", "path": "/user/repos"})),
+        ),
+    )
+    .await
+    .expect("read access session request stalled");
+    assert_eq!(status, 200);
+    assert!(h.prompts.try_recv().is_err());
+
+    // A mutation is not covered by a read grant. Approving it upgrades the
+    // connection to full access for the fixed session window.
+    let socket = h.socket.clone();
+    let auth_clone = auth.clone();
+    let mutation = tokio::spawn(async move {
+        uds_request(
+            &socket,
+            "POST",
+            "/v1/http",
+            &[("authorization", &auth_clone)],
+            Some(json!({
+                "connection": "github", "method": "POST", "path": "/dispatch",
+                "request_id": "grant-upgrade-1"
+            })),
+        )
+        .await
+    });
+    let upgrade = h.decide_next(UiDecision::AllowSession).await;
+    assert!(upgrade.http.unwrap().mutating);
+    assert_eq!(mutation.await.unwrap().0, 200);
+
+    let (status, _) = tokio::time::timeout(
+        Duration::from_secs(2),
+        uds_request(
+            &h.socket,
+            "POST",
+            "/v1/http",
+            &[("authorization", &auth)],
+            Some(json!({
+                "connection": "github", "method": "POST", "path": "/dispatch",
+                "request_id": "grant-upgrade-2"
+            })),
+        ),
+    )
+    .await
+    .expect("full access session request stalled");
+    assert_eq!(status, 200);
+    assert!(h.prompts.try_recv().is_err());
+
+    // Expiry is fixed, not sliding. The next request prompts again.
+    tokio::time::sleep(Duration::from_millis(3100)).await;
+    let socket = h.socket.clone();
+    let auth_clone = auth.clone();
+    let after_expiry = tokio::spawn(async move {
+        uds_request(
+            &socket,
+            "POST",
+            "/v1/http",
+            &[("authorization", &auth_clone)],
+            Some(json!({"connection": "github", "method": "GET", "path": "/user/repos"})),
+        )
+        .await
+    });
+    h.decide_next(UiDecision::Deny).await;
+    assert_eq!(after_expiry.await.unwrap().0, 403);
+}
+
+#[tokio::test]
+async fn full_access_session_covers_repeated_session_opens_until_revoked() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let password = h
+        .broker
+        .store
+        .add_secret("PG_PASSWORD", Zeroizing::new("test-password".into()))
+        .unwrap();
+    h.broker
+        .store
+        .add_connection(ConnectionSpec {
+            name: "prod-db".into(),
+            config: ConnectionConfig::Pg {
+                host: "db.invalid".into(),
+                port: 5432,
+                dbname: "app".into(),
+                user: "app".into(),
+                sslmode: PgSslMode::Require,
+            },
+            secrets: vec![password.id],
+            multi_connect: true,
+        })
+        .unwrap();
+    let token = h.pair("claude-code").await;
+    let auth = format!("Bearer {token}");
+
+    let socket = h.socket.clone();
+    let auth_clone = auth.clone();
+    let first = tokio::spawn(async move {
+        uds_request(
+            &socket,
+            "POST",
+            "/v1/pg/open",
+            &[("authorization", &auth_clone)],
+            Some(json!({"connection": "prod-db", "request_id": "pg-grant-1"})),
+        )
+        .await
+    });
+    h.decide_next(UiDecision::AllowSession).await;
+    assert_eq!(first.await.unwrap().0, 200);
+
+    let (status, _) = tokio::time::timeout(
+        Duration::from_secs(2),
+        uds_request(
+            &h.socket,
+            "POST",
+            "/v1/pg/open",
+            &[("authorization", &auth)],
+            Some(json!({"connection": "prod-db", "request_id": "pg-grant-2"})),
+        ),
+    )
+    .await
+    .expect("repeated session open stalled");
+    assert_eq!(status, 200);
+    assert!(h.prompts.try_recv().is_err());
+
+    let connection = h.broker.store.connection_by_name("prod-db").unwrap();
+    let grant = h.broker.grants_for_connection(&connection).remove(0);
+    assert!(h.broker.ui_remove_grant(&grant.id).unwrap());
+
+    let socket = h.socket.clone();
+    let auth_clone = auth.clone();
+    let after_revoke = tokio::spawn(async move {
+        uds_request(
+            &socket,
+            "POST",
+            "/v1/pg/open",
+            &[("authorization", &auth_clone)],
+            Some(json!({"connection": "prod-db", "request_id": "pg-grant-3"})),
+        )
+        .await
+    });
+    h.decide_next(UiDecision::Deny).await;
+    assert_eq!(after_revoke.await.unwrap().0, 403);
 }
 
 #[tokio::test]

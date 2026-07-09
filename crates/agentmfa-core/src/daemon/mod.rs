@@ -39,6 +39,7 @@ use crate::capability::http::{
 };
 use crate::capability::SpooledBody;
 use crate::error::CoreError;
+use crate::grants::GrantScope;
 use crate::pairing::{validate_agent_name, TokenError};
 use crate::policy::PolicyEngine as _;
 use crate::ratelimit::PairingBlock;
@@ -417,6 +418,7 @@ async fn post_pair(
     let request = ApprovalRequest {
         id: Uuid::new_v4(),
         agent: name.clone(),
+        agent_token_hash: None,
         kind: ApprovalKind::Pair,
         connection: None,
         action: format!("Pair new agent “{name}” with AgentMFA"),
@@ -449,6 +451,7 @@ async fn post_pair(
         Box::pin(async move {
             match broker.pairing.pair(&name, identity) {
                 Ok((token, agent)) => {
+                    broker.revoke_access_grants_for_agent(&name, "agent re-paired");
                     broker.audit.append(
                         AuditEntry::new(AuditKind::Paired, format!("Agent paired: {name}"))
                             .agent(name.clone())
@@ -531,6 +534,13 @@ async fn get_connections(State(state): State<AppState>, authed: Authed) -> Respo
         .list_connections()
         .into_iter()
         .map(|c| {
+            let active_grant =
+                broker
+                    .grants
+                    .matching(&authed.agent.token_hash, &c, GrantScope::Read);
+            let full_grant = active_grant
+                .as_ref()
+                .is_some_and(|grant| grant.summary.scope == GrantScope::Full);
             // What a call costs the agent right now: `will_prompt` blocks on
             // a human decision, `auto_allowed` proceeds immediately under a
             // standing rule (§7). Not a secret; the agent learns the same
@@ -538,12 +548,20 @@ async fn get_connections(State(state): State<AppState>, authed: Authed) -> Respo
             // user before ringing the doorbell.
             let approval = match broker.policy.evaluate(&authed.agent.name, &c.id) {
                 Decision::Allow => "auto_allowed",
+                Decision::Prompt if full_grant => "auto_allowed",
+                Decision::Prompt if active_grant.is_some() => "read_auto_allowed",
                 Decision::Prompt => "will_prompt",
                 // Reserved vocabulary: the v1 policy engine has no deny
                 // rules (policy.rs), so this arm is unreachable today —
                 // don't build agent logic around it.
                 Decision::Deny => ErrorReason::DeniedByPolicy.as_str(),
             };
+            let access_session = active_grant.as_ref().map(|grant| {
+                json!({
+                    "scope": grant.summary.scope,
+                    "expires_at": grant.summary.expires_at,
+                })
+            });
             json!({
                 "name": c.name,
                 "type": c.kind().as_str(),
@@ -556,6 +574,7 @@ async fn get_connections(State(state): State<AppState>, authed: Authed) -> Respo
                 // the same fact.
                 "multi_connect": c.multi_connect,
                 "approval": approval,
+                "access_session": access_session,
             })
         })
         .collect();
@@ -727,6 +746,7 @@ async fn post_http(
     let request = ApprovalRequest {
         id: Uuid::new_v4(),
         agent: agent.name.clone(),
+        agent_token_hash: Some(agent.token_hash.clone()),
         kind: ApprovalKind::Http,
         connection: Some(broker.connection_summary(&conn)),
         action: action.clone(),
@@ -790,7 +810,12 @@ async fn post_http(
         retain_outcome: true,
         executor,
     };
-    run_policied(broker, &agent.name, &conn, park).await
+    let scope = if mutating {
+        GrantScope::Full
+    } else {
+        GrantScope::Read
+    };
+    run_policied(broker, &agent, &conn, scope, park).await
 }
 
 /// Shared capability tail (§4/§7): evaluate policy, a standing rule goes
@@ -798,18 +823,46 @@ async fn post_http(
 /// prompt, then wait and relay the outcome.
 async fn run_policied(
     broker: &Arc<Broker>,
-    agent_name: &str,
+    agent: &PairedAgent,
     conn: &crate::types::Connection,
+    required_scope: GrantScope,
     park: ParkRequest,
 ) -> Response {
-    let parked = match broker.policy.evaluate(agent_name, &conn.id) {
+    if let Some(grant) = broker
+        .grants
+        .matching(&agent.token_hash, conn, required_scope)
+    {
+        broker.audit.append(
+            AuditEntry::new(
+                AuditKind::AutoAllowed,
+                format!("Access session: {} → {}", agent.name, conn.name),
+            )
+            .agent(agent.name.clone())
+            .connection(conn.name.clone())
+            .outcome("access_session")
+            .field("grant_id", grant.summary.id.to_string())
+            .field("scope", format!("{:?}", grant.summary.scope).to_lowercase())
+            .field(
+                "approval_state",
+                crate::wire::ApprovalState::Executing.as_str(),
+            ),
+        );
+        return resolve_parked(
+            broker
+                .approvals
+                .run_preapproved(park, Some(grant.authorization)),
+        )
+        .await;
+    }
+
+    let parked = match broker.policy.evaluate(&agent.name, &conn.id) {
         crate::types::Decision::Allow => {
-            let rule = broker.policy.matching_rule(agent_name, &conn.id);
+            let rule = broker.policy.matching_rule(&agent.name, &conn.id);
             let mut entry = AuditEntry::new(
                 AuditKind::AutoAllowed,
-                format!("Auto-approved: {} → {}", agent_name, conn.name),
+                format!("Auto-approved: {} → {}", agent.name, conn.name),
             )
-            .agent(agent_name.to_string())
+            .agent(agent.name.clone())
             .connection(conn.name.clone())
             .outcome("auto_allowed")
             .field(
@@ -820,7 +873,7 @@ async fn run_policied(
                 entry = entry.rule(rule.id);
             }
             broker.audit.append(entry);
-            broker.approvals.run_preapproved(park)
+            broker.approvals.run_preapproved(park, None)
         }
         crate::types::Decision::Deny => {
             return err(StatusCode::FORBIDDEN, ErrorReason::DeniedByPolicy);
@@ -828,6 +881,10 @@ async fn run_policied(
         crate::types::Decision::Prompt => broker.approvals.park(park),
     };
 
+    resolve_parked(parked).await
+}
+
+async fn resolve_parked(parked: Result<Parked, ParkError>) -> Response {
     match parked {
         Ok(Parked::Wait(handle)) => match handle.wait().await {
             Some(outcome) => outcome_response(outcome),
@@ -901,6 +958,7 @@ async fn post_ws_open(
     let request = ApprovalRequest {
         id: Uuid::new_v4(),
         agent: agent.name.clone(),
+        agent_token_hash: Some(agent.token_hash.clone()),
         kind: ApprovalKind::Ws,
         connection: Some(broker.connection_summary(&conn)),
         action,
@@ -975,7 +1033,7 @@ async fn post_ws_open(
         retain_outcome: true,
         executor,
     };
-    run_policied(broker, &agent.name, &conn, park).await
+    run_policied(broker, &agent, &conn, GrantScope::Full, park).await
 }
 
 /* ------------------------------ SSH open ---------------------------------- */
@@ -1035,6 +1093,7 @@ async fn post_ssh_open(
     let request = ApprovalRequest {
         id: Uuid::new_v4(),
         agent: agent.name.clone(),
+        agent_token_hash: Some(agent.token_hash.clone()),
         kind: ApprovalKind::Ssh,
         connection: Some(broker.connection_summary(&conn)),
         action,
@@ -1103,7 +1162,7 @@ async fn post_ssh_open(
         retain_outcome: true,
         executor,
     };
-    run_policied(broker, &agent.name, &conn, park).await
+    run_policied(broker, &agent, &conn, GrantScope::Full, park).await
 }
 
 /* ------------------------------ PG open ----------------------------------- */
@@ -1159,6 +1218,7 @@ async fn post_pg_open(
     let request = ApprovalRequest {
         id: Uuid::new_v4(),
         agent: agent.name.clone(),
+        agent_token_hash: Some(agent.token_hash.clone()),
         kind: ApprovalKind::Pg,
         connection: Some(broker.connection_summary(&conn)),
         action,
@@ -1228,5 +1288,5 @@ async fn post_pg_open(
         retain_outcome: true,
         executor,
     };
-    run_policied(broker, &agent.name, &conn, park).await
+    run_policied(broker, &agent, &conn, GrantScope::Full, park).await
 }

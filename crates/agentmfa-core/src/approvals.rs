@@ -49,6 +49,11 @@ use crate::wire::ErrorReason;
 pub struct ApprovalRequest {
     pub id: Uuid,
     pub agent: String,
+    /// Pair-token generation that originated a capability request. This is
+    /// internal grant state and is never serialized to an approval surface.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub agent_token_hash: Option<String>,
     pub kind: ApprovalKind,
     /// None for pairing requests.
     pub connection: Option<ConnectionSummary>,
@@ -447,7 +452,12 @@ impl Approvals {
     /// User approved: run the single execution and fan the outcome out to
     /// every attached waiter. Returns the request, or None if it no longer
     /// exists (already decided, timed out, or abandoned).
-    pub(crate) fn approve(&self, id: &Uuid, decision_confirmed: bool) -> Option<ApprovalRequest> {
+    pub(crate) fn approve(
+        &self,
+        id: &Uuid,
+        decision_confirmed: bool,
+        authorization: Option<crate::authorization::SecretReadAuthorization>,
+    ) -> Option<ApprovalRequest> {
         let (request, snapshot, executor) = {
             let mut inner = self.shared.inner.lock().unwrap();
             let entry = inner.pending.get_mut(id)?;
@@ -471,7 +481,7 @@ impl Approvals {
         // not let its confirmation authorize secret reads if that invariant
         // is ever accidentally violated by a future executor.
         let secret_read_confirmed = decision_confirmed && request.kind != ApprovalKind::Pair;
-        self.spawn_completion(*id, executor, secret_read_confirmed);
+        self.spawn_completion(*id, executor, secret_read_confirmed, authorization);
         self.shared.events.queue_changed(&snapshot);
         Some(request)
     }
@@ -479,7 +489,11 @@ impl Approvals {
     /// Run a rule-allowed request through the same machinery, no prompt,
     /// straight to Executing, so auto-allowed mutating retries coalesce
     /// and replay exactly like prompted ones (§4).
-    pub fn run_preapproved(&self, park: ParkRequest) -> Result<Parked, ParkError> {
+    pub(crate) fn run_preapproved(
+        &self,
+        park: ParkRequest,
+        authorization: Option<crate::authorization::SecretReadAuthorization>,
+    ) -> Result<Parked, ParkError> {
         let ParkRequest {
             mut request,
             coalesce_key,
@@ -524,17 +538,28 @@ impl Approvals {
                 id,
             )
         };
-        self.spawn_completion(id, executor, false);
+        self.spawn_completion(id, executor, false, authorization);
         Ok(Parked::Wait(handle))
     }
 
     /// The execution task: not tied to any waiter, so a disconnect cannot
     /// cancel a side effect already in flight (§4). On completion the
     /// outcome is fanned out and retained under the idempotency key.
-    fn spawn_completion(&self, id: Uuid, executor: Executor, secret_read_confirmed: bool) {
+    fn spawn_completion(
+        &self,
+        id: Uuid,
+        executor: Executor,
+        secret_read_confirmed: bool,
+        authorization: Option<crate::authorization::SecretReadAuthorization>,
+    ) {
         let shared = self.shared.clone();
         self.shared.runtime.spawn(async move {
-            let outcome = crate::authorization::scope(secret_read_confirmed, executor).await;
+            let outcome = match authorization {
+                Some(authorization) => {
+                    crate::authorization::scope_authorization(authorization, executor).await
+                }
+                None => crate::authorization::scope(secret_read_confirmed, executor).await,
+            };
             let mut waiters;
             {
                 let mut inner = shared.inner.lock().unwrap();
@@ -648,6 +673,7 @@ mod tests {
         ApprovalRequest {
             id: Uuid::new_v4(),
             agent: agent.into(),
+            agent_token_hash: None,
             kind: ApprovalKind::Http,
             connection: Some(ConnectionSummary {
                 id: Uuid::new_v4(),
@@ -692,7 +718,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(approvals.queue().len(), 1);
-        approvals.approve(&id, false).expect("pending");
+        approvals.approve(&id, false, None).expect("pending");
         let Parked::Wait(handle) = parked else {
             panic!()
         };
@@ -768,7 +794,7 @@ mod tests {
             Err(ParkError::RequestIdMismatch)
         ));
 
-        approvals.approve(&id, false).unwrap();
+        approvals.approve(&id, false, None).unwrap();
         let (Parked::Wait(h1), Parked::Wait(h2)) = (p1, p2) else {
             panic!()
         };
@@ -823,7 +849,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(approvals.queue().len(), 1);
-        approvals.approve(&id, false).unwrap();
+        approvals.approve(&id, false, None).unwrap();
         let (Parked::Wait(h1), Parked::Wait(h2)) = (p1, p2) else {
             panic!()
         };
@@ -892,7 +918,7 @@ mod tests {
         drop(parked); // agent disconnected
         assert!(approvals.queue().is_empty(), "prompt withdrawn");
         // Approving after abandonment is a no-op, never executed.
-        assert!(approvals.approve(&id, false).is_none());
+        assert!(approvals.approve(&id, false, None).is_none());
         assert_eq!(count.load(Ordering::SeqCst), 0);
     }
 
@@ -921,7 +947,7 @@ mod tests {
                 }),
             })
             .unwrap();
-        approvals.approve(&id, false).unwrap();
+        approvals.approve(&id, false, None).unwrap();
         // Waiter disconnects mid-execution; the side effect still completes.
         drop(parked);
         gate_tx.send(()).unwrap();

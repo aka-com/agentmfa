@@ -497,8 +497,8 @@ async fn handle_conn(state: Arc<AgentState>, mut stream: UnixStream) -> std::io:
 
     // Establishment succeeded: register the live session (dropping the
     // redemption without `start` would release the reserved budget slot).
+    let max_ttl = redemption.max_ttl(state.broker.config.session_max_ttl);
     let session = redemption.start(ConnectionKind::Ssh);
-    let max_ttl = state.broker.config.session_max_ttl;
     let idle = state.broker.config.session_idle_timeout;
     let reason = serve(&state, &mut stream, &session, max_ttl, idle).await;
     let _ = stream.shutdown().await;
