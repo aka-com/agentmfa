@@ -1,6 +1,6 @@
 # AgentMFA
 
-AgentMFA is a secrets manager for agents. Make API calls, open database and WebSocket connections, and authenticate SSH sessions — with unmodified tools like `curl`, `psql`, and `git` — without exposing critical secrets to Claude, Codex, or other local agents.
+AgentMFA is a secrets manager for agents. Make API calls, open database and WebSocket connections, and authenticate SSH sessions — with unmodified tools like `curl`, `psql`, and `git` — without returning stored secret values to Claude, Codex, or other local agents.
 
 ```
                         ┌────────────────────────────────────────────┐
@@ -32,12 +32,15 @@ AgentMFA is a secrets manager for agents. Make API calls, open database and WebS
 
 ## Features
 
-- **Secrets manager for agents.** Raw values live in macOS Keychain items, and are only injected into approved outgoing requests, and bidirectional connections.
+- **Secrets manager for agents.** Raw values live in macOS Keychain items. For
+  brokered use, they are fetched only after approval for an outgoing request
+  or connection. Explicit user copy is a separate, user-directed clipboard
+  operation.
 - **Policy-gated access.** Every capability call is evaluated by policy. Prompted calls wait for *Allow once* or *Always allow…*; standing rules proceed without a prompt. Session traffic is authorized when the session is opened, not per frame, query, or SSH operation.
 - **Supports most agent workflows:** Injects credentials for HTTP, WebSocket, Postgres, and SSH.
   - **HTTP** — the agent supplies method/path/headers/body; the connection pins the host; redirects are only followed within that host.
   - **WebSocket** — the agent gets a short-lived `ws://127.0.0.1:…` bridge URL usable by any stock WS client.
-  - **Postgres** — the agent gets a password-less DSN + one-time ticket; unmodified `psql` works, while the broker opens the upstream leg itself. The default `sslmode=require` encrypts without certificate verification; use `verify-full` for CA and hostname verification.
+  - **Postgres** — the agent gets a password-less DSN + short-lived ticket; unmodified `psql` works, while the broker opens the upstream leg itself. The default `sslmode=require` encrypts without certificate verification; use `verify-full` for CA and hostname verification.
   - **SSH** — the agent gets an `SSH_AUTH_SOCK` path; `ssh`/`git`/`rsync` work
     with OpenSSH host-bound authentication, while the broker signs only for the
     connection's pinned user and server host key. Compatible OpenSSH clients
@@ -48,7 +51,56 @@ AgentMFA is a secrets manager for agents. Make API calls, open database and WebS
   emitted to the app's Activity view and appended to disk on a best-effort
   basis. Persistence failures do not block broker operations, so history may
   be incomplete; it is not a tamper-evident audit ledger.
-- **Free and open source.** MIT licensed desktop application for individuals and small teams; contact us for enterprise support.
+- **Free and open source.** MIT-licensed local desktop application; contact us for enterprise support.
+
+## How it works
+
+AgentMFA separates **secrets** from **connections**. A secret is an opaque
+named value. A connection binds one or more secrets to a fixed destination and
+transport, such as an API origin, Postgres database, WebSocket URL, or SSH
+host. The agent supplies the *what* — method, path, body, or session-open
+request — while the connection supplies the *where* and the credential.
+
+After policy and any required human approval, the Rust core reads the required
+secret from the Keychain as late as possible and uses it on the configured
+upstream connection. A full stored value is never returned through the agent
+API or rendered in full in the webview. Explicit user copy is the exception:
+the core writes the value to the macOS pasteboard as a concealed item and
+conditionally clears it after 30 seconds.
+
+- The **core** owns Keychain access, connection configuration, policy,
+  approvals, agent pairing, upstream clients, and activity events.
+- The **webview** receives metadata and, after an explicit reveal, a short
+  secret prefix. High-consequence approvals and configuration changes require
+  a core-owned macOS authentication sheet that the webview cannot forge.
+- Agents use HTTP over a per-user Unix socket for discovery and capability
+  requests. WebSocket and Postgres data sessions use short-lived tickets on
+  OS-assigned loopback ports; SSH uses a scoped per-open ssh-agent socket.
+
+## Adoption and compatibility
+
+- AgentMFA v1 is a single-user, local macOS 13+ application. It has no remote
+  broker surface, shared team vault, or centrally managed policy backend.
+- Secret values remain local to the Mac where they are created; AgentMFA does
+  not provide iCloud or application-level cloud synchronization.
+- The current `keyring` backend uses the login Keychain. It does not provide
+  Data Protection Keychain per-item ACLs; broker-side LocalAuthentication is a
+  separate confirmation and reauthentication control.
+- HTTP connections support bearer and custom-header credentials, Basic auth
+  through `base64(...)`, query injection through `url(...)`, and composition
+  of multiple secrets in a fixed injection template.
+- Postgres `sslmode=require`, the default, encrypts the upstream connection but
+  does not verify its certificate. Use `verify-full` for CA and hostname
+  verification.
+- SSH supports ed25519 and RSA keys and requires OpenSSH-compatible session
+  binding and host-bound authentication. Encrypted or unsupported private keys
+  fail when the SSH capability is opened.
+- AgentMFA does not export durable secrets into an agent or child-process
+  environment; doing so would give the agent the value and bypass per-request
+  mediation.
+- AgentMFA does not ship a built-in MCP server. The Unix-socket protocol is the
+  enforcement surface; `/instructions` and the generated skill are the
+  agent-agnostic discovery and ergonomics layers.
 
 ## Developing
 
@@ -156,9 +208,9 @@ and a multi-connect ticket may open multiple sessions under that one decision.
 ## Conformance
 
 - The **core** owns the Keychain, the daemon, the policy engine, and the audit log.
-- The **webview** gets masked metadata only and cannot complete actions the
-  broker classifies as high consequence without a core-owned native OS
-  authentication sheet.
+- The **webview** gets metadata and explicitly requested short prefixes, never
+  full stored values, and cannot complete actions the broker classifies as
+  high consequence without a core-owned native OS authentication sheet.
 
 Implementation notes:
 
@@ -204,12 +256,12 @@ Implementation notes:
   live in the UI may therefore be absent after restart. Exact stored secret
   values **MUST NOT** be written to activity entries, but local UI-oriented
   entries may include user-facing secret names.
-- **On-disk integrity — closed; identity strength — deferred.** DESIGN.md
-  §13.1 is implemented: `index.json`, `rules.json`, and `agents.json` are
-  sealed with HMAC-SHA256 under a vault-held key and refuse to load on a
-  verification failure (bare pre-seal files migrate trust-on-first-use).
-  The §13.2 deferral (the interpreted-runtime signature caveat) is
-  unchanged — noted, not solved.
+- **On-disk integrity and identity strength.** `index.json`, `rules.json`, and
+  `agents.json` are sealed with HMAC-SHA256 under a vault-held key and refuse
+  to load on a verification failure (bare pre-seal files migrate
+  trust-on-first-use). Identity pinning remains intentionally limited:
+  interpreted runtimes may present a coarse shared identity, and unsigned or
+  ad-hoc peers use a weaker best-effort local executable fingerprint.
 
 ## Persistence map
 
