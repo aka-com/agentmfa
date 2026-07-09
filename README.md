@@ -181,3 +181,101 @@ Documented differences from DESIGN.md:
   verification failure (bare pre-seal files migrate trust-on-first-use).
   The §13.2 deferral (the interpreted-runtime signature caveat) is
   unchanged — noted, not solved.
+
+## Persistence map
+
+```text
+AgentMFA persistence
+|
+|-- macOS production app state
+|   `~/Library/Application Support/agentmfa/`        0700 dir
+|   |
+|   |-- index.json                                  0600, atomic, HMAC-sealed
+|   |   `-- secret metadata, connection configs, settings
+|   |       - secret ids/names/timestamps only
+|   |       - connection targets/templates/secret UUID refs
+|   |       - settings: iCloud sync, reauth, hide prefixes,
+|   |         pg CA bundle path, menu bar Dock behavior
+|   |
+|   |-- rules.json                                  0600, atomic, HMAC-sealed
+|   |   `-- standing "always allow" rules:
+|   |       agent name + stable connection UUID
+|   |
+|   |-- agents.json                                 0600, atomic, HMAC-sealed
+|   |   `-- paired agent records:
+|   |       token hash, token preview, identity pin, last_used
+|   |       no raw bearer token
+|   |
+|   |-- audit.jsonl                                 0600, append-only, not sealed
+|   |   `-- audit/event stream; no secret values
+|   |
+|   `-- dev-vault.json                              non-macOS dev fallback only
+|       `-- unencrypted file vault: secret values + integrity key
+|
+|-- macOS Keychain
+|   |
+|   |-- service: com.aka.desktop
+|   |   |
+|   |   |-- account: <secret UUID>
+|   |   |   `-- raw secret value
+|   |   |
+|   |   `-- account: 00000000-0000-0000-0000-000000000000
+|   |       `-- state integrity HMAC key
+|   |
+|   `-- dev-root services:
+|       com.aka.desktop.dev.<sha256(canonical root)>
+|       `-- same account layout, isolated per `--root`
+|
+|-- runtime / agent rendezvous state
+|   `~/.agentmfa/`                                  0700 dir
+|   |
+|   |-- broker.sock                                 0600 Unix socket, ephemeral
+|   |
+|   |-- tokens/                                     0700 dir
+|   |   `-- <agent-name>                            raw bearer token, written by agents
+|   |                                               broker only advertises this path
+|   |
+|   `-- ssh/
+|       `-- agent-<random>.sock                     0600 per-approved SSH socket,
+|                                                   ephemeral/swept
+|
+|-- dev/test root layout with `--root /path/to/root`
+|   `/path/to/root/`
+|   |
+|   |-- data/
+|   |   |-- index.json
+|   |   |-- rules.json
+|   |   |-- agents.json
+|   |   |-- audit.jsonl
+|   |   `-- dev-vault.json                          non-macOS only
+|   |
+|   `-- sock/
+|       |-- broker.sock
+|       |-- tokens/
+|       `-- ssh/
+|
+`-- in-memory only
+    |-- approval queue
+    |-- retained idempotency outcomes
+    |-- WS/PG/SSH tickets and live sessions
+    |-- rate-limit buckets
+    |-- superseded-token hints
+    `-- loopback WS/PG proxy ports
+```
+
+Integrity checks apply to `index.json`, `rules.json`, and `agents.json`. They
+are sealed as `{"v","alg","mac","payload"}` using an HMAC key stored in the
+vault/Keychain. `audit.jsonl` is append-only and tolerant of bad lines, but not
+integrity-sealed.
+
+The archive action moves only the persistent app data directory, so on macOS
+it archives:
+
+```text
+~/Library/Application Support/agentmfa
+-> ~/Library/Application Support/agentmfa.bak-YYYYMMDD-HHMMSS
+```
+
+It deliberately does not move `~/.agentmfa`, so broker sockets, agent token
+files, and SSH socket directories are left alone. It also does not delete
+Keychain secret values or the integrity key.
