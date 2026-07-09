@@ -10,6 +10,7 @@
 
 use std::sync::Mutex;
 
+use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, Rect};
@@ -42,10 +43,7 @@ struct Bounds {
 /// Install the always-present tray icon (§2). Left-click toggles the compact
 /// dropdown; right-click exposes the conventional app menu.
 pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
-    let icon = app
-        .default_window_icon()
-        .cloned()
-        .expect("bundled default icon");
+    let icon = Image::from_bytes(include_bytes!("../icons/tray.png"))?;
     let open = MenuItem::with_id(app, "tray-open", "Open AgentMFA", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "tray-settings", "Settings…", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
