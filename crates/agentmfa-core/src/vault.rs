@@ -331,8 +331,9 @@ impl SecretVault for MemoryVault {
     }
 }
 
-/// Stable macOS Keychain service for a CLI dev root. This is public so callers
-/// and diagnostics can name the scope without constructing a Keychain backend.
+/// Stable macOS Keychain service for an existing CLI dev root. This is public
+/// so callers and diagnostics can name the scope without constructing a
+/// Keychain backend.
 pub fn dev_root_vault_service(root: &Path) -> Result<String, CoreError> {
     let root = vault_scope_root(root)?;
     let digest = Sha256::digest(root.to_string_lossy().as_bytes());
@@ -348,11 +349,7 @@ fn vault_scope_root(root: &Path) -> Result<PathBuf, CoreError> {
     } else {
         std::env::current_dir()?.join(root)
     };
-    match absolute.canonicalize() {
-        Ok(path) => Ok(path),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(absolute),
-        Err(e) => Err(e.into()),
-    }
+    Ok(absolute.canonicalize()?)
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
@@ -379,14 +376,15 @@ pub fn platform_vault(
 
 /// The platform vault for an explicit CLI/dev root. On macOS this scopes the
 /// Keychain service to `root`, while non-macOS builds already scope through the
-/// root-local `dev-vault.json` path.
+/// root-local `dev-vault.json` path. The scoped directories are created first
+/// so the root has one canonical identity from its first use onward.
 pub fn platform_vault_for_root(
     paths: &crate::paths::Paths,
     root: &Path,
 ) -> Result<std::sync::Arc<dyn SecretVault>, CoreError> {
+    paths.ensure()?;
     #[cfg(target_os = "macos")]
     {
-        let _ = paths;
         Ok(std::sync::Arc::new(MacKeychainVault::for_dev_root(root)?))
     }
     #[cfg(not(target_os = "macos"))]
@@ -420,6 +418,37 @@ mod tests {
         assert_ne!(
             dev_root_vault_service(a.path()).unwrap(),
             dev_root_vault_service(b.path()).unwrap()
+        );
+    }
+
+    #[test]
+    fn dev_root_service_requires_an_existing_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+
+        assert!(matches!(
+            dev_root_vault_service(&missing),
+            Err(CoreError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound
+        ));
+    }
+
+    #[test]
+    fn explicit_vault_root_is_created_before_service_is_derived() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("parent");
+        let intermediate = parent.join("intermediate");
+        std::fs::create_dir_all(&intermediate).unwrap();
+        let root = intermediate.join("..").join("vault-root");
+        let canonical_root = parent.join("vault-root");
+        let paths = crate::paths::Paths::under(&root);
+
+        assert!(!canonical_root.exists());
+        platform_vault_for_root(&paths, &root).unwrap();
+
+        assert!(canonical_root.exists());
+        assert_eq!(
+            dev_root_vault_service(&root).unwrap(),
+            dev_root_vault_service(&canonical_root).unwrap()
         );
     }
 }
