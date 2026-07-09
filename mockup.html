@@ -1116,8 +1116,6 @@ var store = {
   settingsMenuOpen: false,  // desktop-mode settings popover (gear) open
   confirmDelete: null,      // secret name showing the inline "in use" blocker
   confirmDeleteConn: null,  // legacy mock state; destructive deletes use OS confirmation
-  confirmRevoke: null,      // legacy mock state; pairing revocation uses OS confirmation
-  confirmCloseSession: null,// legacy mock state; live-session close uses OS confirmation
   addSecretOpen: false,
   editSecret: null,         // secret name open in the Edit secret sheet
   addConnOpen: false,
@@ -1356,7 +1354,7 @@ function globalSectionsHTML() {
       return '<div class="live-row"><span class="badge" style="background:rgba(0,0,0,.07);color:#555">agent</span>' +
         '<div class="live-txt"><div class="c-name">' + esc(a.name) + '</div>' +
         '<div class="s-sub" style="max-width:250px" title="' + escAttr(sub) + '">' + esc(sub) + '</div></div>' +
-        '<button class="btn sm" data-act="revoke-ask" data-name="' + escAttr(a.name) + '">Revoke</button></div>';
+        '<button class="btn sm" data-act="revoke" data-name="' + escAttr(a.name) + '">Revoke</button></div>';
     }).join('');
   }
   if (store.sessions.length) {
@@ -1365,7 +1363,7 @@ function globalSectionsHTML() {
       return '<div class="live-row"><span class="badge ' + t.cls + '">' + t.label + '</span>' +
         '<div class="live-txt"><div class="c-name">' + esc(s.connection) + '</div>' +
         '<div class="s-sub" title="' + escAttr(s.detail) + '">' + esc(s.detail) + ' · opened ' + s.opened + '</div></div>' +
-        '<button class="btn sm" data-act="close-session-ask" data-id="' + s.id + '">Close</button></div>';
+        '<button class="btn sm" data-act="close-session" data-id="' + s.id + '">Close</button></div>';
     }).join('');
   }
   return sections ? '<div class="dd-global">' + sections + '</div>' : '';
@@ -2460,7 +2458,6 @@ function resetAgent() {
   waitLine = null;
   store.transcript = introLines();
   store.sessions = [];                             // agent gone → its sessions are torn down
-  store.confirmCloseSession = null;
   // NB: store.agents and store.rules are deliberately NOT cleared. Reset only
   // tears down the local agent sandbox (this session's process); the broker-side
   // pairing and its standing auto-allow rules persist until explicitly revoked
@@ -2666,7 +2663,6 @@ function deleteConnection(name) {
 }
 function revokePairing(name) {
   store.agents = store.agents.filter(function (a) { return a.name !== name; });
-  store.confirmRevoke = null;
   audit('🔒', 'Pair token revoked: ' + name);
   toast('🔒 Pair token revoked');
   if (store.paired) {
@@ -2678,7 +2674,6 @@ function revokePairing(name) {
 }
 function closeSessionById(sid) {
   var sess = store.sessions.filter(function (s) { return s.id === sid; })[0];
-  store.confirmCloseSession = null;
   if (!sess) { renderApp(); return; }
   removeSession(sid);
   audit('⏹', (sess.kind === 'ws' ? 'WebSocket bridge' : 'Postgres session') + ' closed by user',
@@ -2785,8 +2780,6 @@ function applyState(k) {
   store.reqDetailOpen = null;
   store.confirmDelete = null;
   store.confirmDeleteConn = null;
-  store.confirmRevoke = null;
-  store.confirmCloseSession = null;
   store.draft = {};
   store.notifFor = null;
   if (k === 'populated') {
@@ -2921,8 +2914,6 @@ document.addEventListener('click', function (e) {
       store.tab = btn.dataset.tab;
       store.confirmDelete = null;
       store.confirmDeleteConn = null;
-      store.confirmRevoke = null;
-      store.confirmCloseSession = null;
       renderApp();
       break;
     case 'reveal':
@@ -3186,15 +3177,7 @@ document.addEventListener('click', function (e) {
       audit('🗑', 'Auto-allow removed');
       renderApp();
       break;
-    case 'revoke-ask':
-      requireOSConfirm('Revoke pairing for “' + name + '”',
-        function () { revokePairing(name); });
-      break;
-    case 'revoke-no':
-      store.confirmRevoke = null;
-      renderApp();
-      break;
-    case 'revoke-yes':
+    case 'revoke':
       revokePairing(name);
       break;
     case 'os-confirm': {
@@ -3209,22 +3192,10 @@ document.addEventListener('click', function (e) {
       toast('🔒 Touch ID canceled — nothing changed');
       renderApp();
       break;
-    case 'close-session-ask':
+    case 'close-session':
       var askSid = Number(btn.dataset.id);
-      var askSess = store.sessions.filter(function (s) { return s.id === askSid; })[0];
-      if (!askSess) break;
-      requireOSConfirm('End ' + (askSess.kind === 'ws' ? 'WebSocket bridge' : 'Postgres session') + ' for “' + askSess.connection + '”',
-        function () { closeSessionById(askSid); });
+      closeSessionById(askSid);
       break;
-    case 'close-session-no':
-      store.confirmCloseSession = null;
-      renderApp();
-      break;
-    case 'close-session-yes': {
-      var sid = Number(btn.dataset.id);
-      closeSessionById(sid);
-      break;
-    }
     case 'scenario':
       selectScenario(btn.dataset.key);
       break;

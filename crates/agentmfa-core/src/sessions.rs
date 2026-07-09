@@ -247,8 +247,8 @@ impl DataPlane {
         sessions
     }
 
-    /// User-initiated close (the inline-confirmed control, §9). Returns
-    /// whether the session existed.
+    /// User-initiated close from the immediate remediation control (§9).
+    /// Returns whether the session existed.
     pub fn close_session(&self, id: u64) -> bool {
         let state = self.inner.state.lock().unwrap();
         match state.sessions.get(&id) {

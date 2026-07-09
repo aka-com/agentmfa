@@ -1,6 +1,7 @@
 //! End-to-end WebSocket bridge tests: real daemon, real upstream WS echo
 //! server, real stock WebSocket client against the bridge URL.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -25,6 +26,7 @@ use zeroize::Zeroizing;
 
 struct TestEvents {
     prompts: mpsc::UnboundedSender<ApprovalRequest>,
+    action_confirmations: Arc<AtomicUsize>,
 }
 
 impl BrokerEvents for TestEvents {
@@ -42,6 +44,7 @@ impl BrokerEvents for TestEvents {
         Some(ConfirmationMethod::Waived)
     }
     fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
+        self.action_confirmations.fetch_add(1, Ordering::SeqCst);
         Some(ConfirmationMethod::Waived)
     }
 }
@@ -55,6 +58,7 @@ struct Harness {
     broker: Arc<Broker>,
     daemon: daemon::DaemonHandle,
     prompts: mpsc::UnboundedReceiver<ApprovalRequest>,
+    action_confirmations: Arc<AtomicUsize>,
     _dir: tempfile::TempDir,
 }
 
@@ -62,11 +66,15 @@ async fn harness(config: BrokerConfig) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let paths = Paths::under(dir.path());
     let (tx, rx) = mpsc::unbounded_channel();
+    let action_confirmations = Arc::new(AtomicUsize::new(0));
     let broker = Broker::new(
         paths,
         Arc::new(MemoryVault::new()),
         config,
-        Arc::new(TestEvents { prompts: tx }),
+        Arc::new(TestEvents {
+            prompts: tx,
+            action_confirmations: action_confirmations.clone(),
+        }),
     )
     .await
     .unwrap();
@@ -75,6 +83,7 @@ async fn harness(config: BrokerConfig) -> Harness {
         broker,
         daemon,
         prompts: rx,
+        action_confirmations,
         _dir: dir,
     }
 }
@@ -451,7 +460,13 @@ async fn user_close_control_drops_the_agent_connection() {
     let sessions = h.broker.sessions();
     assert_eq!(sessions.len(), 1);
 
+    let confirmations_before = h.action_confirmations.load(Ordering::SeqCst);
     assert!(h.broker.ui_close_session(sessions[0].id).unwrap());
+    assert_eq!(
+        h.action_confirmations.load(Ordering::SeqCst),
+        confirmations_before,
+        "closing a session must not request OS authentication"
+    );
     let closed = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             match client.next().await {

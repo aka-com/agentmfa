@@ -33,7 +33,7 @@ AgentMFA is a secrets manager for agents. Make API calls, open database and WebS
 ## Features
 
 - **Secrets manager for agents.** Raw values live in macOS Keychain items, and are only injected into approved outgoing requests, and bidirectional connections.
-- **Per-use human approval.** Requests wait for your approval. Click *Allow once*, *Always allow…* or a Touch ID approval for high-consequence actions.
+- **Policy-gated access.** Every capability call is evaluated by policy. Prompted calls wait for *Allow once* or *Always allow…*; standing rules proceed without a prompt. Session traffic is authorized when the session is opened, not per frame, query, or SSH operation.
 - **Supports most agent workflows:** Injects credentials for HTTP, WebSocket, Postgres, and SSH.
   - **HTTP** — the agent supplies method/path/headers/body; the connection pins the host; redirects are only followed within that host.
   - **WebSocket** — the agent gets a short-lived `ws://127.0.0.1:…` bridge URL usable by any stock WS client.
@@ -143,9 +143,12 @@ cargo run -p agentmfa-cli -- skill --write    # → .claude/skills/agentmfa/SKIL
      host-bound authentication, pinned to the configured user and server
      host-key fingerprint.
 
-Every use is surfaced to the human for approval (per-request by default, or a
-standing "always allow" rule); the approval is a **held-open request** — the
-call simply blocks until the user decides or the 120 s timeout auto-denies.
+Every capability call is evaluated by policy. A call that requires a prompt is
+surfaced as a **held-open request** and blocks until the user decides or the
+120 s timeout auto-denies; a standing "always allow" rule proceeds without a
+prompt. For WebSocket, Postgres, and SSH, policy applies to the session-open
+call. Traffic inside an approved live session is not approved individually,
+and a multi-connect ticket may open multiple sessions under that one decision.
 
 ## Conformance
 

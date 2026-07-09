@@ -231,6 +231,30 @@ async fn unimplemented_shell_fails_closed() {
 }
 
 #[tokio::test]
+async fn pairing_revocation_is_immediate_without_confirmation() {
+    let events = Arc::new(GateEvents {
+        allow: false,
+        confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    broker
+        .pairing
+        .pair("claude-code", PeerIdentity::DevUnverified { uid: 501 })
+        .unwrap();
+
+    assert!(broker.ui_revoke_agent("claude-code").unwrap());
+    assert!(broker.paired_agents().is_empty());
+    assert_eq!(events.confirms.load(Ordering::SeqCst), 0);
+    let revoked = broker
+        .audit
+        .recent(10)
+        .into_iter()
+        .find(|entry| entry.kind == agentmfa_core::audit::AuditKind::TokenRevoked)
+        .expect("revocation should be audited");
+    assert_eq!(revoked.confirmation, None);
+}
+
+#[tokio::test]
 async fn non_mutating_allow_needs_no_confirmation() {
     let events = Arc::new(GateEvents {
         allow: false, // would refuse if ever asked

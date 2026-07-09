@@ -621,7 +621,6 @@ impl Broker {
     /// (visible and removable on the Connections tab) and re-disclosed if
     /// the name pairs again (§9).
     pub fn ui_revoke_agent(&self, name: &str) -> Result<bool> {
-        let confirmation = self.confirm_action(&format!("Revoke pairing for “{name}”"))?;
         let removed = self.pairing.revoke(name)?;
         if removed {
             self.audit.append(
@@ -629,8 +628,7 @@ impl Broker {
                     AuditKind::TokenRevoked,
                     format!("Pair token revoked: {name}"),
                 )
-                .agent(name.to_string())
-                .confirmation(confirmation),
+                .agent(name.to_string()),
             );
             self.events.agents_changed();
         }
@@ -643,18 +641,9 @@ impl Broker {
         self.data_plane.sessions()
     }
 
-    /// Close a live session. Ending a session drops the agent's live
-    /// connection, so the core demands the native confirmation first (§8).
+    /// Close a live session immediately. This is a remediation action: ending
+    /// an agent's access must not be delayed by native authentication.
     pub fn ui_close_session(&self, id: u64) -> Result<bool> {
-        let Some(session) = self.sessions().into_iter().find(|s| s.id == id) else {
-            return Ok(false);
-        };
-        self.confirm_action(&format!(
-            "End {} session “{}” for {}",
-            session.kind.as_str(),
-            session.connection,
-            session.agent
-        ))?;
         Ok(self.data_plane.close_session(id))
     }
 
