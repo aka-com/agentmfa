@@ -94,6 +94,13 @@ impl Paths {
         create_private_dir(&self.ssh_agent_dir())?;
         Ok(())
     }
+
+    /// Move the persistent app data directory aside so the next boot starts
+    /// with fresh local state while preserving the old files for inspection or
+    /// manual restore. Runtime sockets/tokens under `socket_dir` are left alone.
+    pub fn archive_data_dir(&self) -> io::Result<PathBuf> {
+        archive_dir_with_suffix(&self.data_dir, "bak")
+    }
 }
 
 /// Render a path with the user's home directory shortened to `~`, the form
@@ -126,4 +133,82 @@ pub(crate) fn write_private_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> 
     tmp.as_file().sync_all()?;
     tmp.persist(path).map_err(|e| e.error)?;
     Ok(())
+}
+
+fn archive_dir_with_suffix(dir: &Path, suffix: &str) -> io::Result<PathBuf> {
+    let parent = dir
+        .parent()
+        .ok_or_else(|| io::Error::other("data directory has no parent"))?;
+    fs::create_dir_all(parent)?;
+
+    if !dir.exists() {
+        return Ok(unique_archive_path(dir, suffix));
+    }
+
+    let archive = unique_archive_path(dir, suffix);
+    fs::rename(dir, &archive)?;
+    Ok(archive)
+}
+
+fn unique_archive_path(dir: &Path, suffix: &str) -> PathBuf {
+    let base_name = dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "agentmfa".into());
+    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+    let base = dir.with_file_name(format!("{base_name}.{suffix}-{stamp}"));
+    if !base.exists() {
+        return base;
+    }
+    for i in 1.. {
+        let candidate = dir.with_file_name(format!("{base_name}.{suffix}-{stamp}-{i}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded archive suffix search")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn archive_data_dir_moves_data_but_not_socket_state() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::under(root.path());
+        paths.ensure().unwrap();
+        fs::write(paths.index_file(), b"index").unwrap();
+        fs::write(paths.rules_file(), b"rules").unwrap();
+        fs::write(paths.agents_file(), b"agents").unwrap();
+        fs::write(paths.audit_file(), b"audit").unwrap();
+        fs::write(paths.tokens_dir().join("agent"), b"token").unwrap();
+
+        let archive = paths.archive_data_dir().unwrap();
+
+        assert!(!paths.data_dir.exists());
+        assert_eq!(fs::read(archive.join("index.json")).unwrap(), b"index");
+        assert_eq!(fs::read(archive.join("rules.json")).unwrap(), b"rules");
+        assert_eq!(fs::read(archive.join("agents.json")).unwrap(), b"agents");
+        assert_eq!(fs::read(archive.join("audit.jsonl")).unwrap(), b"audit");
+        assert_eq!(
+            fs::read(paths.tokens_dir().join("agent")).unwrap(),
+            b"token"
+        );
+    }
+
+    #[test]
+    fn archive_data_dir_chooses_unique_backup_name() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::under(root.path());
+        paths.ensure().unwrap();
+
+        let first = paths.archive_data_dir().unwrap();
+        paths.ensure().unwrap();
+        let second = paths.archive_data_dir().unwrap();
+
+        assert_ne!(first, second);
+        assert!(first.exists());
+        assert!(second.exists());
+    }
 }

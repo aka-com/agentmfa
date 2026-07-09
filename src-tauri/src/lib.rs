@@ -26,12 +26,131 @@ use tauri_plugin_dialog::{DialogExt as _, MessageDialogKind};
 
 use commands::AppState;
 
+enum IntegrityRecoveryDecision {
+    Quit,
+    ArchiveConfirmed,
+    ArchiveUnconfirmed,
+}
+
+#[cfg(target_os = "macos")]
+fn integrity_recovery_dialog(file: &str) -> IntegrityRecoveryDecision {
+    use objc2::{msg_send, rc::autoreleasepool, rc::Retained, ClassType, MainThreadMarker};
+    use objc2_app_kit::{NSAlert, NSAlertSecondButtonReturn, NSAlertStyle, NSControlStateValueOn};
+    use objc2_foundation::NSString;
+
+    autoreleasepool(|_| {
+        let Some(_mtm) = MainThreadMarker::new() else {
+            return IntegrityRecoveryDecision::Quit;
+        };
+        let alert: Retained<NSAlert> = unsafe { msg_send![NSAlert::class(), new] };
+        alert.setAlertStyle(NSAlertStyle::Critical);
+        alert.setMessageText(&NSString::from_str(
+            "Saved state failed its integrity check",
+        ));
+        alert.setInformativeText(&NSString::from_str(&format!(
+            "{file} failed its integrity check and won't be loaded.\n\n\
+             This happens when the file was modified outside AgentMFA, or was \
+             created under a different app identity. You can quit and restore \
+             the file from backup, or archive AgentMFA's local data directory \
+             so the next launch starts with fresh local state. Keychain secret \
+             values are not deleted."
+        )));
+        alert.addButtonWithTitle(&NSString::from_str("Quit"));
+        alert.addButtonWithTitle(&NSString::from_str("Archive Data and Quit"));
+        alert.setShowsSuppressionButton(true);
+        let Some(checkbox) = alert.suppressionButton() else {
+            return IntegrityRecoveryDecision::Quit;
+        };
+        checkbox.setTitle(&NSString::from_str(
+            "I understand AgentMFA will start with fresh local state on next launch.",
+        ));
+
+        let response = alert.runModal();
+        if response != NSAlertSecondButtonReturn {
+            return IntegrityRecoveryDecision::Quit;
+        }
+        if checkbox.state() == NSControlStateValueOn {
+            IntegrityRecoveryDecision::ArchiveConfirmed
+        } else {
+            IntegrityRecoveryDecision::ArchiveUnconfirmed
+        }
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn integrity_recovery_dialog(_file: &str) -> IntegrityRecoveryDecision {
+    IntegrityRecoveryDecision::Quit
+}
+
+fn fatal_integrity_startup(app: &tauri::App, file: &str) -> ! {
+    match integrity_recovery_dialog(file) {
+        IntegrityRecoveryDecision::Quit => {
+            #[cfg(not(target_os = "macos"))]
+            app.dialog()
+                .message(format!(
+                    "{file} failed its integrity check and won't be loaded.\n\n\
+                     Restore the file from a backup, or move AgentMFA's local \
+                     data directory away to start fresh, then relaunch AgentMFA."
+                ))
+                .kind(MessageDialogKind::Error)
+                .title("Saved state failed its integrity check")
+                .blocking_show();
+            std::process::exit(1);
+        }
+        IntegrityRecoveryDecision::ArchiveUnconfirmed => {
+            app.dialog()
+                .message(
+                    "AgentMFA did not archive local data because the confirmation checkbox \
+                     was not selected.",
+                )
+                .kind(MessageDialogKind::Warning)
+                .title("Archive Not Confirmed")
+                .blocking_show();
+            std::process::exit(1);
+        }
+        IntegrityRecoveryDecision::ArchiveConfirmed => {
+            let archived = Paths::default_locations().and_then(|paths| paths.archive_data_dir());
+            match archived {
+                Ok(path) => {
+                    app.dialog()
+                        .message(format!(
+                            "AgentMFA archived its local data to:\n\n{}\n\n\
+                             Relaunch AgentMFA to start with fresh local state. \
+                             Keychain secret values were not deleted.",
+                            path.display()
+                        ))
+                        .kind(MessageDialogKind::Info)
+                        .title("AgentMFA Data Archived")
+                        .blocking_show();
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    app.dialog()
+                        .message(format!(
+                            "AgentMFA could not archive its local data directory: {e}.\n\n\
+                             Nothing was changed. Restore the failed state file from backup, \
+                             or move the data directory away manually, then relaunch AgentMFA."
+                        ))
+                        .kind(MessageDialogKind::Error)
+                        .title("Archive Failed")
+                        .blocking_show();
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+}
+
 /// A startup failure the user can act on is a dialog, not a crash. The
 /// cases are tailored: which file failed, what likely caused it, what to do
 /// next. `StateTampered` in particular is security-relevant (DESIGN.md
 /// §13.1) *and* the expected outcome of an app-identity change — the user
 /// should see it, not find a crash report.
 fn fatal_startup(app: &tauri::App, e: CoreError) -> ! {
+    if let CoreError::StateTampered(file) = &e {
+        fatal_integrity_startup(app, file);
+    }
+
     let (title, kind, message) = match &e {
         // Single-instance only catches duplicate launches of this app; a
         // broker it cannot see (a headless dev broker, a differently-
@@ -40,18 +159,6 @@ fn fatal_startup(app: &tauri::App, e: CoreError) -> ! {
             "AgentMFA is already running",
             MessageDialogKind::Warning,
             format!("{e}.\n\nQuit the other broker, then relaunch AgentMFA."),
-        ),
-        CoreError::StateTampered(file) => (
-            "Saved state failed its integrity check",
-            MessageDialogKind::Error,
-            format!(
-                "{file} failed its integrity check and won't be loaded.\n\n\
-                 This happens when the file was modified outside AgentMFA, \
-                 or was created under a different app identity (for example \
-                 a build signed with a different certificate or bundle \
-                 identifier). Restore the file from a backup, or move it \
-                 away to start fresh, then relaunch AgentMFA."
-            ),
         ),
         CoreError::Vault(_) => (
             "Keychain access failed",
