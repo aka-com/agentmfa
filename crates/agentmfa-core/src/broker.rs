@@ -173,10 +173,28 @@ impl Broker {
         decision: UiDecision,
         ctx: &DecisionContext,
     ) -> Result<Option<ApprovalRequest>> {
+        self.decide_with_pairing_options(id, decision, false, ctx)
+    }
+
+    /// Apply the user's decision, optionally removing inherited standing
+    /// rules before an approved pairing can mint and return its token.
+    pub fn decide_with_pairing_options(
+        &self,
+        id: &Uuid,
+        decision: UiDecision,
+        revoke_inherited_rules: bool,
+        ctx: &DecisionContext,
+    ) -> Result<Option<ApprovalRequest>> {
         let Some(request) = self.approvals.get(id) else {
             return Ok(None);
         };
         let confirmation = self.confirm_decision(&request, decision)?;
+        if revoke_inherited_rules
+            && request.kind == ApprovalKind::Pair
+            && matches!(decision, UiDecision::AllowOnce | UiDecision::AlwaysAllow)
+        {
+            self.remove_rules_for_agent_before_pairing(&request.agent, Some(ctx), confirmation)?;
+        }
         self.apply_decision(id, decision, ctx, confirmation)
     }
 
@@ -560,20 +578,34 @@ impl Broker {
     }
 
     pub fn ui_remove_rules_for_agent(&self, agent: &str) -> Result<usize> {
+        self.remove_rules_for_agent_before_pairing(agent, None, None)
+    }
+
+    fn remove_rules_for_agent_before_pairing(
+        &self,
+        agent: &str,
+        ctx: Option<&DecisionContext>,
+        confirmation: Option<ConfirmationMethod>,
+    ) -> Result<usize> {
         let removed = self.policy.remove_rules_for_agent(agent)?;
         if removed > 0 {
-            self.audit.append(
-                AuditEntry::new(
-                    AuditKind::RuleRemoved,
-                    format!("Auto-allow permissions revoked: {agent}"),
-                )
-                .agent(agent.to_string())
-                .detail(format!(
-                    "{removed} standing rule{} removed before pairing",
-                    if removed == 1 { "" } else { "s" }
-                ))
-                .field("rules_removed", removed),
-            );
+            let mut entry = AuditEntry::new(
+                AuditKind::RuleRemoved,
+                format!("Auto-allow permissions revoked: {agent}"),
+            )
+            .agent(agent.to_string())
+            .detail(format!(
+                "{removed} standing rule{} removed before pairing",
+                if removed == 1 { "" } else { "s" }
+            ))
+            .field("rules_removed", removed);
+            if let Some(ctx) = ctx {
+                entry = entry.context(ctx);
+            }
+            if let Some(confirmation) = confirmation {
+                entry = entry.confirmation(confirmation);
+            }
+            self.audit.append(entry);
             self.events.rules_changed();
         }
         Ok(removed)

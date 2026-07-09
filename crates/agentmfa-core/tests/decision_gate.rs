@@ -16,9 +16,11 @@ use agentmfa_core::config::BrokerConfig;
 use agentmfa_core::error::CoreError;
 use agentmfa_core::events::BrokerEvents;
 use agentmfa_core::paths::Paths;
+use agentmfa_core::policy::PolicyEngine;
 use agentmfa_core::store::ConnectionSpec;
 use agentmfa_core::types::{
     ConfirmationMethod, Connection, ConnectionConfig, DecisionContext, DecisionSurface,
+    PeerIdentity,
 };
 use agentmfa_core::vault::MemoryVault;
 use chrono::Utc;
@@ -122,6 +124,23 @@ fn http_request(conn: &Connection, mutating: bool) -> ApprovalRequest {
     }
 }
 
+fn pair_request(agent: &str, inherited: Vec<ConnectionSummary>) -> ApprovalRequest {
+    let now = Utc::now();
+    ApprovalRequest {
+        id: Uuid::new_v4(),
+        agent: agent.into(),
+        kind: ApprovalKind::Pair,
+        connection: None,
+        action: format!("Pair new agent \"{agent}\" with AgentMFA"),
+        notification: String::new(),
+        received_at: now,
+        deadline: now,
+        identity: Some(PeerIdentity::DevUnverified { uid: 501 }.display()),
+        inherited,
+        http: None,
+    }
+}
+
 fn park(broker: &Broker, request: ApprovalRequest) -> Parked {
     broker
         .approvals
@@ -136,6 +155,23 @@ fn park(broker: &Broker, request: ApprovalRequest) -> Parked {
                     body: serde_json::json!({"ok": true}),
                 }
             }),
+        })
+        .unwrap()
+}
+
+fn park_with_executor(
+    broker: &Broker,
+    request: ApprovalRequest,
+    executor: agentmfa_core::approvals::Executor,
+) -> Parked {
+    broker
+        .approvals
+        .park(ParkRequest {
+            request,
+            coalesce_key: None,
+            payload_hash: None,
+            retain_outcome: true,
+            executor,
         })
         .unwrap()
 }
@@ -334,4 +370,55 @@ async fn sensitive_settings_record_confirmation() {
         })
         .count();
     assert_eq!(confirmed_settings, 3, "{recent:?}");
+}
+
+#[tokio::test]
+async fn inherited_rules_are_removed_before_pairing_executes() {
+    let events = Arc::new(GateEvents {
+        allow: true,
+        confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    let conn = add_github(&broker);
+    broker
+        .policy
+        .record_rule("claude-code", conn.id)
+        .unwrap();
+    assert_eq!(broker.rules().len(), 1);
+
+    let request = pair_request("claude-code", broker.inherited_for("claude-code"));
+    let id = request.id;
+    let broker_for_executor = broker.clone();
+    let parked = park_with_executor(
+        &broker,
+        request,
+        Box::pin(async move {
+            ExecOutcome {
+                status: 200,
+                body: serde_json::json!({
+                    "rules_at_execution": broker_for_executor.rules().len(),
+                }),
+            }
+        }),
+    );
+
+    broker
+        .decide_with_pairing_options(&id, UiDecision::AllowOnce, true, &ctx())
+        .unwrap()
+        .expect("pending");
+
+    let Parked::Wait(handle) = parked else { panic!() };
+    let outcome = handle.wait().await.unwrap();
+    assert_eq!(outcome.status, 200);
+    assert_eq!(outcome.body["rules_at_execution"], 0);
+    assert_eq!(broker.rules().len(), 0);
+    assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
+
+    let recent = broker.audit.recent(10);
+    let removed = recent
+        .iter()
+        .find(|entry| entry.kind == agentmfa_core::audit::AuditKind::RuleRemoved)
+        .expect("rule removal audit entry");
+    assert_eq!(removed.confirmation, Some(ConfirmationMethod::Waived));
+    assert_eq!(removed.surface, Some(DecisionSurface::Harness));
 }

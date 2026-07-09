@@ -403,7 +403,6 @@ pub fn decide(
     decision: DecisionInput,
     revoke_inherited_rules: Option<bool>,
 ) -> CmdResult<()> {
-    use agentmfa_core::approvals::ApprovalKind;
     let broker = &state.broker;
     let id = parse_id(&id)?;
     let ui_decision = match decision {
@@ -412,15 +411,15 @@ pub fn decide(
         DecisionInput::AlwaysAllow => UiDecision::AlwaysAllow,
     };
     let ctx = DecisionContext::local(DecisionSurface::AppWindow);
-    let decided = broker
-        .decide(&id, ui_decision, &ctx)
+    broker
+        .decide_with_pairing_options(
+            &id,
+            ui_decision,
+            revoke_inherited_rules.unwrap_or(false),
+            &ctx,
+        )
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "no such pending request".to_string())?;
-    if revoke_inherited_rules.unwrap_or(false) && decided.kind == ApprovalKind::Pair {
-        broker
-            .ui_remove_rules_for_agent(&decided.agent)
-            .map_err(|e| e.to_string())?;
-    }
     Ok(())
 }
 
