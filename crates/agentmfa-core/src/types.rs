@@ -354,8 +354,8 @@ impl DecisionContext {
 pub struct Settings {
     /// "Sync secrets via iCloud Keychain", default on.
     pub icloud_sync: bool,
-    /// "Require Touch ID to read secrets", default on. The macOS app
-    /// gates each broker-side vault read with LocalAuthentication.
+    /// "Require OS authentication to read secrets", default on. The macOS
+    /// app gates each broker-side vault read with LocalAuthentication.
     pub reauth_on_read: bool,
     /// "Hide secret prefixes", default on. When on, the secrets list offers
     /// no reveal-prefix affordance; values stay copy-only.

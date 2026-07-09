@@ -227,7 +227,7 @@ pub struct SettingsDto {
 
 /// The queued approval, as the approval window renders it. Serialized via
 /// serde on `ApprovalRequest` directly, but we add the `high_consequence`
-/// hint the UI uses to label the Touch-ID-gated buttons.
+/// hint the UI uses to label the native-authentication-gated buttons.
 #[derive(Serialize, Clone)]
 pub struct ApprovalDto {
     #[serde(flatten)]

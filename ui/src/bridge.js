@@ -2,7 +2,7 @@
 // commands over the IPC. In a plain browser, a self-contained dev mock
 // stands in so the UI is developable and reviewable standalone; the mock
 // mirrors the command surface and the DESIGN.md fixtures, but obviously
-// enforces nothing (no Keychain, no daemon, no Touch ID).
+// enforces nothing (no Keychain, no daemon, no native OS authentication).
 
 const tauri = typeof window !== 'undefined' ? window.__TAURI__ : undefined;
 

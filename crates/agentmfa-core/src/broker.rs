@@ -710,13 +710,13 @@ impl Broker {
         let confirmation = if on {
             None
         } else {
-            Some(self.confirm_action("Disable Touch ID requirement for reading secrets")?)
+            Some(self.confirm_action("Disable OS authentication requirement for reading secrets")?)
         };
         self.store.set_reauth_on_read(on)?;
         let mut entry = AuditEntry::new(
             AuditKind::SettingsChanged,
             format!(
-                "Touch ID requirement {}",
+                "OS authentication requirement {}",
                 if on { "enabled" } else { "disabled" }
             ),
         );

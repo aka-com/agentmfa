@@ -1546,7 +1546,7 @@ function settingsSheetHTML() {
         ? 'a synchronizable item that rides iCloud Keychain to your other Macs.'
         : 'a this-device-only item. iCloud propagates the deletion, so the synced copies are removed from your other Macs — after this, the secrets exist only on this Mac.');
     var extra = dropsReauth
-      ? ' Synced items can’t carry a per-item Touch ID rule, so the Touch ID re-auth requirement is removed and secrets are downgraded to “accessible when unlocked”.'
+      ? ' Synced items can’t carry a per-item OS authentication rule, so the re-authentication requirement is removed and secrets are downgraded to “accessible when unlocked”.'
       : '';
     confirm = '<div class="sync-confirm"><span class="sc-head">' + (dropsReauth ? '⚠ ' : '') + head + '</span>' +
       body + extra +
@@ -1559,9 +1559,9 @@ function settingsSheetHTML() {
   var reauthRow = '';
   if (!s.sync) {
     reauthRow = '<div class="set-row"><div class="set-txt">' +
-      '<div class="st-title">Require Touch ID to read secrets</div>' +
+      '<div class="st-title">Require OS authentication to read secrets</div>' +
       '<div class="st-sub">Re-authenticate each time a secret value is about to be used. Only available while iCloud sync is off.</div></div>' +
-      '<button class="switch' + (s.reauth ? ' on' : '') + '" role="switch" aria-checked="' + s.reauth + '" title="Require Touch ID to read secrets" data-act="toggle-reauth"></button></div>';
+      '<button class="switch' + (s.reauth ? ' on' : '') + '" role="switch" aria-checked="' + s.reauth + '" title="Require OS authentication to read secrets" data-act="toggle-reauth"></button></div>';
   }
   var pgTls = '<details class="set-collapse"' + (caPath ? ' open' : '') + '>' +
     '<summary>Postgres TLS</summary>' +
@@ -1830,9 +1830,9 @@ function renderApp() {
   var osp = document.getElementById('os-prompt');
   if (store.osPrompt) {
     osp.innerHTML = '<div class="osp-card"><div class="osp-ico">👆</div>' +
-      '<div class="osp-title">Touch ID</div>' +
+      '<div class="osp-title">System Authentication</div>' +
       '<div class="osp-body">AgentMFA: ' + esc(store.osPrompt.reason) + '</div>' +
-      '<button class="btn primary block" data-act="os-confirm">Use Touch ID</button>' +
+      '<button class="btn primary block" data-act="os-confirm">Authenticate</button>' +
       '<button class="btn ghost sm" data-act="os-cancel">Cancel</button>' +
       '<div class="osp-note">Native macOS confirmation, owned by the Rust core — falls back to the account password.</div>' +
       '</div>';
@@ -1980,7 +1980,7 @@ function fmtRemaining(ms) {
 function timeoutDeny(req) {
   store.queue = store.queue.filter(function (r) { return r !== req; });
   if (store.notifFor === req) store.notifFor = null;
-  // a Touch ID sheet raised for this request is void once it auto-denies
+  // an OS authentication sheet raised for this request is void once it auto-denies
   if (store.osPrompt && store.osPrompt.req === req) store.osPrompt = null;
   if (!store.queue.length) { store.approvalOpen = false; store.alwaysOpen = false; }
   store.reqDetailOpen = null;
@@ -2307,13 +2307,13 @@ function startWsFrames() {
 }
 
 // ③ a mutating call — the approval window auto-expands the payload for it
-// (A + B) and completes only via Touch ID
+// (A + B) and completes only via OS authentication
 function buildDeploy() {
   var body = { event_type: 'deploy', client_payload: { ref: 'main', environment: 'production' } };
   var headers = { Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' };
   return [
     function () {
-      termClaude('A production deploy is a write, so AgentMFA will show you the exact request body and ask for Touch ID before it signs and sends it. I’m including a request_id so a retried call can’t double-fire the deploy.');
+      termClaude('A production deploy is a write, so AgentMFA will show you the exact request body and ask for OS authentication before it signs and sends it. I’m including a request_id so a retried call can’t double-fire the deploy.');
     },
     function () {
       termTool(CURL + ' -H "Authorization: Bearer $AGENTMFA_TOKEN" http://localhost/v1/http -d \'{"connection":"github","method":"POST","path":"/repos/aka/aka/dispatches","request_id":"req_5d2f8a1c4b9e","body":{"event_type":"deploy","client_payload":{"ref":"main","environment":"production"}}}\'');
@@ -2469,7 +2469,7 @@ function resetAgent() {
     store.reqDetailOpen = null;
     store.notifFor = null;
   }
-  store.osPrompt = null;                           // a pending Touch ID sheet dies with its request
+  store.osPrompt = null;                           // a pending OS authentication sheet dies with its request
   renderAll();
 }
 
@@ -3099,8 +3099,8 @@ document.addEventListener('click', function (e) {
         store.settings.reauth = false;
         store.settings.sync = true;
         audit('💳', 'iCloud Keychain sync turned on',
-          (droppedReauth ? 'Touch ID requirement removed · migrated ' : 'Migrated ') + store.secrets.length + ' secrets');
-        toast(droppedReauth ? '💳 Sync on — Touch ID requirement removed' : '💳 Sync on — secrets will appear on your other Macs');
+          (droppedReauth ? 'OS authentication requirement removed · migrated ' : 'Migrated ') + store.secrets.length + ' secrets');
+        toast(droppedReauth ? '💳 Sync on — OS authentication requirement removed' : '💳 Sync on — secrets will appear on your other Macs');
       }
       store.syncConfirm = false;
       renderApp();
@@ -3112,9 +3112,9 @@ document.addEventListener('click', function (e) {
     case 'toggle-reauth':
       store.settings.reauth = !store.settings.reauth;
       audit('💳', store.settings.reauth
-        ? 'Touch ID requirement enabled'
-        : 'Touch ID requirement disabled');
-      toast(store.settings.reauth ? '💳 Touch ID required to read secrets' : '💳 Touch ID requirement removed');
+        ? 'OS authentication requirement enabled'
+        : 'OS authentication requirement disabled');
+      toast(store.settings.reauth ? '💳 OS authentication required to read secrets' : '💳 OS authentication requirement removed');
       renderApp();
       break;
     case 'save-pg-ca-bundle':
@@ -3198,7 +3198,7 @@ document.addEventListener('click', function (e) {
     }
     case 'os-cancel':
       store.osPrompt = null;
-      toast('🔒 Touch ID canceled — nothing changed');
+      toast('🔒 OS authentication canceled — nothing changed');
       renderApp();
       break;
     case 'close-session':
@@ -3240,7 +3240,7 @@ document.addEventListener('keydown', function (e) {
     if (store.settingsMenuOpen) {
       store.settingsMenuOpen = false; renderApp();
     } else if (store.osPrompt) {
-      store.osPrompt = null; toast('🔒 Touch ID canceled — nothing changed'); renderApp();
+      store.osPrompt = null; toast('🔒 OS authentication canceled — nothing changed'); renderApp();
     } else if (store.settingsOpen) {
       store.settingsOpen = false; store.syncConfirm = false; renderApp();
     } else if (store.addSecretOpen) {

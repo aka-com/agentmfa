@@ -416,7 +416,7 @@ function connSheet(editing) {
   }
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
     <div class="sheet wide"><h3>${editing ? 'Edit connection' : 'Add connection'}</h3>${fields}
-    <div class="sheet-actions"><span class="keychain-note">👆 Confirmed with Touch ID</span>
+    <div class="sheet-actions"><span class="keychain-note">Security-sensitive changes use OS authentication</span>
       <button class="btn" data-act="sheet-cancel">Cancel</button>
       <button class="btn primary" data-act="save-conn">Save</button></div></div>`;
 }
@@ -436,8 +436,8 @@ function settingsSheet() {
         <button class="btn sm" data-act="sync-confirm-no">Cancel</button>
         <button class="btn sm primary" data-act="sync-confirm-yes">${on ? 'Turn on sync' : 'Turn off sync'}</button></div></div>`;
   }
-  const reauthRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Require Touch ID to read secrets</div>
-      <div class="st-sub">Re-authenticate before reveal, copy, or agent credential injection.</div></div>
+  const reauthRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Require OS authentication to read secrets</div>
+      <div class="st-sub">Authenticate before reveal, copy, or agent credential injection.</div></div>
       <button class="switch ${s.reauth_on_read ? 'on' : ''}" data-act="toggle-reauth" role="checkbox" aria-checked="${s.reauth_on_read ? 'true' : 'false'}"></button></div>`;
   const prefixRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Hide secret prefixes</div>
       <div class="st-sub">Remove the reveal-prefix eye from the secrets list; values stay copy-only.</div></div>
@@ -506,7 +506,7 @@ function renderApproval() {
     const box = state.alwaysOpen
       ? `<div class="always-box"><div class="f-row"><label>Auto-allow rule <span class="stub-badge">policy engine v1 stub</span></label>
         <div class="rule-line"><code>${esc(req.agent)}</code> → <code>${esc(req.connection ? req.connection.name : '')}</code></div>
-        <div class="rule-note">Future requests on this connection are approved automatically. Remove it anytime from the Connections tab. Saving requires Touch ID.</div></div>
+        <div class="rule-note">Future requests on this connection are approved automatically. Remove it anytime from the Connections tab. Saving requires OS authentication.</div></div>
         <button class="btn primary sm" data-act="always-save">Save rule &amp; allow</button></div>` : '';
     always = { btn: `<button class="btn ghost sm" data-act="always-toggle">Always allow…</button>`, box };
   }
@@ -857,7 +857,7 @@ document.addEventListener('click', async (e) => {
       {
         const on = !state.settings.reauth_on_read;
         await run(() => invoke('set_reauth_on_read', { on }));
-        toast(on ? '💳 Touch ID required to read secrets' : '💳 Touch ID requirement removed');
+        toast(on ? '💳 OS authentication required to read secrets' : '💳 OS authentication requirement removed');
       }
       await refresh('settings');
       break;
@@ -923,7 +923,7 @@ async function decide(id, decision) {
     state.reqDetailOpen = null;
     state.revokeInheritedRules = false;
   } catch (e) {
-    // Touch ID cancelled or failed: keep the request pending, tell the user.
+    // OS authentication cancelled or failed: keep the request pending.
     toast('🔒 ' + (e.message || e));
   }
   await refresh('queue');
