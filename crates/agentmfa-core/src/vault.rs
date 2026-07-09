@@ -12,10 +12,11 @@
 //! - `MemoryVault`: tests.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -85,8 +86,12 @@ pub trait SecretVault: Send + Sync {
 
 /* ------------------------------- macOS ---------------------------------- */
 
+const MAC_KEYCHAIN_SERVICE: &str = "com.aka.desktop";
+
 /// The macOS Keychain backend (service `com.aka.desktop`, account = the
-/// secret's UUID), via the `keyring` crate.
+/// secret's UUID), via the `keyring` crate. Dev roots use a root-scoped service
+/// so `agentmfa serve --root ...` cannot create or rotate production vault
+/// state.
 ///
 /// Documented divergence from DESIGN.md §3: the `keyring` crate's
 /// apple-native backend targets the file-based login keychain and does not
@@ -105,13 +110,21 @@ pub struct MacKeychainVault {
 
 #[cfg(target_os = "macos")]
 impl MacKeychainVault {
-    pub const SERVICE: &'static str = "com.aka.desktop";
+    pub const SERVICE: &'static str = MAC_KEYCHAIN_SERVICE;
 
     pub fn new() -> Self {
+        Self::with_service(Self::SERVICE)
+    }
+
+    pub fn with_service(service: impl Into<String>) -> Self {
         Self {
-            service: Self::SERVICE.to_string(),
+            service: service.into(),
             attrs: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn for_dev_root(root: &Path) -> Result<Self, CoreError> {
+        Ok(Self::with_service(dev_root_vault_service(root)?))
     }
 
     fn entry(&self, id: &Uuid) -> Result<keyring::Entry, CoreError> {
@@ -318,6 +331,34 @@ impl SecretVault for MemoryVault {
     }
 }
 
+/// Stable macOS Keychain service for a CLI dev root. This is public so callers
+/// and diagnostics can name the scope without constructing a Keychain backend.
+pub fn dev_root_vault_service(root: &Path) -> Result<String, CoreError> {
+    let root = vault_scope_root(root)?;
+    let digest = Sha256::digest(root.to_string_lossy().as_bytes());
+    Ok(format!(
+        "{MAC_KEYCHAIN_SERVICE}.dev.{}",
+        encode_hex(&digest)
+    ))
+}
+
+fn vault_scope_root(root: &Path) -> Result<PathBuf, CoreError> {
+    let absolute = if root.is_absolute() {
+        root.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(root)
+    };
+    match absolute.canonicalize() {
+        Ok(path) => Ok(path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(absolute),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// The platform-default vault: Keychain on macOS, the dev file vault
 /// elsewhere.
 pub fn platform_vault(
@@ -333,5 +374,52 @@ pub fn platform_vault(
         Ok(std::sync::Arc::new(FileVault::open(
             paths.dev_vault_file(),
         )?))
+    }
+}
+
+/// The platform vault for an explicit CLI/dev root. On macOS this scopes the
+/// Keychain service to `root`, while non-macOS builds already scope through the
+/// root-local `dev-vault.json` path.
+pub fn platform_vault_for_root(
+    paths: &crate::paths::Paths,
+    root: &Path,
+) -> Result<std::sync::Arc<dyn SecretVault>, CoreError> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = paths;
+        Ok(std::sync::Arc::new(MacKeychainVault::for_dev_root(root)?))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = root;
+        Ok(std::sync::Arc::new(FileVault::open(
+            paths.dev_vault_file(),
+        )?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dev_root_service_is_stable_and_not_production() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = dev_root_vault_service(dir.path()).unwrap();
+
+        assert_ne!(service, MAC_KEYCHAIN_SERVICE);
+        assert!(service.starts_with("com.aka.desktop.dev."));
+        assert_eq!(service, dev_root_vault_service(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn dev_root_service_separates_roots() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+
+        assert_ne!(
+            dev_root_vault_service(a.path()).unwrap(),
+            dev_root_vault_service(b.path()).unwrap()
+        );
     }
 }

@@ -12,7 +12,7 @@
 //!   `serve --root` harness never hand-writes (sealed) store files.
 
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agentmfa_core::approvals::{ApprovalKind, ApprovalRequest};
@@ -27,7 +27,7 @@ use agentmfa_core::types::{
     ConfirmationMethod, ConnectionConfig, DecisionContext, DecisionSurface, PgSslMode, SecretMeta,
     SecretValue,
 };
-use agentmfa_core::vault::platform_vault;
+use agentmfa_core::vault::{platform_vault, platform_vault_for_root, SecretVault};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use zeroize::Zeroizing;
 
@@ -210,15 +210,29 @@ fn die(message: impl std::fmt::Display) -> ! {
     std::process::exit(1);
 }
 
+fn store_paths(root: Option<&Path>) -> Paths {
+    match root {
+        Some(root) => Paths::under(root),
+        None => Paths::default_locations().expect("default paths"),
+    }
+}
+
+fn open_vault(
+    paths: &Paths,
+    root: Option<&Path>,
+) -> Result<Arc<dyn SecretVault>, agentmfa_core::error::CoreError> {
+    match root {
+        Some(root) => platform_vault_for_root(paths, root),
+        None => platform_vault(paths),
+    }
+}
+
 /// Open the store for offline edits (`secret add`, `conn add`): the same
 /// files a broker on this root serves, so a live broker — which holds the
 /// store in memory and would overwrite the edit on its next persist — is
 /// refused up front.
 fn open_store(root: Option<PathBuf>) -> Store {
-    let paths = match root {
-        Some(root) => Paths::under(&root),
-        None => Paths::default_locations().expect("default paths"),
-    };
+    let paths = store_paths(root.as_deref());
     let socket = paths.socket_file();
     if socket.exists() && std::os::unix::net::UnixStream::connect(&socket).is_ok() {
         die(format!(
@@ -227,7 +241,7 @@ fn open_store(root: Option<PathBuf>) -> Store {
             socket.display()
         ));
     }
-    let vault = match platform_vault(&paths) {
+    let vault = match open_vault(&paths, root.as_deref()) {
         Ok(vault) => vault,
         Err(e) => die(format!("could not open the secret vault: {e}")),
     };
@@ -528,11 +542,8 @@ fn cmd_serve(root: Option<PathBuf>, auto_yes: bool) {
         eprintln!("error: {what}: {e}");
         std::process::exit(1);
     };
-    let paths = match root {
-        Some(root) => Paths::under(&root),
-        None => Paths::default_locations().expect("default paths"),
-    };
-    let vault = match platform_vault(&paths) {
+    let paths = store_paths(root.as_deref());
+    let vault = match open_vault(&paths, root.as_deref()) {
         Ok(vault) => vault,
         Err(e) => fail("could not open the secret vault", &e),
     };
