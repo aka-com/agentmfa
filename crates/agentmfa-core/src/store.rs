@@ -33,7 +33,7 @@ use crate::vault::{SecretVault, VaultAttrs};
 use crate::Result;
 
 /// Everything `index.json` holds.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct IndexState {
     #[serde(default)]
     secrets: Vec<SecretMeta>,
@@ -107,6 +107,12 @@ impl Store {
         Ok(())
     }
 
+    fn commit(&self, state: &mut IndexState, next: IndexState) -> Result<()> {
+        self.persist(&next)?;
+        *state = next;
+        Ok(())
+    }
+
     /* ------------------------------ secrets ------------------------------ */
 
     pub fn list_secrets(&self) -> Vec<SecretMeta> {
@@ -162,8 +168,15 @@ impl Store {
             &value,
         )?;
         drop(value); // late fetch, early drop, the plaintext came in exactly once
-        state.secrets.push(meta.clone());
-        self.persist(&state)?;
+        let mut next = state.clone();
+        next.secrets.push(meta.clone());
+        if let Err(error) = self.persist(&next) {
+            if let Err(rollback) = self.vault.delete(&meta.id) {
+                tracing::error!("failed to roll back vault item {}: {rollback}", meta.id);
+            }
+            return Err(error);
+        }
+        *state = next;
         Ok(meta)
     }
 
@@ -191,10 +204,11 @@ impl Store {
         if state.secrets.iter().any(|s| s.name == new_name) {
             return Err(CoreError::SecretNameTaken(new_name.to_string()));
         }
-        // Rewrite templates in a working copy first; nothing is persisted
+        // Rewrite templates in a working copy first; nothing is committed
         // until every rewrite has parsed and applied cleanly.
+        let mut next = state.clone();
         let mut rewritten = 0usize;
-        for conn in state.connections.iter_mut() {
+        for conn in next.connections.iter_mut() {
             let template = match &mut conn.config {
                 ConnectionConfig::Api { template, .. } => Some(template),
                 ConnectionConfig::Ws { template, .. } => template.as_mut(),
@@ -211,23 +225,29 @@ impl Store {
         }
         let now = Utc::now();
         let (meta, created_at) = {
-            let secret = state.secrets.iter_mut().find(|s| &s.id == id).unwrap();
+            let secret = next.secrets.iter_mut().find(|s| &s.id == id).unwrap();
             secret.name = new_name.to_string();
             secret.updated_at = now;
             (secret.clone(), secret.created_at)
         };
+        self.persist(&next)?;
         // Keep the Keychain label in sync so synced items stay
         // self-describing on another Mac (§3).
         let sync = state.settings().icloud_sync;
-        self.vault.set_attrs(
+        if let Err(error) = self.vault.set_attrs(
             id,
             &VaultAttrs {
                 name: new_name.to_string(),
                 created_at,
                 sync,
             },
-        )?;
-        self.persist(&state)?;
+        ) {
+            if let Err(rollback) = self.persist(&state) {
+                tracing::error!("failed to roll back index after vault error: {rollback}");
+            }
+            return Err(error);
+        }
+        *state = next;
         Ok((meta, rewritten))
     }
 
@@ -235,23 +255,30 @@ impl Store {
     pub fn replace_secret_value(&self, id: &Uuid, value: SecretValue) -> Result<SecretMeta> {
         let mut state = self.state.lock().unwrap();
         let sync = state.settings().icloud_sync;
-        let secret = state
+        let mut next = state.clone();
+        let secret = next
             .secrets
             .iter_mut()
             .find(|s| &s.id == id)
             .ok_or(CoreError::SecretNotFound)?;
-        self.vault.set(
+        secret.updated_at = Utc::now();
+        let meta = secret.clone();
+        self.persist(&next)?;
+        if let Err(error) = self.vault.set(
             id,
             &VaultAttrs {
-                name: secret.name.clone(),
-                created_at: secret.created_at,
+                name: meta.name.clone(),
+                created_at: meta.created_at,
                 sync,
             },
             &value,
-        )?;
-        secret.updated_at = Utc::now();
-        let meta = secret.clone();
-        self.persist(&state)?;
+        ) {
+            if let Err(rollback) = self.persist(&state) {
+                tracing::error!("failed to roll back index after vault error: {rollback}");
+            }
+            return Err(error);
+        }
+        *state = next;
         Ok(meta)
     }
 
@@ -272,9 +299,16 @@ impl Store {
         if !users.is_empty() {
             return Err(CoreError::SecretInUse(users));
         }
-        self.vault.delete(id)?;
-        let meta = state.secrets.remove(pos);
-        self.persist(&state)?;
+        let mut next = state.clone();
+        let meta = next.secrets.remove(pos);
+        self.persist(&next)?;
+        if let Err(error) = self.vault.delete(id) {
+            if let Err(rollback) = self.persist(&state) {
+                tracing::error!("failed to roll back index after vault error: {rollback}");
+            }
+            return Err(error);
+        }
+        *state = next;
         Ok(meta)
     }
 
@@ -418,8 +452,9 @@ impl Store {
             created_at: now,
             updated_at: now,
         };
-        state.connections.push(conn.clone());
-        self.persist(&state)?;
+        let mut next = state.clone();
+        next.connections.push(conn.clone());
+        self.commit(&mut state, next)?;
         Ok(conn)
     }
 
@@ -447,7 +482,8 @@ impl Store {
         }
         let old_target = existing.target();
         let secrets = validate_config_and_bind_secrets(&state, &spec)?;
-        let conn = state
+        let mut next = state.clone();
+        let conn = next
             .connections
             .iter_mut()
             .find(|c| &c.id == id)
@@ -459,7 +495,7 @@ impl Store {
         conn.updated_at = Utc::now();
         let updated = conn.clone();
         let target_changed = updated.target() != old_target;
-        self.persist(&state)?;
+        self.commit(&mut state, next)?;
         Ok((updated, target_changed))
     }
 
@@ -472,8 +508,9 @@ impl Store {
             .iter()
             .position(|c| &c.id == id)
             .ok_or(CoreError::ConnectionNotFound)?;
-        let conn = state.connections.remove(pos);
-        self.persist(&state)?;
+        let mut next = state.clone();
+        let conn = next.connections.remove(pos);
+        self.commit(&mut state, next)?;
         Ok(conn)
     }
 
@@ -527,39 +564,58 @@ impl Store {
                 }
             }
         }
-        let mut state = self.state.lock().unwrap();
-        let mut settings = state.settings();
-        settings.icloud_sync = on;
-        state.settings = Some(settings);
-        self.persist(&state)?;
-        Ok(metas.len())
+        let error = {
+            let mut state = self.state.lock().unwrap();
+            let mut settings = state.settings();
+            settings.icloud_sync = on;
+            let mut next = state.clone();
+            next.settings = Some(settings);
+            match self.persist(&next) {
+                Ok(()) => {
+                    *state = next;
+                    return Ok(metas.len());
+                }
+                Err(error) => error,
+            }
+        };
+        for meta in &metas {
+            let old = VaultAttrs {
+                name: meta.name.clone(),
+                created_at: meta.created_at,
+                sync: !on,
+            };
+            if let Err(rollback) = self.vault.migrate_sync(&meta.id, &old).await {
+                tracing::error!("icloud sync rollback failed for {}: {rollback}", meta.id);
+            }
+        }
+        Err(error)
     }
 
     pub fn set_reauth_on_read(&self, on: bool) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         let mut settings = state.settings();
         settings.reauth_on_read = on;
-        state.settings = Some(settings);
-        self.persist(&state)?;
-        Ok(())
+        let mut next = state.clone();
+        next.settings = Some(settings);
+        self.commit(&mut state, next)
     }
 
     pub fn set_hide_secret_prefixes(&self, on: bool) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         let mut settings = state.settings();
         settings.hide_secret_prefixes = on;
-        state.settings = Some(settings);
-        self.persist(&state)?;
-        Ok(())
+        let mut next = state.clone();
+        next.settings = Some(settings);
+        self.commit(&mut state, next)
     }
 
     pub fn set_menu_bar_hides_dock(&self, on: bool) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         let mut settings = state.settings();
         settings.menu_bar_hides_dock = on;
-        state.settings = Some(settings);
-        self.persist(&state)?;
-        Ok(())
+        let mut next = state.clone();
+        next.settings = Some(settings);
+        self.commit(&mut state, next)
     }
 
     pub fn set_pg_trusted_ca_bundle_path(&self, path: Option<String>) -> Result<()> {
@@ -574,9 +630,9 @@ impl Store {
         let mut state = self.state.lock().unwrap();
         let mut settings = state.settings();
         settings.pg_trusted_ca_bundle_path = path;
-        state.settings = Some(settings);
-        self.persist(&state)?;
-        Ok(())
+        let mut next = state.clone();
+        next.settings = Some(settings);
+        self.commit(&mut state, next)
     }
 }
 
@@ -1286,6 +1342,66 @@ mod tests {
         assert_eq!(vault.sync_flag(&a.id), Some(false));
         assert_eq!(vault.sync_flag(&b.id), Some(false));
         assert_eq!(vault.sync_flag(&c.id), Some(false));
+    }
+
+    #[tokio::test]
+    async fn failed_index_writes_do_not_change_active_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        let vault = Arc::new(MemoryVault::new());
+        let store = Store::open(paths.clone(), vault.clone()).await.unwrap();
+        store.add_secret("A_KEY", val("a")).unwrap();
+        let spare = store.add_secret("B_KEY", val("b")).unwrap();
+        let connection = store
+            .add_connection(api_spec(
+                "github",
+                "api.github.com",
+                "Authorization: Bearer {{A_KEY}}",
+            ))
+            .unwrap();
+        let index = paths.index_file();
+        std::fs::remove_file(&index).unwrap();
+        std::fs::create_dir(&index).unwrap();
+
+        let vault_items = vault.len();
+        assert!(store.add_secret("C_KEY", val("c")).is_err());
+        assert!(store.secret_by_name("C_KEY").is_none());
+        assert_eq!(vault.len(), vault_items);
+
+        assert!(store.rename_secret(&spare.id, "RENAMED_KEY").is_err());
+        assert_eq!(store.secret_by_id(&spare.id).unwrap().name, "B_KEY");
+
+        assert!(store.replace_secret_value(&spare.id, val("new")).is_err());
+        assert_eq!(&*store.secret_value(&spare.id).await.unwrap(), "b");
+
+        assert!(store
+            .update_connection(
+                &connection.id,
+                api_spec(
+                    "renamed",
+                    "other.example.com",
+                    "Authorization: Bearer {{A_KEY}}",
+                ),
+            )
+            .is_err());
+        assert_eq!(
+            store.connection_by_id(&connection.id).unwrap().name,
+            "github"
+        );
+
+        assert!(store.delete_connection(&connection.id).is_err());
+        assert!(store.connection_by_id(&connection.id).is_ok());
+
+        assert!(store.set_hide_secret_prefixes(false).is_err());
+        assert!(store.settings().hide_secret_prefixes);
+
+        assert!(store.set_icloud_sync(false).await.is_err());
+        assert!(store.settings().icloud_sync);
+        assert_eq!(vault.sync_flag(&spare.id), Some(true));
+
+        assert!(store.delete_secret(&spare.id).is_err());
+        assert!(store.secret_by_id(&spare.id).is_ok());
+        assert_eq!(&*store.secret_value(&spare.id).await.unwrap(), "b");
     }
 
     #[tokio::test]

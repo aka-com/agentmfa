@@ -126,18 +126,23 @@ impl PairingRegistry {
             last_used: now,
         };
         let mut agents = self.agents.lock().unwrap();
-        {
-            let mut superseded = self.superseded.lock().unwrap();
-            if superseded.len() > 1024 {
-                superseded.clear();
-            }
-            for old in agents.iter().filter(|a| a.name == name) {
-                superseded.insert(old.token_hash.clone(), name.to_string());
-            }
+        let replaced: Vec<String> = agents
+            .iter()
+            .filter(|a| a.name == name)
+            .map(|a| a.token_hash.clone())
+            .collect();
+        let mut next = agents.clone();
+        next.retain(|a| a.name != name);
+        next.push(agent.clone());
+        self.persist(&next)?;
+        *agents = next;
+        let mut superseded = self.superseded.lock().unwrap();
+        if superseded.len() > 1024 {
+            superseded.clear();
         }
-        agents.retain(|a| a.name != name);
-        agents.push(agent.clone());
-        self.persist(&agents)?;
+        for hash in replaced {
+            superseded.insert(hash, name.to_string());
+        }
         Ok((token, agent))
     }
 
@@ -186,11 +191,13 @@ impl PairingRegistry {
     /// pairs again (DESIGN.md §9).
     pub fn revoke(&self, name: &str) -> Result<bool> {
         let mut agents = self.agents.lock().unwrap();
-        let before = agents.len();
-        agents.retain(|a| a.name != name);
-        let removed = agents.len() != before;
+        let mut next = agents.clone();
+        let before = next.len();
+        next.retain(|a| a.name != name);
+        let removed = next.len() != before;
         if removed {
-            self.persist(&agents)?;
+            self.persist(&next)?;
+            *agents = next;
         }
         Ok(removed)
     }
@@ -401,5 +408,27 @@ mod tests {
         assert!(!validate_agent_name(""));
         assert!(!validate_agent_name("has space"));
         assert!(!validate_agent_name("emoji🙂"));
+    }
+
+    #[test]
+    fn failed_agent_writes_do_not_change_active_tokens() {
+        let (r, dir) = registry(Duration::from_secs(3600));
+        let path = dir.path().join("agents.json");
+        let (token, original) = r.pair("claude-code", dev_identity()).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+
+        assert!(r.pair("codex", dev_identity()).is_err());
+        assert!(r.get("codex").is_none());
+
+        assert!(r.pair("claude-code", dev_identity()).is_err());
+        assert_eq!(
+            r.get("claude-code").unwrap().token_hash,
+            original.token_hash
+        );
+        assert!(r.verify(&token, &dev_identity()).is_ok());
+
+        assert!(r.revoke("claude-code").is_err());
+        assert!(r.verify(&token, &dev_identity()).is_ok());
     }
 }

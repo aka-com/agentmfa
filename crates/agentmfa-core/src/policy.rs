@@ -88,12 +88,14 @@ impl NaivePolicyEngine {
     /// Remove one rule (the removable auto-allow chip, §7).
     pub fn remove_rule(&self, id: &Uuid) -> Result<Option<Rule>> {
         let mut rules = self.rules.lock().unwrap();
-        let removed = rules
+        let mut next = rules.clone();
+        let removed = next
             .iter()
             .position(|r| &r.id == id)
-            .map(|pos| rules.remove(pos));
+            .map(|pos| next.remove(pos));
         if removed.is_some() {
-            self.persist(&rules)?;
+            self.persist(&next)?;
+            *rules = next;
         }
         Ok(removed)
     }
@@ -103,22 +105,26 @@ impl NaivePolicyEngine {
     /// cover another, §9). Returns how many were removed.
     pub fn remove_rules_for_connection(&self, connection_id: &Uuid) -> Result<usize> {
         let mut rules = self.rules.lock().unwrap();
-        let before = rules.len();
-        rules.retain(|r| &r.connection_id != connection_id);
-        let removed = before - rules.len();
+        let mut next = rules.clone();
+        let before = next.len();
+        next.retain(|r| &r.connection_id != connection_id);
+        let removed = before - next.len();
         if removed > 0 {
-            self.persist(&rules)?;
+            self.persist(&next)?;
+            *rules = next;
         }
         Ok(removed)
     }
 
     pub fn remove_rules_for_agent(&self, agent: &str) -> Result<usize> {
         let mut rules = self.rules.lock().unwrap();
-        let before = rules.len();
-        rules.retain(|r| r.agent != agent);
-        let removed = before - rules.len();
+        let mut next = rules.clone();
+        let before = next.len();
+        next.retain(|r| r.agent != agent);
+        let removed = before - next.len();
         if removed > 0 {
-            self.persist(&rules)?;
+            self.persist(&next)?;
+            *rules = next;
         }
         Ok(removed)
     }
@@ -147,8 +153,10 @@ impl PolicyEngine for NaivePolicyEngine {
             connection_id,
             created_at: Utc::now(),
         };
-        rules.push(rule.clone());
-        self.persist(&rules)?;
+        let mut next = rules.clone();
+        next.push(rule.clone());
+        self.persist(&next)?;
+        *rules = next;
         Ok(rule)
     }
 }
@@ -223,5 +231,23 @@ mod tests {
         }
         let e = NaivePolicyEngine::open(path, integrity).unwrap();
         assert_eq!(e.evaluate("claude-code", &conn), Decision::Allow);
+    }
+
+    #[test]
+    fn failed_rule_writes_do_not_change_active_policy() {
+        let (e, dir) = engine();
+        let path = dir.path().join("rules.json");
+        let existing_conn = Uuid::new_v4();
+        let existing = e.record_rule("claude-code", existing_conn).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+
+        assert!(e.record_rule("codex", Uuid::new_v4()).is_err());
+        assert_eq!(e.rules(), vec![existing.clone()]);
+        assert_eq!(e.evaluate("claude-code", &existing_conn), Decision::Allow);
+
+        assert!(e.remove_rule(&existing.id).is_err());
+        assert_eq!(e.rules(), vec![existing]);
+        assert_eq!(e.evaluate("claude-code", &existing_conn), Decision::Allow);
     }
 }

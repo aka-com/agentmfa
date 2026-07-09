@@ -199,12 +199,12 @@ pub struct FileVault {
     state: Mutex<FileVaultState>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct FileVaultState {
     items: HashMap<Uuid, FileVaultItem>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct FileVaultItem {
     attrs: VaultAttrs,
     value: String,
@@ -238,14 +238,17 @@ impl FileVault {
 impl SecretVault for FileVault {
     fn set(&self, id: &Uuid, attrs: &VaultAttrs, value: &SecretValue) -> Result<(), CoreError> {
         let mut state = self.state.lock().unwrap();
-        state.items.insert(
+        let mut next = state.clone();
+        next.items.insert(
             *id,
             FileVaultItem {
                 attrs: attrs.clone(),
                 value: value.to_string(),
             },
         );
-        self.persist(&state)
+        self.persist(&next)?;
+        *state = next;
+        Ok(())
     }
 
     async fn get(&self, id: &Uuid) -> Result<SecretValue, CoreError> {
@@ -259,15 +262,21 @@ impl SecretVault for FileVault {
 
     fn delete(&self, id: &Uuid) -> Result<(), CoreError> {
         let mut state = self.state.lock().unwrap();
-        state.items.remove(id).ok_or(CoreError::SecretNotFound)?;
-        self.persist(&state)
+        let mut next = state.clone();
+        next.items.remove(id).ok_or(CoreError::SecretNotFound)?;
+        self.persist(&next)?;
+        *state = next;
+        Ok(())
     }
 
     fn set_attrs(&self, id: &Uuid, attrs: &VaultAttrs) -> Result<(), CoreError> {
         let mut state = self.state.lock().unwrap();
-        let item = state.items.get_mut(id).ok_or(CoreError::SecretNotFound)?;
+        let mut next = state.clone();
+        let item = next.items.get_mut(id).ok_or(CoreError::SecretNotFound)?;
         item.attrs = attrs.clone();
-        self.persist(&state)
+        self.persist(&next)?;
+        *state = next;
+        Ok(())
     }
 }
 
@@ -399,6 +408,53 @@ pub fn platform_vault_for_root(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn file_vault_rejects_unpersisted_memory_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.json");
+        let vault = FileVault::open(path.clone()).unwrap();
+        let id = Uuid::new_v4();
+        let attrs = VaultAttrs {
+            name: "API_KEY".into(),
+            created_at: chrono::Utc::now(),
+            sync: false,
+        };
+        vault
+            .set(&id, &attrs, &Zeroizing::new("secret".to_string()))
+            .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+
+        assert!(vault
+            .set(&id, &attrs, &Zeroizing::new("replacement".to_string()))
+            .is_err());
+        assert_eq!(&*vault.get(&id).await.unwrap(), "secret");
+
+        let mut renamed = attrs.clone();
+        renamed.name = "RENAMED_KEY".into();
+        assert!(vault.set_attrs(&id, &renamed).is_err());
+        assert_eq!(
+            vault.state.lock().unwrap().items[&id].attrs.name,
+            "API_KEY"
+        );
+
+        assert!(vault.delete(&id).is_err());
+        assert_eq!(&*vault.get(&id).await.unwrap(), "secret");
+
+        let rejected = Uuid::new_v4();
+        assert!(vault
+            .set(
+                &rejected,
+                &attrs,
+                &Zeroizing::new("rejected".to_string())
+            )
+            .is_err());
+        assert!(matches!(
+            vault.get(&rejected).await,
+            Err(CoreError::SecretNotFound)
+        ));
+    }
 
     #[test]
     fn dev_root_service_is_stable_and_not_production() {
