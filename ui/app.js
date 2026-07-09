@@ -349,10 +349,12 @@ function connSheet(editing) {
     const opts = state.secrets.map((s) =>
       `<option value="${escAttr(s.id)}" ${d.secretId === s.id ? 'selected' : ''}>${esc(s.name)}</option>`).join('');
     fields += `<div class="f-row"><label>${secretLabel}</label><select id="c-secret">${opts || '<option disabled>No secrets, add one first</option>'}</select></div>`;
-    fields += `<div class="f-row"><label style="display:flex;align-items:center;gap:7px;cursor:pointer">
-      <input type="checkbox" id="c-multi" ${d.multiConnect !== false ? 'checked' : ''} style="width:auto">
-      <span>Allow multiple client connections per approval</span></label>
-      <div class="rule-note">Pools and reconnecting clients may redeem the session ticket any number of times within its 60s window, under the one approval.</div></div>`;
+    if (t !== 'ssh') {
+      fields += `<div class="f-row"><label style="display:flex;align-items:center;gap:7px;cursor:pointer">
+        <input type="checkbox" id="c-multi" ${d.multiConnect !== false ? 'checked' : ''} style="width:auto">
+        <span>Allow multiple client connections per approval</span></label>
+        <div class="rule-note">Pools and reconnecting clients may redeem the session ticket any number of times within its 60s window, under the one approval.</div></div>`;
+    }
   } else {
     fields += `<div class="f-row"><label>Injection template</label>
       <input id="c-template" placeholder="Authorization: Bearer {{GITHUB_API_KEY}}" value="${escAttr(d.template ?? '')}">
@@ -643,7 +645,7 @@ async function saveConn() {
     else if (!/^wss?:\/\//i.test(url)) errs.url = 'Must start with ws:// or wss://';
   }
   if (Object.keys(errs).length) { state.sheetErrors = errs; render(); return; }
-  const input = { name, type: t, multi_connect: d.multiConnect !== false };
+  const input = { name, type: t, multi_connect: t === 'ssh' || d.multiConnect !== false };
   if (t === 'api') {
     input.host = (d.host || '').trim();
     input.template = (d.template || '').trim();

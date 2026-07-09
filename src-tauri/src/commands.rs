@@ -204,7 +204,7 @@ pub struct ConnectionInput {
     pub sslmode: Option<String>,
     // WS
     pub url: Option<String>,
-    // pg/ws single-secret binding (by id) + multi-connect
+    // pg/ws/ssh single-secret binding (by id) + multi-connect
     pub secret_id: Option<String>,
     #[serde(default = "default_true")]
     pub multi_connect: bool,

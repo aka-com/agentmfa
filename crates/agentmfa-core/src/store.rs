@@ -57,7 +57,7 @@ pub struct ConnectionSpec {
     /// For pg/ws/ssh: the single bound secret. Ignored for api connections,
     /// whose secret list is derived from the template's refs.
     pub secrets: Vec<Uuid>,
-    /// pg/ws/ssh multi-connect checkbox (ignored for api).
+    /// pg/ws multi-connect checkbox (ignored for api; ssh must be true).
     pub multi_connect: bool,
 }
 
@@ -84,10 +84,14 @@ impl Store {
         paths.ensure()?;
         // index.json is sealed (§13.1): a file that fails verification
         // refuses to load rather than silently serving repointed bindings.
-        let state = match integrity.read_verified(&paths.index_file())? {
+        let mut state: IndexState = match integrity.read_verified(&paths.index_file())? {
             Some(bytes) => serde_json::from_slice(&bytes)?,
             None => IndexState::default(),
         };
+        if normalize_ssh_multi_connect(&mut state) {
+            let bytes = serde_json::to_vec_pretty(&state)?;
+            integrity.write(&paths.index_file(), &bytes)?;
+        }
         Ok(Self {
             paths,
             vault,
@@ -671,6 +675,11 @@ fn validate_config_and_bind_secrets(
             bind_single_secret(state, spec)
         }
         ConnectionConfig::Ssh { host, port, user } => {
+            if !spec.multi_connect {
+                return Err(CoreError::InvalidConnectionConfig(
+                    "ssh connections must allow multiple agent connections per approval".into(),
+                ));
+            }
             if host.is_empty() || host.contains('/') || host.contains('@') || host.contains(':') {
                 return Err(CoreError::InvalidConnectionConfig(format!(
                     "invalid host {host:?} (bare hostname, no scheme/port/path)"
@@ -701,6 +710,17 @@ fn bind_single_secret(state: &IndexState, spec: &ConnectionSpec) -> Result<Vec<U
         return Err(CoreError::SecretNotFound);
     }
     Ok(vec![id])
+}
+
+fn normalize_ssh_multi_connect(state: &mut IndexState) -> bool {
+    let mut changed = false;
+    for conn in &mut state.connections {
+        if conn.kind() == ConnectionKind::Ssh && !conn.multi_connect {
+            conn.multi_connect = true;
+            changed = true;
+        }
+    }
+    changed
 }
 
 #[cfg(test)]
@@ -993,6 +1013,39 @@ mod tests {
                 .unwrap_err(),
             CoreError::WrongSecretCount { kind: "ssh" }
         ));
+        assert!(matches!(
+            store
+                .add_connection(ConnectionSpec {
+                    name: "single-use-ssh".into(),
+                    config: ConnectionConfig::Ssh {
+                        host: "h.example.com".into(),
+                        port: 22,
+                        user: "u".into(),
+                    },
+                    secrets: vec![key.id],
+                    multi_connect: false,
+                })
+                .unwrap_err(),
+            CoreError::InvalidConnectionConfig(_)
+        ));
+        assert!(matches!(
+            store
+                .update_connection(
+                    &conn.id,
+                    ConnectionSpec {
+                        name: "prod-ssh".into(),
+                        config: ConnectionConfig::Ssh {
+                            host: "prod.example.com".into(),
+                            port: 22,
+                            user: "deploy".into(),
+                        },
+                        secrets: vec![key.id],
+                        multi_connect: false,
+                    },
+                )
+                .unwrap_err(),
+            CoreError::InvalidConnectionConfig(_)
+        ));
         // Host must be a bare hostname; user is required.
         for (host, user) in [
             ("prod.example.com:22", "deploy"),
@@ -1016,6 +1069,40 @@ mod tests {
                 CoreError::InvalidConnectionConfig(_)
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn legacy_ssh_single_connect_is_normalized_on_open() {
+        let (store, vault, dir) = store().await;
+        let key = store
+            .add_secret("DEPLOY_SSH_KEY", val("-----BEGIN OPENSSH PRIVATE KEY-----…"))
+            .unwrap();
+        let conn = store
+            .add_connection(ConnectionSpec {
+                name: "prod-ssh".into(),
+                config: ConnectionConfig::Ssh {
+                    host: "prod.example.com".into(),
+                    port: 22,
+                    user: "deploy".into(),
+                },
+                secrets: vec![key.id],
+                multi_connect: true,
+            })
+            .unwrap();
+        {
+            let mut state = store.state.lock().unwrap();
+            state
+                .connections
+                .iter_mut()
+                .find(|c| c.id == conn.id)
+                .unwrap()
+                .multi_connect = false;
+            store.persist(&state).unwrap();
+        }
+        drop(store);
+
+        let reopened = Store::open(Paths::under(dir.path()), vault).await.unwrap();
+        assert!(reopened.connection_by_id(&conn.id).unwrap().multi_connect);
     }
 
     #[tokio::test]

@@ -122,11 +122,12 @@ processes are merged into one prompt and receive the same token.
 
 Connections name a destination. Secret names and values are never
 exposed. `endpoint` is where a call naming this connection goes (POST
-it). `multi_connect` (ws/pg/ssh) says whether one open's ticket may be
-redeemed repeatedly within its window. `approval` is what a call costs
-right now: `will_prompt` blocks on a human decision (tell your user to
-expect the prompt), `auto_allowed` proceeds immediately under a standing
-rule.
+it). `multi_connect` says whether one open's ticket may be redeemed
+repeatedly within its window; ws/pg can be configured either way, while
+ssh is always multi-connect because OpenSSH may use several agent
+connections during one login. `approval` is what a call costs right now:
+`will_prompt` blocks on a human decision (tell your user to expect the
+prompt), `auto_allowed` proceeds immediately under a standing rule.
 
 ## 3. Approvals: set your client timeout first
 

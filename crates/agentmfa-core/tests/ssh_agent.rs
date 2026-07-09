@@ -11,6 +11,7 @@ use agentmfa_core::approvals::ApprovalRequest;
 use agentmfa_core::broker::{Broker, UiDecision};
 use agentmfa_core::config::BrokerConfig;
 use agentmfa_core::daemon;
+use agentmfa_core::error::CoreError;
 use agentmfa_core::events::BrokerEvents;
 use agentmfa_core::paths::Paths;
 use agentmfa_core::store::ConnectionSpec;
@@ -413,32 +414,31 @@ async fn multi_connect_serves_many_invocations() {
 }
 
 #[tokio::test]
-async fn single_use_second_connection_is_refused() {
-    let mut h = harness(BrokerConfig::default()).await;
+async fn single_use_ssh_connection_is_rejected() {
+    let h = harness(BrokerConfig::default()).await;
     let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
-    add_ssh_connection(&h.broker, &key, "deploy", false); // multi-connect off
-    let token = h.pair().await;
-    let auth_sock = h.open_ssh(&token).await;
-    let key_blob = key.public_key().to_bytes().unwrap();
-    let data = userauth_blob("deploy", "ssh-ed25519", &key_blob);
+    let pem = key.to_openssh(LineEnding::LF).unwrap();
+    h.broker
+        .store
+        .add_secret("DEPLOY_SSH_KEY", Zeroizing::new(pem.to_string()))
+        .unwrap();
+    let secret = h.broker.store.secret_by_name("DEPLOY_SSH_KEY").unwrap();
 
-    // First connection redeems the single-use ticket and signs.
-    let mut first = UnixStream::connect(&auth_sock).await.unwrap();
-    let (kind, _) = sign(&mut first, &key_blob, &data, 0).await;
-    assert_eq!(kind, SSH_AGENT_SIGN_RESPONSE);
-
-    // A second connection finds the ticket already redeemed: the broker
-    // closes it, so the read of any request fails.
-    let mut second = UnixStream::connect(&auth_sock).await.unwrap();
-    write_message(&mut second, SSH_AGENTC_REQUEST_IDENTITIES, &[]).await;
-    let mut buf = [0u8; 4];
-    let read = tokio::time::timeout(Duration::from_secs(5), second.read(&mut buf))
-        .await
-        .expect("second connection should resolve");
-    assert!(
-        matches!(read, Ok(0)) || read.is_err(),
-        "single-use ticket must refuse a second connection"
-    );
+    let err = h
+        .broker
+        .store
+        .add_connection(ConnectionSpec {
+            name: "prod-ssh".into(),
+            config: ConnectionConfig::Ssh {
+                host: "prod.example.com".into(),
+                port: 22,
+                user: "deploy".into(),
+            },
+            secrets: vec![secret.id],
+            multi_connect: false,
+        })
+        .unwrap_err();
+    assert!(matches!(err, CoreError::InvalidConnectionConfig(_)));
 }
 
 #[tokio::test]

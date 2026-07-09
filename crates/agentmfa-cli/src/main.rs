@@ -157,7 +157,7 @@ struct ConnAdd {
     /// (default: prefer).
     #[arg(long)]
     sslmode: Option<String>,
-    /// pg/ws/ssh: require a fresh approval per connect instead of allowing
+    /// pg/ws: require a fresh approval per connect instead of allowing
     /// any number of connects within one open's ticket window.
     #[arg(long)]
     single_connect: bool,
@@ -376,6 +376,7 @@ fn conn_config(args: &ConnAdd) -> Result<ConnectionConfig, String> {
                 ("url", args.url.is_some()),
                 ("dbname", args.dbname.is_some()),
                 ("sslmode", args.sslmode.is_some()),
+                ("single-connect", args.single_connect),
             ])?;
             require("secret", &args.secret)?;
             Ok(ConnectionConfig::Ssh {
@@ -735,5 +736,7 @@ mod tests {
             ConnectionConfig::Ssh { port, .. } => assert_eq!(port, 22),
             other => panic!("wrong config: {other:?}"),
         }
+        a.single_connect = true;
+        assert!(conn_config(&a).unwrap_err().contains("--single-connect"));
     }
 }

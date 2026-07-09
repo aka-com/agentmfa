@@ -155,6 +155,7 @@ async function mockInvoke(cmd, args = {}) {
     }
     case 'add_connection': {
       const i = args.input;
+      if (i.type === 'ssh' && i.multi_connect === false) throw new Error('ssh connections must allow multiple agent connections per approval');
       if (db.connections.some((c) => c.name === i.name)) throw new Error(`A connection named ${i.name} already exists`);
       const secret_names = i.type === 'api'
         ? (i.template.match(/[A-Z_][A-Z0-9_]*/g) || []).filter((n) => db.secrets.some((s) => s.name === n))
@@ -165,7 +166,9 @@ async function mockInvoke(cmd, args = {}) {
     }
     case 'edit_connection': {
       const c = db.connections.find((x) => x.id === args.id); if (!c) throw new Error('no such connection');
-      const i = args.input; Object.assign(c, { name: i.name, host: i.host, port: i.port, dbname: i.dbname, user: i.user, url: i.url, template: i.template, multi_connect: i.multi_connect });
+      const i = args.input;
+      if (i.type === 'ssh' && i.multi_connect === false) throw new Error('ssh connections must allow multiple agent connections per approval');
+      Object.assign(c, { name: i.name, host: i.host, port: i.port, dbname: i.dbname, user: i.user, url: i.url, template: i.template, multi_connect: i.multi_connect });
       if (i.secret_id) c.secret_names = [db.secrets.find((s) => s.id === i.secret_id)?.name].filter(Boolean);
       audit('✏️', `Connection updated: ${i.name}`); return;
     }

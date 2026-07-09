@@ -182,12 +182,17 @@ impl DataPlane {
         let value = mint_ticket();
         let mut state = self.inner.state.lock().unwrap();
         Self::sweep(&self.inner, &mut state);
+        // OpenSSH can use more than one agent socket connection during a
+        // single login (identity listing, then signing). Store validation
+        // rejects single-connect SSH now; this keeps old persisted state from
+        // turning one approved SSH invocation into a failed second redemption.
+        let multi_connect = connection.multi_connect || matches!(payload, TicketPayload::Ssh);
         state.tickets.insert(
             value.clone(),
             TicketEntry {
                 agent: agent.to_string(),
                 connection: connection.clone(),
-                multi_connect: connection.multi_connect,
+                multi_connect,
                 issued: Instant::now(),
                 redeemed: false,
                 active_sessions: 0,
@@ -400,6 +405,22 @@ mod tests {
         }
     }
 
+    fn ssh_connection(multi: bool) -> Connection {
+        Connection {
+            id: Uuid::new_v4(),
+            name: "prod-ssh".into(),
+            config: ConnectionConfig::Ssh {
+                host: "prod.example.com".into(),
+                port: 22,
+                user: "deploy".into(),
+            },
+            secrets: vec![],
+            multi_connect: multi,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
     fn plane(ttl: Duration, per_ticket: usize, global: usize) -> (DataPlane, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let audit = Arc::new(AuditLog::open(dir.path().join("audit.jsonl")).unwrap());
@@ -427,6 +448,17 @@ mod tests {
             RedeemError::AlreadyRedeemed
         );
         s.finish("test");
+    }
+
+    #[test]
+    fn ssh_tickets_are_never_single_use() {
+        let (plane, _dir) = plane(Duration::from_secs(60), 60, 300);
+        let ticket = plane.issue("claude-code", &ssh_connection(false), TicketPayload::Ssh);
+        let s1 = plane.redeem(&ticket).unwrap().start(ConnectionKind::Ssh);
+        let s2 = plane.redeem(&ticket).unwrap().start(ConnectionKind::Ssh);
+        assert_eq!(plane.sessions().len(), 2);
+        s1.finish("test");
+        s2.finish("test");
     }
 
     #[test]

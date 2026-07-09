@@ -172,10 +172,11 @@ pub struct Connection {
     pub name: String,
     pub config: ConnectionConfig,
     /// Referenced secret ids. API connections may compose several (derived
-    /// from the template's refs); pg/ws bind exactly one (DESIGN.md §9).
+    /// from the template's refs); pg/ws/ssh bind exactly one (DESIGN.md §9).
     pub secrets: Vec<Uuid>,
-    /// pg/ws only: the session ticket may be redeemed any number of times
-    /// within its 60 s window (default true, DESIGN.md §4.2/§4.3).
+    /// pg/ws: the session ticket may be redeemed any number of times within
+    /// its 60 s window. ssh is always multi-connect because OpenSSH may open
+    /// several agent connections during one login.
     #[serde(default = "default_true")]
     pub multi_connect: bool,
     pub created_at: DateTime<Utc>,
