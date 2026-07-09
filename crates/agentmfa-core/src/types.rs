@@ -107,15 +107,17 @@ pub enum ConnectionConfig {
     },
     Ssh {
         /// Destination host the agent is told to connect to, e.g.
-        /// "prod.example.com". Shown in approvals and `/v1/connections`;
-        /// the ssh-agent protocol cannot cryptographically pin it — the
-        /// enforced pins are the user and the key (DESIGN.md §4.4).
+        /// "prod.example.com".
         host: String,
         #[serde(default = "default_ssh_port")]
         port: u16,
         /// Login user the key authenticates as; the broker refuses to sign
         /// an authentication request naming any other user.
         user: String,
+        /// OpenSSH SHA-256/SHA-512 fingerprint of the destination host key.
+        /// Empty only on legacy persisted records, which fail closed at open.
+        #[serde(default)]
+        host_key_fingerprint: String,
     },
 }
 
@@ -152,7 +154,9 @@ impl ConnectionConfig {
                 ..
             } => format!("{user}@{host}:{port}/{dbname}"),
             ConnectionConfig::Ws { url, .. } => url.clone(),
-            ConnectionConfig::Ssh { host, port, user } => {
+            ConnectionConfig::Ssh {
+                host, port, user, ..
+            } => {
                 if *port == 22 {
                     format!("{user}@{host}")
                 } else {
@@ -435,12 +439,14 @@ mod tests {
             host: "prod.example.com".into(),
             port: 22,
             user: "deploy".into(),
+            host_key_fingerprint: "SHA256:test".into(),
         };
         assert_eq!(ssh.target(), "deploy@prod.example.com");
         let ssh_alt_port = ConnectionConfig::Ssh {
             host: "bastion.example.com".into(),
             port: 2222,
             user: "ops".into(),
+            host_key_fingerprint: "SHA256:test".into(),
         };
         assert_eq!(ssh_alt_port.target(), "ops@bastion.example.com:2222");
     }
@@ -456,6 +462,7 @@ mod tests {
                 host: "prod.example.com".into(),
                 port: 22,
                 user: "deploy".into(),
+                host_key_fingerprint: String::new(),
             }
         );
         assert_eq!(conf.kind().as_str(), "ssh");

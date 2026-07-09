@@ -21,10 +21,10 @@ use agentmfa_core::types::{
 use agentmfa_core::vault::MemoryVault;
 use http_body_util::BodyExt as _;
 use serde_json::{json, Value};
-use signature::Verifier as _;
+use signature::{Signer as _, Verifier as _};
 use ssh_key::public::KeyData as PublicKeyData;
 use ssh_key::rand_core::OsRng;
-use ssh_key::{Algorithm, LineEnding, PrivateKey, PublicKey, Signature};
+use ssh_key::{Algorithm, HashAlg, LineEnding, PrivateKey, PublicKey, Signature};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::UnixStream;
@@ -34,10 +34,12 @@ use zeroize::Zeroizing;
 /* ------------------------------ ssh-agent wire ---------------------------- */
 
 const SSH_AGENT_FAILURE: u8 = 5;
+const SSH_AGENT_SUCCESS: u8 = 6;
 const SSH_AGENTC_REQUEST_IDENTITIES: u8 = 11;
 const SSH_AGENT_IDENTITIES_ANSWER: u8 = 12;
 const SSH_AGENTC_SIGN_REQUEST: u8 = 13;
 const SSH_AGENT_SIGN_RESPONSE: u8 = 14;
+const SSH_AGENTC_EXTENSION: u8 = 27;
 const SSH_AGENT_RSA_SHA2_256: u32 = 2;
 const SSH_AGENT_RSA_SHA2_512: u32 = 4;
 const SSH_MSG_USERAUTH_REQUEST: u8 = 50;
@@ -75,16 +77,17 @@ fn take_string(data: &[u8]) -> (&[u8], &[u8]) {
 }
 
 /// Build the publickey `SSH_MSG_USERAUTH_REQUEST` blob an ssh client signs.
-fn userauth_blob(user: &str, alg: &str, key_blob: &[u8]) -> Vec<u8> {
+fn userauth_blob(user: &str, alg: &str, key_blob: &[u8], host_key: &[u8]) -> Vec<u8> {
     let mut b = Vec::new();
     put_string(&mut b, b"test-session-id");
     b.push(SSH_MSG_USERAUTH_REQUEST);
     put_string(&mut b, user.as_bytes());
     put_string(&mut b, b"ssh-connection");
-    put_string(&mut b, b"publickey");
+    put_string(&mut b, b"publickey-hostbound-v00@openssh.com");
     b.push(1); // has signature
     put_string(&mut b, alg.as_bytes());
     put_string(&mut b, key_blob);
+    put_string(&mut b, host_key);
     b
 }
 
@@ -148,7 +151,13 @@ async fn harness(config: BrokerConfig) -> Harness {
 
 /// Store `key` as the connection's private-key secret and register a
 /// `prod-ssh` connection pinned to `user`.
-fn add_ssh_connection(broker: &Broker, key: &PrivateKey, user: &str, multi: bool) {
+fn add_ssh_connection(
+    broker: &Broker,
+    key: &PrivateKey,
+    user: &str,
+    multi: bool,
+) -> PrivateKey {
+    let host_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
     let pem = key.to_openssh(LineEnding::LF).unwrap();
     broker
         .store
@@ -163,11 +172,16 @@ fn add_ssh_connection(broker: &Broker, key: &PrivateKey, user: &str, multi: bool
                 host: "prod.example.com".into(),
                 port: 22,
                 user: user.into(),
+                host_key_fingerprint: host_key
+                    .public_key()
+                    .fingerprint(HashAlg::Sha256)
+                    .to_string(),
             },
             secrets: vec![secret.id],
             multi_connect: multi,
         })
         .unwrap();
+    host_key
 }
 
 async fn uds_request(
@@ -258,6 +272,9 @@ impl Harness {
         assert_eq!(status, 200, "open failed: {body}");
         assert_eq!(body["user"], "deploy");
         assert_eq!(body["host"], "prod.example.com");
+        assert!(body["host_key_fingerprint"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("SHA256:")));
         body["auth_sock"].as_str().unwrap().to_string()
     }
 }
@@ -291,6 +308,28 @@ async fn sign(
     read_message(stream).await
 }
 
+async fn bind_host(stream: &mut UnixStream, host_key: &PrivateKey) -> u8 {
+    let host_blob = host_key.public_key().to_bytes().unwrap();
+    let session_id = b"test-session-id";
+    let signature: Signature = host_key.try_sign(session_id).unwrap();
+    let signature = Vec::<u8>::try_from(signature).unwrap();
+    let mut body = Vec::new();
+    put_string(&mut body, b"session-bind@openssh.com");
+    put_string(&mut body, &host_blob);
+    put_string(&mut body, session_id);
+    put_string(&mut body, &signature);
+    body.push(0);
+    write_message(stream, SSH_AGENTC_EXTENSION, &body).await;
+    read_message(stream).await.0
+}
+
+async fn bound_stream(auth_sock: &str, host_key: &PrivateKey) -> UnixStream {
+    let mut stream = UnixStream::connect(auth_sock).await.unwrap();
+    let kind = bind_host(&mut stream, host_key).await;
+    assert_eq!(kind, SSH_AGENT_SUCCESS, "session bind failed");
+    stream
+}
+
 /// Verify a SIGN_RESPONSE body against `public` over `data`. `PublicKey`'s
 /// inherent `verify` is the `sshsig` (namespaced) form, so call the
 /// `signature::Verifier` impl on the underlying key data explicitly.
@@ -307,18 +346,33 @@ fn verify_signature(public: &PublicKey, response_body: &[u8], data: &[u8]) {
 async fn ed25519_lists_signs_and_pins_user() {
     let mut h = harness(BrokerConfig::default()).await;
     let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
-    add_ssh_connection(&h.broker, &key, "deploy", true);
+    let host_key = add_ssh_connection(&h.broker, &key, "deploy", true);
     let token = h.pair().await;
     let auth_sock = h.open_ssh(&token).await;
 
     let key_blob = key.public_key().to_bytes().unwrap();
+    let host_blob = host_key.public_key().to_bytes().unwrap();
+
+    // A signature request without a verified session binding is refused.
+    let data = userauth_blob("deploy", "ssh-ed25519", &key_blob, &host_blob);
+    let mut unbound = UnixStream::connect(&auth_sock).await.unwrap();
+    let (kind, _) = sign(&mut unbound, &key_blob, &data, 0).await;
+    assert_eq!(kind, SSH_AGENT_FAILURE, "unbound signing must be refused");
+    drop(unbound);
+
+    // A session binding signed by any host key except the configured one is
+    // refused before authentication can be attempted.
+    let wrong_host = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let mut wrong = UnixStream::connect(&auth_sock).await.unwrap();
+    assert_eq!(bind_host(&mut wrong, &wrong_host).await, SSH_AGENT_FAILURE);
+    drop(wrong);
 
     // Identity listing.
-    let mut s = UnixStream::connect(&auth_sock).await.unwrap();
+    let mut s = bound_stream(&auth_sock, &host_key).await;
     assert_lists_identity(&mut s, &key).await;
 
     // A userauth signature for the pinned user is produced and verifies.
-    let data = userauth_blob("deploy", "ssh-ed25519", &key_blob);
+    let data = userauth_blob("deploy", "ssh-ed25519", &key_blob, &host_blob);
     let (kind, body) = sign(&mut s, &key_blob, &data, 0).await;
     assert_eq!(kind, SSH_AGENT_SIGN_RESPONSE);
     verify_signature(key.public_key(), &body, &data);
@@ -328,7 +382,7 @@ async fn ed25519_lists_signs_and_pins_user() {
     assert_eq!(h.broker.sessions()[0].connection, "prod-ssh");
 
     // Refuse: a userauth naming another user.
-    let other = userauth_blob("root", "ssh-ed25519", &key_blob);
+    let other = userauth_blob("root", "ssh-ed25519", &key_blob, &host_blob);
     let (kind, _) = sign(&mut s, &key_blob, &other, 0).await;
     assert_eq!(kind, SSH_AGENT_FAILURE, "wrong user must be refused");
 
@@ -353,12 +407,13 @@ async fn rsa_signs_with_requested_hash() {
     // A 2048-bit key keeps generation fast for the test.
     let keypair = ssh_key::private::RsaKeypair::random(&mut OsRng, 2048).unwrap();
     let key = PrivateKey::from(keypair);
-    add_ssh_connection(&h.broker, &key, "deploy", true);
+    let host_key = add_ssh_connection(&h.broker, &key, "deploy", true);
     let token = h.pair().await;
     let auth_sock = h.open_ssh(&token).await;
     let key_blob = key.public_key().to_bytes().unwrap();
+    let host_blob = host_key.public_key().to_bytes().unwrap();
 
-    let mut s = UnixStream::connect(&auth_sock).await.unwrap();
+    let mut s = bound_stream(&auth_sock, &host_key).await;
     assert_lists_identity(&mut s, &key).await;
 
     // Both RSA SHA-2 variants sign and verify against the public key.
@@ -366,7 +421,7 @@ async fn rsa_signs_with_requested_hash() {
         (SSH_AGENT_RSA_SHA2_256, "rsa-sha2-256"),
         (SSH_AGENT_RSA_SHA2_512, "rsa-sha2-512"),
     ] {
-        let data = userauth_blob("deploy", alg, &key_blob);
+        let data = userauth_blob("deploy", alg, &key_blob, &host_blob);
         let (kind, body) = sign(&mut s, &key_blob, &data, flags).await;
         assert_eq!(kind, SSH_AGENT_SIGN_RESPONSE, "sign failed for {alg}");
         verify_signature(key.public_key(), &body, &data);
@@ -377,15 +432,16 @@ async fn rsa_signs_with_requested_hash() {
 async fn wrong_key_blob_is_refused() {
     let mut h = harness(BrokerConfig::default()).await;
     let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
-    add_ssh_connection(&h.broker, &key, "deploy", true);
+    let host_key = add_ssh_connection(&h.broker, &key, "deploy", true);
     let token = h.pair().await;
     let auth_sock = h.open_ssh(&token).await;
 
     // A different key's blob in the sign request → refused.
     let attacker = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
     let attacker_blob = attacker.public_key().to_bytes().unwrap();
-    let data = userauth_blob("deploy", "ssh-ed25519", &attacker_blob);
-    let mut s = UnixStream::connect(&auth_sock).await.unwrap();
+    let host_blob = host_key.public_key().to_bytes().unwrap();
+    let data = userauth_blob("deploy", "ssh-ed25519", &attacker_blob, &host_blob);
+    let mut s = bound_stream(&auth_sock, &host_key).await;
     let (kind, _) = sign(&mut s, &attacker_blob, &data, 0).await;
     assert_eq!(kind, SSH_AGENT_FAILURE);
 }
@@ -394,17 +450,18 @@ async fn wrong_key_blob_is_refused() {
 async fn multi_connect_serves_many_invocations() {
     let mut h = harness(BrokerConfig::default()).await;
     let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
-    add_ssh_connection(&h.broker, &key, "deploy", true);
+    let host_key = add_ssh_connection(&h.broker, &key, "deploy", true);
     let token = h.pair().await;
     let auth_sock = h.open_ssh(&token).await;
     let key_blob = key.public_key().to_bytes().unwrap();
-    let data = userauth_blob("deploy", "ssh-ed25519", &key_blob);
+    let host_blob = host_key.public_key().to_bytes().unwrap();
+    let data = userauth_blob("deploy", "ssh-ed25519", &key_blob, &host_blob);
 
     // Three separate ssh invocations (connections) all succeed under one
     // approval, each its own session.
     let mut streams = Vec::new();
     for _ in 0..3 {
-        let mut s = UnixStream::connect(&auth_sock).await.unwrap();
+        let mut s = bound_stream(&auth_sock, &host_key).await;
         let (kind, body) = sign(&mut s, &key_blob, &data, 0).await;
         assert_eq!(kind, SSH_AGENT_SIGN_RESPONSE);
         verify_signature(key.public_key(), &body, &data);
@@ -433,6 +490,10 @@ async fn single_use_ssh_connection_is_rejected() {
                 host: "prod.example.com".into(),
                 port: 22,
                 user: "deploy".into(),
+                host_key_fingerprint: key
+                    .public_key()
+                    .fingerprint(HashAlg::Sha256)
+                    .to_string(),
             },
             secrets: vec![secret.id],
             multi_connect: false,
@@ -451,6 +512,7 @@ async fn unparseable_key_fails_open() {
         .add_secret("DEPLOY_SSH_KEY", Zeroizing::new("not a private key".into()))
         .unwrap();
     let secret = h.broker.store.secret_by_name("DEPLOY_SSH_KEY").unwrap();
+    let host_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
     h.broker
         .store
         .add_connection(ConnectionSpec {
@@ -459,6 +521,10 @@ async fn unparseable_key_fails_open() {
                 host: "prod.example.com".into(),
                 port: 22,
                 user: "deploy".into(),
+                host_key_fingerprint: host_key
+                    .public_key()
+                    .fingerprint(HashAlg::Sha256)
+                    .to_string(),
             },
             secrets: vec![secret.id],
             multi_connect: true,

@@ -59,7 +59,10 @@ function seedConnections() {
     mkConn('prod-db', 'pg', ['DATABASE_PASSWORD'], { host: 'db.internal.aka.com', port: 5432, dbname: 'app_production', user: 'app', sslmode: 'require' }, true),
     mkConn('market-feed', 'ws', ['STREAM_TOKEN'], { url: 'wss://stream.example.com/feed' }, true),
     mkConn('internal-api', 'api', ['SERVICE_USER', 'SERVICE_PASSWORD'], { host: 'internal.aka.com', scheme: 'https', template: 'Authorization: Basic {{base64(SERVICE_USER ":" SERVICE_PASSWORD)}}' }),
-    mkConn('prod-ssh', 'ssh', ['DEPLOY_SSH_KEY'], { host: 'prod.example.com', port: 22, user: 'deploy' }, true),
+    mkConn('prod-ssh', 'ssh', ['DEPLOY_SSH_KEY'], {
+      host: 'prod.example.com', port: 22, user: 'deploy',
+      host_key_fingerprint: 'SHA256:vdZ5N8kNxU7J4W2WYa6qK0sJYv8oXb8s2H7n3jE5q1A',
+    }, true),
   ];
   function mkConn(name, type, secretNames, cfg, multi) {
     return { id: uid(), name, type, secret_names: secretNames, secret_ids: secretNames.map(by), multi_connect: !!multi, ...cfg };
@@ -97,7 +100,8 @@ function connDto(c) {
     secret_names: c.secret_names, multi_connect: c.multi_connect,
     rules: db.rules.filter((r) => r.connection_id === c.id).map((r) => ({ id: r.id, agent: r.agent })),
     host: c.host || null, scheme: c.scheme || null, port: c.port || null, template: c.template || null,
-    dbname: c.dbname || null, user: c.user || null, sslmode: c.sslmode || null, url: c.url || null,
+    dbname: c.dbname || null, user: c.user || null, host_key_fingerprint: c.host_key_fingerprint || null,
+    sslmode: c.sslmode || null, url: c.url || null,
   };
 }
 function connTarget(c) {
@@ -158,19 +162,23 @@ async function mockInvoke(cmd, args = {}) {
     case 'add_connection': {
       const i = args.input;
       if (i.type === 'ssh' && i.multi_connect === false) throw new Error('ssh connections must allow multiple agent connections per approval');
+      if (i.type === 'ssh' && !i.host_key_fingerprint) throw new Error('SSH host key fingerprint is required');
       if (db.connections.some((c) => c.name === i.name)) throw new Error(`A connection named ${i.name} already exists`);
       const secret_names = i.type === 'api'
         ? (i.template.match(/[A-Z_][A-Z0-9_]*/g) || []).filter((n) => db.secrets.some((s) => s.name === n))
         : [db.secrets.find((s) => s.id === i.secret_id)?.name].filter(Boolean);
       db.connections.push({ id: uid(), name: i.name, type: i.type, secret_names, multi_connect: i.multi_connect,
-        host: i.host, scheme: i.scheme, port: i.port, template: i.template, dbname: i.dbname, user: i.user, sslmode: i.sslmode, url: i.url });
+        host: i.host, scheme: i.scheme, port: i.port, template: i.template, dbname: i.dbname, user: i.user,
+        host_key_fingerprint: i.host_key_fingerprint, sslmode: i.sslmode, url: i.url });
       audit('🔌', `Connection added: ${i.name}`); return;
     }
     case 'edit_connection': {
       const c = db.connections.find((x) => x.id === args.id); if (!c) throw new Error('no such connection');
       const i = args.input;
       if (i.type === 'ssh' && i.multi_connect === false) throw new Error('ssh connections must allow multiple agent connections per approval');
-      Object.assign(c, { name: i.name, host: i.host, port: i.port, dbname: i.dbname, user: i.user, url: i.url, template: i.template, multi_connect: i.multi_connect });
+      if (i.type === 'ssh' && !i.host_key_fingerprint) throw new Error('SSH host key fingerprint is required');
+      Object.assign(c, { name: i.name, host: i.host, port: i.port, dbname: i.dbname, user: i.user,
+        host_key_fingerprint: i.host_key_fingerprint, url: i.url, template: i.template, multi_connect: i.multi_connect });
       if (i.secret_id) c.secret_names = [db.secrets.find((s) => s.id === i.secret_id)?.name].filter(Boolean);
       audit('✏️', `Connection updated: ${i.name}`); return;
     }

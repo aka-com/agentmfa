@@ -149,6 +149,9 @@ struct ConnAdd {
     /// pg/ssh: login user.
     #[arg(long)]
     user: Option<String>,
+    /// ssh: pinned server host key fingerprint (SHA256:... or SHA512:...).
+    #[arg(long)]
+    host_key_fingerprint: Option<String>,
     /// pg/ws/ssh: name of the one bound secret (api connections derive
     /// theirs from the template).
     #[arg(long)]
@@ -342,6 +345,7 @@ fn conn_config(args: &ConnAdd) -> Result<ConnectionConfig, String> {
                 ("user", args.user.is_some()),
                 ("secret", args.secret.is_some()),
                 ("sslmode", args.sslmode.is_some()),
+                ("host-key-fingerprint", args.host_key_fingerprint.is_some()),
                 ("single-connect", args.single_connect),
             ])?;
             Ok(ConnectionConfig::Api {
@@ -356,6 +360,7 @@ fn conn_config(args: &ConnAdd) -> Result<ConnectionConfig, String> {
                 ("scheme", args.scheme.is_some()),
                 ("template", args.template.is_some()),
                 ("url", args.url.is_some()),
+                ("host-key-fingerprint", args.host_key_fingerprint.is_some()),
             ])?;
             require("secret", &args.secret)?;
             Ok(ConnectionConfig::Pg {
@@ -374,6 +379,7 @@ fn conn_config(args: &ConnAdd) -> Result<ConnectionConfig, String> {
                 ("dbname", args.dbname.is_some()),
                 ("user", args.user.is_some()),
                 ("sslmode", args.sslmode.is_some()),
+                ("host-key-fingerprint", args.host_key_fingerprint.is_some()),
             ])?;
             if args.secret.is_none() && args.template.is_none() {
                 return Err("--secret (or --template) is required for this kind".into());
@@ -397,6 +403,10 @@ fn conn_config(args: &ConnAdd) -> Result<ConnectionConfig, String> {
                 host: require("host", &args.host)?,
                 port: args.port.unwrap_or(22),
                 user: require("user", &args.user)?,
+                host_key_fingerprint: require(
+                    "host-key-fingerprint",
+                    &args.host_key_fingerprint,
+                )?,
             })
         }
     }
@@ -685,6 +695,7 @@ mod tests {
             url: None,
             dbname: None,
             user: None,
+            host_key_fingerprint: None,
             secret: None,
             sslmode: None,
             single_connect: false,
@@ -743,6 +754,8 @@ mod tests {
         a.host = Some("prod.example.com".into());
         a.user = Some("deploy".into());
         a.secret = Some("DEPLOY_KEY".into());
+        a.host_key_fingerprint =
+            Some("SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into());
         match conn_config(&a).unwrap() {
             ConnectionConfig::Ssh { port, .. } => assert_eq!(port, 22),
             other => panic!("wrong config: {other:?}"),

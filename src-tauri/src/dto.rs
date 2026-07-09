@@ -61,6 +61,7 @@ pub struct ConnectionDto {
     pub template: Option<String>,
     pub dbname: Option<String>,
     pub user: Option<String>,
+    pub host_key_fingerprint: Option<String>,
     pub sslmode: Option<String>,
     pub url: Option<String>,
 }
@@ -95,6 +96,7 @@ impl ConnectionDto {
             template: None,
             dbname: None,
             user: None,
+            host_key_fingerprint: None,
             sslmode: None,
             url: None,
         };
@@ -132,10 +134,16 @@ impl ConnectionDto {
                 dto.url = Some(url.clone());
                 dto.template = template.clone();
             }
-            Ssh { host, port, user } => {
+            Ssh {
+                host,
+                port,
+                user,
+                host_key_fingerprint,
+            } => {
                 dto.host = Some(host.clone());
                 dto.port = Some(*port);
                 dto.user = Some(user.clone());
+                dto.host_key_fingerprint = Some(host_key_fingerprint.clone());
             }
         }
         dto

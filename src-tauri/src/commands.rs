@@ -209,6 +209,7 @@ pub struct ConnectionInput {
     // PG
     pub dbname: Option<String>,
     pub user: Option<String>,
+    pub host_key_fingerprint: Option<String>,
     pub sslmode: Option<String>,
     // WS
     pub url: Option<String>,
@@ -260,6 +261,7 @@ impl ConnectionInput {
                 host: self.host.unwrap_or_default(),
                 port: self.port.unwrap_or(22),
                 user: self.user.unwrap_or_default(),
+                host_key_fingerprint: self.host_key_fingerprint.unwrap_or_default(),
             },
             other => return Err(format!("unknown connection type {other:?}")),
         };

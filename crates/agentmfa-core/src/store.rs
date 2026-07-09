@@ -481,6 +481,7 @@ impl Store {
             return Err(CoreError::KindChange);
         }
         let old_target = existing.target();
+        let old_config = existing.config.clone();
         let secrets = validate_config_and_bind_secrets(&state, &spec)?;
         let mut next = state.clone();
         let conn = next
@@ -494,7 +495,20 @@ impl Store {
         conn.secrets = secrets;
         conn.updated_at = Utc::now();
         let updated = conn.clone();
-        let target_changed = updated.target() != old_target;
+        let ssh_host_key_changed = matches!(
+            (&old_config, &updated.config),
+            (
+                ConnectionConfig::Ssh {
+                    host_key_fingerprint: old,
+                    ..
+                },
+                ConnectionConfig::Ssh {
+                    host_key_fingerprint: new,
+                    ..
+                }
+            ) if old != new
+        );
+        let target_changed = updated.target() != old_target || ssh_host_key_changed;
         self.commit(&mut state, next)?;
         Ok((updated, target_changed))
     }
@@ -730,7 +744,12 @@ fn validate_config_and_bind_secrets(
             }
             bind_single_secret(state, spec)
         }
-        ConnectionConfig::Ssh { host, port, user } => {
+        ConnectionConfig::Ssh {
+            host,
+            port,
+            user,
+            host_key_fingerprint,
+        } => {
             if !spec.multi_connect {
                 return Err(CoreError::InvalidConnectionConfig(
                     "ssh connections must allow multiple agent connections per approval".into(),
@@ -746,6 +765,13 @@ fn validate_config_and_bind_secrets(
                     "host, port and user are required".into(),
                 ));
             }
+            host_key_fingerprint
+                .parse::<ssh_key::Fingerprint>()
+                .map_err(|e| {
+                    CoreError::InvalidConnectionConfig(format!(
+                        "invalid SSH host key fingerprint {host_key_fingerprint:?}: {e}"
+                    ))
+                })?;
             bind_single_secret(state, spec)
         }
     }
@@ -786,6 +812,9 @@ mod tests {
     use crate::vault::MemoryVault;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use zeroize::Zeroizing;
+
+    const SSH_HOST_FP: &str = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const SSH_HOST_FP_ALT: &str = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE";
 
     struct ReadGate {
         allow: AtomicBool,
@@ -1046,6 +1075,7 @@ mod tests {
                     host: "prod.example.com".into(),
                     port: 22,
                     user: "deploy".into(),
+                    host_key_fingerprint: SSH_HOST_FP.into(),
                 },
                 secrets: vec![key.id],
                 multi_connect: true,
@@ -1053,6 +1083,41 @@ mod tests {
             .unwrap();
         assert!(conn.multi_connect);
         assert_eq!(conn.target(), "deploy@prod.example.com");
+
+        let (_, changed) = store
+            .update_connection(
+                &conn.id,
+                ConnectionSpec {
+                    name: "prod-ssh".into(),
+                    config: ConnectionConfig::Ssh {
+                        host: "prod.example.com".into(),
+                        port: 22,
+                        user: "deploy".into(),
+                        host_key_fingerprint: SSH_HOST_FP_ALT.into(),
+                    },
+                    secrets: vec![key.id],
+                    multi_connect: true,
+                },
+            )
+            .unwrap();
+        assert!(changed, "changing the pinned host key must reset rules");
+
+        assert!(matches!(
+            store
+                .add_connection(ConnectionSpec {
+                    name: "missing-host-key".into(),
+                    config: ConnectionConfig::Ssh {
+                        host: "h.example.com".into(),
+                        port: 22,
+                        user: "u".into(),
+                        host_key_fingerprint: String::new(),
+                    },
+                    secrets: vec![key.id],
+                    multi_connect: true,
+                })
+                .unwrap_err(),
+            CoreError::InvalidConnectionConfig(_)
+        ));
 
         assert!(matches!(
             store
@@ -1062,6 +1127,7 @@ mod tests {
                         host: "h.example.com".into(),
                         port: 22,
                         user: "u".into(),
+                        host_key_fingerprint: SSH_HOST_FP.into(),
                     },
                     secrets: vec![],
                     multi_connect: true,
@@ -1077,6 +1143,7 @@ mod tests {
                         host: "h.example.com".into(),
                         port: 22,
                         user: "u".into(),
+                        host_key_fingerprint: SSH_HOST_FP.into(),
                     },
                     secrets: vec![key.id],
                     multi_connect: false,
@@ -1094,6 +1161,7 @@ mod tests {
                             host: "prod.example.com".into(),
                             port: 22,
                             user: "deploy".into(),
+                            host_key_fingerprint: SSH_HOST_FP.into(),
                         },
                         secrets: vec![key.id],
                         multi_connect: false,
@@ -1117,6 +1185,7 @@ mod tests {
                             host: host.into(),
                             port: 22,
                             user: user.into(),
+                            host_key_fingerprint: SSH_HOST_FP.into(),
                         },
                         secrets: vec![key.id],
                         multi_connect: true,
@@ -1140,6 +1209,7 @@ mod tests {
                     host: "prod.example.com".into(),
                     port: 22,
                     user: "deploy".into(),
+                    host_key_fingerprint: SSH_HOST_FP.into(),
                 },
                 secrets: vec![key.id],
                 multi_connect: true,

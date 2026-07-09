@@ -987,10 +987,21 @@ async fn post_ssh_open(
             ),
         );
     }
-    let ConnectionConfig::Ssh { host, port, user } = &conn.config else {
+    let ConnectionConfig::Ssh {
+        host,
+        port,
+        user,
+        host_key_fingerprint,
+    } = &conn.config
+    else {
         unreachable!()
     };
-    let (host, port, user) = (host.clone(), *port, user.clone());
+    let (host, port, user, host_key_fingerprint) = (
+        host.clone(),
+        *port,
+        user.clone(),
+        host_key_fingerprint.clone(),
+    );
 
     let action = format!("Open SSH agent → {}", conn.target());
     broker.audit.append(
@@ -1053,6 +1064,7 @@ async fn post_ssh_open(
                         "host": host,
                         "port": port,
                         "user": user,
+                        "host_key_fingerprint": host_key_fingerprint,
                         // The redemption deadline, machine-actionable
                         // instead of prose-only (§5b).
                         "expires_in_seconds": broker.config.ticket_ttl.as_secs(),

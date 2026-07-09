@@ -371,6 +371,7 @@ function connSheet(editing) {
       <div class="f-row"><label>Host</label><input id="f-host" class="${fieldCls('host')}" placeholder="prod.example.com" value="${escAttr(d.host ?? '')}">${fieldErr('host')}</div>
       <div class="f-row" style="flex:0 0 90px"><label>Port</label><input id="f-port" class="${fieldCls('port')}" inputmode="numeric" value="${escAttr(d.port ?? '22')}">${fieldErr('port')}</div></div>
       <div class="f-row"><label>User</label><input id="f-user" class="${fieldCls('user')}" placeholder="deploy" value="${escAttr(d.user ?? '')}">${fieldErr('user')}</div>`;
+    fields += `<div class="f-row"><label>Host key fingerprint</label><input id="f-host-key" class="${fieldCls('hostKeyFingerprint')}" placeholder="SHA256:…" value="${escAttr(d.hostKeyFingerprint ?? '')}">${fieldErr('hostKeyFingerprint')}</div>`;
   } else if (t === 'pg') {
     const sslmode = d.sslmode || 'require';
     const sslOpts = [
@@ -625,6 +626,7 @@ function captureDrafts() {
     if (g('f-port') !== undefined) state.draft.port = g('f-port');
     if (g('f-db') !== undefined) state.draft.dbname = g('f-db');
     if (g('f-user') !== undefined) state.draft.user = g('f-user');
+    if (g('f-host-key') !== undefined) state.draft.hostKeyFingerprint = g('f-host-key');
     if (g('f-sslmode') !== undefined) state.draft.sslmode = g('f-sslmode');
     if (g('f-url') !== undefined) state.draft.url = g('f-url');
     if (g('c-template') !== undefined) state.draft.template = g('c-template');
@@ -688,6 +690,9 @@ async function saveConn() {
     }
     if (t === 'pg' && !(d.dbname || '').trim()) errs.dbname = 'Database is required';
     if (!(d.user || '').trim()) errs.user = 'User is required';
+    if (t === 'ssh' && !(d.hostKeyFingerprint || '').trim()) {
+      errs.hostKeyFingerprint = 'Host key fingerprint is required';
+    }
   }
   if (t === 'ws') {
     const url = (d.url || '').trim();
@@ -710,6 +715,7 @@ async function saveConn() {
     input.host = (d.host || '').trim();
     input.port = port;
     input.user = (d.user || '').trim();
+    input.host_key_fingerprint = (d.hostKeyFingerprint || '').trim();
     input.secret_id = d.secretId || (state.secrets[0] && state.secrets[0].id);
   } else {
     input.url = (d.url || '').trim();
@@ -797,6 +803,7 @@ document.addEventListener('click', async (e) => {
       state.draft = { name: c.name, host: c.host,
         port: c.port ? String(c.port) : (c.type === 'ssh' ? '22' : '5432'),
         dbname: c.dbname, user: c.user, url: c.url, template: c.template,
+        hostKeyFingerprint: c.host_key_fingerprint,
         sslmode: c.sslmode || 'require',
         secretId: null, multiConnect: c.multi_connect };
       // best-effort: prefill single-secret binding by name→id

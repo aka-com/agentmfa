@@ -226,19 +226,21 @@ leg uses the connection's configured TLS. The default upstream
 
     → 200 {{"auth_sock": "/…/.agentmfa/ssh/agent-<id>.sock",
             "host": "prod.example.com", "port": 22, "user": "deploy",
+            "host_key_fingerprint": "SHA256:…",
             "expires_in_seconds": {ticket}}}
 
 Approval runs once, at open time. Point `SSH_AUTH_SOCK` at `auth_sock` and
 run any unmodified SSH client (`ssh`, `git`, `scp`, `rsync`, `ssh -L`):
 
-    SSH_AUTH_SOCK=<auth_sock> ssh -o IdentitiesOnly=yes <user>@<host>
+    SSH_AUTH_SOCK=<auth_sock> ssh -o IdentitiesOnly=yes \
+      -o PubkeyAuthentication=host-bound <user>@<host>
     SSH_AUTH_SOCK=<auth_sock> git -C repo push
 
 The broker serves the ssh-agent protocol on that socket: it offers the one
 configured key and signs your authentication with it, and the private key
-never leaves the broker. It will **only** sign a public-key login **as the
-pinned `user`** returned above; it signs nothing else, so the key can
-authenticate as no one else. Ticket lifetime and multi-connect semantics
+never leaves the broker. It verifies OpenSSH's session binding against the
+configured host-key fingerprint and will **only** sign host-bound public-key
+login as the pinned `user`; it signs nothing else. Ticket lifetime and multi-connect semantics
 match WebSocket and Postgres: the socket accepts connections for the
 {ticket} s window, and with multi-connect on (the default) as many SSH
 invocations as you need under the one approval. The destination host is

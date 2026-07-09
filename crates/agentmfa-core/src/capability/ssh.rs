@@ -19,18 +19,11 @@
 //!
 //! What the oracle will and won't do:
 //! - **REQUEST_IDENTITIES** returns exactly the one pinned public key.
-//! - **SIGN_REQUEST** is honored only when the data to sign is a well-formed
-//!   *publickey* `SSH_MSG_USERAUTH_REQUEST` naming the connection's pinned
-//!   **user** and the pinned key — so the broker can only ever authenticate
-//!   you as `deploy@host`, never sign arbitrary bytes or a login as another
-//!   user. Every signature (and every refusal) is audited.
-//!
-//! The **host is not** cryptographically pinned — the ssh-agent protocol
-//! never sees the destination, only the userauth blob does, and that names
-//! the user, not the host. The configured host is what the approval and
-//! `/v1/connections` display and what the agent is told to connect to; a
-//! process that has already been approved for this connection could aim the
-//! same key at another host. That is an honest v1 limitation (see §4.4).
+//! - **session-bind@openssh.com** must prove possession of the configured
+//!   host key for this SSH transport.
+//! - **SIGN_REQUEST** is honored only for host-bound public-key userauth that
+//!   names the configured user, pinned authentication key, verified session
+//!   id, and configured host key. Every signature and refusal is audited.
 //!
 //! v1 signs **ed25519** and **RSA** (`rsa-sha2-256` / `rsa-sha2-512`,
 //! selected by the client's SIGN_REQUEST flags) keys.
@@ -42,9 +35,9 @@ use std::time::Duration;
 
 use rsa::pkcs1v15;
 use sha2::{Sha256, Sha512};
-use signature::{SignatureEncoding as _, Signer as _};
+use signature::{SignatureEncoding as _, Signer as _, Verifier as _};
 use ssh_key::private::KeypairData;
-use ssh_key::{Algorithm, HashAlg, PrivateKey, Signature};
+use ssh_key::{Algorithm, Fingerprint, HashAlg, PrivateKey, PublicKey, Signature};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{UnixListener, UnixStream};
 
@@ -58,10 +51,15 @@ use crate::types::{Connection, ConnectionConfig, ConnectionKind};
 
 // Message numbers (OpenSSH PROTOCOL.agent).
 const SSH_AGENT_FAILURE: u8 = 5;
+const SSH_AGENT_SUCCESS: u8 = 6;
 const SSH_AGENTC_REQUEST_IDENTITIES: u8 = 11;
 const SSH_AGENT_IDENTITIES_ANSWER: u8 = 12;
 const SSH_AGENTC_SIGN_REQUEST: u8 = 13;
 const SSH_AGENT_SIGN_RESPONSE: u8 = 14;
+const SSH_AGENTC_EXTENSION: u8 = 27;
+
+const SESSION_BIND_EXTENSION: &[u8] = b"session-bind@openssh.com";
+const HOSTBOUND_AUTH_METHOD: &[u8] = b"publickey-hostbound-v00@openssh.com";
 
 // SIGN_REQUEST flags selecting the RSA hash (OpenSSH PROTOCOL.agent).
 const SSH_AGENT_RSA_SHA2_256: u32 = 2;
@@ -110,6 +108,9 @@ impl<'a> Reader<'a> {
         let (s, rest) = self.data.split_at(len);
         self.data = rest;
         Some(s)
+    }
+    fn is_empty(&self) -> bool {
+        self.data.is_empty()
     }
 }
 
@@ -273,13 +274,19 @@ async fn sign_on_blocking_thread(
         .map_err(|e| format!("sign task failed: {e}"))?
 }
 
-/// The pinned user carried by a SIGN_REQUEST's userauth blob, when the blob
-/// is a well-formed publickey `SSH_MSG_USERAUTH_REQUEST` for `public_blob`.
-/// Anything else — non-userauth data, a different method, a mismatched key —
-/// yields `None`, and the broker refuses to sign it.
-fn userauth_user<'a>(data: &'a [u8], public_blob: &[u8]) -> Option<&'a str> {
+struct HostboundUserauth<'a> {
+    session_id: &'a [u8],
+    user: &'a str,
+    host_key: &'a [u8],
+}
+
+/// Parse the OpenSSH host-bound public-key request carried by SIGN_REQUEST.
+fn hostbound_userauth<'a>(
+    data: &'a [u8],
+    public_blob: &[u8],
+) -> Option<HostboundUserauth<'a>> {
     let mut r = Reader::new(data);
-    let _session_id = r.string()?;
+    let session_id = r.string()?;
     if r.u8()? != SSH_MSG_USERAUTH_REQUEST {
         return None;
     }
@@ -288,7 +295,7 @@ fn userauth_user<'a>(data: &'a [u8], public_blob: &[u8]) -> Option<&'a str> {
     if service != b"ssh-connection" {
         return None;
     }
-    if r.string()? != b"publickey" {
+    if r.string()? != HOSTBOUND_AUTH_METHOD {
         return None;
     }
     // has-signature boolean is TRUE for the blob the client signs.
@@ -300,7 +307,61 @@ fn userauth_user<'a>(data: &'a [u8], public_blob: &[u8]) -> Option<&'a str> {
     if key_blob != public_blob {
         return None;
     }
-    Some(user)
+    let host_key = r.string()?;
+    if !r.is_empty() {
+        return None;
+    }
+    Some(HostboundUserauth {
+        session_id,
+        user,
+        host_key,
+    })
+}
+
+#[derive(Clone)]
+struct SessionBinding {
+    host_key: Vec<u8>,
+    session_id: Vec<u8>,
+}
+
+fn verify_session_bind(
+    payload: &[u8],
+    expected: Fingerprint,
+) -> Result<SessionBinding, String> {
+    let mut r = Reader::new(payload);
+    if r.string() != Some(SESSION_BIND_EXTENSION) {
+        return Err("unsupported agent extension".into());
+    }
+    let host_key = r.string().ok_or("missing session-bind host key")?;
+    let session_id = r.string().ok_or("missing session-bind session id")?;
+    let signature = r.string().ok_or("missing session-bind signature")?;
+    let forwarding = r.u8().ok_or("missing session-bind forwarding flag")?;
+    if !r.is_empty() || forwarding > 1 {
+        return Err("malformed session-bind request".into());
+    }
+    if forwarding != 0 {
+        return Err("forwarded SSH agent sessions are not allowed".into());
+    }
+
+    let public = PublicKey::from_bytes(host_key)
+        .map_err(|e| format!("invalid session-bind host key: {e}"))?;
+    let actual = public.fingerprint(expected.algorithm());
+    if actual != expected {
+        return Err(format!(
+            "host key fingerprint {actual} does not match configured {expected}"
+        ));
+    }
+    let signature = Signature::try_from(signature)
+        .map_err(|e| format!("invalid session-bind signature: {e}"))?;
+    public
+        .key_data()
+        .verify(session_id, &signature)
+        .map_err(|e| format!("session-bind host signature failed: {e}"))?;
+
+    Ok(SessionBinding {
+        host_key: host_key.to_vec(),
+        session_id: session_id.to_vec(),
+    })
 }
 
 /* -------------------------------- listener -------------------------------- */
@@ -318,6 +379,7 @@ struct AgentState {
     ticket: String,
     /// Pinned login the userauth blob must name.
     user: String,
+    host_key_fingerprint: Fingerprint,
     connection_name: String,
     comment: String,
     signer: Arc<SshSigner>,
@@ -333,10 +395,18 @@ pub async fn open_agent(
     agent_name: String,
     connection: Connection,
 ) -> Result<String, String> {
-    let ConnectionConfig::Ssh { user, .. } = &connection.config else {
+    let ConnectionConfig::Ssh {
+        user,
+        host_key_fingerprint,
+        ..
+    } = &connection.config
+    else {
         return Err("not an ssh connection".into());
     };
     let user = user.clone();
+    let host_key_fingerprint = host_key_fingerprint
+        .parse::<Fingerprint>()
+        .map_err(|e| format!("SSH host key fingerprint is missing or invalid: {e}"))?;
     let signer = Arc::new(SshSigner::load(&broker.store, &connection).await?);
 
     let ticket = broker.data_plane.issue(
@@ -368,6 +438,7 @@ pub async fn open_agent(
         broker: broker.clone(),
         ticket,
         user,
+        host_key_fingerprint,
         connection_name: connection.name.clone(),
         comment: format!("agentmfa:{}", connection.name),
         signer,
@@ -451,6 +522,7 @@ async fn serve(
     let ttl_deadline = tokio::time::Instant::now() + max_ttl;
     let mut idle_deadline = tokio::time::Instant::now() + idle;
     let close_signal = session.close_signal.clone();
+    let mut binding = None;
 
     loop {
         tokio::select! {
@@ -466,7 +538,7 @@ async fn serve(
                 session
                     .bytes_up
                     .fetch_add(payload.len() as u64 + 1, Ordering::Relaxed);
-                let response = handle_request(state, kind, &payload).await;
+                let response = handle_request(state, &mut binding, kind, &payload).await;
                 session
                     .bytes_down
                     .fetch_add(response.len() as u64, Ordering::Relaxed);
@@ -480,50 +552,85 @@ async fn serve(
 
 /// Answer one agent request. Unknown requests and refused signatures both
 /// return SSH_AGENT_FAILURE — the ssh client's cue to move on.
-async fn handle_request(state: &Arc<AgentState>, kind: u8, payload: &[u8]) -> Vec<u8> {
+async fn handle_request(
+    state: &Arc<AgentState>,
+    binding: &mut Option<SessionBinding>,
+    kind: u8,
+    payload: &[u8],
+) -> Vec<u8> {
     match kind {
         SSH_AGENTC_REQUEST_IDENTITIES => frame(
             SSH_AGENT_IDENTITIES_ANSWER,
             &state.signer.identities_answer(&state.comment),
         ),
-        SSH_AGENTC_SIGN_REQUEST => sign_response(state, payload).await,
+        SSH_AGENTC_EXTENSION => {
+            if binding.is_some() {
+                return refuse(state, "agent connection is already session-bound");
+            }
+            match verify_session_bind(payload, state.host_key_fingerprint) {
+                Ok(verified) => {
+                    *binding = Some(verified);
+                    frame(SSH_AGENT_SUCCESS, &[])
+                }
+                Err(reason) => refuse(state, &reason),
+            }
+        }
+        SSH_AGENTC_SIGN_REQUEST => sign_response(state, binding.as_ref(), payload).await,
         _ => frame(SSH_AGENT_FAILURE, &[]),
     }
 }
 
-async fn sign_response(state: &Arc<AgentState>, payload: &[u8]) -> Vec<u8> {
-    let refuse = |reason: &str| -> Vec<u8> {
-        state.broker.audit.append(
-            AuditEntry::new(
-                AuditKind::SshSigned,
-                format!("SSH signature refused: {}", state.connection_name),
-            )
-            .connection(state.connection_name.clone())
-            .detail(reason.to_string())
-            .outcome("refused"),
-        );
-        frame(SSH_AGENT_FAILURE, &[])
-    };
+fn refuse(state: &AgentState, reason: &str) -> Vec<u8> {
+    state.broker.audit.append(
+        AuditEntry::new(
+            AuditKind::SshSigned,
+            format!("SSH signature refused: {}", state.connection_name),
+        )
+        .connection(state.connection_name.clone())
+        .detail(reason.to_string())
+        .outcome("refused"),
+    );
+    frame(SSH_AGENT_FAILURE, &[])
+}
 
+async fn sign_response(
+    state: &Arc<AgentState>,
+    binding: Option<&SessionBinding>,
+    payload: &[u8],
+) -> Vec<u8> {
+    let Some(binding) = binding else {
+        return refuse(state, "SSH client did not bind the configured host key");
+    };
     let mut r = Reader::new(payload);
     let (Some(key_blob), Some(data), Some(flags)) = (r.string(), r.string(), r.u32()) else {
-        return refuse("malformed sign request");
+        return refuse(state, "malformed sign request");
     };
-    if key_blob != state.signer.public_blob {
-        return refuse("sign request names a different key");
+    if !r.is_empty() {
+        return refuse(state, "malformed sign request");
     }
-    // The core pin: only sign a publickey userauth for the configured user,
-    // so the oracle can authenticate as nobody else and sign nothing else.
-    let Some(user) = userauth_user(data, &state.signer.public_blob) else {
-        return refuse("data is not a publickey userauth request for the pinned key");
+    if key_blob != state.signer.public_blob {
+        return refuse(state, "sign request names a different key");
+    }
+    let Some(auth) = hostbound_userauth(data, &state.signer.public_blob) else {
+        return refuse(
+            state,
+            "data is not host-bound publickey userauth for the pinned key",
+        );
     };
-    if user != state.user {
-        return refuse(&format!(
-            "userauth names {user:?}, connection pins {:?}",
+    if auth.session_id != binding.session_id {
+        return refuse(state, "userauth session id does not match session-bind");
+    }
+    if auth.host_key != binding.host_key {
+        return refuse(state, "userauth host key does not match session-bind");
+    }
+    if auth.user != state.user {
+        return refuse(state, &format!(
+            "userauth names {:?}, connection pins {:?}",
+            auth.user,
             state.user
         ));
     }
-    let user = user.to_string();
+    let user = auth.user.to_string();
     let data = data.to_vec();
 
     match sign_on_blocking_thread(state.signer.clone(), data, flags).await {
@@ -534,14 +641,17 @@ async fn sign_response(state: &Arc<AgentState>, payload: &[u8]) -> Vec<u8> {
                     format!("SSH authentication signed: {}", state.connection_name),
                 )
                 .connection(state.connection_name.clone())
-                .detail(format!("userauth as {user}"))
+                .detail(format!(
+                    "host-bound userauth as {user} · {}",
+                    state.host_key_fingerprint
+                ))
                 .outcome("signed"),
             );
             let mut body = Vec::new();
             put_string(&mut body, &sig_blob);
             frame(SSH_AGENT_SIGN_RESPONSE, &body)
         }
-        Err(e) => refuse(&format!("sign failed: {e}")),
+        Err(e) => refuse(state, &format!("sign failed: {e}")),
     }
 }
 
@@ -573,8 +683,15 @@ pub fn sweep_stale_sockets(dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ssh_key::rand_core::OsRng;
 
-    fn userauth_blob(user: &str, service: &str, method: &str, key_blob: &[u8]) -> Vec<u8> {
+    fn userauth_blob(
+        user: &str,
+        service: &str,
+        method: &str,
+        key_blob: &[u8],
+        host_key: &[u8],
+    ) -> Vec<u8> {
         let mut b = Vec::new();
         put_string(&mut b, b"session-id");
         b.push(SSH_MSG_USERAUTH_REQUEST);
@@ -584,7 +701,21 @@ mod tests {
         b.push(1); // has signature
         put_string(&mut b, b"ssh-ed25519");
         put_string(&mut b, key_blob);
+        put_string(&mut b, host_key);
         b
+    }
+
+    fn session_bind(key: &PrivateKey, session_id: &[u8], forwarding: u8) -> Vec<u8> {
+        let host_key = key.public_key().to_bytes().unwrap();
+        let signature: Signature = key.try_sign(session_id).unwrap();
+        let signature = Vec::<u8>::try_from(signature).unwrap();
+        let mut body = Vec::new();
+        put_string(&mut body, SESSION_BIND_EXTENSION);
+        put_string(&mut body, &host_key);
+        put_string(&mut body, session_id);
+        put_string(&mut body, &signature);
+        body.push(forwarding);
+        body
     }
 
     #[test]
@@ -610,22 +741,59 @@ mod tests {
     }
 
     #[test]
-    fn userauth_user_accepts_pinned_shape_and_rejects_others() {
+    fn hostbound_userauth_accepts_pinned_shape_and_rejects_others() {
         let key = b"the-public-blob";
-        // Well-formed publickey userauth for the pinned key.
-        let good = userauth_blob("deploy", "ssh-connection", "publickey", key);
-        assert_eq!(userauth_user(&good, key), Some("deploy"));
+        let host_key = b"the-host-key";
+        let good = userauth_blob(
+            "deploy",
+            "ssh-connection",
+            "publickey-hostbound-v00@openssh.com",
+            key,
+            host_key,
+        );
+        let parsed = hostbound_userauth(&good, key).unwrap();
+        assert_eq!(parsed.user, "deploy");
+        assert_eq!(parsed.host_key, host_key);
 
         // Wrong key blob.
-        assert_eq!(userauth_user(&good, b"other-key"), None);
+        assert!(hostbound_userauth(&good, b"other-key").is_none());
         // Wrong service.
-        let bad_service = userauth_blob("deploy", "ssh-userauth", "publickey", key);
-        assert_eq!(userauth_user(&bad_service, key), None);
-        // Wrong method.
-        let bad_method = userauth_blob("deploy", "ssh-connection", "password", key);
-        assert_eq!(userauth_user(&bad_method, key), None);
+        let bad_service = userauth_blob(
+            "deploy",
+            "ssh-userauth",
+            "publickey-hostbound-v00@openssh.com",
+            key,
+            host_key,
+        );
+        assert!(hostbound_userauth(&bad_service, key).is_none());
+        // Legacy unbound publickey authentication is refused.
+        let unbound = userauth_blob("deploy", "ssh-connection", "publickey", key, host_key);
+        assert!(hostbound_userauth(&unbound, key).is_none());
         // Not a userauth request at all.
-        assert_eq!(userauth_user(b"random bytes", key), None);
+        assert!(hostbound_userauth(b"random bytes", key).is_none());
+    }
+
+    #[test]
+    fn session_bind_verifies_the_configured_host_key() {
+        let host_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let expected = host_key.public_key().fingerprint(HashAlg::Sha256);
+        let session_id = b"verified-session-id";
+        let binding = verify_session_bind(&session_bind(&host_key, session_id, 0), expected)
+            .expect("configured host key binds");
+        assert_eq!(binding.session_id, session_id);
+        assert_eq!(binding.host_key, host_key.public_key().to_bytes().unwrap());
+
+        let other = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        assert!(verify_session_bind(
+            &session_bind(&other, session_id, 0),
+            expected
+        )
+        .is_err());
+        assert!(verify_session_bind(
+            &session_bind(&host_key, session_id, 1),
+            expected
+        )
+        .is_err());
     }
 
     #[test]

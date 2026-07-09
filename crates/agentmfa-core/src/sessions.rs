@@ -413,6 +413,7 @@ mod tests {
                 host: "prod.example.com".into(),
                 port: 22,
                 user: "deploy".into(),
+                host_key_fingerprint: "SHA256:test".into(),
             },
             secrets: vec![],
             multi_connect: multi,
