@@ -52,7 +52,11 @@ AgentMFA is a secrets manager for agents. Make API calls, open database and WebS
     connection's pinned user and server host key. Compatible OpenSSH clients
     negotiate this automatically; explicitly setting
     `PubkeyAuthentication=host-bound` is not normally required.
-- **Identity-pinned pairing.** Pair tokens are checked against the code-signing identity observed during pairing, or a best-effort local executable fingerprint for unsigned/ad-hoc peers.
+- **Identity-pinned pairing.** Pair tokens are checked against the code-signing
+  identity observed during pairing, or a best-effort local executable
+  fingerprint for unsigned/ad-hoc peers. The app distinguishes the agent's
+  self-reported name from that program identity and, on re-pairing, asks
+  whether previously saved no-prompt access should carry over.
 - **Local activity log.** Pairing, approval, denial, and upstream events are
   emitted to the app's Activity view and appended to disk on a best-effort
   basis. Persistence failures do not block broker operations, so history may

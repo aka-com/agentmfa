@@ -8,7 +8,7 @@ use agentmfa_core::approvals::ApprovalRequest;
 use agentmfa_core::audit::AuditEntry;
 use agentmfa_core::broker::Broker;
 use agentmfa_core::sessions::SessionInfo;
-use agentmfa_core::types::{Connection, PairedAgent, Rule, SecretMeta};
+use agentmfa_core::types::{Connection, PairedAgent, PeerIdentity, Rule, SecretMeta};
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -174,20 +174,43 @@ impl ConnectionDto {
 #[derive(Serialize)]
 pub struct AgentDto {
     pub name: String,
+    pub program: String,
+    pub verification: &'static str,
     pub identity: String,
-    pub token_preview: String,
     pub paired_at: String,
+    pub last_used: String,
     pub rule_count: usize,
+    pub temporary_access_count: usize,
 }
 
 impl AgentDto {
-    pub fn from(agent: &PairedAgent, rules: &[Rule]) -> Self {
+    pub fn from(agent: &PairedAgent, rules: &[Rule], broker: &Broker) -> Self {
+        let (program, verification) = match &agent.identity {
+            PeerIdentity::Signed { signing_id, .. } => (signing_id.clone(), "Signed application"),
+            PeerIdentity::Unsigned {
+                executable_path, ..
+            } => (
+                executable_path
+                    .as_deref()
+                    .and_then(|path| std::path::Path::new(path).file_name())
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("Unsigned local program")
+                    .to_string(),
+                "Local executable",
+            ),
+            PeerIdentity::DevUnverified { .. } => {
+                ("Development process".into(), "Development identity")
+            }
+        };
         Self {
             name: agent.name.clone(),
+            program,
+            verification,
             identity: agent.identity.display(),
-            token_preview: format!("{}…", agent.token_preview),
             paired_at: agent.paired_at.to_rfc3339(),
+            last_used: agent.last_used.to_rfc3339(),
             rule_count: rules.iter().filter(|r| r.agent == agent.name).count(),
+            temporary_access_count: broker.grant_count_for_agent(&agent.name),
         }
     }
 }

@@ -211,6 +211,14 @@ code, .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Conso
 .live-row { display: flex; align-items: center; gap: 9px; padding: 7px 2px; border-bottom: 1px solid var(--line-soft); }
 .live-row .live-txt { flex: 1; min-width: 0; }
 .live-row .s-sub { max-width: 250px; }
+.disconnect-copy { max-width: 310px; font-size: 11px; line-height: 1.35; color: var(--muted); }
+.agent-onboarding { margin: 9px 0; padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--card-bg); }
+.onboarding-copy b, .onboarding-copy span { display: block; }
+.onboarding-copy b { font-size: 13px; }
+.onboarding-copy span { margin: 3px 0 9px; color: var(--muted); font-size: 11.5px; line-height: 1.4; }
+.agent-onboarding details { margin-top: 8px; font-size: 11px; color: var(--muted); }
+.agent-onboarding summary { cursor: pointer; }
+.agent-onboarding p { margin: 5px 0 0; line-height: 1.4; }
 
 /* ---- tables ----------------------------------------------------------- */
 .sec-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
@@ -423,13 +431,23 @@ code, .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Conso
 .rule-line { font-size: 13px; margin: 2px 0 8px; }
 .rule-line code { background: var(--chip-bg); padding: 1px 6px; border-radius: 5px; font-size: 12px; }
 .stub-badge { display: inline-block; margin-left: 6px; padding: 1px 7px; background: var(--amber-wash); border: 1px solid var(--amber-border); color: var(--amber-ink); border-radius: 8px; font-size: 10px; font-weight: 700; letter-spacing: .04em; }
-.inherit-warn { margin: 0 0 13px; padding: 10px 12px; background: var(--danger-wash); border: 1px solid var(--danger-border); border-radius: 9px; font-size: 12px; line-height: 1.5; color: var(--danger-text); }
-.inherit-warn .iw-head { display: block; font-weight: 700; color: var(--danger-ink); margin-bottom: 4px; }
+.pair-explainer { margin: 0 0 12px; color: var(--ink-2); font-size: 12px; line-height: 1.45; }
+.self-reported { display: inline-block; margin-left: 4px; color: var(--muted); font-size: 10px; font-style: normal; font-weight: 500; }
+.pair-identity-warning, .pair-replace { margin: 0 0 12px; padding: 9px 11px; border-radius: 8px; font-size: 11.5px; line-height: 1.4; }
+.pair-identity-warning { background: var(--amber-wash); border: 1px solid var(--amber-border); color: var(--amber-ink); }
+.pair-replace { background: var(--wash-2); border: 1px solid var(--line); color: var(--ink-2); }
+.pair-replace b { color: var(--ink); }
+.pair-tech { margin: 0 0 12px; color: var(--muted); font-size: 11px; }
+.pair-tech summary { cursor: pointer; margin-bottom: 4px; }
+.pair-tech code { display: block; padding: 6px 8px; border-radius: 6px; background: var(--wash-2); word-break: break-all; }
+.inherit-warn { margin: 0 0 13px; padding: 10px 12px; background: var(--amber-wash); border: 1px solid var(--amber-border); border-radius: 9px; font-size: 12px; line-height: 1.5; color: var(--ink-2); }
+.inherit-warn .iw-head { display: block; font-weight: 700; color: var(--ink); margin-bottom: 4px; }
 .inherit-warn ul { margin: 6px 0 0 18px; }
-.inherit-warn code { background: var(--danger-wash); padding: 1px 5px; border-radius: 4px; font-size: 11.5px; }
-.inherit-grants.revoked { text-decoration: line-through; opacity: .62; }
-.inherit-revoke { display: flex; align-items: center; gap: 7px; margin-top: 9px; font-weight: 600; color: var(--danger-text); cursor: pointer; }
-.inherit-revoke input { width: auto; }
+.pair-choice-head { margin-top: 10px; font-weight: 600; color: var(--ink); }
+.pair-choice { display: flex; align-items: flex-start; gap: 7px; margin-top: 7px; cursor: pointer; }
+.pair-choice input { margin-top: 3px; }
+.pair-choice span, .pair-choice b, .pair-choice small { display: block; }
+.pair-choice small { color: var(--muted); font-size: 10.5px; line-height: 1.35; }
 .req-detail-head { margin: 4px 0 0; }
 .mut-tag { display: inline-block; margin-left: 4px; padding: 0 5px; background: rgba(255,149,0,.16); color: var(--amber-strong); border-radius: 5px; font-size: 10px; font-weight: 700; }
 .req-detail { margin: 5px 0 2px; padding: 8px 10px; background: var(--wash-2); border: 1px solid var(--line); border-radius: 8px; }

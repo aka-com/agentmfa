@@ -404,11 +404,12 @@ async fn post_pair(
     // Pairing under a name that already holds standing rules inherits them,
     // the dialog must disclose exactly what (§6).
     let inherited = broker.inherited_for(&name);
+    let replaces_existing_agent = broker.pairing.get(&name).is_some();
 
     broker.audit.append(
         AuditEntry::new(
             AuditKind::PairRequested,
-            format!("Pair request from {name}"),
+            format!("Connection request from {name}"),
         )
         .agent(name.clone())
         .detail(identity.display())
@@ -421,11 +422,15 @@ async fn post_pair(
         agent_token_hash: None,
         kind: ApprovalKind::Pair,
         connection: None,
-        action: format!("Pair new agent “{name}” with AgentMFA"),
+        action: format!("Connect {name} to AgentMFA"),
         notification: format!("{name} requests to pair with AgentMFA"),
         received_at: chrono::Utc::now(),
         deadline: chrono::Utc::now(),
         identity: Some(identity.display()),
+        pairing_identity: Some(crate::approvals::PairingIdentitySummary::from_identity(
+            &identity,
+        )),
+        replaces_existing_agent,
         inherited,
         http: None,
     };
@@ -453,7 +458,7 @@ async fn post_pair(
                 Ok((token, agent)) => {
                     broker.revoke_access_grants_for_agent(&name, "agent re-paired");
                     broker.audit.append(
-                        AuditEntry::new(AuditKind::Paired, format!("Agent paired: {name}"))
+                        AuditEntry::new(AuditKind::Paired, format!("Agent connected: {name}"))
                             .agent(name.clone())
                             .outcome("paired"),
                     );
@@ -757,6 +762,8 @@ async fn post_http(
         received_at: chrono::Utc::now(),
         deadline: chrono::Utc::now(),
         identity: None,
+        pairing_identity: None,
+        replaces_existing_agent: false,
         inherited: vec![],
         http: Some(HttpPayloadView {
             method: method.to_string(),
@@ -971,6 +978,8 @@ async fn post_ws_open(
         received_at: chrono::Utc::now(),
         deadline: chrono::Utc::now(),
         identity: None,
+        pairing_identity: None,
+        replaces_existing_agent: false,
         inherited: vec![],
         http: None,
     };
@@ -1106,6 +1115,8 @@ async fn post_ssh_open(
         received_at: chrono::Utc::now(),
         deadline: chrono::Utc::now(),
         identity: None,
+        pairing_identity: None,
+        replaces_existing_agent: false,
         inherited: vec![],
         http: None,
     };
@@ -1231,6 +1242,8 @@ async fn post_pg_open(
         received_at: chrono::Utc::now(),
         deadline: chrono::Utc::now(),
         identity: None,
+        pairing_identity: None,
+        replaces_existing_agent: false,
         inherited: vec![],
         http: None,
     };

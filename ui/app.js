@@ -34,6 +34,7 @@ const state = {
   alwaysOpen: false,
   reqDetailOpen: null,   // approval payload disclosure override
   revokeInheritedRules: false,
+  approvalRequestId: null,
   menuOpen: false,       // desktop-mode settings popover (gear) open
   copied: null,          // secretId whose value was just copied (transient "Copied" flash)
 };
@@ -99,21 +100,29 @@ function pendingBannerHTML() {
 
 function globalSectionsHTML() {
   let out = '';
-  if (state.agents.length) {
-    out += '<div class="live-head">Paired agents</div>' + state.agents.map((a) => {
-      const sub = `${a.identity} · token ${a.token_preview}` +
-        (a.rule_count ? ` · ${a.rule_count} auto-allow rule${a.rule_count > 1 ? 's' : ''}` : '');
+  if (!state.agents.length) {
+    out += `<div class="agent-onboarding"><div class="onboarding-copy"><b>Connect your first agent</b>
+      <span>Copy a short setup message into your coding agent. AgentMFA will ask you to confirm when it connects.</span></div>
+      <button class="btn primary sm" data-act="copy-agent-setup">Copy setup instructions</button>
+      <details><summary>What connecting allows</summary><p>The agent can see connection names and destinations and ask AgentMFA to use them. Saved secret values are never sent to the agent.</p></details></div>`;
+  } else {
+    out += '<div class="live-head">Connected agents</div>' + state.agents.map((a) => {
+      const access = [];
+      if (a.temporary_access_count) access.push(`${a.temporary_access_count} temporary`);
+      if (a.rule_count) access.push(`${a.rule_count} without asking`);
+      const sub = `${a.program} · ${a.verification} · last used ${relTime(a.last_used)}` +
+        (access.length ? ` · ${access.join(', ')}` : '');
       if (state.confirm && state.confirm.kind === 'revoke-agent' && state.confirm.name === a.name) {
         return `<div class="live-row"><span class="badge b-agent">agent</span>
           <div class="live-txt"><div class="c-name">${esc(a.name)}</div>
-          <div class="s-sub">Revoke this agent’s pair token?</div></div>
+          <div class="disconnect-copy">Disconnect this agent? Temporary access and open connections will end. Access saved as “without asking” remains and will be shown if this name reconnects.</div></div>
           <button class="btn sm" data-act="confirm-cancel">Cancel</button>
-          <button class="btn sm danger" data-act="revoke-confirm" data-name="${escAttr(a.name)}">Revoke</button></div>`;
+          <button class="btn sm danger" data-act="revoke-confirm" data-name="${escAttr(a.name)}">Disconnect</button></div>`;
       }
       return `<div class="live-row"><span class="badge b-agent">agent</span>
         <div class="live-txt"><div class="c-name">${esc(a.name)}</div>
-        <div class="s-sub" style="max-width:260px" title="${escAttr(sub)}">${esc(sub)}</div></div>
-        <button class="btn sm" data-act="revoke-ask" data-name="${escAttr(a.name)}">Revoke</button></div>`;
+        <div class="s-sub" style="max-width:300px" title="${escAttr(a.identity)}">${esc(sub)}</div></div>
+        <button class="btn sm" data-act="revoke-ask" data-name="${escAttr(a.name)}">Disconnect</button></div>`;
     }).join('');
   }
   if (state.sessions.length) {
@@ -249,7 +258,7 @@ function activityRowHTML(a) {
 
 function activityHTML() {
   if (!state.activity.length) {
-    return `<div class="muted-note">No activity yet.<br>Pair an agent and make a request to get started.</div>`;
+    return `<div class="muted-note">No activity yet.<br>Connect an agent and make a request to get started.</div>`;
   }
   return '<div class="act-list">' + state.activity
     .slice(0, ACTIVITY_RENDER_LIMIT)
@@ -482,7 +491,7 @@ function durationLabel(seconds) {
 
 function approvalHeading(req) {
   const name = req.connection ? req.connection.name : 'AgentMFA';
-  if (req.kind === 'pair') return 'Approval required';
+  if (req.kind === 'pair') return `Let ${req.agent} connect to AgentMFA?`;
   if (req.kind === 'http' && req.http && !req.http.mutating) {
     return `${req.agent} wants to fetch data from ${name}`;
   }
@@ -531,6 +540,12 @@ function renderApproval() {
   const conn = req.connection;
   const t = conn ? TYPES[conn.type] : null;
   const isPair = req.kind === 'pair';
+  if (state.approvalRequestId !== req.id) {
+    state.approvalRequestId = req.id;
+    state.alwaysOpen = false;
+    state.reqDetailOpen = null;
+    state.revokeInheritedRules = isPair && !!(req.inherited && req.inherited.length);
+  }
   const cd = countdownParts(req.deadline);
   const connCell = conn
     ? (t ? `<span class="badge ${t.cls}">${t.label}</span> ` : '') + `<b>${esc(conn.name)}</b>`
@@ -539,17 +554,34 @@ function renderApproval() {
   const targetRow = conn ? `<div class="ap-row"><span>Target</span><code>${esc(conn.target)}</code></div>` : '';
   const scopeRow = (req.kind === 'pg' || req.kind === 'ws' || req.kind === 'ssh') && conn && conn.multi_connect
     ? `<div class="ap-row"><span>Reconnects</span><span>Allowed for 60 seconds after this connection is opened</span></div>` : '';
-  const identityRow = isPair
-    ? `<div class="ap-row"><span>Identity</span><code title="The issued token is pinned to this peer identity">${esc(req.identity || 'Unsigned/ad-hoc, no local fingerprint')}</code></div>` : '';
+  const pairIdentity = req.pairing_identity || {
+    program: req.identity || 'Unknown program',
+    verification: 'Program identity',
+    technical: req.identity || 'Unavailable',
+    warning: null,
+  };
+  const identityRows = isPair ? `
+      <div class="ap-row"><span>Requested name</span><span><b>${esc(req.agent)}</b> <em class="self-reported">supplied by program</em></span></div>
+      <div class="ap-row"><span>Program</span><b>${esc(pairIdentity.program)}</b></div>
+      <div class="ap-row"><span>Verification</span><span>${esc(pairIdentity.verification)}</span></div>` : '';
 
   let inherit = '';
   if (isPair && req.inherited && req.inherited.length) {
-    const revoked = state.revokeInheritedRules;
-    inherit = `<div class="inherit-warn"><span class="iw-head">⚠ This pairing inherits permissions</span>
-      <div class="inherit-grants ${revoked ? 'revoked' : ''}">Approving this pairing grants access to these previously-authorized connections:
-      <ul>${req.inherited.map((c) => `<li><code>${esc(`${c.name} (${TYPES[c.type].label.toLowerCase()} · ${c.target})`)}</code></li>`).join('')}</ul></div>
-      <label class="inherit-revoke"><input type="checkbox" data-act="toggle-inherited-revoke" ${revoked ? 'checked' : ''}> Revoke prior standing permissions on approval</label></div>`;
+    inherit = `<div class="inherit-warn"><span class="iw-head">This name already has access that does not require approval</span>
+      <ul>${req.inherited.map((c) => `<li><b>${esc(c.name)}</b> — ${c.type === 'api' ? 'Any request' : 'Open and use this connection'}</li>`).join('')}</ul>
+      <div class="pair-choice-head">When this program connects:</div>
+      <label class="pair-choice"><input type="radio" name="pair-access" data-act="pair-inheritance" data-revoke="true" ${state.revokeInheritedRules ? 'checked' : ''}>
+        <span><b>Require approval again</b><small>Recommended</small></span></label>
+      <label class="pair-choice"><input type="radio" name="pair-access" data-act="pair-inheritance" data-revoke="false" ${state.revokeInheritedRules ? '' : 'checked'}>
+        <span><b>Keep existing access</b><small>The new program inherits everything listed above</small></span></label></div>`;
   }
+
+  const replacement = isPair && req.replaces_existing_agent
+    ? `<div class="pair-replace"><b>${esc(req.agent)} is already connected.</b> Connecting again replaces its current sign-in. Other ${esc(req.agent)} processes may need to reload their saved sign-in.</div>` : '';
+  const identityWarning = isPair && pairIdentity.warning
+    ? `<div class="pair-identity-warning">${esc(pairIdentity.warning)}</div>` : '';
+  const identityDetails = isPair
+    ? `<details class="pair-tech"><summary>Technical identity</summary><code>${esc(pairIdentity.technical)}</code></details>` : '';
 
   const detail = requestDetailHTML(req);
 
@@ -573,24 +605,22 @@ function renderApproval() {
     <div class="ap-head"><div class="ap-icon">🔐</div>
       <div><div class="ap-title">${esc(approvalHeading(req))}</div></div></div>
     <div class="ap-scroll">
+    ${isPair ? `<div class="pair-explainer">Connecting lets this program see connection names and destinations and ask AgentMFA to use them. It cannot read saved secret values.</div>` : ''}
     <div class="ap-rows">
-      <div class="ap-row"><span>Agent</span><b>${esc(req.agent)}</b></div>
-      ${identityRow}
-      ${connectionRow}
-      ${targetRow}
-      <div class="ap-row"><span>This request</span><code>${esc(req.action)}</code></div>
-      ${scopeRow}
+      ${isPair ? identityRows : `<div class="ap-row"><span>Agent</span><b>${esc(req.agent)}</b></div>
+      ${connectionRow}${targetRow}
+      <div class="ap-row"><span>This request</span><code>${esc(req.action)}</code></div>${scopeRow}`}
       <div class="ap-row"><span>Approve within</span><span><span class="ap-countdown${cd.s === 0 ? ' expired' : cd.s <= COUNTDOWN_LOW_S ? ' low' : ''}" id="ap-countdown">${cd.text}</span></span></div>
     </div>
-    ${detail}${inherit}
+    ${identityWarning}${replacement}${inherit}${identityDetails}${detail}
     ${sessionNote}
     ${always ? `<div class="ap-ongoing-action">${always.btn}</div>${always.box}` : ''}
     </div>
     <div class="ap-buttons">
-      <button class="btn deny" data-act="decide-deny" data-id="${req.id}">Deny</button>
+      <button class="btn deny" data-act="decide-deny" data-id="${req.id}">${isPair ? 'Don’t connect' : 'Deny'}</button>
       ${isPair ? '' : `<button class="btn ghost sm" data-act="decide-once" data-id="${req.id}">This request only</button>`}
       <span class="spacer"></span>
-      <button class="btn primary" data-act="decide-allow" data-id="${req.id}">${isPair ? 'Approve pairing' : `Allow for ${esc(temporary.duration)}`}</button></div>
+      <button class="btn primary" data-act="decide-allow" data-id="${req.id}">${isPair ? 'Connect agent' : `Allow for ${esc(temporary.duration)}`}</button></div>
     ${state.queue.length > 1 ? `<div class="aw-queue">${state.queue.length - 1} more request${state.queue.length > 2 ? 's' : ''} waiting</div>` : ''}
   </div>`;
   armCountdown();
@@ -817,6 +847,9 @@ document.addEventListener('click', async (e) => {
     case 'mode-window': run(() => invoke('ui_set_mode', { mode: 'window' })); break;
     case 'toggle-settings-menu': state.menuOpen = !state.menuOpen; render(); break;
     case 'open-settings': state.menuOpen = false; state.sheet = { kind: 'settings' }; render(); break;
+    case 'copy-agent-setup':
+      if (await run(() => invoke('copy_agent_setup'))) toast('📋 Setup instructions copied');
+      break;
 
     case 'reveal-secret':
       await run(async () => { state.reveal[id] = await invoke('reveal_secret_prefix', { id }); render(); });
@@ -888,7 +921,7 @@ document.addEventListener('click', async (e) => {
     case 'revoke-ask': state.confirm = { kind: 'revoke-agent', name }; render(); break;
     case 'revoke-confirm':
       if (await run(() => invoke('revoke_agent', { name }))) {
-        state.confirm = null; toast('🔒 Pair token revoked'); await refresh('agents');
+        state.confirm = null; toast('🔒 Agent disconnected'); await refresh('all');
       }
       break;
     case 'close-session-ask': state.confirm = { kind: 'close-session', id: Number(id) }; render(); break;
@@ -949,7 +982,7 @@ document.addEventListener('click', async (e) => {
       const shownNow = state.reqDetailOpen === null ? (req.http && req.http.mutating) : state.reqDetailOpen;
       state.reqDetailOpen = !shownNow; render(); break;
     }
-    case 'toggle-inherited-revoke': state.revokeInheritedRules = btn.checked; render(); break;
+    case 'pair-inheritance': state.revokeInheritedRules = btn.dataset.revoke === 'true'; render(); break;
     case 'always-toggle': state.alwaysOpen = !state.alwaysOpen; render(); break;
 
     case 'decide-deny': await decide(id, 'deny'); break;
@@ -1055,7 +1088,13 @@ async function boot() {
   // Live updates from the core.
   await listen('amfa://queue-changed', (ev) => { state.queue = ev.payload || []; render(); });
   await listen('amfa://sessions-changed', () => refresh('sessions'));
-  await listen('amfa://agents-changed', () => refresh('agents'));
+  await listen('amfa://agents-changed', async () => {
+    const before = new Set(state.agents.map((agent) => agent.name));
+    await load('agents', 'list_agents');
+    render();
+    const connected = state.agents.find((agent) => !before.has(agent.name));
+    if (connected) toast(`🔗 ${connected.name} is connected and can now ask to use your connections`);
+  });
   await listen('amfa://rules-changed', () => refresh('connections'));
   await listen('amfa://activity-appended', (ev) => receiveActivity(ev.payload));
   await listen('amfa://open-settings', () => {

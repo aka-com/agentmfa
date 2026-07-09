@@ -170,6 +170,12 @@ impl AccessGrants {
             .collect()
     }
 
+    pub fn count_for_agent(&self, agent: &str) -> usize {
+        let mut grants = self.grants.lock().unwrap();
+        Self::sweep(&mut grants);
+        grants.iter().filter(|grant| grant.agent == agent).count()
+    }
+
     pub(crate) fn remove(&self, id: &Uuid) -> Option<AccessGrantSummary> {
         let mut grants = self.grants.lock().unwrap();
         let position = grants.iter().position(|grant| &grant.id == id)?;

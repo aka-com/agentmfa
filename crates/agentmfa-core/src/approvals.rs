@@ -39,7 +39,7 @@ use uuid::Uuid;
 
 use crate::audit::{AuditEntry, AuditKind, AuditLog};
 use crate::events::BrokerEvents;
-use crate::types::ConnectionKind;
+use crate::types::{ConnectionKind, PeerIdentity};
 use crate::wire::ErrorReason;
 
 /* ------------------------------ view types ------------------------------- */
@@ -68,6 +68,12 @@ pub struct ApprovalRequest {
     /// Pairing only: the peer's verified identity display string (§6/§8).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity: Option<String>,
+    /// Pairing only: plain-language program identity for the human prompt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pairing_identity: Option<PairingIdentitySummary>,
+    /// Pairing only: this name already has an active pair token that the new
+    /// token will replace.
+    pub replaces_existing_agent: bool,
     /// Pairing only: connections the name's standing rules would grant the
     /// connecting process promptless access to, the loud disclosure (§6).
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
@@ -75,6 +81,49 @@ pub struct ApprovalRequest {
     /// HTTP only: the request-payload view (§6).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub http: Option<HttpPayloadView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PairingIdentitySummary {
+    pub program: String,
+    pub verification: &'static str,
+    pub technical: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<&'static str>,
+}
+
+impl PairingIdentitySummary {
+    pub fn from_identity(identity: &PeerIdentity) -> Self {
+        match identity {
+            PeerIdentity::Signed { signing_id, .. } => Self {
+                program: signing_id.clone(),
+                verification: "Signed application",
+                technical: identity.display(),
+                warning: None,
+            },
+            PeerIdentity::Unsigned {
+                executable_path, ..
+            } => Self {
+                program: executable_path
+                    .as_deref()
+                    .and_then(|path| std::path::Path::new(path).file_name())
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("Unsigned local program")
+                    .to_string(),
+                verification: "Local executable",
+                technical: identity.display(),
+                warning: Some(
+                    "This program is not signed. AgentMFA uses local file details, and scripts run by the same program may share this identity.",
+                ),
+            },
+            PeerIdentity::DevUnverified { .. } => Self {
+                program: "Development process".into(),
+                verification: "Development identity",
+                technical: identity.display(),
+                warning: Some("This development build cannot verify the connecting program."),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -688,6 +737,8 @@ mod tests {
             received_at: now,
             deadline: now,
             identity: None,
+            pairing_identity: None,
+            replaces_existing_agent: false,
             inherited: vec![],
             http: None,
         }
@@ -701,6 +752,27 @@ mod tests {
                 body: serde_json::json!({"ok": true}),
             }
         })
+    }
+
+    #[test]
+    fn pairing_identity_summary_separates_program_and_verification() {
+        let signed = PairingIdentitySummary::from_identity(&PeerIdentity::Signed {
+            signing_id: "com.example.agent".into(),
+            team_id: Some("TEAM123".into()),
+        });
+        assert_eq!(signed.program, "com.example.agent");
+        assert_eq!(signed.verification, "Signed application");
+        assert!(signed.warning.is_none());
+
+        let unsigned = PairingIdentitySummary::from_identity(&PeerIdentity::Unsigned {
+            uid: Some(501),
+            executable_path: Some("/usr/local/bin/node".into()),
+            file_id: None,
+            executable_sha256: Some("a".repeat(64)),
+        });
+        assert_eq!(unsigned.program, "node");
+        assert_eq!(unsigned.verification, "Local executable");
+        assert!(unsigned.warning.is_some());
     }
 
     #[tokio::test]

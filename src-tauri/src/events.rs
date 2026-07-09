@@ -193,7 +193,7 @@ impl BrokerEvents for TauriEvents {
                 }
             }
             _ => match request.kind {
-                ApprovalKind::Pair => format!("Approve pairing of “{}”", request.agent),
+                ApprovalKind::Pair => format!("Connect {} to AgentMFA", request.agent),
                 _ => format!("Allow {}", request.action),
             },
         };

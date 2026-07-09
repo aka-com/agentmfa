@@ -16,7 +16,8 @@ use agentmfa_core::broker::{Broker, UiDecision};
 use agentmfa_core::store::ConnectionSpec;
 use agentmfa_core::types::{ConnectionConfig, DecisionContext, DecisionSurface, PgSslMode};
 use serde::Deserialize;
-use tauri::State;
+use tauri::{AppHandle, State};
+use tauri_plugin_clipboard_manager::ClipboardExt as _;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -72,12 +73,12 @@ pub fn list_connections(state: State<AppState>) -> Vec<ConnectionDto> {
 
 #[tauri::command]
 pub fn list_agents(state: State<AppState>) -> Vec<AgentDto> {
-    let rules = state.broker.rules();
-    state
-        .broker
+    let broker = &state.broker;
+    let rules = broker.rules();
+    broker
         .paired_agents()
         .iter()
-        .map(|a| AgentDto::from(a, &rules))
+        .map(|a| AgentDto::from(a, &rules, broker))
         .collect()
 }
 
@@ -123,6 +124,20 @@ pub fn get_settings(state: State<AppState>) -> SettingsDto {
         pg_trusted_ca_bundle_path: s.pg_trusted_ca_bundle_path,
         menu_bar_hides_dock: s.menu_bar_hides_dock,
     }
+}
+
+#[tauri::command]
+pub fn copy_agent_setup(app: AppHandle, state: State<AppState>) -> CmdResult<()> {
+    let socket = state.broker.paths.socket_display();
+    let instructions = format!(
+        "Connect to the local AgentMFA broker. Read its current instructions with:\n\n\
+         curl -s --unix-socket {socket} http://localhost/instructions\n\n\
+         Follow those instructions. Reuse an existing token before pairing, use a stable \
+         agent_name, and never ask me to paste a saved secret value."
+    );
+    app.clipboard()
+        .write_text(instructions)
+        .map_err(|error| error.to_string())
 }
 
 /* ------------------------------ secrets ---------------------------------- */
@@ -438,6 +453,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         list_activity,
         get_queue,
         get_settings,
+        copy_agent_setup,
         add_secret,
         edit_secret,
         delete_secret,

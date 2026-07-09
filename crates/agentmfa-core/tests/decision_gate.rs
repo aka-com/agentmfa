@@ -133,6 +133,8 @@ fn http_request(conn: &Connection, mutating: bool) -> ApprovalRequest {
         received_at: now,
         deadline: now,
         identity: None,
+        pairing_identity: None,
+        replaces_existing_agent: false,
         inherited: vec![],
         http: Some(HttpPayloadView {
             method: method.into(),
@@ -159,6 +161,12 @@ fn pair_request(agent: &str, inherited: Vec<ConnectionSummary>) -> ApprovalReque
         received_at: now,
         deadline: now,
         identity: Some(PeerIdentity::DevUnverified { uid: 501 }.display()),
+        pairing_identity: Some(
+            agentmfa_core::approvals::PairingIdentitySummary::from_identity(
+                &PeerIdentity::DevUnverified { uid: 501 },
+            ),
+        ),
+        replaces_existing_agent: false,
         inherited,
         http: None,
     }

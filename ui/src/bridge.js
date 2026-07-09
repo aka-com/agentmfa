@@ -41,8 +41,8 @@ const db = {
   rules: [],
   grants: [],
   agents: [
-    { name: 'claude-code', identity: 'com.anthropic.claude-code · Team 6XN7K9RPQ2',
-      token_preview: 'amfa_7f3a9…', paired_at: now(), rule_count: 0 },
+    { name: 'claude-code', program: 'com.anthropic.claude-code', verification: 'Signed application',
+      identity: 'com.anthropic.claude-code · Team 6XN7K9RPQ2', paired_at: now(), last_used: now() },
   ],
   sessions: [],
   activity: [],
@@ -89,7 +89,7 @@ function seedFixtures() {
     ['📤', 'Postgres connection closed', 'Ticket window elapsed', 400],
     ['📥', 'Postgres connection opened', 'prod-db → app_production', 402],
     ['✅', 'Allowed this request: claude-code', 'Connect to Postgres → app@db.internal.aka.com:5432/app_production', 1500],
-    ['🔗', 'Agent paired: claude-code', null, 3000],
+    ['🔗', 'Agent connected: claude-code', null, 3000],
   ].forEach(([icon, text, detail, min]) =>
     db.activity.push({ icon, text, detail: detail || null, at: t(min) }));
 }
@@ -128,11 +128,14 @@ async function mockInvoke(cmd, args = {}) {
       });
     case 'list_connections': return db.connections.map(connDto);
     case 'list_agents':
-      return db.agents.map((a) => ({ ...a, rule_count: db.rules.filter((r) => r.agent === a.name).length }));
+      return db.agents.map((a) => ({ ...a,
+        rule_count: db.rules.filter((r) => r.agent === a.name).length,
+        temporary_access_count: db.grants.filter((g) => g.agent === a.name).length }));
     case 'list_sessions': return db.sessions.slice();
     case 'list_activity': return db.activity.slice(0, Math.min(args.limit ?? MOCK_ACTIVITY_LIMIT, MOCK_ACTIVITY_LIMIT));
     case 'get_queue': return db.queue.slice();
     case 'get_settings': return { ...db.settings };
+    case 'copy_agent_setup': return;
     case 'add_secret': {
       if (db.secrets.some((s) => s.name === args.name)) throw new Error(`A secret named ${args.name} already exists`);
       db.secrets.push(mkSecret(args.name, args.value)); audit('➕', `Secret added: ${args.name}`); return;
@@ -193,7 +196,7 @@ async function mockInvoke(cmd, args = {}) {
     }
     case 'remove_rule': db.rules = db.rules.filter((r) => r.id !== args.id); audit('🔒', 'Approval required again'); return true;
     case 'remove_grant': db.grants = db.grants.filter((g) => g.id !== args.id); audit('🛑', 'Temporary access ended'); return true;
-    case 'revoke_agent': db.agents = db.agents.filter((a) => a.name !== args.name); audit('🔒', `Pair token revoked: ${args.name}`); return true;
+    case 'revoke_agent': db.agents = db.agents.filter((a) => a.name !== args.name); audit('🔒', `Agent disconnected: ${args.name}`); return true;
     case 'close_session': db.sessions = db.sessions.filter((s) => s.id !== args.id); emit('amfa://sessions-changed', {}); return true;
     case 'set_reauth_on_read': db.settings.reauth_on_read = args.on; return;
     case 'set_hide_secret_prefixes':
@@ -253,12 +256,17 @@ if (!tauri && typeof window !== 'undefined') {
     };
     const req = {
       id: uid(), agent: 'claude-code', kind: kind === 'pair' ? 'pair' : 'http',
-      connection: kind === 'pair' ? null : { name: 'github', type: 'api', target: 'api.github.com', multi_connect: false },
-      action: kind === 'pair' ? 'Pair new agent “claude-code”'
+      connection: kind === 'pair' ? null : { id: db.connections[0].id, name: 'github', type: 'api', target: 'api.github.com', multi_connect: false },
+      action: kind === 'pair' ? 'Connect claude-code to AgentMFA'
         : post ? 'POST api.github.com/repos/aka/aka/dispatches' : 'GET api.github.com/user/repos',
       notification: 'claude-code wants to use github: GET /user/repos',
       received_at: now(), deadline: new Date(Date.now() + ttlMs).toISOString(),
       identity: kind === 'pair' ? 'com.anthropic.claude-code · Team 6XN7K9RPQ2' : null,
+      pairing_identity: kind === 'pair' ? {
+        program: 'com.anthropic.claude-code', verification: 'Signed application',
+        technical: 'com.anthropic.claude-code · Team 6XN7K9RPQ2', warning: null,
+      } : null,
+      replaces_existing_agent: kind === 'pair',
       inherited, http,
       temporary_access: kind === 'pair' ? null : { scope: post ? 'full' : 'read', duration_seconds: 900 },
     };

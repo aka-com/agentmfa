@@ -257,7 +257,7 @@ impl Broker {
                         self.audit.append(attributed(
                             AuditEntry::new(
                                 AuditKind::PairDenied,
-                                format!("Pairing denied: {}", request.agent),
+                                format!("Connection denied: {}", request.agent),
                             )
                             .agent(request.agent.clone())
                             .outcome("denied_by_user"),
@@ -664,6 +664,10 @@ impl Broker {
         self.grants.for_connection(connection)
     }
 
+    pub fn grant_count_for_agent(&self, agent: &str) -> usize {
+        self.grants.count_for_agent(agent)
+    }
+
     pub fn ui_remove_grant(&self, id: &Uuid) -> Result<bool> {
         let Some(grant) = self.grants.remove(id) else {
             return Ok(false);
@@ -788,7 +792,7 @@ impl Broker {
             self.audit.append(
                 AuditEntry::new(
                     AuditKind::TokenRevoked,
-                    format!("Pair token revoked: {name}"),
+                    format!("Agent disconnected: {name}"),
                 )
                 .agent(name.to_string()),
             );

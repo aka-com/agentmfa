@@ -16,7 +16,8 @@ covering the following product-level facts:
   constraints. Distinguish it from a token-generation- and
   connection-revision-bound, scoped 15-minute access session.
 - [ ] State that agent names are self-asserted and that pairing under an
-  existing name inherits that name's standing rules.
+  existing name can inherit that name's standing rules unless the pairing
+  decision removes them.
 - [ ] Qualify identity pinning: interpreted runtimes may share a `node` or
   `python` identity, separate processes may share a signing identity,
   unsigned/ad-hoc fingerprints are weaker, and an in-process compromise
