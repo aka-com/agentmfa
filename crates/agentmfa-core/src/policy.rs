@@ -39,7 +39,7 @@ pub trait PolicyEngine: Send + Sync {
 }
 
 /// v1 behavior: no matching rule → Prompt; a `(agent, connection_id)` rule →
-/// Allow. Rules persist in `rules.json`, sealed (§13.1).
+/// Allow. Rules persist in `rules.json`, sealed.
 pub struct NaivePolicyEngine {
     path: PathBuf,
     integrity: Arc<StateIntegrity>,
@@ -132,7 +132,7 @@ impl NaivePolicyEngine {
             .cloned()
     }
 
-    /// Remove one rule (the removable auto-allow chip, §7).
+    /// Remove one rule (the removable auto-allow chip).
     pub fn remove_rule(&self, id: &Uuid) -> Result<Option<Rule>> {
         let mut rules = self.rules.lock().unwrap();
         let mut next = rules.clone();
@@ -149,7 +149,7 @@ impl NaivePolicyEngine {
 
     /// Rules die with their connection, also invoked when a connection's
     /// target changes (a rule granted for one destination must not silently
-    /// cover another, §9). Returns how many were removed.
+    /// cover another). Returns how many were removed.
     pub fn remove_rules_for_connection(&self, connection_id: &Uuid) -> Result<usize> {
         let mut rules = self.rules.lock().unwrap();
         let mut next = rules.clone();

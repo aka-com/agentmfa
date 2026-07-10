@@ -1,7 +1,7 @@
 // Bridge to the Rust core. Inside Tauri (withGlobalTauri), calls go to real
 // commands over the IPC. In a plain browser, a self-contained dev mock
 // stands in so the UI is developable and reviewable standalone; the mock
-// mirrors the command surface and the DESIGN.md fixtures, but obviously
+// mirrors the command surface and its fixtures, but obviously
 // enforces nothing (no Keychain, no daemon, no native OS authentication).
 
 const tauri = typeof window !== 'undefined' ? window.__TAURI__ : undefined;
@@ -56,7 +56,7 @@ async function mockListen(event, cb) {
   return () => {};
 }
 
-// In-memory store mirroring the DESIGN.md fixtures.
+// In-memory store mirroring the production fixtures.
 let seq = 1;
 const uid = () => `id-${seq++}`;
 const now = () => new Date().toISOString();

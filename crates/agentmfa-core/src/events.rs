@@ -17,7 +17,7 @@ pub trait BrokerEvents: Send + Sync {
     /// was abandoned). Drives the tray badge and the approval window.
     fn queue_changed(&self, _queue: &[ApprovalRequest]) {}
 
-    /// A new prompt was parked, the advisory notification doorbell (§6).
+    /// A new prompt was parked, the advisory notification doorbell.
     fn prompt_raised(&self, _request: &ApprovalRequest) {}
 
     /// Live WS/PG session set changed.
@@ -56,7 +56,7 @@ pub trait BrokerEvents: Send + Sync {
     /// once per decision, *before* any effect (rule save, execution)
     /// happens, so a shell cannot apply a gated decision without passing
     /// through it. The default fails closed so a new shell implementation
-    /// does not silently skip the gate (§8).
+    /// does not silently skip the gate.
     fn confirm_decision(
         &self,
         _request: &ApprovalRequest,
@@ -68,7 +68,7 @@ pub trait BrokerEvents: Send + Sync {
     /// A high-consequence configuration action — creating/deleting a
     /// connection, changing its capability, or deleting a secret — is about
     /// to take effect. Same contract as [`Self::confirm_decision`]: the core
-    /// demands it, `None` aborts, and the default fails closed (§8).
+    /// demands it, `None` aborts, and the default fails closed.
     fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
         None
     }

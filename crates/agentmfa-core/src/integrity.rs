@@ -125,7 +125,7 @@ impl StateIntegrity {
             Err(_) => {
                 if self.established {
                     // A bare file after the key exists is exactly the
-                    // rewrite §13.1 defends against: refuse.
+                    // rewrite defends against: refuse.
                     return Err(CoreError::StateTampered(display(path)));
                 }
                 // Trust-on-first-use: seal now so protection starts at once.

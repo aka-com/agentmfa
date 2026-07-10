@@ -822,10 +822,10 @@ async fn user_close_drops_the_client_connection() {
     assert!(!h.broker.ui_close_session(sessions[0].id).unwrap());
 }
 
-/// DESIGN §4.3 (c): TCP may deliver the client's first 'Q' in the same
-/// segment as handshake bytes; the splice must be seeded with the handshake
-/// reader's residual buffer or the query is swallowed. A raw client
-/// pipelines the PasswordMessage and the Query in a single write.
+/// TCP may deliver the client's first 'Q' in the same segment as handshake
+/// bytes; the splice must be seeded with the handshake reader's residual
+/// buffer or the query is swallowed. A raw client pipelines the
+/// PasswordMessage and the Query in a single write.
 #[tokio::test]
 async fn pipelined_first_query_survives_the_handoff() {
     let mut h = harness(BrokerConfig::default()).await;

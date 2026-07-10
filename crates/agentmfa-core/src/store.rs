@@ -78,7 +78,7 @@ impl Store {
         integrity: Arc<StateIntegrity>,
     ) -> Result<Self> {
         paths.ensure()?;
-        // index.json is sealed (§13.1): a file that fails verification
+        // index.json is sealed: a file that fails verification
         // refuses to load rather than silently serving repointed bindings.
         let mut state: IndexState = match integrity.read_verified(&paths.index_file())? {
             Some(bytes) => serde_json::from_slice(&bytes)?,
@@ -175,7 +175,7 @@ impl Store {
 
     /// Rename a secret, rewriting every injection template that references
     /// it, inside `{{ … }}` placeholders and transform expressions alike,
-    /// atomically with the rename (DESIGN.md §3).
+    /// atomically with the rename.
     ///
     /// Returns the updated meta and how many templates were rewritten.
     pub fn rename_secret(&self, id: &Uuid, new_name: &str) -> Result<(SecretMeta, usize)> {
@@ -241,7 +241,7 @@ impl Store {
         Ok((meta, rewritten))
     }
 
-    /// Replace a secret's value (the Edit sheet's write-only field, §9).
+    /// Replace a secret's value (the Edit sheet's write-only field).
     pub fn replace_secret_value(&self, id: &Uuid, value: SecretValue) -> Result<SecretMeta> {
         let mut state = self.state.lock().unwrap();
         let mut next = state.clone();
@@ -270,7 +270,7 @@ impl Store {
         Ok(meta)
     }
 
-    /// Deleting a secret a connection still uses is refused (DESIGN.md §3).
+    /// Deleting a secret a connection still uses is refused.
     pub fn delete_secret(&self, id: &Uuid) -> Result<SecretMeta> {
         let mut state = self.state.lock().unwrap();
         let pos = state
@@ -301,7 +301,7 @@ impl Store {
     }
 
     /// Audited, core-side Keychain read returning only the short prefix
-    /// (`min(6, ⌊len/2⌋)` chars — DESIGN.md §2). Callers audit.
+    /// (`min(6, ⌊len/2⌋)` chars). Callers audit.
     pub async fn reveal_secret_prefix(&self, id: &Uuid) -> Result<String> {
         let value = self.secret_value(id).await?;
         Ok(reveal_prefix(&value))
@@ -325,7 +325,7 @@ impl Store {
 
     /// Resolve every secret the template references, then render it. The
     /// late-fetch discipline holds: values are fetched here, per use, after
-    /// approval — never cached (§3; caching would foreclose just-in-time
+    /// approval — never cached (caching would foreclose just-in-time
     /// issuance backends).
     pub async fn render_template(&self, template: &Template) -> Result<SecretValue> {
         let mut values: std::collections::BTreeMap<String, SecretValue> =
@@ -366,7 +366,7 @@ impl Store {
 
     /// The confirmation hook can block on a native re-auth prompt (Touch
     /// ID), so it runs on the blocking pool rather than tying up a runtime
-    /// worker while the user decides (§3/§8).
+    /// worker while the user decides.
     async fn confirm_secret_read(&self, meta: SecretMeta, reauth: bool) -> Result<()> {
         if !reauth {
             return Ok(());
@@ -523,7 +523,7 @@ impl Store {
     /// Update a connection. The kind is fixed after creation. Returns the
     /// updated connection and whether its pinned target changed, the caller
     /// must drop the connection's standing rules when it did (a rule granted
-    /// for one destination must not silently cover another, DESIGN.md §9).
+    /// for one destination must not silently cover another).
     pub fn update_connection(&self, id: &Uuid, spec: ConnectionSpec) -> Result<(Connection, bool)> {
         validate_connection_name(&spec.name)?;
         let mut state = self.state.lock().unwrap();
@@ -601,7 +601,7 @@ impl Store {
     }
 
     /// Delete a connection. The caller (policy layer) deletes its rules,
-    /// rules die with their connection (DESIGN.md §7).
+    /// rules die with their connection.
     pub fn delete_connection(&self, id: &Uuid) -> Result<Connection> {
         let mut state = self.state.lock().unwrap();
         let pos = state
@@ -681,7 +681,7 @@ fn validate_connection_name(name: &str) -> Result<()> {
 
 /// Validate the type-specific config and resolve the connection's bound
 /// secrets: API secret lists are derived from the template's refs; pg/ws
-/// bind exactly one secret (DESIGN.md §9).
+/// bind exactly one secret.
 fn validate_config_and_bind_secrets(
     state: &IndexState,
     spec: &ConnectionSpec,
@@ -912,7 +912,7 @@ mod tests {
             .unwrap();
         let names: Vec<_> = store.list_secrets().into_iter().map(|s| s.name).collect();
         assert_eq!(names, ["DATABASE_PASSWORD", "GITHUB_API_KEY"]);
-        // Two user secrets plus the §13.1 integrity key.
+        // Two user secrets plus the integrity key.
         assert_eq!(vault.len(), 3);
         let gh = store.secret_by_name("GITHUB_API_KEY").unwrap();
         assert_eq!(&*store.secret_value(&gh.id).await.unwrap(), "ghp_secret");
@@ -1086,7 +1086,7 @@ mod tests {
             CoreError::SecretInUse(users) => assert_eq!(users, ["github"]),
             other => panic!("unexpected: {other}"),
         }
-        // Deleting the connection unblocks the secret; only the §13.1
+        // Deleting the connection unblocks the secret; only the
         // integrity key remains in the vault afterwards.
         let conn = store.connection_by_name("github").unwrap();
         store.delete_connection(&conn.id).unwrap();
@@ -1472,7 +1472,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::under(dir.path());
         paths.ensure().unwrap();
-        // A pre-§13.1 bare index.json, before any integrity key exists.
+        // A bare index.json from before any integrity key exists.
         std::fs::write(paths.index_file(), br#"{"secrets": [], "connections": []}"#).unwrap();
         let vault = Arc::new(MemoryVault::new());
         let store = Store::open(paths.clone(), vault).await.unwrap();

@@ -28,14 +28,14 @@ use crate::Result;
 
 const COPY_AUTHORIZATION_TTL: Duration = Duration::from_secs(5 * 60);
 
-/// What the user clicked in the approval window (§6).
+/// What the user clicked in the approval window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiDecision {
     Deny,
     AllowOnce,
     /// Create a fixed-lifetime, in-memory access session, then allow.
     AllowSession,
-    /// Save the `(agent, connection)` standing rule, then allow (§7).
+    /// Save the `(agent, connection)` standing rule, then allow.
     AlwaysAllow,
 }
 
@@ -59,13 +59,13 @@ pub struct Broker {
     pub approvals: Approvals,
     pub audit: Arc<AuditLog>,
     pub events: Arc<dyn BrokerEvents>,
-    /// Tickets + live WS/PG sessions (§4.2/§4.3).
+    /// Tickets + live WS/PG sessions.
     pub data_plane: DataPlane,
     /// The WS bridge's ephemeral loopback port, set when the daemon starts;
-    /// surfaced only in open responses (§8).
+    /// surfaced only in open responses.
     pub(crate) ws_bridge_port: std::sync::OnceLock<u16>,
     /// The PG proxy's ephemeral loopback port, set when the daemon starts;
-    /// surfaced only in open responses' DSNs (§4.3/§8).
+    /// surfaced only in open responses' DSNs.
     pub(crate) pg_proxy_port: std::sync::OnceLock<u16>,
     pub(crate) http_client: reqwest::Client,
     pub(crate) token_limiter: KeyedLimiter,
@@ -96,7 +96,7 @@ impl Broker {
             let events = events.clone();
             audit.subscribe(move |entry| events.audit_appended(entry));
         }
-        // One integrity key seals every state file (§13.1): index.json,
+        // One integrity key seals every state file: index.json,
         // rules.json, and agents.json refuse to load if tampered with.
         let integrity = Arc::new(crate::integrity::StateIntegrity::open(&*vault).await?);
         let store = Arc::new(Store::open_with_events(
@@ -125,7 +125,7 @@ impl Broker {
             events.clone(),
         );
         let http_client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none()) // hand-rolled loop (§4.1)
+            .redirect(reqwest::redirect::Policy::none()) // hand-rolled loop
             .build()
             .map_err(|e| CoreError::Vault(format!("http client: {e}")))?;
         let data_plane = DataPlane::new(
@@ -197,7 +197,7 @@ impl Broker {
     }
 
     /// The connections a pairing under `agent` would inherit promptless
-    /// access to, the loud disclosure list (§6).
+    /// access to, the loud disclosure list.
     pub fn inherited_for(&self, client_id: &Uuid) -> Vec<ConnectionSummary> {
         self.policy
             .rules_for_client(client_id)
@@ -218,7 +218,7 @@ impl Broker {
     /// core demands the native confirmation through
     /// [`BrokerEvents::confirm_decision`] *before* the decision takes
     /// effect, so no shell can apply a gated decision without passing
-    /// through it (§8). `ctx` attributes the decision in the audit log.
+    /// through it. `ctx` attributes the decision in the audit log.
     pub fn decide(
         &self,
         id: &Uuid,
@@ -258,9 +258,9 @@ impl Broker {
     }
 
     /// Whether — and how — the decision was confirmed. Deny is always one
-    /// click (§6); *Allow once* on a pairing or mutating request, every access
+    /// click; *Allow once* on a pairing or mutating request, every access
     /// session, and *Always allow…* in every case complete only after the
-    /// shell's native confirmation. Fails closed when the shell refuses (§8).
+    /// shell's native confirmation. Fails closed when the shell refuses.
     fn confirm_decision(
         &self,
         request: &ApprovalRequest,
@@ -305,7 +305,7 @@ impl Broker {
                     .deny(id, crate::wire::ErrorReason::DeniedByUser);
                 if let Some(request) = &request {
                     if request.kind == ApprovalKind::Pair {
-                        // Pairing-prompt spam brake (§8).
+                        // Pairing-prompt spam brake.
                         self.pairing_limiter.on_user_denied();
                         self.audit.append(attributed(
                             AuditEntry::new(
@@ -512,7 +512,7 @@ impl Broker {
     }
 
     /// Demand the shell's native confirmation for a high-consequence
-    /// configuration action (§8). Fails closed when the shell refuses or
+    /// configuration action. Fails closed when the shell refuses or
     /// does not implement the gate.
     fn confirm_action(&self, description: &str) -> Result<ConfirmationMethod> {
         self.events
@@ -532,7 +532,7 @@ impl Broker {
     }
 
     /// The Edit-secret sheet: rename and/or replace the value; blank value
-    /// keeps the current one (§9).
+    /// keeps the current one.
     pub fn ui_edit_secret(
         &self,
         id: &Uuid,
@@ -604,7 +604,7 @@ impl Broker {
         Ok(meta)
     }
 
-    /// Audited core-side reveal: only the short prefix ever leaves (§2).
+    /// Audited core-side reveal: only the short prefix ever leaves.
     pub async fn ui_reveal_secret_prefix(&self, id: &Uuid) -> Result<String> {
         let meta = self.store.secret_by_id(id)?;
         let prefix = self.store.reveal_secret_prefix(id).await?;
@@ -659,8 +659,8 @@ impl Broker {
         Ok(value)
     }
 
-    /// Audit trail for the core-side clipboard copy (the shell owns the
-    /// actual pasteboard write + hygiene, §9).
+    /// Audit trail for the core-side clipboard copy; the shell owns the
+    /// actual pasteboard write and hygiene.
     pub fn ui_note_secret_copied(&self, id: &Uuid) -> Result<()> {
         let meta = self.store.secret_by_id(id)?;
         self.audit.append(AuditEntry::new(
@@ -673,7 +673,7 @@ impl Broker {
     /* --------------------- connections (UI commands) ---------------------- */
 
     /// A connection binds a secret to a destination, so creating one is not
-    /// completable without the native confirmation the core demands (§8).
+    /// completable without the native confirmation the core demands.
     pub fn ui_add_connection(&self, spec: ConnectionSpec) -> Result<Connection> {
         let confirmation = self.confirm_action(&format!("Add connection “{}”", spec.name))?;
         let conn = self.store.add_connection(spec)?;
@@ -725,7 +725,7 @@ impl Broker {
     /// native authentication; changes to configuration, secret bindings, or
     /// authentication do. When the pinned target changes, its standing rules
     /// are dropped, a rule granted for one destination must not silently cover
-    /// another (§9).
+    /// another.
     pub fn ui_update_connection(&self, id: &Uuid, spec: ConnectionSpec) -> Result<Connection> {
         let old = self.store.connection_by_id(id)?;
         let explicit_secrets_changed =
@@ -798,7 +798,7 @@ impl Broker {
         Ok(conn)
     }
 
-    /// Delete a connection; rules die with it (§7).
+    /// Delete a connection; rules die with it.
     pub fn ui_delete_connection(&self, id: &Uuid) -> Result<Connection> {
         let conn = self.store.connection_by_id(id)?;
         let confirmation = self.confirm_action(&format!("Delete connection “{}”", conn.name))?;

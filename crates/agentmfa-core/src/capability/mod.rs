@@ -12,7 +12,7 @@ use std::sync::Mutex;
 
 /// A request body, held in memory below the spool threshold and in an
 /// unlinked temp file above it, a parked, awaiting-approval request holds
-/// its body, so concurrent uploads must not pin RAM (§4.1).
+/// its body, so concurrent uploads must not pin RAM.
 pub enum SpooledBody {
     Empty,
     Inline(Vec<u8>),
@@ -66,7 +66,7 @@ impl SpooledBody {
         }
     }
 
-    /// Size-capped, lossy-UTF-8 preview for the approval window (§6).
+    /// Size-capped, lossy-UTF-8 preview for the approval window.
     pub fn preview(&self, cap: usize) -> std::io::Result<(Option<String>, bool)> {
         if self.is_empty() {
             return Ok((None, false));

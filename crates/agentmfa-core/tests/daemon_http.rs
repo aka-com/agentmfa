@@ -452,7 +452,7 @@ async fn denied_pairing_returns_403_and_arms_cooldown() {
     let (status, body) = call.await.unwrap();
     assert_eq!(status, 403);
     assert_eq!(body["reason"], "denied_by_user");
-    // Cooldown after a user denial (§8): the refusal names its cause (the
+    // Cooldown after a user denial: the refusal names its cause (the
     // human said no, distinct from a full attempt window) and how long to
     // wait.
     let (status, body) = uds_request(
@@ -1261,7 +1261,7 @@ async fn same_host_redirect_followed_cross_host_returned_raw() {
 async fn query_injected_secret_not_leaked_in_upstream_error() {
     // A query-param injection connection carries the credential in the request
     // URL. reqwest's error Display embeds that URL, so returning the raw error
-    // to the agent would leak the secret the broker exists to withhold (§1).
+    // to the agent would leak the secret the broker exists to withhold.
     let mut h = harness(BrokerConfig::default()).await;
     const TOKEN: &str = "supersecretquerytoken123";
     h.broker

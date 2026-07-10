@@ -16,7 +16,7 @@ pub enum ConnectionField {
 }
 
 /// Core-level errors. Daemon handlers map these onto wire responses with
-/// machine-readable `{"reason": …}` bodies (DESIGN.md §4).
+/// machine-readable `{"reason": …}` bodies.
 #[derive(Debug, Error)]
 pub enum CoreError {
     #[error("secret name {0:?} is already in use")]

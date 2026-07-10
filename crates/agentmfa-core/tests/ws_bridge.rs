@@ -518,7 +518,7 @@ async fn open_coalesces_on_request_id_and_replays_ticket() {
 
     let ((s1, b1), (s2, b2)) = (call1.await.unwrap(), call2.await.unwrap());
     assert_eq!((s1, s2), (200, 200));
-    // One approval → the same ticket for every waiter (§4).
+    // One approval → the same ticket for every waiter.
     assert_eq!(b1["ws_url"], b2["ws_url"]);
     // Only one upstream dial happened at open time.
     assert_eq!(up.seen.lock().unwrap().len(), 1);

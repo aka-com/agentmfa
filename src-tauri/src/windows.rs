@@ -123,7 +123,7 @@ fn focus_existing_or_reopen(app: &AppHandle) {
     open_main(app);
 }
 
-/// Install the always-present tray icon (§2). Left-click toggles the compact
+/// Install the always-present tray icon. Left-click toggles the compact
 /// dropdown; right-click exposes the conventional app menu.
 pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "tray-open", "Open AgentMFA", true, None::<&str>)?;
@@ -342,7 +342,7 @@ pub fn ui_set_mode(app: AppHandle, mode: String) -> Result<(), String> {
 }
 
 /// Closing the main window hides it and keeps the broker running rather than
-/// quitting (§2); honors the "hide Dock in the menu bar" preference.
+/// quitting; honors the "hide Dock in the menu bar" preference.
 #[tauri::command]
 pub fn ui_hide_main(app: AppHandle) {
     retreat_to_menu_bar(&app);

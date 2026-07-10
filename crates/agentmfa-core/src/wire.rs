@@ -198,7 +198,7 @@ impl Serialize for ErrorReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthScheme {
     /// A bearer pair token bound out-of-band to the OS-verified peer
-    /// identity observed at pairing (§8): the only scheme in ABP/0.
+    /// identity observed at pairing: the only scheme in ABP/0.
     BearerPinned,
 }
 

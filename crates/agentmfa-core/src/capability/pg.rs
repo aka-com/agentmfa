@@ -198,9 +198,9 @@ fn hex(bytes: &[u8]) -> String {
 
 /* ------------------------------ proxy state ------------------------------- */
 
-/// Where a synthesized BackendKeyData points: enough to open a fresh
-/// upstream connection (same TLS negotiation) and fire the real
-/// CancelRequest at the mapped session (§4.3).
+/// Where a synthesized BackendKeyData points: enough to open a fresh upstream
+/// connection (with the same TLS negotiation) and fire the real CancelRequest
+/// at the mapped session.
 #[derive(Clone)]
 struct CancelTarget {
     host: String,
@@ -283,7 +283,7 @@ pub async fn start_proxy(broker: Arc<Broker>) -> io::Result<(u16, tokio::task::J
 /* ------------------------- downstream state machine ----------------------- */
 
 /// One accepted loopback connection: probes → startup (or cancel) → ticket
-/// auth → upstream handshake → completion → splice (§4.3).
+/// auth → upstream handshake → completion → splice.
 async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()> {
     let _ = stream.set_nodelay(true);
     let mut client = BufReader::new(stream);
@@ -326,7 +326,7 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
         }
     };
 
-    // The presented password IS the ticket (§4.3 step (a)).
+    // The presented password IS the ticket.
     client.write_all(&frame(b'R', &3i32.to_be_bytes())).await?;
     let (tag, payload) = read_message(&mut client).await?;
     if tag != b'p' {
@@ -341,10 +341,9 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
     }
     let (ticket, _) = take_cstr(&payload)?;
 
-    // Redeem: expiry and the two-level session budget are
-    // enforced here, failing fast with the machine reason (§4.3/§8). The
-    // redemption reserves the budget slot; dropping it before `start`
-    // releases the slot.
+    // Redeem: expiry and the two-level session budget are enforced here,
+    // failing fast with the machine reason. The redemption reserves the
+    // budget slot; dropping it before `start` releases the slot.
     let redemption = match state.broker.data_plane.redeem(&ticket) {
         Ok(r) => r,
         Err(e) => {
@@ -386,8 +385,8 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
     };
 
     // Upstream handshake: own TCP + TLS + auth with the configured user and
-    // the stored password secret (§4.3 step (b)). Failure drops the
-    // redemption → the reserved budget slot is released.
+    // the stored password secret. Failure drops the redemption, releasing the
+    // reserved budget slot.
     let upstream = match crate::authorization::scope_existing(
         redemption.secret_read_authorization.clone(),
         dial_upstream(
@@ -443,7 +442,7 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
 }
 
 /// Translate a CancelRequest on a synthesized key into a CancelRequest at
-/// the mapped upstream session (§4.3 (ii)). Works while a query is executing
+/// the mapped upstream session. Works while a query is executing
 /// on the mapped session, the cancel rides its own upstream connection.
 async fn handle_cancel(state: &Arc<ProxyState>, pid: i32, key: i32) {
     let target = state.cancels.lock().unwrap().get(&(pid, key)).cloned();
@@ -782,7 +781,7 @@ fn is_cert_verification_error(detail: &str) -> bool {
     detail.to_ascii_lowercase().contains("certificate")
 }
 
-/// TCP connect + TLS per the connection's `sslmode` (§4.3): `Disable` →
+/// TCP connect + TLS per the connection's `sslmode`: `Disable` →
 /// plaintext; `Prefer` → SSLRequest, wrap on 'S', continue plaintext on 'N';
 /// `Require`/`verify-ca`/`verify-full` → SSLRequest, 'S' or fail. The verify
 /// modes use trusted roots, and may continue once without verification only
@@ -813,7 +812,7 @@ async fn tls_connect(
             {
                 // The re-auth prompt is a blocking native dialog; run it on
                 // the blocking pool so it never ties up a runtime worker
-                // while the user decides (§4.3/§8).
+                // while the user decides.
                 let approved = match events {
                     Some(events) => {
                         let events = events.clone();
@@ -863,11 +862,10 @@ struct UpstreamSession {
     ready_status: u8,
 }
 
-/// Dial the connection's configured host:port with the stored password
-/// secret and drive the client side of the startup/auth exchange up to
-/// ReadyForQuery (§4.3 step (b)). The client's non-auth startup parameters
-/// (application_name, client_encoding, options, search_path, …) are
-/// forwarded for fidelity.
+/// Dial the connection's configured host:port with the stored password secret
+/// and drive the client side of the startup/auth exchange up to ReadyForQuery.
+/// The client's non-auth startup parameters (application_name,
+/// client_encoding, options, search_path, …) are forwarded for fidelity.
 async fn dial_upstream(
     store: &Arc<Store>,
     events: &Arc<dyn BrokerEvents>,
@@ -1046,7 +1044,7 @@ fn md5_password(user: &str, password: &[u8], salt: &[u8]) -> String {
 /// mechanism payload is a NUL-terminated list of mechanism names. When the
 /// server offers SCRAM-SHA-256-PLUS and the upstream leg is TLS, channel
 /// binding is `tls-server-end-point`, the SHA-256 digest of the server
-/// certificate DER (§4.3).
+/// certificate DER.
 async fn sasl_auth(
     stream: &mut BufReader<PgStream>,
     mechanisms_payload: &[u8],
@@ -1140,11 +1138,11 @@ async fn sasl_auth(
 /* --------------------------------- splice --------------------------------- */
 
 /// Byte-forward the established session in both directions with the session
-/// lifetime rules (§4.2/§4.3): max TTL, idle timeout, user close, and either
-/// leg closing tears down both. The copy is seeded with any residual bytes
-/// each leg's handshake reader buffered, TCP may have delivered the
-/// client's first 'Q' in the same segment as the startup bytes, and a naive
-/// handoff of the bare sockets would swallow it (§4.3 step (c)).
+/// lifetime rules: max TTL, idle timeout, user close, and either leg closing
+/// tears down both. The copy is seeded with any residual bytes each leg's
+/// handshake reader buffered; TCP may have delivered the client's first 'Q'
+/// in the same segment as the startup bytes, and a naive handoff of the bare
+/// sockets would swallow it.
 async fn splice(
     client: BufReader<TcpStream>,
     upstream: BufReader<PgStream>,
@@ -1215,7 +1213,7 @@ async fn splice(
         },
     };
 
-    // Tear down both legs whatever the reason (§4.2/§4.3).
+    // Tear down both legs whatever the reason.
     let _ = client_tx.shutdown().await;
     let _ = upstream_tx.shutdown().await;
     session.finish(reason);

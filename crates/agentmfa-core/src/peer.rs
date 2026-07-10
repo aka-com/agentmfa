@@ -223,7 +223,7 @@ mod macos {
 
             if SecCodeCheckValidity(code, K_SEC_CS_DEFAULT_FLAGS, std::ptr::null()) != 0 {
                 // Invalid or ad-hoc/unsigned, the pairing dialog calls this
-                // out loudly (§6).
+                // out loudly.
                 return unsigned_identity(stream, Some(token));
             }
 

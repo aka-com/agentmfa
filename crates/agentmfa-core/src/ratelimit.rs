@@ -9,8 +9,7 @@
 //!
 //! Every refusal carries *how long to wait*: `check` returns
 //! `Err(retry_after)` so the daemon can answer with `Retry-After` and a
-//! `retry_after_seconds` body field instead of an opaque 429 (§5b's
-//! machine-actionable principle applied to backoff).
+//! `retry_after_seconds` body field instead of an opaque 429.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
@@ -118,7 +117,7 @@ pub enum PairingBlock {
 }
 
 /// The pairing brake: a global window plus a cooldown armed whenever the
-/// user *denies* a pairing (§8).
+/// user *denies* a pairing.
 pub struct PairingLimiter {
     window: WindowLimiter,
     cooldown: Duration,

@@ -26,7 +26,7 @@ use crate::wire::ErrorReason;
 pub enum TicketPayload {
     Ws {
         /// The upstream connection dialed (and authenticated) at open time,
-        /// claimed by the first redemption (§4.2 step 3).
+        /// claimed by the first redemption.
         pending_upstream: Option<crate::capability::ws::WsUpstream>,
     },
     Pg,
@@ -79,9 +79,9 @@ pub enum RedeemError {
     Unknown,
     /// Past its 60 s window.
     Expired,
-    /// This approval's session budget is exhausted (§8).
+    /// This approval's session budget is exhausted.
     TicketSessionLimit,
-    /// The broker-wide backstop is exhausted (§8).
+    /// The broker-wide backstop is exhausted.
     BrokerSessionLimit,
 }
 
@@ -152,7 +152,7 @@ pub struct DataPlane {
 }
 
 fn mint_ticket() -> String {
-    let mut buf = [0u8; 16]; // 128-bit (§8)
+    let mut buf = [0u8; 16]; // 128-bit
     getrandom::fill(&mut buf).expect("os rng");
     let hex: String = buf.iter().map(|b| format!("{b:02x}")).collect();
     format!("tkt_{hex}")
@@ -178,7 +178,7 @@ impl DataPlane {
         }
     }
 
-    /// Issue a ticket under one approval (§4.2/§4.3).
+    /// Issue a ticket under one approval.
     pub fn issue(&self, agent: &str, connection: &Connection, payload: TicketPayload) -> String {
         let value = mint_ticket();
         let mut state = self.inner.state.lock().unwrap();
@@ -212,7 +212,7 @@ impl DataPlane {
         if entry.issued.elapsed() > self.inner.ticket_ttl {
             return Err(RedeemError::Expired);
         }
-        // Fail fast with the budget it hit (§8).
+        // Fail fast with the budget it hit.
         if entry.active_sessions >= self.inner.per_ticket {
             return Err(RedeemError::TicketSessionLimit);
         }
@@ -245,7 +245,7 @@ impl DataPlane {
         sessions
     }
 
-    /// User-initiated close from the immediate remediation control (§9).
+    /// User-initiated close from the immediate remediation control.
     /// Returns whether the session existed.
     pub fn close_session(&self, id: u64) -> bool {
         let state = self.inner.state.lock().unwrap();
@@ -414,7 +414,7 @@ impl Drop for Redemption {
 
 impl SessionHandle {
     /// Session over (either leg closed, TTL, idle, or user close): tear
-    /// down accounting and audit with byte counts (§8).
+    /// down accounting and audit with byte counts.
     pub fn finish(self, reason: &str) {
         let mut state = self.plane.state.lock().unwrap();
         let entry = state.sessions.remove(&self.id);

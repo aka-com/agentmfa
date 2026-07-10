@@ -407,7 +407,7 @@ pub fn edit_secret(
 #[tauri::command]
 pub fn delete_secret(state: State<AppState>, id: String) -> CmdResult<()> {
     let id = parse_id(&id)?;
-    // The core refuses in-use deletion and demands the OS confirmation (§8).
+    // The core refuses in-use deletion and demands the OS confirmation.
     state
         .broker
         .ui_delete_secret(&id)
@@ -415,7 +415,7 @@ pub fn delete_secret(state: State<AppState>, id: String) -> CmdResult<()> {
         .map_err(|e| e.to_string())
 }
 
-/// Audited, core-side Keychain read returning only the short prefix (§2).
+/// Audited, core-side Keychain read returning only the short prefix.
 #[tauri::command]
 pub async fn reveal_secret_prefix(state: State<'_, AppState>, id: String) -> CmdResult<String> {
     let id = parse_id(&id)?;
@@ -428,7 +428,7 @@ pub async fn reveal_secret_prefix(state: State<'_, AppState>, id: String) -> Cmd
 
 /// Core-side copy: reads the value in the core, writes it straight to the
 /// clipboard with hygiene, audits *that* a copy happened, never the value.
-/// The value never re-enters the webview (§9).
+/// The value never re-enters the webview.
 #[tauri::command]
 pub async fn copy_secret(state: State<'_, AppState>, id: String) -> CmdResult<()> {
     let id = parse_id(&id)?;
@@ -556,7 +556,7 @@ impl ConnectionInput {
 }
 
 /// Creating a connection binds a secret to a destination; the core demands
-/// the native OS confirmation before it takes effect (§8).
+/// the native OS confirmation before it takes effect.
 #[tauri::command]
 pub fn add_connection(state: State<AppState>, mut input: ConnectionInput) -> FormResult<()> {
     let kind = input.kind.clone();
@@ -653,8 +653,8 @@ pub fn add_connection(state: State<AppState>, mut input: ConnectionInput) -> For
     Ok(())
 }
 
-/// Security-relevant connection edits are core-gated (§8); metadata-only
-/// edits are not. A target change drops the connection's standing rules (§9).
+/// Security-relevant connection edits are core-gated; metadata-only
+/// edits are not. A target change drops the connection's standing rules.
 #[tauri::command]
 pub fn edit_connection(
     state: State<AppState>,
@@ -753,7 +753,7 @@ pub enum DecisionInput {
 /// on a pairing or mutating request, every access session, and Always allow in
 /// every case complete only after the native OS confirmation, which the
 /// **core** demands via `BrokerEvents::confirm_decision` before the decision
-/// takes effect (§6/§8); this command only names the surface for attribution.
+/// takes effect; this command only names the surface for attribution.
 #[tauri::command]
 pub fn decide(
     state: State<AppState>,

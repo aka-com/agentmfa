@@ -115,8 +115,8 @@ impl Paths {
     pub fn tokens_dir(&self) -> PathBuf {
         self.socket_dir.join("tokens")
     }
-    /// Per-open SSH agent sockets live here (DESIGN.md §4.4), one
-    /// `agent-<suffix>.sock` per approved `/v1/ssh/open`.
+    /// Per-open SSH agent sockets live here, one `agent-<suffix>.sock` per
+    /// approved `/v1/ssh/open`.
     pub fn ssh_agent_dir(&self) -> PathBuf {
         self.socket_dir.join("ssh")
     }

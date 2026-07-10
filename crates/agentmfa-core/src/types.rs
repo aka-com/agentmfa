@@ -10,7 +10,7 @@ pub type SecretValue = Zeroizing<String>;
 
 /// Masked metadata, the only thing the UI (or anything else outside the
 /// vault) ever sees about a secret. Deliberately no value material, not even
-/// a masked preview (DESIGN.md §2/§3).
+/// a masked preview.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SecretMeta {
     pub id: Uuid,
@@ -198,7 +198,7 @@ impl ConnectionConfig {
     }
 }
 
-/// A connection binds secret(s) to a destination (DESIGN.md §1/§9).
+/// A connection binds secret(s) to a destination.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Connection {
     /// Stable id, standing rules key on it, never on the renamable name.
@@ -288,7 +288,7 @@ impl PeerIdentity {
     }
 }
 
-/// A paired agent record (DESIGN.md §8/§9). Persisted in `agents.json`;
+/// A paired agent record. Persisted in `agents.json`;
 /// the pair token itself is stored only as a SHA-256 hash.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairedAgent {
@@ -296,7 +296,7 @@ pub struct PairedAgent {
     /// change, but permissions always bind to this id.
     #[serde(default)]
     pub id: Uuid,
-    /// Self-asserted at pairing (§8), a label, not an authenticated identity.
+    /// Self-asserted at pairing, a label, not an authenticated identity.
     pub name: String,
     /// SHA-256 of the 256-bit bearer token, hex-encoded.
     pub token_hash: String,
@@ -364,7 +364,7 @@ pub enum Decision {
     Prompt,
 }
 
-/// The surface a human decision came from (audit attribution, §8).
+/// The surface a human decision came from (audit attribution).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DecisionSurface {
@@ -376,7 +376,7 @@ pub enum DecisionSurface {
     Harness,
 }
 
-/// How a confirmation-required decision was confirmed (§8).
+/// How a confirmation-required decision was confirmed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfirmationMethod {
@@ -410,7 +410,7 @@ impl DecisionContext {
     }
 }
 
-/// User settings (DESIGN.md §3/§9).
+/// User settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Settings {
     /// "Require OS authentication to read secrets", default on. The macOS

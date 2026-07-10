@@ -54,7 +54,7 @@ pub struct AppState {
     pub broker: Arc<Broker>,
 }
 
-/// Per-connection peer info, resolved race-free at accept time (§8).
+/// Per-connection peer info, resolved race-free at accept time.
 #[derive(Clone, Debug)]
 pub struct PeerInfo {
     pub identity: PeerIdentity,
@@ -100,8 +100,8 @@ where
 
 /// The capability endpoint that accepts calls naming a connection of this
 /// kind — the "use this instead" half of `wrong_connection_type`, and the
-/// per-entry `endpoint` field in the listing (§5b: the type→endpoint
-/// mapping should not live only in prose).
+/// per-entry `endpoint` field in the listing. The type→endpoint mapping should
+/// not live only in prose.
 fn endpoint_for(kind: ConnectionKind) -> &'static str {
     match kind {
         ConnectionKind::Api => "/v1/http",
@@ -126,7 +126,7 @@ fn outcome_response(outcome: ExecOutcome) -> Response {
 
 /// 429 with machine-actionable backoff: a `Retry-After` header (whole
 /// seconds, rounded up) plus the same value in the body, so an agent knows
-/// how long to wait instead of guessing (§5b applied to backoff).
+/// how long to wait instead of guessing.
 fn err_rate_limited(reason: ErrorReason, retry_after: std::time::Duration) -> Response {
     let secs = (retry_after.as_secs() + u64::from(retry_after.subsec_nanos() > 0)).max(1);
     (
@@ -159,7 +159,7 @@ fn err_unknown_connection(broker: &Arc<Broker>) -> Response {
     )
 }
 
-/// Bearer-token + identity-pin authentication (§8).
+/// Bearer-token + identity-pin authentication.
 pub struct Authed {
     pub agent: PairedAgent,
 }
@@ -410,7 +410,7 @@ pub fn router(broker: Arc<Broker>) -> Router {
 /// process lease before opening any persistent state and the broker holds it
 /// for its full lifetime. A socket left by a crashed broker is unlinked only
 /// when it is still the observed inode and rejects a connection with the
-/// expected stale-socket error (§12).
+/// expected stale-socket error.
 pub async fn serve(broker: Arc<Broker>) -> crate::Result<DaemonHandle> {
     let paths = broker.paths.clone();
     paths.ensure()?;
@@ -434,12 +434,12 @@ pub async fn serve(broker: Arc<Broker>) -> crate::Result<DaemonHandle> {
     std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
     // Per-open SSH agent sockets self-clean on their deadline; sweep any a
     // crashed broker left behind, mirroring the stale control-socket check
-    // above (§4.4/§12).
+    // above.
     crate::capability::ssh::sweep_stale_sockets(&paths.ssh_agent_dir());
-    // The WS bridge data plane: loopback-only, OS-assigned port (§8).
+    // The WS bridge data plane: loopback-only, OS-assigned port.
     let (ws_bridge_port, bridge_task) = crate::capability::ws::start_bridge(broker.clone()).await?;
     let _ = broker.ws_bridge_port.set(ws_bridge_port);
-    // The PG proxy data plane: loopback-only, OS-assigned port (§4.3/§8).
+    // The PG proxy data plane: loopback-only, OS-assigned port.
     let (pg_proxy_port, proxy_task) = match crate::capability::pg::start_proxy(broker.clone()).await
     {
         Ok(started) => started,
@@ -516,7 +516,7 @@ async fn post_pair(
     let broker = &state.broker;
     // The brake's two causes read differently to an agent: a full window
     // means "slow down"; the post-denial cooldown means "the human just
-    // said no, ask them before trying again" (§8).
+    // said no, ask them before trying again".
     match broker.pairing_limiter.check() {
         Ok(()) => {}
         Err(PairingBlock::Window(wait)) => {
@@ -627,7 +627,7 @@ async fn post_pair(
                             "identity": agent.identity.display(),
                             "expires_after_days": broker.config.token_ttl.as_secs() / 86400,
                             // The storage guidance travels with the
-                            // credential, not just in prose (§5b).
+                            // credential, not just in prose.
                             "store_at": format!("{}/{name}", broker.paths.tokens_display()),
                         }),
                     }
@@ -686,7 +686,7 @@ async fn get_connections(State(state): State<AppState>, authed: Authed) -> Respo
         return err_rate_limited(ErrorReason::RateLimited, wait);
     }
     // The one authenticated endpoint that bypasses the policy engine by
-    // design, an agent must see what it may ask for. Audited (§4.0/§8).
+    // design, an agent must see what it may ask for. Audited.
     broker.audit.append(
         AuditEntry::new(
             AuditKind::Listed,
@@ -708,7 +708,7 @@ async fn get_connections(State(state): State<AppState>, authed: Authed) -> Respo
                 .is_some_and(|grant| grant.summary.scope == PermissionScope::Full);
             // What a call costs the agent right now: `will_prompt` blocks on
             // a human decision, `auto_allowed` proceeds immediately under a
-            // standing rule (§7). Not a secret; the agent learns the same
+            // standing rule. Not a secret; the agent learns the same
             // thing on its first call, but knowing up front lets it warn its
             // user before ringing the doorbell.
             let full_permission =
@@ -771,7 +771,7 @@ async fn get_whoami(State(state): State<AppState>, authed: Authed) -> Response {
         "identity": authed.agent.identity.display(),
         "paired_at": authed.agent.paired_at,
         // The sliding TTL's current horizon; refreshed on every
-        // authenticated call (§8).
+        // authenticated call.
         "expires_at": expires_at,
     }))
     .into_response()
@@ -792,7 +792,7 @@ struct HttpCallBody {
     /// Binary alternative to `body`.
     #[serde(default)]
     body_base64: Option<String>,
-    /// Idempotency key (§4): coalesces retried mutating calls.
+    /// Idempotency key: coalesces retried mutating calls.
     #[serde(default)]
     request_id: Option<String>,
 }
@@ -854,7 +854,7 @@ async fn post_http(
         unreachable!()
     };
 
-    // Validate the *what* (§4.1). Validation runs before any prompt, so a
+    // Validate the *what*. Validation runs before any prompt, so a
     // rejected request never costs the user an approval.
     let method = match parse_method(&call.method) {
         Ok(m) => m,
@@ -883,7 +883,7 @@ async fn post_http(
         }
     };
 
-    // Decode the body (§4.1): JSON string, JSON value, or base64 binary.
+    // Decode the body: JSON string, JSON value, or base64 binary.
     let body_bytes: Vec<u8> = match (&call.body, &call.body_base64) {
         (Some(_), Some(_)) => {
             return err_detail(
@@ -928,7 +928,7 @@ async fn post_http(
         }
     };
 
-    // The approval window's request-payload view (§6).
+    // The approval window's request-payload view.
     let (preview, truncated) = body
         .preview(broker.config.approval_body_preview)
         .unwrap_or((None, false));
@@ -976,7 +976,7 @@ async fn post_http(
     );
 
     // Coalescing is keyed on (agent, request_id) for mutating calls only;
-    // GET/HEAD are never coalesced, a request_id there is ignored (§4).
+    // GET/HEAD are never coalesced, a request_id there is ignored.
     let coalesce_key = match (&call.request_id, mutating) {
         (Some(rid), true) => Some((agent.name.clone(), rid.clone())),
         _ => None,
@@ -1012,7 +1012,7 @@ async fn post_http(
     run_policied(broker, &agent, &conn, scope, park).await
 }
 
-/// Shared capability tail (§4/§7): evaluate policy, a standing rule goes
+/// Shared capability tail: evaluate policy, a standing rule goes
 /// straight to execution (still coalesced), no rule parks a held-open
 /// prompt, then wait and relay the outcome.
 async fn run_policied(
@@ -1117,7 +1117,7 @@ async fn resolve_parked(parked: Result<Parked, ParkError>) -> Response {
 struct OpenBody {
     connection: String,
     /// Idempotency key, session-creating opens coalesce like mutating
-    /// calls (§4).
+    /// calls.
     #[serde(default)]
     request_id: Option<String>,
 }
@@ -1209,7 +1209,7 @@ async fn post_ws_open(
 
     // Executor: dial the configured upstream with the credential injected
     // (validating reachability and auth), issue the ticket, hand back the
-    // bridge URL (§4.2).
+    // bridge URL.
     let executor: crate::approvals::Executor = {
         let broker = broker.clone();
         let conn = conn.clone();
@@ -1230,7 +1230,7 @@ async fn post_ws_open(
                             "ws_url":
                                 format!("ws://127.0.0.1:{bridge_port}/v1/ws/bridge/{ticket}"),
                             // The redemption deadline, machine-actionable
-                            // instead of prose-only (§5b).
+                            // instead of prose-only.
                             "expires_in_seconds": broker.config.ticket_ttl.as_secs(),
                         }),
                     }
@@ -1351,7 +1351,7 @@ async fn post_ssh_open(
     });
 
     // Executor: read + parse the key, bind the per-open agent socket, issue
-    // the ticket, hand back the SSH_AUTH_SOCK path (§4.4). The socket path is
+    // the ticket, hand back the SSH_AUTH_SOCK path. The socket path is
     // the capability, so it is minted only after approval.
     let executor: crate::approvals::Executor = {
         let broker = broker.clone();
@@ -1369,7 +1369,7 @@ async fn post_ssh_open(
                         "user": user,
                         "host_key_fingerprint": host_key_fingerprint,
                         // The redemption deadline, machine-actionable
-                        // instead of prose-only (§5b).
+                        // instead of prose-only.
                         "expires_in_seconds": broker.config.ticket_ttl.as_secs(),
                     }),
                 },
@@ -1482,7 +1482,7 @@ async fn post_pg_open(
             .collect::<String>()
     });
 
-    // Executor: issue the ticket and hand back the password-less DSN (§4.3).
+    // Executor: issue the ticket and hand back the password-less DSN.
     // Unlike WS, nothing is dialed here, the proxy dials upstream at
     // redemption time. The ticket is deliberately NOT embedded in the DSN
     // (it would sit in ps-visible argv and shell history for its window):
@@ -1501,12 +1501,12 @@ async fn post_pg_open(
                 status: 200,
                 body: json!({
                     // Ready-to-adapt invocation; the ticket goes via the
-                    // environment, never argv (§4.3).
+                    // environment, never argv.
                     "example": format!("PGPASSWORD=<ticket> psql \"{dsn}\""),
                     "dsn": dsn,
                     "ticket": ticket,
                     // The redemption deadline, machine-actionable instead
-                    // of prose-only (§5b).
+                    // of prose-only.
                     "expires_in_seconds": broker.config.ticket_ttl.as_secs(),
                 }),
             }

@@ -1,4 +1,4 @@
-//! Broker tunables. Defaults match DESIGN.md; tests shrink them.
+//! Broker tunables. Tests shrink the defaults.
 
 use std::time::Duration;
 
@@ -7,13 +7,13 @@ pub struct BrokerConfig {
     /// Broker version advertised in the discovery manifest.
     pub version: String,
 
-    /// Hard per-request approval timeout (§6): auto-deny after this.
+    /// Hard per-request approval timeout: auto-deny after this.
     pub approval_timeout: Duration,
     /// Advertised, machine-actionable client timeout: approval wait +
-    /// upstream timeout + margin (§4/§5b).
+    /// upstream timeout + margin.
     pub recommended_client_timeout: Duration,
     /// Completed idempotency keys are retained this long. Their outcomes are
-    /// replayed when the byte-bounded response cache still has them (§4). A
+    /// replayed when the byte-bounded response cache still has them. A
     /// zero duration fails closed for new retainable keyed requests.
     pub outcome_retention: Duration,
     /// Global cap on in-flight reservations plus completed idempotency-key
@@ -25,46 +25,46 @@ pub struct BrokerConfig {
     /// larger than this keeps only its compact idempotency tombstone.
     pub outcome_retention_max_bytes: usize,
 
-    /// Upstream HTTP call timeout (§4.1).
+    /// Upstream HTTP call timeout.
     pub upstream_timeout: Duration,
-    /// Response body cap (§4.1, default 10 MB).
+    /// Response body cap (default 10 MB).
     pub response_cap: usize,
-    /// Request body cap (§4.1, default 150 MB).
+    /// Request body cap (default 150 MB).
     pub request_cap: usize,
     /// Request bodies past this are spooled to a temp file rather than held
-    /// in memory while parked (§4.1).
+    /// in memory while parked.
     pub spool_threshold: usize,
-    /// Redirect loop bound (§4.1).
+    /// Redirect loop bound.
     pub max_redirects: usize,
-    /// How much request body the approval window's payload view shows (§6).
+    /// How much request body the approval window's payload view shows.
     pub approval_body_preview: usize,
 
     /// Fixed lifetime of an in-memory access session.
     pub access_grant_ttl: Duration,
 
-    /// Pair token TTL, refreshed on use (§8).
+    /// Pair token TTL, refreshed on use.
     pub token_ttl: Duration,
 
-    /// Per-token rate limit on capability calls (§8): requests per minute.
+    /// Per-token rate limit on capability calls: requests per minute.
     pub per_token_per_min: u32,
-    /// Global discovery limit (unauthenticated endpoints, §8).
+    /// Global discovery limit (unauthenticated endpoints).
     pub discovery_per_min: u32,
-    /// Global pairing brake: max attempts per window (§8).
+    /// Global pairing brake: max attempts per window.
     pub pairing_max_attempts: u32,
     pub pairing_window: Duration,
-    /// Cooldown after a user denies a pairing (§8).
+    /// Cooldown after a user denies a pairing.
     pub pairing_deny_cooldown: Duration,
 
-    /// Data-plane tickets die this long after issue (§4.2/§4.3).
+    /// Data-plane tickets die this long after issue.
     pub ticket_ttl: Duration,
-    /// Bridged/proxied session max TTL (§4.2).
+    /// Bridged/proxied session max TTL.
     pub session_max_ttl: Duration,
     /// Idle teardown (no traffic either direction; WS ping/pong counts as
-    /// activity, §4.2).
+    /// activity).
     pub session_idle_timeout: Duration,
-    /// Per-approval (per-ticket) concurrent session cap (§8).
+    /// Per-approval (per-ticket) concurrent session cap.
     pub per_ticket_sessions: usize,
-    /// Global concurrent session backstop (§8).
+    /// Global concurrent session backstop.
     pub global_sessions: usize,
 }
 

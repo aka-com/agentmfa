@@ -54,7 +54,7 @@ impl TauriEvents {
     fn update_tray_badge(&self, count: usize) {
         // NSStatusItem has no badge API and an accessory app has no Dock
         // icon to badge, so the pending count is rendered into the
-        // status-item title text (DESIGN.md §2).
+        // status-item title text.
         if let Some(tray) = self.app.tray_by_id("main") {
             let title = if count > 0 {
                 Some(count.to_string())
@@ -128,7 +128,7 @@ impl BrokerEvents for TauriEvents {
 
     fn prompt_raised(&self, request: &ApprovalRequest) {
         // Guaranteed path is the tray badge + auto-raised window; the
-        // notification is a best-effort doorbell (§6).
+        // notification is a best-effort doorbell.
         self.set_approval_visible(true);
         let _ = self
             .app
@@ -165,7 +165,7 @@ impl BrokerEvents for TauriEvents {
         crate::auth::confirm(&reason).is_ok()
     }
 
-    /// The core-demanded gate on confirmation-required decisions (§8): the
+    /// The core-demanded gate on confirmation-required decisions: the
     /// LocalAuthentication sheet, phrased for what is being decided.
     fn confirm_decision(
         &self,
@@ -220,7 +220,7 @@ impl BrokerEvents for TauriEvents {
             .map(|_| ConfirmationMethod::OsAuthentication)
     }
 
-    /// The core-demanded gate on high-consequence configuration actions (§8).
+    /// The core-demanded gate on high-consequence configuration actions.
     fn confirm_action(&self, description: &str) -> Option<ConfirmationMethod> {
         crate::auth::confirm(description)
             .ok()

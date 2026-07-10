@@ -145,9 +145,9 @@ fn fatal_integrity_startup(app: &tauri::App, file: &str) -> ! {
 
 /// A startup failure the user can act on is a dialog, not a crash. The
 /// cases are tailored: which file failed, what likely caused it, what to do
-/// next. `StateTampered` in particular is security-relevant (DESIGN.md
-/// §13.1) *and* the expected outcome of an app-identity change — the user
-/// should see it, not find a crash report.
+/// next. `StateTampered` in particular is security-relevant *and* the
+/// expected outcome of an app-identity change — the user should see it, not
+/// find a crash report.
 fn fatal_startup(app: &tauri::App, e: CoreError) -> ! {
     if let CoreError::StateTampered(file) = &e {
         fatal_integrity_startup(app, file);

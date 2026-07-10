@@ -134,8 +134,8 @@ async fn bridge_handler(
     upgrade: WebSocketUpgrade,
 ) -> Response {
     let broker = state.broker;
-    // Redeem: expiry and the two-level session budget are
-    // enforced here, failing fast with the reason (§4.2/§8).
+    // Redeem: expiry and the two-level session budget are enforced here,
+    // failing fast with the reason.
     let mut redemption = match broker.data_plane.redeem(&ticket) {
         Ok(r) => r,
         Err(e) => {
@@ -146,7 +146,7 @@ async fn bridge_handler(
     };
 
     // First redemption claims the upstream dialed at open time; later
-    // later redemptions dial their own (§4.2).
+    // later redemptions dial their own.
     let upstream = match redemption.payload_ws_upstream.take() {
         Some(upstream) => upstream,
         None => match crate::authorization::scope_existing(
@@ -209,8 +209,8 @@ fn message_len(msg: &TMessage) -> u64 {
     }
 }
 
-/// Pipe frames verbatim in both directions with the session lifetime rules
-/// (§4.2): max TTL, idle timeout (ping/pong counts as activity), user
+/// Pipe frames verbatim in both directions while enforcing the session
+/// lifetime limits: max TTL, idle timeout (ping/pong counts as activity), user
 /// close, and either side closing tears down both legs.
 async fn pipe(
     client: WebSocket,

@@ -55,10 +55,10 @@ pub struct AuditEntry {
     pub connection: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
-    /// Matching rule for rule-based allows (§8).
+    /// Matching rule for rule-based allows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule_id: Option<Uuid>,
-    /// Decision attribution (§8): the deciding principal (absent for the
+    /// Decision attribution: the deciding principal (absent for the
     /// local machine's single user), the surface the decision came from,
     /// and how a required decision confirmation was satisfied (absent
     /// when no confirmation was required).
@@ -110,7 +110,7 @@ pub enum AuditKind {
     HttpExecuted,
     SessionOpened,
     SessionClosed,
-    /// One SSH signature issued (or refused) by the agent adapter (§4.4).
+    /// One SSH signature issued (or refused) by the agent adapter.
     SshSigned,
     // Vault + config actions from the UI
     SecretAdded,

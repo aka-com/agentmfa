@@ -60,7 +60,7 @@ impl HttpValidationError {
     }
 }
 
-/// Broker-controlled, non-overridable header denylist (§4.1): the injected
+/// Broker-controlled, non-overridable header denylist: the injected
 /// credential header is added per connection at validation time.
 const DENYLIST: &[&str] = &[
     "host",
@@ -94,7 +94,7 @@ pub fn parse_method(method: &str) -> Result<Method, HttpValidationError> {
     }
 }
 
-/// Path validation (§4.1): must begin with exactly one `/`; absolute URLs,
+/// Path validation: must begin with exactly one `/`; absolute URLs,
 /// protocol-relative `//host/…` paths, userinfo tricks, backslashes and
 /// control bytes are rejected. Any query string is part of the path.
 pub fn validate_path(path: &str) -> Result<(), HttpValidationError> {
@@ -137,7 +137,7 @@ pub fn validate_headers(
     Ok(map)
 }
 
-/// How the connection's rendered template is injected (§4.1): a header line
+/// How the connection's rendered template is injected: a header line
 /// (`Name: value`) or a query-param form (template starting with `?`,
 /// e.g. `?token={{url(STREAM_TOKEN)}}`).
 pub enum InjectionForm {
@@ -301,7 +301,7 @@ fn broker_error(status: u16, reason: ErrorReason, detail: impl Into<String>) -> 
 impl HttpExecution {
     /// Perform the approved request: render the credential, drive the
     /// redirect loop, relay `{status, headers, body}`. Runs exactly once
-    /// per approval (§4).
+    /// per approval.
     pub async fn run(self) -> ExecOutcome {
         let started = Instant::now();
         let outcome = self.run_inner().await;
@@ -328,7 +328,7 @@ impl HttpExecution {
 
     async fn run_inner(&self) -> ExecOutcome {
         // Render the credential as late as possible; values are zeroized on
-        // drop (§3).
+        // drop.
         let ConnectionConfig::Api { template, .. } = &self.connection.config else {
             return broker_error(
                 500,
@@ -345,7 +345,7 @@ impl HttpExecution {
         let redactions = Redactions::from_injection(&injection);
 
         // Build the initial URL from parsed components, never string
-        // concatenation (§4.1).
+        // concatenation.
         let mut base = match Url::parse(&format!("{scheme}://{host}")) {
             Ok(u) => u,
             Err(e) => return broker_error(500, ErrorReason::BadConnectionConfig, e.to_string()),
@@ -416,7 +416,7 @@ impl HttpExecution {
                 // reqwest's Display embeds the full request URL, and a
                 // query-param injection form (`?token={{url(SECRET)}}`) carries
                 // the credential in that URL, so the raw error string would
-                // leak the secret the broker exists to withhold (§1/§4.1).
+                // leak the secret the broker exists to withhold.
                 Err(e) if e.is_timeout() => {
                     return broker_error(
                         504,
@@ -451,7 +451,7 @@ impl HttpExecution {
                                 if clean && same_pinned_authority(&resolved, &scheme, &host, port) {
                                     // Same pinned upstream: follow, with the
                                     // credential re-rendered onto the new
-                                    // request from scratch (§4.1).
+                                    // request from scratch.
                                     hops += 1;
                                     match status.as_u16() {
                                         303 => {
@@ -479,7 +479,7 @@ impl HttpExecution {
                 // Cross-host, unresolvable, over-budget, or non-followable
                 // 3xx: return it to the agent instead of following,
                 // following would send the credential somewhere no
-                // connection was configured for (§4.1).
+                // connection was configured for.
                 return relay_response(response, &self.config, &redactions).await;
             }
 
@@ -505,7 +505,7 @@ async fn render_injection(store: &Store, template_src: &str) -> Result<RenderedI
         .ok_or_else(|| "template must render 'Header: value' or a '?query=form'".to_string())?;
     // Rendered output is validated against the HTTP field grammar before it
     // is attached, so a secret containing control bytes can't smuggle a
-    // second header (§4.1).
+    // second header.
     let header_name = HeaderName::from_bytes(name.trim().as_bytes())
         .map_err(|_| "rendered header name invalid".to_string())?;
     let header_value = HeaderValue::from_str(value.trim())
@@ -514,7 +514,7 @@ async fn render_injection(store: &Store, template_src: &str) -> Result<RenderedI
 }
 
 /// Relay `{status, headers, body}` to the agent, size-capping the body and
-/// base64-encoding non-UTF-8 bodies (§4.1).
+/// base64-encoding non-UTF-8 bodies.
 async fn relay_response(
     response: reqwest::Response,
     config: &BrokerConfig,
@@ -551,7 +551,7 @@ async fn relay_response(
             }
             Ok(None) => break,
             // Same reasoning as the send path: keep any query-injected
-            // credential in the URL out of the agent-visible error (§4.1).
+            // credential in the URL out of the agent-visible error.
             Err(e) => {
                 return broker_error(502, ErrorReason::UpstreamError, e.without_url().to_string())
             }
@@ -582,7 +582,7 @@ async fn relay_response(
 }
 
 /// Idempotency-key payload hash: the full normalized request, a genuine
-/// retry matches byte-for-byte (§4).
+/// retry matches byte-for-byte.
 pub fn payload_hash(
     connection_id: &Uuid,
     method: &Method,

@@ -491,7 +491,7 @@ async fn run_listener(
 async fn handle_conn(state: Arc<AgentState>, mut stream: UnixStream) -> std::io::Result<()> {
     // The socket path is the capability; every accepted connection redeems
     // the ticket, so per-ticket and global session budgets bound how much
-    // one approval can spawn — exactly as the WS/PG data planes do (§8).
+    // one approval can spawn — exactly as the WS/PG data planes do.
     let redemption = match state.broker.data_plane.redeem(&state.ticket) {
         Ok(r) => r,
         Err(e) => {
@@ -660,7 +660,7 @@ async fn sign_response(
     }
 }
 
-/// Remove any leftover agent sockets from a previous run (DESIGN.md §4.4/§12).
+/// Remove any leftover agent sockets from a previous run.
 /// Called at daemon start, mirroring the stale control-socket sweep. Live
 /// sockets from another running broker are left untouched.
 pub fn sweep_stale_sockets(dir: &Path) {

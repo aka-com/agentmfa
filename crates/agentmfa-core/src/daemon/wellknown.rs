@@ -31,7 +31,7 @@ pub fn manifest(config: &BrokerConfig, paths: &Paths) -> serde_json::Value {
         "approval_timeout_seconds": config.approval_timeout.as_secs(),
         "access_grant_ttl_seconds": config.access_grant_ttl.as_secs(),
         // approval wait + upstream timeout + margin: machine-actionable, so
-        // agents set a concrete client timeout instead of parsing prose (§4).
+        // agents set a concrete client timeout instead of parsing prose.
         "recommended_client_timeout_seconds": config.recommended_client_timeout.as_secs(),
         "token_ttl_days": config.token_ttl.as_secs() / 86400,
         "ticket_ttl_seconds": config.ticket_ttl.as_secs(),
@@ -333,7 +333,7 @@ host-key-mismatched signing requests.
     )
 }
 
-/// The generated skill file (`agentmfa skill`, §5): the same instructions
+/// The generated skill file (`agentmfa skill`): the same instructions
 /// content under skill frontmatter; generated output, not a hand-maintained
 /// artifact.
 pub fn skill_file(config: &BrokerConfig, paths: &Paths) -> String {

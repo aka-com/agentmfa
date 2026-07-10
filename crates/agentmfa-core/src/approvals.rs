@@ -73,7 +73,7 @@ pub struct ApprovalRequest {
     pub received_at: DateTime<Utc>,
     /// Auto-deny deadline; the UI renders the countdown.
     pub deadline: DateTime<Utc>,
-    /// Pairing only: the peer's verified identity display string (§6/§8).
+    /// Pairing only: the peer's verified identity display string.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity: Option<String>,
     /// Pairing only: plain-language program identity for the human prompt.
@@ -83,10 +83,10 @@ pub struct ApprovalRequest {
     /// token will replace.
     pub replaces_existing_agent: bool,
     /// Pairing only: connections the name's standing rules would grant the
-    /// connecting process promptless access to, the loud disclosure (§6).
+    /// connecting process promptless access to, the loud disclosure.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub inherited: Vec<ConnectionSummary>,
-    /// HTTP only: the request-payload view (§6).
+    /// HTTP only: the request-payload view.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub http: Option<HttpPayloadView>,
 }
@@ -160,7 +160,7 @@ pub struct ConnectionSummary {
 
 /// Agent-supplied headers plus a size-capped body preview, collapsed for
 /// GET/HEAD, auto-expanded for mutating methods in the UI. The injected
-/// credential is never part of this (§6).
+/// credential is never part of this.
 #[derive(Debug, Clone, Serialize)]
 pub struct HttpPayloadView {
     pub method: String,
@@ -175,7 +175,7 @@ pub struct HttpPayloadView {
 
 impl ApprovalRequest {
     /// Requests whose exact *Allow once* decision completes only behind the
-    /// native OS confirmation: pairing and mutating HTTP requests (§6/§8).
+    /// native OS confirmation: pairing and mutating HTTP requests.
     /// Starting an access session and saving "Always allow…" are gated for
     /// every request kind; the broker enforces those decisions separately.
     pub fn is_high_consequence(&self) -> bool {
@@ -288,12 +288,12 @@ pub(crate) struct SessionClaim {
 pub struct ParkRequest {
     pub request: ApprovalRequest,
     /// `(agent, request_id)` for mutating calls that sent a `request_id`;
-    /// never set for GET/HEAD (§4).
+    /// never set for GET/HEAD.
     pub coalesce_key: Option<(String, String)>,
     /// Hash of the full normalized request; required with `coalesce_key`.
     pub payload_hash: Option<String>,
     /// Whether the completed outcome may be replayed to late retries under
-    /// the key (§4). Capability calls retain; pairing must not — replaying
+    /// the key. Capability calls retain; pairing must not — replaying
     /// a minted token to a *later* caller would skip its approval — so
     /// pairing coalesces only while the prompt is in flight.
     pub retain_outcome: bool,
@@ -304,13 +304,13 @@ pub struct ParkRequest {
 pub enum Parked {
     /// Wait on the held-open decision.
     Wait(WaitHandle),
-    /// A completed outcome for this `request_id` was replayed (§4).
+    /// A completed outcome for this `request_id` was replayed.
     Replay(ExecOutcome),
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ParkError {
-    /// `request_id` reused with a different payload, a client bug (§4).
+    /// `request_id` reused with a different payload, a client bug.
     #[error("request_id reused with a different payload")]
     RequestIdMismatch,
     /// The bounded idempotency table has no slot for a new keyed execution.
@@ -336,7 +336,7 @@ impl WaitHandle {
 }
 
 /// Deregisters its waiter on drop; the last waiter leaving a *prompted*
-/// entry abandons it (§4).
+/// entry abandons it.
 struct WaiterGuard {
     shared: Arc<Shared>,
     pending_id: Uuid,
@@ -354,7 +354,7 @@ impl Drop for WaiterGuard {
                 let prompted = matches!(entry.state, PendingState::Prompted { .. });
                 if prompted && entry.waiters.is_empty() {
                     // Every waiter has disconnected before a decision:
-                    // withdraw the prompt, never execute (§4).
+                    // withdraw the prompt, never execute.
                     let entry = inner.pending.remove(&self.pending_id).unwrap();
                     inner.queue.retain(|id| id != &self.pending_id);
                     if let Some(key) = &entry.key {
@@ -469,7 +469,7 @@ impl Approvals {
     ) -> Option<Result<Parked, ParkError>> {
         prune_expired_outcomes(inner, self.shared.retention);
         let key = coalesce_key.as_ref()?;
-        // Late retry after completion: replay the same response (§4).
+        // Late retry after completion: replay the same response.
         if let Some(retained) = inner.outcomes.get(key) {
             if &retained.payload_hash != payload_hash {
                 return Some(Err(ParkError::RequestIdMismatch));
@@ -570,7 +570,7 @@ impl Approvals {
             }
             raised = Some((request.clone(), queue_snapshot(&inner)));
 
-            // Hard per-request timeout → auto-deny (§6).
+            // Hard per-request timeout → auto-deny.
             let shared = self.shared.clone();
             let timeout = self.shared.approval_timeout;
             self.shared.runtime.spawn(async move {
@@ -610,7 +610,7 @@ impl Approvals {
                 return None; // double-approve race
             }
             // Defensive: abandonment is eager, but never execute with no
-            // waiter attached (§4).
+            // waiter attached.
             if entry.waiters.is_empty() {
                 return None;
             }
@@ -710,7 +710,7 @@ impl Approvals {
 
     /// Run a rule-allowed request through the same machinery, no prompt,
     /// straight to Executing, so auto-allowed mutating retries coalesce
-    /// and replay exactly like prompted ones (§4).
+    /// and replay exactly like prompted ones.
     pub(crate) fn run_preapproved(
         &self,
         park: ParkRequest,
@@ -766,10 +766,10 @@ impl Approvals {
         Ok(Parked::Wait(handle))
     }
 
-    /// The execution task: not tied to any waiter, so a disconnect cannot
-    /// cancel a side effect already in flight (§4). On completion the
-    /// outcome is fanned out and the reserved idempotency slot becomes a
-    /// tombstone, with a replay body when the byte budget permits.
+    /// The execution task is not tied to any waiter, so a disconnect cannot
+    /// cancel a side effect already in flight. On completion, the outcome is
+    /// fanned out and the reserved idempotency slot becomes a tombstone, with
+    /// a replay body when the byte budget permits.
     fn spawn_completion(
         &self,
         id: Uuid,
@@ -814,8 +814,8 @@ impl Approvals {
     }
 
     /// User denied (or the shell decided for them). Completes every waiter
-    /// with `403 {"reason": reason}`; nothing is retained (§4 retains only
-    /// executed outcomes, a denial's retry may re-prompt).
+    /// with `403 {"reason": reason}`; only executed outcomes are retained,
+    /// so a denial's retry may re-prompt.
     pub fn deny(&self, id: &Uuid, reason: ErrorReason) -> Option<ApprovalRequest> {
         let (request, waiters, snapshot) = {
             let mut inner = self.shared.inner.lock().unwrap();
@@ -841,7 +841,7 @@ impl Approvals {
         Some(request)
     }
 
-    /// Timeout task body: auto-deny if still prompted (§6).
+    /// Timeout task body: auto-deny if still prompted.
     fn timeout_fire(&self, id: Uuid) {
         if let Some(request) = self.deny(&id, ErrorReason::ApprovalTimeout) {
             self.shared.audit.append(

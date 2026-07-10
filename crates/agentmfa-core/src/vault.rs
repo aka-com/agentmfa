@@ -41,7 +41,7 @@ pub trait SecretVault: Send + Sync {
     fn set(&self, id: &Uuid, attrs: &VaultAttrs, value: &SecretValue) -> Result<(), CoreError>;
 
     /// Fetch the value. Called as late as possible — after approval, or for
-    /// the audited reveal-prefix read — and dropped immediately (§3).
+    /// the audited reveal-prefix read — and dropped immediately.
     async fn get(&self, id: &Uuid) -> Result<SecretValue, CoreError>;
 
     fn delete(&self, id: &Uuid) -> Result<(), CoreError>;

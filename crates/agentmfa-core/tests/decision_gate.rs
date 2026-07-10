@@ -230,7 +230,7 @@ async fn refused_confirmation_blocks_the_allow_but_not_deny() {
     assert_eq!(broker.approvals_queue().len(), 1);
     assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
 
-    // Deny needs no confirmation: always one click (§6).
+    // Deny needs no confirmation: always one click.
     broker
         .decide(&id, UiDecision::Deny, &ctx())
         .unwrap()

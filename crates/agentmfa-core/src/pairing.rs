@@ -81,7 +81,7 @@ fn mint_token() -> String {
 
 impl PairingRegistry {
     /// `agents.json` carries token hashes *and pinned identities*, so it is
-    /// sealed (§13.1): a rewrite of a pin must not go unnoticed.
+    /// sealed: a rewrite of a pin must not go unnoticed.
     pub fn open(path: PathBuf, ttl: Duration, integrity: Arc<StateIntegrity>) -> Result<Self> {
         let mut agents: Vec<PairedAgent> = match integrity.read_verified(&path)? {
             Some(bytes) => serde_json::from_slice(&bytes)?,
@@ -158,7 +158,7 @@ impl PairingRegistry {
     }
 
     /// Verify a presented bearer token against the given peer identity.
-    /// Success refreshes `last_used` (the TTL is refreshed on use, §8).
+    /// Success refreshes `last_used` (the TTL is refreshed on use).
     pub fn verify(
         &self,
         token: &str,
@@ -196,7 +196,7 @@ impl PairingRegistry {
         Ok(out)
     }
 
-    /// Invalidate a name's token immediately (the Revoke button, §8). The
+    /// Invalidate a name's token immediately (the Revoke button). The
     /// broker removes permissions for the returned client as part of the
     /// same user action.
     pub fn revoke(&self, client_id: &uuid::Uuid) -> Result<bool> {
@@ -454,7 +454,7 @@ mod tests {
         let (r, dir) = registry(Duration::from_secs(2));
         let (token, _) = r.pair("claude-code", dev_identity()).unwrap();
         let path = dir.path().join("agents.json");
-        // agents.json is sealed (§13.1): the agent list is the envelope's
+        // agents.json is sealed: the agent list is the envelope's
         // `payload`.
         let persisted_last_used = |p: &std::path::Path| {
             let sealed: serde_json::Value =
