@@ -59,13 +59,13 @@ pub enum PgSslMode {
     Disable,
     /// Try TLS, fall back to plaintext if the server declines.
     Prefer,
-    /// TLS or fail. The connection is encrypted, but the certificate is not
-    /// validated; use `verify-ca` or `verify-full` for verified TLS.
-    #[default]
+    /// TLS or fail, without certificate validation. Compatibility mode for
+    /// servers that cannot yet present a verifiable certificate.
     Require,
     /// TLS, verify the certificate chain against trusted roots, ignore host name.
     VerifyCa,
     /// TLS, verify both the certificate chain and host name.
+    #[default]
     VerifyFull,
 }
 
@@ -96,6 +96,10 @@ pub enum ConnectionConfig {
         user: String,
         #[serde(default)]
         sslmode: PgSslMode,
+        /// Optional PEM bundle for a private CA. When absent, verified modes
+        /// use the platform/web PKI roots.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trusted_ca_bundle_path: Option<String>,
     },
     Ws {
         /// Full upstream URL, e.g. "wss://stream.example.com/feed".
@@ -191,17 +195,8 @@ pub struct Connection {
     /// Referenced secret ids. API connections may compose several (derived
     /// from the template's refs); pg/ws/ssh bind exactly one (DESIGN.md §9).
     pub secrets: Vec<Uuid>,
-    /// pg/ws: the session ticket may be redeemed any number of times within
-    /// its 60 s window. ssh is always multi-connect because OpenSSH may open
-    /// several agent connections during one login.
-    #[serde(default = "default_true")]
-    pub multi_connect: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 impl Connection {
@@ -211,6 +206,10 @@ impl Connection {
     pub fn target(&self) -> String {
         self.config.target()
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// The peer identity pinned to a pair token at pairing time (DESIGN.md §8).
@@ -411,10 +410,13 @@ pub struct Settings {
     /// no reveal-prefix affordance; values stay copy-only.
     #[serde(default = "default_true")]
     pub hide_secret_prefixes: bool,
-    /// Optional PEM CA bundle trusted for Postgres `verify-ca` /
-    /// `verify-full` upstream TLS.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pg_trusted_ca_bundle_path: Option<String>,
+    /// Read-only migration source for pre-connection-scoped CA settings.
+    #[serde(
+        default,
+        rename = "pg_trusted_ca_bundle_path",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) legacy_pg_trusted_ca_bundle_path: Option<String>,
     /// "Hide the Dock icon when minimized to the menu bar", default off.
     /// The app is a regular windowed app by default (Dock + app switcher);
     /// with this on, explicitly minimizing to the menu bar also drops the
@@ -428,7 +430,7 @@ impl Default for Settings {
         Self {
             reauth_on_read: true,
             hide_secret_prefixes: true,
-            pg_trusted_ca_bundle_path: None,
+            legacy_pg_trusted_ca_bundle_path: None,
             menu_bar_hides_dock: false,
         }
     }
@@ -477,6 +479,7 @@ mod tests {
             dbname: "app_production".into(),
             user: "app".into(),
             sslmode: PgSslMode::Require,
+            trusted_ca_bundle_path: None,
         };
         assert_eq!(pg.target(), "app@db.internal.aka.com:5432/app_production");
         let ws = ConnectionConfig::Ws {
@@ -518,8 +521,25 @@ mod tests {
     }
 
     #[test]
+    fn legacy_connection_reconnect_flag_is_ignored() {
+        let connection: Connection = serde_json::from_str(
+            r#"{
+              "id":"00000000-0000-0000-0000-000000000001",
+              "name":"market-feed",
+              "config":{"kind":"ws","url":"wss://example.com/feed"},
+              "secrets":[],
+              "multi_connect":false,
+              "created_at":"2026-01-01T00:00:00Z",
+              "updated_at":"2026-01-01T00:00:00Z"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(connection.name, "market-feed");
+    }
+
+    #[test]
     fn pg_sslmodes_match_libpq_names() {
-        assert_eq!(PgSslMode::default(), PgSslMode::Require);
+        assert_eq!(PgSslMode::default(), PgSslMode::VerifyFull);
         assert_eq!(
             serde_json::to_string(&PgSslMode::VerifyCa).unwrap(),
             "\"verify-ca\""

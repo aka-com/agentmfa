@@ -162,14 +162,12 @@ struct ConnAdd {
     #[arg(long)]
     secret: Option<String>,
     /// pg: disable | prefer | require | verify-ca | verify-full
-    /// (default: require; encrypted, no certificate verification).
+    /// (default: verify-full).
     #[arg(long)]
     sslmode: Option<String>,
-    /// pg/ws: make each open capability single-use instead of allowing
-    /// multiple connects within its ticket window. This does not force a new
-    /// prompt while a matching access session or standing rule is active.
+    /// pg: optional PEM bundle for a private certificate authority.
     #[arg(long)]
-    single_connect: bool,
+    ca_bundle: Option<String>,
     /// Operate on a broker rooted here instead of the default layout.
     #[arg(long)]
     root: Option<PathBuf>,
@@ -381,7 +379,6 @@ fn cmd_conn_add(args: ConnAdd) {
         name: args.name,
         config,
         secrets,
-        multi_connect: !args.single_connect,
     };
     match store.add_connection(spec) {
         Ok(conn) => eprintln!(
@@ -417,8 +414,8 @@ fn conn_config(args: &ConnAdd) -> Result<ConnectionConfig, String> {
                 ("user", args.user.is_some()),
                 ("secret", args.secret.is_some()),
                 ("sslmode", args.sslmode.is_some()),
+                ("ca-bundle", args.ca_bundle.is_some()),
                 ("host-key-fingerprint", args.host_key_fingerprint.is_some()),
-                ("single-connect", args.single_connect),
             ])?;
             Ok(ConnectionConfig::Api {
                 host: require("host", &args.host)?,
@@ -441,6 +438,7 @@ fn conn_config(args: &ConnAdd) -> Result<ConnectionConfig, String> {
                 dbname: require("dbname", &args.dbname)?,
                 user: require("user", &args.user)?,
                 sslmode: parse_sslmode(args.sslmode.as_deref())?,
+                trusted_ca_bundle_path: args.ca_bundle.clone(),
             })
         }
         ConnKind::Ws => {
@@ -451,6 +449,7 @@ fn conn_config(args: &ConnAdd) -> Result<ConnectionConfig, String> {
                 ("dbname", args.dbname.is_some()),
                 ("user", args.user.is_some()),
                 ("sslmode", args.sslmode.is_some()),
+                ("ca-bundle", args.ca_bundle.is_some()),
                 ("host-key-fingerprint", args.host_key_fingerprint.is_some()),
             ])?;
             if args.secret.is_none() && args.template.is_none() {
@@ -468,7 +467,7 @@ fn conn_config(args: &ConnAdd) -> Result<ConnectionConfig, String> {
                 ("url", args.url.is_some()),
                 ("dbname", args.dbname.is_some()),
                 ("sslmode", args.sslmode.is_some()),
-                ("single-connect", args.single_connect),
+                ("ca-bundle", args.ca_bundle.is_some()),
             ])?;
             require("secret", &args.secret)?;
             Ok(ConnectionConfig::Ssh {
@@ -506,18 +505,7 @@ fn cmd_conn_list(root: Option<PathBuf>) {
         return;
     }
     for conn in connections {
-        let connect_mode = match (conn.kind(), conn.multi_connect) {
-            (agentmfa_core::types::ConnectionKind::Api, _) => "",
-            (_, true) => " · multi-connect",
-            (_, false) => " · single-connect",
-        };
-        println!(
-            "{}  {}  {}{}",
-            conn.name,
-            conn.kind().as_str(),
-            conn.target(),
-            connect_mode
-        );
+        println!("{}  {}  {}", conn.name, conn.kind().as_str(), conn.target());
     }
 }
 
@@ -767,12 +755,10 @@ fn prompt_decision(req: &ApprovalRequest, access_grant_ttl: Duration) -> UiDecis
             conn.kind.as_str(),
             conn.target
         );
-        if conn.multi_connect
-            && matches!(
-                req.kind,
-                ApprovalKind::Pg | ApprovalKind::Ws | ApprovalKind::Ssh
-            )
-        {
+        if matches!(
+            req.kind,
+            ApprovalKind::Pg | ApprovalKind::Ws | ApprovalKind::Ssh
+        ) {
             eprintln!("  scope: all connects within the 60 s ticket window");
         }
     }
@@ -897,7 +883,7 @@ mod tests {
             host_key_fingerprint: None,
             secret: None,
             sslmode: None,
-            single_connect: false,
+            ca_bundle: None,
             root: None,
         }
     }
@@ -928,7 +914,7 @@ mod tests {
         match conn_config(&a).unwrap() {
             ConnectionConfig::Pg { port, sslmode, .. } => {
                 assert_eq!(port, 5432);
-                assert_eq!(sslmode, PgSslMode::Require);
+                assert_eq!(sslmode, PgSslMode::VerifyFull);
             }
             other => panic!("wrong config: {other:?}"),
         }
@@ -961,7 +947,5 @@ mod tests {
             ConnectionConfig::Ssh { port, .. } => assert_eq!(port, 22),
             other => panic!("wrong config: {other:?}"),
         }
-        a.single_connect = true;
-        assert!(conn_config(&a).unwrap_err().contains("--single-connect"));
     }
 }

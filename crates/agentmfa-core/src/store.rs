@@ -57,8 +57,6 @@ pub struct ConnectionSpec {
     /// For pg/ws/ssh: the single bound secret. Ignored for api connections,
     /// whose secret list is derived from the template's refs.
     pub secrets: Vec<Uuid>,
-    /// pg/ws multi-connect checkbox (ignored for api; ssh must be true).
-    pub multi_connect: bool,
 }
 
 pub struct Store {
@@ -88,9 +86,8 @@ impl Store {
             Some(bytes) => serde_json::from_slice(&bytes)?,
             None => IndexState::default(),
         };
-        if normalize_ssh_multi_connect(&mut state) {
-            let bytes = serde_json::to_vec_pretty(&state)?;
-            integrity.write(&paths.index_file(), &bytes)?;
+        if migrate_legacy_pg_ca_bundle(&mut state) {
+            integrity.write(&paths.index_file(), &serde_json::to_vec_pretty(&state)?)?;
         }
         Ok(Self {
             paths,
@@ -442,7 +439,6 @@ impl Store {
         let conn = Connection {
             id: Uuid::new_v4(),
             name: spec.name,
-            multi_connect: spec.config.kind() != ConnectionKind::Api && spec.multi_connect,
             config: spec.config,
             secrets,
             created_at: now,
@@ -500,7 +496,6 @@ impl Store {
         let conn = Connection {
             id: Uuid::new_v4(),
             name: spec.name,
-            multi_connect: spec.config.kind() != ConnectionKind::Api && spec.multi_connect,
             config: spec.config,
             secrets,
             created_at: now,
@@ -559,7 +554,6 @@ impl Store {
             .find(|c| &c.id == id)
             .expect("checked above");
         conn.name = spec.name;
-        conn.multi_connect = spec.config.kind() != ConnectionKind::Api && spec.multi_connect;
         conn.config = spec.config;
         conn.secrets = secrets;
         conn.updated_at = Utc::now();
@@ -655,23 +649,28 @@ impl Store {
         next.settings = Some(settings);
         self.commit(&mut state, next)
     }
+}
 
-    pub fn set_pg_trusted_ca_bundle_path(&self, path: Option<String>) -> Result<()> {
-        let path = path.and_then(|p| {
-            let trimmed = p.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
+fn migrate_legacy_pg_ca_bundle(state: &mut IndexState) -> bool {
+    let Some(path) = state
+        .settings
+        .as_mut()
+        .and_then(|settings| settings.legacy_pg_trusted_ca_bundle_path.take())
+    else {
+        return false;
+    };
+    for connection in &mut state.connections {
+        if let ConnectionConfig::Pg {
+            trusted_ca_bundle_path,
+            ..
+        } = &mut connection.config
+        {
+            if trusted_ca_bundle_path.is_none() {
+                *trusted_ca_bundle_path = Some(path.clone());
             }
-        });
-        let mut state = self.state.lock().unwrap();
-        let mut settings = state.settings();
-        settings.pg_trusted_ca_bundle_path = path;
-        let mut next = state.clone();
-        next.settings = Some(settings);
-        self.commit(&mut state, next)
+        }
     }
+    true
 }
 
 fn validate_connection_name(name: &str) -> Result<()> {
@@ -774,11 +773,6 @@ fn validate_config_and_bind_secrets(
             user,
             host_key_fingerprint,
         } => {
-            if !spec.multi_connect {
-                return Err(CoreError::InvalidConnectionConfig(
-                    "ssh connections must allow multiple agent connections per approval".into(),
-                ));
-            }
             if host.is_empty() || host.contains('/') || host.contains('@') || host.contains(':') {
                 return Err(CoreError::InvalidConnectionConfig(format!(
                     "invalid host {host:?} (bare hostname, no scheme/port/path)"
@@ -816,17 +810,6 @@ fn bind_single_secret(state: &IndexState, spec: &ConnectionSpec) -> Result<Vec<U
         return Err(CoreError::SecretNotFound);
     }
     Ok(vec![id])
-}
-
-fn normalize_ssh_multi_connect(state: &mut IndexState) -> bool {
-    let mut changed = false;
-    for conn in &mut state.connections {
-        if conn.kind() == ConnectionKind::Ssh && !conn.multi_connect {
-            conn.multi_connect = true;
-            changed = true;
-        }
-    }
-    changed
 }
 
 #[cfg(test)]
@@ -875,7 +858,6 @@ mod tests {
                 template: template.into(),
             },
             secrets: vec![],
-            multi_connect: true,
         }
     }
 
@@ -927,9 +909,9 @@ mod tests {
                         dbname: "app".into(),
                         user: "app".into(),
                         sslmode: PgSslMode::Require,
+                        trusted_ca_bundle_path: None,
                     },
                     secrets: vec![],
-                    multi_connect: true,
                 },
             )
             .unwrap();
@@ -1100,8 +1082,6 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(conn.secrets.len(), 2);
-        // api connections never carry multi_connect.
-        assert!(!conn.multi_connect);
 
         // Unknown ref is rejected.
         assert!(matches!(
@@ -1125,12 +1105,11 @@ mod tests {
                     dbname: "app_production".into(),
                     user: "app".into(),
                     sslmode: PgSslMode::Require,
+                    trusted_ca_bundle_path: None,
                 },
                 secrets: vec![pw.id],
-                multi_connect: true,
             })
             .unwrap();
-        assert!(conn.multi_connect);
         assert_eq!(conn.target(), "app@db.internal.aka.com:5432/app_production");
 
         assert!(matches!(
@@ -1143,9 +1122,9 @@ mod tests {
                         dbname: "d".into(),
                         user: "u".into(),
                         sslmode: PgSslMode::Prefer,
+                        trusted_ca_bundle_path: None,
                     },
                     secrets: vec![],
-                    multi_connect: false,
                 })
                 .unwrap_err(),
             CoreError::WrongSecretCount { .. }
@@ -1171,10 +1150,8 @@ mod tests {
                     host_key_fingerprint: SSH_HOST_FP.into(),
                 },
                 secrets: vec![key.id],
-                multi_connect: true,
             })
             .unwrap();
-        assert!(conn.multi_connect);
         assert_eq!(conn.target(), "deploy@prod.example.com");
 
         let (_, changed) = store
@@ -1189,7 +1166,6 @@ mod tests {
                         host_key_fingerprint: SSH_HOST_FP_ALT.into(),
                     },
                     secrets: vec![key.id],
-                    multi_connect: true,
                 },
             )
             .unwrap();
@@ -1206,7 +1182,6 @@ mod tests {
                         host_key_fingerprint: String::new(),
                     },
                     secrets: vec![key.id],
-                    multi_connect: true,
                 })
                 .unwrap_err(),
             CoreError::InvalidConnectionConfig(_)
@@ -1223,45 +1198,9 @@ mod tests {
                         host_key_fingerprint: SSH_HOST_FP.into(),
                     },
                     secrets: vec![],
-                    multi_connect: true,
                 })
                 .unwrap_err(),
             CoreError::WrongSecretCount { kind: "ssh" }
-        ));
-        assert!(matches!(
-            store
-                .add_connection(ConnectionSpec {
-                    name: "single-use-ssh".into(),
-                    config: ConnectionConfig::Ssh {
-                        host: "h.example.com".into(),
-                        port: 22,
-                        user: "u".into(),
-                        host_key_fingerprint: SSH_HOST_FP.into(),
-                    },
-                    secrets: vec![key.id],
-                    multi_connect: false,
-                })
-                .unwrap_err(),
-            CoreError::InvalidConnectionConfig(_)
-        ));
-        assert!(matches!(
-            store
-                .update_connection(
-                    &conn.id,
-                    ConnectionSpec {
-                        name: "prod-ssh".into(),
-                        config: ConnectionConfig::Ssh {
-                            host: "prod.example.com".into(),
-                            port: 22,
-                            user: "deploy".into(),
-                            host_key_fingerprint: SSH_HOST_FP.into(),
-                        },
-                        secrets: vec![key.id],
-                        multi_connect: false,
-                    },
-                )
-                .unwrap_err(),
-            CoreError::InvalidConnectionConfig(_)
         ));
         // Host must be a bare hostname; user is required.
         for (host, user) in [
@@ -1281,50 +1220,11 @@ mod tests {
                             host_key_fingerprint: SSH_HOST_FP.into(),
                         },
                         secrets: vec![key.id],
-                        multi_connect: true,
                     })
                     .unwrap_err(),
                 CoreError::InvalidConnectionConfig(_)
             ));
         }
-    }
-
-    #[tokio::test]
-    async fn legacy_ssh_single_connect_is_normalized_on_open() {
-        let (store, vault, dir) = store().await;
-        let key = store
-            .add_secret(
-                "DEPLOY_SSH_KEY",
-                val("-----BEGIN OPENSSH PRIVATE KEY-----…"),
-            )
-            .unwrap();
-        let conn = store
-            .add_connection(ConnectionSpec {
-                name: "prod-ssh".into(),
-                config: ConnectionConfig::Ssh {
-                    host: "prod.example.com".into(),
-                    port: 22,
-                    user: "deploy".into(),
-                    host_key_fingerprint: SSH_HOST_FP.into(),
-                },
-                secrets: vec![key.id],
-                multi_connect: true,
-            })
-            .unwrap();
-        {
-            let mut state = store.state.lock().unwrap();
-            state
-                .connections
-                .iter_mut()
-                .find(|c| c.id == conn.id)
-                .unwrap()
-                .multi_connect = false;
-            store.persist(&state).unwrap();
-        }
-        drop(store);
-
-        let reopened = Store::open(Paths::under(dir.path()), vault).await.unwrap();
-        assert!(reopened.connection_by_id(&conn.id).unwrap().multi_connect);
     }
 
     #[tokio::test]
@@ -1339,7 +1239,6 @@ mod tests {
                     template: None,
                 },
                 secrets: vec![tok.id],
-                multi_connect: true,
             })
             .unwrap();
         assert!(matches!(
@@ -1351,7 +1250,6 @@ mod tests {
                         template: None,
                     },
                     secrets: vec![tok.id],
-                    multi_connect: true,
                 })
                 .unwrap_err(),
             CoreError::ConnectionNameTaken(_)
@@ -1464,32 +1362,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pg_trusted_ca_bundle_path_persists_and_clears() {
+    async fn legacy_global_pg_ca_bundle_migrates_to_connections() {
         let dir = tempfile::tempdir().unwrap();
         let vault = Arc::new(MemoryVault::new());
         {
             let store = Store::open(Paths::under(dir.path()), vault.clone())
                 .await
                 .unwrap();
+            let password = store.add_secret("PG_PASSWORD", val("pw")).unwrap();
             store
-                .set_pg_trusted_ca_bundle_path(Some("  /etc/ssl/private/pg-ca.pem  ".into()))
+                .add_connection(ConnectionSpec {
+                    name: "prod-db".into(),
+                    config: ConnectionConfig::Pg {
+                        host: "db.example.com".into(),
+                        port: 5432,
+                        dbname: "app".into(),
+                        user: "app".into(),
+                        sslmode: PgSslMode::VerifyFull,
+                        trusted_ca_bundle_path: None,
+                    },
+                    secrets: vec![password.id],
+                })
                 .unwrap();
-            assert_eq!(
-                store.settings().pg_trusted_ca_bundle_path.as_deref(),
-                Some("/etc/ssl/private/pg-ca.pem")
-            );
+            let mut state = store.state.lock().unwrap();
+            let mut settings = state.settings();
+            settings.legacy_pg_trusted_ca_bundle_path = Some("/etc/ssl/private/pg-ca.pem".into());
+            state.settings = Some(settings);
+            store.persist(&state).unwrap();
         }
-        let store = Store::open(Paths::under(dir.path()), vault.clone())
-            .await
-            .unwrap();
+        let store = Store::open(Paths::under(dir.path()), vault).await.unwrap();
+        let connection = store.connection_by_name("prod-db").unwrap();
+        let ConnectionConfig::Pg {
+            trusted_ca_bundle_path,
+            ..
+        } = connection.config
+        else {
+            panic!("expected postgres connection");
+        };
         assert_eq!(
-            store.settings().pg_trusted_ca_bundle_path.as_deref(),
+            trusted_ca_bundle_path.as_deref(),
             Some("/etc/ssl/private/pg-ca.pem")
         );
-        store
-            .set_pg_trusted_ca_bundle_path(Some(" ".into()))
-            .unwrap();
-        assert_eq!(store.settings().pg_trusted_ca_bundle_path, None);
+        assert_eq!(store.settings().legacy_pg_trusted_ca_bundle_path, None);
     }
 
     #[tokio::test]

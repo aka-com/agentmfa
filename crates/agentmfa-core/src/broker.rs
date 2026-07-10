@@ -176,7 +176,6 @@ impl Broker {
             name: conn.name.clone(),
             kind: conn.kind(),
             target: conn.target(),
-            multi_connect: conn.multi_connect,
             connection_updated_at: conn.updated_at,
         }
     }
@@ -191,7 +190,6 @@ impl Broker {
         if conn.updated_at != summary.connection_updated_at
             || conn.kind() != summary.kind
             || conn.target() != summary.target
-            || conn.multi_connect != summary.multi_connect
         {
             return Err(CoreError::ApprovalConnectionChanged);
         }
@@ -438,7 +436,6 @@ impl Broker {
                             queued_connection.id == summary.id
                                 && queued_connection.kind == summary.kind
                                 && queued_connection.target == summary.target
-                                && queued_connection.multi_connect == summary.multi_connect
                                 && queued_connection.connection_updated_at
                                     == summary.connection_updated_at
                         })
@@ -726,18 +723,14 @@ impl Broker {
 
     /// Update a connection. Name-only edits are metadata and do not require
     /// native authentication; changes to configuration, secret bindings, or
-    /// session scope do. When the pinned target changes, its standing rules
+    /// authentication do. When the pinned target changes, its standing rules
     /// are dropped, a rule granted for one destination must not silently cover
     /// another (§9).
     pub fn ui_update_connection(&self, id: &Uuid, spec: ConnectionSpec) -> Result<Connection> {
         let old = self.store.connection_by_id(id)?;
-        let effective_multi_connect =
-            spec.config.kind() != ConnectionKind::Api && spec.multi_connect;
         let explicit_secrets_changed =
             old.kind() != ConnectionKind::Api && old.secrets != spec.secrets;
-        let capability_changed = old.config != spec.config
-            || explicit_secrets_changed
-            || old.multi_connect != effective_multi_connect;
+        let capability_changed = old.config != spec.config || explicit_secrets_changed;
         let confirmation = if capability_changed {
             Some(self.confirm_action(&format!(
                 "Change security settings for connection “{}”",
@@ -1081,22 +1074,6 @@ impl Broker {
 
     pub fn ui_set_menu_bar_hides_dock(&self, on: bool) -> Result<()> {
         self.store.set_menu_bar_hides_dock(on)
-    }
-
-    pub fn ui_change_pg_trusted_ca_bundle_path(&self, path: Option<String>) -> Result<()> {
-        let path = path.and_then(|p| {
-            let trimmed = p.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        });
-        self.confirm_action(match &path {
-            Some(_) => "Change Postgres trusted CA bundle",
-            None => "Clear Postgres trusted CA bundle",
-        })?;
-        self.store.set_pg_trusted_ca_bundle_path(path)
     }
 }
 

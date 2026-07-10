@@ -146,7 +146,7 @@ async fn echo_upstream() -> EchoUpstream {
     EchoUpstream { port, seen }
 }
 
-fn add_ws_connection(broker: &Broker, port: u16, multi: bool) {
+fn add_ws_connection(broker: &Broker, port: u16) {
     broker
         .store
         .add_secret("STREAM_TOKEN", Zeroizing::new("wss-tok-8f31d2".into()))
@@ -161,7 +161,6 @@ fn add_ws_connection(broker: &Broker, port: u16, multi: bool) {
                 template: None,
             },
             secrets: vec![tok.id],
-            multi_connect: multi,
         })
         .unwrap();
 }
@@ -246,7 +245,6 @@ impl Harness {
             .await
             .unwrap()
             .unwrap();
-        // The approval carries the multi-connect scope info the window shows.
         assert_eq!(prompt.connection.as_ref().unwrap().name, "market-feed");
         self.broker
             .decide(&prompt.id, UiDecision::AllowOnce, &ctx())
@@ -261,7 +259,7 @@ impl Harness {
 async fn open_bridge_pipe_frames_and_inject_credential() {
     let mut h = harness(BrokerConfig::default()).await;
     let up = echo_upstream().await;
-    add_ws_connection(&h.broker, up.port, true);
+    add_ws_connection(&h.broker, up.port);
     let token = h.pair().await;
     let ws_url = h.open_ws(&token).await;
     assert!(ws_url.starts_with("ws://127.0.0.1:"));
@@ -311,10 +309,10 @@ async fn open_bridge_pipe_frames_and_inject_credential() {
 }
 
 #[tokio::test]
-async fn multi_connect_ticket_redeems_many_times() {
+async fn one_ticket_redeems_many_times() {
     let mut h = harness(BrokerConfig::default()).await;
     let up = echo_upstream().await;
-    add_ws_connection(&h.broker, up.port, true);
+    add_ws_connection(&h.broker, up.port);
     let token = h.pair().await;
     let ws_url = h.open_ws(&token).await;
 
@@ -336,24 +334,6 @@ async fn multi_connect_ticket_redeems_many_times() {
 }
 
 #[tokio::test]
-async fn single_use_ticket_second_redemption_is_gone() {
-    let mut h = harness(BrokerConfig::default()).await;
-    let up = echo_upstream().await;
-    add_ws_connection(&h.broker, up.port, false); // multi-connect off
-    let token = h.pair().await;
-    let ws_url = h.open_ws(&token).await;
-
-    let (_c1, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
-    let err = tokio_tungstenite::connect_async(&ws_url).await.unwrap_err();
-    match err {
-        tokio_tungstenite::tungstenite::Error::Http(resp) => {
-            assert_eq!(resp.status(), 410, "single-use ticket → 410 Gone");
-        }
-        other => panic!("expected HTTP error, got {other:?}"),
-    }
-}
-
-#[tokio::test]
 async fn expired_ticket_is_rejected() {
     let config = BrokerConfig {
         ticket_ttl: Duration::from_millis(100),
@@ -361,7 +341,7 @@ async fn expired_ticket_is_rejected() {
     };
     let mut h = harness(config).await;
     let up = echo_upstream().await;
-    add_ws_connection(&h.broker, up.port, true);
+    add_ws_connection(&h.broker, up.port);
     let token = h.pair().await;
     let ws_url = h.open_ws(&token).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -383,7 +363,7 @@ async fn session_budgets_hit_with_distinct_reasons() {
     };
     let mut h = harness(config).await;
     let up = echo_upstream().await;
-    add_ws_connection(&h.broker, up.port, true);
+    add_ws_connection(&h.broker, up.port);
     let token = h.pair().await;
     let ws_url = h.open_ws(&token).await;
     let (_c1, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
@@ -407,7 +387,7 @@ async fn idle_timeout_tears_down_but_pings_keep_alive() {
     };
     let mut h = harness(config).await;
     let up = echo_upstream().await;
-    add_ws_connection(&h.broker, up.port, true);
+    add_ws_connection(&h.broker, up.port);
     let token = h.pair().await;
     let ws_url = h.open_ws(&token).await;
 
@@ -452,7 +432,7 @@ async fn idle_timeout_tears_down_but_pings_keep_alive() {
 async fn user_close_control_drops_the_agent_connection() {
     let mut h = harness(BrokerConfig::default()).await;
     let up = echo_upstream().await;
-    add_ws_connection(&h.broker, up.port, true);
+    add_ws_connection(&h.broker, up.port);
     let token = h.pair().await;
     let ws_url = h.open_ws(&token).await;
     let (mut client, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
@@ -494,7 +474,7 @@ async fn user_close_control_drops_the_agent_connection() {
 async fn open_coalesces_on_request_id_and_replays_ticket() {
     let mut h = harness(BrokerConfig::default()).await;
     let up = echo_upstream().await;
-    add_ws_connection(&h.broker, up.port, true);
+    add_ws_connection(&h.broker, up.port);
     let token = h.pair().await;
 
     let payload = json!({"connection": "market-feed", "request_id": "open-1"});

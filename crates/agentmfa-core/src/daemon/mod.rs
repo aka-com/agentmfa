@@ -746,10 +746,6 @@ async fn get_connections(State(state): State<AppState>, authed: Authed) -> Respo
                 // Where a call naming this connection goes; the
                 // type→endpoint mapping shouldn't live only in prose.
                 "endpoint": endpoint_for(c.kind()),
-                // Whether one open's ticket may be redeemed repeatedly
-                // within its window; the approval dialog shows the human
-                // the same fact.
-                "multi_connect": c.multi_connect,
                 "approval": approval,
                 "access_session": access_session,
             })

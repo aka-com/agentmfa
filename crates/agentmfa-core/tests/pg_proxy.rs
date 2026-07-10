@@ -99,7 +99,7 @@ async fn harness(config: BrokerConfig) -> Harness {
     }
 }
 
-fn add_pg_connection(broker: &Broker, upstream_port: u16, multi: bool) {
+fn add_pg_connection(broker: &Broker, upstream_port: u16) {
     broker
         .store
         .add_secret("PG_PASSWORD", Zeroizing::new(REAL_PG_PASSWORD.into()))
@@ -115,9 +115,9 @@ fn add_pg_connection(broker: &Broker, upstream_port: u16, multi: bool) {
                 dbname: "app_production".into(),
                 user: "app".into(),
                 sslmode: PgSslMode::Disable,
+                trusted_ca_bundle_path: None,
             },
             secrets: vec![secret.id],
-            multi_connect: multi,
         })
         .unwrap();
 }
@@ -598,7 +598,7 @@ fn row_value(messages: &[SimpleQueryMessage]) -> Option<String> {
 async fn open_flow_end_to_end_with_cleartext_upstream() {
     let mut h = harness(BrokerConfig::default()).await;
     let fake = fake_pg(FakeAuth::Cleartext).await;
-    add_pg_connection(&h.broker, fake.port, true);
+    add_pg_connection(&h.broker, fake.port);
     let token = h.pair().await;
     let (dsn, ticket) = h.open_pg(&token).await;
 
@@ -659,7 +659,7 @@ async fn open_flow_end_to_end_with_cleartext_upstream() {
 async fn wrong_ticket_is_rejected_with_invalid_password() {
     let mut h = harness(BrokerConfig::default()).await;
     let fake = fake_pg(FakeAuth::Cleartext).await;
-    add_pg_connection(&h.broker, fake.port, true);
+    add_pg_connection(&h.broker, fake.port);
     let token = h.pair().await;
     let (_dsn, _ticket) = h.open_pg(&token).await;
 
@@ -682,10 +682,10 @@ async fn wrong_ticket_is_rejected_with_invalid_password() {
 }
 
 #[tokio::test]
-async fn multi_connect_allows_concurrent_clients_on_one_ticket() {
+async fn one_ticket_allows_concurrent_clients() {
     let mut h = harness(BrokerConfig::default()).await;
     let fake = fake_pg(FakeAuth::Cleartext).await;
-    add_pg_connection(&h.broker, fake.port, true);
+    add_pg_connection(&h.broker, fake.port);
     let token = h.pair().await;
     let (_dsn, ticket) = h.open_pg(&token).await;
 
@@ -713,36 +713,10 @@ async fn multi_connect_allows_concurrent_clients_on_one_ticket() {
 }
 
 #[tokio::test]
-async fn single_use_second_connect_is_rejected() {
-    let mut h = harness(BrokerConfig::default()).await;
-    let fake = fake_pg(FakeAuth::Cleartext).await;
-    add_pg_connection(&h.broker, fake.port, false); // multi-connect off
-    let token = h.pair().await;
-    let (_dsn, ticket) = h.open_pg(&token).await;
-
-    let (_c1, conn1) = tokio_postgres::connect(&h.pg_conn_str(&ticket), NoTls)
-        .await
-        .unwrap();
-    tokio::spawn(conn1);
-
-    let err = match tokio_postgres::connect(&h.pg_conn_str(&ticket), NoTls).await {
-        Ok(_) => panic!("second connect on a single-use ticket must fail"),
-        Err(e) => e,
-    };
-    let db = err.as_db_error().expect("expected a database error");
-    assert_eq!(db.code(), &SqlState::INVALID_PASSWORD);
-    assert!(
-        db.message().contains("ticket_already_redeemed"),
-        "message: {}",
-        db.message()
-    );
-}
-
-#[tokio::test]
 async fn cancel_request_translates_to_the_upstream_key() {
     let mut h = harness(BrokerConfig::default()).await;
     let fake = fake_pg(FakeAuth::Cleartext).await;
-    add_pg_connection(&h.broker, fake.port, true);
+    add_pg_connection(&h.broker, fake.port);
     let token = h.pair().await;
     let (_dsn, ticket) = h.open_pg(&token).await;
 
@@ -797,7 +771,7 @@ async fn cancel_request_translates_to_the_upstream_key() {
 async fn scram_upstream_auth_end_to_end() {
     let mut h = harness(BrokerConfig::default()).await;
     let fake = fake_pg(FakeAuth::Scram).await;
-    add_pg_connection(&h.broker, fake.port, true);
+    add_pg_connection(&h.broker, fake.port);
     let token = h.pair().await;
     let (_dsn, ticket) = h.open_pg(&token).await;
 
@@ -819,7 +793,7 @@ async fn scram_upstream_auth_end_to_end() {
 async fn user_close_drops_the_client_connection() {
     let mut h = harness(BrokerConfig::default()).await;
     let fake = fake_pg(FakeAuth::Cleartext).await;
-    add_pg_connection(&h.broker, fake.port, true);
+    add_pg_connection(&h.broker, fake.port);
     let token = h.pair().await;
     let (_dsn, ticket) = h.open_pg(&token).await;
 
@@ -856,7 +830,7 @@ async fn user_close_drops_the_client_connection() {
 async fn pipelined_first_query_survives_the_handoff() {
     let mut h = harness(BrokerConfig::default()).await;
     let fake = fake_pg(FakeAuth::Cleartext).await;
-    add_pg_connection(&h.broker, fake.port, true);
+    add_pg_connection(&h.broker, fake.port);
     let token = h.pair().await;
     let (_dsn, ticket) = h.open_pg(&token).await;
 

@@ -310,7 +310,6 @@ fn api_connection(harness: &Harness, name: &str, port: u16) {
                 template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
             },
             secrets: vec![],
-            multi_connect: false,
         })
         .unwrap();
 }
@@ -578,9 +577,9 @@ async fn wrong_connection_type_names_the_right_endpoint() {
                 dbname: "app_production".into(),
                 user: "app".into(),
                 sslmode: PgSslMode::Require,
+                trusted_ca_bundle_path: None,
             },
             secrets: vec![pw.id],
-            multi_connect: true,
         })
         .unwrap();
     let token = h.pair("claude-code").await;
@@ -626,9 +625,9 @@ async fn connections_listing_shows_targets_only() {
                 dbname: "app_production".into(),
                 user: "app".into(),
                 sslmode: PgSslMode::Require,
+                trusted_ca_bundle_path: None,
             },
             secrets: vec![pw.id],
-            multi_connect: true,
         })
         .unwrap();
 
@@ -647,10 +646,10 @@ async fn connections_listing_shows_targets_only() {
         list,
         json!([
             {"name": "github", "type": "api", "target": format!("http://127.0.0.1:{}", up.port),
-             "endpoint": "/v1/http", "multi_connect": false,
+             "endpoint": "/v1/http",
              "approval": "will_prompt", "access_session": null},
             {"name": "prod-db", "type": "pg", "target": "app@db.internal.aka.com:5432/app_production",
-             "endpoint": "/v1/pg/open", "multi_connect": true,
+             "endpoint": "/v1/pg/open",
              "approval": "will_prompt", "access_session": null},
         ])
     );
@@ -909,9 +908,9 @@ async fn full_access_session_covers_repeated_session_opens_until_revoked() {
                 dbname: "app".into(),
                 user: "app".into(),
                 sslmode: PgSslMode::Require,
+                trusted_ca_bundle_path: None,
             },
             secrets: vec![password.id],
-            multi_connect: true,
         })
         .unwrap();
     let token = h.pair("claude-code").await;
@@ -1118,7 +1117,6 @@ async fn always_allow_refuses_stale_connection_target() {
                     template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
                 },
                 secrets: vec![],
-                multi_connect: false,
             },
         )
         .unwrap();
@@ -1286,7 +1284,6 @@ async fn query_injected_secret_not_leaked_in_upstream_error() {
                 template: "?token={{url(STREAM_TOKEN)}}".into(),
             },
             secrets: vec![],
-            multi_connect: false,
         })
         .unwrap();
     let token = h.pair("claude-code").await;
@@ -1398,7 +1395,6 @@ async fn blocking_reauth_prompt_does_not_stall_the_daemon() {
                 template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
             },
             secrets: vec![],
-            multi_connect: false,
         })
         .unwrap();
     let daemon = daemon::serve(broker.clone()).await.unwrap();
@@ -1703,7 +1699,6 @@ async fn mutating_request_id_is_scoped_to_connection() {
                 template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
             },
             secrets: vec![],
-            multi_connect: false,
         })
         .unwrap();
     let token = h.pair("claude-code").await;

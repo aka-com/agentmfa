@@ -109,7 +109,6 @@ fn add_github(broker: &Broker) -> Connection {
                 template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
             },
             secrets: vec![],
-            multi_connect: false,
         })
         .unwrap()
 }
@@ -128,7 +127,6 @@ fn http_request(conn: &Connection, mutating: bool) -> ApprovalRequest {
             name: conn.name.clone(),
             kind: conn.kind(),
             target: conn.target(),
-            multi_connect: conn.multi_connect,
             connection_updated_at: conn.updated_at,
         }),
         action: format!("{method} api.github.com/x"),
@@ -489,7 +487,6 @@ async fn durable_decisions_refuse_a_same_target_connection_revision_change() {
                     template: "X-Api-Key: {{GITHUB_API_KEY}}".into(),
                 },
                 secrets: vec![],
-                multi_connect: false,
             },
         )
         .unwrap();
@@ -524,7 +521,6 @@ async fn durable_decisions_refuse_a_same_target_connection_revision_change() {
                     template: "Authorization: token {{GITHUB_API_KEY}}".into(),
                 },
                 secrets: vec![],
-                multi_connect: false,
             },
         )
         .unwrap();
@@ -587,7 +583,6 @@ async fn connection_renames_skip_confirmation_but_capability_changes_do_not() {
                 name: "github-renamed".into(),
                 config: conn.config.clone(),
                 secrets: conn.secrets.clone(),
-                multi_connect: conn.multi_connect,
             },
         )
         .unwrap();
@@ -622,7 +617,6 @@ async fn connection_renames_skip_confirmation_but_capability_changes_do_not() {
                     template,
                 },
                 secrets: renamed.secrets.clone(),
-                multi_connect: renamed.multi_connect,
             },
         )
         .unwrap();
@@ -661,7 +655,6 @@ async fn secret_binding_and_session_scope_changes_require_confirmation() {
                 template: None,
             },
             secrets: vec![first.id],
-            multi_connect: true,
         })
         .unwrap();
 
@@ -672,7 +665,6 @@ async fn secret_binding_and_session_scope_changes_require_confirmation() {
                 name: conn.name.clone(),
                 config: conn.config.clone(),
                 secrets: vec![second.id],
-                multi_connect: conn.multi_connect,
             },
         )
         .unwrap();
@@ -685,7 +677,6 @@ async fn secret_binding_and_session_scope_changes_require_confirmation() {
                 name: rebound.name.clone(),
                 config: rebound.config.clone(),
                 secrets: rebound.secrets.clone(),
-                multi_connect: false,
             },
         )
         .unwrap();
@@ -707,16 +698,9 @@ async fn sensitive_settings_fail_closed_before_mutating() {
     assert!(broker.settings().reauth_on_read);
     assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
 
-    assert!(matches!(
-        broker.ui_change_pg_trusted_ca_bundle_path(Some("/tmp/pg-ca.pem".into())),
-        Err(CoreError::NotConfirmed)
-    ));
-    assert_eq!(broker.settings().pg_trusted_ca_bundle_path, None);
-    assert_eq!(events.confirms.load(Ordering::SeqCst), 2);
-
     // Re-enabling the stricter read gate is not security-reducing.
     broker.ui_change_reauth_on_read(true).unwrap();
-    assert_eq!(events.confirms.load(Ordering::SeqCst), 2);
+    assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -728,12 +712,9 @@ async fn settings_changes_are_not_added_to_the_activity_log() {
     let (broker, _dir) = broker_with(events.clone()).await;
 
     broker.ui_change_reauth_on_read(false).unwrap();
-    broker
-        .ui_change_pg_trusted_ca_bundle_path(Some("/tmp/pg-ca.pem".into()))
-        .unwrap();
     broker.ui_set_hide_secret_prefixes(false).unwrap();
     broker.ui_set_menu_bar_hides_dock(true).unwrap();
-    assert_eq!(events.confirms.load(Ordering::SeqCst), 2);
+    assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
     let recent = broker.audit.recent(10);
     assert!(
         recent

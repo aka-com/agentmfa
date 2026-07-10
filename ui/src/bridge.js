@@ -36,11 +36,7 @@ const MOCK_ACTIVITY_META = {
   grantRevoked: { icon: 'shieldX', tone: 'danger' },
   tokenRevoked: { icon: 'unplug', tone: 'danger' },
 };
-const MOCK_AGENT_SETUP = `Connect to the local AgentMFA broker. Read its current instructions with:
-
-curl -fsS \\
-  --unix-socket ~/.agentmfa/broker.sock \\
-  http://localhost/instructions`;
+const MOCK_AGENT_SETUP = 'Connect to the local AgentMFA broker. Read its current instructions with: curl -fsS --unix-socket ~/.agentmfa/broker.sock http://localhost/instructions';
 function emit(event, payload) {
   (listeners[event] || []).forEach((cb) => cb({ event, payload }));
 }
@@ -71,7 +67,7 @@ const db = {
   ],
   sessions: [],
   activity: [],
-  settings: { reauth_on_read: true, hide_secret_prefixes: true, pg_trusted_ca_bundle_path: null, menu_bar_hides_dock: false },
+  settings: { reauth_on_read: true, hide_secret_prefixes: true, menu_bar_hides_dock: false },
   queue: [],
 };
 function mkSecret(name, value) {
@@ -82,16 +78,16 @@ function seedConnections() {
   const by = (n) => db.secrets.find((s) => s.name === n).id;
   db.connections = [
     mkConn('github', 'api', ['GITHUB_API_KEY'], { host: 'api.github.com', scheme: 'https', template: 'Authorization: Bearer {{GITHUB_API_KEY}}' }),
-    mkConn('prod-db', 'pg', ['DATABASE_PASSWORD'], { host: 'db.internal.aka.com', port: 5432, dbname: 'app_production', user: 'app', sslmode: 'require' }, true),
-    mkConn('market-feed', 'ws', ['STREAM_TOKEN'], { url: 'wss://stream.example.com/feed' }, true),
+    mkConn('prod-db', 'pg', ['DATABASE_PASSWORD'], { host: 'db.internal.aka.com', port: 5432, dbname: 'app_production', user: 'app', sslmode: 'verify-full', trusted_ca_bundle_path: null }),
+    mkConn('market-feed', 'ws', ['STREAM_TOKEN'], { url: 'wss://stream.example.com/feed' }),
     mkConn('internal-api', 'api', ['SERVICE_USER', 'SERVICE_PASSWORD'], { host: 'internal.aka.com', scheme: 'https', template: 'Authorization: Basic {{base64(SERVICE_USER ":" SERVICE_PASSWORD)}}' }),
     mkConn('prod-ssh', 'ssh', ['DEPLOY_SSH_KEY'], {
       host: 'prod.example.com', port: 22, user: 'deploy',
       host_key_fingerprint: 'SHA256:vdZ5N8kNxU7J4W2WYa6qK0sJYv8oXb8s2H7n3jE5q1A',
-    }, true),
+    }),
   ];
-  function mkConn(name, type, secretNames, cfg, multi) {
-    return { id: uid(), name, type, secret_names: secretNames, secret_ids: secretNames.map(by), multi_connect: !!multi, ...cfg };
+  function mkConn(name, type, secretNames, cfg) {
+    return { id: uid(), name, type, secret_names: secretNames, secret_ids: secretNames.map(by), ...cfg };
   }
 }
 seedFixtures();
@@ -125,7 +121,7 @@ function audit(kind, text, detail) {
 function connDto(c) {
   return {
     id: c.id, name: c.name, type: c.type, target: connTarget(c),
-    secret_names: c.secret_names, multi_connect: c.multi_connect,
+    secret_names: c.secret_names,
     permissions: [
       ...db.rules.filter((r) => r.connection_id === c.id).map((r) => ({ id: r.id, agent: r.agent, scope: r.scope, expires_at: null })),
       ...db.grants.filter((g) => g.connection_id === c.id).map((g) => ({ ...g })),
@@ -133,6 +129,7 @@ function connDto(c) {
     host: c.host || null, scheme: c.scheme || null, port: c.port || null, template: c.template || null,
     dbname: c.dbname || null, user: c.user || null, host_key_fingerprint: c.host_key_fingerprint || null,
     sslmode: c.sslmode || null, url: c.url || null,
+    trusted_ca_bundle_path: c.trusted_ca_bundle_path || null,
   };
 }
 function connTarget(c) {
@@ -201,7 +198,6 @@ async function mockInvoke(cmd, args = {}) {
     }
     case 'add_connection': {
       const i = args.input;
-      if (i.type === 'ssh' && i.multi_connect === false) throw new Error('ssh connections must allow multiple agent connections per approval');
       if (i.type === 'ssh' && !i.host_key_fingerprint) throw new Error('SSH host key fingerprint is required');
       if (db.connections.some((c) => c.name === i.name)) throw new Error(`A connection named ${i.name} already exists`);
       if (i.new_secret_name && i.new_secret_value) {
@@ -213,20 +209,20 @@ async function mockInvoke(cmd, args = {}) {
       const secret_names = i.type === 'api'
         ? (i.template.match(/[A-Z_][A-Z0-9_]*/g) || []).filter((n) => db.secrets.some((s) => s.name === n))
         : [db.secrets.find((s) => s.id === i.secret_id)?.name].filter(Boolean);
-      db.connections.push({ id: uid(), name: i.name, type: i.type, secret_names, multi_connect: i.multi_connect,
+      db.connections.push({ id: uid(), name: i.name, type: i.type, secret_names,
         host: i.host, scheme: i.scheme, port: i.port, template: i.template, dbname: i.dbname, user: i.user,
-        host_key_fingerprint: i.host_key_fingerprint, sslmode: i.sslmode, url: i.url });
+        host_key_fingerprint: i.host_key_fingerprint, sslmode: i.sslmode,
+        trusted_ca_bundle_path: i.trusted_ca_bundle_path, url: i.url });
       audit('connectionAdded', `Connection added: ${i.name}`); return;
     }
     case 'edit_connection': {
       const c = db.connections.find((x) => x.id === args.id); if (!c) throw new Error('no such connection');
       const i = args.input;
-      if (i.type === 'ssh' && i.multi_connect === false) throw new Error('ssh connections must allow multiple agent connections per approval');
       if (i.type === 'ssh' && !i.host_key_fingerprint) throw new Error('SSH host key fingerprint is required');
       Object.assign(c, { name: i.name, host: i.host, scheme: i.scheme, port: i.port,
-        dbname: i.dbname, user: i.user, sslmode: i.sslmode,
+        dbname: i.dbname, user: i.user, sslmode: i.sslmode, trusted_ca_bundle_path: i.trusted_ca_bundle_path,
         host_key_fingerprint: i.host_key_fingerprint, url: i.url,
-        template: i.template, multi_connect: i.multi_connect });
+        template: i.template });
       if (i.secret_id) c.secret_names = [db.secrets.find((s) => s.id === i.secret_id)?.name].filter(Boolean);
       audit('connectionUpdated', `Connection updated: ${i.name}`); return;
     }
@@ -260,11 +256,6 @@ async function mockInvoke(cmd, args = {}) {
     case 'set_menu_bar_hides_dock':
       db.settings.menu_bar_hides_dock = args.on;
       return;
-    case 'set_pg_trusted_ca_bundle_path': {
-      const path = (args.path || '').trim();
-      db.settings.pg_trusted_ca_bundle_path = path || null;
-      return;
-    }
     case 'decide': {
       const req = db.queue.find((r) => r.id === args.id);
       if (req && req.kind === 'pair' && args.revokeInheritedRules) {
@@ -339,7 +330,7 @@ if (!tauri && typeof window !== 'undefined') {
     };
     const req = {
       id: uid(), agent: 'claude-code', kind: kind === 'pair' ? 'pair' : 'http',
-      connection: kind === 'pair' ? null : { id: db.connections[0].id, name: 'github', type: 'api', target: 'api.github.com', multi_connect: false },
+      connection: kind === 'pair' ? null : { id: db.connections[0].id, name: 'github', type: 'api', target: 'api.github.com' },
       action: kind === 'pair' ? 'Connect claude-code to AgentMFA'
         : post ? 'POST api.github.com/repos/aka/aka/dispatches' : 'GET api.github.com/user/repos',
       notification: 'claude-code wants to use github: GET /user/repos',

@@ -151,7 +151,6 @@ pub struct ConnectionSummary {
     #[serde(rename = "type")]
     pub kind: ConnectionKind,
     pub target: String,
-    pub multi_connect: bool,
     /// Exact security-relevant connection revision presented by the prompt.
     /// It stays internal because approval surfaces do not need to render it.
     #[serde(skip)]
@@ -1030,7 +1029,6 @@ mod tests {
                 name: "github".into(),
                 kind: ConnectionKind::Api,
                 target: "api.github.com".into(),
-                multi_connect: false,
                 connection_updated_at: now,
             }),
             action: action.into(),

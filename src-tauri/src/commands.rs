@@ -128,17 +128,13 @@ pub fn get_settings(state: State<AppState>) -> SettingsDto {
     SettingsDto {
         reauth_on_read: s.reauth_on_read,
         hide_secret_prefixes: s.hide_secret_prefixes,
-        pg_trusted_ca_bundle_path: s.pg_trusted_ca_bundle_path,
         menu_bar_hides_dock: s.menu_bar_hides_dock,
     }
 }
 
 fn agent_setup_instructions(socket: &str) -> String {
     format!(
-        "Connect to the local AgentMFA broker. Read its current instructions with:\n\n\
-         curl -fsS \\\n\
-           --unix-socket {socket} \\\n\
-           http://localhost/instructions"
+        "Connect to the local AgentMFA broker. Read its current instructions with: curl -fsS --unix-socket {socket} http://localhost/instructions"
     )
 }
 
@@ -239,25 +235,20 @@ pub struct ConnectionInput {
     pub user: Option<String>,
     pub host_key_fingerprint: Option<String>,
     pub sslmode: Option<String>,
+    pub trusted_ca_bundle_path: Option<String>,
     // WS
     pub url: Option<String>,
-    // pg/ws/ssh single-secret binding (by id) + multi-connect
+    // pg/ws/ssh single-secret binding (by id)
     pub secret_id: Option<String>,
-    #[serde(default = "default_true")]
-    pub multi_connect: bool,
     // Add-only connection-first setup. Both fields must be present together;
     // the core writes the vault item and connection atomically.
     pub new_secret_name: Option<String>,
     pub new_secret_value: Option<String>,
 }
 
-fn default_true() -> bool {
-    true
-}
-
 fn parse_pg_sslmode(value: Option<&str>) -> CmdResult<PgSslMode> {
     match value {
-        None => Ok(PgSslMode::Require),
+        None => Ok(PgSslMode::VerifyFull),
         Some("disable") => Ok(PgSslMode::Disable),
         Some("prefer") => Ok(PgSslMode::Prefer),
         Some("require") => Ok(PgSslMode::Require),
@@ -284,6 +275,10 @@ impl ConnectionInput {
                 dbname: self.dbname.unwrap_or_default(),
                 user: self.user.unwrap_or_default(),
                 sslmode: parse_pg_sslmode(self.sslmode.as_deref())?,
+                trusted_ca_bundle_path: self.trusted_ca_bundle_path.and_then(|path| {
+                    let path = path.trim().to_string();
+                    (!path.is_empty()).then_some(path)
+                }),
             },
             "ws" => ConnectionConfig::Ws {
                 url: self.url.unwrap_or_default(),
@@ -305,7 +300,6 @@ impl ConnectionInput {
             name: self.name,
             config,
             secrets,
-            multi_connect: self.multi_connect,
         })
     }
 }
@@ -416,17 +410,6 @@ pub fn set_menu_bar_hides_dock(state: State<AppState>, on: bool) -> CmdResult<()
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn set_pg_trusted_ca_bundle_path(
-    state: State<AppState>,
-    path: Option<String>,
-) -> CmdResult<()> {
-    state
-        .broker
-        .ui_change_pg_trusted_ca_bundle_path(path)
-        .map_err(|e| e.to_string())
-}
-
 /* ------------------------------ approvals -------------------------------- */
 
 #[derive(Deserialize)]
@@ -498,7 +481,6 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         set_reauth_on_read,
         set_hide_secret_prefixes,
         set_menu_bar_hides_dock,
-        set_pg_trusted_ca_bundle_path,
         decide,
         crate::windows::ui_set_mode,
         crate::windows::ui_hide_main,
@@ -513,7 +495,7 @@ mod tests {
 
     #[test]
     fn pg_sslmode_rejects_unknown_values() {
-        assert_eq!(parse_pg_sslmode(None).unwrap(), PgSslMode::Require);
+        assert_eq!(parse_pg_sslmode(None).unwrap(), PgSslMode::VerifyFull);
         assert_eq!(
             parse_pg_sslmode(Some("verify-full")).unwrap(),
             PgSslMode::VerifyFull
@@ -543,9 +525,9 @@ mod tests {
             user: None,
             host_key_fingerprint: None,
             sslmode: None,
+            trusted_ca_bundle_path: None,
             url: None,
             secret_id: None,
-            multi_connect: true,
             new_secret_name: None,
             new_secret_value: None,
         }
@@ -569,9 +551,9 @@ mod tests {
             user: None,
             host_key_fingerprint: None,
             sslmode: None,
+            trusted_ca_bundle_path: None,
             url: Some("wss://stream.example.com/feed".into()),
             secret_id: Some(secret_id.to_string()),
-            multi_connect: true,
             new_secret_name: None,
             new_secret_value: None,
         }
@@ -589,6 +571,8 @@ mod tests {
         let instructions = agent_setup_instructions("/tmp/agentmfa-test.sock");
         assert!(instructions.contains("curl -fsS"));
         assert!(instructions.contains("--unix-socket /tmp/agentmfa-test.sock"));
+        assert_eq!(instructions.lines().count(), 1);
+        assert!(!instructions.contains("\\\n"));
         assert!(instructions.ends_with("http://localhost/instructions"));
         assert!(!instructions.contains("--max-time"));
         assert!(!instructions.contains("Reuse an existing token before pairing"));

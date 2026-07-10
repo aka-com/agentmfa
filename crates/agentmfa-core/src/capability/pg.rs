@@ -206,6 +206,7 @@ struct CancelTarget {
     host: String,
     port: u16,
     sslmode: PgSslMode,
+    trusted_ca_bundle_path: Option<String>,
     backend_pid: i32,
     backend_key: i32,
 }
@@ -340,7 +341,7 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
     }
     let (ticket, _) = take_cstr(&payload)?;
 
-    // Redeem: expiry, single-use, and the two-level session budget are all
+    // Redeem: expiry and the two-level session budget are
     // enforced here, failing fast with the machine reason (§4.3/§8). The
     // redemption reserves the budget slot; dropping it before `start`
     // releases the slot.
@@ -348,7 +349,7 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
         Ok(r) => r,
         Err(e) => {
             let sqlstate = match e {
-                RedeemError::Unknown | RedeemError::Expired | RedeemError::AlreadyRedeemed => {
+                RedeemError::Unknown | RedeemError::Expired => {
                     "28P01" // invalid_password
                 }
                 RedeemError::TicketSessionLimit | RedeemError::BrokerSessionLimit => {
@@ -370,6 +371,7 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
         host,
         port,
         sslmode,
+        trusted_ca_bundle_path,
         ..
     } = redemption.connection.config.clone()
     else {
@@ -417,6 +419,7 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
         host,
         port,
         sslmode,
+        trusted_ca_bundle_path,
         backend_pid: upstream.backend_pid,
         backend_key: upstream.backend_key,
     });
@@ -449,12 +452,11 @@ async fn handle_cancel(state: &Arc<ProxyState>, pid: i32, key: i32) {
         return;
     };
     let send = async {
-        let settings = state.broker.store.settings();
         let (mut stream, _) = tls_connect(
             &target.host,
             target.port,
             target.sslmode,
-            settings.pg_trusted_ca_bundle_path.as_deref(),
+            target.trusted_ca_bundle_path.as_deref(),
             Some(&state.broker.events),
         )
         .await?;
@@ -878,6 +880,7 @@ async fn dial_upstream(
         dbname,
         user,
         sslmode,
+        trusted_ca_bundle_path,
     } = &connection.config
     else {
         return Err("not a postgres connection".into());
@@ -890,13 +893,11 @@ async fn dial_upstream(
         .secret_value(&secret_id)
         .await
         .map_err(|e| format!("credential unavailable: {e}"))?;
-    let settings = store.settings();
-
     let (stream, cert_digest) = tls_connect(
         host,
         *port,
         *sslmode,
-        settings.pg_trusted_ca_bundle_path.as_deref(),
+        trusted_ca_bundle_path.as_deref(),
         Some(events),
     )
     .await?;

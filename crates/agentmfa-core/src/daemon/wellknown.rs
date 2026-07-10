@@ -134,15 +134,12 @@ and closes live WebSocket, Postgres, and SSH connections for that agent name.
 
     GET /v1/connections
     → [{{"name": "github", "type": "api", "target": "https://api.github.com",
-         "endpoint": "/v1/http", "multi_connect": false,
+         "endpoint": "/v1/http",
          "approval": "will_prompt", "access_session": null}}, …]
 
 Connections name a destination. Secret names and values are never
 exposed. `endpoint` is where a call naming this connection goes (POST
-it). `multi_connect` says whether one open's ticket may be redeemed
-repeatedly within its window; ws/pg can be configured either way, while
-ssh is always multi-connect because OpenSSH may use several agent
-connections during one login. `approval` is what a call costs right now:
+it). `approval` is what a call costs right now:
 `will_prompt` blocks on a human decision (tell your user to expect the
 prompt), `read_auto_allowed` covers GET/HEAD under a read-scoped temporary or
 standing permission, and `auto_allowed` proceeds immediately under a full
@@ -228,8 +225,8 @@ response fields are combined with `, `, which is lossy for fields such as
 Authorization is checked once, at open time. Connect any stock WebSocket
 client to `ws_url`; the broker dials the connection's configured upstream
 with the credential injected and pipes frames verbatim. The ticket expires
-`expires_in_seconds` after issue; on multi-connect connections (the
-default) it may be redeemed any number of times within that window, all
+`expires_in_seconds` after issue and may be redeemed any number of times
+within that window, all
 under the authorization that issued it. Sessions carry a configured max TTL
 (1 h) and an idle timeout (5 min; protocol ping/pong counts as activity). A
 grant-backed session is capped by the grant's remaining lifetime and closes if
@@ -255,11 +252,11 @@ in `ps`-visible argv and shell history:
 
 The broker's local proxy speaks real Postgres on the loopback leg and
 opens the upstream Postgres leg itself; you never see the real password or
-host. Ticket lifetime and multi-connect semantics are the same as
-WebSocket. `sslmode=disable` applies only to the loopback leg; the upstream
+host. Ticket lifetime and reconnect semantics are the same as WebSocket.
+`sslmode=disable` applies only to the loopback leg; the upstream
 leg uses the connection's configured TLS. The default upstream
-`sslmode=require` encrypts without certificate verification; use
-`verify-full` when CA and hostname verification are required.
+`sslmode=verify-full` validates the certificate chain and hostname. A
+per-connection private CA bundle can extend the trusted roots.
 
 ## 7. SSH: POST /v1/ssh/open
 
@@ -283,9 +280,9 @@ The broker serves the ssh-agent protocol on that socket: it offers the one
 configured key and signs your authentication with it, and the private key
 never leaves the broker. It verifies OpenSSH's session binding against the
 configured host-key fingerprint and will **only** sign host-bound public-key
-login as the pinned `user`; it signs nothing else. Ticket lifetime and multi-connect semantics
-match WebSocket and Postgres: the socket accepts connections for the
-{ticket} s window, and with multi-connect on (the default) as many SSH
+login as the pinned `user`; it signs nothing else. Ticket lifetime and reconnect semantics
+match WebSocket and Postgres: the socket accepts as many connections as needed for the
+{ticket} s window, so multiple SSH
 invocations as you need under the authorization that issued it. Live SSH
 connections are also capped by the remaining lifetime of an access grant.
 Compatible OpenSSH clients
@@ -437,7 +434,6 @@ mod tests {
             "read_auto_allowed",
             "15-minute",
             "\"endpoint\": \"/v1/http\"",
-            "multi_connect",
             "/v1/ws/open",
             "/v1/pg/open",
             "/v1/ssh/open",

@@ -35,10 +35,18 @@ test('imports a percent-encoded Postgres DSN without putting its password in fie
   assert.equal(imported.type, 'pg');
   assert.deepEqual(imported.fields, {
     host: 'db.example.com', port: 6543, user: 'app@worker',
-    dbname: 'app prod', sslmode: 'verify-full',
+    dbname: 'app prod', sslmode: 'verify-full', pgCaBundlePath: null,
   });
   assert.equal(imported.credential, 'p@ss/word');
   assert.equal(JSON.stringify(imported.fields).includes('p@ss/word'), false);
+});
+
+test('Postgres imports default to verified TLS and keep a private CA path', () => {
+  const imported = parseConnectionImport(
+    'postgresql://app@db.example.com/app?sslrootcert=%2Fetc%2Fcompany-ca.pem',
+  );
+  assert.equal(imported.fields.sslmode, 'verify-full');
+  assert.equal(imported.fields.pgCaBundlePath, '/etc/company-ca.pem');
 });
 
 test('imports API and WebSocket URLs', () => {

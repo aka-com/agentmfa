@@ -129,14 +129,15 @@ export function parseConnectionImport(value) {
     const user = decoded(parsed.username, 'Postgres user');
     const credential = parsed.password ? decoded(parsed.password, 'Postgres password') : null;
     const dbname = decoded(parsed.pathname.replace(/^\//, ''), 'Postgres database');
-    const rawSslmode = parsed.searchParams.get('sslmode') || 'require';
+    const rawSslmode = parsed.searchParams.get('sslmode') || 'verify-full';
     const allowed = new Set(['disable', 'prefer', 'require', 'verify-ca', 'verify-full']);
-    const sslmode = allowed.has(rawSslmode) ? rawSslmode : 'require';
+    const sslmode = allowed.has(rawSslmode) ? rawSslmode : 'verify-full';
+    const trustedCaBundlePath = parsed.searchParams.get('sslrootcert') || null;
     const warnings = [];
     if (!user) warnings.push('Postgres user was not present; enter it below.');
     if (!dbname) warnings.push('Database name was not present; enter it below.');
-    if (rawSslmode !== sslmode) warnings.push(`Unsupported sslmode ${rawSslmode}; using require.`);
-    const unsupported = [...parsed.searchParams.keys()].filter((key) => key !== 'sslmode');
+    if (rawSslmode !== sslmode) warnings.push(`Unsupported sslmode ${rawSslmode}; using verify-full.`);
+    const unsupported = [...parsed.searchParams.keys()].filter((key) => !['sslmode', 'sslrootcert'].includes(key));
     if (unsupported.length) warnings.push(`Review unsupported DSN options: ${[...new Set(unsupported)].join(', ')}.`);
     if (credential) warnings.push('A password was detected. It will only be saved if you choose “Save a new credential” below.');
     return {
@@ -147,6 +148,7 @@ export function parseConnectionImport(value) {
         user,
         dbname,
         sslmode,
+        pgCaBundlePath: trustedCaBundlePath,
       },
     };
   }

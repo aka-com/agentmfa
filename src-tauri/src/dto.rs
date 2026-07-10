@@ -53,7 +53,6 @@ pub struct ConnectionDto {
     pub target: String,
     /// Referenced secret names (the 🔑 chips).
     pub secret_names: Vec<String>,
-    pub multi_connect: bool,
     /// Scoped access, whether expiring or standing.
     pub permissions: Vec<PermissionChip>,
     // Type-specific config, prefilled into the Edit sheet.
@@ -65,6 +64,7 @@ pub struct ConnectionDto {
     pub user: Option<String>,
     pub host_key_fingerprint: Option<String>,
     pub sslmode: Option<String>,
+    pub trusted_ca_bundle_path: Option<String>,
     pub url: Option<String>,
 }
 
@@ -103,7 +103,6 @@ impl ConnectionDto {
             kind: conn.kind().as_str().to_string(),
             target: conn.target(),
             secret_names,
-            multi_connect: conn.multi_connect,
             permissions,
             host: None,
             scheme: None,
@@ -113,6 +112,7 @@ impl ConnectionDto {
             user: None,
             host_key_fingerprint: None,
             sslmode: None,
+            trusted_ca_bundle_path: None,
             url: None,
         };
         match &conn.config {
@@ -133,6 +133,7 @@ impl ConnectionDto {
                 dbname,
                 user,
                 sslmode,
+                trusted_ca_bundle_path,
             } => {
                 dto.host = Some(host.clone());
                 dto.port = Some(*port);
@@ -144,6 +145,7 @@ impl ConnectionDto {
                         .and_then(|v| v.as_str().map(str::to_string))
                         .unwrap_or_else(|| "prefer".into()),
                 );
+                dto.trusted_ca_bundle_path = trusted_ca_bundle_path.clone();
             }
             Ws { url, template } => {
                 dto.url = Some(url.clone());
@@ -264,7 +266,6 @@ impl From<&AuditEntry> for ActivityDto {
 pub struct SettingsDto {
     pub reauth_on_read: bool,
     pub hide_secret_prefixes: bool,
-    pub pg_trusted_ca_bundle_path: Option<String>,
     pub menu_bar_hides_dock: bool,
 }
 

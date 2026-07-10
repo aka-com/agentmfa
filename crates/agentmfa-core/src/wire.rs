@@ -68,7 +68,6 @@ pub enum ErrorReason {
     // Tickets (data-plane redemption).
     UnknownTicket,
     TicketExpired,
-    TicketAlreadyRedeemed,
     // Upstream execution.
     UpstreamTimeout,
     UpstreamError,
@@ -87,7 +86,7 @@ pub enum ErrorReason {
 
 impl ErrorReason {
     /// Every registered reason, for exhaustiveness checks and docs.
-    pub const ALL: [ErrorReason; 43] = [
+    pub const ALL: [ErrorReason; 42] = [
         ErrorReason::MissingToken,
         ErrorReason::InvalidToken,
         ErrorReason::TokenExpired,
@@ -118,7 +117,6 @@ impl ErrorReason {
         ErrorReason::BrokerSessionLimit,
         ErrorReason::UnknownTicket,
         ErrorReason::TicketExpired,
-        ErrorReason::TicketAlreadyRedeemed,
         ErrorReason::UpstreamTimeout,
         ErrorReason::UpstreamError,
         ErrorReason::UpstreamConnectFailed,
@@ -165,7 +163,6 @@ impl ErrorReason {
             ErrorReason::BrokerSessionLimit => "broker_session_limit",
             ErrorReason::UnknownTicket => "unknown_ticket",
             ErrorReason::TicketExpired => "ticket_expired",
-            ErrorReason::TicketAlreadyRedeemed => "ticket_already_redeemed",
             ErrorReason::UpstreamTimeout => "upstream_timeout",
             ErrorReason::UpstreamError => "upstream_error",
             ErrorReason::UpstreamConnectFailed => "upstream_connect_failed",

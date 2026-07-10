@@ -134,7 +134,7 @@ async fn bridge_handler(
     upgrade: WebSocketUpgrade,
 ) -> Response {
     let broker = state.broker;
-    // Redeem: expiry, single-use, and the two-level session budget are all
+    // Redeem: expiry and the two-level session budget are
     // enforced here, failing fast with the reason (§4.2/§8).
     let mut redemption = match broker.data_plane.redeem(&ticket) {
         Ok(r) => r,
@@ -146,7 +146,7 @@ async fn bridge_handler(
     };
 
     // First redemption claims the upstream dialed at open time; later
-    // redemptions (multi-connect) dial their own (§4.2).
+    // later redemptions dial their own (§4.2).
     let upstream = match redemption.payload_ws_upstream.take() {
         Some(upstream) => upstream,
         None => match crate::authorization::scope_existing(

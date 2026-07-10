@@ -50,7 +50,7 @@ from the vault to Claude, Codex, or other local agents.
 - **Supports most agent workflows:** Injects credentials for HTTP, WebSocket, Postgres, and SSH.
   - **HTTP** — the agent supplies method/path/headers/body; the connection pins the host; redirects are only followed within that host.
   - **WebSocket** — the agent gets a short-lived `ws://127.0.0.1:…` bridge URL usable by any stock WS client.
-  - **Postgres** — the agent gets a password-less DSN + short-lived ticket; unmodified `psql` works, while the broker opens the upstream leg itself. The default `sslmode=require` encrypts without certificate verification; use `verify-full` for CA and hostname verification.
+  - **Postgres** — the agent gets a password-less DSN + short-lived ticket; unmodified `psql` works, while the broker opens the upstream leg itself. New connections default to certificate and hostname verification, with an optional per-connection private CA bundle.
   - **SSH** — the agent gets an `SSH_AUTH_SOCK` path; `ssh`/`git`/`rsync` work
     with OpenSSH host-bound authentication, while the broker signs only for the
     connection's pinned user and server host key. Compatible OpenSSH clients
@@ -135,9 +135,9 @@ secret directly. The standalone Secrets manager remains available from
 - HTTP connections support bearer and custom-header credentials, Basic auth
   through `base64(...)`, query injection through `url(...)`, and composition
   of multiple secrets in a fixed injection template.
-- Postgres `sslmode=require`, the default, encrypts the upstream connection but
-  does not verify its certificate. Use `verify-full` for CA and hostname
-  verification.
+- New Postgres connections use `verify-full` by default. Compatibility and
+  advanced modes remain available per connection, as does an optional private
+  CA bundle.
 - SSH supports ed25519 and RSA keys and requires OpenSSH-compatible session
   binding and host-bound authentication. Encrypted or unsupported private keys
   fail when the SSH capability is opened.
@@ -342,8 +342,8 @@ AgentMFA persistence
 |   |   `-- secret metadata, connection configs, settings
 |   |       - secret ids/names/timestamps only
 |   |       - connection targets/templates/secret UUID refs
-|   |       - settings: reauth, hide prefixes, pg CA bundle path,
-|   |         menu bar Dock behavior
+|   |       - settings: reauth, hide prefixes, menu bar Dock behavior
+|   |       - per-connection Postgres TLS mode and optional CA bundle path
 |   |
 |   |-- rules.json                                  0600, atomic, HMAC-sealed
 |   |   `-- standing scoped permissions:

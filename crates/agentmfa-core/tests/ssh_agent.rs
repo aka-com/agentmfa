@@ -11,7 +11,6 @@ use agentmfa_core::approvals::ApprovalRequest;
 use agentmfa_core::broker::{Broker, UiDecision};
 use agentmfa_core::config::BrokerConfig;
 use agentmfa_core::daemon;
-use agentmfa_core::error::CoreError;
 use agentmfa_core::events::BrokerEvents;
 use agentmfa_core::paths::Paths;
 use agentmfa_core::store::ConnectionSpec;
@@ -151,7 +150,7 @@ async fn harness(config: BrokerConfig) -> Harness {
 
 /// Store `key` as the connection's private-key secret and register a
 /// `prod-ssh` connection pinned to `user`.
-fn add_ssh_connection(broker: &Broker, key: &PrivateKey, user: &str, multi: bool) -> PrivateKey {
+fn add_ssh_connection(broker: &Broker, key: &PrivateKey, user: &str) -> PrivateKey {
     let host_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
     let pem = key.to_openssh(LineEnding::LF).unwrap();
     broker
@@ -173,7 +172,6 @@ fn add_ssh_connection(broker: &Broker, key: &PrivateKey, user: &str, multi: bool
                     .to_string(),
             },
             secrets: vec![secret.id],
-            multi_connect: multi,
         })
         .unwrap();
     host_key
@@ -338,7 +336,7 @@ fn verify_signature(public: &PublicKey, response_body: &[u8], data: &[u8]) {
 async fn ed25519_lists_signs_and_pins_user() {
     let mut h = harness(BrokerConfig::default()).await;
     let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
-    let host_key = add_ssh_connection(&h.broker, &key, "deploy", true);
+    let host_key = add_ssh_connection(&h.broker, &key, "deploy");
     let token = h.pair().await;
     let auth_sock = h.open_ssh(&token).await;
 
@@ -399,7 +397,7 @@ async fn rsa_signs_with_requested_hash() {
     // A 2048-bit key keeps generation fast for the test.
     let keypair = ssh_key::private::RsaKeypair::random(&mut OsRng, 2048).unwrap();
     let key = PrivateKey::from(keypair);
-    let host_key = add_ssh_connection(&h.broker, &key, "deploy", true);
+    let host_key = add_ssh_connection(&h.broker, &key, "deploy");
     let token = h.pair().await;
     let auth_sock = h.open_ssh(&token).await;
     let key_blob = key.public_key().to_bytes().unwrap();
@@ -424,7 +422,7 @@ async fn rsa_signs_with_requested_hash() {
 async fn wrong_key_blob_is_refused() {
     let mut h = harness(BrokerConfig::default()).await;
     let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
-    let host_key = add_ssh_connection(&h.broker, &key, "deploy", true);
+    let host_key = add_ssh_connection(&h.broker, &key, "deploy");
     let token = h.pair().await;
     let auth_sock = h.open_ssh(&token).await;
 
@@ -439,10 +437,10 @@ async fn wrong_key_blob_is_refused() {
 }
 
 #[tokio::test]
-async fn multi_connect_serves_many_invocations() {
+async fn one_ticket_serves_many_invocations() {
     let mut h = harness(BrokerConfig::default()).await;
     let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
-    let host_key = add_ssh_connection(&h.broker, &key, "deploy", true);
+    let host_key = add_ssh_connection(&h.broker, &key, "deploy");
     let token = h.pair().await;
     let auth_sock = h.open_ssh(&token).await;
     let key_blob = key.public_key().to_bytes().unwrap();
@@ -460,35 +458,6 @@ async fn multi_connect_serves_many_invocations() {
         streams.push(s);
     }
     assert_eq!(h.broker.sessions().len(), 3);
-}
-
-#[tokio::test]
-async fn single_use_ssh_connection_is_rejected() {
-    let h = harness(BrokerConfig::default()).await;
-    let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
-    let pem = key.to_openssh(LineEnding::LF).unwrap();
-    h.broker
-        .store
-        .add_secret("DEPLOY_SSH_KEY", Zeroizing::new(pem.to_string()))
-        .unwrap();
-    let secret = h.broker.store.secret_by_name("DEPLOY_SSH_KEY").unwrap();
-
-    let err = h
-        .broker
-        .store
-        .add_connection(ConnectionSpec {
-            name: "prod-ssh".into(),
-            config: ConnectionConfig::Ssh {
-                host: "prod.example.com".into(),
-                port: 22,
-                user: "deploy".into(),
-                host_key_fingerprint: key.public_key().fingerprint(HashAlg::Sha256).to_string(),
-            },
-            secrets: vec![secret.id],
-            multi_connect: false,
-        })
-        .unwrap_err();
-    assert!(matches!(err, CoreError::InvalidConnectionConfig(_)));
 }
 
 #[tokio::test]
@@ -516,7 +485,6 @@ async fn unparseable_key_fails_open() {
                     .to_string(),
             },
             secrets: vec![secret.id],
-            multi_connect: true,
         })
         .unwrap();
     let token = h.pair().await;

@@ -28,7 +28,7 @@ const state = {
   activity: [],
   queue: [],
   agentSetupInstructions: '',
-  settings: { reauth_on_read: true, hide_secret_prefixes: true, pg_trusted_ca_bundle_path: null, menu_bar_hides_dock: false },
+  settings: { reauth_on_read: true, hide_secret_prefixes: true, menu_bar_hides_dock: false },
   reveal: {},            // secretId -> prefix string (transient)
   // sheet / confirm state
   sheet: null,           // {kind:'add-secret'|'edit-secret'|'add-conn'|'edit-conn'|'settings', ...}
@@ -494,21 +494,24 @@ function connSheet(editing) {
       <div class="f-row"><label>User</label><input id="f-user" class="${fieldCls('user')}" placeholder="deploy" value="${escAttr(d.user ?? '')}">${fieldErr('user')}</div>`;
     fields += `<div class="f-row"><label>Host key fingerprint</label><input id="f-host-key" class="${fieldCls('hostKeyFingerprint')}" placeholder="SHA256:…" value="${escAttr(d.hostKeyFingerprint ?? '')}">${fieldErr('hostKeyFingerprint')}</div>`;
   } else if (t === 'pg') {
-    const sslmode = d.sslmode || 'require';
+    const sslmode = d.sslmode || 'verify-full';
     const sslOpts = [
-      ['disable', 'Disable'],
-      ['prefer', 'Prefer (TLS optional)'],
+      ['verify-full', 'Verify full'],
       ['require', 'Require TLS (no certificate verification)'],
       ['verify-ca', 'Verify CA only (no hostname verification)'],
-      ['verify-full', 'Verify full'],
-    ].map(([value, label]) =>
-      `<option value="${value}" ${sslmode === value ? 'selected' : ''}>${label}</option>`).join('');
+      ['prefer', 'Prefer (TLS optional)'],
+      ['disable', 'Disable'],
+    ].map(([value, label]) => `<option value="${value}" ${sslmode === value ? 'selected' : ''}>${label}</option>`).join('');
     fields += `<div class="f-2col">
       <div class="f-row"><label>Host</label><input id="f-host" class="${fieldCls('host')}" placeholder="db.internal.example.com" value="${escAttr(d.host ?? '')}">${fieldErr('host')}</div>
       <div class="f-row" style="flex:0 0 90px"><label>Port</label><input id="f-port" class="${fieldCls('port')}" inputmode="numeric" value="${escAttr(d.port ?? '5432')}">${fieldErr('port')}</div></div>
       <div class="f-row"><label>Database</label><input id="f-db" class="${fieldCls('dbname')}" placeholder="app_production" value="${escAttr(d.dbname ?? '')}">${fieldErr('dbname')}</div>
       <div class="f-row"><label>User</label><input id="f-user" class="${fieldCls('user')}" placeholder="app" value="${escAttr(d.user ?? '')}">${fieldErr('user')}</div>
-      <div class="f-row"><label>TLS mode</label>${selectControlHTML('f-sslmode', sslOpts)}</div>`;
+      <div class="f-row"><label>TLS mode</label>${selectControlHTML('f-sslmode', sslOpts)}
+        ${sslmode === 'require' ? '<div class="pair-identity-warning">The server certificate will not be verified.</div>' : ''}</div>
+      <div class="f-row"><label>Trusted CA bundle <span class="label-detail">optional</span></label>
+        <input id="f-pg-ca-bundle" placeholder="/path/to/private-ca.pem" value="${escAttr(d.pgCaBundlePath ?? '')}">
+        <div class="rule-note">Verified TLS uses system roots when this is empty.</div></div>`;
   } else {
     fields += `<div class="f-row"><label>URL</label><input id="f-url" class="${fieldCls('url')}" placeholder="wss://stream.example.com/feed" value="${escAttr(d.url ?? '')}">${fieldErr('url')}</div>`;
   }
@@ -547,11 +550,6 @@ function connSheet(editing) {
   } else {
     fields += credentialChooserHTML(t, d);
   }
-  if (t === 'pg' || t === 'ws') {
-    fields += `<div class="f-row"><label class="checkbox-label">
-      <input type="checkbox" id="c-multi" ${d.multiConnect !== false ? 'checked' : ''} style="width:auto">
-      <span>Let tools reconnect for 60 seconds after opening. <span class="label-detail">Useful for connection pools and tools that reconnect automatically.</span></span></label></div>`;
-  }
   if (editing && conn && (conn.permissions || []).some((permission) => !permission.expires_at)) {
     fields += `<div class="rule-note">Changing the destination makes affected agents ask for approval again.</div>`;
   }
@@ -563,7 +561,6 @@ function connSheet(editing) {
 
 function settingsSheet() {
   const s = state.settings;
-  const pgCaPath = state.draft.pgCaBundlePath ?? s.pg_trusted_ca_bundle_path ?? '';
   const reauthRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Confirm before using saved secrets</div>
       <div class="st-sub">Use OS authentication before showing, copying, or sending a saved credential.</div></div>
       <button class="switch ${s.reauth_on_read ? 'on' : ''}" data-act="toggle-reauth" role="checkbox" aria-checked="${s.reauth_on_read ? 'true' : 'false'}"></button></div>`;
@@ -576,21 +573,9 @@ function settingsSheet() {
   const secretsRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Secrets</div>
       <div class="st-sub">Manage saved values independently from their connections.</div></div>
       <button class="btn sm" data-act="open-secrets">Manage secrets</button></div>`;
-  const pgTls = `<details class="set-collapse pg-options" ${pgCaPath ? 'open' : ''}>
-      <summary><span class="pg-options-chevron" aria-hidden="true">${ICONS.chevronDown}</span><span>Postgres options</span></summary>
-      <div class="set-panel">
-        <div class="f-row"><label>Trusted CA bundle</label>
-          <input id="f-pg-ca-bundle" placeholder="/path/to/ca-bundle.pem" value="${escAttr(pgCaPath)}"></div>
-        <div class="rule-note">Choose a PEM file containing certificates for your enterprise or private CA.</div>
-        <div class="set-actions">
-          <button class="btn sm" data-act="clear-pg-ca-bundle">Clear</button>
-          <button class="btn sm primary" data-act="save-pg-ca-bundle">Save</button>
-        </div>
-      </div>
-    </details>`;
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
     <div class="sheet wide"><h3>Settings</h3>
-    ${reauthRow}${prefixRow}${dockRow}${secretsRow}${pgTls}
+    ${reauthRow}${prefixRow}${dockRow}${secretsRow}
     <div class="sheet-actions"><button class="btn primary" data-act="sheet-cancel">Done</button></div></div>`;
 }
 
@@ -671,8 +656,6 @@ function renderApproval() {
     : '';
   const connectionRow = conn ? `<div class="ap-row"><span>Connection</span><span>${connCell}</span></div>` : '';
   const targetRow = conn ? `<div class="ap-row"><span>Target</span><code>${esc(conn.target)}</code></div>` : '';
-  const scopeRow = (req.kind === 'pg' || req.kind === 'ws' || req.kind === 'ssh') && conn && conn.multi_connect
-    ? `<div class="ap-row"><span>Reconnects</span><span>Allowed for 60 seconds after this connection is opened</span></div>` : '';
   const pairIdentity = req.pairing_identity || {
     program: req.identity || 'Unknown program',
     verification: 'Program identity',
@@ -728,7 +711,7 @@ function renderApproval() {
     <div class="ap-rows">
       ${isPair ? identityRows : `<div class="ap-row"><span>Agent</span><b>${esc(req.agent)}</b></div>
       ${connectionRow}${targetRow}
-      <div class="ap-row"><span>This request</span><code>${esc(req.action)}</code></div>${scopeRow}`}
+      <div class="ap-row"><span>This request</span><code>${esc(req.action)}</code></div>`}
       <div class="ap-row"><span>Approve within</span><span><span class="ap-countdown${cd.s === 0 ? ' expired' : cd.s <= COUNTDOWN_LOW_S ? ' low' : ''}" id="ap-countdown">${cd.text}</span></span></div>
     </div>
     ${identityWarning}${replacement}${inherit}${identityDetails}${detail}
@@ -828,7 +811,6 @@ function selectEditSecretMask() {
 
 function captureDrafts() {
   const g = (id) => { const el = document.getElementById(id); return el ? el.value : undefined; };
-  const gc = (id) => { const el = document.getElementById(id); return el ? el.checked : undefined; };
   if (state.sheet && (state.sheet.kind === 'add-secret' || state.sheet.kind === 'edit-secret')) {
     if (g('f-name') !== undefined) state.draft.name = g('f-name');
     if (g('f-value') !== undefined) state.draft.value = g('f-value');
@@ -843,6 +825,7 @@ function captureDrafts() {
     if (g('f-user') !== undefined) state.draft.user = g('f-user');
     if (g('f-host-key') !== undefined) state.draft.hostKeyFingerprint = g('f-host-key');
     if (g('f-sslmode') !== undefined) state.draft.sslmode = g('f-sslmode');
+    if (g('f-pg-ca-bundle') !== undefined) state.draft.pgCaBundlePath = g('f-pg-ca-bundle');
     if (g('f-url') !== undefined) state.draft.url = g('f-url');
     if (g('c-template') !== undefined) state.draft.template = g('c-template');
     if (g('c-secret') !== undefined) state.draft.secretId = g('c-secret');
@@ -854,10 +837,6 @@ function captureDrafts() {
     }
     if (g('c-auth-mode') !== undefined) state.draft.authMode = g('c-auth-mode');
     if (g('c-auth-detail') !== undefined) state.draft.authDetail = g('c-auth-detail');
-    if (gc('c-multi') !== undefined) state.draft.multiConnect = gc('c-multi');
-  }
-  if (state.sheet && state.sheet.kind === 'settings') {
-    if (g('f-pg-ca-bundle') !== undefined) state.draft.pgCaBundlePath = g('f-pg-ca-bundle');
   }
 }
 
@@ -959,7 +938,7 @@ async function saveConn() {
     errs.template = 'Injection template is required';
   }
   if (Object.keys(errs).length) { state.sheetErrors = errs; render(); return; }
-  const input = { name, type: t, multi_connect: t === 'ssh' || d.multiConnect !== false };
+  const input = { name, type: t };
   if (adding && needsCredentialChoice && secretSource === 'new') {
     input.new_secret_name = newSecretName;
     input.new_secret_value = d.newSecretValue ?? d.importedCredential;
@@ -974,7 +953,8 @@ async function saveConn() {
     input.port = port;
     input.dbname = (d.dbname || '').trim();
     input.user = (d.user || '').trim();
-    input.sslmode = d.sslmode || 'require';
+    input.sslmode = d.sslmode || 'verify-full';
+    input.trusted_ca_bundle_path = (d.pgCaBundlePath || '').trim() || null;
     if (selectedSecret) input.secret_id = selectedSecret.id;
   } else if (t === 'ssh') {
     input.host = (d.host || '').trim();
@@ -1115,8 +1095,8 @@ document.addEventListener('click', async (e) => {
         port: c.port ? String(c.port) : (c.type === 'ssh' ? '22' : '5432'),
         dbname: c.dbname, user: c.user, url: c.url, template: c.template,
         hostKeyFingerprint: c.host_key_fingerprint,
-        sslmode: c.sslmode || 'require',
-        secretId: null, multiConnect: c.multi_connect };
+        sslmode: c.sslmode || 'verify-full', pgCaBundlePath: c.trusted_ca_bundle_path,
+        secretId: null };
       // best-effort: prefill single-secret binding by name→id
       if (c.type !== 'api' && c.secret_names.length) {
         const s = state.secrets.find((s) => s.name === c.secret_names[0]);
@@ -1184,24 +1164,6 @@ document.addEventListener('click', async (e) => {
       }
       await refresh('settings');
       break;
-    case 'save-pg-ca-bundle': {
-      captureDrafts();
-      const path = (state.draft.pgCaBundlePath || '').trim();
-      if (await run(() => invoke('set_pg_trusted_ca_bundle_path', { path: path || null }))) {
-        state.draft.pgCaBundlePath = path;
-        toast(path ? '🔐 Postgres CA bundle saved' : '🔐 Postgres CA bundle cleared');
-        await refresh('settings');
-      }
-      break;
-    }
-    case 'clear-pg-ca-bundle':
-      state.draft.pgCaBundlePath = '';
-      if (await run(() => invoke('set_pg_trusted_ca_bundle_path', { path: null }))) {
-        toast('🔐 Postgres CA bundle cleared');
-        await refresh('settings');
-      }
-      break;
-
     // Approval window
     case 'req-detail-toggle': {
       const req = state.queue[0];
@@ -1294,7 +1256,7 @@ document.addEventListener('input', (e) => {
 // These selects reveal a different, stateful portion of the form. Capture
 // first so switching does not discard fields the user may switch back to.
 document.addEventListener('change', (e) => {
-  if (!e.target || !['c-secret-source', 'c-auth-mode'].includes(e.target.id)) return;
+  if (!e.target || !['c-secret-source', 'c-auth-mode', 'f-sslmode'].includes(e.target.id)) return;
   captureDrafts();
   render(false);
 });
