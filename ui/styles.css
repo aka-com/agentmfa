@@ -288,7 +288,7 @@ code, .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Conso
 /* The value slot is the positioning context: the masked value is the base
    layer, and the copy button / "Copied" status overlay it centered. */
 .val-slot { position: relative; display: inline-flex; align-items: center; justify-content: center; min-width: 92px; }
-.val-slot code { transition: opacity .14s ease; }
+.val-slot code { transform: translateY(-3px); transition: opacity .14s ease; }
 /* Dim the placeholder behind the centered overlay on hover or after a copy. */
 .val-wrap:hover .val-slot code, .val-slot.is-copied code { opacity: .22; }
 .val-overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; }
