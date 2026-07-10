@@ -287,7 +287,7 @@ function connectionsHTML() {
 // semantic Lucide icon, then plain primary text with optional detail.
 function activityRowHTML(a) {
   const icon = ICONS[a.icon] || '';
-  return `<div class="act-row ${a.detail ? '' : 'single-line'}">
+  return `<div class="act-row">
     <span class="act-gutter"><span class="act-time" data-tippy-content="${escAttr(absTime(a.at))}" data-tippy-theme="activity-time">${esc(relTime(a.at))}</span></span>
     <span class="act-ico tone-${escAttr(a.tone || 'neutral')}">${icon}</span>
     <span class="act-txt">${esc(a.text)}${a.detail ? `<div class="act-detail">${esc(a.detail)}</div>` : ''}</span></div>`;
