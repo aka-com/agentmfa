@@ -66,7 +66,7 @@ const db = {
   rules: [],
   grants: [],
   agents: [
-    { name: 'claude-code', program: 'com.anthropic.claude-code', verification: 'Signed application',
+    { id: uid(), name: 'claude-code', program: 'com.anthropic.claude-code', verification: 'Signed application',
       identity: 'com.anthropic.claude-code · Team 6XN7K9RPQ2', paired_at: now(), last_used: now() },
   ],
   sessions: [],
@@ -98,7 +98,7 @@ seedFixtures();
 // Illustrative broker state so the standalone dev page exercises every layout
 // affordance: ongoing access, temporary access, an open connection, and activity.
 function seedFixtures() {
-  db.rules.push({ id: uid(), agent: 'claude-code', connection_id: db.connections[0].id });
+  db.rules.push({ id: uid(), client_id: db.agents[0].id, agent: 'claude-code', connection_id: db.connections[0].id });
   db.grants.push({ id: uid(), agent: 'claude-code', connection_id: db.connections[1].id,
     scope: 'full', expires_at: new Date(Date.now() + 11 * 60000).toISOString() });
   db.sessions.push({ id: 1, type: 'ws', agent: 'claude-code', connection: 'market-feed', detail: 'wss://stream.example.com/feed' });
@@ -158,7 +158,7 @@ async function mockInvoke(cmd, args = {}) {
     case 'list_connections': return db.connections.map(connDto);
     case 'list_agents':
       return db.agents.map((a) => ({ ...a,
-        rule_count: db.rules.filter((r) => r.agent === a.name).length,
+        rule_count: db.rules.filter((r) => r.client_id === a.id).length,
         temporary_access_count: db.grants.filter((g) => g.agent === a.name).length }));
     case 'list_sessions': return db.sessions.slice();
     case 'list_activity': return db.activity.slice(0, Math.min(args.limit ?? MOCK_ACTIVITY_LIMIT, MOCK_ACTIVITY_LIMIT));
@@ -236,10 +236,12 @@ async function mockInvoke(cmd, args = {}) {
     case 'remove_rule': db.rules = db.rules.filter((r) => r.id !== args.id); audit('ruleRemoved', 'Approval required again'); return true;
     case 'remove_grant': db.grants = db.grants.filter((g) => g.id !== args.id); audit('grantRevoked', 'Temporary access ended'); return true;
     case 'revoke_agent':
-      db.agents = db.agents.filter((a) => a.name !== args.name);
-      db.grants = db.grants.filter((g) => g.agent !== args.name);
-      db.sessions = db.sessions.filter((s) => s.agent !== args.name);
-      audit('tokenRevoked', `Agent disconnected: ${args.name}`);
+      { const agent = db.agents.find((a) => a.id === args.id); if (!agent) return false;
+      db.agents = db.agents.filter((a) => a.id !== args.id);
+      db.grants = db.grants.filter((g) => g.agent !== agent.name);
+      db.rules = db.rules.filter((r) => r.client_id !== agent.id);
+      db.sessions = db.sessions.filter((s) => s.agent !== agent.name);
+      audit('tokenRevoked', `Agent disconnected: ${agent.name}`); }
       emit('amfa://agents-changed', {});
       emit('amfa://sessions-changed', {});
       return true;
@@ -259,7 +261,8 @@ async function mockInvoke(cmd, args = {}) {
     case 'decide': {
       const req = db.queue.find((r) => r.id === args.id);
       if (req && req.kind === 'pair' && args.revokeInheritedRules) {
-        db.rules = db.rules.filter((r) => r.agent !== req.agent);
+        const client = db.agents.find((agent) => agent.name === req.agent);
+        db.rules = db.rules.filter((r) => !client || r.client_id !== client.id);
         audit('ruleRemoved', `Approval required again: ${req.agent}`);
       }
       if (req && req.kind === 'pair' && args.decision === 'allow_once') {
@@ -271,6 +274,7 @@ async function mockInvoke(cmd, args = {}) {
           existing.last_used = existing.paired_at;
         } else {
           db.agents.push({
+            id: uid(),
             name: req.agent,
             program: req.pairing_identity.program,
             verification: req.pairing_identity.verification,
@@ -302,7 +306,7 @@ async function mockInvoke(cmd, args = {}) {
 if (!tauri && typeof window !== 'undefined') {
   window.__mockApproval = (kind = 'http', ttlMs = 120000) => {
     const inherited = kind === 'pair'
-      ? db.rules.filter((r) => r.agent === 'claude-code').map((r) => {
+      ? db.rules.filter((r) => r.client_id === db.agents[0]?.id).map((r) => {
           const c = db.connections.find((conn) => conn.id === r.connection_id);
           return c ? { name: c.name, type: c.type, target: connTarget(c) } : null;
         }).filter(Boolean)

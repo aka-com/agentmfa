@@ -83,10 +83,19 @@ impl PairingRegistry {
     /// `agents.json` carries token hashes *and pinned identities*, so it is
     /// sealed (§13.1): a rewrite of a pin must not go unnoticed.
     pub fn open(path: PathBuf, ttl: Duration, integrity: Arc<StateIntegrity>) -> Result<Self> {
-        let agents = match integrity.read_verified(&path)? {
+        let mut agents: Vec<PairedAgent> = match integrity.read_verified(&path)? {
             Some(bytes) => serde_json::from_slice(&bytes)?,
             None => Vec::new(),
         };
+        let migrated = agents.iter().any(|agent| agent.id.is_nil());
+        for agent in &mut agents {
+            if agent.id.is_nil() {
+                agent.id = uuid::Uuid::new_v4();
+            }
+        }
+        if migrated {
+            integrity.write(&path, &serde_json::to_vec_pretty(&agents)?)?;
+        }
         // Refresh at most once per tenth of the TTL, capped at an hour — far
         // inside the window, so an active token never expires, while a busy
         // agent does not trigger a disk write per call.
@@ -110,14 +119,16 @@ impl PairingRegistry {
     }
 
     /// Complete an approved pairing: mint a token pinned to `identity`.
-    /// Re-pairing under an existing name replaces the prior record, one
-    /// live token per name (the §13.2 lifecycle question, resolved to the
-    /// simpler and safer semantics). The replaced token's hash is remembered
+    /// Re-pairing the same verified client preserves its stable id while a
+    /// different program using the same display name receives a new id. One
+    /// live token remains per name. The replaced token's hash is remembered
     /// so its holder gets `token_superseded`, not `invalid_token`.
     pub fn pair(&self, name: &str, identity: PeerIdentity) -> Result<(String, PairedAgent)> {
         let token = mint_token();
         let now = Utc::now();
+        let existing_id = agents_for_identity(&self.agents, name, &identity);
         let agent = PairedAgent {
+            id: existing_id.unwrap_or_else(uuid::Uuid::new_v4),
             name: name.to_string(),
             token_hash: hash_token(&token),
             token_preview: token[..11].to_string(),
@@ -185,15 +196,14 @@ impl PairingRegistry {
         Ok(out)
     }
 
-    /// Invalidate a name's token immediately (the Revoke button, §8).
-    /// Standing rules are deliberately *not* touched here, they stay
-    /// visible on the Connections tab and are re-disclosed if the name
-    /// pairs again (DESIGN.md §9).
-    pub fn revoke(&self, name: &str) -> Result<bool> {
+    /// Invalidate a name's token immediately (the Revoke button, §8). The
+    /// broker removes permissions for the returned client as part of the
+    /// same user action.
+    pub fn revoke(&self, client_id: &uuid::Uuid) -> Result<bool> {
         let mut agents = self.agents.lock().unwrap();
         let mut next = agents.clone();
         let before = next.len();
-        next.retain(|a| a.name != name);
+        next.retain(|agent| &agent.id != client_id);
         let removed = next.len() != before;
         if removed {
             self.persist(&next)?;
@@ -216,6 +226,37 @@ impl PairingRegistry {
             .find(|a| a.name == name)
             .cloned()
     }
+
+    pub fn get_by_id(&self, client_id: &uuid::Uuid) -> Option<PairedAgent> {
+        self.agents
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|agent| &agent.id == client_id)
+            .cloned()
+    }
+
+    pub fn get_matching(&self, name: &str, identity: &PeerIdentity) -> Option<PairedAgent> {
+        self.agents
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|agent| agent.name == name && &agent.identity == identity)
+            .cloned()
+    }
+}
+
+fn agents_for_identity(
+    agents: &Mutex<Vec<PairedAgent>>,
+    name: &str,
+    identity: &PeerIdentity,
+) -> Option<uuid::Uuid> {
+    agents
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|agent| agent.name == name && &agent.identity == identity)
+        .map(|agent| agent.id)
 }
 
 /// Agent names are self-asserted labels; keep them printable and bounded so
@@ -321,20 +362,21 @@ mod tests {
     #[test]
     fn revoke_invalidates_immediately() {
         let (r, _dir) = registry(Duration::from_secs(3600));
-        let (token, _) = r.pair("claude-code", dev_identity()).unwrap();
-        assert!(r.revoke("claude-code").unwrap());
+        let (token, client) = r.pair("claude-code", dev_identity()).unwrap();
+        assert!(r.revoke(&client.id).unwrap());
         assert_eq!(
             r.verify(&token, &dev_identity()).unwrap_err(),
             TokenError::Invalid
         );
-        assert!(!r.revoke("claude-code").unwrap());
+        assert!(!r.revoke(&client.id).unwrap());
     }
 
     #[test]
     fn repairing_replaces_the_token() {
         let (r, _dir) = registry(Duration::from_secs(3600));
-        let (token1, _) = r.pair("claude-code", dev_identity()).unwrap();
-        let (token2, _) = r.pair("claude-code", dev_identity()).unwrap();
+        let (token1, first) = r.pair("claude-code", dev_identity()).unwrap();
+        let (token2, repaired) = r.pair("claude-code", dev_identity()).unwrap();
+        assert_eq!(first.id, repaired.id);
         // The replaced token is reported as superseded — naming whose token
         // file to re-read — not merely invalid, so its holder recovers
         // instead of re-pairing.
@@ -355,6 +397,55 @@ mod tests {
             }
         );
         assert!(r.verify(&token3, &dev_identity()).is_ok());
+    }
+
+    #[test]
+    fn same_name_different_identity_gets_a_new_client_id() {
+        let (r, _dir) = registry(Duration::from_secs(3600));
+        let (_, first) = r.pair("claude-code", dev_identity()).unwrap();
+        let (_, replacement) = r
+            .pair(
+                "claude-code",
+                PeerIdentity::Signed {
+                    signing_id: "com.example.other".into(),
+                    team_id: Some("OTHERTEAM".into()),
+                },
+            )
+            .unwrap();
+        assert_ne!(first.id, replacement.id);
+    }
+
+    #[test]
+    fn legacy_agents_receive_persisted_client_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agents.json");
+        let integrity = Arc::new(
+            futures::executor::block_on(StateIntegrity::open(&crate::vault::MemoryVault::new()))
+                .unwrap(),
+        );
+        let now = Utc::now();
+        let legacy = serde_json::json!([{
+            "name": "claude-code",
+            "token_hash": "hash",
+            "token_preview": "amfa_legacy",
+            "identity": {"kind": "dev_unverified", "uid": 501},
+            "paired_at": now,
+            "last_used": now
+        }]);
+        integrity
+            .write(&path, &serde_json::to_vec_pretty(&legacy).unwrap())
+            .unwrap();
+
+        let registry =
+            PairingRegistry::open(path.clone(), Duration::from_secs(3600), integrity).unwrap();
+        let client = registry.get("claude-code").unwrap();
+        assert!(!client.id.is_nil());
+
+        let sealed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let persisted: Vec<PairedAgent> =
+            serde_json::from_value(sealed["payload"].clone()).unwrap();
+        assert_eq!(persisted[0].id, client.id);
     }
 
     #[test]
@@ -428,7 +519,7 @@ mod tests {
         );
         assert!(r.verify(&token, &dev_identity()).is_ok());
 
-        assert!(r.revoke("claude-code").is_err());
+        assert!(r.revoke(&original.id).is_err());
         assert!(r.verify(&token, &dev_identity()).is_ok());
     }
 }

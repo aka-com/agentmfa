@@ -537,10 +537,16 @@ async fn post_pair(
     }
 
     let identity = peer.identity.clone();
-    // Pairing under a name that already holds standing rules inherits them,
-    // the dialog must disclose exactly what (§6).
-    let inherited = broker.inherited_for(&name);
-    let replaces_existing_agent = broker.pairing.get(&name).is_some();
+    // Only the same verified client can retain its existing permissions.
+    // A different program requesting the same display name starts clean.
+    let existing = broker.pairing.get(&name);
+    let matching_client = broker.pairing.get_matching(&name, &identity);
+    let inherited = matching_client
+        .as_ref()
+        .map(|client| broker.inherited_for(&client.id))
+        .unwrap_or_default();
+    let replaces_existing_agent = existing.is_some();
+    let replaced_client_id = existing.as_ref().map(|client| client.id);
 
     broker.audit.append(
         AuditEntry::new(
@@ -555,6 +561,7 @@ async fn post_pair(
     let request = ApprovalRequest {
         id: Uuid::new_v4(),
         agent: name.clone(),
+        client_id: matching_client.as_ref().map(|client| client.id),
         agent_token_hash: None,
         kind: ApprovalKind::Pair,
         connection: None,
@@ -592,6 +599,14 @@ async fn post_pair(
         Box::pin(async move {
             match broker.pairing.pair(&name, identity) {
                 Ok((token, agent)) => {
+                    if replaced_client_id.is_some_and(|id| id != agent.id) {
+                        let _ = broker.remove_rules_for_client_before_pairing(
+                            &replaced_client_id.unwrap(),
+                            &name,
+                            None,
+                            None,
+                        );
+                    }
                     broker.revoke_access_grants_for_agent(&name, "agent re-paired");
                     let sessions_closed = broker.data_plane.close_agent(&name);
                     broker.audit.append(
@@ -605,6 +620,7 @@ async fn post_pair(
                         status: 200,
                         body: json!({
                             "token": token,
+                            "client_id": agent.id,
                             // Echo what was registered and pinned, so the
                             // agent can log its own enrollment without a
                             // follow-up /v1/whoami.
@@ -696,7 +712,7 @@ async fn get_connections(State(state): State<AppState>, authed: Authed) -> Respo
             // standing rule (§7). Not a secret; the agent learns the same
             // thing on its first call, but knowing up front lets it warn its
             // user before ringing the doorbell.
-            let approval = match broker.policy.evaluate(&authed.agent.name, &c.id) {
+            let approval = match broker.policy.evaluate(&authed.agent.id, &c.id) {
                 Decision::Allow => "auto_allowed",
                 Decision::Prompt if full_grant => "auto_allowed",
                 Decision::Prompt if active_grant.is_some() => "read_auto_allowed",
@@ -745,6 +761,7 @@ async fn get_whoami(State(state): State<AppState>, authed: Authed) -> Response {
         + chrono::Duration::from_std(broker.config.token_ttl)
             .unwrap_or_else(|_| chrono::Duration::days(30));
     Json(json!({
+        "client_id": authed.agent.id,
         "agent": authed.agent.name,
         "identity": authed.agent.identity.display(),
         "paired_at": authed.agent.paired_at,
@@ -915,6 +932,7 @@ async fn post_http(
     let request = ApprovalRequest {
         id: Uuid::new_v4(),
         agent: agent.name.clone(),
+        client_id: Some(agent.id),
         agent_token_hash: Some(agent.token_hash.clone()),
         kind: ApprovalKind::Http,
         connection: Some(broker.connection_summary(&conn)),
@@ -1029,9 +1047,9 @@ async fn run_policied(
             }
             parked
         } else {
-            match broker.policy.evaluate(&agent.name, &conn.id) {
+            match broker.policy.evaluate(&agent.id, &conn.id) {
                 crate::types::Decision::Allow => {
-                    let rule = broker.policy.matching_rule(&agent.name, &conn.id);
+                    let rule = broker.policy.matching_rule(&agent.id, &conn.id);
                     let mut entry = AuditEntry::new(
                         AuditKind::AutoAllowed,
                         format!("Used without asking: {} → {}", agent.name, conn.name),
@@ -1147,6 +1165,7 @@ async fn post_ws_open(
     let request = ApprovalRequest {
         id: Uuid::new_v4(),
         agent: agent.name.clone(),
+        client_id: Some(agent.id),
         agent_token_hash: Some(agent.token_hash.clone()),
         kind: ApprovalKind::Ws,
         connection: Some(broker.connection_summary(&conn)),
@@ -1287,6 +1306,7 @@ async fn post_ssh_open(
     let request = ApprovalRequest {
         id: Uuid::new_v4(),
         agent: agent.name.clone(),
+        client_id: Some(agent.id),
         agent_token_hash: Some(agent.token_hash.clone()),
         kind: ApprovalKind::Ssh,
         connection: Some(broker.connection_summary(&conn)),
@@ -1417,6 +1437,7 @@ async fn post_pg_open(
     let request = ApprovalRequest {
         id: Uuid::new_v4(),
         agent: agent.name.clone(),
+        client_id: Some(agent.id),
         agent_token_hash: Some(agent.token_hash.clone()),
         kind: ApprovalKind::Pg,
         connection: Some(broker.connection_summary(&conn)),

@@ -53,6 +53,10 @@ use crate::wire::ErrorReason;
 pub struct ApprovalRequest {
     pub id: Uuid,
     pub agent: String,
+    /// Stable paired-client authorization principal. Pairing requests carry
+    /// the existing matching client's id when reconnecting the same program.
+    #[serde(skip)]
+    pub client_id: Option<Uuid>,
     /// Pair-token generation that originated a capability request. This is
     /// internal grant state and is never serialized to an approval surface.
     #[serde(skip)]
@@ -1018,6 +1022,7 @@ mod tests {
         ApprovalRequest {
             id: Uuid::new_v4(),
             agent: agent.into(),
+            client_id: Some(Uuid::new_v4()),
             agent_token_hash: None,
             kind: ApprovalKind::Http,
             connection: Some(ConnectionSummary {

@@ -105,16 +105,17 @@ impl Broker {
             events.clone(),
             integrity.clone(),
         )?);
-        let policy = Arc::new(NaivePolicyEngine::open(
-            paths.rules_file(),
-            integrity.clone(),
-        )?);
-        let grants = Arc::new(AccessGrants::new());
         let pairing = Arc::new(PairingRegistry::open(
             paths.agents_file(),
             config.token_ttl,
-            integrity,
+            integrity.clone(),
         )?);
+        let policy = Arc::new(NaivePolicyEngine::open_with_clients(
+            paths.rules_file(),
+            integrity,
+            &pairing.list(),
+        )?);
+        let grants = Arc::new(AccessGrants::new());
         let approvals = Approvals::new(
             config.approval_timeout,
             config.outcome_retention,
@@ -199,9 +200,9 @@ impl Broker {
 
     /// The connections a pairing under `agent` would inherit promptless
     /// access to, the loud disclosure list (§6).
-    pub fn inherited_for(&self, agent: &str) -> Vec<ConnectionSummary> {
+    pub fn inherited_for(&self, client_id: &Uuid) -> Vec<ConnectionSummary> {
         self.policy
-            .rules_for_agent(agent)
+            .rules_for_client(client_id)
             .into_iter()
             .filter_map(|rule| self.store.connection_by_id(&rule.connection_id).ok())
             .map(|conn| self.connection_summary(&conn))
@@ -246,7 +247,14 @@ impl Broker {
             && request.kind == ApprovalKind::Pair
             && matches!(decision, UiDecision::AllowOnce | UiDecision::AlwaysAllow)
         {
-            self.remove_rules_for_agent_before_pairing(&request.agent, Some(ctx), confirmation)?;
+            if let Some(client_id) = request.client_id {
+                self.remove_rules_for_client_before_pairing(
+                    &client_id,
+                    &request.agent,
+                    Some(ctx),
+                    confirmation,
+                )?;
+            }
         }
         self.apply_decision(id, decision, ctx, confirmation)
     }
@@ -374,7 +382,10 @@ impl Broker {
                 }
                 if let Some(summary) = &request.connection {
                     let conn = self.approval_connection(summary)?;
-                    let rule = self.policy.record_rule(&request.agent, conn.id)?;
+                    let client_id = request.client_id.ok_or(CoreError::NotConfirmed)?;
+                    let rule = self
+                        .policy
+                        .record_rule(client_id, &request.agent, conn.id)?;
                     self.audit.append(attributed(
                         AuditEntry::new(
                             AuditKind::RuleSaved,
@@ -954,16 +965,20 @@ impl Broker {
     }
 
     pub fn ui_remove_rules_for_agent(&self, agent: &str) -> Result<usize> {
-        self.remove_rules_for_agent_before_pairing(agent, None, None)
+        let Some(client) = self.pairing.get(agent) else {
+            return Ok(0);
+        };
+        self.remove_rules_for_client_before_pairing(&client.id, agent, None, None)
     }
 
-    fn remove_rules_for_agent_before_pairing(
+    pub(crate) fn remove_rules_for_client_before_pairing(
         &self,
+        client_id: &Uuid,
         agent: &str,
         ctx: Option<&DecisionContext>,
         confirmation: Option<ConfirmationMethod>,
     ) -> Result<usize> {
-        let removed = self.policy.remove_rules_for_agent(agent)?;
+        let removed = self.policy.remove_rules_for_client(client_id)?;
         if removed > 0 {
             let mut entry = AuditEntry::new(
                 AuditKind::RuleRemoved,
@@ -993,20 +1008,25 @@ impl Broker {
         self.pairing.list()
     }
 
-    /// Disconnect invalidates the token and every issued data-plane
-    /// capability immediately. Standing rules are kept (visible and removable
-    /// on the Connections tab) and re-disclosed if the name pairs again (§9).
-    pub fn ui_revoke_agent(&self, name: &str) -> Result<bool> {
-        let removed = self.pairing.revoke(name)?;
+    /// Disconnect invalidates the token, standing permissions, and every
+    /// issued data-plane capability immediately.
+    pub fn ui_revoke_agent(&self, client_id: &Uuid) -> Result<bool> {
+        let client = self.pairing.get_by_id(client_id);
+        let Some(client) = client else {
+            return Ok(false);
+        };
+        let name = client.name.clone();
+        let removed = self.pairing.revoke(client_id)?;
         if removed {
-            self.revoke_access_grants_for_agent(name, "agent revoked");
-            let sessions_closed = self.data_plane.close_agent(name);
+            self.remove_rules_for_client_before_pairing(&client.id, &name, None, None)?;
+            self.revoke_access_grants_for_agent(&name, "agent revoked");
+            let sessions_closed = self.data_plane.close_agent(&name);
             self.audit.append(
                 AuditEntry::new(
                     AuditKind::TokenRevoked,
                     format!("Agent disconnected: {name}"),
                 )
-                .agent(name.to_string())
+                .agent(name)
                 .field("sessions_closed", sessions_closed),
             );
             self.events.agents_changed();

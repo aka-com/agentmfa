@@ -422,7 +422,8 @@ async fn pairing_flow_and_token_auth() {
     assert_eq!(body["reason"], "invalid_token");
 
     // Revocation invalidates immediately.
-    assert!(h.broker.ui_revoke_agent("claude-code").unwrap());
+    let client = h.broker.pairing.get("claude-code").unwrap();
+    assert!(h.broker.ui_revoke_agent(&client.id).unwrap());
     let (status, _) = uds_request(
         &h.socket,
         "GET",
@@ -1906,9 +1907,14 @@ async fn pairing_inheritance_is_disclosed() {
     api_connection(&h, "github", up.port);
     let conn = h.broker.store.connection_by_name("github").unwrap();
 
-    // A previous process under this name earned a standing rule.
+    // The same verified client earned a standing rule before re-pairing.
+    h.pair("claude-code").await;
+    let client = h.broker.pairing.get("claude-code").unwrap();
     use agentmfa_core::policy::PolicyEngine as _;
-    h.broker.policy.record_rule("claude-code", conn.id).unwrap();
+    h.broker
+        .policy
+        .record_rule(client.id, "claude-code", conn.id)
+        .unwrap();
 
     let socket = h.socket.clone();
     let call = tokio::spawn(async move {

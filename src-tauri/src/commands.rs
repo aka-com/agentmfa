@@ -378,10 +378,11 @@ pub fn remove_grant(state: State<AppState>, id: String) -> CmdResult<bool> {
 /* ----------------------------- paired agents ----------------------------- */
 
 #[tauri::command]
-pub fn revoke_agent(state: State<AppState>, name: String) -> CmdResult<bool> {
+pub fn revoke_agent(state: State<AppState>, id: String) -> CmdResult<bool> {
+    let id = parse_id(&id)?;
     state
         .broker
-        .ui_revoke_agent(&name)
+        .ui_revoke_agent(&id)
         .map_err(|e| e.to_string())
 }
 

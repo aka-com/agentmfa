@@ -93,7 +93,8 @@ one first:
 
        curl --unix-socket {socket} \
             -H "Authorization: Bearer <token>" http://localhost/v1/whoami
-       → 200 {{"agent": "<your-name>", "identity": "…", "expires_at": "…"}}
+       → 200 {{"client_id": "<uuid>", "agent": "<your-name>",
+               "identity": "…", "expires_at": "…"}}
 
    `200` means the token works: skip pairing. Any `401` means it does
    not: fall through to pairing.
@@ -103,7 +104,8 @@ one first:
        curl --unix-socket {socket} -X POST http://localhost/v1/pair \
             -H "Content-Type: application/json" \
             -d '{{"agent_name": "<your-name>"}}'
-       → 200 {{"token": "amfa_…", "agent": "<your-name>",
+       → 200 {{"token": "amfa_…", "client_id": "<uuid>",
+               "agent": "<your-name>",
                "identity": "<the peer identity the token is pinned to>",
                "expires_after_days": {token_days},
                "store_at": "{tokens}/<your-name>"}}

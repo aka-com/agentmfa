@@ -4,7 +4,8 @@
 //! layer, decisions are Allow / Deny / Prompt and no matching rule prompts.
 //! The broker checks scoped, in-memory access grants before this layer.
 //! "Always allow…"
-//! stores a rule keyed by exact `(agent, connection_id)`, the connection's
+//! stores a rule keyed by exact `(client_id, connection_id)`, the client's
+//! stable id and the connection's
 //! **stable id**, never its renamable name, so a new connection recycling
 //! an old name never inherits an old rule. There are no deny rules. The
 //! real engine (scoping, precedence, TTLs) is a deferred design session,
@@ -18,13 +19,13 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::integrity::StateIntegrity;
-use crate::types::{Decision, Rule};
+use crate::types::{Decision, PairedAgent, Rule};
 use crate::Result;
 
 pub trait PolicyEngine: Send + Sync {
-    fn evaluate(&self, agent: &str, connection_id: &Uuid) -> Decision;
+    fn evaluate(&self, client_id: &Uuid, connection_id: &Uuid) -> Decision;
     /// From "Always allow…". Returns the stored rule.
-    fn record_rule(&self, agent: &str, connection_id: Uuid) -> Result<Rule>;
+    fn record_rule(&self, client_id: Uuid, agent: &str, connection_id: Uuid) -> Result<Rule>;
 }
 
 /// v1 behavior: no matching rule → Prompt; a `(agent, connection_id)` rule →
@@ -37,10 +38,35 @@ pub struct NaivePolicyEngine {
 
 impl NaivePolicyEngine {
     pub fn open(path: PathBuf, integrity: Arc<StateIntegrity>) -> Result<Self> {
-        let rules = match integrity.read_verified(&path)? {
+        Self::open_with_clients(path, integrity, &[])
+    }
+
+    pub fn open_with_clients(
+        path: PathBuf,
+        integrity: Arc<StateIntegrity>,
+        clients: &[PairedAgent],
+    ) -> Result<Self> {
+        let mut rules: Vec<Rule> = match integrity.read_verified(&path)? {
             Some(bytes) => serde_json::from_slice(&bytes)?,
             None => Vec::new(),
         };
+        let before = rules.len();
+        let mut migrated = false;
+        rules.retain_mut(|rule| {
+            if !rule.client_id.is_nil() {
+                return true;
+            }
+            if let Some(client) = clients.iter().find(|client| client.name == rule.agent) {
+                rule.client_id = client.id;
+                migrated = true;
+                true
+            } else {
+                false
+            }
+        });
+        if migrated || rules.len() != before {
+            integrity.write(&path, &serde_json::to_vec_pretty(&rules)?)?;
+        }
         Ok(Self {
             path,
             integrity,
@@ -58,12 +84,12 @@ impl NaivePolicyEngine {
         self.rules.lock().unwrap().clone()
     }
 
-    pub fn rules_for_agent(&self, agent: &str) -> Vec<Rule> {
+    pub fn rules_for_client(&self, client_id: &Uuid) -> Vec<Rule> {
         self.rules
             .lock()
             .unwrap()
             .iter()
-            .filter(|r| r.agent == agent)
+            .filter(|r| &r.client_id == client_id)
             .cloned()
             .collect()
     }
@@ -78,12 +104,12 @@ impl NaivePolicyEngine {
             .collect()
     }
 
-    pub fn matching_rule(&self, agent: &str, connection_id: &Uuid) -> Option<Rule> {
+    pub fn matching_rule(&self, client_id: &Uuid, connection_id: &Uuid) -> Option<Rule> {
         self.rules
             .lock()
             .unwrap()
             .iter()
-            .find(|r| r.agent == agent && &r.connection_id == connection_id)
+            .find(|r| &r.client_id == client_id && &r.connection_id == connection_id)
             .cloned()
     }
 
@@ -118,11 +144,11 @@ impl NaivePolicyEngine {
         Ok(removed)
     }
 
-    pub fn remove_rules_for_agent(&self, agent: &str) -> Result<usize> {
+    pub fn remove_rules_for_client(&self, client_id: &Uuid) -> Result<usize> {
         let mut rules = self.rules.lock().unwrap();
         let mut next = rules.clone();
         let before = next.len();
-        next.retain(|r| r.agent != agent);
+        next.retain(|r| &r.client_id != client_id);
         let removed = before - next.len();
         if removed > 0 {
             self.persist(&next)?;
@@ -133,24 +159,25 @@ impl NaivePolicyEngine {
 }
 
 impl PolicyEngine for NaivePolicyEngine {
-    fn evaluate(&self, agent: &str, connection_id: &Uuid) -> Decision {
-        if self.matching_rule(agent, connection_id).is_some() {
+    fn evaluate(&self, client_id: &Uuid, connection_id: &Uuid) -> Decision {
+        if self.matching_rule(client_id, connection_id).is_some() {
             Decision::Allow
         } else {
             Decision::Prompt
         }
     }
 
-    fn record_rule(&self, agent: &str, connection_id: Uuid) -> Result<Rule> {
+    fn record_rule(&self, client_id: Uuid, agent: &str, connection_id: Uuid) -> Result<Rule> {
         let mut rules = self.rules.lock().unwrap();
         if let Some(existing) = rules
             .iter()
-            .find(|r| r.agent == agent && r.connection_id == connection_id)
+            .find(|r| r.client_id == client_id && r.connection_id == connection_id)
         {
             return Ok(existing.clone());
         }
         let rule = Rule {
             id: Uuid::new_v4(),
+            client_id,
             agent: agent.to_string(),
             connection_id,
             created_at: Utc::now(),
@@ -184,20 +211,23 @@ mod tests {
     fn no_rule_prompts_rule_allows() {
         let (e, _dir) = engine();
         let conn = Uuid::new_v4();
-        assert_eq!(e.evaluate("claude-code", &conn), Decision::Prompt);
-        e.record_rule("claude-code", conn).unwrap();
-        assert_eq!(e.evaluate("claude-code", &conn), Decision::Allow);
+        let claude = Uuid::new_v4();
+        let codex = Uuid::new_v4();
+        assert_eq!(e.evaluate(&claude, &conn), Decision::Prompt);
+        e.record_rule(claude, "claude-code", conn).unwrap();
+        assert_eq!(e.evaluate(&claude, &conn), Decision::Allow);
         // Keyed on both halves.
-        assert_eq!(e.evaluate("codex", &conn), Decision::Prompt);
-        assert_eq!(e.evaluate("claude-code", &Uuid::new_v4()), Decision::Prompt);
+        assert_eq!(e.evaluate(&codex, &conn), Decision::Prompt);
+        assert_eq!(e.evaluate(&claude, &Uuid::new_v4()), Decision::Prompt);
     }
 
     #[test]
     fn record_is_idempotent() {
         let (e, _dir) = engine();
         let conn = Uuid::new_v4();
-        let a = e.record_rule("claude-code", conn).unwrap();
-        let b = e.record_rule("claude-code", conn).unwrap();
+        let client = Uuid::new_v4();
+        let a = e.record_rule(client, "claude-code", conn).unwrap();
+        let b = e.record_rule(client, "claude-code", conn).unwrap();
         assert_eq!(a.id, b.id);
         assert_eq!(e.rules().len(), 1);
     }
@@ -206,20 +236,25 @@ mod tests {
     fn rules_die_with_their_connection() {
         let (e, _dir) = engine();
         let conn = Uuid::new_v4();
-        e.record_rule("claude-code", conn).unwrap();
-        e.record_rule("codex", conn).unwrap();
-        e.record_rule("codex", Uuid::new_v4()).unwrap();
+        e.record_rule(Uuid::new_v4(), "claude-code", conn).unwrap();
+        e.record_rule(Uuid::new_v4(), "codex", conn).unwrap();
+        e.record_rule(Uuid::new_v4(), "codex", Uuid::new_v4())
+            .unwrap();
         assert_eq!(e.remove_rules_for_connection(&conn).unwrap(), 2);
         assert_eq!(e.rules().len(), 1);
     }
 
     #[test]
-    fn rules_can_be_revoked_by_agent_name() {
+    fn rules_can_be_revoked_by_client_id() {
         let (e, _dir) = engine();
-        e.record_rule("claude-code", Uuid::new_v4()).unwrap();
-        e.record_rule("claude-code", Uuid::new_v4()).unwrap();
-        e.record_rule("codex", Uuid::new_v4()).unwrap();
-        assert_eq!(e.remove_rules_for_agent("claude-code").unwrap(), 2);
+        let claude = Uuid::new_v4();
+        e.record_rule(claude, "claude-code", Uuid::new_v4())
+            .unwrap();
+        e.record_rule(claude, "claude-code", Uuid::new_v4())
+            .unwrap();
+        e.record_rule(Uuid::new_v4(), "codex", Uuid::new_v4())
+            .unwrap();
+        assert_eq!(e.remove_rules_for_client(&claude).unwrap(), 2);
         assert_eq!(e.rules().len(), 1);
         assert_eq!(e.rules()[0].agent, "codex");
     }
@@ -229,13 +264,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("rules.json");
         let conn = Uuid::new_v4();
+        let client = Uuid::new_v4();
         let integrity = integrity();
         {
             let e = NaivePolicyEngine::open(path.clone(), integrity.clone()).unwrap();
-            e.record_rule("claude-code", conn).unwrap();
+            e.record_rule(client, "claude-code", conn).unwrap();
         }
         let e = NaivePolicyEngine::open(path, integrity).unwrap();
-        assert_eq!(e.evaluate("claude-code", &conn), Decision::Allow);
+        assert_eq!(e.evaluate(&client, &conn), Decision::Allow);
     }
 
     #[test]
@@ -243,16 +279,50 @@ mod tests {
         let (e, dir) = engine();
         let path = dir.path().join("rules.json");
         let existing_conn = Uuid::new_v4();
-        let existing = e.record_rule("claude-code", existing_conn).unwrap();
+        let client = Uuid::new_v4();
+        let existing = e.record_rule(client, "claude-code", existing_conn).unwrap();
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
 
-        assert!(e.record_rule("codex", Uuid::new_v4()).is_err());
+        assert!(e
+            .record_rule(Uuid::new_v4(), "codex", Uuid::new_v4())
+            .is_err());
         assert_eq!(e.rules(), vec![existing.clone()]);
-        assert_eq!(e.evaluate("claude-code", &existing_conn), Decision::Allow);
+        assert_eq!(e.evaluate(&client, &existing_conn), Decision::Allow);
 
         assert!(e.remove_rule(&existing.id).is_err());
         assert_eq!(e.rules(), vec![existing]);
-        assert_eq!(e.evaluate("claude-code", &existing_conn), Decision::Allow);
+        assert_eq!(e.evaluate(&client, &existing_conn), Decision::Allow);
+    }
+
+    #[test]
+    fn legacy_name_rules_migrate_only_for_current_clients() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rules.json");
+        let integrity = integrity();
+        let client = PairedAgent {
+            id: Uuid::new_v4(),
+            name: "claude-code".into(),
+            token_hash: "hash".into(),
+            token_preview: "amfa_legacy".into(),
+            identity: crate::types::PeerIdentity::DevUnverified { uid: 501 },
+            paired_at: Utc::now(),
+            last_used: Utc::now(),
+        };
+        let connection_id = Uuid::new_v4();
+        let legacy = serde_json::json!([
+            {"id": Uuid::new_v4(), "agent": "claude-code", "connection_id": connection_id, "created_at": Utc::now()},
+            {"id": Uuid::new_v4(), "agent": "orphan", "connection_id": Uuid::new_v4(), "created_at": Utc::now()}
+        ]);
+        integrity
+            .write(&path, &serde_json::to_vec_pretty(&legacy).unwrap())
+            .unwrap();
+
+        let policy =
+            NaivePolicyEngine::open_with_clients(path, integrity, std::slice::from_ref(&client))
+                .unwrap();
+        assert_eq!(policy.rules().len(), 1);
+        assert_eq!(policy.rules()[0].client_id, client.id);
+        assert_eq!(policy.evaluate(&client.id, &connection_id), Decision::Allow);
     }
 }

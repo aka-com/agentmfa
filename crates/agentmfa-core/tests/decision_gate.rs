@@ -120,6 +120,7 @@ fn http_request(conn: &Connection, mutating: bool) -> ApprovalRequest {
     ApprovalRequest {
         id: Uuid::new_v4(),
         agent: "claude-code".into(),
+        client_id: Some(Uuid::new_v4()),
         agent_token_hash: None,
         kind: ApprovalKind::Http,
         connection: Some(ConnectionSummary {
@@ -155,6 +156,7 @@ fn pair_request(agent: &str, inherited: Vec<ConnectionSummary>) -> ApprovalReque
     ApprovalRequest {
         id: Uuid::new_v4(),
         agent: agent.into(),
+        client_id: Some(Uuid::new_v4()),
         agent_token_hash: None,
         kind: ApprovalKind::Pair,
         connection: None,
@@ -272,7 +274,7 @@ async fn pairing_revocation_is_immediate_without_confirmation() {
         confirms: AtomicUsize::new(0),
     });
     let (broker, _dir) = broker_with(events.clone()).await;
-    broker
+    let (_, client) = broker
         .pairing
         .pair("claude-code", PeerIdentity::DevUnverified { uid: 501 })
         .unwrap();
@@ -288,7 +290,7 @@ async fn pairing_revocation_is_immediate_without_confirmation() {
     let close = session.close_signal.clone();
     let notified = close.notified();
 
-    assert!(broker.ui_revoke_agent("claude-code").unwrap());
+    assert!(broker.ui_revoke_agent(&client.id).unwrap());
     tokio::time::timeout(std::time::Duration::from_secs(1), notified)
         .await
         .expect("disconnect should close live data-plane sessions");
@@ -745,10 +747,15 @@ async fn inherited_rules_are_removed_before_pairing_executes() {
     });
     let (broker, _dir) = broker_with(events.clone()).await;
     let conn = add_github(&broker);
-    broker.policy.record_rule("claude-code", conn.id).unwrap();
+    let client_id = Uuid::new_v4();
+    broker
+        .policy
+        .record_rule(client_id, "claude-code", conn.id)
+        .unwrap();
     assert_eq!(broker.rules().len(), 1);
 
-    let request = pair_request("claude-code", broker.inherited_for("claude-code"));
+    let mut request = pair_request("claude-code", broker.inherited_for(&client_id));
+    request.client_id = Some(client_id);
     let id = request.id;
     let broker_for_executor = broker.clone();
     let parked = park_with_executor(

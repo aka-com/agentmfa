@@ -58,8 +58,9 @@ from the vault to Claude, Codex, or other local agents.
 - **Identity-pinned pairing.** Pair tokens are checked against the code-signing
   identity observed during pairing, or a best-effort local executable
   fingerprint for unsigned/ad-hoc peers. The app distinguishes the agent's
-  self-reported name from that program identity and, on re-pairing, asks
-  whether previously saved no-prompt access should carry over.
+  self-reported name from that program identity. Permissions bind to a stable
+  paired-client ID; a different program requesting the same name inherits
+  nothing.
 - **Local activity log.** Pairing, approval, denial, and upstream events are
   emitted to the app's Activity view and appended to disk on a best-effort
   basis. Persistence failures do not block broker operations, so history may
@@ -254,12 +255,11 @@ to the session-open call. Traffic inside an authorized live session is not
 approved individually. A transport issued under a grant is capped by the
 grant's remaining lifetime, and grant expiry or revocation closes it.
 
-Disconnecting or re-pairing an agent invalidates all of that agent's
-outstanding data-plane capabilities and closes its open WebSocket, Postgres,
-and SSH connections, including connections opened through one-time or saved
-access. Saved "use without asking" permissions remain dormant for a
-disconnected name unless the user removes them or chooses **Require approval
-again** while reconnecting it.
+Disconnecting an agent removes its saved and temporary access, invalidates its
+outstanding data-plane capabilities, and closes its open WebSocket, Postgres,
+and SSH connections. Re-pairing the same verified client rotates its token
+while preserving its stable authorization identity. A different program using
+the same display name receives a new identity and no inherited permissions.
 
 ## Conformance
 
@@ -341,11 +341,11 @@ AgentMFA persistence
 |   |
 |   |-- rules.json                                  0600, atomic, HMAC-sealed
 |   |   `-- standing "always allow" rules:
-|   |       agent name + stable connection UUID
+|   |       stable paired-client UUID + display-name snapshot + connection UUID
 |   |
 |   |-- agents.json                                 0600, atomic, HMAC-sealed
 |   |   `-- paired agent records:
-|   |       token hash, token preview, identity pin, last_used
+|   |       stable client UUID, token hash, token preview, identity pin, last_used
 |   |       no raw bearer token
 |   |
 |   |-- audit.jsonl                                 0600, user-clearable, not sealed

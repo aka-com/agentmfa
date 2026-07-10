@@ -283,6 +283,10 @@ impl PeerIdentity {
 /// the pair token itself is stored only as a SHA-256 hash.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairedAgent {
+    /// Stable authorization principal. Display names and bearer tokens may
+    /// change, but permissions always bind to this id.
+    #[serde(default)]
+    pub id: Uuid,
     /// Self-asserted at pairing (§8), a label, not an authenticated identity.
     pub name: String,
     /// SHA-256 of the 256-bit bearer token, hex-encoded.
@@ -300,7 +304,11 @@ pub struct PairedAgent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Rule {
     pub id: Uuid,
-    /// Self-asserted agent name (see the honesty note in §7).
+    /// Stable paired-client principal. Legacy rules deserialize as nil and
+    /// are migrated only when their display name maps to a current client.
+    #[serde(default)]
+    pub client_id: Uuid,
+    /// Display-name snapshot for audit and UI copy; never authorization.
     pub agent: String,
     /// The connection's stable id, never its renamable name.
     pub connection_id: Uuid,

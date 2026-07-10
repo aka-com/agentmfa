@@ -173,6 +173,7 @@ impl ConnectionDto {
 
 #[derive(Serialize)]
 pub struct AgentDto {
+    pub id: String,
     pub name: String,
     pub program: String,
     pub verification: &'static str,
@@ -203,13 +204,17 @@ impl AgentDto {
             }
         };
         Self {
+            id: agent.id.to_string(),
             name: agent.name.clone(),
             program,
             verification,
             identity: agent.identity.display(),
             paired_at: agent.paired_at.to_rfc3339(),
             last_used: agent.last_used.to_rfc3339(),
-            rule_count: rules.iter().filter(|r| r.agent == agent.name).count(),
+            rule_count: rules
+                .iter()
+                .filter(|rule| rule.client_id == agent.id)
+                .count(),
             temporary_access_count: broker.grant_count_for_agent(&agent.name),
         }
     }

@@ -148,17 +148,17 @@ function globalSectionsHTML() {
       if (a.rule_count) access.push(`${a.rule_count} without asking`);
       const sub = `${a.program} · ${a.verification} · last used ${relTime(a.last_used)}` +
         (access.length ? ` · ${access.join(', ')}` : '');
-      if (state.confirm && state.confirm.kind === 'revoke-agent' && state.confirm.name === a.name) {
+      if (state.confirm && state.confirm.kind === 'revoke-agent' && state.confirm.id === a.id) {
         return `<div class="live-row"><span class="badge b-agent">agent</span>
           <div class="live-txt"><div class="c-name">${esc(a.name)}</div>
-          <div class="disconnect-copy">Disconnect this agent? Temporary access and open connections will end. Access saved as “without asking” remains and will be shown if this name reconnects.</div></div>
+          <div class="disconnect-copy">Disconnect this agent? Temporary access, saved access, and open connections will end.</div></div>
           <button class="btn sm" data-act="confirm-cancel">Cancel</button>
-          <button class="btn sm danger" data-act="revoke-confirm" data-name="${escAttr(a.name)}">Disconnect</button></div>`;
+          <button class="btn sm danger" data-act="revoke-confirm" data-id="${a.id}">Disconnect</button></div>`;
       }
       return `<div class="live-row"><span class="badge b-agent">agent</span>
         <div class="live-txt"><div class="c-name">${esc(a.name)}</div>
         <div class="s-sub" style="max-width:300px" title="${escAttr(a.identity)}">${esc(sub)}</div></div>
-        <button class="btn sm" data-act="revoke-ask" data-name="${escAttr(a.name)}">Disconnect</button></div>`;
+        <button class="btn sm" data-act="revoke-ask" data-id="${a.id}" data-name="${escAttr(a.name)}">Disconnect</button></div>`;
     }).join('');
   }
   if (state.sessions.length) {
@@ -1141,9 +1141,9 @@ document.addEventListener('click', async (e) => {
       toast('🛑 Temporary access ended'); await refresh('all');
       break;
 
-    case 'revoke-ask': state.confirm = { kind: 'revoke-agent', name }; render(); break;
+    case 'revoke-ask': state.confirm = { kind: 'revoke-agent', id, name }; render(); break;
     case 'revoke-confirm':
-      if (await run(() => invoke('revoke_agent', { name }))) {
+      if (await run(() => invoke('revoke_agent', { id }))) {
         state.confirm = null; toast('🔒 Agent disconnected'); await refresh('all');
       }
       break;
