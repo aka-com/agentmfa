@@ -1,4 +1,4 @@
-//! Core-owned OS confirmation (DESIGN.md §8).
+//! Core-owned OS confirmation.
 //!
 //! Confirmation-gated commands — approving a pairing or mutating request,
 //! starting an access session, saving an "Always allow…" rule, creating a

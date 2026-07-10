@@ -1,12 +1,8 @@
-//! Self-describing discovery surface (DESIGN.md §5b).
+//! Self-describing discovery surface.
 //!
-//! `GET /.well-known/agent-broker.json` serves the machine-readable
-//! manifest; `GET /instructions` serves the human/agent-readable version.
-//! Both are served by the daemon itself, so they can never drift from
-//! what's actually running, and `agentmfa skill` emits the same
-//! instructions content as a checked-in skill file (§5). Both render the
-//! *actual* runtime paths (a `--root` broker names its real socket, not the
-//! production default), which is the point of daemon-served discovery.
+//! `GET /.well-known/agent-broker.json` serves machine-readable manifest.
+//! `GET /instructions` serves the human/agent-readable version.
+//! `agentmfa skill` emits the same instructions as a checked-in skill file.
 
 use serde_json::json;
 

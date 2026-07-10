@@ -1,10 +1,11 @@
 //! AgentMFA Tauri shell.
 //!
-//! The webview is the discovery/ergonomics surface; the Rust core owns
-//! everything sensitive (DESIGN.md §2). This shell wires the two together:
-//! it constructs the [`Broker`], starts the agent-facing daemon (control
-//! plane over the Unix socket + WS/PG data planes), installs the tray and
-//! windows, and exposes the minimal, OS-confirmation-gated command surface.
+//! The webview is the discovery/ergonomics surface; the Rust core
+//! owns everything sensitive. This shell wires the two together: it
+//! constructs the [`Broker`], starts the agent-facing daemon (control
+//! plane over the Unix socket + WS/PG data planes), installs the tray
+//! and windows, and exposes the minimal, OS-confirmation-gated
+//! command surface.
 
 mod auth;
 mod clipboard;

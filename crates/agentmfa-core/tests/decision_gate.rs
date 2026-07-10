@@ -1,6 +1,6 @@
-//! The core-owned high-consequence gate (DESIGN.md §8): the broker itself
-//! demands the shell's native confirmation through `BrokerEvents` before a
-//! gated decision or configuration action takes effect — a shell (or a
+//! The core-owned decision gate. The broker itself demands the
+//! shell's native confirmation through `BrokerEvents` before a gated
+//! decision or configuration action takes effect — a shell (or a
 //! compromised webview driving one) cannot apply them without passing
 //! through the gate, and the gate fails closed when unimplemented.
 

@@ -2,7 +2,7 @@
 //!
 //! - `agentmfa skill` emits the `/instructions` content as a checked-in
 //!   skill file, the same content the daemon serves, so the convention
-//!   layer can't drift from the daemon (DESIGN.md §5).
+//!   layer can't drift from the daemon.
 //! - `agentmfa serve` runs the broker headless with a terminal approver, so
 //!   the whole control plane + WS/PG data planes can be exercised without
 //!   the desktop UI (useful for agent integration and CI).

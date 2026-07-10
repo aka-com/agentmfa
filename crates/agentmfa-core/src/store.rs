@@ -1,8 +1,6 @@
-//! The vault-backed store (DESIGN.md §3, §9).
-//!
-//! Secret *values* live in the vault (Keychain on macOS); everything else,
-//! the secrets index (id, name, timestamps; deliberately no value preview)
-//! and all connection config, lives in `index.json`, written atomically.
+//! Vault-backed store. Secrets live in the vault (e.g. macOS Keychain).
+//! Everything else, including the secrets index and connection config
+//! lives in `index.json`.
 //!
 //! Invariants enforced here:
 //! - secret and connection names are unique (templates resolve secrets by

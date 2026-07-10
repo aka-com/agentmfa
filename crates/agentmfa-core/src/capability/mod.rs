@@ -1,4 +1,4 @@
-//! The broker capability surface (DESIGN.md §4): the agent supplies the
+//! The broker capability surface: the agent supplies the
 //! *what* (method, path, body); the connection supplies the *where* (host,
 //! database, URL) and the credential.
 

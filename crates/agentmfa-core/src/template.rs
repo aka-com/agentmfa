@@ -1,4 +1,4 @@
-//! Injection template mini-language (DESIGN.md §4.1).
+//! Injection template mini-language.
 //!
 //! A template is a stored header line (or query-param form) mixing literal
 //! text with `{{ … }}` placeholders. Inside a placeholder:
@@ -16,8 +16,7 @@
 //! against the HTTP field grammar by the HTTP capability before attaching.
 //!
 //! Renaming a secret rewrites every template that references it, matching
-//! the name inside `{{ … }}` placeholders and transform expressions alike,
-//! never literal text (DESIGN.md §3).
+//! the name inside `{{ … }}` placeholders and transform expressions alike.
 
 use std::collections::BTreeSet;
 use std::fmt;

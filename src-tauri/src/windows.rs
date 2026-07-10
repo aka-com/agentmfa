@@ -1,12 +1,8 @@
-//! Tray + window choreography (DESIGN.md §2).
+//! Tray + window
 //!
-//! AgentMFA has a resizable **main window**, an NSStatusItem-style **tray
-//! dropdown**, and a separate always-on-top **approval window**. The tray icon
+//! AgentMFA has a resizable main window, an NSStatusItem-style tray
+//! dropdown, and a separate always-on-top approval window. The tray icon
 //! is always present and toggles the compact dropdown beneath its status item.
-//!
-//! Only when the user enables "hide the Dock icon when minimized to the menu
-//! bar" does retreating switch to the accessory activation policy; opening
-//! the window always restores the regular policy.
 
 use std::sync::Mutex;
 

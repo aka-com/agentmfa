@@ -1,9 +1,10 @@
-// AgentMFA frontend. One file drives all Tauri windows (main, tray dropdown,
-// and approval), chosen from location.hash. Every mutation and
-// read goes through the Rust core via Tauri commands; the webview never
-// holds a secret value (DESIGN.md §2). When run outside Tauri (a plain
-// browser), a dev mock stands in for the core so the UI is developable
-// standalone.
+// AgentMFA frontend. One file drives all Tauri windows (main, tray
+// dropdown, and approval), chosen from location.hash.
+//
+// Every mutation and read goes through the Rust core via Tauri
+// commands; the webview never holds a secret value. When run outside
+// Tauri (a plain browser), a dev mock stands in for the core so the
+// UI is developable standalone.
 
 import { invoke, listen, mode } from '/src/bridge.js';
 import { ICONS, TYPES, esc, escAttr, toast, relTime, absTime } from '/src/util.js';

@@ -1,4 +1,4 @@
-//! Peer verification over the Unix domain socket (DESIGN.md §8).
+//! Peer verification over the Unix domain socket.
 //!
 //! On every UDS accept the broker resolves the connecting peer's identity:
 //!

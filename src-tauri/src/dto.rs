@@ -1,6 +1,6 @@
 //! Data-transfer types crossing the Tauri boundary to the webview.
 //!
-//! These carry masked metadata only (DESIGN.md §2): a secret's name and
+//! These carry masked metadata only, including a secret's name and
 //! timestamps, never any fragment of its value. Reveal is a separate,
 //! audited command that returns a short prefix on demand.
 

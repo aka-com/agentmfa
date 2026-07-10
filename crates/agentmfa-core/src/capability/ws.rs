@@ -1,4 +1,4 @@
-//! WebSocket capability, `POST /v1/ws/open` + local bridge (DESIGN.md §4.2).
+//! WebSocket capability, `POST /v1/ws/open` + local bridge.
 //!
 //! WebSockets are long-lived, so instead of an envelope the broker acts as a
 //! local bridge: authorization is checked once at open time; the broker dials

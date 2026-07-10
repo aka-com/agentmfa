@@ -1,4 +1,4 @@
-//! Pairing and pair tokens (DESIGN.md §8).
+//! Pairing and pair tokens.
 //!
 //! `POST /v1/pair {"agent_name": …}` triggers a user approval and returns a
 //! random 256-bit bearer token, stored hashed. Tokens have a 30-day TTL

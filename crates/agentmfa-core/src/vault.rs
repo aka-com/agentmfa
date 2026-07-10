@@ -1,4 +1,4 @@
-//! Secret value storage (DESIGN.md §3).
+//! Secret value storage.
 //!
 //! Each secret's sensitive material is one Keychain item, keyed by the
 //! secret's stable UUID (service `com.aka.desktop`). Everything that is

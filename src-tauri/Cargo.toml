@@ -49,9 +49,6 @@ objc2-local-authentication = { version = "0.3", features = ["LAContext", "LAErro
 block2 = "0.6"
 
 [features]
-# The webview cannot be trusted with a raw secret value, so there is no
-# get_secret_value command anywhere (DESIGN.md §2). This feature does NOT
-# add one; it exists only to gate louder dev logging.
 dev-verbose = []
 
 [dev-dependencies]

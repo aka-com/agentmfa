@@ -1,7 +1,5 @@
-//! The agent-facing control plane: HTTP over a Unix domain socket
-//! (`~/.agentmfa/broker.sock`, mode 0600, DESIGN.md §2/§8).
+//! Agent-facing control plane. HTTP over a Unix domain socket, mode 0600.
 //!
-//! Endpoints:
 //! - `GET /.well-known/agent-broker.json`, `GET /instructions`,
 //!   unauthenticated discovery, globally rate limited;
 //! - `POST /v1/pair`, unauthenticated, globally rate limited, gated by a

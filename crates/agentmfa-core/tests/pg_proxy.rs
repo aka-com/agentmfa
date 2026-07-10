@@ -1,6 +1,6 @@
-//! End-to-end Postgres proxy tests (DESIGN.md §4.3): real daemon, an
-//! in-process fake Postgres upstream (cleartext and SCRAM-SHA-256 server
-//! sides), and a real `tokio-postgres` client against the proxied DSN.
+//! End-to-end Postgres proxy tests: real daemon, an in-process fake
+//! Postgres upstream (cleartext and SCRAM-SHA-256 server sides), and
+//! a real `tokio-postgres` client against the proxied DSN.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};

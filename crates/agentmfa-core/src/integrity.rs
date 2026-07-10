@@ -1,4 +1,4 @@
-//! On-disk state integrity (DESIGN.md §13.1 — closed).
+//! On-disk state integrity.
 //!
 //! `index.json`, `rules.json`, and `agents.json` are non-secret but
 //! *binding*: a local process that can rewrite them can repoint a pinned

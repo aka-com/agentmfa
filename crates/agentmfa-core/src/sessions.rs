@@ -1,4 +1,4 @@
-//! Data-plane tickets and live sessions (DESIGN.md §4.2/§4.3/§8).
+//! Data-plane tickets and live sessions.
 //!
 //! WS bridge tickets and PG DSN tickets are 128-bit random values that
 //! expire 60 s after issue. A ticket may be redeemed any number of times

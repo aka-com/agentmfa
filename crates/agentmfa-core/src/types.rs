@@ -1,11 +1,11 @@
-//! Core data model (DESIGN.md §9).
+//! Core data model.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-/// A secret's sensitive material, scrubbed on drop (DESIGN.md §3).
+/// A secret's sensitive material, scrubbed on drop.
 pub type SecretValue = Zeroizing<String>;
 
 /// Masked metadata, the only thing the UI (or anything else outside the
@@ -21,7 +21,7 @@ pub struct SecretMeta {
 }
 
 /// The wire vocabulary is `api` / `pg` / `ws` / `ssh`, the same taxonomy the
-/// UI type badges and `GET /v1/connections` share (DESIGN.md §4.0).
+/// UI type badges and `GET /v1/connections` share.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ConnectionKind {
@@ -51,7 +51,7 @@ impl ConnectionKind {
     }
 }
 
-/// How the upstream leg of a Postgres connection is secured (DESIGN.md §4.3).
+/// How the upstream leg of a Postgres connection is secured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum PgSslMode {
@@ -70,7 +70,7 @@ pub enum PgSslMode {
 }
 
 /// Type-specific connection config: the *where* plus how the credential is
-/// injected. The agent never supplies any of this (DESIGN.md §4).
+/// injected. The agent never supplies any of this.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum ConnectionConfig {
@@ -85,7 +85,7 @@ pub enum ConnectionConfig {
         #[serde(default)]
         port: Option<u16>,
         /// Injection template, a header line (or query-param form) mixing
-        /// literal text with `{{ … }}` placeholders (DESIGN.md §4.1),
+        /// literal text with `{{ … }}` placeholders,
         /// e.g. `Authorization: Bearer {{GITHUB_API_KEY}}`.
         template: String,
     },
@@ -148,7 +148,7 @@ impl ConnectionConfig {
     }
 
     /// The human-readable pinned destination, what `GET /v1/connections`
-    /// returns and what the approval window shows (DESIGN.md §4.0):
+    /// returns and what the approval window shows:
     /// api → origin, pg → `user@host:port/dbname`, ws → URL,
     /// ssh → `user@host[:port]` (port shown only when non-default).
     pub fn target(&self) -> String {
@@ -201,14 +201,13 @@ impl ConnectionConfig {
 /// A connection binds secret(s) to a destination (DESIGN.md §1/§9).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Connection {
-    /// Stable id, standing rules key on it, never on the renamable name
-    /// (DESIGN.md §7).
+    /// Stable id, standing rules key on it, never on the renamable name.
     pub id: Uuid,
     /// Unique; how agents and the UI address the connection.
     pub name: String,
     pub config: ConnectionConfig,
     /// Referenced secret ids. API connections may compose several (derived
-    /// from the template's refs); pg/ws/ssh bind exactly one (DESIGN.md §9).
+    /// from the template's refs); pg/ws/ssh bind exactly one.
     pub secrets: Vec<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -223,7 +222,7 @@ impl Connection {
     }
 }
 
-/// The peer identity pinned to a pair token at pairing time (DESIGN.md §8).
+/// The peer identity pinned to a pair token at pairing time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PeerIdentity {
@@ -306,11 +305,11 @@ pub struct PairedAgent {
     /// Identity the token is pinned to.
     pub identity: PeerIdentity,
     pub paired_at: DateTime<Utc>,
-    /// Refreshed on use; tokens expire 30 days after this (DESIGN.md §8).
+    /// Refreshed on use; tokens expire 30 days after this.
     pub last_used: DateTime<Utc>,
 }
 
-/// A standing "always allow" rule (DESIGN.md §7).
+/// A standing "always allow" rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum PermissionScope {
@@ -357,7 +356,7 @@ pub struct Rule {
     pub created_at: DateTime<Utc>,
 }
 
-/// Decision produced by the policy engine (DESIGN.md §7).
+/// Decision produced by the policy engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
     Allow,
@@ -443,8 +442,8 @@ impl Default for Settings {
 }
 
 /// Compute the reveal prefix: the value's first `min(6, ⌊len/2⌋)` characters,
-/// at most half the value, so a short secret isn't mostly exposed
-/// (DESIGN.md §2). Returns the prefix with a trailing ellipsis when truncated.
+/// at most half the value, so a short secret isn't mostly exposed.
+/// Returns the prefix with a trailing ellipsis when truncated.
 pub fn reveal_prefix(value: &str) -> String {
     let len = value.chars().count();
     let n = std::cmp::min(6, len / 2);

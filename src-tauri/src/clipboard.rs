@@ -1,4 +1,4 @@
-//! Core-side clipboard copy with hygiene (DESIGN.md §9).
+//! Core-side clipboard copy with hygiene.
 //!
 //! Copy is performed core-side so the raw value is written straight to the
 //! pasteboard without passing back through the webview. Because the general

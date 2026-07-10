@@ -1,9 +1,9 @@
 //! Core → webview event bridge and window/tray choreography.
 //!
-//! The Rust core owns every state transition (DESIGN.md §2); this observer
-//! turns them into Tauri events the webview re-renders from, updates the
-//! tray pending-count, raises the always-on-top approval window on every
-//! prompt, and rings the advisory notification doorbell (§6).
+//! The Rust core owns every state transition; this observer turns
+//! them into Tauri events the webview re-renders from, updates the
+//! tray pending-count, raises the always-on-top approval window on
+//! every prompt, and rings the advisory notification doorbell.
 
 use std::sync::Arc;
 use std::time::Duration;

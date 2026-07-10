@@ -1,4 +1,4 @@
-//! HTTP capability, `POST /v1/http` (DESIGN.md §4.1).
+//! HTTP capability, `POST /v1/http`.
 //!
 //! Host-pinning is only as good as the URL assembly, so agent input is
 //! validated, not trusted: paths must begin with exactly one `/`, the

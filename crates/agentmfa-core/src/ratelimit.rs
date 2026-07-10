@@ -1,4 +1,4 @@
-//! Rate limiting (DESIGN.md §8).
+//! Rate limiting.
 //!
 //! - Per-token sliding-window buckets on capability calls (60/min default).
 //! - **Global** windows on the unauthenticated endpoints, global rather

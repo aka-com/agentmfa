@@ -1,6 +1,5 @@
-//! The Tauri command surface (DESIGN.md §2/§8).
+//! The Tauri command surface locked to the minimal set the UI needs:
 //!
-//! Locked to the minimal set the UI needs. Crucially:
 //! - there is **no** command that returns a stored secret value; reveal
 //!   returns only the short prefix, copy writes core-side to the clipboard;
 //! - confirmation-gated commands (approving a pairing or mutating request,

@@ -1,10 +1,10 @@
-//! The approval queue (DESIGN.md §4, §6).
+//! The approval queue.
 //!
-//! Approval waits are **held-open requests**: a `Prompt` decision parks the
+//! Approval waits are held-open requests where a `Prompt` decision parks the
 //! request and the daemon simply does not respond until the user decides or
-//! the timeout (default 120 s) auto-denies. No polling, no callback channel.
+//! the timeout (default 120s) auto-denies. No polling or callback channel.
 //!
-//! Retries are governed by an **idempotency key**: mutating calls carry an
+//! Retries are governed by an idempotency key. Mutating calls carry an
 //! optional `request_id`, and a retry re-sending the same `(agent,
 //! request_id)` joins the existing prompt, one approval, exactly one
 //! upstream execution, the same response replayed to every waiter and to

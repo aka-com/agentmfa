@@ -1,5 +1,4 @@
 //! SSH capability — `POST /v1/ssh/open` + a per-open ssh-agent socket
-//! (DESIGN.md §4.4).
 //!
 //! SSH has no request/response envelope and no DSN: a stock `ssh` (and
 //! therefore `git`, `scp`, `rsync`, `ssh -L`, …) authenticates by talking

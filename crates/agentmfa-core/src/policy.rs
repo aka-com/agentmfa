@@ -1,14 +1,13 @@
-//! The policy engine, deliberately a stub in v1 (DESIGN.md §7).
+//! The policy engine, deliberately a stub in v1.
 //!
-//! The interface is real; the brains are not. Within this persistent policy
-//! layer, decisions are Allow / Deny / Prompt and no matching rule prompts.
-//! The broker checks scoped, in-memory access grants before this layer.
-//! "Always allow…"
-//! stores a rule keyed by exact `(client_id, connection_id)`, the client's
-//! stable id and the connection's
-//! **stable id**, never its renamable name, so a new connection recycling
-//! an old name never inherits an old rule. There are no deny rules. The
-//! real engine (scoping, precedence, TTLs) is a deferred design session,
+//! Within this persistent policy layer, decisions are Allow / Deny /
+//! Prompt and no matching rule prompts.  The broker checks scoped,
+//! in-memory access grants before this layer.  "Always allow…"
+//! stores a rule keyed by exact `(client_id, connection_id)`, the
+//! client's stable id and the connection's **stable id**, never its
+//! renamable name, so a new connection recycling an old name never
+//! inherits an old rule. There are no deny rules. The real engine
+//! (scoping, precedence, TTLs) is a deferred design session,
 //! quarantined behind this trait so the naive engine can be replaced
 //! wholesale.
 

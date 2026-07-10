@@ -1,4 +1,4 @@
-//! Filesystem layout (DESIGN.md §3, §8).
+//! Filesystem layout.
 //!
 //! - Non-secret state (`index.json`, `rules.json`, `agents.json`,
 //!   `audit.jsonl`) lives under the per-user data directory,

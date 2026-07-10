@@ -1,6 +1,6 @@
 //! AgentMFA broker core.
 //!
-//! Everything sensitive lives here (DESIGN.md §2): the secret store, the
+//! Everything sensitive lives here: the secret store, the
 //! injection-template engine, the policy engine, the approvals queue, the
 //! audit log, and the agent-facing daemon (control plane over a Unix domain
 //! socket; WS/PG data planes on ephemeral loopback TCP).

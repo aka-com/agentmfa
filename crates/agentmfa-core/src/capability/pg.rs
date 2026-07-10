@@ -1,4 +1,4 @@
-//! Postgres capability, `POST /v1/pg/open` + local TCP proxy (DESIGN.md §4.3).
+//! Postgres capability, `POST /v1/pg/open` + local TCP proxy.
 //!
 //! Postgres clients speak a binary wire protocol and expect a DSN, so the
 //! broker runs a local TCP proxy on an OS-assigned ephemeral loopback port

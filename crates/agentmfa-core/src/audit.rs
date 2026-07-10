@@ -1,4 +1,4 @@
-//! Structured audit log (DESIGN.md §8).
+//! Structured audit log.
 //!
 //! Pairing, policy decisions, brokered calls, and vault-touching UI actions
 //! like reveal/copy emit entries to the activity view and are appended to
