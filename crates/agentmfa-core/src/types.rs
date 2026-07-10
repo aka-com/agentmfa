@@ -301,6 +301,36 @@ pub struct PairedAgent {
 }
 
 /// A standing "always allow" rule (DESIGN.md §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PermissionScope {
+    Read,
+    #[default]
+    Full,
+}
+
+impl PermissionScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Full => "full",
+        }
+    }
+
+    pub fn allows(self, required: Self) -> bool {
+        self == Self::Full || required == Self::Read
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Read => "read access",
+            Self::Full => "full access",
+        }
+    }
+}
+
+/// A persistent permission. Temporary permissions use the same scope model
+/// but remain memory-only because they carry live OS-auth authorization.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Rule {
     pub id: Uuid,
@@ -312,6 +342,8 @@ pub struct Rule {
     pub agent: String,
     /// The connection's stable id, never its renamable name.
     pub connection_id: Uuid,
+    #[serde(default)]
+    pub scope: PermissionScope,
     pub created_at: DateTime<Utc>,
 }
 

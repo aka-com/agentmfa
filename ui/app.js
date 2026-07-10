@@ -84,7 +84,9 @@ function scheduleAccessExpiryRefresh() {
   if (accessExpiryTimer !== null) clearTimeout(accessExpiryTimer);
   accessExpiryTimer = null;
   const expiries = state.connections
-    .flatMap((connection) => (connection.grants || []).map((grant) => new Date(grant.expires_at).getTime()))
+    .flatMap((connection) => (connection.permissions || [])
+      .filter((permission) => permission.expires_at)
+      .map((permission) => new Date(permission.expires_at).getTime()))
     .filter((expiresAt) => Number.isFinite(expiresAt) && expiresAt > Date.now());
   if (!expiries.length) return;
   const delay = Math.max(0, Math.min(...expiries) - Date.now() + 50);
@@ -143,11 +145,8 @@ function globalSectionsHTML() {
     }
   } else {
     out += '<div class="live-head">Connected agents</div>' + state.agents.map((a) => {
-      const access = [];
-      if (a.temporary_access_count) access.push(`${a.temporary_access_count} temporary`);
-      if (a.rule_count) access.push(`${a.rule_count} without asking`);
       const sub = `${a.program} · ${a.verification} · last used ${relTime(a.last_used)}` +
-        (access.length ? ` · ${access.join(', ')}` : '');
+        (a.permission_count ? ` · ${a.permission_count} permission${a.permission_count === 1 ? '' : 's'}` : '');
       if (state.confirm && state.confirm.kind === 'revoke-agent' && state.confirm.id === a.id) {
         return `<div class="live-row"><span class="badge b-agent">agent</span>
           <div class="live-txt"><div class="c-name">${esc(a.name)}</div>
@@ -234,19 +233,18 @@ function accessDescription(connection, scope) {
 }
 
 const accessRowsHTML = (c) => {
-  const temporary = (c.grants || [])
-    .filter((g) => new Date(g.expires_at).getTime() > Date.now())
-    .map((g) => {
-      const mins = Math.max(1, Math.ceil((new Date(g.expires_at).getTime() - Date.now()) / 60000));
-      return `<div class="access-row"><div class="access-copy"><b>${esc(g.agent)}</b>
-        <span>${esc(accessDescription(c, g.scope))} · ${mins} min left</span></div>
-        <button class="btn ghost sm" aria-label="End temporary access for ${escAttr(g.agent)}" data-act="del-grant" data-id="${g.id}">End now</button></div>`;
+  const rows = (c.permissions || [])
+    .filter((permission) => !permission.expires_at || new Date(permission.expires_at).getTime() > Date.now())
+    .map((permission) => {
+      const expiring = !!permission.expires_at;
+      const suffix = expiring
+        ? ` · ${Math.max(1, Math.ceil((new Date(permission.expires_at).getTime() - Date.now()) / 60000))} min left`
+        : ' without asking';
+      const action = expiring ? 'End now' : 'Require approval';
+      return `<div class="access-row"><div class="access-copy"><b>${esc(permission.agent)}</b>
+        <span>${esc(accessDescription(c, permission.scope))}${suffix}</span></div>
+        <button class="btn ghost sm" aria-label="${action} for ${escAttr(permission.agent)}" data-act="del-permission" data-id="${permission.id}">${action}</button></div>`;
     });
-  const ongoing = c.rules.map((r) =>
-    `<div class="access-row"><div class="access-copy"><b>${esc(r.agent)}</b>
-      <span>${esc(accessDescription(c, 'full'))}${state.agents.some((agent) => agent.name === r.agent) ? ' without asking' : ' if reconnected'}</span></div>
-      <button class="btn ghost sm" aria-label="Require approval again for ${escAttr(r.agent)}" data-act="del-rule" data-id="${r.id}">Require approval</button></div>`);
-  const rows = temporary.concat(ongoing);
   return rows.length ? `<div class="access-list"><div class="access-head">Agent access</div>${rows.join('')}</div>` : '';
 };
 const liveCount = (c) => state.sessions.filter((s) => s.connection === c.name).length;
@@ -268,7 +266,7 @@ function connectionsHTML() {
       return `<div class="conn-card confirm-card">
         <div class="cc-top"><span class="badge ${t.cls}">${t.label}</span>
           <span class="c-name" title="${escAttr(c.name)}">${esc(c.name)}</span></div>
-        <div class="cc-confirm">Delete this connection?${c.rules.length ? ' Affected agents will need approval again.' : ''}</div>
+        <div class="cc-confirm">Delete this connection?${(c.permissions || []).some((permission) => !permission.expires_at) ? ' Affected agents will need approval again.' : ''}</div>
         <div class="cc-foot"><button class="btn sm" data-act="confirm-cancel">Cancel</button>
           <button class="btn sm danger" data-act="del-conn-confirm" data-id="${c.id}">Delete</button></div></div>`;
     }
@@ -552,7 +550,7 @@ function connSheet(editing) {
       <input type="checkbox" id="c-multi" ${d.multiConnect !== false ? 'checked' : ''} style="width:auto">
       <span>Let tools reconnect for 60 seconds after opening. <span class="label-detail">Useful for connection pools and tools that reconnect automatically.</span></span></label></div>`;
   }
-  if (editing && conn && conn.rules.length) {
+  if (editing && conn && (conn.permissions || []).some((permission) => !permission.expires_at)) {
     fields += `<div class="rule-note">Changing the destination makes affected agents ask for approval again.</div>`;
   }
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
@@ -637,6 +635,9 @@ function temporaryAccessExplanation(req) {
 
 function ongoingAccessExplanation(req) {
   const connection = req.connection ? req.connection.name : 'this connection';
+  if (req.temporary_access && req.temporary_access.scope === 'read') {
+    return `${req.agent} will be able to fetch data from ${connection} without asking again. Requests that may make changes will still ask.`;
+  }
   if (req.kind === 'http') {
     return `${req.agent} will be able to make any request through ${connection} without asking again, including changes and deletes.`;
   }
@@ -1132,13 +1133,9 @@ document.addEventListener('click', async (e) => {
         state.confirm = null; toast('🗑 Connection removed'); await refresh('all');
       }
       break;
-    case 'del-rule':
-      await run(() => invoke('remove_rule', { id }));
-      toast('🔒 Approval will be required again'); await refreshAccessViews();
-      break;
-    case 'del-grant':
-      await run(() => invoke('remove_grant', { id }));
-      toast('🛑 Temporary access ended'); await refresh('all');
+    case 'del-permission':
+      await run(() => invoke('remove_permission', { id }));
+      toast('🔒 Approval will be required again'); await refresh('all');
       break;
 
     case 'revoke-ask': state.confirm = { kind: 'revoke-agent', id, name }; render(); break;

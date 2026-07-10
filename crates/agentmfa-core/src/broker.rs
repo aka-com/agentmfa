@@ -13,7 +13,7 @@ use crate::audit::{AuditEntry, AuditKind, AuditLog};
 use crate::config::BrokerConfig;
 use crate::error::CoreError;
 use crate::events::BrokerEvents;
-use crate::grants::{AccessGrantSummary, AccessGrants, GrantRemoval, GrantScope};
+use crate::grants::{AccessGrantSummary, AccessGrants, GrantRemoval};
 use crate::pairing::PairingRegistry;
 use crate::paths::{BrokerInstanceLock, Paths};
 use crate::policy::{NaivePolicyEngine, PolicyEngine as _};
@@ -21,8 +21,8 @@ use crate::ratelimit::{KeyedLimiter, PairingLimiter, WindowLimiter};
 use crate::sessions::{DataPlane, SessionInfo};
 use crate::store::{ConnectionSpec, Store};
 use crate::types::{
-    ConfirmationMethod, Connection, ConnectionKind, DecisionContext, PairedAgent, Rule, SecretMeta,
-    SecretValue, Settings,
+    ConfirmationMethod, Connection, ConnectionKind, DecisionContext, PairedAgent, PermissionScope,
+    Rule, SecretMeta, SecretValue, Settings,
 };
 use crate::Result;
 
@@ -383,9 +383,13 @@ impl Broker {
                 if let Some(summary) = &request.connection {
                     let conn = self.approval_connection(summary)?;
                     let client_id = request.client_id.ok_or(CoreError::NotConfirmed)?;
-                    let rule = self
-                        .policy
-                        .record_rule(client_id, &request.agent, conn.id)?;
+                    let scope = match request.http.as_ref() {
+                        Some(http) if !http.mutating => PermissionScope::Read,
+                        _ => PermissionScope::Full,
+                    };
+                    let rule =
+                        self.policy
+                            .record_rule(client_id, &request.agent, conn.id, scope)?;
                     self.audit.append(attributed(
                         AuditEntry::new(
                             AuditKind::RuleSaved,
@@ -393,7 +397,8 @@ impl Broker {
                         )
                         .agent(request.agent.clone())
                         .connection(conn.name.clone())
-                        .rule(rule.id),
+                        .rule(rule.id)
+                        .field("scope", scope.as_str()),
                     ));
                     self.events.rules_changed();
                 }
@@ -422,8 +427,8 @@ impl Broker {
                     .ok_or(CoreError::ApprovalConnectionChanged)?;
                 let conn = self.approval_connection(summary)?;
                 let scope = match request.http.as_ref() {
-                    Some(http) if !http.mutating => GrantScope::Read,
-                    _ => GrantScope::Full,
+                    Some(http) if !http.mutating => PermissionScope::Read,
+                    _ => PermissionScope::Full,
                 };
                 let Some(claim) = self.approvals.claim_session(id, |queued| {
                     queued.kind != ApprovalKind::Pair
@@ -438,8 +443,8 @@ impl Broker {
                                     == summary.connection_updated_at
                         })
                         && scope.allows(match queued.http.as_ref() {
-                            Some(http) if !http.mutating => GrantScope::Read,
-                            _ => GrantScope::Full,
+                            Some(http) if !http.mutating => PermissionScope::Read,
+                            _ => PermissionScope::Full,
                         })
                 }) else {
                     return Ok(None);
@@ -465,7 +470,7 @@ impl Broker {
                         format!(
                             "Temporary access started: {} can {} {}",
                             request.agent,
-                            if scope == GrantScope::Read {
+                            if scope == PermissionScope::Read {
                                 "fetch data from"
                             } else {
                                 "use"
@@ -870,6 +875,15 @@ impl Broker {
         );
         self.events.rules_changed();
         Ok(true)
+    }
+
+    /// Revoke a permission without requiring the UI to know whether it is
+    /// an expiring in-memory authorization or a standing one.
+    pub fn ui_remove_permission(&self, id: &Uuid) -> Result<bool> {
+        if self.ui_remove_grant(id)? {
+            return Ok(true);
+        }
+        self.ui_remove_rule(id)
     }
 
     fn schedule_grant_expiry(

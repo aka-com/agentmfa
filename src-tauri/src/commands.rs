@@ -364,15 +364,12 @@ pub fn delete_connection(state: State<AppState>, id: String) -> CmdResult<()> {
 /* -------------------------------- rules ---------------------------------- */
 
 #[tauri::command]
-pub fn remove_rule(state: State<AppState>, id: String) -> CmdResult<bool> {
+pub fn remove_permission(state: State<AppState>, id: String) -> CmdResult<bool> {
     let id = parse_id(&id)?;
-    state.broker.ui_remove_rule(&id).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn remove_grant(state: State<AppState>, id: String) -> CmdResult<bool> {
-    let id = parse_id(&id)?;
-    state.broker.ui_remove_grant(&id).map_err(|e| e.to_string())
+    state
+        .broker
+        .ui_remove_permission(&id)
+        .map_err(|e| e.to_string())
 }
 
 /* ----------------------------- paired agents ----------------------------- */
@@ -495,8 +492,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         add_connection,
         edit_connection,
         delete_connection,
-        remove_rule,
-        remove_grant,
+        remove_permission,
         revoke_agent,
         close_session,
         set_reauth_on_read,

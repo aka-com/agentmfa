@@ -43,7 +43,8 @@ from the vault to Claude, Codex, or other local agents.
   access session or pass policy. The default prompted approval creates a fixed
   15-minute, in-memory access session: GET/HEAD starts read access, while a
   mutating HTTP request or WebSocket/Postgres/SSH open starts full access.
-  *Allow once* and *Always allow…* remain available. Session traffic is
+  *Allow once* and *Always allow…* remain available. Saved access keeps the
+  request's read/full scope rather than expanding it. Session traffic is
   authorized when the session is opened, not per frame, query, or SSH
   operation.
 - **Supports most agent workflows:** Injects credentials for HTTP, WebSocket, Postgres, and SSH.
@@ -223,7 +224,8 @@ cargo run -p agentmfa-cli -- skill --write    # → .claude/skills/agentmfa/SKIL
    agent's peer identity, plus the `store_at` path to keep it in.
 2. `GET /v1/connections` — discover the named connections it may use (targets
    only; never secret names or values) and whether each one `will_prompt`,
-   is `read_auto_allowed`, or is already `auto_allowed`.
+   is `read_auto_allowed` (read-scoped permission), or is already
+   `auto_allowed` (full permission).
 3. Call a capability, naming a connection:
    - `POST /v1/http` — `{status, headers, body}`; the broker injects the
      credential, validates the path, and follows redirects only within the
@@ -340,8 +342,8 @@ AgentMFA persistence
 |   |         menu bar Dock behavior
 |   |
 |   |-- rules.json                                  0600, atomic, HMAC-sealed
-|   |   `-- standing "always allow" rules:
-|   |       stable paired-client UUID + display-name snapshot + connection UUID
+|   |   `-- standing scoped permissions:
+|   |       stable client UUID + name snapshot + connection UUID + read/full scope
 |   |
 |   |-- agents.json                                 0600, atomic, HMAC-sealed
 |   |   `-- paired agent records:

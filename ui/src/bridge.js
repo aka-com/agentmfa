@@ -98,7 +98,7 @@ seedFixtures();
 // Illustrative broker state so the standalone dev page exercises every layout
 // affordance: ongoing access, temporary access, an open connection, and activity.
 function seedFixtures() {
-  db.rules.push({ id: uid(), client_id: db.agents[0].id, agent: 'claude-code', connection_id: db.connections[0].id });
+  db.rules.push({ id: uid(), client_id: db.agents[0].id, agent: 'claude-code', connection_id: db.connections[0].id, scope: 'full' });
   db.grants.push({ id: uid(), agent: 'claude-code', connection_id: db.connections[1].id,
     scope: 'full', expires_at: new Date(Date.now() + 11 * 60000).toISOString() });
   db.sessions.push({ id: 1, type: 'ws', agent: 'claude-code', connection: 'market-feed', detail: 'wss://stream.example.com/feed' });
@@ -126,8 +126,10 @@ function connDto(c) {
   return {
     id: c.id, name: c.name, type: c.type, target: connTarget(c),
     secret_names: c.secret_names, multi_connect: c.multi_connect,
-    rules: db.rules.filter((r) => r.connection_id === c.id).map((r) => ({ id: r.id, agent: r.agent })),
-    grants: db.grants.filter((g) => g.connection_id === c.id).map((g) => ({ ...g })),
+    permissions: [
+      ...db.rules.filter((r) => r.connection_id === c.id).map((r) => ({ id: r.id, agent: r.agent, scope: r.scope, expires_at: null })),
+      ...db.grants.filter((g) => g.connection_id === c.id).map((g) => ({ ...g })),
+    ],
     host: c.host || null, scheme: c.scheme || null, port: c.port || null, template: c.template || null,
     dbname: c.dbname || null, user: c.user || null, host_key_fingerprint: c.host_key_fingerprint || null,
     sslmode: c.sslmode || null, url: c.url || null,
@@ -158,8 +160,8 @@ async function mockInvoke(cmd, args = {}) {
     case 'list_connections': return db.connections.map(connDto);
     case 'list_agents':
       return db.agents.map((a) => ({ ...a,
-        rule_count: db.rules.filter((r) => r.client_id === a.id).length,
-        temporary_access_count: db.grants.filter((g) => g.agent === a.name).length }));
+        permission_count: db.rules.filter((r) => r.client_id === a.id).length +
+          db.grants.filter((g) => g.agent === a.name).length }));
     case 'list_sessions': return db.sessions.slice();
     case 'list_activity': return db.activity.slice(0, Math.min(args.limit ?? MOCK_ACTIVITY_LIMIT, MOCK_ACTIVITY_LIMIT));
     case 'clear_activity': db.activity = []; emit('amfa://activity-changed', {}); return;
@@ -233,8 +235,13 @@ async function mockInvoke(cmd, args = {}) {
       db.connections = db.connections.filter((x) => x.id !== args.id);
       db.rules = db.rules.filter((r) => r.connection_id !== args.id); audit('connectionDeleted', `Connection deleted: ${c.name}`); return;
     }
-    case 'remove_rule': db.rules = db.rules.filter((r) => r.id !== args.id); audit('ruleRemoved', 'Approval required again'); return true;
-    case 'remove_grant': db.grants = db.grants.filter((g) => g.id !== args.id); audit('grantRevoked', 'Temporary access ended'); return true;
+    case 'remove_permission': {
+      const standing = db.rules.some((permission) => permission.id === args.id);
+      db.rules = db.rules.filter((permission) => permission.id !== args.id);
+      db.grants = db.grants.filter((permission) => permission.id !== args.id);
+      audit(standing ? 'ruleRemoved' : 'grantRevoked', standing ? 'Approval required again' : 'Temporary access ended');
+      return true;
+    }
     case 'revoke_agent':
       { const agent = db.agents.find((a) => a.id === args.id); if (!agent) return false;
       db.agents = db.agents.filter((a) => a.id !== args.id);
@@ -292,6 +299,15 @@ async function mockInvoke(cmd, args = {}) {
         db.grants.push({ id: uid(), agent: req.agent, connection_id: req.connection.id,
           scope: req.temporary_access.scope,
           expires_at: new Date(Date.now() + req.temporary_access.duration_seconds * 1000).toISOString() });
+      }
+      if (req && args.decision === 'always_allow' && req.connection) {
+        const client = db.agents.find((agent) => agent.name === req.agent);
+        if (client) {
+          db.rules = db.rules.filter((permission) =>
+            permission.client_id !== client.id || permission.connection_id !== req.connection.id);
+          db.rules.push({ id: uid(), client_id: client.id, agent: req.agent,
+            connection_id: req.connection.id, scope: req.temporary_access.scope });
+        }
       }
       db.queue = db.queue.filter((r) => r.id !== args.id); emit('amfa://queue-changed', db.queue.slice()); return;
     }

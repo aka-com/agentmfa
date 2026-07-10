@@ -13,34 +13,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::authorization::SecretReadAuthorization;
-use crate::types::Connection;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum GrantScope {
-    Read,
-    Full,
-}
-
-impl GrantScope {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Read => "read",
-            Self::Full => "full",
-        }
-    }
-
-    pub fn allows(self, required: Self) -> bool {
-        self == Self::Full || required == Self::Read
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Read => "read access",
-            Self::Full => "full access",
-        }
-    }
-}
+use crate::types::{Connection, PermissionScope};
 
 #[derive(Clone)]
 struct AccessGrant {
@@ -49,7 +22,7 @@ struct AccessGrant {
     token_hash: String,
     connection_id: Uuid,
     connection_updated_at: DateTime<Utc>,
-    scope: GrantScope,
+    scope: PermissionScope,
     created_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
     deadline: Instant,
@@ -61,7 +34,7 @@ pub struct AccessGrantSummary {
     pub id: Uuid,
     pub agent: String,
     pub connection_id: Uuid,
-    pub scope: GrantScope,
+    pub scope: PermissionScope,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
 }
@@ -103,7 +76,7 @@ impl AccessGrants {
         agent: &str,
         token_hash: &str,
         connection: &Connection,
-        scope: GrantScope,
+        scope: PermissionScope,
         ttl: Duration,
     ) -> GrantCreated {
         let now = Utc::now();
@@ -160,7 +133,7 @@ impl AccessGrants {
         &self,
         token_hash: &str,
         connection: &Connection,
-        required: GrantScope,
+        required: PermissionScope,
     ) -> Option<GrantMatch> {
         let grants = self.grants.lock().unwrap();
         grants
@@ -294,26 +267,26 @@ mod tests {
             "codex",
             "token-a",
             &conn,
-            GrantScope::Read,
+            PermissionScope::Read,
             Duration::from_secs(60),
         );
         assert!(grants
-            .matching("token-a", &conn, GrantScope::Read)
+            .matching("token-a", &conn, PermissionScope::Read)
             .is_some());
         assert!(grants
-            .matching("token-a", &conn, GrantScope::Full)
+            .matching("token-a", &conn, PermissionScope::Full)
             .is_none());
 
         let upgraded = grants.create(
             "codex",
             "token-a",
             &conn,
-            GrantScope::Full,
+            PermissionScope::Full,
             Duration::from_secs(60),
         );
         assert_eq!(upgraded.replaced.len(), 1);
         assert!(grants
-            .matching("token-a", &conn, GrantScope::Full)
+            .matching("token-a", &conn, PermissionScope::Full)
             .is_some());
     }
 
@@ -325,16 +298,16 @@ mod tests {
             "codex",
             "token-a",
             &conn,
-            GrantScope::Full,
+            PermissionScope::Full,
             Duration::from_secs(60),
         );
         assert!(grants
-            .matching("token-b", &conn, GrantScope::Read)
+            .matching("token-b", &conn, PermissionScope::Read)
             .is_none());
         let mut changed = conn.clone();
         changed.updated_at += chrono::Duration::seconds(1);
         assert!(grants
-            .matching("token-a", &changed, GrantScope::Read)
+            .matching("token-a", &changed, PermissionScope::Read)
             .is_none());
     }
 
@@ -342,9 +315,15 @@ mod tests {
     fn expired_grants_do_not_match_and_are_removed_once() {
         let grants = AccessGrants::new();
         let conn = connection();
-        let created = grants.create("codex", "token-a", &conn, GrantScope::Full, Duration::ZERO);
+        let created = grants.create(
+            "codex",
+            "token-a",
+            &conn,
+            PermissionScope::Full,
+            Duration::ZERO,
+        );
         assert!(grants
-            .matching("token-a", &conn, GrantScope::Read)
+            .matching("token-a", &conn, PermissionScope::Read)
             .is_none());
         let expired = grants
             .expire(&created.grant.summary.id)
@@ -352,7 +331,13 @@ mod tests {
         assert_eq!(expired.id, created.grant.summary.id);
         assert!(grants.expire(&expired.id).is_none());
 
-        grants.create("codex", "token-a", &conn, GrantScope::Full, Duration::ZERO);
+        grants.create(
+            "codex",
+            "token-a",
+            &conn,
+            PermissionScope::Full,
+            Duration::ZERO,
+        );
         let removed = grants.remove_for_agent("codex");
         assert!(removed.revoked.is_empty());
         assert_eq!(removed.expired.len(), 1);

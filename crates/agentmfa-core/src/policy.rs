@@ -19,13 +19,24 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::integrity::StateIntegrity;
-use crate::types::{Decision, PairedAgent, Rule};
+use crate::types::{Decision, PairedAgent, PermissionScope, Rule};
 use crate::Result;
 
 pub trait PolicyEngine: Send + Sync {
-    fn evaluate(&self, client_id: &Uuid, connection_id: &Uuid) -> Decision;
+    fn evaluate(
+        &self,
+        client_id: &Uuid,
+        connection_id: &Uuid,
+        required_scope: PermissionScope,
+    ) -> Decision;
     /// From "Always allow…". Returns the stored rule.
-    fn record_rule(&self, client_id: Uuid, agent: &str, connection_id: Uuid) -> Result<Rule>;
+    fn record_rule(
+        &self,
+        client_id: Uuid,
+        agent: &str,
+        connection_id: Uuid,
+        scope: PermissionScope,
+    ) -> Result<Rule>;
 }
 
 /// v1 behavior: no matching rule → Prompt; a `(agent, connection_id)` rule →
@@ -104,12 +115,21 @@ impl NaivePolicyEngine {
             .collect()
     }
 
-    pub fn matching_rule(&self, client_id: &Uuid, connection_id: &Uuid) -> Option<Rule> {
+    pub fn matching_rule(
+        &self,
+        client_id: &Uuid,
+        connection_id: &Uuid,
+        required_scope: PermissionScope,
+    ) -> Option<Rule> {
         self.rules
             .lock()
             .unwrap()
             .iter()
-            .find(|r| &r.client_id == client_id && &r.connection_id == connection_id)
+            .find(|rule| {
+                &rule.client_id == client_id
+                    && &rule.connection_id == connection_id
+                    && rule.scope.allows(required_scope)
+            })
             .cloned()
     }
 
@@ -159,20 +179,35 @@ impl NaivePolicyEngine {
 }
 
 impl PolicyEngine for NaivePolicyEngine {
-    fn evaluate(&self, client_id: &Uuid, connection_id: &Uuid) -> Decision {
-        if self.matching_rule(client_id, connection_id).is_some() {
+    fn evaluate(
+        &self,
+        client_id: &Uuid,
+        connection_id: &Uuid,
+        required_scope: PermissionScope,
+    ) -> Decision {
+        if self
+            .matching_rule(client_id, connection_id, required_scope)
+            .is_some()
+        {
             Decision::Allow
         } else {
             Decision::Prompt
         }
     }
 
-    fn record_rule(&self, client_id: Uuid, agent: &str, connection_id: Uuid) -> Result<Rule> {
+    fn record_rule(
+        &self,
+        client_id: Uuid,
+        agent: &str,
+        connection_id: Uuid,
+        scope: PermissionScope,
+    ) -> Result<Rule> {
         let mut rules = self.rules.lock().unwrap();
-        if let Some(existing) = rules
-            .iter()
-            .find(|r| r.client_id == client_id && r.connection_id == connection_id)
-        {
+        if let Some(existing) = rules.iter().find(|rule| {
+            rule.client_id == client_id
+                && rule.connection_id == connection_id
+                && rule.scope.allows(scope)
+        }) {
             return Ok(existing.clone());
         }
         let rule = Rule {
@@ -180,9 +215,13 @@ impl PolicyEngine for NaivePolicyEngine {
             client_id,
             agent: agent.to_string(),
             connection_id,
+            scope,
             created_at: Utc::now(),
         };
         let mut next = rules.clone();
+        next.retain(|existing| {
+            existing.client_id != client_id || existing.connection_id != connection_id
+        });
         next.push(rule.clone());
         self.persist(&next)?;
         *rules = next;
@@ -213,12 +252,25 @@ mod tests {
         let conn = Uuid::new_v4();
         let claude = Uuid::new_v4();
         let codex = Uuid::new_v4();
-        assert_eq!(e.evaluate(&claude, &conn), Decision::Prompt);
-        e.record_rule(claude, "claude-code", conn).unwrap();
-        assert_eq!(e.evaluate(&claude, &conn), Decision::Allow);
+        assert_eq!(
+            e.evaluate(&claude, &conn, PermissionScope::Full),
+            Decision::Prompt
+        );
+        e.record_rule(claude, "claude-code", conn, PermissionScope::Full)
+            .unwrap();
+        assert_eq!(
+            e.evaluate(&claude, &conn, PermissionScope::Full),
+            Decision::Allow
+        );
         // Keyed on both halves.
-        assert_eq!(e.evaluate(&codex, &conn), Decision::Prompt);
-        assert_eq!(e.evaluate(&claude, &Uuid::new_v4()), Decision::Prompt);
+        assert_eq!(
+            e.evaluate(&codex, &conn, PermissionScope::Full),
+            Decision::Prompt
+        );
+        assert_eq!(
+            e.evaluate(&claude, &Uuid::new_v4(), PermissionScope::Full),
+            Decision::Prompt
+        );
     }
 
     #[test]
@@ -226,8 +278,12 @@ mod tests {
         let (e, _dir) = engine();
         let conn = Uuid::new_v4();
         let client = Uuid::new_v4();
-        let a = e.record_rule(client, "claude-code", conn).unwrap();
-        let b = e.record_rule(client, "claude-code", conn).unwrap();
+        let a = e
+            .record_rule(client, "claude-code", conn, PermissionScope::Full)
+            .unwrap();
+        let b = e
+            .record_rule(client, "claude-code", conn, PermissionScope::Full)
+            .unwrap();
         assert_eq!(a.id, b.id);
         assert_eq!(e.rules().len(), 1);
     }
@@ -236,10 +292,17 @@ mod tests {
     fn rules_die_with_their_connection() {
         let (e, _dir) = engine();
         let conn = Uuid::new_v4();
-        e.record_rule(Uuid::new_v4(), "claude-code", conn).unwrap();
-        e.record_rule(Uuid::new_v4(), "codex", conn).unwrap();
-        e.record_rule(Uuid::new_v4(), "codex", Uuid::new_v4())
+        e.record_rule(Uuid::new_v4(), "claude-code", conn, PermissionScope::Full)
             .unwrap();
+        e.record_rule(Uuid::new_v4(), "codex", conn, PermissionScope::Full)
+            .unwrap();
+        e.record_rule(
+            Uuid::new_v4(),
+            "codex",
+            Uuid::new_v4(),
+            PermissionScope::Full,
+        )
+        .unwrap();
         assert_eq!(e.remove_rules_for_connection(&conn).unwrap(), 2);
         assert_eq!(e.rules().len(), 1);
     }
@@ -248,12 +311,17 @@ mod tests {
     fn rules_can_be_revoked_by_client_id() {
         let (e, _dir) = engine();
         let claude = Uuid::new_v4();
-        e.record_rule(claude, "claude-code", Uuid::new_v4())
+        e.record_rule(claude, "claude-code", Uuid::new_v4(), PermissionScope::Full)
             .unwrap();
-        e.record_rule(claude, "claude-code", Uuid::new_v4())
+        e.record_rule(claude, "claude-code", Uuid::new_v4(), PermissionScope::Full)
             .unwrap();
-        e.record_rule(Uuid::new_v4(), "codex", Uuid::new_v4())
-            .unwrap();
+        e.record_rule(
+            Uuid::new_v4(),
+            "codex",
+            Uuid::new_v4(),
+            PermissionScope::Full,
+        )
+        .unwrap();
         assert_eq!(e.remove_rules_for_client(&claude).unwrap(), 2);
         assert_eq!(e.rules().len(), 1);
         assert_eq!(e.rules()[0].agent, "codex");
@@ -268,10 +336,14 @@ mod tests {
         let integrity = integrity();
         {
             let e = NaivePolicyEngine::open(path.clone(), integrity.clone()).unwrap();
-            e.record_rule(client, "claude-code", conn).unwrap();
+            e.record_rule(client, "claude-code", conn, PermissionScope::Full)
+                .unwrap();
         }
         let e = NaivePolicyEngine::open(path, integrity).unwrap();
-        assert_eq!(e.evaluate(&client, &conn), Decision::Allow);
+        assert_eq!(
+            e.evaluate(&client, &conn, PermissionScope::Full),
+            Decision::Allow
+        );
     }
 
     #[test]
@@ -280,19 +352,32 @@ mod tests {
         let path = dir.path().join("rules.json");
         let existing_conn = Uuid::new_v4();
         let client = Uuid::new_v4();
-        let existing = e.record_rule(client, "claude-code", existing_conn).unwrap();
+        let existing = e
+            .record_rule(client, "claude-code", existing_conn, PermissionScope::Full)
+            .unwrap();
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
 
         assert!(e
-            .record_rule(Uuid::new_v4(), "codex", Uuid::new_v4())
+            .record_rule(
+                Uuid::new_v4(),
+                "codex",
+                Uuid::new_v4(),
+                PermissionScope::Full,
+            )
             .is_err());
         assert_eq!(e.rules(), vec![existing.clone()]);
-        assert_eq!(e.evaluate(&client, &existing_conn), Decision::Allow);
+        assert_eq!(
+            e.evaluate(&client, &existing_conn, PermissionScope::Full),
+            Decision::Allow
+        );
 
         assert!(e.remove_rule(&existing.id).is_err());
         assert_eq!(e.rules(), vec![existing]);
-        assert_eq!(e.evaluate(&client, &existing_conn), Decision::Allow);
+        assert_eq!(
+            e.evaluate(&client, &existing_conn, PermissionScope::Full),
+            Decision::Allow
+        );
     }
 
     #[test]
@@ -323,6 +408,27 @@ mod tests {
                 .unwrap();
         assert_eq!(policy.rules().len(), 1);
         assert_eq!(policy.rules()[0].client_id, client.id);
-        assert_eq!(policy.evaluate(&client.id, &connection_id), Decision::Allow);
+        assert_eq!(
+            policy.evaluate(&client.id, &connection_id, PermissionScope::Full),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn read_permission_does_not_allow_full_access() {
+        let (policy, _dir) = engine();
+        let client = Uuid::new_v4();
+        let connection = Uuid::new_v4();
+        policy
+            .record_rule(client, "claude-code", connection, PermissionScope::Read)
+            .unwrap();
+        assert_eq!(
+            policy.evaluate(&client, &connection, PermissionScope::Read),
+            Decision::Allow
+        );
+        assert_eq!(
+            policy.evaluate(&client, &connection, PermissionScope::Full),
+            Decision::Prompt
+        );
     }
 }

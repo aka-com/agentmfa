@@ -144,9 +144,10 @@ repeatedly within its window; ws/pg can be configured either way, while
 ssh is always multi-connect because OpenSSH may use several agent
 connections during one login. `approval` is what a call costs right now:
 `will_prompt` blocks on a human decision (tell your user to expect the
-prompt), `read_auto_allowed` covers GET/HEAD under an active access session,
-and `auto_allowed` proceeds immediately under a full access session or a
-standing rule. When present, `access_session` gives its scope and expiry.
+prompt), `read_auto_allowed` covers GET/HEAD under a read-scoped temporary or
+standing permission, and `auto_allowed` proceeds immediately under a full
+permission. When present, `access_session` gives a temporary permission's
+scope and expiry.
 
 ## 3. Approvals: set your client timeout first
 
@@ -160,7 +161,7 @@ The primary human choice allows {access_minutes} minutes. A read request starts
 a read session; a mutating HTTP request or WS/PG/SSH open starts a full session.
 A full approval replaces an active read session and starts a new fixed full
 window; ordinary use never extends either window. The human may instead allow
-only the exact request or save a standing rule.
+only the exact request or save a standing permission with the same scope.
 
 Denials come back as `403` with a machine-readable reason:
 - `{{"reason": "denied_by_user"}}`: the human said no; don't retry, ask them.

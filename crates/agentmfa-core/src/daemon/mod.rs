@@ -41,11 +41,12 @@ use crate::capability::http::{
 };
 use crate::capability::SpooledBody;
 use crate::error::CoreError;
-use crate::grants::GrantScope;
 use crate::pairing::{validate_agent_name, TokenError};
 use crate::policy::PolicyEngine as _;
 use crate::ratelimit::PairingBlock;
-use crate::types::{ConnectionConfig, ConnectionKind, Decision, PairedAgent, PeerIdentity};
+use crate::types::{
+    ConnectionConfig, ConnectionKind, Decision, PairedAgent, PeerIdentity, PermissionScope,
+};
 use crate::wire::{ErrorReason, REQUEST_ID_MAX_BYTES};
 
 /* ------------------------------ plumbing --------------------------------- */
@@ -703,24 +704,34 @@ async fn get_connections(State(state): State<AppState>, authed: Authed) -> Respo
             let active_grant =
                 broker
                     .grants
-                    .matching(&authed.agent.token_hash, &c, GrantScope::Read);
+                    .matching(&authed.agent.token_hash, &c, PermissionScope::Read);
             let full_grant = active_grant
                 .as_ref()
-                .is_some_and(|grant| grant.summary.scope == GrantScope::Full);
+                .is_some_and(|grant| grant.summary.scope == PermissionScope::Full);
             // What a call costs the agent right now: `will_prompt` blocks on
             // a human decision, `auto_allowed` proceeds immediately under a
             // standing rule (§7). Not a secret; the agent learns the same
             // thing on its first call, but knowing up front lets it warn its
             // user before ringing the doorbell.
-            let approval = match broker.policy.evaluate(&authed.agent.id, &c.id) {
-                Decision::Allow => "auto_allowed",
-                Decision::Prompt if full_grant => "auto_allowed",
-                Decision::Prompt if active_grant.is_some() => "read_auto_allowed",
-                Decision::Prompt => "will_prompt",
+            let full_permission =
+                broker
+                    .policy
+                    .evaluate(&authed.agent.id, &c.id, PermissionScope::Full)
+                    == Decision::Allow;
+            let read_permission =
+                broker
+                    .policy
+                    .evaluate(&authed.agent.id, &c.id, PermissionScope::Read)
+                    == Decision::Allow;
+            let approval = match (full_permission, read_permission) {
+                (true, _) => "auto_allowed",
+                (false, _) if full_grant => "auto_allowed",
+                (false, true) => "read_auto_allowed",
+                (false, false) if active_grant.is_some() => "read_auto_allowed",
+                (false, false) => "will_prompt",
                 // Reserved vocabulary: the v1 policy engine has no deny
                 // rules (policy.rs), so this arm is unreachable today —
                 // don't build agent logic around it.
-                Decision::Deny => ErrorReason::DeniedByPolicy.as_str(),
             };
             let access_session = active_grant.as_ref().map(|grant| {
                 json!({
@@ -1000,9 +1011,9 @@ async fn post_http(
         executor,
     };
     let scope = if mutating {
-        GrantScope::Full
+        PermissionScope::Full
     } else {
-        GrantScope::Read
+        PermissionScope::Read
     };
     run_policied(broker, &agent, &conn, scope, park).await
 }
@@ -1014,7 +1025,7 @@ async fn run_policied(
     broker: &Arc<Broker>,
     agent: &PairedAgent,
     conn: &crate::types::Connection,
-    required_scope: GrantScope,
+    required_scope: PermissionScope,
     park: ParkRequest,
 ) -> Response {
     let parked = {
@@ -1047,9 +1058,11 @@ async fn run_policied(
             }
             parked
         } else {
-            match broker.policy.evaluate(&agent.id, &conn.id) {
+            match broker.policy.evaluate(&agent.id, &conn.id, required_scope) {
                 crate::types::Decision::Allow => {
-                    let rule = broker.policy.matching_rule(&agent.id, &conn.id);
+                    let rule = broker
+                        .policy
+                        .matching_rule(&agent.id, &conn.id, required_scope);
                     let mut entry = AuditEntry::new(
                         AuditKind::AutoAllowed,
                         format!("Used without asking: {} → {}", agent.name, conn.name),
@@ -1243,7 +1256,7 @@ async fn post_ws_open(
         retain_outcome: true,
         executor,
     };
-    run_policied(broker, &agent, &conn, GrantScope::Full, park).await
+    run_policied(broker, &agent, &conn, PermissionScope::Full, park).await
 }
 
 /* ------------------------------ SSH open ---------------------------------- */
@@ -1378,7 +1391,7 @@ async fn post_ssh_open(
         retain_outcome: true,
         executor,
     };
-    run_policied(broker, &agent, &conn, GrantScope::Full, park).await
+    run_policied(broker, &agent, &conn, PermissionScope::Full, park).await
 }
 
 /* ------------------------------ PG open ----------------------------------- */
@@ -1510,5 +1523,5 @@ async fn post_pg_open(
         retain_outcome: true,
         executor,
     };
-    run_policied(broker, &agent, &conn, GrantScope::Full, park).await
+    run_policied(broker, &agent, &conn, PermissionScope::Full, park).await
 }

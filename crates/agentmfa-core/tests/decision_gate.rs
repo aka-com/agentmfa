@@ -443,6 +443,10 @@ async fn always_allow_confirms_once_and_attributes_the_audit_trail() {
     // the internal AlwaysAllow → AllowOnce step must not re-confirm.
     assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
     assert_eq!(broker.rules().len(), 1);
+    assert_eq!(
+        broker.rules()[0].scope,
+        agentmfa_core::types::PermissionScope::Read
+    );
     let Parked::Wait(handle) = parked else {
         panic!()
     };
@@ -750,7 +754,12 @@ async fn inherited_rules_are_removed_before_pairing_executes() {
     let client_id = Uuid::new_v4();
     broker
         .policy
-        .record_rule(client_id, "claude-code", conn.id)
+        .record_rule(
+            client_id,
+            "claude-code",
+            conn.id,
+            agentmfa_core::types::PermissionScope::Full,
+        )
         .unwrap();
     assert_eq!(broker.rules().len(), 1);
 

@@ -37,17 +37,11 @@ impl SecretDto {
 }
 
 #[derive(Serialize)]
-pub struct RuleChip {
-    pub id: String,
-    pub agent: String,
-}
-
-#[derive(Serialize)]
-pub struct GrantChip {
+pub struct PermissionChip {
     pub id: String,
     pub agent: String,
     pub scope: String,
-    pub expires_at: String,
+    pub expires_at: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -60,10 +54,8 @@ pub struct ConnectionDto {
     /// Referenced secret names (the 🔑 chips).
     pub secret_names: Vec<String>,
     pub multi_connect: bool,
-    /// Standing auto-allow rules on this connection (the ⚡ chips).
-    pub rules: Vec<RuleChip>,
-    /// Active, in-memory access sessions on this connection.
-    pub grants: Vec<GrantChip>,
+    /// Scoped access, whether expiring or standing.
+    pub permissions: Vec<PermissionChip>,
     // Type-specific config, prefilled into the Edit sheet.
     pub host: Option<String>,
     pub scheme: Option<String>,
@@ -84,24 +76,27 @@ impl ConnectionDto {
             .iter()
             .filter_map(|id| broker.store.secret_by_id(id).ok().map(|s| s.name))
             .collect();
-        let rules = all_rules
+        let mut permissions: Vec<PermissionChip> = all_rules
             .iter()
             .filter(|r| r.connection_id == conn.id)
-            .map(|r| RuleChip {
+            .map(|r| PermissionChip {
                 id: r.id.to_string(),
                 agent: r.agent.clone(),
+                scope: r.scope.as_str().to_string(),
+                expires_at: None,
             })
             .collect();
-        let grants = broker
+        permissions.extend(
+            broker
             .grants_for_connection(conn)
             .into_iter()
-            .map(|grant| GrantChip {
+            .map(|grant| PermissionChip {
                 id: grant.id.to_string(),
                 agent: grant.agent,
                 scope: grant.scope.as_str().to_string(),
-                expires_at: grant.expires_at.to_rfc3339(),
-            })
-            .collect();
+                expires_at: Some(grant.expires_at.to_rfc3339()),
+            }),
+        );
         let mut dto = ConnectionDto {
             id: conn.id.to_string(),
             name: conn.name.clone(),
@@ -109,8 +104,7 @@ impl ConnectionDto {
             target: conn.target(),
             secret_names,
             multi_connect: conn.multi_connect,
-            rules,
-            grants,
+            permissions,
             host: None,
             scheme: None,
             port: None,
@@ -180,8 +174,7 @@ pub struct AgentDto {
     pub identity: String,
     pub paired_at: String,
     pub last_used: String,
-    pub rule_count: usize,
-    pub temporary_access_count: usize,
+    pub permission_count: usize,
 }
 
 impl AgentDto {
@@ -211,11 +204,11 @@ impl AgentDto {
             identity: agent.identity.display(),
             paired_at: agent.paired_at.to_rfc3339(),
             last_used: agent.last_used.to_rfc3339(),
-            rule_count: rules
+            permission_count: rules
                 .iter()
                 .filter(|rule| rule.client_id == agent.id)
-                .count(),
-            temporary_access_count: broker.grant_count_for_agent(&agent.name),
+                .count()
+                + broker.grant_count_for_agent(&agent.name),
         }
     }
 }

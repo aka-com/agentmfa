@@ -1027,7 +1027,7 @@ async fn always_allow_saves_rule_then_skips_prompts() {
     )
     .await;
     assert_eq!(status, 200);
-    assert_eq!(list[0]["approval"], "auto_allowed");
+    assert_eq!(list[0]["approval"], "read_auto_allowed");
 
     // Second request: no prompt, auto-approved by the standing rule.
     let (status, envelope) = uds_request(
@@ -1044,6 +1044,22 @@ async fn always_allow_saves_rule_then_skips_prompts() {
         h.prompts.try_recv().is_err(),
         "auto-allowed request must not prompt"
     );
+
+    // The standing read permission does not silently expand to mutations.
+    let socket = h.socket.clone();
+    let auth_clone = auth.clone();
+    let mutating = tokio::spawn(async move {
+        uds_request(
+            &socket,
+            "POST",
+            "/v1/http",
+            &[("authorization", &auth_clone)],
+            Some(json!({"connection": "github", "method": "POST", "path": "/repos"})),
+        )
+        .await
+    });
+    h.decide_next(UiDecision::Deny).await;
+    assert_eq!(mutating.await.unwrap().0, 403);
 
     // Removing the rule restores prompting.
     let rule_id = h.broker.rules()[0].id;
@@ -1913,7 +1929,12 @@ async fn pairing_inheritance_is_disclosed() {
     use agentmfa_core::policy::PolicyEngine as _;
     h.broker
         .policy
-        .record_rule(client.id, "claude-code", conn.id)
+        .record_rule(
+            client.id,
+            "claude-code",
+            conn.id,
+            agentmfa_core::types::PermissionScope::Full,
+        )
         .unwrap();
 
     let socket = h.socket.clone();
