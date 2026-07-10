@@ -17,9 +17,13 @@ use std::fmt;
 use serde::{Serialize, Serializer};
 
 /// The Agent Broker Protocol version the daemon speaks, advertised as
-/// `protocol_version` in the discovery manifest. Version 0 is the
-/// pre-freeze draft of the surface this codebase implements.
+/// `protocol_version` in the discovery manifest. Version 0 remains the
+/// unpublished, pre-freeze draft of the surface this codebase implements.
 pub const PROTOCOL_VERSION: u32 = 0;
+
+/// Maximum UTF-8 byte length of an agent-minted idempotency key. The bound
+/// keeps compact tombstones compact as well as limiting request parsing.
+pub const REQUEST_ID_MAX_BYTES: usize = 256;
 
 /// The closed registry of machine-readable `{"reason": …}` values (ABP
 /// error registry). Every error body the broker sends names exactly one of
@@ -51,12 +55,14 @@ pub enum ErrorReason {
     InvalidBody,
     RequestTooLarge,
     RequestIdMismatch,
+    OutcomeNotReplayable,
     // Policy and approval outcomes.
     DeniedByUser,
     DeniedByPolicy,
     ApprovalTimeout,
     // Rate limits and budgets.
     RateLimited,
+    IdempotencyCapacity,
     TicketSessionLimit,
     BrokerSessionLimit,
     // Tickets (data-plane redemption).
@@ -81,7 +87,7 @@ pub enum ErrorReason {
 
 impl ErrorReason {
     /// Every registered reason, for exhaustiveness checks and docs.
-    pub const ALL: [ErrorReason; 41] = [
+    pub const ALL: [ErrorReason; 43] = [
         ErrorReason::MissingToken,
         ErrorReason::InvalidToken,
         ErrorReason::TokenExpired,
@@ -102,10 +108,12 @@ impl ErrorReason {
         ErrorReason::InvalidBody,
         ErrorReason::RequestTooLarge,
         ErrorReason::RequestIdMismatch,
+        ErrorReason::OutcomeNotReplayable,
         ErrorReason::DeniedByUser,
         ErrorReason::DeniedByPolicy,
         ErrorReason::ApprovalTimeout,
         ErrorReason::RateLimited,
+        ErrorReason::IdempotencyCapacity,
         ErrorReason::TicketSessionLimit,
         ErrorReason::BrokerSessionLimit,
         ErrorReason::UnknownTicket,
@@ -147,10 +155,12 @@ impl ErrorReason {
             ErrorReason::InvalidBody => "invalid_body",
             ErrorReason::RequestTooLarge => "request_too_large",
             ErrorReason::RequestIdMismatch => "request_id_mismatch",
+            ErrorReason::OutcomeNotReplayable => "outcome_not_replayable",
             ErrorReason::DeniedByUser => "denied_by_user",
             ErrorReason::DeniedByPolicy => "denied_by_policy",
             ErrorReason::ApprovalTimeout => "approval_timeout",
             ErrorReason::RateLimited => "rate_limited",
+            ErrorReason::IdempotencyCapacity => "idempotency_capacity",
             ErrorReason::TicketSessionLimit => "ticket_session_limit",
             ErrorReason::BrokerSessionLimit => "broker_session_limit",
             ErrorReason::UnknownTicket => "unknown_ticket",

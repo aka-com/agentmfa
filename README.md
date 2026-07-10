@@ -348,6 +348,8 @@ AgentMFA persistence
 |-- runtime / agent rendezvous state
 |   `~/.agentmfa/`                                  0700 dir
 |   |
+|   |-- broker.lock                                 0600 persistent advisory lock
+|   |
 |   |-- broker.sock                                 0600 Unix socket, ephemeral
 |   |
 |   |-- tokens/                                     0700 dir
@@ -369,6 +371,7 @@ AgentMFA persistence
 |   |   `-- dev-vault.json                          non-macOS only
 |   |
 |   `-- sock/
+|       |-- broker.lock
 |       |-- broker.sock
 |       |-- tokens/
 |       `-- ssh/
@@ -376,7 +379,7 @@ AgentMFA persistence
 `-- in-memory only
     |-- approval queue
     |-- fixed-lifetime access sessions and their authorization state
-    |-- retained idempotency outcomes
+    |-- bounded idempotency tombstones and replay bodies
     |-- WS/PG/SSH tickets and live sessions
     |-- rate-limit buckets
     |-- superseded-token hints

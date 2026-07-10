@@ -15,7 +15,7 @@ use crate::error::CoreError;
 use crate::events::BrokerEvents;
 use crate::grants::{AccessGrantSummary, AccessGrants, GrantRemoval, GrantScope};
 use crate::pairing::PairingRegistry;
-use crate::paths::Paths;
+use crate::paths::{BrokerInstanceLock, Paths};
 use crate::policy::{NaivePolicyEngine, PolicyEngine as _};
 use crate::ratelimit::{KeyedLimiter, PairingLimiter, WindowLimiter};
 use crate::sessions::{DataPlane, SessionInfo};
@@ -71,6 +71,9 @@ pub struct Broker {
     pub(crate) token_limiter: KeyedLimiter,
     pub(crate) discovery_limiter: WindowLimiter,
     pub(crate) pairing_limiter: PairingLimiter,
+    /// Acquired before any persistent state is opened and declared last so it
+    /// remains held while every state-owning field is dropped.
+    _instance_lock: BrokerInstanceLock,
 }
 
 impl Broker {
@@ -83,6 +86,10 @@ impl Broker {
         events: Arc<dyn BrokerEvents>,
     ) -> Result<Arc<Self>> {
         paths.ensure()?;
+        let instance_lock = paths
+            .try_acquire_broker_lock()?
+            .ok_or_else(|| CoreError::BrokerAlreadyRunning(paths.socket_display()))?;
+        reject_legacy_live_socket(&paths).await?;
         let audit = Arc::new(AuditLog::open(paths.audit_file())?);
         let runtime = tokio::runtime::Handle::current();
         {
@@ -111,6 +118,8 @@ impl Broker {
         let approvals = Approvals::new(
             config.approval_timeout,
             config.outcome_retention,
+            config.outcome_retention_max_entries,
+            config.outcome_retention_max_bytes,
             audit.clone(),
             events.clone(),
         );
@@ -156,6 +165,7 @@ impl Broker {
             audit,
             events,
             http_client,
+            _instance_lock: instance_lock,
         }))
     }
 
@@ -1013,6 +1023,62 @@ impl Broker {
             None => "Clear Postgres trusted CA bundle",
         })?;
         self.store.set_pg_trusted_ca_bundle_path(path)
+    }
+}
+
+/// A broker from before the advisory-lock protocol can still own the socket
+/// without holding `broker.lock`. Probe conservatively after acquiring the new
+/// lock but before opening any persistent state, so the first upgraded launch
+/// cannot race the old process's in-memory store.
+async fn reject_legacy_live_socket(paths: &Paths) -> Result<()> {
+    use std::io;
+    use std::os::unix::fs::FileTypeExt as _;
+
+    let socket = paths.socket_file();
+    let metadata = match std::fs::symlink_metadata(&socket) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(CoreError::Io(error)),
+    };
+    if !metadata.file_type().is_socket() {
+        return Err(CoreError::Io(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "refusing to open broker state while {} is not a Unix socket",
+                socket.display()
+            ),
+        )));
+    }
+
+    match tokio::time::timeout(
+        Duration::from_secs(1),
+        tokio::net::UnixStream::connect(&socket),
+    )
+    .await
+    {
+        Ok(Ok(_)) => Err(CoreError::BrokerAlreadyRunning(paths.socket_display())),
+        Ok(Err(error))
+            if matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+            ) =>
+        {
+            Ok(())
+        }
+        Ok(Err(error)) => Err(CoreError::Io(io::Error::new(
+            error.kind(),
+            format!(
+                "failed to probe existing control socket {}; refusing to open broker state: {error}",
+                socket.display()
+            ),
+        ))),
+        Err(_) => Err(CoreError::Io(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "existing control socket {} did not respond within 1 second; refusing to open broker state",
+                socket.display()
+            ),
+        ))),
     }
 }
 

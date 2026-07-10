@@ -12,9 +12,18 @@ pub struct BrokerConfig {
     /// Advertised, machine-actionable client timeout: approval wait +
     /// upstream timeout + margin (§4/§5b).
     pub recommended_client_timeout: Duration,
-    /// Completed outcomes are retained this long and replayed to late
-    /// retries carrying the same `request_id` (§4).
+    /// Completed idempotency keys are retained this long. Their outcomes are
+    /// replayed when the byte-bounded response cache still has them (§4). A
+    /// zero duration fails closed for new retainable keyed requests.
     pub outcome_retention: Duration,
+    /// Global cap on in-flight reservations plus completed idempotency-key
+    /// tombstones. Request IDs have a separate wire-level length limit, so
+    /// entry count also bounds retained tombstone metadata. New keyed
+    /// executions fail closed when every slot is used.
+    pub outcome_retention_max_entries: usize,
+    /// Global cap on serialized replay-body bytes. An individual outcome
+    /// larger than this keeps only its compact idempotency tombstone.
+    pub outcome_retention_max_bytes: usize,
 
     /// Upstream HTTP call timeout (§4.1).
     pub upstream_timeout: Duration,
@@ -66,6 +75,8 @@ impl Default for BrokerConfig {
             approval_timeout: Duration::from_secs(120),
             recommended_client_timeout: Duration::from_secs(240),
             outcome_retention: Duration::from_secs(600),
+            outcome_retention_max_entries: 1024,
+            outcome_retention_max_bytes: 64 * 1024 * 1024,
             upstream_timeout: Duration::from_secs(60),
             response_cap: 10 * 1024 * 1024,
             request_cap: 150 * 1024 * 1024,

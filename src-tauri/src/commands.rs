@@ -129,7 +129,9 @@ pub fn get_settings(state: State<AppState>) -> SettingsDto {
 fn agent_setup_instructions(socket: &str) -> String {
     format!(
         "Connect to the local AgentMFA broker. Read its current instructions with:\n\
-         curl -s --unix-socket {socket} http://localhost/instructions\n\n\
+         curl --silent --show-error --fail-with-body --connect-timeout 3 --max-time 10 \\\n              --unix-socket {socket} http://localhost/instructions\n\n\
+         If that command fails or prints nothing, stop and ask me to open or relaunch \
+         AgentMFA. Do not delete the socket or retry pairing in a loop.\n\n\
          Follow those instructions. Reuse an existing token before pairing, use a stable \
          agent_name, and never ask me to paste a saved secret value."
     )
@@ -520,10 +522,15 @@ mod tests {
     #[test]
     fn agent_setup_instructions_include_the_runtime_socket() {
         let instructions = agent_setup_instructions("/tmp/agentmfa-test.sock");
-        assert!(instructions.contains(
-            "curl -s --unix-socket /tmp/agentmfa-test.sock http://localhost/instructions"
-        ));
-        assert!(instructions.contains("current instructions with:\ncurl -s --unix-socket"));
+        assert!(instructions
+            .contains("--unix-socket /tmp/agentmfa-test.sock http://localhost/instructions"));
+        assert!(instructions.contains("--silent --show-error --fail-with-body"));
+        assert!(instructions.contains("--connect-timeout 3"));
+        assert!(instructions.contains("--max-time 10"));
+        assert!(!instructions.contains("curl -s "));
+        assert!(instructions.contains("If that command fails or prints nothing, stop"));
+        assert!(instructions.contains("ask me to open or relaunch AgentMFA"));
+        assert!(instructions.contains("Do not delete the socket or retry pairing in a loop"));
         assert!(instructions.contains("Reuse an existing token before pairing"));
     }
 }

@@ -8,25 +8,29 @@
 //! optional `request_id`, and a retry re-sending the same `(agent,
 //! request_id)` joins the existing prompt, one approval, exactly one
 //! upstream execution, the same response replayed to every waiter and to
-//! late retries for 10 minutes. Equality under the key is checked, not
-//! assumed: each key stores a hash of the full normalized request, and
-//! reusing a `request_id` with a different payload is rejected (409).
+//! late retries while its byte-bounded replay body remains cached. Every
+//! completed key keeps a compact tombstone for 10 minutes, so evicting a
+//! response can never turn a retry into a second execution. Equality under
+//! the key is checked, not assumed: each key stores a hash of the full
+//! normalized request, and reusing a `request_id` with a different payload
+//! is rejected (409).
 //!
 //! A parked request whose every waiter has disconnected is **abandoned**,
 //! dropped from the queue, its prompt withdrawn, audited, and **never
 //! executed upstream**. Disconnection is detected eagerly: each waiter
 //! holds a guard whose drop (the handler future being dropped when the
 //! agent's connection closes) deregisters it. A disconnect *after* the
-//! upstream call has begun does not cancel it; the outcome is retained and
-//! replayed to a retry presenting the same `request_id`.
+//! upstream call has begun does not cancel it; completion always leaves an
+//! idempotency tombstone and retains the outcome for replay when it fits.
 //!
 //! The canonical lifecycle this machinery implements is
 //! [`crate::wire::ApprovalState`] (pending → executing → executed, or
 //! pending → denied/expired/abandoned); terminal transitions record their
 //! state in the audit log's `approval_state` field.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
+use std::io::Write;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -219,14 +223,19 @@ struct Pending {
     state: PendingState,
     key: Option<Key>,
     payload_hash: Option<String>,
-    retain: bool,
+    /// A slot reserved before this keyed execution was accepted. On
+    /// completion it becomes a tombstone; denial or abandonment releases it.
+    retention_reserved: bool,
     waiters: Vec<(u64, oneshot::Sender<ExecOutcome>)>,
 }
 
 struct Retained {
     at: Instant,
     payload_hash: Option<String>,
-    outcome: ExecOutcome,
+    /// `None` is a compact tombstone: execution completed, but its response
+    /// was too large to retain or was evicted from the byte-bounded cache.
+    outcome: Option<ExecOutcome>,
+    serialized_len: usize,
 }
 
 #[derive(Default)]
@@ -235,12 +244,21 @@ struct Inner {
     pending: HashMap<Uuid, Pending>,
     by_key: HashMap<Key, Uuid>,
     outcomes: HashMap<Key, Retained>,
+    /// Completion order for tombstone expiry. Entries stay here for their
+    /// full TTL even after their replay body is evicted.
+    outcome_order: VecDeque<Key>,
+    /// Completion order for byte-budget eviction of replay bodies only.
+    replay_order: VecDeque<Key>,
+    outcome_bytes: usize,
+    retention_reservations: usize,
     waiter_seq: u64,
 }
 
 struct Shared {
     approval_timeout: Duration,
     retention: Duration,
+    retention_max_entries: usize,
+    retention_max_bytes: usize,
     audit: Arc<AuditLog>,
     events: Arc<dyn BrokerEvents>,
     runtime: tokio::runtime::Handle,
@@ -292,6 +310,13 @@ pub enum ParkError {
     /// `request_id` reused with a different payload, a client bug (§4).
     #[error("request_id reused with a different payload")]
     RequestIdMismatch,
+    /// The bounded idempotency table has no slot for a new keyed execution.
+    #[error("idempotency capacity exhausted")]
+    IdempotencyCapacity,
+    /// The keyed execution completed, but its response body is no longer
+    /// available for a safe replay. The tombstone prevents re-execution.
+    #[error("completed outcome is not replayable")]
+    OutcomeNotReplayable,
 }
 
 pub struct WaitHandle {
@@ -332,6 +357,7 @@ impl Drop for WaiterGuard {
                     if let Some(key) = &entry.key {
                         inner.by_key.remove(key);
                     }
+                    release_retention_reservation(&mut inner, entry.retention_reserved);
                     abandoned = Some(entry.request);
                     snapshot = Some(queue_snapshot(&inner));
                 }
@@ -375,19 +401,40 @@ impl Approvals {
     pub fn new(
         approval_timeout: Duration,
         retention: Duration,
+        retention_max_entries: usize,
+        retention_max_bytes: usize,
         audit: Arc<AuditLog>,
         events: Arc<dyn BrokerEvents>,
     ) -> Self {
-        Self {
-            shared: Arc::new(Shared {
-                approval_timeout,
-                retention,
-                audit,
-                events,
-                runtime: tokio::runtime::Handle::current(),
-                inner: Mutex::new(Inner::default()),
-            }),
+        let shared = Arc::new(Shared {
+            approval_timeout,
+            retention,
+            retention_max_entries,
+            retention_max_bytes,
+            audit,
+            events,
+            runtime: tokio::runtime::Handle::current(),
+            inner: Mutex::new(Inner::default()),
+        });
+        if !retention.is_zero() {
+            let weak = Arc::downgrade(&shared);
+            let runtime = shared.runtime.clone();
+            runtime.spawn(async move {
+                let mut interval = tokio::time::interval(retention_sweep_interval(retention));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                // `interval` ticks immediately once; consume that tick so
+                // the first sweep happens after a useful delay.
+                interval.tick().await;
+                loop {
+                    interval.tick().await;
+                    let Some(shared) = weak.upgrade() else {
+                        break;
+                    };
+                    prune_expired_outcomes(&mut shared.inner.lock().unwrap(), retention);
+                }
+            });
         }
+        Self { shared }
     }
 
     /// The FIFO queue, oldest first (the approval window renders the front
@@ -408,7 +455,8 @@ impl Approvals {
 
     /// Join or replay by idempotency key, if possible. Returns:
     /// - `Some(Ok(Parked))`, replayed or attached to an in-flight entry;
-    /// - `Some(Err(_))`, key reuse with a different payload;
+    /// - `Some(Err(_))`, key reuse with a different payload or a completed
+    ///   key whose replay body is no longer available;
     /// - `None`, nothing under this key; the caller creates a new entry.
     fn try_join(
         &self,
@@ -416,15 +464,17 @@ impl Approvals {
         coalesce_key: &Option<Key>,
         payload_hash: &Option<String>,
     ) -> Option<Result<Parked, ParkError>> {
-        let retention = self.shared.retention;
-        inner.outcomes.retain(|_, r| r.at.elapsed() <= retention);
+        prune_expired_outcomes(inner, self.shared.retention);
         let key = coalesce_key.as_ref()?;
         // Late retry after completion: replay the same response (§4).
         if let Some(retained) = inner.outcomes.get(key) {
             if &retained.payload_hash != payload_hash {
                 return Some(Err(ParkError::RequestIdMismatch));
             }
-            return Some(Ok(Parked::Replay(retained.outcome.clone())));
+            return Some(match &retained.outcome {
+                Some(outcome) => Ok(Parked::Replay(outcome.clone())),
+                None => Err(ParkError::OutcomeNotReplayable),
+            });
         }
         // In-flight (prompted or executing): attach to it.
         if let Some(&pending_id) = inner.by_key.get(key) {
@@ -447,6 +497,31 @@ impl Approvals {
         None
     }
 
+    /// Reserve a tombstone slot before accepting a keyed execution. This is
+    /// the fail-closed boundary: once execution can begin, capacity already
+    /// exists to remember that it happened for the full retention TTL.
+    fn reserve_retention_slot(
+        &self,
+        inner: &mut Inner,
+        coalesce_key: &Option<Key>,
+        retain_outcome: bool,
+    ) -> Result<bool, ParkError> {
+        if !retain_outcome || coalesce_key.is_none() {
+            return Ok(false);
+        }
+        if self.shared.retention.is_zero()
+            || inner
+                .outcomes
+                .len()
+                .saturating_add(inner.retention_reservations)
+                >= self.shared.retention_max_entries
+        {
+            return Err(ParkError::IdempotencyCapacity);
+        }
+        inner.retention_reservations += 1;
+        Ok(true)
+    }
+
     /// Park a request (policy said Prompt), or join / replay by idempotency
     /// key.
     pub fn park(&self, park: ParkRequest) -> Result<Parked, ParkError> {
@@ -463,6 +538,8 @@ impl Approvals {
             if let Some(joined) = self.try_join(&mut inner, &coalesce_key, &payload_hash) {
                 return joined;
             }
+            let retention_reserved =
+                self.reserve_retention_slot(&mut inner, &coalesce_key, retain_outcome)?;
 
             // New prompt.
             let id = request.id;
@@ -480,7 +557,7 @@ impl Approvals {
                     state: PendingState::Prompted { executor },
                     key: coalesce_key.clone(),
                     payload_hash,
-                    retain: retain_outcome,
+                    retention_reserved,
                     waiters: vec![(waiter_id, tx)],
                 },
             );
@@ -648,6 +725,8 @@ impl Approvals {
             if let Some(joined) = self.try_join(&mut inner, &coalesce_key, &payload_hash) {
                 return joined;
             }
+            let retention_reserved =
+                self.reserve_retention_slot(&mut inner, &coalesce_key, retain_outcome)?;
             let id = request.id;
             let now = Utc::now();
             request.received_at = now;
@@ -661,7 +740,7 @@ impl Approvals {
                     state: PendingState::Executing,
                     key: coalesce_key.clone(),
                     payload_hash,
-                    retain: retain_outcome,
+                    retention_reserved,
                     waiters: vec![(waiter_id, tx)],
                 },
             );
@@ -686,7 +765,8 @@ impl Approvals {
 
     /// The execution task: not tied to any waiter, so a disconnect cannot
     /// cancel a side effect already in flight (§4). On completion the
-    /// outcome is fanned out and retained under the idempotency key.
+    /// outcome is fanned out and the reserved idempotency slot becomes a
+    /// tombstone, with a replay body when the byte budget permits.
     fn spawn_completion(
         &self,
         id: Uuid,
@@ -710,14 +790,15 @@ impl Approvals {
                 };
                 if let Some(key) = &entry.key {
                     inner.by_key.remove(key);
-                    if entry.retain {
-                        inner.outcomes.insert(
+                    if entry.retention_reserved {
+                        release_retention_reservation(&mut inner, true);
+                        retain_completed_outcome(
+                            &mut inner,
                             key.clone(),
-                            Retained {
-                                at: Instant::now(),
-                                payload_hash: entry.payload_hash.clone(),
-                                outcome: outcome.clone(),
-                            },
+                            entry.payload_hash.clone(),
+                            outcome.clone(),
+                            shared.retention,
+                            shared.retention_max_bytes,
                         );
                     }
                 }
@@ -746,6 +827,7 @@ impl Approvals {
             if let Some(key) = &entry.key {
                 inner.by_key.remove(key);
             }
+            release_retention_reservation(&mut inner, entry.retention_reserved);
             (entry.request, entry.waiters, queue_snapshot(&inner))
         };
         let outcome = ExecOutcome::refusal(reason);
@@ -783,6 +865,116 @@ impl Approvals {
     }
 }
 
+fn retention_sweep_interval(retention: Duration) -> Duration {
+    // Frequent enough that expiry is prompt even for tests and short-lived
+    // configurations, but capped so the default ten-minute retention does
+    // not leave stale entries around for another full retention period.
+    (retention / 2)
+        .max(Duration::from_millis(1))
+        .min(Duration::from_secs(30))
+}
+
+fn prune_expired_outcomes(inner: &mut Inner, retention: Duration) {
+    while let Some(key) = inner.outcome_order.front().cloned() {
+        let expired = inner
+            .outcomes
+            .get(&key)
+            .is_none_or(|retained| retained.at.elapsed() > retention);
+        if !expired {
+            break;
+        }
+        inner.outcome_order.pop_front();
+        if let Some(retained) = inner.outcomes.remove(&key) {
+            inner.outcome_bytes = inner.outcome_bytes.saturating_sub(retained.serialized_len);
+        }
+        inner.replay_order.retain(|queued| queued != &key);
+    }
+}
+
+fn evict_oldest_replay_body(inner: &mut Inner) -> bool {
+    while let Some(key) = inner.replay_order.pop_front() {
+        if let Some(retained) = inner.outcomes.get_mut(&key) {
+            if retained.outcome.take().is_none() {
+                continue;
+            }
+            inner.outcome_bytes = inner.outcome_bytes.saturating_sub(retained.serialized_len);
+            retained.serialized_len = 0;
+            return true;
+        }
+    }
+    false
+}
+
+fn retain_completed_outcome(
+    inner: &mut Inner,
+    key: Key,
+    payload_hash: Option<String>,
+    outcome: ExecOutcome,
+    retention: Duration,
+    max_bytes: usize,
+) {
+    if retention.is_zero() {
+        return;
+    }
+    debug_assert!(!inner.outcomes.contains_key(&key));
+
+    let serialized_len = serialized_outcome_len(&outcome).filter(|len| *len <= max_bytes);
+    let (outcome, serialized_len) = if let Some(serialized_len) = serialized_len {
+        while serialized_len > max_bytes.saturating_sub(inner.outcome_bytes) {
+            if !evict_oldest_replay_body(inner) {
+                break;
+            }
+        }
+        if serialized_len <= max_bytes.saturating_sub(inner.outcome_bytes) {
+            inner.outcome_bytes += serialized_len;
+            inner.replay_order.push_back(key.clone());
+            (Some(outcome), serialized_len)
+        } else {
+            (None, 0)
+        }
+    } else {
+        (None, 0)
+    };
+
+    inner.outcome_order.push_back(key.clone());
+    inner.outcomes.insert(
+        key,
+        Retained {
+            at: Instant::now(),
+            payload_hash,
+            outcome,
+            serialized_len,
+        },
+    );
+}
+
+fn release_retention_reservation(inner: &mut Inner, reserved: bool) {
+    if reserved {
+        debug_assert!(inner.retention_reservations > 0);
+        inner.retention_reservations = inner.retention_reservations.saturating_sub(1);
+    }
+}
+
+fn serialized_outcome_len(outcome: &ExecOutcome) -> Option<usize> {
+    #[derive(Default)]
+    struct Counter(usize);
+
+    impl Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len());
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut counter = Counter::default();
+    serde_json::to_writer(&mut counter, outcome).ok()?;
+    Some(counter.0)
+}
+
 fn next_waiter(inner: &mut Inner) -> u64 {
     inner.waiter_seq += 1;
     inner.waiter_seq
@@ -797,12 +989,23 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn approvals(timeout: Duration) -> (Approvals, tempfile::TempDir) {
+        approvals_with_limits(timeout, Duration::from_secs(600), 1024, 64 * 1024 * 1024)
+    }
+
+    fn approvals_with_limits(
+        timeout: Duration,
+        retention: Duration,
+        max_entries: usize,
+        max_bytes: usize,
+    ) -> (Approvals, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let audit = Arc::new(AuditLog::open(dir.path().join("audit.jsonl")).unwrap());
         (
             Approvals::new(
                 timeout,
-                Duration::from_secs(600),
+                retention,
+                max_entries,
+                max_bytes,
                 audit,
                 Arc::new(NoopEvents),
             ),
@@ -845,6 +1048,29 @@ mod tests {
                 body: serde_json::json!({"ok": true}),
             }
         })
+    }
+
+    fn outcome_executor(outcome: ExecOutcome) -> Executor {
+        Box::pin(async move { outcome })
+    }
+
+    async fn complete_retained(approvals: &Approvals, key: Key, outcome: ExecOutcome) {
+        let req = request("claude-code", "POST /dispatch");
+        let id = req.id;
+        let parked = approvals
+            .park(ParkRequest {
+                request: req,
+                coalesce_key: Some(key),
+                payload_hash: Some("payload".into()),
+                retain_outcome: true,
+                executor: outcome_executor(outcome),
+            })
+            .unwrap();
+        approvals.approve(&id, false, None).unwrap();
+        let Parked::Wait(handle) = parked else {
+            panic!("new request unexpectedly replayed")
+        };
+        assert!(handle.wait().await.is_some());
     }
 
     #[test]
@@ -1050,6 +1276,243 @@ mod tests {
         }
         assert_eq!(count.load(Ordering::SeqCst), 1);
         assert!(approvals.queue().is_empty());
+    }
+
+    #[tokio::test]
+    async fn retention_capacity_rejects_before_prompt_or_preapproved_execution() {
+        let (approvals, _dir) = approvals_with_limits(
+            Duration::from_secs(60),
+            Duration::from_secs(600),
+            1,
+            usize::MAX,
+        );
+        let executions = Arc::new(AtomicUsize::new(0));
+        let first = request("claude-code", "POST /first");
+        let parked = approvals
+            .park(ParkRequest {
+                request: first,
+                coalesce_key: Some(("claude-code".into(), "req_first".into())),
+                payload_hash: Some("payload".into()),
+                retain_outcome: true,
+                executor: ok_executor(executions.clone()),
+            })
+            .unwrap();
+
+        let prompted_rejection = approvals.park(ParkRequest {
+            request: request("claude-code", "POST /second"),
+            coalesce_key: Some(("claude-code".into(), "req_second".into())),
+            payload_hash: Some("payload".into()),
+            retain_outcome: true,
+            executor: ok_executor(executions.clone()),
+        });
+        assert!(matches!(
+            prompted_rejection,
+            Err(ParkError::IdempotencyCapacity)
+        ));
+        assert_eq!(approvals.queue().len(), 1, "no second prompt was raised");
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+
+        // Abandoning before execution releases the reservation.
+        drop(parked);
+        assert_eq!(
+            approvals
+                .shared
+                .inner
+                .lock()
+                .unwrap()
+                .retention_reservations,
+            0
+        );
+        complete_retained(
+            &approvals,
+            ("claude-code".into(), "req_completed".into()),
+            ExecOutcome {
+                status: 200,
+                body: serde_json::json!({"ok": true}),
+            },
+        )
+        .await;
+
+        let preapproved_rejection = approvals.run_preapproved(
+            ParkRequest {
+                request: request("claude-code", "POST /preapproved"),
+                coalesce_key: Some(("claude-code".into(), "req_preapproved".into())),
+                payload_hash: Some("payload".into()),
+                retain_outcome: true,
+                executor: ok_executor(executions.clone()),
+            },
+            None,
+        );
+        assert!(matches!(
+            preapproved_rejection,
+            Err(ParkError::IdempotencyCapacity)
+        ));
+        tokio::task::yield_now().await;
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        let inner = approvals.shared.inner.lock().unwrap();
+        assert_eq!(inner.outcomes.len(), 1);
+        assert_eq!(inner.retention_reservations, 0);
+    }
+
+    #[tokio::test]
+    async fn zero_retention_rejects_keyed_requests_before_execution() {
+        let (approvals, _dir) =
+            approvals_with_limits(Duration::from_secs(60), Duration::ZERO, 10, usize::MAX);
+        let executions = Arc::new(AtomicUsize::new(0));
+
+        let prompted = approvals.park(ParkRequest {
+            request: request("claude-code", "POST /prompted"),
+            coalesce_key: Some(("claude-code".into(), "req_prompted".into())),
+            payload_hash: Some("payload".into()),
+            retain_outcome: true,
+            executor: ok_executor(executions.clone()),
+        });
+        assert!(matches!(prompted, Err(ParkError::IdempotencyCapacity)));
+        assert!(approvals.queue().is_empty());
+
+        let preapproved = approvals.run_preapproved(
+            ParkRequest {
+                request: request("claude-code", "POST /preapproved"),
+                coalesce_key: Some(("claude-code".into(), "req_preapproved".into())),
+                payload_hash: Some("payload".into()),
+                retain_outcome: true,
+                executor: ok_executor(executions.clone()),
+            },
+            None,
+        );
+        assert!(matches!(preapproved, Err(ParkError::IdempotencyCapacity)));
+        tokio::task::yield_now().await;
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        let inner = approvals.shared.inner.lock().unwrap();
+        assert!(inner.outcomes.is_empty());
+        assert_eq!(inner.retention_reservations, 0);
+    }
+
+    #[tokio::test]
+    async fn retained_outcomes_obey_byte_bound_and_skip_oversized_results() {
+        let first = ExecOutcome {
+            status: 200,
+            body: serde_json::json!({"result": "first"}),
+        };
+        let second = ExecOutcome {
+            status: 200,
+            body: serde_json::json!({"result": "second"}),
+        };
+        let byte_cap =
+            serialized_outcome_len(&first).unwrap() + serialized_outcome_len(&second).unwrap() - 1;
+        let (approvals, _dir) = approvals_with_limits(
+            Duration::from_secs(60),
+            Duration::from_secs(600),
+            10,
+            byte_cap,
+        );
+        let first_key = ("claude-code".into(), "req_first".into());
+        let second_key = ("claude-code".into(), "req_second".into());
+        let oversized_key = ("claude-code".into(), "req_oversized".into());
+
+        complete_retained(&approvals, first_key.clone(), first).await;
+        complete_retained(&approvals, second_key.clone(), second).await;
+        {
+            let inner = approvals.shared.inner.lock().unwrap();
+            assert!(
+                inner.outcomes[&first_key].outcome.is_none(),
+                "oldest replay body was evicted but its tombstone remains"
+            );
+            assert!(inner.outcomes[&second_key].outcome.is_some());
+            assert!(inner.outcome_bytes <= byte_cap);
+        }
+
+        let retry_count = Arc::new(AtomicUsize::new(0));
+        let evicted_retry = approvals.park(ParkRequest {
+            request: request("claude-code", "POST /dispatch"),
+            coalesce_key: Some(first_key.clone()),
+            payload_hash: Some("payload".into()),
+            retain_outcome: true,
+            executor: ok_executor(retry_count.clone()),
+        });
+        assert!(matches!(
+            evicted_retry,
+            Err(ParkError::OutcomeNotReplayable)
+        ));
+        let mismatched_retry = approvals.park(ParkRequest {
+            request: request("claude-code", "POST /dispatch"),
+            coalesce_key: Some(first_key.clone()),
+            payload_hash: Some("different".into()),
+            retain_outcome: true,
+            executor: ok_executor(retry_count.clone()),
+        });
+        assert!(matches!(
+            mismatched_retry,
+            Err(ParkError::RequestIdMismatch)
+        ));
+
+        complete_retained(
+            &approvals,
+            oversized_key.clone(),
+            ExecOutcome {
+                status: 200,
+                body: serde_json::json!({"result": "x".repeat(byte_cap)}),
+            },
+        )
+        .await;
+        {
+            let inner = approvals.shared.inner.lock().unwrap();
+            assert!(
+                inner.outcomes[&second_key].outcome.is_some(),
+                "an oversized result must not evict existing replay bodies"
+            );
+            assert!(inner.outcomes[&oversized_key].outcome.is_none());
+            assert!(inner.outcome_bytes <= byte_cap);
+        }
+        let oversized_retry = approvals.run_preapproved(
+            ParkRequest {
+                request: request("claude-code", "POST /dispatch"),
+                coalesce_key: Some(oversized_key),
+                payload_hash: Some("payload".into()),
+                retain_outcome: true,
+                executor: ok_executor(retry_count.clone()),
+            },
+            None,
+        );
+        assert!(matches!(
+            oversized_retry,
+            Err(ParkError::OutcomeNotReplayable)
+        ));
+        tokio::task::yield_now().await;
+        assert_eq!(retry_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn retained_outcomes_expire_without_a_later_request() {
+        let retention = Duration::from_millis(40);
+        let (approvals, _dir) =
+            approvals_with_limits(Duration::from_secs(60), retention, 10, usize::MAX);
+        complete_retained(
+            &approvals,
+            ("claude-code".into(), "req_expiring".into()),
+            ExecOutcome {
+                status: 200,
+                body: serde_json::json!({"ok": true}),
+            },
+        )
+        .await;
+        assert_eq!(approvals.shared.inner.lock().unwrap().outcomes.len(), 1);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if approvals.shared.inner.lock().unwrap().outcomes.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("background expiry did not remove retained outcome");
+
+        let inner = approvals.shared.inner.lock().unwrap();
+        assert_eq!(inner.outcome_bytes, 0);
+        assert!(inner.outcome_order.is_empty());
+        assert!(inner.replay_order.is_empty());
     }
 
     #[tokio::test]

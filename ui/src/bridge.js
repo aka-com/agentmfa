@@ -37,7 +37,10 @@ const MOCK_ACTIVITY_META = {
   tokenRevoked: { icon: 'unplug', tone: 'danger' },
 };
 const MOCK_AGENT_SETUP = `Connect to the local AgentMFA broker. Read its current instructions with:
-curl -s --unix-socket ~/.agentmfa/broker.sock http://localhost/instructions
+curl --silent --show-error --fail-with-body --connect-timeout 3 --max-time 10 \\
+     --unix-socket ~/.agentmfa/broker.sock http://localhost/instructions
+
+If that command fails or prints nothing, stop and ask me to open or relaunch AgentMFA. Do not delete the socket or retry pairing in a loop.
 
 Follow those instructions. Reuse an existing token before pairing, use a stable agent_name, and never ask me to paste a saved secret value.`;
 function emit(event, payload) {

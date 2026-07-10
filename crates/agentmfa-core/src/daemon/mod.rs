@@ -13,6 +13,8 @@
 pub mod wellknown;
 
 use std::collections::HashMap;
+use std::io;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -44,7 +46,7 @@ use crate::pairing::{validate_agent_name, TokenError};
 use crate::policy::PolicyEngine as _;
 use crate::ratelimit::PairingBlock;
 use crate::types::{ConnectionConfig, ConnectionKind, Decision, PairedAgent, PeerIdentity};
-use crate::wire::ErrorReason;
+use crate::wire::{ErrorReason, REQUEST_ID_MAX_BYTES};
 
 /* ------------------------------ plumbing --------------------------------- */
 
@@ -244,6 +246,9 @@ pub struct DaemonHandle {
     task: tokio::task::JoinHandle<()>,
     bridge_task: tokio::task::JoinHandle<()>,
     proxy_task: tokio::task::JoinHandle<()>,
+    // Declared last so serving tasks are aborted/dropped before the
+    // rendezvous point is unlinked.
+    _socket_guard: SocketGuard,
 }
 
 impl Drop for DaemonHandle {
@@ -251,6 +256,136 @@ impl Drop for DaemonHandle {
         self.task.abort();
         self.bridge_task.abort();
         self.proxy_task.abort();
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SocketIdentity {
+    device: u64,
+    inode: u64,
+}
+
+impl SocketIdentity {
+    fn from(metadata: &std::fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }
+    }
+}
+
+/// Removes a socket only when the path still names the inode we observed.
+/// The lifetime-held instance lock serializes cooperating brokers; this
+/// identity check additionally prevents normal shutdown from unlinking a
+/// socket that was manually replaced underneath it.
+struct SocketGuard {
+    path: PathBuf,
+    identity: SocketIdentity,
+    armed: bool,
+}
+
+impl SocketGuard {
+    fn capture(path: PathBuf) -> io::Result<Self> {
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if !metadata.file_type().is_socket() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{} is not a Unix socket", path.display()),
+            ));
+        }
+        Ok(Self {
+            path,
+            identity: SocketIdentity::from(&metadata),
+            armed: true,
+        })
+    }
+
+    fn remove_if_owned(&mut self) -> io::Result<bool> {
+        if !self.armed {
+            return Ok(false);
+        }
+        let metadata = match std::fs::symlink_metadata(&self.path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                self.armed = false;
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        };
+        if !metadata.file_type().is_socket() || SocketIdentity::from(&metadata) != self.identity {
+            return Ok(false);
+        }
+        std::fs::remove_file(&self.path)?;
+        self.armed = false;
+        Ok(true)
+    }
+}
+
+impl Drop for SocketGuard {
+    fn drop(&mut self) {
+        if let Err(error) = self.remove_if_owned() {
+            tracing::warn!(
+                "failed to clean up control socket {}: {error}",
+                self.path.display()
+            );
+        }
+    }
+}
+
+/// Inspect an existing rendezvous point while the owning [`Broker`] holds the
+/// process lease. Only a socket node that rejects a connection with
+/// `ECONNREFUSED` is considered stale. Unexpected probe errors and non-socket
+/// files are preserved so startup cannot destroy state it does not understand.
+async fn remove_stale_socket(
+    socket_path: &std::path::Path,
+    socket_display: String,
+) -> crate::Result<()> {
+    let metadata = match std::fs::symlink_metadata(socket_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(CoreError::Io(error)),
+    };
+    if !metadata.file_type().is_socket() {
+        return Err(CoreError::Io(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "refusing to replace non-socket path {}",
+                socket_path.display()
+            ),
+        )));
+    }
+    let identity = SocketIdentity::from(&metadata);
+    match tokio::net::UnixStream::connect(socket_path).await {
+        Ok(_) => Err(CoreError::BrokerAlreadyRunning(socket_display)),
+        Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
+            tracing::info!("removing stale socket {}", socket_path.display());
+            let mut stale = SocketGuard {
+                path: socket_path.to_path_buf(),
+                identity,
+                armed: true,
+            };
+            if !stale.remove_if_owned()? {
+                return Err(CoreError::Io(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    format!(
+                        "control socket {} changed while checking whether it was stale",
+                        socket_path.display()
+                    ),
+                )));
+            }
+            Ok(())
+        }
+        // A concurrent non-broker actor may remove the path after metadata;
+        // bind below is then safe. Any replacement will make bind fail rather
+        // than being unlinked here.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(CoreError::Io(io::Error::new(
+            error.kind(),
+            format!(
+                "failed to probe existing control socket {}; refusing to remove it: {error}",
+                socket_path.display()
+            ),
+        ))),
     }
 }
 
@@ -272,8 +407,11 @@ pub fn router(broker: Arc<Broker>) -> Router {
         .with_state(AppState { broker })
 }
 
-/// Bind the control-plane socket and serve. A stale socket file left by a
-/// crashed broker is unlinked after a failed connect test (§12).
+/// Bind the control-plane socket and serve. [`Broker::new`] acquired the OS
+/// process lease before opening any persistent state and the broker holds it
+/// for its full lifetime. A socket left by a crashed broker is unlinked only
+/// when it is still the observed inode and rejects a connection with the
+/// expected stale-socket error (§12).
 pub async fn serve(broker: Arc<Broker>) -> crate::Result<DaemonHandle> {
     let paths = broker.paths.clone();
     paths.ensure()?;
@@ -291,22 +429,10 @@ pub async fn serve(broker: Arc<Broker>) -> crate::Result<DaemonHandle> {
             socket_path.as_os_str().len()
         ))));
     }
-    if socket_path.exists() {
-        match tokio::net::UnixStream::connect(&socket_path).await {
-            Ok(_) => {
-                return Err(CoreError::BrokerAlreadyRunning(paths.socket_display()));
-            }
-            Err(_) => {
-                tracing::info!("removing stale socket {}", socket_path.display());
-                std::fs::remove_file(&socket_path)?;
-            }
-        }
-    }
+    remove_stale_socket(&socket_path, paths.socket_display()).await?;
     let listener = UnixListener::bind(&socket_path)?;
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    let socket_guard = SocketGuard::capture(socket_path.clone())?;
+    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
     // Per-open SSH agent sockets self-clean on their deadline; sweep any a
     // crashed broker left behind, mirroring the stale control-socket check
     // above (§4.4/§12).
@@ -315,7 +441,16 @@ pub async fn serve(broker: Arc<Broker>) -> crate::Result<DaemonHandle> {
     let (ws_bridge_port, bridge_task) = crate::capability::ws::start_bridge(broker.clone()).await?;
     let _ = broker.ws_bridge_port.set(ws_bridge_port);
     // The PG proxy data plane: loopback-only, OS-assigned port (§4.3/§8).
-    let (pg_proxy_port, proxy_task) = crate::capability::pg::start_proxy(broker.clone()).await?;
+    let (pg_proxy_port, proxy_task) = match crate::capability::pg::start_proxy(broker.clone()).await
+    {
+        Ok(started) => started,
+        Err(error) => {
+            // A dropped JoinHandle detaches its task. Abort explicitly so
+            // a partial startup cannot leave a loopback bridge behind.
+            bridge_task.abort();
+            return Err(CoreError::Io(error));
+        }
+    };
     let _ = broker.pg_proxy_port.set(pg_proxy_port);
 
     let app = router(broker);
@@ -336,6 +471,7 @@ pub async fn serve(broker: Arc<Broker>) -> crate::Result<DaemonHandle> {
         task,
         bridge_task,
         proxy_task,
+        _socket_guard: socket_guard,
     })
 }
 
@@ -517,6 +653,13 @@ async fn post_pair(
             "a pairing for this name from a different peer identity is \
              awaiting the user; retry after it resolves",
         ),
+        // Pairing does not retain completed outcomes, so neither condition
+        // is reachable unless that invariant regresses.
+        Err(ParkError::IdempotencyCapacity | ParkError::OutcomeNotReplayable) => err_detail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorReason::PairingFailed,
+            "internal pairing idempotency error",
+        ),
     }
 }
 
@@ -632,6 +775,22 @@ struct HttpCallBody {
     request_id: Option<String>,
 }
 
+fn request_id_error(request_id: Option<&str>) -> Option<Response> {
+    if let Some(request_id) = request_id {
+        if request_id.len() > REQUEST_ID_MAX_BYTES {
+            return Some(err_detail(
+                StatusCode::BAD_REQUEST,
+                ErrorReason::InvalidBody,
+                format!(
+                    "request_id is {} UTF-8 bytes; the maximum is {REQUEST_ID_MAX_BYTES}",
+                    request_id.len()
+                ),
+            ));
+        }
+    }
+    None
+}
+
 async fn post_http(
     State(state): State<AppState>,
     authed: Authed,
@@ -648,6 +807,9 @@ async fn post_http(
             .agent(agent.name.clone()),
         );
         return err_rate_limited(ErrorReason::RateLimited, wait);
+    }
+    if let Some(response) = request_id_error(call.request_id.as_deref()) {
+        return response;
     }
 
     // Resolve the connection: it supplies the *where* and the credential.
@@ -846,24 +1008,26 @@ async fn run_policied(
             .grants
             .matching(&agent.token_hash, conn, required_scope)
         {
-            broker.audit.append(
-                AuditEntry::new(
-                    AuditKind::AutoAllowed,
-                    format!("Temporary access used: {} → {}", agent.name, conn.name),
-                )
-                .agent(agent.name.clone())
-                .connection(conn.name.clone())
-                .outcome("access_session")
-                .field("grant_id", grant.summary.id.to_string())
-                .field("scope", format!("{:?}", grant.summary.scope).to_lowercase())
-                .field(
-                    "approval_state",
-                    crate::wire::ApprovalState::Executing.as_str(),
-                ),
+            let entry = AuditEntry::new(
+                AuditKind::AutoAllowed,
+                format!("Temporary access used: {} → {}", agent.name, conn.name),
+            )
+            .agent(agent.name.clone())
+            .connection(conn.name.clone())
+            .outcome("access_session")
+            .field("grant_id", grant.summary.id.to_string())
+            .field("scope", format!("{:?}", grant.summary.scope).to_lowercase())
+            .field(
+                "approval_state",
+                crate::wire::ApprovalState::Executing.as_str(),
             );
-            broker
+            let parked = broker
                 .approvals
-                .run_preapproved(park, Some(grant.authorization))
+                .run_preapproved(park, Some(grant.authorization));
+            if matches!(&parked, Ok(Parked::Wait(_))) {
+                broker.audit.append(entry);
+            }
+            parked
         } else {
             match broker.policy.evaluate(&agent.name, &conn.id) {
                 crate::types::Decision::Allow => {
@@ -882,8 +1046,11 @@ async fn run_policied(
                     if let Some(rule) = rule {
                         entry = entry.rule(rule.id);
                     }
-                    broker.audit.append(entry);
-                    broker.approvals.run_preapproved(park, None)
+                    let parked = broker.approvals.run_preapproved(park, None);
+                    if matches!(&parked, Ok(Parked::Wait(_))) {
+                        broker.audit.append(entry);
+                    }
+                    parked
                 }
                 crate::types::Decision::Deny => {
                     return err(StatusCode::FORBIDDEN, ErrorReason::DeniedByPolicy);
@@ -909,6 +1076,13 @@ async fn resolve_parked(parked: Result<Parked, ParkError>) -> Response {
         Err(ParkError::RequestIdMismatch) => {
             err(StatusCode::CONFLICT, ErrorReason::RequestIdMismatch)
         }
+        Err(ParkError::OutcomeNotReplayable) => {
+            err(StatusCode::CONFLICT, ErrorReason::OutcomeNotReplayable)
+        }
+        Err(ParkError::IdempotencyCapacity) => err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorReason::IdempotencyCapacity,
+        ),
     }
 }
 
@@ -932,6 +1106,9 @@ async fn post_ws_open(
     let agent = authed.agent;
     if let Err(wait) = broker.token_limiter.check(&agent.token_hash) {
         return err_rate_limited(ErrorReason::RateLimited, wait);
+    }
+    if let Some(response) = request_id_error(body.request_id.as_deref()) {
+        return response;
     }
     let Some(conn) = broker.store.connection_by_name(&body.connection) else {
         return err_unknown_connection(broker);
@@ -1061,6 +1238,9 @@ async fn post_ssh_open(
     let agent = authed.agent;
     if let Err(wait) = broker.token_limiter.check(&agent.token_hash) {
         return err_rate_limited(ErrorReason::RateLimited, wait);
+    }
+    if let Some(response) = request_id_error(body.request_id.as_deref()) {
+        return response;
     }
     let Some(conn) = broker.store.connection_by_name(&body.connection) else {
         return err_unknown_connection(broker);
@@ -1192,6 +1372,9 @@ async fn post_pg_open(
     let agent = authed.agent;
     if let Err(wait) = broker.token_limiter.check(&agent.token_hash) {
         return err_rate_limited(ErrorReason::RateLimited, wait);
+    }
+    if let Some(response) = request_id_error(body.request_id.as_deref()) {
+        return response;
     }
     let Some(conn) = broker.store.connection_by_name(&body.connection) else {
         return err_unknown_connection(broker);

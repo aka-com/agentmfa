@@ -5,12 +5,13 @@
 //!   `~/Library/Application Support/agentmfa` on macOS.
 //! - The control-plane rendezvous point is `~/.agentmfa/broker.sock`
 //!   (short and space-free: it never needs shell quoting and stays well
-//!   clear of the 104-byte `sun_path` limit). `~/.agentmfa` is created
-//!   `0700`; the socket itself is `0600`.
+//!   clear of the 104-byte `sun_path` limit). A persistent `broker.lock`
+//!   serializes startup and stale-socket repair. `~/.agentmfa` is created
+//!   `0700`; the lock and socket are `0600`.
 
 use std::fs;
 use std::io;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -20,6 +21,39 @@ pub struct Paths {
     /// `~/.agentmfa`, the socket directory (also the advisory token home
     /// that `/instructions` names for agents).
     pub socket_dir: PathBuf,
+}
+
+/// Process lifetime lease for the broker's state and rendezvous point.
+///
+/// The lock file itself deliberately persists. Removing it on Drop would let
+/// another process create and lock a different inode before this process had
+/// closed the old locked file. The OS releases the advisory lock when this
+/// value is dropped or the process exits.
+#[must_use = "dropping the broker lease releases it immediately"]
+pub struct BrokerInstanceLock {
+    _file: fs::File,
+}
+
+impl BrokerInstanceLock {
+    /// Try to acquire the broker lease without blocking. `Ok(None)` means a
+    /// live process already owns it; other filesystem/locking failures retain
+    /// their underlying I/O diagnosis.
+    fn try_acquire(path: &Path) -> io::Result<Option<Self>> {
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(path)?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(fs::TryLockError::Error(error)) => return Err(error),
+        }
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        Ok(Some(Self { _file: file }))
+    }
 }
 
 impl Paths {
@@ -63,6 +97,18 @@ impl Paths {
     }
     pub fn socket_file(&self) -> PathBuf {
         self.socket_dir.join("broker.sock")
+    }
+    /// Persistent advisory lock whose OS lock, not filesystem presence,
+    /// serializes broker startup and stale-socket recovery.
+    pub fn broker_lock_file(&self) -> PathBuf {
+        self.socket_dir.join("broker.lock")
+    }
+    /// Try to acquire the process lease guarding both persistent broker state
+    /// and the control-plane rendezvous point. Every process that opens the
+    /// state for writing, including offline CLI commands, must hold this guard
+    /// until its state handles have been dropped.
+    pub fn try_acquire_broker_lock(&self) -> io::Result<Option<BrokerInstanceLock>> {
+        BrokerInstanceLock::try_acquire(&self.broker_lock_file())
     }
     /// The advisory token home `/instructions` tells agents to persist
     /// pair tokens in (one file per agent name, mode 0600).

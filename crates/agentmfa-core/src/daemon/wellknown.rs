@@ -12,7 +12,7 @@ use serde_json::json;
 
 use crate::config::BrokerConfig;
 use crate::paths::Paths;
-use crate::wire::{ApprovalMode, AuthScheme, PROTOCOL_VERSION};
+use crate::wire::{ApprovalMode, AuthScheme, PROTOCOL_VERSION, REQUEST_ID_MAX_BYTES};
 
 pub fn manifest(config: &BrokerConfig, paths: &Paths) -> serde_json::Value {
     json!({
@@ -39,6 +39,7 @@ pub fn manifest(config: &BrokerConfig, paths: &Paths) -> serde_json::Value {
         "recommended_client_timeout_seconds": config.recommended_client_timeout.as_secs(),
         "token_ttl_days": config.token_ttl.as_secs() / 86400,
         "ticket_ttl_seconds": config.ticket_ttl.as_secs(),
+        "request_id_max_bytes": REQUEST_ID_MAX_BYTES,
         "endpoints": {
             "pair": "/v1/pair",
             "whoami": "/v1/whoami",
@@ -164,12 +165,21 @@ Denials come back as `403` with a machine-readable reason:
 - `{{"reason": "approval_timeout"}}`: nobody decided in time; this is
   retryable after re-alerting your user.
 
-**Always send a unique `request_id` (any unique string; a UUID is
-recommended) on mutating calls.** A retry that re-sends the same
+**Always send a unique `request_id` no longer than
+{request_id_max_bytes} UTF-8 bytes (a UUID is recommended) on mutating calls.**
+A retry that re-sends the same
 `request_id` joins the existing prompt: one approval, exactly one upstream
-execution, the same response replayed to every retry (for 10 minutes).
+execution, the same response replayed while its body remains cached, and a
+non-reexecute tombstone retained for 10 minutes.
 Reusing a `request_id` with a *different* payload is rejected with
 `409 {{"reason": "request_id_mismatch"}}`. GET/HEAD are never coalesced.
+The broker reserves bounded idempotency capacity before accepting a keyed
+request. `503 {{"reason": "idempotency_capacity"}}` means it was not accepted:
+wait, then safely retry the same ID. If a completed response was too large or
+evicted, its key remains tombstoned and a retry returns
+`409 {{"reason": "outcome_not_replayable"}}` without executing again. Do not
+mint a new ID and repeat that operation automatically; reconcile its upstream
+effect or ask the user first.
 For WS/PG/SSH opens, replay returns the originally issued capability and does
 not extend its lifetime. Retry the same `request_id` only during the returned
 `expires_in_seconds` window; after that, mint a fresh ID and submit a new open.
@@ -297,6 +307,9 @@ host-key-mismatched signing requests.
   lists the configured names.
 - `409 {{"reason": "request_id_mismatch"}}`: you reused a request_id with a
   different payload; mint a fresh one.
+- `409 {{"reason": "outcome_not_replayable"}}`: the earlier execution
+  completed but its retained response is unavailable; do not repeat it
+  automatically under a fresh ID—reconcile the result or ask your user.
 - `409 {{"reason": "pairing_already_pending"}}`: a pairing prompt for this
   name from another process is on screen; retry after it resolves.
 - `429 {{"reason": "rate_limited" | "pairing_rate_limited"}}`: over budget;
@@ -308,6 +321,9 @@ host-key-mismatched signing requests.
   (missing, encrypted, or an unsupported type); the `detail` says which.
 - `503 {{"reason": "ticket_session_limit" | "broker_session_limit"}}`: your
   session budget is exhausted; close sessions or wait, then reopen.
+- `503 {{"reason": "idempotency_capacity"}}`: the keyed operation was not
+  accepted because the bounded replay table is full; wait, then retry the
+  same request_id.
 "#,
         protocol_version = PROTOCOL_VERSION,
         socket = paths.socket_display(),
@@ -317,6 +333,7 @@ host-key-mismatched signing requests.
         ticket = ticket,
         token_days = token_days,
         access_minutes = access_minutes,
+        request_id_max_bytes = REQUEST_ID_MAX_BYTES,
     )
 }
 
@@ -355,7 +372,8 @@ mod tests {
     #[test]
     fn manifest_advertises_the_contract() {
         let m = manifest(&BrokerConfig::default(), &paths());
-        assert_eq!(m["protocol_version"], PROTOCOL_VERSION);
+        assert_eq!(PROTOCOL_VERSION, 0);
+        assert_eq!(m["protocol_version"], 0);
         assert_eq!(m["auth_schemes"], serde_json::json!(["bearer_pinned"]));
         assert_eq!(m["approval_modes"], serde_json::json!(["blocking"]));
         assert_eq!(m["transport"], "http-over-unix-socket");
@@ -364,6 +382,7 @@ mod tests {
         assert_eq!(m["recommended_client_timeout_seconds"], 240);
         assert_eq!(m["token_ttl_days"], 30);
         assert_eq!(m["ticket_ttl_seconds"], 60);
+        assert_eq!(m["request_id_max_bytes"], REQUEST_ID_MAX_BYTES);
         assert_eq!(m["endpoints"]["pair"], "/v1/pair");
         assert_eq!(m["endpoints"]["whoami"], "/v1/whoami");
         assert_eq!(m["endpoints"]["ssh_open"], "/v1/ssh/open");
@@ -397,12 +416,15 @@ mod tests {
             "store_at",
             "token_superseded",
             "request_id",
+            "256 UTF-8 bytes",
             "PGPASSWORD",
             "expires_in_seconds",
             "at least 240 seconds",
             "denied_by_user",
             "approval_timeout",
             "request_id_mismatch",
+            "outcome_not_replayable",
+            "idempotency_capacity",
             "pairing_already_pending",
             "pairing_denied_cooldown",
             "retry_after_seconds",

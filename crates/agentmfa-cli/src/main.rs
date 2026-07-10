@@ -12,7 +12,10 @@
 //!   `serve --root` harness never hand-writes (sealed) store files.
 
 use std::io::Write as _;
+use std::ops::Deref;
+use std::os::unix::fs::FileTypeExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,8 +24,9 @@ use agentmfa_core::broker::{Broker, UiDecision};
 use agentmfa_core::config::BrokerConfig;
 use agentmfa_core::daemon;
 use agentmfa_core::daemon::wellknown;
+use agentmfa_core::error::CoreError;
 use agentmfa_core::events::BrokerEvents;
-use agentmfa_core::paths::Paths;
+use agentmfa_core::paths::{BrokerInstanceLock, Paths};
 use agentmfa_core::store::{ConnectionSpec, Store};
 use agentmfa_core::types::{
     ConfirmationMethod, ConnectionConfig, DecisionContext, DecisionSurface, PgSslMode, SecretMeta,
@@ -232,20 +236,83 @@ fn open_vault(
     }
 }
 
+/// An offline store handle coupled to the exclusive lease protecting it.
+struct OfflineStore {
+    store: Store,
+    // Declared last so state handles close before another process can acquire
+    // the lease and open the same files.
+    _instance_lock: BrokerInstanceLock,
+}
+
+impl Deref for OfflineStore {
+    type Target = Store;
+
+    fn deref(&self) -> &Self::Target {
+        &self.store
+    }
+}
+
+fn acquire_offline_store_lock(paths: &Paths) -> Result<BrokerInstanceLock, CoreError> {
+    paths.ensure()?;
+    let instance_lock = paths
+        .try_acquire_broker_lock()?
+        .ok_or_else(|| CoreError::BrokerAlreadyRunning(paths.socket_display()))?;
+
+    // A broker from before `broker.lock` may still own the rendezvous point.
+    // Once the new lease is held, reject a live legacy socket before opening
+    // any state; only the expected crash residue is safe to ignore here.
+    let socket = paths.socket_file();
+    let metadata = match std::fs::symlink_metadata(&socket) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(CoreError::Io(error)),
+    };
+    if let Some(metadata) = metadata {
+        if !metadata.file_type().is_socket() {
+            return Err(CoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!(
+                    "refusing to open state while {} is not a Unix socket",
+                    socket.display()
+                ),
+            )));
+        }
+        match std::os::unix::net::UnixStream::connect(&socket) {
+            Ok(_) => return Err(CoreError::BrokerAlreadyRunning(paths.socket_display())),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                ) => {}
+            Err(error) => {
+                return Err(CoreError::Io(std::io::Error::new(
+                    error.kind(),
+                    format!(
+                    "failed to probe existing control socket {}; refusing to open state: {error}",
+                    socket.display()
+                ),
+                )))
+            }
+        }
+    }
+    Ok(instance_lock)
+}
+
 /// Open the store for offline edits (`secret add`, `conn add`): the same
 /// files a broker on this root serves, so a live broker — which holds the
 /// store in memory and would overwrite the edit on its next persist — is
-/// refused up front.
-fn open_store(root: Option<PathBuf>) -> Store {
+/// refused before any state is opened.
+fn open_store(root: Option<PathBuf>) -> OfflineStore {
     let paths = store_paths(root.as_deref());
-    let socket = paths.socket_file();
-    if socket.exists() && std::os::unix::net::UnixStream::connect(&socket).is_ok() {
-        die(format!(
+    let instance_lock = match acquire_offline_store_lock(&paths) {
+        Ok(instance_lock) => instance_lock,
+        Err(CoreError::BrokerAlreadyRunning(_)) => die(format!(
             "a broker is running on {} — stop it first (its in-memory state \
              would overwrite this change), or add through the app",
-            socket.display()
-        ));
-    }
+            paths.socket_file().display()
+        )),
+        Err(error) => die(format!("could not acquire the broker state lease: {error}")),
+    };
     let vault = match open_vault(&paths, root.as_deref()) {
         Ok(vault) => vault,
         Err(e) => die(format!("could not open the secret vault: {e}")),
@@ -255,7 +322,10 @@ fn open_store(root: Option<PathBuf>) -> Store {
         .build()
         .expect("tokio runtime");
     match runtime.block_on(Store::open(paths, vault)) {
-        Ok(store) => store,
+        Ok(store) => OfflineStore {
+            store,
+            _instance_lock: instance_lock,
+        },
         Err(e) => die(format!("could not open the store: {e}")),
     }
 }
@@ -598,18 +668,79 @@ fn cmd_serve(root: Option<PathBuf>, auto_yes: bool) {
     }
     eprintln!("  Ctrl-C to quit.\n");
 
+    // Catch Ctrl-C inside Tokio so the daemon handle gets a normal Drop and
+    // can remove only the control-socket inode it owns. Polling with a short
+    // timeout wakes the otherwise blocking std channel when no approvals are
+    // arriving.
+    let stopping = Arc::new(AtomicBool::new(false));
+    let signal_flag = stopping.clone();
+    runtime.spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            signal_flag.store(true, Ordering::Release);
+        }
+    });
+
     // Terminal approval loop on the main thread.
-    for request in rx {
+    while !stopping.load(Ordering::Acquire) {
+        let request = match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(request) => request,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
         let decision = if auto_yes {
-            UiDecision::AllowOnce
+            Some(UiDecision::AllowOnce)
         } else {
-            prompt_decision(&request, broker.config.access_grant_ttl)
+            prompt_decision_until_shutdown(
+                &request,
+                broker.config.access_grant_ttl,
+                stopping.clone(),
+            )
+        };
+        let Some(decision) = decision else {
+            break;
         };
         // Auto-approve rebounds the pairing brake fairly; on a real denial
         // the core arms the cooldown itself.
         let ctx = DecisionContext::local(DecisionSurface::Cli);
         if let Err(e) = broker.decide(&request.id, decision, &ctx) {
             eprintln!("  (decision failed: {e})");
+        }
+    }
+    drop(daemon);
+}
+
+/// Keep terminal input off the shutdown-owning thread. Once Tokio installs a
+/// SIGINT handler, a blocking `stdin.read_line()` is not guaranteed to wake on
+/// Ctrl-C; polling this result channel lets the main thread drop the daemon
+/// promptly while the process tears down the detached input thread.
+fn prompt_decision_until_shutdown(
+    request: &ApprovalRequest,
+    access_grant_ttl: Duration,
+    stopping: Arc<AtomicBool>,
+) -> Option<UiDecision> {
+    if stopping.load(Ordering::Acquire) {
+        return None;
+    }
+    let request = request.clone();
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = tx.send(prompt_decision(&request, access_grant_ttl));
+    });
+    wait_for_decision_or_shutdown(rx, stopping)
+}
+
+fn wait_for_decision_or_shutdown(
+    rx: std::sync::mpsc::Receiver<UiDecision>,
+    stopping: Arc<AtomicBool>,
+) -> Option<UiDecision> {
+    loop {
+        if stopping.load(Ordering::Acquire) {
+            return None;
+        }
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(decision) => return Some(decision),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Some(UiDecision::Deny),
         }
     }
 }
@@ -698,12 +829,58 @@ fn format_duration(duration: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agentmfa_core::events::NoopEvents;
+    use agentmfa_core::vault::MemoryVault;
 
     #[test]
     fn access_duration_uses_the_configured_value() {
         assert_eq!(format_duration(Duration::from_secs(90)), "90 seconds");
         assert_eq!(format_duration(Duration::from_secs(15 * 60)), "15 minutes");
         assert_eq!(format_duration(Duration::from_secs(60 * 60)), "1 hour");
+    }
+
+    #[test]
+    fn terminal_decision_wait_stops_without_stdin_finishing() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let stopping = Arc::new(AtomicBool::new(false));
+        let signal_flag = stopping.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            signal_flag.store(true, Ordering::Release);
+            // Keep the decision channel connected until after shutdown is
+            // visible, modelling a prompt thread blocked in read_line().
+            std::thread::sleep(Duration::from_secs(1));
+            drop(tx);
+        });
+
+        let started = std::time::Instant::now();
+        assert_eq!(wait_for_decision_or_shutdown(rx, stopping), None);
+        assert!(started.elapsed() < Duration::from_millis(750));
+    }
+
+    #[test]
+    fn offline_store_writer_respects_the_broker_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let broker = runtime
+            .block_on(Broker::new(
+                paths.clone(),
+                Arc::new(MemoryVault::new()),
+                BrokerConfig::default(),
+                Arc::new(NoopEvents),
+            ))
+            .unwrap();
+
+        assert!(matches!(
+            acquire_offline_store_lock(&paths),
+            Err(CoreError::BrokerAlreadyRunning(_))
+        ));
+        drop(broker);
+        assert!(acquire_offline_store_lock(&paths).is_ok());
     }
 
     fn args(kind: ConnKind) -> ConnAdd {

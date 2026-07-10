@@ -19,6 +19,7 @@ use agentmfa_core::types::{
     ConfirmationMethod, ConnectionConfig, DecisionContext, DecisionSurface, PgSslMode, SecretMeta,
 };
 use agentmfa_core::vault::MemoryVault;
+use agentmfa_core::wire::REQUEST_ID_MAX_BYTES;
 use axum::routing::{any, get, post};
 use axum::Router;
 use http_body_util::BodyExt as _;
@@ -132,6 +133,37 @@ impl Harness {
         assert_eq!(status, 200, "pair failed: {body}");
         body["token"].as_str().unwrap().to_string()
     }
+}
+
+async fn save_always_allow_rule(harness: &mut Harness, authorization: &str) {
+    let socket = harness.socket.clone();
+    let authorization = authorization.to_string();
+    let call = tokio::spawn(async move {
+        uds_request(
+            &socket,
+            "POST",
+            "/v1/http",
+            &[("authorization", &authorization)],
+            Some(json!({
+                "connection": "github",
+                "method": "GET",
+                "path": "/user/repos",
+            })),
+        )
+        .await
+    });
+    harness.decide_next(UiDecision::AlwaysAllow).await;
+    assert_eq!(call.await.unwrap().0, 200);
+}
+
+fn auto_allowed_audit_count(harness: &Harness) -> usize {
+    harness
+        .broker
+        .audit
+        .recent(100)
+        .into_iter()
+        .filter(|entry| entry.kind == AuditKind::AutoAllowed)
+        .count()
 }
 
 /// Minimal HTTP/1.1 client over a Unix socket.
@@ -460,6 +492,71 @@ async fn body_parse_errors_follow_the_error_contract() {
     assert_eq!(status, 400);
     assert_eq!(body["reason"], "invalid_json", "got: {body}");
     assert!(body["detail"].as_str().unwrap().contains("agent_name"));
+}
+
+#[tokio::test]
+async fn request_ids_are_bounded_before_prompting_or_connection_lookup() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let token = h.pair("claude-code").await;
+    let auth = format!("Bearer {token}");
+    let oversized = "x".repeat(REQUEST_ID_MAX_BYTES + 1);
+    let cases = [
+        (
+            "/v1/http",
+            json!({
+                "connection": "missing",
+                "method": "POST",
+                "path": "/dispatch",
+                "request_id": oversized.clone(),
+            }),
+        ),
+        (
+            "/v1/ws/open",
+            json!({"connection": "missing", "request_id": oversized.clone()}),
+        ),
+        (
+            "/v1/pg/open",
+            json!({"connection": "missing", "request_id": oversized.clone()}),
+        ),
+        (
+            "/v1/ssh/open",
+            json!({"connection": "missing", "request_id": oversized}),
+        ),
+    ];
+
+    for (endpoint, body) in cases {
+        let (status, body) = uds_request(
+            &h.socket,
+            "POST",
+            endpoint,
+            &[("authorization", &auth)],
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, 400, "wrong status from {endpoint}: {body}");
+        assert_eq!(body["reason"], "invalid_body");
+        assert!(body["detail"].as_str().unwrap().contains("maximum is 256"));
+    }
+    assert!(h.prompts.try_recv().is_err());
+
+    let (status, body) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(json!({
+            "connection": "missing",
+            "method": "POST",
+            "path": "/dispatch",
+            "request_id": "x".repeat(REQUEST_ID_MAX_BYTES),
+        })),
+    )
+    .await;
+    assert_eq!(
+        status, 404,
+        "the maximum-length ID should be accepted: {body}"
+    );
+    assert_eq!(body["reason"], "unknown_connection");
 }
 
 #[tokio::test]
@@ -1481,6 +1578,96 @@ async fn mutating_retries_coalesce_to_one_execution() {
     .await;
     assert_eq!(status, 409);
     assert_eq!(body["reason"], "request_id_mismatch");
+}
+
+#[tokio::test]
+async fn idempotency_capacity_fails_before_prompt_or_upstream_execution() {
+    let config = BrokerConfig {
+        outcome_retention_max_entries: 0,
+        ..BrokerConfig::default()
+    };
+    let mut h = harness(config).await;
+    let up = upstream().await;
+    api_connection(&h, "github", up.port);
+    let token = h.pair("claude-code").await;
+    let auth = format!("Bearer {token}");
+    save_always_allow_rule(&mut h, &auth).await;
+    let auto_allowed_before = auto_allowed_audit_count(&h);
+
+    let (status, body) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(json!({
+            "connection": "github",
+            "method": "POST",
+            "path": "/dispatch",
+            "request_id": "req_no_capacity",
+        })),
+    )
+    .await;
+
+    assert_eq!(status, 503);
+    assert_eq!(body["reason"], "idempotency_capacity");
+    assert!(h.prompts.try_recv().is_err(), "no prompt should be raised");
+    assert_eq!(up.hits.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        auto_allowed_audit_count(&h),
+        auto_allowed_before,
+        "a rejected request must not be audited as executing"
+    );
+}
+
+#[tokio::test]
+async fn non_replayable_tombstone_prevents_duplicate_upstream_execution() {
+    let config = BrokerConfig {
+        outcome_retention_max_bytes: 0,
+        ..BrokerConfig::default()
+    };
+    let mut h = harness(config).await;
+    let up = upstream().await;
+    api_connection(&h, "github", up.port);
+    let token = h.pair("claude-code").await;
+    let auth = format!("Bearer {token}");
+    save_always_allow_rule(&mut h, &auth).await;
+    let payload = json!({
+        "connection": "github",
+        "method": "POST",
+        "path": "/dispatch",
+        "request_id": "req_tombstoned",
+    });
+
+    let (status, body) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(payload.clone()),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["status"], 204);
+    assert_eq!(up.hits.load(Ordering::SeqCst), 1);
+    let auto_allowed_after_execution = auto_allowed_audit_count(&h);
+
+    let (status, body) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(payload),
+    )
+    .await;
+    assert_eq!(status, 409);
+    assert_eq!(body["reason"], "outcome_not_replayable");
+    assert_eq!(up.hits.load(Ordering::SeqCst), 1);
+    assert!(h.prompts.try_recv().is_err(), "retry must not re-prompt");
+    assert_eq!(
+        auto_allowed_audit_count(&h),
+        auto_allowed_after_execution,
+        "a tombstoned retry must not be audited as a new execution"
+    );
 }
 
 #[tokio::test]
