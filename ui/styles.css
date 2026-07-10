@@ -146,6 +146,7 @@ code, .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Conso
   background: var(--wash);
 }
 .dw-brand { display: flex; align-items: center; gap: 9px; padding: 2px 4px 14px; }
+.dw-brand .dd-title { font-size: 14.5px; }
 .dw-nav { display: flex; flex-direction: column; gap: 2px; flex: 1; }
 .nav-item {
   display: flex; align-items: center; gap: 7px;
@@ -253,7 +254,7 @@ code, .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Conso
   border: 1px solid var(--line); border-radius: 7px;
   background: var(--wash-2); color: var(--ink-2);
   font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 13.5px; line-height: 1.45;
+  font-size: 12.5px; line-height: 1.45;
 }
 .setup-instructions code { font: inherit; }
 
