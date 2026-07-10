@@ -10,11 +10,14 @@
 
 use std::sync::Mutex;
 
-use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, MenuItemKind, PredefinedMenuItem, WINDOW_SUBMENU_ID};
-use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, Rect};
 
+#[cfg(test)]
+use tauri::image::Image;
+
+#[cfg(test)]
 const TRAY_ICON_BYTES: &[u8] = include_bytes!("../icons/tray.png");
 #[cfg(test)]
 const APP_ICON_BYTES: &[u8] = include_bytes!("../icons/icon.png");
@@ -108,45 +111,42 @@ fn focus_existing_or_reopen(app: &AppHandle) {
 /// Install the always-present tray icon (§2). Left-click toggles the compact
 /// dropdown; right-click exposes the conventional app menu.
 pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
-    let icon = Image::from_bytes(TRAY_ICON_BYTES)?;
     let open = MenuItem::with_id(app, "tray-open", "Open AgentMFA", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "tray-settings", "Settings…", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "tray-quit", "Quit AgentMFA", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &settings, &separator, &quit])?;
 
-    TrayIconBuilder::with_id("main")
-        .icon(icon)
-        .icon_as_template(true) // render as a menu-bar template image
-        .tooltip("AgentMFA")
-        .menu(&menu)
-        .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id().as_ref() {
-            "tray-open" => open_main(app),
-            "tray-settings" => {
-                show_dropdown(app);
-                let _ = app.emit_to(DROPDOWN, EVT_OPEN_SETTINGS, ());
-            }
-            "tray-quit" => app.exit(0),
-            _ => {}
-        })
-        .on_tray_icon_event(|tray, event| match event {
-            TrayIconEvent::Click {
-                rect,
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } => {
-                let app = tray.app_handle();
-                remember_tray_anchor(app, rect);
-                toggle_dropdown(app);
-            }
-            TrayIconEvent::Click { rect, .. } => {
-                remember_tray_anchor(tray.app_handle(), rect);
-            }
-            _ => {}
-        })
-        .build(app)?;
+    let tray = app
+        .tray_by_id("main")
+        .ok_or_else(|| tauri::Error::AssetNotFound("configured tray icon".into()))?;
+    tray.set_menu(Some(menu))?;
+    tray.set_show_menu_on_left_click(false)?;
+    tray.on_menu_event(|app, event| match event.id().as_ref() {
+        "tray-open" => open_main(app),
+        "tray-settings" => {
+            show_dropdown(app);
+            let _ = app.emit_to(DROPDOWN, EVT_OPEN_SETTINGS, ());
+        }
+        "tray-quit" => app.exit(0),
+        _ => {}
+    });
+    tray.on_tray_icon_event(|tray, event| match event {
+        TrayIconEvent::Click {
+            rect,
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+            ..
+        } => {
+            let app = tray.app_handle();
+            remember_tray_anchor(app, rect);
+            toggle_dropdown(app);
+        }
+        TrayIconEvent::Click { rect, .. } => {
+            remember_tray_anchor(tray.app_handle(), rect);
+        }
+        _ => {}
+    });
     Ok(())
 }
 

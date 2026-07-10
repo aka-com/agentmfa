@@ -52,6 +52,13 @@
         "url": "index.html#dropdown"
       }
     ],
+    "trayIcon": {
+      "id": "main",
+      "iconPath": "icons/tray.png",
+      "iconAsTemplate": true,
+      "showMenuOnLeftClick": false,
+      "tooltip": "AgentMFA"
+    },
     "security": {
       "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self'"
     }
