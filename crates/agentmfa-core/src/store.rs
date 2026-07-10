@@ -454,6 +454,79 @@ impl Store {
         Ok(conn)
     }
 
+    /// Atomically add one credential and the connection that first uses it.
+    /// The index becomes visible only after both objects validate and persist;
+    /// a failed index write removes the just-created vault item.
+    pub fn add_connection_with_secret(
+        &self,
+        secret_name: &str,
+        value: SecretValue,
+        mut spec: ConnectionSpec,
+    ) -> Result<(SecretMeta, Connection)> {
+        if !is_valid_secret_name(secret_name) {
+            return Err(CoreError::InvalidSecretName(secret_name.to_string()));
+        }
+        validate_connection_name(&spec.name)?;
+        let mut state = self.state.lock().unwrap();
+        if state
+            .secrets
+            .iter()
+            .any(|secret| secret.name == secret_name)
+        {
+            return Err(CoreError::SecretNameTaken(secret_name.to_string()));
+        }
+        if state.connections.iter().any(|conn| conn.name == spec.name) {
+            return Err(CoreError::ConnectionNameTaken(spec.name));
+        }
+
+        let now = Utc::now();
+        let meta = SecretMeta {
+            id: Uuid::new_v4(),
+            name: secret_name.to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        let mut next = state.clone();
+        next.secrets.push(meta.clone());
+        if spec.config.kind() != ConnectionKind::Api {
+            spec.secrets = vec![meta.id];
+        }
+        let secrets = validate_config_and_bind_secrets(&next, &spec)?;
+        if !secrets.contains(&meta.id) {
+            return Err(CoreError::InvalidConnectionConfig(
+                "the new credential is not referenced by this connection".into(),
+            ));
+        }
+        let conn = Connection {
+            id: Uuid::new_v4(),
+            name: spec.name,
+            multi_connect: spec.config.kind() != ConnectionKind::Api && spec.multi_connect,
+            config: spec.config,
+            secrets,
+            created_at: now,
+            updated_at: now,
+        };
+        next.connections.push(conn.clone());
+
+        self.vault.set(
+            &meta.id,
+            &VaultAttrs {
+                name: meta.name.clone(),
+                created_at: now,
+            },
+            &value,
+        )?;
+        drop(value);
+        if let Err(error) = self.persist(&next) {
+            if let Err(rollback) = self.vault.delete(&meta.id) {
+                tracing::error!("failed to roll back vault item {}: {rollback}", meta.id);
+            }
+            return Err(error);
+        }
+        *state = next;
+        Ok((meta, conn))
+    }
+
     /// Update a connection. The kind is fixed after creation. Returns the
     /// updated connection and whether its pinned target changed, the caller
     /// must drop the connection's standing rules when it did (a rule granted
@@ -836,6 +909,63 @@ mod tests {
         assert_eq!(vault.len(), 3);
         let gh = store.secret_by_name("GITHUB_API_KEY").unwrap();
         assert_eq!(&*store.secret_value(&gh.id).await.unwrap(), "ghp_secret");
+    }
+
+    #[tokio::test]
+    async fn add_connection_with_secret_is_atomic_and_binds_the_new_secret() {
+        let (store, vault, _dir) = store().await;
+        let initial_vault_len = vault.len();
+        let (secret, connection) = store
+            .add_connection_with_secret(
+                "DATABASE_PASSWORD",
+                val("pg-pw"),
+                ConnectionSpec {
+                    name: "prod-db".into(),
+                    config: ConnectionConfig::Pg {
+                        host: "db.example.com".into(),
+                        port: 5432,
+                        dbname: "app".into(),
+                        user: "app".into(),
+                        sslmode: PgSslMode::Require,
+                    },
+                    secrets: vec![],
+                    multi_connect: true,
+                },
+            )
+            .unwrap();
+        assert_eq!(connection.secrets, vec![secret.id]);
+        assert_eq!(vault.len(), initial_vault_len + 1);
+        assert_eq!(&*store.secret_value(&secret.id).await.unwrap(), "pg-pw");
+
+        let (api_secret, api_connection) = store
+            .add_connection_with_secret(
+                "API_TOKEN",
+                val("api-token"),
+                api_spec(
+                    "service-api",
+                    "api.example.com",
+                    "Authorization: Bearer {{API_TOKEN}}",
+                ),
+            )
+            .unwrap();
+        assert_eq!(api_connection.secrets, vec![api_secret.id]);
+
+        store.add_secret("OTHER", val("existing")).unwrap();
+        let before_invalid = vault.len();
+        let error = store
+            .add_connection_with_secret(
+                "ORPHAN_TOKEN",
+                val("should-not-persist"),
+                api_spec(
+                    "broken",
+                    "api.example.com",
+                    "Authorization: Bearer {{OTHER}}",
+                ),
+            )
+            .unwrap_err();
+        assert!(matches!(error, CoreError::InvalidConnectionConfig(_)));
+        assert!(store.secret_by_name("ORPHAN_TOKEN").is_none());
+        assert_eq!(vault.len(), before_invalid);
     }
 
     #[tokio::test]

@@ -247,6 +247,10 @@ pub struct ConnectionInput {
     pub secret_id: Option<String>,
     #[serde(default = "default_true")]
     pub multi_connect: bool,
+    // Add-only connection-first setup. Both fields must be present together;
+    // the core writes the vault item and connection atomically.
+    pub new_secret_name: Option<String>,
+    pub new_secret_value: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -311,13 +315,25 @@ impl ConnectionInput {
 /// Creating a connection binds a secret to a destination; the core demands
 /// the native OS confirmation before it takes effect (§8).
 #[tauri::command]
-pub fn add_connection(state: State<AppState>, input: ConnectionInput) -> CmdResult<()> {
+pub fn add_connection(state: State<AppState>, mut input: ConnectionInput) -> CmdResult<()> {
+    let new_secret_name = input.new_secret_name.take();
+    // Wrap the user-entered value before any fallible parsing below so every
+    // error path zeroizes it rather than dropping an ordinary String.
+    let new_secret_value = input.new_secret_value.take().map(Zeroizing::new);
     let spec = input.into_spec()?;
-    state
-        .broker
-        .ui_add_connection(spec)
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    match (new_secret_name, new_secret_value) {
+        (Some(name), Some(value)) if !name.is_empty() && !value.is_empty() => state
+            .broker
+            .ui_add_connection_with_secret(&name, value, spec)
+            .map(|_| ())
+            .map_err(|e| e.to_string()),
+        (None, None) => state
+            .broker
+            .ui_add_connection(spec)
+            .map(|_| ())
+            .map_err(|e| e.to_string()),
+        _ => Err("new credential name and value must be provided together".into()),
+    }
 }
 
 /// Security-relevant connection edits are core-gated (§8); metadata-only
@@ -517,6 +533,60 @@ mod tests {
         assert_eq!(activity_view_limit(Some(50)), 50);
         assert_eq!(activity_view_limit(Some(usize::MAX)), ACTIVITY_VIEW_LIMIT);
         assert_eq!(activity_view_limit(Some(0)), 0);
+    }
+
+    #[test]
+    fn connection_input_preserves_api_origin_and_ws_template() {
+        let api = ConnectionInput {
+            name: "local-api".into(),
+            kind: "api".into(),
+            host: Some("localhost".into()),
+            scheme: Some("http".into()),
+            port: Some(8080),
+            template: Some("Authorization: Bearer {{TOKEN}}".into()),
+            dbname: None,
+            user: None,
+            host_key_fingerprint: None,
+            sslmode: None,
+            url: None,
+            secret_id: None,
+            multi_connect: true,
+            new_secret_name: None,
+            new_secret_value: None,
+        }
+        .into_spec()
+        .unwrap();
+        assert!(matches!(
+            api.config,
+            ConnectionConfig::Api { ref host, ref scheme, port: Some(8080), .. }
+                if host == "localhost" && scheme == "http"
+        ));
+
+        let secret_id = Uuid::new_v4();
+        let ws = ConnectionInput {
+            name: "stream".into(),
+            kind: "ws".into(),
+            host: None,
+            scheme: None,
+            port: None,
+            template: Some("X-Stream-Key: {{STREAM_TOKEN}}".into()),
+            dbname: None,
+            user: None,
+            host_key_fingerprint: None,
+            sslmode: None,
+            url: Some("wss://stream.example.com/feed".into()),
+            secret_id: Some(secret_id.to_string()),
+            multi_connect: true,
+            new_secret_name: None,
+            new_secret_value: None,
+        }
+        .into_spec()
+        .unwrap();
+        assert!(matches!(
+            ws.config,
+            ConnectionConfig::Ws { ref template, .. }
+                if template.as_deref() == Some("X-Stream-Key: {{STREAM_TOKEN}}")
+        ));
     }
 
     #[test]

@@ -645,7 +645,7 @@ async fn connections_listing_shows_targets_only() {
     assert_eq!(
         list,
         json!([
-            {"name": "github", "type": "api", "target": "127.0.0.1",
+            {"name": "github", "type": "api", "target": format!("http://127.0.0.1:{}", up.port),
              "endpoint": "/v1/http", "multi_connect": false,
              "approval": "will_prompt", "access_session": null},
             {"name": "prod-db", "type": "pg", "target": "app@db.internal.aka.com:5432/app_production",
@@ -1928,7 +1928,10 @@ async fn pairing_inheritance_is_disclosed() {
     // The dialog data must disclose exactly what the new process inherits.
     assert_eq!(prompt.inherited.len(), 1);
     assert_eq!(prompt.inherited[0].name, "github");
-    assert_eq!(prompt.inherited[0].target, "127.0.0.1");
+    assert_eq!(
+        prompt.inherited[0].target,
+        format!("http://127.0.0.1:{}", up.port)
+    );
     assert!(prompt.identity.is_some());
     h.broker
         .decide(&prompt.id, UiDecision::AllowOnce, &ctx())

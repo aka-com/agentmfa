@@ -141,11 +141,23 @@ impl ConnectionConfig {
 
     /// The human-readable pinned destination, what `GET /v1/connections`
     /// returns and what the approval window shows (DESIGN.md §4.0):
-    /// api → host, pg → `user@host:port/dbname`, ws → URL,
+    /// api → origin, pg → `user@host:port/dbname`, ws → URL,
     /// ssh → `user@host[:port]` (port shown only when non-default).
     pub fn target(&self) -> String {
         match self {
-            ConnectionConfig::Api { host, .. } => host.clone(),
+            ConnectionConfig::Api {
+                host, scheme, port, ..
+            } => {
+                let default_port = match scheme.as_str() {
+                    "https" => 443,
+                    "http" => 80,
+                    _ => 0,
+                };
+                match port {
+                    Some(port) if *port != default_port => format!("{scheme}://{host}:{port}"),
+                    _ => format!("{scheme}://{host}"),
+                }
+            }
             ConnectionConfig::Pg {
                 host,
                 port,
@@ -418,7 +430,7 @@ mod tests {
             port: None,
             template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
         };
-        assert_eq!(api.target(), "api.github.com");
+        assert_eq!(api.target(), "https://api.github.com");
         let pg = ConnectionConfig::Pg {
             host: "db.internal.aka.com".into(),
             port: 5432,

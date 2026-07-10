@@ -668,6 +668,36 @@ impl Broker {
         Ok(conn)
     }
 
+    /// One connection-first setup action: save a new credential and bind it
+    /// without exposing an intermediate, partially configured state.
+    pub fn ui_add_connection_with_secret(
+        &self,
+        secret_name: &str,
+        value: SecretValue,
+        spec: ConnectionSpec,
+    ) -> Result<Connection> {
+        let confirmation = self.confirm_action(&format!("Add connection “{}”", spec.name))?;
+        let (secret, conn) = self
+            .store
+            .add_connection_with_secret(secret_name, value, spec)?;
+        self.audit.append(AuditEntry::new(
+            AuditKind::SecretAdded,
+            format!("Secret added: {}", secret.name),
+        ));
+        self.audit.append(
+            AuditEntry::new(
+                AuditKind::ConnectionAdded,
+                format!("Connection added: {}", conn.name),
+            )
+            .connection(conn.name.clone())
+            .detail(format!("{} → {}", conn.kind().label(), conn.target()))
+            .field("kind", conn.kind().as_str())
+            .field("target", conn.target())
+            .confirmation(confirmation),
+        );
+        Ok(conn)
+    }
+
     /// Update a connection. Name-only edits are metadata and do not require
     /// native authentication; changes to configuration, secret bindings, or
     /// session scope do. When the pinned target changes, its standing rules

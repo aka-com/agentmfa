@@ -136,7 +136,11 @@ function connDto(c) {
   };
 }
 function connTarget(c) {
-  if (c.type === 'api') return c.host;
+  if (c.type === 'api') {
+    const scheme = c.scheme || 'https';
+    const defaultPort = scheme === 'https' ? 443 : 80;
+    return `${scheme}://${c.host}${c.port && c.port !== defaultPort ? `:${c.port}` : ''}`;
+  }
   if (c.type === 'pg') return `${c.user}@${c.host}:${c.port}/${c.dbname}`;
   if (c.type === 'ssh') return c.port && c.port !== 22 ? `${c.user}@${c.host}:${c.port}` : `${c.user}@${c.host}`;
   return c.url;
@@ -200,6 +204,12 @@ async function mockInvoke(cmd, args = {}) {
       if (i.type === 'ssh' && i.multi_connect === false) throw new Error('ssh connections must allow multiple agent connections per approval');
       if (i.type === 'ssh' && !i.host_key_fingerprint) throw new Error('SSH host key fingerprint is required');
       if (db.connections.some((c) => c.name === i.name)) throw new Error(`A connection named ${i.name} already exists`);
+      if (i.new_secret_name && i.new_secret_value) {
+        if (db.secrets.some((s) => s.name === i.new_secret_name)) throw new Error(`A secret named ${i.new_secret_name} already exists`);
+        const secret = mkSecret(i.new_secret_name, i.new_secret_value);
+        db.secrets.push(secret);
+        i.secret_id = secret.id;
+      }
       const secret_names = i.type === 'api'
         ? (i.template.match(/[A-Z_][A-Z0-9_]*/g) || []).filter((n) => db.secrets.some((s) => s.name === n))
         : [db.secrets.find((s) => s.id === i.secret_id)?.name].filter(Boolean);
@@ -213,8 +223,10 @@ async function mockInvoke(cmd, args = {}) {
       const i = args.input;
       if (i.type === 'ssh' && i.multi_connect === false) throw new Error('ssh connections must allow multiple agent connections per approval');
       if (i.type === 'ssh' && !i.host_key_fingerprint) throw new Error('SSH host key fingerprint is required');
-      Object.assign(c, { name: i.name, host: i.host, port: i.port, dbname: i.dbname, user: i.user,
-        host_key_fingerprint: i.host_key_fingerprint, url: i.url, template: i.template, multi_connect: i.multi_connect });
+      Object.assign(c, { name: i.name, host: i.host, scheme: i.scheme, port: i.port,
+        dbname: i.dbname, user: i.user, sslmode: i.sslmode,
+        host_key_fingerprint: i.host_key_fingerprint, url: i.url,
+        template: i.template, multi_connect: i.multi_connect });
       if (i.secret_id) c.secret_names = [db.secrets.find((s) => s.id === i.secret_id)?.name].filter(Boolean);
       audit('connectionUpdated', `Connection updated: ${i.name}`); return;
     }

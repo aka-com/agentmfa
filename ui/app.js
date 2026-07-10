@@ -7,6 +7,10 @@
 
 import { invoke, listen, mode } from '/src/bridge.js';
 import { ICONS, TYPES, esc, escAttr, toast, relTime, absTime } from '/src/util.js';
+import {
+  apiOriginFromParts, authTemplate, parseApiOrigin, parseConnectionImport,
+  portForTypeSwitch, suggestedSecretName,
+} from '/src/connection-input.mjs';
 
 const EDIT_SECRET_MASK = '••••••••••••';
 const ACTIVITY_RENDER_LIMIT = 200;
@@ -96,8 +100,8 @@ function scheduleAccessExpiryRefresh() {
 // (queue/sessions/activity changes) re-render at arbitrary times, so every
 // render first captures open drafts and then puts focus (and any text
 // selection) back where it was.
-function render() {
-  captureDrafts();
+function render(capture = true) {
+  if (capture) captureDrafts();
   const active = document.activeElement;
   const focusId = active && active.id ? active.id : null;
   const sel = focusId && typeof active.selectionStart === 'number'
@@ -419,6 +423,31 @@ function addSecretSheet(editing) {
       <button class="btn primary" data-act="save-secret">Save</button></div></div>`;
 }
 
+function credentialChooserHTML(type, draft, allowNew = true) {
+  const source = allowNew
+    ? (draft.secretSource || (draft.importedCredential || !state.secrets.length ? 'new' : 'existing'))
+    : 'existing';
+  const secretLabel = type === 'pg' ? 'Database password'
+    : type === 'ssh' ? 'SSH private key'
+    : 'Token or API key';
+  const sourceOptions = state.secrets.length
+    ? `<option value="existing" ${source === 'existing' ? 'selected' : ''}>Use a saved credential</option>` : '';
+  const select = allowNew
+    ? `<select id="c-secret-source">${sourceOptions}<option value="new" ${source === 'new' ? 'selected' : ''}>Save a new credential</option></select>`
+    : '';
+  if (source === 'existing' && state.secrets.length) {
+    const opts = state.secrets.map((secret) =>
+      `<option value="${escAttr(secret.id)}" ${draft.secretId === secret.id ? 'selected' : ''}>${esc(secret.name)}</option>`).join('');
+    return `${allowNew ? `<div class="f-row"><label>${secretLabel}</label>${select}</div>` : ''}
+      <div class="f-row"><label>${allowNew ? 'Saved credential' : secretLabel}</label><select id="c-secret">${opts}</select>${fieldErr('secret')}</div>`;
+  }
+  const suggested = suggestedSecretName(draft.name, type);
+  return `<div class="f-row"><label>${secretLabel}</label>${select}</div>
+    <div class="f-row"><label>Credential name</label><input id="c-new-secret-name" class="${fieldCls('newSecretName')}" placeholder="${escAttr(suggested)}" value="${escAttr(draft.newSecretName ?? '')}">${fieldErr('newSecretName')}</div>
+    <div class="f-row"><label>Credential value</label><input id="c-new-secret-value" class="${fieldCls('newSecretValue')}" type="password" placeholder="Saved directly to macOS Keychain" value="${escAttr(draft.newSecretValue ?? draft.importedCredential ?? '')}">${fieldErr('newSecretValue')}
+      <div class="rule-note">The value is submitted only when you save this connection and is never written to connection metadata.</div></div>`;
+}
+
 function connSheet(editing) {
   const d = state.draft;
   const t = state.connType;
@@ -427,11 +456,19 @@ function connSheet(editing) {
     if (editing) return `<button type="button" class="seg-btn ${t === val ? 'on' : ''}" disabled ${t === val ? '' : 'style="opacity:.35"'}>${label}</button>`;
     return `<button type="button" class="seg-btn ${t === val ? 'on' : ''}" data-act="conn-type" data-type="${val}">${label}</button>`;
   };
-  let fields = `<div class="f-row"><label>Name</label><input id="f-cname" class="${fieldCls('name')}" placeholder="e.g. github" value="${escAttr(d.name ?? '')}">${fieldErr('name')}</div>
+  const importWarnings = !editing && d.importWarnings && d.importWarnings.length
+    ? `<div class="pair-identity-warning"><b>Review imported details</b><ul>${d.importWarnings.map((warning) => `<li>${esc(warning)}</li>`).join('')}</ul></div>` : '';
+  let fields = editing ? '' : `<div class="set-panel"><div class="f-row"><label>Paste an existing connection</label>
+      <div class="f-2col"><input id="f-import" placeholder="Postgres DSN, API/WS URL, or ssh user@host" value="${escAttr(d.importSource ?? '')}">
+      <button type="button" class="btn sm" data-act="apply-connection-import">Use details</button></div>
+      <div class="rule-note">AgentMFA parses this locally. You review every field before it is saved.</div>${fieldErr('import')}</div></div>${importWarnings}`;
+  fields += `<div class="f-row"><label>Name</label><input id="f-cname" class="${fieldCls('name')}" placeholder="e.g. github" value="${escAttr(d.name ?? '')}">${fieldErr('name')}</div>
     <div class="f-row"><label>Type${editing ? ': fixed after creation' : ''}</label>
     <div class="seg in-form">${typeBtn('api', 'API key')}${typeBtn('pg', 'Postgres')}${typeBtn('ssh', 'SSH')}${typeBtn('ws', 'WebSocket')}</div></div>`;
   if (t === 'api') {
-    fields += `<div class="f-row"><label>Host</label><input id="f-host" class="${fieldCls('host')}" placeholder="api.github.com" value="${escAttr(d.host ?? '')}">${fieldErr('host')}</div>`;
+    const origin = d.origin ?? apiOriginFromParts(d.scheme, d.host, d.port);
+    fields += `<div class="f-row"><label>API origin</label><input id="f-origin" class="${fieldCls('origin')}" placeholder="https://api.github.com" value="${escAttr(origin)}">${fieldErr('origin')}
+      <div class="rule-note">Scheme, host, and optional port only. The agent supplies each request path.</div></div>`;
   } else if (t === 'ssh') {
     fields += `<div class="f-2col">
       <div class="f-row"><label>Host</label><input id="f-host" class="${fieldCls('host')}" placeholder="prod.example.com" value="${escAttr(d.host ?? '')}">${fieldErr('host')}</div>
@@ -457,25 +494,46 @@ function connSheet(editing) {
   } else {
     fields += `<div class="f-row"><label>URL</label><input id="f-url" class="${fieldCls('url')}" placeholder="wss://stream.example.com/feed" value="${escAttr(d.url ?? '')}">${fieldErr('url')}</div>`;
   }
-  // Secret picker (pg/ws bind one; api derives refs from the template).
-  if (t !== 'api') {
-    const secretLabel = t === 'pg' ? 'Password secret'
-      : t === 'ssh' ? 'Private key secret'
-      : 'Token secret';
-    const hasSecrets = state.secrets.length > 0;
-    const opts = state.secrets.map((s) =>
-      `<option value="${escAttr(s.id)}" ${d.secretId === s.id ? 'selected' : ''}>${esc(s.name)}</option>`).join('');
-    fields += `<div class="f-row"><label>${secretLabel}</label><select id="c-secret" ${hasSecrets ? '' : 'disabled'}>${hasSecrets ? opts : '<option>No secrets, add one first</option>'}</select></div>`;
-    if (t !== 'ssh') {
-      fields += `<div class="f-row"><label style="display:flex;align-items:center;gap:7px;cursor:pointer">
-        <input type="checkbox" id="c-multi" ${d.multiConnect !== false ? 'checked' : ''} style="width:auto">
-        <span>Let tools reconnect for 60 seconds after opening</span></label>
-        <div class="rule-note">Useful for connection pools and tools that reconnect automatically.</div></div>`;
+  // Authentication is recipe-driven for new connections. Existing custom
+  // templates remain directly editable so the UI round-trips every config.
+  if (editing && t === 'api') {
+    fields += `<div class="f-row"><label>Injection template</label>
+      <input id="c-template" class="${fieldCls('template')}" value="${escAttr(d.template ?? '')}">${fieldErr('template')}
+      <div class="rule-note">Advanced template; references saved credentials by name.</div></div>`;
+  } else if (editing) {
+    if (t !== 'ws' || !d.template) fields += credentialChooserHTML(t, d, false);
+    if (t === 'ws' && d.template) {
+      fields += `<details class="set-collapse" ${d.template ? 'open' : ''}><summary>Custom authentication header</summary>
+        <div class="set-panel"><div class="f-row"><label>Injection template</label>
+        <input id="c-template" class="${fieldCls('template')}" placeholder="Authorization: Bearer {{TOKEN_NAME}}" value="${escAttr(d.template ?? '')}">${fieldErr('template')}</div></div></details>`;
+    }
+  } else if (t === 'api' || t === 'ws') {
+    const modeValue = d.authMode || 'bearer';
+    const recipes = [
+      ['bearer', 'Bearer token'], ['header', 'Custom header'],
+      ...(t === 'api' ? [['query', 'Query parameter']] : []),
+      ['advanced', 'Advanced template'],
+    ].map(([value, label]) => `<option value="${value}" ${modeValue === value ? 'selected' : ''}>${label}</option>`).join('');
+    fields += `<div class="f-row"><label>Authentication</label><select id="c-auth-mode">${recipes}</select></div>`;
+    if (modeValue === 'header') {
+      fields += `<div class="f-row"><label>Header name</label><input id="c-auth-detail" class="${fieldCls('authDetail')}" placeholder="X-API-Key" value="${escAttr(d.authDetail ?? '')}">${fieldErr('authDetail')}</div>`;
+    } else if (modeValue === 'query') {
+      fields += `<div class="f-row"><label>Query parameter</label><input id="c-auth-detail" class="${fieldCls('authDetail')}" placeholder="api_key" value="${escAttr(d.authDetail ?? '')}">${fieldErr('authDetail')}</div>`;
+    }
+    if (modeValue === 'advanced') {
+      fields += `<div class="f-row"><label>Injection template</label><input id="c-template" class="${fieldCls('template')}" placeholder="Authorization: Bearer {{TOKEN_NAME}}" value="${escAttr(d.template ?? '')}">${fieldErr('template')}
+        <div class="rule-note">References credentials by name using <code>{{ … }}</code>. Use this for Basic auth or composed credentials.</div></div>`;
+    } else {
+      fields += credentialChooserHTML(t, d);
     }
   } else {
-    fields += `<div class="f-row"><label>Injection template</label>
-      <input id="c-template" placeholder="Authorization: Bearer {{GITHUB_API_KEY}}" value="${escAttr(d.template ?? '')}">
-      <div class="rule-note">References secrets by name in <code>{{ … }}</code>. API connections may compose several (e.g. <code>base64(USER ":" PASS)</code>).</div></div>`;
+    fields += credentialChooserHTML(t, d);
+  }
+  if (t === 'pg' || t === 'ws') {
+    fields += `<div class="f-row"><label style="display:flex;align-items:center;gap:7px;cursor:pointer">
+      <input type="checkbox" id="c-multi" ${d.multiConnect !== false ? 'checked' : ''} style="width:auto">
+      <span>Let tools reconnect for 60 seconds after opening</span></label>
+      <div class="rule-note">Useful for connection pools and tools that reconnect automatically.</div></div>`;
   }
   if (editing && conn && conn.rules.length) {
     fields += `<div class="rule-note">Changing the destination makes affected agents ask for approval again.</div>`;
@@ -755,6 +813,8 @@ function captureDrafts() {
   }
   if (state.sheet && (state.sheet.kind === 'add-conn' || state.sheet.kind === 'edit-conn')) {
     if (g('f-cname') !== undefined) state.draft.name = g('f-cname');
+    if (g('f-import') !== undefined) state.draft.importSource = g('f-import');
+    if (g('f-origin') !== undefined) state.draft.origin = g('f-origin');
     if (g('f-host') !== undefined) state.draft.host = g('f-host');
     if (g('f-port') !== undefined) state.draft.port = g('f-port');
     if (g('f-db') !== undefined) state.draft.dbname = g('f-db');
@@ -764,6 +824,14 @@ function captureDrafts() {
     if (g('f-url') !== undefined) state.draft.url = g('f-url');
     if (g('c-template') !== undefined) state.draft.template = g('c-template');
     if (g('c-secret') !== undefined) state.draft.secretId = g('c-secret');
+    if (g('c-secret-source') !== undefined) state.draft.secretSource = g('c-secret-source');
+    if (g('c-new-secret-name') !== undefined) state.draft.newSecretName = g('c-new-secret-name');
+    if (g('c-new-secret-value') !== undefined) {
+      state.draft.newSecretValue = g('c-new-secret-value');
+      delete state.draft.importedCredential;
+    }
+    if (g('c-auth-mode') !== undefined) state.draft.authMode = g('c-auth-mode');
+    if (g('c-auth-detail') !== undefined) state.draft.authDetail = g('c-auth-detail');
     if (gc('c-multi') !== undefined) state.draft.multiConnect = gc('c-multi');
   }
   if (state.sheet && state.sheet.kind === 'settings') {
@@ -809,10 +877,12 @@ async function saveConn() {
   const d = state.draft;
   const name = (d.name || '').trim();
   const t = state.connType;
+  const adding = state.sheet.kind === 'add-conn';
+  const authMode = d.authMode || 'bearer';
   const errs = {};
   if (!name) errs.name = 'Name is required';
   if (t === 'api' || t === 'pg' || t === 'ssh') {
-    if (!(d.host || '').trim()) errs.host = 'Host is required';
+    if (t !== 'api' && !(d.host || '').trim()) errs.host = 'Host is required';
   }
   let port = t === 'ssh' ? 22 : 5432;
   if (t === 'pg' || t === 'ssh') {
@@ -832,30 +902,71 @@ async function saveConn() {
     if (!url) errs.url = 'URL is required';
     else if (!/^wss?:\/\//i.test(url)) errs.url = 'Must start with ws:// or wss://';
   }
+  let apiOrigin = null;
+  if (t === 'api') {
+    try { apiOrigin = parseApiOrigin(d.origin || ''); }
+    catch (error) { errs.origin = error.message; }
+  }
+  const usesRecipe = adding && (t === 'api' || t === 'ws') && authMode !== 'advanced';
+  const needsCredentialChoice = (adding && !((t === 'api' || t === 'ws') && authMode === 'advanced')) ||
+    (!adding && t !== 'api');
+  const secretSource = adding
+    ? (d.secretSource || (d.importedCredential || !state.secrets.length ? 'new' : 'existing'))
+    : 'existing';
+  let selectedSecret = null;
+  let newSecretName = null;
+  if (needsCredentialChoice && secretSource === 'existing') {
+    selectedSecret = state.secrets.find((secret) => secret.id === d.secretId) || state.secrets[0] || null;
+    if (!selectedSecret) errs.secret = 'Choose a saved credential or save a new one';
+  } else if (needsCredentialChoice) {
+    newSecretName = (d.newSecretName || suggestedSecretName(name, t)).trim();
+    const newSecretValue = d.newSecretValue ?? d.importedCredential ?? '';
+    if (!/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(newSecretName)) {
+      errs.newSecretName = 'Use letters, numbers, and underscores; start with a letter or underscore';
+    }
+    if (!newSecretValue) errs.newSecretValue = 'Credential value is required';
+  }
+  const templateSecretName = selectedSecret ? selectedSecret.name : newSecretName;
+  let injectionTemplate = (d.template || '').trim();
+  if (usesRecipe) {
+    try { injectionTemplate = authTemplate(t, authMode, templateSecretName || '', (d.authDetail || '').trim()); }
+    catch (error) { errs.authDetail = error.message; }
+  } else if ((t === 'api' || (adding && t === 'ws')) && authMode === 'advanced' && !injectionTemplate) {
+    errs.template = 'Injection template is required';
+  } else if (!adding && t === 'api' && !injectionTemplate) {
+    errs.template = 'Injection template is required';
+  }
   if (Object.keys(errs).length) { state.sheetErrors = errs; render(); return; }
   const input = { name, type: t, multi_connect: t === 'ssh' || d.multiConnect !== false };
+  if (adding && needsCredentialChoice && secretSource === 'new') {
+    input.new_secret_name = newSecretName;
+    input.new_secret_value = d.newSecretValue ?? d.importedCredential;
+  }
   if (t === 'api') {
-    input.host = (d.host || '').trim();
-    input.template = (d.template || '').trim();
+    input.host = apiOrigin.host;
+    input.scheme = apiOrigin.scheme;
+    input.port = apiOrigin.port;
+    input.template = injectionTemplate;
   } else if (t === 'pg') {
     input.host = (d.host || '').trim();
     input.port = port;
     input.dbname = (d.dbname || '').trim();
     input.user = (d.user || '').trim();
     input.sslmode = d.sslmode || 'require';
-    input.secret_id = d.secretId || (state.secrets[0] && state.secrets[0].id);
+    if (selectedSecret) input.secret_id = selectedSecret.id;
   } else if (t === 'ssh') {
     input.host = (d.host || '').trim();
     input.port = port;
     input.user = (d.user || '').trim();
     input.host_key_fingerprint = (d.hostKeyFingerprint || '').trim();
-    input.secret_id = d.secretId || (state.secrets[0] && state.secrets[0].id);
+    if (selectedSecret) input.secret_id = selectedSecret.id;
   } else {
     input.url = (d.url || '').trim();
-    input.secret_id = d.secretId || (state.secrets[0] && state.secrets[0].id);
+    input.template = injectionTemplate || null;
+    if (selectedSecret) input.secret_id = selectedSecret.id;
   }
-  const cmd = state.sheet.kind === 'add-conn' ? 'add_connection' : 'edit_connection';
-  const args = state.sheet.kind === 'add-conn' ? { input } : { id: state.sheet.id, input };
+  const cmd = adding ? 'add_connection' : 'edit_connection';
+  const args = adding ? { input } : { id: state.sheet.id, input };
   try {
     await invoke(cmd, args);
     toast(state.sheet.kind === 'add-conn' ? '🔌 Connection saved' : '✏️ Connection updated');
@@ -938,11 +1049,35 @@ document.addEventListener('click', async (e) => {
     case 'save-secret': await saveSecret(); break;
 
     case 'open-add-conn': state.sheet = { kind: 'add-conn' }; state.connType = 'api'; state.draft = {}; state.sheetErrors = {}; render(); focusField('f-cname'); break;
+    case 'apply-connection-import': {
+      captureDrafts();
+      try {
+        const imported = parseConnectionImport(state.draft.importSource || '');
+        state.connType = imported.type;
+        state.draft = {
+          ...state.draft,
+          ...imported.fields,
+          importSource: '',
+          name: state.draft.name || imported.name,
+          importedCredential: imported.credential,
+          importWarnings: imported.warnings,
+          port: imported.fields.port == null ? state.draft.port : String(imported.fields.port),
+        };
+        delete state.sheetErrors.import;
+        render(false);
+        focusField('f-cname');
+      } catch (error) {
+        state.sheetErrors.import = error.message;
+        render();
+      }
+      break;
+    }
     case 'edit-conn': {
       const c = state.connections.find((x) => x.id === id);
       state.sheet = { kind: 'edit-conn', id }; state.connType = c.type;
       state.sheetErrors = {};
-      state.draft = { name: c.name, host: c.host,
+      state.draft = { name: c.name, host: c.host, scheme: c.scheme,
+        origin: c.type === 'api' ? apiOriginFromParts(c.scheme, c.host, c.port) : null,
         port: c.port ? String(c.port) : (c.type === 'ssh' ? '22' : '5432'),
         dbname: c.dbname, user: c.user, url: c.url, template: c.template,
         hostKeyFingerprint: c.host_key_fingerprint,
@@ -955,7 +1090,14 @@ document.addEventListener('click', async (e) => {
       }
       render(); focusField('f-cname'); break;
     }
-    case 'conn-type': captureDrafts(); state.connType = btn.dataset.type; render(); break;
+    case 'conn-type': {
+      captureDrafts();
+      const nextType = btn.dataset.type;
+      state.draft.port = portForTypeSwitch(state.connType, nextType, state.draft.port);
+      state.connType = nextType;
+      render(false);
+      break;
+    }
     case 'save-conn': await saveConn(); break;
     case 'del-conn-ask': state.confirm = { kind: 'del-conn', id }; render(); break;
     case 'del-conn-confirm':
@@ -1104,9 +1246,12 @@ document.addEventListener('keydown', (e) => {
 
 // Editing a field clears its inline validation error.
 const ERR_KEY_BY_INPUT = {
-  'f-name': 'name', 'f-value': 'value',
-  'f-cname': 'name', 'f-host': 'host', 'f-port': 'port',
-  'f-db': 'dbname', 'f-user': 'user', 'f-url': 'url', 'c-template': 'template',
+  'f-name': 'name', 'f-value': 'value', 'f-import': 'import',
+  'f-cname': 'name', 'f-origin': 'origin', 'f-host': 'host', 'f-port': 'port',
+  'f-db': 'dbname', 'f-user': 'user', 'f-host-key': 'hostKeyFingerprint',
+  'f-url': 'url', 'c-template': 'template', 'c-secret': 'secret',
+  'c-new-secret-name': 'newSecretName', 'c-new-secret-value': 'newSecretValue',
+  'c-auth-detail': 'authDetail',
 };
 document.addEventListener('input', (e) => {
   const key = e.target && ERR_KEY_BY_INPUT[e.target.id];
@@ -1114,6 +1259,14 @@ document.addEventListener('input', (e) => {
     delete state.sheetErrors[key];
     render();
   }
+});
+
+// These selects reveal a different, stateful portion of the form. Capture
+// first so switching does not discard fields the user may switch back to.
+document.addEventListener('change', (e) => {
+  if (!e.target || !['c-secret-source', 'c-auth-mode'].includes(e.target.id)) return;
+  captureDrafts();
+  render(false);
 });
 
 /* --------------------------------- boot ---------------------------------- */

@@ -94,6 +94,28 @@ concealed item and conditionally clears it after 30 seconds.
   requests. WebSocket and Postgres data sessions use short-lived tickets on
   OS-assigned loopback ports; SSH uses a scoped per-open ssh-agent socket.
 
+## Add an existing connection
+
+The desktop app is connection-first: open **Connections → Add connection** and
+paste a familiar value into **Paste an existing connection**. The parser runs
+locally and prefills a reviewable form for:
+
+- `postgres://` / `postgresql://` DSNs (including user, password, port,
+  database, and supported `sslmode` values);
+- `http://` / `https://` API origins and `ws://` / `wss://` URLs;
+- simple `ssh [-i key] [-p port] user@host` commands or `ssh://` URLs.
+
+If a Postgres DSN contains a password, the original pasted DSN is cleared
+after parsing. Choosing **Save a new credential** writes the password and the
+connection as one core operation: either both the Keychain item and connection
+are saved, or neither is. SSH identity files are deliberately not read from a
+pasted command, and the server host-key fingerprint must still be confirmed.
+
+For APIs and WebSockets, common Bearer and custom-header recipes—and an API
+query-parameter recipe—generate the visible injection template for you. **Advanced template**
+keeps the explicit template language available for Basic auth, composed
+credentials, and unusual services.
+
 ## Adoption and compatibility
 
 - AgentMFA v1 is a single-user, local macOS 13+ application. It has no remote
@@ -125,8 +147,8 @@ Everything runs from the repo root. `npm install` once to get the pinned
 Tauri CLI, then:
 
 ```
-npm test           # cargo test --workspace (core + CLI crates)
-npm run clippy     # cargo clippy --workspace --all-targets
+npm test           # core, CLI, desktop-command, and pure UI helper tests
+npm run clippy     # lint the workspace and the separate Tauri app crate
 
 # macOS desktop app (src-tauri is outside the cargo workspace; the scripts
 # reach it via --manifest-path / the Tauri CLI)

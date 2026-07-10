@@ -131,7 +131,7 @@ and closes live WebSocket, Postgres, and SSH connections for that agent name.
 ## 2. Discover what you may ask for
 
     GET /v1/connections
-    → [{{"name": "github", "type": "api", "target": "api.github.com",
+    → [{{"name": "github", "type": "api", "target": "https://api.github.com",
          "endpoint": "/v1/http", "multi_connect": false,
          "approval": "will_prompt", "access_session": null}}, …]
 
