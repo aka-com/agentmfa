@@ -632,15 +632,6 @@ impl Store {
         self.commit(&mut state, next)
     }
 
-    pub fn set_hide_secret_prefixes(&self, on: bool) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
-        let mut settings = state.settings();
-        settings.hide_secret_prefixes = on;
-        let mut next = state.clone();
-        next.settings = Some(settings);
-        self.commit(&mut state, next)
-    }
-
     pub fn set_menu_bar_hides_dock(&self, on: bool) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         let mut settings = state.settings();
@@ -1397,8 +1388,8 @@ mod tests {
         assert!(store.delete_connection(&connection.id).is_err());
         assert!(store.connection_by_id(&connection.id).is_ok());
 
-        assert!(store.set_hide_secret_prefixes(false).is_err());
-        assert!(store.settings().hide_secret_prefixes);
+        assert!(store.set_menu_bar_hides_dock(true).is_err());
+        assert!(!store.settings().menu_bar_hides_dock);
 
         assert!(store.delete_secret(&spare.id).is_err());
         assert!(store.secret_by_id(&spare.id).is_ok());

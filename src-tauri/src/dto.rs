@@ -269,7 +269,6 @@ impl From<&AuditEntry> for ActivityDto {
 #[derive(Serialize)]
 pub struct SettingsDto {
     pub reauth_on_read: bool,
-    pub hide_secret_prefixes: bool,
     pub menu_bar_hides_dock: bool,
 }
 

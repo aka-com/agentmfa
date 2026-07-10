@@ -79,7 +79,7 @@ const db = {
   ],
   sessions: [],
   activity: [],
-  settings: { reauth_on_read: true, hide_secret_prefixes: true, menu_bar_hides_dock: false },
+  settings: { reauth_on_read: true, menu_bar_hides_dock: false },
   queue: [],
 };
 function mkSecret(name, value) {
@@ -291,9 +291,6 @@ async function mockInvoke(cmd, args = {}) {
       return true;
     case 'close_session': db.sessions = db.sessions.filter((s) => s.id !== args.id); emit('amfa://sessions-changed', {}); return true;
     case 'set_reauth_on_read': db.settings.reauth_on_read = args.on; return;
-    case 'set_hide_secret_prefixes':
-      db.settings.hide_secret_prefixes = args.on;
-      return;
     case 'set_menu_bar_hides_dock':
       db.settings.menu_bar_hides_dock = args.on;
       return;

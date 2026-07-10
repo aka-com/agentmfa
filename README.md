@@ -123,8 +123,8 @@ keeps the explicit template language available for Basic auth, composed
 credentials, and unusual services.
 
 Connections are the default view, and their setup flow can create or reuse a
-secret directly. The standalone Secrets manager remains available from
-**Settings → Manage secrets** for rotation, copying, and shared credentials.
+secret directly. The Secrets tab sits next to Connections for rotation, copying,
+and shared credentials.
 
 ## Adoption and compatibility
 
@@ -345,7 +345,7 @@ AgentMFA persistence
 |   |   `-- secret metadata, connection configs, settings
 |   |       - secret ids/names/timestamps only
 |   |       - connection targets/templates/secret UUID refs
-|   |       - settings: reauth, hide prefixes, menu bar Dock behavior
+|   |       - settings: reauth, menu bar Dock behavior
 |   |       - per-connection Postgres TLS mode and optional CA bundle path
 |   |
 |   |-- rules.json                                  0600, atomic, HMAC-sealed

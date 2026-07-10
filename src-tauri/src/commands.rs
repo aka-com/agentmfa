@@ -332,7 +332,6 @@ pub fn get_settings(state: State<AppState>) -> SettingsDto {
     let s = state.broker.settings();
     SettingsDto {
         reauth_on_read: s.reauth_on_read,
-        hide_secret_prefixes: s.hide_secret_prefixes,
         menu_bar_hides_dock: s.menu_bar_hides_dock,
     }
 }
@@ -733,14 +732,6 @@ pub fn set_reauth_on_read(state: State<AppState>, on: bool) -> CmdResult<()> {
 }
 
 #[tauri::command]
-pub fn set_hide_secret_prefixes(state: State<AppState>, on: bool) -> CmdResult<()> {
-    state
-        .broker
-        .ui_set_hide_secret_prefixes(on)
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
 pub fn set_menu_bar_hides_dock(state: State<AppState>, on: bool) -> CmdResult<()> {
     state
         .broker
@@ -819,7 +810,6 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         revoke_agent,
         close_session,
         set_reauth_on_read,
-        set_hide_secret_prefixes,
         set_menu_bar_hides_dock,
         decide,
         crate::windows::ui_set_mode,

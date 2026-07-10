@@ -1068,10 +1068,6 @@ impl Broker {
         Ok(())
     }
 
-    pub fn ui_set_hide_secret_prefixes(&self, on: bool) -> Result<()> {
-        self.store.set_hide_secret_prefixes(on)
-    }
-
     pub fn ui_set_menu_bar_hides_dock(&self, on: bool) -> Result<()> {
         self.store.set_menu_bar_hides_dock(on)
     }

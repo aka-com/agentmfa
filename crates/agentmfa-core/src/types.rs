@@ -223,10 +223,6 @@ impl Connection {
     }
 }
 
-fn default_true() -> bool {
-    true
-}
-
 /// The peer identity pinned to a pair token at pairing time (DESIGN.md §8).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -421,10 +417,6 @@ pub struct Settings {
     /// "Require OS authentication to read secrets", default on. The macOS
     /// app gates each broker-side vault read with LocalAuthentication.
     pub reauth_on_read: bool,
-    /// "Hide secret prefixes", default on. When on, the secrets list offers
-    /// no reveal-prefix affordance; values stay copy-only.
-    #[serde(default = "default_true")]
-    pub hide_secret_prefixes: bool,
     /// Read-only migration source for pre-connection-scoped CA settings.
     #[serde(
         default,
@@ -444,7 +436,6 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             reauth_on_read: true,
-            hide_secret_prefixes: true,
             legacy_pg_trusted_ca_bundle_path: None,
             menu_bar_hides_dock: false,
         }

@@ -17,7 +17,7 @@ const EDIT_SECRET_MASK = '••••••••••••';
 const ACTIVITY_RENDER_LIMIT = 200;
 
 // The left-nav tabs, in order — also the cycle order for Ctrl-Tab.
-const TABS = ['connections', 'activity'];
+const TABS = ['connections', 'secrets', 'activity'];
 
 /* ------------------------------ local state ------------------------------ */
 const state = {
@@ -29,7 +29,7 @@ const state = {
   activity: [],
   queue: [],
   brokerInstructions: '', // full GET /instructions body (lazy-loaded)
-  settings: { reauth_on_read: true, hide_secret_prefixes: true, menu_bar_hides_dock: false },
+  settings: { reauth_on_read: true, menu_bar_hides_dock: false },
   reveal: {},            // secretId -> prefix string (transient)
   // sheet / confirm state
   sheet: null,           // {kind:'add-secret'|'edit-secret'|'add-conn'|'edit-conn'|'settings', ...}
@@ -202,14 +202,12 @@ function secretsHTML() {
           <button class="btn sm danger" data-act="del-secret-confirm" data-id="${s.id}">Delete</button></div></td></tr>`;
     }
     // The eye reveals only an audited short prefix (the full value never
-    // enters the webview); the "Hide secret prefixes" setting removes the
-    // affordance entirely.
-    const revealed = state.settings.hide_secret_prefixes ? null : state.reveal[s.id];
+    // enters the webview).
+    const revealed = state.reveal[s.id];
     const copied = state.copied === s.id;
     // the eye toggles reveal ↔ conceal; copy is a ghost button that surfaces on
     // hovering the value (available whether or not the prefix is revealed)
-    const eyeBtn = state.settings.hide_secret_prefixes ? ''
-      : revealed
+    const eyeBtn = revealed
       ? `<button class="icon-btn eye-btn" title="Hide prefix" aria-label="Hide prefix" data-act="hide-secret" data-id="${s.id}">${ICONS.eyeOff}</button>`
       : `<button class="icon-btn eye-btn" title="Reveal prefix" aria-label="Reveal prefix" data-act="reveal-secret" data-id="${s.id}">${ICONS.eye}</button>`;
     // The copy affordance and the post-copy "Copied" status both overlay the
@@ -342,8 +340,7 @@ function brokerReadyHTML() {
 }
 
 function renderMainWindow() {
-  const navTabs = state.tab === 'secrets' ? ['secrets', ...TABS] : TABS;
-  const nav = navTabs.map((tb) =>
+  const nav = TABS.map((tb) =>
     `<button class="nav-item ${state.tab === tb ? 'on' : ''}" data-act="tab" data-tab="${tb}">${cap(tb)}</button>`).join('');
   // One view-specific action, always in the header row next to the title.
   const actionBtn = state.tab === 'connections'
@@ -377,8 +374,7 @@ function renderMainWindow() {
 }
 
 function renderDropdown() {
-  const navTabs = state.tab === 'secrets' ? ['secrets', ...TABS] : TABS;
-  const tabs = navTabs.map((tb) =>
+  const tabs = TABS.map((tb) =>
     `<button class="seg-btn ${state.tab === tb ? 'on' : ''}" data-act="tab" data-tab="${tb}">${cap(tb)}</button>`).join('');
   const footer = state.tab === 'secrets'
     ? '<div class="dd-footer"><button class="btn block" data-act="open-add-secret">＋ Add secret</button></div>'
@@ -582,18 +578,12 @@ function settingsSheet() {
   const reauthRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Confirm before using saved secrets</div>
       <div class="st-sub">Use OS authentication before showing, copying, or sending a saved credential.</div></div>
       <button class="switch ${s.reauth_on_read ? 'on' : ''}" data-act="toggle-reauth" role="checkbox" aria-checked="${s.reauth_on_read ? 'true' : 'false'}"></button></div>`;
-  const prefixRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Hide secret prefixes</div>
-      <div class="st-sub">Don't show the beginning of secrets in the secret list.</div></div>
-      <button class="switch ${s.hide_secret_prefixes ? 'on' : ''}" data-act="toggle-hide-prefixes" role="checkbox" aria-checked="${s.hide_secret_prefixes ? 'true' : 'false'}"></button></div>`;
   const dockRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Hide Dock icon in the menu bar</div>
       <div class="st-sub">When minimized to the menu bar, hide the Dock icon until the window is reopened.</div></div>
       <button class="switch ${s.menu_bar_hides_dock ? 'on' : ''}" data-act="toggle-menubar-dock" role="checkbox" aria-checked="${s.menu_bar_hides_dock ? 'true' : 'false'}"></button></div>`;
-  const secretsRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Secrets</div>
-      <div class="st-sub">Manage saved values independently from their connections.</div></div>
-      <button class="btn sm" data-act="open-secrets">Manage secrets</button></div>`;
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
     <div class="sheet wide"><h3>Settings</h3>
-    ${reauthRow}${prefixRow}${dockRow}${secretsRow}
+    ${reauthRow}${dockRow}
     <div class="sheet-actions"><button class="btn primary" data-act="sheet-cancel">Done</button></div></div>`;
 }
 
@@ -1056,7 +1046,6 @@ document.addEventListener('click', async (e) => {
     case 'mode-window': run(() => invoke('ui_set_mode', { mode: 'window' })); break;
     case 'toggle-settings-menu': state.menuOpen = !state.menuOpen; render(); break;
     case 'open-settings': state.menuOpen = false; state.sheet = { kind: 'settings' }; render(); break;
-    case 'open-secrets': state.sheet = null; state.tab = 'secrets'; render(); break;
     case 'copy-agent-setup':
       if (await run(() => invoke('copy_agent_setup'))) toast('📋 Setup instructions copied');
       break;
@@ -1205,15 +1194,6 @@ document.addEventListener('click', async (e) => {
         const on = !state.settings.reauth_on_read;
         await run(() => invoke('set_reauth_on_read', { on }));
         toast(on ? '💳 Confirmation required before using saved secrets' : '💳 Extra confirmation removed');
-      }
-      await refresh('settings');
-      break;
-    case 'toggle-hide-prefixes':
-      {
-        const on = !state.settings.hide_secret_prefixes;
-        if (on) state.reveal = {}; // conceal anything currently revealed
-        await run(() => invoke('set_hide_secret_prefixes', { on }));
-        toast(on ? '👁 Secret prefixes hidden' : '👁 Secret prefixes shown');
       }
       await refresh('settings');
       break;

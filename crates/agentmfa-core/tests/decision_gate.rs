@@ -712,7 +712,6 @@ async fn settings_changes_are_not_added_to_the_activity_log() {
     let (broker, _dir) = broker_with(events.clone()).await;
 
     broker.ui_change_reauth_on_read(false).unwrap();
-    broker.ui_set_hide_secret_prefixes(false).unwrap();
     broker.ui_set_menu_bar_hides_dock(true).unwrap();
     assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
     let recent = broker.audit.recent(10);
