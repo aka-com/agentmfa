@@ -8,7 +8,25 @@ const cargoArgs = buildArgs.includes("--")
   ? buildArgs.slice(0, buildArgs.indexOf("--"))
   : buildArgs;
 
-function flagValue(names) {
+interface CargoTarget {
+  name: string;
+  kind: string[];
+}
+
+interface CargoPackage {
+  id: string;
+  name: string;
+  targets: CargoTarget[];
+}
+
+interface CargoMetadata {
+  packages: CargoPackage[];
+  workspace_members: string[];
+  workspace_default_members: string[];
+  target_directory: string;
+}
+
+function flagValue(names: readonly string[]): string | undefined {
   for (let index = 0; index < cargoArgs.length; index += 1) {
     const arg = cargoArgs[index];
     for (const name of names) {
@@ -23,8 +41,8 @@ function flagValue(names) {
   return undefined;
 }
 
-function flagValues(names) {
-  const values = [];
+function flagValues(names: readonly string[]): string[] {
+  const values: string[] = [];
   for (let index = 0; index < cargoArgs.length; index += 1) {
     const arg = cargoArgs[index];
     for (const name of names) {
@@ -38,15 +56,15 @@ function flagValues(names) {
   return values;
 }
 
-function hasFlag(names) {
+function hasFlag(names: readonly string[]): boolean {
   return cargoArgs.some((arg) => names.includes(arg));
 }
 
-function matchesPackage(pkg, spec) {
+function matchesPackage(pkg: CargoPackage, spec: string): boolean {
   return pkg.name === spec || pkg.id === spec || pkg.id.includes(`#${spec}`);
 }
 
-function executableSuffix(targetTriple) {
+function executableSuffix(targetTriple: string | undefined): string {
   const buildsWindowsTarget = targetTriple?.includes("windows");
   return buildsWindowsTarget || (!targetTriple && process.platform === "win32")
     ? ".exe"
@@ -77,9 +95,9 @@ if (metadataResult.status !== 0) {
   process.exit(0);
 }
 
-let metadata;
+let metadata: CargoMetadata;
 try {
-  metadata = JSON.parse(metadataResult.stdout);
+  metadata = JSON.parse(metadataResult.stdout) as CargoMetadata;
 } catch {
   console.error("Could not parse Cargo metadata to resolve target executable.");
   process.exit(0);

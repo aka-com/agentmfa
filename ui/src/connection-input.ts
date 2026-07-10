@@ -1,13 +1,73 @@
-// Pure connection-form helpers. Kept separate from app.js so the security-
+// Pure connection-form helpers. Kept separate from app.ts so the security-
 // relevant normalization rules can be exercised without a browser/Tauri.
 
-export function apiOriginFromParts(scheme = 'https', host = '', port = null) {
+export type ConnectionType = 'api' | 'pg' | 'ws' | 'ssh';
+
+export interface HostKeyCandidate {
+  fingerprint: string;
+  algorithm: string;
+  source: string;
+}
+
+export interface SshImportPreview {
+  importId: string;
+  destination: string;
+  host: string;
+  port: number;
+  user: string;
+  proxyJump?: string | null;
+  identityFiles?: string[];
+  hostKeyCandidates?: HostKeyCandidate[];
+  warnings?: string[];
+}
+
+interface ImportBase<T extends ConnectionType, F> {
+  type: T;
+  name: string;
+  credential: string | null;
+  warnings: string[];
+  fields: F;
+}
+
+export type ConnectionImport =
+  | ImportBase<'api', { origin: string }>
+  | ImportBase<'ws', { url: string }>
+  | ImportBase<'pg', {
+      host: string;
+      port: number;
+      user: string;
+      dbname: string;
+      sslmode: string;
+      pgCaBundlePath: string | null;
+    }>
+  | ImportBase<'ssh', {
+      destination?: string;
+      host: string;
+      port: number;
+      user: string;
+      hostKeyFingerprint: string;
+      hostKeyCandidates?: HostKeyCandidate[];
+      identityFiles?: string[];
+      identityFile?: string;
+      sshImportId?: string;
+      proxyJump?: string | null;
+    }>;
+
+export function apiOriginFromParts(
+  scheme = 'https',
+  host = '',
+  port: number | string | null = null,
+): string {
   if (!host) return '';
   return `${scheme || 'https'}://${host}${port ? `:${port}` : ''}`;
 }
 
-export function parseApiOrigin(value) {
-  let parsed;
+export function parseApiOrigin(value: unknown): {
+  scheme: string;
+  host: string;
+  port: number | null;
+} {
+  let parsed: URL;
   try {
     parsed = new URL(String(value).trim());
   } catch {
@@ -30,25 +90,29 @@ export function parseApiOrigin(value) {
   };
 }
 
-export function portForTypeSwitch(currentType, nextType, currentPort) {
-  const defaults = { pg: '5432', ssh: '22' };
+export function portForTypeSwitch(
+  currentType: ConnectionType,
+  nextType: ConnectionType,
+  currentPort: number | string | null,
+): string {
+  const defaults: Partial<Record<ConnectionType, string>> = { pg: '5432', ssh: '22' };
   const value = currentPort == null ? '' : String(currentPort);
   if (value === (defaults[currentType] || '')) return defaults[nextType] || '';
   return value || defaults[nextType] || '';
 }
 
-function decoded(value, label) {
+function decoded(value: string, label: string): string {
   try { return decodeURIComponent(value); }
   catch { throw new Error(`${label} contains invalid percent encoding`); }
 }
 
-function suggestedName(host, fallback) {
+function suggestedName(host: string | undefined, fallback: string): string {
   const first = String(host || fallback || 'connection').split('.')[0];
   const clean = first.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
   return clean || fallback || 'connection';
 }
 
-function unwrapInput(value) {
+function unwrapInput(value: unknown): string {
   let text = String(value || '').trim();
   text = text.replace(/^(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=\s*/, '').trim();
   if ((text.startsWith('"') && text.endsWith('"')) ||
@@ -56,7 +120,7 @@ function unwrapInput(value) {
   return text.trim();
 }
 
-function parseSshCommand(text) {
+function parseSshCommand(text: string): ConnectionImport {
   if (/[;&|`$<>\n\r]/.test(text)) {
     throw new Error('SSH import accepts one ssh command without shell operators');
   }
@@ -97,13 +161,13 @@ function parseSshCommand(text) {
   };
 }
 
-export function shouldResolveSshImport(value) {
+export function shouldResolveSshImport(value: unknown): boolean {
   const text = unwrapInput(value);
   if (/^ssh\s+/i.test(text)) return true;
   return /^[A-Za-z0-9._+%-]+(?:@[A-Za-z0-9._+%-]+)?$/.test(text);
 }
 
-export function sshImportFromPreview(preview) {
+export function sshImportFromPreview(preview: SshImportPreview): ConnectionImport {
   const candidates = preview.hostKeyCandidates || [];
   const identityFiles = preview.identityFiles || [];
   const destinationHost = String(preview.destination || preview.host || '').split('@').pop();
@@ -127,12 +191,12 @@ export function sshImportFromPreview(preview) {
   };
 }
 
-export function parseConnectionImport(value) {
+export function parseConnectionImport(value: unknown): ConnectionImport {
   const text = unwrapInput(value);
   if (!text) throw new Error('Paste a URL, Postgres DSN, or ssh command');
   if (/^ssh\s+/i.test(text)) return parseSshCommand(text);
 
-  let parsed;
+  let parsed: URL;
   try { parsed = new URL(text); }
   catch { throw new Error('Could not recognize that connection. Use a complete URL, Postgres DSN, or ssh command.'); }
   const scheme = parsed.protocol.slice(0, -1).toLowerCase();
@@ -199,14 +263,19 @@ export function parseConnectionImport(value) {
   throw new Error(`Connection scheme ${scheme || '(missing)'} is not supported`);
 }
 
-export function suggestedSecretName(connectionName, type) {
+export function suggestedSecretName(connectionName: string, type: ConnectionType): string {
   const base = String(connectionName || 'CONNECTION')
     .toUpperCase().replace(/[^A-Z0-9_]+/g, '_').replace(/^_+|_+$/g, '') || 'CONNECTION';
   const suffix = type === 'pg' ? 'PASSWORD' : type === 'ssh' ? 'SSH_KEY' : 'TOKEN';
   return `${base}_${suffix}`.slice(0, 64);
 }
 
-export function authTemplate(type, mode, secretName, detail = '') {
+export function authTemplate(
+  type: ConnectionType,
+  mode: string,
+  secretName: string,
+  detail = '',
+): string {
   if (!/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(secretName)) {
     throw new Error('Credential name must be a valid template reference');
   }

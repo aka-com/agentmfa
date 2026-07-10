@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { formErrorKind, formErrorMessage, inlineFormError } from '../src/form-errors.mjs';
+import { formErrorKind, formErrorMessage, inlineFormError } from '../src/form-errors';
 
 test('routes validation and conflict failures to their fields', () => {
   assert.deepEqual(inlineFormError({

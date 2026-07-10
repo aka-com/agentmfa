@@ -33,5 +33,4 @@ fi
 # CI=true makes the DMG bundler skip the Finder/AppleScript window-layout
 # step, which needs Apple-Events automation access and can hang a headless
 # or unattended build.
-node "$repo_root/scripts/sync-lucide-icons.mjs"
 exec env CI=true "$repo_root/node_modules/.bin/tauri" build --bundles app,dmg "${target_args[@]}" "$@"

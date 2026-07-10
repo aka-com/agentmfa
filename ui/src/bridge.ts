@@ -4,17 +4,57 @@
 // mirrors the command surface and its fixtures, but obviously
 // enforces nothing (no Keychain, no daemon, no native OS authentication).
 
+import type {
+  ActivityEntry,
+  AgentSummary,
+  ApprovalRequest,
+  CommandArgs,
+  CommandName,
+  CommandResult,
+  ConnectionInput,
+  ConnectionSummary,
+  ConnectionType,
+  EventMap,
+  EventName,
+  EventPayload,
+  PermissionScope,
+  SessionSummary,
+  Settings,
+  Unlisten,
+} from './types';
+
 const tauri = typeof window !== 'undefined' ? window.__TAURI__ : undefined;
 
 /** Which window chrome to render, from the URL hash. */
 export const mode = location.hash.replace('#', '') || 'window';
 
-export const invoke = tauri ? tauri.core.invoke : mockInvoke;
-export const listen = tauri ? tauri.event.listen : mockListen;
+export async function invoke<K extends CommandName>(
+  command: K,
+  args?: CommandArgs<K>,
+): Promise<CommandResult<K>> {
+  if (tauri) {
+    return tauri.core.invoke(
+      command,
+      args as Record<string, unknown> | undefined,
+    ) as Promise<CommandResult<K>>;
+  }
+  return mockInvoke(command, (args ?? {}) as MockArgs) as Promise<CommandResult<K>>;
+}
+
+export async function listen<K extends EventName>(
+  event: K,
+  callback: (event: EventPayload<EventMap[K]>) => void,
+): Promise<Unlisten> {
+  if (tauri) {
+    return tauri.event.listen(event, callback as (event: EventPayload<unknown>) => void);
+  }
+  return mockListen(event, callback);
+}
 
 /* ----------------------------- dev mock ---------------------------------- */
 
-const listeners = {};
+type MockListener = (event: EventPayload<unknown>) => void;
+const listeners: Record<string, MockListener[]> = {};
 const MOCK_ACTIVITY_LIMIT = 200;
 const MOCK_ACTIVITY_META = {
   denied: { icon: 'circleX', tone: 'danger' },
@@ -48,11 +88,16 @@ Reuse a stored token via GET /v1/whoami, or POST /v1/pair when you must.
 ## 2. Discover
 GET /v1/connections lists named destinations without exposing secrets.
 `;
-function emit(event, payload) {
-  (listeners[event] || []).forEach((cb) => cb({ event, payload }));
+function emit<K extends EventName>(event: K, payload: EventMap[K]): void {
+  (listeners[event] || []).forEach((callback) => callback({ event, payload }));
 }
-async function mockListen(event, cb) {
-  (listeners[event] = listeners[event] || []).push(cb);
+async function mockListen<K extends EventName>(
+  event: K,
+  callback: (event: EventPayload<EventMap[K]>) => void,
+): Promise<Unlisten> {
+  const eventListeners = listeners[event] ?? [];
+  eventListeners.push(callback as MockListener);
+  listeners[event] = eventListeners;
   return () => {};
 }
 
@@ -60,8 +105,81 @@ async function mockListen(event, cb) {
 let seq = 1;
 const uid = () => `id-${seq++}`;
 const now = () => new Date().toISOString();
-const formError = (kind, code, field, message) => ({ kind, code, field, message });
-const db = {
+const formError = (kind: string, code: string, field: string, message: string) =>
+  ({ kind, code, field, message });
+
+interface MockSecret {
+  id: string;
+  name: string;
+  _value: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface MockConnection {
+  id: string;
+  name: string;
+  type: ConnectionType;
+  secret_names: string[];
+  secret_ids: string[];
+  destination?: string | null;
+  host?: string | null;
+  scheme?: string | null;
+  port?: number | null;
+  template?: string | null;
+  dbname?: string | null;
+  user?: string | null;
+  host_key_fingerprint?: string | null;
+  sslmode?: string | null;
+  trusted_ca_bundle_path?: string | null;
+  url?: string | null;
+}
+
+interface MockRule {
+  id: string;
+  client_id: string;
+  agent: string;
+  connection_id: string;
+  scope: PermissionScope;
+}
+
+interface MockGrant {
+  id: string;
+  agent: string;
+  connection_id: string;
+  scope: PermissionScope;
+  expires_at: string;
+}
+
+type MockAgent = Omit<AgentSummary, 'permission_count'>;
+
+interface MockDatabase {
+  secrets: MockSecret[];
+  connections: MockConnection[];
+  rules: MockRule[];
+  grants: MockGrant[];
+  agents: MockAgent[];
+  sessions: SessionSummary[];
+  activity: ActivityEntry[];
+  settings: Settings;
+  queue: ApprovalRequest[];
+}
+
+interface MockArgs {
+  id: string | number;
+  name: string;
+  value: string;
+  newName?: string | null;
+  newValue?: string | null;
+  input: ConnectionInput;
+  limit: number;
+  on: boolean;
+  decision: 'deny' | 'allow_once' | 'allow_session' | 'always_allow';
+  revokeInheritedRules?: boolean;
+  source: string;
+}
+
+const db: MockDatabase = {
   secrets: [
     mkSecret('GITHUB_API_KEY', 'ghp_9aXf2Qe7LmNoP3demoToken41c'),
     mkSecret('DATABASE_PASSWORD', 'pg-s3cr3t-demo-pw'),
@@ -82,12 +200,12 @@ const db = {
   settings: { reauth_on_read: true, menu_bar_hides_dock: false },
   queue: [],
 };
-function mkSecret(name, value) {
+function mkSecret(name: string, value: string): MockSecret {
   return { id: uid(), name, _value: value, created_at: now(), updated_at: now() };
 }
 seedConnections();
 function seedConnections() {
-  const by = (n) => db.secrets.find((s) => s.name === n).id;
+  const by = (name: string) => db.secrets.find((secret) => secret.name === name)!.id;
   db.connections = [
     mkConn('github', 'api', ['GITHUB_API_KEY'], { host: 'api.github.com', scheme: 'https', template: 'Authorization: Bearer {{GITHUB_API_KEY}}' }),
     mkConn('prod-db', 'pg', ['DATABASE_PASSWORD'], { host: 'db.internal.aka.com', port: 5432, dbname: 'app_production', user: 'app', sslmode: 'verify-full', trusted_ca_bundle_path: null }),
@@ -98,8 +216,20 @@ function seedConnections() {
       host_key_fingerprint: 'SHA256:vdZ5N8kNxU7J4W2WYa6qK0sJYv8oXb8s2H7n3jE5q1A',
     }),
   ];
-  function mkConn(name, type, secretNames, cfg) {
-    return { id: uid(), name, type, secret_names: secretNames, secret_ids: secretNames.map(by), ...cfg };
+  function mkConn(
+    name: string,
+    type: ConnectionType,
+    secretNames: string[],
+    config: Partial<MockConnection>,
+  ): MockConnection {
+    return {
+      id: uid(),
+      name,
+      type,
+      secret_names: secretNames,
+      secret_ids: secretNames.map(by),
+      ...config,
+    };
   }
 }
 seedFixtures();
@@ -109,10 +239,17 @@ function seedFixtures() {
   db.rules.push({ id: uid(), client_id: db.agents[0].id, agent: 'claude-code', connection_id: db.connections[0].id, scope: 'full' });
   db.grants.push({ id: uid(), agent: 'claude-code', connection_id: db.connections[1].id,
     scope: 'full', expires_at: new Date(Date.now() + 11 * 60000).toISOString() });
-  db.sessions.push({ id: 1, type: 'ws', agent: 'claude-code', connection: 'market-feed', detail: 'wss://stream.example.com/feed' });
+  db.sessions.push({
+    id: 1,
+    type: 'ws',
+    agent: 'claude-code',
+    connection: 'market-feed',
+    detail: 'wss://stream.example.com/feed',
+    opened_at: now(),
+  });
   // Spread across a day so the relative/absolute timestamp split is visible.
-  const t = (min) => new Date(Date.now() - min * 60000).toISOString();
-  [
+  const t = (minutes: number) => new Date(Date.now() - minutes * 60000).toISOString();
+  const fixtures: Array<[keyof typeof MOCK_ACTIVITY_META, string, string | null, number]> = [
     ['denied', 'Denied: claude-code', 'POST api.github.com/repos/aka/aka/dispatches', 2],
     ['secretCopied', 'Secret copied: GITHUB_API_KEY', null, 6],
     ['sessionClosed', 'WebSocket bridge closed', 'market-feed', 14],
@@ -123,14 +260,21 @@ function seedFixtures() {
     ['sessionOpened', 'Postgres connection opened', 'prod-db → app_production', 402],
     ['allowedOnce', 'Allowed this request: claude-code', 'Connect to Postgres → app@db.internal.aka.com:5432/app_production', 1500],
     ['paired', 'Agent connected: claude-code', null, 3000],
-  ].forEach(([kind, text, detail, min]) =>
-    db.activity.push({ ...MOCK_ACTIVITY_META[kind], text, detail: detail || null, at: t(min) }));
+  ];
+  fixtures.forEach(([kind, text, detail, minutes]) =>
+    db.activity.push({ ...MOCK_ACTIVITY_META[kind], text, detail, at: t(minutes) }));
 }
-function audit(kind, text, detail) {
-  db.activity.unshift({ ...MOCK_ACTIVITY_META[kind], text, detail: detail || null, at: new Date().toISOString() });
+function audit(
+  kind: keyof typeof MOCK_ACTIVITY_META,
+  text: string,
+  detail: string | null = null,
+): ActivityEntry {
+  const entry = { ...MOCK_ACTIVITY_META[kind], text, detail, at: new Date().toISOString() };
+  db.activity.unshift(entry);
   db.activity.length = Math.min(db.activity.length, MOCK_ACTIVITY_LIMIT);
+  return entry;
 }
-function connDto(c) {
+function connDto(c: MockConnection): ConnectionSummary {
   return {
     id: c.id, name: c.name, type: c.type, target: connTarget(c),
     secret_names: c.secret_names,
@@ -145,7 +289,7 @@ function connDto(c) {
     trusted_ca_bundle_path: c.trusted_ca_bundle_path || null,
   };
 }
-function connTarget(c) {
+function connTarget(c: MockConnection): string {
   if (c.type === 'api') {
     const scheme = c.scheme || 'https';
     const defaultPort = scheme === 'https' ? 443 : 80;
@@ -153,14 +297,14 @@ function connTarget(c) {
   }
   if (c.type === 'pg') return `${c.user}@${c.host}:${c.port}/${c.dbname}`;
   if (c.type === 'ssh') return c.port && c.port !== 22 ? `${c.user}@${c.host}:${c.port}` : `${c.user}@${c.host}`;
-  return c.url;
+  return c.url ?? '';
 }
-function revealPrefix(v) {
-  const n = Math.min(6, Math.floor(v.length / 2));
-  return n < v.length ? v.slice(0, n) + '…' : v;
+function revealPrefix(value: string): string {
+  const n = Math.min(6, Math.floor(value.length / 2));
+  return n < value.length ? value.slice(0, n) + '…' : value;
 }
 
-async function mockInvoke(cmd, args = {}) {
+async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
   switch (cmd) {
     case 'list_secrets':
       return db.secrets.map((s) => {
@@ -199,14 +343,15 @@ async function mockInvoke(cmd, args = {}) {
     case 'edit_secret': {
       const s = db.secrets.find((x) => x.id === args.id); if (!s) throw new Error('no such secret');
       if (args.newName && args.newName !== s.name) {
-        if (db.secrets.some((other) => other.id !== s.id && other.name === args.newName)) {
+        const newName = args.newName;
+        if (db.secrets.some((other) => other.id !== s.id && other.name === newName)) {
           throw formError('conflict', 'secret_name_taken', 'name', 'That credential name is already in use');
         }
         db.connections.forEach((c) => {
-          const i = c.secret_names.indexOf(s.name); if (i !== -1) c.secret_names[i] = args.newName;
-          if (c.template) c.template = c.template.split(s.name).join(args.newName);
+          const i = c.secret_names.indexOf(s.name); if (i !== -1) c.secret_names[i] = newName;
+          if (c.template) c.template = c.template.split(s.name).join(newName);
         });
-        s.name = args.newName;
+        s.name = newName;
       }
       if (args.newValue) s._value = args.newValue;
       s.updated_at = now(); audit('secretUpdated', `Secret updated: ${s.name}`); return;
@@ -223,7 +368,9 @@ async function mockInvoke(cmd, args = {}) {
     }
     case 'copy_secret': {
       const s = db.secrets.find((x) => x.id === args.id); if (!s) throw new Error('no such secret');
-      audit('secretCopied', `Secret copied: ${s.name}`); emit('amfa://activity-appended', {}); return;
+      const entry = audit('secretCopied', `Secret copied: ${s.name}`);
+      emit('amfa://activity-appended', entry);
+      return;
     }
     case 'add_connection': {
       const i = args.input;
@@ -242,9 +389,12 @@ async function mockInvoke(cmd, args = {}) {
         i.secret_id = secret.id;
       }
       const secret_names = i.type === 'api'
-        ? (i.template.match(/[A-Z_][A-Z0-9_]*/g) || []).filter((n) => db.secrets.some((s) => s.name === n))
-        : [db.secrets.find((s) => s.id === i.secret_id)?.name].filter(Boolean);
+        ? ((i.template ?? '').match(/[A-Z_][A-Z0-9_]*/g) || [])
+            .filter((n) => db.secrets.some((s) => s.name === n))
+        : [db.secrets.find((s) => s.id === i.secret_id)?.name]
+            .filter((name): name is string => Boolean(name));
       db.connections.push({ id: uid(), name: i.name, type: i.type, secret_names,
+        secret_ids: i.secret_id ? [i.secret_id] : [],
         destination: i.destination, host: i.host, scheme: i.scheme, port: i.port, template: i.template, dbname: i.dbname, user: i.user,
         host_key_fingerprint: i.host_key_fingerprint, sslmode: i.sslmode,
         trusted_ca_bundle_path: i.trusted_ca_bundle_path, url: i.url });
@@ -264,7 +414,10 @@ async function mockInvoke(cmd, args = {}) {
         dbname: i.dbname, user: i.user, sslmode: i.sslmode, trusted_ca_bundle_path: i.trusted_ca_bundle_path,
         host_key_fingerprint: i.host_key_fingerprint, url: i.url,
         template: i.template });
-      if (i.secret_id) c.secret_names = [db.secrets.find((s) => s.id === i.secret_id)?.name].filter(Boolean);
+      if (i.secret_id) {
+        c.secret_names = [db.secrets.find((s) => s.id === i.secret_id)?.name]
+          .filter((name): name is string => Boolean(name));
+      }
       audit('connectionUpdated', `Connection updated: ${i.name}`); return;
     }
     case 'delete_connection': {
@@ -301,7 +454,7 @@ async function mockInvoke(cmd, args = {}) {
         db.rules = db.rules.filter((r) => !client || r.client_id !== client.id);
         audit('ruleRemoved', `Approval required again: ${req.agent}`);
       }
-      if (req && req.kind === 'pair' && args.decision === 'allow_once') {
+      if (req && req.kind === 'pair' && args.decision === 'allow_once' && req.pairing_identity) {
         db.grants = db.grants.filter((g) => g.agent !== req.agent);
         db.sessions = db.sessions.filter((s) => s.agent !== req.agent);
         const existing = db.agents.find((agent) => agent.name === req.agent);
@@ -322,20 +475,23 @@ async function mockInvoke(cmd, args = {}) {
         emit('amfa://agents-changed', {});
         emit('amfa://sessions-changed', {});
       }
-      if (req && args.decision === 'allow_session' && req.connection) {
+      if (req && args.decision === 'allow_session' && req.connection && req.temporary_access) {
+        const connection = req.connection;
+        const temporaryAccess = req.temporary_access;
         db.grants = db.grants.filter((g) =>
-          !(g.agent === req.agent && g.connection_id === req.connection.id));
-        db.grants.push({ id: uid(), agent: req.agent, connection_id: req.connection.id,
-          scope: req.temporary_access.scope,
-          expires_at: new Date(Date.now() + req.temporary_access.duration_seconds * 1000).toISOString() });
+          !(g.agent === req.agent && g.connection_id === connection.id));
+        db.grants.push({ id: uid(), agent: req.agent, connection_id: connection.id,
+          scope: temporaryAccess.scope,
+          expires_at: new Date(Date.now() + temporaryAccess.duration_seconds * 1000).toISOString() });
       }
-      if (req && args.decision === 'always_allow' && req.connection) {
+      if (req && args.decision === 'always_allow' && req.connection && req.temporary_access) {
+        const connection = req.connection;
         const client = db.agents.find((agent) => agent.name === req.agent);
         if (client) {
           db.rules = db.rules.filter((permission) =>
-            permission.client_id !== client.id || permission.connection_id !== req.connection.id);
+            permission.client_id !== client.id || permission.connection_id !== connection.id);
           db.rules.push({ id: uid(), client_id: client.id, agent: req.agent,
-            connection_id: req.connection.id, scope: req.temporary_access.scope });
+            connection_id: connection.id, scope: req.temporary_access.scope });
         }
       }
       db.queue = db.queue.filter((r) => r.id !== args.id); emit('amfa://queue-changed', db.queue.slice()); return;
@@ -351,14 +507,14 @@ async function mockInvoke(cmd, args = {}) {
 if (!tauri && typeof window !== 'undefined') {
   window.__mockApproval = (kind = 'http', ttlMs = 120000) => {
     const inherited = kind === 'pair'
-      ? db.rules.filter((r) => r.client_id === db.agents[0]?.id).map((r) => {
+      ? db.rules.filter((r) => r.client_id === db.agents[0]?.id).flatMap((r) => {
           const c = db.connections.find((conn) => conn.id === r.connection_id);
-          return c ? { name: c.name, type: c.type, target: connTarget(c) } : null;
-        }).filter(Boolean)
+          return c ? [{ name: c.name, type: c.type, target: connTarget(c) }] : [];
+        })
       : [];
     const post = kind === 'post';
     const body = post ? JSON.stringify({ event_type: 'deploy', client_payload: { ref: 'main', sha: 'a1b2c3d', env: 'production', requested_by: 'claude-code' } }, null, 2) : null;
-    const http = kind === 'pair' ? null : {
+    const http: ApprovalRequest['http'] = kind === 'pair' ? null : {
       method: post ? 'POST' : 'GET',
       path: post ? '/repos/aka/aka/dispatches' : '/user/repos',
       headers: post
@@ -366,9 +522,10 @@ if (!tauri && typeof window !== 'undefined') {
         : [['Accept', 'application/vnd.github+json']],
       body_preview: body, body_len: body ? body.length : 0, body_truncated: false, mutating: post,
     };
-    const req = {
+    const firstConnection = db.connections[0]!;
+    const req: ApprovalRequest = {
       id: uid(), agent: 'claude-code', kind: kind === 'pair' ? 'pair' : 'http',
-      connection: kind === 'pair' ? null : { id: db.connections[0].id, name: 'github', type: 'api', target: 'api.github.com' },
+      connection: kind === 'pair' ? null : { id: firstConnection.id, name: 'github', type: 'api', target: 'api.github.com' },
       action: kind === 'pair' ? 'Connect claude-code to AgentMFA'
         : post ? 'POST api.github.com/repos/aka/aka/dispatches' : 'GET api.github.com/user/repos',
       notification: 'claude-code wants to use github: GET /user/repos',

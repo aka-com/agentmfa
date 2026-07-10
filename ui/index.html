@@ -9,14 +9,14 @@
 </head>
 <body>
   <!-- The chrome (main window / tray dropdown / approval window) is chosen from
-       location.hash by app.js, so all Tauri windows share one file. -->
+       location.hash by app.ts, so all Tauri windows share one file. -->
   <div id="root"></div>
   <div id="toasts" class="toasts"></div>
   <!-- Tooltip library (Tippy.js on Popper, self-hosted for the 'self'-only
        CSP). Popper must load first — it defines window.Popper, which Tippy
-       consumes; Tippy then exposes window.tippy for app.js. -->
+       consumes; Tippy then exposes window.tippy for app.ts. -->
   <script src="/vendor/popper.min.js"></script>
   <script src="/vendor/tippy.umd.min.js"></script>
-  <script src="/app.js" type="module"></script>
+  <script src="/app.ts" type="module"></script>
 </body>
 </html>

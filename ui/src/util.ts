@@ -1,18 +1,18 @@
-import { LUCIDE_ICONS } from '/vendor/lucide-icons.js';
+import { LUCIDE_ICONS } from './icons';
 
 // Small shared helpers.
 
-export function esc(s) {
+export function esc(s: unknown): string {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
-export function escAttr(s) {
+export function escAttr(s: unknown): string {
   return esc(s).replace(/"/g, '&quot;');
 }
 
 // Activity timestamps. `relTime` renders relative ("just now", "5m", "3h")
 // for anything under 24h and a short absolute date beyond that; `absTime` is
 // the full, unambiguous value shown in the hover tooltip.
-export function relTime(iso, now = Date.now()) {
+export function relTime(iso: string, now = Date.now()): string {
   const t = Date.parse(iso);
   if (Number.isNaN(t)) return '';
   const secs = Math.max(0, Math.round((now - t) / 1000));
@@ -28,7 +28,7 @@ export function relTime(iso, now = Date.now()) {
     : { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
-export function absTime(iso) {
+export function absTime(iso: string): string {
   const t = Date.parse(iso);
   if (Number.isNaN(t)) return '';
   return new Date(t).toLocaleString(undefined, {
@@ -44,10 +44,10 @@ export const TYPES = {
   ssh: { label: 'SSH', cls: 'b-ssh' },
 };
 
-export const ICONS = LUCIDE_ICONS;
+export const ICONS: Record<string, string> = LUCIDE_ICONS;
 
-let toastHost;
-export function toast(msg) {
+let toastHost: HTMLElement | null = null;
+export function toast(msg: string): void {
   toastHost = toastHost || document.getElementById('toasts');
   if (!toastHost) return;
   const el = document.createElement('div');

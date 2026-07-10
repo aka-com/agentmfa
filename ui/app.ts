@@ -6,22 +6,109 @@
 // Tauri (a plain browser), a dev mock stands in for the core so the
 // UI is developable standalone.
 
-import { invoke, listen, mode } from '/src/bridge.js';
-import { ICONS, TYPES, esc, escAttr, toast, relTime, absTime } from '/src/util.js';
+import { invoke, listen, mode } from '/src/bridge';
+import { ICONS, TYPES, esc, escAttr, toast, relTime, absTime } from '/src/util';
 import {
   apiOriginFromParts, authTemplate, parseApiOrigin, parseConnectionImport,
   portForTypeSwitch, shouldResolveSshImport, sshImportFromPreview, suggestedSecretName,
-} from '/src/connection-input.mjs';
-import { formErrorKind, formErrorMessage, inlineFormError } from '/src/form-errors.mjs';
+} from '/src/connection-input';
+import { formErrorKind, formErrorMessage, inlineFormError } from '/src/form-errors';
+import type { HostKeyCandidate } from '/src/connection-input';
+import type {
+  ActivityEntry,
+  AgentSummary,
+  ApprovalRequest,
+  CommandArgs,
+  CommandName,
+  ConnectionInput,
+  ConnectionSummary,
+  ConnectionType,
+  Decision,
+  SecretSummary,
+  SessionSummary,
+  Settings,
+} from '/src/types';
 
 const EDIT_SECRET_MASK = '••••••••••••';
 const ACTIVITY_RENDER_LIMIT = 200;
 
 // The left-nav tabs, in order — also the cycle order for Ctrl-Tab.
-const TABS = ['connections', 'secrets', 'activity'];
+const TABS = ['connections', 'secrets', 'activity'] as const;
+type Tab = typeof TABS[number];
+
+interface SheetState {
+  kind: 'add-secret' | 'edit-secret' | 'add-conn' | 'edit-conn' | 'settings' | 'clear-activity';
+  id?: string;
+}
+
+interface ConfirmState {
+  kind: string;
+  id?: string | number;
+  name?: string;
+}
+
+interface ConnectionDraft {
+  name?: string;
+  value?: string;
+  importSource?: string;
+  importWarnings?: string[];
+  origin?: string | null;
+  scheme?: string | null;
+  host?: string | null;
+  port?: string;
+  dbname?: string | null;
+  user?: string | null;
+  hostKeyFingerprint?: string | null;
+  hostKeyCandidates?: HostKeyCandidate[];
+  proxyJump?: string | null;
+  sslmode?: string | null;
+  pgCaBundlePath?: string | null;
+  url?: string | null;
+  template?: string | null;
+  secretId?: string | null;
+  secretSource?: string;
+  newSecretName?: string;
+  newSecretValue?: string;
+  importedCredential?: string | null;
+  identityFile?: string;
+  identityFiles?: string[];
+  sshImportId?: string;
+  destination?: string | null;
+  authMode?: string;
+  authDetail?: string;
+  import?: string;
+}
+
+interface AppState {
+  tab: Tab;
+  secrets: SecretSummary[];
+  connections: ConnectionSummary[];
+  agents: AgentSummary[];
+  sessions: SessionSummary[];
+  activity: ActivityEntry[];
+  queue: ApprovalRequest[];
+  agentSetupInstructions: string;
+  brokerInstructions: string;
+  settings: Settings;
+  reveal: Record<string, string>;
+  sheet: SheetState | null;
+  draft: ConnectionDraft;
+  sheetErrors: Record<string, string>;
+  connType: ConnectionType;
+  confirm: ConfirmState | null;
+  alwaysOpen: boolean;
+  reqDetailOpen: boolean | null;
+  revokeInheritedRules: boolean;
+  approvalRequestId: string | null;
+  menuOpen: boolean;
+  copied: string | null;
+  readyCopied: boolean;
+  setupInstructionsOpen: boolean;
+  showFullInstructions: boolean;
+}
 
 /* ------------------------------ local state ------------------------------ */
-const state = {
+const state: AppState = {
   tab: 'connections',
   secrets: [],
   connections: [],
@@ -50,12 +137,20 @@ const state = {
   showFullInstructions: false, // short setup vs full /instructions body
 };
 
-const root = () => document.getElementById('root');
-let accessExpiryTimer = null;
+const root = (): HTMLElement => {
+  const element = document.getElementById('root');
+  if (!element) throw new Error('Missing #root element');
+  return element;
+};
+let accessExpiryTimer: ReturnType<typeof setTimeout> | null = null;
 
 /* ------------------------------ data loading ----------------------------- */
-async function refresh(which = 'all') {
-  const jobs = [];
+type RefreshTarget = 'all' | 'secrets' | 'connections' | 'agents' | 'sessions' |
+  'activity' | 'queue' | 'settings';
+type LoadKey = 'secrets' | 'connections' | 'agents' | 'sessions' | 'activity' | 'queue';
+
+async function refresh(which: RefreshTarget = 'all'): Promise<void> {
+  const jobs: Promise<void>[] = [];
   if (which === 'all' || which === 'secrets') jobs.push(load('secrets', 'list_secrets'));
   if (which === 'all' || which === 'connections') jobs.push(load('connections', 'list_connections'));
   if (which === 'all' || which === 'agents') jobs.push(load('agents', 'list_agents'));
@@ -68,13 +163,29 @@ async function refresh(which = 'all') {
   await Promise.all(jobs);
   render();
 }
-async function load(key, cmd, args) {
-  try { state[key] = await invoke(cmd, args); } catch (e) { console.error(cmd, e); }
+async function load<K extends CommandName>(
+  key: LoadKey,
+  cmd: K,
+  args?: CommandArgs<K>,
+): Promise<void> {
+  try {
+    const result: unknown = await invoke(cmd, args);
+    switch (key) {
+      case 'secrets': state.secrets = result as SecretSummary[]; break;
+      case 'connections': state.connections = result as ConnectionSummary[]; break;
+      case 'agents': state.agents = result as AgentSummary[]; break;
+      case 'sessions': state.sessions = result as SessionSummary[]; break;
+      case 'activity': state.activity = result as ActivityEntry[]; break;
+      case 'queue': state.queue = result as ApprovalRequest[]; break;
+    }
+  } catch (error) {
+    console.error(cmd, error);
+  }
 }
-async function loadSettings() {
+async function loadSettings(): Promise<void> {
   try { state.settings = await invoke('get_settings'); } catch (e) { console.error(e); }
 }
-async function refreshAccessViews() {
+async function refreshAccessViews(): Promise<void> {
   await Promise.all([
     load('connections', 'list_connections'),
     load('agents', 'list_agents'),
@@ -83,13 +194,14 @@ async function refreshAccessViews() {
   scheduleAccessExpiryRefresh();
 }
 
-function scheduleAccessExpiryRefresh() {
+function scheduleAccessExpiryRefresh(): void {
   if (accessExpiryTimer !== null) clearTimeout(accessExpiryTimer);
   accessExpiryTimer = null;
   const expiries = state.connections
     .flatMap((connection) => (connection.permissions || [])
-      .filter((permission) => permission.expires_at)
-      .map((permission) => new Date(permission.expires_at).getTime()))
+      .flatMap((permission) => permission.expires_at
+        ? [new Date(permission.expires_at).getTime()]
+        : []))
     .filter((expiresAt) => Number.isFinite(expiresAt) && expiresAt > Date.now());
   if (!expiries.length) return;
   const delay = Math.max(0, Math.min(...expiries) - Date.now() + 50);
@@ -105,11 +217,14 @@ function scheduleAccessExpiryRefresh() {
 // (queue/sessions/activity changes) re-render at arbitrary times, so every
 // render first captures open drafts and then puts focus (and any text
 // selection) back where it was.
-function render(capture = true) {
+function render(capture = true): void {
   if (capture) captureDrafts();
-  const active = document.activeElement;
+  const active = document.activeElement instanceof HTMLInputElement ||
+    document.activeElement instanceof HTMLTextAreaElement
+    ? document.activeElement
+    : null;
   const focusId = active && active.id ? active.id : null;
-  const sel = focusId && typeof active.selectionStart === 'number'
+  const sel = active && focusId && typeof active.selectionStart === 'number'
     ? { start: active.selectionStart, end: active.selectionEnd, dir: active.selectionDirection }
     : null;
 
@@ -118,7 +233,7 @@ function render(capture = true) {
   else renderMainWindow();
 
   if (focusId) {
-    const el = document.getElementById(focusId);
+    const el = document.getElementById(focusId) as HTMLInputElement | HTMLTextAreaElement | null;
     if (el) {
       el.focus();
       if (sel && typeof el.setSelectionRange === 'function') {
@@ -239,19 +354,19 @@ function secretsHTML() {
 }
 
 /* ---- connections tab ---- */
-function accessDescription(connection, scope) {
+function accessDescription(connection: ConnectionSummary, scope: string): string {
   if (scope === 'read') return 'Can fetch data';
   if (connection.type === 'api') return 'Can make any request';
   return 'Can open and use this connection';
 }
 
-const accessRowsHTML = (c) => {
+const accessRowsHTML = (c: ConnectionSummary): string => {
   const rows = (c.permissions || [])
     .filter((permission) => !permission.expires_at || new Date(permission.expires_at).getTime() > Date.now())
     .map((permission) => {
       const expiring = !!permission.expires_at;
       const suffix = expiring
-        ? ` · ${Math.max(1, Math.ceil((new Date(permission.expires_at).getTime() - Date.now()) / 60000))} min left`
+        ? ` · ${Math.max(1, Math.ceil((new Date(permission.expires_at!).getTime() - Date.now()) / 60000))} min left`
         : ' without asking';
       const action = expiring ? 'End now' : 'Require approval';
       return `<div class="access-row"><div class="access-copy"><b>${esc(permission.agent)}</b>
@@ -260,8 +375,9 @@ const accessRowsHTML = (c) => {
     });
   return rows.length ? `<div class="access-list"><div class="access-head">Agent access</div>${rows.join('')}</div>` : '';
 };
-const liveCount = (c) => state.sessions.filter((s) => s.connection === c.name).length;
-const connActionsHTML = (c) =>
+const liveCount = (c: ConnectionSummary): number =>
+  state.sessions.filter((s) => s.connection === c.name).length;
+const connActionsHTML = (c: ConnectionSummary): string =>
   `<button class="icon-btn" title="Edit connection" aria-label="Edit connection ${escAttr(c.name)}" data-act="edit-conn" data-id="${c.id}">${ICONS.pencil}</button>
    <button class="icon-btn" title="Delete connection" aria-label="Delete connection ${escAttr(c.name)}" data-act="del-conn-ask" data-id="${c.id}">${ICONS.trash}</button>`;
 
@@ -297,7 +413,7 @@ function connectionsHTML() {
 
 // Console.app-style rows: a proportional timestamp gutter, restrained
 // semantic Lucide icon, then plain primary text with optional detail.
-function activityRowHTML(a) {
+function activityRowHTML(a: ActivityEntry): string {
   const icon = ICONS[a.icon] || '';
   return `<div class="act-row">
     <span class="act-gutter"><span class="act-time" data-tippy-content="${escAttr(absTime(a.at))}" data-tippy-theme="activity-time">${esc(relTime(a.at))}</span></span>
@@ -314,7 +430,7 @@ function activityHTML() {
     .map(activityRowHTML).join('') + '</div>';
 }
 
-async function receiveActivity(entry) {
+async function receiveActivity(entry: ActivityEntry | null | undefined): Promise<void> {
   if (!entry || !entry.at || !entry.text) {
     await load('activity', 'list_activity', { limit: ACTIVITY_RENDER_LIMIT });
     if (mode !== 'approval' && state.tab === 'activity' && !state.sheet && !state.menuOpen) render();
@@ -333,7 +449,7 @@ async function receiveActivity(entry) {
     return;
   }
   list.insertAdjacentHTML('afterbegin', activityRowHTML(entry));
-  while (list.children.length > ACTIVITY_RENDER_LIMIT) list.lastElementChild.remove();
+  while (list.children.length > ACTIVITY_RENDER_LIMIT) list.lastElementChild?.remove();
 }
 
 function tabContentHTML() {
@@ -430,16 +546,17 @@ function clearActivitySheet() {
 // Inline per-field validation: saveSecret/saveConn fill state.sheetErrors
 // keyed by field, the sheet renders the message under the offending input,
 // and editing the field clears its error (the `input` listener below).
-const fieldErr = (key) =>
+const fieldErr = (key: string): string =>
   state.sheetErrors[key] ? `<div class="field-error">${esc(state.sheetErrors[key])}</div>` : '';
-const fieldCls = (key) => (state.sheetErrors[key] ? 'err' : '');
-const selectControlHTML = (id, options) => `<span class="select-control">
+const fieldCls = (key: string): string => (state.sheetErrors[key] ? 'err' : '');
+const selectControlHTML = (id: string, options: string): string => `<span class="select-control">
   <select id="${id}">${options}</select>
   <span class="select-chevron" aria-hidden="true">${ICONS.chevronDown}</span></span>`;
 
-function addSecretSheet(editing) {
+function addSecretSheet(editing: boolean): string {
   const d = state.draft;
-  const s = editing ? state.secrets.find((x) => x.id === state.sheet.id) : null;
+  const sheetId = state.sheet?.id;
+  const s = editing ? state.secrets.find((x) => x.id === sheetId) : null;
   const title = editing ? 'Edit secret' : 'Add secret';
   const valueLabel = editing ? 'New value (saved to macOS Keychain)' : 'Value';
   const valuePlaceholder = editing ? '' : 'Your secret (saved in Keychain)';
@@ -452,7 +569,11 @@ function addSecretSheet(editing) {
       <button class="btn primary" data-act="save-secret">Save</button></div></div>`;
 }
 
-function credentialChooserHTML(type, draft, allowNew = true) {
+function credentialChooserHTML(
+  type: ConnectionType,
+  draft: ConnectionDraft,
+  allowNew = true,
+): string {
   const source = allowNew
     ? (draft.secretSource || (draft.importedCredential || draft.sshImportId || !state.secrets.length ? 'new' : 'existing'))
     : 'existing';
@@ -470,7 +591,7 @@ function credentialChooserHTML(type, draft, allowNew = true) {
     return `${allowNew ? `<div class="f-row"><label>${secretLabel}</label>${select}</div>` : ''}
       <div class="f-row"><label>${allowNew ? 'Saved credential' : secretLabel}</label>${selectControlHTML('c-secret', opts)}${fieldErr('secret')}</div>`;
   }
-  const suggested = suggestedSecretName(draft.name, type);
+  const suggested = suggestedSecretName(draft.name ?? '', type);
   if (type === 'ssh' && draft.sshImportId && draft.identityFiles && draft.identityFiles.length) {
     const identityOptions = draft.identityFiles.map((path) =>
       `<option value="${escAttr(path)}" ${draft.identityFile === path ? 'selected' : ''}>${esc(path)}</option>`).join('');
@@ -485,11 +606,12 @@ function credentialChooserHTML(type, draft, allowNew = true) {
       <div class="rule-note">The value is submitted only when you save this connection and is never written to connection metadata.</div></div>`;
 }
 
-function connSheet(editing) {
+function connSheet(editing: boolean): string {
   const d = state.draft;
   const t = state.connType;
-  const conn = editing ? state.connections.find((c) => c.id === state.sheet.id) : null;
-  const typeBtn = (val, label) => {
+  const sheetId = state.sheet?.id;
+  const conn = editing ? state.connections.find((c) => c.id === sheetId) : null;
+  const typeBtn = (val: ConnectionType, label: string): string => {
     if (editing) return `<button type="button" class="seg-btn ${t === val ? 'on' : ''}" disabled ${t === val ? '' : 'style="opacity:.35"'}>${label}</button>`;
     return `<button type="button" class="seg-btn ${t === val ? 'on' : ''}" data-act="conn-type" data-type="${val}">${label}</button>`;
   };
@@ -503,7 +625,7 @@ function connSheet(editing) {
     <div class="f-row"><label>Type${editing ? ': fixed after creation' : ''}</label>
     <div class="seg in-form">${typeBtn('api', 'API key')}${typeBtn('pg', 'Postgres')}${typeBtn('ssh', 'SSH')}${typeBtn('ws', 'WebSocket')}</div></div>`;
   if (t === 'api') {
-    const origin = d.origin ?? apiOriginFromParts(d.scheme, d.host, d.port);
+    const origin = d.origin ?? apiOriginFromParts(d.scheme ?? undefined, d.host ?? undefined, d.port ?? null);
     fields += `<div class="f-row"><label>API origin</label><input id="f-origin" class="${fieldCls('origin')}" placeholder="https://api.github.com" value="${escAttr(origin)}">${fieldErr('origin')}
       <div class="rule-note">Scheme, host, and optional port only. The agent supplies each request path.</div></div>`;
   } else if (t === 'ssh') {
@@ -599,9 +721,9 @@ function settingsSheet() {
 }
 
 /* ----------------------------- approval window --------------------------- */
-let countdownTimer = null;
+let countdownTimer: ReturnType<typeof setInterval> | null = null;
 
-function durationLabel(seconds) {
+function durationLabel(seconds: number): string {
   if (seconds % 60 === 0) {
     const minutes = seconds / 60;
     return `${minutes} minute${minutes === 1 ? '' : 's'}`;
@@ -609,7 +731,7 @@ function durationLabel(seconds) {
   return `${seconds} seconds`;
 }
 
-function approvalHeading(req) {
+function approvalHeading(req: ApprovalRequest): string {
   const name = req.connection ? req.connection.name : 'AgentMFA';
   if (req.kind === 'pair') return `Let ${req.agent} connect to AgentMFA?`;
   if (req.kind === 'http' && req.http && !req.http.mutating) {
@@ -620,7 +742,7 @@ function approvalHeading(req) {
   return `${req.agent} wants to connect to ${name}`;
 }
 
-function temporaryAccessExplanation(req) {
+function temporaryAccessExplanation(req: ApprovalRequest): { duration: string; text: string } {
   const connection = req.connection ? req.connection.name : 'this connection';
   const access = req.temporary_access || { scope: 'full', duration_seconds: 900 };
   const duration = durationLabel(access.duration_seconds);
@@ -642,7 +764,7 @@ function temporaryAccessExplanation(req) {
   };
 }
 
-function ongoingAccessExplanation(req) {
+function ongoingAccessExplanation(req: ApprovalRequest): string {
   const connection = req.connection ? req.connection.name : 'this connection';
   if (req.temporary_access && req.temporary_access.scope === 'read') {
     return `${req.agent} will be able to fetch data from ${connection} without asking again. Requests that may make changes will still ask.`;
@@ -706,7 +828,7 @@ function renderApproval() {
 
   const detail = requestDetailHTML(req);
 
-  let always = '';
+  let always: { btn: string; box: string } | null = null;
   if (!isPair) {
     const box = state.alwaysOpen
       ? `<div class="always-box"><div class="f-row"><label>Use without asking</label>
@@ -715,7 +837,7 @@ function renderApproval() {
     always = { btn: `<button class="btn ghost sm" data-act="always-toggle">Don’t ask again…</button>`, box };
   }
 
-  const temporary = isPair ? null : temporaryAccessExplanation(req);
+  const temporary = temporaryAccessExplanation(req);
   const sessionNote = !isPair
     ? `<div class="ap-access-summary"><b>If you allow for ${esc(temporary.duration)}</b><p>${esc(temporary.text)}</p></div>` : '';
 
@@ -747,7 +869,7 @@ function renderApproval() {
   armCountdown();
 }
 
-function requestDetailHTML(req) {
+function requestDetailHTML(req: ApprovalRequest): string {
   if (req.kind !== 'http' || !req.http) return '';
   const h = req.http;
   const shown = state.reqDetailOpen === null ? h.mutating : state.reqDetailOpen;
@@ -765,13 +887,13 @@ function requestDetailHTML(req) {
 }
 
 const COUNTDOWN_LOW_S = 30;
-function countdownParts(deadlineIso) {
+function countdownParts(deadlineIso: string): { s: number; text: string } {
   const ms = new Date(deadlineIso).getTime() - Date.now();
   const s = Math.max(0, Math.ceil(ms / 1000));
   const text = s === 0 ? 'Expired' : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
   return { s, text };
 }
-function countdown(deadlineIso) {
+function countdown(deadlineIso: string): string {
   return countdownParts(deadlineIso).text;
 }
 // The timer only touches the countdown node (no re-render): text, plus the
@@ -791,19 +913,19 @@ function armCountdown() {
 }
 
 /* --------------------------------- helpers ------------------------------- */
-const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
 
 // Flash "Copied" in place of the masked value for a moment after a copy.
-let copiedTimer = null;
-function flashCopied(id) {
+let copiedTimer: ReturnType<typeof setTimeout> | null = null;
+function flashCopied(id: string): void {
   state.copied = id;
   render();
   if (copiedTimer) clearTimeout(copiedTimer);
   copiedTimer = setTimeout(() => { state.copied = null; render(); }, 1400);
 }
 
-let readyCopiedTimer = null;
-function flashReadyCopied() {
+let readyCopiedTimer: ReturnType<typeof setTimeout> | null = null;
+function flashReadyCopied(): void {
   state.readyCopied = true;
   render();
   if (readyCopiedTimer) clearTimeout(readyCopiedTimer);
@@ -811,7 +933,7 @@ function flashReadyCopied() {
 }
 
 // Focus a sheet field on open (after the render that creates it).
-function focusField(id) {
+function focusField(id: string): void {
   setTimeout(() => {
     const el = document.getElementById(id);
     if (el) el.focus();
@@ -825,7 +947,7 @@ const INPUT_BY_ERROR_FIELD = {
   newSecretName: 'c-new-secret-name', newSecretValue: 'c-new-secret-value',
 };
 
-function showFormError(error) {
+function showFormError(error: unknown): void {
   const inline = inlineFormError(error);
   if (!inline) {
     const prefix = formErrorKind(error) === 'cancelled' ? '' : '⚠ ';
@@ -835,12 +957,15 @@ function showFormError(error) {
   state.sheetErrors = { ...state.sheetErrors, [inline.field]: inline.message };
   render();
   const defaultNameId = state.sheet && state.sheet.kind.includes('secret') ? 'f-name' : 'f-cname';
-  focusField(inline.field === 'name' ? defaultNameId : INPUT_BY_ERROR_FIELD[inline.field]);
+  const inputId = inline.field === 'name'
+    ? defaultNameId
+    : INPUT_BY_ERROR_FIELD[inline.field as keyof typeof INPUT_BY_ERROR_FIELD];
+  if (inputId) focusField(inputId);
 }
 
 function selectEditSecretMask() {
   setTimeout(() => {
-    const el = document.getElementById('f-value');
+    const el = document.getElementById('f-value') as HTMLInputElement | null;
     if (state.sheet && state.sheet.kind === 'edit-secret' && el && el.value === EDIT_SECRET_MASK) {
       el.focus();
       el.select();
@@ -848,8 +973,11 @@ function selectEditSecretMask() {
   }, 0);
 }
 
-function captureDrafts() {
-  const g = (id) => { const el = document.getElementById(id); return el ? el.value : undefined; };
+function captureDrafts(): void {
+  const g = (id: string): string | undefined => {
+    const el = document.getElementById(id) as HTMLInputElement | HTMLSelectElement | null;
+    return el?.value;
+  };
   if (state.sheet && (state.sheet.kind === 'add-secret' || state.sheet.kind === 'edit-secret')) {
     if (g('f-name') !== undefined) state.draft.name = g('f-name');
     if (g('f-value') !== undefined) state.draft.value = g('f-value');
@@ -881,19 +1009,25 @@ function captureDrafts() {
 }
 
 /* --------------------------------- actions ------------------------------- */
-async function run(fn) {
-  try { await fn(); return true; } catch (e) { toast('⚠ ' + (e.message || e)); return false; }
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
-async function saveSecret() {
+async function run(fn: () => Promise<unknown>): Promise<boolean> {
+  try { await fn(); return true; } catch (error) { toast('⚠ ' + errorMessage(error)); return false; }
+}
+
+async function saveSecret(): Promise<void> {
   captureDrafts();
+  const sheet = state.sheet;
+  if (!sheet || (sheet.kind !== 'add-secret' && sheet.kind !== 'edit-secret')) return;
   const name = (state.draft.name || '').trim();
   const value = state.draft.value || '';
-  const errs = {};
+  const errs: Record<string, string> = {};
   if (!name) errs.name = 'Name is required';
-  if (state.sheet.kind === 'add-secret' && !value) errs.value = 'Value is required';
+  if (sheet.kind === 'add-secret' && !value) errs.value = 'Value is required';
   if (Object.keys(errs).length) { state.sheetErrors = errs; render(); return; }
-  if (state.sheet.kind === 'add-secret') {
+  if (sheet.kind === 'add-secret') {
     try { await invoke('add_secret', { name, value }); }
     catch (error) { showFormError(error); return; }
     toast('🔑 Saved to macOS Keychain');
@@ -905,7 +1039,7 @@ async function saveSecret() {
     }
     try {
       await invoke('edit_secret', {
-        id: state.sheet.id,
+        id: sheet.id ?? '',
         newName: name,
         newValue: value === EDIT_SECRET_MASK ? null : value,
       });
@@ -916,14 +1050,16 @@ async function saveSecret() {
   await refresh('secrets');
 }
 
-async function saveConn() {
+async function saveConn(): Promise<void> {
   captureDrafts();
+  const sheet = state.sheet;
+  if (!sheet || (sheet.kind !== 'add-conn' && sheet.kind !== 'edit-conn')) return;
   const d = state.draft;
   const name = (d.name || '').trim();
   const t = state.connType;
-  const adding = state.sheet.kind === 'add-conn';
+  const adding = sheet.kind === 'add-conn';
   const authMode = d.authMode || 'bearer';
-  const errs = {};
+  const errs: Record<string, string> = {};
   if (!name) errs.name = 'Name is required';
   if (t === 'api' || t === 'pg' || t === 'ssh') {
     if (t !== 'api' && !(d.host || '').trim()) errs.host = 'Host is required';
@@ -949,7 +1085,7 @@ async function saveConn() {
   let apiOrigin = null;
   if (t === 'api') {
     try { apiOrigin = parseApiOrigin(d.origin || ''); }
-    catch (error) { errs.origin = error.message; }
+    catch (error) { errs.origin = errorMessage(error); }
   }
   const usesRecipe = adding && (t === 'api' || t === 'ws') && authMode !== 'advanced';
   const needsCredentialChoice = (adding && !((t === 'api' || t === 'ws') && authMode === 'advanced')) ||
@@ -957,8 +1093,8 @@ async function saveConn() {
   const secretSource = adding
     ? (d.secretSource || (d.importedCredential || d.sshImportId || !state.secrets.length ? 'new' : 'existing'))
     : 'existing';
-  let selectedSecret = null;
-  let newSecretName = null;
+  let selectedSecret: SecretSummary | null = null;
+  let newSecretName: string | null = null;
   if (needsCredentialChoice && secretSource === 'existing') {
     selectedSecret = state.secrets.find((secret) => secret.id === d.secretId) || state.secrets[0] || null;
     if (!selectedSecret) errs.secret = 'Choose a saved credential or save a new one';
@@ -975,14 +1111,14 @@ async function saveConn() {
   let injectionTemplate = (d.template || '').trim();
   if (usesRecipe) {
     try { injectionTemplate = authTemplate(t, authMode, templateSecretName || '', (d.authDetail || '').trim()); }
-    catch (error) { errs.authDetail = error.message; }
+    catch (error) { errs.authDetail = errorMessage(error); }
   } else if ((t === 'api' || (adding && t === 'ws')) && authMode === 'advanced' && !injectionTemplate) {
     errs.template = 'Injection template is required';
   } else if (!adding && t === 'api' && !injectionTemplate) {
     errs.template = 'Injection template is required';
   }
   if (Object.keys(errs).length) { state.sheetErrors = errs; render(); return; }
-  const input = { name, type: t };
+  const input: ConnectionInput = { name, type: t };
   if (adding && needsCredentialChoice && secretSource === 'new') {
     input.new_secret_name = newSecretName;
     if (t === 'ssh' && d.sshImportId && d.identityFile) {
@@ -993,9 +1129,9 @@ async function saveConn() {
     }
   }
   if (t === 'api') {
-    input.host = apiOrigin.host;
-    input.scheme = apiOrigin.scheme;
-    input.port = apiOrigin.port;
+    input.host = apiOrigin!.host;
+    input.scheme = apiOrigin!.scheme;
+    input.port = apiOrigin!.port;
     input.template = injectionTemplate;
   } else if (t === 'pg') {
     input.host = (d.host || '').trim();
@@ -1017,11 +1153,10 @@ async function saveConn() {
     input.template = injectionTemplate || null;
     if (selectedSecret) input.secret_id = selectedSecret.id;
   }
-  const cmd = adding ? 'add_connection' : 'edit_connection';
-  const args = adding ? { input } : { id: state.sheet.id, input };
   try {
-    await invoke(cmd, args);
-    toast(state.sheet.kind === 'add-conn' ? '🔌 Connection saved' : '✏️ Connection updated');
+    if (adding) await invoke('add_connection', { input });
+    else await invoke('edit_connection', { id: sheet.id ?? '', input });
+    toast(adding ? '🔌 Connection saved' : '✏️ Connection updated');
     closeSheet();
     await refresh('all');
   } catch (e) {
@@ -1038,10 +1173,11 @@ function closeSheet() {
 
 /* --------------------------------- events -------------------------------- */
 document.addEventListener('click', async (e) => {
-  const btn = e.target.closest('[data-act]');
+  const target = e.target instanceof Element ? e.target : null;
+  const btn = target?.closest<HTMLElement>('[data-act]') ?? null;
   // Dismiss the desktop settings popover on any click outside it (its own
   // toggle handles itself; menu-item clicks close it in their handlers).
-  if (state.menuOpen && !e.target.closest('.settings-menu') &&
+  if (state.menuOpen && !target?.closest('.settings-menu') &&
       !(btn && btn.dataset.act === 'toggle-settings-menu')) {
     state.menuOpen = false;
     if (!btn) { render(); return; }
@@ -1049,10 +1185,16 @@ document.addEventListener('click', async (e) => {
   }
   if (!btn) return;
   const act = btn.dataset.act;
-  const id = btn.dataset.id;
-  const name = btn.dataset.name;
+  const id = btn.dataset.id ?? '';
+  const name = btn.dataset.name ?? '';
   switch (act) {
-    case 'tab': state.tab = btn.dataset.tab; state.confirm = null; render(); break;
+    case 'tab': {
+      const tab = btn.dataset.tab;
+      if (tab && TABS.includes(tab as Tab)) state.tab = tab as Tab;
+      state.confirm = null;
+      render();
+      break;
+    }
     case 'mode-tray': state.menuOpen = false; run(() => invoke('ui_set_mode', { mode: 'tray' })); break;
     case 'mode-window': run(() => invoke('ui_set_mode', { mode: 'window' })); break;
     case 'toggle-settings-menu': state.menuOpen = !state.menuOpen; render(); break;
@@ -1149,32 +1291,36 @@ document.addEventListener('click', async (e) => {
         const imported = shouldResolveSshImport(source)
           ? sshImportFromPreview(await invoke('inspect_ssh_import', { source }))
           : parseConnectionImport(source);
+        const importedFields = imported.fields as ConnectionDraft;
         state.connType = imported.type;
         state.draft = {
           ...state.draft,
-          ...imported.fields,
+          ...importedFields,
           importSource: '',
           name: state.draft.name || imported.name,
           importedCredential: imported.credential,
-          secretSource: imported.fields.sshImportId ? 'new' : state.draft.secretSource,
+          secretSource: importedFields.sshImportId ? 'new' : state.draft.secretSource,
           importWarnings: imported.warnings,
-          port: imported.fields.port == null ? state.draft.port : String(imported.fields.port),
+          port: importedFields.port == null ? state.draft.port : String(importedFields.port),
         };
         delete state.sheetErrors.import;
         render(false);
         focusField('f-cname');
       } catch (error) {
-        state.sheetErrors.import = error.message || String(error);
+        state.sheetErrors.import = errorMessage(error);
         render();
       }
       break;
     }
     case 'edit-conn': {
       const c = state.connections.find((x) => x.id === id);
+      if (!c) break;
       state.sheet = { kind: 'edit-conn', id }; state.connType = c.type;
       state.sheetErrors = {};
       state.draft = { name: c.name, host: c.host, scheme: c.scheme,
-        origin: c.type === 'api' ? apiOriginFromParts(c.scheme, c.host, c.port) : null,
+        origin: c.type === 'api'
+          ? apiOriginFromParts(c.scheme ?? undefined, c.host ?? undefined, c.port)
+          : null,
         port: c.port ? String(c.port) : (c.type === 'ssh' ? '22' : '5432'),
         dbname: c.dbname, user: c.user, url: c.url, template: c.template,
         destination: c.destination,
@@ -1191,8 +1337,14 @@ document.addEventListener('click', async (e) => {
     case 'conn-type': {
       captureDrafts();
       const nextType = btn.dataset.type;
-      state.draft.port = portForTypeSwitch(state.connType, nextType, state.draft.port);
-      state.connType = nextType;
+      if (!nextType || !['api', 'pg', 'ws', 'ssh'].includes(nextType)) break;
+      const typedNextType = nextType as ConnectionType;
+      state.draft.port = portForTypeSwitch(
+        state.connType,
+        typedNextType,
+        state.draft.port ?? null,
+      );
+      state.connType = typedNextType;
       render(false);
       break;
     }
@@ -1257,7 +1409,7 @@ document.addEventListener('click', async (e) => {
   }
 });
 
-async function decide(id, decision) {
+async function decide(id: string, decision: Decision): Promise<void> {
   try {
     const req = state.queue[0];
     const revokeInheritedRules =
@@ -1266,9 +1418,9 @@ async function decide(id, decision) {
     state.alwaysOpen = false;
     state.reqDetailOpen = null;
     state.revokeInheritedRules = false;
-  } catch (e) {
+  } catch (error) {
     // OS authentication cancelled or failed: keep the request pending.
-    toast('🔒 ' + (e.message || e));
+    toast('🔒 ' + errorMessage(error));
   }
   await refresh('queue');
 }
@@ -1290,14 +1442,14 @@ document.addEventListener('keydown', (e) => {
     if (state.sheet) { closeSheet(); return; }
     if (state.confirm) { state.confirm = null; render(); return; }
     if (mode === 'dropdown') invoke('ui_hide_dropdown');
-  } else if (e.key === 'Enter' && e.target.tagName === 'INPUT') {
+  } else if (e.key === 'Enter' && e.target instanceof Element && e.target.tagName === 'INPUT') {
     if (state.sheet && (state.sheet.kind === 'add-secret' || state.sheet.kind === 'edit-secret')) { e.preventDefault(); saveSecret(); }
     else if (state.sheet && (state.sheet.kind === 'add-conn' || state.sheet.kind === 'edit-conn')) { e.preventDefault(); saveConn(); }
   } else if (e.key === 'Tab' && state.sheet) {
     // Keep keyboard focus inside the modal sheet, wrapping at either end.
-    const sheet = document.querySelector('.sheet');
+    const sheet = document.querySelector<HTMLElement>('.sheet');
     if (!sheet) return;
-    const focusables = sheet.querySelectorAll(
+    const focusables = sheet.querySelectorAll<HTMLElement>(
       'button:not([disabled]), input:not([disabled]), select:not([disabled]), summary');
     if (!focusables.length) return;
     const first = focusables[0];
@@ -1321,7 +1473,12 @@ const ERR_KEY_BY_INPUT = {
   'c-auth-detail': 'authDetail',
 };
 document.addEventListener('input', (e) => {
-  const key = e.target && ERR_KEY_BY_INPUT[e.target.id];
+  const target = e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement
+    ? e.target
+    : null;
+  const key = target
+    ? ERR_KEY_BY_INPUT[target.id as keyof typeof ERR_KEY_BY_INPUT]
+    : undefined;
   if (key && state.sheetErrors[key]) {
     delete state.sheetErrors[key];
     render();
@@ -1331,7 +1488,10 @@ document.addEventListener('input', (e) => {
 // These selects reveal a different, stateful portion of the form. Capture
 // first so switching does not discard fields the user may switch back to.
 document.addEventListener('change', (e) => {
-  if (!e.target || !['c-secret-source', 'c-auth-mode', 'f-sslmode'].includes(e.target.id)) return;
+  const target = e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement
+    ? e.target
+    : null;
+  if (!target || !['c-secret-source', 'c-auth-mode', 'f-sslmode'].includes(target.id)) return;
   captureDrafts();
   render(false);
 });

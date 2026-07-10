@@ -37,11 +37,13 @@ Security.framework calls and corresponding signing entitlements.
 ## Developing
 
 ```sh
-npm install        # Install pinned Tauri CLI
-npm test           # Test the core, CLI, desktop-command, and run pure UI helper tests
+npm install        # Install the pinned Tauri and TypeScript toolchain
+npm test           # Type-check, then test the core, CLI, desktop commands, and UI helpers
+npm run test:ui    # Run only the TypeScript UI helper tests
 npm run clippy     # Lint the workspace and the separate Tauri app crate
+npm run typecheck  # Type-check the frontend without emitting files
 
-npm start          # build and launch the desktop app
+npm start          # start Vite and launch the desktop app
 npm run build      # build .app and .dmg bundles
 ```
 

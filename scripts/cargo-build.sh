@@ -6,4 +6,4 @@ repo_root="$(cd "$script_dir/.." >/dev/null && pwd)"
 cd "$repo_root"
 
 cargo build "$@"
-node "$script_dir/print-cargo-build-output.mjs" "$@"
+"$repo_root/node_modules/.bin/tsx" "$script_dir/print-cargo-build-output.ts" "$@"

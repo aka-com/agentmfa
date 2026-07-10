@@ -10,7 +10,7 @@ import {
   shouldResolveSshImport,
   sshImportFromPreview,
   suggestedSecretName,
-} from '../src/connection-input.mjs';
+} from '../src/connection-input';
 
 test('API origins preserve scheme and custom port', () => {
   assert.deepEqual(parseApiOrigin('http://localhost:8080'), {
@@ -34,6 +34,7 @@ test('imports a percent-encoded Postgres DSN without putting its password in fie
   const imported = parseConnectionImport(
     'DATABASE_URL="postgresql://app%40worker:p%40ss%2Fword@db.example.com:6543/app%20prod?sslmode=verify-full"',
   );
+  if (imported.type !== 'pg') assert.fail('expected a Postgres import');
   assert.equal(imported.type, 'pg');
   assert.deepEqual(imported.fields, {
     host: 'db.example.com', port: 6543, user: 'app@worker',
@@ -47,6 +48,7 @@ test('Postgres imports default to verified TLS and keep a private CA path', () =
   const imported = parseConnectionImport(
     'postgresql://app@db.example.com/app?sslrootcert=%2Fetc%2Fcompany-ca.pem',
   );
+  if (imported.type !== 'pg') assert.fail('expected a Postgres import');
   assert.equal(imported.fields.sslmode, 'verify-full');
   assert.equal(imported.fields.pgCaBundlePath, '/etc/company-ca.pem');
 });
@@ -61,6 +63,7 @@ test('imports API and WebSocket URLs', () => {
 
 test('imports common SSH commands but rejects shell operators', () => {
   const ssh = parseConnectionImport('ssh -i ~/.ssh/deploy -p 2222 deploy@prod.example.com');
+  if (ssh.type !== 'ssh') assert.fail('expected an SSH import');
   assert.deepEqual(ssh.fields, {
     host: 'prod.example.com', port: 2222, user: 'deploy', hostKeyFingerprint: '',
   });
@@ -78,6 +81,7 @@ test('maps trusted SSH previews without including private key contents', () => {
     hostKeyCandidates: [{ fingerprint: 'SHA256:abc', algorithm: 'ssh-ed25519', source: 'known_hosts' }],
     warnings: ['This destination connects through ProxyJump bastion.'],
   });
+  if (imported.type !== 'ssh') assert.fail('expected an SSH import');
   assert.equal(imported.fields.destination, 'prod');
   assert.equal(imported.fields.identityFile, '/Users/me/.ssh/deploy');
   assert.equal(imported.fields.hostKeyFingerprint, 'SHA256:abc');
