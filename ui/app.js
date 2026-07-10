@@ -16,11 +16,11 @@ const EDIT_SECRET_MASK = '••••••••••••';
 const ACTIVITY_RENDER_LIMIT = 200;
 
 // The left-nav tabs, in order — also the cycle order for Ctrl-Tab.
-const TABS = ['secrets', 'connections', 'activity'];
+const TABS = ['connections', 'activity'];
 
 /* ------------------------------ local state ------------------------------ */
 const state = {
-  tab: 'secrets',
+  tab: 'connections',
   secrets: [],
   connections: [],
   agents: [],
@@ -338,7 +338,8 @@ function brokerReadyHTML() {
 }
 
 function renderMainWindow() {
-  const nav = TABS.map((tb) =>
+  const navTabs = state.tab === 'secrets' ? ['secrets', ...TABS] : TABS;
+  const nav = navTabs.map((tb) =>
     `<button class="nav-item ${state.tab === tb ? 'on' : ''}" data-act="tab" data-tab="${tb}">${cap(tb)}</button>`).join('');
   // One view-specific action, always in the header row next to the title.
   const actionBtn = state.tab === 'connections'
@@ -372,7 +373,8 @@ function renderMainWindow() {
 }
 
 function renderDropdown() {
-  const tabs = TABS.map((tb) =>
+  const navTabs = state.tab === 'secrets' ? ['secrets', ...TABS] : TABS;
+  const tabs = navTabs.map((tb) =>
     `<button class="seg-btn ${state.tab === tb ? 'on' : ''}" data-act="tab" data-tab="${tb}">${cap(tb)}</button>`).join('');
   const footer = state.tab === 'secrets'
     ? '<div class="dd-footer"><button class="btn block" data-act="open-add-secret">＋ Add secret</button></div>'
@@ -571,6 +573,9 @@ function settingsSheet() {
   const dockRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Hide Dock icon in the menu bar</div>
       <div class="st-sub">When minimized to the menu bar, hide the Dock icon until the window is reopened.</div></div>
       <button class="switch ${s.menu_bar_hides_dock ? 'on' : ''}" data-act="toggle-menubar-dock" role="checkbox" aria-checked="${s.menu_bar_hides_dock ? 'true' : 'false'}"></button></div>`;
+  const secretsRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Secrets</div>
+      <div class="st-sub">Manage saved values independently from their connections.</div></div>
+      <button class="btn sm" data-act="open-secrets">Manage secrets</button></div>`;
   const pgTls = `<details class="set-collapse pg-options" ${pgCaPath ? 'open' : ''}>
       <summary><span class="pg-options-chevron" aria-hidden="true">${ICONS.chevronDown}</span><span>Postgres options</span></summary>
       <div class="set-panel">
@@ -585,7 +590,7 @@ function settingsSheet() {
     </details>`;
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
     <div class="sheet wide"><h3>Settings</h3>
-    ${reauthRow}${prefixRow}${dockRow}${pgTls}
+    ${reauthRow}${prefixRow}${dockRow}${secretsRow}${pgTls}
     <div class="sheet-actions"><button class="btn primary" data-act="sheet-cancel">Done</button></div></div>`;
 }
 
@@ -1022,6 +1027,7 @@ document.addEventListener('click', async (e) => {
     case 'mode-window': run(() => invoke('ui_set_mode', { mode: 'window' })); break;
     case 'toggle-settings-menu': state.menuOpen = !state.menuOpen; render(); break;
     case 'open-settings': state.menuOpen = false; state.sheet = { kind: 'settings' }; render(); break;
+    case 'open-secrets': state.sheet = null; state.tab = 'secrets'; render(); break;
     case 'copy-agent-setup':
       if (await run(() => invoke('copy_agent_setup'))) toast('📋 Setup instructions copied');
       break;

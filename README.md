@@ -119,6 +119,10 @@ query-parameter recipe—generate the visible injection template for you. **Adva
 keeps the explicit template language available for Basic auth, composed
 credentials, and unusual services.
 
+Connections are the default view, and their setup flow can create or reuse a
+secret directly. The standalone Secrets manager remains available from
+**Settings → Manage secrets** for rotation, copying, and shared credentials.
+
 ## Adoption and compatibility
 
 - AgentMFA v1 is a single-user, local macOS 13+ application. It has no remote
