@@ -126,17 +126,32 @@ pub fn get_settings(state: State<AppState>) -> SettingsDto {
     }
 }
 
-#[tauri::command]
-pub fn copy_agent_setup(app: AppHandle, state: State<AppState>) -> CmdResult<()> {
-    let socket = state.broker.paths.socket_display();
-    let instructions = format!(
+fn agent_setup_instructions(socket: &str) -> String {
+    format!(
         "Connect to the local AgentMFA broker. Read its current instructions with:\n\n\
          curl -s --unix-socket {socket} http://localhost/instructions\n\n\
          Follow those instructions. Reuse an existing token before pairing, use a stable \
          agent_name, and never ask me to paste a saved secret value."
-    );
+    )
+}
+
+#[tauri::command]
+pub fn get_agent_setup(state: State<AppState>) -> String {
+    agent_setup_instructions(&state.broker.paths.socket_display())
+}
+
+#[tauri::command]
+pub fn copy_agent_setup(app: AppHandle, state: State<AppState>) -> CmdResult<()> {
+    let instructions = agent_setup_instructions(&state.broker.paths.socket_display());
     app.clipboard()
         .write_text(instructions)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn copy_broker_socket(app: AppHandle, state: State<AppState>) -> CmdResult<()> {
+    app.clipboard()
+        .write_text(state.broker.paths.socket_display())
         .map_err(|error| error.to_string())
 }
 
@@ -197,8 +212,7 @@ pub async fn copy_secret(state: State<'_, AppState>, id: String) -> CmdResult<()
     let id = parse_id(&id)?;
     let value = state
         .broker
-        .store
-        .secret_value(&id)
+        .ui_secret_value_for_copy(&id)
         .await
         .map_err(|e| e.to_string())?;
     crate::clipboard::copy_with_hygiene(value)?;
@@ -453,7 +467,9 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         list_activity,
         get_queue,
         get_settings,
+        get_agent_setup,
         copy_agent_setup,
+        copy_broker_socket,
         add_secret,
         edit_secret,
         delete_secret,
@@ -499,5 +515,14 @@ mod tests {
         assert_eq!(activity_view_limit(Some(50)), 50);
         assert_eq!(activity_view_limit(Some(usize::MAX)), ACTIVITY_VIEW_LIMIT);
         assert_eq!(activity_view_limit(Some(0)), 0);
+    }
+
+    #[test]
+    fn agent_setup_instructions_include_the_runtime_socket() {
+        let instructions = agent_setup_instructions("/tmp/agentmfa-test.sock");
+        assert!(instructions.contains(
+            "curl -s --unix-socket /tmp/agentmfa-test.sock http://localhost/instructions"
+        ));
+        assert!(instructions.contains("Reuse an existing token before pairing"));
     }
 }

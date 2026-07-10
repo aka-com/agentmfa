@@ -121,6 +121,25 @@ code, .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Conso
 .dd-title { font-size: 14.5px; font-weight: 700; }
 .dd-sub { font-size: 12px; color: var(--muted); margin-top: 1px; display: flex; align-items: center; gap: 5px; }
 .dd-sub .dot { width: 7px; height: 7px; border-radius: 50%; background: #30c94e; box-shadow: 0 0 4px rgba(48,201,78,.7); display: inline-block; }
+.socket-copy {
+  width: 88px; min-height: 18px; padding: 1px 4px 1px 2px;
+  border: 0; border-radius: 5px; background: transparent;
+  text-align: left; cursor: pointer;
+  transition: color .14s ease, background .14s ease;
+}
+.socket-copy:hover { color: var(--ink-2); background: var(--hover); }
+.socket-copy:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 1px; }
+.socket-copy-label { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
+.socket-copy-label svg { width: 11px; height: 11px; stroke-width: 2.5; }
+.socket-copy.is-copied {
+  color: var(--ok-ink); background: var(--accent-wash);
+  animation: socket-copy-pop .3s ease-out;
+}
+@keyframes socket-copy-pop {
+  0% { transform: scale(.96); }
+  55% { transform: scale(1.04); box-shadow: 0 0 0 3px var(--accent-wash-2); }
+  100% { transform: none; box-shadow: none; }
+}
 .dd-head { display: flex; align-items: center; gap: 10px; padding: 12px 14px 10px; }
 .dd-identity { flex: 1; min-width: 0; }
 
@@ -143,7 +162,12 @@ code, .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Conso
 .nav-item:hover { background: var(--hover); }
 .nav-item.on { background: var(--accent-wash-2); color: var(--accent-ink); font-weight: 600; }
 .dw-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-.dw-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px 8px; }
+.dw-head {
+  flex: 0 0 44px;
+  height: 44px;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 16px 2px;
+}
 .dw-head h2 { font-size: 16px; }
 
 /* ---- custom title bar (main window) ---------------------------------- */
@@ -216,9 +240,26 @@ code, .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Conso
 .onboarding-copy b, .onboarding-copy span { display: block; }
 .onboarding-copy b { font-size: 13px; }
 .onboarding-copy span { margin: 3px 0 9px; color: var(--muted); font-size: 11.5px; line-height: 1.4; }
-.agent-onboarding details { margin-top: 8px; font-size: 11px; color: var(--muted); }
-.agent-onboarding summary { cursor: pointer; }
-.agent-onboarding p { margin: 5px 0 0; line-height: 1.4; }
+.onboarding-actions { display: flex; align-items: center; gap: 12px; }
+.setup-toggle {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 1px; border: 0; background: transparent;
+  color: var(--accent-text); font-size: 11.5px; line-height: normal;
+  cursor: pointer;
+}
+.setup-toggle::after { content: '▾'; font-size: 10px; transition: transform .14s ease; }
+.setup-toggle[aria-expanded="true"]::after { transform: rotate(180deg); }
+.setup-toggle:hover { text-decoration: underline; }
+.setup-toggle:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; border-radius: 3px; }
+.setup-instructions {
+  margin-top: 7px; padding: 8px 9px;
+  overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  border: 1px solid var(--line); border-radius: 7px;
+  background: var(--wash-2); color: var(--ink-2);
+  font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10.5px; line-height: 1.45;
+}
+.setup-instructions code { font: inherit; }
 
 /* ---- tables ----------------------------------------------------------- */
 .sec-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
@@ -226,6 +267,7 @@ code, .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Conso
 .s-cell { display: flex; align-items: center; gap: 9px; }
 .s-name { font-weight: 600; font-size: 13px; font-family: ui-monospace, Menlo, Consolas, monospace; }
 .s-sub { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; color: var(--muted); margin-top: 2px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.secret-usage { font-family: inherit; }
 .c-name { font-weight: 600; font-size: 13.5px; }
 .key-chip { display: inline-block; padding: 2px 8px; border-radius: 6px; background: var(--chip-bg); color: var(--chip-ink); font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
 .badge { display: inline-block; padding: 2px 8px; border-radius: 9px; font-size: 11px; font-weight: 600; white-space: nowrap; }
@@ -264,7 +306,7 @@ code, .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Conso
 .icon-btn { border: none; background: transparent; cursor: pointer; color: var(--muted-2); padding: 4px; border-radius: 5px; line-height: 0; }
 .icon-btn:hover { background: var(--hover-2); color: var(--ink-2); }
 .rowdel { text-align: right; white-space: nowrap; }
-.confirm-row td { height: 48px; padding: 0 6px; background: var(--danger-wash); border-radius: 6px; font-size: 12px; }
+.confirm-row td { height: 48px; padding: 0 6px; background: var(--danger-wash); border-radius: 0; font-size: 12px; }
 .confirm-inline { min-height: 48px; display: flex; align-items: center; gap: 8px; }
 .confirm-inline span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 

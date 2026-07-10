@@ -23,6 +23,7 @@ const state = {
   sessions: [],
   activity: [],
   queue: [],
+  agentSetupInstructions: '',
   settings: { reauth_on_read: true, hide_secret_prefixes: true, pg_trusted_ca_bundle_path: null, menu_bar_hides_dock: false },
   reveal: {},            // secretId -> prefix string (transient)
   // sheet / confirm state
@@ -37,6 +38,8 @@ const state = {
   approvalRequestId: null,
   menuOpen: false,       // desktop-mode settings popover (gear) open
   copied: null,          // secretId whose value was just copied (transient "Copied" flash)
+  socketCopied: false,   // transient feedback on the broker.sock copy button
+  setupInstructionsOpen: false,
 };
 
 const root = () => document.getElementById('root');
@@ -53,6 +56,7 @@ async function refresh(which = 'all') {
     jobs.push(load('activity', 'list_activity', { limit: ACTIVITY_RENDER_LIMIT }));
   }
   if (which === 'all' || which === 'queue') jobs.push(load('queue', 'get_queue'));
+  if (which === 'all') jobs.push(load('agentSetupInstructions', 'get_agent_setup'));
   if (which === 'all' || which === 'settings') jobs.push(loadSettings());
   await Promise.all(jobs);
   render();
@@ -126,8 +130,11 @@ function globalSectionsHTML() {
   if (!state.agents.length) {
     out += `<div class="agent-onboarding"><div class="onboarding-copy"><b>Connect an agent</b>
       <span>Copy a short setup message into your coding agent. AgentMFA will ask you to confirm when it connects.</span></div>
-      <button class="btn primary sm" data-act="copy-agent-setup">Copy setup instructions</button>
-      <details><summary>What connecting allows</summary><p>The agent can see connection names and destinations and ask AgentMFA to use them. Saved secret values are never sent to the agent.</p></details></div>`;
+      <div class="onboarding-actions">
+        <button class="btn primary sm" data-act="copy-agent-setup">Copy setup instructions</button>
+        <button class="setup-toggle" data-act="toggle-setup-instructions" aria-expanded="${state.setupInstructionsOpen}">See instructions</button>
+      </div>
+      ${state.setupInstructionsOpen ? `<pre class="setup-instructions"><code>${esc(state.agentSetupInstructions)}</code></pre>` : ''}</div>`;
   } else {
     out += '<div class="live-head">Connected agents</div>' + state.agents.map((a) => {
       const access = [];
@@ -171,7 +178,7 @@ function globalSectionsHTML() {
 
 function secretsHTML() {
   if (!state.secrets.length) {
-    return `<div class="empty"><div class="empty-ico">🔐</div><h3>No secrets yet</h3>
+    return `<div class="empty"><div class="empty-ico">🔐</div><h3>No secrets</h3>
       <p>Store API keys, connection strings, and other credentials and secrets here.</p>
       <button class="btn primary" data-act="open-add-secret">＋ Add secret</button></div>`;
   }
@@ -204,7 +211,7 @@ function secretsHTML() {
     const valText = revealed ? esc(revealed) : '••••••••';
     const sub = `Used by ${s.used_by} connection${s.used_by === 1 ? '' : 's'}`;
     return `<tr>
-      <td><div><div class="s-name">${esc(s.name)}</div><div class="s-sub">${esc(sub)}</div></div></td>
+      <td><div><div class="s-name">${esc(s.name)}</div><div class="s-sub secret-usage">${esc(sub)}</div></div></td>
       <td class="val"><span class="val-wrap"><span class="val-slot ${copied ? 'is-copied' : ''}"><code>${valText}</code><span class="val-overlay">${overlay}</span></span></span> ${eyeBtn}</td>
       <td class="rowdel">
         <button class="icon-btn" title="Edit secret" aria-label="Edit secret ${escAttr(s.name)}" data-act="edit-secret" data-id="${s.id}">${ICONS.pencil}</button>
@@ -245,7 +252,7 @@ const connActionsHTML = (c) =>
 // connection = one object with everything about it inside its border.
 function connectionsHTML() {
   if (!state.connections.length) {
-    return `<div class="empty"><div class="empty-ico">🔌</div><h3>No connections yet</h3>
+    return `<div class="empty"><div class="empty-ico">🔌</div><h3>No connections</h3>
       <p>Connect to APIs, databases, remote servers, etc.</p>
       <button class="btn primary" data-act="open-add-conn">＋ Add connection</button></div>`;
   }
@@ -318,6 +325,14 @@ function tabContentHTML() {
     : activityHTML();
 }
 
+function brokerSocketHTML() {
+  const copied = state.socketCopied;
+  return `<button class="dd-sub socket-copy ${copied ? 'is-copied' : ''}"
+    data-act="copy-broker-socket" title="${copied ? 'Broker socket path copied' : 'Copy broker socket path'}"
+    aria-label="Copy broker socket path"><span class="dot"></span>
+    <span class="socket-copy-label" aria-live="polite">${copied ? `${ICONS.check} Copied` : 'broker.sock'}</span></button>`;
+}
+
 function renderMainWindow() {
   const nav = TABS.map((tb) =>
     `<button class="nav-item ${state.tab === tb ? 'on' : ''}" data-act="tab" data-tab="${tb}">${cap(tb)}</button>`).join('');
@@ -336,7 +351,7 @@ function renderMainWindow() {
     <div class="dw-body">
       <div class="dw-side">
         <div class="dw-brand"><div class="dd-appicon">🔐</div>
-          <div><div class="dd-title">AgentMFA</div><div class="dd-sub"><span class="dot"></span>broker.sock</div></div></div>
+          <div><div class="dd-title">AgentMFA</div>${brokerSocketHTML()}</div></div>
         <div class="dw-nav">${nav}</div>
         <div class="dw-settings">${menu}
           <button class="nav-item gear-btn ${state.menuOpen ? 'on' : ''}" data-act="toggle-settings-menu" title="Settings" aria-label="Settings">${ICONS.gear}</button>
@@ -360,7 +375,7 @@ function renderDropdown() {
     ? '<div class="dd-footer"><button class="btn block" data-act="open-add-conn">＋ Add connection</button></div>' : '';
   root().innerHTML = `<div class="surface dropdown-surface">
     <div class="dd-head"><div class="dd-appicon">🔐</div>
-      <div class="dd-identity"><div class="dd-title">AgentMFA</div><div class="dd-sub"><span class="dot"></span>broker.sock</div></div>
+      <div class="dd-identity"><div class="dd-title">AgentMFA</div>${brokerSocketHTML()}</div>
       <button class="icon-btn" title="Open as a window" aria-label="Open as a window" data-act="mode-window">${ICONS.window}</button>
       <button class="icon-btn" title="Settings" aria-label="Settings" data-act="open-settings">${ICONS.gear}</button></div>
     ${pendingBannerHTML()}${globalSectionsHTML()}
@@ -393,14 +408,13 @@ function addSecretSheet(editing) {
   const d = state.draft;
   const s = editing ? state.secrets.find((x) => x.id === state.sheet.id) : null;
   const title = editing ? 'Edit secret' : 'Add secret';
-  const valueLabel = editing ? 'New value' : 'Value';
+  const valueLabel = editing ? 'New value (saved to macOS Keychain)' : 'Value';
   const valuePlaceholder = editing ? '' : 'Your secret (saved in Keychain)';
-  const keychainNote = editing ? '<span class="keychain-note">🔒 Saved to macOS Keychain</span>' : '';
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
     <div class="sheet wide"><h3>${title}</h3>
     <div class="f-row"><label>Name</label><input id="f-name" class="${fieldCls('name')}" placeholder="e.g. STRIPE_API_KEY" value="${escAttr(d.name ?? (s ? s.name : ''))}">${fieldErr('name')}</div>
     <div class="f-row"><label>${valueLabel}</label><input id="f-value" class="${fieldCls('value')}" type="password" placeholder="${valuePlaceholder}" value="${escAttr(d.value ?? '')}">${fieldErr('value')}</div>
-    <div class="sheet-actions">${keychainNote}
+    <div class="sheet-actions">
       <button class="btn" data-act="sheet-cancel">Cancel</button>
       <button class="btn primary" data-act="save-secret">Save</button></div></div>`;
 }
@@ -486,11 +500,11 @@ function settingsSheet() {
       <div class="st-sub">When you minimize to the menu bar, also remove the Dock icon until the window is reopened.</div></div>
       <button class="switch ${s.menu_bar_hides_dock ? 'on' : ''}" data-act="toggle-menubar-dock" role="checkbox" aria-checked="${s.menu_bar_hides_dock ? 'true' : 'false'}"></button></div>`;
   const pgTls = `<details class="set-collapse" ${pgCaPath ? 'open' : ''}>
-      <summary>Postgres TLS</summary>
+      <summary>Postgres options</summary>
       <div class="set-panel">
-        <div class="f-row"><label>Trusted CA bundle path</label>
+        <div class="f-row"><label>Trusted CA bundle</label>
           <input id="f-pg-ca-bundle" placeholder="/path/to/ca-bundle.pem" value="${escAttr(pgCaPath)}"></div>
-        <div class="rule-note">PEM certificates trusted for Postgres verify-ca and verify-full.</div>
+        <div class="rule-note">Choose a PEM file containing certificates for your enterprise or private CA.</div>
         <div class="set-actions">
           <button class="btn sm" data-act="clear-pg-ca-bundle">Clear</button>
           <button class="btn sm primary" data-act="save-pg-ca-bundle">Save</button>
@@ -706,6 +720,14 @@ function flashCopied(id) {
   copiedTimer = setTimeout(() => { state.copied = null; render(); }, 1400);
 }
 
+let socketCopiedTimer = null;
+function flashSocketCopied() {
+  state.socketCopied = true;
+  render();
+  if (socketCopiedTimer) clearTimeout(socketCopiedTimer);
+  socketCopiedTimer = setTimeout(() => { state.socketCopied = false; render(); }, 1400);
+}
+
 // Focus a sheet field on open (after the render that creates it).
 function focusField(id) {
   setTimeout(() => {
@@ -874,6 +896,13 @@ document.addEventListener('click', async (e) => {
     case 'open-settings': state.menuOpen = false; state.sheet = { kind: 'settings' }; render(); break;
     case 'copy-agent-setup':
       if (await run(() => invoke('copy_agent_setup'))) toast('📋 Setup instructions copied');
+      break;
+    case 'toggle-setup-instructions':
+      state.setupInstructionsOpen = !state.setupInstructionsOpen;
+      render();
+      break;
+    case 'copy-broker-socket':
+      if (await run(() => invoke('copy_broker_socket'))) flashSocketCopied();
       break;
 
     case 'reveal-secret':

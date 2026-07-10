@@ -264,9 +264,11 @@ Implementation notes:
   mark the identity `dev-unverified`.
 - **Native authentication / clipboard.** `auth.rs` uses macOS
   LocalAuthentication, which permits Touch ID with account-password fallback,
-  and `clipboard.rs` uses `NSPasteboard`. On other platforms the confirmation
-  gate fails closed and the concealed-clipboard write is skipped (both are
-  macOS product features).
+  and `clipboard.rs` uses `NSPasteboard`. A successful user-initiated copy
+  authorizes other clipboard copies for five minutes in memory; this window
+  does not authorize agent reads or other protected actions. On other
+  platforms the confirmation gate fails closed and the concealed-clipboard
+  write is skipped (both are macOS product features).
 - **SSH host binding.** The AgentMFA implementation requires OpenSSH
   `session-bind@openssh.com` and signs only
   `publickey-hostbound-v00@openssh.com` authentication for the configured user,

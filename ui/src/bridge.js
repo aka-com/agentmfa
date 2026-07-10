@@ -16,6 +16,11 @@ export const listen = tauri ? tauri.event.listen : mockListen;
 
 const listeners = {};
 const MOCK_ACTIVITY_LIMIT = 200;
+const MOCK_AGENT_SETUP = `Connect to the local AgentMFA broker. Read its current instructions with:
+
+curl -s --unix-socket ~/.agentmfa/broker.sock http://localhost/instructions
+
+Follow those instructions. Reuse an existing token before pairing, use a stable agent_name, and never ask me to paste a saved secret value.`;
 function emit(event, payload) {
   (listeners[event] || []).forEach((cb) => cb({ event, payload }));
 }
@@ -135,7 +140,9 @@ async function mockInvoke(cmd, args = {}) {
     case 'list_activity': return db.activity.slice(0, Math.min(args.limit ?? MOCK_ACTIVITY_LIMIT, MOCK_ACTIVITY_LIMIT));
     case 'get_queue': return db.queue.slice();
     case 'get_settings': return { ...db.settings };
+    case 'get_agent_setup': return MOCK_AGENT_SETUP;
     case 'copy_agent_setup': return;
+    case 'copy_broker_socket': return;
     case 'add_secret': {
       if (db.secrets.some((s) => s.name === args.name)) throw new Error(`A secret named ${args.name} already exists`);
       db.secrets.push(mkSecret(args.name, args.value)); audit('➕', `Secret added: ${args.name}`); return;

@@ -387,6 +387,41 @@ async fn confirmed_decision_authorizes_its_executor_secret_reads_only() {
 }
 
 #[tokio::test]
+async fn copy_auth_is_reused_across_secrets_but_not_outside_copying() {
+    let events = Arc::new(UnifiedAuthEvents {
+        decision_confirms: AtomicUsize::new(0),
+        secret_read_confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    let first = broker
+        .store
+        .add_secret("FIRST_SECRET", Zeroizing::new("first".into()))
+        .unwrap();
+    let second = broker
+        .store
+        .add_secret("SECOND_SECRET", Zeroizing::new("second".into()))
+        .unwrap();
+
+    assert_eq!(
+        &*broker.ui_secret_value_for_copy(&first.id).await.unwrap(),
+        "first"
+    );
+    assert_eq!(
+        &*broker.ui_secret_value_for_copy(&second.id).await.unwrap(),
+        "second"
+    );
+    assert_eq!(events.secret_read_confirms.load(Ordering::SeqCst), 1);
+
+    // The copy window is not a general secret-read authorization. An agent
+    // execution or another direct broker read still needs its own gate.
+    assert_eq!(
+        &*broker.store.secret_value(&first.id).await.unwrap(),
+        "first"
+    );
+    assert_eq!(events.secret_read_confirms.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
 async fn always_allow_confirms_once_and_attributes_the_audit_trail() {
     let events = Arc::new(GateEvents {
         allow: true,

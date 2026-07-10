@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
@@ -24,6 +25,8 @@ use crate::types::{
     SecretValue, Settings,
 };
 use crate::Result;
+
+const COPY_AUTHORIZATION_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// What the user clicked in the approval window (§6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +49,11 @@ pub struct Broker {
     /// so a request cannot become a stale prompt while a session grant is
     /// being installed.
     pub(crate) access_gate: Mutex<()>,
+    /// A successful OS authentication for a user-initiated clipboard copy may
+    /// authorize more clipboard copies briefly. This cache is deliberately
+    /// separate from agent execution authorizations and never leaves memory.
+    copy_authorization_until: Mutex<Option<Instant>>,
+    copy_authorization_gate: tokio::sync::Mutex<()>,
     runtime: tokio::runtime::Handle,
     pub pairing: Arc<PairingRegistry>,
     pub approvals: Approvals,
@@ -140,6 +148,8 @@ impl Broker {
             policy,
             grants,
             access_gate: Mutex::new(()),
+            copy_authorization_until: Mutex::new(None),
+            copy_authorization_gate: tokio::sync::Mutex::new(()),
             runtime,
             pairing,
             approvals,
@@ -582,6 +592,40 @@ impl Broker {
         Ok(prefix)
     }
 
+    /// Fetch a value for the shell's core-side clipboard copy. A successful
+    /// OS authentication authorizes only subsequent user-initiated copies for
+    /// five minutes; agent executions and every other protected action keep
+    /// their own authorization scopes.
+    pub async fn ui_secret_value_for_copy(&self, id: &Uuid) -> Result<SecretValue> {
+        // Serialize copy authorization checks so simultaneous clicks cannot
+        // open duplicate native prompts or race to establish the window.
+        let _gate = self.copy_authorization_gate.lock().await;
+
+        if !self.store.settings().reauth_on_read {
+            *self.copy_authorization_until.lock().unwrap() = None;
+            return self.store.secret_value(id).await;
+        }
+
+        let authorized = {
+            let mut until = self.copy_authorization_until.lock().unwrap();
+            match *until {
+                Some(deadline) if Instant::now() < deadline => true,
+                _ => {
+                    *until = None;
+                    false
+                }
+            }
+        };
+        if authorized {
+            return crate::authorization::scope(true, self.store.secret_value(id)).await;
+        }
+
+        let value = self.store.secret_value(id).await?;
+        *self.copy_authorization_until.lock().unwrap() =
+            Some(Instant::now() + COPY_AUTHORIZATION_TTL);
+        Ok(value)
+    }
+
     /// Audit trail for the core-side clipboard copy (the shell owns the
     /// actual pasteboard write + hygiene, §9).
     pub fn ui_note_secret_copied(&self, id: &Uuid) -> Result<()> {
@@ -945,6 +989,7 @@ impl Broker {
             Some(self.confirm_action("Disable OS authentication requirement for reading secrets")?)
         };
         self.store.set_reauth_on_read(on)?;
+        *self.copy_authorization_until.lock().unwrap() = None;
         let mut entry = AuditEntry::new(
             AuditKind::SettingsChanged,
             format!(
