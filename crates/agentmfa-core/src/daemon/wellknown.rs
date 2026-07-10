@@ -305,7 +305,7 @@ host-key-mismatched signing requests.
   different payload; mint a fresh one.
 - `409 {{"reason": "outcome_not_replayable"}}`: the earlier execution
   completed but its retained response is unavailable; do not repeat it
-  automatically under a fresh ID—reconcile the result or ask your user.
+  automatically under a fresh ID. Reconcile the result or ask your user.
 - `409 {{"reason": "pairing_already_pending"}}`: a pairing prompt for this
   name from another process is on screen; retry after it resolves.
 - `429 {{"reason": "rate_limited" | "pairing_rate_limited"}}`: over budget;

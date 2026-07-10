@@ -10,9 +10,9 @@ from `frontendDist` (`../ui`) at `/vendor/…` and loaded by `index.html`.
 | `tippy.css` | `tippy.js` | 6.3.7 | MIT |
 
 Popper must load before Tippy (Tippy consumes `window.Popper`). Note: the
-`tippy-bundle.umd.*` file in the npm package is *not* self-contained in 6.3.7
-— it still expects an external `window.Popper` — so we vendor Popper + the
-core `tippy.umd.min.js` explicitly.
+`tippy-bundle.umd.*` file in the npm package is *not* self-contained in 6.3.7.
+It still expects an external `window.Popper`, so we vendor Popper and the core
+`tippy.umd.min.js` explicitly.
 
 To re-vendor:
 
