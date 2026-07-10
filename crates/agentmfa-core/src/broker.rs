@@ -983,57 +983,20 @@ impl Broker {
     }
 
     pub fn ui_change_reauth_on_read(&self, on: bool) -> Result<()> {
-        let confirmation = if on {
-            None
-        } else {
-            Some(self.confirm_action("Disable OS authentication requirement for reading secrets")?)
-        };
+        if !on {
+            self.confirm_action("Disable OS authentication requirement for reading secrets")?;
+        }
         self.store.set_reauth_on_read(on)?;
         *self.copy_authorization_until.lock().unwrap() = None;
-        let mut entry = AuditEntry::new(
-            AuditKind::SettingsChanged,
-            format!(
-                "OS authentication requirement {}",
-                if on { "enabled" } else { "disabled" }
-            ),
-        );
-        if let Some(confirmation) = confirmation {
-            entry = entry.confirmation(confirmation);
-        }
-        self.audit.append(
-            entry
-                .field("setting", "reauth_on_read")
-                .field("enabled", on),
-        );
         Ok(())
     }
 
     pub fn ui_set_hide_secret_prefixes(&self, on: bool) -> Result<()> {
-        self.store.set_hide_secret_prefixes(on)?;
-        self.audit.append(AuditEntry::new(
-            AuditKind::SettingsChanged,
-            format!(
-                "Secret prefixes {} in the secrets list",
-                if on { "hidden" } else { "shown" }
-            ),
-        ));
-        Ok(())
+        self.store.set_hide_secret_prefixes(on)
     }
 
     pub fn ui_set_menu_bar_hides_dock(&self, on: bool) -> Result<()> {
-        self.store.set_menu_bar_hides_dock(on)?;
-        self.audit.append(
-            AuditEntry::new(
-                AuditKind::SettingsChanged,
-                format!(
-                    "Dock icon {} when minimized to the menu bar",
-                    if on { "hidden" } else { "kept" }
-                ),
-            )
-            .field("setting", "menu_bar_hides_dock")
-            .field("enabled", on),
-        );
-        Ok(())
+        self.store.set_menu_bar_hides_dock(on)
     }
 
     pub fn ui_change_pg_trusted_ca_bundle_path(&self, path: Option<String>) -> Result<()> {
@@ -1045,26 +1008,11 @@ impl Broker {
                 Some(trimmed.to_string())
             }
         });
-        let confirmation = self.confirm_action(match &path {
+        self.confirm_action(match &path {
             Some(_) => "Change Postgres trusted CA bundle",
             None => "Clear Postgres trusted CA bundle",
         })?;
-        self.store.set_pg_trusted_ca_bundle_path(path.clone())?;
-        self.audit.append(
-            AuditEntry::new(
-                AuditKind::SettingsChanged,
-                "Postgres trusted CA bundle updated",
-            )
-            .detail(path.clone().unwrap_or_else(|| "cleared".to_string()))
-            .field("setting", "pg_trusted_ca_bundle_path")
-            .field(
-                "path",
-                path.map(serde_json::Value::from)
-                    .unwrap_or(serde_json::Value::Null),
-            )
-            .confirmation(confirmation),
-        );
-        Ok(())
+        self.store.set_pg_trusted_ca_bundle_path(path)
     }
 }
 

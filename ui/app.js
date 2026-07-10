@@ -132,7 +132,7 @@ function globalSectionsHTML() {
       <span>Copy a short setup message into your coding agent. AgentMFA will ask you to confirm when it connects.</span></div>
       <div class="onboarding-actions">
         <button class="btn primary sm" data-act="copy-agent-setup">Copy setup instructions</button>
-        <button class="setup-toggle" data-act="toggle-setup-instructions" aria-expanded="${state.setupInstructionsOpen}">See instructions</button>
+        <button class="setup-toggle" data-act="toggle-setup-instructions" aria-expanded="${state.setupInstructionsOpen}">See instructions<span class="setup-toggle-icon">${ICONS.chevronDown}</span></button>
       </div>
       ${state.setupInstructionsOpen ? `<pre class="setup-instructions"><code>${esc(state.agentSetupInstructions)}</code></pre>` : ''}</div>`;
   } else {
@@ -173,7 +173,7 @@ function globalSectionsHTML() {
         <button class="btn sm" data-act="close-session-ask" data-id="${s.id}">Close</button></div>`;
     }).join('');
   }
-  return out ? `<div class="dd-global">${out}</div>` : '';
+  return out ? `<div class="dd-global ${!state.agents.length ? 'onboarding-global' : ''}">${out}</div>` : '';
 }
 
 function secretsHTML() {
@@ -278,13 +278,13 @@ function connectionsHTML() {
   }).join('') + `</div>`;
 }
 
-// Console.app-style rows: a mono timestamp gutter, then the emoji the core
-// already records for the entry, then the two-line anatomy (plain primary
-// line + smaller, fainter detail line).
+// Console.app-style rows: a proportional timestamp gutter, restrained
+// semantic Lucide icon, then plain primary text with optional detail.
 function activityRowHTML(a) {
-  return `<div class="act-row" data-tippy-content="${escAttr(absTime(a.at))}">
+  const icon = ICONS[a.icon] || '';
+  return `<div class="act-row ${a.detail ? '' : 'single-line'}" data-tippy-content="${escAttr(absTime(a.at))}">
     <span class="act-gutter">${esc(relTime(a.at))}</span>
-    <span class="act-ico">${a.icon}</span>
+    <span class="act-ico tone-${escAttr(a.tone || 'neutral')}">${icon}</span>
     <span class="act-txt">${esc(a.text)}${a.detail ? `<div class="act-detail">${esc(a.detail)}</div>` : ''}</span></div>`;
 }
 

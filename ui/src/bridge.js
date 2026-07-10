@@ -16,8 +16,27 @@ export const listen = tauri ? tauri.event.listen : mockListen;
 
 const listeners = {};
 const MOCK_ACTIVITY_LIMIT = 200;
+const MOCK_ACTIVITY_META = {
+  denied: { icon: 'circleX', tone: 'danger' },
+  secretCopied: { icon: 'clipboardCopy', tone: 'neutral' },
+  sessionClosed: { icon: 'logOut', tone: 'neutral' },
+  sessionOpened: { icon: 'logIn', tone: 'neutral' },
+  autoAllowed: { icon: 'zap', tone: 'success' },
+  requested: { icon: 'bell', tone: 'warning' },
+  allowedOnce: { icon: 'circleCheck', tone: 'success' },
+  paired: { icon: 'userRoundCheck', tone: 'success' },
+  secretAdded: { icon: 'fileKey', tone: 'neutral' },
+  secretUpdated: { icon: 'pencil', tone: 'neutral' },
+  secretDeleted: { icon: 'trash', tone: 'neutral' },
+  secretRevealed: { icon: 'eye', tone: 'neutral' },
+  connectionAdded: { icon: 'plug', tone: 'neutral' },
+  connectionUpdated: { icon: 'pencil', tone: 'neutral' },
+  connectionDeleted: { icon: 'unplug', tone: 'neutral' },
+  ruleRemoved: { icon: 'shieldMinus', tone: 'neutral' },
+  grantRevoked: { icon: 'shieldX', tone: 'danger' },
+  tokenRevoked: { icon: 'unplug', tone: 'danger' },
+};
 const MOCK_AGENT_SETUP = `Connect to the local AgentMFA broker. Read its current instructions with:
-
 curl -s --unix-socket ~/.agentmfa/broker.sock http://localhost/instructions
 
 Follow those instructions. Reuse an existing token before pairing, use a stable agent_name, and never ask me to paste a saved secret value.`;
@@ -85,21 +104,21 @@ function seedFixtures() {
   // Spread across a day so the relative/absolute timestamp split is visible.
   const t = (min) => new Date(Date.now() - min * 60000).toISOString();
   [
-    ['⛔', 'Denied: claude-code', 'POST api.github.com/repos/aka/aka/dispatches', 2],
-    ['📋', 'Secret copied: GITHUB_API_KEY', null, 6],
-    ['📤', 'WebSocket bridge closed', 'market-feed', 14],
-    ['📥', 'WebSocket connection opened', 'market-feed', 35],
-    ['⚡', 'Used without asking: claude-code → github', null, 90],
-    ['📨', 'claude-code requested github', 'GET api.github.com/user/repos', 180],
-    ['📤', 'Postgres connection closed', 'Ticket window elapsed', 400],
-    ['📥', 'Postgres connection opened', 'prod-db → app_production', 402],
-    ['✅', 'Allowed this request: claude-code', 'Connect to Postgres → app@db.internal.aka.com:5432/app_production', 1500],
-    ['🔗', 'Agent connected: claude-code', null, 3000],
-  ].forEach(([icon, text, detail, min]) =>
-    db.activity.push({ icon, text, detail: detail || null, at: t(min) }));
+    ['denied', 'Denied: claude-code', 'POST api.github.com/repos/aka/aka/dispatches', 2],
+    ['secretCopied', 'Secret copied: GITHUB_API_KEY', null, 6],
+    ['sessionClosed', 'WebSocket bridge closed', 'market-feed', 14],
+    ['sessionOpened', 'WebSocket connection opened', 'market-feed', 35],
+    ['autoAllowed', 'Used without asking: claude-code → github', null, 90],
+    ['requested', 'claude-code requested github', 'GET api.github.com/user/repos', 180],
+    ['sessionClosed', 'Postgres connection closed', 'Ticket window elapsed', 400],
+    ['sessionOpened', 'Postgres connection opened', 'prod-db → app_production', 402],
+    ['allowedOnce', 'Allowed this request: claude-code', 'Connect to Postgres → app@db.internal.aka.com:5432/app_production', 1500],
+    ['paired', 'Agent connected: claude-code', null, 3000],
+  ].forEach(([kind, text, detail, min]) =>
+    db.activity.push({ ...MOCK_ACTIVITY_META[kind], text, detail: detail || null, at: t(min) }));
 }
-function audit(icon, text, detail) {
-  db.activity.unshift({ icon, text, detail: detail || null, at: new Date().toISOString() });
+function audit(kind, text, detail) {
+  db.activity.unshift({ ...MOCK_ACTIVITY_META[kind], text, detail: detail || null, at: new Date().toISOString() });
   db.activity.length = Math.min(db.activity.length, MOCK_ACTIVITY_LIMIT);
 }
 function connDto(c) {
@@ -145,7 +164,7 @@ async function mockInvoke(cmd, args = {}) {
     case 'copy_broker_socket': return;
     case 'add_secret': {
       if (db.secrets.some((s) => s.name === args.name)) throw new Error(`A secret named ${args.name} already exists`);
-      db.secrets.push(mkSecret(args.name, args.value)); audit('➕', `Secret added: ${args.name}`); return;
+      db.secrets.push(mkSecret(args.name, args.value)); audit('secretAdded', `Secret added: ${args.name}`); return;
     }
     case 'edit_secret': {
       const s = db.secrets.find((x) => x.id === args.id); if (!s) throw new Error('no such secret');
@@ -157,21 +176,21 @@ async function mockInvoke(cmd, args = {}) {
         s.name = args.newName;
       }
       if (args.newValue) s._value = args.newValue;
-      s.updated_at = now(); audit('✏️', `Secret updated: ${s.name}`); return;
+      s.updated_at = now(); audit('secretUpdated', `Secret updated: ${s.name}`); return;
     }
     case 'delete_secret': {
       const s = db.secrets.find((x) => x.id === args.id); if (!s) throw new Error('no such secret');
       const users = db.connections.filter((c) => c.secret_names.includes(s.name)).map((c) => c.name);
       if (users.length) throw new Error(`in use by ${users.join(', ')}`);
-      db.secrets = db.secrets.filter((x) => x.id !== args.id); audit('🗑', `Secret deleted: ${s.name}`); return;
+      db.secrets = db.secrets.filter((x) => x.id !== args.id); audit('secretDeleted', `Secret deleted: ${s.name}`); return;
     }
     case 'reveal_secret_prefix': {
       const s = db.secrets.find((x) => x.id === args.id); if (!s) throw new Error('no such secret');
-      audit('👁', `Secret prefix revealed: ${s.name}`); return revealPrefix(s._value);
+      audit('secretRevealed', `Secret prefix revealed: ${s.name}`); return revealPrefix(s._value);
     }
     case 'copy_secret': {
       const s = db.secrets.find((x) => x.id === args.id); if (!s) throw new Error('no such secret');
-      audit('📋', `Secret copied: ${s.name}`); emit('amfa://activity-appended', {}); return;
+      audit('secretCopied', `Secret copied: ${s.name}`); emit('amfa://activity-appended', {}); return;
     }
     case 'add_connection': {
       const i = args.input;
@@ -184,7 +203,7 @@ async function mockInvoke(cmd, args = {}) {
       db.connections.push({ id: uid(), name: i.name, type: i.type, secret_names, multi_connect: i.multi_connect,
         host: i.host, scheme: i.scheme, port: i.port, template: i.template, dbname: i.dbname, user: i.user,
         host_key_fingerprint: i.host_key_fingerprint, sslmode: i.sslmode, url: i.url });
-      audit('🔌', `Connection added: ${i.name}`); return;
+      audit('connectionAdded', `Connection added: ${i.name}`); return;
     }
     case 'edit_connection': {
       const c = db.connections.find((x) => x.id === args.id); if (!c) throw new Error('no such connection');
@@ -194,20 +213,20 @@ async function mockInvoke(cmd, args = {}) {
       Object.assign(c, { name: i.name, host: i.host, port: i.port, dbname: i.dbname, user: i.user,
         host_key_fingerprint: i.host_key_fingerprint, url: i.url, template: i.template, multi_connect: i.multi_connect });
       if (i.secret_id) c.secret_names = [db.secrets.find((s) => s.id === i.secret_id)?.name].filter(Boolean);
-      audit('✏️', `Connection updated: ${i.name}`); return;
+      audit('connectionUpdated', `Connection updated: ${i.name}`); return;
     }
     case 'delete_connection': {
       const c = db.connections.find((x) => x.id === args.id); if (!c) throw new Error('no such connection');
       db.connections = db.connections.filter((x) => x.id !== args.id);
-      db.rules = db.rules.filter((r) => r.connection_id !== args.id); audit('🗑', `Connection deleted: ${c.name}`); return;
+      db.rules = db.rules.filter((r) => r.connection_id !== args.id); audit('connectionDeleted', `Connection deleted: ${c.name}`); return;
     }
-    case 'remove_rule': db.rules = db.rules.filter((r) => r.id !== args.id); audit('🔒', 'Approval required again'); return true;
-    case 'remove_grant': db.grants = db.grants.filter((g) => g.id !== args.id); audit('🛑', 'Temporary access ended'); return true;
+    case 'remove_rule': db.rules = db.rules.filter((r) => r.id !== args.id); audit('ruleRemoved', 'Approval required again'); return true;
+    case 'remove_grant': db.grants = db.grants.filter((g) => g.id !== args.id); audit('grantRevoked', 'Temporary access ended'); return true;
     case 'revoke_agent':
       db.agents = db.agents.filter((a) => a.name !== args.name);
       db.grants = db.grants.filter((g) => g.agent !== args.name);
       db.sessions = db.sessions.filter((s) => s.agent !== args.name);
-      audit('🔒', `Agent disconnected: ${args.name}`);
+      audit('tokenRevoked', `Agent disconnected: ${args.name}`);
       emit('amfa://agents-changed', {});
       emit('amfa://sessions-changed', {});
       return true;
@@ -215,23 +234,20 @@ async function mockInvoke(cmd, args = {}) {
     case 'set_reauth_on_read': db.settings.reauth_on_read = args.on; return;
     case 'set_hide_secret_prefixes':
       db.settings.hide_secret_prefixes = args.on;
-      audit('⚙', `Secret prefixes ${args.on ? 'hidden' : 'shown'} in the secrets list`);
       return;
     case 'set_menu_bar_hides_dock':
       db.settings.menu_bar_hides_dock = args.on;
-      audit('⚙', `Dock icon ${args.on ? 'hidden' : 'kept'} when minimized to the menu bar`);
       return;
     case 'set_pg_trusted_ca_bundle_path': {
       const path = (args.path || '').trim();
       db.settings.pg_trusted_ca_bundle_path = path || null;
-      audit('⚙', path ? 'Postgres trusted CA bundle saved' : 'Postgres trusted CA bundle cleared');
       return;
     }
     case 'decide': {
       const req = db.queue.find((r) => r.id === args.id);
       if (req && req.kind === 'pair' && args.revokeInheritedRules) {
         db.rules = db.rules.filter((r) => r.agent !== req.agent);
-        audit('🔒', `Approval required again: ${req.agent}`);
+        audit('ruleRemoved', `Approval required again: ${req.agent}`);
       }
       if (req && req.kind === 'pair' && args.decision === 'allow_once') {
         db.grants = db.grants.filter((g) => g.agent !== req.agent);

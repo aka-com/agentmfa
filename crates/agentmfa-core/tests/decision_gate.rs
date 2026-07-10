@@ -714,7 +714,7 @@ async fn sensitive_settings_fail_closed_before_mutating() {
 }
 
 #[tokio::test]
-async fn sensitive_settings_record_confirmation() {
+async fn settings_changes_are_not_added_to_the_activity_log() {
     let events = Arc::new(GateEvents {
         allow: true,
         confirms: AtomicUsize::new(0),
@@ -725,16 +725,16 @@ async fn sensitive_settings_record_confirmation() {
     broker
         .ui_change_pg_trusted_ca_bundle_path(Some("/tmp/pg-ca.pem".into()))
         .unwrap();
+    broker.ui_set_hide_secret_prefixes(false).unwrap();
+    broker.ui_set_menu_bar_hides_dock(true).unwrap();
     assert_eq!(events.confirms.load(Ordering::SeqCst), 2);
     let recent = broker.audit.recent(10);
-    let confirmed_settings = recent
-        .iter()
-        .filter(|entry| {
-            entry.kind == agentmfa_core::audit::AuditKind::SettingsChanged
-                && entry.confirmation == Some(ConfirmationMethod::Waived)
-        })
-        .count();
-    assert_eq!(confirmed_settings, 2, "{recent:?}");
+    assert!(
+        recent
+            .iter()
+            .all(|entry| entry.kind != agentmfa_core::audit::AuditKind::SettingsChanged),
+        "{recent:?}"
+    );
 }
 
 #[tokio::test]

@@ -127,38 +127,57 @@ pub enum AuditKind {
 }
 
 impl AuditKind {
-    /// Icon used by the activity view (mirrors the mockup's vocabulary).
+    /// Vendored Lucide icon key used by the activity view.
     pub fn icon(&self) -> &'static str {
         match self {
-            AuditKind::PairRequested | AuditKind::Paired => "🔗",
-            AuditKind::PairDenied | AuditKind::TokenRevoked => "🔒",
-            AuditKind::PeerIdentityMismatch => "🚫",
-            AuditKind::Requested => "📨",
-            AuditKind::AllowedOnce => "✅",
-            AuditKind::GrantStarted => "⏳",
-            AuditKind::GrantExpired => "⌛",
-            AuditKind::GrantRevoked => "🛑",
-            AuditKind::AutoAllowed => "⚡",
-            AuditKind::Denied => "⛔",
-            AuditKind::ApprovalTimeout => "⏱",
-            AuditKind::Abandoned => "🚪",
-            AuditKind::Listed => "📄",
-            AuditKind::RuleSaved => "📜",
-            AuditKind::RuleRemoved => "🗑",
-            AuditKind::HttpExecuted => "🌐",
-            AuditKind::SessionOpened => "📥",
-            AuditKind::SessionClosed => "📤",
-            AuditKind::SshSigned => "🔏",
-            AuditKind::SecretAdded => "➕",
-            AuditKind::SecretUpdated => "✏️",
-            AuditKind::SecretDeleted => "🗑",
-            AuditKind::SecretRevealed => "👁",
-            AuditKind::SecretCopied => "📋",
-            AuditKind::ConnectionAdded => "🔌",
-            AuditKind::ConnectionUpdated => "✏️",
-            AuditKind::ConnectionDeleted => "🗑",
-            AuditKind::SettingsChanged => "💳",
-            AuditKind::RateLimited => "🛑",
+            AuditKind::PairRequested => "userRoundPlus",
+            AuditKind::Paired => "userRoundCheck",
+            AuditKind::PairDenied => "userRoundX",
+            AuditKind::TokenRevoked => "unplug",
+            AuditKind::PeerIdentityMismatch => "shieldAlert",
+            AuditKind::Requested => "bell",
+            AuditKind::AllowedOnce => "circleCheck",
+            AuditKind::GrantStarted => "timer",
+            AuditKind::GrantExpired => "timerOff",
+            AuditKind::GrantRevoked => "shieldX",
+            AuditKind::AutoAllowed => "zap",
+            AuditKind::Denied => "circleX",
+            AuditKind::ApprovalTimeout => "clockAlert",
+            AuditKind::Abandoned => "circleSlash",
+            AuditKind::Listed => "list",
+            AuditKind::RuleSaved => "shieldPlus",
+            AuditKind::RuleRemoved => "shieldMinus",
+            AuditKind::HttpExecuted => "globe",
+            AuditKind::SessionOpened => "logIn",
+            AuditKind::SessionClosed => "logOut",
+            AuditKind::SshSigned => "keyRound",
+            AuditKind::SecretAdded => "fileKey",
+            AuditKind::SecretUpdated => "pencil",
+            AuditKind::SecretDeleted => "trash",
+            AuditKind::SecretRevealed => "eye",
+            AuditKind::SecretCopied => "clipboardCopy",
+            AuditKind::ConnectionAdded => "plug",
+            AuditKind::ConnectionUpdated => "pencil",
+            AuditKind::ConnectionDeleted => "unplug",
+            AuditKind::SettingsChanged => "gear",
+            AuditKind::RateLimited => "gauge",
+        }
+    }
+
+    /// Restrained semantic color used by the activity icon. Ordinary events
+    /// stay neutral; color is reserved for outcomes that benefit from it.
+    pub fn tone(&self) -> &'static str {
+        match self {
+            AuditKind::Paired | AuditKind::AllowedOnce | AuditKind::AutoAllowed => "success",
+            AuditKind::PairRequested | AuditKind::Requested | AuditKind::GrantStarted => "warning",
+            AuditKind::PairDenied
+            | AuditKind::TokenRevoked
+            | AuditKind::PeerIdentityMismatch
+            | AuditKind::GrantRevoked
+            | AuditKind::Denied
+            | AuditKind::ApprovalTimeout
+            | AuditKind::RateLimited => "danger",
+            _ => "neutral",
         }
     }
 }
@@ -385,6 +404,15 @@ mod tests {
         });
         log.append(AuditEntry::new(AuditKind::SecretAdded, "Secret added: X"));
         assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn activity_metadata_uses_restrained_semantic_tones() {
+        assert_eq!(AuditKind::AutoAllowed.icon(), "zap");
+        assert_eq!(AuditKind::AutoAllowed.tone(), "success");
+        assert_eq!(AuditKind::Requested.tone(), "warning");
+        assert_eq!(AuditKind::Denied.tone(), "danger");
+        assert_eq!(AuditKind::SecretCopied.tone(), "neutral");
     }
 
     #[test]

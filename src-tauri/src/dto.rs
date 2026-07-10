@@ -242,6 +242,7 @@ impl From<&SessionInfo> for SessionDto {
 #[derive(Serialize, Clone)]
 pub struct ActivityDto {
     pub icon: String,
+    pub tone: String,
     pub text: String,
     pub detail: Option<String>,
     /// RFC 3339 timestamp; the UI renders it relative (<24h) or absolute and
@@ -253,6 +254,7 @@ impl From<&AuditEntry> for ActivityDto {
     fn from(e: &AuditEntry) -> Self {
         Self {
             icon: e.kind.icon().to_string(),
+            tone: e.kind.tone().to_string(),
             text: e.text.clone(),
             detail: e.detail.clone(),
             at: e.ts.to_rfc3339(),

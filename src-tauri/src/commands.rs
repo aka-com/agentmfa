@@ -128,7 +128,7 @@ pub fn get_settings(state: State<AppState>) -> SettingsDto {
 
 fn agent_setup_instructions(socket: &str) -> String {
     format!(
-        "Connect to the local AgentMFA broker. Read its current instructions with:\n\n\
+        "Connect to the local AgentMFA broker. Read its current instructions with:\n\
          curl -s --unix-socket {socket} http://localhost/instructions\n\n\
          Follow those instructions. Reuse an existing token before pairing, use a stable \
          agent_name, and never ask me to paste a saved secret value."
@@ -523,6 +523,7 @@ mod tests {
         assert!(instructions.contains(
             "curl -s --unix-socket /tmp/agentmfa-test.sock http://localhost/instructions"
         ));
+        assert!(instructions.contains("current instructions with:\ncurl -s --unix-socket"));
         assert!(instructions.contains("Reuse an existing token before pairing"));
     }
 }
