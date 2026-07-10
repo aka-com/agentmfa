@@ -28,7 +28,7 @@ const state = {
   sessions: [],
   activity: [],
   queue: [],
-  agentSetupInstructions: '',
+  brokerInstructions: '', // full GET /instructions body (lazy-loaded)
   settings: { reauth_on_read: true, hide_secret_prefixes: true, menu_bar_hides_dock: false },
   reveal: {},            // secretId -> prefix string (transient)
   // sheet / confirm state
@@ -44,7 +44,7 @@ const state = {
   menuOpen: false,       // desktop-mode settings popover (gear) open
   copied: null,          // secretId whose value was just copied (transient "Copied" flash)
   readyCopied: false,    // transient feedback on the setup-instructions status button
-  setupInstructionsOpen: false,
+  showFullInstructions: false,
 };
 
 const root = () => document.getElementById('root');
@@ -61,7 +61,6 @@ async function refresh(which = 'all') {
     jobs.push(load('activity', 'list_activity', { limit: ACTIVITY_RENDER_LIMIT }));
   }
   if (which === 'all' || which === 'queue') jobs.push(load('queue', 'get_queue'));
-  if (which === 'all') jobs.push(load('agentSetupInstructions', 'get_agent_setup'));
   if (which === 'all' || which === 'settings') jobs.push(loadSettings());
   await Promise.all(jobs);
   render();
@@ -140,9 +139,13 @@ function globalSectionsHTML() {
         <span>Copy a short setup message into your coding agent.</span></div>
         <div class="onboarding-actions">
           <button class="btn primary sm" data-act="copy-agent-setup">Copy setup instructions</button>
-          <button class="setup-toggle" data-act="toggle-setup-instructions" aria-expanded="${state.setupInstructionsOpen}">See instructions<span class="setup-toggle-icon">${ICONS.chevronDown}</span></button>
+          <button class="switch ${state.showFullInstructions ? 'on' : ''}" data-act="toggle-full-instructions"
+            role="switch" aria-checked="${state.showFullInstructions ? 'true' : 'false'}"
+            aria-label="Show full agent instructions" title="Show full agent instructions"></button>
         </div>
-        ${state.setupInstructionsOpen ? `<pre class="setup-instructions"><code>${esc(state.agentSetupInstructions)}</code></pre>` : ''}</div>`;
+        ${state.showFullInstructions
+          ? `<pre class="setup-instructions is-full"><code>${esc(state.brokerInstructions || 'Loading…')}</code></pre>`
+          : ''}</div>`;
     }
   } else {
     out += '<div class="live-head">Connected agents</div>' + state.agents.map((a) => {
@@ -1057,8 +1060,15 @@ document.addEventListener('click', async (e) => {
     case 'copy-agent-setup':
       if (await run(() => invoke('copy_agent_setup'))) toast('📋 Setup instructions copied');
       break;
-    case 'toggle-setup-instructions':
-      state.setupInstructionsOpen = !state.setupInstructionsOpen;
+    case 'toggle-full-instructions':
+      state.showFullInstructions = !state.showFullInstructions;
+      if (state.showFullInstructions && !state.brokerInstructions) {
+        render();
+        const ok = await run(async () => {
+          state.brokerInstructions = await invoke('get_broker_instructions');
+        });
+        if (!ok) state.showFullInstructions = false;
+      }
       render();
       break;
     case 'copy-ready-setup':

@@ -237,17 +237,7 @@ code, .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Conso
 .onboarding-copy b { font-size: 14px; }
 .onboarding-copy span { margin: 3px 0 9px; color: var(--muted); font-size: 12.5px; line-height: 1.4; }
 .onboarding-actions { display: flex; align-items: center; gap: 12px; }
-.setup-toggle {
-  display: inline-flex; align-items: center; gap: 4px;
-  padding: 3px 1px; border: 0; background: transparent;
-  color: var(--ink); font-size: 12.5px; line-height: normal;
-  cursor: pointer;
-}
-.setup-toggle-icon { display: inline-flex; transition: transform .14s ease; }
-.setup-toggle-icon svg { width: 13px; height: 13px; }
-.setup-toggle[aria-expanded="true"] .setup-toggle-icon { transform: rotate(180deg); }
-.setup-toggle:hover { text-decoration: underline; }
-.setup-toggle:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; border-radius: 3px; }
+.onboarding-actions .switch { margin-left: auto; margin-top: 0; }
 .setup-instructions {
   margin-top: 11px; padding: 8px 9px;
   overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere;
@@ -256,6 +246,7 @@ code, .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Conso
   font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12.5px; line-height: 1.45;
 }
+.setup-instructions.is-full { max-height: 320px; overflow-y: auto; }
 .setup-instructions code { font: inherit; }
 
 /* ---- tables ----------------------------------------------------------- */

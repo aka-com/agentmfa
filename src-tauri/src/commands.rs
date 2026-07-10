@@ -339,13 +339,22 @@ pub fn get_settings(state: State<AppState>) -> SettingsDto {
 
 fn agent_setup_instructions(socket: &str) -> String {
     format!(
-        "Connect to the local AgentMFA broker. Read its current instructions with: curl -fsS --unix-socket {socket} http://localhost/instructions"
+        "Connect to the local AgentMFA broker. Read its current instructions with:\n\ncurl -fsS --unix-socket {socket} http://localhost/instructions"
     )
 }
 
 #[tauri::command]
 pub fn get_agent_setup(state: State<AppState>) -> String {
     agent_setup_instructions(&state.broker.paths.socket_display())
+}
+
+/// The full agent-facing walkthrough the daemon serves at `GET /instructions`.
+#[tauri::command]
+pub fn get_broker_instructions(state: State<AppState>) -> String {
+    agentmfa_core::daemon::wellknown::instructions(
+        &state.broker.config,
+        &state.broker.paths,
+    )
 }
 
 #[tauri::command]
@@ -795,6 +804,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         get_queue,
         get_settings,
         get_agent_setup,
+        get_broker_instructions,
         copy_agent_setup,
         inspect_ssh_import,
         add_secret,
@@ -907,7 +917,7 @@ mod tests {
         let instructions = agent_setup_instructions("/tmp/agentmfa-test.sock");
         assert!(instructions.contains("curl -fsS"));
         assert!(instructions.contains("--unix-socket /tmp/agentmfa-test.sock"));
-        assert_eq!(instructions.lines().count(), 1);
+        assert!(instructions.contains("with:\n\ncurl -fsS"));
         assert!(!instructions.contains("\\\n"));
         assert!(instructions.ends_with("http://localhost/instructions"));
         assert!(!instructions.contains("--max-time"));

@@ -36,7 +36,18 @@ const MOCK_ACTIVITY_META = {
   grantRevoked: { icon: 'shieldX', tone: 'danger' },
   tokenRevoked: { icon: 'unplug', tone: 'danger' },
 };
-const MOCK_AGENT_SETUP = 'Connect to the local AgentMFA broker. Read its current instructions with: curl -fsS --unix-socket ~/.agentmfa/broker.sock http://localhost/instructions';
+const MOCK_AGENT_SETUP = 'Connect to the local AgentMFA broker. Read its current instructions with:\n\ncurl -fsS --unix-socket ~/.agentmfa/broker.sock http://localhost/instructions';
+const MOCK_BROKER_INSTRUCTIONS = `# AgentMFA: broker instructions
+
+AgentMFA holds this developer's secrets and brokers their use.
+Transport: HTTP over the Unix domain socket \`~/.agentmfa/broker.sock\`.
+
+## 1. Authenticate
+Reuse a stored token via GET /v1/whoami, or POST /v1/pair when you must.
+
+## 2. Discover
+GET /v1/connections lists named destinations without exposing secrets.
+`;
 function emit(event, payload) {
   (listeners[event] || []).forEach((cb) => cb({ event, payload }));
 }
@@ -167,6 +178,7 @@ async function mockInvoke(cmd, args = {}) {
     case 'get_queue': return db.queue.slice();
     case 'get_settings': return { ...db.settings };
     case 'get_agent_setup': return MOCK_AGENT_SETUP;
+    case 'get_broker_instructions': return MOCK_BROKER_INSTRUCTIONS;
     case 'copy_agent_setup': return;
     case 'inspect_ssh_import':
       return {
