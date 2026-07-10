@@ -630,7 +630,17 @@ impl Broker {
             return crate::authorization::scope(true, self.store.secret_value(id)).await;
         }
 
-        let value = self.store.secret_value(id).await?;
+        let meta = self.store.secret_by_id(id)?;
+        let events = self.events.clone();
+        let confirmed = tokio::task::spawn_blocking(move || {
+            events.confirm_secret_copy(&meta, COPY_AUTHORIZATION_TTL)
+        })
+        .await
+        .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))?;
+        if !confirmed {
+            return Err(CoreError::SecretReadNotAuthenticated);
+        }
+        let value = crate::authorization::scope(true, self.store.secret_value(id)).await?;
         *self.copy_authorization_until.lock().unwrap() =
             Some(Instant::now() + COPY_AUTHORIZATION_TTL);
         Ok(value)

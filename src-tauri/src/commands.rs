@@ -16,7 +16,7 @@ use agentmfa_core::broker::{Broker, UiDecision};
 use agentmfa_core::store::ConnectionSpec;
 use agentmfa_core::types::{ConnectionConfig, DecisionContext, DecisionSurface, PgSslMode};
 use serde::Deserialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter as _, State};
 use tauri_plugin_clipboard_manager::ClipboardExt as _;
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -105,6 +105,13 @@ pub fn list_activity(state: State<AppState>, limit: Option<usize>) -> Vec<Activi
 }
 
 #[tauri::command]
+pub fn clear_activity(app: AppHandle, state: State<AppState>) -> CmdResult<()> {
+    state.broker.audit.clear().map_err(|e| e.to_string())?;
+    let _ = app.emit(crate::events::EVT_ACTIVITY_CHANGED, ());
+    Ok(())
+}
+
+#[tauri::command]
 pub fn get_queue(state: State<AppState>) -> Vec<ApprovalDto> {
     let duration = state.broker.config.access_grant_ttl.as_secs();
     state
@@ -128,12 +135,10 @@ pub fn get_settings(state: State<AppState>) -> SettingsDto {
 
 fn agent_setup_instructions(socket: &str) -> String {
     format!(
-        "Connect to the local AgentMFA broker. Read its current instructions with:\n\
-         curl --silent --show-error --fail-with-body --connect-timeout 3 --max-time 10 \\\n              --unix-socket {socket} http://localhost/instructions\n\n\
-         If that command fails or prints nothing, stop and ask me to open or relaunch \
-         AgentMFA. Do not delete the socket or retry pairing in a loop.\n\n\
-         Follow those instructions. Reuse an existing token before pairing, use a stable \
-         agent_name, and never ask me to paste a saved secret value."
+        "Connect to the local AgentMFA broker. Read its current instructions with:\n\n\
+         curl -fsS \\\n\
+           --unix-socket {socket} \\\n\
+           http://localhost/instructions"
     )
 }
 
@@ -147,13 +152,6 @@ pub fn copy_agent_setup(app: AppHandle, state: State<AppState>) -> CmdResult<()>
     let instructions = agent_setup_instructions(&state.broker.paths.socket_display());
     app.clipboard()
         .write_text(instructions)
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-pub fn copy_broker_socket(app: AppHandle, state: State<AppState>) -> CmdResult<()> {
-    app.clipboard()
-        .write_text(state.broker.paths.socket_display())
         .map_err(|error| error.to_string())
 }
 
@@ -483,11 +481,11 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         list_agents,
         list_sessions,
         list_activity,
+        clear_activity,
         get_queue,
         get_settings,
         get_agent_setup,
         copy_agent_setup,
-        copy_broker_socket,
         add_secret,
         edit_secret,
         delete_secret,
@@ -592,15 +590,10 @@ mod tests {
     #[test]
     fn agent_setup_instructions_include_the_runtime_socket() {
         let instructions = agent_setup_instructions("/tmp/agentmfa-test.sock");
-        assert!(instructions
-            .contains("--unix-socket /tmp/agentmfa-test.sock http://localhost/instructions"));
-        assert!(instructions.contains("--silent --show-error --fail-with-body"));
-        assert!(instructions.contains("--connect-timeout 3"));
-        assert!(instructions.contains("--max-time 10"));
-        assert!(!instructions.contains("curl -s "));
-        assert!(instructions.contains("If that command fails or prints nothing, stop"));
-        assert!(instructions.contains("ask me to open or relaunch AgentMFA"));
-        assert!(instructions.contains("Do not delete the socket or retry pairing in a loop"));
-        assert!(instructions.contains("Reuse an existing token before pairing"));
+        assert!(instructions.contains("curl -fsS"));
+        assert!(instructions.contains("--unix-socket /tmp/agentmfa-test.sock"));
+        assert!(instructions.ends_with("http://localhost/instructions"));
+        assert!(!instructions.contains("--max-time"));
+        assert!(!instructions.contains("Reuse an existing token before pairing"));
     }
 }

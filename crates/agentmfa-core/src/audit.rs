@@ -252,7 +252,7 @@ impl AuditEntry {
 /// Observer callback notified on every appended entry.
 type AuditListener = Box<dyn Fn(&AuditEntry) + Send + Sync>;
 
-/// Append-only jsonl writer plus a tail reader for the activity view.
+/// JSONL writer plus a tail reader for the activity view.
 pub struct AuditLog {
     path: PathBuf,
     file: Mutex<std::fs::File>,
@@ -296,6 +296,16 @@ impl AuditLog {
         for listener in self.listeners.lock().unwrap().iter() {
             listener(&entry);
         }
+    }
+
+    /// Remove all persisted activity while keeping the log ready for new
+    /// entries. Clearing and appending share the writer lock so an entry can
+    /// never be partially truncated.
+    pub fn clear(&self) -> Result<()> {
+        let file = self.file.lock().unwrap();
+        file.set_len(0)?;
+        file.sync_data()?;
+        Ok(())
     }
 
     /// Newest-first tail for the activity view. Unparseable lines are
@@ -404,6 +414,21 @@ mod tests {
         });
         log.append(AuditEntry::new(AuditKind::SecretAdded, "Secret added: X"));
         assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn clear_removes_history_and_allows_future_appends() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = AuditLog::open(dir.path().join("audit.jsonl")).unwrap();
+        log.append(AuditEntry::new(AuditKind::SecretAdded, "before clear"));
+
+        log.clear().unwrap();
+        assert!(log.recent(10).is_empty());
+
+        log.append(AuditEntry::new(AuditKind::SecretAdded, "after clear"));
+        let recent = log.recent(10);
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].text, "after clear");
     }
 
     #[test]

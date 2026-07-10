@@ -37,12 +37,10 @@ const MOCK_ACTIVITY_META = {
   tokenRevoked: { icon: 'unplug', tone: 'danger' },
 };
 const MOCK_AGENT_SETUP = `Connect to the local AgentMFA broker. Read its current instructions with:
-curl --silent --show-error --fail-with-body --connect-timeout 3 --max-time 10 \\
-     --unix-socket ~/.agentmfa/broker.sock http://localhost/instructions
 
-If that command fails or prints nothing, stop and ask me to open or relaunch AgentMFA. Do not delete the socket or retry pairing in a loop.
-
-Follow those instructions. Reuse an existing token before pairing, use a stable agent_name, and never ask me to paste a saved secret value.`;
+curl -fsS \\
+  --unix-socket ~/.agentmfa/broker.sock \\
+  http://localhost/instructions`;
 function emit(event, payload) {
   (listeners[event] || []).forEach((cb) => cb({ event, payload }));
 }
@@ -164,11 +162,11 @@ async function mockInvoke(cmd, args = {}) {
         temporary_access_count: db.grants.filter((g) => g.agent === a.name).length }));
     case 'list_sessions': return db.sessions.slice();
     case 'list_activity': return db.activity.slice(0, Math.min(args.limit ?? MOCK_ACTIVITY_LIMIT, MOCK_ACTIVITY_LIMIT));
+    case 'clear_activity': db.activity = []; emit('amfa://activity-changed', {}); return;
     case 'get_queue': return db.queue.slice();
     case 'get_settings': return { ...db.settings };
     case 'get_agent_setup': return MOCK_AGENT_SETUP;
     case 'copy_agent_setup': return;
-    case 'copy_broker_socket': return;
     case 'add_secret': {
       if (db.secrets.some((s) => s.name === args.name)) throw new Error(`A secret named ${args.name} already exists`);
       db.secrets.push(mkSecret(args.name, args.value)); audit('secretAdded', `Secret added: ${args.name}`); return;

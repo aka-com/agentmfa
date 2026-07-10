@@ -6,6 +6,7 @@
 //! prompt, and rings the advisory notification doorbell (§6).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use agentmfa_core::approvals::{ApprovalKind, ApprovalRequest};
 use agentmfa_core::audit::AuditEntry;
@@ -22,8 +23,20 @@ pub const EVT_SESSIONS: &str = "amfa://sessions-changed";
 pub const EVT_AGENTS: &str = "amfa://agents-changed";
 pub const EVT_RULES: &str = "amfa://rules-changed";
 pub const EVT_ACTIVITY: &str = "amfa://activity-appended";
+pub const EVT_ACTIVITY_CHANGED: &str = "amfa://activity-changed";
 
 pub const APPROVAL_WINDOW: &str = "approval";
+
+fn copy_authorization_reason(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    let window = if seconds % 60 == 0 {
+        let minutes = seconds / 60;
+        format!("{minutes} minute{}", if minutes == 1 { "" } else { "s" })
+    } else {
+        format!("{seconds} second{}", if seconds == 1 { "" } else { "s" })
+    };
+    format!("allow copying saved secrets for the next {window}")
+}
 
 pub struct TauriEvents {
     app: AppHandle,
@@ -143,7 +156,12 @@ impl BrokerEvents for TauriEvents {
     }
 
     fn confirm_secret_read(&self, secret: &SecretMeta) -> bool {
-        let reason = format!("AgentMFA wants to read the secret \"{}\".", secret.name);
+        let reason = format!("read the secret \"{}\"", secret.name);
+        crate::auth::confirm(&reason).is_ok()
+    }
+
+    fn confirm_secret_copy(&self, _secret: &SecretMeta, duration: Duration) -> bool {
+        let reason = copy_authorization_reason(duration);
         crate::auth::confirm(&reason).is_ok()
     }
 
@@ -241,4 +259,17 @@ impl BrokerEvents for TauriEvents {
 /// Convenience for the shell to construct the observer as a trait object.
 pub fn observer(app: AppHandle, access_duration_seconds: u64) -> Arc<dyn BrokerEvents> {
     Arc::new(TauriEvents::new(app, access_duration_seconds))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copy_authorization_reason_describes_the_timed_window() {
+        assert_eq!(
+            copy_authorization_reason(Duration::from_secs(5 * 60)),
+            "allow copying saved secrets for the next 5 minutes"
+        );
+    }
 }

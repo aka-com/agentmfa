@@ -5,6 +5,8 @@
 //! the tray badge, raise the approval window, ring the notification
 //! doorbell, and refresh views.
 
+use std::time::Duration;
+
 use crate::approvals::ApprovalRequest;
 use crate::audit::AuditEntry;
 use crate::broker::UiDecision;
@@ -36,6 +38,13 @@ pub trait BrokerEvents: Send + Sync {
     /// shell implementations do not silently bypass this setting.
     fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
         false
+    }
+
+    /// A user-initiated clipboard copy is about to open a short authorization
+    /// window for more copies. The default delegates to the ordinary secret
+    /// read gate so existing shells remain fail-closed and compatible.
+    fn confirm_secret_copy(&self, secret: &SecretMeta, _duration: Duration) -> bool {
+        self.confirm_secret_read(secret)
     }
 
     /// A confirmation-gated decision — approving a pairing or mutating

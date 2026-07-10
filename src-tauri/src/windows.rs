@@ -28,6 +28,34 @@ pub const EVT_OPEN_SETTINGS: &str = "amfa://open-settings";
 const DROPDOWN_GAP: f64 = 6.0;
 static LAST_TRAY_ANCHOR: Mutex<Option<TrayAnchor>> = Mutex::new(None);
 
+#[cfg(target_os = "macos")]
+pub fn move_traffic_lights_down(window: &tauri::WebviewWindow, offset: f64) -> tauri::Result<()> {
+    use objc2_app_kit::{NSWindow, NSWindowButton};
+
+    let ns_window = window.ns_window()?;
+    let ns_window: &NSWindow = unsafe { &*ns_window.cast() };
+    for kind in [
+        NSWindowButton::CloseButton,
+        NSWindowButton::MiniaturizeButton,
+        NSWindowButton::ZoomButton,
+    ] {
+        if let Some(button) = ns_window.standardWindowButton(kind) {
+            let mut origin = button.frame().origin;
+            origin.y -= offset;
+            button.setFrameOrigin(origin);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn move_traffic_lights_down(
+    _window: &tauri::WebviewWindow,
+    _offset: f64,
+) -> tauri::Result<()> {
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug)]
 struct TrayAnchor {
     x: f64,

@@ -43,7 +43,7 @@ pub enum CoreError {
     #[error("a connection's type is fixed after creation")]
     KindChange,
 
-    #[error("secret read was not authenticated")]
+    #[error("Secret read was not authenticated")]
     SecretReadNotAuthenticated,
 
     #[error("the native confirmation did not complete; nothing was applied")]

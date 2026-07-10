@@ -63,7 +63,8 @@ from the vault to Claude, Codex, or other local agents.
 - **Local activity log.** Pairing, approval, denial, and upstream events are
   emitted to the app's Activity view and appended to disk on a best-effort
   basis. Persistence failures do not block broker operations, so history may
-  be incomplete; it is not a tamper-evident audit ledger.
+  be incomplete; it is not a tamper-evident audit ledger. History can be
+  cleared from the Activity view.
 - **Free and open source.** MIT-licensed local desktop application; contact us for enterprise support.
 
 ## How it works
@@ -347,7 +348,7 @@ AgentMFA persistence
 |   |       token hash, token preview, identity pin, last_used
 |   |       no raw bearer token
 |   |
-|   |-- audit.jsonl                                 0600, append-only, not sealed
+|   |-- audit.jsonl                                 0600, user-clearable, not sealed
 |   |   `-- audit/event stream; no intentionally recorded stored values
 |   |
 |   `-- dev-vault.json                              non-macOS dev fallback only
@@ -410,8 +411,8 @@ AgentMFA persistence
 
 Integrity checks apply to `index.json`, `rules.json`, and `agents.json`. They
 are sealed as `{"v","alg","mac","payload"}` using an HMAC key stored in the
-vault/Keychain. `audit.jsonl` is append-only and tolerant of bad lines, but not
-integrity-sealed.
+vault/Keychain. `audit.jsonl` is tolerant of bad lines and can be cleared from
+the Activity view, but is not integrity-sealed.
 
 The archive action moves only the persistent app data directory, so on macOS
 it archives:

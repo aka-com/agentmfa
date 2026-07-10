@@ -42,7 +42,7 @@ const state = {
   approvalRequestId: null,
   menuOpen: false,       // desktop-mode settings popover (gear) open
   copied: null,          // secretId whose value was just copied (transient "Copied" flash)
-  socketCopied: false,   // transient feedback on the broker.sock copy button
+  readyCopied: false,    // transient feedback on the setup-instructions status button
   setupInstructionsOpen: false,
 };
 
@@ -132,13 +132,15 @@ function pendingBannerHTML() {
 function globalSectionsHTML() {
   let out = '';
   if (!state.agents.length) {
-    out += `<div class="agent-onboarding"><div class="onboarding-copy"><b>Connect an agent</b>
-      <span>Copy a short setup message into your coding agent. AgentMFA will ask you to confirm when it connects.</span></div>
-      <div class="onboarding-actions">
-        <button class="btn primary sm" data-act="copy-agent-setup">Copy setup instructions</button>
-        <button class="setup-toggle" data-act="toggle-setup-instructions" aria-expanded="${state.setupInstructionsOpen}">See instructions<span class="setup-toggle-icon">${ICONS.chevronDown}</span></button>
-      </div>
-      ${state.setupInstructionsOpen ? `<pre class="setup-instructions"><code>${esc(state.agentSetupInstructions)}</code></pre>` : ''}</div>`;
+    if (state.tab !== 'activity') {
+      out += `<div class="agent-onboarding"><div class="onboarding-copy"><b>Connect an agent</b>
+        <span>Copy a short setup message into your coding agent.</span></div>
+        <div class="onboarding-actions">
+          <button class="btn primary sm" data-act="copy-agent-setup">Copy setup instructions</button>
+          <button class="setup-toggle" data-act="toggle-setup-instructions" aria-expanded="${state.setupInstructionsOpen}">See instructions<span class="setup-toggle-icon">${ICONS.chevronDown}</span></button>
+        </div>
+        ${state.setupInstructionsOpen ? `<pre class="setup-instructions"><code>${esc(state.agentSetupInstructions)}</code></pre>` : ''}</div>`;
+    }
   } else {
     out += '<div class="live-head">Connected agents</div>' + state.agents.map((a) => {
       const access = [];
@@ -286,15 +288,15 @@ function connectionsHTML() {
 // semantic Lucide icon, then plain primary text with optional detail.
 function activityRowHTML(a) {
   const icon = ICONS[a.icon] || '';
-  return `<div class="act-row ${a.detail ? '' : 'single-line'}" data-tippy-content="${escAttr(absTime(a.at))}">
-    <span class="act-gutter">${esc(relTime(a.at))}</span>
+  return `<div class="act-row ${a.detail ? '' : 'single-line'}">
+    <span class="act-gutter"><span class="act-time" data-tippy-content="${escAttr(absTime(a.at))}" data-tippy-theme="activity-time">${esc(relTime(a.at))}</span></span>
     <span class="act-ico tone-${escAttr(a.tone || 'neutral')}">${icon}</span>
     <span class="act-txt">${esc(a.text)}${a.detail ? `<div class="act-detail">${esc(a.detail)}</div>` : ''}</span></div>`;
 }
 
 function activityHTML() {
   if (!state.activity.length) {
-    return `<div class="muted-note">No activity yet.<br>Connect an agent and make a request to get started.</div>`;
+    return `<div class="muted-note">No activity yet.<br>Requests and broker actions will appear here.</div>`;
   }
   return '<div class="act-list">' + state.activity
     .slice(0, ACTIVITY_RENDER_LIMIT)
@@ -329,22 +331,23 @@ function tabContentHTML() {
     : activityHTML();
 }
 
-function brokerSocketHTML() {
-  const copied = state.socketCopied;
-  return `<button class="dd-sub socket-copy ${copied ? 'is-copied' : ''}"
-    data-act="copy-broker-socket" title="${copied ? 'Broker socket path copied' : 'Copy broker socket path'}"
-    aria-label="Copy broker socket path"><span class="dot"></span>
-    <span class="socket-copy-label" aria-live="polite">${copied ? `${ICONS.check} Copied` : 'broker.sock'}</span></button>`;
+function brokerReadyHTML() {
+  const copied = state.readyCopied;
+  return `<button class="dd-sub ready-copy ${copied ? 'is-copied' : ''}"
+    data-act="copy-ready-setup" title="${copied ? 'Setup instructions copied' : 'Copy setup instructions'}"
+    aria-label="Copy setup instructions"><span class="dot"></span>
+    <span class="ready-copy-label" aria-live="polite">${copied ? `${ICONS.check} Copied` : 'Ready'}</span></button>`;
 }
 
 function renderMainWindow() {
   const nav = TABS.map((tb) =>
     `<button class="nav-item ${state.tab === tb ? 'on' : ''}" data-act="tab" data-tab="${tb}">${cap(tb)}</button>`).join('');
-  // One Add affordance, always in the header row next to the view title.
-  const addBtn = state.tab === 'connections'
+  // One view-specific action, always in the header row next to the title.
+  const actionBtn = state.tab === 'connections'
     ? `<button class="btn" data-act="open-add-conn">＋ Add connection</button>`
     : state.tab === 'secrets'
-    ? `<button class="btn" data-act="open-add-secret">＋ Add secret</button>` : '';
+    ? `<button class="btn" data-act="open-add-secret">＋ Add secret</button>`
+    : `<button class="btn" data-act="clear-activity-ask" ${state.activity.length ? '' : 'disabled'}>Clear activity</button>`;
   const menu = state.menuOpen
     ? `<div class="settings-menu">
         <button class="menu-item" data-act="mode-tray">${ICONS.menubar} Minimize to menu bar</button>
@@ -355,14 +358,14 @@ function renderMainWindow() {
     <div class="dw-body">
       <div class="dw-side">
         <div class="dw-brand"><div class="dd-appicon">🔐</div>
-          <div><div class="dd-title">AgentMFA</div>${brokerSocketHTML()}</div></div>
+          <div><div class="dd-title">AgentMFA</div>${brokerReadyHTML()}</div></div>
         <div class="dw-nav">${nav}</div>
         <div class="dw-settings">${menu}
           <button class="nav-item gear-btn ${state.menuOpen ? 'on' : ''}" data-act="toggle-settings-menu" title="Settings" aria-label="Settings">${ICONS.gear}</button>
         </div>
       </div>
       <div class="dw-main">
-        <div class="dw-head"><h2>${cap(state.tab)}</h2>${addBtn}</div>
+        <div class="dw-head"><h2>${cap(state.tab)}</h2>${actionBtn}</div>
         ${pendingBannerHTML()}
         ${globalSectionsHTML()}
         <div class="content">${tabContentHTML()}</div>
@@ -379,7 +382,7 @@ function renderDropdown() {
     ? '<div class="dd-footer"><button class="btn block" data-act="open-add-conn">＋ Add connection</button></div>' : '';
   root().innerHTML = `<div class="surface dropdown-surface">
     <div class="dd-head"><div class="dd-appicon">🔐</div>
-      <div class="dd-identity"><div class="dd-title">AgentMFA</div>${brokerSocketHTML()}</div>
+      <div class="dd-identity"><div class="dd-title">AgentMFA</div>${brokerReadyHTML()}</div>
       <button class="icon-btn" title="Open as a window" aria-label="Open as a window" data-act="mode-window">${ICONS.window}</button>
       <button class="icon-btn" title="Settings" aria-label="Settings" data-act="open-settings">${ICONS.gear}</button></div>
     ${pendingBannerHTML()}${globalSectionsHTML()}
@@ -397,8 +400,20 @@ function sheetsHTML() {
     case 'add-conn': return connSheet(false);
     case 'edit-conn': return connSheet(true);
     case 'settings': return settingsSheet();
+    case 'clear-activity': return clearActivitySheet();
     default: return '';
   }
+}
+
+function clearActivitySheet() {
+  return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
+    <div class="sheet wide confirm-sheet" role="dialog" aria-modal="true" aria-labelledby="clear-activity-title">
+      <h3 id="clear-activity-title">Clear activity?</h3>
+      <p>This permanently removes all activity history from this device.</p>
+      <div class="sheet-actions">
+        <button class="btn" data-act="sheet-cancel">Cancel</button>
+        <button class="btn danger" data-act="clear-activity-confirm">Clear activity</button>
+      </div></div>`;
 }
 
 // Inline per-field validation: saveSecret/saveConn fill state.sheetErrors
@@ -407,6 +422,9 @@ function sheetsHTML() {
 const fieldErr = (key) =>
   state.sheetErrors[key] ? `<div class="field-error">${esc(state.sheetErrors[key])}</div>` : '';
 const fieldCls = (key) => (state.sheetErrors[key] ? 'err' : '');
+const selectControlHTML = (id, options) => `<span class="select-control">
+  <select id="${id}">${options}</select>
+  <span class="select-chevron" aria-hidden="true">${ICONS.chevronDown}</span></span>`;
 
 function addSecretSheet(editing) {
   const d = state.draft;
@@ -433,13 +451,13 @@ function credentialChooserHTML(type, draft, allowNew = true) {
   const sourceOptions = state.secrets.length
     ? `<option value="existing" ${source === 'existing' ? 'selected' : ''}>Use a saved credential</option>` : '';
   const select = allowNew
-    ? `<select id="c-secret-source">${sourceOptions}<option value="new" ${source === 'new' ? 'selected' : ''}>Save a new credential</option></select>`
+    ? selectControlHTML('c-secret-source', `${sourceOptions}<option value="new" ${source === 'new' ? 'selected' : ''}>Save a new credential</option>`)
     : '';
   if (source === 'existing' && state.secrets.length) {
     const opts = state.secrets.map((secret) =>
       `<option value="${escAttr(secret.id)}" ${draft.secretId === secret.id ? 'selected' : ''}>${esc(secret.name)}</option>`).join('');
     return `${allowNew ? `<div class="f-row"><label>${secretLabel}</label>${select}</div>` : ''}
-      <div class="f-row"><label>${allowNew ? 'Saved credential' : secretLabel}</label><select id="c-secret">${opts}</select>${fieldErr('secret')}</div>`;
+      <div class="f-row"><label>${allowNew ? 'Saved credential' : secretLabel}</label>${selectControlHTML('c-secret', opts)}${fieldErr('secret')}</div>`;
   }
   const suggested = suggestedSecretName(draft.name, type);
   return `<div class="f-row"><label>${secretLabel}</label>${select}</div>
@@ -460,8 +478,8 @@ function connSheet(editing) {
     ? `<div class="pair-identity-warning"><b>Review imported details</b><ul>${d.importWarnings.map((warning) => `<li>${esc(warning)}</li>`).join('')}</ul></div>` : '';
   let fields = editing ? '' : `<div class="set-panel"><div class="f-row"><label>Paste an existing connection</label>
       <div class="f-2col"><input id="f-import" placeholder="Postgres DSN, API/WS URL, or ssh user@host" value="${escAttr(d.importSource ?? '')}">
-      <button type="button" class="btn sm" data-act="apply-connection-import">Use details</button></div>
-      <div class="rule-note">AgentMFA parses this locally. You review every field before it is saved.</div>${fieldErr('import')}</div></div>${importWarnings}`;
+      <button type="button" class="btn sm" data-act="apply-connection-import">Use</button></div>
+      ${fieldErr('import')}</div></div>${importWarnings}<div class="form-divider" role="separator"></div>`;
   fields += `<div class="f-row"><label>Name</label><input id="f-cname" class="${fieldCls('name')}" placeholder="e.g. github" value="${escAttr(d.name ?? '')}">${fieldErr('name')}</div>
     <div class="f-row"><label>Type${editing ? ': fixed after creation' : ''}</label>
     <div class="seg in-form">${typeBtn('api', 'API key')}${typeBtn('pg', 'Postgres')}${typeBtn('ssh', 'SSH')}${typeBtn('ws', 'WebSocket')}</div></div>`;
@@ -490,7 +508,7 @@ function connSheet(editing) {
       <div class="f-row" style="flex:0 0 90px"><label>Port</label><input id="f-port" class="${fieldCls('port')}" inputmode="numeric" value="${escAttr(d.port ?? '5432')}">${fieldErr('port')}</div></div>
       <div class="f-row"><label>Database</label><input id="f-db" class="${fieldCls('dbname')}" placeholder="app_production" value="${escAttr(d.dbname ?? '')}">${fieldErr('dbname')}</div>
       <div class="f-row"><label>User</label><input id="f-user" class="${fieldCls('user')}" placeholder="app" value="${escAttr(d.user ?? '')}">${fieldErr('user')}</div>
-      <div class="f-row"><label>TLS mode</label><select id="f-sslmode">${sslOpts}</select></div>`;
+      <div class="f-row"><label>TLS mode</label>${selectControlHTML('f-sslmode', sslOpts)}</div>`;
   } else {
     fields += `<div class="f-row"><label>URL</label><input id="f-url" class="${fieldCls('url')}" placeholder="wss://stream.example.com/feed" value="${escAttr(d.url ?? '')}">${fieldErr('url')}</div>`;
   }
@@ -514,7 +532,7 @@ function connSheet(editing) {
       ...(t === 'api' ? [['query', 'Query parameter']] : []),
       ['advanced', 'Advanced template'],
     ].map(([value, label]) => `<option value="${value}" ${modeValue === value ? 'selected' : ''}>${label}</option>`).join('');
-    fields += `<div class="f-row"><label>Authentication</label><select id="c-auth-mode">${recipes}</select></div>`;
+    fields += `<div class="f-row"><label>Authentication</label>${selectControlHTML('c-auth-mode', recipes)}</div>`;
     if (modeValue === 'header') {
       fields += `<div class="f-row"><label>Header name</label><input id="c-auth-detail" class="${fieldCls('authDetail')}" placeholder="X-API-Key" value="${escAttr(d.authDetail ?? '')}">${fieldErr('authDetail')}</div>`;
     } else if (modeValue === 'query') {
@@ -530,18 +548,16 @@ function connSheet(editing) {
     fields += credentialChooserHTML(t, d);
   }
   if (t === 'pg' || t === 'ws') {
-    fields += `<div class="f-row"><label style="display:flex;align-items:center;gap:7px;cursor:pointer">
+    fields += `<div class="f-row"><label class="checkbox-label">
       <input type="checkbox" id="c-multi" ${d.multiConnect !== false ? 'checked' : ''} style="width:auto">
-      <span>Let tools reconnect for 60 seconds after opening</span></label>
-      <div class="rule-note">Useful for connection pools and tools that reconnect automatically.</div></div>`;
+      <span>Let tools reconnect for 60 seconds after opening. <span class="label-detail">Useful for connection pools and tools that reconnect automatically.</span></span></label></div>`;
   }
   if (editing && conn && conn.rules.length) {
     fields += `<div class="rule-note">Changing the destination makes affected agents ask for approval again.</div>`;
   }
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
     <div class="sheet wide"><h3>${editing ? 'Edit connection' : 'Add connection'}</h3>${fields}
-    <div class="sheet-actions"><span class="keychain-note">Security-sensitive changes use OS authentication</span>
-      <button class="btn" data-act="sheet-cancel">Cancel</button>
+    <div class="sheet-actions"><button class="btn" data-act="sheet-cancel">Cancel</button>
       <button class="btn primary" data-act="save-conn">Save</button></div></div>`;
 }
 
@@ -552,13 +568,13 @@ function settingsSheet() {
       <div class="st-sub">Use OS authentication before showing, copying, or sending a saved credential.</div></div>
       <button class="switch ${s.reauth_on_read ? 'on' : ''}" data-act="toggle-reauth" role="checkbox" aria-checked="${s.reauth_on_read ? 'true' : 'false'}"></button></div>`;
   const prefixRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Hide secret prefixes</div>
-      <div class="st-sub">Remove the reveal-prefix eye from the secrets list; values stay copy-only.</div></div>
+      <div class="st-sub">Don't show the beginning of secrets in the secret list.</div></div>
       <button class="switch ${s.hide_secret_prefixes ? 'on' : ''}" data-act="toggle-hide-prefixes" role="checkbox" aria-checked="${s.hide_secret_prefixes ? 'true' : 'false'}"></button></div>`;
   const dockRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Hide Dock icon in the menu bar</div>
-      <div class="st-sub">When you minimize to the menu bar, also remove the Dock icon until the window is reopened.</div></div>
+      <div class="st-sub">When minimized to the menu bar, hide the Dock icon until the window is reopened.</div></div>
       <button class="switch ${s.menu_bar_hides_dock ? 'on' : ''}" data-act="toggle-menubar-dock" role="checkbox" aria-checked="${s.menu_bar_hides_dock ? 'true' : 'false'}"></button></div>`;
-  const pgTls = `<details class="set-collapse" ${pgCaPath ? 'open' : ''}>
-      <summary>Postgres options</summary>
+  const pgTls = `<details class="set-collapse pg-options" ${pgCaPath ? 'open' : ''}>
+      <summary><span class="pg-options-chevron" aria-hidden="true">${ICONS.chevronDown}</span><span>Postgres options</span></summary>
       <div class="set-panel">
         <div class="f-row"><label>Trusted CA bundle</label>
           <input id="f-pg-ca-bundle" placeholder="/path/to/ca-bundle.pem" value="${escAttr(pgCaPath)}"></div>
@@ -778,12 +794,12 @@ function flashCopied(id) {
   copiedTimer = setTimeout(() => { state.copied = null; render(); }, 1400);
 }
 
-let socketCopiedTimer = null;
-function flashSocketCopied() {
-  state.socketCopied = true;
+let readyCopiedTimer = null;
+function flashReadyCopied() {
+  state.readyCopied = true;
   render();
-  if (socketCopiedTimer) clearTimeout(socketCopiedTimer);
-  socketCopiedTimer = setTimeout(() => { state.socketCopied = false; render(); }, 1400);
+  if (readyCopiedTimer) clearTimeout(readyCopiedTimer);
+  readyCopiedTimer = setTimeout(() => { state.readyCopied = false; render(); }, 1400);
 }
 
 // Focus a sheet field on open (after the render that creates it).
@@ -1012,8 +1028,19 @@ document.addEventListener('click', async (e) => {
       state.setupInstructionsOpen = !state.setupInstructionsOpen;
       render();
       break;
-    case 'copy-broker-socket':
-      if (await run(() => invoke('copy_broker_socket'))) flashSocketCopied();
+    case 'copy-ready-setup':
+      if (await run(() => invoke('copy_agent_setup'))) flashReadyCopied();
+      break;
+    case 'clear-activity-ask':
+      state.sheet = { kind: 'clear-activity' };
+      render();
+      break;
+    case 'clear-activity-confirm':
+      if (await run(() => invoke('clear_activity'))) {
+        state.activity = [];
+        closeSheet();
+        toast('Activity cleared');
+      }
       break;
 
     case 'reveal-secret':
@@ -1309,6 +1336,7 @@ async function boot() {
     if (mode !== 'approval') refreshAccessViews();
   });
   await listen('amfa://activity-appended', (ev) => receiveActivity(ev.payload));
+  await listen('amfa://activity-changed', () => refresh('activity'));
   await listen('amfa://open-settings', () => {
     state.sheet = { kind: 'settings' };
     state.draft = {};
