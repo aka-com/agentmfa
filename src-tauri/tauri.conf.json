@@ -60,7 +60,7 @@
     "active": true,
     "targets": ["dmg", "app"],
     "category": "DeveloperTool",
-    "icon": ["icons/icon.png"],
+    "icon": ["icons/icon.icns"],
     "macOS": {
       "minimumSystemVersion": "13.0"
     }

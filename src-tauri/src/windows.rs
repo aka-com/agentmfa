@@ -15,6 +15,10 @@ use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, Rect};
 
+const TRAY_ICON_BYTES: &[u8] = include_bytes!("../icons/tray.png");
+#[cfg(test)]
+const APP_ICON_BYTES: &[u8] = include_bytes!("../icons/icon.png");
+
 pub const MAIN: &str = "main";
 pub const DROPDOWN: &str = "dropdown";
 pub const APPROVAL: &str = "approval";
@@ -43,7 +47,7 @@ struct Bounds {
 /// Install the always-present tray icon (§2). Left-click toggles the compact
 /// dropdown; right-click exposes the conventional app menu.
 pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
-    let icon = Image::from_bytes(include_bytes!("../icons/tray.png"))?;
+    let icon = Image::from_bytes(TRAY_ICON_BYTES)?;
     let open = MenuItem::with_id(app, "tray-open", "Open AgentMFA", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "tray-settings", "Settings…", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
@@ -314,6 +318,38 @@ mod tests {
         assert_eq!(
             dropdown_origin(anchor, 430.0, 520.0, Some(WORK)),
             (1010, 30)
+        );
+    }
+
+    #[test]
+    fn tray_icon_has_a_visible_shape_with_transparent_padding() {
+        let icon = Image::from_bytes(TRAY_ICON_BYTES).expect("tray icon should be valid PNG");
+        let alpha = icon.rgba().chunks_exact(4).map(|pixel| pixel[3]);
+        let pixel_count = alpha.len();
+        let (transparent, visible) = alpha.fold((0, 0), |(transparent, visible), value| {
+            (transparent + usize::from(value == 0), visible + usize::from(value > 0))
+        });
+
+        assert!(
+            transparent > pixel_count / 10,
+            "tray icon needs transparent padding"
+        );
+        assert!(
+            visible > pixel_count / 10,
+            "tray icon needs a substantial visible shape"
+        );
+    }
+
+    #[test]
+    fn bundled_app_icon_is_retina_sized_and_not_a_placeholder() {
+        let icon = Image::from_bytes(APP_ICON_BYTES).expect("app icon should be valid PNG");
+        assert_eq!((icon.width(), icon.height()), (1024, 1024));
+
+        let mut pixels = icon.rgba().chunks_exact(4);
+        let first = pixels.next().expect("app icon should contain pixels");
+        assert!(
+            pixels.any(|pixel| pixel != first),
+            "app icon should contain real artwork"
         );
     }
 }
