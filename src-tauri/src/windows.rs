@@ -11,7 +11,7 @@
 use std::sync::Mutex;
 
 use tauri::image::Image;
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{Menu, MenuItem, MenuItemKind, PredefinedMenuItem, WINDOW_SUBMENU_ID};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, Rect};
 
@@ -24,6 +24,7 @@ pub const DROPDOWN: &str = "dropdown";
 pub const APPROVAL: &str = "approval";
 pub const EVT_DROPDOWN_HIDDEN: &str = "amfa://dropdown-hidden";
 pub const EVT_OPEN_SETTINGS: &str = "amfa://open-settings";
+const APP_WINDOW_MENU_ID: &str = "app-window";
 
 const DROPDOWN_GAP: f64 = 6.0;
 static LAST_TRAY_ANCHOR: Mutex<Option<TrayAnchor>> = Mutex::new(None);
@@ -70,6 +71,38 @@ struct Bounds {
     y: f64,
     width: f64,
     height: f64,
+}
+
+/// Extend Tauri's conventional macOS application menu with a reliable way
+/// back to AgentMFA when its Dock and tray affordances are unavailable.
+pub fn setup_app_menu(app: &AppHandle) -> tauri::Result<()> {
+    let menu = Menu::default(app)?;
+    let item = MenuItem::with_id(app, APP_WINDOW_MENU_ID, "AgentMFA", true, None::<&str>)?;
+    if let Some(MenuItemKind::Submenu(window_menu)) = menu.get(WINDOW_SUBMENU_ID) {
+        let separator = PredefinedMenuItem::separator(app)?;
+        window_menu.append_items(&[&separator, &item])?;
+    }
+    app.set_menu(menu)?;
+    app.on_menu_event(|app, event| {
+        if event.id().as_ref() == APP_WINDOW_MENU_ID {
+            focus_existing_or_reopen(app);
+        }
+    });
+    Ok(())
+}
+
+fn focus_existing_or_reopen(app: &AppHandle) {
+    for label in [MAIN, APPROVAL, DROPDOWN] {
+        let Some(window) = app.get_webview_window(label) else {
+            continue;
+        };
+        if window.is_visible().unwrap_or(false) {
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+            return;
+        }
+    }
+    open_main(app);
 }
 
 /// Install the always-present tray icon (§2). Left-click toggles the compact

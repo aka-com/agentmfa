@@ -260,6 +260,7 @@ pub fn run() {
                 daemon.socket_path.display()
             );
 
+            windows::setup_app_menu(&handle)?;
             windows::setup_tray(&handle)?;
 
             // The regular main window is shown at launch. The always-present
