@@ -28,6 +28,7 @@ const state = {
   sessions: [],
   activity: [],
   queue: [],
+  agentSetupInstructions: '', // short paste-ready setup message (lazy-loaded)
   brokerInstructions: '', // full GET /instructions body (lazy-loaded)
   settings: { reauth_on_read: true, menu_bar_hides_dock: false },
   reveal: {},            // secretId -> prefix string (transient)
@@ -44,7 +45,8 @@ const state = {
   menuOpen: false,       // desktop-mode settings popover (gear) open
   copied: null,          // secretId whose value was just copied (transient "Copied" flash)
   readyCopied: false,    // transient feedback on the setup-instructions status button
-  showFullInstructions: false,
+  setupInstructionsOpen: false,
+  showFullInstructions: false, // short setup vs full /instructions body
 };
 
 const root = () => document.getElementById('root');
@@ -135,16 +137,24 @@ function globalSectionsHTML() {
   let out = '';
   if (!state.agents.length) {
     if (state.tab !== 'activity') {
+      const instructionBody = state.showFullInstructions
+        ? (state.brokerInstructions || 'Loading…')
+        : (state.agentSetupInstructions || 'Loading…');
       out += `<div class="agent-onboarding"><div class="onboarding-copy"><b>Connect an agent</b>
         <span>Copy a short setup message into your coding agent.</span></div>
         <div class="onboarding-actions">
           <button class="btn primary sm" data-act="copy-agent-setup">Copy setup instructions</button>
-          <button class="switch ${state.showFullInstructions ? 'on' : ''}" data-act="toggle-full-instructions"
-            role="switch" aria-checked="${state.showFullInstructions ? 'true' : 'false'}"
-            aria-label="Show full agent instructions" title="Show full agent instructions"></button>
+          <button class="setup-toggle" data-act="toggle-setup-instructions"
+            aria-expanded="${state.setupInstructionsOpen}">View instructions<span class="setup-toggle-icon">${ICONS.chevronDown}</span></button>
+          ${state.setupInstructionsOpen
+            ? `<button class="switch ${state.showFullInstructions ? 'on' : ''}" data-act="toggle-full-instructions"
+                role="switch" aria-checked="${state.showFullInstructions ? 'true' : 'false'}"
+                aria-label="${state.showFullInstructions ? 'Show short setup instructions' : 'Show full broker instructions'}"
+                title="${state.showFullInstructions ? 'Show short setup instructions' : 'Show full broker instructions'}"></button>`
+            : ''}
         </div>
-        ${state.showFullInstructions
-          ? `<pre class="setup-instructions is-full"><code>${esc(state.brokerInstructions || 'Loading…')}</code></pre>`
+        ${state.setupInstructionsOpen
+          ? `<pre class="setup-instructions ${state.showFullInstructions ? 'is-full' : ''}"><code>${esc(instructionBody)}</code></pre>`
           : ''}</div>`;
     }
   } else {
@@ -1049,7 +1059,25 @@ document.addEventListener('click', async (e) => {
     case 'copy-agent-setup':
       if (await run(() => invoke('copy_agent_setup'))) toast('📋 Setup instructions copied');
       break;
+    case 'toggle-setup-instructions':
+      state.setupInstructionsOpen = !state.setupInstructionsOpen;
+      if (state.setupInstructionsOpen) {
+        render();
+        if (!state.showFullInstructions && !state.agentSetupInstructions) {
+          await run(async () => {
+            state.agentSetupInstructions = await invoke('get_agent_setup');
+          });
+        } else if (state.showFullInstructions && !state.brokerInstructions) {
+          const ok = await run(async () => {
+            state.brokerInstructions = await invoke('get_broker_instructions');
+          });
+          if (!ok) state.showFullInstructions = false;
+        }
+      }
+      render();
+      break;
     case 'toggle-full-instructions':
+      if (!state.setupInstructionsOpen) break;
       state.showFullInstructions = !state.showFullInstructions;
       if (state.showFullInstructions && !state.brokerInstructions) {
         render();
@@ -1057,6 +1085,11 @@ document.addEventListener('click', async (e) => {
           state.brokerInstructions = await invoke('get_broker_instructions');
         });
         if (!ok) state.showFullInstructions = false;
+      } else if (!state.showFullInstructions && !state.agentSetupInstructions) {
+        render();
+        await run(async () => {
+          state.agentSetupInstructions = await invoke('get_agent_setup');
+        });
       }
       render();
       break;
