@@ -106,13 +106,16 @@ locally and prefills a reviewable form for:
 - `postgres://` / `postgresql://` DSNs (including user, password, port,
   database, and supported `sslmode` values);
 - `http://` / `https://` API origins and `ws://` / `wss://` URLs;
-- simple `ssh [-i key] [-p port] user@host` commands or `ssh://` URLs.
+- OpenSSH commands and destinations, including aliases resolved through
+  `~/.ssh/config`, `Include`, `IdentityFile`, and `ProxyJump`, or `ssh://` URLs.
 
 If a Postgres DSN contains a password, the original pasted DSN is cleared
 after parsing. Choosing **Save a new credential** writes the password and the
 connection as one core operation: either both the Keychain item and connection
-are saved, or neither is. SSH identity files are deliberately not read from a
-pasted command, and the server host-key fingerprint must still be confirmed.
+are saved, or neither is. SSH imports read the selected `IdentityFile` only in
+the trusted backend and save it directly to Keychain. Concrete host keys are
+prefilled from the effective `known_hosts` files, including hashed entries;
+ambiguous, missing, revoked, and certificate-authority entries require review.
 
 For APIs and WebSockets, common Bearer and custom-header recipes—and an API
 query-parameter recipe—generate the visible injection template for you. **Advanced template**
@@ -140,7 +143,7 @@ secret directly. The standalone Secrets manager remains available from
   CA bundle.
 - SSH supports ed25519 and RSA keys and requires OpenSSH-compatible session
   binding and host-bound authentication. Encrypted or unsupported private keys
-  fail when the SSH capability is opened.
+  are rejected during setup.
 - AgentMFA does not export durable secrets into an agent or child-process
   environment; doing so would give the agent the value and bypass broker
   mediation.

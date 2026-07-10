@@ -110,6 +110,10 @@ pub enum ConnectionConfig {
         template: Option<String>,
     },
     Ssh {
+        /// Original OpenSSH destination (usually an alias) to invoke. The
+        /// resolved host below remains the displayed and pinned identity.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        destination: Option<String>,
         /// Destination host the agent is told to connect to, e.g.
         /// "prod.example.com".
         host: String,
@@ -179,6 +183,17 @@ impl ConnectionConfig {
                     format!("{user}@{host}:{port}")
                 }
             }
+        }
+    }
+
+    /// OpenSSH destination an agent should invoke. Imported aliases are kept
+    /// so OpenSSH can apply ProxyJump and the rest of the user's config.
+    pub fn ssh_destination(&self) -> Option<&str> {
+        match self {
+            ConnectionConfig::Ssh {
+                destination, host, ..
+            } => Some(destination.as_deref().unwrap_or(host)),
+            _ => None,
         }
     }
 }
@@ -488,13 +503,21 @@ mod tests {
         };
         assert_eq!(ws.target(), "wss://stream.example.com/feed");
         let ssh = ConnectionConfig::Ssh {
+            destination: None,
             host: "prod.example.com".into(),
             port: 22,
             user: "deploy".into(),
             host_key_fingerprint: "SHA256:test".into(),
         };
         assert_eq!(ssh.target(), "deploy@prod.example.com");
+        assert_eq!(ssh.ssh_destination(), Some("prod.example.com"));
+        let mut aliased_ssh = ssh.clone();
+        if let ConnectionConfig::Ssh { destination, .. } = &mut aliased_ssh {
+            *destination = Some("prod".into());
+        }
+        assert_eq!(aliased_ssh.ssh_destination(), Some("prod"));
         let ssh_alt_port = ConnectionConfig::Ssh {
+            destination: None,
             host: "bastion.example.com".into(),
             port: 2222,
             user: "ops".into(),
@@ -511,6 +534,7 @@ mod tests {
         assert_eq!(
             conf,
             ConnectionConfig::Ssh {
+                destination: None,
                 host: "prod.example.com".into(),
                 port: 22,
                 user: "deploy".into(),

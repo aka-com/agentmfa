@@ -11,6 +11,7 @@ mod clipboard;
 mod commands;
 mod dto;
 mod events;
+mod ssh_import;
 mod windows;
 
 use std::sync::Arc;
@@ -292,6 +293,7 @@ pub fn run() {
 
             app.manage(AppState {
                 broker,
+                ssh_imports: Default::default(),
                 _daemon: daemon,
                 _runtime: runtime,
             });

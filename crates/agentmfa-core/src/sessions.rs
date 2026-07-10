@@ -482,6 +482,7 @@ mod tests {
             id: Uuid::new_v4(),
             name: "prod-ssh".into(),
             config: ConnectionConfig::Ssh {
+                destination: None,
                 host: "prod.example.com".into(),
                 port: 22,
                 user: "deploy".into(),

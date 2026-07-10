@@ -163,6 +163,7 @@ fn add_ssh_connection(broker: &Broker, key: &PrivateKey, user: &str) -> PrivateK
         .add_connection(ConnectionSpec {
             name: "prod-ssh".into(),
             config: ConnectionConfig::Ssh {
+                destination: Some("prod".into()),
                 host: "prod.example.com".into(),
                 port: 22,
                 user: user.into(),
@@ -265,6 +266,7 @@ impl Harness {
         assert_eq!(status, 200, "open failed: {body}");
         assert_eq!(body["user"], "deploy");
         assert_eq!(body["host"], "prod.example.com");
+        assert_eq!(body["destination"], "prod");
         assert!(body["host_key_fingerprint"]
             .as_str()
             .is_some_and(|value| value.starts_with("SHA256:")));
@@ -476,6 +478,7 @@ async fn unparseable_key_fails_open() {
         .add_connection(ConnectionSpec {
             name: "prod-ssh".into(),
             config: ConnectionConfig::Ssh {
+                destination: None,
                 host: "prod.example.com".into(),
                 port: 22,
                 user: "deploy".into(),

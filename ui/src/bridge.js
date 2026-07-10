@@ -83,7 +83,7 @@ function seedConnections() {
     mkConn('market-feed', 'ws', ['STREAM_TOKEN'], { url: 'wss://stream.example.com/feed' }),
     mkConn('internal-api', 'api', ['SERVICE_USER', 'SERVICE_PASSWORD'], { host: 'internal.aka.com', scheme: 'https', template: 'Authorization: Basic {{base64(SERVICE_USER ":" SERVICE_PASSWORD)}}' }),
     mkConn('prod-ssh', 'ssh', ['DEPLOY_SSH_KEY'], {
-      host: 'prod.example.com', port: 22, user: 'deploy',
+      destination: 'prod', host: 'prod.example.com', port: 22, user: 'deploy',
       host_key_fingerprint: 'SHA256:vdZ5N8kNxU7J4W2WYa6qK0sJYv8oXb8s2H7n3jE5q1A',
     }),
   ];
@@ -129,6 +129,7 @@ function connDto(c) {
     ],
     host: c.host || null, scheme: c.scheme || null, port: c.port || null, template: c.template || null,
     dbname: c.dbname || null, user: c.user || null, host_key_fingerprint: c.host_key_fingerprint || null,
+    destination: c.destination || null,
     sslmode: c.sslmode || null, url: c.url || null,
     trusted_ca_bundle_path: c.trusted_ca_bundle_path || null,
   };
@@ -167,6 +168,16 @@ async function mockInvoke(cmd, args = {}) {
     case 'get_settings': return { ...db.settings };
     case 'get_agent_setup': return MOCK_AGENT_SETUP;
     case 'copy_agent_setup': return;
+    case 'inspect_ssh_import':
+      return {
+        importId: 'mock-ssh-import', destination: 'prod', host: 'prod.example.com', port: 22,
+        user: 'deploy', proxyJump: 'bastion', identityFiles: ['~/.ssh/deploy'],
+        hostKeyCandidates: [{
+          fingerprint: 'SHA256:vdZ5N8kNxU7J4W2WYa6qK0sJYv8oXb8s2H7n3jE5q1A',
+          algorithm: 'ssh-ed25519', source: '~/.ssh/known_hosts',
+        }],
+        warnings: ['This destination connects through ProxyJump bastion.'],
+      };
     case 'add_secret': {
       if (db.secrets.some((s) => s.name === args.name)) {
         throw formError('conflict', 'secret_name_taken', 'name', 'That credential name is already in use');
@@ -210,11 +221,11 @@ async function mockInvoke(cmd, args = {}) {
       if (db.connections.some((c) => c.name === i.name)) {
         throw formError('conflict', 'connection_name_taken', 'name', 'That connection name is already in use');
       }
-      if (i.new_secret_name && i.new_secret_value) {
+      if (i.new_secret_name && (i.new_secret_value || (i.ssh_import_id && i.identity_file))) {
         if (db.secrets.some((s) => s.name === i.new_secret_name)) {
           throw formError('conflict', 'secret_name_taken', 'newSecretName', 'That credential name is already in use');
         }
-        const secret = mkSecret(i.new_secret_name, i.new_secret_value);
+        const secret = mkSecret(i.new_secret_name, i.new_secret_value || '-----BEGIN OPENSSH PRIVATE KEY-----mock');
         db.secrets.push(secret);
         i.secret_id = secret.id;
       }
@@ -222,7 +233,7 @@ async function mockInvoke(cmd, args = {}) {
         ? (i.template.match(/[A-Z_][A-Z0-9_]*/g) || []).filter((n) => db.secrets.some((s) => s.name === n))
         : [db.secrets.find((s) => s.id === i.secret_id)?.name].filter(Boolean);
       db.connections.push({ id: uid(), name: i.name, type: i.type, secret_names,
-        host: i.host, scheme: i.scheme, port: i.port, template: i.template, dbname: i.dbname, user: i.user,
+        destination: i.destination, host: i.host, scheme: i.scheme, port: i.port, template: i.template, dbname: i.dbname, user: i.user,
         host_key_fingerprint: i.host_key_fingerprint, sslmode: i.sslmode,
         trusted_ca_bundle_path: i.trusted_ca_bundle_path, url: i.url });
       audit('connectionAdded', `Connection added: ${i.name}`); return;
@@ -237,6 +248,7 @@ async function mockInvoke(cmd, args = {}) {
         throw formError('conflict', 'connection_name_taken', 'name', 'That connection name is already in use');
       }
       Object.assign(c, { name: i.name, host: i.host, scheme: i.scheme, port: i.port,
+        destination: i.destination,
         dbname: i.dbname, user: i.user, sslmode: i.sslmode, trusted_ca_bundle_path: i.trusted_ca_bundle_path,
         host_key_fingerprint: i.host_key_fingerprint, url: i.url,
         template: i.template });

@@ -7,6 +7,8 @@ import {
   parseConnectionImport,
   parseApiOrigin,
   portForTypeSwitch,
+  shouldResolveSshImport,
+  sshImportFromPreview,
   suggestedSecretName,
 } from '../src/connection-input.mjs';
 
@@ -64,6 +66,22 @@ test('imports common SSH commands but rejects shell operators', () => {
   });
   assert.match(ssh.warnings.join(' '), /not read automatically/);
   assert.throws(() => parseConnectionImport('ssh prod; rm -rf /'), /without shell operators/);
+});
+
+test('maps trusted SSH previews without including private key contents', () => {
+  assert.equal(shouldResolveSshImport('ssh prod'), true);
+  assert.equal(shouldResolveSshImport('deploy@prod'), true);
+  assert.equal(shouldResolveSshImport('https://api.example.com'), false);
+  const imported = sshImportFromPreview({
+    importId: 'preview-1', destination: 'prod', host: 'prod.example.com', port: 2222,
+    user: 'deploy', proxyJump: 'bastion', identityFiles: ['/Users/me/.ssh/deploy'],
+    hostKeyCandidates: [{ fingerprint: 'SHA256:abc', algorithm: 'ssh-ed25519', source: 'known_hosts' }],
+    warnings: ['This destination connects through ProxyJump bastion.'],
+  });
+  assert.equal(imported.fields.destination, 'prod');
+  assert.equal(imported.fields.identityFile, '/Users/me/.ssh/deploy');
+  assert.equal(imported.fields.hostKeyFingerprint, 'SHA256:abc');
+  assert.equal(JSON.stringify(imported).includes('PRIVATE KEY'), false);
 });
 
 test('builds transparent templates for common authentication recipes', () => {

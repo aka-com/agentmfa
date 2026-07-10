@@ -1286,6 +1286,7 @@ async fn post_ssh_open(
         );
     }
     let ConnectionConfig::Ssh {
+        destination,
         host,
         port,
         user,
@@ -1294,7 +1295,8 @@ async fn post_ssh_open(
     else {
         unreachable!()
     };
-    let (host, port, user, host_key_fingerprint) = (
+    let (destination, host, port, user, host_key_fingerprint) = (
+        destination.clone().unwrap_or_else(|| host.clone()),
         host.clone(),
         *port,
         user.clone(),
@@ -1363,6 +1365,7 @@ async fn post_ssh_open(
                     status: 200,
                     body: json!({
                         "auth_sock": auth_sock,
+                        "destination": destination,
                         "host": host,
                         "port": port,
                         "user": user,

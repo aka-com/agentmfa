@@ -9,7 +9,7 @@ import { invoke, listen, mode } from '/src/bridge.js';
 import { ICONS, TYPES, esc, escAttr, toast, relTime, absTime } from '/src/util.js';
 import {
   apiOriginFromParts, authTemplate, parseApiOrigin, parseConnectionImport,
-  portForTypeSwitch, suggestedSecretName,
+  portForTypeSwitch, shouldResolveSshImport, sshImportFromPreview, suggestedSecretName,
 } from '/src/connection-input.mjs';
 import { formErrorKind, formErrorMessage, inlineFormError } from '/src/form-errors.mjs';
 
@@ -444,7 +444,7 @@ function addSecretSheet(editing) {
 
 function credentialChooserHTML(type, draft, allowNew = true) {
   const source = allowNew
-    ? (draft.secretSource || (draft.importedCredential || !state.secrets.length ? 'new' : 'existing'))
+    ? (draft.secretSource || (draft.importedCredential || draft.sshImportId || !state.secrets.length ? 'new' : 'existing'))
     : 'existing';
   const secretLabel = type === 'pg' ? 'Database password'
     : type === 'ssh' ? 'SSH private key'
@@ -461,6 +461,14 @@ function credentialChooserHTML(type, draft, allowNew = true) {
       <div class="f-row"><label>${allowNew ? 'Saved credential' : secretLabel}</label>${selectControlHTML('c-secret', opts)}${fieldErr('secret')}</div>`;
   }
   const suggested = suggestedSecretName(draft.name, type);
+  if (type === 'ssh' && draft.sshImportId && draft.identityFiles && draft.identityFiles.length) {
+    const identityOptions = draft.identityFiles.map((path) =>
+      `<option value="${escAttr(path)}" ${draft.identityFile === path ? 'selected' : ''}>${esc(path)}</option>`).join('');
+    return `<div class="f-row"><label>${secretLabel}</label>${select}</div>
+      <div class="f-row"><label>Credential name</label><input id="c-new-secret-name" class="${fieldCls('newSecretName')}" placeholder="${escAttr(suggested)}" value="${escAttr(draft.newSecretName ?? '')}">${fieldErr('newSecretName')}</div>
+      <div class="f-row"><label>Identity file</label>${selectControlHTML('c-identity-file', identityOptions)}${fieldErr('newSecretValue')}
+        <div class="rule-note">The private key is read by AgentMFA and saved directly to macOS Keychain.</div></div>`;
+  }
   return `<div class="f-row"><label>${secretLabel}</label>${select}</div>
     <div class="f-row"><label>Credential name</label><input id="c-new-secret-name" class="${fieldCls('newSecretName')}" placeholder="${escAttr(suggested)}" value="${escAttr(draft.newSecretName ?? '')}">${fieldErr('newSecretName')}</div>
     <div class="f-row"><label>Credential value</label><input id="c-new-secret-value" class="${fieldCls('newSecretValue')}" type="password" placeholder="Saved directly to macOS Keychain" value="${escAttr(draft.newSecretValue ?? draft.importedCredential ?? '')}">${fieldErr('newSecretValue')}
@@ -493,7 +501,13 @@ function connSheet(editing) {
       <div class="f-row"><label>Host</label><input id="f-host" class="${fieldCls('host')}" placeholder="prod.example.com" value="${escAttr(d.host ?? '')}">${fieldErr('host')}</div>
       <div class="f-row" style="flex:0 0 90px"><label>Port</label><input id="f-port" class="${fieldCls('port')}" inputmode="numeric" value="${escAttr(d.port ?? '22')}">${fieldErr('port')}</div></div>
       <div class="f-row"><label>User</label><input id="f-user" class="${fieldCls('user')}" placeholder="deploy" value="${escAttr(d.user ?? '')}">${fieldErr('user')}</div>`;
-    fields += `<div class="f-row"><label>Host key fingerprint</label><input id="f-host-key" class="${fieldCls('hostKeyFingerprint')}" placeholder="SHA256:…" value="${escAttr(d.hostKeyFingerprint ?? '')}">${fieldErr('hostKeyFingerprint')}</div>`;
+    const hostKeys = d.hostKeyCandidates || [];
+    const hostKeyControl = hostKeys.length
+      ? selectControlHTML('f-host-key', hostKeys.map((candidate) =>
+          `<option value="${escAttr(candidate.fingerprint)}" ${d.hostKeyFingerprint === candidate.fingerprint ? 'selected' : ''}>${esc(candidate.algorithm)} · ${esc(candidate.fingerprint)}</option>`).join(''))
+      : `<input id="f-host-key" class="${fieldCls('hostKeyFingerprint')}" placeholder="SHA256:…" value="${escAttr(d.hostKeyFingerprint ?? '')}">`;
+    fields += `<div class="f-row"><label>Host key fingerprint</label>${hostKeyControl}${fieldErr('hostKeyFingerprint')}</div>
+      ${d.proxyJump ? `<div class="rule-note">ProxyJump: ${esc(d.proxyJump)}</div>` : ''}`;
   } else if (t === 'pg') {
     const sslmode = d.sslmode || 'verify-full';
     const sslOpts = [
@@ -852,6 +866,7 @@ function captureDrafts() {
     if (g('c-secret') !== undefined) state.draft.secretId = g('c-secret');
     if (g('c-secret-source') !== undefined) state.draft.secretSource = g('c-secret-source');
     if (g('c-new-secret-name') !== undefined) state.draft.newSecretName = g('c-new-secret-name');
+    if (g('c-identity-file') !== undefined) state.draft.identityFile = g('c-identity-file');
     if (g('c-new-secret-value') !== undefined) {
       state.draft.newSecretValue = g('c-new-secret-value');
       delete state.draft.importedCredential;
@@ -936,7 +951,7 @@ async function saveConn() {
   const needsCredentialChoice = (adding && !((t === 'api' || t === 'ws') && authMode === 'advanced')) ||
     (!adding && t !== 'api');
   const secretSource = adding
-    ? (d.secretSource || (d.importedCredential || !state.secrets.length ? 'new' : 'existing'))
+    ? (d.secretSource || (d.importedCredential || d.sshImportId || !state.secrets.length ? 'new' : 'existing'))
     : 'existing';
   let selectedSecret = null;
   let newSecretName = null;
@@ -945,11 +960,12 @@ async function saveConn() {
     if (!selectedSecret) errs.secret = 'Choose a saved credential or save a new one';
   } else if (needsCredentialChoice) {
     newSecretName = (d.newSecretName || suggestedSecretName(name, t)).trim();
+    const hasImportedIdentity = t === 'ssh' && d.sshImportId && d.identityFile;
     const newSecretValue = d.newSecretValue ?? d.importedCredential ?? '';
     if (!/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(newSecretName)) {
       errs.newSecretName = 'Use letters, numbers, and underscores; start with a letter or underscore';
     }
-    if (!newSecretValue) errs.newSecretValue = 'Credential value is required';
+    if (!newSecretValue && !hasImportedIdentity) errs.newSecretValue = 'Credential value is required';
   }
   const templateSecretName = selectedSecret ? selectedSecret.name : newSecretName;
   let injectionTemplate = (d.template || '').trim();
@@ -965,7 +981,12 @@ async function saveConn() {
   const input = { name, type: t };
   if (adding && needsCredentialChoice && secretSource === 'new') {
     input.new_secret_name = newSecretName;
-    input.new_secret_value = d.newSecretValue ?? d.importedCredential;
+    if (t === 'ssh' && d.sshImportId && d.identityFile) {
+      input.ssh_import_id = d.sshImportId;
+      input.identity_file = d.identityFile;
+    } else {
+      input.new_secret_value = d.newSecretValue ?? d.importedCredential;
+    }
   }
   if (t === 'api') {
     input.host = apiOrigin.host;
@@ -981,6 +1002,7 @@ async function saveConn() {
     input.trusted_ca_bundle_path = (d.pgCaBundlePath || '').trim() || null;
     if (selectedSecret) input.secret_id = selectedSecret.id;
   } else if (t === 'ssh') {
+    input.destination = (d.destination || '').trim() || null;
     input.host = (d.host || '').trim();
     input.port = port;
     input.user = (d.user || '').trim();
@@ -1090,7 +1112,10 @@ document.addEventListener('click', async (e) => {
     case 'apply-connection-import': {
       captureDrafts();
       try {
-        const imported = parseConnectionImport(state.draft.importSource || '');
+        const source = state.draft.importSource || '';
+        const imported = shouldResolveSshImport(source)
+          ? sshImportFromPreview(await invoke('inspect_ssh_import', { source }))
+          : parseConnectionImport(source);
         state.connType = imported.type;
         state.draft = {
           ...state.draft,
@@ -1098,6 +1123,7 @@ document.addEventListener('click', async (e) => {
           importSource: '',
           name: state.draft.name || imported.name,
           importedCredential: imported.credential,
+          secretSource: imported.fields.sshImportId ? 'new' : state.draft.secretSource,
           importWarnings: imported.warnings,
           port: imported.fields.port == null ? state.draft.port : String(imported.fields.port),
         };
@@ -1105,7 +1131,7 @@ document.addEventListener('click', async (e) => {
         render(false);
         focusField('f-cname');
       } catch (error) {
-        state.sheetErrors.import = error.message;
+        state.sheetErrors.import = error.message || String(error);
         render();
       }
       break;
@@ -1118,6 +1144,7 @@ document.addEventListener('click', async (e) => {
         origin: c.type === 'api' ? apiOriginFromParts(c.scheme, c.host, c.port) : null,
         port: c.port ? String(c.port) : (c.type === 'ssh' ? '22' : '5432'),
         dbname: c.dbname, user: c.user, url: c.url, template: c.template,
+        destination: c.destination,
         hostKeyFingerprint: c.host_key_fingerprint,
         sslmode: c.sslmode || 'verify-full', pgCaBundlePath: c.trusted_ca_bundle_path,
         secretId: null };

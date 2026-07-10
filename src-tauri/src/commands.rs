@@ -26,6 +26,7 @@ use crate::dto::*;
 
 pub struct AppState {
     pub broker: std::sync::Arc<Broker>,
+    pub ssh_imports: std::sync::Mutex<crate::ssh_import::ImportCache>,
     // Keeps the daemon (control plane + WS/PG data planes) alive; dropping
     // it aborts the listeners.
     pub _daemon: agentmfa_core::daemon::DaemonHandle,
@@ -355,6 +356,18 @@ pub fn copy_agent_setup(app: AppHandle, state: State<AppState>) -> CmdResult<()>
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+pub async fn inspect_ssh_import(
+    state: State<'_, AppState>,
+    source: String,
+) -> CmdResult<crate::ssh_import::SshImportPreview> {
+    let resolved = tokio::task::spawn_blocking(move || crate::ssh_import::resolve(&source))
+        .await
+        .map_err(|error| format!("SSH configuration resolution stopped: {error}"))??;
+    let mut imports = state.ssh_imports.lock().unwrap();
+    Ok(imports.insert(resolved))
+}
+
 /* ------------------------------ secrets ---------------------------------- */
 
 #[tauri::command]
@@ -440,6 +453,7 @@ pub struct ConnectionInput {
     pub dbname: Option<String>,
     pub user: Option<String>,
     pub host_key_fingerprint: Option<String>,
+    pub destination: Option<String>,
     pub sslmode: Option<String>,
     pub trusted_ca_bundle_path: Option<String>,
     // WS
@@ -450,6 +464,10 @@ pub struct ConnectionInput {
     // the core writes the vault item and connection atomically.
     pub new_secret_name: Option<String>,
     pub new_secret_value: Option<String>,
+    // SSH import-only: an opaque preview id and one identity path returned by
+    // that preview. The backend verifies the binding before reading the file.
+    pub ssh_import_id: Option<String>,
+    pub identity_file: Option<String>,
 }
 
 fn parse_pg_sslmode(value: Option<&str>) -> CmdResult<PgSslMode> {
@@ -497,6 +515,7 @@ impl ConnectionInput {
                 template: self.template.filter(|t| !t.is_empty()),
             },
             "ssh" => ConnectionConfig::Ssh {
+                destination: self.destination.filter(|value| !value.is_empty()),
                 host: self.host.unwrap_or_default(),
                 port: self.port.unwrap_or(22),
                 user: self.user.unwrap_or_default(),
@@ -538,9 +557,66 @@ pub fn add_connection(state: State<AppState>, mut input: ConnectionInput) -> For
     // Wrap the user-entered value before any fallible parsing below so every
     // error path zeroizes it rather than dropping an ordinary String.
     let new_secret_value = input.new_secret_value.take().map(Zeroizing::new);
+    if kind == "ssh" {
+        if let Some(value) = &new_secret_value {
+            agentmfa_core::capability::ssh::validate_private_key(value.as_bytes()).map_err(
+                |message| {
+                    FormError::validation("invalid_ssh_identity", "newSecretValue", message)
+                },
+            )?;
+        }
+    }
+    let ssh_import_id = input.ssh_import_id.take();
+    let identity_file = input.identity_file.take();
+    let imported_value = match (&ssh_import_id, &identity_file) {
+        (Some(import_id), Some(path)) if kind == "ssh" => {
+            let resolved = state
+                .ssh_imports
+                .lock()
+                .unwrap()
+                .get(import_id)
+                .map_err(|message| {
+                    FormError::validation("ssh_import_expired", "newSecretValue", message)
+                })?;
+            if input.host.as_deref() != Some(resolved.host.as_str())
+                || input.port != Some(resolved.port)
+                || input.user.as_deref() != Some(resolved.user.as_str())
+                || input.destination.as_deref() != Some(resolved.destination.as_str())
+            {
+                return Err(FormError::validation(
+                    "ssh_import_changed",
+                    "newSecretValue",
+                    "SSH details changed after import; resolve the command again",
+                ));
+            }
+            if !resolved.host_key_candidates.is_empty()
+                && !resolved.host_key_candidates.iter().any(|candidate| {
+                    input.host_key_fingerprint.as_deref() == Some(candidate.fingerprint.as_str())
+                })
+            {
+                return Err(FormError::validation(
+                    "ssh_host_key_not_from_preview",
+                    "hostKeyFingerprint",
+                    "Choose a host fingerprint found in known_hosts",
+                ));
+            }
+            Some(crate::ssh_import::load_identity(&resolved, path).map_err(|message| {
+                FormError::validation("invalid_ssh_identity", "newSecretValue", message)
+            })?)
+        }
+        (None, None) => None,
+        _ => {
+            return Err(FormError::validation(
+                "incomplete_ssh_import",
+                "newSecretValue",
+                "Resolve the SSH command and choose an identity file again",
+            ))
+        }
+    };
     let spec = input.into_spec()?;
-    let includes_new_secret = new_secret_name.is_some() || new_secret_value.is_some();
-    let result = match (new_secret_name, new_secret_value) {
+    let includes_new_secret =
+        new_secret_name.is_some() || new_secret_value.is_some() || imported_value.is_some();
+    let result = match (new_secret_name, new_secret_value.or(imported_value)) {
         (Some(name), Some(value)) if !name.is_empty() && !value.is_empty() => state
             .broker
             .ui_add_connection_with_secret(&name, value, spec)
@@ -563,7 +639,11 @@ pub fn add_connection(state: State<AppState>, mut input: ConnectionInput) -> For
                 includes_new_secret,
             },
         )
-    })
+    })?;
+    if let Some(import_id) = ssh_import_id {
+        state.ssh_imports.lock().unwrap().remove(&import_id);
+    }
+    Ok(())
 }
 
 /// Security-relevant connection edits are core-gated (§8); metadata-only
@@ -716,6 +796,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         get_settings,
         get_agent_setup,
         copy_agent_setup,
+        inspect_ssh_import,
         add_secret,
         edit_secret,
         delete_secret,
@@ -773,12 +854,15 @@ mod tests {
             dbname: None,
             user: None,
             host_key_fingerprint: None,
+            destination: None,
             sslmode: None,
             trusted_ca_bundle_path: None,
             url: None,
             secret_id: None,
             new_secret_name: None,
             new_secret_value: None,
+            ssh_import_id: None,
+            identity_file: None,
         }
         .into_spec()
         .unwrap();
@@ -799,12 +883,15 @@ mod tests {
             dbname: None,
             user: None,
             host_key_fingerprint: None,
+            destination: None,
             sslmode: None,
             trusted_ca_bundle_path: None,
             url: Some("wss://stream.example.com/feed".into()),
             secret_id: Some(secret_id.to_string()),
             new_secret_name: None,
             new_secret_value: None,
+            ssh_import_id: None,
+            identity_file: None,
         }
         .into_spec()
         .unwrap();

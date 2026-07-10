@@ -264,6 +264,7 @@ per-connection private CA bundle can extend the trusted roots.
     {{"connection": "prod-ssh", "request_id": "req-<uuid>"}}
 
     → 200 {{"auth_sock": "/…/.agentmfa/ssh/agent-<id>.sock",
+            "destination": "prod",
             "host": "prod.example.com", "port": 22, "user": "deploy",
             "host_key_fingerprint": "SHA256:…",
             "expires_in_seconds": {ticket}}}
@@ -272,8 +273,7 @@ Authorization is checked once, at open time. Point `SSH_AUTH_SOCK` at
 `auth_sock` and run any unmodified SSH client (`ssh`, `git`, `scp`, `rsync`,
 `ssh -L`):
 
-    SSH_AUTH_SOCK=<auth_sock> ssh -o IdentitiesOnly=yes \
-      <user>@<host>
+    SSH_AUTH_SOCK=<auth_sock> ssh -o IdentitiesOnly=yes <destination>
     SSH_AUTH_SOCK=<auth_sock> git -C repo push
 
 The broker serves the ssh-agent protocol on that socket: it offers the one

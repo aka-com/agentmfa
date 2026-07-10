@@ -785,11 +785,23 @@ fn validate_config_and_bind_secrets(
             bind_single_secret(state, spec)
         }
         ConnectionConfig::Ssh {
+            destination,
             host,
             port,
             user,
             host_key_fingerprint,
         } => {
+            if destination.as_ref().is_some_and(|value| {
+                value.is_empty()
+                    || value.contains('/')
+                    || value.contains(':')
+                    || value.chars().any(char::is_whitespace)
+                    || value.matches('@').count() > 1
+            }) {
+                return Err(CoreError::InvalidConnectionConfig(
+                    "invalid SSH destination alias".into(),
+                ));
+            }
             if host.is_empty() || host.contains('/') || host.contains('@') || host.contains(':') {
                 return Err(CoreError::InvalidConnectionField {
                     field: ConnectionField::Host,
@@ -1168,6 +1180,7 @@ mod tests {
             .add_connection(ConnectionSpec {
                 name: "prod-ssh".into(),
                 config: ConnectionConfig::Ssh {
+                    destination: None,
                     host: "prod.example.com".into(),
                     port: 22,
                     user: "deploy".into(),
@@ -1184,6 +1197,7 @@ mod tests {
                 ConnectionSpec {
                     name: "prod-ssh".into(),
                     config: ConnectionConfig::Ssh {
+                        destination: None,
                         host: "prod.example.com".into(),
                         port: 22,
                         user: "deploy".into(),
@@ -1200,6 +1214,7 @@ mod tests {
                 .add_connection(ConnectionSpec {
                     name: "missing-host-key".into(),
                     config: ConnectionConfig::Ssh {
+                        destination: None,
                         host: "h.example.com".into(),
                         port: 22,
                         user: "u".into(),
@@ -1219,6 +1234,7 @@ mod tests {
                 .add_connection(ConnectionSpec {
                     name: "no-secret".into(),
                     config: ConnectionConfig::Ssh {
+                        destination: None,
                         host: "h.example.com".into(),
                         port: 22,
                         user: "u".into(),
@@ -1241,6 +1257,7 @@ mod tests {
                     .add_connection(ConnectionSpec {
                         name: "bad".into(),
                         config: ConnectionConfig::Ssh {
+                            destination: None,
                             host: host.into(),
                             port: 22,
                             user: user.into(),

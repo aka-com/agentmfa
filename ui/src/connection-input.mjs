@@ -97,6 +97,36 @@ function parseSshCommand(text) {
   };
 }
 
+export function shouldResolveSshImport(value) {
+  const text = unwrapInput(value);
+  if (/^ssh\s+/i.test(text)) return true;
+  return /^[A-Za-z0-9._+%-]+(?:@[A-Za-z0-9._+%-]+)?$/.test(text);
+}
+
+export function sshImportFromPreview(preview) {
+  const candidates = preview.hostKeyCandidates || [];
+  const identityFiles = preview.identityFiles || [];
+  const destinationHost = String(preview.destination || preview.host || '').split('@').pop();
+  return {
+    type: 'ssh',
+    name: suggestedName(destinationHost, 'ssh'),
+    credential: null,
+    warnings: preview.warnings || [],
+    fields: {
+      destination: preview.destination,
+      host: preview.host,
+      port: preview.port,
+      user: preview.user,
+      hostKeyFingerprint: candidates.length === 1 ? candidates[0].fingerprint : '',
+      hostKeyCandidates: candidates,
+      identityFiles,
+      identityFile: identityFiles.length === 1 ? identityFiles[0] : '',
+      sshImportId: preview.importId,
+      proxyJump: preview.proxyJump || null,
+    },
+  };
+}
+
 export function parseConnectionImport(value) {
   const text = unwrapInput(value);
   if (!text) throw new Error('Paste a URL, Postgres DSN, or ssh command');

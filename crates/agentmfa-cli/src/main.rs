@@ -471,6 +471,7 @@ fn conn_config(args: &ConnAdd) -> Result<ConnectionConfig, String> {
             ])?;
             require("secret", &args.secret)?;
             Ok(ConnectionConfig::Ssh {
+                destination: None,
                 host: require("host", &args.host)?,
                 port: args.port.unwrap_or(22),
                 user: require("user", &args.user)?,

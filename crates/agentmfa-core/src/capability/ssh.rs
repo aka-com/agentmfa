@@ -176,6 +176,31 @@ pub struct SshSigner {
     public_blob: Vec<u8>,
 }
 
+/// Validate an SSH private key before it is saved by a trusted onboarding
+/// surface. This deliberately enforces the same format and algorithm rules as
+/// the runtime signer so an imported credential cannot fail only at first use.
+pub fn validate_private_key(pem: &[u8]) -> Result<(), String> {
+    parse_supported_private_key(pem).map(|_| ())
+}
+
+fn parse_supported_private_key(pem: &[u8]) -> Result<PrivateKey, String> {
+    let key =
+        PrivateKey::from_openssh(pem).map_err(|e| format!("private key parse failed: {e}"))?;
+    if key.is_encrypted() {
+        return Err("private key is passphrase-encrypted; store the decrypted OpenSSH key".into());
+    }
+    match key.key_data() {
+        KeypairData::Ed25519(_) | KeypairData::Rsa(_) => {}
+        other => {
+            return Err(format!(
+                "unsupported key type {:?} (v1 signs ed25519 and rsa)",
+                other.algorithm().map(|a| a.as_str().to_string())
+            ))
+        }
+    }
+    Ok(key)
+}
+
 impl SshSigner {
     /// Read and parse the connection's bound private key. Fails the open (not
     /// each later signature) on a missing, encrypted, or unsupported key.
@@ -188,22 +213,7 @@ impl SshSigner {
             .secret_value(secret_id)
             .await
             .map_err(|e| format!("credential unavailable: {e}"))?;
-        let key = PrivateKey::from_openssh(pem.as_bytes())
-            .map_err(|e| format!("private key parse failed: {e}"))?;
-        if key.is_encrypted() {
-            return Err(
-                "private key is passphrase-encrypted; store the decrypted OpenSSH key".into(),
-            );
-        }
-        match key.key_data() {
-            KeypairData::Ed25519(_) | KeypairData::Rsa(_) => {}
-            other => {
-                return Err(format!(
-                    "unsupported key type {:?} (v1 signs ed25519 and rsa)",
-                    other.algorithm().map(|a| a.as_str().to_string())
-                ))
-            }
-        }
+        let key = parse_supported_private_key(pem.as_bytes())?;
         let public_blob = key
             .public_key()
             .to_bytes()
