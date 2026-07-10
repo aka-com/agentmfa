@@ -28,6 +28,7 @@ pub const APPROVAL: &str = "approval";
 pub const EVT_DROPDOWN_HIDDEN: &str = "amfa://dropdown-hidden";
 pub const EVT_OPEN_SETTINGS: &str = "amfa://open-settings";
 const APP_WINDOW_MENU_ID: &str = "app-window";
+const NEW_WINDOW_MENU_ID: &str = "new-window";
 
 const DROPDOWN_GAP: f64 = 6.0;
 static LAST_TRAY_ANCHOR: Mutex<Option<TrayAnchor>> = Mutex::new(None);
@@ -80,16 +81,34 @@ struct Bounds {
 /// back to AgentMFA when its Dock and tray affordances are unavailable.
 pub fn setup_app_menu(app: &AppHandle) -> tauri::Result<()> {
     let menu = Menu::default(app)?;
-    let item = MenuItem::with_id(app, APP_WINDOW_MENU_ID, "AgentMFA", true, None::<&str>)?;
+    let new_window = MenuItem::with_id(
+        app,
+        NEW_WINDOW_MENU_ID,
+        "New Window",
+        true,
+        Some("CmdOrCtrl+N"),
+    )?;
+    for item in menu.items()? {
+        if let MenuItemKind::Submenu(submenu) = item {
+            if submenu.text()? == "File" {
+                let separator = PredefinedMenuItem::separator(app)?;
+                submenu.prepend_items(&[&new_window, &separator])?;
+                break;
+            }
+        }
+    }
+
+    let app_window =
+        MenuItem::with_id(app, APP_WINDOW_MENU_ID, "AgentMFA", true, None::<&str>)?;
     if let Some(MenuItemKind::Submenu(window_menu)) = menu.get(WINDOW_SUBMENU_ID) {
         let separator = PredefinedMenuItem::separator(app)?;
-        window_menu.append_items(&[&separator, &item])?;
+        window_menu.append_items(&[&separator, &app_window])?;
     }
     app.set_menu(menu)?;
-    app.on_menu_event(|app, event| {
-        if event.id().as_ref() == APP_WINDOW_MENU_ID {
-            focus_existing_or_reopen(app);
-        }
+    app.on_menu_event(|app, event| match event.id().as_ref() {
+        NEW_WINDOW_MENU_ID => open_main(app),
+        APP_WINDOW_MENU_ID => focus_existing_or_reopen(app),
+        _ => {}
     });
     Ok(())
 }
@@ -265,6 +284,7 @@ fn open_main(app: &AppHandle) {
     hide_dropdown(app);
     set_activation_policy(app, true);
     if let Some(win) = app.get_webview_window(MAIN) {
+        let _ = win.unminimize();
         let _ = win.show();
         let _ = win.set_focus();
     }
