@@ -21,7 +21,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::error::CoreError;
+use crate::error::{ConnectionField, CoreError};
 use crate::events::{BrokerEvents, NoopEvents};
 use crate::integrity::StateIntegrity;
 use crate::paths::Paths;
@@ -713,21 +713,25 @@ fn validate_config_and_bind_secrets(
             template,
         } => {
             if host.is_empty() || host.contains('/') || host.contains('@') || host.contains(':') {
-                return Err(CoreError::InvalidConnectionConfig(format!(
-                    "invalid host {host:?} (bare hostname, no scheme/port/path)"
-                )));
+                return Err(CoreError::InvalidConnectionField {
+                    field: ConnectionField::Host,
+                    message: "Enter only the hostname, without a user, port, scheme, or path"
+                        .into(),
+                });
             }
             if scheme != "https" && scheme != "http" {
-                return Err(CoreError::InvalidConnectionConfig(format!(
-                    "invalid scheme {scheme:?}"
-                )));
+                return Err(CoreError::InvalidConnectionField {
+                    field: ConnectionField::Scheme,
+                    message: "Use http:// or https://".into(),
+                });
             }
             let parsed = Template::parse(template)?;
             let refs = parsed.refs();
             if refs.is_empty() {
-                return Err(CoreError::InvalidConnectionConfig(
-                    "template references no secret".into(),
-                ));
+                return Err(CoreError::InvalidConnectionField {
+                    field: ConnectionField::Template,
+                    message: "Add a saved credential reference such as {{API_KEY}}".into(),
+                });
             }
             refs.iter().map(|name| find_by_name(name)).collect()
         }
@@ -739,22 +743,35 @@ fn validate_config_and_bind_secrets(
             ..
         } => {
             if host.is_empty() || dbname.is_empty() || user.is_empty() || *port == 0 {
-                return Err(CoreError::InvalidConnectionConfig(
-                    "host, port, database and user are required".into(),
-                ));
+                let (field, message) = if host.is_empty() {
+                    (ConnectionField::Host, "Host is required")
+                } else if *port == 0 {
+                    (ConnectionField::Port, "Port must be 1–65535")
+                } else if dbname.is_empty() {
+                    (ConnectionField::Database, "Database is required")
+                } else {
+                    (ConnectionField::User, "User is required")
+                };
+                return Err(CoreError::InvalidConnectionField {
+                    field,
+                    message: message.into(),
+                });
             }
             bind_single_secret(state, spec)
         }
         ConnectionConfig::Ws { url, template } => {
-            let parsed_url = url::Url::parse(url).map_err(|e| {
-                CoreError::InvalidConnectionConfig(format!("invalid url {url:?}: {e}"))
-            })?;
+            let parsed_url =
+                url::Url::parse(url).map_err(|_| CoreError::InvalidConnectionField {
+                    field: ConnectionField::Url,
+                    message: "Enter a complete ws:// or wss:// URL".into(),
+                })?;
             match parsed_url.scheme() {
                 "ws" | "wss" => {}
                 other => {
-                    return Err(CoreError::InvalidConnectionConfig(format!(
-                        "url scheme must be ws or wss, got {other:?}"
-                    )))
+                    return Err(CoreError::InvalidConnectionField {
+                        field: ConnectionField::Url,
+                        message: format!("Use ws:// or wss://, not {other}://"),
+                    })
                 }
             }
             if let Some(template) = template {
@@ -774,21 +791,28 @@ fn validate_config_and_bind_secrets(
             host_key_fingerprint,
         } => {
             if host.is_empty() || host.contains('/') || host.contains('@') || host.contains(':') {
-                return Err(CoreError::InvalidConnectionConfig(format!(
-                    "invalid host {host:?} (bare hostname, no scheme/port/path)"
-                )));
+                return Err(CoreError::InvalidConnectionField {
+                    field: ConnectionField::Host,
+                    message: "Enter only the hostname, without a user, port, scheme, or path"
+                        .into(),
+                });
             }
             if user.is_empty() || *port == 0 {
-                return Err(CoreError::InvalidConnectionConfig(
-                    "host, port and user are required".into(),
-                ));
+                let (field, message) = if *port == 0 {
+                    (ConnectionField::Port, "Port must be 1–65535")
+                } else {
+                    (ConnectionField::User, "User is required")
+                };
+                return Err(CoreError::InvalidConnectionField {
+                    field,
+                    message: message.into(),
+                });
             }
             host_key_fingerprint
                 .parse::<ssh_key::Fingerprint>()
-                .map_err(|e| {
-                    CoreError::InvalidConnectionConfig(format!(
-                        "invalid SSH host key fingerprint {host_key_fingerprint:?}: {e}"
-                    ))
+                .map_err(|_| CoreError::InvalidConnectionField {
+                    field: ConnectionField::HostKeyFingerprint,
+                    message: "Enter an OpenSSH SHA-256 or SHA-512 fingerprint".into(),
                 })?;
             bind_single_secret(state, spec)
         }
@@ -1184,7 +1208,10 @@ mod tests {
                     secrets: vec![key.id],
                 })
                 .unwrap_err(),
-            CoreError::InvalidConnectionConfig(_)
+            CoreError::InvalidConnectionField {
+                field: ConnectionField::HostKeyFingerprint,
+                ..
+            }
         ));
 
         assert!(matches!(
@@ -1222,7 +1249,7 @@ mod tests {
                         secrets: vec![key.id],
                     })
                     .unwrap_err(),
-                CoreError::InvalidConnectionConfig(_)
+                CoreError::InvalidConnectionField { .. }
             ));
         }
     }

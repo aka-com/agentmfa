@@ -1,5 +1,20 @@
 use thiserror::Error;
 
+/// A connection field whose authoritative validation failed. Keeping this
+/// structured lets desktop clients attach the error to the relevant input
+/// without parsing human-readable error strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionField {
+    Host,
+    Scheme,
+    Port,
+    Database,
+    User,
+    Url,
+    Template,
+    HostKeyFingerprint,
+}
+
 /// Core-level errors. Daemon handlers map these onto wire responses with
 /// machine-readable `{"reason": …}` bodies (DESIGN.md §4).
 #[derive(Debug, Error)]
@@ -39,6 +54,12 @@ pub enum CoreError {
 
     #[error("invalid connection config: {0}")]
     InvalidConnectionConfig(String),
+
+    #[error("invalid connection field {field:?}: {message}")]
+    InvalidConnectionField {
+        field: ConnectionField,
+        message: String,
+    },
 
     #[error("a connection's type is fixed after creation")]
     KindChange,

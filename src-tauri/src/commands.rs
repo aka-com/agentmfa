@@ -13,9 +13,10 @@
 //!   through it, so the webview cannot forge or skip the gate.
 
 use agentmfa_core::broker::{Broker, UiDecision};
+use agentmfa_core::error::{ConnectionField, CoreError};
 use agentmfa_core::store::ConnectionSpec;
 use agentmfa_core::types::{ConnectionConfig, DecisionContext, DecisionSurface, PgSslMode};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter as _, State};
 use tauri_plugin_clipboard_manager::ClipboardExt as _;
 use uuid::Uuid;
@@ -34,7 +35,210 @@ pub struct AppState {
 }
 
 type CmdResult<T> = Result<T, String>;
+type FormResult<T> = Result<T, FormError>;
 const ACTIVITY_VIEW_LIMIT: usize = 200;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormError {
+    kind: &'static str,
+    code: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    field: Option<&'static str>,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+enum FormContext<'a> {
+    Secret,
+    Connection {
+        kind: &'a str,
+        includes_new_secret: bool,
+    },
+}
+
+impl FormError {
+    fn validation(code: &'static str, field: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            kind: "validation",
+            code,
+            field: Some(field),
+            message: message.into(),
+            detail: None,
+        }
+    }
+
+    fn global(
+        kind: &'static str,
+        code: &'static str,
+        message: impl Into<String>,
+        detail: Option<String>,
+    ) -> Self {
+        Self {
+            kind,
+            code,
+            field: None,
+            message: message.into(),
+            detail,
+        }
+    }
+
+    fn from_core(error: CoreError, context: FormContext<'_>) -> Self {
+        match error {
+            CoreError::SecretNameTaken(_) => {
+                let field = match context {
+                    FormContext::Secret => "name",
+                    FormContext::Connection { .. } => "newSecretName",
+                };
+                Self::validation(
+                    "secret_name_taken",
+                    field,
+                    "That credential name is already in use",
+                )
+                .with_kind("conflict")
+            }
+            CoreError::ConnectionNameTaken(_) => Self::validation(
+                "connection_name_taken",
+                "name",
+                "That connection name is already in use",
+            )
+            .with_kind("conflict"),
+            CoreError::InvalidSecretName(_) => {
+                let field = match context {
+                    FormContext::Secret => "name",
+                    FormContext::Connection { .. } => "newSecretName",
+                };
+                Self::validation(
+                    "invalid_secret_name",
+                    field,
+                    "Use letters, numbers, and underscores; start with a letter or underscore",
+                )
+            }
+            CoreError::InvalidConnectionName(_) => Self::validation(
+                "invalid_connection_name",
+                "name",
+                "Use 1–64 lowercase letters, numbers, hyphens, or underscores",
+            ),
+            CoreError::Template(error) => Self::validation(
+                "invalid_template",
+                "template",
+                format!("Invalid template: {error}"),
+            ),
+            CoreError::UnknownTemplateRef(name) => Self::validation(
+                "unknown_template_credential",
+                "template",
+                format!("{name} is not a saved credential"),
+            ),
+            CoreError::WrongSecretCount { kind } => {
+                let field = if kind == "websocket" { "template" } else { "secret" };
+                Self::validation(
+                    "wrong_credential_count",
+                    field,
+                    format!("{kind} connections require exactly one saved credential"),
+                )
+            }
+            CoreError::SecretNotFound => match context {
+                FormContext::Secret => Self::global(
+                    "conflict",
+                    "secret_not_found",
+                    "This credential was removed elsewhere",
+                    None,
+                ),
+                FormContext::Connection { .. } => Self::validation(
+                    "secret_not_found",
+                    "secret",
+                    "This credential no longer exists; choose another",
+                ),
+            },
+            CoreError::InvalidConnectionField { field, message } => {
+                let connection_kind = match context {
+                    FormContext::Connection { kind, .. } => kind,
+                    FormContext::Secret => "",
+                };
+                let field = match field {
+                    ConnectionField::Host | ConnectionField::Scheme if connection_kind == "api" => {
+                        "origin"
+                    }
+                    ConnectionField::Host => "host",
+                    ConnectionField::Scheme => "origin",
+                    ConnectionField::Port => "port",
+                    ConnectionField::Database => "dbname",
+                    ConnectionField::User => "user",
+                    ConnectionField::Url => "url",
+                    ConnectionField::Template => "template",
+                    ConnectionField::HostKeyFingerprint => "hostKeyFingerprint",
+                };
+                Self::validation("invalid_connection_field", field, message)
+            }
+            CoreError::InvalidConnectionConfig(message) => {
+                let field = match context {
+                    FormContext::Connection {
+                        kind: "api",
+                        includes_new_secret: true,
+                    } => Some("template"),
+                    FormContext::Connection {
+                        includes_new_secret: true,
+                        ..
+                    } => Some("newSecretValue"),
+                    _ => None,
+                };
+                match field {
+                    Some(field) => Self::validation("invalid_connection", field, message),
+                    None => Self::global("validation", "invalid_connection", message, None),
+                }
+            }
+            CoreError::NotConfirmed => {
+                Self::global("cancelled", "not_confirmed", "Nothing was saved", None)
+            }
+            CoreError::KindChange => Self::global(
+                "validation",
+                "connection_kind_fixed",
+                "Connection type cannot be changed after creation",
+                None,
+            ),
+            CoreError::ConnectionNotFound => Self::global(
+                "conflict",
+                "connection_not_found",
+                "This connection was removed elsewhere",
+                None,
+            ),
+            CoreError::ApprovalConnectionChanged => Self::global(
+                "conflict",
+                "connection_changed",
+                "The connection changed while you were confirming. Review it and save again.",
+                None,
+            ),
+            CoreError::Vault(detail) => Self::global(
+                "system",
+                "keychain_unavailable",
+                "Couldn’t save to macOS Keychain",
+                Some(detail),
+            ),
+            CoreError::Io(error) => Self::global(
+                "system",
+                "state_write_failed",
+                "Couldn’t save your changes",
+                Some(error.to_string()),
+            ),
+            other => {
+                let detail = other.to_string();
+                Self::global(
+                    "system",
+                    "save_failed",
+                    "Couldn’t save your changes",
+                    Some(detail),
+                )
+            }
+        }
+    }
+
+    fn with_kind(mut self, kind: &'static str) -> Self {
+        self.kind = kind;
+        self
+    }
+}
 
 fn activity_view_limit(requested: Option<usize>) -> usize {
     requested
@@ -154,12 +358,12 @@ pub fn copy_agent_setup(app: AppHandle, state: State<AppState>) -> CmdResult<()>
 /* ------------------------------ secrets ---------------------------------- */
 
 #[tauri::command]
-pub fn add_secret(state: State<AppState>, name: String, value: String) -> CmdResult<()> {
+pub fn add_secret(state: State<AppState>, name: String, value: String) -> FormResult<()> {
     state
         .broker
         .ui_add_secret(&name, Zeroizing::new(value))
         .map(|_| ())
-        .map_err(|e| e.to_string())
+        .map_err(|error| FormError::from_core(error, FormContext::Secret))
 }
 
 #[tauri::command]
@@ -168,14 +372,16 @@ pub fn edit_secret(
     id: String,
     new_name: Option<String>,
     new_value: Option<String>,
-) -> CmdResult<()> {
-    let id = parse_id(&id)?;
+) -> FormResult<()> {
+    let id = parse_id(&id).map_err(|detail| {
+        FormError::global("system", "invalid_secret_id", "Couldn’t edit this credential", Some(detail))
+    })?;
     let value = new_value.filter(|v| !v.is_empty()).map(Zeroizing::new);
     state
         .broker
         .ui_edit_secret(&id, new_name.as_deref(), value)
         .map(|_| ())
-        .map_err(|e| e.to_string())
+        .map_err(|error| FormError::from_core(error, FormContext::Secret))
 }
 
 #[tauri::command]
@@ -261,7 +467,7 @@ fn parse_pg_sslmode(value: Option<&str>) -> CmdResult<PgSslMode> {
 }
 
 impl ConnectionInput {
-    fn into_spec(self) -> CmdResult<ConnectionSpec> {
+    fn into_spec(self) -> FormResult<ConnectionSpec> {
         let config = match self.kind.as_str() {
             "api" => ConnectionConfig::Api {
                 host: self.host.unwrap_or_default(),
@@ -274,7 +480,13 @@ impl ConnectionInput {
                 port: self.port.unwrap_or(5432),
                 dbname: self.dbname.unwrap_or_default(),
                 user: self.user.unwrap_or_default(),
-                sslmode: parse_pg_sslmode(self.sslmode.as_deref())?,
+                sslmode: parse_pg_sslmode(self.sslmode.as_deref()).map_err(|_| {
+                    FormError::validation(
+                        "invalid_sslmode",
+                        "sslmode",
+                        "Choose a supported TLS mode",
+                    )
+                })?,
                 trusted_ca_bundle_path: self.trusted_ca_bundle_path.and_then(|path| {
                     let path = path.trim().to_string();
                     (!path.is_empty()).then_some(path)
@@ -290,10 +502,23 @@ impl ConnectionInput {
                 user: self.user.unwrap_or_default(),
                 host_key_fingerprint: self.host_key_fingerprint.unwrap_or_default(),
             },
-            other => return Err(format!("unknown connection type {other:?}")),
+            other => {
+                return Err(FormError::global(
+                    "system",
+                    "unknown_connection_type",
+                    "Couldn’t save this connection",
+                    Some(format!("unknown connection type {other:?}")),
+                ))
+            }
         };
         let secrets = match self.secret_id {
-            Some(id) => vec![parse_id(&id)?],
+            Some(id) => vec![parse_id(&id).map_err(|_| {
+                FormError::validation(
+                    "secret_not_found",
+                    "secret",
+                    "This credential no longer exists; choose another",
+                )
+            })?],
             None => vec![],
         };
         Ok(ConnectionSpec {
@@ -307,25 +532,38 @@ impl ConnectionInput {
 /// Creating a connection binds a secret to a destination; the core demands
 /// the native OS confirmation before it takes effect (§8).
 #[tauri::command]
-pub fn add_connection(state: State<AppState>, mut input: ConnectionInput) -> CmdResult<()> {
+pub fn add_connection(state: State<AppState>, mut input: ConnectionInput) -> FormResult<()> {
+    let kind = input.kind.clone();
     let new_secret_name = input.new_secret_name.take();
     // Wrap the user-entered value before any fallible parsing below so every
     // error path zeroizes it rather than dropping an ordinary String.
     let new_secret_value = input.new_secret_value.take().map(Zeroizing::new);
     let spec = input.into_spec()?;
-    match (new_secret_name, new_secret_value) {
+    let includes_new_secret = new_secret_name.is_some() || new_secret_value.is_some();
+    let result = match (new_secret_name, new_secret_value) {
         (Some(name), Some(value)) if !name.is_empty() && !value.is_empty() => state
             .broker
             .ui_add_connection_with_secret(&name, value, spec)
-            .map(|_| ())
-            .map_err(|e| e.to_string()),
+            .map(|_| ()),
         (None, None) => state
             .broker
             .ui_add_connection(spec)
-            .map(|_| ())
-            .map_err(|e| e.to_string()),
-        _ => Err("new credential name and value must be provided together".into()),
-    }
+            .map(|_| ()),
+        _ => return Err(FormError::validation(
+            "incomplete_new_credential",
+            "newSecretValue",
+            "Credential name and value must be provided together",
+        )),
+    };
+    result.map_err(|error| {
+        FormError::from_core(
+            error,
+            FormContext::Connection {
+                kind: &kind,
+                includes_new_secret,
+            },
+        )
+    })
 }
 
 /// Security-relevant connection edits are core-gated (§8); metadata-only
@@ -335,14 +573,25 @@ pub fn edit_connection(
     state: State<AppState>,
     id: String,
     input: ConnectionInput,
-) -> CmdResult<()> {
-    let id = parse_id(&id)?;
+) -> FormResult<()> {
+    let kind = input.kind.clone();
+    let id = parse_id(&id).map_err(|detail| {
+        FormError::global("system", "invalid_connection_id", "Couldn’t edit this connection", Some(detail))
+    })?;
     let spec = input.into_spec()?;
     state
         .broker
         .ui_update_connection(&id, spec)
         .map(|_| ())
-        .map_err(|e| e.to_string())
+        .map_err(|error| {
+            FormError::from_core(
+                error,
+                FormContext::Connection {
+                    kind: &kind,
+                    includes_new_secret: false,
+                },
+            )
+        })
 }
 
 #[tauri::command]
@@ -576,5 +825,46 @@ mod tests {
         assert!(instructions.ends_with("http://localhost/instructions"));
         assert!(!instructions.contains("--max-time"));
         assert!(!instructions.contains("Reuse an existing token before pairing"));
+    }
+
+    #[test]
+    fn form_errors_serialize_conflicts_with_the_relevant_field() {
+        let error = FormError::from_core(
+            CoreError::ConnectionNameTaken("github".into()),
+            FormContext::Connection {
+                kind: "api",
+                includes_new_secret: false,
+            },
+        );
+        assert_eq!(
+            serde_json::to_value(error).unwrap(),
+            serde_json::json!({
+                "kind": "conflict",
+                "code": "connection_name_taken",
+                "field": "name",
+                "message": "That connection name is already in use"
+            })
+        );
+    }
+
+    #[test]
+    fn form_errors_map_core_connection_fields_without_parsing_messages() {
+        let error = FormError::from_core(
+            CoreError::InvalidConnectionField {
+                field: ConnectionField::HostKeyFingerprint,
+                message: "Enter an OpenSSH SHA-256 or SHA-512 fingerprint".into(),
+            },
+            FormContext::Connection {
+                kind: "ssh",
+                includes_new_secret: false,
+            },
+        );
+        assert_eq!(error.kind, "validation");
+        assert_eq!(error.code, "invalid_connection_field");
+        assert_eq!(error.field, Some("hostKeyFingerprint"));
+        assert_eq!(
+            error.message,
+            "Enter an OpenSSH SHA-256 or SHA-512 fingerprint"
+        );
     }
 }

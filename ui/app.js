@@ -11,6 +11,7 @@ import {
   apiOriginFromParts, authTemplate, parseApiOrigin, parseConnectionImport,
   portForTypeSwitch, suggestedSecretName,
 } from '/src/connection-input.mjs';
+import { formErrorKind, formErrorMessage, inlineFormError } from '/src/form-errors.mjs';
 
 const EDIT_SECRET_MASK = '••••••••••••';
 const ACTIVITY_RENDER_LIMIT = 200;
@@ -507,7 +508,7 @@ function connSheet(editing) {
       <div class="f-row" style="flex:0 0 90px"><label>Port</label><input id="f-port" class="${fieldCls('port')}" inputmode="numeric" value="${escAttr(d.port ?? '5432')}">${fieldErr('port')}</div></div>
       <div class="f-row"><label>Database</label><input id="f-db" class="${fieldCls('dbname')}" placeholder="app_production" value="${escAttr(d.dbname ?? '')}">${fieldErr('dbname')}</div>
       <div class="f-row"><label>User</label><input id="f-user" class="${fieldCls('user')}" placeholder="app" value="${escAttr(d.user ?? '')}">${fieldErr('user')}</div>
-      <div class="f-row"><label>TLS mode</label>${selectControlHTML('f-sslmode', sslOpts)}
+      <div class="f-row"><label>TLS mode</label>${selectControlHTML('f-sslmode', sslOpts)}${fieldErr('sslmode')}
         ${sslmode === 'require' ? '<div class="pair-identity-warning">The server certificate will not be verified.</div>' : ''}</div>
       <div class="f-row"><label>Trusted CA bundle <span class="label-detail">optional</span></label>
         <input id="f-pg-ca-bundle" placeholder="/path/to/private-ca.pem" value="${escAttr(d.pgCaBundlePath ?? '')}">
@@ -799,6 +800,26 @@ function focusField(id) {
   }, 0);
 }
 
+const INPUT_BY_ERROR_FIELD = {
+  name: 'f-cname', value: 'f-value', origin: 'f-origin', host: 'f-host', port: 'f-port',
+  dbname: 'f-db', user: 'f-user', hostKeyFingerprint: 'f-host-key', sslmode: 'f-sslmode',
+  url: 'f-url', template: 'c-template', secret: 'c-secret',
+  newSecretName: 'c-new-secret-name', newSecretValue: 'c-new-secret-value',
+};
+
+function showFormError(error) {
+  const inline = inlineFormError(error);
+  if (!inline) {
+    const prefix = formErrorKind(error) === 'cancelled' ? '' : '⚠ ';
+    toast(prefix + formErrorMessage(error));
+    return;
+  }
+  state.sheetErrors = { ...state.sheetErrors, [inline.field]: inline.message };
+  render();
+  const defaultNameId = state.sheet && state.sheet.kind.includes('secret') ? 'f-name' : 'f-cname';
+  focusField(inline.field === 'name' ? defaultNameId : INPUT_BY_ERROR_FIELD[inline.field]);
+}
+
 function selectEditSecretMask() {
   setTimeout(() => {
     const el = document.getElementById('f-value');
@@ -854,7 +875,8 @@ async function saveSecret() {
   if (state.sheet.kind === 'add-secret' && !value) errs.value = 'Value is required';
   if (Object.keys(errs).length) { state.sheetErrors = errs; render(); return; }
   if (state.sheet.kind === 'add-secret') {
-    if (!await run(() => invoke('add_secret', { name, value }))) return;
+    try { await invoke('add_secret', { name, value }); }
+    catch (error) { showFormError(error); return; }
     toast('🔑 Saved to macOS Keychain');
   } else {
     if (value !== EDIT_SECRET_MASK && (!value || value.includes('•'))) {
@@ -862,11 +884,13 @@ async function saveSecret() {
       render();
       return;
     }
-    if (!await run(() => invoke('edit_secret', {
-      id: state.sheet.id,
-      newName: name,
-      newValue: value === EDIT_SECRET_MASK ? null : value,
-    }))) return;
+    try {
+      await invoke('edit_secret', {
+        id: state.sheet.id,
+        newName: name,
+        newValue: value === EDIT_SECRET_MASK ? null : value,
+      });
+    } catch (error) { showFormError(error); return; }
     toast('✏️ Secret updated');
   }
   closeSheet();
@@ -975,7 +999,7 @@ async function saveConn() {
     closeSheet();
     await refresh('all');
   } catch (e) {
-    toast('⚠ ' + (e.message || e));
+    showFormError(e);
   }
 }
 
@@ -1241,7 +1265,7 @@ const ERR_KEY_BY_INPUT = {
   'f-name': 'name', 'f-value': 'value', 'f-import': 'import',
   'f-cname': 'name', 'f-origin': 'origin', 'f-host': 'host', 'f-port': 'port',
   'f-db': 'dbname', 'f-user': 'user', 'f-host-key': 'hostKeyFingerprint',
-  'f-url': 'url', 'c-template': 'template', 'c-secret': 'secret',
+  'f-url': 'url', 'f-sslmode': 'sslmode', 'c-template': 'template', 'c-secret': 'secret',
   'c-new-secret-name': 'newSecretName', 'c-new-secret-value': 'newSecretValue',
   'c-auth-detail': 'authDetail',
 };

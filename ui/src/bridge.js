@@ -49,6 +49,7 @@ async function mockListen(event, cb) {
 let seq = 1;
 const uid = () => `id-${seq++}`;
 const now = () => new Date().toISOString();
+const formError = (kind, code, field, message) => ({ kind, code, field, message });
 const db = {
   secrets: [
     mkSecret('GITHUB_API_KEY', 'ghp_9aXf2Qe7LmNoP3demoToken41c'),
@@ -167,12 +168,17 @@ async function mockInvoke(cmd, args = {}) {
     case 'get_agent_setup': return MOCK_AGENT_SETUP;
     case 'copy_agent_setup': return;
     case 'add_secret': {
-      if (db.secrets.some((s) => s.name === args.name)) throw new Error(`A secret named ${args.name} already exists`);
+      if (db.secrets.some((s) => s.name === args.name)) {
+        throw formError('conflict', 'secret_name_taken', 'name', 'That credential name is already in use');
+      }
       db.secrets.push(mkSecret(args.name, args.value)); audit('secretAdded', `Secret added: ${args.name}`); return;
     }
     case 'edit_secret': {
       const s = db.secrets.find((x) => x.id === args.id); if (!s) throw new Error('no such secret');
       if (args.newName && args.newName !== s.name) {
+        if (db.secrets.some((other) => other.id !== s.id && other.name === args.newName)) {
+          throw formError('conflict', 'secret_name_taken', 'name', 'That credential name is already in use');
+        }
         db.connections.forEach((c) => {
           const i = c.secret_names.indexOf(s.name); if (i !== -1) c.secret_names[i] = args.newName;
           if (c.template) c.template = c.template.split(s.name).join(args.newName);
@@ -198,10 +204,16 @@ async function mockInvoke(cmd, args = {}) {
     }
     case 'add_connection': {
       const i = args.input;
-      if (i.type === 'ssh' && !i.host_key_fingerprint) throw new Error('SSH host key fingerprint is required');
-      if (db.connections.some((c) => c.name === i.name)) throw new Error(`A connection named ${i.name} already exists`);
+      if (i.type === 'ssh' && !/^SHA(?:256|512):\S+$/.test(i.host_key_fingerprint || '')) {
+        throw formError('validation', 'invalid_connection_field', 'hostKeyFingerprint', 'Enter an OpenSSH SHA-256 or SHA-512 fingerprint');
+      }
+      if (db.connections.some((c) => c.name === i.name)) {
+        throw formError('conflict', 'connection_name_taken', 'name', 'That connection name is already in use');
+      }
       if (i.new_secret_name && i.new_secret_value) {
-        if (db.secrets.some((s) => s.name === i.new_secret_name)) throw new Error(`A secret named ${i.new_secret_name} already exists`);
+        if (db.secrets.some((s) => s.name === i.new_secret_name)) {
+          throw formError('conflict', 'secret_name_taken', 'newSecretName', 'That credential name is already in use');
+        }
         const secret = mkSecret(i.new_secret_name, i.new_secret_value);
         db.secrets.push(secret);
         i.secret_id = secret.id;
@@ -218,7 +230,12 @@ async function mockInvoke(cmd, args = {}) {
     case 'edit_connection': {
       const c = db.connections.find((x) => x.id === args.id); if (!c) throw new Error('no such connection');
       const i = args.input;
-      if (i.type === 'ssh' && !i.host_key_fingerprint) throw new Error('SSH host key fingerprint is required');
+      if (i.type === 'ssh' && !/^SHA(?:256|512):\S+$/.test(i.host_key_fingerprint || '')) {
+        throw formError('validation', 'invalid_connection_field', 'hostKeyFingerprint', 'Enter an OpenSSH SHA-256 or SHA-512 fingerprint');
+      }
+      if (db.connections.some((other) => other.id !== c.id && other.name === i.name)) {
+        throw formError('conflict', 'connection_name_taken', 'name', 'That connection name is already in use');
+      }
       Object.assign(c, { name: i.name, host: i.host, scheme: i.scheme, port: i.port,
         dbname: i.dbname, user: i.user, sslmode: i.sslmode, trusted_ca_bundle_path: i.trusted_ca_bundle_path,
         host_key_fingerprint: i.host_key_fingerprint, url: i.url,
