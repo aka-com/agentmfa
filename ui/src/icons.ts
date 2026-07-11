@@ -33,6 +33,7 @@ import {
   UserRoundCheck,
   UserRoundPlus,
   UserRoundX,
+  X,
   Zap,
 } from 'lucide';
 import type { IconNode, SVGProps } from 'lucide';
@@ -112,5 +113,6 @@ export const LUCIDE_ICONS: Record<string, string> = {
   userRoundCheck: iconHTML(UserRoundCheck, 15),
   userRoundPlus: iconHTML(UserRoundPlus, 15),
   userRoundX: iconHTML(UserRoundX, 15),
+  x: iconHTML(X, 13),
   zap: iconHTML(Zap, 15),
 };

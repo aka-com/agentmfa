@@ -51,7 +51,6 @@ interface ConfirmState {
 interface ConnectionDraft {
   name?: string;
   value?: string;
-  importSource?: string;
   importWarnings?: string[];
   origin?: string | null;
   scheme?: string | null;
@@ -108,6 +107,7 @@ interface AppState {
   revokeInheritedRules: boolean;
   approvalRequestId: string | null;
   menuOpen: boolean;
+  walkthroughMenuOpen: boolean;
   copied: string | null;
   readyCopied: boolean;
   setupInstructionsOpen: boolean;
@@ -130,7 +130,12 @@ const state: AppState = {
   queue: [],
   agentSetupInstructions: '', // short paste-ready setup message (lazy-loaded)
   brokerInstructions: '', // full GET /instructions body (lazy-loaded)
-  settings: { reauth_on_read: true, menu_bar_hides_dock: false },
+  settings: {
+    reauth_on_read: true,
+    menu_bar_hides_dock: false,
+    show_service_walkthrough: true,
+    show_agent_walkthrough: true,
+  },
   reveal: {},            // secretId -> prefix string (transient)
   // sheet / confirm state
   sheet: null,           // {kind:'add-secret'|'edit-secret'|'add-conn'|'edit-conn'|'settings', ...}
@@ -143,6 +148,7 @@ const state: AppState = {
   revokeInheritedRules: false,
   approvalRequestId: null,
   menuOpen: false,       // desktop-mode settings popover (gear) open
+  walkthroughMenuOpen: false,
   copied: null,          // secretId whose value was just copied (transient "Copied" flash)
   readyCopied: false,    // transient feedback on the setup-instructions status button
   setupInstructionsOpen: false,
@@ -281,9 +287,10 @@ function firstConnectionSetupHTML(): string {
   const type = state.quickSetupType;
   const types = QUICK_SETUP_TYPES.map(([value, label]) =>
     `<button class="quick-type ${type === value ? 'on' : ''}" aria-pressed="${type === value}" data-act="quick-setup-type" data-type="${value}">${label}</button>`).join('');
-  return `<div class="agent-onboarding service-onboarding">
+  return `<div class="agent-onboarding service-onboarding walkthrough-card">
+    <button class="icon-btn walkthrough-close" title="Hide this walkthrough" aria-label="Hide Add a service walkthrough" data-act="hide-service-walkthrough">${ICONS.x}</button>
     <div class="onboarding-copy"><b>Add a service for your agent</b>
-      <span>Save a database, server, or API with its credential. AgentMFA brokers access without giving the credential to your agent.</span></div>
+      <span>Save a database, server, or API. AgentMFA brokers access without giving credentials to your agent.</span></div>
     <div class="quick-type-row">
       <div class="quick-types" aria-label="Service type">${types}</div>
       <button class="setup-toggle quick-manual" data-act="quick-setup-manual">Configure manually</button>
@@ -299,17 +306,19 @@ function firstConnectionSetupHTML(): string {
 function globalSectionsHTML() {
   let out = '';
   let hasOnboarding = false;
-  if (state.tab === 'connections' && !state.connections.length) {
+  if (state.tab === 'connections' && !state.connections.length && state.settings.show_service_walkthrough) {
     out += firstConnectionSetupHTML();
     hasOnboarding = true;
   }
   if (!state.agents.length) {
-    if (state.tab === 'connections') {
+    if (state.tab === 'connections' && state.settings.show_agent_walkthrough) {
       hasOnboarding = true;
       const instructionBody = state.showFullInstructions
         ? (state.brokerInstructions || 'Loading…')
         : (state.agentSetupInstructions || 'Loading…');
-      out += `<div class="agent-onboarding"><div class="onboarding-copy"><b>Connect an agent</b>
+      out += `<div class="agent-onboarding walkthrough-card">
+        <button class="icon-btn walkthrough-close" title="Hide this walkthrough" aria-label="Hide Connect an agent walkthrough" data-act="hide-agent-walkthrough">${ICONS.x}</button>
+        <div class="onboarding-copy"><b>Connect an agent</b>
         <span>Copy a short setup message into your coding agent.</span></div>
         <div class="onboarding-actions">
           <button class="btn primary sm" data-act="copy-agent-setup">Copy setup instructions</button>
@@ -327,7 +336,7 @@ function globalSectionsHTML() {
             ? `<div class="setup-instructions is-full">
                 <div class="full-instructions-banner">
                   <p>These are the instructions that the agent will see.</p>
-                  <p>To set up your agent, tell the agent to read these instructions from:</p>
+                  <p>To set up your agent, tell it to read these instructions from:</p>
                   <code>${esc(setupCurlCommand(state.agentSetupInstructions))}</code>
                 </div>
                 <pre class="full-instructions-code"><code>${esc(instructionBody)}</code></pre>
@@ -448,7 +457,7 @@ const connActionsHTML = (c: ConnectionSummary): string =>
 function connectionsHTML() {
   if (!state.connections.length) {
     return `<div class="empty"><div class="empty-ico">🔌</div><h3>No services</h3>
-      <p>Add APIs, databases, SSH servers, and WebSockets for your agents to use.</p>
+      <p>Add APIs, databases, SSH servers, and WebSockets.</p>
       <button class="btn primary" data-act="open-add-conn">＋ Add service</button></div>`;
   }
   const ready = state.connectionReady;
@@ -537,12 +546,28 @@ function brokerReadyHTML() {
     <span class="ready-copy-label" aria-live="polite">${copied ? `${ICONS.check} Copied` : 'Ready'}</span></button>`;
 }
 
+function walkthroughMenuHTML(): string {
+  const option = (action: string, label: string, checked: boolean): string =>
+    `<button class="walkthrough-option" role="menuitemcheckbox" aria-checked="${checked}" data-act="${action}">
+      <span class="walkthrough-check">${checked ? ICONS.check : ''}</span><span>${label}</span></button>`;
+  return `<div class="walkthrough-menu-wrap">
+    <button class="icon-btn walkthrough-menu-btn ${state.walkthroughMenuOpen ? 'on' : ''}"
+      title="Choose walkthroughs" aria-label="Choose walkthroughs" aria-haspopup="menu"
+      aria-expanded="${state.walkthroughMenuOpen}" data-act="toggle-walkthrough-menu">${ICONS.list}</button>
+    ${state.walkthroughMenuOpen ? `<div class="walkthrough-menu" role="menu" aria-label="Walkthroughs">
+      <div class="walkthrough-menu-title">Walkthroughs</div>
+      ${option('toggle-service-walkthrough', 'Add a service for your agent', state.settings.show_service_walkthrough)}
+      ${option('toggle-agent-walkthrough', 'Connect an agent', state.settings.show_agent_walkthrough)}
+    </div>` : ''}
+  </div>`;
+}
+
 function renderMainWindow() {
   const nav = TABS.map((tb) =>
     `<button class="nav-item ${state.tab === tb ? 'on' : ''}" data-act="tab" data-tab="${tb}">${tabLabel(tb)}</button>`).join('');
   // One view-specific action, always in the header row next to the title.
   const actionBtn = state.tab === 'connections'
-    ? `<button class="btn" data-act="open-add-conn">＋ Add service</button>`
+    ? `<div class="dw-head-actions">${walkthroughMenuHTML()}<button class="btn" data-act="open-add-conn">＋ Add service</button></div>`
     : state.tab === 'secrets'
     ? `<button class="btn" data-act="open-add-secret">＋ Add secret</button>`
     : `<button class="btn" data-act="clear-activity-ask" ${state.activity.length ? '' : 'disabled'}>Clear activity</button>`;
@@ -577,7 +602,7 @@ function renderDropdown() {
   const footer = state.tab === 'secrets'
     ? '<div class="dd-footer"><button class="btn block" data-act="open-add-secret">＋ Add secret</button></div>'
     : state.tab === 'connections'
-    ? '<div class="dd-footer"><button class="btn block" data-act="open-add-conn">＋ Add service</button></div>' : '';
+    ? `<div class="dd-footer service-footer">${walkthroughMenuHTML()}<button class="btn block" data-act="open-add-conn">＋ Add service</button></div>` : '';
   root().innerHTML = `<div class="surface dropdown-surface">
     <div class="dd-head"><div class="dd-appicon">🔐</div>
       <div class="dd-identity"><div class="dd-title">AgentMFA</div>${brokerReadyHTML()}</div>
@@ -690,7 +715,6 @@ async function connectionDraftFromImport(
     draft: {
       ...currentDraft,
       ...importedFields,
-      importSource: '',
       name: currentDraft.name || imported.name,
       importedCredential: imported.credential,
       secretSource: importedFields.sshImportId ? 'new' : currentDraft.secretSource,
@@ -716,10 +740,7 @@ function connSheet(editing: boolean): string {
   };
   const importWarnings = !editing && d.importWarnings && d.importWarnings.length
     ? `<div class="pair-identity-warning"><b>Review imported details</b><ul>${d.importWarnings.map((warning) => `<li>${esc(warning)}</li>`).join('')}</ul></div>` : '';
-  let fields = editing || d.setupSource === 'import' ? '' : `<div class="set-panel"><div class="f-row"><label>Paste an existing service</label>
-      <div class="f-2col"><input id="f-import" placeholder="Postgres DSN, API/WS URL, or ssh user@host" value="${escAttr(d.importSource ?? '')}">
-      <button type="button" class="btn sm" data-act="apply-connection-import">Use</button></div>
-      ${fieldErr('import')}</div></div>${importWarnings}<div class="form-divider" role="separator"></div>`;
+  let fields = importWarnings;
   fields += `<div class="f-row"><label>Name</label><input id="f-cname" class="${fieldCls('name')}" placeholder="e.g. github" value="${escAttr(d.name ?? '')}">${fieldErr('name')}</div>
     <div class="f-row"><label>Type${editing ? ': fixed after creation' : ''}</label>
     <div class="seg in-form">${typeBtn('pg', 'Postgres')}${typeBtn('ssh', 'SSH')}${typeBtn('api', 'HTTP API')}${typeBtn('ws', 'WebSocket')}</div></div>`;
@@ -1106,7 +1127,6 @@ function captureDrafts(): void {
   }
   if (state.sheet && (state.sheet.kind === 'add-conn' || state.sheet.kind === 'edit-conn')) {
     if (g('f-cname') !== undefined) state.draft.name = g('f-cname');
-    if (g('f-import') !== undefined) state.draft.importSource = g('f-import');
     if (g('f-origin') !== undefined) state.draft.origin = g('f-origin');
     if (g('f-host') !== undefined) state.draft.host = g('f-host');
     if (g('f-port') !== undefined) state.draft.port = g('f-port');
@@ -1313,6 +1333,10 @@ document.addEventListener('click', async (e) => {
     if (!btn) { render(); return; }
     // fall through: the clicked action runs and its render reflects the close
   }
+  if (state.walkthroughMenuOpen && !target?.closest('.walkthrough-menu-wrap')) {
+    state.walkthroughMenuOpen = false;
+    if (!btn) { render(); return; }
+  }
   if (!btn) return;
   const act = btn.dataset.act;
   const id = btn.dataset.id ?? '';
@@ -1322,12 +1346,48 @@ document.addEventListener('click', async (e) => {
       const tab = btn.dataset.tab;
       if (tab && TABS.includes(tab as Tab)) state.tab = tab as Tab;
       state.confirm = null;
+      state.walkthroughMenuOpen = false;
       render();
       break;
     }
     case 'mode-tray': state.menuOpen = false; run(() => invoke('ui_set_mode', { mode: 'tray' })); break;
     case 'mode-window': run(() => invoke('ui_set_mode', { mode: 'window' })); break;
     case 'toggle-settings-menu': state.menuOpen = !state.menuOpen; render(); break;
+    case 'toggle-walkthrough-menu':
+      state.menuOpen = false;
+      state.walkthroughMenuOpen = !state.walkthroughMenuOpen;
+      render();
+      break;
+    case 'toggle-service-walkthrough': {
+      const on = !state.settings.show_service_walkthrough;
+      if (await run(() => invoke('set_service_walkthrough_visible', { on }))) {
+        state.settings.show_service_walkthrough = on;
+        render();
+      }
+      break;
+    }
+    case 'toggle-agent-walkthrough': {
+      const on = !state.settings.show_agent_walkthrough;
+      if (await run(() => invoke('set_agent_walkthrough_visible', { on }))) {
+        state.settings.show_agent_walkthrough = on;
+        if (!on) state.setupInstructionsOpen = false;
+        render();
+      }
+      break;
+    }
+    case 'hide-service-walkthrough':
+      if (await run(() => invoke('set_service_walkthrough_visible', { on: false }))) {
+        state.settings.show_service_walkthrough = false;
+        render();
+      }
+      break;
+    case 'hide-agent-walkthrough':
+      if (await run(() => invoke('set_agent_walkthrough_visible', { on: false }))) {
+        state.settings.show_agent_walkthrough = false;
+        state.setupInstructionsOpen = false;
+        render();
+      }
+      break;
     case 'open-settings': state.menuOpen = false; state.sheet = { kind: 'settings' }; render(); break;
     case 'copy-agent-setup':
       if (await run(() => invoke('copy_agent_setup'))) toast('📋 Setup instructions copied');
@@ -1468,22 +1528,6 @@ document.addEventListener('click', async (e) => {
       render();
       break;
     case 'open-add-conn': state.sheet = { kind: 'add-conn' }; state.connType = 'api'; state.draft = {}; state.sheetErrors = {}; render(); focusField('f-cname'); break;
-    case 'apply-connection-import': {
-      captureDrafts();
-      try {
-        const source = state.draft.importSource || '';
-        const imported = await connectionDraftFromImport(source, state.draft);
-        state.connType = imported.type;
-        state.draft = imported.draft;
-        delete state.sheetErrors.import;
-        render(false);
-        focusImportedConnectionDraft();
-      } catch (error) {
-        state.sheetErrors.import = errorMessage(error);
-        render();
-      }
-      break;
-    }
     case 'edit-conn': {
       const c = state.connections.find((x) => x.id === id);
       if (!c) break;
@@ -1615,6 +1659,7 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (e.key === 'Escape') {
+    if (state.walkthroughMenuOpen) { state.walkthroughMenuOpen = false; render(); return; }
     if (state.menuOpen) { state.menuOpen = false; render(); return; }
     if (state.sheet) { closeSheet(); return; }
     if (state.confirm) { state.confirm = null; render(); return; }
@@ -1642,7 +1687,7 @@ document.addEventListener('keydown', (e) => {
 
 // Editing a field clears its inline validation error.
 const ERR_KEY_BY_INPUT = {
-  'f-name': 'name', 'f-value': 'value', 'f-import': 'import',
+  'f-name': 'name', 'f-value': 'value',
   'f-cname': 'name', 'f-origin': 'origin', 'f-host': 'host', 'f-port': 'port',
   'f-db': 'dbname', 'f-user': 'user', 'f-host-key': 'hostKeyFingerprint',
   'f-url': 'url', 'f-sslmode': 'sslmode', 'c-template': 'template', 'c-secret': 'secret',
@@ -1730,6 +1775,7 @@ async function boot() {
     state.draft = {};
     state.sheetErrors = {};
     state.confirm = null;
+    state.walkthroughMenuOpen = false;
     render();
   });
 }

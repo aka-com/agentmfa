@@ -69,6 +69,8 @@ export interface ActivityEntry {
 export interface Settings {
   reauth_on_read: boolean;
   menu_bar_hides_dock: boolean;
+  show_service_walkthrough: boolean;
+  show_agent_walkthrough: boolean;
 }
 
 export interface PairingIdentity {
@@ -197,6 +199,8 @@ export interface CommandMap {
   close_session: CommandSpec<{ id: number }, boolean>;
   set_reauth_on_read: CommandSpec<{ on: boolean }, void>;
   set_menu_bar_hides_dock: CommandSpec<{ on: boolean }, void>;
+  set_service_walkthrough_visible: CommandSpec<{ on: boolean }, void>;
+  set_agent_walkthrough_visible: CommandSpec<{ on: boolean }, void>;
   decide: CommandSpec<{
     id: string;
     decision: Decision;

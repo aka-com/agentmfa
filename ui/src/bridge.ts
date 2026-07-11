@@ -197,7 +197,12 @@ const db: MockDatabase = {
   ],
   sessions: [],
   activity: [],
-  settings: { reauth_on_read: true, menu_bar_hides_dock: false },
+  settings: {
+    reauth_on_read: true,
+    menu_bar_hides_dock: false,
+    show_service_walkthrough: true,
+    show_agent_walkthrough: true,
+  },
   queue: [],
 };
 function mkSecret(name: string, value: string): MockSecret {
@@ -446,6 +451,12 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
     case 'set_reauth_on_read': db.settings.reauth_on_read = args.on; return;
     case 'set_menu_bar_hides_dock':
       db.settings.menu_bar_hides_dock = args.on;
+      return;
+    case 'set_service_walkthrough_visible':
+      db.settings.show_service_walkthrough = args.on;
+      return;
+    case 'set_agent_walkthrough_visible':
+      db.settings.show_agent_walkthrough = args.on;
       return;
     case 'decide': {
       const req = db.queue.find((r) => r.id === args.id);

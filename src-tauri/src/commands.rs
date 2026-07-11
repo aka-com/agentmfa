@@ -332,6 +332,8 @@ pub fn get_settings(state: State<AppState>) -> SettingsDto {
     SettingsDto {
         reauth_on_read: s.reauth_on_read,
         menu_bar_hides_dock: s.menu_bar_hides_dock,
+        show_service_walkthrough: s.show_service_walkthrough,
+        show_agent_walkthrough: s.show_agent_walkthrough,
     }
 }
 
@@ -738,6 +740,22 @@ pub fn set_menu_bar_hides_dock(state: State<AppState>, on: bool) -> CmdResult<()
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub fn set_service_walkthrough_visible(state: State<AppState>, on: bool) -> CmdResult<()> {
+    state
+        .broker
+        .ui_set_service_walkthrough_visible(on)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_agent_walkthrough_visible(state: State<AppState>, on: bool) -> CmdResult<()> {
+    state
+        .broker
+        .ui_set_agent_walkthrough_visible(on)
+        .map_err(|e| e.to_string())
+}
+
 /* ------------------------------ approvals -------------------------------- */
 
 #[derive(Deserialize)]
@@ -810,6 +828,8 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         close_session,
         set_reauth_on_read,
         set_menu_bar_hides_dock,
+        set_service_walkthrough_visible,
+        set_agent_walkthrough_visible,
         decide,
         crate::windows::ui_set_mode,
         crate::windows::ui_hide_main,
