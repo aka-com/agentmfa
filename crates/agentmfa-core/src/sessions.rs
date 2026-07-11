@@ -373,7 +373,7 @@ impl Redemption {
             AuditEntry::new(
                 AuditKind::SessionOpened,
                 format!(
-                    "{} connection opened: {}",
+                    "{} session opened: {}",
                     kind_label(kind),
                     info.connection
                 ),
@@ -429,7 +429,7 @@ impl SessionHandle {
                 AuditEntry::new(
                     AuditKind::SessionClosed,
                     format!(
-                        "{} connection closed: {}",
+                        "{} session closed: {}",
                         kind_label(self.kind),
                         self.connection
                     ),

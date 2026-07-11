@@ -9,8 +9,9 @@
 import { invoke, listen, mode } from '/src/bridge';
 import { ICONS, TYPES, esc, escAttr, toast, relTime, absTime } from '/src/util';
 import {
-  apiOriginFromParts, authTemplate, parseApiOrigin, parseConnectionImport,
-  portForTypeSwitch, shouldResolveSshImport, sshImportFromPreview, suggestedSecretName,
+  apiOriginFromParts, authTemplate, firstTaskPrompt, parseApiOrigin, parseConnectionImport,
+  portForTypeSwitch, quickSetupPlaceholder, shouldResolveSshImport, sshImportFromPreview,
+  suggestedSecretName,
 } from '/src/connection-input';
 import { formErrorKind, formErrorMessage, inlineFormError } from '/src/form-errors';
 import type { HostKeyCandidate } from '/src/connection-input';
@@ -77,6 +78,12 @@ interface ConnectionDraft {
   authMode?: string;
   authDetail?: string;
   import?: string;
+  setupSource?: 'manual' | 'import';
+}
+
+interface ConnectionReadyState {
+  name: string;
+  type: ConnectionType;
 }
 
 interface AppState {
@@ -105,6 +112,11 @@ interface AppState {
   readyCopied: boolean;
   setupInstructionsOpen: boolean;
   showFullInstructions: boolean;
+  quickSetupType: ConnectionType;
+  quickSetupSource: string;
+  quickSetupError: string | null;
+  connectionReady: ConnectionReadyState | null;
+  connectionTaskCopied: boolean;
 }
 
 /* ------------------------------ local state ------------------------------ */
@@ -135,6 +147,11 @@ const state: AppState = {
   readyCopied: false,    // transient feedback on the setup-instructions status button
   setupInstructionsOpen: false,
   showFullInstructions: false, // short setup vs full /instructions body
+  quickSetupType: 'pg',
+  quickSetupSource: '',
+  quickSetupError: null,
+  connectionReady: null,
+  connectionTaskCopied: false,
 };
 
 const root = (): HTMLElement => {
@@ -253,10 +270,40 @@ function setupCurlCommand(instructions: string): string {
   return instructions.split(/\r?\n/).find((line) => line.trimStart().startsWith('curl '))?.trim() || 'Loading…';
 }
 
+const QUICK_SETUP_TYPES: Array<[ConnectionType, string]> = [
+  ['pg', 'Postgres'],
+  ['ssh', 'SSH'],
+  ['api', 'HTTP API'],
+  ['ws', 'WebSocket'],
+];
+
+function firstConnectionSetupHTML(): string {
+  const type = state.quickSetupType;
+  const types = QUICK_SETUP_TYPES.map(([value, label]) =>
+    `<button class="quick-type ${type === value ? 'on' : ''}" aria-pressed="${type === value}" data-act="quick-setup-type" data-type="${value}">${label}</button>`).join('');
+  return `<div class="agent-onboarding service-onboarding">
+    <div class="onboarding-copy"><b>Add a service for your agent</b>
+      <span>Save a database, server, or API with its credential. AgentMFA brokers access without giving the credential to your agent.</span></div>
+    <div class="quick-types" aria-label="Service type">${types}</div>
+    <div class="quick-import-row">
+      <input id="quick-setup-source" aria-label="Service to import" placeholder="${escAttr(quickSetupPlaceholder(type))}" value="${escAttr(state.quickSetupSource)}">
+      <button class="btn primary sm" data-act="quick-setup-review">Configure</button>
+    </div>
+    ${state.quickSetupError ? `<div class="field-error quick-setup-error">${esc(state.quickSetupError)}</div>` : ''}
+    <button class="setup-toggle quick-manual" data-act="quick-setup-manual">Configure ${QUICK_SETUP_TYPES.find(([value]) => value === type)?.[1]} manually</button>
+  </div>`;
+}
+
 function globalSectionsHTML() {
   let out = '';
+  let hasOnboarding = false;
+  if (state.tab === 'connections' && !state.connections.length) {
+    out += firstConnectionSetupHTML();
+    hasOnboarding = true;
+  }
   if (!state.agents.length) {
     if (state.tab !== 'activity') {
+      hasOnboarding = true;
       const instructionBody = state.showFullInstructions
         ? (state.brokerInstructions || 'Loading…')
         : (state.agentSetupInstructions || 'Loading…');
@@ -293,7 +340,7 @@ function globalSectionsHTML() {
       if (state.confirm && state.confirm.kind === 'revoke-agent' && state.confirm.id === a.id) {
         return `<div class="live-row"><span class="badge b-agent">agent</span>
           <div class="live-txt"><div class="c-name">${esc(a.name)}</div>
-          <div class="disconnect-copy">Disconnect this agent? Temporary access, saved access, and open connections will end.</div></div>
+          <div class="disconnect-copy">Disconnect this agent? Temporary access, saved access, and active sessions will end.</div></div>
           <button class="btn sm" data-act="confirm-cancel">Cancel</button>
           <button class="btn sm danger" data-act="revoke-confirm" data-id="${a.id}">Disconnect</button></div>`;
       }
@@ -304,14 +351,14 @@ function globalSectionsHTML() {
     }).join('');
   }
   if (state.sessions.length) {
-    out += '<div class="live-head">Open connections</div>' + state.sessions.map((s) => {
+    out += '<div class="live-head">Active sessions</div>' + state.sessions.map((s) => {
       const t = TYPES[s.type];
       // who holds the session matters as much as what it's connected to
       const who = s.agent ? `${esc(s.agent)} → ${esc(s.connection)}` : esc(s.connection);
       if (state.confirm && state.confirm.kind === 'close-session' && state.confirm.id === s.id) {
         return `<div class="live-row"><span class="badge ${t.cls}">${t.label}</span>
           <div class="live-txt"><div class="c-name">${who}</div>
-          <div class="s-sub">Close this connection now?</div></div>
+          <div class="s-sub">Close this session now?</div></div>
           <button class="btn sm" data-act="confirm-cancel">Cancel</button>
           <button class="btn sm danger" data-act="close-session-confirm" data-id="${s.id}">Close</button></div>`;
       }
@@ -321,7 +368,7 @@ function globalSectionsHTML() {
         <button class="btn sm" data-act="close-session-ask" data-id="${s.id}">Close</button></div>`;
     }).join('');
   }
-  return out ? `<div class="dd-global ${!state.agents.length ? 'onboarding-global' : ''}">${out}</div>` : '';
+  return out ? `<div class="dd-global ${hasOnboarding ? 'onboarding-global' : ''}">${out}</div>` : '';
 }
 
 function secretsHTML() {
@@ -332,7 +379,7 @@ function secretsHTML() {
   }
   const rows = state.secrets.map((s) => {
     if (state.confirm && state.confirm.kind === 'del-secret-inuse' && state.confirm.id === s.id) {
-      return `<tr class="confirm-row"><td colspan="3"><div class="confirm-inline"><span>Currently used by ${esc(s.used_by_names.join(', '))}. Delete the connection first.</span>
+      return `<tr class="confirm-row"><td colspan="3"><div class="confirm-inline"><span>Currently used by ${esc(s.used_by_names.join(', '))}. Delete the service first.</span>
           <button class="btn sm" data-act="confirm-cancel">OK</button></div></td></tr>`;
     }
     if (state.confirm && state.confirm.kind === 'del-secret' && state.confirm.id === s.id) {
@@ -355,7 +402,7 @@ function secretsHTML() {
       ? `<span class="copied-badge">${ICONS.check}<span>Copied</span></span>`
       : `<button class="ghost-copy" title="Copy value" data-act="copy-secret" data-id="${s.id}">${ICONS.copy}<span>Copy</span></button>`;
     const valText = revealed ? esc(revealed) : '••••••••';
-    const sub = `Used by ${s.used_by} connection${s.used_by === 1 ? '' : 's'}`;
+    const sub = `Used by ${s.used_by} service${s.used_by === 1 ? '' : 's'}`;
     return `<tr>
       <td><div><div class="s-name">${esc(s.name)}</div><div class="s-sub secret-usage">${esc(sub)}</div></div></td>
       <td class="val"><span class="val-wrap"><span class="val-slot ${copied ? 'is-copied' : ''}"><code>${valText}</code><span class="val-overlay">${overlay}</span></span></span> ${eyeBtn}</td>
@@ -370,7 +417,7 @@ function secretsHTML() {
 function accessDescription(connection: ConnectionSummary, scope: string): string {
   if (scope === 'read') return 'Can fetch data';
   if (connection.type === 'api') return 'Can make any request';
-  return 'Can open and use this connection';
+  return 'Can open and use this service';
 }
 
 const accessRowsHTML = (c: ConnectionSummary): string => {
@@ -391,24 +438,31 @@ const accessRowsHTML = (c: ConnectionSummary): string => {
 const liveCount = (c: ConnectionSummary): number =>
   state.sessions.filter((s) => s.connection === c.name).length;
 const connActionsHTML = (c: ConnectionSummary): string =>
-  `<button class="icon-btn" title="Edit connection" aria-label="Edit connection ${escAttr(c.name)}" data-act="edit-conn" data-id="${c.id}">${ICONS.pencil}</button>
-   <button class="icon-btn" title="Delete connection" aria-label="Delete connection ${escAttr(c.name)}" data-act="del-conn-ask" data-id="${c.id}">${ICONS.trash}</button>`;
+  `<button class="icon-btn" title="Edit service" aria-label="Edit service ${escAttr(c.name)}" data-act="edit-conn" data-id="${c.id}">${ICONS.pencil}</button>
+   <button class="icon-btn" title="Delete service" aria-label="Delete service ${escAttr(c.name)}" data-act="del-conn-ask" data-id="${c.id}">${ICONS.trash}</button>`;
 
 // Card grid, after TablePlus launchers / Keybase device cards: one
 // connection = one object with everything about it inside its border.
 function connectionsHTML() {
   if (!state.connections.length) {
-    return `<div class="empty"><div class="empty-ico">🔌</div><h3>No connections</h3>
-      <p>Connect to APIs, databases, remote servers, etc.</p>
-      <button class="btn primary" data-act="open-add-conn">＋ Add connection</button></div>`;
+    return '';
   }
-  return `<div class="conn-cards">` + state.connections.map((c) => {
+  const ready = state.connectionReady;
+  const readyPrompt = ready ? firstTaskPrompt(ready.name, ready.type) : '';
+  const readyCard = ready && state.agents.length ? `<div class="connection-ready">
+    <div class="connection-ready-copy"><b>${esc(ready.name)} is ready</b>
+      <span>Ask your agent:</span><code>${esc(readyPrompt)}</code></div>
+    <div class="connection-ready-actions">
+      <button class="btn sm" data-act="copy-first-task">${state.connectionTaskCopied ? `${ICONS.check} Copied` : 'Copy task'}</button>
+      <button class="icon-btn" title="Dismiss" aria-label="Dismiss service ready message" data-act="dismiss-connection-ready">${ICONS.circleX}</button>
+    </div></div>` : '';
+  return readyCard + `<div class="conn-cards">` + state.connections.map((c) => {
     const t = TYPES[c.type];
     if (state.confirm && state.confirm.kind === 'del-conn' && state.confirm.id === c.id) {
       return `<div class="conn-card confirm-card">
         <div class="cc-top"><span class="badge ${t.cls}">${t.label}</span>
           <span class="c-name" title="${escAttr(c.name)}">${esc(c.name)}</span></div>
-        <div class="cc-confirm">Delete this connection?${(c.permissions || []).some((permission) => !permission.expires_at) ? ' Affected agents will need approval again.' : ''}</div>
+        <div class="cc-confirm">Delete this service?${(c.permissions || []).some((permission) => !permission.expires_at) ? ' Affected agents will need approval again.' : ''}</div>
         <div class="cc-foot"><button class="btn sm" data-act="confirm-cancel">Cancel</button>
           <button class="btn sm danger" data-act="del-conn-confirm" data-id="${c.id}">Delete</button></div></div>`;
     }
@@ -481,10 +535,10 @@ function brokerReadyHTML() {
 
 function renderMainWindow() {
   const nav = TABS.map((tb) =>
-    `<button class="nav-item ${state.tab === tb ? 'on' : ''}" data-act="tab" data-tab="${tb}">${cap(tb)}</button>`).join('');
+    `<button class="nav-item ${state.tab === tb ? 'on' : ''}" data-act="tab" data-tab="${tb}">${tabLabel(tb)}</button>`).join('');
   // One view-specific action, always in the header row next to the title.
   const actionBtn = state.tab === 'connections'
-    ? `<button class="btn" data-act="open-add-conn">＋ Add connection</button>`
+    ? `<button class="btn" data-act="open-add-conn">＋ Add service</button>`
     : state.tab === 'secrets'
     ? `<button class="btn" data-act="open-add-secret">＋ Add secret</button>`
     : `<button class="btn" data-act="clear-activity-ask" ${state.activity.length ? '' : 'disabled'}>Clear activity</button>`;
@@ -505,7 +559,7 @@ function renderMainWindow() {
         </div>
       </div>
       <div class="dw-main">
-        <div class="dw-head"><h2>${cap(state.tab)}</h2>${actionBtn}</div>
+        <div class="dw-head"><h2>${tabLabel(state.tab)}</h2>${actionBtn}</div>
         ${pendingBannerHTML()}
         ${globalSectionsHTML()}
         <div class="content">${tabContentHTML()}</div>
@@ -515,11 +569,11 @@ function renderMainWindow() {
 
 function renderDropdown() {
   const tabs = TABS.map((tb) =>
-    `<button class="seg-btn ${state.tab === tb ? 'on' : ''}" data-act="tab" data-tab="${tb}">${cap(tb)}</button>`).join('');
+    `<button class="seg-btn ${state.tab === tb ? 'on' : ''}" data-act="tab" data-tab="${tb}">${tabLabel(tb)}</button>`).join('');
   const footer = state.tab === 'secrets'
     ? '<div class="dd-footer"><button class="btn block" data-act="open-add-secret">＋ Add secret</button></div>'
     : state.tab === 'connections'
-    ? '<div class="dd-footer"><button class="btn block" data-act="open-add-conn">＋ Add connection</button></div>' : '';
+    ? '<div class="dd-footer"><button class="btn block" data-act="open-add-conn">＋ Add service</button></div>' : '';
   root().innerHTML = `<div class="surface dropdown-surface">
     <div class="dd-head"><div class="dd-appicon">🔐</div>
       <div class="dd-identity"><div class="dd-title">AgentMFA</div>${brokerReadyHTML()}</div>
@@ -616,7 +670,35 @@ function credentialChooserHTML(
   return `<div class="f-row"><label>${secretLabel}</label>${select}</div>
     <div class="f-row"><label>Credential name</label><input id="c-new-secret-name" class="${fieldCls('newSecretName')}" placeholder="${escAttr(suggested)}" value="${escAttr(draft.newSecretName ?? '')}">${fieldErr('newSecretName')}</div>
     <div class="f-row"><label>Credential value</label><input id="c-new-secret-value" class="${fieldCls('newSecretValue')}" type="password" placeholder="Saved directly to macOS Keychain" value="${escAttr(draft.newSecretValue ?? draft.importedCredential ?? '')}">${fieldErr('newSecretValue')}
-      <div class="rule-note">The value is submitted only when you save this connection and is never written to connection metadata.</div></div>`;
+      <div class="rule-note">The value is submitted only when you save this service and is never written to service metadata.</div></div>`;
+}
+
+async function connectionDraftFromImport(
+  source: string,
+  currentDraft: ConnectionDraft = {},
+): Promise<{ type: ConnectionType; draft: ConnectionDraft }> {
+  const imported = shouldResolveSshImport(source)
+    ? sshImportFromPreview(await invoke('inspect_ssh_import', { source }))
+    : parseConnectionImport(source);
+  const importedFields = imported.fields as ConnectionDraft;
+  return {
+    type: imported.type,
+    draft: {
+      ...currentDraft,
+      ...importedFields,
+      importSource: '',
+      name: currentDraft.name || imported.name,
+      importedCredential: imported.credential,
+      secretSource: importedFields.sshImportId ? 'new' : currentDraft.secretSource,
+      importWarnings: imported.warnings,
+      port: importedFields.port == null ? currentDraft.port : String(importedFields.port),
+      setupSource: 'import',
+    },
+  };
+}
+
+function connectionTypeLabel(type: ConnectionType): string {
+  return QUICK_SETUP_TYPES.find(([value]) => value === type)?.[1] || 'service';
 }
 
 function connSheet(editing: boolean): string {
@@ -630,13 +712,13 @@ function connSheet(editing: boolean): string {
   };
   const importWarnings = !editing && d.importWarnings && d.importWarnings.length
     ? `<div class="pair-identity-warning"><b>Review imported details</b><ul>${d.importWarnings.map((warning) => `<li>${esc(warning)}</li>`).join('')}</ul></div>` : '';
-  let fields = editing ? '' : `<div class="set-panel"><div class="f-row"><label>Paste an existing connection</label>
+  let fields = editing || d.setupSource === 'import' ? '' : `<div class="set-panel"><div class="f-row"><label>Paste an existing service</label>
       <div class="f-2col"><input id="f-import" placeholder="Postgres DSN, API/WS URL, or ssh user@host" value="${escAttr(d.importSource ?? '')}">
       <button type="button" class="btn sm" data-act="apply-connection-import">Use</button></div>
       ${fieldErr('import')}</div></div>${importWarnings}<div class="form-divider" role="separator"></div>`;
   fields += `<div class="f-row"><label>Name</label><input id="f-cname" class="${fieldCls('name')}" placeholder="e.g. github" value="${escAttr(d.name ?? '')}">${fieldErr('name')}</div>
     <div class="f-row"><label>Type${editing ? ': fixed after creation' : ''}</label>
-    <div class="seg in-form">${typeBtn('api', 'API key')}${typeBtn('pg', 'Postgres')}${typeBtn('ssh', 'SSH')}${typeBtn('ws', 'WebSocket')}</div></div>`;
+    <div class="seg in-form">${typeBtn('pg', 'Postgres')}${typeBtn('ssh', 'SSH')}${typeBtn('api', 'HTTP API')}${typeBtn('ws', 'WebSocket')}</div></div>`;
   if (t === 'api') {
     const origin = d.origin ?? apiOriginFromParts(d.scheme ?? undefined, d.host ?? undefined, d.port ?? null);
     fields += `<div class="f-row"><label>API origin</label><input id="f-origin" class="${fieldCls('origin')}" placeholder="https://api.github.com" value="${escAttr(origin)}">${fieldErr('origin')}
@@ -713,10 +795,14 @@ function connSheet(editing: boolean): string {
   if (editing && conn && (conn.permissions || []).some((permission) => !permission.expires_at)) {
     fields += `<div class="rule-note">Changing the destination makes affected agents ask for approval again.</div>`;
   }
+  const title = editing ? 'Edit service'
+    : d.setupSource === 'import' ? `Review ${connectionTypeLabel(t)} service`
+    : d.setupSource === 'manual' ? `Add ${connectionTypeLabel(t)} service`
+    : 'Add service';
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
-    <div class="sheet wide"><h3>${editing ? 'Edit connection' : 'Add connection'}</h3>${fields}
+    <div class="sheet wide"><h3>${title}</h3>${fields}
     <div class="sheet-actions"><button class="btn" data-act="sheet-cancel">Cancel</button>
-      <button class="btn primary" data-act="save-conn">Save</button></div></div>`;
+      <button class="btn primary" data-act="save-conn">${editing ? 'Save' : 'Save service'}</button></div></div>`;
 }
 
 function settingsSheet() {
@@ -773,7 +859,7 @@ function temporaryAccessExplanation(req: ApprovalRequest): { duration: string; t
   }
   return {
     duration,
-    text: `For ${duration}, ${req.agent} can open and use ${connection} without asking again. Activity inside an open connection is not reviewed individually.`,
+    text: `For ${duration}, ${req.agent} can open and use ${connection} without asking again. Activity inside an active session is not reviewed individually.`,
   };
 }
 
@@ -785,7 +871,7 @@ function ongoingAccessExplanation(req: ApprovalRequest): string {
   if (req.kind === 'http') {
     return `${req.agent} will be able to make any request through ${connection} without asking again, including changes and deletes.`;
   }
-  return `${req.agent} will be able to open and use ${connection} without asking again. Activity inside an open connection is not reviewed individually.`;
+  return `${req.agent} will be able to open and use ${connection} without asking again. Activity inside an active session is not reviewed individually.`;
 }
 
 function renderApproval() {
@@ -808,7 +894,7 @@ function renderApproval() {
   const connCell = conn
     ? (t ? `<span class="badge ${t.cls}">${t.label}</span> ` : '') + `<b>${esc(conn.name)}</b>`
     : '';
-  const connectionRow = conn ? `<div class="ap-row"><span>Connection</span><span>${connCell}</span></div>` : '';
+  const connectionRow = conn ? `<div class="ap-row"><span>Service</span><span>${connCell}</span></div>` : '';
   const targetRow = conn ? `<div class="ap-row"><span>Target</span><code>${esc(conn.target)}</code></div>` : '';
   const pairIdentity = req.pairing_identity || {
     program: req.identity || 'Unknown program',
@@ -824,7 +910,7 @@ function renderApproval() {
   let inherit = '';
   if (isPair && req.inherited && req.inherited.length) {
     inherit = `<div class="inherit-warn"><span class="iw-head">This name already has access that does not require approval</span>
-      <ul>${req.inherited.map((c) => `<li><b>${esc(c.name)}</b> — ${c.type === 'api' ? 'Any request' : 'Open and use this connection'}</li>`).join('')}</ul>
+      <ul>${req.inherited.map((c) => `<li><b>${esc(c.name)}</b> — ${c.type === 'api' ? 'Any request' : 'Open and use this service'}</li>`).join('')}</ul>
       <div class="pair-choice-head">When this program connects:</div>
       <label class="pair-choice"><input type="radio" name="pair-access" data-act="pair-inheritance" data-revoke="true" ${state.revokeInheritedRules ? 'checked' : ''}>
         <span><b>Require approval again</b><small>Recommended</small></span></label>
@@ -845,7 +931,7 @@ function renderApproval() {
   if (!isPair) {
     const box = state.alwaysOpen
       ? `<div class="always-box"><div class="f-row"><label>Use without asking</label>
-        <div class="rule-note">${esc(ongoingAccessExplanation(req))} You can require approval again from the Connections tab.</div></div>
+        <div class="rule-note">${esc(ongoingAccessExplanation(req))} You can require approval again from the Services tab.</div></div>
         <button class="btn primary sm" data-act="always-save">Don’t ask again</button></div>` : '';
     always = { btn: `<button class="btn ghost sm" data-act="always-toggle">Don’t ask again…</button>`, box };
   }
@@ -861,7 +947,7 @@ function renderApproval() {
     <div class="ap-head"><div class="ap-icon">🔐</div>
       <div><div class="ap-title">${esc(approvalHeading(req))}</div></div></div>
     <div class="ap-scroll">
-    ${isPair ? `<div class="pair-explainer">Connecting lets this program see connection names and destinations and ask AgentMFA to use them. It cannot read saved secret values.</div>` : ''}
+    ${isPair ? `<div class="pair-explainer">Connecting lets this program see service names and destinations and ask AgentMFA to use them. It cannot read saved secret values.</div>` : ''}
     <div class="ap-rows">
       ${isPair ? identityRows : `<div class="ap-row"><span>Agent</span><b>${esc(req.agent)}</b></div>
       ${connectionRow}${targetRow}
@@ -927,6 +1013,7 @@ function armCountdown() {
 
 /* --------------------------------- helpers ------------------------------- */
 const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
+const tabLabel = (tab: Tab): string => tab === 'connections' ? 'Services' : cap(tab);
 
 // Flash "Copied" in place of the masked value for a moment after a copy.
 let copiedTimer: ReturnType<typeof setTimeout> | null = null;
@@ -951,6 +1038,24 @@ function focusField(id: string): void {
     const el = document.getElementById(id);
     if (el) el.focus();
   }, 0);
+}
+
+function focusImportedConnectionDraft(): void {
+  const d = state.draft;
+  const type = state.connType;
+  if (!(d.name || '').trim()) {
+    focusField('f-cname');
+    return;
+  }
+  const missing = type === 'pg'
+    ? [[d.host, 'f-host'], [d.dbname, 'f-db'], [d.user, 'f-user']]
+    : type === 'ssh'
+    ? [[d.host, 'f-host'], [d.user, 'f-user'], [d.hostKeyFingerprint, 'f-host-key']]
+    : type === 'api'
+    ? [[d.origin, 'f-origin']]
+    : [[d.url, 'f-url']];
+  const firstMissing = missing.find(([value]) => !String(value || '').trim());
+  focusField(firstMissing ? String(firstMissing[1]) : 'f-cname');
 }
 
 const INPUT_BY_ERROR_FIELD = {
@@ -1169,7 +1274,15 @@ async function saveConn(): Promise<void> {
   try {
     if (adding) await invoke('add_connection', { input });
     else await invoke('edit_connection', { id: sheet.id ?? '', input });
-    toast(adding ? '🔌 Connection saved' : '✏️ Connection updated');
+    toast(adding ? '🔌 Service saved' : '✏️ Service updated');
+    if (adding) {
+      if (!state.connections.length) {
+        state.connectionReady = { name, type: t };
+        state.connectionTaskCopied = false;
+      }
+      state.quickSetupSource = '';
+      state.quickSetupError = null;
+    }
     closeSheet();
     await refresh('all');
   } catch (e) {
@@ -1296,29 +1409,71 @@ document.addEventListener('click', async (e) => {
     case 'open-add-secret': state.sheet = { kind: 'add-secret' }; state.draft = {}; state.sheetErrors = {}; render(); focusField('f-name'); break;
     case 'save-secret': await saveSecret(); break;
 
+    case 'quick-setup-type': {
+      const type = btn.dataset.type as ConnectionType | undefined;
+      if (type && QUICK_SETUP_TYPES.some(([value]) => value === type)) {
+        state.quickSetupType = type;
+        state.quickSetupError = null;
+        render();
+        focusField('quick-setup-source');
+      }
+      break;
+    }
+    case 'quick-setup-review': {
+      try {
+        const imported = await connectionDraftFromImport(state.quickSetupSource);
+        state.quickSetupType = imported.type;
+        state.quickSetupError = null;
+        state.sheet = { kind: 'add-conn' };
+        state.connType = imported.type;
+        state.draft = imported.draft;
+        state.sheetErrors = {};
+        render();
+        focusImportedConnectionDraft();
+      } catch (error) {
+        state.quickSetupError = errorMessage(error);
+        render();
+        focusField('quick-setup-source');
+      }
+      break;
+    }
+    case 'quick-setup-manual':
+      state.sheet = { kind: 'add-conn' };
+      state.connType = state.quickSetupType;
+      state.draft = { setupSource: 'manual' };
+      state.sheetErrors = {};
+      render();
+      focusField('f-cname');
+      break;
+    case 'copy-first-task': {
+      const ready = state.connectionReady;
+      if (!ready) break;
+      try {
+        await navigator.clipboard.writeText(firstTaskPrompt(ready.name, ready.type));
+        state.connectionTaskCopied = true;
+        render();
+        setTimeout(() => { state.connectionTaskCopied = false; render(); }, 1400);
+      } catch {
+        toast('⚠ Could not copy the task');
+      }
+      break;
+    }
+    case 'dismiss-connection-ready':
+      state.connectionReady = null;
+      state.connectionTaskCopied = false;
+      render();
+      break;
     case 'open-add-conn': state.sheet = { kind: 'add-conn' }; state.connType = 'api'; state.draft = {}; state.sheetErrors = {}; render(); focusField('f-cname'); break;
     case 'apply-connection-import': {
       captureDrafts();
       try {
         const source = state.draft.importSource || '';
-        const imported = shouldResolveSshImport(source)
-          ? sshImportFromPreview(await invoke('inspect_ssh_import', { source }))
-          : parseConnectionImport(source);
-        const importedFields = imported.fields as ConnectionDraft;
+        const imported = await connectionDraftFromImport(source, state.draft);
         state.connType = imported.type;
-        state.draft = {
-          ...state.draft,
-          ...importedFields,
-          importSource: '',
-          name: state.draft.name || imported.name,
-          importedCredential: imported.credential,
-          secretSource: importedFields.sshImportId ? 'new' : state.draft.secretSource,
-          importWarnings: imported.warnings,
-          port: importedFields.port == null ? state.draft.port : String(importedFields.port),
-        };
+        state.draft = imported.draft;
         delete state.sheetErrors.import;
         render(false);
-        focusField('f-cname');
+        focusImportedConnectionDraft();
       } catch (error) {
         state.sheetErrors.import = errorMessage(error);
         render();
@@ -1441,6 +1596,11 @@ async function decide(id: string, decision: Decision): Promise<void> {
 document.addEventListener('keydown', (e) => {
   // Ctrl-Tab / Ctrl-Shift-Tab cycle the left-nav tabs when the main window is
   // open (the approval window has no tabs; a modal sheet keeps focus).
+  if (e.key === 'Enter' && e.target instanceof HTMLInputElement && e.target.id === 'quick-setup-source') {
+    e.preventDefault();
+    document.querySelector<HTMLElement>('[data-act="quick-setup-review"]')?.click();
+    return;
+  }
   if (e.key === 'Tab' && e.ctrlKey && mode !== 'approval' && !state.sheet) {
     e.preventDefault();
     const i = TABS.indexOf(state.tab);
@@ -1492,6 +1652,10 @@ document.addEventListener('input', (e) => {
   const key = target
     ? ERR_KEY_BY_INPUT[target.id as keyof typeof ERR_KEY_BY_INPUT]
     : undefined;
+  if (target?.id === 'quick-setup-source') {
+    state.quickSetupSource = target.value;
+    state.quickSetupError = null;
+  }
   if (key && state.sheetErrors[key]) {
     delete state.sheetErrors[key];
     render();
@@ -1543,7 +1707,7 @@ async function boot() {
     render();
     const connected = state.agents.find((agent) =>
       !before.has(agent.name) || before.get(agent.name) !== agent.paired_at);
-    if (connected) toast(`🔗 ${connected.name} is connected and can now ask to use your connections`);
+    if (connected) toast(`🔗 ${connected.name} is connected and can now ask to use your services`);
   });
   await listen('amfa://rules-changed', () => {
     if (mode !== 'approval') refreshAccessViews();

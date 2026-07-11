@@ -4,13 +4,22 @@ import assert from 'node:assert/strict';
 import {
   apiOriginFromParts,
   authTemplate,
+  firstTaskPrompt,
   parseConnectionImport,
   parseApiOrigin,
   portForTypeSwitch,
+  quickSetupPlaceholder,
   shouldResolveSshImport,
   sshImportFromPreview,
   suggestedSecretName,
 } from '../src/connection-input';
+
+test('provides task-first examples for every connection type', () => {
+  assert.equal(quickSetupPlaceholder('pg'), 'postgresql://app@db.example.com/production');
+  assert.equal(quickSetupPlaceholder('ssh'), 'ssh deploy@prod.example.com');
+  assert.match(firstTaskPrompt('prod-db', 'pg'), /SELECT current_database\(\)/);
+  assert.match(firstTaskPrompt('prod-ssh', 'ssh'), /uname -a/);
+});
 
 test('API origins preserve scheme and custom port', () => {
   assert.deepEqual(parseApiOrigin('http://localhost:8080'), {
@@ -59,6 +68,20 @@ test('imports API and WebSocket URLs', () => {
   assert.match(api.warnings[0], /Only the API origin/);
   const ws = parseConnectionImport('wss://stream.example.com/feed');
   assert.deepEqual(ws.fields, { url: 'wss://stream.example.com/feed' });
+});
+
+test('does not suggest connection names for IPv4 or IPv6 targets', () => {
+  const postgres = parseConnectionImport('postgresql://app@192.0.2.10/production');
+  assert.equal(postgres.name, '');
+
+  const api = parseConnectionImport('https://[2001:db8::10]/');
+  assert.equal(api.name, '');
+
+  const ssh = sshImportFromPreview({
+    importId: 'preview-ip', destination: '2001:db8::20', host: '2001:db8::20',
+    port: 22, user: 'deploy',
+  });
+  assert.equal(ssh.name, '');
 });
 
 test('imports common SSH commands but rejects shell operators', () => {

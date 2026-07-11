@@ -252,12 +252,12 @@ function seedFixtures() {
   const fixtures: Array<[keyof typeof MOCK_ACTIVITY_META, string, string | null, number]> = [
     ['denied', 'Denied: claude-code', 'POST api.github.com/repos/aka/aka/dispatches', 2],
     ['secretCopied', 'Secret copied: GITHUB_API_KEY', null, 6],
-    ['sessionClosed', 'WebSocket bridge closed', 'market-feed', 14],
-    ['sessionOpened', 'WebSocket connection opened', 'market-feed', 35],
+    ['sessionClosed', 'WebSocket session closed', 'market-feed', 14],
+    ['sessionOpened', 'WebSocket session opened', 'market-feed', 35],
     ['autoAllowed', 'Used without asking: claude-code → github', null, 90],
     ['requested', 'claude-code requested github', 'GET api.github.com/user/repos', 180],
-    ['sessionClosed', 'Postgres connection closed', 'Ticket window elapsed', 400],
-    ['sessionOpened', 'Postgres connection opened', 'prod-db → app_production', 402],
+    ['sessionClosed', 'Postgres session closed', 'Ticket window elapsed', 400],
+    ['sessionOpened', 'Postgres session opened', 'prod-db → app_production', 402],
     ['allowedOnce', 'Allowed this request: claude-code', 'Connect to Postgres → app@db.internal.aka.com:5432/app_production', 1500],
     ['paired', 'Agent connected: claude-code', null, 3000],
   ];
@@ -378,7 +378,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         throw formError('validation', 'invalid_connection_field', 'hostKeyFingerprint', 'Enter an OpenSSH SHA-256 or SHA-512 fingerprint');
       }
       if (db.connections.some((c) => c.name === i.name)) {
-        throw formError('conflict', 'connection_name_taken', 'name', 'That connection name is already in use');
+        throw formError('conflict', 'connection_name_taken', 'name', 'That service name is already in use');
       }
       if (i.new_secret_name && (i.new_secret_value || (i.ssh_import_id && i.identity_file))) {
         if (db.secrets.some((s) => s.name === i.new_secret_name)) {
@@ -398,7 +398,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         destination: i.destination, host: i.host, scheme: i.scheme, port: i.port, template: i.template, dbname: i.dbname, user: i.user,
         host_key_fingerprint: i.host_key_fingerprint, sslmode: i.sslmode,
         trusted_ca_bundle_path: i.trusted_ca_bundle_path, url: i.url });
-      audit('connectionAdded', `Connection added: ${i.name}`); return;
+      audit('connectionAdded', `Service added: ${i.name}`); return;
     }
     case 'edit_connection': {
       const c = db.connections.find((x) => x.id === args.id); if (!c) throw new Error('no such connection');
@@ -407,7 +407,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         throw formError('validation', 'invalid_connection_field', 'hostKeyFingerprint', 'Enter an OpenSSH SHA-256 or SHA-512 fingerprint');
       }
       if (db.connections.some((other) => other.id !== c.id && other.name === i.name)) {
-        throw formError('conflict', 'connection_name_taken', 'name', 'That connection name is already in use');
+        throw formError('conflict', 'connection_name_taken', 'name', 'That service name is already in use');
       }
       Object.assign(c, { name: i.name, host: i.host, scheme: i.scheme, port: i.port,
         destination: i.destination,
@@ -418,12 +418,12 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         c.secret_names = [db.secrets.find((s) => s.id === i.secret_id)?.name]
           .filter((name): name is string => Boolean(name));
       }
-      audit('connectionUpdated', `Connection updated: ${i.name}`); return;
+      audit('connectionUpdated', `Service updated: ${i.name}`); return;
     }
     case 'delete_connection': {
       const c = db.connections.find((x) => x.id === args.id); if (!c) throw new Error('no such connection');
       db.connections = db.connections.filter((x) => x.id !== args.id);
-      db.rules = db.rules.filter((r) => r.connection_id !== args.id); audit('connectionDeleted', `Connection deleted: ${c.name}`); return;
+      db.rules = db.rules.filter((r) => r.connection_id !== args.id); audit('connectionDeleted', `Service deleted: ${c.name}`); return;
     }
     case 'remove_permission': {
       const standing = db.rules.some((permission) => permission.id === args.id);

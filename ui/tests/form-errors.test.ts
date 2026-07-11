@@ -6,8 +6,8 @@ import { formErrorKind, formErrorMessage, inlineFormError } from '../src/form-er
 test('routes validation and conflict failures to their fields', () => {
   assert.deepEqual(inlineFormError({
     kind: 'conflict', code: 'connection_name_taken', field: 'name',
-    message: 'That connection name is already in use',
-  }), { field: 'name', message: 'That connection name is already in use' });
+    message: 'That service name is already in use',
+  }), { field: 'name', message: 'That service name is already in use' });
   assert.deepEqual(inlineFormError(JSON.stringify({
     kind: 'validation', code: 'invalid_connection_field', field: 'hostKeyFingerprint',
     message: 'Enter an OpenSSH fingerprint',

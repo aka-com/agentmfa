@@ -22,25 +22,25 @@ pub enum CoreError {
     #[error("secret name {0:?} is already in use")]
     SecretNameTaken(String),
 
-    #[error("connection name {0:?} is already in use")]
+    #[error("service name {0:?} is already in use")]
     ConnectionNameTaken(String),
 
     #[error("no such secret")]
     SecretNotFound,
 
-    #[error("no such connection")]
+    #[error("no such service")]
     ConnectionNotFound,
 
-    #[error("approval connection changed; review a fresh prompt before saving a rule")]
+    #[error("approval service changed; review a fresh prompt before saving a rule")]
     ApprovalConnectionChanged,
 
-    #[error("secret is in use by connection(s): {}", .0.join(", "))]
+    #[error("secret is in use by service(s): {}", .0.join(", "))]
     SecretInUse(Vec<String>),
 
     #[error("invalid name {0:?}: names are 1-64 chars of [A-Za-z0-9_] not starting with a digit")]
     InvalidSecretName(String),
 
-    #[error("invalid connection name {0:?}: 1-64 chars of [a-z0-9-_]")]
+    #[error("invalid service name {0:?}: 1-64 chars of [a-z0-9-_]")]
     InvalidConnectionName(String),
 
     #[error("invalid template: {0}")]
@@ -49,19 +49,19 @@ pub enum CoreError {
     #[error("template references unknown secret {0:?}")]
     UnknownTemplateRef(String),
 
-    #[error("{kind} connections bind exactly one secret")]
+    #[error("{kind} services bind exactly one secret")]
     WrongSecretCount { kind: &'static str },
 
-    #[error("invalid connection config: {0}")]
+    #[error("invalid service config: {0}")]
     InvalidConnectionConfig(String),
 
-    #[error("invalid connection field {field:?}: {message}")]
+    #[error("invalid service field {field:?}: {message}")]
     InvalidConnectionField {
         field: ConnectionField,
         message: String,
     },
 
-    #[error("a connection's type is fixed after creation")]
+    #[error("a service's type is fixed after creation")]
     KindChange,
 
     #[error("Secret read was not authenticated")]

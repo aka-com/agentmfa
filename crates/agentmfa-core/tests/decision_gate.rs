@@ -557,7 +557,7 @@ async fn config_actions_confirm_and_record_the_method() {
     let recent = broker.audit.recent(5);
     let deleted = recent
         .iter()
-        .find(|e| e.text.starts_with("Connection deleted"))
+        .find(|e| e.text.starts_with("Service deleted"))
         .unwrap();
     assert_eq!(deleted.confirmation, Some(ConfirmationMethod::Waived));
 

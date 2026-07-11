@@ -675,12 +675,12 @@ impl Broker {
     /// A connection binds a secret to a destination, so creating one is not
     /// completable without the native confirmation the core demands.
     pub fn ui_add_connection(&self, spec: ConnectionSpec) -> Result<Connection> {
-        let confirmation = self.confirm_action(&format!("Add connection “{}”", spec.name))?;
+        let confirmation = self.confirm_action(&format!("Add service “{}”", spec.name))?;
         let conn = self.store.add_connection(spec)?;
         self.audit.append(
             AuditEntry::new(
                 AuditKind::ConnectionAdded,
-                format!("Connection added: {}", conn.name),
+                format!("Service added: {}", conn.name),
             )
             .connection(conn.name.clone())
             .detail(format!("{} → {}", conn.kind().label(), conn.target()))
@@ -699,7 +699,7 @@ impl Broker {
         value: SecretValue,
         spec: ConnectionSpec,
     ) -> Result<Connection> {
-        let confirmation = self.confirm_action(&format!("Add connection “{}”", spec.name))?;
+        let confirmation = self.confirm_action(&format!("Add service “{}”", spec.name))?;
         let (secret, conn) = self
             .store
             .add_connection_with_secret(secret_name, value, spec)?;
@@ -710,7 +710,7 @@ impl Broker {
         self.audit.append(
             AuditEntry::new(
                 AuditKind::ConnectionAdded,
-                format!("Connection added: {}", conn.name),
+                format!("Service added: {}", conn.name),
             )
             .connection(conn.name.clone())
             .detail(format!("{} → {}", conn.kind().label(), conn.target()))
@@ -733,7 +733,7 @@ impl Broker {
         let capability_changed = old.config != spec.config || explicit_secrets_changed;
         let confirmation = if capability_changed {
             Some(self.confirm_action(&format!(
-                "Change security settings for connection “{}”",
+                "Change security settings for service “{}”",
                 spec.name
             ))?)
         } else {
@@ -761,7 +761,7 @@ impl Broker {
         let mut entry = AuditEntry::new(
             AuditKind::ConnectionUpdated,
             format!(
-                "Connection updated: {}",
+                "Service updated: {}",
                 if old.name != conn.name {
                     format!("{} → {}", old.name, conn.name)
                 } else {
@@ -801,7 +801,7 @@ impl Broker {
     /// Delete a connection; rules die with it.
     pub fn ui_delete_connection(&self, id: &Uuid) -> Result<Connection> {
         let conn = self.store.connection_by_id(id)?;
-        let confirmation = self.confirm_action(&format!("Delete connection “{}”", conn.name))?;
+        let confirmation = self.confirm_action(&format!("Delete service “{}”", conn.name))?;
         let _access = self.access_gate.lock().unwrap();
         if self.store.connection_by_id(id)?.updated_at != conn.updated_at {
             return Err(CoreError::ApprovalConnectionChanged);
@@ -817,7 +817,7 @@ impl Broker {
         self.audit.append(
             AuditEntry::new(
                 AuditKind::ConnectionDeleted,
-                format!("Connection deleted: {}", conn.name),
+                format!("Service deleted: {}", conn.name),
             )
             .connection(conn.name.clone())
             .confirmation(confirmation),

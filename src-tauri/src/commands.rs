@@ -102,7 +102,7 @@ impl FormError {
             CoreError::ConnectionNameTaken(_) => Self::validation(
                 "connection_name_taken",
                 "name",
-                "That connection name is already in use",
+                "That service name is already in use",
             )
             .with_kind("conflict"),
             CoreError::InvalidSecretName(_) => {
@@ -136,7 +136,7 @@ impl FormError {
                 Self::validation(
                     "wrong_credential_count",
                     field,
-                    format!("{kind} connections require exactly one saved credential"),
+                    format!("{kind} services require exactly one saved credential"),
                 )
             }
             CoreError::SecretNotFound => match context {
@@ -195,19 +195,19 @@ impl FormError {
             CoreError::KindChange => Self::global(
                 "validation",
                 "connection_kind_fixed",
-                "Connection type cannot be changed after creation",
+                "Service type cannot be changed after creation",
                 None,
             ),
             CoreError::ConnectionNotFound => Self::global(
                 "conflict",
                 "connection_not_found",
-                "This connection was removed elsewhere",
+                "This service was removed elsewhere",
                 None,
             ),
             CoreError::ApprovalConnectionChanged => Self::global(
                 "conflict",
                 "connection_changed",
-                "The connection changed while you were confirming. Review it and save again.",
+                "The service changed while you were confirming. Review it and save again.",
                 None,
             ),
             CoreError::Vault(detail) => Self::global(
@@ -532,7 +532,7 @@ impl ConnectionInput {
                 return Err(FormError::global(
                     "system",
                     "unknown_connection_type",
-                    "Couldn’t save this connection",
+                    "Couldn’t save this service",
                     Some(format!("unknown connection type {other:?}")),
                 ))
             }
@@ -663,7 +663,7 @@ pub fn edit_connection(
 ) -> FormResult<()> {
     let kind = input.kind.clone();
     let id = parse_id(&id).map_err(|detail| {
-        FormError::global("system", "invalid_connection_id", "Couldn’t edit this connection", Some(detail))
+        FormError::global("system", "invalid_connection_id", "Couldn’t edit this service", Some(detail))
     })?;
     let spec = input.into_spec()?;
     state
@@ -928,7 +928,7 @@ mod tests {
                 "kind": "conflict",
                 "code": "connection_name_taken",
                 "field": "name",
-                "message": "That connection name is already in use"
+                "message": "That service name is already in use"
             })
         );
     }

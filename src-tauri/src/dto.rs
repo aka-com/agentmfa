@@ -15,7 +15,7 @@ use serde::Serialize;
 pub struct SecretDto {
     pub id: String,
     pub name: String,
-    /// How many connections reference it (the "Used by N connections" line).
+    /// How many services reference it (the "Used by N services" line).
     pub used_by: usize,
     pub used_by_names: Vec<String>,
     pub created_at: String,

@@ -90,7 +90,7 @@ impl TauriEvents {
             .connection
             .as_ref()
             .map(|connection| connection.name.as_str())
-            .unwrap_or("this connection")
+            .unwrap_or("this service")
     }
 
     fn request_summary(&self, request: &ApprovalRequest) -> String {

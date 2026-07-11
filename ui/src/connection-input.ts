@@ -3,6 +3,25 @@
 
 export type ConnectionType = 'api' | 'pg' | 'ws' | 'ssh';
 
+const QUICK_SETUP_PLACEHOLDERS: Record<ConnectionType, string> = {
+  pg: 'postgresql://app@db.example.com/production',
+  ssh: 'ssh deploy@prod.example.com',
+  api: 'https://api.github.com',
+  ws: 'wss://stream.example.com/feed',
+};
+
+export function quickSetupPlaceholder(type: ConnectionType): string {
+  return QUICK_SETUP_PLACEHOLDERS[type];
+}
+
+export function firstTaskPrompt(name: string, type: ConnectionType): string {
+  const service = `AgentMFA service ${name}`;
+  if (type === 'pg') return `Using my ${service}, run SELECT current_database().`;
+  if (type === 'ssh') return `Using my ${service}, run uname -a on the remote server.`;
+  if (type === 'api') return `Using my ${service}, make a GET request to / and summarize the response.`;
+  return `Using my ${service}, connect to the WebSocket and report the first message.`;
+}
+
 export interface HostKeyCandidate {
   fingerprint: string;
   algorithm: string;
@@ -106,7 +125,16 @@ function decoded(value: string, label: string): string {
   catch { throw new Error(`${label} contains invalid percent encoding`); }
 }
 
+function isIpAddress(host: string): boolean {
+  const value = host.replace(/^\[|\]$/g, '');
+  if (value.includes(':')) return /^[0-9a-f:.]+$/i.test(value);
+  const octets = value.split('.');
+  return octets.length === 4 && octets.every((octet) =>
+    /^\d{1,3}$/.test(octet) && Number(octet) <= 255);
+}
+
 function suggestedName(host: string | undefined, fallback: string): string {
+  if (host && isIpAddress(host)) return '';
   const first = String(host || fallback || 'connection').split('.')[0];
   const clean = first.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
   return clean || fallback || 'connection';
@@ -198,7 +226,7 @@ export function parseConnectionImport(value: unknown): ConnectionImport {
 
   let parsed: URL;
   try { parsed = new URL(text); }
-  catch { throw new Error('Could not recognize that connection. Use a complete URL, Postgres DSN, or ssh command.'); }
+  catch { throw new Error('Could not recognize that service. Use a complete URL, Postgres DSN, or ssh command.'); }
   const scheme = parsed.protocol.slice(0, -1).toLowerCase();
   if (scheme === 'http' || scheme === 'https') {
     if (parsed.username || parsed.password) throw new Error('API URLs with embedded credentials are not supported');
@@ -260,7 +288,7 @@ export function parseConnectionImport(value: unknown): ConnectionImport {
       fields: { host, port: parsed.port ? Number(parsed.port) : 22, user, hostKeyFingerprint: '' },
     };
   }
-  throw new Error(`Connection scheme ${scheme || '(missing)'} is not supported`);
+  throw new Error(`Service scheme ${scheme || '(missing)'} is not supported`);
 }
 
 export function suggestedSecretName(connectionName: string, type: ConnectionType): string {
