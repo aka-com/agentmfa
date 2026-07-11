@@ -302,7 +302,7 @@ function globalSectionsHTML() {
     hasOnboarding = true;
   }
   if (!state.agents.length) {
-    if (state.tab !== 'activity') {
+    if (state.tab === 'connections') {
       hasOnboarding = true;
       const instructionBody = state.showFullInstructions
         ? (state.brokerInstructions || 'Loading…')
