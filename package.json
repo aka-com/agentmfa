@@ -8,6 +8,9 @@
     "frontend:build": "vite build",
     "typecheck": "tsc --noEmit",
     "test:ui": "tsx --test ui/tests/*.test.ts",
+    "sandbox:up": "bash scripts/sandbox-up.sh",
+    "sandbox:status": "bash scripts/sandbox-status.sh",
+    "sandbox:down": "bash scripts/sandbox-down.sh",
     "release": "bash scripts/release.sh",
     "test": "npm run typecheck && cargo test --workspace && cargo test --manifest-path src-tauri/Cargo.toml && npm run test:ui",
     "clippy": "cargo clippy --workspace --all-targets && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets"

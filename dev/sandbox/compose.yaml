@@ -1,0 +1,42 @@
+name: agentmfa-sandbox
+
+services:
+  http:
+    image: ghcr.io/mccutchen/go-httpbin:v2.23.1
+    ports:
+      - "127.0.0.1:18080:8080"
+
+  websocket:
+    image: jmalloc/echo-server
+    ports:
+      - "127.0.0.1:18081:8080"
+
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: agentmfa
+      POSTGRES_PASSWORD: agentmfa-test-password
+      POSTGRES_DB: agentmfa_sandbox
+    ports:
+      - "127.0.0.1:15432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentmfa -d agentmfa_sandbox"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  ssh:
+    image: lscr.io/linuxserver/openssh-server:latest
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: Etc/UTC
+      USER_NAME: sandbox
+      PUBLIC_KEY_FILE: /keys/client_key.pub
+      PASSWORD_ACCESS: "false"
+      SUDO_ACCESS: "false"
+    volumes:
+      - ./state/ssh/client_key.pub:/keys/client_key.pub:ro
+      - ./state/ssh/config:/config
+    ports:
+      - "127.0.0.1:12222:2222"

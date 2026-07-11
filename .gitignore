@@ -9,3 +9,6 @@ dist/
 .claude/
 .codex/
 .qmux/
+
+# Generated credentials and runtime state for the local service sandbox.
+/dev/sandbox/state/

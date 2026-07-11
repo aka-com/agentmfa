@@ -74,6 +74,10 @@ cargo run -p agentmfa-cli -- serve
 curl --unix-socket ~/.agentmfa/broker.sock http://localhost/instructions
 ```
 
+For disposable local HTTP, WebSocket, Postgres, and SSH upstreams, see the
+[developer service sandbox](dev/sandbox/README.md). The sandbox runs the
+upstreams in Docker while AgentMFA continues to run natively.
+
 To seed secrets and connections from the terminal, with the broker stopped:
 
 ```sh
