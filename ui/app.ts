@@ -306,22 +306,13 @@ const QUICK_SETUP_TYPES: Array<[ConnectionType, string]> = [
   ['ws', 'WebSocket'],
 ];
 
-// The onboarding step pill: numbered while pending, a green check once the
-// card's goal is met (a service saved / an agent connected). Pure render
-// state — the cards themselves stay until hidden.
-function walkthroughStepHTML(step: number, done: boolean): string {
-  return done
-    ? `<span class="walkthrough-step done">${ICONS.check} Done</span>`
-    : `<span class="walkthrough-step">Step ${step}</span>`;
-}
-
 function firstConnectionSetupHTML(): string {
   const type = state.quickSetupType;
   const types = QUICK_SETUP_TYPES.map(([value, label]) =>
     `<button class="quick-type ${type === value ? 'on' : ''}" aria-pressed="${type === value}" data-act="quick-setup-type" data-type="${value}">${label}</button>`).join('');
   return `<div class="agent-onboarding service-onboarding walkthrough-card">
     <div class="walkthrough-head">
-      <div class="onboarding-copy"><b>${walkthroughStepHTML(1, state.connections.length > 0)}Add a service for your agent</b>
+      <div class="onboarding-copy"><b>Add a service for your agent</b>
         <span>Save a database, server, or API. AgentMFA brokers access without giving credentials to your agent.</span></div>
       <button class="icon-btn walkthrough-close" title="Hide this walkthrough" aria-label="Hide Add a service walkthrough" data-act="hide-service-walkthrough">${ICONS.x}</button>
     </div>
@@ -350,7 +341,7 @@ function globalSectionsHTML() {
       : (state.agentSetupInstructions || 'Loading…');
     out += `<div class="agent-onboarding walkthrough-card">
       <div class="walkthrough-head">
-        <div class="onboarding-copy"><b>${walkthroughStepHTML(2, state.agents.length > 0)}Connect an agent</b>
+        <div class="onboarding-copy"><b>Connect an agent</b>
           <span>Copy a short setup message into your coding agent. After you paste it, your agent will ask to connect. Approve it in the window that pops up.</span></div>
         <button class="icon-btn walkthrough-close" title="Hide this walkthrough" aria-label="Hide Connect an agent walkthrough" data-act="hide-agent-walkthrough">${ICONS.x}</button>
       </div>
@@ -375,12 +366,6 @@ function globalSectionsHTML() {
             </div>`
           : `<pre class="setup-instructions"><code>${esc(instructionBody)}</code></pre>`
         : ''}</div>`;
-  }
-  // Only while both walkthroughs are showing and neither step is done: the
-  // numbering could otherwise read as a required sequence.
-  if (state.tab === 'connections' && state.settings.show_service_walkthrough &&
-      state.settings.show_agent_walkthrough && !state.connections.length && !state.agents.length) {
-    out += '<div class="walkthrough-order-note">Steps work in either order.</div>';
   }
   if (state.agents.length) {
     out += '<div class="live-head">Connected agents</div>' + state.agents.map((a) => {

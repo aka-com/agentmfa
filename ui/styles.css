@@ -269,17 +269,6 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .walkthrough-close svg { width: 12px; height: 12px; }
 .onboarding-copy b, .onboarding-copy span { display: block; }
 .onboarding-copy b { font-size: 14px; }
-/* onboarding step pill: numbered while pending, green check once done */
-.walkthrough-step {
-  display: inline-flex; align-items: center; gap: 3px;
-  margin-right: 7px; padding: 2px 6px; border-radius: 4px;
-  vertical-align: 1px;
-  font-size: 10.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
-  background: var(--accent-wash); color: var(--accent-ink);
-}
-.walkthrough-step.done { background: var(--ok-wash); color: var(--ok-ink); }
-.walkthrough-step svg { width: 10px; height: 10px; stroke-width: 2.5; }
-.walkthrough-order-note { padding: 0 2px 3px; text-align: center; font-size: 12px; color: var(--muted); }
 .onboarding-copy span { margin: 3px 0 9px; color: var(--muted); font-size: 12.5px; line-height: 1.4; }
 .onboarding-actions { display: flex; align-items: center; gap: 12px; }
 .service-onboarding { display: flex; flex-direction: column; gap: 8px; }
