@@ -21,7 +21,17 @@ if ! docker compose version >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! docker info >/dev/null 2>&1; then
+  echo "sandbox: cannot reach the Docker daemon — start Docker Desktop (or the docker service) and retry" >&2
+  exit 1
+fi
+
 mkdir -p "$state_dir"
+# A `docker compose up` that ran before the key existed leaves empty
+# directories where the key files belong; clear them so keygen can run.
+for path in "$client_key" "$client_key.pub"; do
+  if [[ -d "$path" ]]; then rmdir "$path"; fi
+done
 if [[ ! -f "$client_key" ]]; then
   echo "Generating a dedicated SSH key for the AgentMFA sandbox..."
   ssh-keygen -q -t ed25519 -N "" -C agentmfa-sandbox -f "$client_key"
@@ -29,5 +39,10 @@ elif [[ ! -f "$client_key.pub" ]]; then
   ssh-keygen -y -f "$client_key" >"$client_key.pub"
 fi
 
-docker compose -f "$compose_file" up -d
+if ! docker image inspect agentmfa-sandbox-fixture >/dev/null 2>&1; then
+  echo "First start: building the sandbox fixture image — this compiles a small"
+  echo "Rust service and can take several minutes. Later starts take seconds."
+fi
+
+docker compose -f "$compose_file" up -d --build --remove-orphans
 "$repo_root/scripts/sandbox-status.sh" --wait

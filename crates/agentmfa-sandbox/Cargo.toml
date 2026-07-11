@@ -1,0 +1,12 @@
+[package]
+name = "agentmfa-sandbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Deterministic HTTP and WebSocket upstreams for AgentMFA development"
+publish = false
+
+[dependencies]
+axum = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }

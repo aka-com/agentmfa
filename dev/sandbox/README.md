@@ -1,107 +1,153 @@
-# Developer service sandbox
+# Try AgentMFA against the local sandbox
 
-This Docker Compose stack provides disposable upstream services for manually
-exercising every AgentMFA connection type. AgentMFA itself runs natively so it
-can continue to use the host Keychain, Tauri webview, and Unix socket.
+The sandbox is a disposable Docker Compose stack with one upstream for
+every AgentMFA connection type — an authenticated HTTP API, a WebSocket
+echo, Postgres, and SSH — so you can try the whole app in minutes
+without touching a real service. Every port binds to `127.0.0.1` and
+every credential is a fake, fixed test value that must never be reused
+outside the sandbox. AgentMFA itself runs natively so it keeps using the
+host Keychain, webview, and Unix socket.
 
-The stack contains:
+A copy of this walkthrough formatted for the browser is in
+[`quickstart.html`](quickstart.html).
 
-- go-httpbin for HTTP requests, status codes, redirects, bodies, and delays;
-- an HTTP/WebSocket echo server for bridge and frame tests;
-- Postgres with a fixed, test-only login; and
-- OpenSSH with a generated, sandbox-only client key.
+## 1. What you need
 
-All published ports bind to `127.0.0.1`. The credentials are intentionally
-fake and must never be reused outside this sandbox.
+- Docker with Compose v2, **running** (start Docker Desktop first)
+- Node.js with `npm` (only to run the `npm run sandbox:*` scripts —
+  `bash scripts/sandbox-up.sh` works without it)
+- `curl`, `ssh-keygen`, and `ssh-keyscan` (preinstalled on macOS)
+- AgentMFA: the desktop app, or the headless broker
+  (`cargo run -p agentmfa-cli -- serve`) on any platform
 
-## Start and stop
+## 2. Start the sandbox
 
-Prerequisites are Docker with Compose v2, `curl`, `ssh-keygen`, and
-`ssh-keyscan`.
+From the repository root:
 
 ```sh
 npm run sandbox:up
 ```
 
-The first start creates a dedicated SSH client key under the ignored
-`dev/sandbox/state/` directory. Once all services answer, the command prints
-the exact values to enter in AgentMFA, including the current SSH host-key
-fingerprint.
+The first start compiles the HTTP/WebSocket fixture inside Docker and
+can take several minutes; later starts take seconds. The command
+generates a sandbox-only SSH key under the ignored `dev/sandbox/state/`
+directory, waits until all four services answer, and prints the exact
+values to enter in AgentMFA — including a paste-ready “Quick setup”
+line per service and the current SSH host-key fingerprint.
 
-Inspect the current containers and print the connection values again:
+Print the containers and connection values again at any time:
 
 ```sh
 npm run sandbox:status
 ```
 
-Stop and remove the containers:
+## 3. Add the services in AgentMFA
 
-```sh
-npm run sandbox:down
-```
+In AgentMFA, open **Services** → **Add a service for your agent**, pick
+the service type, paste that service's **Quick setup** line from the
+`sandbox:up` output, and press **Continue**. The form pre-fills; the
+printed output lists the few remaining fields under the same names the
+form uses. With the default ports:
 
-Normal shutdown preserves the generated client key in `dev/sandbox/state/`
-and the SSH server host keys in a Docker volume. To reset the server host key,
-run `docker compose -f dev/sandbox/compose.yaml down --volumes`; to reset the
-client key as well, remove `dev/sandbox/state/` before the next start. Either
-reset changes the SSH identity, so update the service in AgentMFA afterward.
+| Service | Quick setup line | Then |
+| --- | --- | --- |
+| HTTP API | `http://127.0.0.1:18080` | Name `sandbox-http`, authentication **Bearer token**, credential value `agentmfa-test-token` |
+| WebSocket | `ws://127.0.0.1:18081/ws` | Name `sandbox-websocket`, authentication **Bearer token**, credential value `agentmfa-ws-test-token` |
+| Postgres | `postgres://agentmfa:agentmfa-test-password@127.0.0.1:15432/agentmfa_sandbox?sslmode=disable` | Name `sandbox-postgres`; host, database, TLS mode **Disable**, and password all pre-fill |
+| SSH | `ssh -i <printed key path> -p 12222 sandbox@127.0.0.1` | Name `sandbox-ssh`; AgentMFA reads the key file itself — never paste key contents |
 
-## Suggested smoke checks
+The SSH **Host key fingerprint** field is optional: paste the printed
+`SHA256:…` value, or leave it blank and AgentMFA will show the observed
+key for confirmation at the first agent connection and pin it then.
 
-### HTTP API
+Press **Test** on each saved service and expect:
 
-Create an HTTP API service using the printed origin, fake secret, and Bearer
-template. The built-in service test calls the origin root. Agent-driven checks
-can exercise behavior such as:
+- **sandbox-http** — an authenticated `HTTP 200 OK` from the API root.
+- **sandbox-websocket** — `WebSocket handshake succeeded`.
+- **sandbox-postgres** — `Signed in to agentmfa_sandbox as agentmfa`.
+- **sandbox-ssh** — `Key loaded; 127.0.0.1:12222 answered with
+  SSH-2.0-…`. This test checks key parsing and reachability only; a
+  real agent connection is what exercises login, host-bound signing,
+  and host-key pinning.
+
+## 4. Let an agent use the services
+
+Pair an agent (the **Connect an agent** walkthrough shows the exact
+command), then ask it to use the services in plain language, e.g.:
+
+- “Using my AgentMFA service `sandbox-http`, make a GET request to
+  `/authenticated` and summarize the response.”
+- “Using my AgentMFA service `sandbox-postgres`, run
+  `SELECT current_user, current_database();`.”
+- “Using my AgentMFA service `sandbox-ssh`, run `uname -a`.”
+- “Using my AgentMFA service `sandbox-websocket`, connect and echo a
+  message.”
+
+Approve the prompts AgentMFA raises. GET/HEAD requests fit a read-scoped
+access session; POST, Postgres, SSH, and WebSocket opens require full
+access. The fixture serves deterministic routes for deeper checks:
 
 ```text
-GET /status/200
-GET /status/401
-GET /redirect/2
-GET /delay/2
-POST /anything
+GET  /authenticated            {"authenticated":true} with the token; 401 without
+GET  /status/{200..599}        the selected status code
+GET  /delay/{seconds}          response delayed up to 20 seconds
+GET  /redirect/same-origin     302 → /authenticated; AgentMFA follows it and
+                               re-injects the credential (expect a final 200)
+GET  /redirect/cross-origin    302 to the fixture's other published port;
+                               AgentMFA returns the raw 302 rather than follow
+                               it (the target answers 418 if ever reached)
+GET  /binary                   5 non-UTF-8 bytes (body_encoding "base64")
+GET  /large/{bytes}            generated body up to 12 MiB; /large/12582912
+                               exceeds the broker's 10 MB cap → 502
+                               response_too_large
+POST /echo                     reflects the request body and content type
 ```
 
-Only use the documented fake token. Echo endpoints can reflect request data.
+The fixture checks the documented fake tokens but never returns or logs
+them. Afterwards, check the **Activity** tab: every call appears under
+the right agent and service, and no secret value is ever shown.
 
-### WebSocket
+## 5. Stop or reset
 
-Create a WebSocket service using the printed URL and fake Bearer token. The
-server accepts the header without validating it. Open the service through
-AgentMFA, connect a normal WebSocket client to the returned loopback URL, and
-verify that text and binary messages are echoed unchanged.
-
-### Postgres
-
-Create a Postgres service from the printed values. The local container does
-not use TLS, so select `disable` for SSL mode. After the built-in connection
-test succeeds, open it through AgentMFA and run:
-
-```sql
-SELECT current_user, current_database(), version();
+```sh
+npm run sandbox:down          # stop; keeps both generated SSH identities
+npm run sandbox:reset         # delete containers, volumes, and SSH identities
+npm run sandbox:reset -- --yes   # same, without the confirmation prompt
 ```
 
-### SSH
-
-Create an SSH service from the printed values and import the generated private
-key. After the reachability test succeeds, open it through AgentMFA and run a
-harmless command such as `whoami` or `uname -a` with the returned
-`SSH_AUTH_SOCK`.
-
-The built-in SSH test checks key parsing and the server banner only. A real
-agent-mediated login is needed to exercise host-bound signing and host-key
-pinning.
+After a reset the SSH host key and fingerprint change: run
+`npm run sandbox:up` and update (or re-create) `sandbox-ssh` before
+connecting again.
 
 ## Troubleshooting
 
-If a published port is already occupied, change it in `compose.yaml` and keep
-the printed connection information in `scripts/sandbox-status.sh` in sync.
+- **“cannot reach the Docker daemon”** — start Docker Desktop (or the
+  `docker` service) and rerun `npm run sandbox:up`.
+- **A port is already in use** — export any of `SANDBOX_HTTP_PORT`,
+  `SANDBOX_WS_PORT`, `SANDBOX_PG_PORT`, `SANDBOX_SSH_PORT` before
+  `sandbox:up`; `sandbox:status` reads the same variables, so export
+  them for the whole shell session. Defaults: 18080, 18081, 15432,
+  12222.
+- **The fixture build fails downloading crates** (for example
+  “self-signed certificate in certificate chain”) — a TLS-intercepting
+  proxy is rewriting the build's connection to crates.io. Build once on
+  a network without interception, or extend
+  `dev/sandbox/fixture/Dockerfile` to install your proxy's CA
+  certificate before `cargo build`.
+- **Container logs**:
 
-Container logs are available with:
+  ```sh
+  docker compose -f dev/sandbox/compose.yaml logs
+  ```
 
-```sh
-docker compose -f dev/sandbox/compose.yaml logs
-```
+## Notes for maintainers
 
-Do not mount the repository, home directory, or real credentials into these
-containers.
+The builder, runtime, Postgres, and OpenSSH images are pinned to
+multi-platform manifest digests for reproducibility across Apple
+Silicon and amd64 hosts; update each tag and digest together after
+reviewing a new upstream release. The full two-layer test plan
+(container checks, then the same surfaces through AgentMFA) is in
+[`TESTPLAN.md`](TESTPLAN.md).
+
+Do not mount the repository, home directory, or real credentials into
+these containers.

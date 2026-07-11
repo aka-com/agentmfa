@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/agentmfa-core", "crates/agentmfa-cli"]
+members = ["crates/agentmfa-core", "crates/agentmfa-cli", "crates/agentmfa-sandbox"]
 # src-tauri is deliberately NOT a workspace member: it only builds where the
 # platform webview toolchain exists (macOS; Linux needs webkit2gtk). The core
 # and CLI crates build and test everywhere.

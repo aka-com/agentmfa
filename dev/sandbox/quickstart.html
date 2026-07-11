@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentMFA sandbox quickstart</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1a1d21; --muted: #5c6470;
+    --card: #f5f6f8; --border: #d9dde3; --accent: #2456c4;
+    --code-bg: #eef0f3; --ok: #1a7f42;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a; --fg: #e8eaed; --muted: #9aa3ad;
+      --card: #1d2026; --border: #333941; --accent: #7aa2ff;
+      --code-bg: #23262c; --ok: #52c47e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+      Helvetica, Arial, sans-serif;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 40px 20px 80px; }
+  h1 { font-size: 1.7rem; margin: 0 0 4px; }
+  .subtitle { color: var(--muted); margin: 0 0 32px; }
+  h2 { font-size: 1.15rem; margin: 40px 0 10px; padding-top: 8px; }
+  h2 .step {
+    display: inline-block; width: 1.6em; height: 1.6em; line-height: 1.6em;
+    text-align: center; border-radius: 50%; background: var(--accent);
+    color: var(--bg); font-size: 0.85em; margin-right: 8px;
+  }
+  p, li { max-width: 68ch; }
+  code, pre {
+    font: 0.86em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: var(--code-bg); border-radius: 5px;
+  }
+  code { padding: 1px 5px; }
+  pre { padding: 12px 14px; overflow-x: auto; }
+  pre code { padding: 0; background: none; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; padding: 14px 18px; margin: 14px 0;
+  }
+  .ok { color: var(--ok); font-weight: 600; }
+  .muted { color: var(--muted); }
+  .wide { overflow-x: auto; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>AgentMFA sandbox quickstart</h1>
+  <p class="subtitle">Try every AgentMFA connection type against disposable
+  local containers — no real credentials involved.</p>
+
+  <p>The sandbox starts four upstreams on <code>127.0.0.1</code>: an
+  authenticated HTTP API, a WebSocket echo, Postgres, and SSH. All
+  credentials are fixed, fake test values; never reuse them anywhere
+  else. AgentMFA itself runs natively on your machine.</p>
+
+  <h2><span class="step">1</span>Check what you need</h2>
+  <ul>
+    <li>Docker with Compose v2 — <b>running</b> (start Docker Desktop first)</li>
+    <li>Node.js with <code>npm</code></li>
+    <li>The AgentMFA app (or the headless broker, <code>cargo run -p agentmfa-cli -- serve</code>)</li>
+  </ul>
+
+  <h2><span class="step">2</span>Start the sandbox</h2>
+  <pre><code>git clone https://github.com/aka-com/agentmfa.git
+cd agentmfa
+npm run sandbox:up</code></pre>
+  <p>The first start compiles the test fixture inside Docker and can take
+  several minutes; later starts take seconds. When everything is ready it
+  prints <span class="ok">ready</span> for HTTP, WebSocket, Postgres, and
+  SSH, followed by the exact values to enter in AgentMFA. Re-print them
+  any time with <code>npm run sandbox:status</code>.</p>
+
+  <h2><span class="step">3</span>Add the four services in AgentMFA</h2>
+  <p>In AgentMFA, open <b>Services</b> → <b>Add a service for your
+  agent</b>. Pick the service type, paste that service's <b>Quick
+  setup</b> line, and press <b>Continue</b> — the form pre-fills. The
+  <code>sandbox:status</code> output lists the few remaining fields under
+  the same names the form shows. With the default ports:</p>
+  <div class="wide">
+  <table>
+    <tr><th>Type</th><th>Paste this Quick setup line</th><th>Then</th></tr>
+    <tr>
+      <td>HTTP&nbsp;API</td>
+      <td><code>http://127.0.0.1:18080</code></td>
+      <td>Name <code>sandbox-http</code> · Bearer token
+          <code>agentmfa-test-token</code></td>
+    </tr>
+    <tr>
+      <td>WebSocket</td>
+      <td><code>ws://127.0.0.1:18081/ws</code></td>
+      <td>Name <code>sandbox-websocket</code> · Bearer token
+          <code>agentmfa-ws-test-token</code></td>
+    </tr>
+    <tr>
+      <td>Postgres</td>
+      <td><code>postgres://agentmfa:agentmfa-test-password@127.0.0.1:15432/agentmfa_sandbox?sslmode=disable</code></td>
+      <td>Name <code>sandbox-postgres</code>; everything else pre-fills
+          (TLS mode <b>Disable</b>)</td>
+    </tr>
+    <tr>
+      <td>SSH</td>
+      <td><code>ssh -i &lt;printed key path&gt; -p 12222 sandbox@127.0.0.1</code>
+          <div class="muted">copy the exact line from
+          <code>sandbox:status</code> — it carries the generated key's
+          absolute path</div></td>
+      <td>Name <code>sandbox-ssh</code>; AgentMFA reads the key file
+          itself. Host key fingerprint is optional — leave it blank to
+          confirm and pin on first connection.</td>
+    </tr>
+  </table>
+  </div>
+  <p>Press <b>Test</b> on each saved service and expect:</p>
+  <div class="card">
+    <b>sandbox-http</b> — an authenticated HTTP 200<br>
+    <b>sandbox-websocket</b> — <code>WebSocket handshake succeeded</code><br>
+    <b>sandbox-postgres</b> — <code>Signed in to agentmfa_sandbox as agentmfa</code><br>
+    <b>sandbox-ssh</b> — <code>Key loaded; 127.0.0.1:12222 answered with SSH-2.0-…</code>
+    <span class="muted">(reachability only; a real agent connection tests login)</span>
+  </div>
+
+  <h2><span class="step">4</span>Let your agent use them</h2>
+  <p>Pair an agent using the <b>Connect an agent</b> walkthrough, then ask
+  it in plain language, for example:</p>
+  <ul>
+    <li>“Using my AgentMFA service <code>sandbox-http</code>, make a GET
+        request to <code>/authenticated</code> and summarize the response.”</li>
+    <li>“Using my AgentMFA service <code>sandbox-postgres</code>, run
+        <code>SELECT current_user, current_database();</code>”</li>
+    <li>“Using my AgentMFA service <code>sandbox-ssh</code>, run
+        <code>uname -a</code> on the server.”</li>
+    <li>“Using my AgentMFA service <code>sandbox-websocket</code>, connect
+        and echo a message.”</li>
+  </ul>
+  <p>Approve the prompts AgentMFA raises — reads (GET/HEAD) can get a
+  read-scoped session, while POST, Postgres, SSH, and WebSocket opens
+  need full access. The agent never sees the tokens, password, or key:
+  check the <b>Activity</b> tab afterwards to watch every brokered call,
+  with no secret values anywhere.</p>
+  <p class="muted">The API fixture also serves deterministic routes for
+  deeper checks (redirects, binary and oversized bodies, arbitrary status
+  codes) — see <code>dev/sandbox/README.md</code>.</p>
+
+  <h2><span class="step">5</span>Stop or reset</h2>
+  <pre><code>npm run sandbox:down    # stop; keeps the generated SSH identities
+npm run sandbox:reset   # delete containers, volumes, and SSH identities</code></pre>
+  <p>After a reset the SSH fingerprint changes — run
+  <code>npm run sandbox:up</code> again and update
+  <code>sandbox-ssh</code> before reconnecting.</p>
+
+  <h2>If something goes wrong</h2>
+  <ul>
+    <li><b>“cannot reach the Docker daemon”</b> — start Docker Desktop and
+        rerun <code>npm run sandbox:up</code>.</li>
+    <li><b>Port already in use</b> — export
+        <code>SANDBOX_HTTP_PORT</code>, <code>SANDBOX_WS_PORT</code>,
+        <code>SANDBOX_PG_PORT</code>, or <code>SANDBOX_SSH_PORT</code>
+        with a free port, then rerun. Keep the variables exported so
+        <code>sandbox:status</code> prints matching values.</li>
+    <li><b>Anything else</b> —
+        <code>docker compose -f dev/sandbox/compose.yaml logs</code>, and
+        the troubleshooting section of
+        <code>dev/sandbox/README.md</code>.</li>
+  </ul>
+</main>
+</body>
+</html>

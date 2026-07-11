@@ -1,0 +1,13 @@
+.git
+.claude
+.codex
+.qmux
+.DS_Store
+.env
+.env.*
+.npmrc
+dev/sandbox/state
+dist
+node_modules
+src-tauri/target
+target

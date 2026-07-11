@@ -1,32 +1,39 @@
 name: agentmfa-sandbox
 
 services:
-  http:
-    image: ghcr.io/mccutchen/go-httpbin:v2.23.1
+  fixture:
+    image: agentmfa-sandbox-fixture
+    build:
+      context: ../..
+      dockerfile: dev/sandbox/fixture/Dockerfile
+    environment:
+      SANDBOX_HTTP_TOKEN: agentmfa-test-token
+      SANDBOX_WEBSOCKET_TOKEN: agentmfa-ws-test-token
+      SANDBOX_CROSS_ORIGIN_URL: http://127.0.0.1:${SANDBOX_WS_PORT:-18081}/credential-sink
     ports:
-      - "127.0.0.1:18080:8080"
-
-  websocket:
-    image: jmalloc/echo-server
-    ports:
-      - "127.0.0.1:18081:8080"
+      # Override any occupied port with SANDBOX_*_PORT environment variables;
+      # scripts/sandbox-status.sh reads the same variables and defaults.
+      - "127.0.0.1:${SANDBOX_HTTP_PORT:-18080}:8080"
+      - "127.0.0.1:${SANDBOX_WS_PORT:-18081}:8080"
 
   postgres:
-    image: postgres:18
+    image: postgres:18@sha256:22c89fe0d0f507606260237fd55e51f6137f58b2d5bcf6152242b96d9fe8f9a4
     environment:
       POSTGRES_USER: agentmfa
       POSTGRES_PASSWORD: agentmfa-test-password
       POSTGRES_DB: agentmfa_sandbox
     ports:
-      - "127.0.0.1:15432:5432"
+      - "127.0.0.1:${SANDBOX_PG_PORT:-15432}:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U agentmfa -d agentmfa_sandbox"]
+      # Probe over TCP: first-boot initdb runs a temporary server that only
+      # answers on the Unix socket, so a socket probe reports ready too early.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U agentmfa -d agentmfa_sandbox"]
       interval: 2s
       timeout: 2s
       retries: 20
 
   ssh:
-    image: lscr.io/linuxserver/openssh-server:latest
+    image: lscr.io/linuxserver/openssh-server:latest@sha256:deec9e402eb9a656de1749c3ea93e99478a565cf187ecfb051f8446d93b12483
     environment:
       PUID: "1000"
       PGID: "1000"
@@ -36,10 +43,20 @@ services:
       PASSWORD_ACCESS: "false"
       SUDO_ACCESS: "false"
     volumes:
-      - ./state/ssh/client_key.pub:/keys/client_key.pub:ro
-      - ssh_config:/config
+      # create_host_path: false makes a direct `docker compose up` fail with a
+      # clear error instead of silently creating a directory where the key
+      # belongs; `npm run sandbox:up` generates the key before composing.
+      - type: bind
+        source: ./state/ssh/client_key.pub
+        target: /keys/client_key.pub
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: volume
+        source: ssh_config
+        target: /config
     ports:
-      - "127.0.0.1:12222:2222"
+      - "127.0.0.1:${SANDBOX_SSH_PORT:-12222}:2222"
 
 volumes:
   ssh_config:
