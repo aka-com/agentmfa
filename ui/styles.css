@@ -241,7 +241,8 @@ code, .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Conso
 .onboarding-actions { display: flex; align-items: center; gap: 12px; }
 .service-onboarding { display: flex; flex-direction: column; gap: 8px; }
 .service-onboarding .onboarding-copy span { margin-bottom: 0; }
-.quick-types { display: flex; flex-wrap: wrap; gap: 5px; }
+.quick-type-row { display: flex; align-items: center; gap: 10px; }
+.quick-types { display: flex; flex: 1; flex-wrap: wrap; gap: 5px; }
 .quick-type {
   border: 1px solid var(--line-strong); background: var(--btn-bg); color: var(--ink-2);
   border-radius: 7px; padding: 4px 8px; font-size: 12px; cursor: pointer;
@@ -257,7 +258,7 @@ code, .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Conso
 .quick-import-row input:focus { outline: 2px solid rgba(10,124,255,.45); border-color: var(--accent); }
 .quick-import-row .btn { flex: 0 0 auto; min-height: 32px; }
 .quick-setup-error { margin-top: -3px; }
-.quick-manual { align-self: flex-start; }
+.quick-manual { flex: 0 0 auto; margin-left: auto; white-space: nowrap; }
 .setup-toggle {
   display: inline-flex; align-items: center; gap: 4px;
   padding: 3px 1px; border: 0; background: transparent;

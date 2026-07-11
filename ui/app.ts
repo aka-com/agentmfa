@@ -284,13 +284,15 @@ function firstConnectionSetupHTML(): string {
   return `<div class="agent-onboarding service-onboarding">
     <div class="onboarding-copy"><b>Add a service for your agent</b>
       <span>Save a database, server, or API with its credential. AgentMFA brokers access without giving the credential to your agent.</span></div>
-    <div class="quick-types" aria-label="Service type">${types}</div>
+    <div class="quick-type-row">
+      <div class="quick-types" aria-label="Service type">${types}</div>
+      <button class="setup-toggle quick-manual" data-act="quick-setup-manual">Configure manually</button>
+    </div>
     <div class="quick-import-row">
       <input id="quick-setup-source" aria-label="Service to import" placeholder="${escAttr(quickSetupPlaceholder(type))}" value="${escAttr(state.quickSetupSource)}">
       <button class="btn primary sm" data-act="quick-setup-review">Configure</button>
     </div>
     ${state.quickSetupError ? `<div class="field-error quick-setup-error">${esc(state.quickSetupError)}</div>` : ''}
-    <button class="setup-toggle quick-manual" data-act="quick-setup-manual">Configure ${QUICK_SETUP_TYPES.find(([value]) => value === type)?.[1]} manually</button>
   </div>`;
 }
 
@@ -445,7 +447,9 @@ const connActionsHTML = (c: ConnectionSummary): string =>
 // connection = one object with everything about it inside its border.
 function connectionsHTML() {
   if (!state.connections.length) {
-    return '';
+    return `<div class="empty"><div class="empty-ico">🔌</div><h3>No services</h3>
+      <p>Add APIs, databases, SSH servers, and WebSockets for your agents to use.</p>
+      <button class="btn primary" data-act="open-add-conn">＋ Add service</button></div>`;
   }
   const ready = state.connectionReady;
   const readyPrompt = ready ? firstTaskPrompt(ready.name, ready.type) : '';
