@@ -249,6 +249,10 @@ function pendingBannerHTML() {
     <button class="btn sm" data-act="open-approval">Review</button></div>`;
 }
 
+function setupCurlCommand(instructions: string): string {
+  return instructions.split(/\r?\n/).find((line) => line.trimStart().startsWith('curl '))?.trim() || 'Loading…';
+}
+
 function globalSectionsHTML() {
   let out = '';
   if (!state.agents.length) {
@@ -270,7 +274,16 @@ function globalSectionsHTML() {
             : ''}
         </div>
         ${state.setupInstructionsOpen
-          ? `<pre class="setup-instructions ${state.showFullInstructions ? 'is-full' : ''}"><code>${esc(instructionBody)}</code></pre>`
+          ? state.showFullInstructions
+            ? `<div class="setup-instructions is-full">
+                <div class="full-instructions-banner">
+                  <p>These are the instructions that the agent will see.</p>
+                  <p>To set up your agent, tell the agent to read these instructions from:</p>
+                  <code>${esc(setupCurlCommand(state.agentSetupInstructions))}</code>
+                </div>
+                <pre class="full-instructions-code"><code>${esc(instructionBody)}</code></pre>
+              </div>`
+            : `<pre class="setup-instructions"><code>${esc(instructionBody)}</code></pre>`
           : ''}</div>`;
     }
   } else {
