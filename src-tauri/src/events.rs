@@ -22,6 +22,7 @@ pub const EVT_QUEUE: &str = "amfa://queue-changed";
 pub const EVT_SESSIONS: &str = "amfa://sessions-changed";
 pub const EVT_AGENTS: &str = "amfa://agents-changed";
 pub const EVT_RULES: &str = "amfa://rules-changed";
+pub const EVT_CONNECTIONS: &str = "amfa://connections-changed";
 pub const EVT_ACTIVITY: &str = "amfa://activity-appended";
 pub const EVT_ACTIVITY_CHANGED: &str = "amfa://activity-changed";
 
@@ -106,6 +107,9 @@ impl TauriEvents {
                     request.agent
                 )
             }
+            ApprovalKind::Ssh if request.ssh.is_some() => {
+                format!("First connection for {connection}: verify the server's host key")
+            }
             ApprovalKind::Ssh => format!("{} wants to sign in through {connection}", request.agent),
             ApprovalKind::Pg | ApprovalKind::Ws => {
                 format!("{} wants to connect to {connection}", request.agent)
@@ -149,6 +153,10 @@ impl BrokerEvents for TauriEvents {
 
     fn rules_changed(&self) {
         let _ = self.app.emit(EVT_RULES, ());
+    }
+
+    fn connections_changed(&self) {
+        let _ = self.app.emit(EVT_CONNECTIONS, ());
     }
 
     fn audit_appended(&self, entry: &AuditEntry) {

@@ -29,6 +29,11 @@ pub trait BrokerEvents: Send + Sync {
     /// Standing rules changed.
     fn rules_changed(&self) {}
 
+    /// A connection's persisted configuration changed core-side (today: a
+    /// trust-on-first-use host-key pin). UI-originated edits refresh through
+    /// their command result instead.
+    fn connections_changed(&self) {}
+
     /// A new audit entry was appended (drives the activity view).
     fn audit_appended(&self, _entry: &AuditEntry) {}
 

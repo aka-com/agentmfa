@@ -64,8 +64,9 @@ export type ConnectionImport =
       host: string;
       port: number;
       user: string;
+      // Always empty on import: the host key is confirmed with the user and
+      // pinned at the first agent connection (trust on first use).
       hostKeyFingerprint: string;
-      hostKeyCandidates?: HostKeyCandidate[];
       identityFiles?: string[];
       identityFile?: string;
       sshImportId?: string;
@@ -180,8 +181,8 @@ function parseSshCommand(text: string): ConnectionImport {
   if (!host || host.includes(':') || host.includes('/')) {
     throw new Error('SSH destination must be a hostname or user@hostname');
   }
-  const warnings = ['Confirm the server host-key fingerprint before saving.'];
-  if (!user) warnings.unshift('SSH user was not present; enter it below.');
+  const warnings = [];
+  if (!user) warnings.push('SSH user was not present; enter it below.');
   if (identityFile) warnings.push(`Identity file ${identityFile} is not read automatically; choose or save its private key below.`);
   return {
     type: 'ssh', name: suggestedName(host, 'ssh'), credential: null, warnings,
@@ -196,7 +197,6 @@ export function shouldResolveSshImport(value: unknown): boolean {
 }
 
 export function sshImportFromPreview(preview: SshImportPreview): ConnectionImport {
-  const candidates = preview.hostKeyCandidates || [];
   const identityFiles = preview.identityFiles || [];
   const destinationHost = String(preview.destination || preview.host || '').split('@').pop();
   return {
@@ -209,8 +209,9 @@ export function sshImportFromPreview(preview: SshImportPreview): ConnectionImpor
       host: preview.host,
       port: preview.port,
       user: preview.user,
-      hostKeyFingerprint: candidates.length === 1 ? candidates[0].fingerprint : '',
-      hostKeyCandidates: candidates,
+      // Never prefilled from known_hosts: the key is confirmed with the
+      // user at the first agent connection instead.
+      hostKeyFingerprint: '',
       identityFiles,
       identityFile: identityFiles.length === 1 ? identityFiles[0] : '',
       sshImportId: preview.importId,
@@ -281,10 +282,7 @@ export function parseConnectionImport(value: unknown): ConnectionImport {
     if (!host) throw new Error('SSH URL is missing a host');
     return {
       type: 'ssh', name: suggestedName(host, 'ssh'), credential: null,
-      warnings: [
-        ...(user ? [] : ['SSH user was not present; enter it below.']),
-        'Confirm the server host-key fingerprint before saving.',
-      ],
+      warnings: user ? [] : ['SSH user was not present; enter it below.'],
       fields: { host, port: parsed.port ? Number(parsed.port) : 22, user, hostKeyFingerprint: '' },
     };
   }

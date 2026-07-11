@@ -155,6 +155,8 @@ struct ConnAdd {
     #[arg(long)]
     user: Option<String>,
     /// ssh: pinned server host key fingerprint (SHA256:... or SHA512:...).
+    /// Omit it to trust on first use: the key is confirmed with the user and
+    /// pinned at the first agent connection.
     #[arg(long)]
     host_key_fingerprint: Option<String>,
     /// pg/ws/ssh: name of the one bound secret (api connections derive
@@ -475,7 +477,9 @@ fn conn_config(args: &ConnAdd) -> Result<ConnectionConfig, String> {
                 host: require("host", &args.host)?,
                 port: args.port.unwrap_or(22),
                 user: require("user", &args.user)?,
-                host_key_fingerprint: require("host-key-fingerprint", &args.host_key_fingerprint)?,
+                // Empty = unpinned; the broker pins the observed key at the
+                // first agent connection after a trust prompt.
+                host_key_fingerprint: args.host_key_fingerprint.clone().unwrap_or_default(),
             })
         }
     }
@@ -776,6 +780,17 @@ fn prompt_decision(req: &ApprovalRequest, access_grant_ttl: Duration) -> UiDecis
             }
         }
     }
+    if let Some(ssh) = &req.ssh {
+        eprintln!(
+            "  ⚠ first connection to {}:{} — trust this host key?",
+            ssh.host, ssh.port
+        );
+        eprintln!("      {} ({})", ssh.observed_fingerprint, ssh.algorithm);
+        eprintln!("      verify it out-of-band (e.g. `ssh-keygen -lf` on the server)");
+    }
+    // Pairing and host-key trust are yes/no decisions: no session or
+    // standing-rule shapes (the broker coerces them to allow-once anyway).
+    let binary_prompt = req.kind == ApprovalKind::Pair || req.ssh.is_some();
     loop {
         eprint!("  decide [a/o/f/d]: ");
         let _ = std::io::stderr().flush();
@@ -784,13 +799,16 @@ fn prompt_decision(req: &ApprovalRequest, access_grant_ttl: Duration) -> UiDecis
             return UiDecision::Deny; // EOF → safe default
         }
         match line.trim() {
-            "a" | "allow" if req.kind == ApprovalKind::Pair => return UiDecision::AllowOnce,
+            "a" | "allow" if binary_prompt => return UiDecision::AllowOnce,
             "a" | "allow" => return UiDecision::AllowSession,
             "o" | "once" => return UiDecision::AllowOnce,
-            "f" | "forever" if req.kind != ApprovalKind::Pair => return UiDecision::AlwaysAllow,
+            "f" | "forever" if !binary_prompt => return UiDecision::AlwaysAllow,
             "d" | "deny" | "" => return UiDecision::Deny,
             _ if req.kind == ApprovalKind::Pair => {
                 eprintln!("  ? enter a (allow pairing) or d (deny)")
+            }
+            _ if req.ssh.is_some() => {
+                eprintln!("  ? enter a (trust this host key) or d (deny)")
             }
             _ => eprintln!(
                 "  ? enter a (allow {}), o (allow once), f (allow forever), or d (deny)",

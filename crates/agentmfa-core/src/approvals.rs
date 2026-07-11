@@ -89,6 +89,13 @@ pub struct ApprovalRequest {
     /// HTTP only: the request-payload view.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub http: Option<HttpPayloadView>,
+    /// SSH host-key trust prompts only: the key observed at the first
+    /// `session-bind`. Set on the dedicated trust-on-first-use prompt, never
+    /// on an ordinary SSH open. Presence is the discriminator: it makes the
+    /// request high-consequence and coerces every allow shape to a one-time
+    /// pin (no standing rules, no access session).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh: Option<SshHostKeyView>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -173,15 +180,30 @@ pub struct HttpPayloadView {
     pub mutating: bool,
 }
 
+/// The SSH host-key trust prompt payload: what the server presented at the
+/// first `session-bind`, shown so the user can verify it out-of-band before
+/// the broker pins it.
+#[derive(Debug, Clone, Serialize)]
+pub struct SshHostKeyView {
+    pub host: String,
+    pub port: u16,
+    /// OpenSSH SHA-256 fingerprint of the observed host key.
+    pub observed_fingerprint: String,
+    /// Key algorithm, e.g. "ssh-ed25519".
+    pub algorithm: String,
+}
+
 impl ApprovalRequest {
     /// Requests whose exact *Allow once* decision completes only behind the
-    /// native OS confirmation: pairing and mutating HTTP requests.
+    /// native OS confirmation: pairing, mutating HTTP requests, and SSH
+    /// host-key trust prompts.
     /// Starting an access session and saving "Always allow…" are gated for
     /// every request kind; the broker enforces those decisions separately.
     pub fn is_high_consequence(&self) -> bool {
         match self.kind {
             ApprovalKind::Pair => true,
             ApprovalKind::Http => self.http.as_ref().is_some_and(|h| h.mutating),
+            ApprovalKind::Ssh => self.ssh.is_some(),
             _ => false,
         }
     }
@@ -1040,6 +1062,7 @@ mod tests {
             replaces_existing_agent: false,
             inherited: vec![],
             http: None,
+            ssh: None,
         }
     }
 

@@ -108,6 +108,15 @@ export interface TemporaryAccess {
   duration_seconds: number;
 }
 
+// SSH host-key trust prompts only: the key the server presented at the
+// first connection, pinned on approval (trust on first use).
+export interface SshHostKeyView {
+  host: string;
+  port: number;
+  observed_fingerprint: string;
+  algorithm: string;
+}
+
 export interface ApprovalRequest {
   id: string;
   agent: string;
@@ -122,6 +131,7 @@ export interface ApprovalRequest {
   replaces_existing_agent: boolean;
   inherited: InheritedConnection[];
   http: HttpPayloadView | null;
+  ssh: SshHostKeyView | null;
   temporary_access: TemporaryAccess | null;
 }
 
@@ -188,6 +198,7 @@ export interface CommandMap {
   get_broker_instructions: CommandSpec<undefined, string>;
   copy_agent_setup: CommandSpec<undefined, void>;
   inspect_ssh_import: CommandSpec<{ source: string }, SshImportPreview>;
+  check_known_hosts: CommandSpec<{ host: string; port: number }, HostKeyCandidate[]>;
   add_secret: CommandSpec<{ name: string; value: string }, void>;
   edit_secret: CommandSpec<{
     id: string;
@@ -257,7 +268,7 @@ declare global {
         ): Promise<Unlisten>;
       };
     };
-    __mockApproval?: (kind?: 'http' | 'post' | 'pair', ttlMs?: number) => void;
+    __mockApproval?: (kind?: 'http' | 'post' | 'pair' | 'ssh', ttlMs?: number) => void;
     tippy?: {
       delegate(
         target: string,

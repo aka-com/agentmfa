@@ -123,7 +123,10 @@ pub enum ConnectionConfig {
         /// an authentication request naming any other user.
         user: String,
         /// OpenSSH SHA-256/SHA-512 fingerprint of the destination host key.
-        /// Empty only on legacy persisted records, which fail closed at open.
+        /// Empty means unpinned: the key is trusted on first use — the broker
+        /// observes it at the first agent `session-bind`, raises a dedicated
+        /// approval prompt, and pins it on approval. Once set, a mismatching
+        /// server key is refused.
         #[serde(default)]
         host_key_fingerprint: String,
     },

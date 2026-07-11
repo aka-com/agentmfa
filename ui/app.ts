@@ -59,7 +59,6 @@ interface ConnectionDraft {
   dbname?: string | null;
   user?: string | null;
   hostKeyFingerprint?: string | null;
-  hostKeyCandidates?: HostKeyCandidate[];
   proxyJump?: string | null;
   sslmode?: string | null;
   pgCaBundlePath?: string | null;
@@ -873,14 +872,10 @@ function connSheet(editing: boolean): string {
       <div class="f-row" style="flex:0 0 90px"><label for="f-user">User</label><input id="f-user" class="${fieldCls('user')}" placeholder="satoshi" value="${escAttr(d.user ?? '')}">${fieldErr('user')}</div>
       <div class="f-row"><label for="f-host">Host</label><input id="f-host" class="${fieldCls('host')}" placeholder="prod.example.com" value="${escAttr(d.host ?? '')}">${fieldErr('host')}</div>
       <div class="f-row" style="flex:0 0 90px"><label for="f-port">Port</label><input id="f-port" class="${fieldCls('port')}" inputmode="numeric" value="${escAttr(d.port ?? '22')}">${fieldErr('port')}</div></div>`;
-    const hostKeys = d.hostKeyCandidates || [];
-    const hostKeyControl = hostKeys.length
-      ? customSelectHTML('f-host-key', hostKeys.map((candidate): [string, string] =>
-          [candidate.fingerprint, `${candidate.algorithm} · ${candidate.fingerprint}`]),
-          d.hostKeyFingerprint, fieldCls('hostKeyFingerprint'))
-      : `<input id="f-host-key" class="${fieldCls('hostKeyFingerprint')}" placeholder="SHA256:…" value="${escAttr(d.hostKeyFingerprint ?? '')}">`;
     fields += d.proxyJump ? `<div class="rule-note">ProxyJump: ${esc(d.proxyJump)}</div>` : '';
-    sshHostKeyField = `<div class="f-row"><label for="f-host-key">Host key fingerprint</label>${hostKeyControl}${fieldErr('hostKeyFingerprint')}</div>`;
+    sshHostKeyField = `<div class="f-row"><label for="f-host-key">Host key fingerprint <span class="label-detail">(optional)</span></label>
+      <input id="f-host-key" class="${fieldCls('hostKeyFingerprint')}" placeholder="SHA256:…" value="${escAttr(d.hostKeyFingerprint ?? '')}">${fieldErr('hostKeyFingerprint')}
+      <div class="rule-note">The server’s identity (host key) is confirmed with you the first time an agent connects.</div></div>`;
   } else if (t === 'pg') {
     const sslmode = d.sslmode || 'verify-full';
     const sslOpts: Array<[string, string]> = [
@@ -996,6 +991,7 @@ function approvalHeading(req: ApprovalRequest): string {
     return `${req.agent} wants to fetch data from ${name}`;
   }
   if (req.kind === 'http') return `${req.agent} wants to make a request through ${name}`;
+  if (req.kind === 'ssh' && req.ssh) return `Trust the host key for ${name}?`;
   if (req.kind === 'ssh') return `${req.agent} wants to sign in through ${name}`;
   return `${req.agent} wants to connect to ${name}`;
 }
@@ -1043,12 +1039,14 @@ function renderApproval() {
   const conn = req.connection;
   const t = conn ? TYPES[conn.type] : null;
   const isPair = req.kind === 'pair';
+  const isHostKey = !!req.ssh;
   if (state.approvalRequestId !== req.id) {
     state.approvalRequestId = req.id;
     state.alwaysOpen = false;
     state.reqDetailOpen = null;
     state.revokeInheritedRules = isPair && !!(req.inherited && req.inherited.length);
   }
+  if (isHostKey) ensureKnownHostsCheck(req);
   const cd = countdownParts(req.deadline);
   const connCell = conn
     ? (t ? `<span class="badge ${t.cls}">${t.label}</span> ` : '') + `<b>${esc(conn.name)}</b>`
@@ -1084,10 +1082,13 @@ function renderApproval() {
   const identityDetails = isPair
     ? `<details class="pair-tech"><summary>Technical identity</summary><code>${esc(pairIdentity.technical)}</code></details>` : '';
 
-  const detail = requestDetailHTML(req);
+  const detail = requestDetailHTML(req) + sshHostKeyDetailHTML(req);
 
+  // Host-key trust prompts are a yes/no decision: no "don't ask again",
+  // no access session (the broker coerces those decisions to a one-time
+  // pin anyway).
   let always: { btn: string; box: string } | null = null;
-  if (!isPair) {
+  if (!isPair && !isHostKey) {
     const box = state.alwaysOpen
       ? `<div class="always-box"><div class="f-row"><label>Use without asking</label>
         <div class="rule-note">${esc(ongoingAccessExplanation(req))} You can require approval again from the Services tab.</div></div>
@@ -1096,7 +1097,7 @@ function renderApproval() {
   }
 
   const temporary = temporaryAccessExplanation(req);
-  const sessionNote = !isPair
+  const sessionNote = !isPair && !isHostKey
     ? `<div class="ap-access-summary"><b>If you allow for ${esc(temporary.duration)}</b><p>${esc(temporary.text)}</p></div>` : '';
 
   // The window is fixed-size and non-resizable, so the variable-height
@@ -1119,9 +1120,11 @@ function renderApproval() {
     </div>
     <div class="ap-buttons">
       <button class="btn deny" data-act="decide-deny" data-id="${req.id}">${isPair ? 'Don’t connect' : 'Deny'}</button>
-      ${isPair ? '' : `<button class="btn ghost sm" data-act="decide-once" data-id="${req.id}">This request only</button>`}
+      ${isPair || isHostKey ? '' : `<button class="btn ghost sm" data-act="decide-once" data-id="${req.id}">This request only</button>`}
       <span class="spacer"></span>
-      <button class="btn primary" data-act="decide-allow" data-id="${req.id}">${isPair ? 'Connect agent' : `Allow for ${esc(temporary.duration)}`}</button></div>
+      ${isHostKey
+        ? `<button class="btn primary" data-act="decide-once" data-id="${req.id}">Trust &amp; allow</button>`
+        : `<button class="btn primary" data-act="decide-allow" data-id="${req.id}">${isPair ? 'Connect agent' : `Allow for ${esc(temporary.duration)}`}</button>`}</div>
     ${state.queue.length > 1 ? `<div class="aw-queue">${state.queue.length - 1} more request${state.queue.length > 2 ? 's' : ''} waiting</div>` : ''}
   </div>`;
   armCountdown();
@@ -1142,6 +1145,49 @@ function requestDetailHTML(req: ApprovalRequest): string {
   return head + `<div class="req-detail">
     <div class="rd-sub">Additional agent headers</div>${hdrs}
     <div class="rd-sub">Body</div>${bodyBlock}</div>`;
+}
+
+/* ---- SSH host-key trust prompts ---- */
+// known_hosts provenance, fetched once per prompt (keyed by request id) so
+// the chip can say whether the observed key matches the user's own records.
+type KnownHostsCheck = HostKeyCandidate[] | 'pending' | 'error';
+const knownHostsChecks: Record<string, KnownHostsCheck> = {};
+
+function ensureKnownHostsCheck(req: ApprovalRequest): void {
+  const ssh = req.ssh;
+  if (!ssh || knownHostsChecks[req.id]) return;
+  knownHostsChecks[req.id] = 'pending';
+  invoke('check_known_hosts', { host: ssh.host, port: ssh.port })
+    .then((candidates) => { knownHostsChecks[req.id] = candidates; })
+    .catch(() => { knownHostsChecks[req.id] = 'error'; })
+    .finally(() => {
+      if (mode === 'approval' && state.queue[0] && state.queue[0].id === req.id) render();
+    });
+}
+
+function knownHostsChipHTML(req: ApprovalRequest): string {
+  const ssh = req.ssh;
+  if (!ssh) return '';
+  const check = knownHostsChecks[req.id];
+  if (!check || check === 'pending') return `<span class="hk-chip">Checking known_hosts…</span>`;
+  if (check === 'error') return `<span class="hk-chip">Couldn’t check known_hosts</span>`;
+  const match = check.find((candidate) => candidate.fingerprint === ssh.observed_fingerprint);
+  if (match) {
+    return `<span class="hk-chip ok" title="${escAttr(match.source)}">${ICONS.check} Matches your known_hosts</span>`;
+  }
+  if (!check.length) return `<span class="hk-chip warn">First sighting — verify out-of-band</span>`;
+  return `<span class="hk-chip danger">${ICONS.circleX} Conflicts with your known_hosts</span>`;
+}
+
+function sshHostKeyDetailHTML(req: ApprovalRequest): string {
+  const ssh = req.ssh;
+  if (!ssh) return '';
+  return `<div class="hk-detail">
+    <div class="rd-sub">Server host key (${esc(ssh.algorithm)})</div>
+    <code class="hk-fingerprint">${esc(ssh.observed_fingerprint)}</code>
+    <div class="hk-provenance">${knownHostsChipHTML(req)}</div>
+    <p class="hk-note">First connection to this server. Trusting this key pins it: later connections must present the same key or are refused.</p>
+  </div>`;
 }
 
 const COUNTDOWN_LOW_S = 30;
@@ -1240,7 +1286,8 @@ function focusImportedConnectionDraft(): void {
   const missing = type === 'pg'
     ? [[d.host, 'f-host'], [d.dbname, 'f-db'], [d.user, 'f-user']]
     : type === 'ssh'
-    ? [[d.host, 'f-host'], [d.user, 'f-user'], [d.hostKeyFingerprint, 'f-host-key']]
+    // The host key fingerprint is optional (trusted at first connection).
+    ? [[d.host, 'f-host'], [d.user, 'f-user']]
     : type === 'api'
     ? [[d.origin, 'f-origin']]
     : [[d.url, 'f-url']];
@@ -1387,9 +1434,8 @@ async function saveConn(): Promise<void> {
     }
     if (t === 'pg' && !(d.dbname || '').trim()) errs.dbname = 'Database is required';
     if (!(d.user || '').trim()) errs.user = 'User is required';
-    if (t === 'ssh' && !(d.hostKeyFingerprint || '').trim()) {
-      errs.hostKeyFingerprint = 'Host key fingerprint is required';
-    }
+    // The SSH host key fingerprint is optional: empty saves the service
+    // unpinned, and the key is confirmed at the first agent connection.
   }
   if (t === 'ws') {
     const url = (d.url || '').trim();
@@ -1797,7 +1843,6 @@ document.addEventListener('click', async (e) => {
       if (menuId === 'c-auth-mode') state.draft.authMode = id;
       else if (menuId === 'f-sslmode') state.draft.sslmode = id;
       else if (menuId === 'c-identity-file') state.draft.identityFile = id;
-      else if (menuId === 'f-host-key') state.draft.hostKeyFingerprint = id;
       render(false);
       focusField(menuId);
       break;
@@ -2070,6 +2115,11 @@ async function boot() {
   });
   await listen('amfa://rules-changed', () => {
     if (mode !== 'approval') refreshAccessViews();
+  });
+  // A core-side connection change (a trust-on-first-use host-key pin) has no
+  // originating UI command to refresh after; reload the services list.
+  await listen('amfa://connections-changed', () => {
+    if (mode !== 'approval') refresh('connections');
   });
   await listen('amfa://activity-appended', (ev) => receiveActivity(ev.payload));
   await listen('amfa://activity-changed', () => refresh('activity'));

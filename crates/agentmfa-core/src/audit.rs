@@ -112,6 +112,9 @@ pub enum AuditKind {
     SessionClosed,
     /// One SSH signature issued (or refused) by the agent adapter.
     SshSigned,
+    /// An SSH host key pinned trust-on-first-use at the first agent
+    /// session-bind (outcome `pinned`), or that trust denied (`denied`).
+    SshHostKeyPinned,
     // Vault + config actions from the UI
     SecretAdded,
     SecretUpdated,
@@ -153,6 +156,7 @@ impl AuditKind {
             AuditKind::SessionOpened => "logIn",
             AuditKind::SessionClosed => "logOut",
             AuditKind::SshSigned => "keyRound",
+            AuditKind::SshHostKeyPinned => "lock",
             AuditKind::SecretAdded => "fileKey",
             AuditKind::SecretUpdated => "pencil",
             AuditKind::SecretDeleted => "trash",

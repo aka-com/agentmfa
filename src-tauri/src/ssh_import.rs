@@ -10,9 +10,9 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
 #[cfg(test)]
 use std::process::Stdio;
+use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -242,7 +242,8 @@ fn parse_command(source: &str) -> Result<ParsedCommand, String> {
     }
 
     Ok(ParsedCommand {
-        destination: destination.ok_or_else(|| "SSH command is missing a destination".to_string())?,
+        destination: destination
+            .ok_or_else(|| "SSH command is missing a destination".to_string())?,
         arguments,
         config_file,
     })
@@ -364,7 +365,10 @@ fn scan_config(path: &Path, seen: &mut HashSet<PathBuf>) -> Result<(), String> {
     let metadata = fs::metadata(&canonical)
         .map_err(|error| format!("could not inspect {}: {error}", canonical.display()))?;
     if metadata.len() > MAX_CONFIG_BYTES {
-        return Err(format!("SSH config {} is unexpectedly large", canonical.display()));
+        return Err(format!(
+            "SSH config {} is unexpectedly large",
+            canonical.display()
+        ));
     }
     let text = fs::read_to_string(&canonical)
         .map_err(|error| format!("could not inspect {}: {error}", canonical.display()))?;
@@ -489,10 +493,13 @@ fn resolved_from_output(destination: String, output: &str) -> Result<ResolvedSsh
     match identity_files.len() {
         0 => warnings.push("OpenSSH did not resolve an existing identity file.".into()),
         1 => {}
-        _ => warnings.push("OpenSSH resolved multiple identity files; choose the one to import.".into()),
+        _ => warnings
+            .push("OpenSSH resolved multiple identity files; choose the one to import.".into()),
     }
     if let Some(jump) = &proxy_jump {
-        warnings.push(format!("This destination connects through ProxyJump {jump}."));
+        warnings.push(format!(
+            "This destination connects through ProxyJump {jump}."
+        ));
     }
     Ok(ResolvedSshImport {
         destination,
@@ -508,17 +515,24 @@ fn resolved_from_output(destination: String, output: &str) -> Result<ResolvedSsh
     })
 }
 
-fn resolve_known_hosts(resolved: &mut ResolvedSshImport) -> Result<(), String> {
-    let lookup_host = resolved.host_key_alias.as_deref().unwrap_or(&resolved.host);
-    let lookup = if resolved.port == 22 {
-        lookup_host.to_string()
+struct KnownHostsScan {
+    candidates: Vec<HostKeyCandidate>,
+    saw_revoked: bool,
+    saw_authority: bool,
+}
+
+/// Search the given known_hosts files for `host` (`[host]:port` when
+/// non-default) with `ssh-keygen -F`, which also resolves hashed entries.
+fn scan_known_hosts(host: &str, port: u16, files: &[PathBuf]) -> Result<KnownHostsScan, String> {
+    let lookup = if port == 22 {
+        host.to_string()
     } else {
-        format!("[{lookup_host}]:{}", resolved.port)
+        format!("[{host}]:{port}")
     };
     let mut candidates = Vec::new();
     let mut saw_revoked = false;
     let mut saw_authority = false;
-    for path in &resolved.known_hosts_files {
+    for path in files {
         let mut command = Command::new("/usr/bin/ssh-keygen");
         command
             .arg("-F")
@@ -565,27 +579,46 @@ fn resolve_known_hosts(resolved: &mut ResolvedSshImport) -> Result<(), String> {
     }
     let mut seen = HashSet::new();
     candidates.retain(|candidate| seen.insert(candidate.fingerprint.clone()));
-    if saw_revoked {
+    Ok(KnownHostsScan {
+        candidates,
+        saw_revoked,
+        saw_authority,
+    })
+}
+
+/// known_hosts candidates for a saved connection's `host:port`, from the
+/// OpenSSH default files. Used at approval time so the first-connection
+/// trust prompt can say whether the observed key matches, conflicts with,
+/// or is absent from the user's known_hosts.
+pub fn known_hosts_candidates(host: &str, port: u16) -> Result<Vec<HostKeyCandidate>, String> {
+    let home = home_dir()?;
+    let files: Vec<PathBuf> = [
+        home.join(".ssh/known_hosts"),
+        home.join(".ssh/known_hosts2"),
+        PathBuf::from("/etc/ssh/ssh_known_hosts"),
+        PathBuf::from("/etc/ssh/ssh_known_hosts2"),
+    ]
+    .into_iter()
+    .filter(|path| path.is_file())
+    .collect();
+    Ok(scan_known_hosts(host, port, &files)?.candidates)
+}
+
+fn resolve_known_hosts(resolved: &mut ResolvedSshImport) -> Result<(), String> {
+    let lookup_host = resolved.host_key_alias.as_deref().unwrap_or(&resolved.host);
+    let scan = scan_known_hosts(lookup_host, resolved.port, &resolved.known_hosts_files)?;
+    if scan.saw_revoked {
         resolved
             .warnings
             .push("known_hosts contains a revoked key for this destination.".into());
     }
-    if saw_authority {
+    if scan.saw_authority {
         resolved.warnings.push(
-            "known_hosts trusts this destination through a certificate authority; confirm the concrete host fingerprint manually."
+            "known_hosts trusts this destination through a certificate authority; the concrete host key is confirmed at the first connection."
                 .into(),
         );
     }
-    match candidates.len() {
-        0 => resolved
-            .warnings
-            .push("No concrete host key was found in known_hosts; confirm it manually.".into()),
-        1 => {}
-        _ => resolved
-            .warnings
-            .push("known_hosts contains multiple host keys; choose the expected fingerprint.".into()),
-    }
-    resolved.host_key_candidates = candidates;
+    resolved.host_key_candidates = scan.candidates;
     Ok(())
 }
 
@@ -617,13 +650,12 @@ mod tests {
 
     #[test]
     fn parses_supported_command_options_without_a_shell() {
-        let parsed = parse_command("ssh -p 2222 -i '~/.ssh/deploy key' -J jump deploy@prod")
-            .unwrap();
+        let parsed =
+            parse_command("ssh -p 2222 -i '~/.ssh/deploy key' -J jump deploy@prod").unwrap();
         assert_eq!(parsed.destination, "deploy@prod");
         assert_eq!(
             parsed.arguments,
-            ["-p", "2222", "-i", "~/.ssh/deploy key", "-J", "jump"]
-                .map(OsString::from)
+            ["-p", "2222", "-i", "~/.ssh/deploy key", "-J", "jump"].map(OsString::from)
         );
     }
 
@@ -650,7 +682,11 @@ mod tests {
     fn detects_match_exec_before_running_openssh() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config");
-        fs::write(&path, "Host prod\n  HostName prod.example.com\nMatch exec \\\"touch /tmp/nope\\\"\n").unwrap();
+        fs::write(
+            &path,
+            "Host prod\n  HostName prod.example.com\nMatch exec \\\"touch /tmp/nope\\\"\n",
+        )
+        .unwrap();
         let error = scan_configs_for_exec(&ConfigSelection::File(path)).unwrap_err();
         assert!(error.contains("Match exec"));
     }
@@ -742,11 +778,7 @@ mod tests {
         let identity_path = dir.path().join("deploy");
         let identity =
             PrivateKey::random(&mut ssh_key::rand_core::OsRng, Algorithm::Ed25519).unwrap();
-        fs::write(
-            &identity_path,
-            identity.to_openssh(LineEnding::LF).unwrap(),
-        )
-        .unwrap();
+        fs::write(&identity_path, identity.to_openssh(LineEnding::LF).unwrap()).unwrap();
         fs::set_permissions(&identity_path, fs::Permissions::from_mode(0o600)).unwrap();
         let host_key =
             PrivateKey::random(&mut ssh_key::rand_core::OsRng, Algorithm::Ed25519).unwrap();
@@ -769,11 +801,7 @@ mod tests {
         )
         .unwrap();
         let config = dir.path().join("config");
-        fs::write(
-            &config,
-            format!("Include {}/*\n", includes.display()),
-        )
-        .unwrap();
+        fs::write(&config, format!("Include {}/*\n", includes.display())).unwrap();
 
         let resolved = resolve(&format!("ssh -F {} prod", config.display())).unwrap();
         assert_eq!(resolved.destination, "prod");
@@ -785,7 +813,10 @@ mod tests {
         assert_eq!(resolved.host_key_candidates.len(), 1);
         assert_eq!(
             resolved.host_key_candidates[0].fingerprint,
-            host_key.public_key().fingerprint(HashAlg::Sha256).to_string()
+            host_key
+                .public_key()
+                .fingerprint(HashAlg::Sha256)
+                .to_string()
         );
     }
 }

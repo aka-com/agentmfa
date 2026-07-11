@@ -87,14 +87,24 @@ test('does not suggest connection names for IPv4 or IPv6 targets', () => {
 test('imports common SSH commands but rejects shell operators', () => {
   const ssh = parseConnectionImport('ssh -i ~/.ssh/deploy -p 2222 deploy@prod.example.com');
   if (ssh.type !== 'ssh') assert.fail('expected an SSH import');
+  // The fingerprint stays empty: the host key is confirmed with the user at
+  // the first agent connection, so no warning nags about it either.
   assert.deepEqual(ssh.fields, {
     host: 'prod.example.com', port: 2222, user: 'deploy', hostKeyFingerprint: '',
   });
   assert.match(ssh.warnings.join(' '), /not read automatically/);
+  assert.equal(ssh.warnings.some((warning) => /host-key|fingerprint/i.test(warning)), false);
   assert.throws(() => parseConnectionImport('ssh prod; rm -rf /'), /without shell operators/);
 });
 
-test('maps trusted SSH previews without including private key contents', () => {
+test('SSH URL imports leave the host key to first-connection trust', () => {
+  const ssh = parseConnectionImport('ssh://deploy@prod.example.com:2222');
+  if (ssh.type !== 'ssh') assert.fail('expected an SSH import');
+  assert.equal(ssh.fields.hostKeyFingerprint, '');
+  assert.deepEqual(ssh.warnings, []);
+});
+
+test('maps trusted SSH previews without auto-filling the host key', () => {
   assert.equal(shouldResolveSshImport('ssh prod'), true);
   assert.equal(shouldResolveSshImport('deploy@prod'), true);
   assert.equal(shouldResolveSshImport('https://api.example.com'), false);
@@ -107,7 +117,10 @@ test('maps trusted SSH previews without including private key contents', () => {
   if (imported.type !== 'ssh') assert.fail('expected an SSH import');
   assert.equal(imported.fields.destination, 'prod');
   assert.equal(imported.fields.identityFile, '/Users/me/.ssh/deploy');
-  assert.equal(imported.fields.hostKeyFingerprint, 'SHA256:abc');
+  // known_hosts candidates never prefill the form; the key is trusted (and
+  // shown with provenance) at the first agent connection instead.
+  assert.equal(imported.fields.hostKeyFingerprint, '');
+  assert.equal('hostKeyCandidates' in imported.fields, false);
   assert.equal(JSON.stringify(imported).includes('PRIVATE KEY'), false);
 });
 

@@ -47,6 +47,16 @@ impl IndexState {
     }
 }
 
+/// Outcome of a trust-on-first-use SSH host-key pin attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinOutcome {
+    /// The observed key was pinned by this call.
+    Pinned(ssh_key::Fingerprint),
+    /// The connection already pinned a key; nothing changed. Callers must
+    /// compare it against the observed key and fail closed on a mismatch.
+    AlreadyPinned(ssh_key::Fingerprint),
+}
+
 /// Input for creating or updating a connection.
 #[derive(Debug, Clone)]
 pub struct ConnectionSpec {
@@ -600,6 +610,63 @@ impl Store {
         Ok(renamed)
     }
 
+    /// Pin an SSH connection's host key, trust-on-first-use. Called by the
+    /// SSH agent adapter after the user approves the first-connection trust
+    /// prompt; the human factor is the approval decision itself, so there is
+    /// deliberately no additional `confirm_action` gate here. Unlike
+    /// `update_connection`, pinning does **not** drop the connection's
+    /// standing rules: the fingerprint only moves empty → set, which narrows
+    /// access rather than repointing it. The state lock plus commit make
+    /// concurrent pins linearizable: exactly one caller observes `Pinned`.
+    pub fn pin_ssh_host_key(
+        &self,
+        id: &Uuid,
+        observed: &ssh_key::Fingerprint,
+    ) -> Result<PinOutcome> {
+        let mut state = self.state.lock().unwrap();
+        let existing = state
+            .connections
+            .iter()
+            .find(|c| &c.id == id)
+            .ok_or(CoreError::ConnectionNotFound)?;
+        let ConnectionConfig::Ssh {
+            host_key_fingerprint,
+            ..
+        } = &existing.config
+        else {
+            return Err(CoreError::InvalidConnectionConfig(
+                "not an ssh connection".into(),
+            ));
+        };
+        if !host_key_fingerprint.is_empty() {
+            let pinned = host_key_fingerprint
+                .parse::<ssh_key::Fingerprint>()
+                .map_err(|e| {
+                    CoreError::InvalidConnectionConfig(format!(
+                        "stored host key fingerprint is invalid: {e}"
+                    ))
+                })?;
+            return Ok(PinOutcome::AlreadyPinned(pinned));
+        }
+        let mut next = state.clone();
+        let conn = next
+            .connections
+            .iter_mut()
+            .find(|c| &c.id == id)
+            .expect("checked above");
+        let ConnectionConfig::Ssh {
+            host_key_fingerprint,
+            ..
+        } = &mut conn.config
+        else {
+            unreachable!("kind checked above");
+        };
+        *host_key_fingerprint = observed.to_string();
+        conn.updated_at = Utc::now();
+        self.commit(&mut state, next)?;
+        Ok(PinOutcome::Pinned(*observed))
+    }
+
     /// Delete a connection. The caller (policy layer) deletes its rules,
     /// rules die with their connection.
     pub fn delete_connection(&self, id: &Uuid) -> Result<Connection> {
@@ -827,12 +894,16 @@ fn validate_config_and_bind_secrets(
                     message: message.into(),
                 });
             }
-            host_key_fingerprint
-                .parse::<ssh_key::Fingerprint>()
-                .map_err(|_| CoreError::InvalidConnectionField {
-                    field: ConnectionField::HostKeyFingerprint,
-                    message: "Enter an OpenSSH SHA-256 or SHA-512 fingerprint".into(),
-                })?;
+            // Empty is a valid state: unpinned, trusted on first use via
+            // `pin_ssh_host_key` at the first agent session-bind.
+            if !host_key_fingerprint.is_empty() {
+                host_key_fingerprint
+                    .parse::<ssh_key::Fingerprint>()
+                    .map_err(|_| CoreError::InvalidConnectionField {
+                        field: ConnectionField::HostKeyFingerprint,
+                        message: "Enter an OpenSSH SHA-256 or SHA-512 fingerprint".into(),
+                    })?;
+            }
             bind_single_secret(state, spec)
         }
     }
@@ -1229,16 +1300,31 @@ mod tests {
             .unwrap();
         assert!(changed, "changing the pinned host key must reset rules");
 
+        // Empty is a valid unpinned state (trusted on first use)…
+        store
+            .add_connection(ConnectionSpec {
+                name: "unpinned-host-key".into(),
+                config: ConnectionConfig::Ssh {
+                    destination: None,
+                    host: "h.example.com".into(),
+                    port: 22,
+                    user: "u".into(),
+                    host_key_fingerprint: String::new(),
+                },
+                secrets: vec![key.id],
+            })
+            .expect("empty fingerprint saves as unpinned");
+        // …but a malformed non-empty fingerprint is still rejected.
         assert!(matches!(
             store
                 .add_connection(ConnectionSpec {
-                    name: "missing-host-key".into(),
+                    name: "bad-host-key".into(),
                     config: ConnectionConfig::Ssh {
                         destination: None,
                         host: "h.example.com".into(),
                         port: 22,
                         user: "u".into(),
-                        host_key_fingerprint: String::new(),
+                        host_key_fingerprint: "not-a-fingerprint".into(),
                     },
                     secrets: vec![key.id],
                 })
@@ -1289,6 +1375,66 @@ mod tests {
                 CoreError::InvalidConnectionField { .. }
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn tofu_pin_sets_the_fingerprint_exactly_once() {
+        let (store, _, _dir) = store().await;
+        let key = store.add_secret("DEPLOY_SSH_KEY", val("k")).unwrap();
+        let conn = store
+            .add_connection(ConnectionSpec {
+                name: "prod-ssh".into(),
+                config: ConnectionConfig::Ssh {
+                    destination: None,
+                    host: "prod.example.com".into(),
+                    port: 22,
+                    user: "deploy".into(),
+                    host_key_fingerprint: String::new(),
+                },
+                secrets: vec![key.id],
+            })
+            .unwrap();
+        let observed: ssh_key::Fingerprint = SSH_HOST_FP.parse().unwrap();
+        let racing: ssh_key::Fingerprint = SSH_HOST_FP_ALT.parse().unwrap();
+
+        assert_eq!(
+            store.pin_ssh_host_key(&conn.id, &observed).unwrap(),
+            PinOutcome::Pinned(observed)
+        );
+        let pinned = store.connection_by_id(&conn.id).unwrap();
+        assert!(pinned.updated_at > conn.updated_at);
+        match &pinned.config {
+            ConnectionConfig::Ssh {
+                host_key_fingerprint,
+                ..
+            } => assert_eq!(host_key_fingerprint, SSH_HOST_FP),
+            _ => unreachable!(),
+        }
+        // A second (racing) pin reports the existing key and changes nothing.
+        assert_eq!(
+            store.pin_ssh_host_key(&conn.id, &racing).unwrap(),
+            PinOutcome::AlreadyPinned(observed)
+        );
+        assert_eq!(
+            store.connection_by_id(&conn.id).unwrap().updated_at,
+            pinned.updated_at
+        );
+        // Wrong kind and unknown connections are refused.
+        store.add_secret("GITHUB_API_KEY", val("g")).unwrap();
+        let api = store
+            .add_connection(api_spec(
+                "github",
+                "api.github.com",
+                "Authorization: Bearer {{GITHUB_API_KEY}}",
+            ))
+            .unwrap();
+        assert!(store.pin_ssh_host_key(&api.id, &observed).is_err());
+        assert!(matches!(
+            store
+                .pin_ssh_host_key(&Uuid::new_v4(), &observed)
+                .unwrap_err(),
+            CoreError::ConnectionNotFound
+        ));
     }
 
     #[tokio::test]

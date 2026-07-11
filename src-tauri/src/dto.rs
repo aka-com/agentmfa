@@ -87,17 +87,14 @@ impl ConnectionDto {
                 expires_at: None,
             })
             .collect();
-        permissions.extend(
-            broker
-            .grants_for_connection(conn)
-            .into_iter()
-            .map(|grant| PermissionChip {
+        permissions.extend(broker.grants_for_connection(conn).into_iter().map(|grant| {
+            PermissionChip {
                 id: grant.id.to_string(),
                 agent: grant.agent,
                 scope: grant.scope.as_str().to_string(),
                 expires_at: Some(grant.expires_at.to_rfc3339()),
-            }),
-        );
+            }
+        }));
         let mut dto = ConnectionDto {
             id: conn.id.to_string(),
             name: conn.name.clone(),
@@ -164,7 +161,10 @@ impl ConnectionDto {
                 dto.host = Some(host.clone());
                 dto.port = Some(*port);
                 dto.user = Some(user.clone());
-                dto.host_key_fingerprint = Some(host_key_fingerprint.clone());
+                // None while unpinned so the UI can tell "trusted on first
+                // use, pending" apart from a pinned fingerprint.
+                dto.host_key_fingerprint =
+                    (!host_key_fingerprint.is_empty()).then(|| host_key_fingerprint.clone());
             }
         }
         dto
@@ -297,7 +297,11 @@ pub struct TemporaryAccessDto {
 impl ApprovalDto {
     pub fn new(request: ApprovalRequest, access_duration_seconds: u64) -> Self {
         let high_consequence = request.is_high_consequence();
-        let temporary_access = if request.kind == agentmfa_core::approvals::ApprovalKind::Pair {
+        // Pairing and host-key trust prompts have no access-session shape;
+        // the broker coerces any such decision to allow-once regardless.
+        let temporary_access = if request.kind == agentmfa_core::approvals::ApprovalKind::Pair
+            || request.ssh.is_some()
+        {
             None
         } else {
             Some(TemporaryAccessDto {

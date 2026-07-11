@@ -386,6 +386,11 @@ impl Broker {
                     // "Always allow" does not apply to pairing.
                     return self.apply_decision(id, UiDecision::AllowOnce, ctx, confirmation);
                 }
+                if request.ssh.is_some() {
+                    // Trusting a host key must never create a standing rule;
+                    // the only allow shape is the one-time pin.
+                    return self.apply_decision(id, UiDecision::AllowOnce, ctx, confirmation);
+                }
                 if let Some(summary) = &request.connection {
                     let conn = self.approval_connection(summary)?;
                     let client_id = request.client_id.ok_or(CoreError::NotConfirmed)?;
@@ -418,6 +423,11 @@ impl Broker {
                 if request.kind == ApprovalKind::Pair {
                     return self.apply_decision(id, UiDecision::AllowOnce, ctx, confirmation);
                 }
+                if request.ssh.is_some() {
+                    // A host-key trust decision must not start an access
+                    // session; coerce to the one-time pin.
+                    return self.apply_decision(id, UiDecision::AllowOnce, ctx, confirmation);
+                }
                 let token_hash = request
                     .agent_token_hash
                     .as_deref()
@@ -438,6 +448,9 @@ impl Broker {
                 };
                 let Some(claim) = self.approvals.claim_session(id, |queued| {
                     queued.kind != ApprovalKind::Pair
+                        // A queued host-key trust prompt is never absorbed by
+                        // an access session; the user must see the fingerprint.
+                        && queued.ssh.is_none()
                         && queued.agent_token_hash.as_deref()
                             == Some(current_agent.token_hash.as_str())
                         && queued.connection.as_ref().is_some_and(|queued_connection| {

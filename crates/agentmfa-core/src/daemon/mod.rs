@@ -575,6 +575,7 @@ async fn post_pair(
         replaces_existing_agent,
         inherited,
         http: None,
+        ssh: None,
     };
 
     // Concurrent pairings under one name coalesce: identically-signed
@@ -961,6 +962,7 @@ async fn post_http(
             body_truncated: truncated,
             mutating,
         }),
+        ssh: None,
     };
 
     broker.audit.append(
@@ -1190,6 +1192,7 @@ async fn post_ws_open(
         replaces_existing_agent: false,
         inherited: vec![],
         http: None,
+        ssh: None,
     };
 
     // The idempotency payload is the open itself: same key + same
@@ -1293,13 +1296,17 @@ async fn post_ssh_open(
     else {
         unreachable!()
     };
-    let (destination, host, port, user, host_key_fingerprint) = (
+    let (destination, host, port, user) = (
         destination.clone().unwrap_or_else(|| host.clone()),
         host.clone(),
         *port,
         user.clone(),
-        host_key_fingerprint.clone(),
     );
+    // `null` while unpinned: the key is confirmed with the user and pinned
+    // at the first session-bind, so agents can distinguish "not yet trusted"
+    // from a configured fingerprint.
+    let host_key_fingerprint =
+        (!host_key_fingerprint.is_empty()).then(|| host_key_fingerprint.clone());
 
     let action = format!("Sign in with SSH → {}", conn.target());
     broker.audit.append(
@@ -1333,6 +1340,7 @@ async fn post_ssh_open(
         replaces_existing_agent: false,
         inherited: vec![],
         http: None,
+        ssh: None,
     };
 
     // The idempotency payload is the open itself: same key + same
@@ -1465,6 +1473,7 @@ async fn post_pg_open(
         replaces_existing_agent: false,
         inherited: vec![],
         http: None,
+        ssh: None,
     };
 
     // The idempotency payload is the open itself: same key + same

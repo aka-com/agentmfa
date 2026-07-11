@@ -40,10 +40,15 @@ use ssh_key::{Algorithm, Fingerprint, HashAlg, PrivateKey, PublicKey, Signature}
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{UnixListener, UnixStream};
 
+use uuid::Uuid;
+
+use crate::approvals::{
+    ApprovalKind, ApprovalRequest, ExecOutcome, ParkRequest, Parked, SshHostKeyView,
+};
 use crate::audit::{AuditEntry, AuditKind};
 use crate::broker::Broker;
 use crate::sessions::SessionHandle;
-use crate::store::Store;
+use crate::store::{PinOutcome, Store};
 use crate::types::{Connection, ConnectionConfig, ConnectionKind};
 
 /* --------------------------- ssh-agent protocol --------------------------- */
@@ -324,13 +329,24 @@ fn hostbound_userauth<'a>(data: &'a [u8], public_blob: &[u8]) -> Option<Hostboun
     })
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct SessionBinding {
     host_key: Vec<u8>,
     session_id: Vec<u8>,
 }
 
-fn verify_session_bind(payload: &[u8], expected: Fingerprint) -> Result<SessionBinding, String> {
+/// A session-bind that passed every structural and cryptographic check —
+/// parse, forwarding refusal, and the host key's signature over the session
+/// id — before any comparison against a pinned fingerprint. The caller
+/// decides what to compare `public` against (or, on the first-use path, to
+/// ask the user to trust it).
+#[derive(Debug)]
+struct ObservedBinding {
+    binding: SessionBinding,
+    public: PublicKey,
+}
+
+fn parse_and_verify_session_bind(payload: &[u8]) -> Result<ObservedBinding, String> {
     let mut r = Reader::new(payload);
     if r.string() != Some(SESSION_BIND_EXTENSION) {
         return Err("unsupported agent extension".into());
@@ -348,12 +364,6 @@ fn verify_session_bind(payload: &[u8], expected: Fingerprint) -> Result<SessionB
 
     let public = PublicKey::from_bytes(host_key)
         .map_err(|e| format!("invalid session-bind host key: {e}"))?;
-    let actual = public.fingerprint(expected.algorithm());
-    if actual != expected {
-        return Err(format!(
-            "host key fingerprint {actual} does not match configured {expected}"
-        ));
-    }
     let signature = Signature::try_from(signature)
         .map_err(|e| format!("invalid session-bind signature: {e}"))?;
     public
@@ -361,10 +371,24 @@ fn verify_session_bind(payload: &[u8], expected: Fingerprint) -> Result<SessionB
         .verify(session_id, &signature)
         .map_err(|e| format!("session-bind host signature failed: {e}"))?;
 
-    Ok(SessionBinding {
-        host_key: host_key.to_vec(),
-        session_id: session_id.to_vec(),
+    Ok(ObservedBinding {
+        binding: SessionBinding {
+            host_key: host_key.to_vec(),
+            session_id: session_id.to_vec(),
+        },
+        public,
     })
+}
+
+fn verify_session_bind(payload: &[u8], expected: Fingerprint) -> Result<SessionBinding, String> {
+    let observed = parse_and_verify_session_bind(payload)?;
+    let actual = observed.public.fingerprint(expected.algorithm());
+    if actual != expected {
+        return Err(format!(
+            "host key fingerprint {actual} does not match configured {expected}"
+        ));
+    }
+    Ok(observed.binding)
 }
 
 /* -------------------------------- listener -------------------------------- */
@@ -380,10 +404,24 @@ impl Drop for SocketGuard {
 struct AgentState {
     broker: Arc<Broker>,
     ticket: String,
+    /// The agent this socket was opened for; names the trust prompt.
+    agent_name: String,
     /// Pinned login the userauth blob must name.
     user: String,
-    host_key_fingerprint: Fingerprint,
+    /// The pinned host key: `Some` from open time when the connection was
+    /// already pinned, otherwise `None` until trust-on-first-use pins it at
+    /// the first session-bind. A `Mutex` because the TOFU path writes it
+    /// while other connections on this socket read it.
+    host_key_fingerprint: tokio::sync::Mutex<Option<Fingerprint>>,
+    /// Serializes unpinned session-binds across this socket's connections so
+    /// one open raises at most one trust prompt at a time; the loser of the
+    /// race re-checks the (then pinned) state instead of double-prompting.
+    bind_gate: tokio::sync::Mutex<()>,
+    connection_id: Uuid,
     connection_name: String,
+    /// Pinned destination, displayed by the trust prompt.
+    host: String,
+    port: u16,
     comment: String,
     signer: Arc<SshSigner>,
 }
@@ -448,6 +486,8 @@ pub async fn open_agent(
 ) -> Result<String, String> {
     let ConnectionConfig::Ssh {
         user,
+        host,
+        port,
         host_key_fingerprint,
         ..
     } = &connection.config
@@ -455,9 +495,18 @@ pub async fn open_agent(
         return Err("not an ssh connection".into());
     };
     let user = user.clone();
-    let host_key_fingerprint = host_key_fingerprint
-        .parse::<Fingerprint>()
-        .map_err(|e| format!("SSH host key fingerprint is missing or invalid: {e}"))?;
+    let (host, port) = (host.clone(), *port);
+    // Empty means unpinned: the key is observed and pinned at the first
+    // session-bind, behind a dedicated trust prompt.
+    let host_key_fingerprint = if host_key_fingerprint.is_empty() {
+        None
+    } else {
+        Some(
+            host_key_fingerprint
+                .parse::<Fingerprint>()
+                .map_err(|e| format!("SSH host key fingerprint is invalid: {e}"))?,
+        )
+    };
     let signer = Arc::new(SshSigner::load(&broker.store, &connection).await?);
 
     let ticket = broker.data_plane.issue(
@@ -488,9 +537,14 @@ pub async fn open_agent(
     let state = Arc::new(AgentState {
         broker: broker.clone(),
         ticket,
+        agent_name,
         user,
-        host_key_fingerprint,
+        host_key_fingerprint: tokio::sync::Mutex::new(host_key_fingerprint),
+        bind_gate: tokio::sync::Mutex::new(()),
+        connection_id: connection.id,
         connection_name: connection.name.clone(),
+        host,
+        port,
         comment: format!("agentmfa:{}", connection.name),
         signer,
     });
@@ -618,17 +672,226 @@ async fn handle_request(
             if binding.is_some() {
                 return refuse(state, "agent connection is already session-bound");
             }
-            match verify_session_bind(payload, state.host_key_fingerprint) {
-                Ok(verified) => {
-                    *binding = Some(verified);
-                    frame(SSH_AGENT_SUCCESS, &[])
-                }
-                Err(reason) => refuse(state, &reason),
-            }
+            session_bind(state, binding, payload).await
         }
         SSH_AGENTC_SIGN_REQUEST => sign_response(state, binding.as_ref(), payload).await,
         _ => frame(SSH_AGENT_FAILURE, &[]),
     }
+}
+
+/// Answer a `session-bind@openssh.com` request. Pinned connections verify
+/// against the cached fingerprint exactly as before; an unpinned connection
+/// takes the trust-on-first-use path.
+async fn session_bind(
+    state: &Arc<AgentState>,
+    binding: &mut Option<SessionBinding>,
+    payload: &[u8],
+) -> Vec<u8> {
+    let pinned = *state.host_key_fingerprint.lock().await;
+    if let Some(expected) = pinned {
+        return match verify_session_bind(payload, expected) {
+            Ok(verified) => {
+                *binding = Some(verified);
+                frame(SSH_AGENT_SUCCESS, &[])
+            }
+            Err(reason) => refuse(state, &reason),
+        };
+    }
+    tofu_session_bind(state, binding, payload).await
+}
+
+/// Trust-on-first-use: the connection was opened unpinned, so the observed
+/// host key is put to the user through the ordinary approval surface, and
+/// the ssh client blocks on the agent socket while they decide. The
+/// approvals auto-deny timeout bounds the wait (and fits inside sshd's
+/// default LoginGraceTime); a denial or timeout refuses the bind and leaves
+/// the connection unpinned.
+async fn tofu_session_bind(
+    state: &Arc<AgentState>,
+    binding: &mut Option<SessionBinding>,
+    payload: &[u8],
+) -> Vec<u8> {
+    // One trust prompt at a time per open: a second connection racing this
+    // one parks here and re-checks the (then pinned) state instead of
+    // raising a duplicate prompt.
+    let _gate = state.bind_gate.lock().await;
+    if let Some(expected) = *state.host_key_fingerprint.lock().await {
+        return match verify_session_bind(payload, expected) {
+            Ok(verified) => {
+                *binding = Some(verified);
+                frame(SSH_AGENT_SUCCESS, &[])
+            }
+            Err(reason) => refuse(state, &reason),
+        };
+    }
+
+    // Re-read the store: another agent socket for the same connection (or a
+    // manual edit) may have pinned a key since this socket opened. If so,
+    // cache and verify against it — no prompt.
+    let conn = match state.broker.store.connection_by_id(&state.connection_id) {
+        Ok(conn) => conn,
+        Err(_) => return refuse(state, "connection no longer exists"),
+    };
+    let ConnectionConfig::Ssh {
+        host_key_fingerprint: stored,
+        ..
+    } = &conn.config
+    else {
+        return refuse(state, "connection is no longer ssh");
+    };
+    if !stored.is_empty() {
+        let expected = match stored.parse::<Fingerprint>() {
+            Ok(expected) => expected,
+            Err(e) => return refuse(state, &format!("stored host key fingerprint invalid: {e}")),
+        };
+        *state.host_key_fingerprint.lock().await = Some(expected);
+        return match verify_session_bind(payload, expected) {
+            Ok(verified) => {
+                *binding = Some(verified);
+                frame(SSH_AGENT_SUCCESS, &[])
+            }
+            Err(reason) => refuse(state, &reason),
+        };
+    }
+
+    let observed_binding = match parse_and_verify_session_bind(payload) {
+        Ok(observed) => observed,
+        Err(reason) => return refuse(state, &reason),
+    };
+    let observed = observed_binding.public.fingerprint(HashAlg::Sha256);
+    let algorithm = observed_binding.public.algorithm().as_str().to_string();
+
+    // Raise the trust prompt through the existing approval machinery. The
+    // request deliberately carries no client_id/token hash: a host-key
+    // decision must never be absorbed into an access session or create a
+    // standing rule (the broker also coerces those decisions to allow-once).
+    let request = ApprovalRequest {
+        id: Uuid::new_v4(),
+        agent: state.agent_name.clone(),
+        client_id: None,
+        agent_token_hash: None,
+        kind: ApprovalKind::Ssh,
+        connection: Some(state.broker.connection_summary(&conn)),
+        action: format!("Trust SSH host key for {}", conn.name),
+        notification: format!(
+            "{} reached {} for the first time: verify the server's host key",
+            state.agent_name, conn.name
+        ),
+        received_at: chrono::Utc::now(),
+        deadline: chrono::Utc::now(),
+        identity: None,
+        pairing_identity: None,
+        replaces_existing_agent: false,
+        inherited: vec![],
+        http: None,
+        ssh: Some(SshHostKeyView {
+            host: state.host.clone(),
+            port: state.port,
+            observed_fingerprint: observed.to_string(),
+            algorithm,
+        }),
+    };
+
+    let executor: crate::approvals::Executor = {
+        let broker = state.broker.clone();
+        let connection_id = state.connection_id;
+        let connection_name = state.connection_name.clone();
+        let public = observed_binding.public.clone();
+        Box::pin(async move {
+            match broker.store.pin_ssh_host_key(&connection_id, &observed) {
+                Ok(PinOutcome::Pinned(pinned)) => {
+                    broker.audit.append(
+                        AuditEntry::new(
+                            AuditKind::SshHostKeyPinned,
+                            format!("SSH host key trusted: {connection_name}"),
+                        )
+                        .connection(connection_name.clone())
+                        .detail(format!("{pinned} pinned at first connection"))
+                        .outcome("pinned"),
+                    );
+                    broker.events.connections_changed();
+                    ExecOutcome {
+                        status: 200,
+                        body: serde_json::json!({ "host_key_fingerprint": pinned.to_string() }),
+                    }
+                }
+                // A concurrent pin won; accept it only if it is the same key
+                // (possibly under a different hash algorithm), else fail
+                // closed — the user never saw this server's key.
+                Ok(PinOutcome::AlreadyPinned(existing)) => {
+                    if public.fingerprint(existing.algorithm()) == existing {
+                        ExecOutcome {
+                            status: 200,
+                            body: serde_json::json!({
+                                "host_key_fingerprint": existing.to_string(),
+                            }),
+                        }
+                    } else {
+                        ExecOutcome {
+                            status: 403,
+                            body: serde_json::json!({
+                                "reason": crate::wire::ErrorReason::DeniedByPolicy,
+                                "detail": "connection meanwhile pinned a different host key",
+                            }),
+                        }
+                    }
+                }
+                Err(e) => ExecOutcome {
+                    status: 500,
+                    body: serde_json::json!({
+                        "reason": crate::wire::ErrorReason::BadConnectionConfig,
+                        "detail": format!("host key pin failed: {e}"),
+                    }),
+                },
+            }
+        })
+    };
+
+    let parked = state.broker.approvals.park(ParkRequest {
+        request,
+        coalesce_key: None,
+        payload_hash: None,
+        retain_outcome: false,
+        executor,
+    });
+    let outcome = match parked {
+        Ok(Parked::Wait(handle)) => handle.wait().await,
+        // Unreachable without a coalesce key, and replay is never retained.
+        Ok(Parked::Replay(_)) | Err(_) => None,
+    };
+    let Some(outcome) = outcome else {
+        return refuse(state, "host key trust prompt failed");
+    };
+    if outcome.status != 200 {
+        let detail = outcome.body["reason"]
+            .as_str()
+            .unwrap_or("denied")
+            .to_string();
+        state.broker.audit.append(
+            AuditEntry::new(
+                AuditKind::SshHostKeyPinned,
+                format!("SSH host key not trusted: {}", state.connection_name),
+            )
+            .connection(state.connection_name.clone())
+            .detail(format!("{observed} · {detail}"))
+            .outcome("denied"),
+        );
+        return frame(SSH_AGENT_FAILURE, &[]);
+    }
+    // The pinned fingerprint may legitimately differ from `observed` (a
+    // concurrent manual pin of the same key under SHA-512); cache what the
+    // store actually holds.
+    let pinned = match outcome.body["host_key_fingerprint"]
+        .as_str()
+        .unwrap_or_default()
+        .parse::<Fingerprint>()
+    {
+        Ok(pinned) => pinned,
+        Err(e) => return refuse(state, &format!("pinned fingerprint unreadable: {e}")),
+    };
+    *state.host_key_fingerprint.lock().await = Some(pinned);
+    *binding = Some(observed_binding.binding);
+    frame(SSH_AGENT_SUCCESS, &[])
 }
 
 fn refuse(state: &AgentState, reason: &str) -> Vec<u8> {
@@ -686,6 +949,14 @@ async fn sign_response(
     let user = auth.user.to_string();
     let data = data.to_vec();
 
+    // A bound connection always cached the pinned fingerprint at bind time.
+    let pinned = state
+        .host_key_fingerprint
+        .lock()
+        .await
+        .map(|fingerprint| fingerprint.to_string())
+        .unwrap_or_else(|| "(unpinned)".into());
+
     match sign_on_blocking_thread(state.signer.clone(), data, flags).await {
         Ok(sig_blob) => {
             state.broker.audit.append(
@@ -694,10 +965,7 @@ async fn sign_response(
                     format!("SSH authentication signed: {}", state.connection_name),
                 )
                 .connection(state.connection_name.clone())
-                .detail(format!(
-                    "host-bound userauth as {user} · {}",
-                    state.host_key_fingerprint
-                ))
+                .detail(format!("host-bound userauth as {user} · {pinned}"))
                 .outcome("signed"),
             );
             let mut body = Vec::new();
@@ -839,6 +1107,47 @@ mod tests {
         let other = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
         assert!(verify_session_bind(&session_bind(&other, session_id, 0), expected).is_err());
         assert!(verify_session_bind(&session_bind(&host_key, session_id, 1), expected).is_err());
+    }
+
+    #[test]
+    fn parse_and_verify_checks_structure_and_signature_but_pins_nothing() {
+        let host_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let session_id = b"observed-session-id";
+
+        // Any structurally valid, host-signed bind parses — no fingerprint
+        // comparison happens at this layer.
+        let observed = parse_and_verify_session_bind(&session_bind(&host_key, session_id, 0))
+            .expect("valid bind parses without a pinned key");
+        assert_eq!(observed.binding.session_id, session_id);
+        assert_eq!(
+            observed.public.fingerprint(HashAlg::Sha256),
+            host_key.public_key().fingerprint(HashAlg::Sha256)
+        );
+
+        // Forwarded sessions are refused before any trust decision.
+        assert!(
+            parse_and_verify_session_bind(&session_bind(&host_key, session_id, 1))
+                .unwrap_err()
+                .contains("forwarded")
+        );
+        // A signature over a different session id fails verification.
+        let mut wrong_session = Vec::new();
+        let host_blob = host_key.public_key().to_bytes().unwrap();
+        let signature: Signature = host_key.try_sign(b"some-other-session").unwrap();
+        put_string(&mut wrong_session, SESSION_BIND_EXTENSION);
+        put_string(&mut wrong_session, &host_blob);
+        put_string(&mut wrong_session, session_id);
+        put_string(&mut wrong_session, &Vec::<u8>::try_from(signature).unwrap());
+        wrong_session.push(0);
+        assert!(parse_and_verify_session_bind(&wrong_session)
+            .unwrap_err()
+            .contains("signature failed"));
+        // Truncated and non-session-bind payloads are refused.
+        assert!(parse_and_verify_session_bind(b"junk").is_err());
+        let mut truncated = Vec::new();
+        put_string(&mut truncated, SESSION_BIND_EXTENSION);
+        put_string(&mut truncated, &host_blob);
+        assert!(parse_and_verify_session_bind(&truncated).is_err());
     }
 
     #[test]

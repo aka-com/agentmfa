@@ -178,6 +178,8 @@ interface MockArgs {
   decision: 'deny' | 'allow_once' | 'allow_session' | 'always_allow';
   revokeInheritedRules?: boolean;
   source: string;
+  host: string;
+  port: number;
 }
 
 const db: MockDatabase = {
@@ -340,6 +342,15 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         }],
         warnings: ['This destination connects through ProxyJump bastion.'],
       };
+    case 'check_known_hosts':
+      // The prod.example.com fixture matches its known_hosts entry; other
+      // hosts read as a first sighting.
+      return args.host === 'prod.example.com'
+        ? [{
+            fingerprint: 'SHA256:vdZ5N8kNxU7J4W2WYa6qK0sJYv8oXb8s2H7n3jE5q1A',
+            algorithm: 'ssh-ed25519', source: '~/.ssh/known_hosts',
+          }]
+        : [];
     case 'add_secret': {
       if (db.secrets.some((s) => s.name === args.name)) {
         throw formError('conflict', 'secret_name_taken', 'name', 'That credential name is already in use');
@@ -380,7 +391,9 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
     }
     case 'add_connection': {
       const i = args.input;
-      if (i.type === 'ssh' && !/^SHA(?:256|512):\S+$/.test(i.host_key_fingerprint || '')) {
+      // Empty is valid (unpinned, trusted on first use); only a malformed
+      // non-empty fingerprint is rejected, mirroring the core.
+      if (i.type === 'ssh' && i.host_key_fingerprint && !/^SHA(?:256|512):\S+$/.test(i.host_key_fingerprint)) {
         throw formError('validation', 'invalid_connection_field', 'hostKeyFingerprint', 'Enter an OpenSSH SHA-256 or SHA-512 fingerprint');
       }
       if (db.connections.some((c) => c.name === i.name)) {
@@ -409,7 +422,8 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
     case 'edit_connection': {
       const c = db.connections.find((x) => x.id === args.id); if (!c) throw new Error('no such connection');
       const i = args.input;
-      if (i.type === 'ssh' && !/^SHA(?:256|512):\S+$/.test(i.host_key_fingerprint || '')) {
+      // Clearing the fingerprint un-pins (re-trusted at the next connection).
+      if (i.type === 'ssh' && i.host_key_fingerprint && !/^SHA(?:256|512):\S+$/.test(i.host_key_fingerprint)) {
         throw formError('validation', 'invalid_connection_field', 'hostKeyFingerprint', 'Enter an OpenSSH SHA-256 or SHA-512 fingerprint');
       }
       if (db.connections.some((other) => other.id !== c.id && other.name === i.name)) {
@@ -533,6 +547,27 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
 // payload with many headers + body — exercises the scroll region), 'pair'.
 if (!tauri && typeof window !== 'undefined') {
   window.__mockApproval = (kind = 'http', ttlMs = 120000) => {
+    if (kind === 'ssh') {
+      // A trust-on-first-use host-key prompt (kind 'ssh' + ssh payload).
+      const sshConn = db.connections.find((c) => c.type === 'ssh') ?? db.connections[0]!;
+      const req: ApprovalRequest = {
+        id: uid(), agent: 'claude-code', kind: 'ssh',
+        connection: { id: sshConn.id, name: sshConn.name, type: 'ssh', target: connTarget(sshConn) },
+        action: `Trust SSH host key for ${sshConn.name}`,
+        notification: `claude-code reached ${sshConn.name} for the first time: verify the server's host key`,
+        received_at: now(), deadline: new Date(Date.now() + ttlMs).toISOString(),
+        identity: null, pairing_identity: null, replaces_existing_agent: false,
+        inherited: [], http: null,
+        ssh: {
+          host: sshConn.host || 'prod.example.com', port: sshConn.port || 22,
+          observed_fingerprint: 'SHA256:vdZ5N8kNxU7J4W2WYa6qK0sJYv8oXb8s2H7n3jE5q1A',
+          algorithm: 'ssh-ed25519',
+        },
+        temporary_access: null,
+      };
+      db.queue = [req]; emit('amfa://queue-changed', db.queue.slice());
+      return;
+    }
     const inherited = kind === 'pair'
       ? db.rules.filter((r) => r.client_id === db.agents[0]?.id).flatMap((r) => {
           const c = db.connections.find((conn) => conn.id === r.connection_id);
@@ -564,6 +599,7 @@ if (!tauri && typeof window !== 'undefined') {
       } : null,
       replaces_existing_agent: kind === 'pair',
       inherited, http,
+      ssh: null,
       temporary_access: kind === 'pair' ? null : { scope: post ? 'full' : 'read', duration_seconds: 900 },
     };
     db.queue = [req]; emit('amfa://queue-changed', db.queue.slice());

@@ -132,7 +132,11 @@ impl FormError {
                 format!("{name} is not a saved credential"),
             ),
             CoreError::WrongSecretCount { kind } => {
-                let field = if kind == "websocket" { "template" } else { "secret" };
+                let field = if kind == "websocket" {
+                    "template"
+                } else {
+                    "secret"
+                };
                 Self::validation(
                     "wrong_credential_count",
                     field,
@@ -351,10 +355,7 @@ pub fn get_agent_setup(state: State<AppState>) -> String {
 /// The full agent-facing walkthrough the daemon serves at `GET /instructions`.
 #[tauri::command]
 pub fn get_broker_instructions(state: State<AppState>) -> String {
-    agentmfa_core::daemon::wellknown::instructions(
-        &state.broker.config,
-        &state.broker.paths,
-    )
+    agentmfa_core::daemon::wellknown::instructions(&state.broker.config, &state.broker.paths)
 }
 
 #[tauri::command]
@@ -377,6 +378,19 @@ pub async fn inspect_ssh_import(
     Ok(imports.insert(resolved))
 }
 
+/// known_hosts provenance for the first-connection host-key trust prompt:
+/// what the user's own known_hosts files say about `host:port`. Read-only
+/// and fingerprints-only — never key material.
+#[tauri::command]
+pub async fn check_known_hosts(
+    host: String,
+    port: u16,
+) -> CmdResult<Vec<crate::ssh_import::HostKeyCandidate>> {
+    tokio::task::spawn_blocking(move || crate::ssh_import::known_hosts_candidates(&host, port))
+        .await
+        .map_err(|error| format!("known_hosts lookup stopped: {error}"))?
+}
+
 /* ------------------------------ secrets ---------------------------------- */
 
 #[tauri::command]
@@ -396,7 +410,12 @@ pub fn edit_secret(
     new_value: Option<String>,
 ) -> FormResult<()> {
     let id = parse_id(&id).map_err(|detail| {
-        FormError::global("system", "invalid_secret_id", "Couldn’t edit this credential", Some(detail))
+        FormError::global(
+            "system",
+            "invalid_secret_id",
+            "Couldn’t edit this credential",
+            Some(detail),
+        )
     })?;
     let value = new_value.filter(|v| !v.is_empty()).map(Zeroizing::new);
     state
@@ -569,9 +588,7 @@ pub fn add_connection(state: State<AppState>, mut input: ConnectionInput) -> For
     if kind == "ssh" {
         if let Some(value) = &new_secret_value {
             agentmfa_core::capability::ssh::validate_private_key(value.as_bytes()).map_err(
-                |message| {
-                    FormError::validation("invalid_ssh_identity", "newSecretValue", message)
-                },
+                |message| FormError::validation("invalid_ssh_identity", "newSecretValue", message),
             )?;
         }
     }
@@ -598,20 +615,11 @@ pub fn add_connection(state: State<AppState>, mut input: ConnectionInput) -> For
                     "SSH details changed after import; resolve the command again",
                 ));
             }
-            if !resolved.host_key_candidates.is_empty()
-                && !resolved.host_key_candidates.iter().any(|candidate| {
-                    input.host_key_fingerprint.as_deref() == Some(candidate.fingerprint.as_str())
-                })
-            {
-                return Err(FormError::validation(
-                    "ssh_host_key_not_from_preview",
-                    "hostKeyFingerprint",
-                    "Choose a host fingerprint found in known_hosts",
-                ));
-            }
-            Some(crate::ssh_import::load_identity(&resolved, path).map_err(|message| {
-                FormError::validation("invalid_ssh_identity", "newSecretValue", message)
-            })?)
+            Some(
+                crate::ssh_import::load_identity(&resolved, path).map_err(|message| {
+                    FormError::validation("invalid_ssh_identity", "newSecretValue", message)
+                })?,
+            )
         }
         (None, None) => None,
         _ => {
@@ -630,15 +638,14 @@ pub fn add_connection(state: State<AppState>, mut input: ConnectionInput) -> For
             .broker
             .ui_add_connection_with_secret(&name, value, spec)
             .map(|_| ()),
-        (None, None) => state
-            .broker
-            .ui_add_connection(spec)
-            .map(|_| ()),
-        _ => return Err(FormError::validation(
-            "incomplete_new_credential",
-            "newSecretValue",
-            "Credential name and value must be provided together",
-        )),
+        (None, None) => state.broker.ui_add_connection(spec).map(|_| ()),
+        _ => {
+            return Err(FormError::validation(
+                "incomplete_new_credential",
+                "newSecretValue",
+                "Credential name and value must be provided together",
+            ))
+        }
     };
     result.map_err(|error| {
         FormError::from_core(
@@ -665,7 +672,12 @@ pub fn edit_connection(
 ) -> FormResult<()> {
     let kind = input.kind.clone();
     let id = parse_id(&id).map_err(|detail| {
-        FormError::global("system", "invalid_connection_id", "Couldn’t edit this service", Some(detail))
+        FormError::global(
+            "system",
+            "invalid_connection_id",
+            "Couldn’t edit this service",
+            Some(detail),
+        )
     })?;
     let spec = input.into_spec()?;
     state
@@ -724,10 +736,7 @@ pub fn remove_permission(state: State<AppState>, id: String) -> CmdResult<bool> 
 #[tauri::command]
 pub fn revoke_agent(state: State<AppState>, id: String) -> CmdResult<bool> {
     let id = parse_id(&id)?;
-    state
-        .broker
-        .ui_revoke_agent(&id)
-        .map_err(|e| e.to_string())
+    state.broker.ui_revoke_agent(&id).map_err(|e| e.to_string())
 }
 
 /* ------------------------------ sessions --------------------------------- */
@@ -830,6 +839,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         get_broker_instructions,
         copy_agent_setup,
         inspect_ssh_import,
+        check_known_hosts,
         add_secret,
         edit_secret,
         delete_secret,

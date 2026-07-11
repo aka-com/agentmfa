@@ -16,7 +16,8 @@ AgentMFA supports most everyday workflows:
 - **Postgres**: the agent gets a password-less DSN + short-lived ticket
 - **SSH**: the agent gets an `SSH_AUTH_SOCK` path, which supports
   `ssh`/`git`/`rsync` while the broker signs only for the connection's
-  pinned user and server host key
+  pinned user and server host key (pinned up front, or confirmed with you
+  and pinned at the first connection)
 - **WebSocket**: the agent gets a short-lived `ws://127.0.0.1:…` bridge
   URL usable by any stock WS client
 
@@ -108,9 +109,12 @@ cargo run -p agentmfa-cli -- skill --write    # → .claude/skills/agentmfa/SKIL
    - `POST /v1/ssh/open` — an `auth_sock` path to point `SSH_AUTH_SOCK` at;
      `ssh`/`git`/`rsync` authenticate through the broker's ssh-agent using
      host-bound authentication, pinned to the configured user and server
-     host-key fingerprint. OpenSSH normally negotiates the host-bound mode
-     automatically; forcing it with `PubkeyAuthentication=host-bound` is
-     optional.
+     host-key fingerprint. A service saved without a fingerprint is trusted
+     on first use: the first connection shows the observed host key in a
+     trust prompt (with known_hosts provenance) and pins it on approval,
+     while the ssh client waits on the agent socket. OpenSSH normally
+     negotiates the host-bound mode automatically; forcing it with
+     `PubkeyAuthentication=host-bound` is optional.
 
 ## Architecture
 
@@ -166,6 +170,11 @@ Other features:
   key, session, and server host-key fingerprint. Unbound or mismatched signing
   requests fail closed. Compatible OpenSSH clients negotiate these extensions
   without requiring an explicit `PubkeyAuthentication=host-bound` option.
+  The fingerprint is optional at setup: an unpinned service pins the key
+  trust-on-first-use — the first `session-bind` raises a dedicated approval
+  showing the observed fingerprint alongside what the user's own known_hosts
+  says about it, and only that one-time decision (never an access session or
+  standing rule) writes the pin.
 - **HTTP consequence classification.** For access-session scope, idempotency,
   and the extra confirmation on *Allow once*, AgentMFA classifies `GET` and
   `HEAD` as read-like and every other accepted method as potentially mutating.
@@ -197,6 +206,11 @@ Other features:
 - [ ] State that a paired agent can list every configured connection target,
   including internal hostnames and database users, but not secret names, IDs,
   or injection templates.
+- [ ] SSH trust on first use pins whatever key the server presents at the
+  first approved connection. It authenticates continuity, not initial
+  identity: a machine-in-the-middle present at that first connection would
+  be pinned. Enter the fingerprint manually (or verify the prompt's value
+  out-of-band) when first-connection integrity matters.
 
 ## License
 

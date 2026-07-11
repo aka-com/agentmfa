@@ -262,7 +262,7 @@ per-connection private CA bundle can extend the trusted roots.
     → 200 {{"auth_sock": "/…/.agentmfa/ssh/agent-<id>.sock",
             "destination": "prod",
             "host": "prod.example.com", "port": 22, "user": "deploy",
-            "host_key_fingerprint": "SHA256:…",
+            "host_key_fingerprint": "SHA256:…" or null,
             "expires_in_seconds": {ticket}}}
 
 Authorization is checked once, at open time. Point `SSH_AUTH_SOCK` at
@@ -275,8 +275,17 @@ Authorization is checked once, at open time. Point `SSH_AUTH_SOCK` at
 The broker serves the ssh-agent protocol on that socket: it offers the one
 configured key and signs your authentication with it, and the private key
 never leaves the broker. It verifies OpenSSH's session binding against the
-configured host-key fingerprint and will **only** sign host-bound public-key
-login as the pinned `user`; it signs nothing else. Ticket lifetime and reconnect semantics
+pinned host-key fingerprint and will **only** sign host-bound public-key
+login as the pinned `user`; it signs nothing else.
+
+When `host_key_fingerprint` is `null`, the server's key is not pinned yet:
+the broker trusts it on first use. At your first connection it shows the
+observed host key to the user for approval, and your ssh client simply waits
+on the agent socket during that decision (up to the approval timeout, so do
+not treat a slow first authentication as a hang). Approval pins the key for
+every later connection; denial or timeout makes the authentication fail.
+
+Ticket lifetime and reconnect semantics
 match WebSocket and Postgres: the socket accepts as many connections as needed for the
 {ticket} s window, so multiple SSH
 invocations as you need under the authorization that issued it. Live SSH
