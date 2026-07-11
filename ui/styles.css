@@ -88,6 +88,7 @@ body {
 }
 button { font-family: inherit; }
 code, .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace; font-size: calc(1em - 1px); }
+input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 #root { height: 100%; }
 
 /* ---- surfaces --------------------------------------------------------- */

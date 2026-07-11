@@ -698,8 +698,7 @@ function credentialChooserHTML(
   }
   return `<div class="f-row"><label>${secretLabel}</label>${select}</div>
     <div class="f-row"><label>Credential name</label><input id="c-new-secret-name" class="${fieldCls('newSecretName')}" placeholder="${escAttr(suggested)}" value="${escAttr(draft.newSecretName ?? '')}">${fieldErr('newSecretName')}</div>
-    <div class="f-row"><label>Credential value</label><input id="c-new-secret-value" class="${fieldCls('newSecretValue')}" type="password" placeholder="Saved directly to macOS Keychain" value="${escAttr(draft.newSecretValue ?? draft.importedCredential ?? '')}">${fieldErr('newSecretValue')}
-      <div class="rule-note">The value is submitted only when you save this service and is never written to service metadata.</div></div>`;
+    <div class="f-row"><label>Credential value</label><input id="c-new-secret-value" class="${fieldCls('newSecretValue')}" type="password" placeholder="Saved directly to macOS Keychain" value="${escAttr(draft.newSecretValue ?? draft.importedCredential ?? '')}">${fieldErr('newSecretValue')}</div>`;
 }
 
 async function connectionDraftFromImport(
@@ -772,8 +771,9 @@ function connSheet(editing: boolean): string {
     fields += `<div class="f-2col">
       <div class="f-row"><label>Host</label><input id="f-host" class="${fieldCls('host')}" placeholder="db.internal.example.com" value="${escAttr(d.host ?? '')}">${fieldErr('host')}</div>
       <div class="f-row" style="flex:0 0 90px"><label>Port</label><input id="f-port" class="${fieldCls('port')}" inputmode="numeric" value="${escAttr(d.port ?? '5432')}">${fieldErr('port')}</div></div>
+      <div class="f-2col">
       <div class="f-row"><label>Database</label><input id="f-db" class="${fieldCls('dbname')}" placeholder="app_production" value="${escAttr(d.dbname ?? '')}">${fieldErr('dbname')}</div>
-      <div class="f-row"><label>User</label><input id="f-user" class="${fieldCls('user')}" placeholder="app" value="${escAttr(d.user ?? '')}">${fieldErr('user')}</div>
+      <div class="f-row" style="flex:0 0 90px"><label>User</label><input id="f-user" class="${fieldCls('user')}" placeholder="app" value="${escAttr(d.user ?? '')}">${fieldErr('user')}</div></div>
       <div class="f-row"><label>TLS mode</label>${selectControlHTML('f-sslmode', sslOpts)}${fieldErr('sslmode')}
         ${sslmode === 'require' ? '<div class="pair-identity-warning">The server certificate will not be verified.</div>' : ''}</div>
       <div class="f-row"><label>Trusted CA bundle <span class="label-detail">optional</span></label>
