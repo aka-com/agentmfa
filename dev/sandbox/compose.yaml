@@ -37,6 +37,9 @@ services:
       SUDO_ACCESS: "false"
     volumes:
       - ./state/ssh/client_key.pub:/keys/client_key.pub:ro
-      - ./state/ssh/config:/config
+      - ssh_config:/config
     ports:
       - "127.0.0.1:12222:2222"
+
+volumes:
+  ssh_config:

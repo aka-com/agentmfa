@@ -21,7 +21,7 @@ if ! docker compose version >/dev/null 2>&1; then
   exit 1
 fi
 
-mkdir -p "$state_dir/config"
+mkdir -p "$state_dir"
 if [[ ! -f "$client_key" ]]; then
   echo "Generating a dedicated SSH key for the AgentMFA sandbox..."
   ssh-keygen -q -t ed25519 -N "" -C agentmfa-sandbox -f "$client_key"

@@ -40,9 +40,11 @@ Stop and remove the containers:
 npm run sandbox:down
 ```
 
-Normal shutdown preserves `dev/sandbox/state/`, including the generated SSH
-client key and SSH server host keys. Removing that directory resets the SSH
-identity and causes the fingerprint to change on the next start.
+Normal shutdown preserves the generated client key in `dev/sandbox/state/`
+and the SSH server host keys in a Docker volume. To reset the server host key,
+run `docker compose -f dev/sandbox/compose.yaml down --volumes`; to reset the
+client key as well, remove `dev/sandbox/state/` before the next start. Either
+reset changes the SSH identity, so update the service in AgentMFA afterward.
 
 ## Suggested smoke checks
 

@@ -20,12 +20,17 @@ for command in docker curl ssh-keyscan ssh-keygen; do
   fi
 done
 
+if [[ ! -f "$client_key" ]]; then
+  echo "sandbox: SSH client key is missing; run npm run sandbox:up" >&2
+  exit 1
+fi
+
 check_http() {
   curl --fail --silent --show-error --max-time 2 http://127.0.0.1:18080/status/200 >/dev/null
 }
 
 check_websocket_server() {
-  curl --silent --show-error --max-time 2 http://127.0.0.1:18081/ >/dev/null
+  curl --fail --silent --show-error --max-time 2 http://127.0.0.1:18081/ >/dev/null
 }
 
 check_postgres() {
@@ -34,14 +39,18 @@ check_postgres() {
 }
 
 scan_ssh_host_key() {
-  ssh-keyscan -T 2 -p 12222 127.0.0.1 2>/dev/null
+  ssh-keyscan -T 2 -t ed25519 -p 12222 127.0.0.1 2>/dev/null
+}
+
+check_ssh() {
+  scan_ssh_host_key >/dev/null
 }
 
 wait_for() {
   local label="$1"
   shift
   local attempt
-  for attempt in $(seq 1 30); do
+  for attempt in {1..30}; do
     if "$@"; then
       echo "  ready: $label"
       return 0
@@ -57,7 +66,7 @@ if $wait_for_services; then
   wait_for HTTP check_http
   wait_for WebSocket check_websocket_server
   wait_for Postgres check_postgres
-  wait_for SSH scan_ssh_host_key
+  wait_for SSH check_ssh
 else
   docker compose -f "$compose_file" ps
   echo
@@ -68,7 +77,8 @@ if [[ -z "$host_keys" ]]; then
   echo "sandbox: SSH is not ready; run npm run sandbox:up" >&2
   exit 1
 fi
-ssh_fingerprint="$(printf '%s\n' "$host_keys" | ssh-keygen -lf - | head -n 1 | awk '{print $2}')"
+fingerprint_line="$(printf '%s\n' "$host_keys" | ssh-keygen -lf -)"
+read -r _ ssh_fingerprint _ <<<"$fingerprint_line"
 
 cat <<EOF
 
