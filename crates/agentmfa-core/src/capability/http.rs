@@ -488,6 +488,50 @@ impl HttpExecution {
     }
 }
 
+/// UI-initiated test: GET the pinned origin root with the credential
+/// injected, reporting the upstream status. A 401/403 means the service
+/// answered but rejected the credential.
+pub async fn test_upstream(
+    store: &Arc<Store>,
+    client: &reqwest::Client,
+    timeout: std::time::Duration,
+    connection: &Connection,
+) -> Result<String, String> {
+    let ConnectionConfig::Api { template, .. } = &connection.config else {
+        return Err("not an api connection".into());
+    };
+    let (scheme, host, port) = pinned_base(&connection.config).expect("api config");
+    let injection = render_injection(store, template).await?;
+    let mut url =
+        Url::parse(&format!("{scheme}://{host}/")).map_err(|e| format!("bad origin: {e}"))?;
+    if url.set_port(port).is_err() {
+        return Err("cannot set port".into());
+    }
+    let request = match &injection {
+        RenderedInjection::Header(name, value) => client
+            .request(Method::GET, url.clone())
+            .header(name.clone(), value.clone()),
+        RenderedInjection::Query(fragment) => {
+            url.set_query(Some(fragment));
+            client.request(Method::GET, url.clone())
+        }
+    };
+    let response = request
+        .timeout(timeout)
+        .send()
+        .await
+        // reqwest's Display embeds the URL, which can carry a query-injected
+        // credential; strip it exactly as the relay path does.
+        .map_err(|e| e.without_url().to_string())?;
+    let status = response.status();
+    if matches!(status.as_u16(), 401 | 403) {
+        return Err(format!(
+            "{host} answered but rejected the credential (HTTP {status})"
+        ));
+    }
+    Ok(format!("GET {scheme}://{host}/ answered HTTP {status}"))
+}
+
 async fn render_injection(store: &Store, template_src: &str) -> Result<RenderedInjection, String> {
     let template = Template::parse(template_src).map_err(|e| e.to_string())?;
     let rendered = store

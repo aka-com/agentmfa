@@ -72,6 +72,7 @@ const MOCK_ACTIVITY_META = {
   connectionAdded: { icon: 'plug', tone: 'neutral' },
   connectionUpdated: { icon: 'pencil', tone: 'neutral' },
   connectionDeleted: { icon: 'unplug', tone: 'neutral' },
+  connectionTested: { icon: 'flaskConical', tone: 'neutral' },
   ruleRemoved: { icon: 'shieldMinus', tone: 'neutral' },
   grantRevoked: { icon: 'shieldX', tone: 'danger' },
   tokenRevoked: { icon: 'unplug', tone: 'danger' },
@@ -429,6 +430,21 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       const c = db.connections.find((x) => x.id === args.id); if (!c) throw new Error('no such connection');
       db.connections = db.connections.filter((x) => x.id !== args.id);
       db.rules = db.rules.filter((r) => r.connection_id !== args.id); audit('connectionDeleted', `Service deleted: ${c.name}`); return;
+    }
+    case 'test_connection': {
+      const c = db.connections.find((x) => x.id === args.id); if (!c) throw new Error('no such connection');
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      // Deterministic mock: the internal-api fixture fails, everything else
+      // passes, so both result presentations are exercisable standalone.
+      const ok = c.type !== 'api' || !/internal/.test(c.name);
+      const detail = !ok
+        ? `${c.host} answered but rejected the credential (HTTP 401)`
+        : c.type === 'pg' ? `Signed in to ${c.dbname} as ${c.user}`
+        : c.type === 'ssh' ? `Key loaded; ${c.host}:${c.port || 22} answered with SSH-2.0-OpenSSH_9.8. Login and host key are not verified by this test.`
+        : c.type === 'ws' ? 'WebSocket handshake succeeded'
+        : `GET https://${c.host}/ answered HTTP 200 OK`;
+      audit('connectionTested', `Service test ${ok ? 'passed' : 'failed'}: ${c.name}`, detail);
+      return { ok, detail };
     }
     case 'remove_permission': {
       const standing = db.rules.some((permission) => permission.id === args.id);

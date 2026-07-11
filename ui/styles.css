@@ -167,7 +167,13 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .dw-head h2 { font-size: 17px; }
 .dw-head-actions { display: flex; align-items: center; gap: 6px; }
 .walkthrough-menu-wrap { position: relative; flex: 0 0 auto; }
-.walkthrough-menu-btn { width: 28px; height: 28px; transform: translateX(-2px); }
+.walkthrough-menu-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 28px; padding: 0 9px;
+  border: none; background: none; border-radius: 7px;
+  font-size: 12.5px; color: var(--muted); cursor: pointer;
+}
+.walkthrough-menu-btn:hover { background: var(--hover); color: var(--ink-2); }
 .walkthrough-menu-btn.on { background: var(--hover-2); color: var(--ink-2); }
 .walkthrough-menu {
   position: absolute; right: 0; top: calc(100% + 5px); z-index: 16;
@@ -297,14 +303,8 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .setup-toggle[aria-expanded="true"] .setup-toggle-icon { transform: rotate(180deg); }
 .setup-toggle:hover { text-decoration: underline; }
 .setup-toggle:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; border-radius: 3px; }
-.onboarding-actions .switch {
-  margin-left: auto; margin-top: 1px;
-  width: 28px; height: 17px; border-radius: 9px;
-}
-.onboarding-actions .switch::after {
-  top: 2px; left: 2px; width: 13px; height: 13px;
-}
-.onboarding-actions .switch.on::after { left: 13px; }
+.onboarding-actions .instructions-seg { margin: 0 0 0 auto; }
+.instructions-seg .seg-btn { flex: 0 0 auto; padding: 2px 9px; font-size: 12px; }
 .setup-instructions {
   margin-top: 11px; padding: 8px 9px;
   overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere;
@@ -390,6 +390,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .empty-ico { font-size: 35px; width: 66px; height: 66px; line-height: 66px; margin: 0 auto 12px; border-radius: 16px; background: var(--wash-2); border: 1px dashed var(--line-strong); }
 .empty h3 { font-size: 16px; margin-bottom: 6px; }
 .empty p { font-size: 13.5px; color: var(--muted); line-height: 1.5; margin-bottom: 16px; }
+.empty p.empty-tip { font-size: 12.5px; margin-top: -8px; }
 .muted-note { font-size: 13.5px; color: var(--muted); text-align: center; padding: 30px 20px; line-height: 1.5; }
 
 /* ---- buttons ---------------------------------------------------------- */
@@ -468,6 +469,12 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .access-copy span { color: var(--muted); }
 .access-row .btn { flex: 0 0 auto; padding-inline: 6px; font-size: 11px; }
 .cc-foot { display: flex; justify-content: flex-end; gap: 2px; margin-top: auto; padding-top: 4px; border-top: 1px solid var(--line-soft); }
+.cc-foot .cc-test-btn { margin-right: auto; padding-inline: 7px; font-size: 11.5px; }
+/* pass/fail summary of the last broker-side test, inside the card border */
+.cc-test { display: flex; align-items: flex-start; gap: 5px; font-size: 12px; line-height: 1.4; }
+.cc-test svg { flex: 0 0 13px; width: 13px; height: 13px; margin-top: 2px; }
+.cc-test.ok { color: var(--ok-ink); }
+.cc-test.err { color: var(--danger-ink); }
 /* delete-confirm state of a card: same object, danger dress, Cancel/Delete */
 .conn-card.confirm-card { border-color: var(--danger-border); background: var(--danger-wash); }
 .conn-card.confirm-card .cc-foot { gap: 6px; border-top: none; }
@@ -490,8 +497,8 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .f-row label { display: block; font-size: 12.5px; color: var(--muted); font-weight: 600; margin-bottom: 4px; }
 .f-row input { width: 100%; min-height: 32px; padding: 6px 8px; border: 1px solid var(--line-field); border-radius: 7px; font-size: 14px; font-family: inherit; background-color: var(--field-bg); color: var(--ink); }
 .f-row input:focus { outline: 2px solid rgba(10,124,255,.45); border-color: var(--accent); }
-.f-row input.err { border-color: var(--danger); outline: 2px solid rgba(255,59,48,.35); }
-.field-error { margin-top: 4px; color: var(--danger-ink); font-size: 12.5px; font-weight: 600; }
+.f-row input.err { border-color: var(--danger); outline: none; }
+.field-error { margin-top: 4px; color: var(--danger-ink); font-size: 12.5px; font-weight: 400; }
 .f-2col { display: flex; gap: 10px; }
 .f-2col .f-row { flex: 1; }
 .credential-group { margin: 2px 0 10px; }
@@ -512,7 +519,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .cred-trigger:focus-visible, .cred-trigger[aria-expanded="true"] {
   outline: 2px solid rgba(10,124,255,.45); border-color: var(--accent);
 }
-.cred-trigger.err { border-color: var(--danger); outline: 2px solid rgba(255,59,48,.35); }
+.cred-trigger.err { border-color: var(--danger); outline: none; }
 .cred-chevron { margin-left: auto; display: inline-flex; color: var(--select-arrow); }
 .cred-badge {
   flex: 0 0 auto; width: 21px; height: 21px; border-radius: 6px;
@@ -523,8 +530,8 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .cred-name { font-size: 13.5px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cred-detail { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cred-menu {
-  /* Fixed so the sheet's overflow-y:auto can't clip it; app.ts anchors it
-     to the trigger (and unhides it) right after each render. */
+  /* app.ts portals this under #root so the scrolling sheet cannot clip it,
+     then anchors it to the trigger after each render. */
   position: fixed; z-index: 12; visibility: hidden;
   padding: 5px; background: var(--panel);
   border: 1px solid var(--line-mid); border-radius: 10px;

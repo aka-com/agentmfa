@@ -388,6 +388,54 @@ struct AgentState {
     signer: Arc<SshSigner>,
 }
 
+/// UI-initiated reachability test: load the stored key (validating that it
+/// parses) and read the server's version banner from the pinned host:port.
+/// No key exchange is performed, so login and the host key stay unverified.
+pub async fn test_reachability(store: &Store, connection: &Connection) -> Result<String, String> {
+    let ConnectionConfig::Ssh { host, port, .. } = &connection.config else {
+        return Err("not an ssh connection".into());
+    };
+    SshSigner::load(store, connection).await?;
+    let stream = tokio::net::TcpStream::connect((host.as_str(), *port))
+        .await
+        .map_err(|e| format!("could not reach {host}:{port}: {e}"))?;
+    let banner = read_version_banner(stream).await?;
+    Ok(format!(
+        "Key loaded; {host}:{port} answered with {banner}. Login and host key are not verified by this test."
+    ))
+}
+
+/// Read until the SSH identification line arrives. RFC 4253 §4.2 lets the
+/// server send other lines first, so scan complete lines for the `SSH-`
+/// prefix, capped so a non-SSH endpoint cannot stall the test.
+async fn read_version_banner(mut stream: tokio::net::TcpStream) -> Result<String, String> {
+    const BANNER_SCAN_CAP: usize = 4096;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 512];
+    loop {
+        let n = stream
+            .read(&mut chunk)
+            .await
+            .map_err(|e| format!("banner read failed: {e}"))?;
+        if n == 0 {
+            return Err("server closed the connection before sending an SSH banner".into());
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        let mut start = 0;
+        while let Some(pos) = buf[start..].iter().position(|b| *b == b'\n') {
+            let line = String::from_utf8_lossy(&buf[start..start + pos]);
+            let line = line.trim_end_matches('\r').trim();
+            if line.starts_with("SSH-") {
+                return Ok(line.to_string());
+            }
+            start += pos + 1;
+        }
+        if buf.len() > BANNER_SCAN_CAP {
+            return Err("the server did not present an SSH banner".into());
+        }
+    }
+}
+
 /// Bind the per-open agent socket, issue the ticket, and spawn its accept
 /// loop. Returns the socket path (`SSH_AUTH_SOCK`) the agent should use.
 ///

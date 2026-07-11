@@ -103,6 +103,14 @@ pub async fn dial_upstream(
     Ok(stream)
 }
 
+/// UI-initiated test: perform the upstream WebSocket handshake with the
+/// credential injected, then close immediately.
+pub async fn test_upstream(store: &Arc<Store>, connection: &Connection) -> Result<String, String> {
+    let mut stream = dial_upstream(store, connection).await?;
+    let _ = stream.close(None).await;
+    Ok("WebSocket handshake succeeded".into())
+}
+
 /* ------------------------------- bridge ---------------------------------- */
 
 #[derive(Clone)]

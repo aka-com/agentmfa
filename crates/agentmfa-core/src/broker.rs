@@ -28,6 +28,14 @@ use crate::Result;
 
 const COPY_AUTHORIZATION_TTL: Duration = Duration::from_secs(5 * 60);
 
+/// Outcome of a UI-initiated connection test: a pass/fail flag plus a short
+/// human-readable summary (never credential material).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ConnectionTestReport {
+    pub ok: bool,
+    pub detail: String,
+}
+
 /// What the user clicked in the approval window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiDecision {
@@ -823,6 +831,65 @@ impl Broker {
             .confirmation(confirmation),
         );
         Ok(conn)
+    }
+
+    /// UI-initiated connectivity/credential test against the connection's
+    /// pinned destination. The credential travels only on the upstream leg,
+    /// exactly as it would for a brokered agent request; only a pass/fail
+    /// summary comes back.
+    pub async fn ui_test_connection(&self, id: &Uuid) -> Result<ConnectionTestReport> {
+        const TEST_TIMEOUT: Duration = Duration::from_secs(15);
+        let connection = self.store.connection_by_id(id)?;
+        let started = Instant::now();
+        let test = async {
+            match connection.config.kind() {
+                ConnectionKind::Api => {
+                    crate::capability::http::test_upstream(
+                        &self.store,
+                        &self.http_client,
+                        TEST_TIMEOUT,
+                        &connection,
+                    )
+                    .await
+                }
+                ConnectionKind::Pg => {
+                    crate::capability::pg::test_upstream(&self.store, &self.events, &connection)
+                        .await
+                }
+                ConnectionKind::Ws => {
+                    crate::capability::ws::test_upstream(&self.store, &connection).await
+                }
+                ConnectionKind::Ssh => {
+                    crate::capability::ssh::test_reachability(&self.store, &connection).await
+                }
+            }
+        };
+        let outcome = match tokio::time::timeout(TEST_TIMEOUT, test).await {
+            Ok(result) => result,
+            Err(_) => Err(format!(
+                "no answer within {} seconds",
+                TEST_TIMEOUT.as_secs()
+            )),
+        };
+        let (ok, detail) = match outcome {
+            Ok(detail) => (true, detail),
+            Err(detail) => (false, detail),
+        };
+        self.audit.append(
+            AuditEntry::new(
+                AuditKind::ConnectionTested,
+                format!(
+                    "Service test {}: {}",
+                    if ok { "passed" } else { "failed" },
+                    connection.name
+                ),
+            )
+            .connection(connection.name.clone())
+            .outcome(if ok { "ok" } else { "failed" })
+            .detail(detail.clone())
+            .duration_ms(started.elapsed().as_millis() as u64),
+        );
+        Ok(ConnectionTestReport { ok, detail })
     }
 
     /* ---------------------------- rules (UI) ------------------------------ */

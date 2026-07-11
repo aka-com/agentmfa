@@ -120,6 +120,13 @@ interface AppState {
   quickSetupError: string | null;
   connectionReady: ConnectionReadyState | null;
   connectionTaskCopied: boolean;
+  connTests: Record<string, ConnectionTestState>;
+}
+
+interface ConnectionTestState {
+  running: boolean;
+  ok?: boolean;
+  detail?: string;
 }
 
 /* ------------------------------ local state ------------------------------ */
@@ -164,6 +171,7 @@ const state: AppState = {
   quickSetupError: null,
   connectionReady: null,
   connectionTaskCopied: false,
+  connTests: {},         // connectionId -> in-flight/last test result (transient)
 };
 
 const root = (): HTMLElement => {
@@ -314,7 +322,7 @@ function firstConnectionSetupHTML(): string {
     </div>
     <div class="quick-import-row">
       <input id="quick-setup-source" aria-label="Service to import" placeholder="${escAttr(quickSetupPlaceholder(type))}" value="${escAttr(state.quickSetupSource)}">
-      <button class="btn primary sm" data-act="quick-setup-review">Configure</button>
+      <button class="btn primary sm" data-act="quick-setup-review">Continue</button>
     </div>
     ${state.quickSetupError ? `<div class="field-error quick-setup-error">${esc(state.quickSetupError)}</div>` : ''}
   </div>`;
@@ -323,46 +331,44 @@ function firstConnectionSetupHTML(): string {
 function globalSectionsHTML() {
   let out = '';
   let hasOnboarding = false;
-  if (state.tab === 'connections' && !state.connections.length && state.settings.show_service_walkthrough) {
+  if (state.tab === 'connections' && state.settings.show_service_walkthrough) {
     out += firstConnectionSetupHTML();
     hasOnboarding = true;
   }
-  if (!state.agents.length) {
-    if (state.tab === 'connections' && state.settings.show_agent_walkthrough) {
-      hasOnboarding = true;
-      const instructionBody = state.showFullInstructions
-        ? (state.brokerInstructions || 'Loading…')
-        : (state.agentSetupInstructions || 'Loading…');
-      out += `<div class="agent-onboarding walkthrough-card">
-        <div class="walkthrough-head">
-          <div class="onboarding-copy"><b>Connect an agent</b>
-            <span>Copy a short setup message into your coding agent.</span></div>
-          <button class="icon-btn walkthrough-close" title="Hide this walkthrough" aria-label="Hide Connect an agent walkthrough" data-act="hide-agent-walkthrough">${ICONS.x}</button>
-        </div>
-        <div class="onboarding-actions">
-          <button class="btn primary sm" data-act="copy-agent-setup">Copy setup instructions</button>
-          <button class="setup-toggle" data-act="toggle-setup-instructions"
-            aria-expanded="${state.setupInstructionsOpen}">View instructions<span class="setup-toggle-icon">${ICONS.chevronDown}</span></button>
-          ${state.setupInstructionsOpen
-            ? `<button class="switch ${state.showFullInstructions ? 'on' : ''}" data-act="toggle-full-instructions"
-                role="switch" aria-checked="${state.showFullInstructions ? 'true' : 'false'}"
-                aria-label="${state.showFullInstructions ? 'Show short setup instructions' : 'Show full broker instructions'}"
-                title="${state.showFullInstructions ? 'Show short setup instructions' : 'Show full broker instructions'}"></button>`
-            : ''}
-        </div>
+  if (state.tab === 'connections' && state.settings.show_agent_walkthrough) {
+    hasOnboarding = true;
+    const instructionBody = state.showFullInstructions
+      ? (state.brokerInstructions || 'Loading…')
+      : (state.agentSetupInstructions || 'Loading…');
+    out += `<div class="agent-onboarding walkthrough-card">
+      <div class="walkthrough-head">
+        <div class="onboarding-copy"><b>Connect an agent</b>
+          <span>Copy a short setup message into your coding agent. After you paste it, your agent will ask to connect. Approve it in the window that pops up.</span></div>
+        <button class="icon-btn walkthrough-close" title="Hide this walkthrough" aria-label="Hide Connect an agent walkthrough" data-act="hide-agent-walkthrough">${ICONS.x}</button>
+      </div>
+      <div class="onboarding-actions">
+        <button class="btn primary sm" data-act="copy-agent-setup">Copy setup instructions</button>
+        <button class="setup-toggle" data-act="toggle-setup-instructions"
+          aria-expanded="${state.setupInstructionsOpen}">View instructions<span class="setup-toggle-icon">${ICONS.chevronDown}</span></button>
         ${state.setupInstructionsOpen
-          ? state.showFullInstructions
-            ? `<div class="setup-instructions is-full">
-                <div class="full-instructions-banner">
-                  <p>These are the instructions that the agent will see. Tell it to read from:</p>
-                  <code>${esc(setupCurlCommand(state.agentSetupInstructions))}</code>
-                </div>
-                <pre class="full-instructions-code"><code>${esc(instructionBody)}</code></pre>
-              </div>`
-            : `<pre class="setup-instructions"><code>${esc(instructionBody)}</code></pre>`
-          : ''}</div>`;
-    }
-  } else {
+          ? `<div class="seg instructions-seg" role="group" aria-label="Instruction detail">
+              <button class="seg-btn ${state.showFullInstructions ? '' : 'on'}" data-act="set-instructions-detail" data-full="false" aria-pressed="${!state.showFullInstructions}">Short</button>
+              <button class="seg-btn ${state.showFullInstructions ? 'on' : ''}" data-act="set-instructions-detail" data-full="true" aria-pressed="${state.showFullInstructions}">Full</button></div>`
+          : ''}
+      </div>
+      ${state.setupInstructionsOpen
+        ? state.showFullInstructions
+          ? `<div class="setup-instructions is-full">
+              <div class="full-instructions-banner">
+                <p>These are the instructions that the agent will see. Tell it to read from:</p>
+                <code>${esc(setupCurlCommand(state.agentSetupInstructions))}</code>
+              </div>
+              <pre class="full-instructions-code"><code>${esc(instructionBody)}</code></pre>
+            </div>`
+          : `<pre class="setup-instructions"><code>${esc(instructionBody)}</code></pre>`
+        : ''}</div>`;
+  }
+  if (state.agents.length) {
     out += '<div class="live-head">Connected agents</div>' + state.agents.map((a) => {
       const sub = `${a.program} · ${a.verification} · last used ${relTime(a.last_used)}` +
         (a.permission_count ? ` · ${a.permission_count} permission${a.permission_count === 1 ? '' : 's'}` : '');
@@ -404,6 +410,7 @@ function secretsHTML() {
   if (!state.secrets.length) {
     return `<div class="empty"><div class="empty-ico">🔐</div><h3>No secrets</h3>
       <p>Store API keys, connection strings, and other credentials and secrets here.</p>
+      <p class="empty-tip">Tip: adding a service can save its credential in one step.</p>
       <button class="btn primary" data-act="open-add-secret">＋ Add secret</button></div>`;
   }
   const rows = state.secrets.map((s) => {
@@ -466,9 +473,19 @@ const accessRowsHTML = (c: ConnectionSummary): string => {
 };
 const liveCount = (c: ConnectionSummary): number =>
   state.sessions.filter((s) => s.connection === c.name).length;
-const connActionsHTML = (c: ConnectionSummary): string =>
-  `<button class="icon-btn" title="Edit service" aria-label="Edit service ${escAttr(c.name)}" data-act="edit-conn" data-id="${c.id}">${ICONS.pencil}</button>
+const connActionsHTML = (c: ConnectionSummary): string => {
+  const test = state.connTests[c.id];
+  return `<button class="btn ghost sm cc-test-btn" data-act="test-conn" data-id="${c.id}"
+     aria-label="Test service ${escAttr(c.name)}" ${test && test.running ? 'disabled' : ''}>${test && test.running ? 'Testing…' : 'Test'}</button>
+   <button class="icon-btn" title="Edit service" aria-label="Edit service ${escAttr(c.name)}" data-act="edit-conn" data-id="${c.id}">${ICONS.pencil}</button>
    <button class="icon-btn" title="Delete service" aria-label="Delete service ${escAttr(c.name)}" data-act="del-conn-ask" data-id="${c.id}">${ICONS.trash}</button>`;
+};
+
+const connTestResultHTML = (c: ConnectionSummary): string => {
+  const test = state.connTests[c.id];
+  if (!test || test.running || test.detail === undefined) return '';
+  return `<div class="cc-test ${test.ok ? 'ok' : 'err'}">${test.ok ? ICONS.circleCheck : ICONS.circleX}<span>${esc(test.detail)}</span></div>`;
+};
 
 // Card grid, after TablePlus launchers / Keybase device cards: one
 // connection = one object with everything about it inside its border.
@@ -505,6 +522,7 @@ function connectionsHTML() {
       <div class="cc-target" title="${escAttr(c.target)}">${esc(c.target)}</div>
       <div class="cc-chips">${chips}</div>
       ${accessRowsHTML(c)}
+      ${connTestResultHTML(c)}
       <div class="cc-foot">${connActionsHTML(c)}</div></div>`;
   }).join('') + `</div>`;
 }
@@ -569,9 +587,9 @@ function walkthroughMenuHTML(): string {
     `<button class="walkthrough-option" role="menuitemcheckbox" aria-checked="${checked}" data-act="${action}">
       <span class="walkthrough-check">${checked ? ICONS.check : ''}</span><span>${label}</span></button>`;
   return `<div class="walkthrough-menu-wrap">
-    <button class="icon-btn walkthrough-menu-btn ${state.walkthroughMenuOpen ? 'on' : ''}"
-      title="Choose walkthroughs" aria-label="Choose walkthroughs" aria-haspopup="menu"
-      aria-expanded="${state.walkthroughMenuOpen}" data-act="toggle-walkthrough-menu">${ICONS.bookOpenCheck}</button>
+    <button class="walkthrough-menu-btn ${state.walkthroughMenuOpen ? 'on' : ''}"
+      title="Choose walkthroughs" aria-haspopup="menu"
+      aria-expanded="${state.walkthroughMenuOpen}" data-act="toggle-walkthrough-menu">${ICONS.bookOpenCheck}<span>Walkthroughs</span></button>
     ${state.walkthroughMenuOpen ? `<div class="walkthrough-menu" role="menu" aria-label="Walkthroughs">
       <div class="walkthrough-menu-title">Walkthroughs</div>
       ${option('toggle-service-walkthrough', 'Add a service for your agent', state.settings.show_service_walkthrough)}
@@ -968,7 +986,7 @@ function approvalHeading(req: ApprovalRequest): string {
 }
 
 function temporaryAccessExplanation(req: ApprovalRequest): { duration: string; text: string } {
-  const connection = req.connection ? req.connection.name : 'this connection';
+  const connection = req.connection ? req.connection.name : 'this service';
   const access = req.temporary_access || { scope: 'full', duration_seconds: 900 };
   const duration = durationLabel(access.duration_seconds);
   if (access.scope === 'read') {
@@ -990,7 +1008,7 @@ function temporaryAccessExplanation(req: ApprovalRequest): { duration: string; t
 }
 
 function ongoingAccessExplanation(req: ApprovalRequest): string {
-  const connection = req.connection ? req.connection.name : 'this connection';
+  const connection = req.connection ? req.connection.name : 'this service';
   if (req.temporary_access && req.temporary_access.scope === 'read') {
     return `${req.agent} will be able to fetch data from ${connection} without asking again. Requests that may make changes will still ask.`;
   }
@@ -1173,6 +1191,10 @@ function positionFormMenu(): void {
   const trigger = state.formMenuOpen ? document.getElementById(state.formMenuOpen) : null;
   const menu = document.querySelector<HTMLElement>('.cred-menu');
   if (!trigger || !menu) return;
+  // A fixed descendant is still clipped by an ancestor's overflow. Move the
+  // listbox out of the scrolling sheet before positioning it so the sheet can
+  // keep its scrollbar without cutting the menu off.
+  if (menu.parentElement !== root()) root().appendChild(menu);
   const rect = trigger.getBoundingClientRect();
   menu.style.left = `${rect.left}px`;
   menu.style.width = `${rect.width}px`;
@@ -1511,7 +1533,7 @@ document.addEventListener('click', async (e) => {
     state.walkthroughMenuOpen = false;
     if (!btn) { render(); return; }
   }
-  if (state.formMenuOpen && !target?.closest('.cred-select')) {
+  if (state.formMenuOpen && !target?.closest('.cred-select') && !target?.closest('.cred-menu')) {
     state.formMenuOpen = null;
     if (!btn) { render(); return; }
     // fall through: the clicked action runs and its render reflects the close
@@ -1588,16 +1610,18 @@ document.addEventListener('click', async (e) => {
       }
       render();
       break;
-    case 'toggle-full-instructions':
+    case 'set-instructions-detail': {
       if (!state.setupInstructionsOpen) break;
-      state.showFullInstructions = !state.showFullInstructions;
-      if (state.showFullInstructions && !state.brokerInstructions) {
+      const full = btn.dataset.full === 'true';
+      if (full === state.showFullInstructions) break;
+      state.showFullInstructions = full;
+      if (full && !state.brokerInstructions) {
         render();
         const ok = await run(async () => {
           state.brokerInstructions = await invoke('get_broker_instructions');
         });
         if (!ok) state.showFullInstructions = false;
-      } else if (!state.showFullInstructions && !state.agentSetupInstructions) {
+      } else if (!full && !state.agentSetupInstructions) {
         render();
         await run(async () => {
           state.agentSetupInstructions = await invoke('get_agent_setup');
@@ -1605,6 +1629,7 @@ document.addEventListener('click', async (e) => {
       }
       render();
       break;
+    }
     case 'copy-ready-setup':
       if (await run(() => invoke('copy_agent_setup'))) flashReadyCopied();
       break;
@@ -1734,6 +1759,7 @@ document.addEventListener('click', async (e) => {
         state.draft.port ?? null,
       );
       state.connType = typedNextType;
+      state.sheetErrors = {};
       state.formMenuOpen = null;
       render(false);
       break;
@@ -1778,9 +1804,25 @@ document.addEventListener('click', async (e) => {
     case 'del-conn-ask': state.confirm = { kind: 'del-conn', id }; render(); break;
     case 'del-conn-confirm':
       if (await run(() => invoke('delete_connection', { id }))) {
-        state.confirm = null; toast('🗑 Connection removed'); await refresh('all');
+        state.confirm = null;
+        delete state.connTests[id];
+        toast('🗑 Service removed');
+        await refresh('all');
       }
       break;
+    case 'test-conn': {
+      if (state.connTests[id] && state.connTests[id].running) break;
+      state.connTests[id] = { running: true };
+      render();
+      try {
+        const report = await invoke('test_connection', { id });
+        state.connTests[id] = { running: false, ok: report.ok, detail: report.detail };
+      } catch (error) {
+        state.connTests[id] = { running: false, ok: false, detail: errorMessage(error) };
+      }
+      render();
+      break;
+    }
     case 'del-permission':
       await run(() => invoke('remove_permission', { id }));
       toast('🔒 Approval will be required again'); await refresh('all');

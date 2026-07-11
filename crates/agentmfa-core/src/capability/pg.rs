@@ -1027,6 +1027,22 @@ async fn dial_upstream(
     })
 }
 
+/// UI-initiated connectivity/credential test: dial and authenticate exactly
+/// as a brokered session would, then send Terminate without issuing a query.
+pub async fn test_upstream(
+    store: &Arc<Store>,
+    events: &Arc<dyn BrokerEvents>,
+    connection: &Connection,
+) -> Result<String, String> {
+    let ConnectionConfig::Pg { dbname, user, .. } = &connection.config else {
+        return Err("not a postgres connection".into());
+    };
+    let mut upstream = dial_upstream(store, events, connection, &[]).await?;
+    let _ = upstream.stream.write_all(&frame(b'X', &[])).await;
+    let _ = upstream.stream.shutdown().await;
+    Ok(format!("Signed in to {dbname} as {user}"))
+}
+
 /// md5 auth: `"md5" + md5hex(md5hex(password + user) + salt4)`.
 fn md5_password(user: &str, password: &[u8], salt: &[u8]) -> String {
     use md5::{Digest as _, Md5};

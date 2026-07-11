@@ -693,6 +693,21 @@ pub fn delete_connection(state: State<AppState>, id: String) -> CmdResult<()> {
         .map_err(|e| e.to_string())
 }
 
+/// Broker-side connectivity/credential test against the service's pinned
+/// destination; only the pass/fail summary reaches the webview.
+#[tauri::command]
+pub async fn test_connection(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<agentmfa_core::broker::ConnectionTestReport> {
+    let id = parse_id(&id)?;
+    state
+        .broker
+        .ui_test_connection(&id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /* -------------------------------- rules ---------------------------------- */
 
 #[tauri::command]
@@ -823,6 +838,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         add_connection,
         edit_connection,
         delete_connection,
+        test_connection,
         remove_permission,
         revoke_agent,
         close_session,

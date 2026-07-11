@@ -121,6 +121,8 @@ pub enum AuditKind {
     ConnectionAdded,
     ConnectionUpdated,
     ConnectionDeleted,
+    /// A user-initiated connectivity/credential test from the UI.
+    ConnectionTested,
     SettingsChanged,
     // Rate limiting / budgets
     RateLimited,
@@ -159,6 +161,7 @@ impl AuditKind {
             AuditKind::ConnectionAdded => "plug",
             AuditKind::ConnectionUpdated => "pencil",
             AuditKind::ConnectionDeleted => "unplug",
+            AuditKind::ConnectionTested => "flaskConical",
             AuditKind::SettingsChanged => "gear",
             AuditKind::RateLimited => "gauge",
         }

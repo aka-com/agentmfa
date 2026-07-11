@@ -164,6 +164,12 @@ export interface ConnectionInput {
   url?: string | null;
 }
 
+// Pass/fail summary of a broker-side service connectivity test.
+export interface ConnectionTestReport {
+  ok: boolean;
+  detail: string;
+}
+
 interface CommandSpec<Args, Result> {
   args: Args;
   result: Result;
@@ -194,6 +200,7 @@ export interface CommandMap {
   add_connection: CommandSpec<{ input: ConnectionInput }, void>;
   edit_connection: CommandSpec<{ id: string; input: ConnectionInput }, void>;
   delete_connection: CommandSpec<{ id: string }, void>;
+  test_connection: CommandSpec<{ id: string }, ConnectionTestReport>;
   remove_permission: CommandSpec<{ id: string }, boolean>;
   revoke_agent: CommandSpec<{ id: string }, boolean>;
   close_session: CommandSpec<{ id: number }, boolean>;
