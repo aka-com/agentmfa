@@ -90,16 +90,16 @@ export function parseApiOrigin(value: unknown): {
   try {
     parsed = new URL(String(value).trim());
   } catch {
-    throw new Error('Enter a complete origin such as https://api.example.com');
+    throw new Error('Enter a complete API root such as https://api.example.com');
   }
   if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-    throw new Error('API origin must start with https:// or http://');
+    throw new Error('API root must start with https:// or http://');
   }
   if (parsed.username || parsed.password) {
-    throw new Error('API origin must not contain credentials');
+    throw new Error('API root must not contain credentials');
   }
   if (parsed.pathname !== '/' || parsed.search || parsed.hash) {
-    throw new Error('API origin cannot contain a path, query, or fragment');
+    throw new Error('API root cannot contain a path, query, or fragment');
   }
   const port = parsed.port ? Number(parsed.port) : null;
   return {
@@ -232,7 +232,7 @@ export function parseConnectionImport(value: unknown): ConnectionImport {
     if (parsed.username || parsed.password) throw new Error('API URLs with embedded credentials are not supported');
     const warnings = [];
     if (parsed.pathname !== '/' || parsed.search || parsed.hash) {
-      warnings.push('Only the API origin is saved; the path, query, and fragment are supplied per request.');
+      warnings.push('Only the API root is saved; the path, query, and fragment are supplied per request.');
     }
     return {
       type: 'api', name: suggestedName(parsed.hostname, 'api'), credential: null, warnings,

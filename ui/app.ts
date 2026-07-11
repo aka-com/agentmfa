@@ -746,7 +746,7 @@ function connSheet(editing: boolean): string {
     <div class="seg in-form">${typeBtn('pg', 'Postgres')}${typeBtn('ssh', 'SSH')}${typeBtn('api', 'HTTP API')}${typeBtn('ws', 'WebSocket')}</div></div>`;
   if (t === 'api') {
     const origin = d.origin ?? apiOriginFromParts(d.scheme ?? undefined, d.host ?? undefined, d.port ?? null);
-    fields += `<div class="f-row"><label>API origin</label><input id="f-origin" class="${fieldCls('origin')}" placeholder="https://api.github.com" value="${escAttr(origin)}">${fieldErr('origin')}
+    fields += `<div class="f-row"><label>API root</label><input id="f-origin" class="${fieldCls('origin')}" placeholder="https://api.github.com" value="${escAttr(origin)}">${fieldErr('origin')}
       <div class="rule-note">Scheme, host, and optional port only. The agent supplies each request path.</div></div>`;
   } else if (t === 'ssh') {
     fields += `<div class="f-2col">
@@ -1694,6 +1694,12 @@ const ERR_KEY_BY_INPUT = {
   'c-new-secret-name': 'newSecretName', 'c-new-secret-value': 'newSecretValue',
   'c-auth-detail': 'authDetail',
 };
+
+function updateCredentialNamePlaceholder(connectionName: string): void {
+  const input = document.getElementById('c-new-secret-name') as HTMLInputElement | null;
+  if (input) input.placeholder = suggestedSecretName(connectionName, state.connType);
+}
+
 document.addEventListener('input', (e) => {
   const target = e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement
     ? e.target
@@ -1705,10 +1711,16 @@ document.addEventListener('input', (e) => {
     state.quickSetupSource = target.value;
     state.quickSetupError = null;
   }
+  if (target?.id === 'f-cname') updateCredentialNamePlaceholder(target.value);
   if (key && state.sheetErrors[key]) {
     delete state.sheetErrors[key];
     render();
   }
+});
+
+document.addEventListener('focusout', (e) => {
+  const target = e.target instanceof HTMLInputElement ? e.target : null;
+  if (target?.id === 'f-cname') updateCredentialNamePlaceholder(target.value);
 });
 
 // These selects reveal a different, stateful portion of the form. Capture
