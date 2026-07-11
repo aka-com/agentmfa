@@ -288,12 +288,13 @@ function firstConnectionSetupHTML(): string {
   const types = QUICK_SETUP_TYPES.map(([value, label]) =>
     `<button class="quick-type ${type === value ? 'on' : ''}" aria-pressed="${type === value}" data-act="quick-setup-type" data-type="${value}">${label}</button>`).join('');
   return `<div class="agent-onboarding service-onboarding walkthrough-card">
-    <button class="icon-btn walkthrough-close" title="Hide this walkthrough" aria-label="Hide Add a service walkthrough" data-act="hide-service-walkthrough">${ICONS.x}</button>
-    <div class="onboarding-copy"><b>Add a service for your agent</b>
-      <span>Save a database, server, or API. AgentMFA brokers access without giving credentials to your agent.</span></div>
+    <div class="walkthrough-head">
+      <div class="onboarding-copy"><b>Add a service for your agent</b>
+        <span>Save a database, server, or API. AgentMFA brokers access without giving credentials to your agent.</span></div>
+      <button class="icon-btn walkthrough-close" title="Hide this walkthrough" aria-label="Hide Add a service walkthrough" data-act="hide-service-walkthrough">${ICONS.x}</button>
+    </div>
     <div class="quick-type-row">
       <div class="quick-types" aria-label="Service type">${types}</div>
-      <button class="setup-toggle quick-manual" data-act="quick-setup-manual">Configure manually</button>
     </div>
     <div class="quick-import-row">
       <input id="quick-setup-source" aria-label="Service to import" placeholder="${escAttr(quickSetupPlaceholder(type))}" value="${escAttr(state.quickSetupSource)}">
@@ -317,9 +318,11 @@ function globalSectionsHTML() {
         ? (state.brokerInstructions || 'Loading…')
         : (state.agentSetupInstructions || 'Loading…');
       out += `<div class="agent-onboarding walkthrough-card">
-        <button class="icon-btn walkthrough-close" title="Hide this walkthrough" aria-label="Hide Connect an agent walkthrough" data-act="hide-agent-walkthrough">${ICONS.x}</button>
-        <div class="onboarding-copy"><b>Connect an agent</b>
-        <span>Copy a short setup message into your coding agent.</span></div>
+        <div class="walkthrough-head">
+          <div class="onboarding-copy"><b>Connect an agent</b>
+            <span>Copy a short setup message into your coding agent.</span></div>
+          <button class="icon-btn walkthrough-close" title="Hide this walkthrough" aria-label="Hide Connect an agent walkthrough" data-act="hide-agent-walkthrough">${ICONS.x}</button>
+        </div>
         <div class="onboarding-actions">
           <button class="btn primary sm" data-act="copy-agent-setup">Copy setup instructions</button>
           <button class="setup-toggle" data-act="toggle-setup-instructions"
@@ -335,8 +338,7 @@ function globalSectionsHTML() {
           ? state.showFullInstructions
             ? `<div class="setup-instructions is-full">
                 <div class="full-instructions-banner">
-                  <p>These are the instructions that the agent will see.</p>
-                  <p>To set up your agent, tell it to read these instructions from:</p>
+                  <p>These are the instructions that the agent will see. Tell it to read from:</p>
                   <code>${esc(setupCurlCommand(state.agentSetupInstructions))}</code>
                 </div>
                 <pre class="full-instructions-code"><code>${esc(instructionBody)}</code></pre>
@@ -553,7 +555,7 @@ function walkthroughMenuHTML(): string {
   return `<div class="walkthrough-menu-wrap">
     <button class="icon-btn walkthrough-menu-btn ${state.walkthroughMenuOpen ? 'on' : ''}"
       title="Choose walkthroughs" aria-label="Choose walkthroughs" aria-haspopup="menu"
-      aria-expanded="${state.walkthroughMenuOpen}" data-act="toggle-walkthrough-menu">${ICONS.list}</button>
+      aria-expanded="${state.walkthroughMenuOpen}" data-act="toggle-walkthrough-menu">${ICONS.bookOpenCheck}</button>
     ${state.walkthroughMenuOpen ? `<div class="walkthrough-menu" role="menu" aria-label="Walkthroughs">
       <div class="walkthrough-menu-title">Walkthroughs</div>
       ${option('toggle-service-walkthrough', 'Add a service for your agent', state.settings.show_service_walkthrough)}
@@ -563,8 +565,10 @@ function walkthroughMenuHTML(): string {
 }
 
 function renderMainWindow() {
-  const nav = TABS.map((tb) =>
-    `<button class="nav-item ${state.tab === tb ? 'on' : ''}" data-act="tab" data-tab="${tb}">${tabLabel(tb)}</button>`).join('');
+  const navItem = (tab: Tab): string =>
+    `<button class="nav-item ${state.tab === tab ? 'on' : ''}" data-act="tab" data-tab="${tab}">${tabLabel(tab)}</button>`;
+  const nav = TABS.filter((tab) => tab !== 'activity').map(navItem).join('');
+  const activityNav = navItem('activity');
   // One view-specific action, always in the header row next to the title.
   const actionBtn = state.tab === 'connections'
     ? `<div class="dw-head-actions">${walkthroughMenuHTML()}<button class="btn" data-act="open-add-conn">＋ Add service</button></div>`
@@ -583,6 +587,7 @@ function renderMainWindow() {
         <div class="dw-brand"><div class="dd-appicon">🔐</div>
           <div><div class="dd-title">AgentMFA</div>${brokerReadyHTML()}</div></div>
         <div class="dw-nav">${nav}</div>
+        <div class="dw-secondary-nav">${activityNav}</div>
         <div class="dw-settings">${menu}
           <button class="nav-item gear-btn ${state.menuOpen ? 'on' : ''}" data-act="toggle-settings-menu" title="Settings" aria-label="Settings">${ICONS.gear}</button>
         </div>
@@ -681,29 +686,28 @@ function credentialChooserHTML(
   const select = allowNew
     ? selectControlHTML('c-secret-source', `${sourceOptions}<option value="new" ${source === 'new' ? 'selected' : ''}>Save a new credential</option>`)
     : '';
-  const firstLabel = (label: string): string =>
-    `<label class="credential-first-label"><span class="credential-key" aria-hidden="true">${ICONS.keyRound}</span>${label}</label>`;
+  const railKey = `<span class="credential-key" aria-hidden="true">${ICONS.keyRound}</span>`;
   if (source === 'existing' && state.secrets.length) {
     const opts = state.secrets.map((secret) =>
       `<option value="${escAttr(secret.id)}" ${draft.secretId === secret.id ? 'selected' : ''}>${esc(secret.name)}</option>`).join('');
-    return `<div class="credential-rail">
-      ${allowNew ? `<div class="f-row">${firstLabel(secretLabel)}${select}</div>` : ''}
-      <div class="f-row">${allowNew ? '<label>Saved credential</label>' : firstLabel(secretLabel)}${selectControlHTML('c-secret', opts)}${fieldErr('secret')}</div>
+    return `<div class="credential-rail">${railKey}
+      ${allowNew ? `<div class="f-row"><label>${secretLabel}</label>${select}</div>` : ''}
+      <div class="f-row"><label>${allowNew ? 'Saved credential' : secretLabel}</label>${selectControlHTML('c-secret', opts)}${fieldErr('secret')}</div>
     </div>`;
   }
   const suggested = suggestedSecretName(draft.name ?? '', type);
   if (type === 'ssh' && draft.sshImportId && draft.identityFiles && draft.identityFiles.length) {
     const identityOptions = draft.identityFiles.map((path) =>
       `<option value="${escAttr(path)}" ${draft.identityFile === path ? 'selected' : ''}>${esc(path)}</option>`).join('');
-    return `<div class="credential-rail">
-      <div class="f-row">${firstLabel(secretLabel)}${select}</div>
+    return `<div class="credential-rail">${railKey}
+      <div class="f-row"><label>${secretLabel}</label>${select}</div>
       <div class="f-row"><label>Credential name</label><input id="c-new-secret-name" class="${fieldCls('newSecretName')}" placeholder="${escAttr(suggested)}" value="${escAttr(draft.newSecretName ?? '')}">${fieldErr('newSecretName')}</div>
       <div class="f-row"><label>Identity file</label>${selectControlHTML('c-identity-file', identityOptions)}${fieldErr('newSecretValue')}
         <div class="rule-note">The private key is read by AgentMFA and saved directly to macOS Keychain.</div></div>
     </div>`;
   }
-  return `<div class="credential-rail">
-    <div class="f-row">${firstLabel(secretLabel)}${select}</div>
+  return `<div class="credential-rail">${railKey}
+    <div class="f-row"><label>${secretLabel}</label>${select}</div>
     <div class="f-row"><label>Credential name</label><input id="c-new-secret-name" class="${fieldCls('newSecretName')}" placeholder="${escAttr(suggested)}" value="${escAttr(draft.newSecretName ?? '')}">${fieldErr('newSecretName')}</div>
     <div class="f-row"><label>Credential value</label><input id="c-new-secret-value" class="${fieldCls('newSecretValue')}" type="password" placeholder="Saved directly to macOS Keychain" value="${escAttr(draft.newSecretValue ?? draft.importedCredential ?? '')}">${fieldErr('newSecretValue')}</div>
   </div>`;
@@ -748,19 +752,19 @@ function connSheet(editing: boolean): string {
   const importWarnings = !editing && d.importWarnings && d.importWarnings.length
     ? `<div class="pair-identity-warning"><b>Review imported details</b><ul>${d.importWarnings.map((warning) => `<li>${esc(warning)}</li>`).join('')}</ul></div>` : '';
   let sshHostKeyField = '';
+  let pgTlsFields = '';
   let fields = importWarnings;
   fields += `<div class="f-row"><label>Name</label><input id="f-cname" class="${fieldCls('name')}" placeholder="e.g. github" value="${escAttr(d.name ?? '')}">${fieldErr('name')}</div>
     <div class="f-row"><label>Type${editing ? ': fixed after creation' : ''}</label>
     <div class="seg in-form">${typeBtn('pg', 'Postgres')}${typeBtn('ssh', 'SSH')}${typeBtn('api', 'HTTP API')}${typeBtn('ws', 'WebSocket')}</div></div>`;
   if (t === 'api') {
     const origin = d.origin ?? apiOriginFromParts(d.scheme ?? undefined, d.host ?? undefined, d.port ?? null);
-    fields += `<div class="f-row"><label>API root</label><input id="f-origin" class="${fieldCls('origin')}" placeholder="https://api.github.com" value="${escAttr(origin)}">${fieldErr('origin')}
-      <div class="rule-note">Scheme, host, and optional port only. The agent supplies each request path.</div></div>`;
+    fields += `<div class="f-row"><label>API root</label><input id="f-origin" class="${fieldCls('origin')}" placeholder="https://api.github.com" value="${escAttr(origin)}">${fieldErr('origin')}</div>`;
   } else if (t === 'ssh') {
     fields += `<div class="f-2col">
+      <div class="f-row" style="flex:0 0 90px"><label>User</label><input id="f-user" class="${fieldCls('user')}" placeholder="deploy" value="${escAttr(d.user ?? '')}">${fieldErr('user')}</div>
       <div class="f-row"><label>Host</label><input id="f-host" class="${fieldCls('host')}" placeholder="prod.example.com" value="${escAttr(d.host ?? '')}">${fieldErr('host')}</div>
-      <div class="f-row" style="flex:0 0 90px"><label>Port</label><input id="f-port" class="${fieldCls('port')}" inputmode="numeric" value="${escAttr(d.port ?? '22')}">${fieldErr('port')}</div></div>
-      <div class="f-row"><label>User</label><input id="f-user" class="${fieldCls('user')}" placeholder="deploy" value="${escAttr(d.user ?? '')}">${fieldErr('user')}</div>`;
+      <div class="f-row" style="flex:0 0 90px"><label>Port</label><input id="f-port" class="${fieldCls('port')}" inputmode="numeric" value="${escAttr(d.port ?? '22')}">${fieldErr('port')}</div></div>`;
     const hostKeys = d.hostKeyCandidates || [];
     const hostKeyControl = hostKeys.length
       ? selectControlHTML('f-host-key', hostKeys.map((candidate) =>
@@ -782,10 +786,10 @@ function connSheet(editing: boolean): string {
       <div class="f-row" style="flex:0 0 90px"><label>Port</label><input id="f-port" class="${fieldCls('port')}" inputmode="numeric" value="${escAttr(d.port ?? '5432')}">${fieldErr('port')}</div></div>
       <div class="f-2col">
       <div class="f-row"><label>Database</label><input id="f-db" class="${fieldCls('dbname')}" placeholder="app_production" value="${escAttr(d.dbname ?? '')}">${fieldErr('dbname')}</div>
-      <div class="f-row" style="flex:0 0 90px"><label>User</label><input id="f-user" class="${fieldCls('user')}" placeholder="app" value="${escAttr(d.user ?? '')}">${fieldErr('user')}</div></div>
-      <div class="f-row"><label>TLS mode</label>${selectControlHTML('f-sslmode', sslOpts)}${fieldErr('sslmode')}
+      <div class="f-row" style="flex:0 0 90px"><label>User</label><input id="f-user" class="${fieldCls('user')}" placeholder="app" value="${escAttr(d.user ?? '')}">${fieldErr('user')}</div></div>`;
+    pgTlsFields = `<div class="f-row"><label>TLS mode</label>${selectControlHTML('f-sslmode', sslOpts)}${fieldErr('sslmode')}
         ${sslmode === 'require' ? '<div class="pair-identity-warning">The server certificate will not be verified.</div>' : ''}</div>
-      <div class="f-row"><label>Trusted CA bundle <span class="label-detail">optional</span></label>
+      <div class="f-row"><label>Trusted CA bundle <span class="label-detail">(optional)</span></label>
         <input id="f-pg-ca-bundle" placeholder="/path/to/private-ca.pem" value="${escAttr(d.pgCaBundlePath ?? '')}">
         <div class="rule-note">Verified TLS uses system roots when this is empty.</div></div>`;
   } else {
@@ -796,7 +800,7 @@ function connSheet(editing: boolean): string {
   if (editing && t === 'api') {
     fields += `<div class="f-row"><label>Injection template</label>
       <input id="c-template" class="${fieldCls('template')}" value="${escAttr(d.template ?? '')}">${fieldErr('template')}
-      <div class="rule-note">Advanced template; references saved credentials by name.</div></div>`;
+      <div class="rule-note">Bearer token + template; references saved credentials by name.</div></div>`;
   } else if (editing) {
     if (t !== 'ws' || !d.template) fields += credentialChooserHTML(t, d, false);
     if (t === 'ws' && d.template) {
@@ -809,23 +813,26 @@ function connSheet(editing: boolean): string {
     const recipes = [
       ['bearer', 'Bearer token'], ['header', 'Custom header'],
       ...(t === 'api' ? [['query', 'Query parameter']] : []),
-      ['advanced', 'Advanced template'],
+      ['advanced', 'Bearer token + template'],
     ].map(([value, label]) => `<option value="${value}" ${modeValue === value ? 'selected' : ''}>${label}</option>`).join('');
-    fields += `<div class="f-row"><label>Authentication</label>${selectControlHTML('c-auth-mode', recipes)}</div>`;
+    let authenticationFields = `<div class="f-row"><label>Authentication Type</label>${selectControlHTML('c-auth-mode', recipes)}</div>`;
     if (modeValue === 'header') {
-      fields += `<div class="f-row"><label>Header name</label><input id="c-auth-detail" class="${fieldCls('authDetail')}" placeholder="X-API-Key" value="${escAttr(d.authDetail ?? '')}">${fieldErr('authDetail')}</div>`;
+      authenticationFields += `<div class="f-row"><label>Header name</label><input id="c-auth-detail" class="${fieldCls('authDetail')}" placeholder="X-API-Key" value="${escAttr(d.authDetail ?? '')}">${fieldErr('authDetail')}</div>`;
     } else if (modeValue === 'query') {
-      fields += `<div class="f-row"><label>Query parameter</label><input id="c-auth-detail" class="${fieldCls('authDetail')}" placeholder="api_key" value="${escAttr(d.authDetail ?? '')}">${fieldErr('authDetail')}</div>`;
+      authenticationFields += `<div class="f-row"><label>Query parameter</label><input id="c-auth-detail" class="${fieldCls('authDetail')}" placeholder="api_key" value="${escAttr(d.authDetail ?? '')}">${fieldErr('authDetail')}</div>`;
     }
     if (modeValue === 'advanced') {
-      fields += `<div class="f-row"><label>Injection template</label><input id="c-template" class="${fieldCls('template')}" placeholder="Authorization: Bearer {{TOKEN_NAME}}" value="${escAttr(d.template ?? '')}">${fieldErr('template')}
+      authenticationFields += `<div class="f-row"><label>Injection template</label><input id="c-template" class="${fieldCls('template')}" placeholder="Authorization: Bearer {{TOKEN_NAME}}" value="${escAttr(d.template ?? '')}">${fieldErr('template')}
         <div class="rule-note">References credentials by name using <code>{{ … }}</code>. Use this for Basic auth or composed credentials.</div></div>`;
+      fields += authenticationFields;
     } else {
       fields += credentialChooserHTML(t, d);
+      fields += authenticationFields;
     }
   } else {
     fields += credentialChooserHTML(t, d);
   }
+  fields += pgTlsFields;
   fields += sshHostKeyField;
   if (editing && conn && (conn.permissions || []).some((permission) => !permission.expires_at)) {
     fields += `<div class="rule-note">Changing the destination makes affected agents ask for approval again.</div>`;
@@ -1511,14 +1518,6 @@ document.addEventListener('click', async (e) => {
       }
       break;
     }
-    case 'quick-setup-manual':
-      state.sheet = { kind: 'add-conn' };
-      state.connType = state.quickSetupType;
-      state.draft = { setupSource: 'manual' };
-      state.sheetErrors = {};
-      render();
-      focusField('f-cname');
-      break;
     case 'copy-first-task': {
       const ready = state.connectionReady;
       if (!ready) break;

@@ -151,6 +151,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .dw-brand { display: flex; align-items: center; gap: 9px; padding: 2px 4px 14px; }
 .dw-brand .dd-title { font-size: 14.5px; }
 .dw-nav { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+.dw-secondary-nav { margin-bottom: 8px; }
 .nav-item {
   display: flex; align-items: center; gap: 7px;
   border: none; background: transparent; cursor: pointer;
@@ -169,7 +170,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .dw-head h2 { font-size: 17px; }
 .dw-head-actions { display: flex; align-items: center; gap: 6px; }
 .walkthrough-menu-wrap { position: relative; flex: 0 0 auto; }
-.walkthrough-menu-btn { width: 28px; height: 28px; }
+.walkthrough-menu-btn { width: 28px; height: 28px; transform: translateX(-2px); }
 .walkthrough-menu-btn.on { background: var(--hover-2); color: var(--ink-2); }
 .walkthrough-menu {
   position: absolute; right: 0; top: calc(100% + 5px); z-index: 16;
@@ -251,7 +252,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 
 /* ---- global band ------------------------------------------------------ */
 .dd-global { padding: 0 14px; margin-bottom: 8px; max-height: 172px; overflow-y: auto; border-bottom: 1px solid var(--line); }
-.dd-global.onboarding-global { max-height: none; overflow: visible; }
+.dd-global.onboarding-global { max-height: none; overflow: visible; border-bottom: 0; }
 .dw-main .dd-global { margin: 0 16px 8px; padding: 0; }
 .live-head { font-size: 12.5px; font-weight: 600; color: var(--muted); padding: 9px 2px 4px; }
 .live-row { display: flex; align-items: center; gap: 9px; padding: 7px 2px; border-bottom: 1px solid var(--line-soft); }
@@ -259,8 +260,9 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .live-row .s-sub { max-width: 250px; }
 .disconnect-copy { max-width: 310px; font-size: 12px; line-height: 1.35; color: var(--muted); }
 .agent-onboarding { margin: 9px 0; padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--card-bg); }
-.walkthrough-card { position: relative; padding-right: 38px; }
-.walkthrough-close { position: absolute; top: 7px; right: 7px; }
+.walkthrough-head { display: flex; align-items: flex-start; gap: 8px; }
+.walkthrough-head .onboarding-copy { flex: 1; min-width: 0; }
+.walkthrough-close { flex: 0 0 auto; margin: -4px -5px 0 0; }
 .walkthrough-close svg { width: 12px; height: 12px; }
 .onboarding-copy b, .onboarding-copy span { display: block; }
 .onboarding-copy b { font-size: 14px; }
@@ -283,9 +285,8 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
   background: var(--field-bg); color: var(--ink); font: 13px ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 .quick-import-row input:focus { outline: 2px solid rgba(10,124,255,.45); border-color: var(--accent); }
-.quick-import-row .btn { flex: 0 0 auto; min-height: 32px; }
+.quick-import-row .btn { flex: 0 0 auto; min-height: 31px; }
 .quick-setup-error { margin-top: -3px; }
-.quick-manual { flex: 0 0 auto; margin-left: auto; color: var(--muted); white-space: nowrap; }
 .setup-toggle {
   display: inline-flex; align-items: center; gap: 4px;
   padding: 3px 1px; border: 0; background: transparent;
@@ -328,7 +329,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 }
 .full-instructions-banner p + p { margin-top: 3px; }
 .full-instructions-banner code {
-  display: block; margin-top: 7px;
+  display: block; margin-top: 5px;
   font: inherit; overflow-wrap: anywhere;
 }
 .full-instructions-code {
@@ -515,12 +516,16 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .f-2col { display: flex; gap: 10px; }
 .f-2col .f-row { flex: 1; }
 .credential-rail {
+  position: relative;
   margin: 2px 0 10px; padding-left: 12px;
   border-left: 2px solid var(--line-field);
 }
 .credential-rail .f-row:last-child { margin-bottom: 0; }
-.f-row .credential-first-label { display: flex; align-items: center; gap: 6px; }
-.credential-key { display: inline-flex; color: var(--muted); }
+.credential-key {
+  position: absolute; left: -8px; top: 0;
+  display: inline-flex; padding: 2px 0;
+  background: var(--panel); color: var(--muted);
+}
 .credential-key svg { width: 14px; height: 14px; }
 .f-row .checkbox-label { display: flex; align-items: flex-start; gap: 7px; cursor: pointer; line-height: 1.4; }
 .checkbox-label input { margin-top: 2px; }
