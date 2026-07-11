@@ -100,6 +100,8 @@ interface AppState {
   sheet: SheetState | null;
   draft: ConnectionDraft;
   sheetErrors: Record<string, string>;
+  sheetBaseline: string | null;
+  confirmDiscard: boolean;
   connType: ConnectionType;
   confirm: ConfirmState | null;
   alwaysOpen: boolean;
@@ -141,6 +143,8 @@ const state: AppState = {
   sheet: null,           // {kind:'add-secret'|'edit-secret'|'add-conn'|'edit-conn'|'settings', ...}
   draft: {},
   sheetErrors: {},       // field key -> inline validation message
+  sheetBaseline: null,   // draft signature at sheet open (dirty-close detection)
+  confirmDiscard: false, // "Discard this service?" confirm over the conn sheet
   connType: 'api',
   confirm: null,         // {kind, id/name}
   alwaysOpen: false,
@@ -263,6 +267,14 @@ function render(capture = true): void {
         try { el.setSelectionRange(sel.start, sel.end, sel.dir || 'none'); } catch { /* non-text input */ }
       }
     }
+  }
+
+  // First render of a connection sheet: snapshot the draft as the form
+  // presents it (defaults included) so cancelling can detect real edits.
+  if (state.sheet && (state.sheet.kind === 'add-conn' || state.sheet.kind === 'edit-conn') &&
+      state.sheetBaseline === null) {
+    captureDrafts();
+    state.sheetBaseline = connDraftSignature();
   }
 }
 
@@ -663,12 +675,16 @@ function addSecretSheet(editing: boolean): string {
   const valuePlaceholder = editing ? '' : 'Your secret (saved in Keychain)';
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
     <div class="sheet wide"><h3>${title}</h3>
-    <div class="f-row"><label>Name</label><input id="f-name" class="${fieldCls('name')}" placeholder="e.g. STRIPE_API_KEY" value="${escAttr(d.name ?? (s ? s.name : ''))}">${fieldErr('name')}</div>
-    <div class="f-row"><label>${valueLabel}</label><input id="f-value" class="${fieldCls('value')}" type="password" placeholder="${valuePlaceholder}" value="${escAttr(d.value ?? '')}">${fieldErr('value')}</div>
+    <div class="f-row"><label for="f-name">Name</label><input id="f-name" class="${fieldCls('name')}" placeholder="e.g. STRIPE_API_KEY" value="${escAttr(d.name ?? (s ? s.name : ''))}">${fieldErr('name')}</div>
+    <div class="f-row"><label for="f-value">${valueLabel}</label><input id="f-value" class="${fieldCls('value')}" type="password" placeholder="${valuePlaceholder}" value="${escAttr(d.value ?? '')}">${fieldErr('value')}</div>
     <div class="sheet-actions">
       <button class="btn" data-act="sheet-cancel">Cancel</button>
       <button class="btn primary" data-act="save-secret">Save</button></div></div>`;
 }
+
+// Sentinel option value in the saved-credential select that switches the
+// chooser into "create a new credential" mode.
+const NEW_CREDENTIAL_OPTION = '__new__';
 
 function credentialChooserHTML(
   type: ConnectionType,
@@ -681,36 +697,40 @@ function credentialChooserHTML(
   const secretLabel = type === 'pg' ? 'Database password'
     : type === 'ssh' ? 'SSH private key'
     : 'Token or API key';
-  const railKey = `<span class="credential-key" aria-hidden="true">${ICONS.keyRound}</span>`;
-  if (source === 'existing' && state.secrets.length) {
-    const opts = state.secrets.map((secret) =>
-      `<option value="${escAttr(secret.id)}" ${draft.secretId === secret.id ? 'selected' : ''}>${esc(secret.name)}</option>`).join('');
-    return `<div class="credential-rail">${railKey}
-      <div class="f-row"><label>${secretLabel}</label>
-        <div class="credential-saved-row">${selectControlHTML('c-secret', opts)}
-          ${allowNew ? '<button type="button" class="setup-toggle credential-source-action" data-act="credential-use-new">Use new</button>' : ''}
-        </div>${fieldErr('secret')}</div>
-    </div>`;
+  const keychainNote = '<div class="rule-note">Stored in macOS Keychain.</div>';
+  let picker = '';
+  if (state.secrets.length) {
+    // Usage detail disambiguates similarly named credentials without
+    // touching secret values (revealing those is a separate audited call).
+    const usageDetail = (secret: SecretSummary): string => !secret.used_by ? ''
+      : secret.used_by === 1 && secret.used_by_names.length ? ` · used by ${secret.used_by_names[0]}`
+      : ` · used by ${secret.used_by} services`;
+    let opts = state.secrets.map((secret) =>
+      `<option value="${escAttr(secret.id)}" ${source === 'existing' && draft.secretId === secret.id ? 'selected' : ''}>${esc(secret.name + usageDetail(secret))}</option>`).join('');
+    if (allowNew) opts += `<option value="${NEW_CREDENTIAL_OPTION}" ${source === 'new' ? 'selected' : ''}>＋ Create new credential…</option>`;
+    picker = `<div class="f-row"><label for="c-secret">${secretLabel}</label>${selectControlHTML('c-secret', opts)}${fieldErr('secret')}</div>`;
+  } else if (source === 'new') {
+    picker = `<div class="f-row"><label>${secretLabel}</label></div>`;
   }
-  const useSaved = allowNew && state.secrets.length
-    ? '<button type="button" class="setup-toggle credential-source-action" data-act="credential-use-saved">Use saved</button>'
-    : '';
+  if (source === 'existing') {
+    return `<div class="credential-group">${picker}${keychainNote}</div>`;
+  }
   const suggested = suggestedSecretName(draft.name ?? '', type);
+  const nameRow = `<div class="f-row"><label for="c-new-secret-name">Credential name</label><input id="c-new-secret-name" class="${fieldCls('newSecretName')}" placeholder="${escAttr(suggested)}" value="${escAttr(draft.newSecretName ?? '')}">${fieldErr('newSecretName')}</div>`;
   if (type === 'ssh' && draft.sshImportId && draft.identityFiles && draft.identityFiles.length) {
     const identityOptions = draft.identityFiles.map((path) =>
       `<option value="${escAttr(path)}" ${draft.identityFile === path ? 'selected' : ''}>${esc(path)}</option>`).join('');
-    return `<div class="credential-rail">${railKey}
-      <div class="f-row credential-mode-row"><label>${secretLabel}</label>${useSaved}</div>
-      <div class="f-row"><label>Credential name</label><input id="c-new-secret-name" class="${fieldCls('newSecretName')}" placeholder="${escAttr(suggested)}" value="${escAttr(draft.newSecretName ?? '')}">${fieldErr('newSecretName')}</div>
-      <div class="f-row"><label>Identity file</label>${selectControlHTML('c-identity-file', identityOptions)}${fieldErr('newSecretValue')}
+    return `<div class="credential-group">${picker}${nameRow}
+      <div class="f-row"><label for="c-identity-file">Identity file</label>${selectControlHTML('c-identity-file', identityOptions)}${fieldErr('newSecretValue')}
         <div class="rule-note">The private key is read by AgentMFA and saved directly to macOS Keychain.</div></div>
     </div>`;
   }
-  return `<div class="credential-rail">${railKey}
-    <div class="f-row credential-mode-row"><label>${secretLabel}</label>${useSaved}</div>
-    <div class="f-row"><label>Credential name</label><input id="c-new-secret-name" class="${fieldCls('newSecretName')}" placeholder="${escAttr(suggested)}" value="${escAttr(draft.newSecretName ?? '')}">${fieldErr('newSecretName')}</div>
-    <div class="f-row"><label>Credential value</label><input id="c-new-secret-value" class="${fieldCls('newSecretValue')}" type="password" placeholder="Saved directly to macOS Keychain" value="${escAttr(draft.newSecretValue ?? draft.importedCredential ?? '')}">${fieldErr('newSecretValue')}</div>
-  </div>`;
+  const valuePlaceholder = type === 'pg' ? 'Paste the database password'
+    : type === 'ssh' ? 'Paste the private key'
+    : 'Paste the token or API key';
+  return `<div class="credential-group">${picker}${nameRow}
+    <div class="f-row"><label for="c-new-secret-value">Credential value</label><input id="c-new-secret-value" class="${fieldCls('newSecretValue')}" type="password" placeholder="${valuePlaceholder}" value="${escAttr(draft.newSecretValue ?? draft.importedCredential ?? '')}">${fieldErr('newSecretValue')}</div>
+    ${keychainNote}</div>`;
 }
 
 async function connectionDraftFromImport(
@@ -754,24 +774,24 @@ function connSheet(editing: boolean): string {
   let sshHostKeyField = '';
   let pgTlsFields = '';
   let fields = importWarnings;
-  fields += `<div class="f-row"><label>Name</label><input id="f-cname" class="${fieldCls('name')}" placeholder="e.g. github" value="${escAttr(d.name ?? '')}">${fieldErr('name')}</div>
+  fields += `<div class="f-row"><label for="f-cname">Name</label><input id="f-cname" class="${fieldCls('name')}" placeholder="e.g. github" value="${escAttr(d.name ?? '')}">${fieldErr('name')}</div>
     <div class="f-row"><label>Type${editing ? ': fixed after creation' : ''}</label>
     <div class="seg in-form">${typeBtn('pg', 'Postgres')}${typeBtn('ssh', 'SSH')}${typeBtn('api', 'HTTP API')}${typeBtn('ws', 'WebSocket')}</div></div>`;
   if (t === 'api') {
     const origin = d.origin ?? apiOriginFromParts(d.scheme ?? undefined, d.host ?? undefined, d.port ?? null);
-    fields += `<div class="f-row"><label>API root</label><input id="f-origin" class="${fieldCls('origin')}" placeholder="https://api.github.com" value="${escAttr(origin)}">${fieldErr('origin')}</div>`;
+    fields += `<div class="f-row"><label for="f-origin">API root</label><input id="f-origin" class="${fieldCls('origin')}" placeholder="https://api.github.com" value="${escAttr(origin)}">${fieldErr('origin')}</div>`;
   } else if (t === 'ssh') {
     fields += `<div class="f-2col">
-      <div class="f-row" style="flex:0 0 90px"><label>User</label><input id="f-user" class="${fieldCls('user')}" placeholder="satoshi" value="${escAttr(d.user ?? '')}">${fieldErr('user')}</div>
-      <div class="f-row"><label>Host</label><input id="f-host" class="${fieldCls('host')}" placeholder="prod.example.com" value="${escAttr(d.host ?? '')}">${fieldErr('host')}</div>
-      <div class="f-row" style="flex:0 0 90px"><label>Port</label><input id="f-port" class="${fieldCls('port')}" inputmode="numeric" value="${escAttr(d.port ?? '22')}">${fieldErr('port')}</div></div>`;
+      <div class="f-row" style="flex:0 0 90px"><label for="f-user">User</label><input id="f-user" class="${fieldCls('user')}" placeholder="satoshi" value="${escAttr(d.user ?? '')}">${fieldErr('user')}</div>
+      <div class="f-row"><label for="f-host">Host</label><input id="f-host" class="${fieldCls('host')}" placeholder="prod.example.com" value="${escAttr(d.host ?? '')}">${fieldErr('host')}</div>
+      <div class="f-row" style="flex:0 0 90px"><label for="f-port">Port</label><input id="f-port" class="${fieldCls('port')}" inputmode="numeric" value="${escAttr(d.port ?? '22')}">${fieldErr('port')}</div></div>`;
     const hostKeys = d.hostKeyCandidates || [];
     const hostKeyControl = hostKeys.length
       ? selectControlHTML('f-host-key', hostKeys.map((candidate) =>
           `<option value="${escAttr(candidate.fingerprint)}" ${d.hostKeyFingerprint === candidate.fingerprint ? 'selected' : ''}>${esc(candidate.algorithm)} · ${esc(candidate.fingerprint)}</option>`).join(''))
       : `<input id="f-host-key" class="${fieldCls('hostKeyFingerprint')}" placeholder="SHA256:…" value="${escAttr(d.hostKeyFingerprint ?? '')}">`;
     fields += d.proxyJump ? `<div class="rule-note">ProxyJump: ${esc(d.proxyJump)}</div>` : '';
-    sshHostKeyField = `<div class="f-row"><label>Host key fingerprint</label>${hostKeyControl}${fieldErr('hostKeyFingerprint')}</div>`;
+    sshHostKeyField = `<div class="f-row"><label for="f-host-key">Host key fingerprint</label>${hostKeyControl}${fieldErr('hostKeyFingerprint')}</div>`;
   } else if (t === 'pg') {
     const sslmode = d.sslmode || 'verify-full';
     const sslOpts = [
@@ -782,29 +802,29 @@ function connSheet(editing: boolean): string {
       ['disable', 'Disable'],
     ].map(([value, label]) => `<option value="${value}" ${sslmode === value ? 'selected' : ''}>${label}</option>`).join('');
     fields += `<div class="f-2col">
-      <div class="f-row"><label>Host</label><input id="f-host" class="${fieldCls('host')}" placeholder="db.internal.example.com" value="${escAttr(d.host ?? '')}">${fieldErr('host')}</div>
-      <div class="f-row" style="flex:0 0 90px"><label>Port</label><input id="f-port" class="${fieldCls('port')}" inputmode="numeric" value="${escAttr(d.port ?? '5432')}">${fieldErr('port')}</div></div>
+      <div class="f-row"><label for="f-host">Host</label><input id="f-host" class="${fieldCls('host')}" placeholder="db.internal.example.com" value="${escAttr(d.host ?? '')}">${fieldErr('host')}</div>
+      <div class="f-row" style="flex:0 0 90px"><label for="f-port">Port</label><input id="f-port" class="${fieldCls('port')}" inputmode="numeric" value="${escAttr(d.port ?? '5432')}">${fieldErr('port')}</div></div>
       <div class="f-2col">
-      <div class="f-row"><label>Database</label><input id="f-db" class="${fieldCls('dbname')}" placeholder="app_production" value="${escAttr(d.dbname ?? '')}">${fieldErr('dbname')}</div>
-      <div class="f-row" style="flex:0 0 90px"><label>User</label><input id="f-user" class="${fieldCls('user')}" placeholder="app" value="${escAttr(d.user ?? '')}">${fieldErr('user')}</div></div>`;
-    pgTlsFields = `<div class="f-row"><label>TLS mode</label>${selectControlHTML('f-sslmode', sslOpts)}${fieldErr('sslmode')}
+      <div class="f-row"><label for="f-db">Database</label><input id="f-db" class="${fieldCls('dbname')}" placeholder="app_production" value="${escAttr(d.dbname ?? '')}">${fieldErr('dbname')}</div>
+      <div class="f-row" style="flex:0 0 90px"><label for="f-user">User</label><input id="f-user" class="${fieldCls('user')}" placeholder="app" value="${escAttr(d.user ?? '')}">${fieldErr('user')}</div></div>`;
+    pgTlsFields = `<div class="f-row"><label for="f-sslmode">TLS mode</label>${selectControlHTML('f-sslmode', sslOpts)}${fieldErr('sslmode')}
         ${sslmode === 'require' ? '<div class="pair-identity-warning">The server certificate will not be verified.</div>' : ''}</div>
-      <div class="f-row"><label>Trusted CA bundle <span class="label-detail">(optional)</span></label>
+      <div class="f-row"><label for="f-pg-ca-bundle">Trusted CA bundle <span class="label-detail">(optional)</span></label>
         <input id="f-pg-ca-bundle" placeholder="/path/to/private-ca.pem" value="${escAttr(d.pgCaBundlePath ?? '')}"></div>`;
   } else {
-    fields += `<div class="f-row"><label>URL</label><input id="f-url" class="${fieldCls('url')}" placeholder="wss://stream.example.com/feed" value="${escAttr(d.url ?? '')}">${fieldErr('url')}</div>`;
+    fields += `<div class="f-row"><label for="f-url">URL</label><input id="f-url" class="${fieldCls('url')}" placeholder="wss://stream.example.com/feed" value="${escAttr(d.url ?? '')}">${fieldErr('url')}</div>`;
   }
   // Authentication is recipe-driven for new connections. Existing custom
   // templates remain directly editable so the UI round-trips every config.
   if (editing && t === 'api') {
-    fields += `<div class="f-row"><label>Injection template</label>
+    fields += `<div class="f-row"><label for="c-template">Injection template</label>
       <input id="c-template" class="${fieldCls('template')}" value="${escAttr(d.template ?? '')}">${fieldErr('template')}
       <div class="rule-note">Bearer token + template; references saved credentials by name.</div></div>`;
   } else if (editing) {
     if (t !== 'ws' || !d.template) fields += credentialChooserHTML(t, d, false);
     if (t === 'ws' && d.template) {
       fields += `<details class="set-collapse" ${d.template ? 'open' : ''}><summary>Custom authentication header</summary>
-        <div class="set-panel"><div class="f-row"><label>Injection template</label>
+        <div class="set-panel"><div class="f-row"><label for="c-template">Injection template</label>
         <input id="c-template" class="${fieldCls('template')}" placeholder="Authorization: Bearer {{TOKEN_NAME}}" value="${escAttr(d.template ?? '')}">${fieldErr('template')}</div></div></details>`;
     }
   } else if (t === 'api' || t === 'ws') {
@@ -814,19 +834,19 @@ function connSheet(editing: boolean): string {
       ...(t === 'api' ? [['query', 'Query parameter']] : []),
       ['advanced', 'Bearer token + template'],
     ].map(([value, label]) => `<option value="${value}" ${modeValue === value ? 'selected' : ''}>${label}</option>`).join('');
-    let authenticationFields = `<div class="f-row"><label>Authentication Type</label>${selectControlHTML('c-auth-mode', recipes)}</div>`;
+    // Decision first: the authentication type governs which detail field and
+    // credential inputs appear, so those render beneath the select.
+    fields += `<div class="f-row"><label for="c-auth-mode">Authentication type</label>${selectControlHTML('c-auth-mode', recipes)}</div>`;
     if (modeValue === 'header') {
-      authenticationFields += `<div class="f-row"><label>Header name</label><input id="c-auth-detail" class="${fieldCls('authDetail')}" placeholder="X-API-Key" value="${escAttr(d.authDetail ?? '')}">${fieldErr('authDetail')}</div>`;
+      fields += `<div class="f-row"><label for="c-auth-detail">Header name</label><input id="c-auth-detail" class="${fieldCls('authDetail')}" placeholder="X-API-Key" value="${escAttr(d.authDetail ?? '')}">${fieldErr('authDetail')}</div>`;
     } else if (modeValue === 'query') {
-      authenticationFields += `<div class="f-row"><label>Query parameter</label><input id="c-auth-detail" class="${fieldCls('authDetail')}" placeholder="api_key" value="${escAttr(d.authDetail ?? '')}">${fieldErr('authDetail')}</div>`;
+      fields += `<div class="f-row"><label for="c-auth-detail">Query parameter</label><input id="c-auth-detail" class="${fieldCls('authDetail')}" placeholder="api_key" value="${escAttr(d.authDetail ?? '')}">${fieldErr('authDetail')}</div>`;
     }
     if (modeValue === 'advanced') {
-      authenticationFields += `<div class="f-row"><label>Injection template</label><input id="c-template" class="${fieldCls('template')}" placeholder="Authorization: Bearer {{TOKEN_NAME}}" value="${escAttr(d.template ?? '')}">${fieldErr('template')}
+      fields += `<div class="f-row"><label for="c-template">Injection template</label><input id="c-template" class="${fieldCls('template')}" placeholder="Authorization: Bearer {{TOKEN_NAME}}" value="${escAttr(d.template ?? '')}">${fieldErr('template')}
         <div class="rule-note">References credentials by name using <code>{{ … }}</code>. Use this for Basic auth or composed credentials.</div></div>`;
-      fields += authenticationFields;
     } else {
       fields += credentialChooserHTML(t, d);
-      fields += authenticationFields;
     }
   } else {
     fields += credentialChooserHTML(t, d);
@@ -840,10 +860,19 @@ function connSheet(editing: boolean): string {
     : d.setupSource === 'import' ? `Review ${connectionTypeLabel(t)} service`
     : d.setupSource === 'manual' ? `Add ${connectionTypeLabel(t)} service`
     : 'Add service';
+  const discardConfirm = state.confirmDiscard ? `
+    <div class="sheet-backdrop over-sheet" data-act="discard-keep"></div>
+    <div class="sheet wide confirm-sheet discard-confirm" role="dialog" aria-modal="true" aria-labelledby="discard-conn-title">
+      <h3 id="discard-conn-title">${editing ? 'Discard changes?' : 'Discard this service?'}</h3>
+      <p>You have unsaved changes in this form. Closing it discards them.</p>
+      <div class="sheet-actions">
+        <button class="btn" data-act="discard-keep">Keep editing</button>
+        <button class="btn danger" data-act="discard-confirm">Discard</button>
+      </div></div>` : '';
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
     <div class="sheet wide"><h3>${title}</h3>${fields}
     <div class="sheet-actions"><button class="btn" data-act="sheet-cancel">Cancel</button>
-      <button class="btn primary" data-act="save-conn">${editing ? 'Save' : 'Save service'}</button></div></div>`;
+      <button class="btn primary" data-act="save-conn">${editing ? 'Save' : 'Add service'}</button></div></div>${discardConfirm}`;
 }
 
 function settingsSheet() {
@@ -1153,7 +1182,15 @@ function captureDrafts(): void {
     if (g('f-pg-ca-bundle') !== undefined) state.draft.pgCaBundlePath = g('f-pg-ca-bundle');
     if (g('f-url') !== undefined) state.draft.url = g('f-url');
     if (g('c-template') !== undefined) state.draft.template = g('c-template');
-    if (g('c-secret') !== undefined) state.draft.secretId = g('c-secret');
+    const secretChoice = g('c-secret');
+    if (secretChoice !== undefined) {
+      if (secretChoice === NEW_CREDENTIAL_OPTION) {
+        state.draft.secretSource = 'new';
+      } else {
+        state.draft.secretId = secretChoice;
+        state.draft.secretSource = 'existing';
+      }
+    }
     if (g('c-new-secret-name') !== undefined) state.draft.newSecretName = g('c-new-secret-name');
     if (g('c-identity-file') !== undefined) state.draft.identityFile = g('c-identity-file');
     if (g('c-new-secret-value') !== undefined) {
@@ -1333,7 +1370,45 @@ function closeSheet() {
   state.sheet = null;
   state.draft = {};
   state.sheetErrors = {};
+  state.sheetBaseline = null;
+  state.confirmDiscard = false;
   render();
+}
+
+// Draft fields compared against the sheet-open baseline to decide whether
+// cancelling should ask before discarding.
+const DIRTY_DRAFT_FIELDS: Array<keyof ConnectionDraft> = [
+  'name', 'origin', 'host', 'port', 'dbname', 'user', 'url', 'template',
+  'hostKeyFingerprint', 'sslmode', 'pgCaBundlePath', 'secretId', 'secretSource',
+  'newSecretName', 'newSecretValue', 'authMode', 'authDetail', 'identityFile',
+];
+
+function connDraftSignature(): string {
+  // When adding, switching the type auto-fills defaults (port, TLS mode), so
+  // exclude the type and those fields — only typed content should count as
+  // an edit worth a discard confirmation.
+  const adding = state.sheet?.kind === 'add-conn';
+  const fields = adding
+    ? DIRTY_DRAFT_FIELDS.filter((key) => key !== 'port' && key !== 'sslmode')
+    : DIRTY_DRAFT_FIELDS;
+  const values = fields.map((key) => {
+    const value = state.draft[key];
+    return value == null || value === '' ? null : value;
+  });
+  return (adding ? '' : state.connType) + '|' + JSON.stringify(values);
+}
+
+function requestCloseSheet(): void {
+  const kind = state.sheet?.kind;
+  if ((kind === 'add-conn' || kind === 'edit-conn') && state.sheetBaseline !== null) {
+    captureDrafts();
+    if (connDraftSignature() !== state.sheetBaseline) {
+      state.confirmDiscard = true;
+      render(false);
+      return;
+    }
+  }
+  closeSheet();
 }
 
 /* --------------------------------- events -------------------------------- */
@@ -1507,6 +1582,7 @@ document.addEventListener('click', async (e) => {
         state.connType = imported.type;
         state.draft = imported.draft;
         state.sheetErrors = {};
+        state.sheetBaseline = null;
         render();
         focusImportedConnectionDraft();
       } catch (error) {
@@ -1534,12 +1610,13 @@ document.addEventListener('click', async (e) => {
       state.connectionTaskCopied = false;
       render();
       break;
-    case 'open-add-conn': state.sheet = { kind: 'add-conn' }; state.connType = 'api'; state.draft = {}; state.sheetErrors = {}; render(); focusField('f-cname'); break;
+    case 'open-add-conn': state.sheet = { kind: 'add-conn' }; state.connType = 'api'; state.draft = {}; state.sheetErrors = {}; state.sheetBaseline = null; render(); focusField('f-cname'); break;
     case 'edit-conn': {
       const c = state.connections.find((x) => x.id === id);
       if (!c) break;
       state.sheet = { kind: 'edit-conn', id }; state.connType = c.type;
       state.sheetErrors = {};
+      state.sheetBaseline = null;
       state.draft = { name: c.name, host: c.host, scheme: c.scheme,
         origin: c.type === 'api'
           ? apiOriginFromParts(c.scheme ?? undefined, c.host ?? undefined, c.port)
@@ -1571,18 +1648,6 @@ document.addEventListener('click', async (e) => {
       render(false);
       break;
     }
-    case 'credential-use-new':
-      captureDrafts();
-      state.draft.secretSource = 'new';
-      render(false);
-      focusField('c-new-secret-name');
-      break;
-    case 'credential-use-saved':
-      captureDrafts();
-      state.draft.secretSource = 'existing';
-      render(false);
-      focusField('c-secret');
-      break;
     case 'save-conn': await saveConn(); break;
     case 'del-conn-ask': state.confirm = { kind: 'del-conn', id }; render(); break;
     case 'del-conn-confirm':
@@ -1609,7 +1674,9 @@ document.addEventListener('click', async (e) => {
       break;
     case 'confirm-cancel': state.confirm = null; render(); break;
 
-    case 'sheet-cancel': closeSheet(); break;
+    case 'sheet-cancel': requestCloseSheet(); break;
+    case 'discard-keep': state.confirmDiscard = false; render(false); break;
+    case 'discard-confirm': closeSheet(); break;
     case 'toggle-reauth':
       {
         const on = !state.settings.reauth_on_read;
@@ -1680,15 +1747,19 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     if (state.walkthroughMenuOpen) { state.walkthroughMenuOpen = false; render(); return; }
     if (state.menuOpen) { state.menuOpen = false; render(); return; }
-    if (state.sheet) { closeSheet(); return; }
+    if (state.confirmDiscard) { state.confirmDiscard = false; render(false); return; }
+    if (state.sheet) { requestCloseSheet(); return; }
     if (state.confirm) { state.confirm = null; render(); return; }
     if (mode === 'dropdown') invoke('ui_hide_dropdown');
   } else if (e.key === 'Enter' && e.target instanceof Element && e.target.tagName === 'INPUT') {
+    if (state.confirmDiscard) return;
     if (state.sheet && (state.sheet.kind === 'add-secret' || state.sheet.kind === 'edit-secret')) { e.preventDefault(); saveSecret(); }
     else if (state.sheet && (state.sheet.kind === 'add-conn' || state.sheet.kind === 'edit-conn')) { e.preventDefault(); saveConn(); }
   } else if (e.key === 'Tab' && state.sheet) {
     // Keep keyboard focus inside the modal sheet, wrapping at either end.
-    const sheet = document.querySelector<HTMLElement>('.sheet');
+    // The discard confirm stacks over the form sheet and takes the trap.
+    const sheet = document.querySelector<HTMLElement>('.sheet.discard-confirm')
+      ?? document.querySelector<HTMLElement>('.sheet');
     if (!sheet) return;
     const focusables = sheet.querySelectorAll<HTMLElement>(
       'button:not([disabled]), input:not([disabled]), select:not([disabled]), summary');
@@ -1748,9 +1819,11 @@ document.addEventListener('change', (e) => {
   const target = e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement
     ? e.target
     : null;
-  if (!target || !['c-auth-mode', 'f-sslmode'].includes(target.id)) return;
+  if (!target || !['c-auth-mode', 'f-sslmode', 'c-secret'].includes(target.id)) return;
+  const startNewCredential = target.id === 'c-secret' && target.value === NEW_CREDENTIAL_OPTION;
   captureDrafts();
   render(false);
+  if (startNewCredential) focusField('c-new-secret-name');
 });
 
 /* --------------------------------- boot ---------------------------------- */
@@ -1805,6 +1878,8 @@ async function boot() {
     state.sheet = null;
     state.draft = {};
     state.sheetErrors = {};
+    state.sheetBaseline = null;
+    state.confirmDiscard = false;
     state.confirm = null;
     state.walkthroughMenuOpen = false;
     render();
