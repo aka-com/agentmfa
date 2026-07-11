@@ -499,6 +499,18 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .f-row input:focus { outline: 2px solid rgba(10,124,255,.45); border-color: var(--accent); }
 .f-row input.err { border-color: var(--danger); outline: none; }
 .field-error { margin-top: 4px; color: var(--danger-ink); font-size: 12.5px; font-weight: 400; }
+.adv-collapse { margin: 2px 0 8px; }
+.adv-toggle {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 2px 1px; border: 0; background: transparent;
+  color: var(--muted); font-size: 12px; line-height: normal; cursor: pointer;
+}
+.adv-toggle:hover { color: var(--ink); }
+.adv-toggle:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; border-radius: 3px; }
+.adv-toggle-icon { display: inline-flex; transform: rotate(-90deg); transition: transform .14s ease; }
+.adv-toggle-icon svg { width: 11px; height: 11px; }
+.adv-toggle[aria-expanded="true"] .adv-toggle-icon { transform: rotate(0); }
+.adv-collapse .f-row:first-of-type { margin-top: 8px; }
 .f-2col { display: flex; gap: 10px; }
 .f-2col.compact-field-row { gap: 8px; }
 .f-2col .f-row { flex: 1; }
@@ -518,7 +530,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 }
 .cred-trigger:hover { border-color: var(--line-strong); }
 .cred-trigger:focus-visible, .cred-trigger[aria-expanded="true"] {
-  outline: 2px solid rgba(10,124,255,.45); border-color: var(--accent);
+  outline: none; border-color: var(--accent);
 }
 .cred-trigger.err { border-color: var(--danger); outline: none; }
 .cred-chevron { margin-left: auto; display: inline-flex; color: var(--select-arrow); }
@@ -530,6 +542,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .cred-badge.plus { background: var(--seg-bg); color: var(--muted); }
 .cred-name { font-size: 13.5px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cred-detail { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cred-placeholder { color: var(--muted); font-weight: 400; }
 .cred-menu {
   /* app.ts portals this under #root so the scrolling sheet cannot clip it,
      then anchors it to the trigger after each render. */
@@ -551,11 +564,6 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .cred-opt-sub { display: block; font-size: 11.5px; color: var(--muted); margin-top: 1px; }
 .cred-opt-check { display: inline-flex; color: var(--accent-text); }
 .cred-menu-divider { height: 1px; margin: 4px 6px; background: var(--line-soft); }
-.cred-hint {
-  display: flex; align-items: center; gap: 5px;
-  font-size: 12px; color: var(--muted); line-height: 1.35;
-}
-.cred-hint svg { flex: 0 0 auto; }
 .f-row .checkbox-label { display: flex; align-items: flex-start; gap: 7px; cursor: pointer; line-height: 1.4; }
 .checkbox-label input { margin-top: 2px; }
 .checkbox-label .label-detail { font-weight: 400; }

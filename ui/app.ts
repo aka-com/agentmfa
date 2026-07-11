@@ -102,6 +102,7 @@ interface AppState {
   sheetBaseline: string | null;
   confirmDiscard: boolean;
   formMenuOpen: string | null;
+  connAdvancedOpen: boolean;
   connType: ConnectionType;
   confirm: ConfirmState | null;
   alwaysOpen: boolean;
@@ -153,6 +154,7 @@ const state: AppState = {
   sheetBaseline: null,   // draft signature at sheet open (dirty-close detection)
   confirmDiscard: false, // "Discard this service?" confirm over the conn sheet
   formMenuOpen: null,    // id of the open custom-select listbox in the sheet
+  connAdvancedOpen: false, // "Advanced" disclosure in the service sheet
   connType: 'api',
   confirm: null,         // {kind, id/name}
   alwaysOpen: false,
@@ -739,7 +741,6 @@ function credentialChooserHTML(
   const secretLabel = type === 'pg' ? 'Database password'
     : type === 'ssh' ? 'SSH private key'
     : 'Token or API key';
-  const storeHint = `<div class="cred-hint">${ICONS.lock}<span>From your secrets</span></div>`;
   let picker = '';
   if (state.secrets.length) {
     // Usage detail disambiguates similarly named credentials without
@@ -747,15 +748,19 @@ function credentialChooserHTML(
     const usageDetail = (secret: SecretSummary): string => !secret.used_by ? ''
       : secret.used_by === 1 && secret.used_by_names.length ? `used by ${secret.used_by_names[0]}`
       : `used by ${secret.used_by} services`;
+    // No default selection: a wrong prefilled secret (a password where a
+    // private key belongs, or vice versa) is worse than an explicit choice.
     const selected = source === 'existing'
-      ? state.secrets.find((secret) => secret.id === draft.secretId) || state.secrets[0]
+      ? state.secrets.find((secret) => secret.id === draft.secretId) || null
       : null;
     const keyBadge = `<span class="cred-badge" aria-hidden="true">${ICONS.keyRound}</span>`;
     const plusBadge = `<span class="cred-badge plus" aria-hidden="true">${ICONS.plus}</span>`;
     const triggerContent = selected
       ? `${keyBadge}<span class="cred-name">${esc(selected.name)}</span>
          ${selected.used_by ? `<span class="cred-detail">${esc(usageDetail(selected))}</span>` : ''}`
-      : `${plusBadge}<span class="cred-name">New secret…</span>`;
+      : source === 'new'
+      ? `${plusBadge}<span class="cred-name">New secret…</span>`
+      : `<span class="cred-name cred-placeholder">Choose a secret…</span>`;
     const options = state.secrets.map((secret) => {
       const picked = selected !== null && selected.id === secret.id;
       return `<button type="button" class="cred-opt" role="option" data-act="credential-pick"
@@ -778,7 +783,7 @@ function credentialChooserHTML(
     picker = `<div class="f-row"><label for="c-secret">${secretLabel}</label>
       <div class="cred-select">
         <button type="button" id="c-secret" class="cred-trigger ${fieldCls('secret')}"
-          value="${escAttr(selected ? selected.id : NEW_CREDENTIAL_OPTION)}" data-act="select-toggle" data-menu="c-secret"
+          value="${escAttr(selected ? selected.id : source === 'new' ? NEW_CREDENTIAL_OPTION : '')}" data-act="select-toggle" data-menu="c-secret"
           aria-haspopup="listbox" aria-expanded="${state.formMenuOpen === 'c-secret'}">
           ${triggerContent}<span class="cred-chevron" aria-hidden="true">${ICONS.chevronDown}</span></button>
         ${menu}</div>${fieldErr('secret')}</div>`;
@@ -786,7 +791,7 @@ function credentialChooserHTML(
     picker = `<div class="f-row"><label>${secretLabel}</label></div>`;
   }
   if (source === 'existing') {
-    return `<div class="credential-group">${picker}${storeHint}</div>`;
+    return `<div class="credential-group">${picker}</div>`;
   }
   const suggested = suggestedSecretName(draft.name ?? '', type);
   const nameRow = `<div class="f-row"><label for="c-new-secret-name">Credential name</label><input id="c-new-secret-name" class="${fieldCls('newSecretName')}" placeholder="${escAttr(suggested)}" value="${escAttr(draft.newSecretName ?? '')}">${fieldErr('newSecretName')}</div>`;
@@ -794,15 +799,13 @@ function credentialChooserHTML(
     const identityOptions = draft.identityFiles.map((path): [string, string] => [path, path]);
     return `<div class="credential-group">${picker}${nameRow}
       <div class="f-row"><label for="c-identity-file">Identity file</label>${customSelectHTML('c-identity-file', identityOptions, draft.identityFile)}${fieldErr('newSecretValue')}
-        <div class="rule-note">The private key is read by AgentMFA and saved directly to macOS Keychain.</div></div>
-    ${storeHint}</div>`;
+        <div class="rule-note">The private key is read by AgentMFA and saved directly to macOS Keychain.</div></div></div>`;
   }
   const valuePlaceholder = type === 'pg' ? 'Paste the database password'
     : type === 'ssh' ? 'Paste the private key'
     : 'Paste the token or API key';
   return `<div class="credential-group">${picker}${nameRow}
-    <div class="f-row"><label for="c-new-secret-value">Credential value</label><input id="c-new-secret-value" class="${fieldCls('newSecretValue')}" type="password" placeholder="${valuePlaceholder}" value="${escAttr(draft.newSecretValue ?? draft.importedCredential ?? '')}">${fieldErr('newSecretValue')}</div>
-    ${storeHint}</div>`;
+    <div class="f-row"><label for="c-new-secret-value">Credential value</label><input id="c-new-secret-value" class="${fieldCls('newSecretValue')}" type="password" placeholder="${valuePlaceholder}" value="${escAttr(draft.newSecretValue ?? draft.importedCredential ?? '')}">${fieldErr('newSecretValue')}</div></div>`;
 }
 
 async function connectionDraftFromImport(
@@ -830,6 +833,17 @@ async function connectionDraftFromImport(
 
 function connectionTypeLabel(type: ConnectionType): string {
   return QUICK_SETUP_TYPES.find(([value]) => value === type)?.[1] || 'service';
+}
+
+// Whether the draft carries a non-default value in one of the fields hidden
+// behind the "Advanced" disclosure, so opening the sheet shows what is set.
+function draftUsesAdvancedFields(d: ConnectionDraft, t: ConnectionType): boolean {
+  if (t === 'ssh') return Boolean((d.hostKeyFingerprint || '').trim());
+  if (t === 'pg') {
+    return Boolean((d.pgCaBundlePath || '').trim())
+      || Boolean(d.sslmode && d.sslmode !== 'verify-full');
+  }
+  return false;
 }
 
 function connSheet(editing: boolean): string {
@@ -920,8 +934,18 @@ function connSheet(editing: boolean): string {
   } else {
     fields += credentialChooserHTML(t, d);
   }
-  fields += pgTlsFields;
-  fields += sshHostKeyField;
+  const advancedFields = pgTlsFields + sshHostKeyField;
+  if (advancedFields) {
+    // Force the section open when one of its fields has a validation error,
+    // so the inline message (and the focused input) is visible.
+    const advancedError = ['hostKeyFingerprint', 'sslmode', 'pgCaBundlePath']
+      .some((key) => state.sheetErrors[key]);
+    const advOpen = state.connAdvancedOpen || advancedError;
+    fields += `<div class="adv-collapse">
+      <button type="button" class="adv-toggle" aria-expanded="${advOpen}" data-act="toggle-conn-advanced">
+        <span class="adv-toggle-icon" aria-hidden="true">${ICONS.chevronDown}</span>Advanced</button>
+      ${advOpen ? advancedFields : ''}</div>`;
+  }
   if (editing && conn && (conn.permissions || []).some((permission) => !permission.expires_at)) {
     fields += `<div class="rule-note">Changing the destination makes affected agents ask for approval again.</div>`;
   }
@@ -1338,10 +1362,11 @@ function captureDrafts(): void {
     if (secretChoice !== undefined) {
       if (secretChoice === NEW_CREDENTIAL_OPTION) {
         state.draft.secretSource = 'new';
-      } else {
+      } else if (secretChoice) {
         state.draft.secretId = secretChoice;
         state.draft.secretSource = 'existing';
       }
+      // An empty value is the unselected placeholder: leave the draft as-is.
     }
     if (g('c-new-secret-name') !== undefined) state.draft.newSecretName = g('c-new-secret-name');
     if (g('c-identity-file') !== undefined) state.draft.identityFile = g('c-identity-file');
@@ -1441,7 +1466,7 @@ async function saveConn(): Promise<void> {
   let selectedSecret: SecretSummary | null = null;
   let newSecretName: string | null = null;
   if (needsCredentialChoice && secretSource === 'existing') {
-    selectedSecret = state.secrets.find((secret) => secret.id === d.secretId) || state.secrets[0] || null;
+    selectedSecret = state.secrets.find((secret) => secret.id === d.secretId) || null;
     if (!selectedSecret) errs.secret = 'Choose a saved credential or save a new one';
   } else if (needsCredentialChoice) {
     newSecretName = (d.newSecretName || suggestedSecretName(name, t)).trim();
@@ -1743,6 +1768,7 @@ document.addEventListener('click', async (e) => {
         state.draft = imported.draft;
         state.sheetErrors = {};
         state.sheetBaseline = null;
+        state.connAdvancedOpen = draftUsesAdvancedFields(state.draft, state.connType);
         render();
         focusImportedConnectionDraft();
       } catch (error) {
@@ -1770,7 +1796,7 @@ document.addEventListener('click', async (e) => {
       state.connectionTaskCopied = false;
       render();
       break;
-    case 'open-add-conn': state.sheet = { kind: 'add-conn' }; state.connType = 'api'; state.draft = {}; state.sheetErrors = {}; state.sheetBaseline = null; render(); focusField('f-cname'); break;
+    case 'open-add-conn': state.sheet = { kind: 'add-conn' }; state.connType = 'api'; state.draft = {}; state.sheetErrors = {}; state.sheetBaseline = null; state.connAdvancedOpen = false; render(); focusField('f-cname'); break;
     case 'edit-conn': {
       const c = state.connections.find((x) => x.id === id);
       if (!c) break;
@@ -1792,6 +1818,7 @@ document.addEventListener('click', async (e) => {
         const s = state.secrets.find((s) => s.name === c.secret_names[0]);
         if (s) state.draft.secretId = s.id;
       }
+      state.connAdvancedOpen = draftUsesAdvancedFields(state.draft, state.connType);
       render(); focusField('f-cname'); break;
     }
     case 'conn-type': {
@@ -1810,6 +1837,11 @@ document.addEventListener('click', async (e) => {
       render(false);
       break;
     }
+    case 'toggle-conn-advanced':
+      captureDrafts();
+      state.connAdvancedOpen = !state.connAdvancedOpen;
+      render(false);
+      break;
     case 'select-toggle': {
       const menuId = btn.dataset.menu ?? '';
       captureDrafts();
