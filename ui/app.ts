@@ -681,24 +681,32 @@ function credentialChooserHTML(
   const select = allowNew
     ? selectControlHTML('c-secret-source', `${sourceOptions}<option value="new" ${source === 'new' ? 'selected' : ''}>Save a new credential</option>`)
     : '';
+  const firstLabel = (label: string): string =>
+    `<label class="credential-first-label"><span class="credential-key" aria-hidden="true">${ICONS.keyRound}</span>${label}</label>`;
   if (source === 'existing' && state.secrets.length) {
     const opts = state.secrets.map((secret) =>
       `<option value="${escAttr(secret.id)}" ${draft.secretId === secret.id ? 'selected' : ''}>${esc(secret.name)}</option>`).join('');
-    return `${allowNew ? `<div class="f-row"><label>${secretLabel}</label>${select}</div>` : ''}
-      <div class="f-row"><label>${allowNew ? 'Saved credential' : secretLabel}</label>${selectControlHTML('c-secret', opts)}${fieldErr('secret')}</div>`;
+    return `<div class="credential-rail">
+      ${allowNew ? `<div class="f-row">${firstLabel(secretLabel)}${select}</div>` : ''}
+      <div class="f-row">${allowNew ? '<label>Saved credential</label>' : firstLabel(secretLabel)}${selectControlHTML('c-secret', opts)}${fieldErr('secret')}</div>
+    </div>`;
   }
   const suggested = suggestedSecretName(draft.name ?? '', type);
   if (type === 'ssh' && draft.sshImportId && draft.identityFiles && draft.identityFiles.length) {
     const identityOptions = draft.identityFiles.map((path) =>
       `<option value="${escAttr(path)}" ${draft.identityFile === path ? 'selected' : ''}>${esc(path)}</option>`).join('');
-    return `<div class="f-row"><label>${secretLabel}</label>${select}</div>
+    return `<div class="credential-rail">
+      <div class="f-row">${firstLabel(secretLabel)}${select}</div>
       <div class="f-row"><label>Credential name</label><input id="c-new-secret-name" class="${fieldCls('newSecretName')}" placeholder="${escAttr(suggested)}" value="${escAttr(draft.newSecretName ?? '')}">${fieldErr('newSecretName')}</div>
       <div class="f-row"><label>Identity file</label>${selectControlHTML('c-identity-file', identityOptions)}${fieldErr('newSecretValue')}
-        <div class="rule-note">The private key is read by AgentMFA and saved directly to macOS Keychain.</div></div>`;
+        <div class="rule-note">The private key is read by AgentMFA and saved directly to macOS Keychain.</div></div>
+    </div>`;
   }
-  return `<div class="f-row"><label>${secretLabel}</label>${select}</div>
+  return `<div class="credential-rail">
+    <div class="f-row">${firstLabel(secretLabel)}${select}</div>
     <div class="f-row"><label>Credential name</label><input id="c-new-secret-name" class="${fieldCls('newSecretName')}" placeholder="${escAttr(suggested)}" value="${escAttr(draft.newSecretName ?? '')}">${fieldErr('newSecretName')}</div>
-    <div class="f-row"><label>Credential value</label><input id="c-new-secret-value" class="${fieldCls('newSecretValue')}" type="password" placeholder="Saved directly to macOS Keychain" value="${escAttr(draft.newSecretValue ?? draft.importedCredential ?? '')}">${fieldErr('newSecretValue')}</div>`;
+    <div class="f-row"><label>Credential value</label><input id="c-new-secret-value" class="${fieldCls('newSecretValue')}" type="password" placeholder="Saved directly to macOS Keychain" value="${escAttr(draft.newSecretValue ?? draft.importedCredential ?? '')}">${fieldErr('newSecretValue')}</div>
+  </div>`;
 }
 
 async function connectionDraftFromImport(
@@ -739,6 +747,7 @@ function connSheet(editing: boolean): string {
   };
   const importWarnings = !editing && d.importWarnings && d.importWarnings.length
     ? `<div class="pair-identity-warning"><b>Review imported details</b><ul>${d.importWarnings.map((warning) => `<li>${esc(warning)}</li>`).join('')}</ul></div>` : '';
+  let sshHostKeyField = '';
   let fields = importWarnings;
   fields += `<div class="f-row"><label>Name</label><input id="f-cname" class="${fieldCls('name')}" placeholder="e.g. github" value="${escAttr(d.name ?? '')}">${fieldErr('name')}</div>
     <div class="f-row"><label>Type${editing ? ': fixed after creation' : ''}</label>
@@ -757,8 +766,8 @@ function connSheet(editing: boolean): string {
       ? selectControlHTML('f-host-key', hostKeys.map((candidate) =>
           `<option value="${escAttr(candidate.fingerprint)}" ${d.hostKeyFingerprint === candidate.fingerprint ? 'selected' : ''}>${esc(candidate.algorithm)} · ${esc(candidate.fingerprint)}</option>`).join(''))
       : `<input id="f-host-key" class="${fieldCls('hostKeyFingerprint')}" placeholder="SHA256:…" value="${escAttr(d.hostKeyFingerprint ?? '')}">`;
-    fields += `<div class="f-row"><label>Host key fingerprint</label>${hostKeyControl}${fieldErr('hostKeyFingerprint')}</div>
-      ${d.proxyJump ? `<div class="rule-note">ProxyJump: ${esc(d.proxyJump)}</div>` : ''}`;
+    fields += d.proxyJump ? `<div class="rule-note">ProxyJump: ${esc(d.proxyJump)}</div>` : '';
+    sshHostKeyField = `<div class="f-row"><label>Host key fingerprint</label>${hostKeyControl}${fieldErr('hostKeyFingerprint')}</div>`;
   } else if (t === 'pg') {
     const sslmode = d.sslmode || 'verify-full';
     const sslOpts = [
@@ -817,6 +826,7 @@ function connSheet(editing: boolean): string {
   } else {
     fields += credentialChooserHTML(t, d);
   }
+  fields += sshHostKeyField;
   if (editing && conn && (conn.permissions || []).some((permission) => !permission.expires_at)) {
     fields += `<div class="rule-note">Changing the destination makes affected agents ask for approval again.</div>`;
   }
