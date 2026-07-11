@@ -102,6 +102,7 @@ interface AppState {
   sheetErrors: Record<string, string>;
   sheetBaseline: string | null;
   confirmDiscard: boolean;
+  formMenuOpen: string | null;
   connType: ConnectionType;
   confirm: ConfirmState | null;
   alwaysOpen: boolean;
@@ -145,6 +146,7 @@ const state: AppState = {
   sheetErrors: {},       // field key -> inline validation message
   sheetBaseline: null,   // draft signature at sheet open (dirty-close detection)
   confirmDiscard: false, // "Discard this service?" confirm over the conn sheet
+  formMenuOpen: null,    // id of the open custom-select listbox in the sheet
   connType: 'api',
   confirm: null,         // {kind, id/name}
   alwaysOpen: false,
@@ -268,6 +270,8 @@ function render(capture = true): void {
       }
     }
   }
+
+  if (state.formMenuOpen) positionFormMenu();
 
   // First render of a connection sheet: snapshot the draft as the form
   // presents it (defaults included) so cancelling can detect real edits.
@@ -662,9 +666,30 @@ function clearActivitySheet() {
 const fieldErr = (key: string): string =>
   state.sheetErrors[key] ? `<div class="field-error">${esc(state.sheetErrors[key])}</div>` : '';
 const fieldCls = (key: string): string => (state.sheetErrors[key] ? 'err' : '');
-const selectControlHTML = (id: string, options: string): string => `<span class="select-control">
-  <select id="${id}">${options}</select>
-  <span class="select-chevron" aria-hidden="true">${ICONS.chevronDown}</span></span>`;
+// Custom select shared by every dropdown in the form sheets: a trigger
+// button plus a fixed-position listbox (see positionFormMenu). The trigger
+// carries the selection as its value so captureDrafts reads it like the
+// native select it replaces.
+function customSelectHTML(
+  id: string,
+  options: Array<[string, string]>,
+  selectedValue: string | null | undefined,
+  errCls = '',
+): string {
+  const open = state.formMenuOpen === id;
+  const selected = options.find(([value]) => value === selectedValue) ?? options[0];
+  const rows = options.map(([value, label]) =>
+    `<button type="button" class="cred-opt" role="option" data-act="select-pick"
+      data-menu="${id}" data-id="${escAttr(value)}" aria-selected="${value === selected[0]}">
+      <span class="cred-opt-col"><span class="cred-name">${esc(label)}</span></span>
+      ${value === selected[0] ? `<span class="cred-opt-check">${ICONS.check}</span>` : ''}</button>`).join('');
+  return `<div class="cred-select">
+    <button type="button" id="${id}" class="cred-trigger ${errCls}" value="${escAttr(selected[0])}"
+      data-act="select-toggle" data-menu="${id}" aria-haspopup="listbox" aria-expanded="${open}">
+      <span class="cred-name">${esc(selected[1])}</span>
+      <span class="cred-chevron" aria-hidden="true">${ICONS.chevronDown}</span></button>
+    ${open ? `<div class="cred-menu" role="listbox">${rows}</div>` : ''}</div>`;
+}
 
 function addSecretSheet(editing: boolean): string {
   const d = state.draft;
@@ -697,40 +722,70 @@ function credentialChooserHTML(
   const secretLabel = type === 'pg' ? 'Database password'
     : type === 'ssh' ? 'SSH private key'
     : 'Token or API key';
-  const keychainNote = '<div class="rule-note">Stored in macOS Keychain.</div>';
+  const storeHint = `<div class="cred-hint">${ICONS.lock}<span>From your secrets</span></div>`;
   let picker = '';
   if (state.secrets.length) {
     // Usage detail disambiguates similarly named credentials without
     // touching secret values (revealing those is a separate audited call).
     const usageDetail = (secret: SecretSummary): string => !secret.used_by ? ''
-      : secret.used_by === 1 && secret.used_by_names.length ? ` · used by ${secret.used_by_names[0]}`
-      : ` · used by ${secret.used_by} services`;
-    let opts = state.secrets.map((secret) =>
-      `<option value="${escAttr(secret.id)}" ${source === 'existing' && draft.secretId === secret.id ? 'selected' : ''}>${esc(secret.name + usageDetail(secret))}</option>`).join('');
-    if (allowNew) opts += `<option value="${NEW_CREDENTIAL_OPTION}" ${source === 'new' ? 'selected' : ''}>＋ Create new credential…</option>`;
-    picker = `<div class="f-row"><label for="c-secret">${secretLabel}</label>${selectControlHTML('c-secret', opts)}${fieldErr('secret')}</div>`;
+      : secret.used_by === 1 && secret.used_by_names.length ? `used by ${secret.used_by_names[0]}`
+      : `used by ${secret.used_by} services`;
+    const selected = source === 'existing'
+      ? state.secrets.find((secret) => secret.id === draft.secretId) || state.secrets[0]
+      : null;
+    const keyBadge = `<span class="cred-badge" aria-hidden="true">${ICONS.keyRound}</span>`;
+    const plusBadge = `<span class="cred-badge plus" aria-hidden="true">${ICONS.plus}</span>`;
+    const triggerContent = selected
+      ? `${keyBadge}<span class="cred-name">${esc(selected.name)}</span>
+         ${selected.used_by ? `<span class="cred-detail">${esc(usageDetail(selected))}</span>` : ''}`
+      : `${plusBadge}<span class="cred-name">New secret…</span>`;
+    const options = state.secrets.map((secret) => {
+      const picked = selected !== null && selected.id === secret.id;
+      return `<button type="button" class="cred-opt" role="option" data-act="credential-pick"
+        data-id="${escAttr(secret.id)}" aria-selected="${picked}">${keyBadge}
+        <span class="cred-opt-col"><span class="cred-name">${esc(secret.name)}</span>
+          ${secret.used_by ? `<span class="cred-opt-sub">${esc(usageDetail(secret))}</span>` : ''}</span>
+        ${picked ? `<span class="cred-opt-check">${ICONS.check}</span>` : ''}</button>`;
+    }).join('');
+    const newOption = allowNew
+      ? `<div class="cred-menu-divider"></div>
+        <button type="button" class="cred-opt" role="option" data-act="credential-pick"
+          data-id="${NEW_CREDENTIAL_OPTION}" aria-selected="${source === 'new'}">${plusBadge}
+          <span class="cred-opt-col"><span class="cred-name">New secret…</span></span></button>`
+      : '';
+    const menu = state.formMenuOpen === 'c-secret'
+      ? `<div class="cred-menu" role="listbox">${options}${newOption}</div>`
+      : '';
+    // The trigger carries the selection as its value so captureDrafts and the
+    // sheet-open baseline read it exactly like the native select it replaced.
+    picker = `<div class="f-row"><label for="c-secret">${secretLabel}</label>
+      <div class="cred-select">
+        <button type="button" id="c-secret" class="cred-trigger ${fieldCls('secret')}"
+          value="${escAttr(selected ? selected.id : NEW_CREDENTIAL_OPTION)}" data-act="select-toggle" data-menu="c-secret"
+          aria-haspopup="listbox" aria-expanded="${state.formMenuOpen === 'c-secret'}">
+          ${triggerContent}<span class="cred-chevron" aria-hidden="true">${ICONS.chevronDown}</span></button>
+        ${menu}</div>${fieldErr('secret')}</div>`;
   } else if (source === 'new') {
     picker = `<div class="f-row"><label>${secretLabel}</label></div>`;
   }
   if (source === 'existing') {
-    return `<div class="credential-group">${picker}${keychainNote}</div>`;
+    return `<div class="credential-group">${picker}${storeHint}</div>`;
   }
   const suggested = suggestedSecretName(draft.name ?? '', type);
   const nameRow = `<div class="f-row"><label for="c-new-secret-name">Credential name</label><input id="c-new-secret-name" class="${fieldCls('newSecretName')}" placeholder="${escAttr(suggested)}" value="${escAttr(draft.newSecretName ?? '')}">${fieldErr('newSecretName')}</div>`;
   if (type === 'ssh' && draft.sshImportId && draft.identityFiles && draft.identityFiles.length) {
-    const identityOptions = draft.identityFiles.map((path) =>
-      `<option value="${escAttr(path)}" ${draft.identityFile === path ? 'selected' : ''}>${esc(path)}</option>`).join('');
+    const identityOptions = draft.identityFiles.map((path): [string, string] => [path, path]);
     return `<div class="credential-group">${picker}${nameRow}
-      <div class="f-row"><label for="c-identity-file">Identity file</label>${selectControlHTML('c-identity-file', identityOptions)}${fieldErr('newSecretValue')}
+      <div class="f-row"><label for="c-identity-file">Identity file</label>${customSelectHTML('c-identity-file', identityOptions, draft.identityFile)}${fieldErr('newSecretValue')}
         <div class="rule-note">The private key is read by AgentMFA and saved directly to macOS Keychain.</div></div>
-    </div>`;
+    ${storeHint}</div>`;
   }
   const valuePlaceholder = type === 'pg' ? 'Paste the database password'
     : type === 'ssh' ? 'Paste the private key'
     : 'Paste the token or API key';
   return `<div class="credential-group">${picker}${nameRow}
     <div class="f-row"><label for="c-new-secret-value">Credential value</label><input id="c-new-secret-value" class="${fieldCls('newSecretValue')}" type="password" placeholder="${valuePlaceholder}" value="${escAttr(draft.newSecretValue ?? draft.importedCredential ?? '')}">${fieldErr('newSecretValue')}</div>
-    ${keychainNote}</div>`;
+    ${storeHint}</div>`;
 }
 
 async function connectionDraftFromImport(
@@ -787,27 +842,28 @@ function connSheet(editing: boolean): string {
       <div class="f-row" style="flex:0 0 90px"><label for="f-port">Port</label><input id="f-port" class="${fieldCls('port')}" inputmode="numeric" value="${escAttr(d.port ?? '22')}">${fieldErr('port')}</div></div>`;
     const hostKeys = d.hostKeyCandidates || [];
     const hostKeyControl = hostKeys.length
-      ? selectControlHTML('f-host-key', hostKeys.map((candidate) =>
-          `<option value="${escAttr(candidate.fingerprint)}" ${d.hostKeyFingerprint === candidate.fingerprint ? 'selected' : ''}>${esc(candidate.algorithm)} · ${esc(candidate.fingerprint)}</option>`).join(''))
+      ? customSelectHTML('f-host-key', hostKeys.map((candidate): [string, string] =>
+          [candidate.fingerprint, `${candidate.algorithm} · ${candidate.fingerprint}`]),
+          d.hostKeyFingerprint, fieldCls('hostKeyFingerprint'))
       : `<input id="f-host-key" class="${fieldCls('hostKeyFingerprint')}" placeholder="SHA256:…" value="${escAttr(d.hostKeyFingerprint ?? '')}">`;
     fields += d.proxyJump ? `<div class="rule-note">ProxyJump: ${esc(d.proxyJump)}</div>` : '';
     sshHostKeyField = `<div class="f-row"><label for="f-host-key">Host key fingerprint</label>${hostKeyControl}${fieldErr('hostKeyFingerprint')}</div>`;
   } else if (t === 'pg') {
     const sslmode = d.sslmode || 'verify-full';
-    const sslOpts = [
+    const sslOpts: Array<[string, string]> = [
       ['verify-full', 'Verify full'],
       ['require', 'Require TLS (no certificate verification)'],
       ['verify-ca', 'Verify CA only (no hostname verification)'],
       ['prefer', 'Prefer (TLS optional)'],
       ['disable', 'Disable'],
-    ].map(([value, label]) => `<option value="${value}" ${sslmode === value ? 'selected' : ''}>${label}</option>`).join('');
+    ];
     fields += `<div class="f-2col">
       <div class="f-row"><label for="f-host">Host</label><input id="f-host" class="${fieldCls('host')}" placeholder="db.internal.example.com" value="${escAttr(d.host ?? '')}">${fieldErr('host')}</div>
       <div class="f-row" style="flex:0 0 90px"><label for="f-port">Port</label><input id="f-port" class="${fieldCls('port')}" inputmode="numeric" value="${escAttr(d.port ?? '5432')}">${fieldErr('port')}</div></div>
       <div class="f-2col">
       <div class="f-row"><label for="f-db">Database</label><input id="f-db" class="${fieldCls('dbname')}" placeholder="app_production" value="${escAttr(d.dbname ?? '')}">${fieldErr('dbname')}</div>
       <div class="f-row" style="flex:0 0 90px"><label for="f-user">User</label><input id="f-user" class="${fieldCls('user')}" placeholder="app" value="${escAttr(d.user ?? '')}">${fieldErr('user')}</div></div>`;
-    pgTlsFields = `<div class="f-row"><label for="f-sslmode">TLS mode</label>${selectControlHTML('f-sslmode', sslOpts)}${fieldErr('sslmode')}
+    pgTlsFields = `<div class="f-row"><label for="f-sslmode">TLS mode</label>${customSelectHTML('f-sslmode', sslOpts, sslmode, fieldCls('sslmode'))}${fieldErr('sslmode')}
         ${sslmode === 'require' ? '<div class="pair-identity-warning">The server certificate will not be verified.</div>' : ''}</div>
       <div class="f-row"><label for="f-pg-ca-bundle">Trusted CA bundle <span class="label-detail">(optional)</span></label>
         <input id="f-pg-ca-bundle" placeholder="/path/to/private-ca.pem" value="${escAttr(d.pgCaBundlePath ?? '')}"></div>`;
@@ -829,14 +885,14 @@ function connSheet(editing: boolean): string {
     }
   } else if (t === 'api' || t === 'ws') {
     const modeValue = d.authMode || 'bearer';
-    const recipes = [
+    const recipes: Array<[string, string]> = [
       ['bearer', 'Bearer token'], ['header', 'Custom header'],
-      ...(t === 'api' ? [['query', 'Query parameter']] : []),
+      ...(t === 'api' ? [['query', 'Query parameter'] as [string, string]] : []),
       ['advanced', 'Bearer token + template'],
-    ].map(([value, label]) => `<option value="${value}" ${modeValue === value ? 'selected' : ''}>${label}</option>`).join('');
+    ];
     // Decision first: the authentication type governs which detail field and
     // credential inputs appear, so those render beneath the select.
-    fields += `<div class="f-row"><label for="c-auth-mode">Authentication type</label>${selectControlHTML('c-auth-mode', recipes)}</div>`;
+    fields += `<div class="f-row"><label for="c-auth-mode">Authentication type</label>${customSelectHTML('c-auth-mode', recipes, modeValue)}</div>`;
     if (modeValue === 'header') {
       fields += `<div class="f-row"><label for="c-auth-detail">Header name</label><input id="c-auth-detail" class="${fieldCls('authDetail')}" placeholder="X-API-Key" value="${escAttr(d.authDetail ?? '')}">${fieldErr('authDetail')}</div>`;
     } else if (modeValue === 'query') {
@@ -1110,6 +1166,33 @@ function focusField(id: string): void {
   }, 0);
 }
 
+// Anchor the fixed-position listbox menu to its trigger, flipping above
+// when the viewport bottom would cut it off. Runs after every render while
+// a menu is open, and again on scroll/resize so it tracks the trigger.
+function positionFormMenu(): void {
+  const trigger = state.formMenuOpen ? document.getElementById(state.formMenuOpen) : null;
+  const menu = document.querySelector<HTMLElement>('.cred-menu');
+  if (!trigger || !menu) return;
+  const rect = trigger.getBoundingClientRect();
+  menu.style.left = `${rect.left}px`;
+  menu.style.width = `${rect.width}px`;
+  const below = rect.bottom + 5;
+  const flip = below + menu.offsetHeight > window.innerHeight - 8 &&
+    rect.top - menu.offsetHeight - 5 > 8;
+  menu.style.top = flip ? `${rect.top - menu.offsetHeight - 5}px` : `${below}px`;
+  menu.style.visibility = 'visible';
+}
+
+// Focus the selected option when a listbox menu opens.
+function focusMenuOption(): void {
+  setTimeout(() => {
+    const menu = document.querySelector<HTMLElement>('.cred-menu');
+    const option = menu?.querySelector<HTMLElement>('[aria-selected="true"]')
+      ?? menu?.querySelector<HTMLElement>('[role="option"]');
+    option?.focus();
+  }, 0);
+}
+
 function focusImportedConnectionDraft(): void {
   const d = state.draft;
   const type = state.connType;
@@ -1372,6 +1455,7 @@ function closeSheet() {
   state.sheetErrors = {};
   state.sheetBaseline = null;
   state.confirmDiscard = false;
+  state.formMenuOpen = null;
   render();
 }
 
@@ -1426,6 +1510,11 @@ document.addEventListener('click', async (e) => {
   if (state.walkthroughMenuOpen && !target?.closest('.walkthrough-menu-wrap')) {
     state.walkthroughMenuOpen = false;
     if (!btn) { render(); return; }
+  }
+  if (state.formMenuOpen && !target?.closest('.cred-select')) {
+    state.formMenuOpen = null;
+    if (!btn) { render(); return; }
+    // fall through: the clicked action runs and its render reflects the close
   }
   if (!btn) return;
   const act = btn.dataset.act;
@@ -1645,9 +1734,46 @@ document.addEventListener('click', async (e) => {
         state.draft.port ?? null,
       );
       state.connType = typedNextType;
+      state.formMenuOpen = null;
       render(false);
       break;
     }
+    case 'select-toggle': {
+      const menuId = btn.dataset.menu ?? '';
+      captureDrafts();
+      state.formMenuOpen = state.formMenuOpen === menuId ? null : menuId;
+      render(false);
+      if (state.formMenuOpen) focusMenuOption();
+      else focusField(menuId);
+      break;
+    }
+    case 'select-pick': {
+      const menuId = btn.dataset.menu ?? '';
+      captureDrafts();
+      state.formMenuOpen = null;
+      const errKey = ERR_KEY_BY_INPUT[menuId as keyof typeof ERR_KEY_BY_INPUT];
+      if (errKey) delete state.sheetErrors[errKey];
+      if (menuId === 'c-auth-mode') state.draft.authMode = id;
+      else if (menuId === 'f-sslmode') state.draft.sslmode = id;
+      else if (menuId === 'c-identity-file') state.draft.identityFile = id;
+      else if (menuId === 'f-host-key') state.draft.hostKeyFingerprint = id;
+      render(false);
+      focusField(menuId);
+      break;
+    }
+    case 'credential-pick':
+      captureDrafts();
+      state.formMenuOpen = null;
+      delete state.sheetErrors.secret;
+      if (id === NEW_CREDENTIAL_OPTION) {
+        state.draft.secretSource = 'new';
+      } else {
+        state.draft.secretSource = 'existing';
+        state.draft.secretId = id;
+      }
+      render(false);
+      focusField(id === NEW_CREDENTIAL_OPTION ? 'c-new-secret-name' : 'c-secret');
+      break;
     case 'save-conn': await saveConn(); break;
     case 'del-conn-ask': state.confirm = { kind: 'del-conn', id }; render(); break;
     case 'del-conn-confirm':
@@ -1747,10 +1873,37 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     if (state.walkthroughMenuOpen) { state.walkthroughMenuOpen = false; render(); return; }
     if (state.menuOpen) { state.menuOpen = false; render(); return; }
+    if (state.formMenuOpen) {
+      const menuId = state.formMenuOpen;
+      state.formMenuOpen = null;
+      render(false);
+      focusField(menuId);
+      return;
+    }
     if (state.confirmDiscard) { state.confirmDiscard = false; render(false); return; }
     if (state.sheet) { requestCloseSheet(); return; }
     if (state.confirm) { state.confirm = null; render(); return; }
     if (mode === 'dropdown') invoke('ui_hide_dropdown');
+  } else if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && state.sheet &&
+      (state.formMenuOpen ||
+        (e.key === 'ArrowDown' && document.activeElement?.classList.contains('cred-trigger')))) {
+    // Native-select keyboard behavior for the listboxes: ArrowDown on a
+    // closed trigger opens it; arrows move between options once open.
+    e.preventDefault();
+    if (!state.formMenuOpen) {
+      state.formMenuOpen = (document.activeElement as HTMLElement).id;
+      render(false);
+      focusMenuOption();
+      return;
+    }
+    const options = Array.from(
+      document.querySelectorAll<HTMLElement>('.cred-menu [role="option"]'));
+    if (!options.length) return;
+    const index = options.indexOf(document.activeElement as HTMLElement);
+    const next = index === -1
+      ? (e.key === 'ArrowDown' ? 0 : options.length - 1)
+      : Math.min(Math.max(index + (e.key === 'ArrowDown' ? 1 : -1), 0), options.length - 1);
+    options[next].focus();
   } else if (e.key === 'Enter' && e.target instanceof Element && e.target.tagName === 'INPUT') {
     if (state.confirmDiscard) return;
     if (state.sheet && (state.sheet.kind === 'add-secret' || state.sheet.kind === 'edit-secret')) { e.preventDefault(); saveSecret(); }
@@ -1813,17 +1966,13 @@ document.addEventListener('focusout', (e) => {
   if (target?.id === 'f-cname') updateCredentialNamePlaceholder(target.value);
 });
 
-// These selects reveal a different, stateful portion of the form. Capture
-// first so switching does not discard fields the user may switch back to.
-document.addEventListener('change', (e) => {
-  const target = e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement
-    ? e.target
-    : null;
-  if (!target || !['c-auth-mode', 'f-sslmode', 'c-secret'].includes(target.id)) return;
-  const startNewCredential = target.id === 'c-secret' && target.value === NEW_CREDENTIAL_OPTION;
-  captureDrafts();
-  render(false);
-  if (startNewCredential) focusField('c-new-secret-name');
+// Keep an open fixed-position listbox glued to its trigger while the sheet
+// scrolls or the window resizes.
+document.addEventListener('scroll', () => {
+  if (state.formMenuOpen) positionFormMenu();
+}, true);
+window.addEventListener('resize', () => {
+  if (state.formMenuOpen) positionFormMenu();
 });
 
 /* --------------------------------- boot ---------------------------------- */
