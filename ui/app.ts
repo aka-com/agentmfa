@@ -681,33 +681,33 @@ function credentialChooserHTML(
   const secretLabel = type === 'pg' ? 'Database password'
     : type === 'ssh' ? 'SSH private key'
     : 'Token or API key';
-  const sourceOptions = state.secrets.length
-    ? `<option value="existing" ${source === 'existing' ? 'selected' : ''}>Use a saved credential</option>` : '';
-  const select = allowNew
-    ? selectControlHTML('c-secret-source', `${sourceOptions}<option value="new" ${source === 'new' ? 'selected' : ''}>Save a new credential</option>`)
-    : '';
   const railKey = `<span class="credential-key" aria-hidden="true">${ICONS.keyRound}</span>`;
   if (source === 'existing' && state.secrets.length) {
     const opts = state.secrets.map((secret) =>
       `<option value="${escAttr(secret.id)}" ${draft.secretId === secret.id ? 'selected' : ''}>${esc(secret.name)}</option>`).join('');
     return `<div class="credential-rail">${railKey}
-      ${allowNew ? `<div class="f-row"><label>${secretLabel}</label>${select}</div>` : ''}
-      <div class="f-row"><label>${allowNew ? 'Saved credential' : secretLabel}</label>${selectControlHTML('c-secret', opts)}${fieldErr('secret')}</div>
+      <div class="f-row"><label>${secretLabel}</label>
+        <div class="credential-saved-row">${selectControlHTML('c-secret', opts)}
+          ${allowNew ? '<button type="button" class="setup-toggle credential-source-action" data-act="credential-use-new">Use new</button>' : ''}
+        </div>${fieldErr('secret')}</div>
     </div>`;
   }
+  const useSaved = allowNew && state.secrets.length
+    ? '<button type="button" class="setup-toggle credential-source-action" data-act="credential-use-saved">Use saved</button>'
+    : '';
   const suggested = suggestedSecretName(draft.name ?? '', type);
   if (type === 'ssh' && draft.sshImportId && draft.identityFiles && draft.identityFiles.length) {
     const identityOptions = draft.identityFiles.map((path) =>
       `<option value="${escAttr(path)}" ${draft.identityFile === path ? 'selected' : ''}>${esc(path)}</option>`).join('');
     return `<div class="credential-rail">${railKey}
-      <div class="f-row"><label>${secretLabel}</label>${select}</div>
+      <div class="f-row credential-mode-row"><label>${secretLabel}</label>${useSaved}</div>
       <div class="f-row"><label>Credential name</label><input id="c-new-secret-name" class="${fieldCls('newSecretName')}" placeholder="${escAttr(suggested)}" value="${escAttr(draft.newSecretName ?? '')}">${fieldErr('newSecretName')}</div>
       <div class="f-row"><label>Identity file</label>${selectControlHTML('c-identity-file', identityOptions)}${fieldErr('newSecretValue')}
         <div class="rule-note">The private key is read by AgentMFA and saved directly to macOS Keychain.</div></div>
     </div>`;
   }
   return `<div class="credential-rail">${railKey}
-    <div class="f-row"><label>${secretLabel}</label>${select}</div>
+    <div class="f-row credential-mode-row"><label>${secretLabel}</label>${useSaved}</div>
     <div class="f-row"><label>Credential name</label><input id="c-new-secret-name" class="${fieldCls('newSecretName')}" placeholder="${escAttr(suggested)}" value="${escAttr(draft.newSecretName ?? '')}">${fieldErr('newSecretName')}</div>
     <div class="f-row"><label>Credential value</label><input id="c-new-secret-value" class="${fieldCls('newSecretValue')}" type="password" placeholder="Saved directly to macOS Keychain" value="${escAttr(draft.newSecretValue ?? draft.importedCredential ?? '')}">${fieldErr('newSecretValue')}</div>
   </div>`;
@@ -762,7 +762,7 @@ function connSheet(editing: boolean): string {
     fields += `<div class="f-row"><label>API root</label><input id="f-origin" class="${fieldCls('origin')}" placeholder="https://api.github.com" value="${escAttr(origin)}">${fieldErr('origin')}</div>`;
   } else if (t === 'ssh') {
     fields += `<div class="f-2col">
-      <div class="f-row" style="flex:0 0 90px"><label>User</label><input id="f-user" class="${fieldCls('user')}" placeholder="deploy" value="${escAttr(d.user ?? '')}">${fieldErr('user')}</div>
+      <div class="f-row" style="flex:0 0 90px"><label>User</label><input id="f-user" class="${fieldCls('user')}" placeholder="satoshi" value="${escAttr(d.user ?? '')}">${fieldErr('user')}</div>
       <div class="f-row"><label>Host</label><input id="f-host" class="${fieldCls('host')}" placeholder="prod.example.com" value="${escAttr(d.host ?? '')}">${fieldErr('host')}</div>
       <div class="f-row" style="flex:0 0 90px"><label>Port</label><input id="f-port" class="${fieldCls('port')}" inputmode="numeric" value="${escAttr(d.port ?? '22')}">${fieldErr('port')}</div></div>`;
     const hostKeys = d.hostKeyCandidates || [];
@@ -790,8 +790,7 @@ function connSheet(editing: boolean): string {
     pgTlsFields = `<div class="f-row"><label>TLS mode</label>${selectControlHTML('f-sslmode', sslOpts)}${fieldErr('sslmode')}
         ${sslmode === 'require' ? '<div class="pair-identity-warning">The server certificate will not be verified.</div>' : ''}</div>
       <div class="f-row"><label>Trusted CA bundle <span class="label-detail">(optional)</span></label>
-        <input id="f-pg-ca-bundle" placeholder="/path/to/private-ca.pem" value="${escAttr(d.pgCaBundlePath ?? '')}">
-        <div class="rule-note">Verified TLS uses system roots when this is empty.</div></div>`;
+        <input id="f-pg-ca-bundle" placeholder="/path/to/private-ca.pem" value="${escAttr(d.pgCaBundlePath ?? '')}"></div>`;
   } else {
     fields += `<div class="f-row"><label>URL</label><input id="f-url" class="${fieldCls('url')}" placeholder="wss://stream.example.com/feed" value="${escAttr(d.url ?? '')}">${fieldErr('url')}</div>`;
   }
@@ -1155,7 +1154,6 @@ function captureDrafts(): void {
     if (g('f-url') !== undefined) state.draft.url = g('f-url');
     if (g('c-template') !== undefined) state.draft.template = g('c-template');
     if (g('c-secret') !== undefined) state.draft.secretId = g('c-secret');
-    if (g('c-secret-source') !== undefined) state.draft.secretSource = g('c-secret-source');
     if (g('c-new-secret-name') !== undefined) state.draft.newSecretName = g('c-new-secret-name');
     if (g('c-identity-file') !== undefined) state.draft.identityFile = g('c-identity-file');
     if (g('c-new-secret-value') !== undefined) {
@@ -1573,6 +1571,18 @@ document.addEventListener('click', async (e) => {
       render(false);
       break;
     }
+    case 'credential-use-new':
+      captureDrafts();
+      state.draft.secretSource = 'new';
+      render(false);
+      focusField('c-new-secret-name');
+      break;
+    case 'credential-use-saved':
+      captureDrafts();
+      state.draft.secretSource = 'existing';
+      render(false);
+      focusField('c-secret');
+      break;
     case 'save-conn': await saveConn(); break;
     case 'del-conn-ask': state.confirm = { kind: 'del-conn', id }; render(); break;
     case 'del-conn-confirm':
@@ -1738,7 +1748,7 @@ document.addEventListener('change', (e) => {
   const target = e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement
     ? e.target
     : null;
-  if (!target || !['c-secret-source', 'c-auth-mode', 'f-sslmode'].includes(target.id)) return;
+  if (!target || !['c-auth-mode', 'f-sslmode'].includes(target.id)) return;
   captureDrafts();
   render(false);
 });
