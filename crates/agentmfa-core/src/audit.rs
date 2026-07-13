@@ -126,7 +126,8 @@ pub enum AuditKind {
     ConnectionAdded,
     ConnectionUpdated,
     ConnectionDeleted,
-    /// A user-initiated connectivity/credential test from the UI.
+    /// Retained so activity logs written by older versions still deserialize.
+    /// New service tests do not create activity entries.
     ConnectionTested,
     SettingsChanged,
     // Rate limiting / budgets

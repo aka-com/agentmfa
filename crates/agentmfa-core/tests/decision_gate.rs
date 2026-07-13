@@ -862,6 +862,35 @@ async fn prefix_reveals_are_not_added_to_the_activity_log() {
 }
 
 #[tokio::test]
+async fn service_tests_are_not_added_to_the_activity_log() {
+    let (broker, _dir) = broker_with(Arc::new(UnimplementedShell)).await;
+    broker
+        .store
+        .add_secret("API_KEY", Zeroizing::new("bad\nvalue".into()))
+        .unwrap();
+    let connection = broker
+        .store
+        .add_connection(ConnectionSpec {
+            name: "local-api".into(),
+            config: ConnectionConfig::Api {
+                host: "127.0.0.1".into(),
+                scheme: "http".into(),
+                port: None,
+                template: "Authorization: Bearer {{API_KEY}}".into(),
+            },
+            secrets: vec![],
+        })
+        .unwrap();
+
+    assert!(!broker.ui_test_connection(&connection.id).await.unwrap().ok);
+    assert!(broker
+        .audit
+        .recent(10)
+        .iter()
+        .all(|entry| entry.kind != agentmfa_core::audit::AuditKind::ConnectionTested));
+}
+
+#[tokio::test]
 async fn inherited_rules_are_removed_before_pairing_executes() {
     let events = Arc::new(GateEvents {
         allow: true,

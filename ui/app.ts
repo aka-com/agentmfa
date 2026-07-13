@@ -35,7 +35,7 @@ const EDIT_SECRET_MASK = '••••••••••••';
 const ACTIVITY_RENDER_LIMIT = 200;
 
 // The left-nav tabs, in order — also the cycle order for Ctrl-Tab.
-const TABS = ['connections', 'access', 'secrets', 'activity'] as const;
+const TABS = ['agents', 'connections', 'secrets', 'activity'] as const;
 type Tab = typeof TABS[number];
 
 interface SheetState {
@@ -133,7 +133,7 @@ interface ConnectionTestState {
 
 /* ------------------------------ local state ------------------------------ */
 const state: AppState = {
-  tab: 'connections',
+  tab: 'agents',
   secrets: [],
   connections: [],
   agents: [],
@@ -165,7 +165,7 @@ const state: AppState = {
   approvalRequestId: null,
   menuOpen: false,       // desktop-mode settings popover (gear) open
   walkthroughMenuOpen: false,
-  agentMenuOpen: null,   // agent id whose ⋯ options menu is open (Access tab)
+  agentMenuOpen: null,   // agent id whose ⋯ options menu is open (Agents tab)
   copied: null,          // secretId whose value was just copied (transient "Copied" flash)
   readyCopied: false,    // transient feedback on the setup-instructions status button
   setupInstructionsOpen: false,
@@ -226,7 +226,7 @@ async function load<K extends CommandName>(
 async function loadSettings(): Promise<void> {
   try { state.settings = await invoke('get_settings'); } catch (e) { console.error(e); }
 }
-async function refreshAccessViews(): Promise<void> {
+async function refreshAgentsView(): Promise<void> {
   await Promise.all([
     load('connections', 'list_connections'),
     load('agents', 'list_agents'),
@@ -248,7 +248,7 @@ function scheduleAccessExpiryRefresh(): void {
   const delay = Math.max(0, Math.min(...expiries) - Date.now() + 50);
   accessExpiryTimer = setTimeout(() => {
     accessExpiryTimer = null;
-    if (mode !== 'approval') refreshAccessViews();
+    if (mode !== 'approval') refreshAgentsView();
   }, Math.min(delay, 2_147_483_647));
 }
 
@@ -339,7 +339,7 @@ function globalSectionsHTML() {
     out += firstConnectionSetupHTML();
     hasOnboarding = true;
   }
-  if (state.tab === 'connections' && state.settings.show_agent_walkthrough) {
+  if (state.tab === 'agents' && state.settings.show_agent_walkthrough) {
     hasOnboarding = true;
     const instructionBody = state.showFullInstructions
       ? (state.brokerInstructions || 'Loading…')
@@ -438,13 +438,13 @@ function secretsHTML() {
 }
 
 /* ---- connections tab ---- */
-function accessDescription(connection: ConnectionSummary, scope: string): string {
+function permissionDescription(connection: ConnectionSummary, scope: string): string {
   if (scope === 'read') return 'Can fetch data';
   if (connection.type === 'api') return 'Can make any request';
   return 'Can open and use this service';
 }
 
-/* ---- access tab ---- */
+/* ---- agents tab ---- */
 // The screen pivots around the broker's core question — what can this agent
 // reach right now? One block per paired agent: an identity card on top, then
 // one row per service stating the agent's current capability in plain words.
@@ -452,16 +452,16 @@ const agentPermissionFor = (a: AgentSummary, c: ConnectionSummary): PermissionSu
   (c.permissions || []).find((permission) => permission.agent === a.name &&
     (!permission.expires_at || new Date(permission.expires_at).getTime() > Date.now()));
 
-function accessPillHTML(c: ConnectionSummary, permission: PermissionSummary | undefined): string {
+function permissionPillHTML(c: ConnectionSummary, permission: PermissionSummary | undefined): string {
   if (!permission) return '<span class="acc-pill">Asks you each time</span>';
   if (permission.expires_at) {
     const minutes = Math.max(1, Math.ceil((new Date(permission.expires_at).getTime() - Date.now()) / 60000));
-    return `<span class="acc-pill granted">${esc(accessDescription(c, permission.scope))} · ${minutes} min left</span>`;
+    return `<span class="acc-pill granted">${esc(permissionDescription(c, permission.scope))} · ${minutes} min left</span>`;
   }
-  return `<span class="acc-pill rule">${esc(accessDescription(c, permission.scope))} · without asking</span>`;
+  return `<span class="acc-pill rule">${esc(permissionDescription(c, permission.scope))} · without asking</span>`;
 }
 
-function agentAccessRowHTML(a: AgentSummary, c: ConnectionSummary): string {
+function agentServiceRowHTML(a: AgentSummary, c: ConnectionSummary): string {
   const t = TYPES[c.type];
   const permission = agentPermissionFor(a, c);
   const live = state.sessions.some((s) => s.agent === a.name && s.connection === c.name);
@@ -472,14 +472,14 @@ function agentAccessRowHTML(a: AgentSummary, c: ConnectionSummary): string {
     <span class="badge ${t.cls}">${t.label}</span>
     <div class="acc-svc"><div class="acc-name">${esc(c.name)}${live ? ' <span class="cc-live">● live</span>' : ''}</div>
       <div class="acc-target" title="${escAttr(c.target)}">${esc(c.target)}</div></div>
-    ${accessPillHTML(c, permission)}${action}</div>`;
+    ${permissionPillHTML(c, permission)}${action}</div>`;
 }
 
 function agentBlockHTML(a: AgentSummary): string {
   const menuOpen = state.agentMenuOpen === a.id;
   const sub = `${a.program} · ${a.verification} · last used ${relTime(a.last_used)}`;
   const rows = state.connections.length
-    ? state.connections.map((c) => agentAccessRowHTML(a, c)).join('')
+    ? state.connections.map((c) => agentServiceRowHTML(a, c)).join('')
     : `<div class="acc-none">No services yet.${mode === 'dropdown' ? '' : ` Add one to give ${esc(a.name)} somewhere to connect.`}</div>`;
   return `<div class="agent-block">
     <div class="agent-card">
@@ -500,7 +500,7 @@ function agentBlockHTML(a: AgentSummary): string {
   </div>`;
 }
 
-function accessHTML(): string {
+function agentsHTML(): string {
   if (!state.agents.length) {
     const detail = mode === 'dropdown' ? '' : `
       <p>Pair a coding agent to see and control what it can reach.</p>
@@ -610,7 +610,7 @@ async function receiveActivity(entry: ActivityEntry | null | undefined): Promise
 function tabContentHTML() {
   return state.tab === 'secrets' ? secretsHTML()
     : state.tab === 'connections' ? connectionsHTML()
-    : state.tab === 'access' ? accessHTML()
+    : state.tab === 'agents' ? agentsHTML()
     : activityHTML();
 }
 
@@ -646,7 +646,7 @@ function renderMainWindow() {
   // One view-specific action, always in the header row next to the title.
   const actionBtn = state.tab === 'connections'
     ? `<div class="dw-head-actions">${walkthroughMenuHTML()}<button class="btn" data-act="open-add-conn">＋ Add service</button></div>`
-    : state.tab === 'access'
+    : state.tab === 'agents'
     ? `<button class="btn" data-act="copy-agent-setup">Copy setup instructions</button>`
     : state.tab === 'secrets'
     ? `<button class="btn" data-act="open-add-secret">＋ Add secret</button>`
@@ -1163,7 +1163,7 @@ function renderApproval() {
   if (!isPair && !isHostKey) {
     const box = state.alwaysOpen
       ? `<div class="always-box"><div class="f-row"><label>Use without asking</label>
-        <div class="rule-note">${esc(ongoingAccessExplanation(req))} You can require approval again from the Access tab.</div></div>
+        <div class="rule-note">${esc(ongoingAccessExplanation(req))} You can require approval again from the Agents tab.</div></div>
         <button class="btn primary sm" data-act="always-save">Don’t ask again</button></div>` : '';
     always = { btn: `<button class="btn ghost sm" data-act="always-toggle">Don’t ask again…</button>`, box };
   }
@@ -2256,10 +2256,10 @@ async function boot() {
     if (mode !== 'approval' && state.tab === 'activity' && !state.sheet && !state.menuOpen) render();
   }, 60000);
   // Access sessions are in-memory and expire without a persisted state
-  // change. Refresh access rows and agent summaries so expiry disappears
+  // change. Refresh the Agents view so expiry disappears
   // promptly everywhere it is presented.
   setInterval(() => {
-    if (mode !== 'approval' && !state.sheet && !state.menuOpen) refreshAccessViews();
+    if (mode !== 'approval' && !state.sheet && !state.menuOpen) refreshAgentsView();
   }, 30000);
   // Live updates from the core.
   await listen('amfa://queue-changed', (ev) => { state.queue = ev.payload || []; render(); });
@@ -2273,7 +2273,7 @@ async function boot() {
     if (connected) toast(`🔗 ${connected.name} is connected and can now ask to use your services`);
   });
   await listen('amfa://rules-changed', () => {
-    if (mode !== 'approval') refreshAccessViews();
+    if (mode !== 'approval') refreshAgentsView();
   });
   // A core-side connection change (a trust-on-first-use host-key pin) has no
   // originating UI command to refresh after; reload the services list.

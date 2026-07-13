@@ -71,7 +71,6 @@ const MOCK_ACTIVITY_META = {
   connectionAdded: { icon: 'plug', tone: 'neutral' },
   connectionUpdated: { icon: 'pencil', tone: 'neutral' },
   connectionDeleted: { icon: 'unplug', tone: 'neutral' },
-  connectionTested: { icon: 'flaskConical', tone: 'neutral' },
   ruleRemoved: { icon: 'shieldMinus', tone: 'neutral' },
   grantRevoked: { icon: 'shieldX', tone: 'danger' },
   tokenRevoked: { icon: 'unplug', tone: 'danger' },
@@ -456,7 +455,6 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         : c.type === 'ssh' ? `Key loaded; ${c.host}:${c.port || 22} answered with SSH-2.0-OpenSSH_9.8. Login and host key are not verified by this test.`
         : c.type === 'ws' ? 'WebSocket handshake succeeded'
         : `GET https://${c.host}/ answered HTTP 200 OK`;
-      audit('connectionTested', `Service test ${ok ? 'passed' : 'failed'}: ${c.name}`, detail);
       return { ok, detail };
     }
     case 'remove_permission': {

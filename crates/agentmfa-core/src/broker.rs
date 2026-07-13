@@ -853,7 +853,6 @@ impl Broker {
     pub async fn ui_test_connection(&self, id: &Uuid) -> Result<ConnectionTestReport> {
         const TEST_TIMEOUT: Duration = Duration::from_secs(15);
         let connection = self.store.connection_by_id(id)?;
-        let started = Instant::now();
         let test = async {
             match connection.config.kind() {
                 ConnectionKind::Api => {
@@ -888,20 +887,6 @@ impl Broker {
             Ok(detail) => (true, detail),
             Err(detail) => (false, detail),
         };
-        self.audit.append(
-            AuditEntry::new(
-                AuditKind::ConnectionTested,
-                format!(
-                    "Service test {}: {}",
-                    if ok { "passed" } else { "failed" },
-                    connection.name
-                ),
-            )
-            .connection(connection.name.clone())
-            .outcome(if ok { "ok" } else { "failed" })
-            .detail(detail.clone())
-            .duration_ms(started.elapsed().as_millis() as u64),
-        );
         Ok(ConnectionTestReport { ok, detail })
     }
 

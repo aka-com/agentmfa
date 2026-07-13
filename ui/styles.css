@@ -153,6 +153,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .dw-brand .dd-title { font-size: 14.5px; }
 .dw-nav { display: flex; flex-direction: column; gap: 2px; flex: 1; }
 .dw-secondary-nav { margin-bottom: 8px; }
+.dw-secondary-nav .nav-item { width: 100%; }
 .nav-item {
   display: flex; align-items: center; gap: 7px;
   border: none; background: transparent; cursor: pointer;
@@ -473,7 +474,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .conn-card.confirm-card .cc-foot { gap: 6px; border-top: none; }
 .cc-confirm { font-size: 13px; line-height: 1.45; color: var(--danger-text); }
 
-/* ---- access tab: one block per agent (identity card + a row per service
+/* ---- agents tab: one block per agent (identity card + a row per service
    stating what the agent can do right now, with the revoke control beside
    the state it revokes) ------------------------------------------------- */
 .agent-block {
