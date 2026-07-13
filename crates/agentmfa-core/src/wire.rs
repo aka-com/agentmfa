@@ -88,6 +88,11 @@ pub enum ErrorReason {
     RequestTooLarge,
     RequestIdMismatch,
     OutcomeNotReplayable,
+    // Connection proposals.
+    InvalidProposal,
+    ProposalAlreadyPending,
+    ConnectionExists,
+    SecretNameTaken,
     // Policy and approval outcomes.
     DeniedByUser,
     DeniedByPolicy,
@@ -118,7 +123,7 @@ pub enum ErrorReason {
 
 impl ErrorReason {
     /// Every registered reason, for exhaustiveness checks and docs.
-    pub const ALL: [ErrorReason; 42] = [
+    pub const ALL: [ErrorReason; 46] = [
         ErrorReason::MissingToken,
         ErrorReason::InvalidToken,
         ErrorReason::TokenExpired,
@@ -140,6 +145,10 @@ impl ErrorReason {
         ErrorReason::RequestTooLarge,
         ErrorReason::RequestIdMismatch,
         ErrorReason::OutcomeNotReplayable,
+        ErrorReason::InvalidProposal,
+        ErrorReason::ProposalAlreadyPending,
+        ErrorReason::ConnectionExists,
+        ErrorReason::SecretNameTaken,
         ErrorReason::DeniedByUser,
         ErrorReason::DeniedByPolicy,
         ErrorReason::ApprovalTimeout,
@@ -186,6 +195,10 @@ impl ErrorReason {
             ErrorReason::RequestTooLarge => "request_too_large",
             ErrorReason::RequestIdMismatch => "request_id_mismatch",
             ErrorReason::OutcomeNotReplayable => "outcome_not_replayable",
+            ErrorReason::InvalidProposal => "invalid_proposal",
+            ErrorReason::ProposalAlreadyPending => "proposal_already_pending",
+            ErrorReason::ConnectionExists => "connection_exists",
+            ErrorReason::SecretNameTaken => "secret_name_taken",
             ErrorReason::DeniedByUser => "denied_by_user",
             ErrorReason::DeniedByPolicy => "denied_by_policy",
             ErrorReason::ApprovalTimeout => "approval_timeout",

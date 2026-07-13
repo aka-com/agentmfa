@@ -147,6 +147,8 @@ fn http_request(conn: &Connection, mutating: bool) -> ApprovalRequest {
             mutating,
         }),
         ssh: None,
+        proposal: None,
+        proposal_credential: None,
     }
 }
 
@@ -173,6 +175,8 @@ fn pair_request(agent: &str, inherited: Vec<ConnectionSummary>) -> ApprovalReque
         inherited,
         http: None,
         ssh: None,
+        proposal: None,
+        proposal_credential: None,
     }
 }
 

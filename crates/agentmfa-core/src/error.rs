@@ -72,6 +72,9 @@ pub enum CoreError {
     #[error("the native confirmation did not complete; nothing was applied")]
     NotConfirmed,
 
+    #[error("{0}")]
+    ProposalCredential(String),
+
     #[error("another broker is already listening on {0}")]
     BrokerAlreadyRunning(String),
 

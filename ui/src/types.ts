@@ -120,7 +120,7 @@ export interface SshHostKeyView {
 export interface ApprovalRequest {
   id: string;
   agent: string;
-  kind: 'pair' | 'http' | 'ws' | 'pg' | 'ssh';
+  kind: 'pair' | 'http' | 'ws' | 'pg' | 'ssh' | 'propose';
   connection: ApprovalConnection | null;
   action: string;
   notification: string;
@@ -132,7 +132,18 @@ export interface ApprovalRequest {
   inherited: InheritedConnection[];
   http: HttpPayloadView | null;
   ssh: SshHostKeyView | null;
+  proposal?: ProposalView | null;
   temporary_access: TemporaryAccess | null;
+}
+
+/** An agent-proposed service, shown in full before the user decides. */
+export interface ProposalView {
+  name: string;
+  type: ConnectionType;
+  target: string;
+  credential_name: string;
+  template?: string | null;
+  tls?: string | null;
 }
 
 export interface HostKeyCandidate {
@@ -224,6 +235,7 @@ export interface CommandMap {
     id: string;
     decision: Decision;
     revokeInheritedRules?: boolean;
+    credentialValue?: string;
   }, void>;
   ui_set_mode: CommandSpec<{ mode: string }, void>;
   ui_hide_main: CommandSpec<undefined, void>;

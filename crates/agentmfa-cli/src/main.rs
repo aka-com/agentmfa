@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agentmfa_core::approvals::{ApprovalKind, ApprovalRequest};
-use agentmfa_core::broker::{Broker, UiDecision};
+use agentmfa_core::broker::{Broker, DecisionOptions, UiDecision};
 use agentmfa_core::config::BrokerConfig;
 use agentmfa_core::daemon;
 use agentmfa_core::daemon::wellknown;
@@ -680,8 +680,14 @@ fn cmd_serve(root: Option<PathBuf>, auto_yes: bool) {
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         };
-        let decision = if auto_yes {
-            Some(UiDecision::AllowOnce)
+        let decided = if auto_yes {
+            if request.kind == ApprovalKind::Propose {
+                // A proposal needs a human-typed credential; --yes has none.
+                eprintln!("  ⚠ --yes cannot supply a proposal credential; denying");
+                Some((UiDecision::Deny, None))
+            } else {
+                Some((UiDecision::AllowOnce, None))
+            }
         } else {
             prompt_decision_until_shutdown(
                 &request,
@@ -689,13 +695,17 @@ fn cmd_serve(root: Option<PathBuf>, auto_yes: bool) {
                 stopping.clone(),
             )
         };
-        let Some(decision) = decision else {
+        let Some((decision, proposal_credential)) = decided else {
             break;
         };
         // Auto-approve rebounds the pairing brake fairly; on a real denial
         // the core arms the cooldown itself.
         let ctx = DecisionContext::local(DecisionSurface::Cli);
-        if let Err(e) = broker.decide(&request.id, decision, &ctx) {
+        let options = DecisionOptions {
+            revoke_inherited_rules: false,
+            proposal_credential,
+        };
+        if let Err(e) = broker.decide_with_options(&request.id, decision, options, &ctx) {
             eprintln!("  (decision failed: {e})");
         }
     }
@@ -710,7 +720,7 @@ fn prompt_decision_until_shutdown(
     request: &ApprovalRequest,
     access_grant_ttl: Duration,
     stopping: Arc<AtomicBool>,
-) -> Option<UiDecision> {
+) -> Option<(UiDecision, Option<agentmfa_core::types::SecretValue>)> {
     if stopping.load(Ordering::Acquire) {
         return None;
     }
@@ -723,9 +733,9 @@ fn prompt_decision_until_shutdown(
 }
 
 fn wait_for_decision_or_shutdown(
-    rx: std::sync::mpsc::Receiver<UiDecision>,
+    rx: std::sync::mpsc::Receiver<(UiDecision, Option<agentmfa_core::types::SecretValue>)>,
     stopping: Arc<AtomicBool>,
-) -> Option<UiDecision> {
+) -> Option<(UiDecision, Option<agentmfa_core::types::SecretValue>)> {
     loop {
         if stopping.load(Ordering::Acquire) {
             return None;
@@ -733,12 +743,15 @@ fn wait_for_decision_or_shutdown(
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(decision) => return Some(decision),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Some(UiDecision::Deny),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Some((UiDecision::Deny, None)),
         }
     }
 }
 
-fn prompt_decision(req: &ApprovalRequest, access_grant_ttl: Duration) -> UiDecision {
+fn prompt_decision(
+    req: &ApprovalRequest,
+    access_grant_ttl: Duration,
+) -> (UiDecision, Option<agentmfa_core::types::SecretValue>) {
     eprintln!("── approval required ──────────────────────────────");
     eprintln!("  agent:   {}", req.agent);
     if req.kind == ApprovalKind::Pair {
@@ -788,24 +801,46 @@ fn prompt_decision(req: &ApprovalRequest, access_grant_ttl: Duration) -> UiDecis
         eprintln!("      {} ({})", ssh.observed_fingerprint, ssh.algorithm);
         eprintln!("      verify it out-of-band (e.g. `ssh-keygen -lf` on the server)");
     }
+    if let Some(proposal) = &req.proposal {
+        eprintln!(
+            "  proposed service: {} ({} · {})",
+            proposal.name,
+            proposal.kind.as_str(),
+            proposal.target
+        );
+        if let Some(tls) = &proposal.tls {
+            eprintln!("  TLS mode: {tls}");
+        }
+        if let Some(template) = &proposal.template {
+            eprintln!("  auth template: {template}");
+        }
+        eprintln!(
+            "  approving will ask you to type the credential (saved as {})",
+            proposal.credential_name
+        );
+    }
     // Pairing and host-key trust are yes/no decisions: no session or
     // standing-rule shapes (the broker coerces them to allow-once anyway).
-    let binary_prompt = req.kind == ApprovalKind::Pair || req.ssh.is_some();
-    loop {
+    let binary_prompt =
+        matches!(req.kind, ApprovalKind::Pair | ApprovalKind::Propose) || req.ssh.is_some();
+    let decision = loop {
         eprint!("  decide [a/o/f/d]: ");
         let _ = std::io::stderr().flush();
         let mut line = String::new();
         if std::io::stdin().read_line(&mut line).is_err() || line.is_empty() {
-            return UiDecision::Deny; // EOF → safe default
+            break UiDecision::Deny; // EOF → safe default
         }
         match line.trim() {
-            "a" | "allow" if binary_prompt => return UiDecision::AllowOnce,
-            "a" | "allow" => return UiDecision::AllowSession,
-            "o" | "once" => return UiDecision::AllowOnce,
-            "f" | "forever" if !binary_prompt => return UiDecision::AlwaysAllow,
-            "d" | "deny" | "" => return UiDecision::Deny,
+            "a" | "allow" if binary_prompt => break UiDecision::AllowOnce,
+            "a" | "allow" => break UiDecision::AllowSession,
+            "o" | "once" => break UiDecision::AllowOnce,
+            "f" | "forever" if !binary_prompt => break UiDecision::AlwaysAllow,
+            "d" | "deny" | "" => break UiDecision::Deny,
             _ if req.kind == ApprovalKind::Pair => {
                 eprintln!("  ? enter a (allow pairing) or d (deny)")
+            }
+            _ if req.kind == ApprovalKind::Propose => {
+                eprintln!("  ? enter a (save this service) or d (deny)")
             }
             _ if req.ssh.is_some() => {
                 eprintln!("  ? enter a (trust this host key) or d (deny)")
@@ -815,7 +850,28 @@ fn prompt_decision(req: &ApprovalRequest, access_grant_ttl: Duration) -> UiDecis
                 format_duration(access_grant_ttl)
             ),
         }
+    };
+    // A proposal approval needs the credential the wire schema deliberately
+    // cannot carry: the human types it here, into the trusted terminal.
+    if req.kind == ApprovalKind::Propose && decision != UiDecision::Deny {
+        let credential_name = req
+            .proposal
+            .as_ref()
+            .map(|proposal| proposal.credential_name.clone())
+            .unwrap_or_else(|| "credential".to_string());
+        eprint!("  value for {credential_name}: ");
+        let _ = std::io::stderr().flush();
+        let mut value = String::new();
+        if std::io::stdin().read_line(&mut value).is_err() {
+            return (UiDecision::Deny, None);
+        }
+        let value = value.trim_end_matches(['\r', '\n']).to_string();
+        return (
+            decision,
+            Some(agentmfa_core::types::SecretValue::new(value)),
+        );
     }
+    (decision, None)
 }
 
 fn format_duration(duration: Duration) -> String {

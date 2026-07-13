@@ -112,6 +112,14 @@ impl TauriEvents {
                 format!("First connection for {connection}: verify the server's host key")
             }
             ApprovalKind::Ssh => format!("{} wants to sign in through {connection}", request.agent),
+            ApprovalKind::Propose => {
+                let name = request
+                    .proposal
+                    .as_ref()
+                    .map(|proposal| proposal.name.as_str())
+                    .unwrap_or("a service");
+                format!("{} wants to add a new service: {name}", request.agent)
+            }
             ApprovalKind::Pg | ApprovalKind::Ws => {
                 format!("{} wants to connect to {connection}", request.agent)
             }
@@ -190,6 +198,7 @@ impl BrokerEvents for TauriEvents {
                         request.agent, connection
                     ),
                     ApprovalKind::Pair => format!("Connect {} to AgentMFA", request.agent),
+                    ApprovalKind::Propose => proposal_confirmation(request),
                     ApprovalKind::Pg | ApprovalKind::Ws | ApprovalKind::Ssh => format!(
                         "Let {} open and use {} without asking again",
                         request.agent, connection
@@ -217,10 +226,12 @@ impl BrokerEvents for TauriEvents {
                         request.agent, connection, duration
                     ),
                     ApprovalKind::Pair => format!("Connect {} to AgentMFA", request.agent),
+                    ApprovalKind::Propose => proposal_confirmation(request),
                 }
             }
             _ => match request.kind {
                 ApprovalKind::Pair => format!("Connect {} to AgentMFA", request.agent),
+                ApprovalKind::Propose => proposal_confirmation(request),
                 _ => format!("Allow {}", request.action),
             },
         };
@@ -268,6 +279,19 @@ impl BrokerEvents for TauriEvents {
 /// Convenience for the shell to construct the observer as a trait object.
 pub fn observer(app: AppHandle, access_duration_seconds: u64) -> Arc<dyn BrokerEvents> {
     Arc::new(TauriEvents::new(app, access_duration_seconds))
+}
+
+
+/// Native-confirmation copy for saving an agent-proposed service. Names the
+/// full destination so the OS prompt matches what the window showed.
+fn proposal_confirmation(request: &agentmfa_core::approvals::ApprovalRequest) -> String {
+    match &request.proposal {
+        Some(proposal) => format!(
+            "Save service \u{201c}{}\u{201d} ({}) proposed by {}",
+            proposal.name, proposal.target, request.agent
+        ),
+        None => format!("Save the service proposed by {}", request.agent),
+    }
 }
 
 #[cfg(test)]

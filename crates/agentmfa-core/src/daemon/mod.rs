@@ -42,6 +42,7 @@ use crate::error::CoreError;
 use crate::pairing::{validate_agent_name, TokenError};
 use crate::policy::PolicyEngine as _;
 use crate::ratelimit::PairingBlock;
+use crate::store::ConnectionSpec;
 use crate::types::{
     ConnectionConfig, ConnectionKind, Decision, PairedAgent, PeerIdentity, PermissionScope,
 };
@@ -442,6 +443,7 @@ pub fn router(broker: Arc<Broker>) -> Router {
         .route("/instructions", get(get_instructions))
         .route("/v1/pair", post(post_pair))
         .route("/v1/connections", get(get_connections))
+        .route("/v1/connections/propose", post(post_propose))
         .route("/v1/whoami", get(get_whoami))
         .route("/v1/http", post(post_http))
         .route("/v1/ws/open", post(post_ws_open))
@@ -623,6 +625,8 @@ async fn post_pair(
         inherited,
         http: None,
         ssh: None,
+        proposal: None,
+        proposal_credential: None,
     };
 
     // Concurrent pairings under one name coalesce: identically-signed
@@ -1010,6 +1014,8 @@ async fn post_http(
             mutating,
         }),
         ssh: None,
+        proposal: None,
+        proposal_credential: None,
     };
 
     broker.audit.append(
@@ -1160,6 +1166,284 @@ async fn resolve_parked(parked: Result<Parked, ParkError>) -> Response {
     }
 }
 
+/* --------------------------- connection proposal -------------------------- */
+
+#[derive(Deserialize)]
+struct ProposeBody {
+    name: String,
+    /// The Keychain name the credential will be saved under. The value is
+    /// never on the wire: the user types it into the approval prompt.
+    credential_name: String,
+    config: crate::types::ConnectionConfig,
+}
+
+/// `POST /v1/connections/propose` — an agent asks the user to save a new
+/// named connection. Approval saves configuration only (no session, no
+/// standing rule); the credential value is collected from the user inside
+/// the prompt and can never ride in on this request.
+async fn post_propose(
+    State(state): State<AppState>,
+    authed: Authed,
+    ApiJson(body): ApiJson<ProposeBody>,
+) -> Response {
+    let broker = &state.broker;
+    let agent = authed.agent;
+    if let Err(wait) = broker.token_limiter.check(&agent.token_hash) {
+        return err_rate_limited(ErrorReason::RateLimited, wait);
+    }
+    let name = body.name.trim().to_string();
+    let credential_name = body.credential_name.trim().to_string();
+    let config = body.config;
+
+    // Proposals cannot pre-pin trust or point the broker at local files.
+    match &config {
+        crate::types::ConnectionConfig::Ssh {
+            host_key_fingerprint,
+            ..
+        } if !host_key_fingerprint.is_empty() => {
+            return err_detail(
+                StatusCode::BAD_REQUEST,
+                ErrorReason::InvalidProposal,
+                "proposals cannot pin a host key; trust is confirmed with the user at the first connection",
+            );
+        }
+        crate::types::ConnectionConfig::Pg {
+            trusted_ca_bundle_path: Some(_),
+            ..
+        } => {
+            return err_detail(
+                StatusCode::BAD_REQUEST,
+                ErrorReason::InvalidProposal,
+                "proposals cannot name a CA bundle path",
+            );
+        }
+        _ => {}
+    }
+
+    // Any injection template may reference only the credential created by
+    // this proposal — never an existing stored secret.
+    let template = match &config {
+        crate::types::ConnectionConfig::Api { template, .. } => Some(template.clone()),
+        crate::types::ConnectionConfig::Ws { template, .. } => template.clone(),
+        _ => None,
+    };
+    if let Some(template) = &template {
+        match crate::template::Template::parse(template) {
+            Ok(parsed) => {
+                if parsed.refs().iter().any(|reference| reference != &credential_name) {
+                    return err_detail(
+                        StatusCode::BAD_REQUEST,
+                        ErrorReason::InvalidProposal,
+                        format!(
+                            "the template may reference only the proposed credential {credential_name:?}"
+                        ),
+                    );
+                }
+            }
+            Err(error) => {
+                return err_detail(
+                    StatusCode::BAD_REQUEST,
+                    ErrorReason::InvalidProposal,
+                    format!("invalid template: {error}"),
+                );
+            }
+        }
+    }
+
+    // Refuse duplicates up front, by name and by equivalent target, without
+    // spending the user's attention on a prompt.
+    let proposed_kind = config.kind();
+    let proposed_target = config.target();
+    for existing in broker.store.list_connections() {
+        if existing.name == name {
+            return err_detail(
+                StatusCode::CONFLICT,
+                ErrorReason::ConnectionExists,
+                format!("a connection named {name:?} already exists; list /v1/connections and use it"),
+            );
+        }
+        if existing.kind() == proposed_kind && existing.target() == proposed_target {
+            return err_detail(
+                StatusCode::CONFLICT,
+                ErrorReason::ConnectionExists,
+                format!(
+                    "connection {:?} already points at {proposed_target}; use it instead",
+                    existing.name
+                ),
+            );
+        }
+    }
+
+    // Full validation before prompting; the store re-checks after approval.
+    let spec = ConnectionSpec {
+        name: name.clone(),
+        config: config.clone(),
+        secrets: vec![],
+    };
+    if let Err(error) = broker
+        .store
+        .preflight_add_connection_with_secret(&credential_name, &spec)
+    {
+        return match error {
+            CoreError::SecretNameTaken(taken) => err_detail(
+                StatusCode::CONFLICT,
+                ErrorReason::SecretNameTaken,
+                format!("secret name {taken:?} is already in use; propose a different credential_name"),
+            ),
+            CoreError::ConnectionNameTaken(taken) => err_detail(
+                StatusCode::CONFLICT,
+                ErrorReason::ConnectionExists,
+                format!("a connection named {taken:?} already exists"),
+            ),
+            other => err_detail(
+                StatusCode::BAD_REQUEST,
+                ErrorReason::InvalidProposal,
+                other.to_string(),
+            ),
+        };
+    }
+
+    let tls = match &config {
+        crate::types::ConnectionConfig::Pg { sslmode, .. } => {
+            Some(serde_json::to_value(sslmode).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default())
+        }
+        _ => None,
+    };
+    let action = format!("Add {} service {name} → {proposed_target}", proposed_kind.as_str());
+    broker.audit.append(
+        AuditEntry::new(
+            AuditKind::Requested,
+            format!("{} proposed a new service: {name}", agent.name),
+        )
+        .agent(agent.name.clone())
+        .connection(name.clone())
+        .detail(action.clone())
+        .field("target", proposed_target.clone()),
+    );
+
+    let credential_slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let request = ApprovalRequest {
+        id: Uuid::new_v4(),
+        agent: agent.name.clone(),
+        client_id: Some(agent.id),
+        agent_token_hash: None,
+        kind: ApprovalKind::Propose,
+        connection: None,
+        action,
+        notification: format!(
+            "{} wants to add a new service: {name} ({proposed_target})",
+            agent.name
+        ),
+        received_at: chrono::Utc::now(),
+        deadline: chrono::Utc::now(),
+        identity: None,
+        pairing_identity: None,
+        replaces_existing_agent: false,
+        inherited: vec![],
+        http: None,
+        ssh: None,
+        proposal: Some(crate::approvals::ProposalView {
+            name: name.clone(),
+            kind: proposed_kind,
+            target: proposed_target.clone(),
+            credential_name: credential_name.clone(),
+            template,
+            tls,
+        }),
+        proposal_credential: Some(credential_slot.clone()),
+    };
+
+    // One pending proposal per client; an identical concurrent proposal
+    // coalesces onto the same prompt, a different one is refused.
+    let coalesce_key = Some((format!("propose\u{0}{}", agent.id), String::new()));
+    let payload_hash = {
+        use sha2::{Digest as _, Sha256};
+        let canonical = format!(
+            "{name}\u{0}{credential_name}\u{0}{}",
+            serde_json::to_string(&config).unwrap_or_default()
+        );
+        let digest = Sha256::digest(canonical.as_bytes());
+        Some(digest.iter().map(|b| format!("{b:02x}")).collect::<String>())
+    };
+
+    // Executor: runs only on approval, with the user-typed credential staged
+    // in the slot by the decision path. Saves secret + connection atomically.
+    let executor: crate::approvals::Executor = {
+        let broker = broker.clone();
+        let agent_name = agent.name.clone();
+        Box::pin(async move {
+            let Some(value) = credential_slot.lock().unwrap().take() else {
+                return ExecOutcome {
+                    status: 500,
+                    body: json!({
+                        "reason": ErrorReason::InvalidProposal,
+                        "detail": "approved without a staged credential value",
+                    }),
+                };
+            };
+            match broker.apply_agent_proposal(&agent_name, &credential_name, value, spec) {
+                Ok(conn) => ExecOutcome {
+                    status: 201,
+                    body: json!({
+                        "name": conn.name,
+                        "type": conn.kind().as_str(),
+                        "target": conn.target(),
+                        "endpoint": endpoint_for(conn.kind()),
+                    }),
+                },
+                Err(CoreError::ConnectionNameTaken(taken)) => ExecOutcome {
+                    status: 409,
+                    body: json!({
+                        "reason": ErrorReason::ConnectionExists,
+                        "detail": format!("a connection named {taken:?} already exists"),
+                    }),
+                },
+                Err(CoreError::SecretNameTaken(taken)) => ExecOutcome {
+                    status: 409,
+                    body: json!({
+                        "reason": ErrorReason::SecretNameTaken,
+                        "detail": format!("secret name {taken:?} is already in use"),
+                    }),
+                },
+                Err(other) => ExecOutcome {
+                    status: 400,
+                    body: json!({
+                        "reason": ErrorReason::InvalidProposal,
+                        "detail": other.to_string(),
+                    }),
+                },
+            }
+        })
+    };
+
+    let parked = broker.approvals.park(ParkRequest {
+        request,
+        coalesce_key,
+        payload_hash,
+        // A created connection is visible in /v1/connections; there is
+        // nothing to replay, and a repeat proposal is answered honestly by
+        // the duplicate check above.
+        retain_outcome: false,
+        executor,
+    });
+    match parked {
+        Ok(Parked::Wait(handle)) => match handle.wait().await {
+            Some(outcome) => outcome_response(outcome),
+            None => err(StatusCode::INTERNAL_SERVER_ERROR, ErrorReason::BrokerShutdown),
+        },
+        Ok(Parked::Replay(outcome)) => outcome_response(outcome),
+        Err(ParkError::RequestIdMismatch) => err_detail(
+            StatusCode::CONFLICT,
+            ErrorReason::ProposalAlreadyPending,
+            "another proposal from this client is already waiting for the user",
+        ),
+        Err(ParkError::IdempotencyCapacity | ParkError::OutcomeNotReplayable) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorReason::BrokerShutdown,
+        ),
+    }
+}
+
 /* ------------------------------ WS open ----------------------------------- */
 
 #[derive(Deserialize)]
@@ -1240,6 +1524,8 @@ async fn post_ws_open(
         inherited: vec![],
         http: None,
         ssh: None,
+        proposal: None,
+        proposal_credential: None,
     };
 
     // The idempotency payload is the open itself: same key + same
@@ -1388,6 +1674,8 @@ async fn post_ssh_open(
         inherited: vec![],
         http: None,
         ssh: None,
+        proposal: None,
+        proposal_credential: None,
     };
 
     // The idempotency payload is the open itself: same key + same
@@ -1521,6 +1809,8 @@ async fn post_pg_open(
         inherited: vec![],
         http: None,
         ssh: None,
+        proposal: None,
+        proposal_credential: None,
     };
 
     // The idempotency payload is the open itself: same key + same

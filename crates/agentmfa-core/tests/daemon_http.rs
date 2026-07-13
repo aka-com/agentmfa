@@ -2196,3 +2196,225 @@ async fn concurrent_same_name_pairings_coalesce() {
         "a post-completion pairing gets a fresh prompt and token"
     );
 }
+
+/* --------------------------- connection proposals ------------------------- */
+
+fn propose_pg_body(name: &str, credential_name: &str) -> serde_json::Value {
+    json!({
+        "name": name,
+        "credential_name": credential_name,
+        "config": {
+            "kind": "pg", "host": "127.0.0.1", "port": 5432,
+            "dbname": "app", "user": "app",
+        },
+    })
+}
+
+impl Harness {
+    /// Wait for the next prompt and decide it carrying a proposal credential.
+    async fn decide_next_with_credential(
+        &mut self,
+        decision: UiDecision,
+        credential: Option<&str>,
+    ) -> ApprovalRequest {
+        let request = tokio::time::timeout(Duration::from_secs(5), self.prompts.recv())
+            .await
+            .expect("timed out waiting for a prompt")
+            .expect("events channel closed");
+        self.broker
+            .decide_with_options(
+                &request.id,
+                decision,
+                agentmfa_core::broker::DecisionOptions {
+                    revoke_inherited_rules: false,
+                    proposal_credential: credential.map(|value| Zeroizing::new(value.to_string())),
+                },
+                &ctx(),
+            )
+            .unwrap();
+        request
+    }
+}
+
+#[tokio::test]
+async fn propose_prompts_and_creates_connection_with_user_credential() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let token = h.pair("claude-code").await;
+    let auth = format!("Bearer {token}");
+
+    let socket = h.socket.clone();
+    let call = tokio::spawn(async move {
+        uds_request(
+            &socket,
+            "POST",
+            "/v1/connections/propose",
+            &[("authorization", &auth)],
+            Some(propose_pg_body("sandbox-pg", "SANDBOX_PG_PASSWORD")),
+        )
+        .await
+    });
+
+    let prompt = h
+        .decide_next_with_credential(UiDecision::AllowOnce, Some("s3cr3t"))
+        .await;
+    assert_eq!(prompt.kind, agentmfa_core::approvals::ApprovalKind::Propose);
+    let proposal = prompt.proposal.as_ref().expect("proposal view");
+    assert_eq!(proposal.name, "sandbox-pg");
+    assert_eq!(proposal.credential_name, "SANDBOX_PG_PASSWORD");
+    assert_eq!(proposal.target, "app@127.0.0.1:5432/app");
+    assert_eq!(proposal.tls.as_deref(), Some("verify-full"));
+
+    let (status, body) = call.await.unwrap();
+    assert_eq!(status, 201, "propose failed: {body}");
+    assert_eq!(body["name"], "sandbox-pg");
+    assert_eq!(body["type"], "pg");
+    assert_eq!(body["endpoint"], "/v1/pg/open");
+
+    // The connection exists but grants nothing: listing shows will_prompt.
+    let conn = h
+        .broker
+        .store
+        .connection_by_name("sandbox-pg")
+        .expect("connection saved");
+    assert_eq!(conn.target(), "app@127.0.0.1:5432/app");
+    assert!(h.broker.store.secret_by_name("SANDBOX_PG_PASSWORD").is_some());
+}
+
+#[tokio::test]
+async fn propose_allow_without_credential_fails_closed_and_stays_pending() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let token = h.pair("claude-code").await;
+    let auth = format!("Bearer {token}");
+
+    let socket = h.socket.clone();
+    let call = tokio::spawn(async move {
+        uds_request(
+            &socket,
+            "POST",
+            "/v1/connections/propose",
+            &[("authorization", &auth)],
+            Some(propose_pg_body("sandbox-pg", "SANDBOX_PG_PASSWORD")),
+        )
+        .await
+    });
+
+    let request = tokio::time::timeout(Duration::from_secs(5), h.prompts.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    // Allowing without a typed value must fail without consuming the prompt…
+    let missing = h.broker.decide_with_options(
+        &request.id,
+        UiDecision::AllowOnce,
+        agentmfa_core::broker::DecisionOptions::default(),
+        &ctx(),
+    );
+    assert!(missing.is_err(), "allow without a credential must fail");
+    // …then a real decision still works.
+    h.broker
+        .decide_with_options(
+            &request.id,
+            UiDecision::Deny,
+            agentmfa_core::broker::DecisionOptions::default(),
+            &ctx(),
+        )
+        .unwrap();
+    let (status, body) = call.await.unwrap();
+    assert_eq!(status, 403);
+    assert_eq!(body["reason"], "denied_by_user");
+    assert!(h.broker.store.connection_by_name("sandbox-pg").is_none());
+}
+
+#[tokio::test]
+async fn propose_duplicate_target_is_refused_without_prompting() {
+    let mut h = harness(BrokerConfig::default()).await;
+    api_connection(&h, "github", 18080);
+    let token = h.pair("claude-code").await;
+    let auth = format!("Bearer {token}");
+
+    // Same target under a different name: refused up front, no prompt.
+    let (status, body) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/connections/propose",
+        &[("authorization", &auth)],
+        Some(json!({
+            "name": "github-two",
+            "credential_name": "GITHUB_TOKEN_TWO",
+            "config": {
+                "kind": "api", "host": "127.0.0.1", "scheme": "http", "port": 18080,
+                "template": "Authorization: Bearer {{GITHUB_TOKEN_TWO}}",
+            },
+        })),
+    )
+    .await;
+    assert_eq!(status, 409, "expected conflict: {body}");
+    assert_eq!(body["reason"], "connection_exists");
+    assert!(body["detail"].as_str().unwrap().contains("github"));
+
+    // Same name: also refused.
+    let (status, body) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/connections/propose",
+        &[("authorization", &auth)],
+        Some(json!({
+            "name": "github",
+            "credential_name": "GITHUB_TOKEN_TWO",
+            "config": {
+                "kind": "api", "host": "example.com", "template": "Authorization: Bearer {{GITHUB_TOKEN_TWO}}",
+            },
+        })),
+    )
+    .await;
+    assert_eq!(status, 409);
+    assert_eq!(body["reason"], "connection_exists");
+}
+
+#[tokio::test]
+async fn propose_rejects_templates_referencing_existing_secrets() {
+    let mut h = harness(BrokerConfig::default()).await;
+    h.broker
+        .store
+        .add_secret("EXISTING_SECRET", Zeroizing::new("shh".into()))
+        .unwrap();
+    let token = h.pair("claude-code").await;
+    let auth = format!("Bearer {token}");
+
+    let (status, body) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/connections/propose",
+        &[("authorization", &auth)],
+        Some(json!({
+            "name": "exfil",
+            "credential_name": "NEW_TOKEN",
+            "config": {
+                "kind": "api", "host": "evil.example.com",
+                "template": "Authorization: Bearer {{EXISTING_SECRET}}",
+            },
+        })),
+    )
+    .await;
+    assert_eq!(status, 400, "expected refusal: {body}");
+    assert_eq!(body["reason"], "invalid_proposal");
+
+    // Pre-pinned SSH trust is refused too.
+    let (status, body) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/connections/propose",
+        &[("authorization", &auth)],
+        Some(json!({
+            "name": "box",
+            "credential_name": "BOX_SSH_KEY",
+            "config": {
+                "kind": "ssh", "host": "host.example.com", "user": "deploy",
+                "host_key_fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            },
+        })),
+    )
+    .await;
+    assert_eq!(status, 400, "expected refusal: {body}");
+    assert_eq!(body["reason"], "invalid_proposal");
+}

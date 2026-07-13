@@ -47,6 +47,17 @@ pub enum UiDecision {
     AlwaysAllow,
 }
 
+/// What a decision can carry beyond its shape. All fields default to off.
+#[derive(Default)]
+pub struct DecisionOptions {
+    /// Pairing approvals: remove inherited standing rules before the token
+    /// is minted.
+    pub revoke_inherited_rules: bool,
+    /// Connection-proposal approvals: the credential value the user typed
+    /// into the prompt. Required to allow a proposal; never logged.
+    pub proposal_credential: Option<SecretValue>,
+}
+
 pub struct Broker {
     pub config: BrokerConfig,
     pub paths: Paths,
@@ -245,11 +256,37 @@ impl Broker {
         revoke_inherited_rules: bool,
         ctx: &DecisionContext,
     ) -> Result<Option<ApprovalRequest>> {
+        self.decide_with_options(
+            id,
+            decision,
+            DecisionOptions {
+                revoke_inherited_rules,
+                ..DecisionOptions::default()
+            },
+            ctx,
+        )
+    }
+
+    /// Apply the user's decision with everything it can carry: inherited-rule
+    /// revocation for pairing approvals, and the user-typed credential value
+    /// for connection-proposal approvals.
+    pub fn decide_with_options(
+        &self,
+        id: &Uuid,
+        decision: UiDecision,
+        options: DecisionOptions,
+        ctx: &DecisionContext,
+    ) -> Result<Option<ApprovalRequest>> {
         let Some(request) = self.approvals.get(id) else {
             return Ok(None);
         };
+        // Stage the proposal credential before the native confirmation so a
+        // missing value fails the decision without burning a confirmation.
+        if request.kind == ApprovalKind::Propose && decision != UiDecision::Deny {
+            self.stage_proposal_credential(&request, options.proposal_credential)?;
+        }
         let confirmation = self.confirm_decision(&request, decision)?;
-        if revoke_inherited_rules
+        if options.revoke_inherited_rules
             && request.kind == ApprovalKind::Pair
             && matches!(decision, UiDecision::AllowOnce | UiDecision::AlwaysAllow)
         {
@@ -263,6 +300,36 @@ impl Broker {
             }
         }
         self.apply_decision(id, decision, ctx, confirmation)
+    }
+
+    /// Validate and place the user's typed credential where the proposal's
+    /// parked executor will read it. Fails closed: an allow decision on a
+    /// proposal without a usable value never reaches the executor.
+    fn stage_proposal_credential(
+        &self,
+        request: &ApprovalRequest,
+        value: Option<SecretValue>,
+    ) -> Result<()> {
+        let (Some(view), Some(slot)) = (&request.proposal, &request.proposal_credential) else {
+            return Err(CoreError::ProposalCredential(
+                "this proposal is missing its credential slot and cannot be applied".into(),
+            ));
+        };
+        let value = value
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                CoreError::ProposalCredential(format!(
+                    "Enter the credential value to save as {}",
+                    view.credential_name
+                ))
+            })?;
+        if view.kind == ConnectionKind::Ssh {
+            crate::capability::ssh::validate_private_key(value.as_bytes()).map_err(|error| {
+                CoreError::ProposalCredential(format!("Not a usable SSH private key: {error}"))
+            })?;
+        }
+        *slot.lock().unwrap() = Some(value);
+        Ok(())
     }
 
     /// Whether — and how — the decision was confirmed. Deny is always one
@@ -351,7 +418,7 @@ impl Broker {
             UiDecision::AllowOnce => {
                 let request = self.approvals.approve(id, confirmation.is_some(), None);
                 if let Some(request) = &request {
-                    if request.kind != ApprovalKind::Pair {
+                    if !matches!(request.kind, ApprovalKind::Pair | ApprovalKind::Propose) {
                         self.audit.append(attributed(
                             AuditEntry::new(
                                 AuditKind::AllowedOnce,
@@ -382,8 +449,9 @@ impl Broker {
                 let Some(request) = self.approvals.get(id) else {
                     return Ok(None);
                 };
-                if request.kind == ApprovalKind::Pair {
-                    // "Always allow" does not apply to pairing.
+                if matches!(request.kind, ApprovalKind::Pair | ApprovalKind::Propose) {
+                    // "Always allow" applies to neither pairing nor a
+                    // connection proposal; both are one-shot decisions.
                     return self.apply_decision(id, UiDecision::AllowOnce, ctx, confirmation);
                 }
                 if request.ssh.is_some() {
@@ -420,7 +488,9 @@ impl Broker {
                 let Some(request) = self.approvals.get(id) else {
                     return Ok(None);
                 };
-                if request.kind == ApprovalKind::Pair {
+                if matches!(request.kind, ApprovalKind::Pair | ApprovalKind::Propose) {
+                    // Neither pairing nor a proposal starts an access
+                    // session; coerce to the one-shot decision.
                     return self.apply_decision(id, UiDecision::AllowOnce, ctx, confirmation);
                 }
                 if request.ssh.is_some() {
@@ -739,6 +809,39 @@ impl Broker {
             .field("target", conn.target())
             .confirmation(confirmation),
         );
+        Ok(conn)
+    }
+
+    /// Apply an approved agent proposal: save the user-typed credential and
+    /// the proposed connection atomically, then audit and refresh views. The
+    /// decision's native confirmation already gated this — there is no
+    /// second `confirm_action` pause.
+    pub fn apply_agent_proposal(
+        &self,
+        agent: &str,
+        secret_name: &str,
+        value: SecretValue,
+        spec: ConnectionSpec,
+    ) -> Result<Connection> {
+        let (secret, conn) = self
+            .store
+            .add_connection_with_secret(secret_name, value, spec)?;
+        self.audit.append(AuditEntry::new(
+            AuditKind::SecretAdded,
+            format!("Secret added: {}", secret.name),
+        ));
+        self.audit.append(
+            AuditEntry::new(
+                AuditKind::ConnectionAdded,
+                format!("Service added from {agent}'s proposal: {}", conn.name),
+            )
+            .agent(agent.to_string())
+            .connection(conn.name.clone())
+            .detail(format!("{} → {}", conn.kind().label(), conn.target()))
+            .field("kind", conn.kind().as_str())
+            .field("target", conn.target()),
+        );
+        self.events.connections_changed();
         Ok(conn)
     }
 

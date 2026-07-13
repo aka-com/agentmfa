@@ -43,7 +43,7 @@ use uuid::Uuid;
 
 use crate::audit::{AuditEntry, AuditKind, AuditLog};
 use crate::events::BrokerEvents;
-use crate::types::{ConnectionKind, PeerIdentity};
+use crate::types::{ConnectionKind, PeerIdentity, SecretValue};
 use crate::wire::ErrorReason;
 
 /* ------------------------------ view types ------------------------------- */
@@ -96,6 +96,16 @@ pub struct ApprovalRequest {
     /// pin (no standing rules, no access session).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ssh: Option<SshHostKeyView>,
+    /// Connection proposals only: the proposed service, presented in full
+    /// (including scheme/TLS mode) per the protocol's prompt requirements.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<ProposalView>,
+    /// Connection proposals only: the slot the user's typed credential value
+    /// is placed into at decision time, read by the parked executor. Never
+    /// serialized to an approval surface.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub proposal_credential: Option<Arc<Mutex<Option<SecretValue>>>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -149,6 +159,32 @@ pub enum ApprovalKind {
     Ws,
     Pg,
     Ssh,
+    /// An agent proposing a new named connection (`POST
+    /// /v1/connections/propose`). Approval saves configuration only — like
+    /// pairing and host-key pins, every allow shape is coerced to a single
+    /// one-time decision.
+    Propose,
+}
+
+/// The proposed service as the approval prompt presents it. The protocol
+/// requires the full destination — scheme/TLS mode included — to be visible
+/// before the user decides.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProposalView {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub kind: ConnectionKind,
+    pub target: String,
+    /// The Keychain name the user-typed value will be saved under.
+    pub credential_name: String,
+    /// API/WS only: the injection template, which references only
+    /// `credential_name` (validated before the prompt is raised).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    /// Postgres only: the proposed TLS mode, shown so a downgrade cannot be
+    /// approved unseen.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -201,7 +237,7 @@ impl ApprovalRequest {
     /// every request kind; the broker enforces those decisions separately.
     pub fn is_high_consequence(&self) -> bool {
         match self.kind {
-            ApprovalKind::Pair => true,
+            ApprovalKind::Pair | ApprovalKind::Propose => true,
             ApprovalKind::Http => self.http.as_ref().is_some_and(|h| h.mutating),
             ApprovalKind::Ssh => self.ssh.is_some(),
             _ => false,
@@ -647,7 +683,8 @@ impl Approvals {
         // Pairing mints an agent token and never reads a user credential. Do
         // not let its confirmation authorize secret reads if that invariant
         // is ever accidentally violated by a future executor.
-        let secret_read_confirmed = decision_confirmed && request.kind != ApprovalKind::Pair;
+        let secret_read_confirmed = decision_confirmed
+            && !matches!(request.kind, ApprovalKind::Pair | ApprovalKind::Propose);
         self.spawn_completion(*id, executor, secret_read_confirmed, authorization);
         self.shared.events.queue_changed(&snapshot);
         Some(request)
@@ -1063,6 +1100,8 @@ mod tests {
             inherited: vec![],
             http: None,
             ssh: None,
+            proposal: None,
+            proposal_credential: None,
         }
     }
 

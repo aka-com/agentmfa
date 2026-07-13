@@ -14,6 +14,11 @@ import {
   suggestedSecretName,
 } from '/src/connection-input';
 import { formErrorKind, formErrorMessage, inlineFormError } from '/src/form-errors';
+import {
+  GUIDE_DISMISS_SETTINGS, GUIDE_STEPS, guideAdvancesOnSave, guideCanFinish,
+  guideRetargetsReady, guideSettingForStep, guideTabForStep, guideTaskStage, guideTaskTarget,
+} from '/src/guide';
+import type { GuideStep } from '/src/guide';
 import type { HostKeyCandidate } from '/src/connection-input';
 import type {
   ActivityEntry,
@@ -38,16 +43,6 @@ const ACTIVITY_RENDER_LIMIT = 200;
 const TABS = ['agents', 'connections', 'secrets', 'activity'] as const;
 type Tab = typeof TABS[number];
 
-// Guided setup: one workflow spanning two panes. The Agents hero is the
-// Connect step; Add service, First task, and Done live in the Services
-// panel. Breadcrumbs navigate freely — steps never lock.
-type GuideStep = 'connect' | 'add' | 'task' | 'done';
-const GUIDE_STEPS: Array<[GuideStep, string]> = [
-  ['connect', 'Connect agent'],
-  ['add', 'Add service'],
-  ['task', 'First task'],
-  ['done', 'Done'],
-];
 
 interface SheetState {
   kind: 'add-secret' | 'edit-secret' | 'add-conn' | 'edit-conn' | 'settings' | 'clear-activity';
@@ -121,6 +116,8 @@ interface AppState {
   reqDetailOpen: boolean | null;
   revokeInheritedRules: boolean;
   approvalRequestId: string | null;
+  proposalCredential: string;
+  proposalCredentialError: string | null;
   menuOpen: boolean;
   walkthroughMenuOpen: boolean;
   agentMenuOpen: string | null;
@@ -133,6 +130,7 @@ interface AppState {
   quickSetupSource: string;
   quickSetupError: string | null;
   guideStep: GuideStep;
+  guideTaskCopied: boolean;
   connectionReady: ConnectionReadyState | null;
   connectionTaskCopied: boolean;
   connTests: Record<string, ConnectionTestState>;
@@ -176,6 +174,8 @@ const state: AppState = {
   reqDetailOpen: null,   // approval payload disclosure override
   revokeInheritedRules: false,
   approvalRequestId: null,
+  proposalCredential: '',       // transient; typed into the proposal prompt
+  proposalCredentialError: null,
   menuOpen: false,       // desktop-mode settings popover (gear) open
   walkthroughMenuOpen: false,
   agentMenuOpen: null,   // agent id whose ⋯ options menu is open (Agents tab)
@@ -188,6 +188,7 @@ const state: AppState = {
   quickSetupSource: '',
   quickSetupError: null,
   guideStep: 'add',      // current guided-setup step (Services panel / Agents hero)
+  guideTaskCopied: false, // the first task was actually copied (gates Finish)
   connectionReady: null,
   connectionTaskCopied: false,
   connTests: {},         // connectionId -> in-flight/last test result (transient)
@@ -354,23 +355,40 @@ function guideAddStepHTML(): string {
 }
 
 function guideTaskStepHTML(): string {
-  const ready = state.connectionReady;
-  const conn = (ready && state.connections.find((c) => c.name === ready.name)) || state.connections[0];
-  if (!conn) {
+  const stage = guideTaskStage(state.connections.length, state.agents.length);
+  if (stage === 'need-service') {
     return `<div class="onboarding-copy"><b>Try it end to end</b>
         <span>Add a service first — then this step hands your agent its first task.</span></div>
       <div class="guide-nav-row"><button class="linklike" data-act="guide-step" data-step="add">Go to Add service</button></div>`;
   }
+  if (stage === 'need-agent') {
+    return `<div class="onboarding-copy"><b>Try it end to end</b>
+        <span>No agent is connected yet — connect one first, so it has somewhere to ask from.</span></div>
+      <div class="guide-nav-row"><button class="linklike" data-act="guide-step" data-step="connect">Go to Connect agent</button></div>`;
+  }
+  const conn = guideTaskTarget(state.connectionReady, state.connections)!;
   return `<div class="onboarding-copy"><b>Try it end to end</b>
-      <span>${state.agents.length ? 'Ask your agent:' : 'Connect an agent, then ask it:'}</span></div>
+      <span>Ask your agent:</span></div>
     <div class="guide-task-row"><code>${esc(firstTaskPrompt(conn.name, conn.type))}</code>
       <button class="btn primary sm" data-act="guide-copy-task" data-name="${escAttr(conn.name)}" data-type="${conn.type}">${state.connectionTaskCopied ? `${ICONS.check} Copied` : 'Copy task'}</button></div>
-    <div class="guide-nav-row"><button class="linklike" data-act="guide-step" data-step="done">Finish setup →</button></div>`;
+    ${guideCanFinish(state.agents.length, state.guideTaskCopied)
+      ? '<div class="guide-nav-row"><button class="linklike" data-act="guide-step" data-step="done">Finish setup →</button></div>'
+      : ''}`;
 }
 
 // The success state lives in the same panel as the breadcrumbs and steps —
 // no separate dialog: text above, buttons centered beneath.
 function guideDoneStepHTML(): string {
+  if (!state.agents.length) {
+    return `<div class="guide-done">
+      <b>Almost there</b>
+      <p>Your services are saved, but no agent is connected yet — nothing can use them until one is. Head back to Connect agent to finish.</p>
+      <div class="guide-done-actions">
+        <button class="btn primary" data-act="guide-step" data-step="connect">Go to Connect agent</button>
+        <button class="btn" data-act="guide-dismiss">Dismiss walkthrough</button>
+      </div>
+    </div>`;
+  }
   return `<div class="guide-done">
     <b>Setup complete</b>
     <p>Your agent can now ask to use your services — every request still comes back to you for approval. Re-run this walkthrough any time from the walkthrough menu.</p>
@@ -1131,6 +1149,9 @@ function approvalWindowLabel(req: ApprovalRequest): string {
 function approvalHeading(req: ApprovalRequest): string {
   const name = req.connection ? req.connection.name : 'AgentMFA';
   if (req.kind === 'pair') return `Let ${req.agent} connect to AgentMFA?`;
+  if (req.kind === 'propose') {
+    return `${req.agent} wants to add a new service: ${req.proposal?.name ?? ''}`;
+  }
   if (req.kind === 'http' && req.http && !req.http.mutating) {
     return `${req.agent} wants to fetch data from ${name}`;
   }
@@ -1185,11 +1206,14 @@ function renderApproval() {
   const t = conn ? TYPES[conn.type] : null;
   const isPair = req.kind === 'pair';
   const isHostKey = !!req.ssh;
+  const isPropose = req.kind === 'propose';
   if (state.approvalRequestId !== req.id) {
     state.approvalRequestId = req.id;
     state.alwaysOpen = false;
     state.reqDetailOpen = null;
     state.revokeInheritedRules = isPair && !!(req.inherited && req.inherited.length);
+    state.proposalCredential = '';
+    state.proposalCredentialError = null;
   }
   if (isHostKey) ensureKnownHostsCheck(req);
   const connCell = conn
@@ -1228,11 +1252,25 @@ function renderApproval() {
 
   const detail = requestDetailHTML(req) + sshHostKeyDetailHTML(req);
 
+  const proposal = req.proposal;
+  const proposalRows = isPropose && proposal ? `
+      <div class="ap-row"><span>Service</span><span><span class="badge ${TYPES[proposal.type].cls}">${TYPES[proposal.type].label}</span> <b>${esc(proposal.name)}</b> <em class="self-reported">supplied by agent</em></span></div>
+      <div class="ap-row"><span>Target</span><code>${esc(proposal.target)}</code></div>
+      ${proposal.tls ? `<div class="ap-row"><span>TLS mode</span><span>${proposal.tls === 'verify-full' ? esc(proposal.tls) : `<b class="tls-warn">${esc(proposal.tls)}</b>`}</span></div>` : ''}
+      ${proposal.template ? `<div class="ap-row"><span>Authentication</span><code>${esc(proposal.template)}</code></div>` : ''}` : '';
+  const proposalCredential = isPropose && proposal ? `
+    <div class="ap-proposal-cred">
+      <label for="proposal-credential">Credential — typed by you, saved to macOS Keychain as <b>${esc(proposal.credential_name)}</b></label>
+      <input id="proposal-credential" type="password" placeholder="Paste the ${proposal.type === 'pg' ? 'database password' : proposal.type === 'ssh' ? 'private key' : 'token or API key'}" value="${escAttr(state.proposalCredential)}">
+      ${state.proposalCredentialError ? `<div class="field-error">${esc(state.proposalCredentialError)}</div>` : ''}
+      <div class="rule-note">The agent never sees this window. Saving the service grants no access — connections will still ask you.</div>
+    </div>` : '';
+
   // Host-key trust prompts are a yes/no decision: no "don't ask again",
   // no access session (the broker coerces those decisions to a one-time
   // pin anyway).
   let always: { btn: string; box: string } | null = null;
-  if (!isPair && !isHostKey) {
+  if (!isPair && !isHostKey && !isPropose) {
     const box = state.alwaysOpen
       ? `<div class="always-box"><div class="f-row"><label>Use without asking</label>
         <div class="rule-note">${esc(ongoingAccessExplanation(req))} You can require approval again from the Agents tab.</div></div>
@@ -1241,7 +1279,7 @@ function renderApproval() {
   }
 
   const temporary = temporaryAccessExplanation(req);
-  const sessionNote = !isPair && !isHostKey
+  const sessionNote = !isPair && !isHostKey && !isPropose
     ? `<div class="ap-access-summary"><b>If you allow for ${esc(temporary.duration)}</b><p>${esc(temporary.text)}</p></div>` : '';
 
   el.innerHTML = `<div class="surface approval">
@@ -1249,22 +1287,28 @@ function renderApproval() {
       <div data-tauri-drag-region><div class="ap-title" data-tauri-drag-region>${esc(approvalHeading(req))}</div></div></div>
     <div class="ap-scroll">
     ${isPair ? `<div class="pair-explainer"><p>This program will be able to list services you have added, and request to make outbound connections to them.</p><p>Agents can never read saved secrets.</p></div>` : ''}
+    ${isPropose ? `<div class="pair-explainer"><p>${esc(req.agent)} proposed this service. Approving saves it; using it will still ask you.</p></div>` : ''}
     <div class="ap-rows">
-      ${isPair ? identityRows : `<div class="ap-row"><span>Agent</span><b>${esc(req.agent)}</b></div>
+      ${isPair ? identityRows
+      : isPropose ? `<div class="ap-row"><span>Agent</span><b>${esc(req.agent)}</b></div>${proposalRows}`
+      : `<div class="ap-row"><span>Agent</span><b>${esc(req.agent)}</b></div>
       ${connectionRow}${targetRow}
       <div class="ap-row"><span>This request</span><code>${esc(req.action)}</code></div>`}
       <div class="ap-row"><span>Approve within</span><span>${esc(approvalWindowLabel(req))}</span></div>
     </div>
     ${identityWarning}${replacement}${inherit}${identityDetails}${detail}
+    ${proposalCredential}
     ${sessionNote}
     ${always ? `<div class="ap-ongoing-action">${always.btn}</div>${always.box}` : ''}
     </div>
     <div class="ap-buttons">
-      <button class="btn deny" data-act="decide-deny" data-id="${req.id}">${isPair ? 'Don’t connect' : 'Deny'}</button>
-      ${isPair || isHostKey ? '' : `<button class="btn ghost sm" data-act="decide-once" data-id="${req.id}">This request only</button>`}
+      <button class="btn deny" data-act="decide-deny" data-id="${req.id}">${isPair ? 'Don’t connect' : isPropose ? 'Reject proposal' : 'Deny'}</button>
+      ${isPair || isHostKey || isPropose ? '' : `<button class="btn ghost sm" data-act="decide-once" data-id="${req.id}">This request only</button>`}
       <span class="spacer"></span>
       ${isHostKey
         ? `<button class="btn primary" data-act="decide-once" data-id="${req.id}">Trust &amp; allow</button>`
+        : isPropose
+        ? `<button class="btn primary" data-act="decide-once" data-id="${req.id}">Save service</button>`
         : `<button class="btn primary" data-act="decide-allow" data-id="${req.id}">${isPair ? 'Connect agent' : `Allow for ${esc(temporary.duration)}`}</button>`}</div>
     ${state.queue.length > 1 ? `<div class="aw-queue">${state.queue.length - 1} more request${state.queue.length > 2 ? 's' : ''} waiting</div>` : ''}
   </div>`;
@@ -1678,7 +1722,9 @@ async function saveConn(): Promise<void> {
     else await invoke('edit_connection', { id: sheet.id ?? '', input });
     toast(adding ? '🔌 Service saved' : '✏️ Service updated');
     if (adding) {
-      if (!state.connections.length) {
+      // The first-task prompt names the service just saved — the very first
+      // one, and every guided save after it — never an older neighbor.
+      if (guideRetargetsReady(state.connections.length > 0, d.setupSource)) {
         state.connectionReady = { name, type: t };
         state.connectionTaskCopied = false;
       }
@@ -1686,7 +1732,7 @@ async function saveConn(): Promise<void> {
       state.quickSetupError = null;
       // A save that started in the guided panel moves the walkthrough
       // forward; a plain ＋ Add service does not touch it.
-      if (state.settings.show_service_walkthrough && d.setupSource === 'import') {
+      if (guideAdvancesOnSave(state.settings.show_service_walkthrough, d.setupSource)) {
         state.guideStep = 'task';
       }
     }
@@ -1844,17 +1890,14 @@ document.addEventListener('click', async (e) => {
       const step = btn.dataset.step as GuideStep | undefined;
       if (!step || !GUIDE_STEPS.some(([value]) => value === step)) break;
       state.guideStep = step;
-      if (step === 'connect') {
-        state.tab = 'agents';
-        if (!state.settings.show_agent_walkthrough &&
-            await run(() => invoke('set_agent_walkthrough_visible', { on: true }))) {
-          state.settings.show_agent_walkthrough = true;
-        }
-      } else {
-        state.tab = 'connections';
-        if (!state.settings.show_service_walkthrough &&
-            await run(() => invoke('set_service_walkthrough_visible', { on: true }))) {
-          state.settings.show_service_walkthrough = true;
+      state.tab = guideTabForStep(step);
+      const setting = guideSettingForStep(step);
+      if (!state.settings[setting]) {
+        const command = setting === 'show_agent_walkthrough'
+          ? 'set_agent_walkthrough_visible' as const
+          : 'set_service_walkthrough_visible' as const;
+        if (await run(() => invoke(command, { on: true }))) {
+          state.settings[setting] = true;
         }
       }
       render();
@@ -1866,7 +1909,8 @@ document.addEventListener('click', async (e) => {
       if (!name || !taskType || !TYPES[taskType]) break;
       try {
         await navigator.clipboard.writeText(firstTaskPrompt(name, taskType));
-        state.connectionTaskCopied = true;
+        state.guideTaskCopied = true; // durable: gates Finish setup
+        state.connectionTaskCopied = true; // transient: the Copied flash
         render();
         setTimeout(() => { state.connectionTaskCopied = false; render(); }, 1400);
       } catch {
@@ -1874,13 +1918,29 @@ document.addEventListener('click', async (e) => {
       }
       break;
     }
-    case 'guide-dismiss':
-      if (await run(() => invoke('set_service_walkthrough_visible', { on: false }))) {
-        state.settings.show_service_walkthrough = false;
-        state.guideStep = 'add';
-        render();
+    case 'guide-dismiss': {
+      // Dismissing the walkthrough dismisses the whole workflow: the
+      // Services panel and the Agents hero both retire, or Back-to-the-
+      // beginning would resurrect a supposedly dismissed walkthrough.
+      let allOff = true;
+      for (const setting of GUIDE_DISMISS_SETTINGS) {
+        const command = setting === 'show_agent_walkthrough'
+          ? 'set_agent_walkthrough_visible' as const
+          : 'set_service_walkthrough_visible' as const;
+        if (await run(() => invoke(command, { on: false }))) {
+          state.settings[setting] = false;
+        } else {
+          allOff = false;
+        }
       }
+      if (allOff) {
+        state.guideStep = 'add';
+        state.guideTaskCopied = false;
+        state.setupInstructionsOpen = false;
+      }
+      render();
       break;
+    }
     case 'open-settings': state.menuOpen = false; state.sheet = { kind: 'settings' }; render(); break;
     case 'copy-agent-setup':
       if (state.agentMenuOpen) { state.agentMenuOpen = null; render(); }
@@ -2198,10 +2258,26 @@ async function decide(id: string, decision: Decision): Promise<void> {
     const req = state.queue[0];
     const revokeInheritedRules =
       decision === 'allow_once' && req && req.kind === 'pair' && !!state.revokeInheritedRules;
-    await invoke('decide', { id, decision, revokeInheritedRules });
+    let credentialValue: string | undefined;
+    if (req && req.kind === 'propose' && decision !== 'deny') {
+      // The typed value rides only on an approving decision, and never an
+      // empty one — fail before the OS confirmation, not after.
+      const typed = (document.getElementById('proposal-credential') as HTMLInputElement | null)
+        ?.value ?? state.proposalCredential;
+      if (!typed.trim()) {
+        state.proposalCredentialError = 'Enter the credential value first';
+        render();
+        focusField('proposal-credential');
+        return;
+      }
+      credentialValue = typed;
+    }
+    await invoke('decide', { id, decision, revokeInheritedRules, credentialValue });
     state.alwaysOpen = false;
     state.reqDetailOpen = null;
     state.revokeInheritedRules = false;
+    state.proposalCredential = '';
+    state.proposalCredentialError = null;
   } catch (error) {
     // OS authentication cancelled or failed: keep the request pending.
     toast('🔒 ' + errorMessage(error));
@@ -2333,6 +2409,13 @@ document.addEventListener('input', (e) => {
   if (target?.id === 'quick-setup-source') {
     state.quickSetupSource = target.value;
     state.quickSetupError = null;
+  }
+  if (target?.id === 'proposal-credential') {
+    state.proposalCredential = target.value;
+    if (state.proposalCredentialError) {
+      state.proposalCredentialError = null;
+      render();
+    }
   }
   if (target?.id === 'f-cname') {
     updateCredentialNamePlaceholder(target.value);

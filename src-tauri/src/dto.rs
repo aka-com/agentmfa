@@ -299,8 +299,11 @@ impl ApprovalDto {
         let high_consequence = request.is_high_consequence();
         // Pairing and host-key trust prompts have no access-session shape;
         // the broker coerces any such decision to allow-once regardless.
-        let temporary_access = if request.kind == agentmfa_core::approvals::ApprovalKind::Pair
-            || request.ssh.is_some()
+        let temporary_access = if matches!(
+            request.kind,
+            agentmfa_core::approvals::ApprovalKind::Pair
+                | agentmfa_core::approvals::ApprovalKind::Propose
+        ) || request.ssh.is_some()
         {
             None
         } else {

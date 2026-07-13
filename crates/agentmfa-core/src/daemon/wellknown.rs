@@ -40,6 +40,7 @@ pub fn manifest(config: &BrokerConfig, paths: &Paths) -> serde_json::Value {
             "pair": "/v1/pair",
             "whoami": "/v1/whoami",
             "connections": "/v1/connections",
+            "propose": "/v1/connections/propose",
             "http": "/v1/http",
             "ws_open": "/v1/ws/open",
             "pg_open": "/v1/pg/open",
@@ -296,7 +297,39 @@ explicit `-o PubkeyAuthentication=host-bound` is optional. Clients without
 those OpenSSH extensions fail closed because the broker refuses unbound or
 host-key-mismatched signing requests.
 
-## 8. Other errors
+## 8. Propose a missing service: POST /v1/connections/propose
+
+If a service you need is not in `GET /v1/connections`, propose it instead of
+asking your user to fill in a form. Send:
+
+    {{"name": "sandbox-pg",
+      "credential_name": "SANDBOX_PG_PASSWORD",
+      "config": {{"kind": "pg", "host": "127.0.0.1", "port": 5432,
+                 "dbname": "app", "user": "app"}}}}
+
+`config` kinds: `api` (`host`, `scheme`?, `port`?, `template`), `pg`
+(`host`, `port`?, `dbname`, `user`, `sslmode`?), `ws` (`url`, `template`?),
+`ssh` (`host`, `port`?, `user`, `destination`?). Never send a secret value —
+there is no field for one. The user is shown the full proposal and types the
+credential themselves; it is saved under your `credential_name`. Any `api`/`ws`
+template must reference only `{{{{CREDENTIAL_NAME}}}}`; referencing any other
+name is refused. SSH proposals must not set a host key fingerprint (trust is
+confirmed with the user at the first connection), and `pg` proposals cannot
+name a CA bundle path.
+
+The call blocks like every approval. On approval you get
+`201 {{"name", "type", "target", "endpoint"}}` — the connection exists but you
+have no access yet; call its endpoint and the usual approval flow applies.
+`409 {{"reason": "connection_exists"}}` means a connection with that name or
+target already exists — list `/v1/connections` and use it.
+`409 {{"reason": "secret_name_taken"}}` means pick a different
+`credential_name`. `409 {{"reason": "proposal_already_pending"}}` means your
+earlier proposal is still on screen. `400 {{"reason": "invalid_proposal"}}`
+explains what to fix in `detail`. Denials and timeouts return
+`403 {{"reason": "denied_by_user" | "approval_timeout"}}`; do not re-propose
+without talking to your user.
+
+## 9. Other errors
 
 - `400 {{"reason": "invalid_json"}}`: the request body was not valid JSON
   for the endpoint (wrong/missing Content-Type, malformed JSON, or a
@@ -450,6 +483,11 @@ mod tests {
             "/v1/ws/open",
             "/v1/pg/open",
             "/v1/ssh/open",
+            "/v1/connections/propose",
+            "credential_name",
+            "connection_exists",
+            "proposal_already_pending",
+            "invalid_proposal",
             "SSH_AUTH_SOCK",
             "session binding and host-bound authentication automatically",
             "host-key-mismatched signing requests",

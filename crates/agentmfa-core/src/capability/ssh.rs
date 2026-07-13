@@ -790,6 +790,8 @@ async fn tofu_session_bind(
             observed_fingerprint: observed.to_string(),
             algorithm,
         }),
+        proposal: None,
+        proposal_credential: None,
     };
 
     let executor: crate::approvals::Executor = {

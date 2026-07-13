@@ -11,7 +11,7 @@
 //!   this command layer cannot apply a gated action without passing
 //!   through it, so the webview cannot forge or skip the gate.
 
-use agentmfa_core::broker::{Broker, UiDecision};
+use agentmfa_core::broker::{Broker, DecisionOptions, UiDecision};
 use agentmfa_core::error::{ConnectionField, CoreError};
 use agentmfa_core::store::ConnectionSpec;
 use agentmfa_core::types::{ConnectionConfig, DecisionContext, DecisionSurface, PgSslMode};
@@ -344,7 +344,7 @@ pub fn get_settings(state: State<AppState>) -> SettingsDto {
 
 fn agent_setup_instructions(socket: &str) -> String {
     format!(
-        "Connect to the local AgentMFA broker. Read its current instructions, then list what connections are currently available:\n\ncurl -fsS --unix-socket {socket} http://localhost/instructions"
+        "Connect to the local AgentMFA broker. Read its current instructions, then list what connections are currently available. If a service you need is missing, propose it (POST /v1/connections/propose, documented in the instructions) and the user will review it:\n\ncurl -fsS --unix-socket {socket} http://localhost/instructions"
     )
 }
 
@@ -818,6 +818,7 @@ pub fn decide(
     id: String,
     decision: DecisionInput,
     revoke_inherited_rules: Option<bool>,
+    credential_value: Option<String>,
 ) -> CmdResult<()> {
     let broker = &state.broker;
     let id = parse_id(&id)?;
@@ -829,10 +830,13 @@ pub fn decide(
     };
     let ctx = DecisionContext::local(DecisionSurface::AppWindow);
     broker
-        .decide_with_pairing_options(
+        .decide_with_options(
             &id,
             ui_decision,
-            revoke_inherited_rules.unwrap_or(false),
+            DecisionOptions {
+                revoke_inherited_rules: revoke_inherited_rules.unwrap_or(false),
+                proposal_credential: credential_value.map(Zeroizing::new),
+            },
             &ctx,
         )
         .map_err(|e| e.to_string())?
@@ -972,8 +976,9 @@ mod tests {
         assert!(instructions.contains("curl -fsS"));
         assert!(instructions.contains("--unix-socket /tmp/agentmfa-test.sock"));
         assert!(instructions.contains(
-            "Read its current instructions, then list what connections are currently available:\n\ncurl -fsS"
+            "Read its current instructions, then list what connections are currently available."
         ));
+        assert!(instructions.contains("propose it (POST /v1/connections/propose"));
         assert!(!instructions.contains("\\\n"));
         assert!(instructions.ends_with("http://localhost/instructions"));
         assert!(!instructions.contains("--max-time"));
