@@ -113,6 +113,7 @@ interface AppState {
   menuOpen: boolean;
   walkthroughMenuOpen: boolean;
   agentMenuOpen: string | null;
+  connMenuOpen: string | null;
   copied: string | null;
   readyCopied: boolean;
   setupInstructionsOpen: boolean;
@@ -166,6 +167,7 @@ const state: AppState = {
   menuOpen: false,       // desktop-mode settings popover (gear) open
   walkthroughMenuOpen: false,
   agentMenuOpen: null,   // agent id whose ⋯ options menu is open (Agents tab)
+  connMenuOpen: null,    // connection id whose ⋯ options menu is open (Services tab)
   copied: null,          // secretId whose value was just copied (transient "Copied" flash)
   readyCopied: false,    // transient feedback on the setup-instructions status button
   setupInstructionsOpen: false,
@@ -512,22 +514,45 @@ function agentsHTML(): string {
 }
 const liveCount = (c: ConnectionSummary): number =>
   state.sessions.filter((s) => s.connection === c.name).length;
-const connActionsHTML = (c: ConnectionSummary): string => {
-  const test = state.connTests[c.id];
-  return `<button class="btn ghost sm cc-test-btn" data-act="test-conn" data-id="${c.id}"
-     aria-label="Test service ${escAttr(c.name)}" ${test && test.running ? 'disabled' : ''}>${test && test.running ? 'Testing…' : 'Test'}</button>
-   <button class="icon-btn" title="Edit service" aria-label="Edit service ${escAttr(c.name)}" data-act="edit-conn" data-id="${c.id}">${ICONS.pencil}</button>
-   <button class="icon-btn" title="Delete service" aria-label="Delete service ${escAttr(c.name)}" data-act="del-conn-ask" data-id="${c.id}">${ICONS.trash}</button>`;
-};
-
 const connTestResultHTML = (c: ConnectionSummary): string => {
   const test = state.connTests[c.id];
-  if (!test || test.running || test.detail === undefined) return '';
+  if (!test) return '';
+  if (test.running) return '<div class="cc-test running">Testing…</div>';
+  if (test.detail === undefined) return '';
   return `<div class="cc-test ${test.ok ? 'ok' : 'err'}">${test.ok ? ICONS.circleCheck : ICONS.circleX}<span>${esc(test.detail)}</span></div>`;
 };
 
-// Card grid, after TablePlus launchers / Keybase device cards: one
-// connection = one object with everything about it inside its border.
+// Compact tile per connection: badge, name, target — identity only. All
+// actions live in a hover-revealed ⋯ menu, and grants live on the Agents
+// tab, so the inventory stays quiet no matter how many services exist.
+function connTileHTML(c: ConnectionSummary): string {
+  const t = TYPES[c.type];
+  if (state.confirm && state.confirm.kind === 'del-conn' && state.confirm.id === c.id) {
+    return `<div class="tile confirm-tile">
+      <span class="badge ${t.cls}">${t.label}</span>
+      <div class="tile-tx"><b title="${escAttr(c.name)}">${esc(c.name)}</b>
+        <span class="tile-confirm">Delete this service?${(c.permissions || []).some((permission) => !permission.expires_at) ? ' Affected agents will need approval again.' : ''}</span>
+        <span class="tile-confirm-actions"><button class="btn sm" data-act="confirm-cancel">Cancel</button>
+          <button class="btn sm danger" data-act="del-conn-confirm" data-id="${c.id}">Delete</button></span></div></div>`;
+  }
+  const test = state.connTests[c.id];
+  const menuOpen = state.connMenuOpen === c.id;
+  return `<div class="tile">
+    <span class="badge ${t.cls}">${t.label}</span>
+    <div class="tile-tx"><b title="${escAttr(c.name)}">${esc(c.name)}${liveCount(c) ? ' <span class="cc-live">● live</span>' : ''}</b>
+      <code title="${escAttr(c.target)}">${esc(c.target)}</code>${connTestResultHTML(c)}</div>
+    <div class="tile-menu-wrap">
+      <button class="icon-btn tile-menu-btn ${menuOpen ? 'on' : ''}" title="Service options"
+        aria-label="Options for ${escAttr(c.name)}" aria-haspopup="menu"
+        aria-expanded="${menuOpen}" data-act="toggle-conn-menu" data-id="${c.id}">${ICONS.ellipsis}</button>
+      ${menuOpen ? `<div class="tile-menu" role="menu" aria-label="Options for ${escAttr(c.name)}">
+        <button class="menu-item" role="menuitem" data-act="test-conn" data-id="${c.id}" ${test && test.running ? 'disabled' : ''}>${ICONS.flaskConical} ${test && test.running ? 'Testing…' : 'Test connection'}</button>
+        <button class="menu-item" role="menuitem" data-act="edit-conn" data-id="${c.id}">${ICONS.pencil} Edit…</button>
+        <button class="menu-item danger" role="menuitem" data-act="del-conn-ask" data-id="${c.id}">${ICONS.trash} Delete…</button>
+      </div>` : ''}
+    </div></div>`;
+}
+
 function connectionsHTML() {
   if (!state.connections.length) {
     const detail = mode === 'dropdown' ? '' : `
@@ -544,26 +569,8 @@ function connectionsHTML() {
       <button class="btn sm" data-act="copy-first-task">${state.connectionTaskCopied ? `${ICONS.check} Copied` : 'Copy task'}</button>
       <button class="icon-btn" title="Dismiss" aria-label="Dismiss service ready message" data-act="dismiss-connection-ready">${ICONS.circleX}</button>
     </div></div>` : '';
-  return readyCard + `<div class="conn-cards">` + state.connections.map((c) => {
-    const t = TYPES[c.type];
-    if (state.confirm && state.confirm.kind === 'del-conn' && state.confirm.id === c.id) {
-      return `<div class="conn-card confirm-card">
-        <div class="cc-top"><span class="badge ${t.cls}">${t.label}</span>
-          <span class="c-name" title="${escAttr(c.name)}">${esc(c.name)}</span></div>
-        <div class="cc-confirm">Delete this service?${(c.permissions || []).some((permission) => !permission.expires_at) ? ' Affected agents will need approval again.' : ''}</div>
-        <div class="cc-foot"><button class="btn sm" data-act="confirm-cancel">Cancel</button>
-          <button class="btn sm danger" data-act="del-conn-confirm" data-id="${c.id}">Delete</button></div></div>`;
-    }
-    const chips = c.secret_names.map((n) => `<span class="key-chip">🔑 ${esc(n)}</span>`).join('');
-    return `<div class="conn-card">
-      <div class="cc-top"><span class="badge ${t.cls}">${t.label}</span>
-        <span class="c-name" title="${escAttr(c.name)}">${esc(c.name)}</span>
-        ${liveCount(c) ? '<span class="cc-live">● live</span>' : ''}</div>
-      <div class="cc-target" title="${escAttr(c.target)}">${esc(c.target)}</div>
-      <div class="cc-chips">${chips}</div>
-      ${connTestResultHTML(c)}
-      <div class="cc-foot">${connActionsHTML(c)}</div></div>`;
-  }).join('') + `</div>`;
+  return readyCard + `<div class="conn-tiles">` +
+    state.connections.map(connTileHTML).join('') + `</div>`;
 }
 
 // Console.app-style rows: a proportional timestamp gutter, restrained
@@ -1689,6 +1696,11 @@ document.addEventListener('click', async (e) => {
     if (!btn) { render(); return; }
     // fall through: the clicked action runs and its render reflects the close
   }
+  if (state.connMenuOpen && !target?.closest('.tile-menu-wrap')) {
+    state.connMenuOpen = null;
+    if (!btn) { render(); return; }
+    // fall through: the clicked action runs and its render reflects the close
+  }
   if (state.formMenuOpen && !target?.closest('.cred-select') && !target?.closest('.cred-menu')) {
     state.formMenuOpen = null;
     if (!btn) { render(); return; }
@@ -1705,6 +1717,7 @@ document.addEventListener('click', async (e) => {
       state.confirm = null;
       state.walkthroughMenuOpen = false;
       state.agentMenuOpen = null;
+      state.connMenuOpen = null;
       render();
       break;
     }
@@ -1718,6 +1731,10 @@ document.addEventListener('click', async (e) => {
       break;
     case 'toggle-agent-menu':
       state.agentMenuOpen = state.agentMenuOpen === id ? null : id;
+      render();
+      break;
+    case 'toggle-conn-menu':
+      state.connMenuOpen = state.connMenuOpen === id ? null : id;
       render();
       break;
     case 'toggle-service-walkthrough': {
@@ -1900,6 +1917,7 @@ document.addEventListener('click', async (e) => {
     case 'edit-conn': {
       const c = state.connections.find((x) => x.id === id);
       if (!c) break;
+      state.connMenuOpen = null;
       if (!await holdDropdownFormOpen()) break;
       state.sheet = { kind: 'edit-conn', id }; state.connType = c.type;
       state.sheetErrors = {};
@@ -1979,7 +1997,7 @@ document.addEventListener('click', async (e) => {
       focusField(id === NEW_CREDENTIAL_OPTION ? 'c-new-secret-name' : 'c-secret');
       break;
     case 'save-conn': await saveConn(); break;
-    case 'del-conn-ask': state.confirm = { kind: 'del-conn', id }; render(); break;
+    case 'del-conn-ask': state.connMenuOpen = null; state.confirm = { kind: 'del-conn', id }; render(); break;
     case 'del-conn-confirm':
       if (await run(() => invoke('delete_connection', { id }))) {
         state.confirm = null;
@@ -1990,6 +2008,7 @@ document.addEventListener('click', async (e) => {
       break;
     case 'test-conn': {
       if (state.connTests[id] && state.connTests[id].running) break;
+      state.connMenuOpen = null;
       state.connTests[id] = { running: true };
       render();
       try {
@@ -2096,6 +2115,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     if (state.walkthroughMenuOpen) { state.walkthroughMenuOpen = false; render(); return; }
     if (state.agentMenuOpen) { state.agentMenuOpen = null; render(); return; }
+    if (state.connMenuOpen) { state.connMenuOpen = null; render(); return; }
     if (state.menuOpen) { state.menuOpen = false; render(); return; }
     if (state.formMenuOpen) {
       const menuId = state.formMenuOpen;
@@ -2303,6 +2323,7 @@ async function boot() {
     state.confirm = null;
     state.walkthroughMenuOpen = false;
     state.agentMenuOpen = null;
+    state.connMenuOpen = null;
     render();
   });
 }

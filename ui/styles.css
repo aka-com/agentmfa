@@ -346,7 +346,6 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .s-sub { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; color: var(--muted); margin-top: 2px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .secret-usage { font-family: inherit; font-size: 12px; }
 .c-name { font-weight: 600; font-size: 14.5px; }
-.key-chip { display: inline-block; padding: 2px 8px; border-radius: 6px; background: var(--chip-bg); color: var(--chip-ink); font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
 .badge { display: inline-block; padding: 2px 8px; border-radius: 9px; font-size: 12px; font-weight: 600; white-space: nowrap; }
 .b-api { background: var(--b-api-bg); color: var(--b-api-ink); }
 .b-pg  { background: var(--b-pg-bg); color: var(--b-pg-ink); }
@@ -430,9 +429,10 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .act-txt { flex: 1; line-height: 18px; color: var(--ink-2); word-break: break-word; }
 .act-detail { font-size: 12px; color: var(--faint); line-height: 1.4; margin-top: 2px; }
 
-/* ---- connections (card grid, after TablePlus launchers / Keybase device
-   cards): one connection = one object with everything inside its border --- */
-.conn-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 9px; padding-top: 4px; }
+/* ---- connections (compact tile grid): a tile carries identity only —
+   badge, name, target — and every action sits in a hover-revealed ⋯ menu,
+   so the inventory reads the same at 5 services or 50 ------------------- */
+.conn-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 8px; padding-top: 4px; }
 .connection-ready {
   display: flex; align-items: center; gap: 12px; margin: 3px 0 9px; padding: 10px 11px;
   border: 1px solid var(--ok-border); border-radius: 10px; background: var(--ok-wash);
@@ -446,33 +446,44 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
   text-overflow: ellipsis; white-space: nowrap;
 }
 .connection-ready-actions { display: flex; align-items: center; gap: 3px; flex: 0 0 auto; }
-.conn-card {
+.tile {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 12px; min-width: 0;
   background: var(--card-bg); border: 1px solid var(--line);
-  border-radius: 11px; padding: 10px 11px 8px;
-  box-shadow: 0 1px 3px rgba(20,24,50,.06);
-  display: flex; flex-direction: column; gap: 6px;
+  border-radius: 10px; box-shadow: 0 1px 3px rgba(20,24,50,.06);
 }
-.cc-top { display: flex; align-items: center; gap: 6px; }
-.cc-top .c-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
-.cc-target {
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  font-size: 10.5px; color: var(--muted-2);
+.tile > .badge { flex: 0 0 auto; }
+.tile-tx { flex: 1; min-width: 0; }
+.tile-tx b { display: block; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tile-tx code {
+  display: block; margin-top: 1px;
+  font-size: 11.5px; color: var(--muted-2);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.cc-chips { display: flex; flex-wrap: wrap; gap: 4px; }
-.cc-chips .key-chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
-.cc-live { flex: 0 0 auto; font-size: 11.5px; color: var(--ok-ink); font-weight: 600; }
-.cc-foot { display: flex; justify-content: flex-end; gap: 2px; margin-top: auto; padding-top: 4px; border-top: 1px solid var(--line-soft); }
-.cc-foot .cc-test-btn { margin-right: auto; padding-inline: 7px; font-size: 11.5px; }
-/* pass/fail summary of the last broker-side test, inside the card border */
-.cc-test { display: flex; align-items: flex-start; gap: 5px; font-size: 12px; line-height: 1.4; }
+.cc-live { font-size: 11.5px; color: var(--ok-ink); font-weight: 600; }
+/* pass/fail summary of the last broker-side test, inside the tile border */
+.cc-test { display: flex; align-items: flex-start; gap: 5px; margin-top: 3px; font-size: 12px; line-height: 1.4; }
 .cc-test svg { flex: 0 0 13px; width: 13px; height: 13px; margin-top: 2px; }
 .cc-test.ok { color: var(--ok-ink); }
 .cc-test.err { color: var(--danger-ink); }
-/* delete-confirm state of a card: same object, danger dress, Cancel/Delete */
-.conn-card.confirm-card { border-color: var(--danger-border); background: var(--danger-wash); }
-.conn-card.confirm-card .cc-foot { gap: 6px; border-top: none; }
-.cc-confirm { font-size: 13px; line-height: 1.45; color: var(--danger-text); }
+.cc-test.running { color: var(--muted); }
+/* the ⋯ menu surfaces on hover, keyboard focus, or while open */
+.tile-menu-wrap { position: relative; flex: 0 0 auto; }
+.tile-menu-btn { opacity: 0; transition: opacity .12s ease; }
+.tile:hover .tile-menu-btn, .tile-menu-btn:focus-visible, .tile-menu-btn.on { opacity: 1; }
+.tile-menu-btn.on { background: var(--hover-2); color: var(--ink-2); }
+.tile-menu {
+  position: absolute; right: 0; top: calc(100% + 4px); z-index: 14;
+  min-width: 185px; display: flex; flex-direction: column; gap: 2px; padding: 4px;
+  background: var(--panel); border: 1px solid var(--line-mid); border-radius: 9px;
+  box-shadow: 0 10px 28px rgba(10,15,40,.22);
+}
+.menu-item:disabled { opacity: .5; cursor: default; }
+.menu-item:disabled:hover { background: transparent; }
+/* delete-confirm state of a tile: same object, danger dress, Cancel/Delete */
+.tile.confirm-tile { border-color: var(--danger-border); background: var(--danger-wash); align-items: flex-start; }
+.tile-confirm { display: block; margin-top: 2px; font-size: 12.5px; line-height: 1.4; color: var(--danger-text); white-space: normal; }
+.tile-confirm-actions { display: flex; gap: 6px; margin-top: 7px; }
 
 /* ---- agents tab: one block per agent (identity card + a row per service
    stating what the agent can do right now, with the revoke control beside
