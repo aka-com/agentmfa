@@ -213,6 +213,7 @@ export interface CommandMap {
   delete_connection: CommandSpec<{ id: string }, void>;
   test_connection: CommandSpec<{ id: string }, ConnectionTestReport>;
   remove_permission: CommandSpec<{ id: string }, boolean>;
+  confirm_agent_disconnect: CommandSpec<undefined, boolean>;
   revoke_agent: CommandSpec<{ id: string }, boolean>;
   close_session: CommandSpec<{ id: number }, boolean>;
   set_reauth_on_read: CommandSpec<{ on: boolean }, void>;

@@ -18,6 +18,7 @@ use agentmfa_core::types::{ConnectionConfig, DecisionContext, DecisionSurface, P
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter as _, State};
 use tauri_plugin_clipboard_manager::ClipboardExt as _;
+use tauri_plugin_dialog::{DialogExt as _, MessageDialogButtons, MessageDialogKind};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -739,6 +740,21 @@ pub fn revoke_agent(state: State<AppState>, id: String) -> CmdResult<bool> {
     state.broker.ui_revoke_agent(&id).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub async fn confirm_agent_disconnect(app: AppHandle) -> bool {
+    app.dialog()
+        .message(
+            "Disconnect this agent? Temporary access, saved access, and active sessions will end.",
+        )
+        .title("Disconnect agent")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Disconnect".to_string(),
+            "Cancel".to_string(),
+        ))
+        .blocking_show()
+}
+
 /* ------------------------------ sessions --------------------------------- */
 
 #[tauri::command]
@@ -850,6 +866,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         delete_connection,
         test_connection,
         remove_permission,
+        confirm_agent_disconnect,
         revoke_agent,
         close_session,
         set_reauth_on_read,

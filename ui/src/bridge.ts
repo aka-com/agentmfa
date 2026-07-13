@@ -466,6 +466,8 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       audit(standing ? 'ruleRemoved' : 'grantRevoked', standing ? 'Approval required again' : 'Temporary access ended');
       return true;
     }
+    case 'confirm_agent_disconnect':
+      return window.confirm('Disconnect agent\n\nDisconnect this agent? Temporary access, saved access, and active sessions will end.');
     case 'revoke_agent':
       { const agent = db.agents.find((a) => a.id === args.id); if (!agent) return false;
       db.agents = db.agents.filter((a) => a.id !== args.id);

@@ -1,5 +1,6 @@
 import {
   Bell,
+  Bot,
   Check,
   ChevronDown,
   CircleCheck,
@@ -81,6 +82,7 @@ function iconHTML(iconNode: IconNode, size: number, attrs: SVGProps = {}): strin
 }
 
 export const LUCIDE_ICONS: Record<string, string> = {
+  bot: iconHTML(Bot, 15),
   expand: iconHTML(Expand, 15),
   eye: iconHTML(Eye, 14),
   eyeOff: iconHTML(EyeOff, 14),
