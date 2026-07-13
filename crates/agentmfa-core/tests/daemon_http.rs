@@ -135,6 +135,11 @@ impl Harness {
     }
 }
 
+// A standing rule's scope derives from the prompted request (mutating →
+// full, otherwise read), and the callers here rely on the rule matching
+// later POSTs — so the rule must be saved from a mutating request. /echo
+// keeps the /dispatch hit counter untouched, and omitting request_id keeps
+// idempotency retention out of play under the zero-capacity configs.
 async fn save_always_allow_rule(harness: &mut Harness, authorization: &str) {
     let socket = harness.socket.clone();
     let authorization = authorization.to_string();
@@ -146,8 +151,8 @@ async fn save_always_allow_rule(harness: &mut Harness, authorization: &str) {
             &[("authorization", &authorization)],
             Some(json!({
                 "connection": "github",
-                "method": "GET",
-                "path": "/user/repos",
+                "method": "POST",
+                "path": "/echo",
             })),
         )
         .await
