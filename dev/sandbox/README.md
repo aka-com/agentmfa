@@ -1,5 +1,14 @@
 # Try AgentMFA against the local sandbox
 
+```text
+     _                    _   __  __ _____ _
+    / \   __ _  ___ _ __ | |_|  \/  |  ___/ \
+   / _ \ / _` |/ _ \ '_ \| __| |\/| | |_ / _ \
+  / ___ \ (_| |  __/ | | | |_| |  | |  _/ ___ \
+ /_/   \_\__, |\___|_| |_|\__|_|  |_|_|/_/   \_\
+         |___/
+```
+
 The sandbox is a disposable Docker Compose stack with one upstream for
 every AgentMFA connection type — an authenticated HTTP API, a WebSocket
 echo, Postgres, and SSH — so you can try the whole app in minutes
@@ -32,8 +41,8 @@ The first start compiles the HTTP/WebSocket fixture inside Docker and
 can take several minutes; later starts take seconds. The command
 generates a sandbox-only SSH key under the ignored `dev/sandbox/state/`
 directory, waits until all four services answer, and prints the exact
-values to enter in AgentMFA — including a paste-ready “Quick setup”
-line per service and the current SSH host-key fingerprint.
+values to enter in AgentMFA — including paste-ready “Quick setup” lines
+for Postgres and SSH and the current SSH host-key fingerprint.
 
 Print the containers and connection values again at any time:
 
@@ -52,22 +61,21 @@ isn't shown, re-enable it from the **Walkthroughs** menu — the ?
 button in the Services header — or use **＋ Add service** to fill the
 form by hand.)
 
-For each service: paste its **Quick setup** line from the `sandbox:up`
-output into the card and press **Continue** — the service type is
-detected automatically and the form opens pre-filled. The printed
-output lists the few remaining values under the same names the form
-uses; press **Add service**, then press **Test** on the service's card
-in the list. Filling the form by hand instead? The same values cover
-every field; the Postgres **TLS mode** and SSH **Host key fingerprint**
-fields are under the form's **Advanced** section. With the default
-ports:
+For HTTP API and WebSocket, use **＋ Add service** and enter the printed
+fields manually. For Postgres and SSH, paste the **Quick setup** line
+from the `sandbox:up` output into the card and press **Continue** — the
+service type is detected automatically and the form opens pre-filled.
+Enter any remaining values, press **Add service**, then press **Test**
+on the service's card in the list. The Postgres **TLS mode** and SSH
+**Host key fingerprint** fields are under the form's **Advanced**
+section. With the default ports:
 
-| Service | Quick setup line | Then |
+| Service | Setup | Then |
 | --- | --- | --- |
-| HTTP API | `http://127.0.0.1:18080` | Name `sandbox-http`, authentication type **Bearer token**, credential value `agentmfa-test-token` |
-| WebSocket | `ws://127.0.0.1:18081/ws` | Name `sandbox-websocket`, authentication type **Bearer token**, credential value `agentmfa-ws-test-token` |
-| Postgres | `postgres://agentmfa:agentmfa-test-password@127.0.0.1:15432/agentmfa_sandbox?sslmode=disable` | Name `sandbox-postgres`; host, database, TLS mode **Disable** (under **Advanced**), and password all pre-fill |
-| SSH | `ssh -i <printed key path> -p 12222 sandbox@127.0.0.1` | Name `sandbox-ssh`; AgentMFA reads the key file itself — never paste key contents |
+| HTTP API | Enter manually: API root `http://127.0.0.1:18080` | Name `sandbox-http`, authentication type **Bearer token**, credential value `agentmfa-test-token` |
+| WebSocket | Enter manually: URL `ws://127.0.0.1:18081/ws` | Name `sandbox-websocket`, authentication type **Bearer token**, credential value `agentmfa-ws-test-token` |
+| Postgres | Quick setup: `postgres://agentmfa:agentmfa-test-password@127.0.0.1:15432/agentmfa_sandbox?sslmode=disable` | Name `sandbox-postgres`; host, database, TLS mode **Disable** (under **Advanced**), and password all pre-fill |
+| SSH | Quick setup: `ssh -i <printed key path> -p 12222 sandbox@127.0.0.1` | Name `sandbox-ssh`; AgentMFA reads the key file itself — never paste key contents |
 
 The SSH **Host key fingerprint** field (under **Advanced**) is
 optional: paste the printed `SHA256:…` value, or leave it blank and

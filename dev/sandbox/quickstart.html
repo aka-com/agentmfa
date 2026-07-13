@@ -55,6 +55,12 @@
 </head>
 <body>
 <main>
+  <pre aria-label="AgentMFA logo"><code>     _                    _   __  __ _____ _
+    / \   __ _  ___ _ __ | |_|  \/  |  ___/ \
+   / _ \ / _` |/ _ \ '_ \| __| |\/| | |_ / _ \
+  / ___ \ (_| |  __/ | | | |_| |  | |  _/ ___ \
+ /_/   \_\__, |\___|_| |_|\__|_|  |_|_|/_/   \_\
+         |___/</code></pre>
   <h1>AgentMFA sandbox quickstart</h1>
   <p class="subtitle">Try every AgentMFA connection type against disposable
   local containers — no real credentials involved.</p>
@@ -89,39 +95,38 @@ npm run sandbox:up</code></pre>
   the card isn't shown, re-enable it from the <b>Walkthroughs</b> menu —
   the ? button in the Services header — or use <b>＋ Add service</b> to
   fill the form by hand.)</p>
-  <p>For each service, paste its <b>Quick setup</b> line into the card
-  and press <b>Continue</b> — the service type is detected automatically
-  and the form opens pre-filled. The <code>sandbox:status</code> output
-  lists the few remaining fields under the same names the form shows.
-  Press <b>Add service</b>, then press <b>Test</b> on the service's card
-  in the list. Filling the form by hand instead? The same values cover
-  every field; Postgres <b>TLS mode</b> and the SSH <b>Host key
-  fingerprint</b> are under the form's <b>Advanced</b> section. With the
-  default ports:</p>
+  <p>For HTTP API and WebSocket, use <b>＋ Add service</b> and enter the
+  printed fields manually. For Postgres and SSH, paste the <b>Quick
+  setup</b> line into the card and press <b>Continue</b> — the service
+  type is detected automatically and the form opens pre-filled. Enter
+  any remaining values, press <b>Add service</b>, then press <b>Test</b>
+  on the service's card in the list. Postgres <b>TLS mode</b> and the
+  SSH <b>Host key fingerprint</b> are under the form's <b>Advanced</b>
+  section. With the default ports:</p>
   <div class="wide">
   <table>
-    <tr><th>Type</th><th>Paste this Quick setup line</th><th>Then</th></tr>
+    <tr><th>Type</th><th>Setup</th><th>Then</th></tr>
     <tr>
       <td>HTTP&nbsp;API</td>
-      <td><code>http://127.0.0.1:18080</code></td>
+      <td>Enter API root <code>http://127.0.0.1:18080</code> manually</td>
       <td>Name <code>sandbox-http</code> · Bearer token
           <code>agentmfa-test-token</code></td>
     </tr>
     <tr>
       <td>WebSocket</td>
-      <td><code>ws://127.0.0.1:18081/ws</code></td>
+      <td>Enter URL <code>ws://127.0.0.1:18081/ws</code> manually</td>
       <td>Name <code>sandbox-websocket</code> · Bearer token
           <code>agentmfa-ws-test-token</code></td>
     </tr>
     <tr>
       <td>Postgres</td>
-      <td><code>postgres://agentmfa:agentmfa-test-password@127.0.0.1:15432/agentmfa_sandbox?sslmode=disable</code></td>
+      <td>Quick setup: <code>postgres://agentmfa:agentmfa-test-password@127.0.0.1:15432/agentmfa_sandbox?sslmode=disable</code></td>
       <td>Name <code>sandbox-postgres</code>; everything else pre-fills
           (TLS mode <b>Disable</b>, under <b>Advanced</b>)</td>
     </tr>
     <tr>
       <td>SSH</td>
-      <td><code>ssh -i &lt;printed key path&gt; -p 12222 sandbox@127.0.0.1</code>
+      <td>Quick setup: <code>ssh -i &lt;printed key path&gt; -p 12222 sandbox@127.0.0.1</code>
           <div class="muted">copy the exact line from
           <code>sandbox:status</code> — it carries the generated key's
           absolute path</div></td>

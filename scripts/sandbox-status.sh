@@ -101,6 +101,15 @@ read -r _ ssh_fingerprint _ <<<"$fingerprint_line"
 
 # Keep this walkthrough in sync with dev/sandbox/README.md (section 3)
 # and dev/sandbox/quickstart.html (step 3).
+cat <<'LOGO'
+
+     _                    _   __  __ _____ _
+    / \   __ _  ___ _ __ | |_|  \/  |  ___/ \
+   / _ \ / _` |/ _ \ '_ \| __| |\/| | |_ / _ \
+  / ___ \ (_| |  __/ | | | |_| |  | |  _/ ___ \
+ /_/   \_\__, |\___|_| |_|\__|_|  |_|_|/_/   \_\
+         |___/
+LOGO
 cat <<EOF
 
 AgentMFA sandbox services
@@ -110,14 +119,13 @@ the top is an “Add a service for your agent” card. (If the card isn't
 shown, re-enable it from the Walkthroughs menu — the ? button in the
 Services header — or use “＋ Add service” to fill the form by hand.)
 
-For each service below: paste its Quick setup line into the card and
-press Continue — the service type is detected automatically and the
-form opens pre-filled. Enter the remaining values listed below, press
+For HTTP API and WebSocket, use “＋ Add service” and enter the fields
+listed below. For Postgres and SSH, paste the Quick setup line into the
+card and press Continue — the service type is detected automatically
+and the form opens pre-filled. Enter any remaining values, press
 “Add service”, then press Test on the service's card in the list.
-Filling the form by hand instead? The same values cover every field.
 
 HTTP API
-  Quick setup:      http://127.0.0.1:$http_port
   Name:             sandbox-http
   API root:         http://127.0.0.1:$http_port
   Authentication type: Bearer token
@@ -126,7 +134,6 @@ HTTP API
   Test → expect:    an authenticated HTTP 200 OK
 
 WebSocket
-  Quick setup:      ws://127.0.0.1:$ws_port/ws
   Name:             sandbox-websocket
   URL:              ws://127.0.0.1:$ws_port/ws
   Authentication type: Bearer token

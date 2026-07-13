@@ -262,7 +262,7 @@ export function parseConnectionImport(value: unknown): ConnectionImport {
     if (rawSslmode !== sslmode) warnings.push(`Unsupported sslmode ${rawSslmode}; using verify-full.`);
     const unsupported = [...parsed.searchParams.keys()].filter((key) => !['sslmode', 'sslrootcert'].includes(key));
     if (unsupported.length) warnings.push(`Review unsupported DSN options: ${[...new Set(unsupported)].join(', ')}.`);
-    if (credential) warnings.push('A password was detected. It will only be saved if you choose “Save a new credential” below.');
+    if (credential) warnings.push('A password was filled in below. It will be saved if you add this service with “New secret…” selected.');
     return {
       type: 'pg', name: suggestedName(parsed.hostname, 'postgres'), credential, warnings,
       fields: {

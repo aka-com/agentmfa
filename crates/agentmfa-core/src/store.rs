@@ -436,22 +436,18 @@ impl Store {
             .cloned()
     }
 
+    /// Check whether a connection can be added against the current index
+    /// without changing either the index or the vault. Callers that pause for
+    /// user confirmation must still use `add_connection` afterward, which
+    /// repeats these state-dependent checks to close the confirmation race.
+    pub fn preflight_add_connection(&self, spec: &ConnectionSpec) -> Result<()> {
+        let state = self.state.lock().unwrap();
+        prepare_connection(&state, spec.clone()).map(|_| ())
+    }
+
     pub fn add_connection(&self, spec: ConnectionSpec) -> Result<Connection> {
-        validate_connection_name(&spec.name)?;
         let mut state = self.state.lock().unwrap();
-        if state.connections.iter().any(|c| c.name == spec.name) {
-            return Err(CoreError::ConnectionNameTaken(spec.name));
-        }
-        let secrets = validate_config_and_bind_secrets(&state, &spec)?;
-        let now = Utc::now();
-        let conn = Connection {
-            id: Uuid::new_v4(),
-            name: spec.name,
-            config: spec.config,
-            secrets,
-            created_at: now,
-            updated_at: now,
-        };
+        let conn = prepare_connection(&state, spec)?;
         let mut next = state.clone();
         next.connections.push(conn.clone());
         self.commit(&mut state, next)?;
@@ -461,61 +457,32 @@ impl Store {
     /// Atomically add one credential and the connection that first uses it.
     /// The index becomes visible only after both objects validate and persist;
     /// a failed index write removes the just-created vault item.
+    pub fn preflight_add_connection_with_secret(
+        &self,
+        secret_name: &str,
+        spec: &ConnectionSpec,
+    ) -> Result<()> {
+        let state = self.state.lock().unwrap();
+        prepare_connection_with_secret(&state, secret_name, spec.clone()).map(|_| ())
+    }
+
     pub fn add_connection_with_secret(
         &self,
         secret_name: &str,
         value: SecretValue,
-        mut spec: ConnectionSpec,
+        spec: ConnectionSpec,
     ) -> Result<(SecretMeta, Connection)> {
-        if !is_valid_secret_name(secret_name) {
-            return Err(CoreError::InvalidSecretName(secret_name.to_string()));
-        }
-        validate_connection_name(&spec.name)?;
         let mut state = self.state.lock().unwrap();
-        if state
-            .secrets
-            .iter()
-            .any(|secret| secret.name == secret_name)
-        {
-            return Err(CoreError::SecretNameTaken(secret_name.to_string()));
-        }
-        if state.connections.iter().any(|conn| conn.name == spec.name) {
-            return Err(CoreError::ConnectionNameTaken(spec.name));
-        }
-
-        let now = Utc::now();
-        let meta = SecretMeta {
-            id: Uuid::new_v4(),
-            name: secret_name.to_string(),
-            created_at: now,
-            updated_at: now,
-        };
+        let (meta, conn) = prepare_connection_with_secret(&state, secret_name, spec)?;
         let mut next = state.clone();
         next.secrets.push(meta.clone());
-        if spec.config.kind() != ConnectionKind::Api {
-            spec.secrets = vec![meta.id];
-        }
-        let secrets = validate_config_and_bind_secrets(&next, &spec)?;
-        if !secrets.contains(&meta.id) {
-            return Err(CoreError::InvalidConnectionConfig(
-                "the new credential is not referenced by this connection".into(),
-            ));
-        }
-        let conn = Connection {
-            id: Uuid::new_v4(),
-            name: spec.name,
-            config: spec.config,
-            secrets,
-            created_at: now,
-            updated_at: now,
-        };
         next.connections.push(conn.clone());
 
         self.vault.set(
             &meta.id,
             &VaultAttrs {
                 name: meta.name.clone(),
-                created_at: now,
+                created_at: meta.created_at,
             },
             &value,
         )?;
@@ -745,6 +712,72 @@ fn migrate_legacy_pg_ca_bundle(state: &mut IndexState) -> bool {
         }
     }
     true
+}
+
+fn prepare_connection(state: &IndexState, spec: ConnectionSpec) -> Result<Connection> {
+    validate_connection_name(&spec.name)?;
+    if state.connections.iter().any(|conn| conn.name == spec.name) {
+        return Err(CoreError::ConnectionNameTaken(spec.name));
+    }
+    let secrets = validate_config_and_bind_secrets(state, &spec)?;
+    let now = Utc::now();
+    Ok(Connection {
+        id: Uuid::new_v4(),
+        name: spec.name,
+        config: spec.config,
+        secrets,
+        created_at: now,
+        updated_at: now,
+    })
+}
+
+fn prepare_connection_with_secret(
+    state: &IndexState,
+    secret_name: &str,
+    mut spec: ConnectionSpec,
+) -> Result<(SecretMeta, Connection)> {
+    if !is_valid_secret_name(secret_name) {
+        return Err(CoreError::InvalidSecretName(secret_name.to_string()));
+    }
+    validate_connection_name(&spec.name)?;
+    if state
+        .secrets
+        .iter()
+        .any(|secret| secret.name == secret_name)
+    {
+        return Err(CoreError::SecretNameTaken(secret_name.to_string()));
+    }
+    if state.connections.iter().any(|conn| conn.name == spec.name) {
+        return Err(CoreError::ConnectionNameTaken(spec.name));
+    }
+
+    let now = Utc::now();
+    let meta = SecretMeta {
+        id: Uuid::new_v4(),
+        name: secret_name.to_string(),
+        created_at: now,
+        updated_at: now,
+    };
+    let mut next = state.clone();
+    next.secrets.push(meta.clone());
+    if spec.config.kind() != ConnectionKind::Api {
+        spec.secrets = vec![meta.id];
+    }
+    let secrets = validate_config_and_bind_secrets(&next, &spec)?;
+    if !secrets.contains(&meta.id) {
+        return Err(CoreError::InvalidConnectionConfig(
+            "the new credential is not referenced by this connection".into(),
+        ));
+    }
+    let conn = Connection {
+        id: Uuid::new_v4(),
+        name: spec.name,
+        config: spec.config,
+        secrets,
+        created_at: now,
+        updated_at: now,
+    };
+    Ok((meta, conn))
 }
 
 fn validate_connection_name(name: &str) -> Result<()> {

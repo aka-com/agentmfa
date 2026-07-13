@@ -20,7 +20,7 @@ Expected output:
 
 - a first-build notice (first start only), then
 - `ready: HTTP`, `ready: WebSocket`, `ready: Postgres`, `ready: SSH`
-- the per-service Quick setup lines and form values, including the SSH
+- the Postgres and SSH Quick setup lines, all form values, and the SSH
   fingerprint
 
 Check it again with `npm run sandbox:status`. The WebSocket readiness

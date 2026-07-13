@@ -690,6 +690,10 @@ impl Broker {
     /// A connection binds a secret to a destination, so creating one is not
     /// completable without the native confirmation the core demands.
     pub fn ui_add_connection(&self, spec: ConnectionSpec) -> Result<Connection> {
+        // Reject invalid or already-stale input before asking the user to
+        // authenticate. `add_connection` repeats the state-dependent checks
+        // after confirmation in case the index changed while the sheet was up.
+        self.store.preflight_add_connection(&spec)?;
         let confirmation = self.confirm_action(&format!("Add service “{}”", spec.name))?;
         let conn = self.store.add_connection(spec)?;
         self.audit.append(
@@ -714,6 +718,8 @@ impl Broker {
         value: SecretValue,
         spec: ConnectionSpec,
     ) -> Result<Connection> {
+        self.store
+            .preflight_add_connection_with_secret(secret_name, &spec)?;
         let confirmation = self.confirm_action(&format!("Add service “{}”", spec.name))?;
         let (secret, conn) = self
             .store

@@ -570,6 +570,114 @@ async fn config_actions_confirm_and_record_the_method() {
 }
 
 #[tokio::test]
+async fn connection_add_preflight_rejects_failures_before_confirmation() {
+    let events = Arc::new(GateEvents {
+        allow: true,
+        confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    let existing = add_github(&broker);
+    let api_spec = |name: &str, host: &str, template: &str| ConnectionSpec {
+        name: name.into(),
+        config: ConnectionConfig::Api {
+            host: host.into(),
+            scheme: "https".into(),
+            port: None,
+            template: template.into(),
+        },
+        secrets: vec![],
+    };
+
+    let duplicate = broker
+        .ui_add_connection(api_spec(
+            &existing.name,
+            "api.example.com",
+            "Authorization: Bearer {{GITHUB_API_KEY}}",
+        ))
+        .unwrap_err();
+    assert!(matches!(duplicate, CoreError::ConnectionNameTaken(_)));
+
+    let invalid_target = broker
+        .ui_add_connection(api_spec(
+            "invalid-target",
+            "https://api.example.com",
+            "Authorization: Bearer {{GITHUB_API_KEY}}",
+        ))
+        .unwrap_err();
+    assert!(matches!(
+        invalid_target,
+        CoreError::InvalidConnectionField { .. }
+    ));
+
+    let unknown_credential = broker
+        .ui_add_connection(api_spec(
+            "unknown-credential",
+            "api.example.com",
+            "Authorization: Bearer {{MISSING_TOKEN}}",
+        ))
+        .unwrap_err();
+    assert!(matches!(
+        unknown_credential,
+        CoreError::UnknownTemplateRef(_)
+    ));
+
+    let duplicate_credential = broker
+        .ui_add_connection_with_secret(
+            "GITHUB_API_KEY",
+            Zeroizing::new("replacement".into()),
+            api_spec(
+                "duplicate-credential",
+                "api.example.com",
+                "Authorization: Bearer {{GITHUB_API_KEY}}",
+            ),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        duplicate_credential,
+        CoreError::SecretNameTaken(_)
+    ));
+
+    let unbound_new_credential = broker
+        .ui_add_connection_with_secret(
+            "NEW_TOKEN",
+            Zeroizing::new("new-token".into()),
+            api_spec(
+                "unbound-new-credential",
+                "api.example.com",
+                "Authorization: Bearer {{GITHUB_API_KEY}}",
+            ),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        unbound_new_credential,
+        CoreError::InvalidConnectionConfig(_)
+    ));
+
+    assert_eq!(
+        events.confirms.load(Ordering::SeqCst),
+        0,
+        "no invalid add should reach native authentication"
+    );
+
+    broker
+        .ui_add_connection_with_secret(
+            "NEW_TOKEN",
+            Zeroizing::new("new-token".into()),
+            api_spec(
+                "valid-service",
+                "api.example.com",
+                "Authorization: Bearer {{NEW_TOKEN}}",
+            ),
+        )
+        .unwrap();
+    assert_eq!(
+        events.confirms.load(Ordering::SeqCst),
+        1,
+        "a valid add still authenticates exactly once"
+    );
+}
+
+#[tokio::test]
 async fn connection_renames_skip_confirmation_but_capability_changes_do_not() {
     let events = Arc::new(GateEvents {
         allow: true,

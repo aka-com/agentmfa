@@ -578,14 +578,14 @@ function brokerReadyHTML() {
     <span class="ready-copy-label" aria-live="polite">${copied ? `${ICONS.check} Copied` : 'Ready'}</span></button>`;
 }
 
-function walkthroughMenuHTML(iconOnly = false): string {
+function walkthroughMenuHTML(): string {
   const option = (action: string, label: string, checked: boolean): string =>
     `<button class="walkthrough-option" role="menuitemcheckbox" aria-checked="${checked}" data-act="${action}">
       <span class="walkthrough-check">${checked ? ICONS.check : ''}</span><span>${label}</span></button>`;
   return `<div class="walkthrough-menu-wrap">
-    <button class="${iconOnly ? 'icon-btn walkthrough-menu-icon' : 'walkthrough-menu-btn'} ${state.walkthroughMenuOpen ? 'on' : ''}"
+    <button class="icon-btn walkthrough-menu-icon ${state.walkthroughMenuOpen ? 'on' : ''}"
       title="Choose walkthroughs" aria-label="Choose walkthroughs" aria-haspopup="menu"
-      aria-expanded="${state.walkthroughMenuOpen}" data-act="toggle-walkthrough-menu">${ICONS.circleQuestion}${iconOnly ? '' : '<span>Walkthroughs</span>'}</button>
+      aria-expanded="${state.walkthroughMenuOpen}" data-act="toggle-walkthrough-menu">${ICONS.circleQuestion}</button>
     ${state.walkthroughMenuOpen ? `<div class="walkthrough-menu" role="menu" aria-label="Walkthroughs">
       <div class="walkthrough-menu-title">Walkthroughs</div>
       ${option('toggle-service-walkthrough', 'Add a service for your agent', state.settings.show_service_walkthrough)}
@@ -642,7 +642,7 @@ function renderDropdown() {
     <div class="dd-head"><div class="dd-appicon">🔐</div>
       <div class="dd-identity"><div class="dd-title">AgentMFA</div>${brokerReadyHTML()}</div>
       <button class="icon-btn" title="Open as a window" aria-label="Open as a window" data-act="mode-window">${ICONS.expand}</button>
-      ${walkthroughMenuHTML(true)}
+      ${walkthroughMenuHTML()}
       <button class="icon-btn" title="Settings" aria-label="Settings" data-act="open-settings">${ICONS.gear}</button></div>
     ${pendingBannerHTML()}
     <div class="seg">${tabs}</div>
@@ -727,6 +727,16 @@ function addSecretSheet(editing: boolean): string {
 // chooser into "create a new credential" mode.
 const NEW_CREDENTIAL_OPTION = '__new__';
 
+function credentialNameIsTaken(name: string): boolean {
+  const candidate = name.trim();
+  return Boolean(candidate) && state.secrets.some((secret) => secret.name === candidate);
+}
+
+function serviceNameIsTaken(name: string): boolean {
+  const candidate = name.trim();
+  return Boolean(candidate) && state.connections.some((connection) => connection.name === candidate);
+}
+
 function credentialChooserHTML(
   type: ConnectionType,
   draft: ConnectionDraft,
@@ -791,12 +801,14 @@ function credentialChooserHTML(
     return `<div class="credential-group">${picker}</div>`;
   }
   const suggested = suggestedSecretName(draft.name ?? '', type);
-  const nameRow = `<div class="f-row"><label for="c-new-secret-name">Credential name</label><input id="c-new-secret-name" class="${fieldCls('newSecretName')}" placeholder="${escAttr(suggested)}" value="${escAttr(draft.newSecretName ?? '')}">${fieldErr('newSecretName')}</div>`;
+  const effectiveName = (draft.newSecretName || suggested).trim();
+  const nameTaken = credentialNameIsTaken(effectiveName);
+  const nameRow = `<div class="f-row"><label for="c-new-secret-name">Credential name</label><input id="c-new-secret-name" class="${fieldCls('newSecretName')} ${nameTaken ? 'name-conflict-warning' : ''}" aria-describedby="credential-name-warning" placeholder="${escAttr(suggested)}" value="${escAttr(draft.newSecretName ?? '')}">${fieldErr('newSecretName')}<div id="credential-name-warning" class="field-warning" role="status" aria-live="polite"${nameTaken ? '' : ' hidden'}>Name used by an existing credential</div></div>`;
   if (type === 'ssh' && draft.sshImportId && draft.identityFiles && draft.identityFiles.length) {
     const identityOptions = draft.identityFiles.map((path): [string, string] => [path, path]);
     return `<div class="credential-group">${picker}${nameRow}
       <div class="f-row"><label for="c-identity-file">Identity file</label>${customSelectHTML('c-identity-file', identityOptions, draft.identityFile)}${fieldErr('newSecretValue')}
-        <div class="rule-note">The private key is read by AgentMFA and saved directly to macOS Keychain.</div></div></div>`;
+        <div class="rule-note">Saved directly to macOS Keychain</div></div></div>`;
   }
   const valuePlaceholder = type === 'pg' ? 'Paste the database password'
     : type === 'ssh' ? 'Paste the private key'
@@ -853,11 +865,14 @@ function connSheet(editing: boolean): string {
     return `<button type="button" class="seg-btn ${t === val ? 'on' : ''}" data-act="conn-type" data-type="${val}">${label}</button>`;
   };
   const importWarnings = !editing && d.importWarnings && d.importWarnings.length
-    ? `<div class="pair-identity-warning"><b>Review imported details</b><ul>${d.importWarnings.map((warning) => `<li>${esc(warning)}</li>`).join('')}</ul></div>` : '';
+    ? `<div class="pair-identity-warning import-warning"><b>Review imported details</b><ul>${d.importWarnings.map((warning) => `<li>${esc(warning)}</li>`).join('')}</ul></div>` : '';
   let sshHostKeyField = '';
   let pgTlsFields = '';
   let fields = importWarnings;
-  fields += `<div class="f-row"><label for="f-cname">Name</label><input id="f-cname" class="${fieldCls('name')}" placeholder="e.g. github" value="${escAttr(d.name ?? '')}">${fieldErr('name')}</div>
+  const nameTaken = !editing && serviceNameIsTaken(d.name ?? '');
+  const nameWarning = editing ? ''
+    : `<div id="service-name-warning" class="field-warning" role="status" aria-live="polite"${nameTaken ? '' : ' hidden'}>Name used by an existing service</div>`;
+  fields += `<div class="f-row"><label for="f-cname">Name</label><input id="f-cname" class="${fieldCls('name')} ${nameTaken ? 'name-conflict-warning' : ''}"${editing ? '' : ' aria-describedby="service-name-warning"'} placeholder="e.g. github" value="${escAttr(d.name ?? '')}">${fieldErr('name')}${nameWarning}</div>
     <div class="f-row"><label>Type${editing ? ': fixed after creation' : ''}</label>
     <div class="seg in-form">${typeBtn('pg', 'Postgres')}${typeBtn('ssh', 'SSH')}${typeBtn('api', 'HTTP API')}${typeBtn('ws', 'WebSocket')}</div></div>`;
   if (t === 'api') {
@@ -1415,6 +1430,7 @@ async function saveConn(): Promise<void> {
   const name = (d.name || '').trim();
   const t = state.connType;
   const adding = sheet.kind === 'add-conn';
+  const serviceNameTaken = adding && serviceNameIsTaken(name);
   const authMode = d.authMode || 'bearer';
   const errs: Record<string, string> = {};
   if (!name) errs.name = 'Name is required';
@@ -1451,6 +1467,7 @@ async function saveConn(): Promise<void> {
     : 'existing';
   let selectedSecret: SecretSummary | null = null;
   let newSecretName: string | null = null;
+  let newSecretNameTaken = false;
   if (needsCredentialChoice && secretSource === 'existing') {
     selectedSecret = state.secrets.find((secret) => secret.id === d.secretId) || null;
     if (!selectedSecret) errs.secret = 'Choose a saved credential or save a new one';
@@ -1461,6 +1478,7 @@ async function saveConn(): Promise<void> {
     if (!/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(newSecretName)) {
       errs.newSecretName = 'Use letters, numbers, and underscores; start with a letter or underscore';
     }
+    newSecretNameTaken = credentialNameIsTaken(newSecretName);
     if (!newSecretValue && !hasImportedIdentity) errs.newSecretValue = 'Credential value is required';
   }
   const templateSecretName = selectedSecret ? selectedSecret.name : newSecretName;
@@ -1473,7 +1491,13 @@ async function saveConn(): Promise<void> {
   } else if (!adding && t === 'api' && !injectionTemplate) {
     errs.template = 'Injection template is required';
   }
-  if (Object.keys(errs).length) { state.sheetErrors = errs; render(); return; }
+  if (Object.keys(errs).length || serviceNameTaken || newSecretNameTaken) {
+    state.sheetErrors = errs;
+    render();
+    if (serviceNameTaken) focusField('f-cname');
+    else if (newSecretNameTaken) focusField('c-new-secret-name');
+    return;
+  }
   const input: ConnectionInput = { name, type: t };
   if (adding && needsCredentialChoice && secretSource === 'new') {
     input.new_secret_name = newSecretName;
@@ -2050,6 +2074,28 @@ function updateCredentialNamePlaceholder(connectionName: string): void {
   if (input) input.placeholder = suggestedSecretName(connectionName, state.connType);
 }
 
+function updateCredentialNameWarning(): void {
+  const input = document.getElementById('c-new-secret-name') as HTMLInputElement | null;
+  const hint = document.getElementById('credential-name-warning');
+  if (!input || !hint) return;
+  const connectionName = (document.getElementById('f-cname') as HTMLInputElement | null)?.value
+    ?? state.draft.name
+    ?? '';
+  const effectiveName = (input.value || suggestedSecretName(connectionName, state.connType)).trim();
+  const nameTaken = credentialNameIsTaken(effectiveName);
+  input.classList.toggle('name-conflict-warning', nameTaken);
+  hint.hidden = !nameTaken;
+}
+
+function updateServiceNameWarning(): void {
+  const input = document.getElementById('f-cname') as HTMLInputElement | null;
+  const hint = document.getElementById('service-name-warning');
+  if (!input || !hint) return;
+  const nameTaken = serviceNameIsTaken(input.value);
+  input.classList.toggle('name-conflict-warning', nameTaken);
+  hint.hidden = !nameTaken;
+}
+
 document.addEventListener('input', (e) => {
   const target = e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement
     ? e.target
@@ -2061,7 +2107,12 @@ document.addEventListener('input', (e) => {
     state.quickSetupSource = target.value;
     state.quickSetupError = null;
   }
-  if (target?.id === 'f-cname') updateCredentialNamePlaceholder(target.value);
+  if (target?.id === 'f-cname') {
+    updateCredentialNamePlaceholder(target.value);
+    updateCredentialNameWarning();
+    updateServiceNameWarning();
+  }
+  if (target?.id === 'c-new-secret-name') updateCredentialNameWarning();
   if (key && state.sheetErrors[key]) {
     delete state.sheetErrors[key];
     render();
