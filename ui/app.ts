@@ -316,10 +316,6 @@ function pendingBannerHTML() {
     <button class="btn sm" data-act="open-approval">Review</button></div>`;
 }
 
-function setupCurlCommand(instructions: string): string {
-  return instructions.split(/\r?\n/).find((line) => line.trimStart().startsWith('curl '))?.trim() || 'Loading…';
-}
-
 const QUICK_SETUP_TYPES: Array<[ConnectionType, string]> = [
   ['pg', 'Postgres'],
   ['ssh', 'SSH'],
@@ -428,7 +424,7 @@ function globalSectionsHTML() {
     out += `<div class="agent-onboarding walkthrough-card">
       <div class="walkthrough-head">
         <div class="onboarding-copy"><b>Let your agent set this up</b>
-          <span>Copy a short setup message into your coding agent. After you paste and run it, your agent will walk you through setup — every request comes back to you for approval.</span></div>
+          <span>Copy a short setup message into your coding agent. After you paste and run it, your agent will walk you through setup. Every requests still comes back to you for approval.</span></div>
         <button class="icon-btn walkthrough-close" title="Hide this walkthrough" aria-label="Hide Let your agent set this up walkthrough" data-act="hide-agent-walkthrough">${ICONS.x}</button>
       </div>
       <div class="onboarding-actions">
@@ -445,14 +441,13 @@ function globalSectionsHTML() {
         ? state.showFullInstructions
           ? `<div class="setup-instructions is-full">
               <div class="full-instructions-banner">
-                <p>These are the instructions that the agent will see. Tell it to read from:</p>
-                <code>${esc(setupCurlCommand(state.agentSetupInstructions))}</code>
+                <p>These are the instructions that the agent will see.</p>
               </div>
               <pre class="full-instructions-code"><code>${esc(instructionBody)}</code></pre>
             </div>`
           : `<pre class="setup-instructions"><code>${esc(instructionBody)}</code></pre>`
         : ''}
-      <div class="guide-nav-row"><button class="linklike" data-act="guide-step" data-step="add">I’ll add services by hand instead</button></div></div>`;
+      <div class="guide-nav-row"><button class="linklike manual-setup-link" data-act="guide-step" data-step="add">I’ll add services by hand instead</button></div></div>`;
   }
   if (state.sessions.length) {
     out += '<div class="live-head">Active sessions</div>' + state.sessions.map((s) => {
@@ -737,7 +732,7 @@ function renderMainWindow() {
   const actionBtn = state.tab === 'connections'
     ? `<div class="dw-head-actions">${walkthroughMenuHTML()}<button class="btn" data-act="open-add-conn">＋ Add service</button></div>`
     : state.tab === 'agents'
-    ? `<button class="btn" data-act="copy-agent-setup">Copy setup instructions</button>`
+    ? `<div class="dw-head-actions">${walkthroughMenuHTML()}<button class="btn" data-act="copy-agent-setup">Copy setup instructions</button></div>`
     : state.tab === 'secrets'
     ? `<button class="btn" data-act="open-add-secret">＋ Add secret</button>`
     : `<button class="btn" data-act="clear-activity-ask" ${state.activity.length ? '' : 'disabled'}>Clear activity</button>`;
