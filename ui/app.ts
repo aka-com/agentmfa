@@ -2070,7 +2070,14 @@ document.addEventListener('input', (e) => {
 
 document.addEventListener('focusout', (e) => {
   const target = e.target instanceof HTMLInputElement ? e.target : null;
-  if (target?.id === 'f-cname') updateCredentialNamePlaceholder(target.value);
+  if (target?.id === 'f-cname') {
+    // Internal spaces are valid service-name characters, but edge whitespace
+    // is not part of the stored name. Reflect the submitted value as soon as
+    // the field is left instead of waiting for Save to trim it invisibly.
+    target.value = target.value.trim();
+    state.draft.name = target.value;
+    updateCredentialNamePlaceholder(target.value);
+  }
 });
 
 // Keep an open fixed-position listbox glued to its trigger while the sheet

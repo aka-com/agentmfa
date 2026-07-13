@@ -40,7 +40,9 @@ pub enum CoreError {
     #[error("invalid name {0:?}: names are 1-64 chars of [A-Za-z0-9_] not starting with a digit")]
     InvalidSecretName(String),
 
-    #[error("invalid service name {0:?}: 1-64 chars of [a-z0-9-_]")]
+    #[error(
+        "invalid service name {0:?}: use 1-64 ASCII letters, numbers, spaces, hyphens, or underscores; start with a letter or number and do not end with a space"
+    )]
     InvalidConnectionName(String),
 
     #[error("invalid template: {0}")]

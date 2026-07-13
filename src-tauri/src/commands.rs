@@ -120,7 +120,7 @@ impl FormError {
             CoreError::InvalidConnectionName(_) => Self::validation(
                 "invalid_connection_name",
                 "name",
-                "Use 1–64 lowercase letters, numbers, hyphens, or underscores",
+                "Use 1–64 letters, numbers, spaces, hyphens, or underscores; start with a letter or number and don’t end with a space",
             ),
             CoreError::Template(error) => Self::validation(
                 "invalid_template",

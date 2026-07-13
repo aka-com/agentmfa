@@ -752,11 +752,12 @@ fn validate_connection_name(name: &str) -> Result<()> {
         && name.len() <= 64
         && name
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            .all(|c| c.is_ascii_alphanumeric() || c == ' ' || c == '-' || c == '_')
         && name
             .chars()
             .next()
-            .is_some_and(|c| c.is_ascii_alphanumeric());
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+        && !name.ends_with(' ');
     if ok {
         Ok(())
     } else {
@@ -1133,6 +1134,60 @@ mod tests {
         assert!(store.add_secret("9BAD", val("x")).is_err());
         assert!(store.add_secret("has space", val("x")).is_err());
         assert!(store.add_secret("", val("x")).is_err());
+    }
+
+    #[test]
+    fn connection_names_allow_internal_spaces() {
+        assert!(validate_connection_name("Internal API").is_ok());
+        assert!(validate_connection_name("Production Database 2").is_ok());
+        assert!(validate_connection_name("two  spaces").is_ok());
+
+        for invalid in [
+            " leading",
+            "trailing ",
+            "has\ttab",
+            "has\nnewline",
+            "-starts-with-hyphen",
+            "_starts_with_underscore",
+        ] {
+            assert!(
+                validate_connection_name(invalid).is_err(),
+                "accepted invalid service name {invalid:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn connection_names_with_spaces_round_trip() {
+        let (store, _, _dir) = store().await;
+        let token = store.add_secret("STREAM_TOKEN", val("t")).unwrap();
+        let connection = store
+            .add_connection(ConnectionSpec {
+                name: "Market Feed".into(),
+                config: ConnectionConfig::Ws {
+                    url: "wss://stream.example.com/feed".into(),
+                    template: None,
+                },
+                secrets: vec![token.id],
+            })
+            .unwrap();
+
+        assert_eq!(
+            store.connection_by_name("Market Feed").unwrap().id,
+            connection.id
+        );
+        let renamed = store
+            .rename_connection(&connection.id, "Production Market Feed".into())
+            .unwrap();
+        assert_eq!(renamed.name, "Production Market Feed");
+        assert!(store.connection_by_name("Market Feed").is_none());
+        assert_eq!(
+            store
+                .connection_by_name("Production Market Feed")
+                .unwrap()
+                .id,
+            connection.id
+        );
     }
 
     #[tokio::test]
