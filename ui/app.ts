@@ -25,6 +25,7 @@ import type {
   ConnectionSummary,
   ConnectionType,
   Decision,
+  PermissionSummary,
   SecretSummary,
   SessionSummary,
   Settings,
@@ -34,7 +35,7 @@ const EDIT_SECRET_MASK = '••••••••••••';
 const ACTIVITY_RENDER_LIMIT = 200;
 
 // The left-nav tabs, in order — also the cycle order for Ctrl-Tab.
-const TABS = ['connections', 'secrets', 'activity'] as const;
+const TABS = ['connections', 'access', 'secrets', 'activity'] as const;
 type Tab = typeof TABS[number];
 
 interface SheetState {
@@ -111,6 +112,7 @@ interface AppState {
   approvalRequestId: string | null;
   menuOpen: boolean;
   walkthroughMenuOpen: boolean;
+  agentMenuOpen: string | null;
   copied: string | null;
   readyCopied: boolean;
   setupInstructionsOpen: boolean;
@@ -163,6 +165,7 @@ const state: AppState = {
   approvalRequestId: null,
   menuOpen: false,       // desktop-mode settings popover (gear) open
   walkthroughMenuOpen: false,
+  agentMenuOpen: null,   // agent id whose ⋯ options menu is open (Access tab)
   copied: null,          // secretId whose value was just copied (transient "Copied" flash)
   readyCopied: false,    // transient feedback on the setup-instructions status button
   setupInstructionsOpen: false,
@@ -369,16 +372,6 @@ function globalSectionsHTML() {
           : `<pre class="setup-instructions"><code>${esc(instructionBody)}</code></pre>`
         : ''}</div>`;
   }
-  if (state.agents.length) {
-    out += '<div class="live-head">Connected agents</div>' + state.agents.map((a) => {
-      const sub = `${a.program} · ${a.verification} · last used ${relTime(a.last_used)}` +
-        (a.permission_count ? ` · ${a.permission_count} permission${a.permission_count === 1 ? '' : 's'}` : '');
-      return `<div class="live-row"><span class="badge b-agent" role="img" aria-label="Agent">${ICONS.bot}</span>
-        <div class="live-txt"><div class="c-name">${esc(a.name)}</div>
-        <div class="s-sub agent-sub" style="max-width:300px" title="${escAttr(a.identity)}">${esc(sub)}</div></div>
-        <button class="btn sm" data-act="revoke-ask" data-id="${a.id}">Disconnect</button></div>`;
-    }).join('');
-  }
   if (state.sessions.length) {
     out += '<div class="live-head">Active sessions</div>' + state.sessions.map((s) => {
       const t = TYPES[s.type];
@@ -451,21 +444,72 @@ function accessDescription(connection: ConnectionSummary, scope: string): string
   return 'Can open and use this service';
 }
 
-const accessRowsHTML = (c: ConnectionSummary): string => {
-  const rows = (c.permissions || [])
-    .filter((permission) => !permission.expires_at || new Date(permission.expires_at).getTime() > Date.now())
-    .map((permission) => {
-      const expiring = !!permission.expires_at;
-      const suffix = expiring
-        ? ` · ${Math.max(1, Math.ceil((new Date(permission.expires_at!).getTime() - Date.now()) / 60000))} min left`
-        : ' without asking';
-      const action = expiring ? 'End now' : 'Require approval';
-      return `<div class="access-row"><div class="access-copy"><b>${esc(permission.agent)}</b>
-        <span>${esc(accessDescription(c, permission.scope))}${suffix}</span></div>
-        <button class="btn ghost sm" aria-label="${action} for ${escAttr(permission.agent)}" data-act="del-permission" data-id="${permission.id}">${action}</button></div>`;
-    });
-  return rows.length ? `<div class="access-list"><div class="access-head">Agent access</div>${rows.join('')}</div>` : '';
-};
+/* ---- access tab ---- */
+// The screen pivots around the broker's core question — what can this agent
+// reach right now? One block per paired agent: an identity card on top, then
+// one row per service stating the agent's current capability in plain words.
+const agentPermissionFor = (a: AgentSummary, c: ConnectionSummary): PermissionSummary | undefined =>
+  (c.permissions || []).find((permission) => permission.agent === a.name &&
+    (!permission.expires_at || new Date(permission.expires_at).getTime() > Date.now()));
+
+function accessPillHTML(c: ConnectionSummary, permission: PermissionSummary | undefined): string {
+  if (!permission) return '<span class="acc-pill">Asks you each time</span>';
+  if (permission.expires_at) {
+    const minutes = Math.max(1, Math.ceil((new Date(permission.expires_at).getTime() - Date.now()) / 60000));
+    return `<span class="acc-pill granted">${esc(accessDescription(c, permission.scope))} · ${minutes} min left</span>`;
+  }
+  return `<span class="acc-pill rule">${esc(accessDescription(c, permission.scope))} · without asking</span>`;
+}
+
+function agentAccessRowHTML(a: AgentSummary, c: ConnectionSummary): string {
+  const t = TYPES[c.type];
+  const permission = agentPermissionFor(a, c);
+  const live = state.sessions.some((s) => s.agent === a.name && s.connection === c.name);
+  const action = !permission ? '' : permission.expires_at
+    ? `<button class="btn ghost sm" aria-label="End access to ${escAttr(c.name)} for ${escAttr(a.name)} now" data-act="del-permission" data-id="${permission.id}">End now</button>`
+    : `<button class="btn ghost sm" aria-label="Require approval again for ${escAttr(a.name)} on ${escAttr(c.name)}" data-act="del-permission" data-id="${permission.id}">Require approval</button>`;
+  return `<div class="acc-row">
+    <span class="badge ${t.cls}">${t.label}</span>
+    <div class="acc-svc"><div class="acc-name">${esc(c.name)}${live ? ' <span class="cc-live">● live</span>' : ''}</div>
+      <div class="acc-target" title="${escAttr(c.target)}">${esc(c.target)}</div></div>
+    ${accessPillHTML(c, permission)}${action}</div>`;
+}
+
+function agentBlockHTML(a: AgentSummary): string {
+  const menuOpen = state.agentMenuOpen === a.id;
+  const sub = `${a.program} · ${a.verification} · last used ${relTime(a.last_used)}`;
+  const rows = state.connections.length
+    ? state.connections.map((c) => agentAccessRowHTML(a, c)).join('')
+    : `<div class="acc-none">No services yet.${mode === 'dropdown' ? '' : ` Add one to give ${esc(a.name)} somewhere to connect.`}</div>`;
+  return `<div class="agent-block">
+    <div class="agent-card">
+      <span class="agent-avatar" role="img" aria-label="Agent">${ICONS.bot}</span>
+      <div class="agent-id"><div class="c-name">${esc(a.name)}</div>
+        <div class="s-sub agent-sub" title="${escAttr(a.identity)}">${esc(sub)}</div></div>
+      <div class="agent-menu-wrap">
+        <button class="icon-btn agent-menu-btn ${menuOpen ? 'on' : ''}" title="Agent options"
+          aria-label="Options for ${escAttr(a.name)}" aria-haspopup="menu"
+          aria-expanded="${menuOpen}" data-act="toggle-agent-menu" data-id="${a.id}">${ICONS.ellipsis}</button>
+        ${menuOpen ? `<div class="agent-menu" role="menu" aria-label="Options for ${escAttr(a.name)}">
+          <button class="menu-item" role="menuitem" data-act="copy-agent-setup">${ICONS.copy} Copy setup instructions</button>
+          <button class="menu-item danger" role="menuitem" data-act="revoke-ask" data-id="${a.id}">${ICONS.unplug} Disconnect ${esc(a.name)}…</button>
+        </div>` : ''}
+      </div>
+    </div>
+    <div class="acc-rows">${rows}</div>
+  </div>`;
+}
+
+function accessHTML(): string {
+  if (!state.agents.length) {
+    const detail = mode === 'dropdown' ? '' : `
+      <p>Pair a coding agent to see and control what it can reach.</p>
+      <p class="empty-tip">Copy the setup instructions into your agent to get started.</p>
+      <button class="btn primary" data-act="copy-agent-setup">Copy setup instructions</button>`;
+    return `<div class="empty"><div class="empty-ico">🤖</div><h3>No agents connected</h3>${detail}</div>`;
+  }
+  return state.agents.map(agentBlockHTML).join('');
+}
 const liveCount = (c: ConnectionSummary): number =>
   state.sessions.filter((s) => s.connection === c.name).length;
 const connActionsHTML = (c: ConnectionSummary): string => {
@@ -517,7 +561,6 @@ function connectionsHTML() {
         ${liveCount(c) ? '<span class="cc-live">● live</span>' : ''}</div>
       <div class="cc-target" title="${escAttr(c.target)}">${esc(c.target)}</div>
       <div class="cc-chips">${chips}</div>
-      ${accessRowsHTML(c)}
       ${connTestResultHTML(c)}
       <div class="cc-foot">${connActionsHTML(c)}</div></div>`;
   }).join('') + `</div>`;
@@ -567,6 +610,7 @@ async function receiveActivity(entry: ActivityEntry | null | undefined): Promise
 function tabContentHTML() {
   return state.tab === 'secrets' ? secretsHTML()
     : state.tab === 'connections' ? connectionsHTML()
+    : state.tab === 'access' ? accessHTML()
     : activityHTML();
 }
 
@@ -602,6 +646,8 @@ function renderMainWindow() {
   // One view-specific action, always in the header row next to the title.
   const actionBtn = state.tab === 'connections'
     ? `<div class="dw-head-actions">${walkthroughMenuHTML()}<button class="btn" data-act="open-add-conn">＋ Add service</button></div>`
+    : state.tab === 'access'
+    ? `<button class="btn" data-act="copy-agent-setup">Copy setup instructions</button>`
     : state.tab === 'secrets'
     ? `<button class="btn" data-act="open-add-secret">＋ Add secret</button>`
     : `<button class="btn" data-act="clear-activity-ask" ${state.activity.length ? '' : 'disabled'}>Clear activity</button>`;
@@ -1117,7 +1163,7 @@ function renderApproval() {
   if (!isPair && !isHostKey) {
     const box = state.alwaysOpen
       ? `<div class="always-box"><div class="f-row"><label>Use without asking</label>
-        <div class="rule-note">${esc(ongoingAccessExplanation(req))} You can require approval again from the Services tab.</div></div>
+        <div class="rule-note">${esc(ongoingAccessExplanation(req))} You can require approval again from the Access tab.</div></div>
         <button class="btn primary sm" data-act="always-save">Don’t ask again</button></div>` : '';
     always = { btn: `<button class="btn ghost sm" data-act="always-toggle">Don’t ask again…</button>`, box };
   }
@@ -1638,6 +1684,11 @@ document.addEventListener('click', async (e) => {
     state.walkthroughMenuOpen = false;
     if (!btn) { render(); return; }
   }
+  if (state.agentMenuOpen && !target?.closest('.agent-menu-wrap')) {
+    state.agentMenuOpen = null;
+    if (!btn) { render(); return; }
+    // fall through: the clicked action runs and its render reflects the close
+  }
   if (state.formMenuOpen && !target?.closest('.cred-select') && !target?.closest('.cred-menu')) {
     state.formMenuOpen = null;
     if (!btn) { render(); return; }
@@ -1653,6 +1704,7 @@ document.addEventListener('click', async (e) => {
       if (tab && TABS.includes(tab as Tab)) state.tab = tab as Tab;
       state.confirm = null;
       state.walkthroughMenuOpen = false;
+      state.agentMenuOpen = null;
       render();
       break;
     }
@@ -1662,6 +1714,10 @@ document.addEventListener('click', async (e) => {
     case 'toggle-walkthrough-menu':
       state.menuOpen = false;
       state.walkthroughMenuOpen = !state.walkthroughMenuOpen;
+      render();
+      break;
+    case 'toggle-agent-menu':
+      state.agentMenuOpen = state.agentMenuOpen === id ? null : id;
       render();
       break;
     case 'toggle-service-walkthrough': {
@@ -1696,6 +1752,7 @@ document.addEventListener('click', async (e) => {
       break;
     case 'open-settings': state.menuOpen = false; state.sheet = { kind: 'settings' }; render(); break;
     case 'copy-agent-setup':
+      if (state.agentMenuOpen) { state.agentMenuOpen = null; render(); }
       if (await run(() => invoke('copy_agent_setup'))) toast('📋 Setup instructions copied');
       break;
     case 'toggle-setup-instructions':
@@ -1950,6 +2007,7 @@ document.addEventListener('click', async (e) => {
       break;
 
     case 'revoke-ask': {
+      if (state.agentMenuOpen) { state.agentMenuOpen = null; render(); }
       let confirmed = false;
       if (!await run(async () => { confirmed = await invoke('confirm_agent_disconnect'); }) || !confirmed) break;
       if (await run(() => invoke('revoke_agent', { id }))) {
@@ -2037,6 +2095,7 @@ document.addEventListener('keydown', (e) => {
   }
   if (e.key === 'Escape') {
     if (state.walkthroughMenuOpen) { state.walkthroughMenuOpen = false; render(); return; }
+    if (state.agentMenuOpen) { state.agentMenuOpen = null; render(); return; }
     if (state.menuOpen) { state.menuOpen = false; render(); return; }
     if (state.formMenuOpen) {
       const menuId = state.formMenuOpen;
@@ -2243,6 +2302,7 @@ async function boot() {
     state.confirmDiscard = false;
     state.confirm = null;
     state.walkthroughMenuOpen = false;
+    state.agentMenuOpen = null;
     render();
   });
 }

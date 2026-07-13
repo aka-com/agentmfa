@@ -461,13 +461,6 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .cc-chips { display: flex; flex-wrap: wrap; gap: 4px; }
 .cc-chips .key-chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .cc-live { flex: 0 0 auto; font-size: 11.5px; color: var(--ok-ink); font-weight: 600; }
-.access-list { margin-top: 2px; padding-top: 7px; border-top: 1px solid var(--line-soft); }
-.access-head { margin-bottom: 4px; font-size: 11.5px; font-weight: 700; color: var(--muted); }
-.access-row { display: flex; align-items: center; gap: 6px; padding: 4px 0; }
-.access-copy { flex: 1; min-width: 0; font-size: 12px; line-height: 1.3; }
-.access-copy b, .access-copy span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.access-copy span { color: var(--muted); }
-.access-row .btn { flex: 0 0 auto; padding-inline: 6px; font-size: 11px; }
 .cc-foot { display: flex; justify-content: flex-end; gap: 2px; margin-top: auto; padding-top: 4px; border-top: 1px solid var(--line-soft); }
 .cc-foot .cc-test-btn { margin-right: auto; padding-inline: 7px; font-size: 11.5px; }
 /* pass/fail summary of the last broker-side test, inside the card border */
@@ -479,6 +472,55 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .conn-card.confirm-card { border-color: var(--danger-border); background: var(--danger-wash); }
 .conn-card.confirm-card .cc-foot { gap: 6px; border-top: none; }
 .cc-confirm { font-size: 13px; line-height: 1.45; color: var(--danger-text); }
+
+/* ---- access tab: one block per agent (identity card + a row per service
+   stating what the agent can do right now, with the revoke control beside
+   the state it revokes) ------------------------------------------------- */
+.agent-block {
+  margin-top: 10px; border: 1px solid var(--line); border-radius: 11px;
+  background: var(--card-bg); box-shadow: 0 1px 3px rgba(20,24,50,.06);
+}
+.agent-card { display: flex; align-items: center; gap: 10px; padding: 11px 12px; }
+.agent-avatar {
+  flex: 0 0 34px; width: 34px; height: 34px; border-radius: 9px;
+  background: var(--b-agent-bg); color: var(--b-agent-ink);
+  display: flex; align-items: center; justify-content: center;
+}
+.agent-avatar svg { width: 17px; height: 17px; }
+.agent-id { flex: 1; min-width: 0; }
+.agent-id .s-sub { max-width: none; font-family: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-menu-wrap { position: relative; flex: 0 0 auto; }
+.agent-menu-btn.on { background: var(--hover-2); color: var(--ink-2); }
+.agent-menu {
+  position: absolute; right: 0; top: calc(100% + 5px); z-index: 16;
+  min-width: 218px; display: flex; flex-direction: column; gap: 2px; padding: 4px;
+  background: var(--panel); border: 1px solid var(--line-mid); border-radius: 9px;
+  box-shadow: 0 10px 28px rgba(10,15,40,.22);
+}
+.menu-item.danger, .menu-item.danger svg { color: var(--danger-ink); }
+.acc-rows { border-top: 1px solid var(--line-soft); }
+.acc-row {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px 9px;
+  padding: 8px 12px; border-bottom: 1px solid var(--line-soft);
+}
+.acc-row:last-child { border-bottom: 0; }
+.acc-svc { flex: 1 1 140px; min-width: 0; }
+.acc-name { font-weight: 600; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acc-name .cc-live { font-weight: 600; }
+.acc-target {
+  margin-top: 1px; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px; color: var(--muted-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.acc-pill {
+  flex: 0 0 auto; padding: 3px 10px; border-radius: 999px;
+  background: var(--chip-bg); color: var(--chip-ink);
+  font-size: 12px; font-weight: 600; white-space: nowrap;
+}
+.acc-pill.granted { background: var(--ok-wash); border: 1px solid var(--ok-border); color: var(--ok-ink); }
+.acc-pill.rule { background: var(--amber-wash); border: 1px solid var(--amber-border); color: var(--amber-ink); }
+.acc-row .btn { flex: 0 0 auto; }
+.acc-none { padding: 13px 12px; color: var(--muted); font-size: 13px; }
 
 /* ---- sheets ----------------------------------------------------------- */
 .sheet-backdrop { position: fixed; inset: 0; z-index: 8; background: var(--backdrop); }
