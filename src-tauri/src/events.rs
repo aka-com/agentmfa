@@ -55,14 +55,15 @@ impl TauriEvents {
     fn update_tray_badge(&self, count: usize) {
         // NSStatusItem has no badge API and an accessory app has no Dock
         // icon to badge, so the pending count is rendered into the
-        // status-item title text.
+        // status-item title text. tray-icon's macOS implementation ignores
+        // `None`, so use an explicit empty title to clear a stale count.
         if let Some(tray) = self.app.tray_by_id("main") {
-            let title = if count > 0 {
-                Some(count.to_string())
+            let title = if count == 0 {
+                String::new()
             } else {
-                None
+                count.to_string()
             };
-            let _ = tray.set_title(title.as_deref());
+            let _ = tray.set_title(Some(title.as_str()));
         }
     }
 
