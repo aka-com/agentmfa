@@ -99,38 +99,49 @@ fi
 fingerprint_line="$(printf '%s\n' "$host_keys" | ssh-keygen -lf -)"
 read -r _ ssh_fingerprint _ <<<"$fingerprint_line"
 
+# Keep this walkthrough in sync with dev/sandbox/README.md (section 3)
+# and dev/sandbox/quickstart.html (step 3).
 cat <<EOF
 
 AgentMFA sandbox services
 
-In AgentMFA, open Services → “Add a service for your agent”, pick the
-type, paste the Quick setup line, and press Continue. It pre-fills the
-form; the values below cover the remaining fields (and manual entry).
-Press Test on each service after saving it.
+Open AgentMFA from the menu bar icon; Services is the first tab. At
+the top is an “Add a service for your agent” card. (If the card isn't
+shown, re-enable it from the Walkthroughs menu — the ? button in the
+Services header — or use “＋ Add service” to fill the form by hand.)
+
+For each service below: paste its Quick setup line into the card and
+press Continue — the service type is detected automatically and the
+form opens pre-filled. Enter the remaining values listed below, press
+“Add service”, then press Test on the service's card in the list.
+Filling the form by hand instead? The same values cover every field.
 
 HTTP API
   Quick setup:      http://127.0.0.1:$http_port
   Name:             sandbox-http
   API root:         http://127.0.0.1:$http_port
-  Authentication:   Bearer token
+  Authentication type: Bearer token
   Credential name:  SANDBOX_HTTP_TOKEN
   Credential value: agentmfa-test-token
+  Test → expect:    an authenticated HTTP 200 OK
 
 WebSocket
   Quick setup:      ws://127.0.0.1:$ws_port/ws
   Name:             sandbox-websocket
   URL:              ws://127.0.0.1:$ws_port/ws
-  Authentication:   Bearer token
+  Authentication type: Bearer token
   Credential name:  SANDBOX_WEBSOCKET_TOKEN
   Credential value: agentmfa-ws-test-token
+  Test → expect:    WebSocket handshake succeeded
 
 Postgres
   Quick setup:      postgres://agentmfa:agentmfa-test-password@127.0.0.1:$pg_port/agentmfa_sandbox?sslmode=disable
   Name:             sandbox-postgres
   Host / Port:      127.0.0.1 / $pg_port
   Database / User:  agentmfa_sandbox / agentmfa
-  TLS mode:         Disable (the container has no TLS)
+  TLS mode:         Disable — under “Advanced” (the container has no TLS)
   Database password: agentmfa-test-password
+  Test → expect:    Signed in to agentmfa_sandbox as agentmfa
 
 SSH
   Quick setup:      ssh -i $client_key -p $ssh_port sandbox@127.0.0.1
@@ -139,8 +150,10 @@ SSH
   Identity file:    $client_key
                     (pre-selected by the Quick setup line; AgentMFA reads
                     the key file itself — no need to paste key contents)
-  Host key fingerprint (optional): $ssh_fingerprint
+  Host key fingerprint — optional, under “Advanced”: $ssh_fingerprint
                     Leave blank to confirm and pin it at the first connection.
+  Test → expect:    Key loaded; 127.0.0.1:$ssh_port answered with SSH-2.0-…
+                    (reachability only; an agent connection tests login)
 
 Details and agent-driven checks: dev/sandbox/README.md
 EOF

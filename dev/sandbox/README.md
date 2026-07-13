@@ -43,24 +43,38 @@ npm run sandbox:status
 
 ## 3. Add the services in AgentMFA
 
-In AgentMFA, open **Services** → **Add a service for your agent**, pick
-the service type, paste that service's **Quick setup** line from the
-`sandbox:up` output, and press **Continue**. The form pre-fills; the
-printed output lists the few remaining fields under the same names the
-form uses. With the default ports:
+<!-- Keep this walkthrough in sync with scripts/sandbox-status.sh and
+     quickstart.html (step 3). -->
+
+Open AgentMFA from the menu bar icon; **Services** is the first tab.
+At the top is an **Add a service for your agent** card. (If the card
+isn't shown, re-enable it from the **Walkthroughs** menu — the ?
+button in the Services header — or use **＋ Add service** to fill the
+form by hand.)
+
+For each service: paste its **Quick setup** line from the `sandbox:up`
+output into the card and press **Continue** — the service type is
+detected automatically and the form opens pre-filled. The printed
+output lists the few remaining values under the same names the form
+uses; press **Add service**, then press **Test** on the service's card
+in the list. Filling the form by hand instead? The same values cover
+every field; the Postgres **TLS mode** and SSH **Host key fingerprint**
+fields are under the form's **Advanced** section. With the default
+ports:
 
 | Service | Quick setup line | Then |
 | --- | --- | --- |
-| HTTP API | `http://127.0.0.1:18080` | Name `sandbox-http`, authentication **Bearer token**, credential value `agentmfa-test-token` |
-| WebSocket | `ws://127.0.0.1:18081/ws` | Name `sandbox-websocket`, authentication **Bearer token**, credential value `agentmfa-ws-test-token` |
-| Postgres | `postgres://agentmfa:agentmfa-test-password@127.0.0.1:15432/agentmfa_sandbox?sslmode=disable` | Name `sandbox-postgres`; host, database, TLS mode **Disable**, and password all pre-fill |
+| HTTP API | `http://127.0.0.1:18080` | Name `sandbox-http`, authentication type **Bearer token**, credential value `agentmfa-test-token` |
+| WebSocket | `ws://127.0.0.1:18081/ws` | Name `sandbox-websocket`, authentication type **Bearer token**, credential value `agentmfa-ws-test-token` |
+| Postgres | `postgres://agentmfa:agentmfa-test-password@127.0.0.1:15432/agentmfa_sandbox?sslmode=disable` | Name `sandbox-postgres`; host, database, TLS mode **Disable** (under **Advanced**), and password all pre-fill |
 | SSH | `ssh -i <printed key path> -p 12222 sandbox@127.0.0.1` | Name `sandbox-ssh`; AgentMFA reads the key file itself — never paste key contents |
 
-The SSH **Host key fingerprint** field is optional: paste the printed
-`SHA256:…` value, or leave it blank and AgentMFA will show the observed
-key for confirmation at the first agent connection and pin it then.
+The SSH **Host key fingerprint** field (under **Advanced**) is
+optional: paste the printed `SHA256:…` value, or leave it blank and
+AgentMFA will show the observed key for confirmation at the first
+agent connection and pin it then.
 
-Press **Test** on each saved service and expect:
+Press **Test** on each service's card and expect:
 
 - **sandbox-http** — an authenticated `HTTP 200 OK` from the API root.
 - **sandbox-websocket** — `WebSocket handshake succeeded`.

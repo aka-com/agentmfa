@@ -82,11 +82,22 @@ npm run sandbox:up</code></pre>
   any time with <code>npm run sandbox:status</code>.</p>
 
   <h2><span class="step">3</span>Add the four services in AgentMFA</h2>
-  <p>In AgentMFA, open <b>Services</b> → <b>Add a service for your
-  agent</b>. Pick the service type, paste that service's <b>Quick
-  setup</b> line, and press <b>Continue</b> — the form pre-fills. The
-  <code>sandbox:status</code> output lists the few remaining fields under
-  the same names the form shows. With the default ports:</p>
+  <!-- Keep this walkthrough in sync with scripts/sandbox-status.sh and
+       dev/sandbox/README.md (section 3). -->
+  <p>Open AgentMFA from the menu bar icon; <b>Services</b> is the first
+  tab, with an <b>Add a service for your agent</b> card at the top. (If
+  the card isn't shown, re-enable it from the <b>Walkthroughs</b> menu —
+  the ? button in the Services header — or use <b>＋ Add service</b> to
+  fill the form by hand.)</p>
+  <p>For each service, paste its <b>Quick setup</b> line into the card
+  and press <b>Continue</b> — the service type is detected automatically
+  and the form opens pre-filled. The <code>sandbox:status</code> output
+  lists the few remaining fields under the same names the form shows.
+  Press <b>Add service</b>, then press <b>Test</b> on the service's card
+  in the list. Filling the form by hand instead? The same values cover
+  every field; Postgres <b>TLS mode</b> and the SSH <b>Host key
+  fingerprint</b> are under the form's <b>Advanced</b> section. With the
+  default ports:</p>
   <div class="wide">
   <table>
     <tr><th>Type</th><th>Paste this Quick setup line</th><th>Then</th></tr>
@@ -106,7 +117,7 @@ npm run sandbox:up</code></pre>
       <td>Postgres</td>
       <td><code>postgres://agentmfa:agentmfa-test-password@127.0.0.1:15432/agentmfa_sandbox?sslmode=disable</code></td>
       <td>Name <code>sandbox-postgres</code>; everything else pre-fills
-          (TLS mode <b>Disable</b>)</td>
+          (TLS mode <b>Disable</b>, under <b>Advanced</b>)</td>
     </tr>
     <tr>
       <td>SSH</td>
@@ -115,12 +126,13 @@ npm run sandbox:up</code></pre>
           <code>sandbox:status</code> — it carries the generated key's
           absolute path</div></td>
       <td>Name <code>sandbox-ssh</code>; AgentMFA reads the key file
-          itself. Host key fingerprint is optional — leave it blank to
-          confirm and pin on first connection.</td>
+          itself. Host key fingerprint (under <b>Advanced</b>) is
+          optional — leave it blank to confirm and pin on first
+          connection.</td>
     </tr>
   </table>
   </div>
-  <p>Press <b>Test</b> on each saved service and expect:</p>
+  <p>Press <b>Test</b> on each service's card and expect:</p>
   <div class="card">
     <b>sandbox-http</b> — an authenticated HTTP 200<br>
     <b>sandbox-websocket</b> — <code>WebSocket handshake succeeded</code><br>
