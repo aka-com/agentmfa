@@ -648,8 +648,9 @@ function renderDropdown() {
       <div class="dd-identity"><div class="dd-title">AgentMFA</div>${brokerReadyHTML()}</div>
       <button class="icon-btn" title="Open as a window" aria-label="Open as a window" data-act="mode-window">${ICONS.window}</button>
       <button class="icon-btn" title="Settings" aria-label="Settings" data-act="open-settings">${ICONS.gear}</button></div>
-    ${pendingBannerHTML()}${globalSectionsHTML()}
+    ${pendingBannerHTML()}
     <div class="seg">${tabs}</div>
+    ${globalSectionsHTML()}
     <div class="content dd-content">${tabContentHTML()}</div>
     ${footer}</div>${sheetsHTML()}`;
 }

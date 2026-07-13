@@ -104,7 +104,6 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 }
 .surface.dropdown-surface {
   background: var(--surface);
-  border: 1px solid var(--line-mid);
   border-radius: 13px;
   box-shadow: 0 16px 40px rgba(15,20,45,.32), 0 2px 10px rgba(15,20,45,.18);
   backdrop-filter: blur(24px) saturate(170%);
