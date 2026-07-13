@@ -38,6 +38,17 @@ const ACTIVITY_RENDER_LIMIT = 200;
 const TABS = ['agents', 'connections', 'secrets', 'activity'] as const;
 type Tab = typeof TABS[number];
 
+// Guided setup: one workflow spanning two panes. The Agents hero is the
+// Connect step; Add service, First task, and Done live in the Services
+// panel. Breadcrumbs navigate freely — steps never lock.
+type GuideStep = 'connect' | 'add' | 'task' | 'done';
+const GUIDE_STEPS: Array<[GuideStep, string]> = [
+  ['connect', 'Connect agent'],
+  ['add', 'Add service'],
+  ['task', 'First task'],
+  ['done', 'Done'],
+];
+
 interface SheetState {
   kind: 'add-secret' | 'edit-secret' | 'add-conn' | 'edit-conn' | 'settings' | 'clear-activity';
   id?: string;
@@ -121,6 +132,7 @@ interface AppState {
   quickSetupType: ConnectionType;
   quickSetupSource: string;
   quickSetupError: string | null;
+  guideStep: GuideStep;
   connectionReady: ConnectionReadyState | null;
   connectionTaskCopied: boolean;
   connTests: Record<string, ConnectionTestState>;
@@ -175,6 +187,7 @@ const state: AppState = {
   quickSetupType: 'pg',
   quickSetupSource: '',
   quickSetupError: null,
+  guideStep: 'add',      // current guided-setup step (Services panel / Agents hero)
   connectionReady: null,
   connectionTaskCopied: false,
   connTests: {},         // connectionId -> in-flight/last test result (transient)
@@ -313,16 +326,23 @@ const QUICK_SETUP_TYPES: Array<[ConnectionType, string]> = [
   ['ws', 'WebSocket'],
 ];
 
-function firstConnectionSetupHTML(): string {
+// Centered breadcrumbs over the guided-setup surfaces. Every crumb is
+// clickable regardless of progress — the workflow suggests an order, it
+// never enforces one.
+function guideCrumbsHTML(active: GuideStep): string {
+  const crumbs = GUIDE_STEPS.map(([step, label]) =>
+    `<button class="guide-crumb ${step === active ? 'on' : ''}" data-act="guide-step" data-step="${step}"
+      ${step === active ? 'aria-current="step"' : ''}>${label}</button>`)
+    .join('<span class="guide-crumb-sep" aria-hidden="true">›</span>');
+  return `<nav class="guide-crumbs" aria-label="Setup steps">${crumbs}</nav>`;
+}
+
+function guideAddStepHTML(): string {
   const type = state.quickSetupType;
   const types = QUICK_SETUP_TYPES.map(([value, label]) =>
     `<button class="quick-type ${type === value ? 'on' : ''}" aria-pressed="${type === value}" data-act="quick-setup-type" data-type="${value}">${label}</button>`).join('');
-  return `<div class="agent-onboarding service-onboarding walkthrough-card">
-    <div class="walkthrough-head">
-      <div class="onboarding-copy"><b>Add a service for your agent</b>
-        ${mode === 'dropdown' ? '' : '<span>Save a database, server, or API.</span>'}</div>
-      <button class="icon-btn walkthrough-close" title="Hide this walkthrough" aria-label="Hide Add a service walkthrough" data-act="hide-service-walkthrough">${ICONS.x}</button>
-    </div>
+  return `<div class="onboarding-copy"><b>Add a service for your agent</b>
+      ${mode === 'dropdown' ? '' : '<span>Save a database, server, or API.</span>'}</div>
     <div class="quick-type-row">
       <div class="quick-types" aria-label="Service type">${types}</div>
     </div>
@@ -330,7 +350,48 @@ function firstConnectionSetupHTML(): string {
       <input id="quick-setup-source" aria-label="Service to import" placeholder="${escAttr(quickSetupPlaceholder(type))}" value="${escAttr(state.quickSetupSource)}">
       <button class="btn primary sm" data-act="quick-setup-review">Continue</button>
     </div>
-    ${state.quickSetupError ? `<div class="field-error quick-setup-error">${esc(state.quickSetupError)}</div>` : ''}
+    ${state.quickSetupError ? `<div class="field-error quick-setup-error">${esc(state.quickSetupError)}</div>` : ''}`;
+}
+
+function guideTaskStepHTML(): string {
+  const ready = state.connectionReady;
+  const conn = (ready && state.connections.find((c) => c.name === ready.name)) || state.connections[0];
+  if (!conn) {
+    return `<div class="onboarding-copy"><b>Try it end to end</b>
+        <span>Add a service first — then this step hands your agent its first task.</span></div>
+      <div class="guide-nav-row"><button class="linklike" data-act="guide-step" data-step="add">Go to Add service</button></div>`;
+  }
+  return `<div class="onboarding-copy"><b>Try it end to end</b>
+      <span>${state.agents.length ? 'Ask your agent:' : 'Connect an agent, then ask it:'}</span></div>
+    <div class="guide-task-row"><code>${esc(firstTaskPrompt(conn.name, conn.type))}</code>
+      <button class="btn primary sm" data-act="guide-copy-task" data-name="${escAttr(conn.name)}" data-type="${conn.type}">${state.connectionTaskCopied ? `${ICONS.check} Copied` : 'Copy task'}</button></div>
+    <div class="guide-nav-row"><button class="linklike" data-act="guide-step" data-step="done">Finish setup →</button></div>`;
+}
+
+// The success state lives in the same panel as the breadcrumbs and steps —
+// no separate dialog: text above, buttons centered beneath.
+function guideDoneStepHTML(): string {
+  return `<div class="guide-done">
+    <b>Setup complete</b>
+    <p>Your agent can now ask to use your services — every request still comes back to you for approval. Re-run this walkthrough any time from the walkthrough menu.</p>
+    <div class="guide-done-actions">
+      <button class="btn" data-act="guide-step" data-step="connect">Back to the beginning</button>
+      <button class="btn primary" data-act="guide-dismiss">Dismiss walkthrough</button>
+    </div>
+  </div>`;
+}
+
+function firstConnectionSetupHTML(): string {
+  // 'connect' renders on the Agents hero; on Services fall back to Add.
+  const step: GuideStep = state.guideStep === 'connect' ? 'add' : state.guideStep;
+  const body = step === 'task' ? guideTaskStepHTML()
+    : step === 'done' ? guideDoneStepHTML()
+    : guideAddStepHTML();
+  return `<div class="agent-onboarding service-onboarding walkthrough-card">
+    <div class="guide-head">${guideCrumbsHTML(step)}
+      <button class="icon-btn walkthrough-close" title="Hide this walkthrough" aria-label="Hide guided setup walkthrough" data-act="hide-service-walkthrough">${ICONS.x}</button>
+    </div>
+    ${body}
   </div>`;
 }
 
@@ -348,9 +409,9 @@ function globalSectionsHTML() {
       : (state.agentSetupInstructions || 'Loading…');
     out += `<div class="agent-onboarding walkthrough-card">
       <div class="walkthrough-head">
-        <div class="onboarding-copy"><b>Connect an agent</b>
-          <span>Copy a short setup message into your coding agent. After you paste and run it, your agent will walk you through setup.</span></div>
-        <button class="icon-btn walkthrough-close" title="Hide this walkthrough" aria-label="Hide Connect an agent walkthrough" data-act="hide-agent-walkthrough">${ICONS.x}</button>
+        <div class="onboarding-copy"><b>Let your agent set this up</b>
+          <span>Copy a short setup message into your coding agent. After you paste and run it, your agent will walk you through setup — every request comes back to you for approval.</span></div>
+        <button class="icon-btn walkthrough-close" title="Hide this walkthrough" aria-label="Hide Let your agent set this up walkthrough" data-act="hide-agent-walkthrough">${ICONS.x}</button>
       </div>
       <div class="onboarding-actions">
         <button class="btn primary sm" data-act="copy-agent-setup">Copy setup instructions</button>
@@ -372,7 +433,8 @@ function globalSectionsHTML() {
               <pre class="full-instructions-code"><code>${esc(instructionBody)}</code></pre>
             </div>`
           : `<pre class="setup-instructions"><code>${esc(instructionBody)}</code></pre>`
-        : ''}</div>`;
+        : ''}
+      <div class="guide-nav-row"><button class="linklike" data-act="guide-step" data-step="add">I’ll add services by hand instead</button></div></div>`;
   }
   if (state.sessions.length) {
     out += '<div class="live-head">Active sessions</div>' + state.sessions.map((s) => {
@@ -562,7 +624,10 @@ function connectionsHTML() {
   }
   const ready = state.connectionReady;
   const readyPrompt = ready ? firstTaskPrompt(ready.name, ready.type) : '';
-  const readyCard = ready && state.agents.length ? `<div class="connection-ready">
+  // The guided panel's First-task step carries the same prompt; don't
+  // show the nudge twice on one screen.
+  const guideShowsTask = state.settings.show_service_walkthrough && state.guideStep === 'task';
+  const readyCard = ready && state.agents.length && !guideShowsTask ? `<div class="connection-ready">
     <div class="connection-ready-copy"><b>${esc(ready.name)} is ready</b>
       <span>Ask your agent:</span><code>${esc(readyPrompt)}</code></div>
     <div class="connection-ready-actions">
@@ -639,8 +704,8 @@ function walkthroughMenuHTML(): string {
       aria-expanded="${state.walkthroughMenuOpen}" data-act="toggle-walkthrough-menu">${ICONS.circleQuestion}</button>
     ${state.walkthroughMenuOpen ? `<div class="walkthrough-menu" role="menu" aria-label="Walkthroughs">
       <div class="walkthrough-menu-title">Walkthroughs</div>
-      ${option('toggle-service-walkthrough', 'Add a service for your agent', state.settings.show_service_walkthrough)}
-      ${option('toggle-agent-walkthrough', 'Connect an agent', state.settings.show_agent_walkthrough)}
+      ${option('toggle-service-walkthrough', 'Guided setup on Services', state.settings.show_service_walkthrough)}
+      ${option('toggle-agent-walkthrough', 'Let your agent set this up', state.settings.show_agent_walkthrough)}
     </div>` : ''}
   </div>`;
 }
@@ -1619,6 +1684,11 @@ async function saveConn(): Promise<void> {
       }
       state.quickSetupSource = '';
       state.quickSetupError = null;
+      // A save that started in the guided panel moves the walkthrough
+      // forward; a plain ＋ Add service does not touch it.
+      if (state.settings.show_service_walkthrough && d.setupSource === 'import') {
+        state.guideStep = 'task';
+      }
     }
     closeSheet();
     await refresh('all');
@@ -1764,6 +1834,50 @@ document.addEventListener('click', async (e) => {
       if (await run(() => invoke('set_agent_walkthrough_visible', { on: false }))) {
         state.settings.show_agent_walkthrough = false;
         state.setupInstructionsOpen = false;
+        render();
+      }
+      break;
+    // Guided-setup breadcrumb navigation. The Connect step is the Agents
+    // hero; the rest live in the Services panel — a crumb click may switch
+    // tabs, and re-shows a hidden walkthrough (the click asked for it).
+    case 'guide-step': {
+      const step = btn.dataset.step as GuideStep | undefined;
+      if (!step || !GUIDE_STEPS.some(([value]) => value === step)) break;
+      state.guideStep = step;
+      if (step === 'connect') {
+        state.tab = 'agents';
+        if (!state.settings.show_agent_walkthrough &&
+            await run(() => invoke('set_agent_walkthrough_visible', { on: true }))) {
+          state.settings.show_agent_walkthrough = true;
+        }
+      } else {
+        state.tab = 'connections';
+        if (!state.settings.show_service_walkthrough &&
+            await run(() => invoke('set_service_walkthrough_visible', { on: true }))) {
+          state.settings.show_service_walkthrough = true;
+        }
+      }
+      render();
+      if (step === 'add') focusField('quick-setup-source');
+      break;
+    }
+    case 'guide-copy-task': {
+      const taskType = btn.dataset.type as ConnectionType | undefined;
+      if (!name || !taskType || !TYPES[taskType]) break;
+      try {
+        await navigator.clipboard.writeText(firstTaskPrompt(name, taskType));
+        state.connectionTaskCopied = true;
+        render();
+        setTimeout(() => { state.connectionTaskCopied = false; render(); }, 1400);
+      } catch {
+        toast('⚠ Could not copy the task');
+      }
+      break;
+    }
+    case 'guide-dismiss':
+      if (await run(() => invoke('set_service_walkthrough_visible', { on: false }))) {
+        state.settings.show_service_walkthrough = false;
+        state.guideStep = 'add';
         render();
       }
       break;
