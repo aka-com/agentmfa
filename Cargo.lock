@@ -9,6 +9,7 @@ dependencies = [
  "agentmfa-core",
  "clap",
  "dirs",
+ "libc",
  "tempfile",
  "tokio",
  "tracing-subscriber",

@@ -315,7 +315,10 @@ credential themselves; it is saved under your `credential_name`. Any `api`/`ws`
 template must reference only `{{{{CREDENTIAL_NAME}}}}`; referencing any other
 name is refused. SSH proposals must not set a host key fingerprint (trust is
 confirmed with the user at the first connection), and `pg` proposals cannot
-name a CA bundle path.
+name a CA bundle path. Omitted `pg` and `ssh` ports default to 5432 and 22.
+When `destination` is present on SSH, the approval shows that exact invocation
+alias alongside the resolved `user@host[:port]` target because it may activate
+local ssh_config behavior.
 
 The call blocks like every approval. On approval you get
 `201 {{"name", "type", "target", "endpoint"}}` — the connection exists but you

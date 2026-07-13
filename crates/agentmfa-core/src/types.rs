@@ -91,6 +91,7 @@ pub enum ConnectionConfig {
     },
     Pg {
         host: String,
+        #[serde(default = "default_pg_port")]
         port: u16,
         dbname: String,
         user: String,
@@ -134,6 +135,10 @@ pub enum ConnectionConfig {
 
 fn default_scheme() -> String {
     "https".into()
+}
+
+fn default_pg_port() -> u16 {
+    5432
 }
 
 fn default_ssh_port() -> u16 {
@@ -186,6 +191,83 @@ impl ConnectionConfig {
                     format!("{user}@{host}:{port}")
                 }
             }
+        }
+    }
+
+    /// Whether two configurations identify the same upstream destination.
+    /// This is stricter than comparing display strings where identity is
+    /// case-sensitive (database/user/path), but canonicalizes the parts whose
+    /// wire semantics are equivalent (DNS host case/trailing dot, default
+    /// ports, and URL normalization).
+    pub fn has_equivalent_target(&self, other: &Self) -> bool {
+        fn host_key(host: &str) -> String {
+            host.trim_end_matches('.').to_ascii_lowercase()
+        }
+
+        match (self, other) {
+            (
+                Self::Api {
+                    host: a_host,
+                    scheme: a_scheme,
+                    port: a_port,
+                    ..
+                },
+                Self::Api {
+                    host: b_host,
+                    scheme: b_scheme,
+                    port: b_port,
+                    ..
+                },
+            ) => {
+                let effective_port = |scheme: &str, port: Option<u16>| {
+                    port.unwrap_or(if scheme == "https" { 443 } else { 80 })
+                };
+                a_scheme == b_scheme
+                    && host_key(a_host) == host_key(b_host)
+                    && effective_port(a_scheme, *a_port) == effective_port(b_scheme, *b_port)
+            }
+            (
+                Self::Pg {
+                    host: a_host,
+                    port: a_port,
+                    dbname: a_dbname,
+                    user: a_user,
+                    ..
+                },
+                Self::Pg {
+                    host: b_host,
+                    port: b_port,
+                    dbname: b_dbname,
+                    user: b_user,
+                    ..
+                },
+            ) => {
+                host_key(a_host) == host_key(b_host)
+                    && a_port == b_port
+                    && a_dbname == b_dbname
+                    && a_user == b_user
+            }
+            (Self::Ws { url: a, .. }, Self::Ws { url: b, .. }) => {
+                match (url::Url::parse(a), url::Url::parse(b)) {
+                    (Ok(a), Ok(b)) => a == b,
+                    _ => a == b,
+                }
+            }
+            (
+                Self::Ssh {
+                    host: a_host,
+                    port: a_port,
+                    user: a_user,
+                    ..
+                },
+                Self::Ssh {
+                    host: b_host,
+                    port: b_port,
+                    user: b_user,
+                    ..
+                },
+            ) => host_key(a_host) == host_key(b_host) && a_port == b_port && a_user == b_user,
+            _ => false,
         }
     }
 
@@ -557,6 +639,49 @@ mod tests {
             }
         );
         assert_eq!(conf.kind().as_str(), "ssh");
+    }
+
+    #[test]
+    fn pg_port_defaults_to_5432() {
+        let conf: ConnectionConfig = serde_json::from_str(
+            r#"{"kind":"pg","host":"db.example.com","dbname":"app","user":"app"}"#,
+        )
+        .unwrap();
+        assert!(matches!(conf, ConnectionConfig::Pg { port: 5432, .. }));
+    }
+
+    #[test]
+    fn equivalent_targets_canonicalize_hosts_ports_and_urls() {
+        let api_a = ConnectionConfig::Api {
+            host: "API.Example.com.".into(),
+            scheme: "https".into(),
+            port: None,
+            template: "Authorization: Bearer {{A}}".into(),
+        };
+        let api_b = ConnectionConfig::Api {
+            host: "api.example.com".into(),
+            scheme: "https".into(),
+            port: Some(443),
+            template: "Authorization: Bearer {{B}}".into(),
+        };
+        assert!(api_a.has_equivalent_target(&api_b));
+
+        let ws_a = ConnectionConfig::Ws {
+            url: "wss://EXAMPLE.com".into(),
+            template: None,
+        };
+        let ws_b = ConnectionConfig::Ws {
+            url: "wss://example.com/".into(),
+            template: Some("Authorization: Bearer {{TOKEN}}".into()),
+        };
+        assert!(ws_a.has_equivalent_target(&ws_b));
+
+        let mut different_port = api_b.clone();
+        if let ConnectionConfig::Api { port, .. } = &mut different_port {
+            *port = Some(444);
+        }
+        assert!(!api_a.has_equivalent_target(&different_port));
+        assert!(!api_a.has_equivalent_target(&ws_a));
     }
 
     #[test]

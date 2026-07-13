@@ -185,6 +185,11 @@ pub struct ProposalView {
     /// approved unseen.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tls: Option<String>,
+    /// SSH only: the exact OpenSSH destination/alias the agent will invoke.
+    /// This can activate local ssh_config, so it must be disclosed separately
+    /// from the resolved pinned target.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

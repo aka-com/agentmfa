@@ -2204,7 +2204,7 @@ fn propose_pg_body(name: &str, credential_name: &str) -> serde_json::Value {
         "name": name,
         "credential_name": credential_name,
         "config": {
-            "kind": "pg", "host": "127.0.0.1", "port": 5432,
+            "kind": "pg", "host": "127.0.0.1",
             "dbname": "app", "user": "app",
         },
     })
@@ -2277,7 +2277,11 @@ async fn propose_prompts_and_creates_connection_with_user_credential() {
         .connection_by_name("sandbox-pg")
         .expect("connection saved");
     assert_eq!(conn.target(), "app@127.0.0.1:5432/app");
-    assert!(h.broker.store.secret_by_name("SANDBOX_PG_PASSWORD").is_some());
+    assert!(h
+        .broker
+        .store
+        .secret_by_name("SANDBOX_PG_PASSWORD")
+        .is_some());
 }
 
 #[tokio::test]
@@ -2326,6 +2330,99 @@ async fn propose_allow_without_credential_fails_closed_and_stays_pending() {
 }
 
 #[tokio::test]
+async fn disconnected_agent_cannot_apply_its_parked_proposal() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let token = h.pair("claude-code").await;
+    let auth = format!("Bearer {token}");
+
+    let socket = h.socket.clone();
+    let call = tokio::spawn(async move {
+        uds_request(
+            &socket,
+            "POST",
+            "/v1/connections/propose",
+            &[("authorization", &auth)],
+            Some(propose_pg_body("sandbox-pg", "SANDBOX_PG_PASSWORD")),
+        )
+        .await
+    });
+    let request = tokio::time::timeout(Duration::from_secs(5), h.prompts.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let client_id = request.client_id.expect("proposal client id");
+    assert!(h.broker.ui_revoke_agent(&client_id).unwrap());
+
+    let stale = h.broker.decide_with_options(
+        &request.id,
+        UiDecision::AllowOnce,
+        agentmfa_core::broker::DecisionOptions {
+            revoke_inherited_rules: false,
+            proposal_credential: Some(Zeroizing::new("s3cr3t".into())),
+        },
+        &ctx(),
+    );
+    assert!(matches!(stale, Err(CoreError::ProposalStale)));
+    assert!(h.broker.store.connection_by_name("sandbox-pg").is_none());
+
+    // The stale prompt remains rejectable so its held-open caller resolves.
+    h.broker
+        .decide_with_options(
+            &request.id,
+            UiDecision::Deny,
+            agentmfa_core::broker::DecisionOptions::default(),
+            &ctx(),
+        )
+        .unwrap();
+    let (status, body) = call.await.unwrap();
+    assert_eq!(status, 403);
+    assert_eq!(body["reason"], "denied_by_user");
+}
+
+#[tokio::test]
+async fn ssh_proposal_discloses_the_exact_invocation_alias() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let token = h.pair("claude-code").await;
+    let auth = format!("Bearer {token}");
+    let socket = h.socket.clone();
+    let call = tokio::spawn(async move {
+        uds_request(
+            &socket,
+            "POST",
+            "/v1/connections/propose",
+            &[("authorization", &auth)],
+            Some(json!({
+                "name": "production",
+                "credential_name": "PRODUCTION_SSH_KEY",
+                "config": {
+                    "kind": "ssh",
+                    "destination": "prod-via-bastion",
+                    "host": "prod.example.com",
+                    "user": "deploy"
+                }
+            })),
+        )
+        .await
+    });
+    let request = tokio::time::timeout(Duration::from_secs(5), h.prompts.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let proposal = request.proposal.as_ref().expect("proposal view");
+    assert_eq!(proposal.target, "deploy@prod.example.com");
+    assert_eq!(proposal.destination.as_deref(), Some("prod-via-bastion"));
+    h.broker
+        .decide_with_options(
+            &request.id,
+            UiDecision::Deny,
+            agentmfa_core::broker::DecisionOptions::default(),
+            &ctx(),
+        )
+        .unwrap();
+    assert_eq!(call.await.unwrap().0, 403);
+}
+
+#[tokio::test]
 async fn propose_duplicate_target_is_refused_without_prompting() {
     let mut h = harness(BrokerConfig::default()).await;
     api_connection(&h, "github", 18080);
@@ -2369,6 +2466,69 @@ async fn propose_duplicate_target_is_refused_without_prompting() {
     .await;
     assert_eq!(status, 409);
     assert_eq!(body["reason"], "connection_exists");
+}
+
+#[tokio::test]
+async fn proposal_rechecks_equivalent_target_after_the_prompt() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let token = h.pair("claude-code").await;
+    let auth = format!("Bearer {token}");
+    let socket = h.socket.clone();
+    let call = tokio::spawn(async move {
+        uds_request(
+            &socket,
+            "POST",
+            "/v1/connections/propose",
+            &[("authorization", &auth)],
+            Some(propose_pg_body("sandbox-pg", "SANDBOX_PG_PASSWORD")),
+        )
+        .await
+    });
+    let request = tokio::time::timeout(Duration::from_secs(5), h.prompts.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let secret = h
+        .broker
+        .store
+        .add_secret("OTHER_DATABASE_PASSWORD", Zeroizing::new("other".into()))
+        .unwrap();
+    h.broker
+        .store
+        .add_connection(ConnectionSpec {
+            name: "existing-pg".into(),
+            config: ConnectionConfig::Pg {
+                host: "127.0.0.1.".into(),
+                port: 5432,
+                dbname: "app".into(),
+                user: "app".into(),
+                sslmode: PgSslMode::VerifyFull,
+                trusted_ca_bundle_path: None,
+            },
+            secrets: vec![secret.id],
+        })
+        .unwrap();
+
+    h.broker
+        .decide_with_options(
+            &request.id,
+            UiDecision::AllowOnce,
+            agentmfa_core::broker::DecisionOptions {
+                revoke_inherited_rules: false,
+                proposal_credential: Some(Zeroizing::new("s3cr3t".into())),
+            },
+            &ctx(),
+        )
+        .unwrap();
+    let (status, body) = call.await.unwrap();
+    assert_eq!(status, 409, "expected post-prompt conflict: {body}");
+    assert_eq!(body["reason"], "connection_exists");
+    assert!(h
+        .broker
+        .store
+        .secret_by_name("SANDBOX_PG_PASSWORD")
+        .is_none());
 }
 
 #[tokio::test]

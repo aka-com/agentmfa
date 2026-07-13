@@ -280,6 +280,9 @@ impl Broker {
         let Some(request) = self.approvals.get(id) else {
             return Ok(None);
         };
+        if request.kind == ApprovalKind::Propose && decision != UiDecision::Deny {
+            self.ensure_proposal_agent_current(&request)?;
+        }
         // Stage the proposal credential before the native confirmation so a
         // missing value fails the decision without burning a confirmation.
         if request.kind == ApprovalKind::Propose && decision != UiDecision::Deny {
@@ -300,6 +303,22 @@ impl Broker {
             }
         }
         self.apply_decision(id, decision, ctx, confirmation)
+    }
+
+    /// A proposal is authority from one exact paired-client token generation,
+    /// not merely from a reusable agent name. Disconnecting or re-pairing the
+    /// agent makes its queued proposal stale immediately.
+    fn ensure_proposal_agent_current(&self, request: &ApprovalRequest) -> Result<()> {
+        let (Some(client_id), Some(token_hash)) =
+            (request.client_id, request.agent_token_hash.as_deref())
+        else {
+            return Err(CoreError::ProposalStale);
+        };
+        self.pairing
+            .get(&request.agent)
+            .filter(|agent| agent.id == client_id && agent.token_hash == token_hash)
+            .map(|_| ())
+            .ok_or(CoreError::ProposalStale)
     }
 
     /// Validate and place the user's typed credential where the proposal's
@@ -819,10 +838,25 @@ impl Broker {
     pub fn apply_agent_proposal(
         &self,
         agent: &str,
+        client_id: &Uuid,
+        token_hash: &str,
         secret_name: &str,
         value: SecretValue,
         spec: ConnectionSpec,
     ) -> Result<Connection> {
+        let _access = self.access_gate.lock().unwrap();
+        self.pairing
+            .get(agent)
+            .filter(|current| current.id == *client_id && current.token_hash == token_hash)
+            .ok_or(CoreError::ProposalStale)?;
+        if let Some(existing) = self
+            .store
+            .list_connections()
+            .into_iter()
+            .find(|existing| existing.config.has_equivalent_target(&spec.config))
+        {
+            return Err(CoreError::ConnectionTargetTaken(existing.name));
+        }
         let (secret, conn) = self
             .store
             .add_connection_with_secret(secret_name, value, spec)?;
@@ -1186,6 +1220,7 @@ impl Broker {
     /// Disconnect invalidates the token, standing permissions, and every
     /// issued data-plane capability immediately.
     pub fn ui_revoke_agent(&self, client_id: &Uuid) -> Result<bool> {
+        let _access = self.access_gate.lock().unwrap();
         let client = self.pairing.get_by_id(client_id);
         let Some(client) = client else {
             return Ok(false);

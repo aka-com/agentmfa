@@ -1230,7 +1230,11 @@ async fn post_propose(
     if let Some(template) = &template {
         match crate::template::Template::parse(template) {
             Ok(parsed) => {
-                if parsed.refs().iter().any(|reference| reference != &credential_name) {
+                if parsed
+                    .refs()
+                    .iter()
+                    .any(|reference| reference != &credential_name)
+                {
                     return err_detail(
                         StatusCode::BAD_REQUEST,
                         ErrorReason::InvalidProposal,
@@ -1259,10 +1263,12 @@ async fn post_propose(
             return err_detail(
                 StatusCode::CONFLICT,
                 ErrorReason::ConnectionExists,
-                format!("a connection named {name:?} already exists; list /v1/connections and use it"),
+                format!(
+                    "a connection named {name:?} already exists; list /v1/connections and use it"
+                ),
             );
         }
-        if existing.kind() == proposed_kind && existing.target() == proposed_target {
+        if existing.config.has_equivalent_target(&config) {
             return err_detail(
                 StatusCode::CONFLICT,
                 ErrorReason::ConnectionExists,
@@ -1288,7 +1294,9 @@ async fn post_propose(
             CoreError::SecretNameTaken(taken) => err_detail(
                 StatusCode::CONFLICT,
                 ErrorReason::SecretNameTaken,
-                format!("secret name {taken:?} is already in use; propose a different credential_name"),
+                format!(
+                    "secret name {taken:?} is already in use; propose a different credential_name"
+                ),
             ),
             CoreError::ConnectionNameTaken(taken) => err_detail(
                 StatusCode::CONFLICT,
@@ -1304,12 +1312,24 @@ async fn post_propose(
     }
 
     let tls = match &config {
-        crate::types::ConnectionConfig::Pg { sslmode, .. } => {
-            Some(serde_json::to_value(sslmode).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default())
-        }
+        crate::types::ConnectionConfig::Pg { sslmode, .. } => Some(
+            serde_json::to_value(sslmode)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_default(),
+        ),
         _ => None,
     };
-    let action = format!("Add {} service {name} → {proposed_target}", proposed_kind.as_str());
+    let destination = match &config {
+        crate::types::ConnectionConfig::Ssh {
+            destination, host, ..
+        } => Some(destination.clone().unwrap_or_else(|| host.clone())),
+        _ => None,
+    };
+    let action = format!(
+        "Add {} service {name} → {proposed_target}",
+        proposed_kind.as_str()
+    );
     broker.audit.append(
         AuditEntry::new(
             AuditKind::Requested,
@@ -1326,7 +1346,7 @@ async fn post_propose(
         id: Uuid::new_v4(),
         agent: agent.name.clone(),
         client_id: Some(agent.id),
-        agent_token_hash: None,
+        agent_token_hash: Some(agent.token_hash.clone()),
         kind: ApprovalKind::Propose,
         connection: None,
         action,
@@ -1349,6 +1369,7 @@ async fn post_propose(
             credential_name: credential_name.clone(),
             template,
             tls,
+            destination,
         }),
         proposal_credential: Some(credential_slot.clone()),
     };
@@ -1363,7 +1384,12 @@ async fn post_propose(
             serde_json::to_string(&config).unwrap_or_default()
         );
         let digest = Sha256::digest(canonical.as_bytes());
-        Some(digest.iter().map(|b| format!("{b:02x}")).collect::<String>())
+        Some(
+            digest
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>(),
+        )
     };
 
     // Executor: runs only on approval, with the user-typed credential staged
@@ -1371,6 +1397,8 @@ async fn post_propose(
     let executor: crate::approvals::Executor = {
         let broker = broker.clone();
         let agent_name = agent.name.clone();
+        let agent_id = agent.id;
+        let agent_token_hash = agent.token_hash.clone();
         Box::pin(async move {
             let Some(value) = credential_slot.lock().unwrap().take() else {
                 return ExecOutcome {
@@ -1381,7 +1409,14 @@ async fn post_propose(
                     }),
                 };
             };
-            match broker.apply_agent_proposal(&agent_name, &credential_name, value, spec) {
+            match broker.apply_agent_proposal(
+                &agent_name,
+                &agent_id,
+                &agent_token_hash,
+                &credential_name,
+                value,
+                spec,
+            ) {
                 Ok(conn) => ExecOutcome {
                     status: 201,
                     body: json!({
@@ -1398,11 +1433,25 @@ async fn post_propose(
                         "detail": format!("a connection named {taken:?} already exists"),
                     }),
                 },
+                Err(CoreError::ConnectionTargetTaken(existing)) => ExecOutcome {
+                    status: 409,
+                    body: json!({
+                        "reason": ErrorReason::ConnectionExists,
+                        "detail": format!("connection {existing:?} already points at an equivalent target"),
+                    }),
+                },
                 Err(CoreError::SecretNameTaken(taken)) => ExecOutcome {
                     status: 409,
                     body: json!({
                         "reason": ErrorReason::SecretNameTaken,
                         "detail": format!("secret name {taken:?} is already in use"),
+                    }),
+                },
+                Err(CoreError::ProposalStale) => ExecOutcome {
+                    status: 403,
+                    body: json!({
+                        "reason": ErrorReason::DeniedByPolicy,
+                        "detail": "the proposing agent was disconnected or re-paired before approval completed",
                     }),
                 },
                 Err(other) => ExecOutcome {
@@ -1429,7 +1478,10 @@ async fn post_propose(
     match parked {
         Ok(Parked::Wait(handle)) => match handle.wait().await {
             Some(outcome) => outcome_response(outcome),
-            None => err(StatusCode::INTERNAL_SERVER_ERROR, ErrorReason::BrokerShutdown),
+            None => err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorReason::BrokerShutdown,
+            ),
         },
         Ok(Parked::Replay(outcome)) => outcome_response(outcome),
         Err(ParkError::RequestIdMismatch) => err_detail(

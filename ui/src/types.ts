@@ -144,6 +144,7 @@ export interface ProposalView {
   credential_name: string;
   template?: string | null;
   tls?: string | null;
+  destination?: string | null;
 }
 
 export interface HostKeyCandidate {

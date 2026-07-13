@@ -6,10 +6,12 @@ import {
   GUIDE_STEPS,
   guideAdvancesOnSave,
   guideCanFinish,
+  guideCompletionStage,
   guideRetargetsReady,
   guideSettingForStep,
   guideTabForStep,
   guideTaskStage,
+  guideTaskCopiedAfterSave,
   guideTaskTarget,
 } from '../src/guide';
 
@@ -51,6 +53,19 @@ test('finishing requires a connected agent and a copied task', () => {
   assert.equal(guideCanFinish(0, true), false);
   assert.equal(guideCanFinish(1, false), false);
   assert.equal(guideCanFinish(1, true), true);
+});
+
+test('the freely navigable Done step never claims completion early', () => {
+  assert.equal(guideCompletionStage(0, 0, false), 'need-service');
+  assert.equal(guideCompletionStage(1, 0, false), 'need-agent');
+  assert.equal(guideCompletionStage(1, 1, false), 'need-task');
+  assert.equal(guideCompletionStage(1, 1, true), 'complete');
+});
+
+test('retargeting a newly saved service resets copied-task progress', () => {
+  assert.equal(guideTaskCopiedAfterSave(false, undefined, true), false);
+  assert.equal(guideTaskCopiedAfterSave(true, 'import', true), false);
+  assert.equal(guideTaskCopiedAfterSave(true, 'manual', true), true);
 });
 
 test('breadcrumbs navigate across the two panes', () => {

@@ -70,6 +70,20 @@ export function guideCanFinish(agentCount: number, taskCopied: boolean): boolean
   return agentCount > 0 && taskCopied;
 }
 
+/** What the freely navigable Done crumb may truthfully claim. */
+export type GuideCompletionStage = 'need-service' | 'need-agent' | 'need-task' | 'complete';
+
+export function guideCompletionStage(
+  connectionCount: number,
+  agentCount: number,
+  taskCopied: boolean,
+): GuideCompletionStage {
+  if (!connectionCount) return 'need-service';
+  if (!agentCount) return 'need-agent';
+  if (!taskCopied) return 'need-task';
+  return 'complete';
+}
+
 /**
  * Whether a saved connection came through the guided panel (quick-setup
  * import) while the walkthrough is visible — only those saves advance the
@@ -92,4 +106,13 @@ export function guideRetargetsReady(
   setupSource: string | undefined,
 ): boolean {
   return !hadConnections || setupSource === 'import';
+}
+
+/** A newly targeted service always needs its own task copied. */
+export function guideTaskCopiedAfterSave(
+  hadConnections: boolean,
+  setupSource: string | undefined,
+  wasCopied: boolean,
+): boolean {
+  return guideRetargetsReady(hadConnections, setupSource) ? false : wasCopied;
 }

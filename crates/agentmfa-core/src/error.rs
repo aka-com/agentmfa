@@ -25,6 +25,9 @@ pub enum CoreError {
     #[error("service name {0:?} is already in use")]
     ConnectionNameTaken(String),
 
+    #[error("an equivalent target is already saved as service {0:?}")]
+    ConnectionTargetTaken(String),
+
     #[error("no such secret")]
     SecretNotFound,
 
@@ -74,6 +77,9 @@ pub enum CoreError {
 
     #[error("{0}")]
     ProposalCredential(String),
+
+    #[error("the proposing agent is no longer connected with the token that made this request")]
+    ProposalStale,
 
     #[error("another broker is already listening on {0}")]
     BrokerAlreadyRunning(String),

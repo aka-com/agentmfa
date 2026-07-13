@@ -11,8 +11,9 @@
 //!   app's Secrets and Connections tabs — with the same validation, so a
 //!   `serve --root` harness never hand-writes (sealed) store files.
 
-use std::io::Write as _;
+use std::io::{IsTerminal as _, Write as _};
 use std::ops::Deref;
+use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::FileTypeExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,8 +30,8 @@ use agentmfa_core::events::BrokerEvents;
 use agentmfa_core::paths::{BrokerInstanceLock, Paths};
 use agentmfa_core::store::{ConnectionSpec, Store};
 use agentmfa_core::types::{
-    ConfirmationMethod, ConnectionConfig, DecisionContext, DecisionSurface, PgSslMode, SecretMeta,
-    SecretValue,
+    ConfirmationMethod, ConnectionConfig, ConnectionKind, DecisionContext, DecisionSurface,
+    PgSslMode, SecretMeta, SecretValue,
 };
 use agentmfa_core::vault::{platform_vault, platform_vault_for_root, SecretVault};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -743,7 +744,9 @@ fn wait_for_decision_or_shutdown(
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(decision) => return Some(decision),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Some((UiDecision::Deny, None)),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Some((UiDecision::Deny, None))
+            }
         }
     }
 }
@@ -814,6 +817,9 @@ fn prompt_decision(
         if let Some(template) = &proposal.template {
             eprintln!("  auth template: {template}");
         }
+        if let Some(destination) = &proposal.destination {
+            eprintln!("  SSH invocation: ssh {destination}");
+        }
         eprintln!(
             "  approving will ask you to type the credential (saved as {})",
             proposal.credential_name
@@ -854,24 +860,113 @@ fn prompt_decision(
     // A proposal approval needs the credential the wire schema deliberately
     // cannot carry: the human types it here, into the trusted terminal.
     if req.kind == ApprovalKind::Propose && decision != UiDecision::Deny {
-        let credential_name = req
-            .proposal
-            .as_ref()
-            .map(|proposal| proposal.credential_name.clone())
-            .unwrap_or_else(|| "credential".to_string());
-        eprint!("  value for {credential_name}: ");
-        let _ = std::io::stderr().flush();
-        let mut value = String::new();
-        if std::io::stdin().read_line(&mut value).is_err() {
+        let Some(proposal) = req.proposal.as_ref() else {
             return (UiDecision::Deny, None);
+        };
+        match read_proposal_credential(proposal) {
+            Ok(value) => return (decision, Some(value)),
+            Err(error) => {
+                eprintln!("  ! could not read credential: {error}");
+                return (UiDecision::Deny, None);
+            }
         }
-        let value = value.trim_end_matches(['\r', '\n']).to_string();
-        return (
-            decision,
-            Some(agentmfa_core::types::SecretValue::new(value)),
-        );
     }
     (decision, None)
+}
+
+/// Temporarily suppress terminal echo while a user types or pastes a secret.
+/// Piped stdin is left alone; only a real terminal has echo state to change.
+struct TerminalEchoGuard {
+    fd: std::os::fd::RawFd,
+    original: libc::termios,
+}
+
+impl TerminalEchoGuard {
+    fn disable(fd: std::os::fd::RawFd) -> std::io::Result<Self> {
+        let mut original = std::mem::MaybeUninit::<libc::termios>::uninit();
+        // SAFETY: `original` points to valid writable storage and `fd` is the
+        // live stdin terminal descriptor for the duration of this guard.
+        if unsafe { libc::tcgetattr(fd, original.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: tcgetattr initialized the value after returning success.
+        let original = unsafe { original.assume_init() };
+        let mut hidden = original;
+        hidden.c_lflag &= !libc::ECHO;
+        // SAFETY: both pointers are valid termios values for this descriptor.
+        if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &hidden) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self { fd, original })
+    }
+}
+
+impl Drop for TerminalEchoGuard {
+    fn drop(&mut self) {
+        // SAFETY: restoring a previously returned termios value on the same
+        // descriptor. Failure cannot be reported from Drop.
+        let _ = unsafe { libc::tcsetattr(self.fd, libc::TCSANOW, &self.original) };
+    }
+}
+
+fn read_proposal_credential(
+    proposal: &agentmfa_core::approvals::ProposalView,
+) -> std::io::Result<SecretValue> {
+    let stdin = std::io::stdin();
+    let is_terminal = stdin.is_terminal();
+    if proposal.kind == ConnectionKind::Ssh {
+        eprintln!(
+            "  paste the OpenSSH private key for {}; input ends at its END line",
+            proposal.credential_name
+        );
+    } else {
+        eprint!("  value for {}: ", proposal.credential_name);
+        std::io::stderr().flush()?;
+    }
+    let echo_guard = if is_terminal {
+        Some(TerminalEchoGuard::disable(stdin.as_raw_fd())?)
+    } else {
+        None
+    };
+    let result =
+        read_proposal_credential_from(&mut stdin.lock(), proposal.kind == ConnectionKind::Ssh);
+    drop(echo_guard);
+    if is_terminal {
+        eprintln!();
+    }
+    result
+}
+
+fn read_proposal_credential_from(
+    reader: &mut impl std::io::BufRead,
+    multiline_ssh: bool,
+) -> std::io::Result<SecretValue> {
+    let mut value = SecretValue::new(String::new());
+    if !multiline_ssh {
+        if reader.read_line(&mut value)? == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "credential input ended before a value was read",
+            ));
+        }
+        while value.ends_with(['\r', '\n']) {
+            value.pop();
+        }
+        return Ok(value);
+    }
+
+    loop {
+        let start = value.len();
+        if reader.read_line(&mut value)? == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "SSH private key input ended before -----END OPENSSH PRIVATE KEY-----",
+            ));
+        }
+        if value[start..].trim_end() == "-----END OPENSSH PRIVATE KEY-----" {
+            return Ok(value);
+        }
+    }
 }
 
 fn format_duration(duration: Duration) -> String {
@@ -892,6 +987,24 @@ mod tests {
     use super::*;
     use agentmfa_core::events::NoopEvents;
     use agentmfa_core::vault::MemoryVault;
+
+    #[test]
+    fn proposal_credential_reader_handles_single_and_multiline_values() {
+        let mut single = std::io::Cursor::new(b"token-value\r\n".to_vec());
+        let value = read_proposal_credential_from(&mut single, false).unwrap();
+        assert_eq!(&*value, "token-value");
+
+        let key = concat!(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n",
+            "payload\n",
+            "-----END OPENSSH PRIVATE KEY-----\n",
+            "unused\n"
+        );
+        let mut multiline = std::io::Cursor::new(key.as_bytes().to_vec());
+        let value = read_proposal_credential_from(&mut multiline, true).unwrap();
+        assert!(value.ends_with("-----END OPENSSH PRIVATE KEY-----\n"));
+        assert!(!value.contains("unused"));
+    }
 
     #[test]
     fn access_duration_uses_the_configured_value() {

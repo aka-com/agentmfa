@@ -281,15 +281,23 @@ pub fn observer(app: AppHandle, access_duration_seconds: u64) -> Arc<dyn BrokerE
     Arc::new(TauriEvents::new(app, access_duration_seconds))
 }
 
-
 /// Native-confirmation copy for saving an agent-proposed service. Names the
 /// full destination so the OS prompt matches what the window showed.
 fn proposal_confirmation(request: &agentmfa_core::approvals::ApprovalRequest) -> String {
     match &request.proposal {
-        Some(proposal) => format!(
-            "Save service \u{201c}{}\u{201d} ({}) proposed by {}",
-            proposal.name, proposal.target, request.agent
-        ),
+        Some(proposal) => {
+            let mut destination = proposal.target.clone();
+            if let Some(ssh_destination) = &proposal.destination {
+                destination.push_str(&format!(", SSH invocation ssh {ssh_destination}"));
+            }
+            if let Some(tls) = &proposal.tls {
+                destination.push_str(&format!(", TLS {tls}"));
+            }
+            format!(
+                "Save service \u{201c}{}\u{201d} ({destination}) proposed by {}",
+                proposal.name, request.agent
+            )
+        }
         None => format!("Save the service proposed by {}", request.agent),
     }
 }

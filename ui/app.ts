@@ -16,7 +16,8 @@ import {
 import { formErrorKind, formErrorMessage, inlineFormError } from '/src/form-errors';
 import {
   GUIDE_DISMISS_SETTINGS, GUIDE_STEPS, guideAdvancesOnSave, guideCanFinish,
-  guideRetargetsReady, guideSettingForStep, guideTabForStep, guideTaskStage, guideTaskTarget,
+  guideCompletionStage, guideRetargetsReady, guideSettingForStep, guideTabForStep,
+  guideTaskCopiedAfterSave, guideTaskStage, guideTaskTarget,
 } from '/src/guide';
 import type { GuideStep } from '/src/guide';
 import type { HostKeyCandidate } from '/src/connection-input';
@@ -375,12 +376,37 @@ function guideTaskStepHTML(): string {
 // The success state lives in the same panel as the breadcrumbs and steps —
 // no separate dialog: text above, buttons centered beneath.
 function guideDoneStepHTML(): string {
-  if (!state.agents.length) {
+  const stage = guideCompletionStage(
+    state.connections.length,
+    state.agents.length,
+    state.guideTaskCopied,
+  );
+  if (stage === 'need-service') {
+    return `<div class="guide-done">
+      <b>Almost there</b>
+      <p>Add a service before finishing setup.</p>
+      <div class="guide-done-actions">
+        <button class="btn primary" data-act="guide-step" data-step="add">Go to Add service</button>
+        <button class="btn" data-act="guide-dismiss">Dismiss walkthrough</button>
+      </div>
+    </div>`;
+  }
+  if (stage === 'need-agent') {
     return `<div class="guide-done">
       <b>Almost there</b>
       <p>Your services are saved, but no agent is connected yet — nothing can use them until one is. Head back to Connect agent to finish.</p>
       <div class="guide-done-actions">
         <button class="btn primary" data-act="guide-step" data-step="connect">Go to Connect agent</button>
+        <button class="btn" data-act="guide-dismiss">Dismiss walkthrough</button>
+      </div>
+    </div>`;
+  }
+  if (stage === 'need-task') {
+    return `<div class="guide-done">
+      <b>Almost there</b>
+      <p>Copy the first task for your agent before finishing setup.</p>
+      <div class="guide-done-actions">
+        <button class="btn primary" data-act="guide-step" data-step="task">Go to First task</button>
         <button class="btn" data-act="guide-dismiss">Dismiss walkthrough</button>
       </div>
     </div>`;
@@ -1251,6 +1277,7 @@ function renderApproval() {
   const proposalRows = isPropose && proposal ? `
       <div class="ap-row"><span>Service</span><span><span class="badge ${TYPES[proposal.type].cls}">${TYPES[proposal.type].label}</span> <b>${esc(proposal.name)}</b> <em class="self-reported">supplied by agent</em></span></div>
       <div class="ap-row"><span>Target</span><code>${esc(proposal.target)}</code></div>
+      ${proposal.destination ? `<div class="ap-row"><span>SSH invocation</span><code>ssh ${esc(proposal.destination)}</code></div>` : ''}
       ${proposal.tls ? `<div class="ap-row"><span>TLS mode</span><span>${proposal.tls === 'verify-full' ? esc(proposal.tls) : `<b class="tls-warn">${esc(proposal.tls)}</b>`}</span></div>` : ''}
       ${proposal.template ? `<div class="ap-row"><span>Authentication</span><code>${esc(proposal.template)}</code></div>` : ''}` : '';
   const proposalCredential = isPropose && proposal ? `
@@ -1719,7 +1746,14 @@ async function saveConn(): Promise<void> {
     if (adding) {
       // The first-task prompt names the service just saved — the very first
       // one, and every guided save after it — never an older neighbor.
-      if (guideRetargetsReady(state.connections.length > 0, d.setupSource)) {
+      const hadConnections = state.connections.length > 0;
+      const retargetsReady = guideRetargetsReady(hadConnections, d.setupSource);
+      state.guideTaskCopied = guideTaskCopiedAfterSave(
+        hadConnections,
+        d.setupSource,
+        state.guideTaskCopied,
+      );
+      if (retargetsReady) {
         state.connectionReady = { name, type: t };
         state.connectionTaskCopied = false;
       }
