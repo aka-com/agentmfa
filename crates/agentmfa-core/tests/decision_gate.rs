@@ -742,7 +742,7 @@ async fn connection_renames_skip_confirmation_but_capability_changes_do_not() {
 }
 
 #[tokio::test]
-async fn secret_binding_and_session_scope_changes_require_confirmation() {
+async fn secret_binding_changes_confirm_but_noop_updates_do_not() {
     let events = Arc::new(GateEvents {
         allow: true,
         confirms: AtomicUsize::new(0),
@@ -790,7 +790,11 @@ async fn secret_binding_and_session_scope_changes_require_confirmation() {
             },
         )
         .unwrap();
-    assert_eq!(events.confirms.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        events.confirms.load(Ordering::SeqCst),
+        1,
+        "an identical update must not request another confirmation"
+    );
 }
 
 #[tokio::test]
