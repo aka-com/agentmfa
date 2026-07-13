@@ -291,10 +291,12 @@ pub fn run() {
             if let Some(win) = app.get_webview_window(windows::DROPDOWN) {
                 let handle = handle.clone();
                 win.on_window_event(move |event| match event {
-                    WindowEvent::Focused(false) => windows::hide_dropdown(&handle),
+                    WindowEvent::Focused(false) => {
+                        let _ = windows::hide_dropdown(&handle);
+                    }
                     WindowEvent::CloseRequested { api, .. } => {
                         api.prevent_close();
-                        windows::hide_dropdown(&handle);
+                        let _ = windows::hide_dropdown(&handle);
                     }
                     _ => {}
                 });

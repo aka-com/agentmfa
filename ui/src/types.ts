@@ -228,6 +228,7 @@ export interface CommandMap {
   ui_set_mode: CommandSpec<{ mode: string }, void>;
   ui_hide_main: CommandSpec<undefined, void>;
   ui_hide_dropdown: CommandSpec<undefined, void>;
+  ui_set_dropdown_form_active: CommandSpec<{ active: boolean }, void>;
   ui_show_approval: CommandSpec<undefined, void>;
   ui_resize_approval: CommandSpec<{ height: number }, void>;
 }

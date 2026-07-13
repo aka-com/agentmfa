@@ -538,7 +538,8 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       }
       db.queue = db.queue.filter((r) => r.id !== args.id); emit('amfa://queue-changed', db.queue.slice()); return;
     }
-    case 'ui_set_mode': case 'ui_hide_main': case 'ui_hide_dropdown': case 'ui_show_approval':
+    case 'ui_set_mode': case 'ui_hide_main': case 'ui_hide_dropdown':
+    case 'ui_set_dropdown_form_active': case 'ui_show_approval':
     case 'ui_resize_approval': return;
     default: throw new Error(`mock: unknown command ${cmd}`);
   }

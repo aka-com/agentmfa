@@ -1389,6 +1389,28 @@ async function run(fn: () => Promise<unknown>): Promise<boolean> {
   try { await fn(); return true; } catch (error) { toast('⚠ ' + errorMessage(error)); return false; }
 }
 
+function isProtectedFormSheet(sheet: SheetState | null = state.sheet): boolean {
+  return sheet?.kind === 'add-secret' || sheet?.kind === 'edit-secret'
+    || sheet?.kind === 'add-conn' || sheet?.kind === 'edit-conn';
+}
+
+async function holdDropdownFormOpen(): Promise<boolean> {
+  if (mode !== 'dropdown') return true;
+  try {
+    await invoke('ui_set_dropdown_form_active', { active: true });
+    return true;
+  } catch (error) {
+    toast('⚠ Couldn’t keep this form open: ' + errorMessage(error));
+    return false;
+  }
+}
+
+function releaseDropdownForm(): void {
+  if (mode !== 'dropdown') return;
+  void invoke('ui_set_dropdown_form_active', { active: false })
+    .catch((error) => toast('⚠ Couldn’t release the menu-bar form: ' + errorMessage(error)));
+}
+
 async function saveSecret(): Promise<void> {
   captureDrafts();
   const sheet = state.sheet;
@@ -1553,6 +1575,7 @@ async function saveConn(): Promise<void> {
 }
 
 function closeSheet() {
+  const releaseDropdown = isProtectedFormSheet();
   state.sheet = null;
   state.draft = {};
   state.sheetErrors = {};
@@ -1560,6 +1583,7 @@ function closeSheet() {
   state.confirmDiscard = false;
   state.formMenuOpen = null;
   render();
+  if (releaseDropdown) releaseDropdownForm();
 }
 
 // Draft fields compared against the sheet-open baseline to decide whether
@@ -1749,13 +1773,17 @@ document.addEventListener('click', async (e) => {
       }
       break;
     case 'edit-secret':
+      if (!await holdDropdownFormOpen()) break;
       state.sheet = { kind: 'edit-secret', id };
       state.draft = { value: EDIT_SECRET_MASK };
       state.sheetErrors = {};
       render();
       selectEditSecretMask();
       break;
-    case 'open-add-secret': state.sheet = { kind: 'add-secret' }; state.draft = {}; state.sheetErrors = {}; render(); focusField('f-name'); break;
+    case 'open-add-secret':
+      if (!await holdDropdownFormOpen()) break;
+      state.sheet = { kind: 'add-secret' }; state.draft = {}; state.sheetErrors = {};
+      render(); focusField('f-name'); break;
     case 'save-secret': await saveSecret(); break;
 
     case 'quick-setup-type': {
@@ -1771,6 +1799,7 @@ document.addEventListener('click', async (e) => {
     case 'quick-setup-review': {
       try {
         const imported = await connectionDraftFromImport(state.quickSetupSource);
+        if (!await holdDropdownFormOpen()) break;
         state.quickSetupType = imported.type;
         state.quickSetupError = null;
         state.sheet = { kind: 'add-conn' };
@@ -1806,10 +1835,15 @@ document.addEventListener('click', async (e) => {
       state.connectionTaskCopied = false;
       render();
       break;
-    case 'open-add-conn': state.sheet = { kind: 'add-conn' }; state.connType = 'api'; state.draft = {}; state.sheetErrors = {}; state.sheetBaseline = null; state.connAdvancedOpen = false; render(); focusField('f-cname'); break;
+    case 'open-add-conn':
+      if (!await holdDropdownFormOpen()) break;
+      state.sheet = { kind: 'add-conn' }; state.connType = 'api'; state.draft = {};
+      state.sheetErrors = {}; state.sheetBaseline = null; state.connAdvancedOpen = false;
+      render(); focusField('f-cname'); break;
     case 'edit-conn': {
       const c = state.connections.find((x) => x.id === id);
       if (!c) break;
+      if (!await holdDropdownFormOpen()) break;
       state.sheet = { kind: 'edit-conn', id }; state.connType = c.type;
       state.sheetErrors = {};
       state.sheetBaseline = null;
@@ -2142,6 +2176,9 @@ window.addEventListener('resize', () => {
 
 /* --------------------------------- boot ---------------------------------- */
 async function boot() {
+  // A webview reload must not leave a stale native lock behind. Forms acquire
+  // it again before they are shown.
+  if (mode === 'dropdown') await invoke('ui_set_dropdown_form_active', { active: false });
   await refresh(mode === 'approval' ? 'queue' : 'all');
   if (mode !== 'approval') scheduleAccessExpiryRefresh();
   // Hover tooltips (absolute timestamps on activity rows, etc.). Delegated
@@ -2187,6 +2224,7 @@ async function boot() {
   await listen('amfa://activity-appended', (ev) => receiveActivity(ev.payload));
   await listen('amfa://activity-changed', () => refresh('activity'));
   await listen('amfa://open-settings', () => {
+    if (isProtectedFormSheet()) return;
     state.sheet = { kind: 'settings' };
     state.draft = {};
     state.sheetErrors = {};
@@ -2196,6 +2234,7 @@ async function boot() {
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
   });
   await listen('amfa://dropdown-hidden', () => {
+    releaseDropdownForm();
     state.reveal = {};
     state.sheet = null;
     state.draft = {};

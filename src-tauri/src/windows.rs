@@ -4,6 +4,7 @@
 //! dropdown, and a separate always-on-top approval window. The tray icon
 //! is always present and toggles the compact dropdown beneath its status item.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use tauri::menu::{Menu, MenuItem, MenuItemKind, PredefinedMenuItem, WINDOW_SUBMENU_ID};
@@ -32,6 +33,14 @@ const NEW_WINDOW_MENU_ID: &str = "new-window";
 
 const DROPDOWN_GAP: f64 = 6.0;
 static LAST_TRAY_ANCHOR: Mutex<Option<TrayAnchor>> = Mutex::new(None);
+/// A dropdown form may hold credentials that must survive native
+/// authentication and any error returned afterwards. While it is open, focus
+/// loss (including the Touch ID sheet becoming key) must not dismiss it.
+static DROPDOWN_FORM_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+fn dropdown_hide_allowed() -> bool {
+    !DROPDOWN_FORM_ACTIVE.load(Ordering::SeqCst)
+}
 
 #[cfg(target_os = "macos")]
 tauri_panel! {
@@ -151,6 +160,10 @@ pub fn setup_app_menu(app: &AppHandle) -> tauri::Result<()> {
 }
 
 fn focus_existing_or_reopen(app: &AppHandle) {
+    if !dropdown_hide_allowed() {
+        show_dropdown(app);
+        return;
+    }
     for label in [MAIN, APPROVAL, DROPDOWN] {
         let Some(window) = app.get_webview_window(label) else {
             continue;
@@ -181,6 +194,10 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     tray.on_menu_event(|app, event| match event.id().as_ref() {
         "tray-open" => open_main(app),
         "tray-settings" => {
+            if !dropdown_hide_allowed() {
+                show_dropdown(app);
+                return;
+            }
             show_dropdown(app);
             let _ = app.emit_to(DROPDOWN, EVT_OPEN_SETTINGS, ());
         }
@@ -223,7 +240,7 @@ fn remember_tray_anchor(app: &AppHandle, rect: Rect) {
 
 fn toggle_dropdown(app: &AppHandle) {
     if window_visible(app, DROPDOWN) {
-        hide_dropdown(app);
+        let _ = hide_dropdown(app);
     } else {
         show_dropdown(app);
     }
@@ -308,14 +325,20 @@ fn window_visible(app: &AppHandle, label: &str) -> bool {
 }
 
 /// Hide the compact dropdown and ask its webview to clear transient secret
-/// prefixes and unfinished modal state before the next open.
-pub fn hide_dropdown(app: &AppHandle) {
+/// prefixes and unfinished modal state before the next open. An active form
+/// blocks hiding so focus transfers to native authentication cannot destroy
+/// the draft before a command reports its outcome.
+pub fn hide_dropdown(app: &AppHandle) -> bool {
+    if !dropdown_hide_allowed() {
+        return false;
+    }
     if let Some(window) = app.get_webview_window(DROPDOWN) {
         if window.is_visible().unwrap_or(false) {
             let _ = app.emit_to(DROPDOWN, EVT_DROPDOWN_HIDDEN, ());
             hide_dropdown_window(app, &window);
         }
     }
+    true
 }
 
 #[cfg(target_os = "macos")]
@@ -334,7 +357,22 @@ fn hide_dropdown_window(_app: &AppHandle, window: &tauri::WebviewWindow) {
 
 #[tauri::command]
 pub fn ui_hide_dropdown(app: AppHandle) {
-    hide_dropdown(&app);
+    let _ = hide_dropdown(&app);
+}
+
+/// Keep the menu-bar form visible across focus changes while it may contain
+/// unfinished or sensitive input. Only the dropdown webview can hold this
+/// lock; other windows must not be able to strand the dropdown open.
+#[tauri::command]
+pub fn ui_set_dropdown_form_active(
+    window: tauri::WebviewWindow,
+    active: bool,
+) -> Result<(), String> {
+    if window.label() != DROPDOWN {
+        return Err("only the menu-bar dropdown can hold its form open".into());
+    }
+    DROPDOWN_FORM_ACTIVE.store(active, Ordering::SeqCst);
+    Ok(())
 }
 
 /// Bring the always-on-top approval window forward — the pending banner's
@@ -380,7 +418,9 @@ pub fn ui_resize_approval(app: AppHandle, height: f64) -> Result<(), String> {
 /// activation policy. Restores the Dock icon if a prior menu-bar retreat
 /// had hidden it.
 fn open_main(app: &AppHandle) {
-    hide_dropdown(app);
+    if !hide_dropdown(app) {
+        return;
+    }
     set_activation_policy(app, true);
     if let Some(win) = app.get_webview_window(MAIN) {
         let _ = win.unminimize();
@@ -461,6 +501,14 @@ mod tests {
         width: 1440.0,
         height: 876.0,
     };
+
+    #[test]
+    fn active_form_blocks_dropdown_hiding() {
+        DROPDOWN_FORM_ACTIVE.store(true, Ordering::SeqCst);
+        assert!(!dropdown_hide_allowed());
+        DROPDOWN_FORM_ACTIVE.store(false, Ordering::SeqCst);
+        assert!(dropdown_hide_allowed());
+    }
 
     #[test]
     fn dropdown_is_centered_below_a_top_tray_item() {
