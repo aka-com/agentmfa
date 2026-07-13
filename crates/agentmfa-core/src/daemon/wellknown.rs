@@ -382,9 +382,9 @@ mod tests {
         assert_eq!(m["auth_schemes"], serde_json::json!(["bearer_pinned"]));
         assert_eq!(m["approval_modes"], serde_json::json!(["blocking"]));
         assert_eq!(m["transport"], "http-over-unix-socket");
-        assert_eq!(m["approval_timeout_seconds"], 120);
+        assert_eq!(m["approval_timeout_seconds"], 900);
         assert_eq!(m["access_grant_ttl_seconds"], 900);
-        assert_eq!(m["recommended_client_timeout_seconds"], 240);
+        assert_eq!(m["recommended_client_timeout_seconds"], 1020);
         assert_eq!(m["token_ttl_days"], 30);
         assert_eq!(m["ticket_ttl_seconds"], 60);
         assert_eq!(m["request_id_max_bytes"], REQUEST_ID_MAX_BYTES);
@@ -424,7 +424,7 @@ mod tests {
             "256 UTF-8 bytes",
             "PGPASSWORD",
             "expires_in_seconds",
-            "at least 240 seconds",
+            "at least 1020 seconds",
             "denied_by_user",
             "approval_timeout",
             "request_id_mismatch",

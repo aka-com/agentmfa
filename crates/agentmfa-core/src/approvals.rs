@@ -2,7 +2,7 @@
 //!
 //! Approval waits are held-open requests where a `Prompt` decision parks the
 //! request and the daemon simply does not respond until the user decides or
-//! the timeout (default 120s) auto-denies. No polling or callback channel.
+//! the timeout (default 15 minutes) auto-denies. No polling or callback channel.
 //!
 //! Retries are governed by an idempotency key. Mutating calls carry an
 //! optional `request_id`, and a retry re-sending the same `(agent,
@@ -572,7 +572,7 @@ impl Approvals {
             request.received_at = now;
             request.deadline = now
                 + chrono::Duration::from_std(self.shared.approval_timeout)
-                    .unwrap_or_else(|_| chrono::Duration::seconds(120));
+                    .unwrap_or_else(|_| chrono::Duration::minutes(15));
             let waiter_id = next_waiter(&mut inner);
             let (tx, rx) = oneshot::channel();
             inner.pending.insert(

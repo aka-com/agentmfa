@@ -310,8 +310,8 @@ impl Store {
         Ok(meta)
     }
 
-    /// Audited, core-side Keychain read returning only the short prefix
-    /// (`min(6, ⌊len/2⌋)` chars). Callers audit.
+    /// Core-side Keychain read returning only the short prefix
+    /// (`min(6, ⌊len/2⌋)` chars).
     pub async fn reveal_secret_prefix(&self, id: &Uuid) -> Result<String> {
         let value = self.secret_value(id).await?;
         Ok(reveal_prefix(&value))

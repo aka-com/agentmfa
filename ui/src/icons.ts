@@ -1,10 +1,9 @@
 import {
-  AppWindow,
   Bell,
-  BookOpenCheck,
   Check,
   ChevronDown,
   CircleCheck,
+  CircleQuestionMark,
   CircleSlash,
   CircleX,
   ClipboardCopy,
@@ -12,6 +11,7 @@ import {
   Copy,
   Eye,
   EyeOff,
+  Expand,
   FileKey,
   FlaskConical,
   Gauge,
@@ -81,7 +81,7 @@ function iconHTML(iconNode: IconNode, size: number, attrs: SVGProps = {}): strin
 }
 
 export const LUCIDE_ICONS: Record<string, string> = {
-  window: iconHTML(AppWindow, 15),
+  expand: iconHTML(Expand, 15),
   eye: iconHTML(Eye, 14),
   eyeOff: iconHTML(EyeOff, 14),
   copy: iconHTML(Copy, 14),
@@ -92,7 +92,7 @@ export const LUCIDE_ICONS: Record<string, string> = {
   gear: iconHTML(Settings, 15),
   menubar: iconHTML(RotateCcwKey, 14),
   bell: iconHTML(Bell, 15),
-  bookOpenCheck: iconHTML(BookOpenCheck, 15),
+  circleQuestion: iconHTML(CircleQuestionMark, 15),
   circleCheck: iconHTML(CircleCheck, 15),
   circleSlash: iconHTML(CircleSlash, 15),
   circleX: iconHTML(CircleX, 15),

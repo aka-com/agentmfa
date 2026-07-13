@@ -726,6 +726,30 @@ async fn settings_changes_are_not_added_to_the_activity_log() {
 }
 
 #[tokio::test]
+async fn prefix_reveals_are_not_added_to_the_activity_log() {
+    let events = Arc::new(UnifiedAuthEvents {
+        decision_confirms: AtomicUsize::new(0),
+        secret_read_confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    let secret = broker
+        .store
+        .add_secret("TOKEN", Zeroizing::new("abcdefghijkl".into()))
+        .unwrap();
+
+    assert_eq!(
+        broker.ui_reveal_secret_prefix(&secret.id).await.unwrap(),
+        "abcdef…"
+    );
+    assert_eq!(events.secret_read_confirms.load(Ordering::SeqCst), 1);
+    assert!(broker
+        .audit
+        .recent(10)
+        .iter()
+        .all(|entry| entry.kind != agentmfa_core::audit::AuditKind::SecretRevealed));
+}
+
+#[tokio::test]
 async fn inherited_rules_are_removed_before_pairing_executes() {
     let events = Arc::new(GateEvents {
         allow: true,

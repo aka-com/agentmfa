@@ -72,8 +72,8 @@ impl Default for BrokerConfig {
     fn default() -> Self {
         Self {
             version: env!("CARGO_PKG_VERSION").to_string(),
-            approval_timeout: Duration::from_secs(120),
-            recommended_client_timeout: Duration::from_secs(240),
+            approval_timeout: Duration::from_secs(15 * 60),
+            recommended_client_timeout: Duration::from_secs(17 * 60),
             outcome_retention: Duration::from_secs(600),
             outcome_retention_max_entries: 1024,
             outcome_retention_max_bytes: 64 * 1024 * 1024,

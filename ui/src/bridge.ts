@@ -68,7 +68,6 @@ const MOCK_ACTIVITY_META = {
   secretAdded: { icon: 'fileKey', tone: 'neutral' },
   secretUpdated: { icon: 'pencil', tone: 'neutral' },
   secretDeleted: { icon: 'trash', tone: 'neutral' },
-  secretRevealed: { icon: 'eye', tone: 'neutral' },
   connectionAdded: { icon: 'plug', tone: 'neutral' },
   connectionUpdated: { icon: 'pencil', tone: 'neutral' },
   connectionDeleted: { icon: 'unplug', tone: 'neutral' },
@@ -77,7 +76,7 @@ const MOCK_ACTIVITY_META = {
   grantRevoked: { icon: 'shieldX', tone: 'danger' },
   tokenRevoked: { icon: 'unplug', tone: 'danger' },
 };
-const MOCK_AGENT_SETUP = 'Connect to the local AgentMFA broker. Read its current instructions with:\n\ncurl -fsS --unix-socket ~/.agentmfa/broker.sock http://localhost/instructions';
+const MOCK_AGENT_SETUP = 'Connect to the local AgentMFA broker. Read its current instructions, then list what connections are currently available:\n\ncurl -fsS --unix-socket ~/.agentmfa/broker.sock http://localhost/instructions';
 const MOCK_BROKER_INSTRUCTIONS = `# AgentMFA: broker instructions
 
 AgentMFA holds this developer's secrets and brokers their use.
@@ -381,7 +380,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
     }
     case 'reveal_secret_prefix': {
       const s = db.secrets.find((x) => x.id === args.id); if (!s) throw new Error('no such secret');
-      audit('secretRevealed', `Secret prefix revealed: ${s.name}`); return revealPrefix(s._value);
+      return revealPrefix(s._value);
     }
     case 'copy_secret': {
       const s = db.secrets.find((x) => x.id === args.id); if (!s) throw new Error('no such secret');
@@ -537,7 +536,8 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       }
       db.queue = db.queue.filter((r) => r.id !== args.id); emit('amfa://queue-changed', db.queue.slice()); return;
     }
-    case 'ui_set_mode': case 'ui_hide_main': case 'ui_hide_dropdown': case 'ui_show_approval': return;
+    case 'ui_set_mode': case 'ui_hide_main': case 'ui_hide_dropdown': case 'ui_show_approval':
+    case 'ui_resize_approval': return;
     default: throw new Error(`mock: unknown command ${cmd}`);
   }
 }
@@ -546,7 +546,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
 // Kinds: 'http' (GET, collapsed payload), 'post' (mutating, auto-expanded
 // payload with many headers + body — exercises the scroll region), 'pair'.
 if (!tauri && typeof window !== 'undefined') {
-  window.__mockApproval = (kind = 'http', ttlMs = 120000) => {
+  window.__mockApproval = (kind = 'http', ttlMs = 900000) => {
     if (kind === 'ssh') {
       // A trust-on-first-use host-key prompt (kind 'ssh' + ssh payload).
       const sshConn = db.connections.find((c) => c.type === 'ssh') ?? db.connections[0]!;

@@ -30,7 +30,7 @@
         "label": "approval",
         "title": "AgentMFA Approval",
         "width": 380,
-        "height": 520,
+        "height": 380,
         "resizable": false,
         "decorations": false,
         "transparent": true,

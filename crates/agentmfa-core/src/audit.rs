@@ -119,6 +119,8 @@ pub enum AuditKind {
     SecretAdded,
     SecretUpdated,
     SecretDeleted,
+    /// Retained so activity logs written by older versions still deserialize.
+    /// New prefix reveals do not create activity entries.
     SecretRevealed,
     SecretCopied,
     ConnectionAdded,

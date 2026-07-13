@@ -625,15 +625,9 @@ impl Broker {
         Ok(meta)
     }
 
-    /// Audited core-side reveal: only the short prefix ever leaves.
+    /// Core-side reveal: only the short prefix ever leaves.
     pub async fn ui_reveal_secret_prefix(&self, id: &Uuid) -> Result<String> {
-        let meta = self.store.secret_by_id(id)?;
-        let prefix = self.store.reveal_secret_prefix(id).await?;
-        self.audit.append(AuditEntry::new(
-            AuditKind::SecretRevealed,
-            format!("Secret prefix revealed: {}", meta.name),
-        ));
-        Ok(prefix)
+        self.store.reveal_secret_prefix(id).await
     }
 
     /// Fetch a value for the shell's core-side clipboard copy. A successful

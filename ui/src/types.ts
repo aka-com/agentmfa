@@ -228,6 +228,7 @@ export interface CommandMap {
   ui_hide_main: CommandSpec<undefined, void>;
   ui_hide_dropdown: CommandSpec<undefined, void>;
   ui_show_approval: CommandSpec<undefined, void>;
+  ui_resize_approval: CommandSpec<{ height: number }, void>;
 }
 
 export type CommandName = keyof CommandMap;
@@ -245,6 +246,7 @@ export interface EventMap {
   'amfa://settings-changed': Record<string, never>;
   'amfa://open-settings': Record<string, never>;
   'amfa://dropdown-hidden': Record<string, never>;
+  'amfa://dropdown-shown': Record<string, never>;
 }
 
 export type EventName = keyof EventMap;

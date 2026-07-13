@@ -102,6 +102,11 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
   box-shadow: 0 20px 48px rgba(10,15,40,.35);
   padding: 14px 15px 13px;
 }
+.approval-measure {
+  position: fixed; visibility: hidden; pointer-events: none;
+  width: 380px; height: auto; max-height: none;
+}
+.approval-measure .ap-scroll { flex: none; overflow: visible; }
 .surface.dropdown-surface {
   background: var(--surface);
   border-radius: 13px;
@@ -174,11 +179,16 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 }
 .walkthrough-menu-btn:hover { background: var(--hover); color: var(--ink-2); }
 .walkthrough-menu-btn.on { background: var(--hover-2); color: var(--ink-2); }
+.walkthrough-menu-icon.on { background: var(--hover-2); color: var(--ink-2); }
 .walkthrough-menu {
   position: absolute; right: 0; top: calc(100% + 5px); z-index: 16;
   width: 245px; padding: 5px;
   background: var(--panel); border: 1px solid var(--line-mid); border-radius: 9px;
   box-shadow: 0 10px 28px rgba(10,15,40,.22);
+}
+.dropdown-surface .walkthrough-menu-wrap { z-index: 20; }
+.dropdown-surface .walkthrough-menu {
+  right: 0; left: auto; top: calc(100% + 7px);
 }
 .walkthrough-menu-title { padding: 4px 7px 5px; color: var(--muted); font-size: 11.5px; font-weight: 600; }
 .walkthrough-option {
@@ -379,6 +389,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .icon-btn { border: none; background: transparent; cursor: pointer; color: var(--muted-2); padding: 4px; border-radius: 5px; line-height: 0; }
 .icon-btn:hover { background: var(--hover-2); color: var(--ink-2); }
 .sec-table .icon-btn, .sec-table .ghost-copy { transform: translateY(2px); }
+.dropdown-surface .sec-table .ghost-copy { transform: none; }
 .rowdel { text-align: right; white-space: nowrap; }
 .confirm-row td { height: 48px; padding: 0 6px; background: var(--danger-wash); border-radius: 0; font-size: 13px; }
 .confirm-inline { min-height: 48px; display: flex; align-items: center; gap: 8px; }
@@ -594,9 +605,9 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .ap-icon { width: 36px; height: 36px; border-radius: 9px; flex: 0 0 auto; background: linear-gradient(160deg, #4a4a52, #26262c); color: #fff; font-size: 19px; display: flex; align-items: center; justify-content: center; }
 .ap-title { font-size: 15.5px; font-weight: 700; }
 .ap-sub { font-size: 12px; color: var(--muted-2); }
-/* The approval window is fixed-size and non-resizable: the variable-height
-   middle (rows, payload, inherited list) shrinks and scrolls as needed so
-   the Deny/Allow row below it always stays reachable. */
+/* The native window fits ordinary approvals to their content. For unusually
+   tall requests it is capped to the display and this middle section scrolls,
+   keeping the Deny/Allow row reachable. */
 .ap-scroll { flex: 0 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; }
 .ap-scroll::-webkit-scrollbar { width: 8px; }
 .ap-scroll::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 4px; }
@@ -607,11 +618,6 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .ap-row code { font-size: 12px; word-break: break-all; color: var(--ink-2); }
 .ap-buttons { display: flex; gap: 8px; align-items: center; }
 .ap-buttons .spacer { flex: 1; }
-.ap-countdown { color: var(--amber-strong); font-weight: 600; }
-/* urgency: pulsing red for the last 30 s, steady red once expired */
-.ap-countdown.low, .ap-countdown.expired { color: var(--danger-ink); }
-.ap-countdown.low { animation: countdown-pulse 1s ease-in-out infinite; }
-@keyframes countdown-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
 .aw-queue { margin-top: 11px; padding-top: 9px; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--muted); text-align: center; }
 .ap-ongoing-action { display: flex; justify-content: flex-end; margin: -5px 0 9px; }
 .always-box { margin-top: 13px; padding: 11px 12px; border: 1px dashed var(--always-border); border-radius: 9px; background: var(--always-bg); }
@@ -622,6 +628,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .rule-line code { background: var(--chip-bg); padding: 1px 6px; border-radius: 5px; font-size: 12px; }
 .stub-badge { display: inline-block; margin-left: 6px; padding: 1px 7px; background: var(--amber-wash); border: 1px solid var(--amber-border); color: var(--amber-ink); border-radius: 8px; font-size: 11px; font-weight: 700; letter-spacing: .04em; }
 .pair-explainer { margin: 0 0 12px; color: var(--ink-2); font-size: 13px; line-height: 1.45; }
+.pair-explainer p + p { margin-top: 8px; }
 .self-reported { display: inline-block; margin-left: 4px; color: var(--muted); font-size: 11px; font-style: normal; font-weight: 500; }
 .pair-identity-warning, .pair-replace { margin: 0 0 12px; padding: 9px 11px; border-radius: 8px; font-size: 12.5px; line-height: 1.4; }
 .pair-identity-warning { background: var(--amber-wash); border: 1px solid var(--amber-border); color: var(--amber-ink); }

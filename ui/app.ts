@@ -315,7 +315,7 @@ function firstConnectionSetupHTML(): string {
   return `<div class="agent-onboarding service-onboarding walkthrough-card">
     <div class="walkthrough-head">
       <div class="onboarding-copy"><b>Add a service for your agent</b>
-        <span>Save a database, server, or API.</span></div>
+        ${mode === 'dropdown' ? '' : '<span>Save a database, server, or API.</span>'}</div>
       <button class="icon-btn walkthrough-close" title="Hide this walkthrough" aria-label="Hide Add a service walkthrough" data-act="hide-service-walkthrough">${ICONS.x}</button>
     </div>
     <div class="quick-type-row">
@@ -344,7 +344,7 @@ function globalSectionsHTML() {
     out += `<div class="agent-onboarding walkthrough-card">
       <div class="walkthrough-head">
         <div class="onboarding-copy"><b>Connect an agent</b>
-          <span>Copy a short setup message into your coding agent. After you paste it, your agent will ask to connect.</span></div>
+          <span>Copy a short setup message into your coding agent. After you paste and run it, your agent will walk you through setup.</span></div>
         <button class="icon-btn walkthrough-close" title="Hide this walkthrough" aria-label="Hide Connect an agent walkthrough" data-act="hide-agent-walkthrough">${ICONS.x}</button>
       </div>
       <div class="onboarding-actions">
@@ -409,10 +409,11 @@ function globalSectionsHTML() {
 
 function secretsHTML() {
   if (!state.secrets.length) {
-    return `<div class="empty"><div class="empty-ico">🔐</div><h3>No secrets</h3>
+    const detail = mode === 'dropdown' ? '' : `
       <p>Store API keys, connection strings, and other credentials and secrets here.</p>
       <p class="empty-tip">Tip: adding a service can save its credential in one step.</p>
-      <button class="btn primary" data-act="open-add-secret">＋ Add secret</button></div>`;
+      <button class="btn primary" data-act="open-add-secret">＋ Add secret</button>`;
+    return `<div class="empty"><div class="empty-ico">🔐</div><h3>No secrets</h3>${detail}</div>`;
   }
   const rows = state.secrets.map((s) => {
     if (state.confirm && state.confirm.kind === 'del-secret-inuse' && state.confirm.id === s.id) {
@@ -424,13 +425,13 @@ function secretsHTML() {
           <button class="btn sm" data-act="confirm-cancel">Cancel</button>
           <button class="btn sm danger" data-act="del-secret-confirm" data-id="${s.id}">Delete</button></div></td></tr>`;
     }
-    // The eye reveals only an audited short prefix (the full value never
+    // The eye reveals only a short prefix (the full value never
     // enters the webview).
     const revealed = state.reveal[s.id];
     const copied = state.copied === s.id;
     // the eye toggles reveal ↔ conceal; copy is a ghost button that surfaces on
     // hovering the value (available whether or not the prefix is revealed)
-    const eyeBtn = revealed
+    const eyeBtn = mode === 'dropdown' ? '' : revealed
       ? `<button class="icon-btn eye-btn" title="Hide prefix" aria-label="Hide prefix" data-act="hide-secret" data-id="${s.id}">${ICONS.eyeOff}</button>`
       : `<button class="icon-btn eye-btn" title="Reveal prefix" aria-label="Reveal prefix" data-act="reveal-secret" data-id="${s.id}">${ICONS.eye}</button>`;
     // The copy affordance and the post-copy "Copied" status both overlay the
@@ -492,9 +493,10 @@ const connTestResultHTML = (c: ConnectionSummary): string => {
 // connection = one object with everything about it inside its border.
 function connectionsHTML() {
   if (!state.connections.length) {
-    return `<div class="empty"><div class="empty-ico">🔌</div><h3>No services</h3>
+    const detail = mode === 'dropdown' ? '' : `
       <p>Add APIs, databases, SSH servers, and WebSockets.</p>
-      <button class="btn primary" data-act="open-add-conn">＋ Add service</button></div>`;
+      <button class="btn primary" data-act="open-add-conn">＋ Add service</button>`;
+    return `<div class="empty"><div class="empty-ico">🔌</div><h3>No services</h3>${detail}</div>`;
   }
   const ready = state.connectionReady;
   const readyPrompt = ready ? firstTaskPrompt(ready.name, ready.type) : '';
@@ -540,7 +542,7 @@ function activityRowHTML(a: ActivityEntry): string {
 
 function activityHTML() {
   if (!state.activity.length) {
-    return `<div class="muted-note">No activity yet.<br>Requests and broker actions will appear here.</div>`;
+    return `<div class="muted-note">No activity yet.${mode === 'dropdown' ? '' : '<br>Requests and broker actions will appear here.'}</div>`;
   }
   return '<div class="act-list">' + state.activity
     .slice(0, ACTIVITY_RENDER_LIMIT)
@@ -583,14 +585,14 @@ function brokerReadyHTML() {
     <span class="ready-copy-label" aria-live="polite">${copied ? `${ICONS.check} Copied` : 'Ready'}</span></button>`;
 }
 
-function walkthroughMenuHTML(): string {
+function walkthroughMenuHTML(iconOnly = false): string {
   const option = (action: string, label: string, checked: boolean): string =>
     `<button class="walkthrough-option" role="menuitemcheckbox" aria-checked="${checked}" data-act="${action}">
       <span class="walkthrough-check">${checked ? ICONS.check : ''}</span><span>${label}</span></button>`;
   return `<div class="walkthrough-menu-wrap">
-    <button class="walkthrough-menu-btn ${state.walkthroughMenuOpen ? 'on' : ''}"
-      title="Choose walkthroughs" aria-haspopup="menu"
-      aria-expanded="${state.walkthroughMenuOpen}" data-act="toggle-walkthrough-menu">${ICONS.bookOpenCheck}<span>Walkthroughs</span></button>
+    <button class="${iconOnly ? 'icon-btn walkthrough-menu-icon' : 'walkthrough-menu-btn'} ${state.walkthroughMenuOpen ? 'on' : ''}"
+      title="Choose walkthroughs" aria-label="Choose walkthroughs" aria-haspopup="menu"
+      aria-expanded="${state.walkthroughMenuOpen}" data-act="toggle-walkthrough-menu">${ICONS.circleQuestion}${iconOnly ? '' : '<span>Walkthroughs</span>'}</button>
     ${state.walkthroughMenuOpen ? `<div class="walkthrough-menu" role="menu" aria-label="Walkthroughs">
       <div class="walkthrough-menu-title">Walkthroughs</div>
       ${option('toggle-service-walkthrough', 'Add a service for your agent', state.settings.show_service_walkthrough)}
@@ -646,7 +648,8 @@ function renderDropdown() {
   root().innerHTML = `<div class="surface dropdown-surface">
     <div class="dd-head"><div class="dd-appicon">🔐</div>
       <div class="dd-identity"><div class="dd-title">AgentMFA</div>${brokerReadyHTML()}</div>
-      <button class="icon-btn" title="Open as a window" aria-label="Open as a window" data-act="mode-window">${ICONS.window}</button>
+      <button class="icon-btn" title="Open as a window" aria-label="Open as a window" data-act="mode-window">${ICONS.expand}</button>
+      ${walkthroughMenuHTML(true)}
       <button class="icon-btn" title="Settings" aria-label="Settings" data-act="open-settings">${ICONS.gear}</button></div>
     ${pendingBannerHTML()}
     <div class="seg">${tabs}</div>
@@ -745,7 +748,7 @@ function credentialChooserHTML(
   let picker = '';
   if (state.secrets.length) {
     // Usage detail disambiguates similarly named credentials without
-    // touching secret values (revealing those is a separate audited call).
+    // touching secret values (revealing those is a separate explicit call).
     const usageDetail = (secret: SecretSummary): string => !secret.used_by ? ''
       : secret.used_by === 1 && secret.used_by_names.length ? `used by ${secret.used_by_names[0]}`
       : `used by ${secret.used_by} services`;
@@ -984,14 +987,19 @@ function settingsSheet() {
 }
 
 /* ----------------------------- approval window --------------------------- */
-let countdownTimer: ReturnType<typeof setInterval> | null = null;
-
 function durationLabel(seconds: number): string {
   if (seconds % 60 === 0) {
     const minutes = seconds / 60;
     return `${minutes} minute${minutes === 1 ? '' : 's'}`;
   }
   return `${seconds} seconds`;
+}
+
+function approvalWindowLabel(req: ApprovalRequest): string {
+  const received = new Date(req.received_at).getTime();
+  const deadline = new Date(req.deadline).getTime();
+  const seconds = Math.max(0, Math.round((deadline - received) / 1000));
+  return durationLabel(seconds);
 }
 
 function approvalHeading(req: ApprovalRequest): string {
@@ -1044,6 +1052,7 @@ function renderApproval() {
   const el = root();
   if (!req) {
     el.innerHTML = `<div class="surface approval"><div class="ap-empty">No requests waiting.</div></div>`;
+    resizeApprovalToContent();
     return;
   }
   const conn = req.connection;
@@ -1057,7 +1066,6 @@ function renderApproval() {
     state.revokeInheritedRules = isPair && !!(req.inherited && req.inherited.length);
   }
   if (isHostKey) ensureKnownHostsCheck(req);
-  const cd = countdownParts(req.deadline);
   const connCell = conn
     ? (t ? `<span class="badge ${t.cls}">${t.label}</span> ` : '') + `<b>${esc(conn.name)}</b>`
     : '';
@@ -1110,19 +1118,16 @@ function renderApproval() {
   const sessionNote = !isPair && !isHostKey
     ? `<div class="ap-access-summary"><b>If you allow for ${esc(temporary.duration)}</b><p>${esc(temporary.text)}</p></div>` : '';
 
-  // The window is fixed-size and non-resizable, so the variable-height
-  // middle (rows, payload, inherited-permissions list) scrolls; Deny/Allow
-  // can never be pushed out of reach.
   el.innerHTML = `<div class="surface approval">
-    <div class="ap-head"><div class="ap-icon">🔐</div>
-      <div><div class="ap-title">${esc(approvalHeading(req))}</div></div></div>
+    <div class="ap-head" data-tauri-drag-region><div class="ap-icon" data-tauri-drag-region>🔐</div>
+      <div data-tauri-drag-region><div class="ap-title" data-tauri-drag-region>${esc(approvalHeading(req))}</div></div></div>
     <div class="ap-scroll">
-    ${isPair ? `<div class="pair-explainer">Connecting lets this program see service names and destinations and ask AgentMFA to use them. It cannot read saved secret values.</div>` : ''}
+    ${isPair ? `<div class="pair-explainer"><p>This program will be able to list services you have added, and request to make outbound connections to them.</p><p>Agents can never read saved secrets.</p></div>` : ''}
     <div class="ap-rows">
       ${isPair ? identityRows : `<div class="ap-row"><span>Agent</span><b>${esc(req.agent)}</b></div>
       ${connectionRow}${targetRow}
       <div class="ap-row"><span>This request</span><code>${esc(req.action)}</code></div>`}
-      <div class="ap-row"><span>Approve within</span><span><span class="ap-countdown${cd.s === 0 ? ' expired' : cd.s <= COUNTDOWN_LOW_S ? ' low' : ''}" id="ap-countdown">${cd.text}</span></span></div>
+      <div class="ap-row"><span>Approve within</span><span>${esc(approvalWindowLabel(req))}</span></div>
     </div>
     ${identityWarning}${replacement}${inherit}${identityDetails}${detail}
     ${sessionNote}
@@ -1137,7 +1142,20 @@ function renderApproval() {
         : `<button class="btn primary" data-act="decide-allow" data-id="${req.id}">${isPair ? 'Connect agent' : `Allow for ${esc(temporary.duration)}`}</button>`}</div>
     ${state.queue.length > 1 ? `<div class="aw-queue">${state.queue.length - 1} more request${state.queue.length > 2 ? 's' : ''} waiting</div>` : ''}
   </div>`;
-  armCountdown();
+  resizeApprovalToContent();
+}
+
+function resizeApprovalToContent(): void {
+  requestAnimationFrame(() => {
+    const approval = document.querySelector<HTMLElement>('.surface.approval');
+    if (!approval) return;
+    const measure = approval.cloneNode(true) as HTMLElement;
+    measure.classList.add('approval-measure');
+    document.body.appendChild(measure);
+    const height = measure.getBoundingClientRect().height;
+    measure.remove();
+    void invoke('ui_resize_approval', { height }).catch(() => { /* window may be closing */ });
+  });
 }
 
 function requestDetailHTML(req: ApprovalRequest): string {
@@ -1198,32 +1216,6 @@ function sshHostKeyDetailHTML(req: ApprovalRequest): string {
     <div class="hk-provenance">${knownHostsChipHTML(req)}</div>
     <p class="hk-note">First connection to this server. Trusting this key pins it: later connections must present the same key or are refused.</p>
   </div>`;
-}
-
-const COUNTDOWN_LOW_S = 30;
-function countdownParts(deadlineIso: string): { s: number; text: string } {
-  const ms = new Date(deadlineIso).getTime() - Date.now();
-  const s = Math.max(0, Math.ceil(ms / 1000));
-  const text = s === 0 ? 'Expired' : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
-  return { s, text };
-}
-function countdown(deadlineIso: string): string {
-  return countdownParts(deadlineIso).text;
-}
-// The timer only touches the countdown node (no re-render): text, plus the
-// urgency classes — pulsing red in the last 30 s, steady red once expired
-// (the core auto-denies moments later).
-function armCountdown() {
-  if (countdownTimer) clearInterval(countdownTimer);
-  countdownTimer = setInterval(() => {
-    const req = state.queue[0];
-    const el = document.getElementById('ap-countdown');
-    if (!req || !el) return;
-    const { s, text } = countdownParts(req.deadline);
-    el.textContent = text;
-    el.classList.toggle('low', s > 0 && s <= COUNTDOWN_LOW_S);
-    el.classList.toggle('expired', s === 0);
-  }, 1000);
 }
 
 /* --------------------------------- helpers ------------------------------- */
@@ -2146,6 +2138,9 @@ async function boot() {
     state.draft = {};
     state.sheetErrors = {};
     render();
+  });
+  await listen('amfa://dropdown-shown', () => {
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
   });
   await listen('amfa://dropdown-hidden', () => {
     state.reveal = {};

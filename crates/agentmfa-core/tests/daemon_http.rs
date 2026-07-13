@@ -329,7 +329,7 @@ async fn discovery_is_unauthenticated_and_complete() {
     .await;
     assert_eq!(status, 200);
     assert_eq!(manifest["transport"], "http-over-unix-socket");
-    assert_eq!(manifest["approval_timeout_seconds"], 120);
+    assert_eq!(manifest["approval_timeout_seconds"], 900);
     assert_eq!(manifest["endpoints"]["whoami"], "/v1/whoami");
     // The manifest names the socket actually serving it, not the
     // production default (this harness runs under a temp root).
