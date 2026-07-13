@@ -408,9 +408,6 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .btn.sm { padding: 3px 9px; font-size: 12.5px; }
 .btn.block { width: 100%; }
 .dd-footer { flex: 0 0 auto; padding: 10px 14px 12px; border-top: 1px solid var(--line-soft); }
-.service-footer { display: flex; align-items: center; gap: 7px; }
-.service-footer .btn.block { flex: 1; width: auto; }
-.service-footer .walkthrough-menu { top: auto; bottom: calc(100% + 5px); right: auto; left: 0; }
 .dropdown-surface .empty { padding: 28px 22px; }
 
 /* ---- activity --------------------------------------------------------- */

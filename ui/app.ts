@@ -315,7 +315,7 @@ function firstConnectionSetupHTML(): string {
   return `<div class="agent-onboarding service-onboarding walkthrough-card">
     <div class="walkthrough-head">
       <div class="onboarding-copy"><b>Add a service for your agent</b>
-        <span>Save a database, server, or API. AgentMFA brokers access without giving credentials to your agent.</span></div>
+        <span>Save a database, server, or API.</span></div>
       <button class="icon-btn walkthrough-close" title="Hide this walkthrough" aria-label="Hide Add a service walkthrough" data-act="hide-service-walkthrough">${ICONS.x}</button>
     </div>
     <div class="quick-type-row">
@@ -344,13 +344,13 @@ function globalSectionsHTML() {
     out += `<div class="agent-onboarding walkthrough-card">
       <div class="walkthrough-head">
         <div class="onboarding-copy"><b>Connect an agent</b>
-          <span>Copy a short setup message into your coding agent. After you paste it, your agent will ask to connect. Approve it in the window that pops up.</span></div>
+          <span>Copy a short setup message into your coding agent. After you paste it, your agent will ask to connect.</span></div>
         <button class="icon-btn walkthrough-close" title="Hide this walkthrough" aria-label="Hide Connect an agent walkthrough" data-act="hide-agent-walkthrough">${ICONS.x}</button>
       </div>
       <div class="onboarding-actions">
         <button class="btn primary sm" data-act="copy-agent-setup">Copy setup instructions</button>
         <button class="setup-toggle" data-act="toggle-setup-instructions"
-          aria-expanded="${state.setupInstructionsOpen}">View instructions<span class="setup-toggle-icon">${ICONS.chevronDown}</span></button>
+          aria-expanded="${state.setupInstructionsOpen}">${mode === 'dropdown' ? 'View' : 'View instructions'}<span class="setup-toggle-icon">${ICONS.chevronDown}</span></button>
         ${state.setupInstructionsOpen
           ? `<div class="seg instructions-seg" role="group" aria-label="Instruction detail">
               <button class="seg-btn ${state.showFullInstructions ? '' : 'on'}" data-act="set-instructions-detail" data-full="false" aria-pressed="${!state.showFullInstructions}">Short</button>
@@ -642,7 +642,7 @@ function renderDropdown() {
   const footer = state.tab === 'secrets'
     ? '<div class="dd-footer"><button class="btn block" data-act="open-add-secret">＋ Add secret</button></div>'
     : state.tab === 'connections'
-    ? `<div class="dd-footer service-footer">${walkthroughMenuHTML()}<button class="btn block" data-act="open-add-conn">＋ Add service</button></div>` : '';
+    ? '<div class="dd-footer"><button class="btn block" data-act="open-add-conn">＋ Add service</button></div>' : '';
   root().innerHTML = `<div class="surface dropdown-surface">
     <div class="dd-head"><div class="dd-appicon">🔐</div>
       <div class="dd-identity"><div class="dd-title">AgentMFA</div>${brokerReadyHTML()}</div>
