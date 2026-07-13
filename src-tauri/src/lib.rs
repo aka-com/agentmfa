@@ -200,7 +200,7 @@ pub fn run() {
         )
         .init();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         // Must be the first plugin registered: a duplicate launch hands off
         // here (in the running instance) and exits before its own broker
         // setup can race the daemon socket and panic inside the setup hook
@@ -214,7 +214,14 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_clipboard_manager::init());
+
+    // The menu-bar dropdown is an NSPanel on macOS, while the main window
+    // remains a conventional Dock-backed application window.
+    #[cfg(target_os = "macos")]
+    let builder = builder.plugin(tauri_nspanel::init());
+
+    builder
         .invoke_handler(commands::handler())
         .setup(|app| {
             let handle = app.handle().clone();
@@ -263,6 +270,7 @@ pub fn run() {
             );
 
             windows::setup_app_menu(&handle)?;
+            windows::setup_dropdown_panel(&handle)?;
             windows::setup_tray(&handle)?;
 
             // The regular main window is shown at launch. The always-present

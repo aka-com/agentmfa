@@ -10,6 +10,9 @@ use tauri::menu::{Menu, MenuItem, MenuItemKind, PredefinedMenuItem, WINDOW_SUBME
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, Rect};
 
+#[cfg(target_os = "macos")]
+use tauri_nspanel::{tauri_panel, ManagerExt as _, WebviewWindowExt as _};
+
 #[cfg(test)]
 use tauri::image::Image;
 
@@ -28,6 +31,43 @@ const NEW_WINDOW_MENU_ID: &str = "new-window";
 
 const DROPDOWN_GAP: f64 = 6.0;
 static LAST_TRAY_ANCHOR: Mutex<Option<TrayAnchor>> = Mutex::new(None);
+
+#[cfg(target_os = "macos")]
+tauri_panel! {
+    panel!(AgentMfaDropdownPanel {
+        config: {
+            can_become_key_window: true,
+            can_become_main_window: false,
+            becomes_key_only_if_needed: true,
+            is_floating_panel: true,
+            hides_on_deactivate: false
+        }
+    })
+}
+
+/// Convert the dropdown's ordinary Tauri NSWindow into a non-activating
+/// NSPanel. A panel can accept keyboard input without activating AgentMFA and
+/// raising the already-visible main window above the user's current app.
+#[cfg(target_os = "macos")]
+pub fn setup_dropdown_panel(app: &AppHandle) -> tauri::Result<()> {
+    use tauri_nspanel::panel::NSWindowStyleMask;
+
+    let window = app
+        .get_webview_window(DROPDOWN)
+        .ok_or_else(|| tauri::Error::AssetNotFound("configured dropdown window".into()))?;
+    let panel = window.to_panel::<AgentMfaDropdownPanel>()?;
+    let style = panel.as_panel().styleMask() | NSWindowStyleMask::NonactivatingPanel;
+    panel.set_style_mask(style);
+    panel.set_floating_panel(true);
+    panel.set_becomes_key_only_if_needed(true);
+    panel.set_hides_on_deactivate(false);
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn setup_dropdown_panel(_app: &AppHandle) -> tauri::Result<()> {
+    Ok(())
+}
 
 #[cfg(target_os = "macos")]
 pub fn move_traffic_lights_down(window: &tauri::WebviewWindow, offset: f64) -> tauri::Result<()> {
@@ -214,6 +254,26 @@ fn show_dropdown(app: &AppHandle) {
             let _ = window.set_position(PhysicalPosition::new(x, y));
         }
     }
+    show_dropdown_window(app, &window);
+}
+
+/// Show the macOS dropdown through NSPanel rather than Tauri's `show` and
+/// `set_focus`: Tauri activates the whole application when focusing a native
+/// window, which also raises the main AgentMFA window.
+#[cfg(target_os = "macos")]
+fn show_dropdown_window(app: &AppHandle, window: &tauri::WebviewWindow) {
+    if let Ok(panel) = app.get_webview_panel(DROPDOWN) {
+        panel.show_and_make_key();
+    } else {
+        // Startup normally makes this unreachable, but retaining a fallback
+        // keeps the dropdown recoverable if panel registration ever changes.
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn show_dropdown_window(_app: &AppHandle, window: &tauri::WebviewWindow) {
     let _ = window.show();
     let _ = window.set_focus();
 }
@@ -251,9 +311,23 @@ pub fn hide_dropdown(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(DROPDOWN) {
         if window.is_visible().unwrap_or(false) {
             let _ = app.emit_to(DROPDOWN, EVT_DROPDOWN_HIDDEN, ());
-            let _ = window.hide();
+            hide_dropdown_window(app, &window);
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn hide_dropdown_window(app: &AppHandle, window: &tauri::WebviewWindow) {
+    if let Ok(panel) = app.get_webview_panel(DROPDOWN) {
+        panel.hide();
+    } else {
+        let _ = window.hide();
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn hide_dropdown_window(_app: &AppHandle, window: &tauri::WebviewWindow) {
+    let _ = window.hide();
 }
 
 #[tauri::command]
