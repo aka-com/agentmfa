@@ -301,8 +301,16 @@ host-key-mismatched signing requests.
 - `400 {{"reason": "invalid_json"}}`: the request body was not valid JSON
   for the endpoint (wrong/missing Content-Type, malformed JSON, or a
   missing field); the `detail` says which.
-- `401 {{"reason": "invalid_token" | "token_expired"}}`: re-pair (the human
-  will see a pairing prompt).
+- `401 {{"reason": "missing_token", "cause": "...", "detail": "..."}}`:
+  no usable bearer token reached the broker. The `cause` distinguishes an
+  absent or invalid Authorization header, a non-Bearer scheme, and an empty
+  bearer credential. The detail describes what arrived without assuming the
+  agent itself omitted or rewrote the data.
+- `401 {{"reason": "invalid_token", "detail": "..."}}`: the token that
+  reached the broker was not recognized. It may have been revoked or rewritten
+  by a local application; re-pair.
+- `401 {{"reason": "token_expired"}}`: re-pair (the human will see a pairing
+  prompt).
 - `401 {{"reason": "token_superseded"}}`: another instance under your name
   re-paired; re-read the token at the response's `store_at`, do not pair
   again.

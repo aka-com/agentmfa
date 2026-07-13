@@ -388,6 +388,37 @@ async fn pairing_flow_and_token_auth() {
     let (status, body) = uds_request(&h.socket, "GET", "/v1/connections", &[], None).await;
     assert_eq!(status, 401);
     assert_eq!(body["reason"], "missing_token");
+    assert_eq!(body["cause"], "authorization_header_absent");
+    assert!(body["detail"]
+        .as_str()
+        .unwrap()
+        .contains("reached the broker"));
+
+    // Authentication errors describe what reached the broker without
+    // blaming the calling agent for omission or rewriting along the way.
+    let (status, body) = uds_request(
+        &h.socket,
+        "GET",
+        "/v1/connections",
+        &[("authorization", "Basic abc")],
+        None,
+    )
+    .await;
+    assert_eq!(status, 401);
+    assert_eq!(body["reason"], "missing_token");
+    assert_eq!(body["cause"], "authorization_scheme_invalid");
+
+    let (status, body) = uds_request(
+        &h.socket,
+        "GET",
+        "/v1/connections",
+        &[("authorization", "Bearer ")],
+        None,
+    )
+    .await;
+    assert_eq!(status, 401);
+    assert_eq!(body["reason"], "missing_token");
+    assert_eq!(body["cause"], "bearer_token_empty");
 
     let token = h.pair("claude-code").await;
     assert!(token.starts_with("amfa_"));
@@ -409,6 +440,16 @@ async fn pairing_flow_and_token_auth() {
     .await;
     assert_eq!(status, 200);
     assert_eq!(list, json!([]));
+    let lower_auth = format!("bearer {token}");
+    let (status, _) = uds_request(
+        &h.socket,
+        "GET",
+        "/v1/connections",
+        &[("authorization", &lower_auth)],
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
     let (status, body) = uds_request(
         &h.socket,
         "GET",
@@ -419,6 +460,10 @@ async fn pairing_flow_and_token_auth() {
     .await;
     assert_eq!(status, 401);
     assert_eq!(body["reason"], "invalid_token");
+    assert!(body["detail"]
+        .as_str()
+        .unwrap()
+        .contains("reached the broker"));
 
     // Revocation invalidates immediately.
     let client = h.broker.pairing.get("claude-code").unwrap();

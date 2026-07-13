@@ -25,6 +25,38 @@ pub const PROTOCOL_VERSION: u32 = 0;
 /// keeps compact tombstones compact as well as limiting request parsing.
 pub const REQUEST_ID_MAX_BYTES: usize = 256;
 
+/// Why authentication arrived without a usable bearer credential. This is
+/// deliberately phrased in terms of what the broker observed: without a
+/// credential, the broker cannot attribute omission or rewriting to the
+/// calling agent, its HTTP library, or another local forwarding application.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MissingTokenCause {
+    AuthorizationHeaderAbsent,
+    AuthorizationHeaderInvalid,
+    AuthorizationSchemeInvalid,
+    BearerTokenEmpty,
+}
+
+impl MissingTokenCause {
+    pub const fn detail(self) -> &'static str {
+        match self {
+            Self::AuthorizationHeaderAbsent => {
+                "No Authorization header reached the broker. It may have been blocked by a local application."
+            }
+            Self::AuthorizationHeaderInvalid => {
+                "An invalid Authorization header reached the broker. It may have been rewritten by a local application."
+            }
+            Self::AuthorizationSchemeInvalid => {
+                "An Authorization header reached the broker but did not use the Bearer scheme. It may have been rewritten by a local application."
+            }
+            Self::BearerTokenEmpty => {
+                "A Bearer Authorization header reached the broker without a token. It may have been rewritten by a local application."
+            }
+        }
+    }
+}
+
 /// The closed registry of machine-readable `{"reason": …}` values (ABP
 /// error registry). Every error body the broker sends names exactly one of
 /// these; producers hold variants, never raw strings, so the registry
@@ -325,6 +357,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&AuthScheme::BearerPinned).unwrap(),
             "\"bearer_pinned\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MissingTokenCause::AuthorizationHeaderAbsent).unwrap(),
+            "\"authorization_header_absent\""
         );
         assert_eq!(
             serde_json::to_string(&ApprovalMode::Blocking).unwrap(),

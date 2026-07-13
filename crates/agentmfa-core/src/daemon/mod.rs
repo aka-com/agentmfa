@@ -45,7 +45,7 @@ use crate::ratelimit::PairingBlock;
 use crate::types::{
     ConnectionConfig, ConnectionKind, Decision, PairedAgent, PeerIdentity, PermissionScope,
 };
-use crate::wire::{ErrorReason, REQUEST_ID_MAX_BYTES};
+use crate::wire::{ErrorReason, MissingTokenCause, REQUEST_ID_MAX_BYTES};
 
 /* ------------------------------ plumbing --------------------------------- */
 
@@ -70,6 +70,55 @@ impl Connected<axum::serve::IncomingStream<'_, UnixListener>> for PeerInfo {
 
 fn err(status: StatusCode, reason: ErrorReason) -> Response {
     (status, Json(json!({ "reason": reason }))).into_response()
+}
+
+fn err_missing_token(cause: MissingTokenCause) -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({
+            "reason": ErrorReason::MissingToken,
+            "cause": cause,
+            "detail": cause.detail(),
+        })),
+    )
+        .into_response()
+}
+
+fn bearer_token(headers: &axum::http::HeaderMap) -> Result<&str, MissingTokenCause> {
+    let authorization = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .ok_or(MissingTokenCause::AuthorizationHeaderAbsent)?;
+    let authorization = authorization
+        .to_str()
+        .map_err(|_| MissingTokenCause::AuthorizationHeaderInvalid)?;
+
+    let mut fields = authorization.splitn(2, char::is_whitespace);
+    let scheme = fields.next().unwrap_or_default();
+    if !scheme.eq_ignore_ascii_case("Bearer") {
+        return Err(MissingTokenCause::AuthorizationSchemeInvalid);
+    }
+
+    let token = fields.next().unwrap_or_default().trim();
+    if token.is_empty() {
+        return Err(MissingTokenCause::BearerTokenEmpty);
+    }
+    Ok(token)
+}
+
+#[cfg(test)]
+mod auth_header_tests {
+    use super::*;
+    use axum::http::{header::AUTHORIZATION, HeaderMap, HeaderValue};
+
+    #[test]
+    fn non_text_authorization_header_has_a_distinct_cause() {
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_bytes(b"\xff").unwrap());
+        assert_eq!(
+            bearer_token(&headers),
+            Err(MissingTokenCause::AuthorizationHeaderInvalid)
+        );
+    }
 }
 
 /// `Json` with the error contract applied. Axum's default body rejections
@@ -181,16 +230,7 @@ impl FromRequestParts<AppState> for Authed {
                 file_id: None,
                 executable_sha256: None,
             });
-        let token = parts
-            .headers
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .map(str::trim)
-            .filter(|t| !t.is_empty());
-        let Some(token) = token else {
-            return Err(err(StatusCode::UNAUTHORIZED, ErrorReason::MissingToken));
-        };
+        let token = bearer_token(&parts.headers).map_err(err_missing_token)?;
         match state.broker.pairing.verify(token, &peer) {
             Ok(agent) => Ok(Authed { agent }),
             Err(e) => {
@@ -223,6 +263,13 @@ impl FromRequestParts<AppState> for Authed {
                         })),
                     )
                         .into_response());
+                }
+                if e == TokenError::Invalid {
+                    return Err(err_detail(
+                        StatusCode::UNAUTHORIZED,
+                        ErrorReason::InvalidToken,
+                        "A bearer token reached the broker but was not recognized. It may have been revoked or rewritten by a local application.",
+                    ));
                 }
                 Err(err(StatusCode::UNAUTHORIZED, e.reason()))
             }
