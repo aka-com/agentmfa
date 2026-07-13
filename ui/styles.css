@@ -302,7 +302,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .guide-crumbs { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 2px; padding: 0 22px; }
 .guide-crumb {
   border: 0; background: none; font: inherit; font-size: 11.5px;
-  color: var(--muted); cursor: pointer; padding: 2px 7px; border-radius: 6px;
+  color: var(--muted); cursor: pointer; margin: 0 2px; padding: 2px 5px; border-radius: 6px;
 }
 .guide-crumb:hover { background: var(--hover); color: var(--ink-2); }
 .guide-crumb.on { color: var(--accent-ink); background: var(--accent-wash-2); }

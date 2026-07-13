@@ -339,8 +339,7 @@ function guideAddStepHTML(): string {
   const type = state.quickSetupType;
   const types = QUICK_SETUP_TYPES.map(([value, label]) =>
     `<button class="quick-type ${type === value ? 'on' : ''}" aria-pressed="${type === value}" data-act="quick-setup-type" data-type="${value}">${label}</button>`).join('');
-  return `<div class="onboarding-copy"><b>Add a service for your agent</b>
-      ${mode === 'dropdown' ? '' : '<span>Save a database, server, or API.</span>'}</div>
+  return `<div class="onboarding-copy"><b>Add a service for your agent</b></div>
     <div class="quick-type-row">
       <div class="quick-types" aria-label="Service type">${types}</div>
     </div>
@@ -580,7 +579,7 @@ function agentServiceRowHTML(a: AgentSummary, c: ConnectionSummary): string {
 
 function agentBlockHTML(a: AgentSummary): string {
   const menuOpen = state.agentMenuOpen === a.id;
-  const sub = `${a.program} · ${a.verification} · last used ${relTime(a.last_used)}`;
+  const sub = `${a.program} · last used ${relTime(a.last_used)}`;
   const rows = state.connections.length
     ? state.connections.map((c) => agentServiceRowHTML(a, c)).join('')
     : `<div class="acc-none">No services yet.${mode === 'dropdown' ? '' : ` Add one to give ${esc(a.name)} somewhere to connect.`}</div>`;
@@ -594,7 +593,6 @@ function agentBlockHTML(a: AgentSummary): string {
           aria-label="Options for ${escAttr(a.name)}" aria-haspopup="menu"
           aria-expanded="${menuOpen}" data-act="toggle-agent-menu" data-id="${a.id}">${ICONS.ellipsis}</button>
         ${menuOpen ? `<div class="agent-menu" role="menu" aria-label="Options for ${escAttr(a.name)}">
-          <button class="menu-item" role="menuitem" data-act="copy-agent-setup">${ICONS.copy} Copy setup instructions</button>
           <button class="menu-item danger" role="menuitem" data-act="revoke-ask" data-id="${a.id}">${ICONS.unplug} Disconnect ${esc(a.name)}…</button>
         </div>` : ''}
       </div>
