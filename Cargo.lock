@@ -3,10 +3,28 @@
 version = 4
 
 [[package]]
-name = "agentmfa-cli"
+name = "agentmfa-sandbox"
 version = "0.1.0"
 dependencies = [
- "agentmfa-core",
+ "axum",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "aho-corasick"
+version = "1.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
+name = "aka"
+version = "0.1.0"
+dependencies = [
+ "aka-core",
  "clap",
  "dirs",
  "libc",
@@ -17,7 +35,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "agentmfa-core"
+name = "aka-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -59,24 +77,6 @@ dependencies = [
  "uuid",
  "webpki-roots 0.26.11",
  "zeroize",
-]
-
-[[package]]
-name = "agentmfa-sandbox"
-version = "0.1.0"
-dependencies = [
- "axum",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "aho-corasick"
-version = "1.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301"
-dependencies = [
- "memchr",
 ]
 
 [[package]]

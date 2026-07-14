@@ -145,7 +145,7 @@ pub fn setup_app_menu(app: &AppHandle) -> tauri::Result<()> {
     }
 
     let app_window =
-        MenuItem::with_id(app, APP_WINDOW_MENU_ID, "AgentMFA", true, None::<&str>)?;
+        MenuItem::with_id(app, APP_WINDOW_MENU_ID, "AKA Desktop", true, None::<&str>)?;
     if let Some(MenuItemKind::Submenu(window_menu)) = menu.get(WINDOW_SUBMENU_ID) {
         let separator = PredefinedMenuItem::separator(app)?;
         window_menu.append_items(&[&separator, &app_window])?;
@@ -180,10 +180,10 @@ fn focus_existing_or_reopen(app: &AppHandle) {
 /// Install the always-present tray icon. Left-click toggles the compact
 /// dropdown; right-click exposes the conventional app menu.
 pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
-    let open = MenuItem::with_id(app, "tray-open", "Open AgentMFA", true, None::<&str>)?;
+    let open = MenuItem::with_id(app, "tray-open", "Open AKA Desktop", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "tray-settings", "Settings…", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
-    let quit = MenuItem::with_id(app, "tray-quit", "Quit AgentMFA", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "tray-quit", "Quit AKA Desktop", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &settings, &separator, &quit])?;
 
     let tray = app

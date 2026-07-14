@@ -1,16 +1,17 @@
-# AgentMFA
+# AKA Credential Server
 
-AgentMFA allows agents to make API calls, open database connections,
-and access SSH servers, using unmodified tools like `curl`, `psql`,
-and `git` without exposing raw credentials.
+The AKA credential server allows agents to make API calls, open
+database connections, and access SSH servers, using unmodified tools
+like `curl`, `psql`, and `git` without exposing raw credentials.
 
-Agents make calls through a connection broker, which keeps API keys in
-macOS keychain and injects them into request following user approval.
+1. Agents make calls through a connection broker, which keeps keys in
+   a local secret store, where they are encrypted on-disk and injected
+   into requests, only following user approval.
+2. Secrets are synced between different backing stores, like the macOS
+   Keychain, Hashicorp Vault (coming soon), 1Password (coming soon), or
+   AWS KMS (coming soon).
 
-The default approval creates a fixed 15-minute session. Try a GET/HEAD
-request for read access, or a POST or pg/SSH connection for full access.
-
-AgentMFA supports most everyday workflows:
+AKA supports most common workflows:
 
 - **HTTP**: the agent supplies method/path/headers/body to a pinned host
 - **Postgres**: the agent gets a password-less DSN + short-lived ticket
@@ -20,6 +21,10 @@ AgentMFA supports most everyday workflows:
   and pinned at the first connection)
 - **WebSocket**: the agent gets a short-lived `ws://127.0.0.1:…` bridge
   URL usable by any stock WS client
+- **MCP**: coming soon, via https://executor.sh
+
+The default approval creates fixed 15-minute sessions. Try a GET/HEAD
+request, a POST request, or open a Postgres or SSH connection.
 
 Pair tokens are checked against the code-signing identity observed
 during pairing, or a best-effort local executable fingerprint for
@@ -28,10 +33,10 @@ name from that program identity. Permissions bind to a stable
 paired-client ID; a different program requesting the same name
 inherits nothing.
 
-We uses the `keyring` crate's apple-native backend, which targets the
-login keychain and does not expose the Data Protection keychain's
-`SecAccessControl` policies.  Native reauthentication on read is
-enforced by the broker before app-initiated vault reads; true
+Locally, we use the `keyring` crate's apple-native backend, which
+targets the login keychain and does not expose the Data Protection
+keychain's `SecAccessControl` policies. Native reauthentication on
+read is enforced by the broker before app-initiated vault reads; true
 Keychain-enforced per-item ACL semantics require direct
 Security.framework calls and corresponding signing entitlements.
 
@@ -65,13 +70,13 @@ or `APPLE_ID`, `APPLE_PASSWORD`, and `APPLE_TEAM_ID`.
 
 ## Test builds
 
-To drive the system without the desktop app, `agentmfa serve` runs the
+To drive the system without the desktop app, `aka serve` runs the
 whole broker headless with a terminal approver, so you can drive it
 exactly as an agent would over the Unix socket:
 
 ```sh
-cargo run -p agentmfa-cli -- serve
-curl --unix-socket ~/.agentmfa/broker.sock http://localhost/instructions
+cargo run -p aka -- serve
+curl --unix-socket ~/.aka/broker.sock http://localhost/instructions
 ```
 
 For disposable local HTTP, WebSocket, Postgres, and SSH upstreams — the
@@ -86,21 +91,21 @@ npm run sandbox:up
 To seed secrets and connections from the terminal, with the broker stopped:
 
 ```sh
-printf '%s' "$GITHUB_TOKEN" | cargo run -p agentmfa-cli -- secret add GITHUB_API_KEY
-cargo run -p agentmfa-cli -- conn add github --kind api --host api.github.com \
+printf '%s' "$GITHUB_TOKEN" | cargo run -p aka -- secret add GITHUB_API_KEY
+cargo run -p aka -- conn add github --kind api --host api.github.com \
     --template 'Authorization: Bearer {{GITHUB_API_KEY}}'
-cargo run -p agentmfa-cli -- conn list
+cargo run -p aka -- conn list
 ```
 
 To generate the checked-in skill file served at /instructions:
 
 ```sh
-cargo run -p agentmfa-cli -- skill --write    # → .claude/skills/agentmfa/SKILL.md
+cargo run -p aka -- skill --write    # → .claude/skills/aka/SKILL.md
 ```
 
 ## Agent workflow
 
-1. Reuse the token stored at `~/.agentmfa/tokens/<name>` if `GET /v1/whoami`
+1. Reuse the token stored at `~/.aka/tokens/<name>` if `GET /v1/whoami`
    accepts it, or use `POST /v1/pair {"agent_name": "claude-code"}` to pair
    a new agent and get a 30-day bearer token.
 2. `GET /v1/connections` — discover the named connections it may use (targets
@@ -138,7 +143,7 @@ cargo run -p agentmfa-cli -- skill --write    # → .claude/skills/agentmfa/SKIL
 
 ```
                         ┌────────────────────────────────────────────┐
-                        │                AgentMFA.app                │
+                        │              Credential Server             │
                         │                                            │
  ┌──────────────┐ Tauri │  ┌──────────────┐        ┌──────────────┐  │
  │ Webview UI   │ cmds  │  │  UI commands │        │   Keychain   │  │
@@ -173,7 +178,7 @@ Other features:
   does not authorize agent reads or other protected actions. On other
   platforms the confirmation gate fails closed and the concealed-clipboard
   write is skipped (both are macOS product features).
-- **SSH host binding.** The AgentMFA implementation requires OpenSSH
+- **SSH host binding.** The AKA implementation requires OpenSSH
   `session-bind@openssh.com` and signs only
   `publickey-hostbound-v00@openssh.com` authentication for the configured user,
   key, session, and server host-key fingerprint. Unbound or mismatched signing
@@ -185,7 +190,7 @@ Other features:
   says about it, and only that one-time decision (never an access session or
   standing rule) writes the pin.
 - **HTTP consequence classification.** For access-session scope, idempotency,
-  and the extra confirmation on *Allow once*, AgentMFA classifies `GET` and
+  and the extra confirmation on *Allow once*, AKA classifies `GET` and
   `HEAD` as read-like and every other accepted method as potentially mutating.
   In the desktop app, starting an access session always requires native
   confirmation, including for a read. The method classification is a

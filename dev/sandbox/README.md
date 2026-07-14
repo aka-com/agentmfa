@@ -27,7 +27,7 @@ A copy of this walkthrough formatted for the browser is in
   `bash scripts/sandbox-up.sh` works without it)
 - `curl`, `ssh-keygen`, and `ssh-keyscan` (preinstalled on macOS)
 - AgentMFA: the desktop app, or the headless broker
-  (`cargo run -p agentmfa-cli -- serve`) on any platform
+  (`cargo run -p aka -- serve`) on any platform
 
 ## 2. Start the sandbox
 

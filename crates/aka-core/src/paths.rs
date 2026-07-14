@@ -2,11 +2,11 @@
 //!
 //! - Non-secret state (`index.json`, `rules.json`, `agents.json`,
 //!   `audit.jsonl`) lives under the per-user data directory,
-//!   `~/Library/Application Support/agentmfa` on macOS.
-//! - The control-plane rendezvous point is `~/.agentmfa/broker.sock`
+//!   `~/Library/Application Support/aka` on macOS.
+//! - The control-plane rendezvous point is `~/.aka/broker.sock`
 //!   (short and space-free: it never needs shell quoting and stays well
 //!   clear of the 104-byte `sun_path` limit). A persistent `broker.lock`
-//!   serializes startup and stale-socket repair. `~/.agentmfa` is created
+//!   serializes startup and stale-socket repair. `~/.aka` is created
 //!   `0700`; the lock and socket are `0600`.
 
 use std::fs;
@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 pub struct Paths {
     /// Non-secret app state: index.json, rules.json, agents.json, audit.jsonl.
     pub data_dir: PathBuf,
-    /// `~/.agentmfa`, the socket directory (also the advisory token home
+    /// `~/.aka`, the socket directory (also the advisory token home
     /// that `/instructions` names for agents).
     pub socket_dir: PathBuf,
 }
@@ -61,10 +61,10 @@ impl Paths {
     pub fn default_locations() -> io::Result<Self> {
         let data_dir = dirs::data_dir()
             .ok_or_else(|| io::Error::other("no per-user data directory"))?
-            .join("agentmfa");
+            .join("aka");
         let socket_dir = dirs::home_dir()
             .ok_or_else(|| io::Error::other("no home directory"))?
-            .join(".agentmfa");
+            .join(".aka");
         Ok(Self {
             data_dir,
             socket_dir,
@@ -218,6 +218,13 @@ fn unique_archive_path(dir: &Path, suffix: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_locations_use_aka_directories() {
+        let paths = Paths::default_locations().unwrap();
+        assert_eq!(paths.data_dir.file_name().unwrap(), "aka");
+        assert_eq!(paths.socket_dir.file_name().unwrap(), ".aka");
+    }
 
     #[test]
     fn archive_data_dir_moves_data_but_not_socket_state() {

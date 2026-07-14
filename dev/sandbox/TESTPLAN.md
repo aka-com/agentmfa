@@ -208,7 +208,7 @@ the Unix socket:
 
 ```sh
 cargo build --workspace
-B=./target/debug/agentmfa; ROOT=/tmp/amfa   # keep the root path short
+B=./target/debug/aka; ROOT=/tmp/amfa   # keep the root path short
 
 printf '%s' agentmfa-test-token       | $B secret add SANDBOX_HTTP_TOKEN --root $ROOT
 printf '%s' agentmfa-ws-test-token    | $B secret add SANDBOX_WEBSOCKET_TOKEN --root $ROOT

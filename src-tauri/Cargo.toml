@@ -24,7 +24,7 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-agentmfa-core = { path = "../crates/agentmfa-core" }
+aka-core = { path = "../crates/aka-core" }
 tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
 tauri-plugin-notification = "2"
 tauri-plugin-clipboard-manager = "2"

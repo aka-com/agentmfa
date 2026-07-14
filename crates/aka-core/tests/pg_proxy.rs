@@ -6,18 +6,18 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use agentmfa_core::approvals::ApprovalRequest;
-use agentmfa_core::broker::{Broker, UiDecision};
-use agentmfa_core::config::BrokerConfig;
-use agentmfa_core::daemon;
-use agentmfa_core::events::BrokerEvents;
-use agentmfa_core::paths::Paths;
-use agentmfa_core::store::ConnectionSpec;
-use agentmfa_core::types::{
+use aka_core::approvals::ApprovalRequest;
+use aka_core::broker::{Broker, UiDecision};
+use aka_core::config::BrokerConfig;
+use aka_core::daemon;
+use aka_core::events::BrokerEvents;
+use aka_core::paths::Paths;
+use aka_core::store::ConnectionSpec;
+use aka_core::types::{
     ConfirmationMethod, ConnectionConfig, ConnectionKind, DecisionContext, DecisionSurface,
     PgSslMode, SecretMeta,
 };
-use agentmfa_core::vault::MemoryVault;
+use aka_core::vault::MemoryVault;
 use base64::Engine as _;
 use hmac::{Hmac, Mac as _};
 use http_body_util::BodyExt as _;

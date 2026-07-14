@@ -766,11 +766,11 @@ function renderMainWindow() {
         <button class="menu-item" data-act="open-settings">${ICONS.gear} Settings</button>
       </div>` : '';
   root().innerHTML = `<div class="surface">
-    <div class="dw-titlebar" data-tauri-drag-region><span class="dw-title">AgentMFA</span></div>
+    <div class="dw-titlebar" data-tauri-drag-region><span class="dw-title">AKA Desktop</span></div>
     <div class="dw-body">
       <div class="dw-side">
         <div class="dw-brand"><div class="dd-appicon">🔐</div>
-          <div><div class="dd-title">AgentMFA</div>${brokerReadyHTML()}</div></div>
+          <div><div class="dd-title">AKA Desktop</div>${brokerReadyHTML()}</div></div>
         <div class="dw-nav">${nav}</div>
         <div class="dw-secondary-nav">${activityNav}</div>
         <div class="dw-settings">${menu}
@@ -795,7 +795,7 @@ function renderDropdown() {
     ? '<div class="dd-footer"><button class="btn block" data-act="open-add-conn">＋ Add service</button></div>' : '';
   root().innerHTML = `<div class="surface dropdown-surface">
     <div class="dd-head"><div class="dd-appicon">🔐</div>
-      <div class="dd-identity"><div class="dd-title">AgentMFA</div>${brokerReadyHTML()}</div>
+      <div class="dd-identity"><div class="dd-title">AKA Desktop</div>${brokerReadyHTML()}</div>
       <button class="icon-btn" title="Open as a window" aria-label="Open as a window" data-act="mode-window">${ICONS.expand}</button>
       ${walkthroughMenuHTML()}
       <button class="icon-btn" title="Settings" aria-label="Settings" data-act="open-settings">${ICONS.gear}</button></div>
@@ -1166,8 +1166,8 @@ function approvalWindowLabel(req: ApprovalRequest): string {
 }
 
 function approvalHeading(req: ApprovalRequest): string {
-  const name = req.connection ? req.connection.name : 'AgentMFA';
-  if (req.kind === 'pair') return `Let ${req.agent} connect to AgentMFA?`;
+  const name = req.connection ? req.connection.name : 'AKA Desktop';
+  if (req.kind === 'pair') return `Let ${req.agent} connect to AKA Desktop?`;
   if (req.kind === 'propose') {
     return `${req.agent} wants to add a new service: ${req.proposal?.name ?? ''}`;
   }

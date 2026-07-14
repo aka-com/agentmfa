@@ -6,20 +6,20 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use agentmfa_core::approvals::ApprovalRequest;
-use agentmfa_core::audit::AuditKind;
-use agentmfa_core::broker::{Broker, UiDecision};
-use agentmfa_core::config::BrokerConfig;
-use agentmfa_core::daemon;
-use agentmfa_core::error::CoreError;
-use agentmfa_core::events::BrokerEvents;
-use agentmfa_core::paths::Paths;
-use agentmfa_core::store::ConnectionSpec;
-use agentmfa_core::types::{
+use aka_core::approvals::ApprovalRequest;
+use aka_core::audit::AuditKind;
+use aka_core::broker::{Broker, UiDecision};
+use aka_core::config::BrokerConfig;
+use aka_core::daemon;
+use aka_core::error::CoreError;
+use aka_core::events::BrokerEvents;
+use aka_core::paths::Paths;
+use aka_core::store::ConnectionSpec;
+use aka_core::types::{
     ConfirmationMethod, ConnectionConfig, DecisionContext, DecisionSurface, PgSslMode, SecretMeta,
 };
-use agentmfa_core::vault::MemoryVault;
-use agentmfa_core::wire::REQUEST_ID_MAX_BYTES;
+use aka_core::vault::MemoryVault;
+use aka_core::wire::REQUEST_ID_MAX_BYTES;
 use axum::routing::{any, get, post};
 use axum::Router;
 use http_body_util::BodyExt as _;
@@ -1971,14 +1971,14 @@ async fn pairing_inheritance_is_disclosed() {
     // The same verified client earned a standing rule before re-pairing.
     h.pair("claude-code").await;
     let client = h.broker.pairing.get("claude-code").unwrap();
-    use agentmfa_core::policy::PolicyEngine as _;
+    use aka_core::policy::PolicyEngine as _;
     h.broker
         .policy
         .record_rule(
             client.id,
             "claude-code",
             conn.id,
-            agentmfa_core::types::PermissionScope::Full,
+            aka_core::types::PermissionScope::Full,
         )
         .unwrap();
 
@@ -2225,7 +2225,7 @@ impl Harness {
             .decide_with_options(
                 &request.id,
                 decision,
-                agentmfa_core::broker::DecisionOptions {
+                aka_core::broker::DecisionOptions {
                     revoke_inherited_rules: false,
                     proposal_credential: credential.map(|value| Zeroizing::new(value.to_string())),
                 },
@@ -2257,7 +2257,7 @@ async fn propose_prompts_and_creates_connection_with_user_credential() {
     let prompt = h
         .decide_next_with_credential(UiDecision::AllowOnce, Some("s3cr3t"))
         .await;
-    assert_eq!(prompt.kind, agentmfa_core::approvals::ApprovalKind::Propose);
+    assert_eq!(prompt.kind, aka_core::approvals::ApprovalKind::Propose);
     let proposal = prompt.proposal.as_ref().expect("proposal view");
     assert_eq!(proposal.name, "sandbox-pg");
     assert_eq!(proposal.credential_name, "SANDBOX_PG_PASSWORD");
@@ -2310,7 +2310,7 @@ async fn propose_allow_without_credential_fails_closed_and_stays_pending() {
     let missing = h.broker.decide_with_options(
         &request.id,
         UiDecision::AllowOnce,
-        agentmfa_core::broker::DecisionOptions::default(),
+        aka_core::broker::DecisionOptions::default(),
         &ctx(),
     );
     assert!(missing.is_err(), "allow without a credential must fail");
@@ -2319,7 +2319,7 @@ async fn propose_allow_without_credential_fails_closed_and_stays_pending() {
         .decide_with_options(
             &request.id,
             UiDecision::Deny,
-            agentmfa_core::broker::DecisionOptions::default(),
+            aka_core::broker::DecisionOptions::default(),
             &ctx(),
         )
         .unwrap();
@@ -2356,7 +2356,7 @@ async fn disconnected_agent_cannot_apply_its_parked_proposal() {
     let stale = h.broker.decide_with_options(
         &request.id,
         UiDecision::AllowOnce,
-        agentmfa_core::broker::DecisionOptions {
+        aka_core::broker::DecisionOptions {
             revoke_inherited_rules: false,
             proposal_credential: Some(Zeroizing::new("s3cr3t".into())),
         },
@@ -2370,7 +2370,7 @@ async fn disconnected_agent_cannot_apply_its_parked_proposal() {
         .decide_with_options(
             &request.id,
             UiDecision::Deny,
-            agentmfa_core::broker::DecisionOptions::default(),
+            aka_core::broker::DecisionOptions::default(),
             &ctx(),
         )
         .unwrap();
@@ -2415,7 +2415,7 @@ async fn ssh_proposal_discloses_the_exact_invocation_alias() {
         .decide_with_options(
             &request.id,
             UiDecision::Deny,
-            agentmfa_core::broker::DecisionOptions::default(),
+            aka_core::broker::DecisionOptions::default(),
             &ctx(),
         )
         .unwrap();
@@ -2514,7 +2514,7 @@ async fn proposal_rechecks_equivalent_target_after_the_prompt() {
         .decide_with_options(
             &request.id,
             UiDecision::AllowOnce,
-            agentmfa_core::broker::DecisionOptions {
+            aka_core::broker::DecisionOptions {
                 revoke_inherited_rules: false,
                 proposal_credential: Some(Zeroizing::new("s3cr3t".into())),
             },

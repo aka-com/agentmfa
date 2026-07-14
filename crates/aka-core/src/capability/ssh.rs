@@ -12,7 +12,7 @@
 //! Unlike the WS bridge and PG proxy (one shared loopback-TCP listener bound
 //! at daemon start), each SSH open binds its **own** Unix-domain socket:
 //! the ssh-agent wire protocol carries no ticket field, so the socket path
-//! *is* the capability. The socket lives under `~/.agentmfa/ssh/`, created
+//! *is* the capability. The socket lives under `~/.aka/ssh/`, created
 //! `0700`, and the socket itself `0600` — only the same local user can reach
 //! it, a strictly tighter boundary than the loopback-TCP data planes.
 //!

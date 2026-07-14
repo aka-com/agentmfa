@@ -2,7 +2,7 @@
 //!
 //! Pairing, policy decisions, brokered calls, and vault-touching UI actions
 //! like reveal/copy emit entries to the activity view and are appended to
-//! `~/Library/Application Support/agentmfa/audit.jsonl` on a best-effort
+//! `~/Library/Application Support/aka/audit.jsonl` on a best-effort
 //! basis. Append failures are logged but do not fail the associated operation.
 
 use std::collections::BTreeMap;

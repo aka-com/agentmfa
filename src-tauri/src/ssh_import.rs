@@ -139,7 +139,7 @@ pub fn load_identity(
     }
     let value = fs::read_to_string(&selected)
         .map_err(|error| format!("could not read selected identity file: {error}"))?;
-    agentmfa_core::capability::ssh::validate_private_key(value.as_bytes())?;
+    aka_core::capability::ssh::validate_private_key(value.as_bytes())?;
     Ok(zeroize::Zeroizing::new(value))
 }
 

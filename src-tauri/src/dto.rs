@@ -4,11 +4,11 @@
 //! timestamps, never any fragment of its value. Reveal is a separate,
 //! audited command that returns a short prefix on demand.
 
-use agentmfa_core::approvals::ApprovalRequest;
-use agentmfa_core::audit::AuditEntry;
-use agentmfa_core::broker::Broker;
-use agentmfa_core::sessions::SessionInfo;
-use agentmfa_core::types::{Connection, PairedAgent, PeerIdentity, Rule, SecretMeta};
+use aka_core::approvals::ApprovalRequest;
+use aka_core::audit::AuditEntry;
+use aka_core::broker::Broker;
+use aka_core::sessions::SessionInfo;
+use aka_core::types::{Connection, PairedAgent, PeerIdentity, Rule, SecretMeta};
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -71,7 +71,7 @@ pub struct ConnectionDto {
 
 impl ConnectionDto {
     pub fn from(conn: &Connection, all_rules: &[Rule], broker: &Broker) -> Self {
-        use agentmfa_core::types::ConnectionConfig::*;
+        use aka_core::types::ConnectionConfig::*;
         let secret_names = conn
             .secrets
             .iter()
@@ -301,8 +301,8 @@ impl ApprovalDto {
         // the broker coerces any such decision to allow-once regardless.
         let temporary_access = if matches!(
             request.kind,
-            agentmfa_core::approvals::ApprovalKind::Pair
-                | agentmfa_core::approvals::ApprovalKind::Propose
+            aka_core::approvals::ApprovalKind::Pair
+                | aka_core::approvals::ApprovalKind::Propose
         ) || request.ssh.is_some()
         {
             None

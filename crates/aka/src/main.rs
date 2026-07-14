@@ -1,12 +1,12 @@
-//! `agentmfa` CLI.
+//! `aka` CLI.
 //!
-//! - `agentmfa skill` emits the `/instructions` content as a checked-in
+//! - `aka skill` emits the `/instructions` content as a checked-in
 //!   skill file, the same content the daemon serves, so the convention
 //!   layer can't drift from the daemon.
-//! - `agentmfa serve` runs the broker headless with a terminal approver, so
+//! - `aka serve` runs the broker headless with a terminal approver, so
 //!   the whole control plane + WS/PG data planes can be exercised without
 //!   the desktop UI (useful for agent integration and CI).
-//! - `agentmfa secret add` / `agentmfa conn add` / `agentmfa conn list`
+//! - `aka secret add` / `aka conn add` / `aka conn list`
 //!   seed the store from the terminal — the dev/headless counterpart of the
 //!   app's Secrets and Connections tabs — with the same validation, so a
 //!   `serve --root` harness never hand-writes (sealed) store files.
@@ -20,25 +20,25 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use agentmfa_core::approvals::{ApprovalKind, ApprovalRequest};
-use agentmfa_core::broker::{Broker, DecisionOptions, UiDecision};
-use agentmfa_core::config::BrokerConfig;
-use agentmfa_core::daemon;
-use agentmfa_core::daemon::wellknown;
-use agentmfa_core::error::CoreError;
-use agentmfa_core::events::BrokerEvents;
-use agentmfa_core::paths::{BrokerInstanceLock, Paths};
-use agentmfa_core::store::{ConnectionSpec, Store};
-use agentmfa_core::types::{
+use aka_core::approvals::{ApprovalKind, ApprovalRequest};
+use aka_core::broker::{Broker, DecisionOptions, UiDecision};
+use aka_core::config::BrokerConfig;
+use aka_core::daemon;
+use aka_core::daemon::wellknown;
+use aka_core::error::CoreError;
+use aka_core::events::BrokerEvents;
+use aka_core::paths::{BrokerInstanceLock, Paths};
+use aka_core::store::{ConnectionSpec, Store};
+use aka_core::types::{
     ConfirmationMethod, ConnectionConfig, ConnectionKind, DecisionContext, DecisionSurface,
     PgSslMode, SecretMeta, SecretValue,
 };
-use agentmfa_core::vault::{platform_vault, platform_vault_for_root, SecretVault};
+use aka_core::vault::{platform_vault, platform_vault_for_root, SecretVault};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use zeroize::Zeroizing;
 
 #[derive(Parser)]
-#[command(name = "agentmfa", version, about = "AgentMFA broker CLI")]
+#[command(name = "aka", version, about = "AKA broker CLI")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -47,9 +47,9 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Emit the /instructions content as a skill file. Prints to stdout by
-    /// default; `--write` writes .claude/skills/agentmfa/SKILL.md.
+    /// default; `--write` writes .claude/skills/aka/SKILL.md.
     Skill {
-        /// Write the file to `path` (default .claude/skills/agentmfa/SKILL.md)
+        /// Write the file to `path` (default .claude/skills/aka/SKILL.md)
         /// instead of printing to stdout.
         #[arg(long)]
         write: bool,
@@ -57,7 +57,7 @@ enum Command {
         #[arg(long, conflicts_with = "user")]
         path: Option<PathBuf>,
         /// With --write, target the user-level skills directory
-        /// (~/.claude/skills/agentmfa/SKILL.md) instead of the repo-local
+        /// (~/.claude/skills/aka/SKILL.md) instead of the repo-local
         /// default, so every project's agents see it.
         #[arg(long)]
         user: bool,
@@ -230,7 +230,7 @@ fn store_paths(root: Option<&Path>) -> Paths {
 fn open_vault(
     paths: &Paths,
     root: Option<&Path>,
-) -> Result<Arc<dyn SecretVault>, agentmfa_core::error::CoreError> {
+) -> Result<Arc<dyn SecretVault>, aka_core::error::CoreError> {
     match root {
         Some(root) => platform_vault_for_root(paths, root),
         None => platform_vault(paths),
@@ -373,7 +373,7 @@ fn cmd_conn_add(args: ConnAdd) {
         (Some(name), _) => match store.secret_by_name(name) {
             Some(meta) => vec![meta.id],
             None => die(format!(
-                "no secret named {name:?}; add it first with `agentmfa secret add {name}`"
+                "no secret named {name:?}; add it first with `aka secret add {name}`"
             )),
         },
         (None, _) => Vec::new(),
@@ -507,7 +507,7 @@ fn cmd_conn_list(root: Option<PathBuf>) {
     let store = open_store(root);
     let connections = store.list_connections();
     if connections.is_empty() {
-        eprintln!("no connections configured (add one with `agentmfa conn add`)");
+        eprintln!("no connections configured (add one with `aka conn add`)");
         return;
     }
     for conn in connections {
@@ -534,8 +534,8 @@ fn cmd_skill(write: bool, path: Option<PathBuf>, user: bool, root: Option<PathBu
         (Some(path), _) => path,
         (None, true) => dirs::home_dir()
             .expect("home directory")
-            .join(".claude/skills/agentmfa/SKILL.md"),
-        (None, false) => PathBuf::from(".claude/skills/agentmfa/SKILL.md"),
+            .join(".claude/skills/aka/SKILL.md"),
+        (None, false) => PathBuf::from(".claude/skills/aka/SKILL.md"),
     };
     if let Some(dir) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(dir) {
@@ -599,7 +599,7 @@ fn cmd_serve(root: Option<PathBuf>, auto_yes: bool) {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "agentmfa_core=info".into()),
+                .unwrap_or_else(|_| "aka_core=info".into()),
         )
         .init();
 
@@ -649,7 +649,7 @@ fn cmd_serve(root: Option<PathBuf>, auto_yes: bool) {
         daemon.socket_path.display()
     );
     eprintln!(
-        "  skill file: `agentmfa skill --write` in a repo (or --write --user) \
+        "  skill file: `aka skill --write` in a repo (or --write --user) \
          teaches agents this broker"
     );
     if auto_yes {
@@ -721,7 +721,7 @@ fn prompt_decision_until_shutdown(
     request: &ApprovalRequest,
     access_grant_ttl: Duration,
     stopping: Arc<AtomicBool>,
-) -> Option<(UiDecision, Option<agentmfa_core::types::SecretValue>)> {
+) -> Option<(UiDecision, Option<aka_core::types::SecretValue>)> {
     if stopping.load(Ordering::Acquire) {
         return None;
     }
@@ -734,9 +734,9 @@ fn prompt_decision_until_shutdown(
 }
 
 fn wait_for_decision_or_shutdown(
-    rx: std::sync::mpsc::Receiver<(UiDecision, Option<agentmfa_core::types::SecretValue>)>,
+    rx: std::sync::mpsc::Receiver<(UiDecision, Option<aka_core::types::SecretValue>)>,
     stopping: Arc<AtomicBool>,
-) -> Option<(UiDecision, Option<agentmfa_core::types::SecretValue>)> {
+) -> Option<(UiDecision, Option<aka_core::types::SecretValue>)> {
     loop {
         if stopping.load(Ordering::Acquire) {
             return None;
@@ -754,7 +754,7 @@ fn wait_for_decision_or_shutdown(
 fn prompt_decision(
     req: &ApprovalRequest,
     access_grant_ttl: Duration,
-) -> (UiDecision, Option<agentmfa_core::types::SecretValue>) {
+) -> (UiDecision, Option<aka_core::types::SecretValue>) {
     eprintln!("── approval required ──────────────────────────────");
     eprintln!("  agent:   {}", req.agent);
     if req.kind == ApprovalKind::Pair {
@@ -910,7 +910,7 @@ impl Drop for TerminalEchoGuard {
 }
 
 fn read_proposal_credential(
-    proposal: &agentmfa_core::approvals::ProposalView,
+    proposal: &aka_core::approvals::ProposalView,
 ) -> std::io::Result<SecretValue> {
     let stdin = std::io::stdin();
     let is_terminal = stdin.is_terminal();
@@ -985,8 +985,8 @@ fn format_duration(duration: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentmfa_core::events::NoopEvents;
-    use agentmfa_core::vault::MemoryVault;
+    use aka_core::events::NoopEvents;
+    use aka_core::vault::MemoryVault;
 
     #[test]
     fn proposal_credential_reader_handles_single_and_multiline_values() {

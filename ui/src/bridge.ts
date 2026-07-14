@@ -75,11 +75,11 @@ const MOCK_ACTIVITY_META = {
   grantRevoked: { icon: 'shieldX', tone: 'danger' },
   tokenRevoked: { icon: 'unplug', tone: 'danger' },
 };
-const MOCK_AGENT_SETUP = 'Connect to the local AgentMFA broker. Read its current instructions, then list what connections are currently available:\n\ncurl -fsS --unix-socket ~/.agentmfa/broker.sock http://localhost/instructions';
+const MOCK_AGENT_SETUP = 'Connect to the local AgentMFA broker. Read its current instructions, then list what connections are currently available:\n\ncurl -fsS --unix-socket ~/.aka/broker.sock http://localhost/instructions';
 const MOCK_BROKER_INSTRUCTIONS = `# AgentMFA: broker instructions
 
 AgentMFA holds this developer's secrets and brokers their use.
-Transport: HTTP over the Unix domain socket \`~/.agentmfa/broker.sock\`.
+Transport: HTTP over the Unix domain socket \`~/.aka/broker.sock\`.
 
 ## 1. Authenticate
 Reuse a stored token via GET /v1/whoami, or POST /v1/pair when you must.
@@ -589,7 +589,7 @@ if (!tauri && typeof window !== 'undefined') {
     const req: ApprovalRequest = {
       id: uid(), agent: 'claude-code', kind: kind === 'pair' ? 'pair' : 'http',
       connection: kind === 'pair' ? null : { id: firstConnection.id, name: 'github', type: 'api', target: 'api.github.com' },
-      action: kind === 'pair' ? 'Connect claude-code to AgentMFA'
+      action: kind === 'pair' ? 'Connect claude-code to AKA Desktop'
         : post ? 'POST api.github.com/repos/aka/aka/dispatches' : 'GET api.github.com/user/repos',
       notification: 'claude-code wants to use github: GET /user/repos',
       received_at: now(), deadline: new Date(Date.now() + ttlMs).toISOString(),

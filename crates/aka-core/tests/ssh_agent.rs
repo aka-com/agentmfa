@@ -7,17 +7,17 @@
 use std::path::Path;
 use std::time::Duration;
 
-use agentmfa_core::approvals::ApprovalRequest;
-use agentmfa_core::broker::{Broker, UiDecision};
-use agentmfa_core::config::BrokerConfig;
-use agentmfa_core::daemon;
-use agentmfa_core::events::BrokerEvents;
-use agentmfa_core::paths::Paths;
-use agentmfa_core::store::ConnectionSpec;
-use agentmfa_core::types::{
+use aka_core::approvals::ApprovalRequest;
+use aka_core::broker::{Broker, UiDecision};
+use aka_core::config::BrokerConfig;
+use aka_core::daemon;
+use aka_core::events::BrokerEvents;
+use aka_core::paths::Paths;
+use aka_core::store::ConnectionSpec;
+use aka_core::types::{
     ConfirmationMethod, ConnectionConfig, DecisionContext, DecisionSurface, SecretMeta,
 };
-use agentmfa_core::vault::MemoryVault;
+use aka_core::vault::MemoryVault;
 use http_body_util::BodyExt as _;
 use serde_json::{json, Value};
 use signature::{Signer as _, Verifier as _};
@@ -795,7 +795,7 @@ fn stale_socket_sweep_cleans_dead_files() {
     let other = root.join("notes.txt");
     std::fs::write(&other, b"keep").unwrap();
 
-    agentmfa_core::capability::ssh::sweep_stale_sockets(Path::new(root));
+    aka_core::capability::ssh::sweep_stale_sockets(Path::new(root));
     assert!(!dead.exists(), "dead .sock file should be removed");
     assert!(other.exists(), "non-socket files are left untouched");
 }

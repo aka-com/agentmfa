@@ -4,13 +4,13 @@
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::sync::Arc;
 
-use agentmfa_core::broker::Broker;
-use agentmfa_core::config::BrokerConfig;
-use agentmfa_core::daemon;
-use agentmfa_core::error::CoreError;
-use agentmfa_core::events::NoopEvents;
-use agentmfa_core::paths::Paths;
-use agentmfa_core::vault::MemoryVault;
+use aka_core::broker::Broker;
+use aka_core::config::BrokerConfig;
+use aka_core::daemon;
+use aka_core::error::CoreError;
+use aka_core::events::NoopEvents;
+use aka_core::paths::Paths;
+use aka_core::vault::MemoryVault;
 
 async fn broker(paths: Paths, vault: Arc<MemoryVault>) -> Arc<Broker> {
     Broker::new(paths, vault, BrokerConfig::default(), Arc::new(NoopEvents))

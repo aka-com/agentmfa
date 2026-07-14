@@ -1,16 +1,16 @@
 [package]
-name = "agentmfa-cli"
+name = "aka"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "AgentMFA command line: skill file generator and dev harness"
+description = "AKA command line: skill file generator and dev harness"
 
 [[bin]]
-name = "agentmfa"
+name = "aka"
 path = "src/main.rs"
 
 [dependencies]
-agentmfa-core = { workspace = true }
+aka-core = { workspace = true }
 clap = { workspace = true }
 dirs = { workspace = true }
 libc = { workspace = true }

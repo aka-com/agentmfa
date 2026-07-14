@@ -11,10 +11,10 @@
 //!   this command layer cannot apply a gated action without passing
 //!   through it, so the webview cannot forge or skip the gate.
 
-use agentmfa_core::broker::{Broker, DecisionOptions, UiDecision};
-use agentmfa_core::error::{ConnectionField, CoreError};
-use agentmfa_core::store::ConnectionSpec;
-use agentmfa_core::types::{ConnectionConfig, DecisionContext, DecisionSurface, PgSslMode};
+use aka_core::broker::{Broker, DecisionOptions, UiDecision};
+use aka_core::error::{ConnectionField, CoreError};
+use aka_core::store::ConnectionSpec;
+use aka_core::types::{ConnectionConfig, DecisionContext, DecisionSurface, PgSslMode};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter as _, State};
 use tauri_plugin_clipboard_manager::ClipboardExt as _;
@@ -29,7 +29,7 @@ pub struct AppState {
     pub ssh_imports: std::sync::Mutex<crate::ssh_import::ImportCache>,
     // Keeps the daemon (control plane + WS/PG data planes) alive; dropping
     // it aborts the listeners.
-    pub _daemon: agentmfa_core::daemon::DaemonHandle,
+    pub _daemon: aka_core::daemon::DaemonHandle,
     // Keeps the broker's tokio runtime (daemon + approvals) alive for the
     // life of the app. Dropped last (after `_daemon`).
     pub _runtime: tokio::runtime::Runtime,
@@ -356,7 +356,7 @@ pub fn get_agent_setup(state: State<AppState>) -> String {
 /// The full agent-facing walkthrough the daemon serves at `GET /instructions`.
 #[tauri::command]
 pub fn get_broker_instructions(state: State<AppState>) -> String {
-    agentmfa_core::daemon::wellknown::instructions(&state.broker.config, &state.broker.paths)
+    aka_core::daemon::wellknown::instructions(&state.broker.config, &state.broker.paths)
 }
 
 #[tauri::command]
@@ -588,7 +588,7 @@ pub fn add_connection(state: State<AppState>, mut input: ConnectionInput) -> For
     let new_secret_value = input.new_secret_value.take().map(Zeroizing::new);
     if kind == "ssh" {
         if let Some(value) = &new_secret_value {
-            agentmfa_core::capability::ssh::validate_private_key(value.as_bytes()).map_err(
+            aka_core::capability::ssh::validate_private_key(value.as_bytes()).map_err(
                 |message| FormError::validation("invalid_ssh_identity", "newSecretValue", message),
             )?;
         }
@@ -712,7 +712,7 @@ pub fn delete_connection(state: State<AppState>, id: String) -> CmdResult<()> {
 pub async fn test_connection(
     state: State<'_, AppState>,
     id: String,
-) -> CmdResult<agentmfa_core::broker::ConnectionTestReport> {
+) -> CmdResult<aka_core::broker::ConnectionTestReport> {
     let id = parse_id(&id)?;
     state
         .broker

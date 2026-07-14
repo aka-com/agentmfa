@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/agentmfa-core", "crates/agentmfa-cli", "crates/agentmfa-sandbox"]
+members = ["crates/aka-core", "crates/aka", "crates/agentmfa-sandbox"]
 # src-tauri is deliberately NOT a workspace member: it only builds where the
 # platform webview toolchain exists (macOS; Linux needs webkit2gtk). The core
 # and CLI crates build and test everywhere.
@@ -12,7 +12,7 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
-agentmfa-core = { path = "crates/agentmfa-core" }
+aka-core = { path = "crates/aka-core" }
 
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }

@@ -7,23 +7,23 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use agentmfa_core::approvals::{
+use aka_core::approvals::{
     ApprovalKind, ApprovalRequest, ConnectionSummary, ExecOutcome, HttpPayloadView, ParkRequest,
     Parked,
 };
-use agentmfa_core::broker::{Broker, UiDecision};
-use agentmfa_core::config::BrokerConfig;
-use agentmfa_core::error::CoreError;
-use agentmfa_core::events::BrokerEvents;
-use agentmfa_core::paths::Paths;
-use agentmfa_core::policy::PolicyEngine;
-use agentmfa_core::sessions::{RedeemError, TicketPayload};
-use agentmfa_core::store::ConnectionSpec;
-use agentmfa_core::types::{
+use aka_core::broker::{Broker, UiDecision};
+use aka_core::config::BrokerConfig;
+use aka_core::error::CoreError;
+use aka_core::events::BrokerEvents;
+use aka_core::paths::Paths;
+use aka_core::policy::PolicyEngine;
+use aka_core::sessions::{RedeemError, TicketPayload};
+use aka_core::store::ConnectionSpec;
+use aka_core::types::{
     ConfirmationMethod, Connection, ConnectionConfig, ConnectionKind, DecisionContext,
     DecisionSurface, PeerIdentity,
 };
-use agentmfa_core::vault::MemoryVault;
+use aka_core::vault::MemoryVault;
 use chrono::Utc;
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -41,7 +41,7 @@ struct UnifiedAuthEvents {
 }
 
 impl BrokerEvents for UnifiedAuthEvents {
-    fn confirm_secret_read(&self, _secret: &agentmfa_core::types::SecretMeta) -> bool {
+    fn confirm_secret_read(&self, _secret: &aka_core::types::SecretMeta) -> bool {
         self.secret_read_confirms.fetch_add(1, Ordering::SeqCst);
         true
     }
@@ -167,7 +167,7 @@ fn pair_request(agent: &str, inherited: Vec<ConnectionSummary>) -> ApprovalReque
         deadline: now,
         identity: Some(PeerIdentity::DevUnverified { uid: 501 }.display()),
         pairing_identity: Some(
-            agentmfa_core::approvals::PairingIdentitySummary::from_identity(
+            aka_core::approvals::PairingIdentitySummary::from_identity(
                 &PeerIdentity::DevUnverified { uid: 501 },
             ),
         ),
@@ -201,7 +201,7 @@ fn park(broker: &Broker, request: ApprovalRequest) -> Parked {
 fn park_with_executor(
     broker: &Broker,
     request: ApprovalRequest,
-    executor: agentmfa_core::approvals::Executor,
+    executor: aka_core::approvals::Executor,
 ) -> Parked {
     broker
         .approvals
@@ -309,7 +309,7 @@ async fn pairing_revocation_is_immediate_without_confirmation() {
         .audit
         .recent(10)
         .into_iter()
-        .find(|entry| entry.kind == agentmfa_core::audit::AuditKind::TokenRevoked)
+        .find(|entry| entry.kind == aka_core::audit::AuditKind::TokenRevoked)
         .expect("revocation should be audited");
     assert_eq!(revoked.confirmation, None);
 }
@@ -449,7 +449,7 @@ async fn always_allow_confirms_once_and_attributes_the_audit_trail() {
     assert_eq!(broker.rules().len(), 1);
     assert_eq!(
         broker.rules()[0].scope,
-        agentmfa_core::types::PermissionScope::Read
+        aka_core::types::PermissionScope::Read
     );
     let Parked::Wait(handle) = parked else {
         panic!()
@@ -705,7 +705,7 @@ async fn connection_renames_skip_confirmation_but_capability_changes_do_not() {
         .audit
         .recent(5)
         .into_iter()
-        .find(|entry| entry.kind == agentmfa_core::audit::AuditKind::ConnectionUpdated)
+        .find(|entry| entry.kind == aka_core::audit::AuditKind::ConnectionUpdated)
         .unwrap();
     assert_eq!(renamed_entry.confirmation, None);
     assert_eq!(renamed_entry.fields["capability_changed"], false);
@@ -739,7 +739,7 @@ async fn connection_renames_skip_confirmation_but_capability_changes_do_not() {
         .audit
         .recent(5)
         .into_iter()
-        .find(|entry| entry.kind == agentmfa_core::audit::AuditKind::ConnectionUpdated)
+        .find(|entry| entry.kind == aka_core::audit::AuditKind::ConnectionUpdated)
         .unwrap();
     assert_eq!(changed_entry.confirmation, Some(ConfirmationMethod::Waived));
     assert_eq!(changed_entry.fields["capability_changed"], true);
@@ -836,7 +836,7 @@ async fn settings_changes_are_not_added_to_the_activity_log() {
     assert!(
         recent
             .iter()
-            .all(|entry| entry.kind != agentmfa_core::audit::AuditKind::SettingsChanged),
+            .all(|entry| entry.kind != aka_core::audit::AuditKind::SettingsChanged),
         "{recent:?}"
     );
 }
@@ -862,7 +862,7 @@ async fn prefix_reveals_are_not_added_to_the_activity_log() {
         .audit
         .recent(10)
         .iter()
-        .all(|entry| entry.kind != agentmfa_core::audit::AuditKind::SecretRevealed));
+        .all(|entry| entry.kind != aka_core::audit::AuditKind::SecretRevealed));
 }
 
 #[tokio::test]
@@ -891,7 +891,7 @@ async fn service_tests_are_not_added_to_the_activity_log() {
         .audit
         .recent(10)
         .iter()
-        .all(|entry| entry.kind != agentmfa_core::audit::AuditKind::ConnectionTested));
+        .all(|entry| entry.kind != aka_core::audit::AuditKind::ConnectionTested));
 }
 
 #[tokio::test]
@@ -909,7 +909,7 @@ async fn inherited_rules_are_removed_before_pairing_executes() {
             client_id,
             "claude-code",
             conn.id,
-            agentmfa_core::types::PermissionScope::Full,
+            aka_core::types::PermissionScope::Full,
         )
         .unwrap();
     assert_eq!(broker.rules().len(), 1);
@@ -948,7 +948,7 @@ async fn inherited_rules_are_removed_before_pairing_executes() {
     let recent = broker.audit.recent(10);
     let removed = recent
         .iter()
-        .find(|entry| entry.kind == agentmfa_core::audit::AuditKind::RuleRemoved)
+        .find(|entry| entry.kind == aka_core::audit::AuditKind::RuleRemoved)
         .expect("rule removal audit entry");
     assert_eq!(removed.confirmation, Some(ConfirmationMethod::Waived));
     assert_eq!(removed.surface, Some(DecisionSurface::Harness));

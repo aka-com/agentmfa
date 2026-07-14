@@ -8,11 +8,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use agentmfa_core::approvals::{ApprovalKind, ApprovalRequest};
-use agentmfa_core::audit::AuditEntry;
-use agentmfa_core::broker::UiDecision;
-use agentmfa_core::events::BrokerEvents;
-use agentmfa_core::types::{ConfirmationMethod, PgSslMode, SecretMeta};
+use aka_core::approvals::{ApprovalKind, ApprovalRequest};
+use aka_core::audit::AuditEntry;
+use aka_core::broker::UiDecision;
+use aka_core::events::BrokerEvents;
+use aka_core::types::{ConfirmationMethod, PgSslMode, SecretMeta};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
 
@@ -98,7 +98,7 @@ impl TauriEvents {
     fn request_summary(&self, request: &ApprovalRequest) -> String {
         let connection = self.connection_name(request);
         match request.kind {
-            ApprovalKind::Pair => format!("{} wants to connect to AgentMFA", request.agent),
+            ApprovalKind::Pair => format!("{} wants to connect to AKA Desktop", request.agent),
             ApprovalKind::Http if request.http.as_ref().is_some_and(|http| !http.mutating) => {
                 format!("{} wants to fetch data from {connection}", request.agent)
             }
@@ -147,7 +147,7 @@ impl BrokerEvents for TauriEvents {
             .app
             .notification()
             .builder()
-            .title("AgentMFA")
+            .title("AKA Desktop")
             .body(self.request_summary(request))
             .show();
     }
@@ -197,7 +197,7 @@ impl BrokerEvents for TauriEvents {
                         "Let {} make any request through {} without asking again",
                         request.agent, connection
                     ),
-                    ApprovalKind::Pair => format!("Connect {} to AgentMFA", request.agent),
+                    ApprovalKind::Pair => format!("Connect {} to AKA Desktop", request.agent),
                     ApprovalKind::Propose => proposal_confirmation(request),
                     ApprovalKind::Pg | ApprovalKind::Ws | ApprovalKind::Ssh => format!(
                         "Let {} open and use {} without asking again",
@@ -225,12 +225,12 @@ impl BrokerEvents for TauriEvents {
                         "Let {} open and use {} for {}",
                         request.agent, connection, duration
                     ),
-                    ApprovalKind::Pair => format!("Connect {} to AgentMFA", request.agent),
+                    ApprovalKind::Pair => format!("Connect {} to AKA Desktop", request.agent),
                     ApprovalKind::Propose => proposal_confirmation(request),
                 }
             }
             _ => match request.kind {
-                ApprovalKind::Pair => format!("Connect {} to AgentMFA", request.agent),
+                ApprovalKind::Pair => format!("Connect {} to AKA Desktop", request.agent),
                 ApprovalKind::Propose => proposal_confirmation(request),
                 _ => format!("Allow {}", request.action),
             },
@@ -283,7 +283,7 @@ pub fn observer(app: AppHandle, access_duration_seconds: u64) -> Arc<dyn BrokerE
 
 /// Native-confirmation copy for saving an agent-proposed service. Names the
 /// full destination so the OS prompt matches what the window showed.
-fn proposal_confirmation(request: &agentmfa_core::approvals::ApprovalRequest) -> String {
+fn proposal_confirmation(request: &aka_core::approvals::ApprovalRequest) -> String {
     match &request.proposal {
         Some(proposal) => {
             let mut destination = proposal.target.clone();
