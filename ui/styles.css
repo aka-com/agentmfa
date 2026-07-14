@@ -411,7 +411,10 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 @keyframes copied-pop { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }
 .icon-btn { border: none; background: transparent; cursor: pointer; color: var(--muted-2); padding: 4px; border-radius: 5px; line-height: 0; }
 .icon-btn:hover { background: var(--hover-2); color: var(--ink-2); }
-.sec-table .icon-btn, .sec-table .ghost-copy { transform: translateY(2px); }
+.sec-table .icon-btn { transform: translateY(1px); }
+/* The copy button is centered over the masked value, whose slot sits ~3.5px
+   below the row's icons; lift it so it lines up with the eye/edit/delete icons. */
+.sec-table .ghost-copy { transform: translateY(-2.5px); }
 .dropdown-surface .sec-table .ghost-copy { transform: none; }
 .rowdel { text-align: right; white-space: nowrap; }
 .confirm-row td { height: 48px; padding: 0 6px; background: var(--danger-wash); border-radius: 0; font-size: 13px; }
