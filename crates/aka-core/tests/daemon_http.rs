@@ -426,7 +426,7 @@ async fn pairing_flow_and_token_auth() {
     assert_eq!(body["cause"], "bearer_token_empty");
 
     let token = h.pair("claude-code").await;
-    assert!(token.starts_with("amfa_"));
+    assert!(token.starts_with("aka_"));
 
     // The paired agent shows up for the UI band.
     let agents = h.broker.paired_agents();
@@ -459,7 +459,7 @@ async fn pairing_flow_and_token_auth() {
         &h.socket,
         "GET",
         "/v1/connections",
-        &[("authorization", "Bearer amfa_bogus")],
+        &[("authorization", "Bearer aka_bogus")],
         None,
     )
     .await;
@@ -2029,7 +2029,7 @@ async fn pair_response_is_self_contained() {
     h.decide_next(UiDecision::AllowOnce).await;
     let (status, body) = call.await.unwrap();
     assert_eq!(status, 200);
-    assert!(body["token"].as_str().unwrap().starts_with("amfa_"));
+    assert!(body["token"].as_str().unwrap().starts_with("aka_"));
     // The response echoes what was registered and pinned, so the agent can
     // log its enrollment without a follow-up /v1/whoami.
     assert_eq!(body["agent"], "claude-code");
@@ -2070,7 +2070,7 @@ async fn whoami_probes_a_stored_token() {
         &h.socket,
         "GET",
         "/v1/whoami",
-        &[("authorization", "Bearer amfa_bogus")],
+        &[("authorization", "Bearer aka_bogus")],
         None,
     )
     .await;

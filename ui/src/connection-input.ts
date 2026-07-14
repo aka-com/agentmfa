@@ -15,7 +15,7 @@ export function quickSetupPlaceholder(type: ConnectionType): string {
 }
 
 export function firstTaskPrompt(name: string, type: ConnectionType): string {
-  const service = `AgentMFA service ${name}`;
+  const service = `AKA service ${name}`;
   if (type === 'pg') return `Using my ${service}, run SELECT current_database().`;
   if (type === 'ssh') return `Using my ${service}, run uname -a on the remote server.`;
   if (type === 'api') return `Using my ${service}, make a GET request to / and summarize the response.`;

@@ -44,7 +44,7 @@ check_websocket_server() {
       --header 'Upgrade: websocket' \
       --header 'Sec-WebSocket-Version: 13' \
       --header 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
-      --header 'Authorization: Bearer agentmfa-ws-test-token' \
+      --header 'Authorization: Bearer aka-ws-test-token' \
       "http://127.0.0.1:$ws_port/ws" 2>/dev/null || true
   )"
   [[ "$response" == "HTTP/1.1 101 "* ]]
@@ -54,7 +54,7 @@ check_postgres() {
   # TCP, not the Unix socket: initdb's temporary first-boot server answers
   # on the socket while the real server is not accepting connections yet.
   docker compose -f "$compose_file" exec -T postgres \
-    pg_isready -h 127.0.0.1 -U agentmfa -d agentmfa_sandbox >/dev/null 2>&1
+    pg_isready -h 127.0.0.1 -U aka -d aka_sandbox >/dev/null 2>&1
 }
 
 scan_ssh_host_key() {
@@ -112,9 +112,9 @@ cat <<'LOGO'
 LOGO
 cat <<EOF
 
-AgentMFA sandbox services
+AKA sandbox services
 
-Open AgentMFA from the menu bar icon; Services is the first tab. At
+Open AKA Desktop from the menu bar icon; Services is the first tab. At
 the top is an “Add a service for your agent” card. (If the card isn't
 shown, re-enable it from the Walkthroughs menu — the ? button in the
 Services header — or use “＋ Add service” to fill the form by hand.)
@@ -130,7 +130,7 @@ HTTP API
   API root:         http://127.0.0.1:$http_port
   Authentication type: Bearer token
   Credential name:  SANDBOX_HTTP_TOKEN
-  Credential value: agentmfa-test-token
+  Credential value: aka-test-token
   Test → expect:    an authenticated HTTP 200 OK
 
 WebSocket
@@ -138,24 +138,24 @@ WebSocket
   URL:              ws://127.0.0.1:$ws_port/ws
   Authentication type: Bearer token
   Credential name:  SANDBOX_WEBSOCKET_TOKEN
-  Credential value: agentmfa-ws-test-token
+  Credential value: aka-ws-test-token
   Test → expect:    WebSocket handshake succeeded
 
 Postgres
-  Quick setup:      postgres://agentmfa:agentmfa-test-password@127.0.0.1:$pg_port/agentmfa_sandbox?sslmode=disable
+  Quick setup:      postgres://aka:aka-test-password@127.0.0.1:$pg_port/aka_sandbox?sslmode=disable
   Name:             sandbox-postgres
   Host / Port:      127.0.0.1 / $pg_port
-  Database / User:  agentmfa_sandbox / agentmfa
+  Database / User:  aka_sandbox / aka
   TLS mode:         Disable — under “Advanced” (the container has no TLS)
-  Database password: agentmfa-test-password
-  Test → expect:    Signed in to agentmfa_sandbox as agentmfa
+  Database password: aka-test-password
+  Test → expect:    Signed in to aka_sandbox as aka
 
 SSH
   Quick setup:      ssh -i $client_key -p $ssh_port sandbox@127.0.0.1
   Name:             sandbox-ssh
   User / Host / Port: sandbox / 127.0.0.1 / $ssh_port
   Identity file:    $client_key
-                    (pre-selected by the Quick setup line; AgentMFA reads
+                    (pre-selected by the Quick setup line; AKA reads
                     the key file itself — no need to paste key contents)
   Host key fingerprint — optional, under “Advanced”: $ssh_fingerprint
                     Leave blank to confirm and pin it at the first connection.

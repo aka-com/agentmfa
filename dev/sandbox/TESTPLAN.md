@@ -1,7 +1,7 @@
 # Sandbox test plan
 
 Test in two layers: first verify the containers directly, then exercise
-the same surfaces through AgentMFA. Layer 2 can run against the desktop
+the same surfaces through AKA. Layer 2 can run against the desktop
 app or the headless broker (see the end); the expected values below were
 verified against both the fixture and the broker.
 
@@ -43,7 +43,7 @@ With the token, expect `200` and `{"authenticated":true}`:
 
 ```sh
 curl -i \
-  -H 'Authorization: Bearer agentmfa-test-token' \
+  -H 'Authorization: Bearer aka-test-token' \
   http://127.0.0.1:18080/authenticated
 ```
 
@@ -61,13 +61,13 @@ curl -i -H 'Content-Type: application/json' \
 ### Postgres
 
 ```sh
-PGPASSWORD=agentmfa-test-password \
+PGPASSWORD=aka-test-password \
   psql -h 127.0.0.1 -p 15432 \
-  -U agentmfa -d agentmfa_sandbox \
+  -U aka -d aka_sandbox \
   -c 'SELECT current_user, current_database();'
 ```
 
-Expect `agentmfa` and `agentmfa_sandbox`.
+Expect `aka` and `aka_sandbox`.
 
 ### SSH
 
@@ -82,12 +82,12 @@ ssh \
 ```
 
 Expect `sandbox`. The relaxed host-key options are appropriate only for
-this direct disposable-container check — never for AgentMFA itself,
+this direct disposable-container check — never for AKA itself,
 which pins the host key.
 
-## 3. Add the services to AgentMFA
+## 3. Add the services to AKA Desktop
 
-Run AgentMFA natively and add the four services by pasting each Quick
+Run AKA Desktop natively and add the four services by pasting each Quick
 setup line printed by `sandbox:status` into **Services → Add a service
 for your agent** (details in [README.md](README.md)). Then press
 **Test** on each and expect:
@@ -96,7 +96,7 @@ for your agent** (details in [README.md](README.md)). Then press
 | --- | --- |
 | `sandbox-http` | an authenticated `HTTP 200 OK` from `GET /` |
 | `sandbox-websocket` | `WebSocket handshake succeeded` |
-| `sandbox-postgres` | `Signed in to agentmfa_sandbox as agentmfa` |
+| `sandbox-postgres` | `Signed in to aka_sandbox as aka` |
 | `sandbox-ssh` | `Key loaded; 127.0.0.1:12222 answered with SSH-2.0-…` |
 
 The SSH test checks key parsing and the server banner only; it does not
@@ -111,7 +111,7 @@ make these requests through `sandbox-http`.
 | Request | Expected result |
 | --- | --- |
 | `GET /authenticated` | `200`, `{"authenticated":true}` |
-| `GET /redirect/same-origin` | final `200` from `/authenticated` — AgentMFA followed the redirect and re-injected the credential |
+| `GET /redirect/same-origin` | final `200` from `/authenticated` — AKA followed the redirect and re-injected the credential |
 | `GET /redirect/cross-origin` | the raw `302` with a `location` on port `18081`, not followed; a `418` means the credential sink was reached and is a failure |
 | `GET /binary` | `200` with `body_encoding: "base64"` (5 bytes) |
 | `GET /large/12582912` | `502` broker error, reason `response_too_large` (“upstream body exceeds the 10485760 byte cap”) |
@@ -150,7 +150,7 @@ PGPASSWORD='RETURNED_TICKET' psql 'RETURNED_DSN' \
   -c 'SELECT current_user, current_database();'
 ```
 
-Expect the upstream identity `agentmfa` / `agentmfa_sandbox`, not a
+Expect the upstream identity `aka` / `aka_sandbox`, not a
 local proxy identity.
 
 ### SSH
@@ -165,7 +165,7 @@ SSH_AUTH_SOCK='RETURNED_AUTH_SOCK' \
 ```
 
 Expect `sandbox` and the container's system information. This is the
-test that exercises AgentMFA's host-bound signing and pinned host key.
+test that exercises AKA's host-bound signing and pinned host key.
 If the service was saved without a fingerprint, expect the trust-on-
 first-use prompt showing the observed key before the login proceeds.
 
@@ -208,11 +208,11 @@ the Unix socket:
 
 ```sh
 cargo build --workspace
-B=./target/debug/aka; ROOT=/tmp/amfa   # keep the root path short
+B=./target/debug/aka; ROOT=/tmp/aka   # keep the root path short
 
-printf '%s' agentmfa-test-token       | $B secret add SANDBOX_HTTP_TOKEN --root $ROOT
-printf '%s' agentmfa-ws-test-token    | $B secret add SANDBOX_WEBSOCKET_TOKEN --root $ROOT
-printf '%s' agentmfa-test-password    | $B secret add SANDBOX_POSTGRES_PASSWORD --root $ROOT
+printf '%s' aka-test-token       | $B secret add SANDBOX_HTTP_TOKEN --root $ROOT
+printf '%s' aka-ws-test-token    | $B secret add SANDBOX_WEBSOCKET_TOKEN --root $ROOT
+printf '%s' aka-test-password    | $B secret add SANDBOX_POSTGRES_PASSWORD --root $ROOT
 KEY="$(cat dev/sandbox/state/ssh/client_key)" \
   $B secret add SANDBOX_SSH_KEY --value-env KEY --root $ROOT
 
@@ -221,7 +221,7 @@ $B conn add sandbox-http --kind api --scheme http --host 127.0.0.1 --port 18080 
 $B conn add sandbox-websocket --kind ws --url ws://127.0.0.1:18081/ws \
   --secret SANDBOX_WEBSOCKET_TOKEN --root $ROOT
 $B conn add sandbox-postgres --kind pg --host 127.0.0.1 --port 15432 \
-  --dbname agentmfa_sandbox --user agentmfa \
+  --dbname aka_sandbox --user aka \
   --secret SANDBOX_POSTGRES_PASSWORD --sslmode disable --root $ROOT
 $B conn add sandbox-ssh --kind ssh --host 127.0.0.1 --port 12222 --user sandbox \
   --secret SANDBOX_SSH_KEY --root $ROOT

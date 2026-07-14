@@ -388,7 +388,7 @@ mod tests {
             id: Uuid::new_v4(),
             name: "claude-code".into(),
             token_hash: "hash".into(),
-            token_preview: "amfa_legacy".into(),
+            token_preview: "aka_legacy".into(),
             identity: crate::types::PeerIdentity::DevUnverified { uid: 501 },
             paired_at: Utc::now(),
             last_used: Utc::now(),

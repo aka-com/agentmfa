@@ -251,17 +251,17 @@ export type CommandArgs<K extends CommandName> = CommandMap[K]['args'];
 export type CommandResult<K extends CommandName> = CommandMap[K]['result'];
 
 export interface EventMap {
-  'amfa://activity-appended': ActivityEntry;
-  'amfa://activity-changed': Record<string, never>;
-  'amfa://agents-changed': Record<string, never>;
-  'amfa://connections-changed': Record<string, never>;
-  'amfa://queue-changed': ApprovalRequest[];
-  'amfa://rules-changed': Record<string, never>;
-  'amfa://sessions-changed': Record<string, never>;
-  'amfa://settings-changed': Record<string, never>;
-  'amfa://open-settings': Record<string, never>;
-  'amfa://dropdown-hidden': Record<string, never>;
-  'amfa://dropdown-shown': Record<string, never>;
+  'aka://activity-appended': ActivityEntry;
+  'aka://activity-changed': Record<string, never>;
+  'aka://agents-changed': Record<string, never>;
+  'aka://connections-changed': Record<string, never>;
+  'aka://queue-changed': ApprovalRequest[];
+  'aka://rules-changed': Record<string, never>;
+  'aka://sessions-changed': Record<string, never>;
+  'aka://settings-changed': Record<string, never>;
+  'aka://open-settings': Record<string, never>;
+  'aka://dropdown-hidden': Record<string, never>;
+  'aka://dropdown-shown': Record<string, never>;
 }
 
 export type EventName = keyof EventMap;

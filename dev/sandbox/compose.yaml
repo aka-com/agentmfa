@@ -1,14 +1,14 @@
-name: agentmfa-sandbox
+name: aka-sandbox
 
 services:
   fixture:
-    image: agentmfa-sandbox-fixture
+    image: aka-sandbox-fixture
     build:
       context: ../..
       dockerfile: dev/sandbox/fixture/Dockerfile
     environment:
-      SANDBOX_HTTP_TOKEN: agentmfa-test-token
-      SANDBOX_WEBSOCKET_TOKEN: agentmfa-ws-test-token
+      SANDBOX_HTTP_TOKEN: aka-test-token
+      SANDBOX_WEBSOCKET_TOKEN: aka-ws-test-token
       SANDBOX_CROSS_ORIGIN_URL: http://127.0.0.1:${SANDBOX_WS_PORT:-18081}/credential-sink
     ports:
       # Override any occupied port with SANDBOX_*_PORT environment variables;
@@ -19,15 +19,15 @@ services:
   postgres:
     image: postgres:18@sha256:22c89fe0d0f507606260237fd55e51f6137f58b2d5bcf6152242b96d9fe8f9a4
     environment:
-      POSTGRES_USER: agentmfa
-      POSTGRES_PASSWORD: agentmfa-test-password
-      POSTGRES_DB: agentmfa_sandbox
+      POSTGRES_USER: aka
+      POSTGRES_PASSWORD: aka-test-password
+      POSTGRES_DB: aka_sandbox
     ports:
       - "127.0.0.1:${SANDBOX_PG_PORT:-15432}:5432"
     healthcheck:
       # Probe over TCP: first-boot initdb runs a temporary server that only
       # answers on the Unix socket, so a socket probe reports ready too early.
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U agentmfa -d agentmfa_sandbox"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U aka -d aka_sandbox"]
       interval: 2s
       timeout: 2s
       retries: 20

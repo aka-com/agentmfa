@@ -161,16 +161,14 @@ fn pair_request(agent: &str, inherited: Vec<ConnectionSummary>) -> ApprovalReque
         agent_token_hash: None,
         kind: ApprovalKind::Pair,
         connection: None,
-        action: format!("Pair new agent \"{agent}\" with AgentMFA"),
+        action: format!("Pair new agent \"{agent}\" with AKA"),
         notification: String::new(),
         received_at: now,
         deadline: now,
         identity: Some(PeerIdentity::DevUnverified { uid: 501 }.display()),
-        pairing_identity: Some(
-            aka_core::approvals::PairingIdentitySummary::from_identity(
-                &PeerIdentity::DevUnverified { uid: 501 },
-            ),
-        ),
+        pairing_identity: Some(aka_core::approvals::PairingIdentitySummary::from_identity(
+            &PeerIdentity::DevUnverified { uid: 501 },
+        )),
         replaces_existing_agent: false,
         inherited,
         http: None,

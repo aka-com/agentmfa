@@ -138,7 +138,7 @@ impl PairingIdentitySummary {
                 verification: "Local executable",
                 technical: identity.display(),
                 warning: Some(
-                    "This program is not signed. AgentMFA uses local file details, and scripts run by the same program may share this identity.",
+                    "This program is not signed. AKA uses local file details, and scripts run by the same program may share this identity.",
                 ),
             },
             PeerIdentity::DevUnverified { .. } => Self {

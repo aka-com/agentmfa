@@ -1,4 +1,4 @@
-# Try AgentMFA against the local sandbox
+# Try AKA against the local sandbox
 
 ```text
      _                    _   __  __ _____ _
@@ -10,11 +10,11 @@
 ```
 
 The sandbox is a disposable Docker Compose stack with one upstream for
-every AgentMFA connection type — an authenticated HTTP API, a WebSocket
+every AKA connection type — an authenticated HTTP API, a WebSocket
 echo, Postgres, and SSH — so you can try the whole app in minutes
 without touching a real service. Every port binds to `127.0.0.1` and
 every credential is a fake, fixed test value that must never be reused
-outside the sandbox. AgentMFA itself runs natively so it keeps using the
+outside the sandbox. AKA Desktop runs natively so it keeps using the
 host Keychain, webview, and Unix socket.
 
 A copy of this walkthrough formatted for the browser is in
@@ -26,7 +26,7 @@ A copy of this walkthrough formatted for the browser is in
 - Node.js with `npm` (only to run the `npm run sandbox:*` scripts —
   `bash scripts/sandbox-up.sh` works without it)
 - `curl`, `ssh-keygen`, and `ssh-keyscan` (preinstalled on macOS)
-- AgentMFA: the desktop app, or the headless broker
+- AKA Desktop: the desktop app, or the headless broker
   (`cargo run -p aka -- serve`) on any platform
 
 ## 2. Start the sandbox
@@ -41,7 +41,7 @@ The first start compiles the HTTP/WebSocket fixture inside Docker and
 can take several minutes; later starts take seconds. The command
 generates a sandbox-only SSH key under the ignored `dev/sandbox/state/`
 directory, waits until all four services answer, and prints the exact
-values to enter in AgentMFA — including paste-ready “Quick setup” lines
+values to enter in AKA Desktop — including paste-ready “Quick setup” lines
 for Postgres and SSH and the current SSH host-key fingerprint.
 
 Print the containers and connection values again at any time:
@@ -50,12 +50,12 @@ Print the containers and connection values again at any time:
 npm run sandbox:status
 ```
 
-## 3. Add the services in AgentMFA
+## 3. Add the services in AKA Desktop
 
 <!-- Keep this walkthrough in sync with scripts/sandbox-status.sh and
      quickstart.html (step 3). -->
 
-Open AgentMFA from the menu bar icon; **Services** is the first tab.
+Open AKA Desktop from the menu bar icon; **Services** is the first tab.
 At the top is an **Add a service for your agent** card. (If the card
 isn't shown, re-enable it from the **Walkthroughs** menu — the ?
 button in the Services header — or use **＋ Add service** to fill the
@@ -72,21 +72,21 @@ section. With the default ports:
 
 | Service | Setup | Then |
 | --- | --- | --- |
-| HTTP API | Enter manually: API root `http://127.0.0.1:18080` | Name `sandbox-http`, authentication type **Bearer token**, credential value `agentmfa-test-token` |
-| WebSocket | Enter manually: URL `ws://127.0.0.1:18081/ws` | Name `sandbox-websocket`, authentication type **Bearer token**, credential value `agentmfa-ws-test-token` |
-| Postgres | Quick setup: `postgres://agentmfa:agentmfa-test-password@127.0.0.1:15432/agentmfa_sandbox?sslmode=disable` | Name `sandbox-postgres`; host, database, TLS mode **Disable** (under **Advanced**), and password all pre-fill |
-| SSH | Quick setup: `ssh -i <printed key path> -p 12222 sandbox@127.0.0.1` | Name `sandbox-ssh`; AgentMFA reads the key file itself — never paste key contents |
+| HTTP API | Enter manually: API root `http://127.0.0.1:18080` | Name `sandbox-http`, authentication type **Bearer token**, credential value `aka-test-token` |
+| WebSocket | Enter manually: URL `ws://127.0.0.1:18081/ws` | Name `sandbox-websocket`, authentication type **Bearer token**, credential value `aka-ws-test-token` |
+| Postgres | Quick setup: `postgres://aka:aka-test-password@127.0.0.1:15432/aka_sandbox?sslmode=disable` | Name `sandbox-postgres`; host, database, TLS mode **Disable** (under **Advanced**), and password all pre-fill |
+| SSH | Quick setup: `ssh -i <printed key path> -p 12222 sandbox@127.0.0.1` | Name `sandbox-ssh`; AKA Desktop reads the key file itself — never paste key contents |
 
 The SSH **Host key fingerprint** field (under **Advanced**) is
 optional: paste the printed `SHA256:…` value, or leave it blank and
-AgentMFA will show the observed key for confirmation at the first
+AKA Desktop will show the observed key for confirmation at the first
 agent connection and pin it then.
 
 Press **Test** on each service's card and expect:
 
 - **sandbox-http** — an authenticated `HTTP 200 OK` from the API root.
 - **sandbox-websocket** — `WebSocket handshake succeeded`.
-- **sandbox-postgres** — `Signed in to agentmfa_sandbox as agentmfa`.
+- **sandbox-postgres** — `Signed in to aka_sandbox as aka`.
 - **sandbox-ssh** — `Key loaded; 127.0.0.1:12222 answered with
   SSH-2.0-…`. This test checks key parsing and reachability only; a
   real agent connection is what exercises login, host-bound signing,
@@ -97,15 +97,15 @@ Press **Test** on each service's card and expect:
 Pair an agent (the **Connect an agent** walkthrough shows the exact
 command), then ask it to use the services in plain language, e.g.:
 
-- “Using my AgentMFA service `sandbox-http`, make a GET request to
+- “Using my AKA service `sandbox-http`, make a GET request to
   `/authenticated` and summarize the response.”
-- “Using my AgentMFA service `sandbox-postgres`, run
+- “Using my AKA service `sandbox-postgres`, run
   `SELECT current_user, current_database();`.”
-- “Using my AgentMFA service `sandbox-ssh`, run `uname -a`.”
-- “Using my AgentMFA service `sandbox-websocket`, connect and echo a
+- “Using my AKA service `sandbox-ssh`, run `uname -a`.”
+- “Using my AKA service `sandbox-websocket`, connect and echo a
   message.”
 
-Approve the prompts AgentMFA raises. GET/HEAD requests fit a read-scoped
+Approve the prompts AKA Desktop raises. GET/HEAD requests fit a read-scoped
 access session; POST, Postgres, SSH, and WebSocket opens require full
 access. The fixture serves deterministic routes for deeper checks:
 
@@ -113,10 +113,10 @@ access. The fixture serves deterministic routes for deeper checks:
 GET  /authenticated            {"authenticated":true} with the token; 401 without
 GET  /status/{200..599}        the selected status code
 GET  /delay/{seconds}          response delayed up to 20 seconds
-GET  /redirect/same-origin     302 → /authenticated; AgentMFA follows it and
+GET  /redirect/same-origin     302 → /authenticated; AKA follows it and
                                re-injects the credential (expect a final 200)
 GET  /redirect/cross-origin    302 to the fixture's other published port;
-                               AgentMFA returns the raw 302 rather than follow
+                               AKA returns the raw 302 rather than follow
                                it (the target answers 418 if ever reached)
 GET  /binary                   5 non-UTF-8 bytes (body_encoding "base64")
 GET  /large/{bytes}            generated body up to 12 MiB; /large/12582912
@@ -168,7 +168,7 @@ The builder, runtime, Postgres, and OpenSSH images are pinned to
 multi-platform manifest digests for reproducibility across Apple
 Silicon and amd64 hosts; update each tag and digest together after
 reviewing a new upstream release. The full two-layer test plan
-(container checks, then the same surfaces through AgentMFA) is in
+(container checks, then the same surfaces through AKA) is in
 [`TESTPLAN.md`](TESTPLAN.md).
 
 Do not mount the repository, home directory, or real credentials into

@@ -359,7 +359,7 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
                 .write_all(&error_response(
                     "FATAL",
                     sqlstate,
-                    &format!("AgentMFA: {}", e.reason()),
+                    &format!("AKA: {}", e.reason()),
                 ))
                 .await?;
             return Ok(());
@@ -378,7 +378,7 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
             .write_all(&error_response(
                 "FATAL",
                 "08P01",
-                "AgentMFA: ticket is not for a Postgres connection",
+                "AKA: ticket is not for a Postgres connection",
             ))
             .await?;
         return Ok(());
@@ -404,7 +404,7 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
                 .write_all(&error_response(
                     "FATAL",
                     "08001", // sqlclient_unable_to_establish_sqlconnection
-                    &format!("AgentMFA: upstream_connect_failed: {detail}"),
+                    &format!("AKA: upstream_connect_failed: {detail}"),
                 ))
                 .await?;
             return Ok(());
@@ -1280,9 +1280,9 @@ mod tests {
 
     #[test]
     fn error_response_carries_sqlstate() {
-        let msg = error_response("FATAL", "28P01", "AgentMFA: unknown_ticket");
+        let msg = error_response("FATAL", "28P01", "AKA: unknown_ticket");
         assert_eq!(msg[0], b'E');
         let text = parse_error_response(&msg[5..]);
-        assert_eq!(text, "28P01: AgentMFA: unknown_ticket");
+        assert_eq!(text, "28P01: AKA: unknown_ticket");
     }
 }

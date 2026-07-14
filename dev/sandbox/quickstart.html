@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AgentMFA sandbox quickstart</title>
+<title>AKA sandbox quickstart</title>
 <style>
   :root {
     --bg: #ffffff; --fg: #1a1d21; --muted: #5c6470;
@@ -55,42 +55,42 @@
 </head>
 <body>
 <main>
-  <pre aria-label="AgentMFA logo"><code>     _                    _   __  __ _____ _
+  <pre aria-label="AKA logo"><code>     _                    _   __  __ _____ _
     / \   __ _  ___ _ __ | |_|  \/  |  ___/ \
    / _ \ / _` |/ _ \ '_ \| __| |\/| | |_ / _ \
   / ___ \ (_| |  __/ | | | |_| |  | |  _/ ___ \
  /_/   \_\__, |\___|_| |_|\__|_|  |_|_|/_/   \_\
          |___/</code></pre>
-  <h1>AgentMFA sandbox quickstart</h1>
-  <p class="subtitle">Try every AgentMFA connection type against disposable
+  <h1>AKA sandbox quickstart</h1>
+  <p class="subtitle">Try every AKA connection type against disposable
   local containers — no real credentials involved.</p>
 
   <p>The sandbox starts four upstreams on <code>127.0.0.1</code>: an
   authenticated HTTP API, a WebSocket echo, Postgres, and SSH. All
   credentials are fixed, fake test values; never reuse them anywhere
-  else. AgentMFA itself runs natively on your machine.</p>
+  else. AKA Desktop runs natively on your machine.</p>
 
   <h2><span class="step">1</span>Check what you need</h2>
   <ul>
     <li>Docker with Compose v2 — <b>running</b> (start Docker Desktop first)</li>
     <li>Node.js with <code>npm</code></li>
-    <li>The AgentMFA app (or the headless broker, <code>cargo run -p aka -- serve</code>)</li>
+    <li>The AKA Desktop app (or the headless broker, <code>cargo run -p aka -- serve</code>)</li>
   </ul>
 
   <h2><span class="step">2</span>Start the sandbox</h2>
-  <pre><code>git clone https://github.com/aka-com/agentmfa.git
-cd agentmfa
+  <pre><code>git clone https://github.com/aka-com/aka.git
+cd aka
 npm run sandbox:up</code></pre>
   <p>The first start compiles the test fixture inside Docker and can take
   several minutes; later starts take seconds. When everything is ready it
   prints <span class="ok">ready</span> for HTTP, WebSocket, Postgres, and
-  SSH, followed by the exact values to enter in AgentMFA. Re-print them
+  SSH, followed by the exact values to enter in AKA Desktop. Re-print them
   any time with <code>npm run sandbox:status</code>.</p>
 
-  <h2><span class="step">3</span>Add the four services in AgentMFA</h2>
+  <h2><span class="step">3</span>Add the four services in AKA</h2>
   <!-- Keep this walkthrough in sync with scripts/sandbox-status.sh and
        dev/sandbox/README.md (section 3). -->
-  <p>Open AgentMFA from the menu bar icon; <b>Services</b> is the first
+  <p>Open AKA Desktop from the menu bar icon; <b>Services</b> is the first
   tab, with an <b>Add a service for your agent</b> card at the top. (If
   the card isn't shown, re-enable it from the <b>Walkthroughs</b> menu —
   the ? button in the Services header — or use <b>＋ Add service</b> to
@@ -110,17 +110,17 @@ npm run sandbox:up</code></pre>
       <td>HTTP&nbsp;API</td>
       <td>Enter API root <code>http://127.0.0.1:18080</code> manually</td>
       <td>Name <code>sandbox-http</code> · Bearer token
-          <code>agentmfa-test-token</code></td>
+          <code>aka-test-token</code></td>
     </tr>
     <tr>
       <td>WebSocket</td>
       <td>Enter URL <code>ws://127.0.0.1:18081/ws</code> manually</td>
       <td>Name <code>sandbox-websocket</code> · Bearer token
-          <code>agentmfa-ws-test-token</code></td>
+          <code>aka-ws-test-token</code></td>
     </tr>
     <tr>
       <td>Postgres</td>
-      <td>Quick setup: <code>postgres://agentmfa:agentmfa-test-password@127.0.0.1:15432/agentmfa_sandbox?sslmode=disable</code></td>
+      <td>Quick setup: <code>postgres://aka:aka-test-password@127.0.0.1:15432/aka_sandbox?sslmode=disable</code></td>
       <td>Name <code>sandbox-postgres</code>; everything else pre-fills
           (TLS mode <b>Disable</b>, under <b>Advanced</b>)</td>
     </tr>
@@ -130,7 +130,7 @@ npm run sandbox:up</code></pre>
           <div class="muted">copy the exact line from
           <code>sandbox:status</code> — it carries the generated key's
           absolute path</div></td>
-      <td>Name <code>sandbox-ssh</code>; AgentMFA reads the key file
+      <td>Name <code>sandbox-ssh</code>; AKA Desktop reads the key file
           itself. Host key fingerprint (under <b>Advanced</b>) is
           optional — leave it blank to confirm and pin on first
           connection.</td>
@@ -141,7 +141,7 @@ npm run sandbox:up</code></pre>
   <div class="card">
     <b>sandbox-http</b> — an authenticated HTTP 200<br>
     <b>sandbox-websocket</b> — <code>WebSocket handshake succeeded</code><br>
-    <b>sandbox-postgres</b> — <code>Signed in to agentmfa_sandbox as agentmfa</code><br>
+    <b>sandbox-postgres</b> — <code>Signed in to aka_sandbox as aka</code><br>
     <b>sandbox-ssh</b> — <code>Key loaded; 127.0.0.1:12222 answered with SSH-2.0-…</code>
     <span class="muted">(reachability only; a real agent connection tests login)</span>
   </div>
@@ -150,16 +150,16 @@ npm run sandbox:up</code></pre>
   <p>Pair an agent using the <b>Connect an agent</b> walkthrough, then ask
   it in plain language, for example:</p>
   <ul>
-    <li>“Using my AgentMFA service <code>sandbox-http</code>, make a GET
+    <li>“Using my AKA service <code>sandbox-http</code>, make a GET
         request to <code>/authenticated</code> and summarize the response.”</li>
-    <li>“Using my AgentMFA service <code>sandbox-postgres</code>, run
+    <li>“Using my AKA service <code>sandbox-postgres</code>, run
         <code>SELECT current_user, current_database();</code>”</li>
-    <li>“Using my AgentMFA service <code>sandbox-ssh</code>, run
+    <li>“Using my AKA service <code>sandbox-ssh</code>, run
         <code>uname -a</code> on the server.”</li>
-    <li>“Using my AgentMFA service <code>sandbox-websocket</code>, connect
+    <li>“Using my AKA service <code>sandbox-websocket</code>, connect
         and echo a message.”</li>
   </ul>
-  <p>Approve the prompts AgentMFA raises — reads (GET/HEAD) can get a
+  <p>Approve the prompts AKA Desktop raises — reads (GET/HEAD) can get a
   read-scoped session, while POST, Postgres, SSH, and WebSocket opens
   need full access. The agent never sees the tokens, password, or key:
   check the <b>Activity</b> tab afterwards to watch every brokered call,

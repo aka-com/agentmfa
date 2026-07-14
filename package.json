@@ -1,5 +1,5 @@
 {
-  "name": "agentmfa",
+  "name": "aka-desktop",
   "private": true,
   "scripts": {
     "build": "bash scripts/build.sh",

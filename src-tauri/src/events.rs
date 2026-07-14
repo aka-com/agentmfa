@@ -18,13 +18,13 @@ use tauri_plugin_notification::NotificationExt;
 
 use crate::dto::{ActivityDto, ApprovalDto};
 
-pub const EVT_QUEUE: &str = "amfa://queue-changed";
-pub const EVT_SESSIONS: &str = "amfa://sessions-changed";
-pub const EVT_AGENTS: &str = "amfa://agents-changed";
-pub const EVT_RULES: &str = "amfa://rules-changed";
-pub const EVT_CONNECTIONS: &str = "amfa://connections-changed";
-pub const EVT_ACTIVITY: &str = "amfa://activity-appended";
-pub const EVT_ACTIVITY_CHANGED: &str = "amfa://activity-changed";
+pub const EVT_QUEUE: &str = "aka://queue-changed";
+pub const EVT_SESSIONS: &str = "aka://sessions-changed";
+pub const EVT_AGENTS: &str = "aka://agents-changed";
+pub const EVT_RULES: &str = "aka://rules-changed";
+pub const EVT_CONNECTIONS: &str = "aka://connections-changed";
+pub const EVT_ACTIVITY: &str = "aka://activity-appended";
+pub const EVT_ACTIVITY_CHANGED: &str = "aka://activity-changed";
 
 pub const APPROVAL_WINDOW: &str = "approval";
 

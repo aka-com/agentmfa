@@ -9,36 +9,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
-name = "agentmfa"
-version = "0.1.0"
-dependencies = [
- "aka-core",
- "block2",
- "glob",
- "objc2",
- "objc2-app-kit",
- "objc2-foundation",
- "objc2-local-authentication",
- "serde",
- "serde_json",
- "shell-words",
- "ssh-key",
- "tauri",
- "tauri-build",
- "tauri-nspanel",
- "tauri-plugin-clipboard-manager",
- "tauri-plugin-dialog",
- "tauri-plugin-notification",
- "tauri-plugin-single-instance",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "zeroize",
-]
-
-[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -88,6 +58,36 @@ dependencies = [
  "url",
  "uuid",
  "webpki-roots 0.26.11",
+ "zeroize",
+]
+
+[[package]]
+name = "aka-desktop"
+version = "0.1.0"
+dependencies = [
+ "aka-core",
+ "block2",
+ "glob",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "objc2-local-authentication",
+ "serde",
+ "serde_json",
+ "shell-words",
+ "ssh-key",
+ "tauri",
+ "tauri-build",
+ "tauri-nspanel",
+ "tauri-plugin-clipboard-manager",
+ "tauri-plugin-dialog",
+ "tauri-plugin-notification",
+ "tauri-plugin-single-instance",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
  "zeroize",
 ]
 

@@ -35,7 +35,7 @@ use crate::Result;
 /// index, so it is never listed in the UI or exposed to agents, and the
 /// nil UUID cannot collide with the v4 ids user secrets get.
 const KEY_ID: Uuid = Uuid::nil();
-const KEY_NAME: &str = "AGENTMFA_STATE_INTEGRITY_KEY";
+const KEY_NAME: &str = "AKA_STATE_INTEGRITY_KEY";
 const ENVELOPE_VERSION: u32 = 1;
 const ALG: &str = "hmac-sha256";
 

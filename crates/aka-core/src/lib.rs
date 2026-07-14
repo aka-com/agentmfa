@@ -1,4 +1,4 @@
-//! AgentMFA broker core.
+//! AKA broker core.
 //!
 //! Everything sensitive lives here: the secret store, the
 //! injection-template engine, the policy engine, the approvals queue, the

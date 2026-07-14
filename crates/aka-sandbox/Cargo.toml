@@ -1,9 +1,9 @@
 [package]
-name = "agentmfa-sandbox"
+name = "aka-sandbox"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Deterministic HTTP and WebSocket upstreams for AgentMFA development"
+description = "Deterministic HTTP and WebSocket upstreams for AKA development"
 publish = false
 
 [dependencies]

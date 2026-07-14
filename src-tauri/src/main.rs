@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    agentmfa_app::run()
+    aka_desktop_app::run()
 }

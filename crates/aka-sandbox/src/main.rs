@@ -22,8 +22,8 @@ use axum::{
 };
 use serde_json::json;
 
-const DEFAULT_HTTP_TOKEN: &str = "agentmfa-test-token";
-const DEFAULT_WEBSOCKET_TOKEN: &str = "agentmfa-ws-test-token";
+const DEFAULT_HTTP_TOKEN: &str = "aka-test-token";
+const DEFAULT_WEBSOCKET_TOKEN: &str = "aka-ws-test-token";
 const DEFAULT_CROSS_ORIGIN: &str = "http://127.0.0.1:18081/credential-sink";
 const MAX_DELAY_SECONDS: u64 = 20;
 const MAX_GENERATED_BODY: usize = 12 * 1024 * 1024;

@@ -33,13 +33,13 @@ for path in "$client_key" "$client_key.pub"; do
   if [[ -d "$path" ]]; then rmdir "$path"; fi
 done
 if [[ ! -f "$client_key" ]]; then
-  echo "Generating a dedicated SSH key for the AgentMFA sandbox..."
-  ssh-keygen -q -t ed25519 -N "" -C agentmfa-sandbox -f "$client_key"
+  echo "Generating a dedicated SSH key for the AKA sandbox..."
+  ssh-keygen -q -t ed25519 -N "" -C aka-sandbox -f "$client_key"
 elif [[ ! -f "$client_key.pub" ]]; then
   ssh-keygen -y -f "$client_key" >"$client_key.pub"
 fi
 
-if ! docker image inspect agentmfa-sandbox-fixture >/dev/null 2>&1; then
+if ! docker image inspect aka-sandbox-fixture >/dev/null 2>&1; then
   echo "First start: building the sandbox fixture image — this compiles a small"
   echo "Rust service and can take several minutes. Later starts take seconds."
 fi

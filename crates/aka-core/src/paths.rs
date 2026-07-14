@@ -200,7 +200,7 @@ fn unique_archive_path(dir: &Path, suffix: &str) -> PathBuf {
     let base_name = dir
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "agentmfa".into());
+        .unwrap_or_else(|| "aka".into());
     let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
     let base = dir.with_file_name(format!("{base_name}.{suffix}-{stamp}"));
     if !base.exists() {

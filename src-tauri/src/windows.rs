@@ -1,6 +1,6 @@
 //! Tray + window
 //!
-//! AgentMFA has a resizable main window, an NSStatusItem-style tray
+//! AKA has a resizable main window, an NSStatusItem-style tray
 //! dropdown, and a separate always-on-top approval window. The tray icon
 //! is always present and toggles the compact dropdown beneath its status item.
 
@@ -25,9 +25,9 @@ const APP_ICON_BYTES: &[u8] = include_bytes!("../icons/icon.png");
 pub const MAIN: &str = "main";
 pub const DROPDOWN: &str = "dropdown";
 pub const APPROVAL: &str = "approval";
-pub const EVT_DROPDOWN_HIDDEN: &str = "amfa://dropdown-hidden";
-pub const EVT_DROPDOWN_SHOWN: &str = "amfa://dropdown-shown";
-pub const EVT_OPEN_SETTINGS: &str = "amfa://open-settings";
+pub const EVT_DROPDOWN_HIDDEN: &str = "aka://dropdown-hidden";
+pub const EVT_DROPDOWN_SHOWN: &str = "aka://dropdown-shown";
+pub const EVT_OPEN_SETTINGS: &str = "aka://open-settings";
 const APP_WINDOW_MENU_ID: &str = "app-window";
 const NEW_WINDOW_MENU_ID: &str = "new-window";
 
@@ -44,7 +44,7 @@ fn dropdown_hide_allowed() -> bool {
 
 #[cfg(target_os = "macos")]
 tauri_panel! {
-    panel!(AgentMfaDropdownPanel {
+    panel!(AkaDropdownPanel {
         config: {
             can_become_key_window: true,
             can_become_main_window: false,
@@ -56,7 +56,7 @@ tauri_panel! {
 }
 
 /// Convert the dropdown's ordinary Tauri NSWindow into a non-activating
-/// NSPanel. A panel can accept keyboard input without activating AgentMFA and
+/// NSPanel. A panel can accept keyboard input without activating AKA and
 /// raising the already-visible main window above the user's current app.
 #[cfg(target_os = "macos")]
 pub fn setup_dropdown_panel(app: &AppHandle) -> tauri::Result<()> {
@@ -65,7 +65,7 @@ pub fn setup_dropdown_panel(app: &AppHandle) -> tauri::Result<()> {
     let window = app
         .get_webview_window(DROPDOWN)
         .ok_or_else(|| tauri::Error::AssetNotFound("configured dropdown window".into()))?;
-    let panel = window.to_panel::<AgentMfaDropdownPanel>()?;
+    let panel = window.to_panel::<AkaDropdownPanel>()?;
     let style = panel.as_panel().styleMask() | NSWindowStyleMask::NonactivatingPanel;
     panel.set_style_mask(style);
     panel.set_floating_panel(true);
@@ -124,7 +124,7 @@ struct Bounds {
 }
 
 /// Extend Tauri's conventional macOS application menu with a reliable way
-/// back to AgentMFA when its Dock and tray affordances are unavailable.
+/// back to AKA when its Dock and tray affordances are unavailable.
 pub fn setup_app_menu(app: &AppHandle) -> tauri::Result<()> {
     let menu = Menu::default(app)?;
     let new_window = MenuItem::with_id(
@@ -278,7 +278,7 @@ fn show_dropdown(app: &AppHandle) {
 
 /// Show the macOS dropdown through NSPanel rather than Tauri's `show` and
 /// `set_focus`: Tauri activates the whole application when focusing a native
-/// window, which also raises the main AgentMFA window.
+/// window, which also raises the main AKA Desktop window.
 #[cfg(target_os = "macos")]
 fn show_dropdown_window(app: &AppHandle, window: &tauri::WebviewWindow) {
     if let Ok(panel) = app.get_webview_panel(DROPDOWN) {

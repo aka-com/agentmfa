@@ -12,7 +12,7 @@ use crate::wire::{ApprovalMode, AuthScheme, PROTOCOL_VERSION, REQUEST_ID_MAX_BYT
 
 pub fn manifest(config: &BrokerConfig, paths: &Paths) -> serde_json::Value {
     json!({
-        "name": "agentmfa",
+        "name": "aka",
         "version": config.version,
         // The Agent Broker Protocol revision (PROTOCOL.md / wire.rs); the
         // `version` above is the broker build, this is the wire contract.
@@ -60,9 +60,9 @@ pub fn instructions(config: &BrokerConfig, paths: &Paths) -> String {
     let token_days = config.token_ttl.as_secs() / 86400;
     let access_minutes = config.access_grant_ttl.as_secs() / 60;
     format!(
-        r#"# AgentMFA: broker instructions
+        r#"# AKA: broker instructions
 
-AgentMFA holds this developer's secrets in the macOS Keychain and brokers
+AKA holds this developer's secrets in the macOS Keychain and brokers
 their use. Broker-produced fields do not expose vault-held values or secret
 names; you ask the broker to *use a named connection* (make an HTTP request
 through `github`, connect to `prod-db`) and the broker injects the credential
@@ -101,13 +101,13 @@ one first:
        curl --unix-socket {socket} -X POST http://localhost/v1/pair \
             -H "Content-Type: application/json" \
             -d '{{"agent_name": "<your-name>"}}'
-       → 200 {{"token": "amfa_…", "client_id": "<uuid>",
+       → 200 {{"token": "aka_…", "client_id": "<uuid>",
                "agent": "<your-name>",
                "identity": "<the peer identity the token is pinned to>",
                "expires_after_days": {token_days},
                "store_at": "{tokens}/<your-name>"}}
 
-   The human approves the pairing in the AgentMFA window; the call blocks
+   The human approves the pairing in the AKA Desktop window; the call blocks
    until they decide. Store the token at `store_at` with mode 0600 (the
    directory already exists), or in your own credential store, and send it
    on every subsequent call as `Authorization: Bearer <token>`.
@@ -395,7 +395,7 @@ pub fn skill_file(config: &BrokerConfig, paths: &Paths) -> String {
 name: aka
 description: >-
   Broker credentialed HTTP, WebSocket, Postgres and SSH access through the
-  local AgentMFA daemon. Use when a task needs an API key, database, stream,
+  local AKA daemon. Use when a task needs an API key, database, stream,
   or SSH key the developer has configured. The broker does not directly expose
   the stored secret; access is authorization-gated. Start by reading the live
   instructions over the broker socket.

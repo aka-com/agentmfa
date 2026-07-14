@@ -344,7 +344,7 @@ pub fn get_settings(state: State<AppState>) -> SettingsDto {
 
 fn agent_setup_instructions(socket: &str) -> String {
     format!(
-        "Connect to the local AgentMFA broker. Read its current instructions, then list what connections are currently available. If a service you need is missing, propose it (POST /v1/connections/propose, documented in the instructions) and the user will review it:\n\ncurl -fsS --unix-socket {socket} http://localhost/instructions"
+        "Connect to the local AKA broker. Read its current instructions, then list what connections are currently available. If a service you need is missing, propose it (POST /v1/connections/propose, documented in the instructions) and the user will review it:\n\ncurl -fsS --unix-socket {socket} http://localhost/instructions"
     )
 }
 
@@ -972,9 +972,9 @@ mod tests {
 
     #[test]
     fn agent_setup_instructions_include_the_runtime_socket() {
-        let instructions = agent_setup_instructions("/tmp/agentmfa-test.sock");
+        let instructions = agent_setup_instructions("/tmp/aka-test.sock");
         assert!(instructions.contains("curl -fsS"));
-        assert!(instructions.contains("--unix-socket /tmp/agentmfa-test.sock"));
+        assert!(instructions.contains("--unix-socket /tmp/aka-test.sock"));
         assert!(instructions.contains(
             "Read its current instructions, then list what connections are currently available."
         ));

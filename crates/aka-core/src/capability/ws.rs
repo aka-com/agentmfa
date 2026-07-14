@@ -239,7 +239,7 @@ async fn pipe(
                 let _ = client_tx
                     .send(AxumMessage::Close(Some(AxumCloseFrame {
                         code: 1000,
-                        reason: "closed from AgentMFA".into(),
+                        reason: "closed from AKA".into(),
                     })))
                     .await;
                 let _ = upstream_tx.send(TMessage::Close(None)).await;

@@ -372,11 +372,7 @@ impl Redemption {
         inner.audit.append(
             AuditEntry::new(
                 AuditKind::SessionOpened,
-                format!(
-                    "{} session opened: {}",
-                    kind_label(kind),
-                    info.connection
-                ),
+                format!("{} session opened: {}", kind_label(kind), info.connection),
             )
             .agent(info.agent.clone())
             .connection(info.connection.clone())

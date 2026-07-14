@@ -75,10 +75,10 @@ const MOCK_ACTIVITY_META = {
   grantRevoked: { icon: 'shieldX', tone: 'danger' },
   tokenRevoked: { icon: 'unplug', tone: 'danger' },
 };
-const MOCK_AGENT_SETUP = 'Connect to the local AgentMFA broker. Read its current instructions, then list what connections are currently available:\n\ncurl -fsS --unix-socket ~/.aka/broker.sock http://localhost/instructions';
-const MOCK_BROKER_INSTRUCTIONS = `# AgentMFA: broker instructions
+const MOCK_AGENT_SETUP = 'Connect to the local AKA broker. Read its current instructions, then list what connections are currently available:\n\ncurl -fsS --unix-socket ~/.aka/broker.sock http://localhost/instructions';
+const MOCK_BROKER_INSTRUCTIONS = `# AKA: broker instructions
 
-AgentMFA holds this developer's secrets and brokers their use.
+AKA holds this developer's secrets and brokers their use.
 Transport: HTTP over the Unix domain socket \`~/.aka/broker.sock\`.
 
 ## 1. Authenticate
@@ -324,7 +324,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
           db.grants.filter((g) => g.agent === a.name).length }));
     case 'list_sessions': return db.sessions.slice();
     case 'list_activity': return db.activity.slice(0, Math.min(args.limit ?? MOCK_ACTIVITY_LIMIT, MOCK_ACTIVITY_LIMIT));
-    case 'clear_activity': db.activity = []; emit('amfa://activity-changed', {}); return;
+    case 'clear_activity': db.activity = []; emit('aka://activity-changed', {}); return;
     case 'get_queue': return db.queue.slice();
     case 'get_settings': return { ...db.settings };
     case 'get_agent_setup': return MOCK_AGENT_SETUP;
@@ -384,7 +384,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
     case 'copy_secret': {
       const s = db.secrets.find((x) => x.id === args.id); if (!s) throw new Error('no such secret');
       const entry = audit('secretCopied', `Secret copied: ${s.name}`);
-      emit('amfa://activity-appended', entry);
+      emit('aka://activity-appended', entry);
       return;
     }
     case 'add_connection': {
@@ -473,10 +473,10 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       db.rules = db.rules.filter((r) => r.client_id !== agent.id);
       db.sessions = db.sessions.filter((s) => s.agent !== agent.name);
       audit('tokenRevoked', `Agent disconnected: ${agent.name}`); }
-      emit('amfa://agents-changed', {});
-      emit('amfa://sessions-changed', {});
+      emit('aka://agents-changed', {});
+      emit('aka://sessions-changed', {});
       return true;
-    case 'close_session': db.sessions = db.sessions.filter((s) => s.id !== args.id); emit('amfa://sessions-changed', {}); return true;
+    case 'close_session': db.sessions = db.sessions.filter((s) => s.id !== args.id); emit('aka://sessions-changed', {}); return true;
     case 'set_reauth_on_read': db.settings.reauth_on_read = args.on; return;
     case 'set_menu_bar_hides_dock':
       db.settings.menu_bar_hides_dock = args.on;
@@ -512,8 +512,8 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
             last_used: now(),
           });
         }
-        emit('amfa://agents-changed', {});
-        emit('amfa://sessions-changed', {});
+        emit('aka://agents-changed', {});
+        emit('aka://sessions-changed', {});
       }
       if (req && args.decision === 'allow_session' && req.connection && req.temporary_access) {
         const connection = req.connection;
@@ -534,7 +534,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
             connection_id: connection.id, scope: req.temporary_access.scope });
         }
       }
-      db.queue = db.queue.filter((r) => r.id !== args.id); emit('amfa://queue-changed', db.queue.slice()); return;
+      db.queue = db.queue.filter((r) => r.id !== args.id); emit('aka://queue-changed', db.queue.slice()); return;
     }
     case 'ui_set_mode': case 'ui_hide_main': case 'ui_hide_dropdown':
     case 'ui_set_dropdown_form_active': case 'ui_show_approval':
@@ -566,7 +566,7 @@ if (!tauri && typeof window !== 'undefined') {
         },
         temporary_access: null,
       };
-      db.queue = [req]; emit('amfa://queue-changed', db.queue.slice());
+      db.queue = [req]; emit('aka://queue-changed', db.queue.slice());
       return;
     }
     const inherited = kind === 'pair'
@@ -603,6 +603,6 @@ if (!tauri && typeof window !== 'undefined') {
       ssh: null,
       temporary_access: kind === 'pair' ? null : { scope: post ? 'full' : 'read', duration_seconds: 900 },
     };
-    db.queue = [req]; emit('amfa://queue-changed', db.queue.slice());
+    db.queue = [req]; emit('aka://queue-changed', db.queue.slice());
   };
 }

@@ -545,7 +545,7 @@ pub async fn open_agent(
         connection_name: connection.name.clone(),
         host,
         port,
-        comment: format!("agentmfa:{}", connection.name),
+        comment: format!("aka:{}", connection.name),
         signer,
     });
     let socket_display = socket_path.to_string_lossy().into_owned();

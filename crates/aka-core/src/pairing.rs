@@ -72,11 +72,11 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// 256-bit random bearer token: `amfa_` + 64 hex chars.
+/// 256-bit random bearer token: `aka_` + 64 hex chars.
 fn mint_token() -> String {
     let mut buf = [0u8; 32];
     getrandom::fill(&mut buf).expect("os rng");
-    format!("amfa_{}", hex(&buf))
+    format!("aka_{}", hex(&buf))
 }
 
 impl PairingRegistry {
@@ -291,12 +291,12 @@ mod tests {
     fn pair_verify_roundtrip() {
         let (r, _dir) = registry(Duration::from_secs(3600));
         let (token, agent) = r.pair("claude-code", dev_identity()).unwrap();
-        assert!(token.starts_with("amfa_"));
-        assert_eq!(token.len(), 5 + 64);
+        assert!(token.starts_with("aka_"));
+        assert_eq!(token.len(), 4 + 64);
         assert_eq!(agent.token_preview, &token[..11]);
         let verified = r.verify(&token, &dev_identity()).unwrap();
         assert_eq!(verified.name, "claude-code");
-        assert!(r.verify("amfa_bogus", &dev_identity()).is_err());
+        assert!(r.verify("aka_bogus", &dev_identity()).is_err());
     }
 
     #[test]
@@ -427,7 +427,7 @@ mod tests {
         let legacy = serde_json::json!([{
             "name": "claude-code",
             "token_hash": "hash",
-            "token_preview": "amfa_legacy",
+            "token_preview": "aka_legacy",
             "identity": {"kind": "dev_unverified", "uid": 501},
             "paired_at": now,
             "last_used": now

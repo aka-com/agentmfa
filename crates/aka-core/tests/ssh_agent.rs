@@ -325,7 +325,7 @@ async fn assert_lists_identity(stream: &mut UnixStream, key: &PrivateKey) {
     let (blob, rest) = take_string(&body[4..]);
     assert_eq!(blob, key.public_key().to_bytes().unwrap());
     let (comment, _) = take_string(rest);
-    assert_eq!(comment, b"agentmfa:prod-ssh");
+    assert_eq!(comment, b"aka:prod-ssh");
 }
 
 /// Sign a userauth blob for `user`/`alg` with `flags`; return the raw

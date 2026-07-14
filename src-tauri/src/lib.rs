@@ -1,4 +1,4 @@
-//! AgentMFA Tauri shell.
+//! AKA Desktop Tauri shell.
 //!
 //! The webview is the discovery/ergonomics surface; the Rust core
 //! owns everything sensitive. This shell wires the two together: it
@@ -196,7 +196,7 @@ pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "aka_core=info,agentmfa_app=info".into()),
+                .unwrap_or_else(|_| "aka_core=info,aka_desktop_app=info".into()),
         )
         .init();
 
@@ -265,7 +265,7 @@ pub fn run() {
                 Err(e) => fatal_startup(app, e),
             };
             tracing::info!(
-                "AgentMFA daemon listening on {}",
+                "AKA daemon listening on {}",
                 daemon.socket_path.display()
             );
 
@@ -311,7 +311,7 @@ pub fn run() {
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("error while building AgentMFA")
+        .expect("error while building AKA")
         .run(|handle, event| {
             // Clicking the Dock icon (incl. when no window is visible) reopens
             // the main window — the standard regular-app reactivation path.

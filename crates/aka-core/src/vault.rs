@@ -61,7 +61,7 @@ const MAC_KEYCHAIN_SERVICE: &str = "com.aka.desktop";
 ///
 /// The `keyring` crate's apple-native backend targets the file-based login
 /// keychain and does not expose `kSecUseDataProtectionKeychain` or
-/// `SecAccessControl`. AgentMFA still gates broker-side reads with the shell's
+/// `SecAccessControl`. AKA still gates broker-side reads with the shell's
 /// native re-auth hook before calling `get`. Keychain-enforced per-item ACLs
 /// require direct Security.framework calls and the appropriate entitlement.
 #[cfg(target_os = "macos")]

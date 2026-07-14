@@ -529,7 +529,7 @@ async fn scram_server(s: &mut TcpStream) -> std::io::Result<bool> {
         .to_string();
 
     let server_nonce = format!("{client_nonce}srv-nonce-0123456789");
-    let salt = b"agentmfa-test-salt";
+    let salt = b"aka-test-salt";
     let iterations = 4096u32;
     let server_first = format!("r={server_nonce},s={},i={iterations}", b64.encode(salt));
     let mut p = Vec::new();

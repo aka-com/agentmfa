@@ -1,4 +1,4 @@
-// AgentMFA frontend. One file drives all Tauri windows (main, tray
+// AKA Desktop frontend. One file drives all Tauri windows (main, tray
 // dropdown, and approval), chosen from location.hash.
 //
 // Every mutation and read goes through the Rust core via Tauri
@@ -2506,9 +2506,9 @@ async function boot() {
     if (mode !== 'approval' && !state.sheet && !state.menuOpen) refreshAgentsView();
   }, 30000);
   // Live updates from the core.
-  await listen('amfa://queue-changed', (ev) => { state.queue = ev.payload || []; render(); });
-  await listen('amfa://sessions-changed', () => refresh('sessions'));
-  await listen('amfa://agents-changed', async () => {
+  await listen('aka://queue-changed', (ev) => { state.queue = ev.payload || []; render(); });
+  await listen('aka://sessions-changed', () => refresh('sessions'));
+  await listen('aka://agents-changed', async () => {
     const before = new Map(state.agents.map((agent) => [agent.name, agent.paired_at]));
     await load('agents', 'list_agents');
     render();
@@ -2516,27 +2516,27 @@ async function boot() {
       !before.has(agent.name) || before.get(agent.name) !== agent.paired_at);
     if (connected) toast(`🔗 ${connected.name} is connected and can now ask to use your services`);
   });
-  await listen('amfa://rules-changed', () => {
+  await listen('aka://rules-changed', () => {
     if (mode !== 'approval') refreshAgentsView();
   });
   // A core-side connection change (a trust-on-first-use host-key pin) has no
   // originating UI command to refresh after; reload the services list.
-  await listen('amfa://connections-changed', () => {
+  await listen('aka://connections-changed', () => {
     if (mode !== 'approval') refresh('connections');
   });
-  await listen('amfa://activity-appended', (ev) => receiveActivity(ev.payload));
-  await listen('amfa://activity-changed', () => refresh('activity'));
-  await listen('amfa://open-settings', () => {
+  await listen('aka://activity-appended', (ev) => receiveActivity(ev.payload));
+  await listen('aka://activity-changed', () => refresh('activity'));
+  await listen('aka://open-settings', () => {
     if (isProtectedFormSheet()) return;
     state.sheet = { kind: 'settings' };
     state.draft = {};
     state.sheetErrors = {};
     render();
   });
-  await listen('amfa://dropdown-shown', () => {
+  await listen('aka://dropdown-shown', () => {
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
   });
-  await listen('amfa://dropdown-hidden', () => {
+  await listen('aka://dropdown-hidden', () => {
     releaseDropdownForm();
     state.reveal = {};
     state.sheet = null;

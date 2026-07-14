@@ -3,7 +3,7 @@
 [workspace]
 
 [package]
-name = "agentmfa"
+name = "aka-desktop"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
@@ -13,11 +13,11 @@ description = "A secrets manager for humans and agents."
 # webkit2gtk). The core + CLI crates build and test everywhere.
 
 [lib]
-name = "agentmfa_app"
+name = "aka_desktop_app"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [[bin]]
-name = "agentmfa-app"
+name = "aka-desktop"
 path = "src/main.rs"
 
 [build-dependencies]

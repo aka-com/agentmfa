@@ -634,10 +634,7 @@ fn cmd_serve(root: Option<PathBuf>, auto_yes: bool) {
         Err(e) => fail("could not serve the control plane", &e),
     };
 
-    eprintln!(
-        "AgentMFA broker listening on {}",
-        daemon.socket_path.display()
-    );
+    eprintln!("AKA broker listening on {}", daemon.socket_path.display());
     if cfg!(not(target_os = "macos")) {
         eprintln!(
             "  ⚠ dev build: peer identity is uid-pinned only on this OS \
