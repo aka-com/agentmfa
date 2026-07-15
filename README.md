@@ -1,4 +1,4 @@
-# AKA Credential Server
+# Multitool
 
 The AKA credential server allows agents to make API calls, open
 database connections, and access SSH servers, using unmodified tools
