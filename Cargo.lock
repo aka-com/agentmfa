@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "aka"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "aka-core",
  "clap",
@@ -27,7 +27,7 @@ dependencies = [
 
 [[package]]
 name = "aka-core"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -72,7 +72,7 @@ dependencies = [
 
 [[package]]
 name = "aka-sandbox"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "axum",
  "serde_json",

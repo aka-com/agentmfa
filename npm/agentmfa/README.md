@@ -1,0 +1,81 @@
+# agentmfa
+
+AgentMFA is a credential broker for AI coding agents. Agents make API
+calls, open database connections, and reach SSH servers using
+unmodified tools like `curl`, `psql`, and `git`.
+
+The broker keeps the raw credentials in a local secret store and
+injects them into requests only after human approval.
+
+This package installs the broker's command line, `aka` (also linked as
+`agentmfa`): the headless broker, the store seeding commands, and the
+skill-file generator that teaches agents how to use the broker.
+
+- **HTTP**: the agent supplies method/path/headers/body to a pinned host
+- **Postgres**: the agent gets a password-less DSN plus a short-lived ticket
+- **SSH**: the agent gets an `SSH_AUTH_SOCK` that signs only for the
+  connection's pinned user and server host key
+- **WebSocket**: the agent gets a short-lived `ws://127.0.0.1:…` bridge URL
+
+## Install
+
+```sh
+npm install -g agentmfa
+```
+
+This installs a prebuilt binary via a platform-specific optional
+dependency — there is no postinstall script and no install-time network
+access beyond npm itself.
+
+Supported platforms: macOS (Apple silicon and Intel) and Linux
+(x64 and arm64, glibc). The broker rendezvous is a Unix domain socket, so
+Windows is not supported.
+
+## Quick start
+
+Run a broker headless with terminal approvals (the desktop app is the
+primary interface; the CLI is its dev/headless counterpart):
+
+```sh
+aka serve
+```
+
+Seed the store from another terminal (offline edits require the broker to
+be stopped first, so it cannot overwrite them from memory):
+
+```sh
+printf '%s' "$GITHUB_TOKEN" | aka secret add GITHUB_TOKEN
+aka conn add github --kind api --host api.github.com \
+    --template 'Authorization: Bearer {{GITHUB_TOKEN}}'
+aka conn list
+```
+
+Teach the agents in a repository about the broker:
+
+```sh
+aka skill --write          # writes .claude/skills/aka/SKILL.md
+aka skill --write --user   # or ~/.claude/skills/aka/SKILL.md for all repos
+```
+
+Agents discover the live contract from the broker itself:
+
+```sh
+curl --unix-socket ~/.aka/broker.sock http://localhost/instructions
+```
+
+Every command accepts `--root <dir>` to run against an isolated directory
+(data and socket under it) instead of the per-user defaults — handy for
+demos, tests, and CI. `aka serve --yes` auto-approves everything and exists
+for CI and local demos only; the entire point of the broker is the human
+approval step.
+
+## Platform notes
+
+- **macOS** is the fully supported product platform: secrets live in the
+  Keychain, approvals confirm via LocalAuthentication (Touch ID), and
+  paired agents are pinned to their code-signing identity.
+- **Linux** support is developer-grade: secrets are kept in a `0600` JSON
+  file vault that is **not encrypted at rest**, and peer identity is
+  pinned by uid plus a best-effort executable fingerprint. `aka serve`
+  prints a warning to this effect. It is intended for development,
+  integration testing, and evaluation rather than production use.

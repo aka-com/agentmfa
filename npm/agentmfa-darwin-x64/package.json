@@ -1,0 +1,21 @@
+{
+  "name": "agentmfa-darwin-x64",
+  "version": "0.0.1",
+  "description": "AgentMFA (AKA) CLI binary for macOS (Intel). Install the agentmfa package instead of installing this directly.",
+  "homepage": "https://github.com/aka-com/agentmfa",
+  "files": [
+    "bin/aka"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "prepublishOnly": "node ../../scripts/npm/verify-package.mjs"
+  },
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ]
+}

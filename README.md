@@ -53,6 +53,17 @@ npm start          # start Vite and launch the desktop app
 npm run build      # build .app and .dmg bundles
 ```
 
+## Publishing the CLI
+
+```sh
+brew install zig # one-time macOS cross-linker setup
+npm run npm:dist
+npm run npm:publish -- --dry-run
+```
+
+The distribution script also uses GNU cross-toolchains when they are already
+available or explicitly configured through Cargo's target linker variables.
+
 ## Signing and notarization
 
 For a distributable `.app`/`.dmg`, build with the Tauri CLI and a

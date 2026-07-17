@@ -12,3 +12,6 @@ dist/
 
 # Generated credentials and runtime state for the local service sandbox.
 /dev/sandbox/state/
+
+# Staged CLI binaries for the npm distribution (scripts/npm-dist.sh)
+/npm/agentmfa-*/bin/

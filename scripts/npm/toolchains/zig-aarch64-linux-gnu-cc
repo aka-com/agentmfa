@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+args=()
+for arg in "$@"; do
+  case "$arg" in
+    --target=aarch64-unknown-linux-gnu) ;;
+    *) args+=("$arg") ;;
+  esac
+done
+exec zig cc -target aarch64-linux-gnu "${args[@]}"
