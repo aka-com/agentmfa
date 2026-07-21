@@ -83,6 +83,8 @@ fn add_github(broker: &Broker) -> Connection {
                 scheme: "https".into(),
                 port: None,
                 template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
+            
+                mcp_path: None,
             },
             secrets: vec![],
         })
@@ -219,6 +221,8 @@ async fn connection_add_preflight_rejects_failures_before_confirmation() {
             scheme: "https".into(),
             port: None,
             template: template.into(),
+        
+            mcp_path: None,
         },
         secrets: vec![],
     };
@@ -360,6 +364,8 @@ async fn connection_renames_skip_confirmation_but_capability_changes_do_not() {
                     scheme,
                     port,
                     template,
+                
+                    mcp_path: None,
                 },
                 secrets: renamed.secrets.clone(),
             },
@@ -511,6 +517,8 @@ async fn service_tests_are_not_added_to_the_activity_log() {
                 scheme: "http".into(),
                 port: None,
                 template: "Authorization: Bearer {{API_KEY}}".into(),
+            
+                mcp_path: None,
             },
             secrets: vec![],
         })
@@ -580,6 +588,8 @@ async fn target_changes_drop_the_connection_wirings() {
                     scheme: "https".into(),
                     port: None,
                     template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
+                
+                    mcp_path: None,
                 },
                 secrets: vec![],
             },

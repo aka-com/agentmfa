@@ -20,8 +20,16 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 
 import { BrokerClient, BrokerError, type BrokerConnection, type BrokerIdentity } from './broker';
+import { z } from 'zod';
+
 import { log } from './log';
 import { describe, invoke, schemaFor, toolNameFor } from './tools';
+import {
+  callUpstreamTool,
+  listUpstreamTools,
+  upstreamToolName,
+  type UpstreamTool,
+} from './upstream-mcp';
 
 export const MCP_PATH = '/mcp';
 
@@ -261,6 +269,14 @@ export async function createToolServer(
   // every other tool it has.
   const taken = new Set<string>(['multitool_status']);
   for (const connection of wired) {
+    // An MCP upstream contributes its own tools rather than one request
+    // tool. Its traffic still rides the broker's HTTP plane, so the
+    // credential stays where it belongs.
+    if (connection.mcp_path) {
+      await registerUpstream(server, broker, principal, connection, taken);
+      continue;
+    }
+
     const toolName = toolNameFor(connection);
     if (taken.has(toolName)) {
       log('warn', 'skipping a connection whose tool name collides', {
@@ -284,6 +300,99 @@ export async function createToolServer(
   }
 
   return server;
+}
+
+/**
+ * What the agent is told about an upstream tool.
+ *
+ * The upstream's JSON Schema is inlined here because our own declared
+ * schema is deliberately permissive — this is where the agent learns what
+ * the tool actually takes.
+ */
+function describeUpstream(connection: BrokerConnection, tool: UpstreamTool): string {
+  const base = tool.description ?? `${tool.name} via ${connection.name}`;
+  if (!tool.inputSchema) return `${base} (via ${connection.name})`;
+  return `${base} (via ${connection.name}). Parameters: ${JSON.stringify(tool.inputSchema)}`;
+}
+
+/**
+ * Re-expose an upstream MCP server's tools under this connection's name.
+ *
+ * A server that cannot be reached costs its own tools and nothing else: the
+ * session still opens, and `multitool_status` reports the failure, because
+ * one unreachable upstream must not take down every other tool the agent
+ * has.
+ */
+async function registerUpstream(
+  server: McpServer,
+  broker: BrokerClient,
+  principal: Principal,
+  connection: BrokerConnection,
+  taken: Set<string>,
+): Promise<void> {
+  let tools: Awaited<ReturnType<typeof listUpstreamTools>> = [];
+  try {
+    tools = await listUpstreamTools(broker, principal.token, connection);
+  } catch (error) {
+    log('warn', 'could not list tools from an MCP upstream', {
+      connection: connection.name,
+      error: String(error),
+    });
+    return;
+  }
+
+  for (const tool of tools) {
+    const toolName = upstreamToolName(connection, tool.name);
+    if (taken.has(toolName)) {
+      log('warn', 'skipping an upstream tool whose name collides', {
+        connection: connection.name,
+        tool: tool.name,
+        toolName,
+      });
+      continue;
+    }
+    taken.add(toolName);
+
+    server.registerTool(
+      toolName,
+      {
+        title: tool.name,
+        description: describeUpstream(connection, tool),
+        // A permissive object, NOT `undefined`. With no schema the SDK
+        // calls the handler with its `extra` (session id, request headers,
+        // the agent's own Authorization) as the first argument — which we
+        // would then forward to the upstream as tool arguments. Declaring a
+        // schema keeps the callback's first argument the agent's arguments
+        // and nothing else. Loose, so the upstream's own parameters pass
+        // through unvalidated by us; the upstream validates them.
+        inputSchema: z.looseObject({}),
+      },
+      async (args: Record<string, unknown>) => {
+        try {
+          const result = await callUpstreamTool(
+            broker,
+            principal.token,
+            connection,
+            tool.name,
+            args ?? {},
+          );
+          // The upstream already speaks MCP, so its result is returned as
+          // it stands rather than rewrapped.
+          return result as { content: Array<{ type: 'text'; text: string }> };
+        } catch (error) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: 'text' as const,
+                text: `${connection.name} failed: ${String(error)}`,
+              },
+            ],
+          };
+        }
+      },
+    );
+  }
 }
 
 /** Mint a transport + server pair for a new session. */

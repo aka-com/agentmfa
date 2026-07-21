@@ -506,6 +506,8 @@ impl ConnectionInput {
                 scheme: self.scheme.unwrap_or_else(|| "https".into()),
                 port: self.port,
                 template: self.template.unwrap_or_default(),
+            
+                mcp_path: None,
             },
             "pg" => ConnectionConfig::Pg {
                 host: self.host.unwrap_or_default(),

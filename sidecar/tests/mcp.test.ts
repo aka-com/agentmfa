@@ -20,10 +20,12 @@ const AGENTS: Record<string, { client_id: string; agent: string }> = {
   'token-wired': { client_id: 'client-wired', agent: 'claude-code' },
   'token-bare': { client_id: 'client-bare', agent: 'other-agent' },
   'token-collide': { client_id: 'client-collide', agent: 'collide-agent' },
+  'token-mcp': { client_id: 'client-mcp', agent: 'mcp-agent' },
 };
 const WIRED: Record<string, string[]> = {
   'client-wired': ['prod-db'],
   'client-collide': ['prod.db', 'prod db'],
+  'client-mcp': ['notion'],
   'client-bare': [],
 };
 const CONNECTIONS = [
@@ -33,7 +35,32 @@ const CONNECTIONS = [
   // Hyphens survive; dots and spaces do not.
   { name: 'prod.db', type: 'pg', target: 'db.other:5432/app', endpoint: '/v1/pg/open' },
   { name: 'prod db', type: 'pg', target: 'db.third:5432/app', endpoint: '/v1/pg/open' },
+  {
+    name: 'notion',
+    type: 'api',
+    target: 'https://mcp.notion.com',
+    endpoint: '/v1/http',
+    mcp_path: '/mcp',
+  },
 ];
+
+/** A stand-in for an upstream MCP server, reached through the broker. */
+function upstreamRpc(request: { id: number; method: string; params?: unknown }): unknown {
+  const reply = (result: unknown) => ({ jsonrpc: '2.0', id: request.id, result });
+  if (request.method === 'initialize') {
+    return reply({ protocolVersion: '2025-06-18', capabilities: {}, serverInfo: { name: 'notion' } });
+  }
+  if (request.method === 'tools/list') {
+    return reply({
+      tools: [{ name: 'search', description: 'Search the workspace' }],
+    });
+  }
+  if (request.method === 'tools/call') {
+    const params = request.params as { name: string; arguments: Record<string, unknown> };
+    return reply({ content: [{ type: 'text', text: `${params.name}:${JSON.stringify(params.arguments)}` }] });
+  }
+  return { jsonrpc: '2.0', id: request.id, error: { code: -32601, message: 'Method not found' } };
+}
 
 /** A stand-in for the broker's control plane, on a Unix socket. */
 function fakeBroker(socketPath: string): Promise<Server> {
@@ -75,6 +102,10 @@ function fakeBroker(socketPath: string): Promise<Server> {
         const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
         if (!WIRED[identity.client_id].includes(body.connection)) {
           send(403, { reason: 'denied_by_policy' });
+          return;
+        }
+        if (req.url === '/v1/http' && body.path === '/mcp') {
+          send(200, { status: 200, body: upstreamRpc(body.body) });
           return;
         }
         send(200, { endpoint: req.url, body });
@@ -197,6 +228,76 @@ test('status reports tools wired after the session opened', async () => {
       assert.match(status.hint ?? '', /reconnect/i);
     } finally {
       WIRED['client-bare'] = [];
+    }
+  } finally {
+    await app.close();
+  }
+});
+
+test("an MCP upstream's own tools are re-exposed, credential-side untouched", async () => {
+  const app = await harness();
+  try {
+    const client = await app.connect('token-mcp');
+    const { tools } = await client.listTools();
+    assert.deepEqual(tools.map((tool) => tool.name).sort(), [
+      'multitool_notion_search',
+      'multitool_status',
+    ]);
+
+    const result = await client.callTool({
+      name: 'multitool_notion_search',
+      arguments: { query: 'roadmap' },
+    });
+    // The upstream's own result comes back as it stands.
+    assert.deepEqual((result as { content: Array<{ text: string }> }).content, [
+      { type: 'text', text: 'search:{"query":"roadmap"}' },
+    ]);
+  } finally {
+    await app.close();
+  }
+});
+
+test('an upstream tool call carries only the agent arguments', async () => {
+  // Regression: with no declared input schema the MCP SDK hands the
+  // handler its `extra` — session id, request headers, and the agent's own
+  // Authorization — as the first argument. Forwarding that to the upstream
+  // would leak the agent's broker token to a third-party server.
+  const app = await harness();
+  try {
+    const client = await app.connect('token-mcp');
+    const result = await client.callTool({
+      name: 'multitool_notion_search',
+      arguments: { query: 'roadmap' },
+    });
+    const echoed = (result as { content: Array<{ text: string }> }).content[0].text;
+    assert.equal(echoed, 'search:{"query":"roadmap"}');
+    assert.ok(!echoed.includes('token-mcp'), 'the agent token must not reach the upstream');
+    assert.ok(!echoed.includes('authorization'), 'headers must not reach the upstream');
+  } finally {
+    await app.close();
+  }
+});
+
+test('an unreachable MCP upstream costs only its own tools', async () => {
+  const app = await harness();
+  try {
+    // `prod-db` is wired alongside nothing that can serve MCP; point the
+    // agent at an upstream whose path the fake broker will not answer.
+    WIRED['client-wired'] = ['prod-db', 'notion'];
+    const notion = CONNECTIONS.find((c) => c.name === 'notion')!;
+    notion.mcp_path = '/unreachable';
+    try {
+      const client = await app.connect('token-wired');
+      const { tools } = await client.listTools();
+      // The session opened and the healthy tool survived.
+      assert.ok(
+        tools.some((tool) => tool.name === 'multitool_prod-db_open'),
+        'the healthy tool should still be registered',
+      );
+      assert.ok(!tools.some((tool) => tool.name.startsWith('multitool_notion')));
+    } finally {
+      WIRED['client-wired'] = ['prod-db'];
+      notion.mcp_path = '/mcp';
     }
   } finally {
     await app.close();

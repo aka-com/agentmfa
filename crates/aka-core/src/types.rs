@@ -88,6 +88,17 @@ pub enum ConnectionConfig {
         /// literal text with `{{ … }}` placeholders,
         /// e.g. `Authorization: Bearer {{GITHUB_API_KEY}}`.
         template: String,
+        /// When set, this upstream speaks MCP at that path (e.g. `/mcp`),
+        /// and the sidecar re-exposes its tools under this connection's
+        /// name.
+        ///
+        /// An MCP server reached over HTTP is an API connection in every
+        /// way that matters here — same pinned host, same credential
+        /// injected on the upstream leg — so it is a field rather than a
+        /// separate kind. That is also what keeps the secret out of the
+        /// sidecar: the MCP traffic rides the existing HTTP plane.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mcp_path: Option<String>,
     },
     Pg {
         host: String,
@@ -471,6 +482,8 @@ mod tests {
             scheme: "https".into(),
             port: None,
             template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
+        
+            mcp_path: None,
         };
         assert_eq!(api.target(), "https://api.github.com");
         let pg = ConnectionConfig::Pg {
@@ -545,12 +558,16 @@ mod tests {
             scheme: "https".into(),
             port: None,
             template: "Authorization: Bearer {{A}}".into(),
+        
+            mcp_path: None,
         };
         let api_b = ConnectionConfig::Api {
             host: "api.example.com".into(),
             scheme: "https".into(),
             port: Some(443),
             template: "Authorization: Bearer {{B}}".into(),
+        
+            mcp_path: None,
         };
         assert!(api_a.has_equivalent_target(&api_b));
 

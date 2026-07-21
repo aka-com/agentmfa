@@ -31,7 +31,10 @@
     "vite": "^8.1.4"
   },
   "dependencies": {
+    "@executor-js/plugin-mcp": "^1.5.35",
+    "@executor-js/sdk": "^1.5.35",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "effect": "^4.0.0-beta.59",
     "lucide": "^1.23.0",
     "zod": "^4.4.3"
   }

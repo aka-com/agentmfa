@@ -596,7 +596,7 @@ async fn get_connections(State(state): State<AppState>, authed: Authed) -> Respo
         .list_connections()
         .into_iter()
         .map(|c| {
-            json!({
+            let mut row = json!({
                 "name": c.name,
                 "type": c.kind().as_str(),
                 "target": c.target(),
@@ -607,7 +607,17 @@ async fn get_connections(State(state): State<AppState>, authed: Authed) -> Respo
                 // connections are visible but refused; the user wires
                 // agents up in the app.
                 "wired": broker.wirings.is_wired(&authed.agent.id, &c.id),
-            })
+            });
+            // Present only when this upstream speaks MCP, so the payload
+            // stays exactly as it was for every other connection.
+            if let ConnectionConfig::Api {
+                mcp_path: Some(path),
+                ..
+            } = &c.config
+            {
+                row["mcp_path"] = json!(path);
+            }
+            row
         })
         .collect();
     Json(list).into_response()

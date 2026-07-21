@@ -164,12 +164,55 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
     // than assumed.
     let upstream_auth: Arc<std::sync::Mutex<Option<String>>> = Arc::default();
     let seen = upstream_auth.clone();
+    let mcp_auth: Arc<std::sync::Mutex<Option<String>>> = Arc::default();
+    let mcp_seen = mcp_auth.clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind upstream");
     let upstream_port = listener.local_addr().expect("addr").port();
-    let app = axum::Router::new().route(
-        "/whoami",
+    let app = axum::Router::new()
+        .route(
+            "/mcp",
+            axum::routing::post(
+                move |headers: axum::http::HeaderMap, body: axum::Json<Value>| {
+                    let seen = mcp_seen.clone();
+                    async move {
+                        *seen.lock().expect("lock") = headers
+                            .get("authorization")
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
+                        let id = body.0["id"].clone();
+                        let result = match body.0["method"].as_str() {
+                            Some("initialize") => json!({
+                                "protocolVersion": "2025-06-18",
+                                "capabilities": {},
+                                "serverInfo": {"name": "notes", "version": "1.0.0"},
+                            }),
+                            Some("tools/list") => json!({
+                                "tools": [{
+                                    "name": "search",
+                                    "description": "Search notes",
+                                    "inputSchema": {
+                                        "type": "object",
+                                        "properties": {"query": {"type": "string"}},
+                                    },
+                                }],
+                            }),
+                            Some("tools/call") => json!({
+                                "content": [{
+                                    "type": "text",
+                                    "text": format!("found: {}", body.0["params"]["arguments"]),
+                                }],
+                            }),
+                            _ => json!(null),
+                        };
+                        axum::Json(json!({"jsonrpc": "2.0", "id": id, "result": result}))
+                    }
+                },
+            ),
+        )
+        .route(
+            "/whoami",
         axum::routing::get(move |headers: axum::http::HeaderMap| {
             let seen = seen.clone();
             async move {
@@ -213,11 +256,28 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
                     scheme: "http".into(),
                     port: Some(upstream_port),
                     template: "Authorization: Bearer {{API_KEY}}".into(),
+                
+                    mcp_path: None,
                 },
                 secrets: vec![],
             })
             .expect("connection");
     }
+
+    broker
+        .store
+        .add_connection(ConnectionSpec {
+            name: "notes".into(),
+            config: ConnectionConfig::Api {
+                host: "127.0.0.1".into(),
+                scheme: "http".into(),
+                port: Some(upstream_port),
+                template: "Authorization: Bearer {{API_KEY}}".into(),
+                mcp_path: Some("/mcp".into()),
+            },
+            secrets: vec![],
+        })
+        .expect("mcp connection");
 
     // The first agent is auto-wired to everything by design; the second
     // starts with nothing. That asymmetry is exactly what we want to test.
@@ -259,8 +319,12 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
     let tools = wired.list_tools().await;
     assert_eq!(
         tools,
-        vec!["multitool_prod-db_request", "multitool_status"],
-        "unwired connections must not become tools"
+        vec![
+            "multitool_notes_search",
+            "multitool_prod-db_request",
+            "multitool_status"
+        ],
+        "an MCP upstream contributes its own tools; unwired ones contribute none"
     );
 
     // The real thing: a call that reaches the upstream server, with the
@@ -282,6 +346,26 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
     assert!(
         !serde_json::to_string(&result).expect("json").contains("secret-value"),
         "the secret must not come back to the agent: {result}"
+    );
+
+    // The MCP upstream is reached *through* the broker, so its credential
+    // is injected on the upstream leg exactly like any other API call.
+    let searched = wired
+        .call_tool("multitool_notes_search", json!({"query": "roadmap"}))
+        .await;
+    let text = searched["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("roadmap"),
+        "the upstream tool should have run: {searched}"
+    );
+    assert_eq!(
+        mcp_auth.lock().expect("lock").as_deref(),
+        Some("Bearer secret-value"),
+        "the broker must inject the credential for MCP traffic too"
+    );
+    assert!(
+        !text.contains(&first),
+        "the agent's own token must not reach the MCP upstream"
     );
 
     // A second agent, wired to nothing, gets the status tool and nothing else.

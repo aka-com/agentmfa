@@ -135,11 +135,38 @@ Verified end to end against a real broker and a real upstream: the
 `Authorization` header arrives upstream with the injected credential, and
 the same secret is absent from everything the agent sees.
 
-**Phase 4 — real MCP.** `@executor-js/plugin-mcp` lets a catalog row be
-an external MCP server, with our vault behind `CredentialProvider` for
-its auth. *Verify:* add a live MCP server, wire an agent, call one of
-its tools; deleting the connection drops its wirings as it does for
-every other tool type.
+**Phase 4 — real MCP. Done.** An API connection gained one optional
+field, `mcp_path`. When set, that upstream speaks MCP, and the sidecar
+re-exposes its tools as `multitool_<namespace>_<tool>`.
+
+No new connection kind, deliberately. An MCP server reached over HTTP
+*is* an API connection in every way that matters: pinned host, pinned
+scheme and port, credential injected on the upstream leg. Making it a
+field rather than a kind is also what keeps the secret out of the
+sidecar — MCP JSON-RPC rides the existing `/v1/http` plane, so the
+sidecar never opens a socket to the upstream and never sees its
+credential. It is wiring-checked like everything else, and the field is
+omitted from `/v1/connections` when unset, so the payload is unchanged
+for every other connection.
+
+From executor we import `deriveMcpNamespace` and `joinToolPath` out of
+`@executor-js/plugin-mcp/core`, so a tool surfaced here is named the way
+an executor host would name it. We do **not** adopt `mcpPlugin` itself:
+it needs `createExecutor` with a SQLite store, which is precisely the
+second source of truth for connections that the risks section warns
+against — and it peer-depends on React and TanStack Router, which have
+no business in a headless sidecar.
+
+Stdio MCP servers are not supported. Spawning one requires putting its
+credential in the sidecar's environment, which this design exists to
+avoid; doing it properly means the broker spawns the process.
+
+The review here caught a **credential leak**: registering a tool with no
+input schema makes the MCP SDK pass its `extra` — session id, request
+headers, the agent's own `Authorization` — as the handler's first
+argument, which we then forwarded upstream as tool arguments. Declaring a
+permissive `z.looseObject({})` fixes it; a regression test asserts the
+agent's token never appears in what the upstream receives.
 
 **Phase 5 — UI.** MCP catalog rows become addable, the dimmed
 GitHub/Gmail/Notion/1Password rows light up, and the Get Started "MCP

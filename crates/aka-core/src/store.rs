@@ -811,6 +811,7 @@ fn validate_config_and_bind_secrets(
             scheme,
             port: _,
             template,
+            mcp_path,
         } => {
             if host.is_empty() || host.contains('/') || host.contains('@') || host.contains(':') {
                 return Err(CoreError::InvalidConnectionField {
@@ -824,6 +825,14 @@ fn validate_config_and_bind_secrets(
                     field: ConnectionField::Scheme,
                     message: "Use http:// or https://".into(),
                 });
+            }
+            if let Some(path) = mcp_path {
+                if !path.starts_with('/') {
+                    return Err(CoreError::InvalidConnectionField {
+                        field: ConnectionField::Url,
+                        message: "The MCP path must start with / (for example /mcp)".into(),
+                    });
+                }
             }
             let parsed = Template::parse(template)?;
             let refs = parsed.refs();
@@ -996,6 +1005,8 @@ mod tests {
                 scheme: "https".into(),
                 port: None,
                 template: template.into(),
+            
+                mcp_path: None,
             },
             secrets: vec![],
         }

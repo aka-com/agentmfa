@@ -221,6 +221,8 @@ fn api_connection(harness: &Harness, name: &str, port: u16) {
                 scheme: "http".into(),
                 port: Some(port),
                 template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
+            
+                mcp_path: None,
             },
             secrets: vec![],
         })
@@ -789,6 +791,8 @@ async fn query_injected_secret_not_leaked_in_upstream_error() {
                 scheme: "http".into(),
                 port: Some(dead_port),
                 template: "?token={{url(STREAM_TOKEN)}}".into(),
+            
+                mcp_path: None,
             },
             secrets: vec![],
         })
@@ -965,6 +969,8 @@ async fn mutating_request_id_is_scoped_to_connection() {
                 scheme: "http".into(),
                 port: Some(up.port),
                 template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
+            
+                mcp_path: None,
             },
             secrets: vec![],
         })

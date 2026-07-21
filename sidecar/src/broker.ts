@@ -22,6 +22,8 @@ export interface BrokerConnection {
   endpoint: string;
   /** Whether *this* agent may use it. The broker decides; we only report. */
   wired: boolean;
+  /** Set when this upstream speaks MCP at that path, e.g. `/mcp`. */
+  mcp_path?: string | null;
 }
 
 /** A non-2xx from the broker, carried through with its status intact. */

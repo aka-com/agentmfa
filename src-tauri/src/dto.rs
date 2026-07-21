@@ -65,6 +65,9 @@ pub struct ConnectionDto {
     pub sslmode: Option<String>,
     pub trusted_ca_bundle_path: Option<String>,
     pub url: Option<String>,
+    /// Set when an API upstream speaks MCP at that path; the sidecar
+    /// re-exposes its tools under this connection's name.
+    pub mcp_path: Option<String>,
 }
 
 impl ConnectionDto {
@@ -101,6 +104,7 @@ impl ConnectionDto {
             sslmode: None,
             trusted_ca_bundle_path: None,
             url: None,
+            mcp_path: None,
         };
         match &conn.config {
             Api {
@@ -108,11 +112,13 @@ impl ConnectionDto {
                 scheme,
                 port,
                 template,
+                mcp_path,
             } => {
                 dto.host = Some(host.clone());
                 dto.scheme = Some(scheme.clone());
                 dto.port = *port;
                 dto.template = Some(template.clone());
+                dto.mcp_path = mcp_path.clone();
             }
             Pg {
                 host,
