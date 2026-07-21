@@ -7,7 +7,6 @@
 import type {
   ActivityEntry,
   AgentSummary,
-  ApprovalRequest,
   CommandArgs,
   CommandName,
   CommandResult,
@@ -17,7 +16,6 @@ import type {
   EventMap,
   EventName,
   EventPayload,
-  PermissionScope,
   SessionSummary,
   Settings,
   Unlisten,
@@ -71,8 +69,8 @@ const MOCK_ACTIVITY_META = {
   connectionAdded: { icon: 'plug', tone: 'neutral' },
   connectionUpdated: { icon: 'pencil', tone: 'neutral' },
   connectionDeleted: { icon: 'unplug', tone: 'neutral' },
-  ruleRemoved: { icon: 'shieldMinus', tone: 'neutral' },
-  grantRevoked: { icon: 'shieldX', tone: 'danger' },
+  wired: { icon: 'plug', tone: 'neutral' },
+  unwired: { icon: 'unplug', tone: 'neutral' },
   tokenRevoked: { icon: 'unplug', tone: 'danger' },
 };
 const MOCK_AGENT_SETUP = 'Connect to the local AKA broker. Read its current instructions, then list what connections are currently available:\n\ncurl -fsS --unix-socket ~/.aka/broker.sock http://localhost/instructions';
@@ -134,34 +132,22 @@ interface MockConnection {
   url?: string | null;
 }
 
-interface MockRule {
-  id: string;
+interface MockWiring {
   client_id: string;
   agent: string;
   connection_id: string;
-  scope: PermissionScope;
 }
 
-interface MockGrant {
-  id: string;
-  agent: string;
-  connection_id: string;
-  scope: PermissionScope;
-  expires_at: string;
-}
-
-type MockAgent = Omit<AgentSummary, 'permission_count'>;
+type MockAgent = Omit<AgentSummary, 'wiring_count'>;
 
 interface MockDatabase {
   secrets: MockSecret[];
   connections: MockConnection[];
-  rules: MockRule[];
-  grants: MockGrant[];
+  wirings: MockWiring[];
   agents: MockAgent[];
   sessions: SessionSummary[];
   activity: ActivityEntry[];
   settings: Settings;
-  queue: ApprovalRequest[];
 }
 
 interface MockArgs {
@@ -173,8 +159,9 @@ interface MockArgs {
   input: ConnectionInput;
   limit: number;
   on: boolean;
-  decision: 'deny' | 'allow_once' | 'allow_session' | 'always_allow';
-  revokeInheritedRules?: boolean;
+  agentId: string;
+  connectionId: string;
+  wired: boolean;
   source: string;
   host: string;
   port: number;
@@ -190,8 +177,7 @@ const db: MockDatabase = {
     mkSecret('DEPLOY_SSH_KEY', '-----BEGIN OPENSSH PRIVATE KEY-----demo'),
   ],
   connections: [],
-  rules: [],
-  grants: [],
+  wirings: [],
   agents: [
     { id: uid(), name: 'claude-code', paired_at: now(), last_used: now() },
   ],
@@ -203,7 +189,6 @@ const db: MockDatabase = {
     show_service_walkthrough: true,
     show_agent_walkthrough: true,
   },
-  queue: [],
 };
 function mkSecret(name: string, value: string): MockSecret {
   return { id: uid(), name, _value: value, created_at: now(), updated_at: now() };
@@ -241,9 +226,8 @@ seedFixtures();
 // Illustrative broker state so the standalone dev page exercises every layout
 // affordance: ongoing access, temporary access, an open connection, and activity.
 function seedFixtures() {
-  db.rules.push({ id: uid(), client_id: db.agents[0].id, agent: 'claude-code', connection_id: db.connections[0].id, scope: 'full' });
-  db.grants.push({ id: uid(), agent: 'claude-code', connection_id: db.connections[1].id,
-    scope: 'full', expires_at: new Date(Date.now() + 11 * 60000).toISOString() });
+  db.wirings.push({ client_id: db.agents[0].id, agent: 'claude-code', connection_id: db.connections[0].id });
+  db.wirings.push({ client_id: db.agents[0].id, agent: 'claude-code', connection_id: db.connections[1].id });
   db.sessions.push({
     id: 1,
     type: 'ws',
@@ -283,10 +267,9 @@ function connDto(c: MockConnection): ConnectionSummary {
   return {
     id: c.id, name: c.name, type: c.type, target: connTarget(c),
     secret_names: c.secret_names,
-    permissions: [
-      ...db.rules.filter((r) => r.connection_id === c.id).map((r) => ({ id: r.id, agent: r.agent, scope: r.scope, expires_at: null })),
-      ...db.grants.filter((g) => g.connection_id === c.id).map((g) => ({ ...g })),
-    ],
+    wired_agents: db.wirings
+      .filter((w) => w.connection_id === c.id)
+      .map((w) => ({ agent_id: w.client_id, agent: w.agent })),
     host: c.host || null, scheme: c.scheme || null, port: c.port || null, template: c.template || null,
     dbname: c.dbname || null, user: c.user || null, host_key_fingerprint: c.host_key_fingerprint || null,
     destination: c.destination || null,
@@ -319,12 +302,10 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
     case 'list_connections': return db.connections.map(connDto);
     case 'list_agents':
       return db.agents.map((a) => ({ ...a,
-        permission_count: db.rules.filter((r) => r.client_id === a.id).length +
-          db.grants.filter((g) => g.agent === a.name).length }));
+        wiring_count: db.wirings.filter((w) => w.client_id === a.id).length }));
     case 'list_sessions': return db.sessions.slice();
     case 'list_activity': return db.activity.slice(0, Math.min(args.limit ?? MOCK_ACTIVITY_LIMIT, MOCK_ACTIVITY_LIMIT));
     case 'clear_activity': db.activity = []; emit('aka://activity-changed', {}); return;
-    case 'get_queue': return db.queue.slice();
     case 'get_settings': return { ...db.settings };
     case 'get_agent_setup': return MOCK_AGENT_SETUP;
     case 'get_broker_instructions': return MOCK_BROKER_INSTRUCTIONS;
@@ -440,7 +421,8 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
     case 'delete_connection': {
       const c = db.connections.find((x) => x.id === args.id); if (!c) throw new Error('no such connection');
       db.connections = db.connections.filter((x) => x.id !== args.id);
-      db.rules = db.rules.filter((r) => r.connection_id !== args.id); audit('connectionDeleted', `Service deleted: ${c.name}`); return;
+      db.wirings = db.wirings.filter((w) => w.connection_id !== args.id);
+      audit('connectionDeleted', `Service deleted: ${c.name}`); return;
     }
     case 'test_connection': {
       const c = db.connections.find((x) => x.id === args.id); if (!c) throw new Error('no such connection');
@@ -456,20 +438,29 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         : `GET https://${c.host}/ answered HTTP 200 OK`;
       return { ok, detail };
     }
-    case 'remove_permission': {
-      const standing = db.rules.some((permission) => permission.id === args.id);
-      db.rules = db.rules.filter((permission) => permission.id !== args.id);
-      db.grants = db.grants.filter((permission) => permission.id !== args.id);
-      audit(standing ? 'ruleRemoved' : 'grantRevoked', standing ? 'Approval required again' : 'Temporary access ended');
+    case 'set_wiring': {
+      const agent = db.agents.find((a) => a.id === args.agentId);
+      const connection = db.connections.find((c) => c.id === args.connectionId);
+      if (!agent || !connection) return false;
+      const wired = db.wirings.some((w) =>
+        w.client_id === agent.id && w.connection_id === connection.id);
+      if (args.wired && !wired) {
+        db.wirings.push({ client_id: agent.id, agent: agent.name, connection_id: connection.id });
+        audit('wired', `${agent.name} wired to ${connection.name}`);
+      } else if (!args.wired && wired) {
+        db.wirings = db.wirings.filter((w) =>
+          !(w.client_id === agent.id && w.connection_id === connection.id));
+        audit('unwired', `${agent.name} unwired from ${connection.name}`);
+      }
+      emit('aka://wirings-changed', {});
       return true;
     }
     case 'confirm_agent_disconnect':
-      return window.confirm('Disconnect agent\n\nDisconnect this agent? Temporary access, saved access, and active sessions will end.');
+      return window.confirm('Disconnect agent\n\nDisconnect this agent? Its wirings and active sessions will end.');
     case 'revoke_agent':
       { const agent = db.agents.find((a) => a.id === args.id); if (!agent) return false;
       db.agents = db.agents.filter((a) => a.id !== args.id);
-      db.grants = db.grants.filter((g) => g.agent !== agent.name);
-      db.rules = db.rules.filter((r) => r.client_id !== agent.id);
+      db.wirings = db.wirings.filter((w) => w.client_id !== agent.id);
       db.sessions = db.sessions.filter((s) => s.agent !== agent.name);
       audit('tokenRevoked', `Agent disconnected: ${agent.name}`); }
       emit('aka://agents-changed', {});
@@ -486,82 +477,8 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
     case 'set_agent_walkthrough_visible':
       db.settings.show_agent_walkthrough = args.on;
       return;
-    case 'decide': {
-      const req = db.queue.find((r) => r.id === args.id);
-      if (req && args.decision === 'allow_session' && req.connection && req.temporary_access) {
-        const connection = req.connection;
-        const temporaryAccess = req.temporary_access;
-        db.grants = db.grants.filter((g) =>
-          !(g.agent === req.agent && g.connection_id === connection.id));
-        db.grants.push({ id: uid(), agent: req.agent, connection_id: connection.id,
-          scope: temporaryAccess.scope,
-          expires_at: new Date(Date.now() + temporaryAccess.duration_seconds * 1000).toISOString() });
-      }
-      if (req && args.decision === 'always_allow' && req.connection && req.temporary_access) {
-        const connection = req.connection;
-        const client = db.agents.find((agent) => agent.name === req.agent);
-        if (client) {
-          db.rules = db.rules.filter((permission) =>
-            permission.client_id !== client.id || permission.connection_id !== connection.id);
-          db.rules.push({ id: uid(), client_id: client.id, agent: req.agent,
-            connection_id: connection.id, scope: req.temporary_access.scope });
-        }
-      }
-      db.queue = db.queue.filter((r) => r.id !== args.id); emit('aka://queue-changed', db.queue.slice()); return;
-    }
     case 'ui_set_mode': case 'ui_hide_main': case 'ui_hide_dropdown':
-    case 'ui_set_dropdown_form_active': case 'ui_show_approval':
-    case 'ui_resize_approval': return;
+    case 'ui_set_dropdown_form_active': return;
     default: throw new Error(`mock: unknown command ${cmd}`);
   }
-}
-
-// Expose a way for the dev page to inject a fake approval for visual testing.
-// Kinds: 'http' (GET, collapsed payload), 'post' (mutating, auto-expanded
-// payload with many headers + body — exercises the scroll region), 'ssh'.
-if (!tauri && typeof window !== 'undefined') {
-  window.__mockApproval = (kind = 'http', ttlMs = 900000) => {
-    if (kind === 'ssh') {
-      // A trust-on-first-use host-key prompt (kind 'ssh' + ssh payload).
-      const sshConn = db.connections.find((c) => c.type === 'ssh') ?? db.connections[0]!;
-      const req: ApprovalRequest = {
-        id: uid(), agent: 'claude-code', kind: 'ssh',
-        connection: { id: sshConn.id, name: sshConn.name, type: 'ssh', target: connTarget(sshConn) },
-        action: `Trust SSH host key for ${sshConn.name}`,
-        notification: `claude-code reached ${sshConn.name} for the first time: verify the server's host key`,
-        received_at: now(), deadline: new Date(Date.now() + ttlMs).toISOString(),
-        http: null,
-        ssh: {
-          host: sshConn.host || 'prod.example.com', port: sshConn.port || 22,
-          observed_fingerprint: 'SHA256:vdZ5N8kNxU7J4W2WYa6qK0sJYv8oXb8s2H7n3jE5q1A',
-          algorithm: 'ssh-ed25519',
-        },
-        temporary_access: null,
-      };
-      db.queue = [req]; emit('aka://queue-changed', db.queue.slice());
-      return;
-    }
-    const post = kind === 'post';
-    const body = post ? JSON.stringify({ event_type: 'deploy', client_payload: { ref: 'main', sha: 'a1b2c3d', env: 'production', requested_by: 'claude-code' } }, null, 2) : null;
-    const http: ApprovalRequest['http'] = {
-      method: post ? 'POST' : 'GET',
-      path: post ? '/repos/aka/aka/dispatches' : '/user/repos',
-      headers: post
-        ? [['Accept', 'application/vnd.github+json'], ['Content-Type', 'application/json'], ['X-GitHub-Api-Version', '2022-11-28'], ['User-Agent', 'claude-code/1.0'], ['X-Request-Id', 'req-8f31d2c4'], ['Accept-Encoding', 'gzip, deflate, br'], ['Connection', 'keep-alive'], ['Idempotency-Key', 'dispatch-20260708-01']]
-        : [['Accept', 'application/vnd.github+json']],
-      body_preview: body, body_len: body ? body.length : 0, body_truncated: false, mutating: post,
-    };
-    const firstConnection = db.connections[0]!;
-    const req: ApprovalRequest = {
-      id: uid(), agent: 'claude-code', kind: 'http',
-      connection: { id: firstConnection.id, name: 'github', type: 'api', target: 'api.github.com' },
-      action: post ? 'POST api.github.com/repos/aka/aka/dispatches' : 'GET api.github.com/user/repos',
-      notification: 'claude-code wants to use github: GET /user/repos',
-      received_at: now(), deadline: new Date(Date.now() + ttlMs).toISOString(),
-      http,
-      ssh: null,
-      temporary_access: { scope: post ? 'full' : 'read', duration_seconds: 900 },
-    };
-    db.queue = [req]; emit('aka://queue-changed', db.queue.slice());
-  };
 }

@@ -25,11 +25,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::net::UnixListener;
-use uuid::Uuid;
 
-use crate::approvals::{
-    ApprovalKind, ApprovalRequest, ExecOutcome, HttpPayloadView, ParkError, ParkRequest, Parked,
-};
 use crate::audit::{AuditEntry, AuditKind};
 use crate::broker::Broker;
 use crate::capability::http::{
@@ -38,10 +34,9 @@ use crate::capability::http::{
 };
 use crate::capability::SpooledBody;
 use crate::error::CoreError;
+use crate::executions::{ExecError, ExecOutcome, ExecRequest, Execution};
 use crate::pairing::{validate_agent_name, TokenError};
-use crate::policy::PolicyEngine as _;
-use crate::store::ConnectionSpec;
-use crate::types::{ConnectionConfig, ConnectionKind, Decision, PairedAgent, PermissionScope};
+use crate::types::{ConnectionConfig, ConnectionKind, PairedAgent};
 use crate::wire::{ErrorReason, MissingTokenCause, REQUEST_ID_MAX_BYTES};
 
 /* ------------------------------ plumbing --------------------------------- */
@@ -403,7 +398,6 @@ pub fn router(broker: Arc<Broker>) -> Router {
         .route("/instructions", get(get_instructions))
         .route("/v1/pair", post(post_pair))
         .route("/v1/connections", get(get_connections))
-        .route("/v1/connections/propose", post(post_propose))
         .route("/v1/whoami", get(get_whoami))
         .route("/v1/http", post(post_http))
         .route("/v1/ws/open", post(post_ws_open))
@@ -528,14 +522,19 @@ async fn post_pair(State(state): State<AppState>, ApiJson(body): ApiJson<PairBod
 
     // Registration is immediate: no approval prompt. The new agent simply
     // appears in the app, unwired — it can list connections but cannot use
-    // any until the user wires it up.
+    // any until the user wires it up. The one exception: the very first
+    // agent is wired to every existing connection, so a fresh install works
+    // end-to-end without a trip through the app.
+    let is_first_agent = broker.pairing.list().is_empty();
     let replaces_existing_agent = broker.pairing.get(&name).is_some();
     match broker.pairing.pair(&name) {
         Ok((token, agent)) => {
+            if is_first_agent {
+                broker.bootstrap_first_agent_wirings(&agent);
+            }
             if replaces_existing_agent {
-                // A re-pair invalidates the prior token generation; end the
-                // in-memory access it carried.
-                broker.revoke_access_grants_for_agent(&name, "agent re-paired");
+                // A re-pair invalidates the prior token generation; close
+                // the transports it carried.
                 let sessions_closed = broker.data_plane.close_agent(&name);
                 broker.audit.append(
                     AuditEntry::new(AuditKind::Paired, format!("Agent reconnected: {name}"))
@@ -582,8 +581,9 @@ async fn get_connections(State(state): State<AppState>, authed: Authed) -> Respo
     if let Err(wait) = broker.token_limiter.check(&authed.agent.token_hash) {
         return err_rate_limited(ErrorReason::RateLimited, wait);
     }
-    // The one authenticated endpoint that bypasses the policy engine by
-    // design, an agent must see what it may ask for. Audited.
+    // The one authenticated endpoint that bypasses the wiring check by
+    // design, an agent must see what exists (and what it is wired to).
+    // Audited.
     broker.audit.append(
         AuditEntry::new(
             AuditKind::Listed,
@@ -596,44 +596,6 @@ async fn get_connections(State(state): State<AppState>, authed: Authed) -> Respo
         .list_connections()
         .into_iter()
         .map(|c| {
-            let active_grant =
-                broker
-                    .grants
-                    .matching(&authed.agent.token_hash, &c, PermissionScope::Read);
-            let full_grant = active_grant
-                .as_ref()
-                .is_some_and(|grant| grant.summary.scope == PermissionScope::Full);
-            // What a call costs the agent right now: `will_prompt` blocks on
-            // a human decision, `auto_allowed` proceeds immediately under a
-            // standing rule. Not a secret; the agent learns the same
-            // thing on its first call, but knowing up front lets it warn its
-            // user before ringing the doorbell.
-            let full_permission =
-                broker
-                    .policy
-                    .evaluate(&authed.agent.id, &c.id, PermissionScope::Full)
-                    == Decision::Allow;
-            let read_permission =
-                broker
-                    .policy
-                    .evaluate(&authed.agent.id, &c.id, PermissionScope::Read)
-                    == Decision::Allow;
-            let approval = match (full_permission, read_permission) {
-                (true, _) => "auto_allowed",
-                (false, _) if full_grant => "auto_allowed",
-                (false, true) => "read_auto_allowed",
-                (false, false) if active_grant.is_some() => "read_auto_allowed",
-                (false, false) => "will_prompt",
-                // Reserved vocabulary: the v1 policy engine has no deny
-                // rules (policy.rs), so this arm is unreachable today —
-                // don't build agent logic around it.
-            };
-            let access_session = active_grant.as_ref().map(|grant| {
-                json!({
-                    "scope": grant.summary.scope,
-                    "expires_at": grant.summary.expires_at,
-                })
-            });
             json!({
                 "name": c.name,
                 "type": c.kind().as_str(),
@@ -641,8 +603,10 @@ async fn get_connections(State(state): State<AppState>, authed: Authed) -> Respo
                 // Where a call naming this connection goes; the
                 // type→endpoint mapping shouldn't live only in prose.
                 "endpoint": endpoint_for(c.kind()),
-                "approval": approval,
-                "access_session": access_session,
+                // Whether this agent may use the connection. Unwired
+                // connections are visible but refused; the user wires
+                // agents up in the app.
+                "wired": broker.wirings.is_wired(&authed.agent.id, &c.id),
             })
         })
         .collect();
@@ -824,51 +788,8 @@ async fn post_http(
         }
     };
 
-    // The approval window's request-payload view.
-    let (preview, truncated) = body
-        .preview(broker.config.approval_body_preview)
-        .unwrap_or((None, false));
     let mutating = is_mutating(&method);
-    let action = format!("{} {}{}", method, host, call.path);
-    let request = ApprovalRequest {
-        id: Uuid::new_v4(),
-        agent: agent.name.clone(),
-        client_id: Some(agent.id),
-        agent_token_hash: Some(agent.token_hash.clone()),
-        kind: ApprovalKind::Http,
-        connection: Some(broker.connection_summary(&conn)),
-        action: action.clone(),
-        notification: format!(
-            "{} wants to use {}: {} {}",
-            agent.name, conn.name, method, call.path
-        ),
-        received_at: chrono::Utc::now(),
-        deadline: chrono::Utc::now(),
-        http: Some(HttpPayloadView {
-            method: method.to_string(),
-            path: call.path.clone(),
-            headers: wire_headers,
-            body_preview: preview,
-            body_len: body.len(),
-            body_truncated: truncated,
-            mutating,
-        }),
-        ssh: None,
-        proposal: None,
-        proposal_credential: None,
-    };
-
-    broker.audit.append(
-        AuditEntry::new(
-            AuditKind::Requested,
-            format!("{} requested {}", agent.name, conn.name),
-        )
-        .agent(agent.name.clone())
-        .connection(conn.name.clone())
-        .detail(action)
-        .field("method", method.to_string())
-        .field("path", call.path.clone()),
-    );
+    let _ = host;
 
     // Coalescing is keyed on (agent, request_id) for mutating calls only;
     // GET/HEAD are never coalesced, a request_id there is ignored.
@@ -890,444 +811,66 @@ async fn post_http(
         headers: header_map,
         body: body.clone(),
     };
-    let executor: crate::approvals::Executor = Box::pin(executor.run());
+    let executor: crate::executions::Executor = Box::pin(executor.run());
 
-    let park = ParkRequest {
-        request,
-        coalesce_key,
-        payload_hash,
-        retain_outcome: true,
-        executor,
-    };
-    let scope = if mutating {
-        PermissionScope::Full
-    } else {
-        PermissionScope::Read
-    };
-    run_policied(broker, &agent, &conn, scope, park).await
+    run_wired(
+        broker,
+        &agent,
+        &conn,
+        ExecRequest {
+            coalesce_key,
+            payload_hash,
+            executor,
+        },
+    )
+    .await
 }
 
-/// Shared capability tail: evaluate policy, a standing rule goes
-/// straight to execution (still coalesced), no rule parks a held-open
-/// prompt, then wait and relay the outcome.
-async fn run_policied(
+/// Shared capability tail: a wired agent executes immediately (retries
+/// still coalesce under their idempotency key); an unwired one is refused.
+async fn run_wired(
     broker: &Arc<Broker>,
     agent: &PairedAgent,
     conn: &crate::types::Connection,
-    required_scope: PermissionScope,
-    park: ParkRequest,
+    exec: ExecRequest,
 ) -> Response {
-    let parked = {
-        // Keep grant matching and prompt insertion in one short critical
-        // section. Session creation uses the same gate, so neither side can
-        // miss the other and leave behind a redundant prompt.
-        let _access = broker.access_gate.lock().unwrap();
-        if let Some(grant) = broker
-            .grants
-            .matching(&agent.token_hash, conn, required_scope)
-        {
-            let entry = AuditEntry::new(
-                AuditKind::AutoAllowed,
-                format!("Temporary access used: {} → {}", agent.name, conn.name),
+    if !broker.wirings.is_wired(&agent.id, &conn.id) {
+        broker.audit.append(
+            AuditEntry::new(
+                AuditKind::Denied,
+                format!("Refused (not wired): {} → {}", agent.name, conn.name),
             )
             .agent(agent.name.clone())
             .connection(conn.name.clone())
-            .outcome("access_session")
-            .field("grant_id", grant.summary.id.to_string())
-            .field("scope", format!("{:?}", grant.summary.scope).to_lowercase())
-            .field(
-                "approval_state",
-                crate::wire::ApprovalState::Executing.as_str(),
-            );
-            let parked = broker
-                .approvals
-                .run_preapproved(park, Some(grant.authorization));
-            if matches!(&parked, Ok(Parked::Wait(_))) {
-                broker.audit.append(entry);
-            }
-            parked
-        } else {
-            match broker.policy.evaluate(&agent.id, &conn.id, required_scope) {
-                crate::types::Decision::Allow => {
-                    let rule = broker
-                        .policy
-                        .matching_rule(&agent.id, &conn.id, required_scope);
-                    let mut entry = AuditEntry::new(
-                        AuditKind::AutoAllowed,
-                        format!("Used without asking: {} → {}", agent.name, conn.name),
-                    )
-                    .agent(agent.name.clone())
-                    .connection(conn.name.clone())
-                    .outcome("auto_allowed")
-                    .field(
-                        "approval_state",
-                        crate::wire::ApprovalState::Executing.as_str(),
-                    );
-                    if let Some(rule) = rule {
-                        entry = entry.rule(rule.id);
-                    }
-                    let parked = broker.approvals.run_preapproved(park, None);
-                    if matches!(&parked, Ok(Parked::Wait(_))) {
-                        broker.audit.append(entry);
-                    }
-                    parked
-                }
-                crate::types::Decision::Deny => {
-                    return err(StatusCode::FORBIDDEN, ErrorReason::DeniedByPolicy);
-                }
-                crate::types::Decision::Prompt => broker.approvals.park(park),
-            }
-        }
-    };
-
-    resolve_parked(parked).await
-}
-
-async fn resolve_parked(parked: Result<Parked, ParkError>) -> Response {
-    match parked {
-        Ok(Parked::Wait(handle)) => match handle.wait().await {
+            .outcome("denied_by_policy"),
+        );
+        return err_detail(
+            StatusCode::FORBIDDEN,
+            ErrorReason::DeniedByPolicy,
+            format!(
+                "{} is not wired to {}; the user can wire it up in Multitool",
+                agent.name, conn.name
+            ),
+        );
+    }
+    match broker.executions.run(exec) {
+        Ok(Execution::Wait(handle)) => match handle.wait().await {
             Some(outcome) => outcome_response(outcome),
             None => err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 ErrorReason::BrokerShutdown,
             ),
         },
-        Ok(Parked::Replay(outcome)) => outcome_response(outcome),
-        Err(ParkError::RequestIdMismatch) => {
+        Ok(Execution::Replay(outcome)) => outcome_response(outcome),
+        Err(ExecError::RequestIdMismatch) => {
             err(StatusCode::CONFLICT, ErrorReason::RequestIdMismatch)
         }
-        Err(ParkError::OutcomeNotReplayable) => {
+        Err(ExecError::OutcomeNotReplayable) => {
             err(StatusCode::CONFLICT, ErrorReason::OutcomeNotReplayable)
         }
-        Err(ParkError::IdempotencyCapacity) => err(
+        Err(ExecError::IdempotencyCapacity) => err(
             StatusCode::SERVICE_UNAVAILABLE,
             ErrorReason::IdempotencyCapacity,
-        ),
-    }
-}
-
-/* --------------------------- connection proposal -------------------------- */
-
-#[derive(Deserialize)]
-struct ProposeBody {
-    name: String,
-    /// The Keychain name the credential will be saved under. The value is
-    /// never on the wire: the user types it into the approval prompt.
-    credential_name: String,
-    config: crate::types::ConnectionConfig,
-}
-
-/// `POST /v1/connections/propose` — an agent asks the user to save a new
-/// named connection. Approval saves configuration only (no session, no
-/// standing rule); the credential value is collected from the user inside
-/// the prompt and can never ride in on this request.
-async fn post_propose(
-    State(state): State<AppState>,
-    authed: Authed,
-    ApiJson(body): ApiJson<ProposeBody>,
-) -> Response {
-    let broker = &state.broker;
-    let agent = authed.agent;
-    if let Err(wait) = broker.token_limiter.check(&agent.token_hash) {
-        return err_rate_limited(ErrorReason::RateLimited, wait);
-    }
-    let name = body.name.trim().to_string();
-    let credential_name = body.credential_name.trim().to_string();
-    let config = body.config;
-
-    // Proposals cannot pre-pin trust or point the broker at local files.
-    match &config {
-        crate::types::ConnectionConfig::Ssh {
-            host_key_fingerprint,
-            ..
-        } if !host_key_fingerprint.is_empty() => {
-            return err_detail(
-                StatusCode::BAD_REQUEST,
-                ErrorReason::InvalidProposal,
-                "proposals cannot pin a host key; trust is confirmed with the user at the first connection",
-            );
-        }
-        crate::types::ConnectionConfig::Pg {
-            trusted_ca_bundle_path: Some(_),
-            ..
-        } => {
-            return err_detail(
-                StatusCode::BAD_REQUEST,
-                ErrorReason::InvalidProposal,
-                "proposals cannot name a CA bundle path",
-            );
-        }
-        _ => {}
-    }
-
-    // Any injection template may reference only the credential created by
-    // this proposal — never an existing stored secret.
-    let template = match &config {
-        crate::types::ConnectionConfig::Api { template, .. } => Some(template.clone()),
-        crate::types::ConnectionConfig::Ws { template, .. } => template.clone(),
-        _ => None,
-    };
-    if let Some(template) = &template {
-        match crate::template::Template::parse(template) {
-            Ok(parsed) => {
-                if parsed
-                    .refs()
-                    .iter()
-                    .any(|reference| reference != &credential_name)
-                {
-                    return err_detail(
-                        StatusCode::BAD_REQUEST,
-                        ErrorReason::InvalidProposal,
-                        format!(
-                            "the template may reference only the proposed credential {credential_name:?}"
-                        ),
-                    );
-                }
-            }
-            Err(error) => {
-                return err_detail(
-                    StatusCode::BAD_REQUEST,
-                    ErrorReason::InvalidProposal,
-                    format!("invalid template: {error}"),
-                );
-            }
-        }
-    }
-
-    // Refuse duplicates up front, by name and by equivalent target, without
-    // spending the user's attention on a prompt.
-    let proposed_kind = config.kind();
-    let proposed_target = config.target();
-    for existing in broker.store.list_connections() {
-        if existing.name == name {
-            return err_detail(
-                StatusCode::CONFLICT,
-                ErrorReason::ConnectionExists,
-                format!(
-                    "a connection named {name:?} already exists; list /v1/connections and use it"
-                ),
-            );
-        }
-        if existing.config.has_equivalent_target(&config) {
-            return err_detail(
-                StatusCode::CONFLICT,
-                ErrorReason::ConnectionExists,
-                format!(
-                    "connection {:?} already points at {proposed_target}; use it instead",
-                    existing.name
-                ),
-            );
-        }
-    }
-
-    // Full validation before prompting; the store re-checks after approval.
-    let spec = ConnectionSpec {
-        name: name.clone(),
-        config: config.clone(),
-        secrets: vec![],
-    };
-    if let Err(error) = broker
-        .store
-        .preflight_add_connection_with_secret(&credential_name, &spec)
-    {
-        return match error {
-            CoreError::SecretNameTaken(taken) => err_detail(
-                StatusCode::CONFLICT,
-                ErrorReason::SecretNameTaken,
-                format!(
-                    "secret name {taken:?} is already in use; propose a different credential_name"
-                ),
-            ),
-            CoreError::ConnectionNameTaken(taken) => err_detail(
-                StatusCode::CONFLICT,
-                ErrorReason::ConnectionExists,
-                format!("a connection named {taken:?} already exists"),
-            ),
-            other => err_detail(
-                StatusCode::BAD_REQUEST,
-                ErrorReason::InvalidProposal,
-                other.to_string(),
-            ),
-        };
-    }
-
-    let tls = match &config {
-        crate::types::ConnectionConfig::Pg { sslmode, .. } => Some(
-            serde_json::to_value(sslmode)
-                .ok()
-                .and_then(|v| v.as_str().map(String::from))
-                .unwrap_or_default(),
-        ),
-        _ => None,
-    };
-    let destination = match &config {
-        crate::types::ConnectionConfig::Ssh {
-            destination, host, ..
-        } => Some(destination.clone().unwrap_or_else(|| host.clone())),
-        _ => None,
-    };
-    let action = format!(
-        "Add {} service {name} → {proposed_target}",
-        proposed_kind.as_str()
-    );
-    broker.audit.append(
-        AuditEntry::new(
-            AuditKind::Requested,
-            format!("{} proposed a new service: {name}", agent.name),
-        )
-        .agent(agent.name.clone())
-        .connection(name.clone())
-        .detail(action.clone())
-        .field("target", proposed_target.clone()),
-    );
-
-    let credential_slot = std::sync::Arc::new(std::sync::Mutex::new(None));
-    let request = ApprovalRequest {
-        id: Uuid::new_v4(),
-        agent: agent.name.clone(),
-        client_id: Some(agent.id),
-        agent_token_hash: Some(agent.token_hash.clone()),
-        kind: ApprovalKind::Propose,
-        connection: None,
-        action,
-        notification: format!(
-            "{} wants to add a new service: {name} ({proposed_target})",
-            agent.name
-        ),
-        received_at: chrono::Utc::now(),
-        deadline: chrono::Utc::now(),
-        http: None,
-        ssh: None,
-        proposal: Some(crate::approvals::ProposalView {
-            name: name.clone(),
-            kind: proposed_kind,
-            target: proposed_target.clone(),
-            credential_name: credential_name.clone(),
-            template,
-            tls,
-            destination,
-        }),
-        proposal_credential: Some(credential_slot.clone()),
-    };
-
-    // One pending proposal per client; an identical concurrent proposal
-    // coalesces onto the same prompt, a different one is refused.
-    let coalesce_key = Some((format!("propose\u{0}{}", agent.id), String::new()));
-    let payload_hash = {
-        use sha2::{Digest as _, Sha256};
-        let canonical = format!(
-            "{name}\u{0}{credential_name}\u{0}{}",
-            serde_json::to_string(&config).unwrap_or_default()
-        );
-        let digest = Sha256::digest(canonical.as_bytes());
-        Some(
-            digest
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>(),
-        )
-    };
-
-    // Executor: runs only on approval, with the user-typed credential staged
-    // in the slot by the decision path. Saves secret + connection atomically.
-    let executor: crate::approvals::Executor = {
-        let broker = broker.clone();
-        let agent_name = agent.name.clone();
-        let agent_id = agent.id;
-        let agent_token_hash = agent.token_hash.clone();
-        Box::pin(async move {
-            let Some(value) = credential_slot.lock().unwrap().take() else {
-                return ExecOutcome {
-                    status: 500,
-                    body: json!({
-                        "reason": ErrorReason::InvalidProposal,
-                        "detail": "approved without a staged credential value",
-                    }),
-                };
-            };
-            match broker.apply_agent_proposal(
-                &agent_name,
-                &agent_id,
-                &agent_token_hash,
-                &credential_name,
-                value,
-                spec,
-            ) {
-                Ok(conn) => ExecOutcome {
-                    status: 201,
-                    body: json!({
-                        "name": conn.name,
-                        "type": conn.kind().as_str(),
-                        "target": conn.target(),
-                        "endpoint": endpoint_for(conn.kind()),
-                    }),
-                },
-                Err(CoreError::ConnectionNameTaken(taken)) => ExecOutcome {
-                    status: 409,
-                    body: json!({
-                        "reason": ErrorReason::ConnectionExists,
-                        "detail": format!("a connection named {taken:?} already exists"),
-                    }),
-                },
-                Err(CoreError::ConnectionTargetTaken(existing)) => ExecOutcome {
-                    status: 409,
-                    body: json!({
-                        "reason": ErrorReason::ConnectionExists,
-                        "detail": format!("connection {existing:?} already points at an equivalent target"),
-                    }),
-                },
-                Err(CoreError::SecretNameTaken(taken)) => ExecOutcome {
-                    status: 409,
-                    body: json!({
-                        "reason": ErrorReason::SecretNameTaken,
-                        "detail": format!("secret name {taken:?} is already in use"),
-                    }),
-                },
-                Err(CoreError::ProposalStale) => ExecOutcome {
-                    status: 403,
-                    body: json!({
-                        "reason": ErrorReason::DeniedByPolicy,
-                        "detail": "the proposing agent was disconnected or re-paired before approval completed",
-                    }),
-                },
-                Err(other) => ExecOutcome {
-                    status: 400,
-                    body: json!({
-                        "reason": ErrorReason::InvalidProposal,
-                        "detail": other.to_string(),
-                    }),
-                },
-            }
-        })
-    };
-
-    let parked = broker.approvals.park(ParkRequest {
-        request,
-        coalesce_key,
-        payload_hash,
-        // A created connection is visible in /v1/connections; there is
-        // nothing to replay, and a repeat proposal is answered honestly by
-        // the duplicate check above.
-        retain_outcome: false,
-        executor,
-    });
-    match parked {
-        Ok(Parked::Wait(handle)) => match handle.wait().await {
-            Some(outcome) => outcome_response(outcome),
-            None => err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ErrorReason::BrokerShutdown,
-            ),
-        },
-        Ok(Parked::Replay(outcome)) => outcome_response(outcome),
-        Err(ParkError::RequestIdMismatch) => err_detail(
-            StatusCode::CONFLICT,
-            ErrorReason::ProposalAlreadyPending,
-            "another proposal from this client is already waiting for the user",
-        ),
-        Err(ParkError::IdempotencyCapacity | ParkError::OutcomeNotReplayable) => err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ErrorReason::BrokerShutdown,
         ),
     }
 }
@@ -1378,40 +921,6 @@ async fn post_ws_open(
         );
     };
 
-    let action = format!("Connect to WebSocket → {}", conn.target());
-    broker.audit.append(
-        AuditEntry::new(
-            AuditKind::Requested,
-            format!("{} requested {}", agent.name, conn.name),
-        )
-        .agent(agent.name.clone())
-        .connection(conn.name.clone())
-        .detail(action.clone())
-        .field("target", conn.target()),
-    );
-
-    let request = ApprovalRequest {
-        id: Uuid::new_v4(),
-        agent: agent.name.clone(),
-        client_id: Some(agent.id),
-        agent_token_hash: Some(agent.token_hash.clone()),
-        kind: ApprovalKind::Ws,
-        connection: Some(broker.connection_summary(&conn)),
-        action,
-        notification: format!(
-            "{} wants to use {}: {}",
-            agent.name,
-            conn.name,
-            conn.target()
-        ),
-        received_at: chrono::Utc::now(),
-        deadline: chrono::Utc::now(),
-        http: None,
-        ssh: None,
-        proposal: None,
-        proposal_credential: None,
-    };
-
     // The idempotency payload is the open itself: same key + same
     // connection = a genuine retry.
     let coalesce_key = body
@@ -1430,7 +939,7 @@ async fn post_ws_open(
     // Executor: dial the configured upstream with the credential injected
     // (validating reachability and auth), issue the ticket, hand back the
     // bridge URL.
-    let executor: crate::approvals::Executor = {
+    let executor: crate::executions::Executor = {
         let broker = broker.clone();
         let conn = conn.clone();
         let agent_name = agent.name.clone();
@@ -1463,14 +972,17 @@ async fn post_ws_open(
         })
     };
 
-    let park = ParkRequest {
-        request,
-        coalesce_key,
-        payload_hash,
-        retain_outcome: true,
-        executor,
-    };
-    run_policied(broker, &agent, &conn, PermissionScope::Full, park).await
+    run_wired(
+        broker,
+        &agent,
+        &conn,
+        ExecRequest {
+            coalesce_key,
+            payload_hash,
+            executor,
+        },
+    )
+    .await
 }
 
 /* ------------------------------ SSH open ---------------------------------- */
@@ -1525,39 +1037,6 @@ async fn post_ssh_open(
     let host_key_fingerprint =
         (!host_key_fingerprint.is_empty()).then(|| host_key_fingerprint.clone());
 
-    let action = format!("Sign in with SSH → {}", conn.target());
-    broker.audit.append(
-        AuditEntry::new(
-            AuditKind::Requested,
-            format!("{} requested {}", agent.name, conn.name),
-        )
-        .agent(agent.name.clone())
-        .connection(conn.name.clone())
-        .detail(action.clone()),
-    );
-
-    let request = ApprovalRequest {
-        id: Uuid::new_v4(),
-        agent: agent.name.clone(),
-        client_id: Some(agent.id),
-        agent_token_hash: Some(agent.token_hash.clone()),
-        kind: ApprovalKind::Ssh,
-        connection: Some(broker.connection_summary(&conn)),
-        action,
-        notification: format!(
-            "{} wants to use {}: {}",
-            agent.name,
-            conn.name,
-            conn.target()
-        ),
-        received_at: chrono::Utc::now(),
-        deadline: chrono::Utc::now(),
-        http: None,
-        ssh: None,
-        proposal: None,
-        proposal_credential: None,
-    };
-
     // The idempotency payload is the open itself: same key + same
     // connection = a genuine retry.
     let coalesce_key = body
@@ -1575,8 +1054,8 @@ async fn post_ssh_open(
 
     // Executor: read + parse the key, bind the per-open agent socket, issue
     // the ticket, hand back the SSH_AUTH_SOCK path. The socket path is
-    // the capability, so it is minted only after approval.
-    let executor: crate::approvals::Executor = {
+    // the capability, so it is minted only for a wired agent.
+    let executor: crate::executions::Executor = {
         let broker = broker.clone();
         let conn = conn.clone();
         let agent_name = agent.name.clone();
@@ -1604,14 +1083,17 @@ async fn post_ssh_open(
         })
     };
 
-    let park = ParkRequest {
-        request,
-        coalesce_key,
-        payload_hash,
-        retain_outcome: true,
-        executor,
-    };
-    run_policied(broker, &agent, &conn, PermissionScope::Full, park).await
+    run_wired(
+        broker,
+        &agent,
+        &conn,
+        ExecRequest {
+            coalesce_key,
+            payload_hash,
+            executor,
+        },
+    )
+    .await
 }
 
 /* ------------------------------ PG open ----------------------------------- */
@@ -1655,40 +1137,6 @@ async fn post_pg_open(
     };
     let dbname = dbname.clone();
 
-    let action = format!("Connect to Postgres → {}", conn.target());
-    broker.audit.append(
-        AuditEntry::new(
-            AuditKind::Requested,
-            format!("{} requested {}", agent.name, conn.name),
-        )
-        .agent(agent.name.clone())
-        .connection(conn.name.clone())
-        .detail(action.clone())
-        .field("target", conn.target()),
-    );
-
-    let request = ApprovalRequest {
-        id: Uuid::new_v4(),
-        agent: agent.name.clone(),
-        client_id: Some(agent.id),
-        agent_token_hash: Some(agent.token_hash.clone()),
-        kind: ApprovalKind::Pg,
-        connection: Some(broker.connection_summary(&conn)),
-        action,
-        notification: format!(
-            "{} wants to use {}: {}",
-            agent.name,
-            conn.name,
-            conn.target()
-        ),
-        received_at: chrono::Utc::now(),
-        deadline: chrono::Utc::now(),
-        http: None,
-        ssh: None,
-        proposal: None,
-        proposal_credential: None,
-    };
-
     // The idempotency payload is the open itself: same key + same
     // connection = a genuine retry.
     let coalesce_key = body
@@ -1709,7 +1157,7 @@ async fn post_pg_open(
     // redemption time. The ticket is deliberately NOT embedded in the DSN
     // (it would sit in ps-visible argv and shell history for its window):
     // agents supply it out-of-band via PGPASSWORD.
-    let executor: crate::approvals::Executor = {
+    let executor: crate::executions::Executor = {
         let broker = broker.clone();
         let conn = conn.clone();
         let agent_name = agent.name.clone();
@@ -1735,12 +1183,15 @@ async fn post_pg_open(
         })
     };
 
-    let park = ParkRequest {
-        request,
-        coalesce_key,
-        payload_hash,
-        retain_outcome: true,
-        executor,
-    };
-    run_policied(broker, &agent, &conn, PermissionScope::Full, park).await
+    run_wired(
+        broker,
+        &agent,
+        &conn,
+        ExecRequest {
+            coalesce_key,
+            payload_hash,
+            executor,
+        },
+    )
+    .await
 }

@@ -2,19 +2,18 @@
 //!
 //! - there is **no** command that returns a stored secret value; reveal
 //!   returns only the short prefix, copy writes core-side to the clipboard;
-//! - confirmation-gated commands (approving a pairing or mutating request,
-//!   starting an access session, saving an "Always allow…" rule, creating a
-//!   connection, or changing a connection's capability) are
-//!   gated by the **core itself**: the broker demands the native OS
-//!   confirmation through the `BrokerEvents` hooks (implemented over
-//!   [`crate::auth::confirm`] in this shell) before any effect happens —
-//!   this command layer cannot apply a gated action without passing
-//!   through it, so the webview cannot forge or skip the gate.
+//! - confirmation-gated commands (creating a connection, changing a
+//!   connection's capability, or deleting a secret) are gated by the
+//!   **core itself**: the broker demands the native OS confirmation through
+//!   the `BrokerEvents` hooks (implemented over [`crate::auth::confirm`] in
+//!   this shell) before any effect happens — this command layer cannot
+//!   apply a gated action without passing through it, so the webview cannot
+//!   forge or skip the gate.
 
-use aka_core::broker::{Broker, DecisionOptions, UiDecision};
+use aka_core::broker::Broker;
 use aka_core::error::{ConnectionField, CoreError};
 use aka_core::store::ConnectionSpec;
-use aka_core::types::{ConnectionConfig, DecisionContext, DecisionSurface, PgSslMode};
+use aka_core::types::{ConnectionConfig, PgSslMode};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter as _, State};
 use tauri_plugin_clipboard_manager::ClipboardExt as _;
@@ -30,7 +29,7 @@ pub struct AppState {
     // Keeps the daemon (control plane + WS/PG data planes) alive; dropping
     // it aborts the listeners.
     pub _daemon: aka_core::daemon::DaemonHandle,
-    // Keeps the broker's tokio runtime (daemon + approvals) alive for the
+    // Keeps the broker's tokio runtime (daemon + executions) alive for the
     // life of the app. Dropped last (after `_daemon`).
     pub _runtime: tokio::runtime::Runtime,
 }
@@ -271,23 +270,23 @@ pub fn list_secrets(state: State<AppState>) -> Vec<SecretDto> {
 #[tauri::command]
 pub fn list_connections(state: State<AppState>) -> Vec<ConnectionDto> {
     let broker = &state.broker;
-    let rules = broker.rules();
+    let wirings = broker.wirings();
     broker
         .store
         .list_connections()
         .iter()
-        .map(|c| ConnectionDto::from(c, &rules, broker))
+        .map(|c| ConnectionDto::from(c, &wirings, broker))
         .collect()
 }
 
 #[tauri::command]
 pub fn list_agents(state: State<AppState>) -> Vec<AgentDto> {
     let broker = &state.broker;
-    let rules = broker.rules();
+    let wirings = broker.wirings();
     broker
         .paired_agents()
         .iter()
-        .map(|a| AgentDto::from(a, &rules, broker))
+        .map(|a| AgentDto::from(a, &wirings))
         .collect()
 }
 
@@ -321,17 +320,6 @@ pub fn clear_activity(app: AppHandle, state: State<AppState>) -> CmdResult<()> {
 }
 
 #[tauri::command]
-pub fn get_queue(state: State<AppState>) -> Vec<ApprovalDto> {
-    let duration = state.broker.config.access_grant_ttl.as_secs();
-    state
-        .broker
-        .approvals_queue()
-        .into_iter()
-        .map(|request| ApprovalDto::new(request, duration))
-        .collect()
-}
-
-#[tauri::command]
 pub fn get_settings(state: State<AppState>) -> SettingsDto {
     let s = state.broker.settings();
     SettingsDto {
@@ -344,7 +332,7 @@ pub fn get_settings(state: State<AppState>) -> SettingsDto {
 
 fn agent_setup_instructions(socket: &str) -> String {
     format!(
-        "Connect to the local AKA broker. Read its current instructions, then list what connections are currently available. If a service you need is missing, propose it (POST /v1/connections/propose, documented in the instructions) and the user will review it:\n\ncurl -fsS --unix-socket {socket} http://localhost/instructions"
+        "Connect to the local Multitool broker. Read its current instructions, then list what connections are currently available and which of them you are wired to:\n\ncurl -fsS --unix-socket {socket} http://localhost/instructions"
     )
 }
 
@@ -721,14 +709,23 @@ pub async fn test_connection(
         .map_err(|e| e.to_string())
 }
 
-/* -------------------------------- rules ---------------------------------- */
+/* ------------------------------- wirings ---------------------------------- */
 
+/// Wire or unwire an agent from a connection. Editing the wiring table is
+/// the whole authorization model: wired agents use the connection without
+/// prompting, unwired agents are refused.
 #[tauri::command]
-pub fn remove_permission(state: State<AppState>, id: String) -> CmdResult<bool> {
-    let id = parse_id(&id)?;
+pub fn set_wiring(
+    state: State<AppState>,
+    agent_id: String,
+    connection_id: String,
+    wired: bool,
+) -> CmdResult<bool> {
+    let agent_id = parse_id(&agent_id)?;
+    let connection_id = parse_id(&connection_id)?;
     state
         .broker
-        .ui_remove_permission(&id)
+        .ui_set_wiring(&agent_id, &connection_id, wired)
         .map_err(|e| e.to_string())
 }
 
@@ -744,7 +741,7 @@ pub fn revoke_agent(state: State<AppState>, id: String) -> CmdResult<bool> {
 pub async fn confirm_agent_disconnect(app: AppHandle) -> bool {
     app.dialog()
         .message(
-            "Disconnect this agent? Temporary access, saved access, and active sessions will end.",
+            "Disconnect this agent? Its wirings and active sessions will end.",
         )
         .title("Disconnect agent")
         .kind(MessageDialogKind::Warning)
@@ -796,52 +793,6 @@ pub fn set_agent_walkthrough_visible(state: State<AppState>, on: bool) -> CmdRes
         .map_err(|e| e.to_string())
 }
 
-/* ------------------------------ approvals -------------------------------- */
-
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DecisionInput {
-    Deny,
-    AllowOnce,
-    AllowSession,
-    AlwaysAllow,
-}
-
-/// Apply a decision to a queued approval. Deny is always one click. Allow once
-/// on a proposal or mutating request, every access session, and Always allow in
-/// every case complete only after the native OS confirmation, which the
-/// **core** demands via `BrokerEvents::confirm_decision` before the decision
-/// takes effect; this command only names the surface for attribution.
-#[tauri::command]
-pub fn decide(
-    state: State<AppState>,
-    id: String,
-    decision: DecisionInput,
-    credential_value: Option<String>,
-) -> CmdResult<()> {
-    let broker = &state.broker;
-    let id = parse_id(&id)?;
-    let ui_decision = match decision {
-        DecisionInput::Deny => UiDecision::Deny,
-        DecisionInput::AllowOnce => UiDecision::AllowOnce,
-        DecisionInput::AllowSession => UiDecision::AllowSession,
-        DecisionInput::AlwaysAllow => UiDecision::AlwaysAllow,
-    };
-    let ctx = DecisionContext::local(DecisionSurface::AppWindow);
-    broker
-        .decide_with_options(
-            &id,
-            ui_decision,
-            DecisionOptions {
-                proposal_credential: credential_value.map(Zeroizing::new),
-            },
-            &ctx,
-        )
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "no such pending request".to_string())?;
-    Ok(())
-}
-
 /// Register every command with the Tauri builder.
 pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
@@ -851,7 +802,6 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         list_sessions,
         list_activity,
         clear_activity,
-        get_queue,
         get_settings,
         get_agent_setup,
         get_broker_instructions,
@@ -867,7 +817,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         edit_connection,
         delete_connection,
         test_connection,
-        remove_permission,
+        set_wiring,
         confirm_agent_disconnect,
         revoke_agent,
         close_session,
@@ -875,13 +825,10 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         set_menu_bar_hides_dock,
         set_service_walkthrough_visible,
         set_agent_walkthrough_visible,
-        decide,
         crate::windows::ui_set_mode,
         crate::windows::ui_hide_main,
         crate::windows::ui_hide_dropdown,
         crate::windows::ui_set_dropdown_form_active,
-        crate::windows::ui_show_approval,
-        crate::windows::ui_resize_approval,
     ]
 }
 
@@ -974,9 +921,8 @@ mod tests {
         assert!(instructions.contains("curl -fsS"));
         assert!(instructions.contains("--unix-socket /tmp/aka-test.sock"));
         assert!(instructions.contains(
-            "Read its current instructions, then list what connections are currently available."
+            "Read its current instructions, then list what connections are currently available"
         ));
-        assert!(instructions.contains("propose it (POST /v1/connections/propose"));
         assert!(!instructions.contains("\\\n"));
         assert!(instructions.ends_with("http://localhost/instructions"));
         assert!(!instructions.contains("--max-time"));

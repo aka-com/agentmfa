@@ -1,31 +1,22 @@
-//! The core-owned decision gate. The broker itself demands the
-//! shell's native confirmation through `BrokerEvents` before a gated
-//! decision or configuration action takes effect — a shell (or a
+//! The core-owned confirmation gate on configuration actions, plus the
+//! broker-level wiring lifecycle. The broker itself demands the shell's
+//! native confirmation through `BrokerEvents::confirm_action` before a
+//! high-consequence configuration action takes effect — a shell (or a
 //! compromised webview driving one) cannot apply them without passing
 //! through the gate, and the gate fails closed when unimplemented.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use aka_core::approvals::{
-    ApprovalKind, ApprovalRequest, ConnectionSummary, ExecOutcome, HttpPayloadView, ParkRequest,
-    Parked,
-};
-use aka_core::broker::{Broker, UiDecision};
+use aka_core::broker::Broker;
 use aka_core::config::BrokerConfig;
 use aka_core::error::CoreError;
 use aka_core::events::BrokerEvents;
 use aka_core::paths::Paths;
-use aka_core::policy::PolicyEngine;
 use aka_core::sessions::{RedeemError, TicketPayload};
 use aka_core::store::ConnectionSpec;
-use aka_core::types::{
-    ConfirmationMethod, Connection, ConnectionConfig, ConnectionKind, DecisionContext,
-    DecisionSurface,
-};
+use aka_core::types::{ConfirmationMethod, Connection, ConnectionConfig, ConnectionKind};
 use aka_core::vault::MemoryVault;
-use chrono::Utc;
-use uuid::Uuid;
 use zeroize::Zeroizing;
 
 /// Counting gate: `allow: false` refuses every confirmation (and the
@@ -36,7 +27,6 @@ struct GateEvents {
 }
 
 struct UnifiedAuthEvents {
-    decision_confirms: AtomicUsize,
     secret_read_confirms: AtomicUsize,
 }
 
@@ -46,24 +36,14 @@ impl BrokerEvents for UnifiedAuthEvents {
         true
     }
 
-    fn confirm_decision(
-        &self,
-        _request: &ApprovalRequest,
-        _decision: UiDecision,
-    ) -> Option<ConfirmationMethod> {
-        self.decision_confirms.fetch_add(1, Ordering::SeqCst);
-        Some(ConfirmationMethod::OsAuthentication)
+    fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
+        Some(ConfirmationMethod::Waived)
     }
 }
 
 impl BrokerEvents for GateEvents {
-    fn confirm_decision(
-        &self,
-        _request: &ApprovalRequest,
-        _decision: UiDecision,
-    ) -> Option<ConfirmationMethod> {
-        self.confirms.fetch_add(1, Ordering::SeqCst);
-        self.allow.then_some(ConfirmationMethod::Waived)
+    fn confirm_secret_read(&self, _secret: &aka_core::types::SecretMeta) -> bool {
+        true
     }
 
     fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
@@ -89,10 +69,6 @@ async fn broker_with(events: Arc<dyn BrokerEvents>) -> (Arc<Broker>, tempfile::T
     (broker, dir)
 }
 
-fn ctx() -> DecisionContext {
-    DecisionContext::local(DecisionSurface::Harness)
-}
-
 fn add_github(broker: &Broker) -> Connection {
     broker
         .store
@@ -113,125 +89,11 @@ fn add_github(broker: &Broker) -> Connection {
         .unwrap()
 }
 
-fn http_request(conn: &Connection, mutating: bool) -> ApprovalRequest {
-    let method = if mutating { "POST" } else { "GET" };
-    let now = Utc::now();
-    ApprovalRequest {
-        id: Uuid::new_v4(),
-        agent: "claude-code".into(),
-        client_id: Some(Uuid::new_v4()),
-        agent_token_hash: None,
-        kind: ApprovalKind::Http,
-        connection: Some(ConnectionSummary {
-            id: conn.id,
-            name: conn.name.clone(),
-            kind: conn.kind(),
-            target: conn.target(),
-            connection_updated_at: conn.updated_at,
-        }),
-        action: format!("{method} api.github.com/x"),
-        notification: String::new(),
-        received_at: now,
-        deadline: now,
-        http: Some(HttpPayloadView {
-            method: method.into(),
-            path: "/x".into(),
-            headers: vec![],
-            body_preview: None,
-            body_len: 0,
-            body_truncated: false,
-            mutating,
-        }),
-        ssh: None,
-        proposal: None,
-        proposal_credential: None,
-    }
-}
-
-fn park(broker: &Broker, request: ApprovalRequest) -> Parked {
-    broker
-        .approvals
-        .park(ParkRequest {
-            request,
-            coalesce_key: None,
-            payload_hash: None,
-            retain_outcome: true,
-            executor: Box::pin(async {
-                ExecOutcome {
-                    status: 200,
-                    body: serde_json::json!({"ok": true}),
-                }
-            }),
-        })
-        .unwrap()
-}
-
-fn park_with_executor(
-    broker: &Broker,
-    request: ApprovalRequest,
-    executor: aka_core::approvals::Executor,
-) -> Parked {
-    broker
-        .approvals
-        .park(ParkRequest {
-            request,
-            coalesce_key: None,
-            payload_hash: None,
-            retain_outcome: true,
-            executor,
-        })
-        .unwrap()
-}
-
 #[tokio::test]
-async fn refused_confirmation_blocks_the_allow_but_not_deny() {
-    let events = Arc::new(GateEvents {
-        allow: false,
-        confirms: AtomicUsize::new(0),
-    });
-    let (broker, _dir) = broker_with(events.clone()).await;
-    let conn = add_github(&broker);
-    let request = http_request(&conn, true);
-    let id = request.id;
-    let parked = park(&broker, request);
-
-    // The gate refuses: the mutating allow must not apply...
-    assert!(matches!(
-        broker.decide(&id, UiDecision::AllowOnce, &ctx()),
-        Err(CoreError::NotConfirmed)
-    ));
-    // ...and the request is still pending, not consumed.
-    assert_eq!(broker.approvals_queue().len(), 1);
-    assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
-
-    // Deny needs no confirmation: always one click.
-    broker
-        .decide(&id, UiDecision::Deny, &ctx())
-        .unwrap()
-        .expect("still pending");
-    assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
-    let Parked::Wait(handle) = parked else {
-        panic!()
-    };
-    let outcome = handle.wait().await.unwrap();
-    assert_eq!(outcome.status, 403);
-}
-
-#[tokio::test]
-async fn unimplemented_shell_fails_closed() {
+async fn unimplemented_shell_fails_closed_on_config_actions() {
     let (broker, _dir) = broker_with(Arc::new(UnimplementedShell)).await;
     let conn = add_github(&broker);
 
-    // Decisions on high-consequence requests are blocked...
-    let request = http_request(&conn, true);
-    let id = request.id;
-    let _parked = park(&broker, request);
-    assert!(matches!(
-        broker.decide(&id, UiDecision::AllowOnce, &ctx()),
-        Err(CoreError::NotConfirmed)
-    ));
-
-    // ...and so are high-consequence configuration actions.
     assert!(matches!(
         broker.ui_delete_connection(&conn.id),
         Err(CoreError::NotConfirmed)
@@ -240,7 +102,7 @@ async fn unimplemented_shell_fails_closed() {
 }
 
 #[tokio::test]
-async fn pairing_revocation_is_immediate_without_confirmation() {
+async fn agent_revocation_is_immediate_without_confirmation() {
     let events = Arc::new(GateEvents {
         allow: false,
         confirms: AtomicUsize::new(0),
@@ -280,87 +142,8 @@ async fn pairing_revocation_is_immediate_without_confirmation() {
 }
 
 #[tokio::test]
-async fn non_mutating_allow_needs_no_confirmation() {
-    let events = Arc::new(GateEvents {
-        allow: false, // would refuse if ever asked
-        confirms: AtomicUsize::new(0),
-    });
-    let (broker, _dir) = broker_with(events.clone()).await;
-    let conn = add_github(&broker);
-    let request = http_request(&conn, false);
-    let id = request.id;
-    let parked = park(&broker, request);
-
-    broker
-        .decide(&id, UiDecision::AllowOnce, &ctx())
-        .unwrap()
-        .expect("pending");
-    assert_eq!(events.confirms.load(Ordering::SeqCst), 0);
-    let Parked::Wait(handle) = parked else {
-        panic!()
-    };
-    assert_eq!(handle.wait().await.unwrap().status, 200);
-}
-
-#[tokio::test]
-async fn confirmed_decision_authorizes_its_executor_secret_reads_only() {
-    let events = Arc::new(UnifiedAuthEvents {
-        decision_confirms: AtomicUsize::new(0),
-        secret_read_confirms: AtomicUsize::new(0),
-    });
-    let (broker, _dir) = broker_with(events.clone()).await;
-    let conn = add_github(&broker);
-    let request = http_request(&conn, true);
-    let id = request.id;
-    let executor_broker = broker.clone();
-    let parked = park_with_executor(
-        &broker,
-        request,
-        Box::pin(async move {
-            // Multiple credential reads in the same approved execution reuse
-            // the decision's native authentication.
-            executor_broker
-                .store
-                .secret_value_by_name("GITHUB_API_KEY")
-                .await
-                .unwrap();
-            executor_broker
-                .store
-                .secret_value_by_name("GITHUB_API_KEY")
-                .await
-                .unwrap();
-            ExecOutcome {
-                status: 200,
-                body: serde_json::json!({"ok": true}),
-            }
-        }),
-    );
-
-    broker
-        .decide(&id, UiDecision::AllowOnce, &ctx())
-        .unwrap()
-        .expect("pending");
-    let Parked::Wait(handle) = parked else {
-        panic!()
-    };
-    assert_eq!(handle.wait().await.unwrap().status, 200);
-    assert_eq!(events.decision_confirms.load(Ordering::SeqCst), 1);
-    assert_eq!(events.secret_read_confirms.load(Ordering::SeqCst), 0);
-
-    // The authorization is execution-scoped: an independent read still
-    // requires its own confirmation.
-    broker
-        .store
-        .secret_value_by_name("GITHUB_API_KEY")
-        .await
-        .unwrap();
-    assert_eq!(events.secret_read_confirms.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
 async fn copy_auth_is_reused_across_secrets_but_not_outside_copying() {
     let events = Arc::new(UnifiedAuthEvents {
-        decision_confirms: AtomicUsize::new(0),
         secret_read_confirms: AtomicUsize::new(0),
     });
     let (broker, _dir) = broker_with(events.clone()).await;
@@ -383,127 +166,13 @@ async fn copy_auth_is_reused_across_secrets_but_not_outside_copying() {
     );
     assert_eq!(events.secret_read_confirms.load(Ordering::SeqCst), 1);
 
-    // The copy window is not a general secret-read authorization. An agent
-    // execution or another direct broker read still needs its own gate.
+    // The copy window is not a general secret-read authorization. A direct
+    // broker read (a UI-plane read) still needs its own gate.
     assert_eq!(
         &*broker.store.secret_value(&first.id).await.unwrap(),
         "first"
     );
     assert_eq!(events.secret_read_confirms.load(Ordering::SeqCst), 2);
-}
-
-#[tokio::test]
-async fn always_allow_confirms_once_and_attributes_the_audit_trail() {
-    let events = Arc::new(GateEvents {
-        allow: true,
-        confirms: AtomicUsize::new(0),
-    });
-    let (broker, _dir) = broker_with(events.clone()).await;
-    let conn = add_github(&broker);
-    let request = http_request(&conn, false);
-    let id = request.id;
-    let parked = park(&broker, request);
-
-    broker
-        .decide(&id, UiDecision::AlwaysAllow, &ctx())
-        .unwrap()
-        .expect("pending");
-    // One confirmation covers the rule save AND the allow it implies —
-    // the internal AlwaysAllow → AllowOnce step must not re-confirm.
-    assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
-    assert_eq!(broker.rules().len(), 1);
-    assert_eq!(
-        broker.rules()[0].scope,
-        aka_core::types::PermissionScope::Read
-    );
-    let Parked::Wait(handle) = parked else {
-        panic!()
-    };
-    assert_eq!(handle.wait().await.unwrap().status, 200);
-
-    // Both decision entries carry the attribution and the confirmation.
-    let recent = broker.audit.recent(10);
-    let attributed: Vec<_> = recent
-        .iter()
-        .filter(|e| e.surface == Some(DecisionSurface::Harness))
-        .collect();
-    assert_eq!(attributed.len(), 2, "RuleSaved + AllowedOnce: {recent:?}");
-    for entry in attributed {
-        assert_eq!(entry.confirmation, Some(ConfirmationMethod::Waived));
-        assert_eq!(entry.approver, None);
-    }
-}
-
-#[tokio::test]
-async fn durable_decisions_refuse_a_same_target_connection_revision_change() {
-    let events = Arc::new(GateEvents {
-        allow: true,
-        confirms: AtomicUsize::new(0),
-    });
-    let (broker, _dir) = broker_with(events).await;
-    let mut conn = add_github(&broker);
-
-    let request = http_request(&conn, false);
-    let always_id = request.id;
-    let always_waiter = park(&broker, request);
-    conn = broker
-        .ui_update_connection(
-            &conn.id,
-            ConnectionSpec {
-                name: conn.name.clone(),
-                config: ConnectionConfig::Api {
-                    host: "api.github.com".into(),
-                    scheme: "https".into(),
-                    port: None,
-                    template: "X-Api-Key: {{GITHUB_API_KEY}}".into(),
-                },
-                secrets: vec![],
-            },
-        )
-        .unwrap();
-    assert!(matches!(
-        broker.decide(&always_id, UiDecision::AlwaysAllow, &ctx()),
-        Err(CoreError::ApprovalConnectionChanged)
-    ));
-    assert!(broker.rules().is_empty());
-    broker.decide(&always_id, UiDecision::Deny, &ctx()).unwrap();
-    let Parked::Wait(always_waiter) = always_waiter else {
-        panic!()
-    };
-    assert_eq!(always_waiter.wait().await.unwrap().status, 403);
-
-    let (_, paired) = broker.pairing.pair("claude-code").unwrap();
-    let mut request = http_request(&conn, false);
-    request.agent_token_hash = Some(paired.token_hash);
-    let session_id = request.id;
-    let session_waiter = park(&broker, request);
-    broker
-        .ui_update_connection(
-            &conn.id,
-            ConnectionSpec {
-                name: conn.name.clone(),
-                config: ConnectionConfig::Api {
-                    host: "api.github.com".into(),
-                    scheme: "https".into(),
-                    port: None,
-                    template: "Authorization: token {{GITHUB_API_KEY}}".into(),
-                },
-                secrets: vec![],
-            },
-        )
-        .unwrap();
-    assert!(matches!(
-        broker.decide(&session_id, UiDecision::AllowSession, &ctx()),
-        Err(CoreError::ApprovalConnectionChanged)
-    ));
-    assert!(broker.grants_for_connection(&conn).is_empty());
-    broker
-        .decide(&session_id, UiDecision::Deny, &ctx())
-        .unwrap();
-    let Parked::Wait(session_waiter) = session_waiter else {
-        panic!()
-    };
-    assert_eq!(session_waiter.wait().await.unwrap().status, 403);
 }
 
 #[tokio::test]
@@ -806,7 +475,6 @@ async fn settings_changes_are_not_added_to_the_activity_log() {
 #[tokio::test]
 async fn prefix_reveals_are_not_added_to_the_activity_log() {
     let events = Arc::new(UnifiedAuthEvents {
-        decision_confirms: AtomicUsize::new(0),
         secret_read_confirms: AtomicUsize::new(0),
     });
     let (broker, _dir) = broker_with(events.clone()).await;
@@ -856,8 +524,10 @@ async fn service_tests_are_not_added_to_the_activity_log() {
         .all(|entry| entry.kind != aka_core::audit::AuditKind::ConnectionTested));
 }
 
+/* ------------------------------- wirings ---------------------------------- */
+
 #[tokio::test]
-async fn revoking_an_agent_removes_its_rules() {
+async fn revoking_an_agent_removes_its_wirings() {
     let events = Arc::new(GateEvents {
         allow: true,
         confirms: AtomicUsize::new(0),
@@ -865,23 +535,94 @@ async fn revoking_an_agent_removes_its_rules() {
     let (broker, _dir) = broker_with(events.clone()).await;
     let conn = add_github(&broker);
     let (_, client) = broker.pairing.pair("claude-code").unwrap();
-    broker
-        .policy
-        .record_rule(
-            client.id,
-            "claude-code",
-            conn.id,
-            aka_core::types::PermissionScope::Full,
-        )
-        .unwrap();
-    assert_eq!(broker.rules().len(), 1);
+    assert!(broker.ui_set_wiring(&client.id, &conn.id, true).unwrap());
+    assert_eq!(broker.wirings().len(), 1);
 
     assert!(broker.ui_revoke_agent(&client.id).unwrap());
-    assert_eq!(broker.rules().len(), 0);
+    assert_eq!(broker.wirings().len(), 0);
+}
 
-    let recent = broker.audit.recent(10);
-    recent
-        .iter()
-        .find(|entry| entry.kind == aka_core::audit::AuditKind::RuleRemoved)
-        .expect("rule removal audit entry");
+#[tokio::test]
+async fn wirings_die_with_a_deleted_connection() {
+    let events = Arc::new(GateEvents {
+        allow: true,
+        confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    let conn = add_github(&broker);
+    let (_, client) = broker.pairing.pair("claude-code").unwrap();
+    assert!(broker.ui_set_wiring(&client.id, &conn.id, true).unwrap());
+
+    broker.ui_delete_connection(&conn.id).unwrap();
+    assert_eq!(broker.wirings().len(), 0);
+    assert!(!broker.wirings.is_wired(&client.id, &conn.id));
+}
+
+#[tokio::test]
+async fn target_changes_drop_the_connection_wirings() {
+    let events = Arc::new(GateEvents {
+        allow: true,
+        confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    let conn = add_github(&broker);
+    let (_, client) = broker.pairing.pair("claude-code").unwrap();
+    assert!(broker.ui_set_wiring(&client.id, &conn.id, true).unwrap());
+
+    // A wiring granted for one destination must not silently cover another.
+    broker
+        .ui_update_connection(
+            &conn.id,
+            ConnectionSpec {
+                name: conn.name.clone(),
+                config: ConnectionConfig::Api {
+                    host: "api.enterprise.github.com".into(),
+                    scheme: "https".into(),
+                    port: None,
+                    template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
+                },
+                secrets: vec![],
+            },
+        )
+        .unwrap();
+    assert!(!broker.wirings.is_wired(&client.id, &conn.id));
+
+    // A rename alone keeps the wiring: same destination, same authority.
+    let renamed = broker
+        .ui_set_wiring(&client.id, &conn.id, true)
+        .and_then(|_| {
+            let current = broker.store.connection_by_id(&conn.id)?;
+            broker.ui_update_connection(
+                &conn.id,
+                ConnectionSpec {
+                    name: "github-renamed".into(),
+                    config: current.config.clone(),
+                    secrets: current.secrets.clone(),
+                },
+            )
+        })
+        .unwrap();
+    assert_eq!(renamed.name, "github-renamed");
+    assert!(broker.wirings.is_wired(&client.id, &conn.id));
+}
+
+#[tokio::test]
+async fn wiring_an_unknown_agent_or_connection_is_refused() {
+    let events = Arc::new(GateEvents {
+        allow: true,
+        confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    let conn = add_github(&broker);
+    let (_, client) = broker.pairing.pair("claude-code").unwrap();
+
+    // Unknown agent: report false rather than persisting a dangling wiring.
+    assert!(!broker
+        .ui_set_wiring(&uuid::Uuid::new_v4(), &conn.id, true)
+        .unwrap());
+    // Unknown connection: an error, nothing persisted.
+    assert!(broker
+        .ui_set_wiring(&client.id, &uuid::Uuid::new_v4(), true)
+        .is_err());
+    assert_eq!(broker.wirings().len(), 0);
 }

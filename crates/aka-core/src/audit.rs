@@ -98,18 +98,29 @@ pub enum AuditKind {
     /// Retained so activity logs written by older versions still deserialize.
     /// Peer identity verification was removed; nothing emits this.
     PeerIdentityMismatch,
-    // Requests + decisions
+    // Requests + decisions. Most decision kinds are retained only so
+    // activity logs written by older versions still deserialize; with the
+    // wiring model there are no prompts, grants, or per-request decisions.
     Requested,
+    /// Retained for older logs; nothing emits this.
     AllowedOnce,
+    /// Retained for older logs; nothing emits this.
     GrantStarted,
+    /// Retained for older logs; nothing emits this.
     GrantExpired,
+    /// Retained for older logs; nothing emits this.
     GrantRevoked,
     AutoAllowed,
     Denied,
+    /// Retained for older logs; nothing emits this.
     ApprovalTimeout,
+    /// Retained for older logs; nothing emits this.
     Abandoned,
     Listed,
-    // Rules
+    // Wirings (and their standing-rule ancestors, retained for older logs)
+    Wired,
+    Unwired,
+    /// Retained for older logs; nothing emits this.
     RuleSaved,
     RuleRemoved,
     // Upstream execution / sessions
@@ -159,6 +170,8 @@ impl AuditKind {
             AuditKind::ApprovalTimeout => "clockAlert",
             AuditKind::Abandoned => "circleSlash",
             AuditKind::Listed => "list",
+            AuditKind::Wired => "plug",
+            AuditKind::Unwired => "unplug",
             AuditKind::RuleSaved => "shieldPlus",
             AuditKind::RuleRemoved => "shieldMinus",
             AuditKind::HttpExecuted => "globe",

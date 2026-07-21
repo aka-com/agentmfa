@@ -326,59 +326,18 @@ pub struct PairedAgent {
     pub last_used: DateTime<Utc>,
 }
 
-/// A standing "always allow" rule.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum PermissionScope {
-    Read,
-    #[default]
-    Full,
-}
-
-impl PermissionScope {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Read => "read",
-            Self::Full => "full",
-        }
-    }
-
-    pub fn allows(self, required: Self) -> bool {
-        self == Self::Full || required == Self::Read
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Read => "read access",
-            Self::Full => "full access",
-        }
-    }
-}
-
-/// A persistent permission. Temporary permissions use the same scope model
-/// but remain memory-only because they carry live OS-auth authorization.
+/// A persistent agent → connection wiring. A wired agent may use the
+/// connection without prompting; an unwired agent is refused.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Rule {
+pub struct Wiring {
     pub id: Uuid,
-    /// Stable paired-client principal. Legacy rules deserialize as nil and
-    /// are migrated only when their display name maps to a current client.
-    #[serde(default)]
+    /// Stable paired-client principal.
     pub client_id: Uuid,
     /// Display-name snapshot for audit and UI copy; never authorization.
     pub agent: String,
     /// The connection's stable id, never its renamable name.
     pub connection_id: Uuid,
-    #[serde(default)]
-    pub scope: PermissionScope,
     pub created_at: DateTime<Utc>,
-}
-
-/// Decision produced by the policy engine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Decision {
-    Allow,
-    Deny,
-    Prompt,
 }
 
 /// The surface a human decision came from (audit attribution).

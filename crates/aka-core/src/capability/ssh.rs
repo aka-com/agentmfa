@@ -42,9 +42,6 @@ use tokio::net::{UnixListener, UnixStream};
 
 use uuid::Uuid;
 
-use crate::approvals::{
-    ApprovalKind, ApprovalRequest, ExecOutcome, ParkRequest, Parked, SshHostKeyView,
-};
 use crate::audit::{AuditEntry, AuditKind};
 use crate::broker::Broker;
 use crate::sessions::SessionHandle;
@@ -404,8 +401,6 @@ impl Drop for SocketGuard {
 struct AgentState {
     broker: Arc<Broker>,
     ticket: String,
-    /// The agent this socket was opened for; names the trust prompt.
-    agent_name: String,
     /// Pinned login the userauth blob must name.
     user: String,
     /// The pinned host key: `Some` from open time when the connection was
@@ -419,9 +414,6 @@ struct AgentState {
     bind_gate: tokio::sync::Mutex<()>,
     connection_id: Uuid,
     connection_name: String,
-    /// Pinned destination, displayed by the trust prompt.
-    host: String,
-    port: u16,
     comment: String,
     signer: Arc<SshSigner>,
 }
@@ -486,8 +478,6 @@ pub async fn open_agent(
 ) -> Result<String, String> {
     let ConnectionConfig::Ssh {
         user,
-        host,
-        port,
         host_key_fingerprint,
         ..
     } = &connection.config
@@ -495,9 +485,8 @@ pub async fn open_agent(
         return Err("not an ssh connection".into());
     };
     let user = user.clone();
-    let (host, port) = (host.clone(), *port);
-    // Empty means unpinned: the key is observed and pinned at the first
-    // session-bind, behind a dedicated trust prompt.
+    // Empty means unpinned: the key the server presents at the first
+    // session-bind is pinned automatically (trust on first use).
     let host_key_fingerprint = if host_key_fingerprint.is_empty() {
         None
     } else {
@@ -537,14 +526,11 @@ pub async fn open_agent(
     let state = Arc::new(AgentState {
         broker: broker.clone(),
         ticket,
-        agent_name,
         user,
         host_key_fingerprint: tokio::sync::Mutex::new(host_key_fingerprint),
         bind_gate: tokio::sync::Mutex::new(()),
         connection_id: connection.id,
         connection_name: connection.name.clone(),
-        host,
-        port,
         comment: format!("aka:{}", connection.name),
         signer,
     });
@@ -608,7 +594,7 @@ async fn handle_conn(state: Arc<AgentState>, mut stream: UnixStream) -> std::io:
 
     // Establishment succeeded: register the live session (dropping the
     // redemption without `start` would release the reserved budget slot).
-    let max_ttl = redemption.max_ttl(state.broker.config.session_max_ttl);
+    let max_ttl = state.broker.config.session_max_ttl;
     let session = redemption.start(ConnectionKind::Ssh);
     let idle = state.broker.config.session_idle_timeout;
     let reason = serve(&state, &mut stream, &session, max_ttl, idle).await;
@@ -700,12 +686,10 @@ async fn session_bind(
     tofu_session_bind(state, binding, payload).await
 }
 
-/// Trust-on-first-use: the connection was opened unpinned, so the observed
-/// host key is put to the user through the ordinary approval surface, and
-/// the ssh client blocks on the agent socket while they decide. The
-/// approvals auto-deny timeout bounds the wait (and fits inside sshd's
-/// default LoginGraceTime); a denial or timeout refuses the bind and leaves
-/// the connection unpinned.
+/// Trust-on-first-use: the connection was opened unpinned, so the key the
+/// server presents at the first session-bind is pinned immediately and the
+/// pin is recorded in the activity log. Every later connection is verified
+/// against it; a server that later presents a different key is refused.
 async fn tofu_session_bind(
     state: &Arc<AgentState>,
     binding: &mut Option<SessionBinding>,
@@ -759,133 +743,37 @@ async fn tofu_session_bind(
         Err(reason) => return refuse(state, &reason),
     };
     let observed = observed_binding.public.fingerprint(HashAlg::Sha256);
-    let algorithm = observed_binding.public.algorithm().as_str().to_string();
 
-    // Raise the trust prompt through the existing approval machinery. The
-    // request deliberately carries no client_id/token hash: a host-key
-    // decision must never be absorbed into an access session or create a
-    // standing rule (the broker also coerces those decisions to allow-once).
-    let request = ApprovalRequest {
-        id: Uuid::new_v4(),
-        agent: state.agent_name.clone(),
-        client_id: None,
-        agent_token_hash: None,
-        kind: ApprovalKind::Ssh,
-        connection: Some(state.broker.connection_summary(&conn)),
-        action: format!("Trust SSH host key for {}", conn.name),
-        notification: format!(
-            "{} reached {} for the first time: verify the server's host key",
-            state.agent_name, conn.name
-        ),
-        received_at: chrono::Utc::now(),
-        deadline: chrono::Utc::now(),
-        http: None,
-        ssh: Some(SshHostKeyView {
-            host: state.host.clone(),
-            port: state.port,
-            observed_fingerprint: observed.to_string(),
-            algorithm,
-        }),
-        proposal: None,
-        proposal_credential: None,
-    };
-
-    let executor: crate::approvals::Executor = {
-        let broker = state.broker.clone();
-        let connection_id = state.connection_id;
-        let connection_name = state.connection_name.clone();
-        let public = observed_binding.public.clone();
-        Box::pin(async move {
-            match broker.store.pin_ssh_host_key(&connection_id, &observed) {
-                Ok(PinOutcome::Pinned(pinned)) => {
-                    broker.audit.append(
-                        AuditEntry::new(
-                            AuditKind::SshHostKeyPinned,
-                            format!("SSH host key trusted: {connection_name}"),
-                        )
-                        .connection(connection_name.clone())
-                        .detail(format!("{pinned} pinned at first connection"))
-                        .outcome("pinned"),
-                    );
-                    broker.events.connections_changed();
-                    ExecOutcome {
-                        status: 200,
-                        body: serde_json::json!({ "host_key_fingerprint": pinned.to_string() }),
-                    }
-                }
-                // A concurrent pin won; accept it only if it is the same key
-                // (possibly under a different hash algorithm), else fail
-                // closed — the user never saw this server's key.
-                Ok(PinOutcome::AlreadyPinned(existing)) => {
-                    if public.fingerprint(existing.algorithm()) == existing {
-                        ExecOutcome {
-                            status: 200,
-                            body: serde_json::json!({
-                                "host_key_fingerprint": existing.to_string(),
-                            }),
-                        }
-                    } else {
-                        ExecOutcome {
-                            status: 403,
-                            body: serde_json::json!({
-                                "reason": crate::wire::ErrorReason::DeniedByPolicy,
-                                "detail": "connection meanwhile pinned a different host key",
-                            }),
-                        }
-                    }
-                }
-                Err(e) => ExecOutcome {
-                    status: 500,
-                    body: serde_json::json!({
-                        "reason": crate::wire::ErrorReason::BadConnectionConfig,
-                        "detail": format!("host key pin failed: {e}"),
-                    }),
-                },
-            }
-        })
-    };
-
-    let parked = state.broker.approvals.park(ParkRequest {
-        request,
-        coalesce_key: None,
-        payload_hash: None,
-        retain_outcome: false,
-        executor,
-    });
-    let outcome = match parked {
-        Ok(Parked::Wait(handle)) => handle.wait().await,
-        // Unreachable without a coalesce key, and replay is never retained.
-        Ok(Parked::Replay(_)) | Err(_) => None,
-    };
-    let Some(outcome) = outcome else {
-        return refuse(state, "host key trust prompt failed");
-    };
-    if outcome.status != 200 {
-        let detail = outcome.body["reason"]
-            .as_str()
-            .unwrap_or("denied")
-            .to_string();
-        state.broker.audit.append(
-            AuditEntry::new(
-                AuditKind::SshHostKeyPinned,
-                format!("SSH host key not trusted: {}", state.connection_name),
-            )
-            .connection(state.connection_name.clone())
-            .detail(format!("{observed} · {detail}"))
-            .outcome("denied"),
-        );
-        return frame(SSH_AGENT_FAILURE, &[]);
-    }
-    // The pinned fingerprint may legitimately differ from `observed` (a
-    // concurrent manual pin of the same key under SHA-512); cache what the
-    // store actually holds.
-    let pinned = match outcome.body["host_key_fingerprint"]
-        .as_str()
-        .unwrap_or_default()
-        .parse::<Fingerprint>()
+    // Pin the observed key immediately and record it; there is no prompt.
+    let pinned = match state
+        .broker
+        .store
+        .pin_ssh_host_key(&state.connection_id, &observed)
     {
-        Ok(pinned) => pinned,
-        Err(e) => return refuse(state, &format!("pinned fingerprint unreadable: {e}")),
+        Ok(PinOutcome::Pinned(pinned)) => {
+            state.broker.audit.append(
+                AuditEntry::new(
+                    AuditKind::SshHostKeyPinned,
+                    format!("SSH host key trusted: {}", state.connection_name),
+                )
+                .connection(state.connection_name.clone())
+                .detail(format!("{pinned} pinned at first connection"))
+                .outcome("pinned"),
+            );
+            state.broker.events.connections_changed();
+            pinned
+        }
+        // A concurrent pin won; accept it only if it is the same key
+        // (possibly under a different hash algorithm), else fail closed —
+        // the server presented a different key than the one on record.
+        Ok(PinOutcome::AlreadyPinned(existing)) => {
+            if observed_binding.public.fingerprint(existing.algorithm()) == existing {
+                existing
+            } else {
+                return refuse(state, "connection meanwhile pinned a different host key");
+            }
+        }
+        Err(e) => return refuse(state, &format!("host key pin failed: {e}")),
     };
     *state.host_key_fingerprint.lock().await = Some(pinned);
     *binding = Some(observed_binding.binding);

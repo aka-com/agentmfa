@@ -7,16 +7,13 @@
 use std::path::Path;
 use std::time::Duration;
 
-use aka_core::approvals::ApprovalRequest;
-use aka_core::broker::{Broker, UiDecision};
+use aka_core::broker::Broker;
 use aka_core::config::BrokerConfig;
 use aka_core::daemon;
 use aka_core::events::BrokerEvents;
 use aka_core::paths::Paths;
 use aka_core::store::ConnectionSpec;
-use aka_core::types::{
-    ConfirmationMethod, ConnectionConfig, DecisionContext, DecisionSurface, SecretMeta,
-};
+use aka_core::types::{ConfirmationMethod, ConnectionConfig, SecretMeta};
 use aka_core::vault::MemoryVault;
 use http_body_util::BodyExt as _;
 use serde_json::{json, Value};
@@ -27,7 +24,6 @@ use ssh_key::{Algorithm, HashAlg, LineEnding, PrivateKey, PublicKey, Signature};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::UnixStream;
-use tokio::sync::mpsc;
 use zeroize::Zeroizing;
 
 /* ------------------------------ ssh-agent wire ---------------------------- */
@@ -92,50 +88,31 @@ fn userauth_blob(user: &str, alg: &str, key_blob: &[u8], host_key: &[u8]) -> Vec
 
 /* -------------------------------- harness --------------------------------- */
 
-struct TestEvents {
-    prompts: mpsc::UnboundedSender<ApprovalRequest>,
-}
+struct TestEvents;
 
 impl BrokerEvents for TestEvents {
-    fn prompt_raised(&self, request: &ApprovalRequest) {
-        let _ = self.prompts.send(request.clone());
-    }
     fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
         true
-    }
-    fn confirm_decision(
-        &self,
-        _request: &ApprovalRequest,
-        _decision: UiDecision,
-    ) -> Option<ConfirmationMethod> {
-        Some(ConfirmationMethod::Waived)
     }
     fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
         Some(ConfirmationMethod::Waived)
     }
 }
 
-/// The scripted user's decision attribution.
-fn ctx() -> DecisionContext {
-    DecisionContext::local(DecisionSurface::Harness)
-}
-
 struct Harness {
     broker: Arc<Broker>,
     daemon: daemon::DaemonHandle,
-    prompts: mpsc::UnboundedReceiver<ApprovalRequest>,
     _dir: tempfile::TempDir,
 }
 
 async fn harness(config: BrokerConfig) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let paths = Paths::under(dir.path());
-    let (tx, rx) = mpsc::unbounded_channel();
     let broker = Broker::new(
         paths,
         Arc::new(MemoryVault::new()),
         config,
-        Arc::new(TestEvents { prompts: tx }),
+        Arc::new(TestEvents),
     )
     .await
     .unwrap();
@@ -143,7 +120,6 @@ async fn harness(config: BrokerConfig) -> Harness {
     Harness {
         broker,
         daemon,
-        prompts: rx,
         _dir: dir,
     }
 }
@@ -257,32 +233,19 @@ impl Harness {
         body["token"].as_str().unwrap().to_string()
     }
 
-    /// POST /v1/ssh/open and approve; returns the auth_sock path and the
-    /// full open-response body (its `host_key_fingerprint` is null while
-    /// the connection is unpinned).
+    /// POST /v1/ssh/open (the first paired agent is auto-wired); returns
+    /// the auth_sock path and the full open-response body (its
+    /// `host_key_fingerprint` is null while the connection is unpinned).
     async fn open_ssh(&mut self, token: &str) -> (String, Value) {
-        let socket = self.daemon.socket_path.clone();
         let auth = format!("Bearer {token}");
-        let call = tokio::spawn(async move {
-            uds_request(
-                &socket,
-                "POST",
-                "/v1/ssh/open",
-                &[("authorization", &auth)],
-                Some(json!({"connection": "prod-ssh"})),
-            )
-            .await
-        });
-        let prompt = tokio::time::timeout(Duration::from_secs(5), self.prompts.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(prompt.connection.as_ref().unwrap().name, "prod-ssh");
-        assert!(prompt.ssh.is_none(), "an open prompt is not a trust prompt");
-        self.broker
-            .decide(&prompt.id, UiDecision::AllowOnce, &ctx())
-            .unwrap();
-        let (status, body) = call.await.unwrap();
+        let (status, body) = uds_request(
+            &self.daemon.socket_path,
+            "POST",
+            "/v1/ssh/open",
+            &[("authorization", &auth)],
+            Some(json!({"connection": "prod-ssh"})),
+        )
+        .await;
         assert_eq!(status, 200, "open failed: {body}");
         assert_eq!(body["user"], "deploy");
         assert_eq!(body["host"], "prod.example.com");
@@ -292,8 +255,7 @@ impl Harness {
 }
 
 /// Connect a fresh agent connection and session-bind `host_key` on it, in a
-/// background task — a trust-on-first-use bind blocks on the approval
-/// decision, so the test thread must stay free to decide it.
+/// background task.
 fn spawn_bind(auth_sock: &str, host_key: &PrivateKey) -> tokio::task::JoinHandle<(u8, UnixStream)> {
     let auth_sock = auth_sock.to_string();
     let host_key = host_key.clone();
@@ -525,26 +487,15 @@ async fn unparseable_key_fails_open() {
         .unwrap();
     let token = h.pair().await;
 
-    let socket = h.daemon.socket_path.clone();
     let auth = format!("Bearer {token}");
-    let call = tokio::spawn(async move {
-        uds_request(
-            &socket,
-            "POST",
-            "/v1/ssh/open",
-            &[("authorization", &auth)],
-            Some(json!({"connection": "prod-ssh"})),
-        )
-        .await
-    });
-    let prompt = tokio::time::timeout(Duration::from_secs(5), h.prompts.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    h.broker
-        .decide(&prompt.id, UiDecision::AllowOnce, &ctx())
-        .unwrap();
-    let (status, body) = call.await.unwrap();
+    let (status, body) = uds_request(
+        &h.daemon.socket_path,
+        "POST",
+        "/v1/ssh/open",
+        &[("authorization", &auth)],
+        Some(json!({"connection": "prod-ssh"})),
+    )
+    .await;
     assert_eq!(status, 502, "unparseable key must fail the open");
     assert_eq!(body["reason"], "ssh_agent_open_failed");
     // Nothing was left listening.
@@ -554,7 +505,7 @@ async fn unparseable_key_fails_open() {
 /* --------------------------- trust on first use --------------------------- */
 
 #[tokio::test]
-async fn tofu_first_bind_prompts_pins_and_signs() {
+async fn tofu_first_bind_pins_and_signs() {
     let mut h = harness(BrokerConfig::default()).await;
     let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
     add_ssh_connection_with_fingerprint(&h.broker, &key, "deploy", String::new());
@@ -571,25 +522,9 @@ async fn tofu_first_bind_prompts_pins_and_signs() {
         "unpinned open must report a null fingerprint, got {body}"
     );
 
-    // The bind parks on the trust prompt; decide it from the test thread.
-    let bind = spawn_bind(&auth_sock, &host_key);
-    let prompt = tokio::time::timeout(Duration::from_secs(5), h.prompts.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    let view = prompt.ssh.as_ref().expect("trust prompt carries the key");
-    assert_eq!(view.observed_fingerprint, observed);
-    assert_eq!(view.algorithm, "ssh-ed25519");
-    assert_eq!(view.host, "prod.example.com");
-    assert_eq!(view.port, 22);
-    assert!(prompt.action.contains("Trust SSH host key"));
-    assert_eq!(prompt.connection.as_ref().unwrap().name, "prod-ssh");
-    h.broker
-        .decide(&prompt.id, UiDecision::AllowOnce, &ctx())
-        .unwrap();
-
-    let (kind, mut stream) = bind.await.unwrap();
-    assert_eq!(kind, SSH_AGENT_SUCCESS, "approved bind succeeds");
+    // The first bind pins the observed key automatically — no prompt.
+    let (kind, mut stream) = spawn_bind(&auth_sock, &host_key).await.unwrap();
+    assert_eq!(kind, SSH_AGENT_SUCCESS, "first bind succeeds");
     assert_eq!(stored_fingerprint(&h.broker), observed, "pin persisted");
 
     // The now-bound connection signs exactly as a pre-pinned one would.
@@ -606,50 +541,6 @@ async fn tofu_first_bind_prompts_pins_and_signs() {
 }
 
 #[tokio::test]
-async fn tofu_denied_bind_fails_and_stays_unpinned() {
-    let mut h = harness(BrokerConfig::default()).await;
-    let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
-    add_ssh_connection_with_fingerprint(&h.broker, &key, "deploy", String::new());
-    let host_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
-    let token = h.pair().await;
-    let (auth_sock, _) = h.open_ssh(&token).await;
-
-    let bind = spawn_bind(&auth_sock, &host_key);
-    let prompt = tokio::time::timeout(Duration::from_secs(5), h.prompts.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(prompt.ssh.is_some());
-    h.broker
-        .decide(&prompt.id, UiDecision::Deny, &ctx())
-        .unwrap();
-    let (kind, _stream) = bind.await.unwrap();
-    assert_eq!(kind, SSH_AGENT_FAILURE, "denied bind fails");
-    assert_eq!(stored_fingerprint(&h.broker), "", "denial pins nothing");
-
-    // Denial is not a standing decision: the next bind asks again, and an
-    // approval then pins normally.
-    let bind = spawn_bind(&auth_sock, &host_key);
-    let prompt = tokio::time::timeout(Duration::from_secs(5), h.prompts.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(prompt.ssh.is_some(), "denial does not suppress re-asking");
-    h.broker
-        .decide(&prompt.id, UiDecision::AllowOnce, &ctx())
-        .unwrap();
-    let (kind, _stream) = bind.await.unwrap();
-    assert_eq!(kind, SSH_AGENT_SUCCESS);
-    assert_eq!(
-        stored_fingerprint(&h.broker),
-        host_key
-            .public_key()
-            .fingerprint(HashAlg::Sha256)
-            .to_string()
-    );
-}
-
-#[tokio::test]
 async fn tofu_pin_holds_for_later_binds_and_refuses_other_keys() {
     let mut h = harness(BrokerConfig::default()).await;
     let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
@@ -658,31 +549,27 @@ async fn tofu_pin_holds_for_later_binds_and_refuses_other_keys() {
     let token = h.pair().await;
     let (auth_sock, _) = h.open_ssh(&token).await;
 
-    let bind = spawn_bind(&auth_sock, &host_key);
-    let prompt = tokio::time::timeout(Duration::from_secs(5), h.prompts.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    h.broker
-        .decide(&prompt.id, UiDecision::AllowOnce, &ctx())
-        .unwrap();
-    assert_eq!(bind.await.unwrap().0, SSH_AGENT_SUCCESS);
+    assert_eq!(spawn_bind(&auth_sock, &host_key).await.unwrap().0, SSH_AGENT_SUCCESS);
 
-    // A second connection binds the pinned key with no prompt at all.
+    // A second connection binds the pinned key without re-pinning.
     let mut again = UnixStream::connect(&auth_sock).await.unwrap();
     assert_eq!(bind_host(&mut again, &host_key).await, SSH_AGENT_SUCCESS);
-    // A different server key is refused outright — and silently.
+    // A different server key is refused outright.
     let imposter = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
     let mut wrong = UnixStream::connect(&auth_sock).await.unwrap();
     assert_eq!(bind_host(&mut wrong, &imposter).await, SSH_AGENT_FAILURE);
-    assert!(
-        h.prompts.try_recv().is_err(),
-        "no prompt after the key is pinned"
+    assert_eq!(
+        stored_fingerprint(&h.broker),
+        host_key
+            .public_key()
+            .fingerprint(HashAlg::Sha256)
+            .to_string(),
+        "the imposter never displaces the pinned key"
     );
 }
 
 #[tokio::test]
-async fn tofu_concurrent_binds_prompt_once_and_both_succeed() {
+async fn tofu_concurrent_binds_pin_once_and_both_succeed() {
     let mut h = harness(BrokerConfig::default()).await;
     let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
     add_ssh_connection_with_fingerprint(&h.broker, &key, "deploy", String::new());
@@ -691,20 +578,11 @@ async fn tofu_concurrent_binds_prompt_once_and_both_succeed() {
     let (auth_sock, _) = h.open_ssh(&token).await;
 
     // Two clients race the first bind; the gate serializes them so exactly
-    // one trust prompt is raised, and the loser re-checks the pinned state.
+    // one pin is written, and the loser re-checks the pinned state.
     let first = spawn_bind(&auth_sock, &host_key);
     let second = spawn_bind(&auth_sock, &host_key);
-    let prompt = tokio::time::timeout(Duration::from_secs(5), h.prompts.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(prompt.ssh.is_some());
-    h.broker
-        .decide(&prompt.id, UiDecision::AllowOnce, &ctx())
-        .unwrap();
     assert_eq!(first.await.unwrap().0, SSH_AGENT_SUCCESS);
     assert_eq!(second.await.unwrap().0, SSH_AGENT_SUCCESS);
-    assert!(h.prompts.try_recv().is_err(), "exactly one trust prompt");
     assert_eq!(
         stored_fingerprint(&h.broker),
         host_key
@@ -725,51 +603,14 @@ async fn tofu_pin_reaches_agent_sockets_opened_before_it() {
     let (first_sock, _) = h.open_ssh(&token).await;
     let (second_sock, _) = h.open_ssh(&token).await;
 
-    let bind = spawn_bind(&first_sock, &host_key);
-    let prompt = tokio::time::timeout(Duration::from_secs(5), h.prompts.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    h.broker
-        .decide(&prompt.id, UiDecision::AllowOnce, &ctx())
-        .unwrap();
-    assert_eq!(bind.await.unwrap().0, SSH_AGENT_SUCCESS);
+    assert_eq!(spawn_bind(&first_sock, &host_key).await.unwrap().0, SSH_AGENT_SUCCESS);
 
-    // The second socket re-reads the store instead of prompting again.
+    // The second socket re-reads the store instead of re-pinning.
     let mut stream = UnixStream::connect(&second_sock).await.unwrap();
     assert_eq!(bind_host(&mut stream, &host_key).await, SSH_AGENT_SUCCESS);
     let imposter = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
     let mut wrong = UnixStream::connect(&second_sock).await.unwrap();
     assert_eq!(bind_host(&mut wrong, &imposter).await, SSH_AGENT_FAILURE);
-    assert!(h.prompts.try_recv().is_err(), "no second trust prompt");
-}
-
-#[tokio::test]
-async fn tofu_timeout_auto_denies_and_stays_unpinned() {
-    let config = BrokerConfig {
-        approval_timeout: Duration::from_millis(1500),
-        ..BrokerConfig::default()
-    };
-    let mut h = harness(config).await;
-    let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
-    add_ssh_connection_with_fingerprint(&h.broker, &key, "deploy", String::new());
-    let host_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
-    let token = h.pair().await;
-    let (auth_sock, _) = h.open_ssh(&token).await;
-
-    // Nobody decides: the approval auto-denies and the bind fails closed.
-    let bind = spawn_bind(&auth_sock, &host_key);
-    let prompt = tokio::time::timeout(Duration::from_secs(5), h.prompts.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(prompt.ssh.is_some());
-    let (kind, _stream) = tokio::time::timeout(Duration::from_secs(10), bind)
-        .await
-        .expect("auto-deny resolves the bind")
-        .unwrap();
-    assert_eq!(kind, SSH_AGENT_FAILURE);
-    assert_eq!(stored_fingerprint(&h.broker), "", "timeout pins nothing");
 }
 
 /// The stale-socket sweep removes dead files but keeps live ones.

@@ -8,7 +8,7 @@ use serde_json::json;
 
 use crate::config::BrokerConfig;
 use crate::paths::Paths;
-use crate::wire::{ApprovalMode, AuthScheme, PROTOCOL_VERSION, REQUEST_ID_MAX_BYTES};
+use crate::wire::{AuthScheme, PROTOCOL_VERSION, REQUEST_ID_MAX_BYTES};
 
 pub fn manifest(config: &BrokerConfig, paths: &Paths) -> serde_json::Value {
     json!({
@@ -23,15 +23,12 @@ pub fn manifest(config: &BrokerConfig, paths: &Paths) -> serde_json::Value {
         // per-agent path in `store_at`.
         "tokens_dir": paths.tokens_display(),
         "capabilities": ["http", "websocket", "postgres", "ssh"],
-        // Capability flags: how a client may authenticate and how approval
-        // decisions reach it. Closed vocabularies (wire.rs); new schemes
-        // and modes appear here before any client is expected to use them.
+        // Capability flags: how a client may authenticate. Closed
+        // vocabulary (wire.rs); new schemes appear here before any client
+        // is expected to use them.
         "auth_schemes": AuthScheme::ALL,
-        "approval_modes": ApprovalMode::ALL,
-        "approval_timeout_seconds": config.approval_timeout.as_secs(),
-        "access_grant_ttl_seconds": config.access_grant_ttl.as_secs(),
-        // approval wait + upstream timeout + margin: machine-actionable, so
-        // agents set a concrete client timeout instead of parsing prose.
+        // upstream timeout + margin: machine-actionable, so agents set a
+        // concrete client timeout instead of parsing prose.
         "recommended_client_timeout_seconds": config.recommended_client_timeout.as_secs(),
         "token_ttl_days": config.token_ttl.as_secs() / 86400,
         "ticket_ttl_seconds": config.ticket_ttl.as_secs(),
@@ -40,7 +37,6 @@ pub fn manifest(config: &BrokerConfig, paths: &Paths) -> serde_json::Value {
             "pair": "/v1/pair",
             "whoami": "/v1/whoami",
             "connections": "/v1/connections",
-            "propose": "/v1/connections/propose",
             "http": "/v1/http",
             "ws_open": "/v1/ws/open",
             "pg_open": "/v1/pg/open",
@@ -54,11 +50,9 @@ pub fn manifest(config: &BrokerConfig, paths: &Paths) -> serde_json::Value {
 /// The `/instructions` markdown. The pair-or-reuse walkthrough, one worked
 /// example per capability, token-storage guidance, and error semantics.
 pub fn instructions(config: &BrokerConfig, paths: &Paths) -> String {
-    let approval = config.approval_timeout.as_secs();
     let client_timeout = config.recommended_client_timeout.as_secs();
     let ticket = config.ticket_ttl.as_secs();
     let token_days = config.token_ttl.as_secs() / 86400;
-    let access_minutes = config.access_grant_ttl.as_secs() / 60;
     format!(
         r#"# AKA: broker instructions
 
@@ -66,15 +60,12 @@ AKA holds this developer's secrets in the macOS Keychain and brokers
 their use. Broker-produced fields do not expose vault-held values or secret
 names; you ask the broker to *use a named connection* (make an HTTP request
 through `github`, connect to `prod-db`) and the broker injects the credential
-on the upstream leg only when an exact approval, active access session, or
-standing rule authorizes the request. Relayed HTTP responses are scrubbed for
+on the upstream leg. Authorization is a **wiring**: the user wires agents to
+connections in the Multitool app. A wired call executes immediately, with no
+prompt; an unwired call is refused with `403 denied_by_policy` — ask your
+user to wire you up in the app. Relayed HTTP responses are scrubbed for
 recognized credential material, but arbitrary transformed upstream output
 cannot be guaranteed secret-free.
-
-The default approval creates a fixed {access_minutes}-minute in-memory access
-session. A read session covers HTTP GET/HEAD; a full session covers every HTTP
-method or new WebSocket/Postgres/SSH opens. Sessions are bound to this token
-generation and the exact connection configuration and never extend on use.
 
 Protocol: Agent Broker Protocol version {protocol_version} (the manifest's
 `protocol_version`; PROTOCOL.md is the spec).
@@ -126,41 +117,26 @@ and closes live WebSocket, Postgres, and SSH connections for that agent name.
 
     GET /v1/connections
     → [{{"name": "github", "type": "api", "target": "https://api.github.com",
-         "endpoint": "/v1/http",
-         "approval": "will_prompt", "access_session": null}}, …]
+         "endpoint": "/v1/http", "wired": true}}, …]
 
 Connections name a destination. Secret names and values are never
 exposed. `endpoint` is where a call naming this connection goes (POST
-it). `approval` is what a call costs right now:
-`will_prompt` blocks on a human decision (tell your user to expect the
-prompt), `read_auto_allowed` covers GET/HEAD under a read-scoped temporary or
-standing permission, and `auto_allowed` proceeds immediately under a full
-permission. When present, `access_session` gives a temporary permission's
-scope and expiry.
+it). `wired` says whether *you* may use the connection: a wired call
+executes immediately, an unwired call is refused with
+`403 {{"reason": "denied_by_policy"}}`. Wiring is changed only by the user
+in the Multitool app — if you need a connection you are not wired to, ask
+your user rather than retrying.
 
-## 3. Approvals: set your client timeout first
+## 3. Retries and timeouts
 
-Approval waits are **held-open requests**: a prompted call simply does not
-respond until the human decides or the {approval} s approval timeout
-auto-denies it. Blocking on the call is the correct behavior. Set your HTTP
-client timeout to **at least {client_timeout} seconds** (approval wait +
-upstream timeout + margin); many client defaults are far lower.
-
-The primary human choice allows {access_minutes} minutes. A read request starts
-a read session; a mutating HTTP request or WS/PG/SSH open starts a full session.
-A full approval replaces an active read session and starts a new fixed full
-window; ordinary use never extends either window. The human may instead allow
-only the exact request or save a standing permission with the same scope.
-
-Denials come back as `403` with a machine-readable reason:
-- `{{"reason": "denied_by_user"}}`: the human said no; don't retry, ask them.
-- `{{"reason": "approval_timeout"}}`: nobody decided in time; this is
-  retryable after re-alerting your user.
+Calls execute immediately; there is no approval wait. Set your HTTP client
+timeout to **at least {client_timeout} seconds** (upstream timeout +
+margin).
 
 **Always send a unique `request_id` no longer than
 {request_id_max_bytes} UTF-8 bytes (a UUID is recommended) on mutating calls.**
 A retry that re-sends the same
-`request_id` joins the existing prompt: one approval, exactly one upstream
+`request_id` joins the in-flight execution: exactly one upstream
 execution, the same response replayed while its body remains cached, and a
 non-reexecute tombstone retained for 10 minutes.
 Reusing a `request_id` with a *different* payload is rejected with
@@ -221,10 +197,7 @@ with the credential injected and pipes frames verbatim. The ticket expires
 within that window, all
 under the authorization that issued it. Sessions carry a configured max TTL
 (1 h) and an idle timeout (5 min; protocol ping/pong counts as activity). A
-grant-backed session is capped by the grant's remaining lifetime and closes if
-the grant expires or is revoked. A reconnect after the ticket window needs a
-fresh open. An active full access session or standing rule lets that open
-proceed without another prompt.
+reconnect after the ticket window needs a fresh open.
 
 ## 6. Postgres: POST /v1/pg/open
 
@@ -275,11 +248,10 @@ pinned host-key fingerprint and will **only** sign host-bound public-key
 login as the pinned `user`; it signs nothing else.
 
 When `host_key_fingerprint` is `null`, the server's key is not pinned yet:
-the broker trusts it on first use. At your first connection it shows the
-observed host key to the user for approval, and your ssh client simply waits
-on the agent socket during that decision (up to the approval timeout, so do
-not treat a slow first authentication as a hang). Approval pins the key for
-every later connection; denial or timeout makes the authentication fail.
+the broker trusts it on first use. The key the server presents at your first
+connection is pinned automatically and recorded in the activity log; every
+later connection is verified against it, and a server that presents a
+different key is refused.
 
 Ticket lifetime and reconnect semantics
 match WebSocket and Postgres: the socket accepts as many connections as needed for the
@@ -292,42 +264,7 @@ explicit `-o PubkeyAuthentication=host-bound` is optional. Clients without
 those OpenSSH extensions fail closed because the broker refuses unbound or
 host-key-mismatched signing requests.
 
-## 8. Propose a missing service: POST /v1/connections/propose
-
-If a service you need is not in `GET /v1/connections`, propose it instead of
-asking your user to fill in a form. Send:
-
-    {{"name": "sandbox-pg",
-      "credential_name": "SANDBOX_PG_PASSWORD",
-      "config": {{"kind": "pg", "host": "127.0.0.1", "port": 5432,
-                 "dbname": "app", "user": "app"}}}}
-
-`config` kinds: `api` (`host`, `scheme`?, `port`?, `template`), `pg`
-(`host`, `port`?, `dbname`, `user`, `sslmode`?), `ws` (`url`, `template`?),
-`ssh` (`host`, `port`?, `user`, `destination`?). Never send a secret value —
-there is no field for one. The user is shown the full proposal and types the
-credential themselves; it is saved under your `credential_name`. Any `api`/`ws`
-template must reference only `{{{{CREDENTIAL_NAME}}}}`; referencing any other
-name is refused. SSH proposals must not set a host key fingerprint (trust is
-confirmed with the user at the first connection), and `pg` proposals cannot
-name a CA bundle path. Omitted `pg` and `ssh` ports default to 5432 and 22.
-When `destination` is present on SSH, the approval shows that exact invocation
-alias alongside the resolved `user@host[:port]` target because it may activate
-local ssh_config behavior.
-
-The call blocks like every approval. On approval you get
-`201 {{"name", "type", "target", "endpoint"}}` — the connection exists but you
-have no access yet; call its endpoint and the usual approval flow applies.
-`409 {{"reason": "connection_exists"}}` means a connection with that name or
-target already exists — list `/v1/connections` and use it.
-`409 {{"reason": "secret_name_taken"}}` means pick a different
-`credential_name`. `409 {{"reason": "proposal_already_pending"}}` means your
-earlier proposal is still on screen. `400 {{"reason": "invalid_proposal"}}`
-explains what to fix in `detail`. Denials and timeouts return
-`403 {{"reason": "denied_by_user" | "approval_timeout"}}`; do not re-propose
-without talking to your user.
-
-## 9. Other errors
+## 8. Other errors
 
 - `400 {{"reason": "invalid_json"}}`: the request body was not valid JSON
   for the endpoint (wrong/missing Content-Type, malformed JSON, or a
@@ -365,11 +302,9 @@ without talking to your user.
         protocol_version = PROTOCOL_VERSION,
         socket = paths.socket_display(),
         tokens = paths.tokens_display(),
-        approval = approval,
         client_timeout = client_timeout,
         ticket = ticket,
         token_days = token_days,
-        access_minutes = access_minutes,
         request_id_max_bytes = REQUEST_ID_MAX_BYTES,
     )
 }
@@ -412,11 +347,11 @@ mod tests {
         assert_eq!(PROTOCOL_VERSION, 0);
         assert_eq!(m["protocol_version"], 0);
         assert_eq!(m["auth_schemes"], serde_json::json!(["bearer"]));
-        assert_eq!(m["approval_modes"], serde_json::json!(["blocking"]));
         assert_eq!(m["transport"], "http-over-unix-socket");
-        assert_eq!(m["approval_timeout_seconds"], 900);
-        assert_eq!(m["access_grant_ttl_seconds"], 900);
-        assert_eq!(m["recommended_client_timeout_seconds"], 1020);
+        assert!(m.get("approval_modes").is_none());
+        assert!(m.get("approval_timeout_seconds").is_none());
+        assert!(m.get("access_grant_ttl_seconds").is_none());
+        assert_eq!(m["recommended_client_timeout_seconds"], 120);
         assert_eq!(m["token_ttl_days"], 30);
         assert_eq!(m["ticket_ttl_seconds"], 60);
         assert_eq!(m["request_id_max_bytes"], REQUEST_ID_MAX_BYTES);
@@ -456,27 +391,18 @@ mod tests {
             "256 UTF-8 bytes",
             "PGPASSWORD",
             "expires_in_seconds",
-            "at least 1020 seconds",
-            "denied_by_user",
-            "approval_timeout",
+            "at least 120 seconds",
+            "denied_by_policy",
+            "\"wired\": true",
             "request_id_mismatch",
             "outcome_not_replayable",
             "idempotency_capacity",
             "retry_after_seconds",
             "invalid_json",
-            "will_prompt",
-            "auto_allowed",
-            "read_auto_allowed",
-            "15-minute",
             "\"endpoint\": \"/v1/http\"",
             "/v1/ws/open",
             "/v1/pg/open",
             "/v1/ssh/open",
-            "/v1/connections/propose",
-            "credential_name",
-            "connection_exists",
-            "proposal_already_pending",
-            "invalid_proposal",
             "SSH_AUTH_SOCK",
             "session binding and host-bound authentication automatically",
             "host-key-mismatched signing requests",

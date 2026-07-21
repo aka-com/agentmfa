@@ -82,6 +82,10 @@ impl Paths {
     pub fn index_file(&self) -> PathBuf {
         self.data_dir.join("index.json")
     }
+    pub fn wirings_file(&self) -> PathBuf {
+        self.data_dir.join("wirings.json")
+    }
+    /// Legacy standing-rules file; read once to migrate into wirings.
     pub fn rules_file(&self) -> PathBuf {
         self.data_dir.join("rules.json")
     }

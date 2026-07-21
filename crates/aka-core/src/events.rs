@@ -1,33 +1,23 @@
 //! Core → UI notification bridge.
 //!
 //! The Rust core owns all state transitions; the shell (Tauri layer, tests,
-//! or the headless dev harness) observes them through this trait to update
-//! the tray badge, raise the approval window, ring the notification
-//! doorbell, and refresh views.
+//! or the headless dev harness) observes them through this trait to refresh
+//! views and to run the native confirmation gates for user-initiated
+//! actions.
 
 use std::time::Duration;
 
-use crate::approvals::ApprovalRequest;
-use crate::audit::AuditEntry;
-use crate::broker::UiDecision;
 use crate::types::{ConfirmationMethod, PgSslMode, SecretMeta};
 
 pub trait BrokerEvents: Send + Sync {
-    /// The pending queue changed (something parked, decided, timed out or
-    /// was abandoned). Drives the tray badge and the approval window.
-    fn queue_changed(&self, _queue: &[ApprovalRequest]) {}
-
-    /// A new prompt was parked, the advisory notification doorbell.
-    fn prompt_raised(&self, _request: &ApprovalRequest) {}
-
     /// Live WS/PG session set changed.
     fn sessions_changed(&self) {}
 
-    /// Paired agents changed (pair/revoke).
+    /// Registered agents changed (pair/revoke).
     fn agents_changed(&self) {}
 
-    /// Standing rules changed.
-    fn rules_changed(&self) {}
+    /// The wiring table changed.
+    fn wirings_changed(&self) {}
 
     /// A connection's persisted configuration changed core-side (today: a
     /// trust-on-first-use host-key pin). UI-originated edits refresh through
@@ -35,12 +25,14 @@ pub trait BrokerEvents: Send + Sync {
     fn connections_changed(&self) {}
 
     /// A new audit entry was appended (drives the activity view).
-    fn audit_appended(&self, _entry: &AuditEntry) {}
+    fn audit_appended(&self, _entry: &crate::audit::AuditEntry) {}
 
-    /// A secret value is about to be read from the vault while the user's
-    /// re-auth-on-read setting is enabled. Product shells should show their
-    /// native authentication gate here. The default fails closed so new
-    /// shell implementations do not silently bypass this setting.
+    /// A secret value is about to be read from the vault for a
+    /// user-initiated action while the re-auth-on-read setting is enabled.
+    /// Product shells should show their native authentication gate here.
+    /// Agent-plane executions are pre-authorized by their wiring and never
+    /// reach this. The default fails closed so new shell implementations do
+    /// not silently bypass this setting.
     fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
         false
     }
@@ -52,28 +44,10 @@ pub trait BrokerEvents: Send + Sync {
         self.confirm_secret_read(secret)
     }
 
-    /// A confirmation-gated decision — approving a pairing or mutating
-    /// request exactly once, starting an access session, or saving an
-    /// "Always allow…" rule — is about to take effect. Product shells must run
-    /// their native confirmation gate here (the LocalAuthentication sheet on
-    /// macOS) and report how it was
-    /// satisfied; `None` aborts the decision. The core calls this exactly
-    /// once per decision, *before* any effect (rule save, execution)
-    /// happens, so a shell cannot apply a gated decision without passing
-    /// through it. The default fails closed so a new shell implementation
-    /// does not silently skip the gate.
-    fn confirm_decision(
-        &self,
-        _request: &ApprovalRequest,
-        _decision: UiDecision,
-    ) -> Option<ConfirmationMethod> {
-        None
-    }
-
     /// A high-consequence configuration action — creating/deleting a
     /// connection, changing its capability, or deleting a secret — is about
-    /// to take effect. Same contract as [`Self::confirm_decision`]: the core
-    /// demands it, `None` aborts, and the default fails closed.
+    /// to take effect. The core demands it, `None` aborts, and the default
+    /// fails closed.
     fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
         None
     }
@@ -100,14 +74,6 @@ pub struct NoopEvents;
 impl BrokerEvents for NoopEvents {
     fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
         true
-    }
-
-    fn confirm_decision(
-        &self,
-        _request: &ApprovalRequest,
-        _decision: UiDecision,
-    ) -> Option<ConfirmationMethod> {
-        Some(ConfirmationMethod::Waived)
     }
 
     fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {

@@ -4,11 +4,10 @@
 //! timestamps, never any fragment of its value. Reveal is a separate,
 //! audited command that returns a short prefix on demand.
 
-use aka_core::approvals::ApprovalRequest;
 use aka_core::audit::AuditEntry;
 use aka_core::broker::Broker;
 use aka_core::sessions::SessionInfo;
-use aka_core::types::{Connection, PairedAgent, Rule, SecretMeta};
+use aka_core::types::{Connection, PairedAgent, SecretMeta, Wiring};
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -36,12 +35,11 @@ impl SecretDto {
     }
 }
 
+/// One agent wired to a connection, as the UI toggles it.
 #[derive(Serialize)]
-pub struct PermissionChip {
-    pub id: String,
+pub struct WiringChip {
+    pub agent_id: String,
     pub agent: String,
-    pub scope: String,
-    pub expires_at: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -53,8 +51,8 @@ pub struct ConnectionDto {
     pub target: String,
     /// Referenced secret names (the 🔑 chips).
     pub secret_names: Vec<String>,
-    /// Scoped access, whether expiring or standing.
-    pub permissions: Vec<PermissionChip>,
+    /// Agents wired to this connection.
+    pub wired_agents: Vec<WiringChip>,
     // Type-specific config, prefilled into the Edit sheet.
     pub host: Option<String>,
     pub scheme: Option<String>,
@@ -70,38 +68,28 @@ pub struct ConnectionDto {
 }
 
 impl ConnectionDto {
-    pub fn from(conn: &Connection, all_rules: &[Rule], broker: &Broker) -> Self {
+    pub fn from(conn: &Connection, all_wirings: &[Wiring], broker: &Broker) -> Self {
         use aka_core::types::ConnectionConfig::*;
         let secret_names = conn
             .secrets
             .iter()
             .filter_map(|id| broker.store.secret_by_id(id).ok().map(|s| s.name))
             .collect();
-        let mut permissions: Vec<PermissionChip> = all_rules
+        let wired_agents: Vec<WiringChip> = all_wirings
             .iter()
-            .filter(|r| r.connection_id == conn.id)
-            .map(|r| PermissionChip {
-                id: r.id.to_string(),
-                agent: r.agent.clone(),
-                scope: r.scope.as_str().to_string(),
-                expires_at: None,
+            .filter(|w| w.connection_id == conn.id)
+            .map(|w| WiringChip {
+                agent_id: w.client_id.to_string(),
+                agent: w.agent.clone(),
             })
             .collect();
-        permissions.extend(broker.grants_for_connection(conn).into_iter().map(|grant| {
-            PermissionChip {
-                id: grant.id.to_string(),
-                agent: grant.agent,
-                scope: grant.scope.as_str().to_string(),
-                expires_at: Some(grant.expires_at.to_rfc3339()),
-            }
-        }));
         let mut dto = ConnectionDto {
             id: conn.id.to_string(),
             name: conn.name.clone(),
             kind: conn.kind().as_str().to_string(),
             target: conn.target(),
             secret_names,
-            permissions,
+            wired_agents,
             host: None,
             scheme: None,
             port: None,
@@ -177,21 +165,20 @@ pub struct AgentDto {
     pub name: String,
     pub paired_at: String,
     pub last_used: String,
-    pub permission_count: usize,
+    pub wiring_count: usize,
 }
 
 impl AgentDto {
-    pub fn from(agent: &PairedAgent, rules: &[Rule], broker: &Broker) -> Self {
+    pub fn from(agent: &PairedAgent, wirings: &[Wiring]) -> Self {
         Self {
             id: agent.id.to_string(),
             name: agent.name.clone(),
             paired_at: agent.paired_at.to_rfc3339(),
             last_used: agent.last_used.to_rfc3339(),
-            permission_count: rules
+            wiring_count: wirings
                 .iter()
-                .filter(|rule| rule.client_id == agent.id)
-                .count()
-                + broker.grant_count_for_agent(&agent.name),
+                .filter(|wiring| wiring.client_id == agent.id)
+                .count(),
         }
     }
 }
@@ -249,50 +236,4 @@ pub struct SettingsDto {
     pub menu_bar_hides_dock: bool,
     pub show_service_walkthrough: bool,
     pub show_agent_walkthrough: bool,
-}
-
-/// The queued approval, as the approval window renders it. Serialized via
-/// serde on `ApprovalRequest` directly, but we add the `high_consequence`
-/// hint describing whether this request's exact *Allow once* decision needs
-/// native authentication. Access-session and standing-rule decisions are
-/// always gated independently of this hint.
-#[derive(Serialize, Clone)]
-pub struct ApprovalDto {
-    #[serde(flatten)]
-    pub request: ApprovalRequest,
-    pub high_consequence: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub temporary_access: Option<TemporaryAccessDto>,
-}
-
-#[derive(Serialize, Clone)]
-pub struct TemporaryAccessDto {
-    pub scope: &'static str,
-    pub duration_seconds: u64,
-}
-
-impl ApprovalDto {
-    pub fn new(request: ApprovalRequest, access_duration_seconds: u64) -> Self {
-        let high_consequence = request.is_high_consequence();
-        // Proposals and host-key trust prompts have no access-session shape;
-        // the broker coerces any such decision to allow-once regardless.
-        let temporary_access = if request.kind == aka_core::approvals::ApprovalKind::Propose
-            || request.ssh.is_some()
-        {
-            None
-        } else {
-            Some(TemporaryAccessDto {
-                scope: match request.http.as_ref() {
-                    Some(http) if !http.mutating => "read",
-                    _ => "full",
-                },
-                duration_seconds: access_duration_seconds,
-            })
-        };
-        Self {
-            request,
-            high_consequence,
-            temporary_access,
-        }
-    }
 }

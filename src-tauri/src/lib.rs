@@ -236,8 +236,8 @@ pub fn run() {
                 CoreError,
             > {
                 // The broker's tokio runtime hosts the daemon listeners and
-                // the approvals timers. Broker::new must run inside it
-                // (approvals spawn tasks; the integrity key loads via the
+                // the execution tasks. Broker::new must run inside it
+                // (executions spawn tasks; the integrity key loads via the
                 // async vault).
                 let runtime = tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
@@ -246,7 +246,7 @@ pub fn run() {
                 let paths = Paths::default_locations()?;
                 let vault = platform_vault(&paths)?;
                 let config = BrokerConfig::default();
-                let events = events::observer(handle.clone(), config.access_grant_ttl.as_secs());
+                let events = events::observer(handle.clone());
 
                 let broker: Arc<Broker> = runtime.block_on(Broker::new(
                     paths,

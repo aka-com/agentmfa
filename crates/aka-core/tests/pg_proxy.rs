@@ -6,17 +6,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use aka_core::approvals::ApprovalRequest;
-use aka_core::broker::{Broker, UiDecision};
+use aka_core::broker::Broker;
 use aka_core::config::BrokerConfig;
 use aka_core::daemon;
 use aka_core::events::BrokerEvents;
 use aka_core::paths::Paths;
 use aka_core::store::ConnectionSpec;
-use aka_core::types::{
-    ConfirmationMethod, ConnectionConfig, ConnectionKind, DecisionContext, DecisionSurface,
-    PgSslMode, SecretMeta,
-};
+use aka_core::types::{ConnectionConfig, ConnectionKind, PgSslMode, SecretMeta};
 use aka_core::vault::MemoryVault;
 use base64::Engine as _;
 use hmac::{Hmac, Mac as _};
@@ -25,7 +21,6 @@ use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
 use tokio_postgres::error::SqlState;
 use tokio_postgres::{NoTls, SimpleQueryMessage};
 use zeroize::Zeroizing;
@@ -35,40 +30,26 @@ const REAL_PG_PASSWORD: &str = "s3cr3t-pg-pass-77";
 /* -------------------------------- harness --------------------------------- */
 
 struct TestEvents {
-    prompts: mpsc::UnboundedSender<ApprovalRequest>,
     secret_read_confirmations: Arc<AtomicUsize>,
 }
 
 impl BrokerEvents for TestEvents {
-    fn prompt_raised(&self, request: &ApprovalRequest) {
-        let _ = self.prompts.send(request.clone());
-    }
     fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
         self.secret_read_confirmations
             .fetch_add(1, Ordering::SeqCst);
         true
     }
-    fn confirm_decision(
+    fn confirm_action(
         &self,
-        _request: &ApprovalRequest,
-        _decision: UiDecision,
-    ) -> Option<ConfirmationMethod> {
-        Some(ConfirmationMethod::Waived)
+        _description: &str,
+    ) -> Option<aka_core::types::ConfirmationMethod> {
+        Some(aka_core::types::ConfirmationMethod::Waived)
     }
-    fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
-        Some(ConfirmationMethod::Waived)
-    }
-}
-
-/// The scripted user's decision attribution.
-fn ctx() -> DecisionContext {
-    DecisionContext::local(DecisionSurface::Harness)
 }
 
 struct Harness {
     broker: Arc<Broker>,
     daemon: daemon::DaemonHandle,
-    prompts: mpsc::UnboundedReceiver<ApprovalRequest>,
     secret_read_confirmations: Arc<AtomicUsize>,
     _dir: tempfile::TempDir,
 }
@@ -76,14 +57,12 @@ struct Harness {
 async fn harness(config: BrokerConfig) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let paths = Paths::under(dir.path());
-    let (tx, rx) = mpsc::unbounded_channel();
     let secret_read_confirmations = Arc::new(AtomicUsize::new(0));
     let broker = Broker::new(
         paths,
         Arc::new(MemoryVault::new()),
         config,
         Arc::new(TestEvents {
-            prompts: tx,
             secret_read_confirmations: secret_read_confirmations.clone(),
         }),
     )
@@ -93,7 +72,6 @@ async fn harness(config: BrokerConfig) -> Harness {
     Harness {
         broker,
         daemon,
-        prompts: rx,
         secret_read_confirmations,
         _dir: dir,
     }
@@ -173,29 +151,18 @@ impl Harness {
         body["token"].as_str().unwrap().to_string()
     }
 
-    /// POST /v1/pg/open and approve the prompt; returns (dsn, ticket).
+    /// POST /v1/pg/open (the first paired agent is auto-wired); returns
+    /// (dsn, ticket).
     async fn open_pg(&mut self, token: &str) -> (String, String) {
-        let socket = self.daemon.socket_path.clone();
         let auth = format!("Bearer {token}");
-        let call = tokio::spawn(async move {
-            uds_request(
-                &socket,
-                "POST",
-                "/v1/pg/open",
-                &[("authorization", &auth)],
-                Some(json!({"connection": "prod-db"})),
-            )
-            .await
-        });
-        let prompt = tokio::time::timeout(Duration::from_secs(5), self.prompts.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(prompt.connection.as_ref().unwrap().name, "prod-db");
-        self.broker
-            .decide(&prompt.id, UiDecision::AllowOnce, &ctx())
-            .unwrap();
-        let (status, body) = call.await.unwrap();
+        let (status, body) = uds_request(
+            &self.daemon.socket_path,
+            "POST",
+            "/v1/pg/open",
+            &[("authorization", &auth)],
+            Some(json!({"connection": "prod-db"})),
+        )
+        .await;
         assert_eq!(status, 200, "open failed: {body}");
         (
             body["dsn"].as_str().unwrap().to_string(),
@@ -690,8 +657,8 @@ async fn one_ticket_allows_concurrent_clients() {
     assert_eq!(h.broker.sessions().len(), 2);
     assert_eq!(
         h.secret_read_confirmations.load(Ordering::SeqCst),
-        1,
-        "one approval ticket should require at most one credential-read confirmation"
+        0,
+        "wired agent-plane reads are pre-authorized and never re-confirm"
     );
     // Each session has its own authenticated upstream connection.
     assert_eq!(fake.state.startups.lock().unwrap().len(), 2);

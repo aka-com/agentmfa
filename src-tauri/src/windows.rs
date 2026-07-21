@@ -1,7 +1,7 @@
 //! Tray + window
 //!
 //! AKA has a resizable main window, an NSStatusItem-style tray
-//! dropdown, and a separate always-on-top approval window. The tray icon
+//! dropdown. The tray icon
 //! is always present and toggles the compact dropdown beneath its status item.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 use tauri::menu::{Menu, MenuItem, MenuItemKind, PredefinedMenuItem, WINDOW_SUBMENU_ID};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
-use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, Rect};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, Rect};
 
 #[cfg(target_os = "macos")]
 use tauri_nspanel::{tauri_panel, ManagerExt as _, WebviewWindowExt as _};
@@ -24,7 +24,6 @@ const APP_ICON_BYTES: &[u8] = include_bytes!("../icons/icon.png");
 
 pub const MAIN: &str = "main";
 pub const DROPDOWN: &str = "dropdown";
-pub const APPROVAL: &str = "approval";
 pub const EVT_DROPDOWN_HIDDEN: &str = "aka://dropdown-hidden";
 pub const EVT_DROPDOWN_SHOWN: &str = "aka://dropdown-shown";
 pub const EVT_OPEN_SETTINGS: &str = "aka://open-settings";
@@ -164,7 +163,7 @@ fn focus_existing_or_reopen(app: &AppHandle) {
         show_dropdown(app);
         return;
     }
-    for label in [MAIN, APPROVAL, DROPDOWN] {
+    for label in [MAIN, DROPDOWN] {
         let Some(window) = app.get_webview_window(label) else {
             continue;
         };
@@ -373,45 +372,6 @@ pub fn ui_set_dropdown_form_active(
     }
     DROPDOWN_FORM_ACTIVE.store(active, Ordering::SeqCst);
     Ok(())
-}
-
-/// Bring the always-on-top approval window forward — the pending banner's
-/// "Review" button. The core populates and shows it whenever the queue is
-/// non-empty; this makes the button an explicit path back to it (e.g. after
-/// it lost focus behind another always-on-top window or on another Space).
-#[tauri::command]
-pub fn ui_show_approval(app: AppHandle) {
-    if let Some(win) = app.get_webview_window(APPROVAL) {
-        let _ = win.show();
-        let _ = win.set_focus();
-    }
-}
-
-/// Fit the approval window to its rendered dialog while keeping unusually
-/// long requests within the current display. The approval's middle section
-/// scrolls when this display-height cap is reached.
-#[tauri::command]
-pub fn ui_resize_approval(app: AppHandle, height: f64) -> Result<(), String> {
-    if !height.is_finite() {
-        return Err("invalid approval window height".to_string());
-    }
-    let win = app
-        .get_webview_window(APPROVAL)
-        .ok_or_else(|| "approval window not found".to_string())?;
-    let scale = win.scale_factor().map_err(|e| e.to_string())?;
-    let width = win
-        .inner_size()
-        .map_err(|e| e.to_string())?
-        .to_logical::<f64>(scale)
-        .width;
-    let display_height = win
-        .current_monitor()
-        .map_err(|e| e.to_string())?
-        .map(|monitor| monitor.size().to_logical::<f64>(scale).height - 80.0)
-        .unwrap_or(760.0);
-    let fitted_height = height.ceil().clamp(120.0, display_height.max(120.0));
-    win.set_size(LogicalSize::new(width, fitted_height))
-        .map_err(|e| e.to_string())
 }
 
 /// Show and focus the main window under the regular (Dock-visible)

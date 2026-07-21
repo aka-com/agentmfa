@@ -5,43 +5,28 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use aka_core::approvals::ApprovalRequest;
-use aka_core::broker::{Broker, UiDecision};
+use aka_core::broker::Broker;
 use aka_core::config::BrokerConfig;
 use aka_core::daemon;
 use aka_core::events::BrokerEvents;
 use aka_core::paths::Paths;
 use aka_core::store::ConnectionSpec;
-use aka_core::types::{
-    ConfirmationMethod, ConnectionConfig, DecisionContext, DecisionSurface, SecretMeta,
-};
+use aka_core::types::{ConfirmationMethod, ConnectionConfig, SecretMeta};
 use aka_core::vault::MemoryVault;
 use futures::{SinkExt as _, StreamExt as _};
 use http_body_util::BodyExt as _;
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response as WsResponse};
 use tokio_tungstenite::tungstenite::Message;
 use zeroize::Zeroizing;
 
 struct TestEvents {
-    prompts: mpsc::UnboundedSender<ApprovalRequest>,
     action_confirmations: Arc<AtomicUsize>,
 }
 
 impl BrokerEvents for TestEvents {
-    fn prompt_raised(&self, request: &ApprovalRequest) {
-        let _ = self.prompts.send(request.clone());
-    }
     fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
         true
-    }
-    fn confirm_decision(
-        &self,
-        _request: &ApprovalRequest,
-        _decision: UiDecision,
-    ) -> Option<ConfirmationMethod> {
-        Some(ConfirmationMethod::Waived)
     }
     fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
         self.action_confirmations.fetch_add(1, Ordering::SeqCst);
@@ -49,15 +34,9 @@ impl BrokerEvents for TestEvents {
     }
 }
 
-/// The scripted user's decision attribution.
-fn ctx() -> DecisionContext {
-    DecisionContext::local(DecisionSurface::Harness)
-}
-
 struct Harness {
     broker: Arc<Broker>,
     daemon: daemon::DaemonHandle,
-    prompts: mpsc::UnboundedReceiver<ApprovalRequest>,
     action_confirmations: Arc<AtomicUsize>,
     _dir: tempfile::TempDir,
 }
@@ -65,14 +44,12 @@ struct Harness {
 async fn harness(config: BrokerConfig) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let paths = Paths::under(dir.path());
-    let (tx, rx) = mpsc::unbounded_channel();
     let action_confirmations = Arc::new(AtomicUsize::new(0));
     let broker = Broker::new(
         paths,
         Arc::new(MemoryVault::new()),
         config,
         Arc::new(TestEvents {
-            prompts: tx,
             action_confirmations: action_confirmations.clone(),
         }),
     )
@@ -82,7 +59,6 @@ async fn harness(config: BrokerConfig) -> Harness {
     Harness {
         broker,
         daemon,
-        prompts: rx,
         action_confirmations,
         _dir: dir,
     }
@@ -216,29 +192,18 @@ impl Harness {
         body["token"].as_str().unwrap().to_string()
     }
 
-    /// POST /v1/ws/open and approve the prompt; returns the bridge URL.
+    /// POST /v1/ws/open (the first paired agent is auto-wired); returns
+    /// the bridge URL.
     async fn open_ws(&mut self, token: &str) -> String {
-        let socket = self.daemon.socket_path.clone();
         let auth = format!("Bearer {token}");
-        let call = tokio::spawn(async move {
-            uds_request(
-                &socket,
-                "POST",
-                "/v1/ws/open",
-                &[("authorization", &auth)],
-                Some(json!({"connection": "market-feed"})),
-            )
-            .await
-        });
-        let prompt = tokio::time::timeout(Duration::from_secs(5), self.prompts.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(prompt.connection.as_ref().unwrap().name, "market-feed");
-        self.broker
-            .decide(&prompt.id, UiDecision::AllowOnce, &ctx())
-            .unwrap();
-        let (status, body) = call.await.unwrap();
+        let (status, body) = uds_request(
+            &self.daemon.socket_path,
+            "POST",
+            "/v1/ws/open",
+            &[("authorization", &auth)],
+            Some(json!({"connection": "market-feed"})),
+        )
+        .await;
         assert_eq!(status, 200, "open failed: {body}");
         body["ws_url"].as_str().unwrap().to_string()
     }
@@ -494,25 +459,14 @@ async fn open_coalesces_on_request_id_and_replays_ticket() {
         .await
     });
 
-    // One prompt for both calls.
-    let prompt = tokio::time::timeout(Duration::from_secs(5), h.prompts.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(h.prompts.try_recv().is_err());
-    h.broker
-        .decide(&prompt.id, UiDecision::AllowOnce, &ctx())
-        .unwrap();
-
     let ((s1, b1), (s2, b2)) = (call1.await.unwrap(), call2.await.unwrap());
     assert_eq!((s1, s2), (200, 200));
-    // One approval → the same ticket for every waiter.
+    // One execution → the same ticket for every waiter.
     assert_eq!(b1["ws_url"], b2["ws_url"]);
     // Only one upstream dial happened at open time.
     assert_eq!(up.seen.lock().unwrap().len(), 1);
 
-    // A late retry replays the same ticket without another prompt.
+    // A late retry replays the same ticket without re-executing.
     let (status, b3) = uds_request(
         &h.daemon.socket_path,
         "POST",
@@ -523,5 +477,5 @@ async fn open_coalesces_on_request_id_and_replays_ticket() {
     .await;
     assert_eq!(status, 200);
     assert_eq!(b3["ws_url"], b1["ws_url"]);
-    assert!(h.prompts.try_recv().is_err());
+    assert_eq!(up.seen.lock().unwrap().len(), 1);
 }

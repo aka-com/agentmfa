@@ -1,6 +1,7 @@
-//! The broker facade: one struct owning the store, policy engine, pairing
-//! registry, approvals queue and audit log. The daemon (agent-facing) and
-//! the shell (UI-facing Tauri commands, tests, dev harness) both drive it.
+//! The broker facade: one struct owning the store, wiring table, pairing
+//! registry, execution machinery and audit log. The daemon (agent-facing)
+//! and the shell (UI-facing Tauri commands, tests, dev harness) both drive
+//! it.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -8,22 +9,18 @@ use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
-use crate::approvals::{ApprovalKind, ApprovalRequest, Approvals, ConnectionSummary};
 use crate::audit::{AuditEntry, AuditKind, AuditLog};
 use crate::config::BrokerConfig;
 use crate::error::CoreError;
 use crate::events::BrokerEvents;
-use crate::grants::{AccessGrantSummary, AccessGrants, GrantRemoval};
+use crate::executions::Executions;
 use crate::pairing::PairingRegistry;
 use crate::paths::{BrokerInstanceLock, Paths};
-use crate::policy::{NaivePolicyEngine, PolicyEngine as _};
+use crate::policy::Wirings;
 use crate::ratelimit::{KeyedLimiter, WindowLimiter};
 use crate::sessions::{DataPlane, SessionInfo};
 use crate::store::{ConnectionSpec, Store};
-use crate::types::{
-    ConfirmationMethod, Connection, ConnectionKind, DecisionContext, PairedAgent, PermissionScope,
-    Rule, SecretMeta, SecretValue, Settings,
-};
+use crate::types::{Connection, ConnectionKind, PairedAgent, SecretMeta, SecretValue, Settings, Wiring};
 use crate::Result;
 
 const COPY_AUTHORIZATION_TTL: Duration = Duration::from_secs(5 * 60);
@@ -36,43 +33,22 @@ pub struct ConnectionTestReport {
     pub detail: String,
 }
 
-/// What the user clicked in the approval window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UiDecision {
-    Deny,
-    AllowOnce,
-    /// Create a fixed-lifetime, in-memory access session, then allow.
-    AllowSession,
-    /// Save the `(agent, connection)` standing rule, then allow.
-    AlwaysAllow,
-}
-
-/// What a decision can carry beyond its shape. All fields default to off.
-#[derive(Default)]
-pub struct DecisionOptions {
-    /// Connection-proposal approvals: the credential value the user typed
-    /// into the prompt. Required to allow a proposal; never logged.
-    pub proposal_credential: Option<SecretValue>,
-}
-
 pub struct Broker {
     pub config: BrokerConfig,
     pub paths: Paths,
     pub store: Arc<Store>,
-    pub policy: Arc<NaivePolicyEngine>,
-    pub grants: Arc<AccessGrants>,
-    /// Serializes the short "match-or-park" and "claim-and-create" sections
-    /// so a request cannot become a stale prompt while a session grant is
-    /// being installed.
-    pub(crate) access_gate: Mutex<()>,
+    pub wirings: Arc<Wirings>,
+    /// Serializes configuration mutations that read-then-write shared state
+    /// (connection edits, wiring changes) so concurrent UI actions cannot
+    /// interleave.
+    pub(crate) config_gate: Mutex<()>,
     /// A successful OS authentication for a user-initiated clipboard copy may
     /// authorize more clipboard copies briefly. This cache is deliberately
     /// separate from agent execution authorizations and never leaves memory.
     copy_authorization_until: Mutex<Option<Instant>>,
     copy_authorization_gate: tokio::sync::Mutex<()>,
-    runtime: tokio::runtime::Handle,
     pub pairing: Arc<PairingRegistry>,
-    pub approvals: Approvals,
+    pub executions: Executions,
     pub audit: Arc<AuditLog>,
     pub events: Arc<dyn BrokerEvents>,
     /// Tickets + live WS/PG sessions.
@@ -93,7 +69,7 @@ pub struct Broker {
 }
 
 impl Broker {
-    /// Must be constructed inside a tokio runtime (approvals spawn tasks;
+    /// Must be constructed inside a tokio runtime (executions spawn tasks;
     /// the integrity key loads through the async vault read path).
     pub async fn new(
         paths: Paths,
@@ -107,13 +83,12 @@ impl Broker {
             .ok_or_else(|| CoreError::BrokerAlreadyRunning(paths.socket_display()))?;
         reject_legacy_live_socket(&paths).await?;
         let audit = Arc::new(AuditLog::open(paths.audit_file())?);
-        let runtime = tokio::runtime::Handle::current();
         {
             let events = events.clone();
             audit.subscribe(move |entry| events.audit_appended(entry));
         }
         // One integrity key seals every state file: index.json,
-        // rules.json, and agents.json refuse to load if tampered with.
+        // wirings.json, and agents.json refuse to load if tampered with.
         let integrity = Arc::new(crate::integrity::StateIntegrity::open(&*vault).await?);
         let store = Arc::new(Store::open_with_events(
             paths.clone(),
@@ -126,19 +101,15 @@ impl Broker {
             config.token_ttl,
             integrity.clone(),
         )?);
-        let policy = Arc::new(NaivePolicyEngine::open_with_clients(
-            paths.rules_file(),
+        let wirings = Arc::new(Wirings::open_with_legacy_rules(
+            paths.wirings_file(),
+            Some(&paths.rules_file()),
             integrity,
-            &pairing.list(),
         )?);
-        let grants = Arc::new(AccessGrants::new());
-        let approvals = Approvals::new(
-            config.approval_timeout,
+        let executions = Executions::new(
             config.outcome_retention,
             config.outcome_retention_max_entries,
             config.outcome_retention_max_bytes,
-            audit.clone(),
-            events.clone(),
         );
         let http_client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none()) // hand-rolled loop
@@ -167,14 +138,12 @@ impl Broker {
             config,
             paths,
             store,
-            policy,
-            grants,
-            access_gate: Mutex::new(()),
+            wirings,
+            config_gate: Mutex::new(()),
             copy_authorization_until: Mutex::new(None),
             copy_authorization_gate: tokio::sync::Mutex::new(()),
-            runtime,
             pairing,
-            approvals,
+            executions,
             audit,
             events,
             http_client,
@@ -182,380 +151,10 @@ impl Broker {
         }))
     }
 
-    pub(crate) fn connection_summary(&self, conn: &Connection) -> ConnectionSummary {
-        ConnectionSummary {
-            id: conn.id,
-            name: conn.name.clone(),
-            kind: conn.kind(),
-            target: conn.target(),
-            connection_updated_at: conn.updated_at,
-        }
-    }
-
-    /// Reload the connection named by a prompt and require that its exact
-    /// revision still matches what the user reviewed.
-    fn approval_connection(&self, summary: &ConnectionSummary) -> Result<Connection> {
-        let conn = self
-            .store
-            .connection_by_id(&summary.id)
-            .map_err(|_| CoreError::ApprovalConnectionChanged)?;
-        if conn.updated_at != summary.connection_updated_at
-            || conn.kind() != summary.kind
-            || conn.target() != summary.target
-        {
-            return Err(CoreError::ApprovalConnectionChanged);
-        }
-        Ok(conn)
-    }
-
-    /* --------------------------- approvals (UI) --------------------------- */
-
-    pub fn approvals_queue(&self) -> Vec<ApprovalRequest> {
-        self.approvals.queue()
-    }
-
-    /// Apply the user's decision to a queued request. Auditing and rule
-    /// recording happen here, and so does the decision confirmation gate: the
-    /// core demands the native confirmation through
-    /// [`BrokerEvents::confirm_decision`] *before* the decision takes
-    /// effect, so no shell can apply a gated decision without passing
-    /// through it. `ctx` attributes the decision in the audit log.
-    pub fn decide(
-        &self,
-        id: &Uuid,
-        decision: UiDecision,
-        ctx: &DecisionContext,
-    ) -> Result<Option<ApprovalRequest>> {
-        self.decide_with_options(id, decision, DecisionOptions::default(), ctx)
-    }
-
-    /// Apply the user's decision with everything it can carry: the
-    /// user-typed credential value for connection-proposal approvals.
-    pub fn decide_with_options(
-        &self,
-        id: &Uuid,
-        decision: UiDecision,
-        options: DecisionOptions,
-        ctx: &DecisionContext,
-    ) -> Result<Option<ApprovalRequest>> {
-        let Some(request) = self.approvals.get(id) else {
-            return Ok(None);
-        };
-        if request.kind == ApprovalKind::Propose && decision != UiDecision::Deny {
-            self.ensure_proposal_agent_current(&request)?;
-        }
-        // Stage the proposal credential before the native confirmation so a
-        // missing value fails the decision without burning a confirmation.
-        if request.kind == ApprovalKind::Propose && decision != UiDecision::Deny {
-            self.stage_proposal_credential(&request, options.proposal_credential)?;
-        }
-        let confirmation = self.confirm_decision(&request, decision)?;
-        self.apply_decision(id, decision, ctx, confirmation)
-    }
-
-    /// A proposal is authority from one exact paired-client token generation,
-    /// not merely from a reusable agent name. Disconnecting or re-pairing the
-    /// agent makes its queued proposal stale immediately.
-    fn ensure_proposal_agent_current(&self, request: &ApprovalRequest) -> Result<()> {
-        let (Some(client_id), Some(token_hash)) =
-            (request.client_id, request.agent_token_hash.as_deref())
-        else {
-            return Err(CoreError::ProposalStale);
-        };
-        self.pairing
-            .get(&request.agent)
-            .filter(|agent| agent.id == client_id && agent.token_hash == token_hash)
-            .map(|_| ())
-            .ok_or(CoreError::ProposalStale)
-    }
-
-    /// Validate and place the user's typed credential where the proposal's
-    /// parked executor will read it. Fails closed: an allow decision on a
-    /// proposal without a usable value never reaches the executor.
-    fn stage_proposal_credential(
-        &self,
-        request: &ApprovalRequest,
-        value: Option<SecretValue>,
-    ) -> Result<()> {
-        let (Some(view), Some(slot)) = (&request.proposal, &request.proposal_credential) else {
-            return Err(CoreError::ProposalCredential(
-                "this proposal is missing its credential slot and cannot be applied".into(),
-            ));
-        };
-        let value = value
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| {
-                CoreError::ProposalCredential(format!(
-                    "Enter the credential value to save as {}",
-                    view.credential_name
-                ))
-            })?;
-        if view.kind == ConnectionKind::Ssh {
-            crate::capability::ssh::validate_private_key(value.as_bytes()).map_err(|error| {
-                CoreError::ProposalCredential(format!("Not a usable SSH private key: {error}"))
-            })?;
-        }
-        *slot.lock().unwrap() = Some(value);
-        Ok(())
-    }
-
-    /// Whether — and how — the decision was confirmed. Deny is always one
-    /// click; *Allow once* on a proposal or mutating request, every access
-    /// session, and *Always allow…* in every case complete only after the
-    /// shell's native confirmation. Fails closed when the shell refuses.
-    fn confirm_decision(
-        &self,
-        request: &ApprovalRequest,
-        decision: UiDecision,
-    ) -> Result<Option<ConfirmationMethod>> {
-        let required = match decision {
-            UiDecision::Deny => false,
-            UiDecision::AllowOnce => request.is_high_consequence(),
-            UiDecision::AllowSession => true,
-            UiDecision::AlwaysAllow => true,
-        };
-        if !required {
-            return Ok(None);
-        }
-        match self.events.confirm_decision(request, decision) {
-            Some(method) => Ok(Some(method)),
-            None => Err(CoreError::NotConfirmed),
-        }
-    }
-
-    /// The decision body, run after the (single) confirmation. The
-    /// AlwaysAllow → AllowOnce recursion stays inside this method so a
-    /// decision is never confirmed twice.
-    fn apply_decision(
-        &self,
-        id: &Uuid,
-        decision: UiDecision,
-        ctx: &DecisionContext,
-        confirmation: Option<ConfirmationMethod>,
-    ) -> Result<Option<ApprovalRequest>> {
-        let attributed = |mut entry: AuditEntry| {
-            entry = entry.context(ctx);
-            if let Some(method) = confirmation {
-                entry = entry.confirmation(method);
-            }
-            entry
-        };
-        match decision {
-            UiDecision::Deny => {
-                let request = self
-                    .approvals
-                    .deny(id, crate::wire::ErrorReason::DeniedByUser);
-                if let Some(request) = &request {
-                    self.audit.append(attributed(
-                        AuditEntry::new(AuditKind::Denied, format!("Denied: {}", request.agent))
-                            .agent(request.agent.clone())
-                            .connection(
-                                request
-                                    .connection
-                                    .as_ref()
-                                    .map(|c| c.name.clone())
-                                    .unwrap_or_default(),
-                            )
-                            .detail(request.action.clone())
-                            .outcome("denied_by_user")
-                            .field(
-                                "approval_state",
-                                crate::wire::ApprovalState::Denied.as_str(),
-                            ),
-                    ));
-                }
-                Ok(request)
-            }
-            UiDecision::AllowOnce => {
-                let request = self.approvals.approve(id, confirmation.is_some(), None);
-                if let Some(request) = &request {
-                    if request.kind != ApprovalKind::Propose {
-                        self.audit.append(attributed(
-                            AuditEntry::new(
-                                AuditKind::AllowedOnce,
-                                format!("Allowed this request: {}", request.agent),
-                            )
-                            .agent(request.agent.clone())
-                            .connection(
-                                request
-                                    .connection
-                                    .as_ref()
-                                    .map(|c| c.name.clone())
-                                    .unwrap_or_default(),
-                            )
-                            .detail(request.action.clone())
-                            .outcome("allowed_once")
-                            .field(
-                                "approval_state",
-                                crate::wire::ApprovalState::Executing.as_str(),
-                            ),
-                        ));
-                    }
-                }
-                Ok(request)
-            }
-            UiDecision::AlwaysAllow => {
-                // Save the standing rule first, then allow this request.
-                let _access = self.access_gate.lock().unwrap();
-                let Some(request) = self.approvals.get(id) else {
-                    return Ok(None);
-                };
-                if request.kind == ApprovalKind::Propose {
-                    // "Always allow" does not apply to a connection
-                    // proposal; it is a one-shot decision.
-                    return self.apply_decision(id, UiDecision::AllowOnce, ctx, confirmation);
-                }
-                if request.ssh.is_some() {
-                    // Trusting a host key must never create a standing rule;
-                    // the only allow shape is the one-time pin.
-                    return self.apply_decision(id, UiDecision::AllowOnce, ctx, confirmation);
-                }
-                if let Some(summary) = &request.connection {
-                    let conn = self.approval_connection(summary)?;
-                    let client_id = request.client_id.ok_or(CoreError::NotConfirmed)?;
-                    let scope = match request.http.as_ref() {
-                        Some(http) if !http.mutating => PermissionScope::Read,
-                        _ => PermissionScope::Full,
-                    };
-                    let rule =
-                        self.policy
-                            .record_rule(client_id, &request.agent, conn.id, scope)?;
-                    self.audit.append(attributed(
-                        AuditEntry::new(
-                            AuditKind::RuleSaved,
-                            format!("{} can use {} without asking", request.agent, conn.name),
-                        )
-                        .agent(request.agent.clone())
-                        .connection(conn.name.clone())
-                        .rule(rule.id)
-                        .field("scope", scope.as_str()),
-                    ));
-                    self.events.rules_changed();
-                }
-                self.apply_decision(id, UiDecision::AllowOnce, ctx, confirmation)
-            }
-            UiDecision::AllowSession => {
-                let _access = self.access_gate.lock().unwrap();
-                let Some(request) = self.approvals.get(id) else {
-                    return Ok(None);
-                };
-                if request.kind == ApprovalKind::Propose {
-                    // A proposal never starts an access session; coerce to
-                    // the one-shot decision.
-                    return self.apply_decision(id, UiDecision::AllowOnce, ctx, confirmation);
-                }
-                if request.ssh.is_some() {
-                    // A host-key trust decision must not start an access
-                    // session; coerce to the one-time pin.
-                    return self.apply_decision(id, UiDecision::AllowOnce, ctx, confirmation);
-                }
-                let token_hash = request
-                    .agent_token_hash
-                    .as_deref()
-                    .ok_or(CoreError::NotConfirmed)?;
-                let current_agent = self
-                    .pairing
-                    .get(&request.agent)
-                    .filter(|agent| agent.token_hash == token_hash)
-                    .ok_or(CoreError::NotConfirmed)?;
-                let summary = request
-                    .connection
-                    .as_ref()
-                    .ok_or(CoreError::ApprovalConnectionChanged)?;
-                let conn = self.approval_connection(summary)?;
-                let scope = match request.http.as_ref() {
-                    Some(http) if !http.mutating => PermissionScope::Read,
-                    _ => PermissionScope::Full,
-                };
-                let Some(claim) = self.approvals.claim_session(id, |queued| {
-                    // A queued host-key trust prompt is never absorbed by
-                    // an access session; the user must see the fingerprint.
-                    queued.ssh.is_none()
-                        && queued.agent_token_hash.as_deref()
-                            == Some(current_agent.token_hash.as_str())
-                        && queued.connection.as_ref().is_some_and(|queued_connection| {
-                            queued_connection.id == summary.id
-                                && queued_connection.kind == summary.kind
-                                && queued_connection.target == summary.target
-                                && queued_connection.connection_updated_at
-                                    == summary.connection_updated_at
-                        })
-                        && scope.allows(match queued.http.as_ref() {
-                            Some(http) if !http.mutating => PermissionScope::Read,
-                            _ => PermissionScope::Full,
-                        })
-                }) else {
-                    return Ok(None);
-                };
-                let created = self.grants.create(
-                    &current_agent.name,
-                    &current_agent.token_hash,
-                    &conn,
-                    scope,
-                    self.config.access_grant_ttl,
-                );
-                let grant_deadline = created.deadline;
-                for replaced in &created.replaced {
-                    self.data_plane.close_grant(replaced);
-                }
-                let grant = created.grant;
-                let (approved, absorbed) = self
-                    .approvals
-                    .execute_session(claim, grant.authorization.clone());
-                self.audit.append(attributed(
-                    AuditEntry::new(
-                        AuditKind::GrantStarted,
-                        format!(
-                            "Temporary access started: {} can {} {}",
-                            request.agent,
-                            if scope == PermissionScope::Read {
-                                "fetch data from"
-                            } else {
-                                "use"
-                            },
-                            conn.name
-                        ),
-                    )
-                    .agent(request.agent.clone())
-                    .connection(conn.name.clone())
-                    .outcome("access_session_started")
-                    .field("grant_id", grant.summary.id.to_string())
-                    .field("scope", format!("{:?}", scope).to_lowercase())
-                    .field("expires_at", grant.summary.expires_at.to_rfc3339()),
-                ));
-                self.schedule_grant_expiry(
-                    grant.summary.clone(),
-                    grant_deadline,
-                    conn.name.clone(),
-                );
-                for request in absorbed {
-                    self.audit.append(attributed(
-                        AuditEntry::new(
-                            AuditKind::AutoAllowed,
-                            format!("Temporary access used: {} → {}", request.agent, conn.name),
-                        )
-                        .agent(request.agent)
-                        .connection(conn.name.clone())
-                        .detail(request.action)
-                        .outcome("access_session")
-                        .field("grant_id", grant.summary.id.to_string())
-                        .field("scope", format!("{:?}", scope).to_lowercase())
-                        .field(
-                            "approval_state",
-                            crate::wire::ApprovalState::Executing.as_str(),
-                        ),
-                    ));
-                }
-                self.events.rules_changed();
-                Ok(Some(approved))
-            }
-        }
-    }
-
     /// Demand the shell's native confirmation for a high-consequence
     /// configuration action. Fails closed when the shell refuses or
     /// does not implement the gate.
-    fn confirm_action(&self, description: &str) -> Result<ConfirmationMethod> {
+    fn confirm_action(&self, description: &str) -> Result<crate::types::ConfirmationMethod> {
         self.events
             .confirm_action(description)
             .ok_or(CoreError::NotConfirmed)
@@ -580,7 +179,7 @@ impl Broker {
         new_name: Option<&str>,
         new_value: Option<SecretValue>,
     ) -> Result<SecretMeta> {
-        let _access = self.access_gate.lock().unwrap();
+        let _gate = self.config_gate.lock().unwrap();
         let mut meta = self.store.secret_by_id(id)?;
         let mut changes = Vec::new();
         let mut rename: Option<(String, String, usize)> = None;
@@ -762,58 +361,10 @@ impl Broker {
         Ok(conn)
     }
 
-    /// Apply an approved agent proposal: save the user-typed credential and
-    /// the proposed connection atomically, then audit and refresh views. The
-    /// decision's native confirmation already gated this — there is no
-    /// second `confirm_action` pause.
-    pub fn apply_agent_proposal(
-        &self,
-        agent: &str,
-        client_id: &Uuid,
-        token_hash: &str,
-        secret_name: &str,
-        value: SecretValue,
-        spec: ConnectionSpec,
-    ) -> Result<Connection> {
-        let _access = self.access_gate.lock().unwrap();
-        self.pairing
-            .get(agent)
-            .filter(|current| current.id == *client_id && current.token_hash == token_hash)
-            .ok_or(CoreError::ProposalStale)?;
-        if let Some(existing) = self
-            .store
-            .list_connections()
-            .into_iter()
-            .find(|existing| existing.config.has_equivalent_target(&spec.config))
-        {
-            return Err(CoreError::ConnectionTargetTaken(existing.name));
-        }
-        let (secret, conn) = self
-            .store
-            .add_connection_with_secret(secret_name, value, spec)?;
-        self.audit.append(AuditEntry::new(
-            AuditKind::SecretAdded,
-            format!("Secret added: {}", secret.name),
-        ));
-        self.audit.append(
-            AuditEntry::new(
-                AuditKind::ConnectionAdded,
-                format!("Service added from {agent}'s proposal: {}", conn.name),
-            )
-            .agent(agent.to_string())
-            .connection(conn.name.clone())
-            .detail(format!("{} → {}", conn.kind().label(), conn.target()))
-            .field("kind", conn.kind().as_str())
-            .field("target", conn.target()),
-        );
-        self.events.connections_changed();
-        Ok(conn)
-    }
-
     /// Update a connection. Name-only edits are metadata and do not require
     /// native authentication; changes to configuration, secret bindings, or
-    /// authentication do. When the pinned target changes, its standing rules
-    /// are dropped, a rule granted for one destination must not silently cover
+    /// authentication do. When the pinned target changes, its wirings are
+    /// dropped: a wiring granted for one destination must not silently cover
     /// another.
     pub fn ui_update_connection(&self, id: &Uuid, spec: ConnectionSpec) -> Result<Connection> {
         let old = self.store.connection_by_id(id)?;
@@ -828,7 +379,7 @@ impl Broker {
         } else {
             None
         };
-        let _access = self.access_gate.lock().unwrap();
+        let _gate = self.config_gate.lock().unwrap();
         if self.store.connection_by_id(id)?.updated_at != old.updated_at {
             return Err(CoreError::ApprovalConnectionChanged);
         }
@@ -837,14 +388,11 @@ impl Broker {
         } else {
             (self.store.rename_connection(id, spec.name)?, false)
         };
-        let removed_grants = self.grants.remove_for_connection(id);
-        self.close_grants(&removed_grants.revoked);
-        self.record_expired_grants(removed_grants.expired, Some(old.name.clone()));
         let mut dropped = 0;
         if target_changed {
-            dropped = self.policy.remove_rules_for_connection(id)?;
+            dropped = self.wirings.remove_for_connection(id)?;
             if dropped > 0 {
-                self.events.rules_changed();
+                self.events.wirings_changed();
             }
         }
         let mut entry = AuditEntry::new(
@@ -864,7 +412,7 @@ impl Broker {
             conn.target(),
             if dropped > 0 {
                 format!(
-                    " · {dropped} auto-allow rule{} removed (target changed)",
+                    " · {dropped} wiring{} removed (target changed)",
                     if dropped == 1 { "" } else { "s" }
                 )
             } else {
@@ -874,7 +422,7 @@ impl Broker {
         .field("target", conn.target())
         .field("target_changed", target_changed)
         .field("capability_changed", capability_changed)
-        .field("rules_removed", dropped);
+        .field("wirings_removed", dropped);
         if let Some(confirmation) = confirmation {
             entry = entry.confirmation(confirmation);
         }
@@ -887,21 +435,18 @@ impl Broker {
         Ok(conn)
     }
 
-    /// Delete a connection; rules die with it.
+    /// Delete a connection; wirings die with it.
     pub fn ui_delete_connection(&self, id: &Uuid) -> Result<Connection> {
         let conn = self.store.connection_by_id(id)?;
         let confirmation = self.confirm_action(&format!("Delete service “{}”", conn.name))?;
-        let _access = self.access_gate.lock().unwrap();
+        let _gate = self.config_gate.lock().unwrap();
         if self.store.connection_by_id(id)?.updated_at != conn.updated_at {
             return Err(CoreError::ApprovalConnectionChanged);
         }
         let conn = self.store.delete_connection(id)?;
-        let removed_grants = self.grants.remove_for_connection(id);
-        self.close_grants(&removed_grants.revoked);
-        self.record_expired_grants(removed_grants.expired, Some(conn.name.clone()));
-        let dropped = self.policy.remove_rules_for_connection(id)?;
+        let dropped = self.wirings.remove_for_connection(id)?;
         if dropped > 0 {
-            self.events.rules_changed();
+            self.events.wirings_changed();
         }
         self.audit.append(
             AuditEntry::new(
@@ -958,189 +503,104 @@ impl Broker {
         Ok(ConnectionTestReport { ok, detail })
     }
 
-    /* ---------------------------- rules (UI) ------------------------------ */
+    /* ---------------------------- wirings (UI) ----------------------------- */
 
-    pub fn rules(&self) -> Vec<Rule> {
-        self.policy.rules()
+    pub fn wirings(&self) -> Vec<Wiring> {
+        self.wirings.wirings()
     }
 
-    pub fn grants_for_connection(&self, connection: &Connection) -> Vec<AccessGrantSummary> {
-        self.grants.for_connection(connection)
-    }
-
-    pub fn grant_count_for_agent(&self, agent: &str) -> usize {
-        self.grants.count_for_agent(agent)
-    }
-
-    pub fn ui_remove_grant(&self, id: &Uuid) -> Result<bool> {
-        let Some(removal) = self.grants.remove(id) else {
+    /// Wire or unwire an agent from the app. Unwiring closes the agent's
+    /// live transports to the connection is *not* attempted here — transports
+    /// are short-lived tickets; the next open is refused.
+    pub fn ui_set_wiring(&self, client_id: &Uuid, connection_id: &Uuid, wired: bool) -> Result<bool> {
+        let _gate = self.config_gate.lock().unwrap();
+        let Some(agent) = self.pairing.get_by_id(client_id) else {
             return Ok(false);
         };
-        let grant = match removal {
-            GrantRemoval::Expired(grant) => {
-                self.record_expired_grants(vec![grant], None);
-                return Ok(true);
+        let connection = self.store.connection_by_id(connection_id)?;
+        if wired {
+            let existing = self.wirings.is_wired(client_id, connection_id);
+            self.wirings.wire(*client_id, &agent.name, *connection_id)?;
+            if !existing {
+                self.audit.append(
+                    AuditEntry::new(
+                        AuditKind::Wired,
+                        format!("{} wired to {}", agent.name, connection.name),
+                    )
+                    .agent(agent.name.clone())
+                    .connection(connection.name.clone()),
+                );
+                self.events.wirings_changed();
             }
-            GrantRemoval::Revoked(grant) => grant,
-        };
-        self.data_plane.close_grant(id);
-        let connection = self
-            .store
-            .connection_by_id(&grant.connection_id)
-            .map(|connection| connection.name)
-            .unwrap_or_else(|_| "(deleted connection)".into());
-        self.audit.append(
-            AuditEntry::new(
-                AuditKind::GrantRevoked,
-                format!("Temporary access ended: {} → {connection}", grant.agent),
-            )
-            .agent(grant.agent)
-            .connection(connection)
-            .field("grant_id", id.to_string())
-            .field("scope", format!("{:?}", grant.scope).to_lowercase()),
-        );
-        self.events.rules_changed();
-        Ok(true)
-    }
-
-    /// Revoke a permission without requiring the UI to know whether it is
-    /// an expiring in-memory authorization or a standing one.
-    pub fn ui_remove_permission(&self, id: &Uuid) -> Result<bool> {
-        if self.ui_remove_grant(id)? {
-            return Ok(true);
-        }
-        self.ui_remove_rule(id)
-    }
-
-    fn schedule_grant_expiry(
-        &self,
-        grant: AccessGrantSummary,
-        deadline: std::time::Instant,
-        connection_name: String,
-    ) {
-        let grants = self.grants.clone();
-        let data_plane = self.data_plane.clone();
-        let audit = self.audit.clone();
-        let events = self.events.clone();
-        self.runtime.spawn(async move {
-            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
-            let Some(expired) = grants.expire(&grant.id) else {
-                return;
-            };
-            record_grant_expiry(&data_plane, &audit, &*events, expired, connection_name);
-        });
-    }
-
-    fn record_expired_grants(
-        &self,
-        grants: Vec<AccessGrantSummary>,
-        known_connection_name: Option<String>,
-    ) {
-        for grant in grants {
-            let connection_name = known_connection_name.clone().unwrap_or_else(|| {
-                self.store
-                    .connection_by_id(&grant.connection_id)
-                    .map(|connection| connection.name)
-                    .unwrap_or_else(|_| "(deleted connection)".into())
-            });
-            record_grant_expiry(
-                &self.data_plane,
-                &self.audit,
-                &*self.events,
-                grant,
-                connection_name,
-            );
-        }
-    }
-
-    pub(crate) fn revoke_access_grants_for_agent(&self, agent: &str, reason: &str) {
-        let removed = self.grants.remove_for_agent(agent);
-        self.record_expired_grants(removed.expired, None);
-        if removed.revoked.is_empty() {
-            return;
-        }
-        self.close_grants(&removed.revoked);
-        self.audit.append(
-            AuditEntry::new(
-                AuditKind::GrantRevoked,
-                format!("Temporary access ended: {agent}"),
-            )
-            .agent(agent.to_string())
-            .detail(reason)
-            .field("grants_removed", removed.revoked.len()),
-        );
-        self.events.rules_changed();
-    }
-
-    fn close_grants(&self, ids: &[Uuid]) {
-        for id in ids {
-            self.data_plane.close_grant(id);
-        }
-        if !ids.is_empty() {
-            self.events.rules_changed();
-        }
-    }
-
-    pub fn ui_remove_rule(&self, id: &Uuid) -> Result<bool> {
-        let removed = self.policy.remove_rule(id)?;
-        if let Some(rule) = removed {
-            let conn_name = self
-                .store
-                .connection_by_id(&rule.connection_id)
-                .map(|c| c.name)
-                .unwrap_or_else(|_| "(deleted connection)".into());
-            self.audit.append(
-                AuditEntry::new(
-                    AuditKind::RuleRemoved,
-                    format!("Approval required again: {} → {}", rule.agent, conn_name),
-                )
-                .agent(rule.agent.clone())
-                .rule(rule.id),
-            );
-            self.events.rules_changed();
             Ok(true)
         } else {
-            Ok(false)
+            let removed = self.wirings.unwire(client_id, connection_id)?;
+            if removed.is_some() {
+                self.audit.append(
+                    AuditEntry::new(
+                        AuditKind::Unwired,
+                        format!("{} unwired from {}", agent.name, connection.name),
+                    )
+                    .agent(agent.name.clone())
+                    .connection(connection.name.clone()),
+                );
+                self.events.wirings_changed();
+            }
+            Ok(removed.is_some())
         }
     }
 
-    pub fn ui_remove_rules_for_agent(&self, agent: &str) -> Result<usize> {
-        let Some(client) = self.pairing.get(agent) else {
-            return Ok(0);
-        };
-        self.remove_rules_for_client(&client.id, agent)
-    }
-
-    pub(crate) fn remove_rules_for_client(&self, client_id: &Uuid, agent: &str) -> Result<usize> {
-        let removed = self.policy.remove_rules_for_client(client_id)?;
-        if removed > 0 {
-            self.audit.append(
-                AuditEntry::new(
-                    AuditKind::RuleRemoved,
-                    format!("Approval required again: {agent}"),
-                )
-                .agent(agent.to_string())
-                .detail(format!(
-                    "{removed} standing rule{} removed",
-                    if removed == 1 { "" } else { "s" }
-                ))
-                .field("rules_removed", removed),
-            );
-            self.events.rules_changed();
+    /// The very first agent to register is wired to every existing
+    /// connection, so a fresh install works end-to-end without a wiring
+    /// trip through the app. Later agents start unwired.
+    pub(crate) fn bootstrap_first_agent_wirings(&self, agent: &PairedAgent) {
+        let _gate = self.config_gate.lock().unwrap();
+        let connection_ids: Vec<Uuid> = self
+            .store
+            .list_connections()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        if connection_ids.is_empty() {
+            return;
         }
-        Ok(removed)
+        match self
+            .wirings
+            .wire_all(agent.id, &agent.name, &connection_ids)
+        {
+            Ok(added) if !added.is_empty() => {
+                self.audit.append(
+                    AuditEntry::new(
+                        AuditKind::Wired,
+                        format!(
+                            "First agent {} wired to all {} service{}",
+                            agent.name,
+                            added.len(),
+                            if added.len() == 1 { "" } else { "s" }
+                        ),
+                    )
+                    .agent(agent.name.clone())
+                    .field("wirings_added", added.len()),
+                );
+                self.events.wirings_changed();
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!("could not bootstrap first-agent wirings: {error}");
+            }
+        }
     }
 
-    /* ------------------------- paired agents (UI) ------------------------- */
+    /* ------------------------- registered agents (UI) ---------------------- */
 
     pub fn paired_agents(&self) -> Vec<PairedAgent> {
         self.pairing.list()
     }
 
-    /// Disconnect invalidates the token, standing permissions, and every
+    /// Disconnect invalidates the token, the agent's wirings, and every
     /// issued data-plane capability immediately.
     pub fn ui_revoke_agent(&self, client_id: &Uuid) -> Result<bool> {
-        let _access = self.access_gate.lock().unwrap();
+        let _gate = self.config_gate.lock().unwrap();
         let client = self.pairing.get_by_id(client_id);
         let Some(client) = client else {
             return Ok(false);
@@ -1148,8 +608,10 @@ impl Broker {
         let name = client.name.clone();
         let removed = self.pairing.revoke(client_id)?;
         if removed {
-            self.remove_rules_for_client(&client.id, &name)?;
-            self.revoke_access_grants_for_agent(&name, "agent revoked");
+            let dropped = self.wirings.remove_for_client(client_id)?;
+            if dropped > 0 {
+                self.events.wirings_changed();
+            }
             let sessions_closed = self.data_plane.close_agent(&name);
             self.audit.append(
                 AuditEntry::new(
@@ -1157,7 +619,8 @@ impl Broker {
                     format!("Agent disconnected: {name}"),
                 )
                 .agent(name)
-                .field("sessions_closed", sessions_closed),
+                .field("sessions_closed", sessions_closed)
+                .field("wirings_removed", dropped),
             );
             self.events.agents_changed();
         }
@@ -1258,33 +721,4 @@ async fn reject_legacy_live_socket(paths: &Paths) -> Result<()> {
             ),
         ))),
     }
-}
-
-fn record_grant_expiry(
-    data_plane: &DataPlane,
-    audit: &AuditLog,
-    events: &dyn BrokerEvents,
-    expired: AccessGrantSummary,
-    connection_name: String,
-) {
-    let transports_closed = data_plane.close_grant(&expired.id);
-    audit.append(
-        AuditEntry::new(
-            AuditKind::GrantExpired,
-            format!(
-                "Temporary access expired: {} → {connection_name}",
-                expired.agent
-            ),
-        )
-        .agent(expired.agent)
-        .connection(connection_name)
-        .outcome("access_session_expired")
-        .field("reason", "expired")
-        .field("grant_id", expired.id.to_string())
-        .field("scope", expired.scope.as_str())
-        .field("created_at", expired.created_at.to_rfc3339())
-        .field("expires_at", expired.expires_at.to_rfc3339())
-        .field("transports_closed", transports_closed),
-    );
-    events.rules_changed();
 }

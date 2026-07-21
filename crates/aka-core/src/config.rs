@@ -7,10 +7,8 @@ pub struct BrokerConfig {
     /// Broker version advertised in the discovery manifest.
     pub version: String,
 
-    /// Hard per-request approval timeout: auto-deny after this.
-    pub approval_timeout: Duration,
-    /// Advertised, machine-actionable client timeout: approval wait +
-    /// upstream timeout + margin.
+    /// Advertised, machine-actionable client timeout: upstream timeout +
+    /// margin.
     pub recommended_client_timeout: Duration,
     /// Completed idempotency keys are retained this long. Their outcomes are
     /// replayed when the byte-bounded response cache still has them. A
@@ -36,11 +34,6 @@ pub struct BrokerConfig {
     pub spool_threshold: usize,
     /// Redirect loop bound.
     pub max_redirects: usize,
-    /// How much request body the approval window's payload view shows.
-    pub approval_body_preview: usize,
-
-    /// Fixed lifetime of an in-memory access session.
-    pub access_grant_ttl: Duration,
 
     /// Pair token TTL, refreshed on use.
     pub token_ttl: Duration,
@@ -70,8 +63,7 @@ impl Default for BrokerConfig {
     fn default() -> Self {
         Self {
             version: env!("CARGO_PKG_VERSION").to_string(),
-            approval_timeout: Duration::from_secs(15 * 60),
-            recommended_client_timeout: Duration::from_secs(17 * 60),
+            recommended_client_timeout: Duration::from_secs(2 * 60),
             outcome_retention: Duration::from_secs(600),
             outcome_retention_max_entries: 1024,
             outcome_retention_max_bytes: 64 * 1024 * 1024,
@@ -80,8 +72,6 @@ impl Default for BrokerConfig {
             request_cap: 150 * 1024 * 1024,
             spool_threshold: 2 * 1024 * 1024,
             max_redirects: 10,
-            approval_body_preview: 4096,
-            access_grant_ttl: Duration::from_secs(15 * 60),
             token_ttl: Duration::from_secs(30 * 24 * 60 * 60),
             per_token_per_min: 60,
             discovery_per_min: 60,

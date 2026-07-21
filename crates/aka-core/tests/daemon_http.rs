@@ -3,76 +3,40 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::Arc;
 
-use aka_core::approvals::ApprovalRequest;
-use aka_core::audit::AuditKind;
-use aka_core::broker::{Broker, UiDecision};
+use aka_core::broker::Broker;
 use aka_core::config::BrokerConfig;
 use aka_core::daemon;
-use aka_core::error::CoreError;
 use aka_core::events::BrokerEvents;
 use aka_core::paths::Paths;
 use aka_core::store::ConnectionSpec;
-use aka_core::types::{
-    ConfirmationMethod, ConnectionConfig, DecisionContext, DecisionSurface, PgSslMode, SecretMeta,
-};
+use aka_core::types::{ConfirmationMethod, ConnectionConfig, PgSslMode, SecretMeta};
 use aka_core::vault::MemoryVault;
 use aka_core::wire::REQUEST_ID_MAX_BYTES;
 use axum::routing::{any, get, post};
 use axum::Router;
 use http_body_util::BodyExt as _;
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
 use zeroize::Zeroizing;
 
 /* ------------------------------ harness ---------------------------------- */
 
-/// Captures prompts so tests can play the user.
-struct TestEvents {
-    prompts: mpsc::UnboundedSender<ApprovalRequest>,
-    queue_len: Arc<Mutex<usize>>,
-    access_changes: Arc<AtomicUsize>,
-}
+struct TestEvents;
 
 impl BrokerEvents for TestEvents {
-    fn prompt_raised(&self, request: &ApprovalRequest) {
-        let _ = self.prompts.send(request.clone());
-    }
-    fn queue_changed(&self, queue: &[ApprovalRequest]) {
-        *self.queue_len.lock().unwrap() = queue.len();
-    }
-    fn rules_changed(&self) {
-        self.access_changes.fetch_add(1, Ordering::SeqCst);
-    }
     fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
         true
-    }
-    fn confirm_decision(
-        &self,
-        _request: &ApprovalRequest,
-        _decision: UiDecision,
-    ) -> Option<ConfirmationMethod> {
-        Some(ConfirmationMethod::Waived)
     }
     fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
         Some(ConfirmationMethod::Waived)
     }
 }
 
-/// The scripted user's decision attribution.
-fn ctx() -> DecisionContext {
-    DecisionContext::local(DecisionSurface::Harness)
-}
-
 struct Harness {
     broker: Arc<Broker>,
     _daemon: daemon::DaemonHandle,
     socket: std::path::PathBuf,
-    prompts: mpsc::UnboundedReceiver<ApprovalRequest>,
-    queue_len: Arc<Mutex<usize>>,
-    access_changes: Arc<AtomicUsize>,
     _dir: tempfile::TempDir,
 }
 
@@ -80,42 +44,27 @@ async fn harness(mut config: BrokerConfig) -> Harness {
     config.version = "test".into();
     let dir = tempfile::tempdir().unwrap();
     let paths = Paths::under(dir.path());
-    let (tx, rx) = mpsc::unbounded_channel();
-    let queue_len = Arc::new(Mutex::new(0));
-    let access_changes = Arc::new(AtomicUsize::new(0));
-    let events = Arc::new(TestEvents {
-        prompts: tx,
-        queue_len: queue_len.clone(),
-        access_changes: access_changes.clone(),
-    });
-    let broker = Broker::new(paths, Arc::new(MemoryVault::new()), config, events)
-        .await
-        .unwrap();
+    let broker = Broker::new(
+        paths,
+        Arc::new(MemoryVault::new()),
+        config,
+        Arc::new(TestEvents),
+    )
+    .await
+    .unwrap();
     let handle = daemon::serve(broker.clone()).await.unwrap();
     let socket = handle.socket_path.clone();
     Harness {
         broker,
         _daemon: handle,
         socket,
-        prompts: rx,
-        queue_len,
-        access_changes,
         _dir: dir,
     }
 }
 
 impl Harness {
-    /// Wait for the next prompt and decide it.
-    async fn decide_next(&mut self, decision: UiDecision) -> ApprovalRequest {
-        let request = tokio::time::timeout(Duration::from_secs(5), self.prompts.recv())
-            .await
-            .expect("timed out waiting for a prompt")
-            .expect("events channel closed");
-        self.broker.decide(&request.id, decision, &ctx()).unwrap();
-        request
-    }
-
-    /// Registration is immediate: no prompt to decide.
+    /// Registration is immediate: no prompt to decide. The first agent to
+    /// pair is auto-wired to every existing connection.
     async fn pair(&mut self, name: &str) -> String {
         let (status, body) = uds_request(
             &self.socket,
@@ -128,42 +77,6 @@ impl Harness {
         assert_eq!(status, 200, "pair failed: {body}");
         body["token"].as_str().unwrap().to_string()
     }
-}
-
-// A standing rule's scope derives from the prompted request (mutating →
-// full, otherwise read), and the callers here rely on the rule matching
-// later POSTs — so the rule must be saved from a mutating request. /echo
-// keeps the /dispatch hit counter untouched, and omitting request_id keeps
-// idempotency retention out of play under the zero-capacity configs.
-async fn save_always_allow_rule(harness: &mut Harness, authorization: &str) {
-    let socket = harness.socket.clone();
-    let authorization = authorization.to_string();
-    let call = tokio::spawn(async move {
-        uds_request(
-            &socket,
-            "POST",
-            "/v1/http",
-            &[("authorization", &authorization)],
-            Some(json!({
-                "connection": "github",
-                "method": "POST",
-                "path": "/echo",
-            })),
-        )
-        .await
-    });
-    harness.decide_next(UiDecision::AlwaysAllow).await;
-    assert_eq!(call.await.unwrap().0, 200);
-}
-
-fn auto_allowed_audit_count(harness: &Harness) -> usize {
-    harness
-        .broker
-        .audit
-        .recent(100)
-        .into_iter()
-        .filter(|entry| entry.kind == AuditKind::AutoAllowed)
-        .count()
 }
 
 /// Minimal HTTP/1.1 client over a Unix socket.
@@ -329,7 +242,6 @@ async fn discovery_is_unauthenticated_and_complete() {
     .await;
     assert_eq!(status, 200);
     assert_eq!(manifest["transport"], "http-over-unix-socket");
-    assert_eq!(manifest["approval_timeout_seconds"], 900);
     assert_eq!(manifest["endpoints"]["whoami"], "/v1/whoami");
     // The manifest names the socket actually serving it, not the
     // production default (this harness runs under a temp root).
@@ -351,17 +263,11 @@ async fn overlong_socket_path_is_diagnosed() {
     let dir = tempfile::tempdir().unwrap();
     let deep = dir.path().join("x".repeat(120));
     let paths = Paths::under(&deep);
-    let (tx, _rx) = mpsc::unbounded_channel();
-    let events = Arc::new(TestEvents {
-        prompts: tx,
-        queue_len: Arc::new(Mutex::new(0)),
-        access_changes: Arc::new(AtomicUsize::new(0)),
-    });
     let broker = Broker::new(
         paths,
         Arc::new(MemoryVault::new()),
         BrokerConfig::default(),
-        events,
+        Arc::new(TestEvents),
     )
     .await
     .unwrap();
@@ -535,7 +441,7 @@ async fn body_parse_errors_follow_the_error_contract() {
 }
 
 #[tokio::test]
-async fn request_ids_are_bounded_before_prompting_or_connection_lookup() {
+async fn request_ids_are_bounded_before_connection_lookup() {
     let mut h = harness(BrokerConfig::default()).await;
     let token = h.pair("claude-code").await;
     let auth = format!("Bearer {token}");
@@ -577,7 +483,6 @@ async fn request_ids_are_bounded_before_prompting_or_connection_lookup() {
         assert_eq!(body["reason"], "invalid_body");
         assert!(body["detail"].as_str().unwrap().contains("maximum is 256"));
     }
-    assert!(h.prompts.try_recv().is_err());
 
     let (status, body) = uds_request(
         &h.socket,
@@ -686,52 +591,55 @@ async fn connections_listing_shows_targets_only() {
         list,
         json!([
             {"name": "github", "type": "api", "target": format!("http://127.0.0.1:{}", up.port),
-             "endpoint": "/v1/http",
-             "approval": "will_prompt", "access_session": null},
+             "endpoint": "/v1/http", "wired": true},
             {"name": "prod-db", "type": "pg", "target": "app@db.internal.aka.com:5432/app_production",
-             "endpoint": "/v1/pg/open",
-             "approval": "will_prompt", "access_session": null},
+             "endpoint": "/v1/pg/open", "wired": true},
         ])
     );
     // No secret names, ids, or templates anywhere in the response.
     let raw = list.to_string();
     assert!(!raw.contains("GITHUB_API_KEY"));
     assert!(!raw.contains("Bearer {{"));
+
+    // A later agent starts unwired: it sees the catalog but `wired` is
+    // false everywhere.
+    let second = h.pair("codex").await;
+    let second_auth = format!("Bearer {second}");
+    let (status, list) = uds_request(
+        &h.socket,
+        "GET",
+        "/v1/connections",
+        &[("authorization", &second_auth)],
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    for entry in list.as_array().unwrap() {
+        assert_eq!(entry["wired"], false, "later agents start unwired");
+    }
 }
 
 #[tokio::test]
-async fn http_get_prompts_executes_and_injects_credential() {
+async fn http_get_executes_and_injects_credential() {
     let mut h = harness(BrokerConfig::default()).await;
     let up = upstream().await;
     api_connection(&h, "github", up.port);
     let token = h.pair("claude-code").await;
     let auth = format!("Bearer {token}");
 
-    let socket = h.socket.clone();
-    let auth_clone = auth.clone();
-    let call = tokio::spawn(async move {
-        uds_request(
-            &socket,
-            "POST",
-            "/v1/http",
-            &[("authorization", &auth_clone)],
-            Some(json!({
-                "connection": "github",
-                "method": "GET",
-                "path": "/echo?x=1",
-                "headers": {"Accept": "application/vnd.github+json"},
-            })),
-        )
-        .await
-    });
-    let prompt = h.decide_next(UiDecision::AllowOnce).await;
-    assert_eq!(prompt.agent, "claude-code");
-    assert_eq!(prompt.connection.as_ref().unwrap().name, "github");
-    assert!(prompt.action.contains("GET"));
-    let http_view = prompt.http.as_ref().unwrap();
-    assert!(!http_view.mutating);
-
-    let (status, envelope) = call.await.unwrap();
+    let (status, envelope) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(json!({
+            "connection": "github",
+            "method": "GET",
+            "path": "/echo?x=1",
+            "headers": {"Accept": "application/vnd.github+json"},
+        })),
+    )
+    .await;
     assert_eq!(status, 200);
     assert_eq!(envelope["status"], 200);
     assert_eq!(envelope["body_encoding"], "utf8");
@@ -748,437 +656,7 @@ async fn http_get_prompts_executes_and_injects_credential() {
 }
 
 #[tokio::test]
-async fn access_session_defaults_to_read_then_upgrades_to_full_and_expires() {
-    let config = BrokerConfig {
-        access_grant_ttl: Duration::from_secs(3),
-        ..BrokerConfig::default()
-    };
-    let mut h = harness(config).await;
-    let up = upstream().await;
-    api_connection(&h, "github", up.port);
-    let token = h.pair("claude-code").await;
-    let auth = format!("Bearer {token}");
-
-    // The first read creates the default read access session.
-    let socket = h.socket.clone();
-    let auth_clone = auth.clone();
-    let first = tokio::spawn(async move {
-        uds_request(
-            &socket,
-            "POST",
-            "/v1/http",
-            &[("authorization", &auth_clone)],
-            Some(json!({"connection": "github", "method": "GET", "path": "/user/repos"})),
-        )
-        .await
-    });
-    h.decide_next(UiDecision::AllowSession).await;
-    assert_eq!(first.await.unwrap().0, 200);
-
-    // Another read is covered without a prompt.
-    let (status, _) = tokio::time::timeout(
-        Duration::from_secs(2),
-        uds_request(
-            &h.socket,
-            "POST",
-            "/v1/http",
-            &[("authorization", &auth)],
-            Some(json!({"connection": "github", "method": "GET", "path": "/user/repos"})),
-        ),
-    )
-    .await
-    .expect("read access session request stalled");
-    assert_eq!(status, 200);
-    assert!(h.prompts.try_recv().is_err());
-
-    // A mutation is not covered by a read grant. Approving it upgrades the
-    // connection to full access for the fixed session window.
-    let socket = h.socket.clone();
-    let auth_clone = auth.clone();
-    let mutation = tokio::spawn(async move {
-        uds_request(
-            &socket,
-            "POST",
-            "/v1/http",
-            &[("authorization", &auth_clone)],
-            Some(json!({
-                "connection": "github", "method": "POST", "path": "/dispatch",
-                "request_id": "grant-upgrade-1"
-            })),
-        )
-        .await
-    });
-    let upgrade = h.decide_next(UiDecision::AllowSession).await;
-    assert!(upgrade.http.unwrap().mutating);
-    assert_eq!(mutation.await.unwrap().0, 200);
-
-    let (status, _) = tokio::time::timeout(
-        Duration::from_secs(2),
-        uds_request(
-            &h.socket,
-            "POST",
-            "/v1/http",
-            &[("authorization", &auth)],
-            Some(json!({
-                "connection": "github", "method": "POST", "path": "/dispatch",
-                "request_id": "grant-upgrade-2"
-            })),
-        ),
-    )
-    .await
-    .expect("full access session request stalled");
-    assert_eq!(status, 200);
-    assert!(h.prompts.try_recv().is_err());
-
-    // Expiry is fixed, not sliding. It is removed, audited distinctly, and
-    // tells access views to refresh at the deadline.
-    let access_changes_before_expiry = h.access_changes.load(Ordering::SeqCst);
-    tokio::time::sleep(Duration::from_millis(3100)).await;
-    let connection = h.broker.store.connection_by_name("github").unwrap();
-    assert!(h.broker.grants_for_connection(&connection).is_empty());
-    assert!(h.access_changes.load(Ordering::SeqCst) > access_changes_before_expiry);
-    let expiry_entries: Vec<_> = h
-        .broker
-        .audit
-        .recent(20)
-        .into_iter()
-        .filter(|entry| entry.kind == AuditKind::GrantExpired)
-        .collect();
-    assert_eq!(expiry_entries.len(), 1);
-    assert_eq!(
-        expiry_entries[0].outcome.as_deref(),
-        Some("access_session_expired")
-    );
-    assert_eq!(expiry_entries[0].fields["reason"], "expired");
-    assert_eq!(expiry_entries[0].fields["scope"], "full");
-    assert!(expiry_entries[0].fields.contains_key("created_at"));
-    assert!(expiry_entries[0].fields.contains_key("expires_at"));
-
-    // The next request prompts again, and observing the expired state does
-    // not append a duplicate expiry entry.
-    let socket = h.socket.clone();
-    let auth_clone = auth.clone();
-    let after_expiry = tokio::spawn(async move {
-        uds_request(
-            &socket,
-            "POST",
-            "/v1/http",
-            &[("authorization", &auth_clone)],
-            Some(json!({"connection": "github", "method": "GET", "path": "/user/repos"})),
-        )
-        .await
-    });
-    h.decide_next(UiDecision::Deny).await;
-    assert_eq!(after_expiry.await.unwrap().0, 403);
-    assert_eq!(
-        h.broker
-            .audit
-            .recent(20)
-            .into_iter()
-            .filter(|entry| entry.kind == AuditKind::GrantExpired)
-            .count(),
-        1
-    );
-}
-
-#[tokio::test]
-async fn access_session_absorbs_already_queued_matching_prompts() {
-    let mut h = harness(BrokerConfig::default()).await;
-    let up = upstream().await;
-    api_connection(&h, "github", up.port);
-    let token = h.pair("claude-code").await;
-    let auth = format!("Bearer {token}");
-
-    let mut calls = Vec::new();
-    for _ in 0..2 {
-        let socket = h.socket.clone();
-        let auth = auth.clone();
-        calls.push(tokio::spawn(async move {
-            uds_request(
-                &socket,
-                "POST",
-                "/v1/http",
-                &[("authorization", &auth)],
-                Some(json!({
-                    "connection": "github",
-                    "method": "GET",
-                    "path": "/user/repos"
-                })),
-            )
-            .await
-        }));
-    }
-
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if *h.queue_len.lock().unwrap() == 2 {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("both requests should be queued before approval");
-
-    h.decide_next(UiDecision::AllowSession).await;
-    for call in calls {
-        assert_eq!(call.await.unwrap().0, 200);
-    }
-    assert_eq!(*h.queue_len.lock().unwrap(), 0);
-    assert_eq!(h.broker.approvals_queue().len(), 0);
-    let connection = h.broker.store.connection_by_name("github").unwrap();
-    assert_eq!(h.broker.grants_for_connection(&connection).len(), 1);
-}
-
-#[tokio::test]
-async fn full_access_session_covers_repeated_session_opens_until_revoked() {
-    let mut h = harness(BrokerConfig::default()).await;
-    let password = h
-        .broker
-        .store
-        .add_secret("PG_PASSWORD", Zeroizing::new("test-password".into()))
-        .unwrap();
-    h.broker
-        .store
-        .add_connection(ConnectionSpec {
-            name: "prod-db".into(),
-            config: ConnectionConfig::Pg {
-                host: "db.invalid".into(),
-                port: 5432,
-                dbname: "app".into(),
-                user: "app".into(),
-                sslmode: PgSslMode::Require,
-                trusted_ca_bundle_path: None,
-            },
-            secrets: vec![password.id],
-        })
-        .unwrap();
-    let token = h.pair("claude-code").await;
-    let auth = format!("Bearer {token}");
-
-    let socket = h.socket.clone();
-    let auth_clone = auth.clone();
-    let first = tokio::spawn(async move {
-        uds_request(
-            &socket,
-            "POST",
-            "/v1/pg/open",
-            &[("authorization", &auth_clone)],
-            Some(json!({"connection": "prod-db", "request_id": "pg-grant-1"})),
-        )
-        .await
-    });
-    h.decide_next(UiDecision::AllowSession).await;
-    assert_eq!(first.await.unwrap().0, 200);
-
-    let (status, _) = tokio::time::timeout(
-        Duration::from_secs(2),
-        uds_request(
-            &h.socket,
-            "POST",
-            "/v1/pg/open",
-            &[("authorization", &auth)],
-            Some(json!({"connection": "prod-db", "request_id": "pg-grant-2"})),
-        ),
-    )
-    .await
-    .expect("repeated session open stalled");
-    assert_eq!(status, 200);
-    assert!(h.prompts.try_recv().is_err());
-
-    let connection = h.broker.store.connection_by_name("prod-db").unwrap();
-    let grant = h.broker.grants_for_connection(&connection).remove(0);
-    assert!(h.broker.ui_remove_grant(&grant.id).unwrap());
-
-    let socket = h.socket.clone();
-    let auth_clone = auth.clone();
-    let after_revoke = tokio::spawn(async move {
-        uds_request(
-            &socket,
-            "POST",
-            "/v1/pg/open",
-            &[("authorization", &auth_clone)],
-            Some(json!({"connection": "prod-db", "request_id": "pg-grant-3"})),
-        )
-        .await
-    });
-    h.decide_next(UiDecision::Deny).await;
-    assert_eq!(after_revoke.await.unwrap().0, 403);
-}
-
-#[tokio::test]
-async fn http_deny_returns_403_reason() {
-    let mut h = harness(BrokerConfig::default()).await;
-    let up = upstream().await;
-    api_connection(&h, "github", up.port);
-    let token = h.pair("claude-code").await;
-    let auth = format!("Bearer {token}");
-    let socket = h.socket.clone();
-    let call = tokio::spawn(async move {
-        uds_request(
-            &socket,
-            "POST",
-            "/v1/http",
-            &[("authorization", &auth)],
-            Some(json!({"connection": "github", "method": "GET", "path": "/user/repos"})),
-        )
-        .await
-    });
-    h.decide_next(UiDecision::Deny).await;
-    let (status, body) = call.await.unwrap();
-    assert_eq!(status, 403);
-    assert_eq!(body["reason"], "denied_by_user");
-    assert_eq!(up.hits.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
-async fn always_allow_saves_rule_then_skips_prompts() {
-    let mut h = harness(BrokerConfig::default()).await;
-    let up = upstream().await;
-    api_connection(&h, "github", up.port);
-    let token = h.pair("claude-code").await;
-    let auth = format!("Bearer {token}");
-
-    let socket = h.socket.clone();
-    let auth_clone = auth.clone();
-    let call = tokio::spawn(async move {
-        uds_request(
-            &socket,
-            "POST",
-            "/v1/http",
-            &[("authorization", &auth_clone)],
-            Some(json!({"connection": "github", "method": "GET", "path": "/user/repos"})),
-        )
-        .await
-    });
-    h.decide_next(UiDecision::AlwaysAllow).await;
-    let (status, _) = call.await.unwrap();
-    assert_eq!(status, 200);
-    assert_eq!(h.broker.rules().len(), 1);
-
-    // The connections listing now tells the agent this is promptless.
-    let (status, list) = uds_request(
-        &h.socket,
-        "GET",
-        "/v1/connections",
-        &[("authorization", &auth)],
-        None,
-    )
-    .await;
-    assert_eq!(status, 200);
-    assert_eq!(list[0]["approval"], "read_auto_allowed");
-
-    // Second request: no prompt, auto-approved by the standing rule.
-    let (status, envelope) = uds_request(
-        &h.socket,
-        "POST",
-        "/v1/http",
-        &[("authorization", &auth)],
-        Some(json!({"connection": "github", "method": "GET", "path": "/user/repos"})),
-    )
-    .await;
-    assert_eq!(status, 200);
-    assert_eq!(envelope["status"], 200);
-    assert!(
-        h.prompts.try_recv().is_err(),
-        "auto-allowed request must not prompt"
-    );
-
-    // The standing read permission does not silently expand to mutations.
-    let socket = h.socket.clone();
-    let auth_clone = auth.clone();
-    let mutating = tokio::spawn(async move {
-        uds_request(
-            &socket,
-            "POST",
-            "/v1/http",
-            &[("authorization", &auth_clone)],
-            Some(json!({"connection": "github", "method": "POST", "path": "/repos"})),
-        )
-        .await
-    });
-    h.decide_next(UiDecision::Deny).await;
-    assert_eq!(mutating.await.unwrap().0, 403);
-
-    // Removing the rule restores prompting.
-    let rule_id = h.broker.rules()[0].id;
-    assert!(h.broker.ui_remove_rule(&rule_id).unwrap());
-    let socket = h.socket.clone();
-    let auth_clone = auth.clone();
-    let call = tokio::spawn(async move {
-        uds_request(
-            &socket,
-            "POST",
-            "/v1/http",
-            &[("authorization", &auth_clone)],
-            Some(json!({"connection": "github", "method": "GET", "path": "/user/repos"})),
-        )
-        .await
-    });
-    h.decide_next(UiDecision::Deny).await;
-    let (status, _) = call.await.unwrap();
-    assert_eq!(status, 403);
-}
-
-#[tokio::test]
-async fn always_allow_refuses_stale_connection_target() {
-    let mut h = harness(BrokerConfig::default()).await;
-    let up = upstream().await;
-    api_connection(&h, "github", up.port);
-    let conn = h.broker.store.connection_by_name("github").unwrap();
-    let token = h.pair("claude-code").await;
-    let auth = format!("Bearer {token}");
-
-    let socket = h.socket.clone();
-    let call = tokio::spawn(async move {
-        uds_request(
-            &socket,
-            "POST",
-            "/v1/http",
-            &[("authorization", &auth)],
-            Some(json!({"connection": "github", "method": "GET", "path": "/user/repos"})),
-        )
-        .await
-    });
-    let prompt = tokio::time::timeout(Duration::from_secs(5), h.prompts.recv())
-        .await
-        .unwrap()
-        .unwrap();
-
-    h.broker
-        .ui_update_connection(
-            &conn.id,
-            ConnectionSpec {
-                name: "github".into(),
-                config: ConnectionConfig::Api {
-                    host: "api.github.com".into(),
-                    scheme: "https".into(),
-                    port: None,
-                    template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
-                },
-                secrets: vec![],
-            },
-        )
-        .unwrap();
-
-    let err = h
-        .broker
-        .decide(&prompt.id, UiDecision::AlwaysAllow, &ctx())
-        .unwrap_err();
-    assert!(matches!(err, CoreError::ApprovalConnectionChanged));
-    assert_eq!(h.broker.rules().len(), 0);
-    assert_eq!(h.broker.approvals_queue().len(), 1);
-
-    h.broker
-        .decide(&prompt.id, UiDecision::AllowOnce, &ctx())
-        .unwrap();
-    let (status, _) = call.await.unwrap();
-    assert_eq!(status, 200);
-    assert_eq!(h.broker.rules().len(), 0);
-}
-
-#[tokio::test]
-async fn validation_rejects_before_any_prompt() {
+async fn validation_rejects_before_execution() {
     let mut h = harness(BrokerConfig::default()).await;
     let up = upstream().await;
     api_connection(&h, "github", up.port);
@@ -1240,8 +718,7 @@ async fn validation_rejects_before_any_prompt() {
             );
         }
     }
-    // None of those produced a prompt.
-    assert!(h.prompts.try_recv().is_err());
+    // None of those reached the upstream.
     assert_eq!(up.hits.load(Ordering::SeqCst), 0);
 }
 
@@ -1254,20 +731,14 @@ async fn same_host_redirect_followed_cross_host_returned_raw() {
     let auth = format!("Bearer {token}");
 
     // Same-host: followed, credential re-injected on the next hop.
-    let socket = h.socket.clone();
-    let auth_clone = auth.clone();
-    let call = tokio::spawn(async move {
-        uds_request(
-            &socket,
-            "POST",
-            "/v1/http",
-            &[("authorization", &auth_clone)],
-            Some(json!({"connection": "github", "method": "GET", "path": "/redirect-same"})),
-        )
-        .await
-    });
-    h.decide_next(UiDecision::AllowOnce).await;
-    let (status, envelope) = call.await.unwrap();
+    let (status, envelope) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(json!({"connection": "github", "method": "GET", "path": "/redirect-same"})),
+    )
+    .await;
     assert_eq!(status, 200);
     assert_eq!(envelope["status"], 200, "redirect should be followed");
     let echoed: Value = serde_json::from_str(envelope["body"].as_str().unwrap()).unwrap();
@@ -1278,20 +749,14 @@ async fn same_host_redirect_followed_cross_host_returned_raw() {
     assert!(!envelope.to_string().contains("ghp_test_secret_value"));
 
     // Cross-host: returned to the agent as the raw 3xx.
-    let socket = h.socket.clone();
-    let auth_clone = auth.clone();
-    let call = tokio::spawn(async move {
-        uds_request(
-            &socket,
-            "POST",
-            "/v1/http",
-            &[("authorization", &auth_clone)],
-            Some(json!({"connection": "github", "method": "GET", "path": "/redirect-cross"})),
-        )
-        .await
-    });
-    h.decide_next(UiDecision::AllowOnce).await;
-    let (status, envelope) = call.await.unwrap();
+    let (status, envelope) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(json!({"connection": "github", "method": "GET", "path": "/redirect-cross"})),
+    )
+    .await;
     assert_eq!(status, 200);
     assert_eq!(envelope["status"], 302, "cross-host 3xx is not followed");
     assert_eq!(envelope["headers"]["location"], "http://evil.invalid/steal");
@@ -1329,20 +794,14 @@ async fn query_injected_secret_not_leaked_in_upstream_error() {
     let token = h.pair("claude-code").await;
     let auth = format!("Bearer {token}");
 
-    let socket = h.socket.clone();
-    let auth_clone = auth.clone();
-    let call = tokio::spawn(async move {
-        uds_request(
-            &socket,
-            "POST",
-            "/v1/http",
-            &[("authorization", &auth_clone)],
-            Some(json!({"connection": "feed", "method": "GET", "path": "/x"})),
-        )
-        .await
-    });
-    h.decide_next(UiDecision::AllowOnce).await;
-    let (status, body) = call.await.unwrap();
+    let (status, body) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(json!({"connection": "feed", "method": "GET", "path": "/x"})),
+    )
+    .await;
     // Upstream is unreachable → a broker error, but the injected credential
     // must never appear anywhere in the agent-visible response.
     assert_eq!(status, 502, "expected an upstream_error, got {body}");
@@ -1351,176 +810,6 @@ async fn query_injected_secret_not_leaked_in_upstream_error() {
     assert!(
         !raw.contains(TOKEN),
         "query-injected credential leaked in the error response: {raw}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn blocking_reauth_prompt_does_not_stall_the_daemon() {
-    use std::io::{Read as _, Write as _};
-    use std::sync::Condvar;
-
-    // Events whose re-auth-on-read confirmation blocks until released,
-    // signalling when it has started. Credential injection reads a secret, so
-    // this fires during the approved HTTP request's execution. On a
-    // single-worker runtime, running that blocking confirmation on a runtime
-    // worker would wedge the whole daemon; the broker runs it on the blocking
-    // pool instead, so other requests keep flowing.
-    struct GateEvents {
-        prompts: mpsc::UnboundedSender<ApprovalRequest>,
-        blocked: Arc<(Mutex<bool>, Condvar)>,
-        release: Arc<(Mutex<bool>, Condvar)>,
-    }
-    impl BrokerEvents for GateEvents {
-        fn prompt_raised(&self, request: &ApprovalRequest) {
-            let _ = self.prompts.send(request.clone());
-        }
-        fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
-            {
-                let (m, cv) = &*self.blocked;
-                *m.lock().unwrap() = true;
-                cv.notify_all();
-            }
-            let (m, cv) = &*self.release;
-            let mut released = m.lock().unwrap();
-            while !*released {
-                released = cv.wait(released).unwrap();
-            }
-            true
-        }
-        fn confirm_decision(
-            &self,
-            _request: &ApprovalRequest,
-            _decision: UiDecision,
-        ) -> Option<ConfirmationMethod> {
-            Some(ConfirmationMethod::Waived)
-        }
-        fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
-            Some(ConfirmationMethod::Waived)
-        }
-    }
-
-    let dir = tempfile::tempdir().unwrap();
-    let paths = Paths::under(dir.path());
-    let (tx, mut prompts) = mpsc::unbounded_channel();
-    let blocked = Arc::new((Mutex::new(false), Condvar::new()));
-    let release = Arc::new((Mutex::new(false), Condvar::new()));
-    let broker = Broker::new(
-        paths,
-        Arc::new(MemoryVault::new()),
-        BrokerConfig::default(),
-        Arc::new(GateEvents {
-            prompts: tx,
-            blocked: blocked.clone(),
-            release: release.clone(),
-        }),
-    )
-    .await
-    .unwrap();
-    let up = upstream().await;
-    broker
-        .store
-        .add_secret(
-            "GITHUB_API_KEY",
-            Zeroizing::new("ghp_test_secret_value".into()),
-        )
-        .unwrap();
-    broker
-        .store
-        .add_connection(ConnectionSpec {
-            name: "github".into(),
-            config: ConnectionConfig::Api {
-                host: "127.0.0.1".into(),
-                scheme: "http".into(),
-                port: Some(up.port),
-                template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
-            },
-            secrets: vec![],
-        })
-        .unwrap();
-    let daemon = daemon::serve(broker.clone()).await.unwrap();
-    let socket = daemon.socket_path.clone();
-
-    // Pair (registration is immediate; no secret read, so the gate is not
-    // touched).
-    let token = {
-        let (status, body) = uds_request(
-            &socket,
-            "POST",
-            "/v1/pair",
-            &[],
-            Some(json!({"agent_name": "claude-code"})),
-        )
-        .await;
-        assert_eq!(status, 200);
-        body["token"].as_str().unwrap().to_string()
-    };
-
-    // Fire an HTTP GET; approving it runs the executor, which reads the
-    // credential and blocks in the gated confirmation.
-    let s = socket.clone();
-    let auth = format!("Bearer {token}");
-    let call = tokio::spawn(async move {
-        uds_request(
-            &s,
-            "POST",
-            "/v1/http",
-            &[("authorization", &auth)],
-            Some(json!({"connection": "github", "method": "GET", "path": "/user/repos"})),
-        )
-        .await
-    });
-    let prompt = tokio::time::timeout(Duration::from_secs(5), prompts.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    broker
-        .decide(&prompt.id, UiDecision::AllowOnce, &ctx())
-        .unwrap();
-
-    // Observer on a plain OS thread (immune to a wedged runtime): once the
-    // confirmation is blocking, an unrelated GET /v1/connections must still
-    // get a response. If the read blocked the one worker, this times out.
-    let obs_socket = socket.clone();
-    let obs_auth = format!("Bearer {token}");
-    let blocked2 = blocked.clone();
-    let release2 = release.clone();
-    let observer = std::thread::spawn(move || -> bool {
-        {
-            let (m, cv) = &*blocked2;
-            let mut b = m.lock().unwrap();
-            while !*b {
-                b = cv.wait(b).unwrap();
-            }
-        }
-        let served = (|| -> std::io::Result<bool> {
-            let mut s = std::os::unix::net::UnixStream::connect(&obs_socket)?;
-            s.set_read_timeout(Some(Duration::from_secs(2)))?;
-            let req = format!(
-                "GET /v1/connections HTTP/1.1\r\nHost: localhost\r\n\
-                 Authorization: {obs_auth}\r\nConnection: close\r\n\r\n"
-            );
-            s.write_all(req.as_bytes())?;
-            let mut buf = Vec::new();
-            let _ = s.read_to_end(&mut buf); // times out if the daemon is wedged
-            Ok(String::from_utf8_lossy(&buf).contains("200 OK"))
-        })()
-        .unwrap_or(false);
-        {
-            let (m, cv) = &*release2;
-            *m.lock().unwrap() = true;
-            cv.notify_all();
-        }
-        served
-    });
-
-    let (status, _) = tokio::time::timeout(Duration::from_secs(10), call)
-        .await
-        .expect("request should complete once the confirmation is released")
-        .unwrap();
-    assert_eq!(status, 200);
-    assert!(
-        observer.join().unwrap(),
-        "daemon must keep serving requests while a re-auth confirmation blocks"
     );
 }
 
@@ -1541,64 +830,7 @@ async fn mutating_retries_coalesce_to_one_execution() {
         "body": {"event_type": "deploy"},
     });
 
-    // Two concurrent calls with the same request_id.
-    let socket = h.socket.clone();
-    let (a1, p1) = (auth.clone(), payload.clone());
-    let call1 = tokio::spawn(async move {
-        uds_request(
-            &socket,
-            "POST",
-            "/v1/http",
-            &[("authorization", &a1)],
-            Some(p1),
-        )
-        .await
-    });
-    let socket = h.socket.clone();
-    let (a2, p2) = (auth.clone(), payload.clone());
-    // Give the first call time to park so the second joins it.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let call2 = tokio::spawn(async move {
-        uds_request(
-            &socket,
-            "POST",
-            "/v1/http",
-            &[("authorization", &a2)],
-            Some(p2),
-        )
-        .await
-    });
-
-    // Exactly one prompt for the pair of calls.
-    let prompt = tokio::time::timeout(Duration::from_secs(5), h.prompts.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    let view = prompt.http.as_ref().unwrap();
-    assert!(view.mutating);
-    assert!(view.body_preview.as_ref().unwrap().contains("deploy"));
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(
-        h.prompts.try_recv().is_err(),
-        "retry must join, not re-prompt"
-    );
-    assert_eq!(*h.queue_len.lock().unwrap(), 1);
-
-    h.broker
-        .decide(&prompt.id, UiDecision::AllowOnce, &ctx())
-        .unwrap();
-    let ((s1, b1), (s2, b2)) = (call1.await.unwrap(), call2.await.unwrap());
-    assert_eq!((s1, s2), (200, 200));
-    assert_eq!(b1["status"], 204);
-    assert_eq!(b2["status"], 204);
-    assert_eq!(
-        up.hits.load(Ordering::SeqCst),
-        1,
-        "exactly one upstream execution"
-    );
-
-    // Late retry with the same request_id: replayed, still one execution.
-    let (status, body) = uds_request(
+    let (status, b1) = uds_request(
         &h.socket,
         "POST",
         "/v1/http",
@@ -1607,8 +839,25 @@ async fn mutating_retries_coalesce_to_one_execution() {
     )
     .await;
     assert_eq!(status, 200);
-    assert_eq!(body["status"], 204);
+    assert_eq!(b1["status"], 204);
     assert_eq!(up.hits.load(Ordering::SeqCst), 1);
+
+    // A retry with the same request_id: replayed, still one execution.
+    let (status, b2) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(payload.clone()),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(b2["status"], 204);
+    assert_eq!(
+        up.hits.load(Ordering::SeqCst),
+        1,
+        "exactly one upstream execution"
+    );
 
     // Same request_id, different payload: a client bug, 409.
     let mut altered = payload.clone();
@@ -1623,10 +872,11 @@ async fn mutating_retries_coalesce_to_one_execution() {
     .await;
     assert_eq!(status, 409);
     assert_eq!(body["reason"], "request_id_mismatch");
+    assert_eq!(up.hits.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
-async fn idempotency_capacity_fails_before_prompt_or_upstream_execution() {
+async fn idempotency_capacity_fails_before_upstream_execution() {
     let config = BrokerConfig {
         outcome_retention_max_entries: 0,
         ..BrokerConfig::default()
@@ -1636,8 +886,6 @@ async fn idempotency_capacity_fails_before_prompt_or_upstream_execution() {
     api_connection(&h, "github", up.port);
     let token = h.pair("claude-code").await;
     let auth = format!("Bearer {token}");
-    save_always_allow_rule(&mut h, &auth).await;
-    let auto_allowed_before = auto_allowed_audit_count(&h);
 
     let (status, body) = uds_request(
         &h.socket,
@@ -1655,13 +903,7 @@ async fn idempotency_capacity_fails_before_prompt_or_upstream_execution() {
 
     assert_eq!(status, 503);
     assert_eq!(body["reason"], "idempotency_capacity");
-    assert!(h.prompts.try_recv().is_err(), "no prompt should be raised");
     assert_eq!(up.hits.load(Ordering::SeqCst), 0);
-    assert_eq!(
-        auto_allowed_audit_count(&h),
-        auto_allowed_before,
-        "a rejected request must not be audited as executing"
-    );
 }
 
 #[tokio::test]
@@ -1675,7 +917,6 @@ async fn non_replayable_tombstone_prevents_duplicate_upstream_execution() {
     api_connection(&h, "github", up.port);
     let token = h.pair("claude-code").await;
     let auth = format!("Bearer {token}");
-    save_always_allow_rule(&mut h, &auth).await;
     let payload = json!({
         "connection": "github",
         "method": "POST",
@@ -1694,7 +935,6 @@ async fn non_replayable_tombstone_prevents_duplicate_upstream_execution() {
     assert_eq!(status, 200);
     assert_eq!(body["status"], 204);
     assert_eq!(up.hits.load(Ordering::SeqCst), 1);
-    let auto_allowed_after_execution = auto_allowed_audit_count(&h);
 
     let (status, body) = uds_request(
         &h.socket,
@@ -1707,12 +947,6 @@ async fn non_replayable_tombstone_prevents_duplicate_upstream_execution() {
     assert_eq!(status, 409);
     assert_eq!(body["reason"], "outcome_not_replayable");
     assert_eq!(up.hits.load(Ordering::SeqCst), 1);
-    assert!(h.prompts.try_recv().is_err(), "retry must not re-prompt");
-    assert_eq!(
-        auto_allowed_audit_count(&h),
-        auto_allowed_after_execution,
-        "a tombstoned retry must not be audited as a new execution"
-    );
 }
 
 #[tokio::test]
@@ -1736,32 +970,26 @@ async fn mutating_request_id_is_scoped_to_connection() {
     let token = h.pair("claude-code").await;
     let auth = format!("Bearer {token}");
 
-    let payload = json!({
-        "connection": "github",
-        "method": "POST",
-        "path": "/dispatch",
-        "request_id": "req_same_payload_different_connection",
-        "body": {"event_type": "deploy"},
-    });
+    let (status, body) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(json!({
+            "connection": "github",
+            "method": "POST",
+            "path": "/dispatch",
+            "request_id": "req_same_payload_different_connection",
+            "body": {"event_type": "deploy"},
+        })),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["status"], 204);
+    assert_eq!(up.hits.load(Ordering::SeqCst), 1);
 
-    let socket = h.socket.clone();
-    let auth_clone = auth.clone();
-    let call = tokio::spawn(async move {
-        uds_request(
-            &socket,
-            "POST",
-            "/v1/http",
-            &[("authorization", &auth_clone)],
-            Some(payload),
-        )
-        .await
-    });
-    let prompt = tokio::time::timeout(Duration::from_secs(5), h.prompts.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(prompt.connection.as_ref().unwrap().name, "github");
-
+    // The same request_id against a different connection is a mismatch,
+    // never a silent replay of the other connection's outcome.
     let (status, body) = uds_request(
         &h.socket,
         "POST",
@@ -1778,99 +1006,7 @@ async fn mutating_request_id_is_scoped_to_connection() {
     .await;
     assert_eq!(status, 409);
     assert_eq!(body["reason"], "request_id_mismatch");
-    assert!(
-        h.prompts.try_recv().is_err(),
-        "cross-connection request_id reuse must not add a second prompt"
-    );
-
-    h.broker
-        .decide(&prompt.id, UiDecision::AllowOnce, &ctx())
-        .unwrap();
-    let (status, body) = call.await.unwrap();
-    assert_eq!(status, 200);
-    assert_eq!(body["status"], 204);
     assert_eq!(up.hits.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-async fn approval_timeout_auto_denies() {
-    let config = BrokerConfig {
-        approval_timeout: Duration::from_millis(300),
-        ..BrokerConfig::default()
-    };
-    let mut h = harness(config).await;
-    let up = upstream().await;
-    api_connection(&h, "github", up.port);
-    let token = h.pair("claude-code").await;
-    let auth = format!("Bearer {token}");
-
-    let (status, body) = uds_request(
-        &h.socket,
-        "POST",
-        "/v1/http",
-        &[("authorization", &auth)],
-        Some(json!({"connection": "github", "method": "GET", "path": "/user/repos"})),
-    )
-    .await;
-    assert_eq!(status, 403);
-    assert_eq!(body["reason"], "approval_timeout");
-    assert_eq!(*h.queue_len.lock().unwrap(), 0);
-    let _ = h.prompts.try_recv();
-}
-
-#[tokio::test]
-async fn disconnect_abandons_parked_request() {
-    let mut h = harness(BrokerConfig::default()).await;
-    let up = upstream().await;
-    api_connection(&h, "github", up.port);
-    let token = h.pair("claude-code").await;
-    let auth = format!("Bearer {token}");
-
-    // Open a raw connection, send the request, then slam the connection shut
-    // before any decision.
-    let socket = h.socket.clone();
-    let call = tokio::spawn(async move {
-        tokio::time::timeout(
-            Duration::from_millis(400),
-            uds_request(
-                &socket,
-                "POST",
-                "/v1/http",
-                &[("authorization", &auth)],
-                Some(
-                    json!({"connection": "github", "method": "POST", "path": "/dispatch",
-                            "request_id": "req_abandon", "body": {"x": 1}}),
-                ),
-            ),
-        )
-        .await
-    });
-    let prompt = tokio::time::timeout(Duration::from_secs(5), h.prompts.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(*h.queue_len.lock().unwrap(), 1);
-    // The client gives up (timeout aborts the request future / connection).
-    let _ = call.await;
-    // The prompt is withdrawn without execution.
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if *h.queue_len.lock().unwrap() == 0 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("prompt should be withdrawn after disconnect");
-    // Approving the withdrawn prompt does nothing.
-    assert!(h
-        .broker
-        .decide(&prompt.id, UiDecision::AllowOnce, &ctx())
-        .unwrap()
-        .is_none());
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(up.hits.load(Ordering::SeqCst), 0, "never executed upstream");
 }
 
 #[tokio::test]
@@ -1920,20 +1056,14 @@ async fn binary_bodies_come_back_base64() {
     api_connection(&h, "github", up.port);
     let token = h.pair("claude-code").await;
     let auth = format!("Bearer {token}");
-    let socket = h.socket.clone();
-    let auth_clone = auth.clone();
-    let call = tokio::spawn(async move {
-        uds_request(
-            &socket,
-            "POST",
-            "/v1/http",
-            &[("authorization", &auth_clone)],
-            Some(json!({"connection": "github", "method": "GET", "path": "/binary"})),
-        )
-        .await
-    });
-    h.decide_next(UiDecision::AllowOnce).await;
-    let (status, envelope) = call.await.unwrap();
+    let (status, envelope) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(json!({"connection": "github", "method": "GET", "path": "/binary"})),
+    )
+    .await;
     assert_eq!(status, 200);
     assert_eq!(envelope["body_encoding"], "base64");
     use base64::Engine as _;
@@ -1944,31 +1074,79 @@ async fn binary_bodies_come_back_base64() {
 }
 
 #[tokio::test]
-async fn repairing_preserves_client_id_and_rules() {
+async fn repairing_preserves_client_id_and_wirings() {
     let mut h = harness(BrokerConfig::default()).await;
     let up = upstream().await;
     api_connection(&h, "github", up.port);
     let conn = h.broker.store.connection_by_name("github").unwrap();
 
-    // The client earned a standing rule before re-pairing.
+    // The first agent is auto-wired at pairing time.
     h.pair("claude-code").await;
     let client = h.broker.pairing.get("claude-code").unwrap();
-    use aka_core::policy::PolicyEngine as _;
-    h.broker
-        .policy
-        .record_rule(
-            client.id,
-            "claude-code",
-            conn.id,
-            aka_core::types::PermissionScope::Full,
-        )
-        .unwrap();
+    assert!(h.broker.wirings.is_wired(&client.id, &conn.id));
 
-    // Re-pairing preserves the stable client id, so the rule survives.
+    // Re-pairing preserves the stable client id, so the wiring survives.
     h.pair("claude-code").await;
     let repaired = h.broker.pairing.get("claude-code").unwrap();
     assert_eq!(repaired.id, client.id);
-    assert_eq!(h.broker.rules().len(), 1);
+    assert!(h.broker.wirings.is_wired(&repaired.id, &conn.id));
+    assert_eq!(h.broker.wirings().len(), 1);
+}
+
+#[tokio::test]
+async fn unwired_agent_is_refused_until_wired() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let up = upstream().await;
+    api_connection(&h, "github", up.port);
+    let conn = h.broker.store.connection_by_name("github").unwrap();
+    // The first agent takes the auto-wire bootstrap; the second starts
+    // unwired.
+    h.pair("claude-code").await;
+    let token = h.pair("codex").await;
+    let auth = format!("Bearer {token}");
+
+    let call = json!({"connection": "github", "method": "GET", "path": "/echo"});
+    let (status, body) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(call.clone()),
+    )
+    .await;
+    assert_eq!(status, 403);
+    assert_eq!(body["reason"], "denied_by_policy");
+    assert!(
+        body["detail"].as_str().unwrap().contains("not wired"),
+        "refusal should explain the wiring model: {body}"
+    );
+    assert_eq!(up.hits.load(Ordering::SeqCst), 0, "nothing reached upstream");
+
+    // Wiring the agent in the app flips the same call to allowed…
+    let codex = h.broker.pairing.get("codex").unwrap();
+    assert!(h.broker.ui_set_wiring(&codex.id, &conn.id, true).unwrap());
+    let (status, _) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(call.clone()),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    // …and unwiring refuses it again.
+    assert!(h.broker.ui_set_wiring(&codex.id, &conn.id, false).unwrap());
+    let (status, body) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(call),
+    )
+    .await;
+    assert_eq!(status, 403);
+    assert_eq!(body["reason"], "denied_by_policy");
 }
 
 #[tokio::test]
@@ -2104,381 +1282,3 @@ async fn repairing_supersedes_the_previous_token() {
     assert_eq!(status, 200);
 }
 
-/* --------------------------- connection proposals ------------------------- */
-
-fn propose_pg_body(name: &str, credential_name: &str) -> serde_json::Value {
-    json!({
-        "name": name,
-        "credential_name": credential_name,
-        "config": {
-            "kind": "pg", "host": "127.0.0.1",
-            "dbname": "app", "user": "app",
-        },
-    })
-}
-
-impl Harness {
-    /// Wait for the next prompt and decide it carrying a proposal credential.
-    async fn decide_next_with_credential(
-        &mut self,
-        decision: UiDecision,
-        credential: Option<&str>,
-    ) -> ApprovalRequest {
-        let request = tokio::time::timeout(Duration::from_secs(5), self.prompts.recv())
-            .await
-            .expect("timed out waiting for a prompt")
-            .expect("events channel closed");
-        self.broker
-            .decide_with_options(
-                &request.id,
-                decision,
-                aka_core::broker::DecisionOptions {
-                    proposal_credential: credential.map(|value| Zeroizing::new(value.to_string())),
-                },
-                &ctx(),
-            )
-            .unwrap();
-        request
-    }
-}
-
-#[tokio::test]
-async fn propose_prompts_and_creates_connection_with_user_credential() {
-    let mut h = harness(BrokerConfig::default()).await;
-    let token = h.pair("claude-code").await;
-    let auth = format!("Bearer {token}");
-
-    let socket = h.socket.clone();
-    let call = tokio::spawn(async move {
-        uds_request(
-            &socket,
-            "POST",
-            "/v1/connections/propose",
-            &[("authorization", &auth)],
-            Some(propose_pg_body("sandbox-pg", "SANDBOX_PG_PASSWORD")),
-        )
-        .await
-    });
-
-    let prompt = h
-        .decide_next_with_credential(UiDecision::AllowOnce, Some("s3cr3t"))
-        .await;
-    assert_eq!(prompt.kind, aka_core::approvals::ApprovalKind::Propose);
-    let proposal = prompt.proposal.as_ref().expect("proposal view");
-    assert_eq!(proposal.name, "sandbox-pg");
-    assert_eq!(proposal.credential_name, "SANDBOX_PG_PASSWORD");
-    assert_eq!(proposal.target, "app@127.0.0.1:5432/app");
-    assert_eq!(proposal.tls.as_deref(), Some("verify-full"));
-
-    let (status, body) = call.await.unwrap();
-    assert_eq!(status, 201, "propose failed: {body}");
-    assert_eq!(body["name"], "sandbox-pg");
-    assert_eq!(body["type"], "pg");
-    assert_eq!(body["endpoint"], "/v1/pg/open");
-
-    // The connection exists but grants nothing: listing shows will_prompt.
-    let conn = h
-        .broker
-        .store
-        .connection_by_name("sandbox-pg")
-        .expect("connection saved");
-    assert_eq!(conn.target(), "app@127.0.0.1:5432/app");
-    assert!(h
-        .broker
-        .store
-        .secret_by_name("SANDBOX_PG_PASSWORD")
-        .is_some());
-}
-
-#[tokio::test]
-async fn propose_allow_without_credential_fails_closed_and_stays_pending() {
-    let mut h = harness(BrokerConfig::default()).await;
-    let token = h.pair("claude-code").await;
-    let auth = format!("Bearer {token}");
-
-    let socket = h.socket.clone();
-    let call = tokio::spawn(async move {
-        uds_request(
-            &socket,
-            "POST",
-            "/v1/connections/propose",
-            &[("authorization", &auth)],
-            Some(propose_pg_body("sandbox-pg", "SANDBOX_PG_PASSWORD")),
-        )
-        .await
-    });
-
-    let request = tokio::time::timeout(Duration::from_secs(5), h.prompts.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    // Allowing without a typed value must fail without consuming the prompt…
-    let missing = h.broker.decide_with_options(
-        &request.id,
-        UiDecision::AllowOnce,
-        aka_core::broker::DecisionOptions::default(),
-        &ctx(),
-    );
-    assert!(missing.is_err(), "allow without a credential must fail");
-    // …then a real decision still works.
-    h.broker
-        .decide_with_options(
-            &request.id,
-            UiDecision::Deny,
-            aka_core::broker::DecisionOptions::default(),
-            &ctx(),
-        )
-        .unwrap();
-    let (status, body) = call.await.unwrap();
-    assert_eq!(status, 403);
-    assert_eq!(body["reason"], "denied_by_user");
-    assert!(h.broker.store.connection_by_name("sandbox-pg").is_none());
-}
-
-#[tokio::test]
-async fn disconnected_agent_cannot_apply_its_parked_proposal() {
-    let mut h = harness(BrokerConfig::default()).await;
-    let token = h.pair("claude-code").await;
-    let auth = format!("Bearer {token}");
-
-    let socket = h.socket.clone();
-    let call = tokio::spawn(async move {
-        uds_request(
-            &socket,
-            "POST",
-            "/v1/connections/propose",
-            &[("authorization", &auth)],
-            Some(propose_pg_body("sandbox-pg", "SANDBOX_PG_PASSWORD")),
-        )
-        .await
-    });
-    let request = tokio::time::timeout(Duration::from_secs(5), h.prompts.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    let client_id = request.client_id.expect("proposal client id");
-    assert!(h.broker.ui_revoke_agent(&client_id).unwrap());
-
-    let stale = h.broker.decide_with_options(
-        &request.id,
-        UiDecision::AllowOnce,
-        aka_core::broker::DecisionOptions {
-            proposal_credential: Some(Zeroizing::new("s3cr3t".into())),
-        },
-        &ctx(),
-    );
-    assert!(matches!(stale, Err(CoreError::ProposalStale)));
-    assert!(h.broker.store.connection_by_name("sandbox-pg").is_none());
-
-    // The stale prompt remains rejectable so its held-open caller resolves.
-    h.broker
-        .decide_with_options(
-            &request.id,
-            UiDecision::Deny,
-            aka_core::broker::DecisionOptions::default(),
-            &ctx(),
-        )
-        .unwrap();
-    let (status, body) = call.await.unwrap();
-    assert_eq!(status, 403);
-    assert_eq!(body["reason"], "denied_by_user");
-}
-
-#[tokio::test]
-async fn ssh_proposal_discloses_the_exact_invocation_alias() {
-    let mut h = harness(BrokerConfig::default()).await;
-    let token = h.pair("claude-code").await;
-    let auth = format!("Bearer {token}");
-    let socket = h.socket.clone();
-    let call = tokio::spawn(async move {
-        uds_request(
-            &socket,
-            "POST",
-            "/v1/connections/propose",
-            &[("authorization", &auth)],
-            Some(json!({
-                "name": "production",
-                "credential_name": "PRODUCTION_SSH_KEY",
-                "config": {
-                    "kind": "ssh",
-                    "destination": "prod-via-bastion",
-                    "host": "prod.example.com",
-                    "user": "deploy"
-                }
-            })),
-        )
-        .await
-    });
-    let request = tokio::time::timeout(Duration::from_secs(5), h.prompts.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    let proposal = request.proposal.as_ref().expect("proposal view");
-    assert_eq!(proposal.target, "deploy@prod.example.com");
-    assert_eq!(proposal.destination.as_deref(), Some("prod-via-bastion"));
-    h.broker
-        .decide_with_options(
-            &request.id,
-            UiDecision::Deny,
-            aka_core::broker::DecisionOptions::default(),
-            &ctx(),
-        )
-        .unwrap();
-    assert_eq!(call.await.unwrap().0, 403);
-}
-
-#[tokio::test]
-async fn propose_duplicate_target_is_refused_without_prompting() {
-    let mut h = harness(BrokerConfig::default()).await;
-    api_connection(&h, "github", 18080);
-    let token = h.pair("claude-code").await;
-    let auth = format!("Bearer {token}");
-
-    // Same target under a different name: refused up front, no prompt.
-    let (status, body) = uds_request(
-        &h.socket,
-        "POST",
-        "/v1/connections/propose",
-        &[("authorization", &auth)],
-        Some(json!({
-            "name": "github-two",
-            "credential_name": "GITHUB_TOKEN_TWO",
-            "config": {
-                "kind": "api", "host": "127.0.0.1", "scheme": "http", "port": 18080,
-                "template": "Authorization: Bearer {{GITHUB_TOKEN_TWO}}",
-            },
-        })),
-    )
-    .await;
-    assert_eq!(status, 409, "expected conflict: {body}");
-    assert_eq!(body["reason"], "connection_exists");
-    assert!(body["detail"].as_str().unwrap().contains("github"));
-
-    // Same name: also refused.
-    let (status, body) = uds_request(
-        &h.socket,
-        "POST",
-        "/v1/connections/propose",
-        &[("authorization", &auth)],
-        Some(json!({
-            "name": "github",
-            "credential_name": "GITHUB_TOKEN_TWO",
-            "config": {
-                "kind": "api", "host": "example.com", "template": "Authorization: Bearer {{GITHUB_TOKEN_TWO}}",
-            },
-        })),
-    )
-    .await;
-    assert_eq!(status, 409);
-    assert_eq!(body["reason"], "connection_exists");
-}
-
-#[tokio::test]
-async fn proposal_rechecks_equivalent_target_after_the_prompt() {
-    let mut h = harness(BrokerConfig::default()).await;
-    let token = h.pair("claude-code").await;
-    let auth = format!("Bearer {token}");
-    let socket = h.socket.clone();
-    let call = tokio::spawn(async move {
-        uds_request(
-            &socket,
-            "POST",
-            "/v1/connections/propose",
-            &[("authorization", &auth)],
-            Some(propose_pg_body("sandbox-pg", "SANDBOX_PG_PASSWORD")),
-        )
-        .await
-    });
-    let request = tokio::time::timeout(Duration::from_secs(5), h.prompts.recv())
-        .await
-        .unwrap()
-        .unwrap();
-
-    let secret = h
-        .broker
-        .store
-        .add_secret("OTHER_DATABASE_PASSWORD", Zeroizing::new("other".into()))
-        .unwrap();
-    h.broker
-        .store
-        .add_connection(ConnectionSpec {
-            name: "existing-pg".into(),
-            config: ConnectionConfig::Pg {
-                host: "127.0.0.1.".into(),
-                port: 5432,
-                dbname: "app".into(),
-                user: "app".into(),
-                sslmode: PgSslMode::VerifyFull,
-                trusted_ca_bundle_path: None,
-            },
-            secrets: vec![secret.id],
-        })
-        .unwrap();
-
-    h.broker
-        .decide_with_options(
-            &request.id,
-            UiDecision::AllowOnce,
-            aka_core::broker::DecisionOptions {
-                proposal_credential: Some(Zeroizing::new("s3cr3t".into())),
-            },
-            &ctx(),
-        )
-        .unwrap();
-    let (status, body) = call.await.unwrap();
-    assert_eq!(status, 409, "expected post-prompt conflict: {body}");
-    assert_eq!(body["reason"], "connection_exists");
-    assert!(h
-        .broker
-        .store
-        .secret_by_name("SANDBOX_PG_PASSWORD")
-        .is_none());
-}
-
-#[tokio::test]
-async fn propose_rejects_templates_referencing_existing_secrets() {
-    let mut h = harness(BrokerConfig::default()).await;
-    h.broker
-        .store
-        .add_secret("EXISTING_SECRET", Zeroizing::new("shh".into()))
-        .unwrap();
-    let token = h.pair("claude-code").await;
-    let auth = format!("Bearer {token}");
-
-    let (status, body) = uds_request(
-        &h.socket,
-        "POST",
-        "/v1/connections/propose",
-        &[("authorization", &auth)],
-        Some(json!({
-            "name": "exfil",
-            "credential_name": "NEW_TOKEN",
-            "config": {
-                "kind": "api", "host": "evil.example.com",
-                "template": "Authorization: Bearer {{EXISTING_SECRET}}",
-            },
-        })),
-    )
-    .await;
-    assert_eq!(status, 400, "expected refusal: {body}");
-    assert_eq!(body["reason"], "invalid_proposal");
-
-    // Pre-pinned SSH trust is refused too.
-    let (status, body) = uds_request(
-        &h.socket,
-        "POST",
-        "/v1/connections/propose",
-        &[("authorization", &auth)],
-        Some(json!({
-            "name": "box",
-            "credential_name": "BOX_SSH_KEY",
-            "config": {
-                "kind": "ssh", "host": "host.example.com", "user": "deploy",
-                "host_key_fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-            },
-        })),
-    )
-    .await;
-    assert_eq!(status, 400, "expected refusal: {body}");
-    assert_eq!(body["reason"], "invalid_proposal");
-}

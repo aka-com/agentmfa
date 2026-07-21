@@ -18,7 +18,7 @@ use url::Url;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::approvals::ExecOutcome;
+use crate::executions::ExecOutcome;
 use crate::audit::{AuditEntry, AuditKind, AuditLog};
 use crate::capability::SpooledBody;
 use crate::config::BrokerConfig;

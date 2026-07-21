@@ -1,6 +1,4 @@
 export type ConnectionType = 'api' | 'pg' | 'ws' | 'ssh';
-export type PermissionScope = 'read' | 'full';
-export type Decision = 'deny' | 'allow_once' | 'allow_session' | 'always_allow';
 
 export interface SecretSummary {
   id: string;
@@ -11,11 +9,10 @@ export interface SecretSummary {
   updated_at: string;
 }
 
-export interface PermissionSummary {
-  id: string;
+/** One agent wired to a connection. */
+export interface WiringSummary {
+  agent_id: string;
   agent: string;
-  scope: PermissionScope;
-  expires_at: string | null;
 }
 
 export interface ConnectionSummary {
@@ -24,7 +21,7 @@ export interface ConnectionSummary {
   type: ConnectionType;
   target: string;
   secret_names: string[];
-  permissions: PermissionSummary[];
+  wired_agents: WiringSummary[];
   host: string | null;
   scheme: string | null;
   port: number | null;
@@ -43,7 +40,7 @@ export interface AgentSummary {
   name: string;
   paired_at: string;
   last_used: string;
-  permission_count: number;
+  wiring_count: number;
 }
 
 export interface SessionSummary {
@@ -68,63 +65,6 @@ export interface Settings {
   menu_bar_hides_dock: boolean;
   show_service_walkthrough: boolean;
   show_agent_walkthrough: boolean;
-}
-
-export interface ApprovalConnection {
-  id: string;
-  name: string;
-  type: ConnectionType;
-  target: string;
-}
-
-export interface HttpPayloadView {
-  method: string;
-  path: string;
-  headers: Array<[string, string]>;
-  body_preview: string | null;
-  body_len: number;
-  body_truncated: boolean;
-  mutating: boolean;
-}
-
-export interface TemporaryAccess {
-  scope: PermissionScope;
-  duration_seconds: number;
-}
-
-// SSH host-key trust prompts only: the key the server presented at the
-// first connection, pinned on approval (trust on first use).
-export interface SshHostKeyView {
-  host: string;
-  port: number;
-  observed_fingerprint: string;
-  algorithm: string;
-}
-
-export interface ApprovalRequest {
-  id: string;
-  agent: string;
-  kind: 'http' | 'ws' | 'pg' | 'ssh' | 'propose';
-  connection: ApprovalConnection | null;
-  action: string;
-  notification: string;
-  received_at: string;
-  deadline: string;
-  http: HttpPayloadView | null;
-  ssh: SshHostKeyView | null;
-  proposal?: ProposalView | null;
-  temporary_access: TemporaryAccess | null;
-}
-
-/** An agent-proposed service, shown in full before the user decides. */
-export interface ProposalView {
-  name: string;
-  type: ConnectionType;
-  target: string;
-  credential_name: string;
-  template?: string | null;
-  tls?: string | null;
-  destination?: string | null;
 }
 
 export interface HostKeyCandidate {
@@ -184,7 +124,6 @@ export interface CommandMap {
   list_sessions: CommandSpec<undefined, SessionSummary[]>;
   list_activity: CommandSpec<{ limit: number }, ActivityEntry[]>;
   clear_activity: CommandSpec<undefined, void>;
-  get_queue: CommandSpec<undefined, ApprovalRequest[]>;
   get_settings: CommandSpec<undefined, Settings>;
   get_agent_setup: CommandSpec<undefined, string>;
   get_broker_instructions: CommandSpec<undefined, string>;
@@ -204,7 +143,11 @@ export interface CommandMap {
   edit_connection: CommandSpec<{ id: string; input: ConnectionInput }, void>;
   delete_connection: CommandSpec<{ id: string }, void>;
   test_connection: CommandSpec<{ id: string }, ConnectionTestReport>;
-  remove_permission: CommandSpec<{ id: string }, boolean>;
+  set_wiring: CommandSpec<{
+    agentId: string;
+    connectionId: string;
+    wired: boolean;
+  }, boolean>;
   confirm_agent_disconnect: CommandSpec<undefined, boolean>;
   revoke_agent: CommandSpec<{ id: string }, boolean>;
   close_session: CommandSpec<{ id: number }, boolean>;
@@ -212,17 +155,10 @@ export interface CommandMap {
   set_menu_bar_hides_dock: CommandSpec<{ on: boolean }, void>;
   set_service_walkthrough_visible: CommandSpec<{ on: boolean }, void>;
   set_agent_walkthrough_visible: CommandSpec<{ on: boolean }, void>;
-  decide: CommandSpec<{
-    id: string;
-    decision: Decision;
-    credentialValue?: string;
-  }, void>;
   ui_set_mode: CommandSpec<{ mode: string }, void>;
   ui_hide_main: CommandSpec<undefined, void>;
   ui_hide_dropdown: CommandSpec<undefined, void>;
   ui_set_dropdown_form_active: CommandSpec<{ active: boolean }, void>;
-  ui_show_approval: CommandSpec<undefined, void>;
-  ui_resize_approval: CommandSpec<{ height: number }, void>;
 }
 
 export type CommandName = keyof CommandMap;
@@ -234,8 +170,7 @@ export interface EventMap {
   'aka://activity-changed': Record<string, never>;
   'aka://agents-changed': Record<string, never>;
   'aka://connections-changed': Record<string, never>;
-  'aka://queue-changed': ApprovalRequest[];
-  'aka://rules-changed': Record<string, never>;
+  'aka://wirings-changed': Record<string, never>;
   'aka://sessions-changed': Record<string, never>;
   'aka://settings-changed': Record<string, never>;
   'aka://open-settings': Record<string, never>;
@@ -264,7 +199,6 @@ declare global {
         ): Promise<Unlisten>;
       };
     };
-    __mockApproval?: (kind?: 'http' | 'post' | 'ssh', ttlMs?: number) => void;
     tippy?: {
       delegate(
         target: string,

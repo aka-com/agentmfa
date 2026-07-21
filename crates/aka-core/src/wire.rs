@@ -85,15 +85,8 @@ pub enum ErrorReason {
     RequestTooLarge,
     RequestIdMismatch,
     OutcomeNotReplayable,
-    // Connection proposals.
-    InvalidProposal,
-    ProposalAlreadyPending,
-    ConnectionExists,
-    SecretNameTaken,
-    // Policy and approval outcomes.
-    DeniedByUser,
+    // Policy outcomes.
     DeniedByPolicy,
-    ApprovalTimeout,
     // Rate limits and budgets.
     RateLimited,
     IdempotencyCapacity,
@@ -120,7 +113,7 @@ pub enum ErrorReason {
 
 impl ErrorReason {
     /// Every registered reason, for exhaustiveness checks and docs.
-    pub const ALL: [ErrorReason; 43] = [
+    pub const ALL: [ErrorReason; 37] = [
         ErrorReason::MissingToken,
         ErrorReason::InvalidToken,
         ErrorReason::TokenExpired,
@@ -139,13 +132,7 @@ impl ErrorReason {
         ErrorReason::RequestTooLarge,
         ErrorReason::RequestIdMismatch,
         ErrorReason::OutcomeNotReplayable,
-        ErrorReason::InvalidProposal,
-        ErrorReason::ProposalAlreadyPending,
-        ErrorReason::ConnectionExists,
-        ErrorReason::SecretNameTaken,
-        ErrorReason::DeniedByUser,
         ErrorReason::DeniedByPolicy,
-        ErrorReason::ApprovalTimeout,
         ErrorReason::RateLimited,
         ErrorReason::IdempotencyCapacity,
         ErrorReason::TicketSessionLimit,
@@ -186,13 +173,7 @@ impl ErrorReason {
             ErrorReason::RequestTooLarge => "request_too_large",
             ErrorReason::RequestIdMismatch => "request_id_mismatch",
             ErrorReason::OutcomeNotReplayable => "outcome_not_replayable",
-            ErrorReason::InvalidProposal => "invalid_proposal",
-            ErrorReason::ProposalAlreadyPending => "proposal_already_pending",
-            ErrorReason::ConnectionExists => "connection_exists",
-            ErrorReason::SecretNameTaken => "secret_name_taken",
-            ErrorReason::DeniedByUser => "denied_by_user",
             ErrorReason::DeniedByPolicy => "denied_by_policy",
-            ErrorReason::ApprovalTimeout => "approval_timeout",
             ErrorReason::RateLimited => "rate_limited",
             ErrorReason::IdempotencyCapacity => "idempotency_capacity",
             ErrorReason::TicketSessionLimit => "ticket_session_limit",
@@ -254,86 +235,6 @@ impl Serialize for AuthScheme {
     }
 }
 
-/// How approval decisions reach the agent. Advertised as `approval_modes`
-/// in the manifest. ABP/0 defines only the blocking mode; an async mode
-/// (submit, then poll or subscribe) would be a new flag, not a change to
-/// this one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ApprovalMode {
-    /// Held-open requests: the capability call does not respond until the
-    /// request reaches a terminal [`ApprovalState`].
-    Blocking,
-}
-
-impl ApprovalMode {
-    pub const ALL: [ApprovalMode; 1] = [ApprovalMode::Blocking];
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            ApprovalMode::Blocking => "blocking",
-        }
-    }
-}
-
-impl Serialize for ApprovalMode {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-/// The approval lifecycle (ABP lifecycle registry). Every capability
-/// request occupies exactly one state:
-///
-/// ```text
-/// pending ──allow──▶ executing ──▶ executed   (exactly one execution)
-///    │
-///    ├──deny────────▶ denied     (user or policy; reason names which)
-///    ├──timeout─────▶ expired    (approval window elapsed; auto-denied)
-///    └──abandon─────▶ abandoned  (no waiter left; never executed)
-/// ```
-///
-/// `executed`, `denied`, `expired`, and `abandoned` are terminal. On the
-/// blocking binding, abandonment is defined by waiter liveness: a parked
-/// request whose every attached client connection has closed is abandoned
-/// and MUST NOT be executed. A future non-blocking binding must define its
-/// own abandonment trigger (e.g. an explicit TTL) but keeps these states
-/// and transitions unchanged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ApprovalState {
-    Pending,
-    Executing,
-    Executed,
-    Denied,
-    Expired,
-    Abandoned,
-}
-
-impl ApprovalState {
-    pub const ALL: [ApprovalState; 6] = [
-        ApprovalState::Pending,
-        ApprovalState::Executing,
-        ApprovalState::Executed,
-        ApprovalState::Denied,
-        ApprovalState::Expired,
-        ApprovalState::Abandoned,
-    ];
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            ApprovalState::Pending => "pending",
-            ApprovalState::Executing => "executing",
-            ApprovalState::Executed => "executed",
-            ApprovalState::Denied => "denied",
-            ApprovalState::Expired => "expired",
-            ApprovalState::Abandoned => "abandoned",
-        }
-    }
-}
-
-impl Serialize for ApprovalState {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,8 +257,8 @@ mod tests {
     #[test]
     fn vocabulary_serializes_as_bare_strings() {
         assert_eq!(
-            serde_json::to_string(&ErrorReason::DeniedByUser).unwrap(),
-            "\"denied_by_user\""
+            serde_json::to_string(&ErrorReason::DeniedByPolicy).unwrap(),
+            "\"denied_by_policy\""
         );
         assert_eq!(
             serde_json::to_string(&AuthScheme::Bearer).unwrap(),
@@ -366,14 +267,6 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&MissingTokenCause::AuthorizationHeaderAbsent).unwrap(),
             "\"authorization_header_absent\""
-        );
-        assert_eq!(
-            serde_json::to_string(&ApprovalMode::Blocking).unwrap(),
-            "\"blocking\""
-        );
-        assert_eq!(
-            serde_json::to_string(&ApprovalState::Abandoned).unwrap(),
-            "\"abandoned\""
         );
     }
 }

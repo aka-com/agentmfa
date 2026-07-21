@@ -11,17 +11,12 @@
 //!   app's Secrets and Connections tabs — with the same validation, so a
 //!   `serve --root` harness never hand-writes (sealed) store files.
 
-use std::io::{IsTerminal as _, Write as _};
 use std::ops::Deref;
-use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::FileTypeExt as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
-use aka_core::approvals::{ApprovalKind, ApprovalRequest};
-use aka_core::broker::{Broker, DecisionOptions, UiDecision};
+use aka_core::broker::Broker;
 use aka_core::config::BrokerConfig;
 use aka_core::daemon;
 use aka_core::daemon::wellknown;
@@ -29,10 +24,7 @@ use aka_core::error::CoreError;
 use aka_core::events::BrokerEvents;
 use aka_core::paths::{BrokerInstanceLock, Paths};
 use aka_core::store::{ConnectionSpec, Store};
-use aka_core::types::{
-    ConfirmationMethod, ConnectionConfig, ConnectionKind, DecisionContext, DecisionSurface,
-    PgSslMode, SecretMeta, SecretValue,
-};
+use aka_core::types::{ConfirmationMethod, ConnectionConfig, PgSslMode, SecretMeta, SecretValue};
 use aka_core::vault::{platform_vault, platform_vault_for_root, SecretVault};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use zeroize::Zeroizing;
@@ -73,16 +65,14 @@ enum Command {
         #[arg(long)]
         root: Option<PathBuf>,
     },
-    /// Run the broker headless with a terminal approver (no desktop UI).
+    /// Run the broker headless (no desktop UI). Agents register instantly;
+    /// wire them to connections from the desktop app, or rely on the
+    /// first-agent bootstrap.
     Serve {
         /// Use an isolated root dir (data + socket under it) instead of the
         /// default per-user locations. Handy for testing.
         #[arg(long)]
         root: Option<PathBuf>,
-        /// Auto-approve everything (⚠ DANGER: for CI/local demos only; the
-        /// whole point of the broker is human approval).
-        #[arg(long)]
-        yes: bool,
     },
     /// Manage secrets from the terminal (dev/headless use; the desktop app
     /// is the primary interface).
@@ -199,7 +189,7 @@ fn main() {
                 wellknown::instructions(&BrokerConfig::default(), &doc_paths(root))
             );
         }
-        Command::Serve { root, yes } => cmd_serve(root, yes),
+        Command::Serve { root } => cmd_serve(root),
         Command::Secret {
             command:
                 SecretCommand::Add {
@@ -550,30 +540,11 @@ fn cmd_skill(write: bool, path: Option<PathBuf>, user: bool, root: Option<PathBu
     eprintln!("wrote {}", path.display());
 }
 
-/// A terminal approver: prints each prompt and reads a decision from stdin.
-struct CliEvents {
-    tx: std::sync::mpsc::Sender<ApprovalRequest>,
-    /// `--yes` mode: confirmations are explicitly waived, not interactive.
-    auto_yes: bool,
-}
-
-impl CliEvents {
-    fn confirmation(&self) -> ConfirmationMethod {
-        if self.auto_yes {
-            ConfirmationMethod::Waived
-        } else {
-            // The decision the human just typed at the interactive prompt
-            // *is* the acknowledgement; there is no second gate to show.
-            ConfirmationMethod::Terminal
-        }
-    }
-}
+/// Headless events: the terminal session that launched `serve` stands in
+/// for the app's native confirmation gates.
+struct CliEvents;
 
 impl BrokerEvents for CliEvents {
-    fn prompt_raised(&self, request: &ApprovalRequest) {
-        let _ = self.tx.send(request.clone());
-    }
-
     fn confirm_secret_read(&self, secret: &SecretMeta) -> bool {
         eprintln!(
             "  secret read re-auth requested for {} (headless CLI allows this dev path)",
@@ -582,20 +553,12 @@ impl BrokerEvents for CliEvents {
         true
     }
 
-    fn confirm_decision(
-        &self,
-        _request: &ApprovalRequest,
-        _decision: UiDecision,
-    ) -> Option<ConfirmationMethod> {
-        Some(self.confirmation())
-    }
-
     fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
-        Some(self.confirmation())
+        Some(ConfirmationMethod::Terminal)
     }
 }
 
-fn cmd_serve(root: Option<PathBuf>, auto_yes: bool) {
+fn cmd_serve(root: Option<PathBuf>) {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -621,9 +584,7 @@ fn cmd_serve(root: Option<PathBuf>, auto_yes: bool) {
         Err(e) => fail("could not open the secret vault", &e),
     };
 
-    let (tx, rx) = std::sync::mpsc::channel::<ApprovalRequest>();
-    let events: Arc<dyn BrokerEvents> = Arc::new(CliEvents { tx, auto_yes });
-
+    let events: Arc<dyn BrokerEvents> = Arc::new(CliEvents);
     let broker: Arc<Broker> =
         match runtime.block_on(Broker::new(paths, vault, BrokerConfig::default(), events)) {
             Ok(broker) => broker,
@@ -643,315 +604,15 @@ fn cmd_serve(root: Option<PathBuf>, auto_yes: bool) {
         "  skill file: `aka skill --write` in a repo (or --write --user) \
          teaches agents this broker"
     );
-    if auto_yes {
-        eprintln!("  ⚠ --yes: auto-approving every request (no human in the loop)");
-    } else {
-        let access_duration = format_duration(broker.config.access_grant_ttl);
-        eprintln!(
-            "  approve prompts below with: [a]llow {access_duration} · allow [o]nce · allow [f]orever · [d]eny"
-        );
-    }
+    eprintln!("  agents register instantly; wire them to connections in the app");
     eprintln!("  Ctrl-C to quit.\n");
 
-    // Catch Ctrl-C inside Tokio so the daemon handle gets a normal Drop and
-    // can remove only the control-socket inode it owns. Polling with a short
-    // timeout wakes the otherwise blocking std channel when no approvals are
-    // arriving.
-    let stopping = Arc::new(AtomicBool::new(false));
-    let signal_flag = stopping.clone();
-    runtime.spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            signal_flag.store(true, Ordering::Release);
-        }
+    // Block until Ctrl-C, then drop the daemon handle so it removes only
+    // the control-socket inode it owns.
+    runtime.block_on(async {
+        let _ = tokio::signal::ctrl_c().await;
     });
-
-    // Terminal approval loop on the main thread.
-    while !stopping.load(Ordering::Acquire) {
-        let request = match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(request) => request,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-        };
-        let decided = if auto_yes {
-            if request.kind == ApprovalKind::Propose {
-                // A proposal needs a human-typed credential; --yes has none.
-                eprintln!("  ⚠ --yes cannot supply a proposal credential; denying");
-                Some((UiDecision::Deny, None))
-            } else {
-                Some((UiDecision::AllowOnce, None))
-            }
-        } else {
-            prompt_decision_until_shutdown(
-                &request,
-                broker.config.access_grant_ttl,
-                stopping.clone(),
-            )
-        };
-        let Some((decision, proposal_credential)) = decided else {
-            break;
-        };
-        let ctx = DecisionContext::local(DecisionSurface::Cli);
-        let options = DecisionOptions {
-            proposal_credential,
-        };
-        if let Err(e) = broker.decide_with_options(&request.id, decision, options, &ctx) {
-            eprintln!("  (decision failed: {e})");
-        }
-    }
     drop(daemon);
-}
-
-/// Keep terminal input off the shutdown-owning thread. Once Tokio installs a
-/// SIGINT handler, a blocking `stdin.read_line()` is not guaranteed to wake on
-/// Ctrl-C; polling this result channel lets the main thread drop the daemon
-/// promptly while the process tears down the detached input thread.
-fn prompt_decision_until_shutdown(
-    request: &ApprovalRequest,
-    access_grant_ttl: Duration,
-    stopping: Arc<AtomicBool>,
-) -> Option<(UiDecision, Option<aka_core::types::SecretValue>)> {
-    if stopping.load(Ordering::Acquire) {
-        return None;
-    }
-    let request = request.clone();
-    let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    std::thread::spawn(move || {
-        let _ = tx.send(prompt_decision(&request, access_grant_ttl));
-    });
-    wait_for_decision_or_shutdown(rx, stopping)
-}
-
-fn wait_for_decision_or_shutdown(
-    rx: std::sync::mpsc::Receiver<(UiDecision, Option<aka_core::types::SecretValue>)>,
-    stopping: Arc<AtomicBool>,
-) -> Option<(UiDecision, Option<aka_core::types::SecretValue>)> {
-    loop {
-        if stopping.load(Ordering::Acquire) {
-            return None;
-        }
-        match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(decision) => return Some(decision),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                return Some((UiDecision::Deny, None))
-            }
-        }
-    }
-}
-
-fn prompt_decision(
-    req: &ApprovalRequest,
-    access_grant_ttl: Duration,
-) -> (UiDecision, Option<aka_core::types::SecretValue>) {
-    eprintln!("── approval required ──────────────────────────────");
-    eprintln!("  agent:   {}", req.agent);
-    if let Some(conn) = &req.connection {
-        eprintln!(
-            "  connection: {} ({} · {})",
-            conn.name,
-            conn.kind.as_str(),
-            conn.target
-        );
-        if matches!(
-            req.kind,
-            ApprovalKind::Pg | ApprovalKind::Ws | ApprovalKind::Ssh
-        ) {
-            eprintln!("  scope: all connects within the 60 s ticket window");
-        }
-    }
-    eprintln!("  action:  {}", req.action);
-    if let Some(http) = &req.http {
-        if http.mutating {
-            eprintln!(
-                "  ⚠ mutating {}, headers: {}",
-                http.method,
-                http.headers.len()
-            );
-            if let Some(body) = &http.body_preview {
-                eprintln!("  body: {}", body.lines().next().unwrap_or(""));
-            }
-        }
-    }
-    if let Some(ssh) = &req.ssh {
-        eprintln!(
-            "  ⚠ first connection to {}:{} — trust this host key?",
-            ssh.host, ssh.port
-        );
-        eprintln!("      {} ({})", ssh.observed_fingerprint, ssh.algorithm);
-        eprintln!("      verify it out-of-band (e.g. `ssh-keygen -lf` on the server)");
-    }
-    if let Some(proposal) = &req.proposal {
-        eprintln!(
-            "  proposed service: {} ({} · {})",
-            proposal.name,
-            proposal.kind.as_str(),
-            proposal.target
-        );
-        if let Some(tls) = &proposal.tls {
-            eprintln!("  TLS mode: {tls}");
-        }
-        if let Some(template) = &proposal.template {
-            eprintln!("  auth template: {template}");
-        }
-        if let Some(destination) = &proposal.destination {
-            eprintln!("  SSH invocation: ssh {destination}");
-        }
-        eprintln!(
-            "  approving will ask you to type the credential (saved as {})",
-            proposal.credential_name
-        );
-    }
-    // Proposals and host-key trust are yes/no decisions: no session or
-    // standing-rule shapes (the broker coerces them to allow-once anyway).
-    let binary_prompt = req.kind == ApprovalKind::Propose || req.ssh.is_some();
-    let decision = loop {
-        eprint!("  decide [a/o/f/d]: ");
-        let _ = std::io::stderr().flush();
-        let mut line = String::new();
-        if std::io::stdin().read_line(&mut line).is_err() || line.is_empty() {
-            break UiDecision::Deny; // EOF → safe default
-        }
-        match line.trim() {
-            "a" | "allow" if binary_prompt => break UiDecision::AllowOnce,
-            "a" | "allow" => break UiDecision::AllowSession,
-            "o" | "once" => break UiDecision::AllowOnce,
-            "f" | "forever" if !binary_prompt => break UiDecision::AlwaysAllow,
-            "d" | "deny" | "" => break UiDecision::Deny,
-            _ if req.kind == ApprovalKind::Propose => {
-                eprintln!("  ? enter a (save this service) or d (deny)")
-            }
-            _ if req.ssh.is_some() => {
-                eprintln!("  ? enter a (trust this host key) or d (deny)")
-            }
-            _ => eprintln!(
-                "  ? enter a (allow {}), o (allow once), f (allow forever), or d (deny)",
-                format_duration(access_grant_ttl)
-            ),
-        }
-    };
-    // A proposal approval needs the credential the wire schema deliberately
-    // cannot carry: the human types it here, into the trusted terminal.
-    if req.kind == ApprovalKind::Propose && decision != UiDecision::Deny {
-        let Some(proposal) = req.proposal.as_ref() else {
-            return (UiDecision::Deny, None);
-        };
-        match read_proposal_credential(proposal) {
-            Ok(value) => return (decision, Some(value)),
-            Err(error) => {
-                eprintln!("  ! could not read credential: {error}");
-                return (UiDecision::Deny, None);
-            }
-        }
-    }
-    (decision, None)
-}
-
-/// Temporarily suppress terminal echo while a user types or pastes a secret.
-/// Piped stdin is left alone; only a real terminal has echo state to change.
-struct TerminalEchoGuard {
-    fd: std::os::fd::RawFd,
-    original: libc::termios,
-}
-
-impl TerminalEchoGuard {
-    fn disable(fd: std::os::fd::RawFd) -> std::io::Result<Self> {
-        let mut original = std::mem::MaybeUninit::<libc::termios>::uninit();
-        // SAFETY: `original` points to valid writable storage and `fd` is the
-        // live stdin terminal descriptor for the duration of this guard.
-        if unsafe { libc::tcgetattr(fd, original.as_mut_ptr()) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        // SAFETY: tcgetattr initialized the value after returning success.
-        let original = unsafe { original.assume_init() };
-        let mut hidden = original;
-        hidden.c_lflag &= !libc::ECHO;
-        // SAFETY: both pointers are valid termios values for this descriptor.
-        if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &hidden) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(Self { fd, original })
-    }
-}
-
-impl Drop for TerminalEchoGuard {
-    fn drop(&mut self) {
-        // SAFETY: restoring a previously returned termios value on the same
-        // descriptor. Failure cannot be reported from Drop.
-        let _ = unsafe { libc::tcsetattr(self.fd, libc::TCSANOW, &self.original) };
-    }
-}
-
-fn read_proposal_credential(
-    proposal: &aka_core::approvals::ProposalView,
-) -> std::io::Result<SecretValue> {
-    let stdin = std::io::stdin();
-    let is_terminal = stdin.is_terminal();
-    if proposal.kind == ConnectionKind::Ssh {
-        eprintln!(
-            "  paste the OpenSSH private key for {}; input ends at its END line",
-            proposal.credential_name
-        );
-    } else {
-        eprint!("  value for {}: ", proposal.credential_name);
-        std::io::stderr().flush()?;
-    }
-    let echo_guard = if is_terminal {
-        Some(TerminalEchoGuard::disable(stdin.as_raw_fd())?)
-    } else {
-        None
-    };
-    let result =
-        read_proposal_credential_from(&mut stdin.lock(), proposal.kind == ConnectionKind::Ssh);
-    drop(echo_guard);
-    if is_terminal {
-        eprintln!();
-    }
-    result
-}
-
-fn read_proposal_credential_from(
-    reader: &mut impl std::io::BufRead,
-    multiline_ssh: bool,
-) -> std::io::Result<SecretValue> {
-    let mut value = SecretValue::new(String::new());
-    if !multiline_ssh {
-        if reader.read_line(&mut value)? == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "credential input ended before a value was read",
-            ));
-        }
-        while value.ends_with(['\r', '\n']) {
-            value.pop();
-        }
-        return Ok(value);
-    }
-
-    loop {
-        let start = value.len();
-        if reader.read_line(&mut value)? == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "SSH private key input ended before -----END OPENSSH PRIVATE KEY-----",
-            ));
-        }
-        if value[start..].trim_end() == "-----END OPENSSH PRIVATE KEY-----" {
-            return Ok(value);
-        }
-    }
-}
-
-fn format_duration(duration: Duration) -> String {
-    let seconds = duration.as_secs();
-    if seconds > 0 && seconds.is_multiple_of(3_600) {
-        let hours = seconds / 3_600;
-        format!("{hours} hour{}", if hours == 1 { "" } else { "s" })
-    } else if seconds > 0 && seconds.is_multiple_of(60) {
-        let minutes = seconds / 60;
-        format!("{minutes} minute{}", if minutes == 1 { "" } else { "s" })
-    } else {
-        format!("{seconds} second{}", if seconds == 1 { "" } else { "s" })
-    }
 }
 
 #[cfg(test)]
@@ -959,50 +620,6 @@ mod tests {
     use super::*;
     use aka_core::events::NoopEvents;
     use aka_core::vault::MemoryVault;
-
-    #[test]
-    fn proposal_credential_reader_handles_single_and_multiline_values() {
-        let mut single = std::io::Cursor::new(b"token-value\r\n".to_vec());
-        let value = read_proposal_credential_from(&mut single, false).unwrap();
-        assert_eq!(&*value, "token-value");
-
-        let key = concat!(
-            "-----BEGIN OPENSSH PRIVATE KEY-----\n",
-            "payload\n",
-            "-----END OPENSSH PRIVATE KEY-----\n",
-            "unused\n"
-        );
-        let mut multiline = std::io::Cursor::new(key.as_bytes().to_vec());
-        let value = read_proposal_credential_from(&mut multiline, true).unwrap();
-        assert!(value.ends_with("-----END OPENSSH PRIVATE KEY-----\n"));
-        assert!(!value.contains("unused"));
-    }
-
-    #[test]
-    fn access_duration_uses_the_configured_value() {
-        assert_eq!(format_duration(Duration::from_secs(90)), "90 seconds");
-        assert_eq!(format_duration(Duration::from_secs(15 * 60)), "15 minutes");
-        assert_eq!(format_duration(Duration::from_secs(60 * 60)), "1 hour");
-    }
-
-    #[test]
-    fn terminal_decision_wait_stops_without_stdin_finishing() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let stopping = Arc::new(AtomicBool::new(false));
-        let signal_flag = stopping.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(20));
-            signal_flag.store(true, Ordering::Release);
-            // Keep the decision channel connected until after shutdown is
-            // visible, modelling a prompt thread blocked in read_line().
-            std::thread::sleep(Duration::from_secs(1));
-            drop(tx);
-        });
-
-        let started = std::time::Instant::now();
-        assert_eq!(wait_for_decision_or_shutdown(rx, stopping), None);
-        assert!(started.elapsed() < Duration::from_millis(750));
-    }
 
     #[test]
     fn offline_store_writer_respects_the_broker_lease() {

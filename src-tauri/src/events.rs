@@ -1,32 +1,24 @@
-//! Core → webview event bridge and window/tray choreography.
+//! Core → webview event bridge.
 //!
 //! The Rust core owns every state transition; this observer turns
-//! them into Tauri events the webview re-renders from, updates the
-//! tray pending-count, raises the always-on-top approval window on
-//! every prompt, and rings the advisory notification doorbell.
+//! them into Tauri events the webview re-renders from.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use aka_core::approvals::{ApprovalKind, ApprovalRequest};
 use aka_core::audit::AuditEntry;
-use aka_core::broker::UiDecision;
 use aka_core::events::BrokerEvents;
 use aka_core::types::{ConfirmationMethod, PgSslMode, SecretMeta};
-use tauri::{AppHandle, Emitter, Manager};
-use tauri_plugin_notification::NotificationExt;
+use tauri::{AppHandle, Emitter};
 
-use crate::dto::{ActivityDto, ApprovalDto};
+use crate::dto::ActivityDto;
 
-pub const EVT_QUEUE: &str = "aka://queue-changed";
 pub const EVT_SESSIONS: &str = "aka://sessions-changed";
 pub const EVT_AGENTS: &str = "aka://agents-changed";
-pub const EVT_RULES: &str = "aka://rules-changed";
+pub const EVT_WIRINGS: &str = "aka://wirings-changed";
 pub const EVT_CONNECTIONS: &str = "aka://connections-changed";
 pub const EVT_ACTIVITY: &str = "aka://activity-appended";
 pub const EVT_ACTIVITY_CHANGED: &str = "aka://activity-changed";
-
-pub const APPROVAL_WINDOW: &str = "approval";
 
 fn copy_authorization_reason(duration: Duration) -> String {
     let seconds = duration.as_secs();
@@ -41,116 +33,15 @@ fn copy_authorization_reason(duration: Duration) -> String {
 
 pub struct TauriEvents {
     app: AppHandle,
-    access_duration_seconds: u64,
 }
 
 impl TauriEvents {
-    pub fn new(app: AppHandle, access_duration_seconds: u64) -> Self {
-        Self {
-            app,
-            access_duration_seconds,
-        }
-    }
-
-    fn update_tray_badge(&self, count: usize) {
-        // NSStatusItem has no badge API and an accessory app has no Dock
-        // icon to badge, so the pending count is rendered into the
-        // status-item title text. tray-icon's macOS implementation ignores
-        // `None`, so use an explicit empty title to clear a stale count.
-        if let Some(tray) = self.app.tray_by_id("main") {
-            let title = if count == 0 {
-                String::new()
-            } else {
-                count.to_string()
-            };
-            let _ = tray.set_title(Some(title.as_str()));
-        }
-    }
-
-    fn set_approval_visible(&self, visible: bool) {
-        if let Some(win) = self.app.get_webview_window(APPROVAL_WINDOW) {
-            if visible {
-                let _ = win.show();
-                let _ = win.set_focus();
-            } else {
-                let _ = win.hide();
-            }
-        }
-    }
-
-    fn access_duration(&self) -> String {
-        if self.access_duration_seconds % 60 == 0 {
-            let minutes = self.access_duration_seconds / 60;
-            format!("{minutes} minute{}", if minutes == 1 { "" } else { "s" })
-        } else {
-            format!("{} seconds", self.access_duration_seconds)
-        }
-    }
-
-    fn connection_name<'a>(&self, request: &'a ApprovalRequest) -> &'a str {
-        request
-            .connection
-            .as_ref()
-            .map(|connection| connection.name.as_str())
-            .unwrap_or("this service")
-    }
-
-    fn request_summary(&self, request: &ApprovalRequest) -> String {
-        let connection = self.connection_name(request);
-        match request.kind {
-            ApprovalKind::Http if request.http.as_ref().is_some_and(|http| !http.mutating) => {
-                format!("{} wants to fetch data from {connection}", request.agent)
-            }
-            ApprovalKind::Http => {
-                format!(
-                    "{} wants to make a request through {connection}",
-                    request.agent
-                )
-            }
-            ApprovalKind::Ssh if request.ssh.is_some() => {
-                format!("First connection for {connection}: verify the server's host key")
-            }
-            ApprovalKind::Ssh => format!("{} wants to sign in through {connection}", request.agent),
-            ApprovalKind::Propose => {
-                let name = request
-                    .proposal
-                    .as_ref()
-                    .map(|proposal| proposal.name.as_str())
-                    .unwrap_or("a service");
-                format!("{} wants to add a new service: {name}", request.agent)
-            }
-            ApprovalKind::Pg | ApprovalKind::Ws => {
-                format!("{} wants to connect to {connection}", request.agent)
-            }
-        }
+    pub fn new(app: AppHandle) -> Self {
+        Self { app }
     }
 }
 
 impl BrokerEvents for TauriEvents {
-    fn queue_changed(&self, queue: &[ApprovalRequest]) {
-        let dtos: Vec<ApprovalDto> = queue
-            .iter()
-            .cloned()
-            .map(|request| ApprovalDto::new(request, self.access_duration_seconds))
-            .collect();
-        self.update_tray_badge(queue.len());
-        self.set_approval_visible(!queue.is_empty());
-        let _ = self.app.emit(EVT_QUEUE, &dtos);
-    }
-
-    fn prompt_raised(&self, request: &ApprovalRequest) {
-        // Guaranteed path is the tray badge + auto-raised window; the
-        // notification is a best-effort doorbell.
-        self.set_approval_visible(true);
-        let _ = self
-            .app
-            .notification()
-            .builder()
-            .title("AKA Desktop")
-            .body(self.request_summary(request))
-            .show();
-    }
-
     fn sessions_changed(&self) {
         let _ = self.app.emit(EVT_SESSIONS, ());
     }
@@ -159,8 +50,8 @@ impl BrokerEvents for TauriEvents {
         let _ = self.app.emit(EVT_AGENTS, ());
     }
 
-    fn rules_changed(&self) {
-        let _ = self.app.emit(EVT_RULES, ());
+    fn wirings_changed(&self) {
+        let _ = self.app.emit(EVT_WIRINGS, ());
     }
 
     fn connections_changed(&self) {
@@ -179,61 +70,6 @@ impl BrokerEvents for TauriEvents {
     fn confirm_secret_copy(&self, _secret: &SecretMeta, duration: Duration) -> bool {
         let reason = copy_authorization_reason(duration);
         crate::auth::confirm(&reason).is_ok()
-    }
-
-    /// The core-demanded gate on confirmation-required decisions: the
-    /// LocalAuthentication sheet, phrased for what is being decided.
-    fn confirm_decision(
-        &self,
-        request: &ApprovalRequest,
-        decision: UiDecision,
-    ) -> Option<ConfirmationMethod> {
-        let reason = match decision {
-            UiDecision::AlwaysAllow => {
-                let connection = self.connection_name(request);
-                match request.kind {
-                    ApprovalKind::Http => format!(
-                        "Let {} make any request through {} without asking again",
-                        request.agent, connection
-                    ),
-                    ApprovalKind::Propose => proposal_confirmation(request),
-                    ApprovalKind::Pg | ApprovalKind::Ws | ApprovalKind::Ssh => format!(
-                        "Let {} open and use {} without asking again",
-                        request.agent, connection
-                    ),
-                }
-            }
-            UiDecision::AllowSession => {
-                let connection = self.connection_name(request);
-                let duration = self.access_duration();
-                match request.kind {
-                    ApprovalKind::Http
-                        if request.http.as_ref().is_some_and(|http| !http.mutating) =>
-                    {
-                        format!(
-                            "Let {} fetch data from {} for {}",
-                            request.agent, connection, duration
-                        )
-                    }
-                    ApprovalKind::Http => format!(
-                        "Let {} make any request through {} for {}",
-                        request.agent, connection, duration
-                    ),
-                    ApprovalKind::Pg | ApprovalKind::Ws | ApprovalKind::Ssh => format!(
-                        "Let {} open and use {} for {}",
-                        request.agent, connection, duration
-                    ),
-                    ApprovalKind::Propose => proposal_confirmation(request),
-                }
-            }
-            _ => match request.kind {
-                ApprovalKind::Propose => proposal_confirmation(request),
-                _ => format!("Allow {}", request.action),
-            },
-        };
-        crate::auth::confirm(&reason)
-            .ok()
-            .map(|_| ConfirmationMethod::OsAuthentication)
     }
 
     /// The core-demanded gate on high-consequence configuration actions.
@@ -273,29 +109,8 @@ impl BrokerEvents for TauriEvents {
 }
 
 /// Convenience for the shell to construct the observer as a trait object.
-pub fn observer(app: AppHandle, access_duration_seconds: u64) -> Arc<dyn BrokerEvents> {
-    Arc::new(TauriEvents::new(app, access_duration_seconds))
-}
-
-/// Native-confirmation copy for saving an agent-proposed service. Names the
-/// full destination so the OS prompt matches what the window showed.
-fn proposal_confirmation(request: &aka_core::approvals::ApprovalRequest) -> String {
-    match &request.proposal {
-        Some(proposal) => {
-            let mut destination = proposal.target.clone();
-            if let Some(ssh_destination) = &proposal.destination {
-                destination.push_str(&format!(", SSH invocation ssh {ssh_destination}"));
-            }
-            if let Some(tls) = &proposal.tls {
-                destination.push_str(&format!(", TLS {tls}"));
-            }
-            format!(
-                "Save service \u{201c}{}\u{201d} ({destination}) proposed by {}",
-                proposal.name, request.agent
-            )
-        }
-        None => format!("Save the service proposed by {}", request.agent),
-    }
+pub fn observer(app: AppHandle) -> Arc<dyn BrokerEvents> {
+    Arc::new(TauriEvents::new(app))
 }
 
 #[cfg(test)]

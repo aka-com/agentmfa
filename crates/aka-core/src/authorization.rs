@@ -1,18 +1,16 @@
 //! Execution-scoped authorization for broker-side secret reads.
 //!
-//! A user decision and the credential reads performed for that decision are
-//! one interaction. The approval executor receives a fresh authorization;
-//! a separately confirmed decision marks it satisfied up front, while an
-//! ordinary approval lets the first vault read satisfy it. Data-plane tickets
-//! carry the same authorization into deferred or repeated session dials.
+//! Agent-plane executions run with secret reads pre-authorized: the wiring
+//! is the authorization, so a wired call never raises a native prompt.
+//! UI-initiated reads (reveal, copy) run outside any execution scope and
+//! keep their own per-operation confirmation behavior. Data-plane tickets
+//! carry the execution's authorization into deferred or repeated session
+//! dials.
 
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
 
 use tokio::sync::Mutex;
-use uuid::Uuid;
 
 use crate::{CoreError, Result};
 
@@ -25,24 +23,6 @@ enum ConfirmationState {
 #[derive(Clone)]
 pub(crate) struct SecretReadAuthorization {
     state: Arc<Mutex<ConfirmationState>>,
-    grant: Option<GrantAuthorization>,
-}
-
-#[derive(Clone)]
-pub(crate) struct GrantAuthorization {
-    pub(crate) id: Uuid,
-    pub(crate) expires_at: Instant,
-    revoked: Arc<AtomicBool>,
-}
-
-impl GrantAuthorization {
-    pub(crate) fn is_active(&self) -> bool {
-        !self.revoked.load(Ordering::Acquire) && Instant::now() < self.expires_at
-    }
-
-    fn revoke(&self) {
-        self.revoked.store(true, Ordering::Release);
-    }
 }
 
 impl SecretReadAuthorization {
@@ -53,28 +33,6 @@ impl SecretReadAuthorization {
             } else {
                 ConfirmationState::Pending
             })),
-            grant: None,
-        }
-    }
-
-    pub(crate) fn for_grant(id: Uuid, expires_at: Instant) -> Self {
-        Self {
-            state: Arc::new(Mutex::new(ConfirmationState::Confirmed)),
-            grant: Some(GrantAuthorization {
-                id,
-                expires_at,
-                revoked: Arc::new(AtomicBool::new(false)),
-            }),
-        }
-    }
-
-    pub(crate) fn grant(&self) -> Option<GrantAuthorization> {
-        self.grant.clone()
-    }
-
-    pub(crate) fn revoke_grant(&self) {
-        if let Some(grant) = &self.grant {
-            grant.revoke();
         }
     }
 }
@@ -83,7 +41,8 @@ tokio::task_local! {
     static CURRENT: SecretReadAuthorization;
 }
 
-/// Run one approval execution under a fresh, narrowly-scoped authorization.
+/// Run one execution under a fresh authorization; `confirmed: true` marks
+/// its secret reads pre-authorized.
 pub(crate) async fn scope<F>(confirmed: bool, future: F) -> F::Output
 where
     F: Future,
@@ -91,17 +50,6 @@ where
     CURRENT
         .scope(SecretReadAuthorization::new(confirmed), future)
         .await
-}
-
-/// Run under a particular authorization, used by active access grants.
-pub(crate) async fn scope_authorization<F>(
-    authorization: SecretReadAuthorization,
-    future: F,
-) -> F::Output
-where
-    F: Future,
-{
-    CURRENT.scope(authorization, future).await
 }
 
 /// Continue an execution authorization across a deferred data-plane dial.
@@ -123,10 +71,6 @@ pub(crate) fn current() -> Option<SecretReadAuthorization> {
     CURRENT.try_with(Clone::clone).ok()
 }
 
-pub(crate) fn current_grant() -> Option<GrantAuthorization> {
-    current().and_then(|authorization| authorization.grant())
-}
-
 /// Confirm at most once within the current execution authorization. With no
 /// execution scope (for example, a user-initiated copy), preserve the normal
 /// per-operation confirmation behavior.
@@ -138,12 +82,6 @@ where
     let Some(authorization) = current() else {
         return confirm().await;
     };
-    if authorization
-        .grant()
-        .is_some_and(|grant| !grant.is_active())
-    {
-        return Err(CoreError::SecretReadNotAuthenticated);
-    }
     let mut state = authorization.state.lock().await;
     match *state {
         ConfirmationState::Confirmed => return Ok(()),
@@ -193,20 +131,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn revoked_grant_cannot_read_a_secret() {
+    async fn preauthorized_scope_never_confirms() {
         let calls = AtomicUsize::new(0);
-        let authorization = SecretReadAuthorization::for_grant(
-            Uuid::new_v4(),
-            Instant::now() + std::time::Duration::from_secs(60),
-        );
-        authorization.revoke_grant();
-        scope_authorization(authorization, async {
+        scope(true, async {
             let result = confirm_once(|| async {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             })
             .await;
-            assert!(matches!(result, Err(CoreError::SecretReadNotAuthenticated)));
+            assert!(result.is_ok());
         })
         .await;
         assert_eq!(calls.load(Ordering::SeqCst), 0);

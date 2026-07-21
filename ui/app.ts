@@ -24,14 +24,12 @@ import type { HostKeyCandidate } from '/src/connection-input';
 import type {
   ActivityEntry,
   AgentSummary,
-  ApprovalRequest,
   CommandArgs,
   CommandName,
   ConnectionInput,
   ConnectionSummary,
   ConnectionType,
-  Decision,
-  PermissionSummary,
+  WiringSummary,
   SecretSummary,
   SessionSummary,
   Settings,
@@ -99,7 +97,6 @@ interface AppState {
   agents: AgentSummary[];
   sessions: SessionSummary[];
   activity: ActivityEntry[];
-  queue: ApprovalRequest[];
   agentSetupInstructions: string;
   brokerInstructions: string;
   settings: Settings;
@@ -113,11 +110,6 @@ interface AppState {
   connAdvancedOpen: boolean;
   connType: ConnectionType;
   confirm: ConfirmState | null;
-  alwaysOpen: boolean;
-  reqDetailOpen: boolean | null;
-  approvalRequestId: string | null;
-  proposalCredential: string;
-  proposalCredentialError: string | null;
   menuOpen: boolean;
   walkthroughMenuOpen: boolean;
   agentMenuOpen: string | null;
@@ -150,7 +142,6 @@ const state: AppState = {
   agents: [],
   sessions: [],
   activity: [],
-  queue: [],
   agentSetupInstructions: '', // short paste-ready setup message (lazy-loaded)
   brokerInstructions: '', // full GET /instructions body (lazy-loaded)
   settings: {
@@ -170,11 +161,6 @@ const state: AppState = {
   connAdvancedOpen: false, // "Advanced" disclosure in the service sheet
   connType: 'api',
   confirm: null,         // {kind, id/name}
-  alwaysOpen: false,
-  reqDetailOpen: null,   // approval payload disclosure override
-  approvalRequestId: null,
-  proposalCredential: '',       // transient; typed into the proposal prompt
-  proposalCredentialError: null,
   menuOpen: false,       // desktop-mode settings popover (gear) open
   walkthroughMenuOpen: false,
   agentMenuOpen: null,   // agent id whose ⋯ options menu is open (Agents tab)
@@ -198,12 +184,10 @@ const root = (): HTMLElement => {
   if (!element) throw new Error('Missing #root element');
   return element;
 };
-let accessExpiryTimer: ReturnType<typeof setTimeout> | null = null;
-
 /* ------------------------------ data loading ----------------------------- */
 type RefreshTarget = 'all' | 'secrets' | 'connections' | 'agents' | 'sessions' |
-  'activity' | 'queue' | 'settings';
-type LoadKey = 'secrets' | 'connections' | 'agents' | 'sessions' | 'activity' | 'queue';
+  'activity' | 'settings';
+type LoadKey = 'secrets' | 'connections' | 'agents' | 'sessions' | 'activity';
 
 async function refresh(which: RefreshTarget = 'all'): Promise<void> {
   const jobs: Promise<void>[] = [];
@@ -214,7 +198,6 @@ async function refresh(which: RefreshTarget = 'all'): Promise<void> {
   if (which === 'all' || which === 'activity') {
     jobs.push(load('activity', 'list_activity', { limit: ACTIVITY_RENDER_LIMIT }));
   }
-  if (which === 'all' || which === 'queue') jobs.push(load('queue', 'get_queue'));
   if (which === 'all' || which === 'settings') jobs.push(loadSettings());
   await Promise.all(jobs);
   render();
@@ -232,7 +215,6 @@ async function load<K extends CommandName>(
       case 'agents': state.agents = result as AgentSummary[]; break;
       case 'sessions': state.sessions = result as SessionSummary[]; break;
       case 'activity': state.activity = result as ActivityEntry[]; break;
-      case 'queue': state.queue = result as ApprovalRequest[]; break;
     }
   } catch (error) {
     console.error(cmd, error);
@@ -247,30 +229,12 @@ async function refreshAgentsView(): Promise<void> {
     load('agents', 'list_agents'),
   ]);
   render();
-  scheduleAccessExpiryRefresh();
-}
-
-function scheduleAccessExpiryRefresh(): void {
-  if (accessExpiryTimer !== null) clearTimeout(accessExpiryTimer);
-  accessExpiryTimer = null;
-  const expiries = state.connections
-    .flatMap((connection) => (connection.permissions || [])
-      .flatMap((permission) => permission.expires_at
-        ? [new Date(permission.expires_at).getTime()]
-        : []))
-    .filter((expiresAt) => Number.isFinite(expiresAt) && expiresAt > Date.now());
-  if (!expiries.length) return;
-  const delay = Math.max(0, Math.min(...expiries) - Date.now() + 50);
-  accessExpiryTimer = setTimeout(() => {
-    accessExpiryTimer = null;
-    if (mode !== 'approval') refreshAgentsView();
-  }, Math.min(delay, 2_147_483_647));
 }
 
 /* --------------------------------- render -------------------------------- */
 // Rebuilding #root from scratch would drop anything the DOM holds that state
 // doesn't: in-progress sheet input and the focused control. Broker events
-// (queue/sessions/activity changes) re-render at arbitrary times, so every
+// (sessions/activity changes) re-render at arbitrary times, so every
 // render first captures open drafts and then puts focus (and any text
 // selection) back where it was.
 function render(capture = true): void {
@@ -284,8 +248,7 @@ function render(capture = true): void {
     ? { start: active.selectionStart, end: active.selectionEnd, dir: active.selectionDirection }
     : null;
 
-  if (mode === 'approval') renderApproval();
-  else if (mode === 'dropdown') renderDropdown();
+  if (mode === 'dropdown') renderDropdown();
   else renderMainWindow();
 
   if (focusId) {
@@ -307,12 +270,6 @@ function render(capture = true): void {
     captureDrafts();
     state.sheetBaseline = connDraftSignature();
   }
-}
-
-function pendingBannerHTML() {
-  if (!state.queue.length) return '';
-  return `<div class="pending-banner"><span>⏳ ${state.queue.length} request${state.queue.length > 1 ? 's' : ''} waiting</span>
-    <button class="btn sm" data-act="open-approval">Review</button></div>`;
 }
 
 const QUICK_SETUP_TYPES: Array<[ConnectionType, string]> = [
@@ -537,42 +494,29 @@ function secretsHTML() {
   return `<table class="sec-table"><tbody>${rows}</tbody></table>`;
 }
 
-/* ---- connections tab ---- */
-function permissionDescription(connection: ConnectionSummary, scope: string): string {
-  if (scope === 'read') return 'Can fetch data';
-  if (connection.type === 'api') return 'Can make any request';
-  return 'Can open and use this service';
-}
-
 /* ---- agents tab ---- */
-// The screen pivots around the broker's core question — what can this agent
-// reach right now? One block per paired agent: an identity card on top, then
-// one row per service stating the agent's current capability in plain words.
-const agentPermissionFor = (a: AgentSummary, c: ConnectionSummary): PermissionSummary | undefined =>
-  (c.permissions || []).find((permission) => permission.agent === a.name &&
-    (!permission.expires_at || new Date(permission.expires_at).getTime() > Date.now()));
-
-function permissionPillHTML(c: ConnectionSummary, permission: PermissionSummary | undefined): string {
-  if (!permission) return '<span class="acc-pill">Asks you each time</span>';
-  if (permission.expires_at) {
-    const minutes = Math.max(1, Math.ceil((new Date(permission.expires_at).getTime() - Date.now()) / 60000));
-    return `<span class="acc-pill granted">${esc(permissionDescription(c, permission.scope))} · ${minutes} min left</span>`;
-  }
-  return `<span class="acc-pill rule">${esc(permissionDescription(c, permission.scope))} · without asking</span>`;
-}
+// The screen pivots around the core question — what can this agent reach?
+// One block per registered agent: an identity card on top, then one row per
+// service with a wire/unwire toggle. Wired = the agent uses the service
+// without prompting; unwired = refused.
+const agentWiringFor = (a: AgentSummary, c: ConnectionSummary): WiringSummary | undefined =>
+  (c.wired_agents || []).find((wiring) => wiring.agent_id === a.id);
 
 function agentServiceRowHTML(a: AgentSummary, c: ConnectionSummary): string {
   const t = TYPES[c.type];
-  const permission = agentPermissionFor(a, c);
+  const wired = !!agentWiringFor(a, c);
   const live = state.sessions.some((s) => s.agent === a.name && s.connection === c.name);
-  const action = !permission ? '' : permission.expires_at
-    ? `<button class="btn ghost sm" aria-label="End access to ${escAttr(c.name)} for ${escAttr(a.name)} now" data-act="del-permission" data-id="${permission.id}">End now</button>`
-    : `<button class="btn ghost sm" aria-label="Require approval again for ${escAttr(a.name)} on ${escAttr(c.name)}" data-act="del-permission" data-id="${permission.id}">Require approval</button>`;
+  const pill = wired
+    ? '<span class="acc-pill rule">Wired · can use this service</span>'
+    : '<span class="acc-pill">Not wired</span>';
+  const action = wired
+    ? `<button class="btn ghost sm" aria-label="Unwire ${escAttr(a.name)} from ${escAttr(c.name)}" data-act="unwire" data-id="${a.id}" data-conn="${c.id}">Unwire</button>`
+    : `<button class="btn ghost sm" aria-label="Wire ${escAttr(a.name)} to ${escAttr(c.name)}" data-act="wire" data-id="${a.id}" data-conn="${c.id}">Wire up</button>`;
   return `<div class="acc-row">
     <span class="badge ${t.cls}">${t.label}</span>
     <div class="acc-svc"><div class="acc-name">${esc(c.name)}${live ? ' <span class="cc-live">● live</span>' : ''}</div>
       <div class="acc-target" title="${escAttr(c.target)}">${esc(c.target)}</div></div>
-    ${permissionPillHTML(c, permission)}${action}</div>`;
+    ${pill}${action}</div>`;
 }
 
 function agentBlockHTML(a: AgentSummary): string {
@@ -628,7 +572,7 @@ function connTileHTML(c: ConnectionSummary): string {
     return `<div class="tile confirm-tile">
       <span class="badge ${t.cls}">${t.label}</span>
       <div class="tile-tx"><b title="${escAttr(c.name)}">${esc(c.name)}</b>
-        <span class="tile-confirm">Delete this service?${(c.permissions || []).some((permission) => !permission.expires_at) ? ' Affected agents will need approval again.' : ''}</span>
+        <span class="tile-confirm">Delete this service?${(c.wired_agents || []).length ? ' Wired agents will lose access.' : ''}</span>
         <span class="tile-confirm-actions"><button class="btn sm" data-act="confirm-cancel">Cancel</button>
           <button class="btn sm danger" data-act="del-conn-confirm" data-id="${c.id}">Delete</button></span></div></div>`;
   }
@@ -777,7 +721,6 @@ function renderMainWindow() {
       </div>
       <div class="dw-main">
         <div class="dw-head"><h2>${tabLabel(state.tab)}</h2>${actionBtn}</div>
-        ${pendingBannerHTML()}
         ${globalSectionsHTML()}
         <div class="content">${tabContentHTML()}</div>
       </div>
@@ -797,7 +740,6 @@ function renderDropdown() {
       <button class="icon-btn" title="Open as a window" aria-label="Open as a window" data-act="mode-window">${ICONS.expand}</button>
       ${walkthroughMenuHTML()}
       <button class="icon-btn" title="Settings" aria-label="Settings" data-act="open-settings">${ICONS.gear}</button></div>
-    ${pendingBannerHTML()}
     <div class="seg">${tabs}</div>
     ${globalSectionsHTML()}
     <div class="content dd-content">${tabContentHTML()}</div>
@@ -1111,8 +1053,8 @@ function connSheet(editing: boolean): string {
         <span class="adv-toggle-icon" aria-hidden="true">${ICONS.chevronDown}</span>Advanced</button>
       ${advOpen ? advancedFields : ''}</div>`;
   }
-  if (editing && conn && (conn.permissions || []).some((permission) => !permission.expires_at)) {
-    fields += `<div class="rule-note">Changing the destination makes affected agents ask for approval again.</div>`;
+  if (editing && conn && (conn.wired_agents || []).length) {
+    fields += `<div class="rule-note">Changing the destination unwires affected agents.</div>`;
   }
   const title = editing ? 'Edit service'
     : d.setupSource === 'import' ? `Review ${connectionTypeLabel(t)} service`
@@ -1145,232 +1087,6 @@ function settingsSheet() {
     <div class="sheet wide"><h3>Settings</h3>
     ${reauthRow}${dockRow}
     <div class="sheet-actions"><button class="btn primary" data-act="sheet-cancel">Done</button></div></div>`;
-}
-
-/* ----------------------------- approval window --------------------------- */
-function durationLabel(seconds: number): string {
-  if (seconds % 60 === 0) {
-    const minutes = seconds / 60;
-    return `${minutes} minute${minutes === 1 ? '' : 's'}`;
-  }
-  return `${seconds} seconds`;
-}
-
-function approvalWindowLabel(req: ApprovalRequest): string {
-  const received = new Date(req.received_at).getTime();
-  const deadline = new Date(req.deadline).getTime();
-  const seconds = Math.max(0, Math.round((deadline - received) / 1000));
-  return durationLabel(seconds);
-}
-
-function approvalHeading(req: ApprovalRequest): string {
-  const name = req.connection ? req.connection.name : 'AKA Desktop';
-  if (req.kind === 'propose') {
-    return `${req.agent} wants to add a new service: ${req.proposal?.name ?? ''}`;
-  }
-  if (req.kind === 'http' && req.http && !req.http.mutating) {
-    return `${req.agent} wants to fetch data from ${name}`;
-  }
-  if (req.kind === 'http') return `${req.agent} wants to make a request through ${name}`;
-  if (req.kind === 'ssh' && req.ssh) return `Trust the host key for ${name}?`;
-  if (req.kind === 'ssh') return `${req.agent} wants to sign in through ${name}`;
-  return `${req.agent} wants to connect to ${name}`;
-}
-
-function temporaryAccessExplanation(req: ApprovalRequest): { duration: string; text: string } {
-  const connection = req.connection ? req.connection.name : 'this service';
-  const access = req.temporary_access || { scope: 'full', duration_seconds: 900 };
-  const duration = durationLabel(access.duration_seconds);
-  if (access.scope === 'read') {
-    return {
-      duration,
-      text: `For ${duration}, ${req.agent} can fetch data from ${connection} without asking again. Requests that may make changes will still ask.`,
-    };
-  }
-  if (req.kind === 'http') {
-    return {
-      duration,
-      text: `For ${duration}, ${req.agent} can make any request through ${connection} without asking again, including changes and deletes.`,
-    };
-  }
-  return {
-    duration,
-    text: `For ${duration}, ${req.agent} can open and use ${connection} without asking again. Activity inside an active session is not reviewed individually.`,
-  };
-}
-
-function ongoingAccessExplanation(req: ApprovalRequest): string {
-  const connection = req.connection ? req.connection.name : 'this service';
-  if (req.temporary_access && req.temporary_access.scope === 'read') {
-    return `${req.agent} will be able to fetch data from ${connection} without asking again. Requests that may make changes will still ask.`;
-  }
-  if (req.kind === 'http') {
-    return `${req.agent} will be able to make any request through ${connection} without asking again, including changes and deletes.`;
-  }
-  return `${req.agent} will be able to open and use ${connection} without asking again. Activity inside an active session is not reviewed individually.`;
-}
-
-function renderApproval() {
-  const req = state.queue[0];
-  const el = root();
-  if (!req) {
-    el.innerHTML = `<div class="surface approval"><div class="ap-empty">No requests waiting.</div></div>`;
-    resizeApprovalToContent();
-    return;
-  }
-  const conn = req.connection;
-  const t = conn ? TYPES[conn.type] : null;
-  const isHostKey = !!req.ssh;
-  const isPropose = req.kind === 'propose';
-  if (state.approvalRequestId !== req.id) {
-    state.approvalRequestId = req.id;
-    state.alwaysOpen = false;
-    state.reqDetailOpen = null;
-    state.proposalCredential = '';
-    state.proposalCredentialError = null;
-  }
-  if (isHostKey) ensureKnownHostsCheck(req);
-  const connCell = conn
-    ? (t ? `<span class="badge ${t.cls}">${t.label}</span> ` : '') + `<b>${esc(conn.name)}</b>`
-    : '';
-  const connectionRow = conn ? `<div class="ap-row"><span>Service</span><span>${connCell}</span></div>` : '';
-  const targetRow = conn ? `<div class="ap-row"><span>Target</span><code>${esc(conn.target)}</code></div>` : '';
-
-  const detail = requestDetailHTML(req) + sshHostKeyDetailHTML(req);
-
-  const proposal = req.proposal;
-  const proposalRows = isPropose && proposal ? `
-      <div class="ap-row"><span>Service</span><span><span class="badge ${TYPES[proposal.type].cls}">${TYPES[proposal.type].label}</span> <b>${esc(proposal.name)}</b> <em class="self-reported">supplied by agent</em></span></div>
-      <div class="ap-row"><span>Target</span><code>${esc(proposal.target)}</code></div>
-      ${proposal.destination ? `<div class="ap-row"><span>SSH invocation</span><code>ssh ${esc(proposal.destination)}</code></div>` : ''}
-      ${proposal.tls ? `<div class="ap-row"><span>TLS mode</span><span>${proposal.tls === 'verify-full' ? esc(proposal.tls) : `<b class="tls-warn">${esc(proposal.tls)}</b>`}</span></div>` : ''}
-      ${proposal.template ? `<div class="ap-row"><span>Authentication</span><code>${esc(proposal.template)}</code></div>` : ''}` : '';
-  const proposalCredential = isPropose && proposal ? `
-    <div class="ap-proposal-cred">
-      <label for="proposal-credential">Credential — typed by you, saved to macOS Keychain as <b>${esc(proposal.credential_name)}</b></label>
-      <input id="proposal-credential" type="password" placeholder="Paste the ${proposal.type === 'pg' ? 'database password' : proposal.type === 'ssh' ? 'private key' : 'token or API key'}" value="${escAttr(state.proposalCredential)}">
-      ${state.proposalCredentialError ? `<div class="field-error">${esc(state.proposalCredentialError)}</div>` : ''}
-      <div class="rule-note">The agent never sees this window. Saving the service grants no access — connections will still ask you.</div>
-    </div>` : '';
-
-  // Host-key trust prompts are a yes/no decision: no "don't ask again",
-  // no access session (the broker coerces those decisions to a one-time
-  // pin anyway).
-  let always: { btn: string; box: string } | null = null;
-  if (!isHostKey && !isPropose) {
-    const box = state.alwaysOpen
-      ? `<div class="always-box"><div class="f-row"><label>Use without asking</label>
-        <div class="rule-note">${esc(ongoingAccessExplanation(req))} You can require approval again from the Agents tab.</div></div>
-        <button class="btn primary sm" data-act="always-save">Don’t ask again</button></div>` : '';
-    always = { btn: `<button class="btn ghost sm" data-act="always-toggle">Don’t ask again…</button>`, box };
-  }
-
-  const temporary = temporaryAccessExplanation(req);
-  const sessionNote = !isHostKey && !isPropose
-    ? `<div class="ap-access-summary"><b>If you allow for ${esc(temporary.duration)}</b><p>${esc(temporary.text)}</p></div>` : '';
-
-  el.innerHTML = `<div class="surface approval">
-    <div class="ap-head" data-tauri-drag-region><div class="ap-icon" data-tauri-drag-region>🔐</div>
-      <div data-tauri-drag-region><div class="ap-title" data-tauri-drag-region>${esc(approvalHeading(req))}</div></div></div>
-    <div class="ap-scroll">
-    ${isPropose ? `<div class="pair-explainer"><p>${esc(req.agent)} proposed this service. Approving saves it; using it will still ask you.</p></div>` : ''}
-    <div class="ap-rows">
-      ${isPropose ? `<div class="ap-row"><span>Agent</span><b>${esc(req.agent)}</b></div>${proposalRows}`
-      : `<div class="ap-row"><span>Agent</span><b>${esc(req.agent)}</b></div>
-      ${connectionRow}${targetRow}
-      <div class="ap-row"><span>This request</span><code>${esc(req.action)}</code></div>`}
-      <div class="ap-row"><span>Approve within</span><span>${esc(approvalWindowLabel(req))}</span></div>
-    </div>
-    ${detail}
-    ${proposalCredential}
-    ${sessionNote}
-    ${always ? `<div class="ap-ongoing-action">${always.btn}</div>${always.box}` : ''}
-    </div>
-    <div class="ap-buttons">
-      <button class="btn deny" data-act="decide-deny" data-id="${req.id}">${isPropose ? 'Reject proposal' : 'Deny'}</button>
-      ${isHostKey || isPropose ? '' : `<button class="btn ghost sm" data-act="decide-once" data-id="${req.id}">This request only</button>`}
-      <span class="spacer"></span>
-      ${isHostKey
-        ? `<button class="btn primary" data-act="decide-once" data-id="${req.id}">Trust &amp; allow</button>`
-        : isPropose
-        ? `<button class="btn primary" data-act="decide-once" data-id="${req.id}">Save service</button>`
-        : `<button class="btn primary" data-act="decide-allow" data-id="${req.id}">Allow for ${esc(temporary.duration)}</button>`}</div>
-    ${state.queue.length > 1 ? `<div class="aw-queue">${state.queue.length - 1} more request${state.queue.length > 2 ? 's' : ''} waiting</div>` : ''}
-  </div>`;
-  resizeApprovalToContent();
-}
-
-function resizeApprovalToContent(): void {
-  requestAnimationFrame(() => {
-    const approval = document.querySelector<HTMLElement>('.surface.approval');
-    if (!approval) return;
-    const measure = approval.cloneNode(true) as HTMLElement;
-    measure.classList.add('approval-measure');
-    document.body.appendChild(measure);
-    const height = measure.getBoundingClientRect().height;
-    measure.remove();
-    void invoke('ui_resize_approval', { height }).catch(() => { /* window may be closing */ });
-  });
-}
-
-function requestDetailHTML(req: ApprovalRequest): string {
-  if (req.kind !== 'http' || !req.http) return '';
-  const h = req.http;
-  const shown = state.reqDetailOpen === null ? h.mutating : state.reqDetailOpen;
-  const head = `<div class="req-detail-head"><button class="btn ghost sm" data-act="req-detail-toggle">${shown ? '▾' : '▸'} Technical request details${h.mutating ? `<span class="mut-tag">${esc(h.method)}</span>` : ''}</button></div>`;
-  if (!shown) return head;
-  const hdrs = h.headers && h.headers.length
-    ? h.headers.map(([k, v]) => `<div class="rd-line"><span class="rd-k">${esc(k)}:</span> ${esc(String(v))}</div>`).join('')
-    : '<div class="rd-empty">none</div>';
-  let bodyBlock;
-  if (h.body_preview == null) bodyBlock = '<div class="rd-empty">none</div>';
-  else bodyBlock = `<pre class="rd-body">${esc(h.body_preview)}${h.body_truncated ? `\n… +${h.body_len - h.body_preview.length} bytes not shown` : ''}</pre>`;
-  return head + `<div class="req-detail">
-    <div class="rd-sub">Additional agent headers</div>${hdrs}
-    <div class="rd-sub">Body</div>${bodyBlock}</div>`;
-}
-
-/* ---- SSH host-key trust prompts ---- */
-// known_hosts provenance, fetched once per prompt (keyed by request id) so
-// the chip can say whether the observed key matches the user's own records.
-type KnownHostsCheck = HostKeyCandidate[] | 'pending' | 'error';
-const knownHostsChecks: Record<string, KnownHostsCheck> = {};
-
-function ensureKnownHostsCheck(req: ApprovalRequest): void {
-  const ssh = req.ssh;
-  if (!ssh || knownHostsChecks[req.id]) return;
-  knownHostsChecks[req.id] = 'pending';
-  invoke('check_known_hosts', { host: ssh.host, port: ssh.port })
-    .then((candidates) => { knownHostsChecks[req.id] = candidates; })
-    .catch(() => { knownHostsChecks[req.id] = 'error'; })
-    .finally(() => {
-      if (mode === 'approval' && state.queue[0] && state.queue[0].id === req.id) render();
-    });
-}
-
-function knownHostsChipHTML(req: ApprovalRequest): string {
-  const ssh = req.ssh;
-  if (!ssh) return '';
-  const check = knownHostsChecks[req.id];
-  if (!check || check === 'pending') return `<span class="hk-chip">Checking known_hosts…</span>`;
-  if (check === 'error') return `<span class="hk-chip">Couldn’t check known_hosts</span>`;
-  const match = check.find((candidate) => candidate.fingerprint === ssh.observed_fingerprint);
-  if (match) {
-    return `<span class="hk-chip ok" title="${escAttr(match.source)}">${ICONS.check} Matches your known_hosts</span>`;
-  }
-  if (!check.length) return `<span class="hk-chip warn">First sighting — verify out-of-band</span>`;
-  return `<span class="hk-chip danger">${ICONS.circleX} Conflicts with your known_hosts</span>`;
-}
-
-function sshHostKeyDetailHTML(req: ApprovalRequest): string {
-  const ssh = req.ssh;
-  if (!ssh) return '';
-  return `<div class="hk-detail">
-    <div class="rd-sub">Server host key (${esc(ssh.algorithm)})</div>
-    <code class="hk-fingerprint">${esc(ssh.observed_fingerprint)}</code>
-    <div class="hk-provenance">${knownHostsChipHTML(req)}</div>
-    <p class="hk-note">First connection to this server. Trusting this key pins it: later connections must present the same key or are refused.</p>
-  </div>`;
 }
 
 /* --------------------------------- helpers ------------------------------- */
@@ -2186,9 +1902,13 @@ document.addEventListener('click', async (e) => {
       render();
       break;
     }
-    case 'del-permission':
-      await run(() => invoke('remove_permission', { id }));
-      toast('🔒 Approval will be required again'); await refresh('all');
+    case 'wire':
+      await run(() => invoke('set_wiring', { agentId: id, connectionId: btn.dataset.conn || '', wired: true }));
+      await refresh('all');
+      break;
+    case 'unwire':
+      await run(() => invoke('set_wiring', { agentId: id, connectionId: btn.dataset.conn || '', wired: false }));
+      toast('🔌 Unwired'); await refresh('all');
       break;
 
     case 'revoke-ask': {
@@ -2227,61 +1947,19 @@ document.addEventListener('click', async (e) => {
       }
       await refresh('settings');
       break;
-    // Approval window
-    case 'req-detail-toggle': {
-      const req = state.queue[0];
-      const shownNow = state.reqDetailOpen === null ? (req.http && req.http.mutating) : state.reqDetailOpen;
-      state.reqDetailOpen = !shownNow; render(); break;
-    }
-    case 'always-toggle': state.alwaysOpen = !state.alwaysOpen; render(); break;
-
-    case 'decide-deny': await decide(id, 'deny'); break;
-    case 'decide-allow': await decide(id, mode === 'approval' ? 'allow_session' : 'allow_once'); break;
-    case 'decide-once': await decide(id, 'allow_once'); break;
-    case 'always-save': await decide(id, 'always_allow'); break;
-    case 'open-approval': run(() => invoke('ui_show_approval')); break;
     default: break;
   }
 });
 
-async function decide(id: string, decision: Decision): Promise<void> {
-  try {
-    const req = state.queue[0];
-    let credentialValue: string | undefined;
-    if (req && req.kind === 'propose' && decision !== 'deny') {
-      // The typed value rides only on an approving decision, and never an
-      // empty one — fail before the OS confirmation, not after.
-      const typed = (document.getElementById('proposal-credential') as HTMLInputElement | null)
-        ?.value ?? state.proposalCredential;
-      if (!typed.trim()) {
-        state.proposalCredentialError = 'Enter the credential value first';
-        render();
-        focusField('proposal-credential');
-        return;
-      }
-      credentialValue = typed;
-    }
-    await invoke('decide', { id, decision, credentialValue });
-    state.alwaysOpen = false;
-    state.reqDetailOpen = null;
-    state.proposalCredential = '';
-    state.proposalCredentialError = null;
-  } catch (error) {
-    // OS authentication cancelled or failed: keep the request pending.
-    toast('🔒 ' + errorMessage(error));
-  }
-  await refresh('queue');
-}
-
 document.addEventListener('keydown', (e) => {
   // Ctrl-Tab / Ctrl-Shift-Tab cycle the left-nav tabs when the main window is
-  // open (the approval window has no tabs; a modal sheet keeps focus).
+  // open (a modal sheet keeps focus).
   if (e.key === 'Enter' && e.target instanceof HTMLInputElement && e.target.id === 'quick-setup-source') {
     e.preventDefault();
     document.querySelector<HTMLElement>('[data-act="quick-setup-review"]')?.click();
     return;
   }
-  if (e.key === 'Tab' && e.ctrlKey && mode !== 'approval' && !state.sheet) {
+  if (e.key === 'Tab' && e.ctrlKey && !state.sheet) {
     e.preventDefault();
     const i = TABS.indexOf(state.tab);
     const n = TABS.length;
@@ -2398,13 +2076,6 @@ document.addEventListener('input', (e) => {
     state.quickSetupSource = target.value;
     state.quickSetupError = null;
   }
-  if (target?.id === 'proposal-credential') {
-    state.proposalCredential = target.value;
-    if (state.proposalCredentialError) {
-      state.proposalCredentialError = null;
-      render();
-    }
-  }
   if (target?.id === 'f-cname') {
     updateCredentialNamePlaceholder(target.value);
     updateCredentialNameWarning();
@@ -2443,8 +2114,7 @@ async function boot() {
   // A webview reload must not leave a stale native lock behind. Forms acquire
   // it again before they are shown.
   if (mode === 'dropdown') await invoke('ui_set_dropdown_form_active', { active: false });
-  await refresh(mode === 'approval' ? 'queue' : 'all');
-  if (mode !== 'approval') scheduleAccessExpiryRefresh();
+  await refresh('all');
   // Hover tooltips (absolute timestamps on activity rows, etc.). Delegated
   // from #root so they survive re-renders; content is each element's
   // data-tippy-content. Vendored Tippy.js (self-hosted for the 'self' CSP).
@@ -2458,16 +2128,9 @@ async function boot() {
   // Relative timestamps drift; re-render the activity view every minute so
   // "just now" becomes "1m", etc., while that tab is open.
   setInterval(() => {
-    if (mode !== 'approval' && state.tab === 'activity' && !state.sheet && !state.menuOpen) render();
+    if (state.tab === 'activity' && !state.sheet && !state.menuOpen) render();
   }, 60000);
-  // Access sessions are in-memory and expire without a persisted state
-  // change. Refresh the Agents view so expiry disappears
-  // promptly everywhere it is presented.
-  setInterval(() => {
-    if (mode !== 'approval' && !state.sheet && !state.menuOpen) refreshAgentsView();
-  }, 30000);
   // Live updates from the core.
-  await listen('aka://queue-changed', (ev) => { state.queue = ev.payload || []; render(); });
   await listen('aka://sessions-changed', () => refresh('sessions'));
   await listen('aka://agents-changed', async () => {
     const before = new Map(state.agents.map((agent) => [agent.name, agent.paired_at]));
@@ -2475,16 +2138,12 @@ async function boot() {
     render();
     const connected = state.agents.find((agent) =>
       !before.has(agent.name) || before.get(agent.name) !== agent.paired_at);
-    if (connected) toast(`🔗 ${connected.name} is connected and can now ask to use your services`);
+    if (connected) toast(`🔗 ${connected.name} is connected — wire it to your services from the Agents tab`);
   });
-  await listen('aka://rules-changed', () => {
-    if (mode !== 'approval') refreshAgentsView();
-  });
+  await listen('aka://wirings-changed', () => refreshAgentsView());
   // A core-side connection change (a trust-on-first-use host-key pin) has no
   // originating UI command to refresh after; reload the services list.
-  await listen('aka://connections-changed', () => {
-    if (mode !== 'approval') refresh('connections');
-  });
+  await listen('aka://connections-changed', () => refresh('connections'));
   await listen('aka://activity-appended', (ev) => receiveActivity(ev.payload));
   await listen('aka://activity-changed', () => refresh('activity'));
   await listen('aka://open-settings', () => {

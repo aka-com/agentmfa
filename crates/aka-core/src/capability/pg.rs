@@ -433,7 +433,7 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
     client.write_all(&completion).await?;
 
     // Both handshakes done: register the live session and splice.
-    let max_ttl = redemption.max_ttl(state.broker.config.session_max_ttl);
+    let max_ttl = state.broker.config.session_max_ttl;
     let session = redemption.start(ConnectionKind::Pg);
     let idle = state.broker.config.session_idle_timeout;
     splice(client, upstream.stream, session, max_ttl, idle).await;

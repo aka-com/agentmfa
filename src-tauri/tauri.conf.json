@@ -27,20 +27,6 @@
         "url": "index.html"
       },
       {
-        "label": "approval",
-        "title": "AKA Desktop Approval",
-        "width": 380,
-        "height": 380,
-        "resizable": false,
-        "decorations": false,
-        "transparent": true,
-        "alwaysOnTop": true,
-        "visible": false,
-        "skipTaskbar": true,
-        "focus": true,
-        "url": "index.html#approval"
-      },
-      {
         "label": "dropdown",
         "title": "AKA Desktop",
         "width": 430,
@@ -68,9 +54,14 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["dmg", "app"],
+    "targets": [
+      "dmg",
+      "app"
+    ],
     "category": "DeveloperTool",
-    "icon": ["icons/icon.icns"],
+    "icon": [
+      "icons/icon.icns"
+    ],
     "macOS": {
       "minimumSystemVersion": "13.0"
     }

@@ -50,7 +50,6 @@ struct TicketEntry {
     active_sessions: usize,
     payload: TicketPayload,
     secret_read_authorization: Option<crate::authorization::SecretReadAuthorization>,
-    grant: Option<crate::authorization::GrantAuthorization>,
     invalidated: bool,
 }
 
@@ -70,7 +69,6 @@ struct SessionEntry {
     info: SessionInfo,
     ticket: String,
     close: Arc<Notify>,
-    grant_id: Option<uuid::Uuid>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -114,7 +112,6 @@ pub struct Redemption {
     pub connection: Connection,
     pub payload_ws_upstream: Option<crate::capability::ws::WsUpstream>,
     pub(crate) secret_read_authorization: Option<crate::authorization::SecretReadAuthorization>,
-    grant: Option<crate::authorization::GrantAuthorization>,
     started: bool,
 }
 
@@ -192,7 +189,6 @@ impl DataPlane {
                 active_sessions: 0,
                 payload,
                 secret_read_authorization: crate::authorization::current(),
-                grant: crate::authorization::current_grant(),
                 invalidated: false,
             },
         );
@@ -206,7 +202,7 @@ impl DataPlane {
         Self::sweep(&self.inner, &mut state);
         let global_active = state.sessions.len();
         let entry = state.tickets.get_mut(value).ok_or(RedeemError::Unknown)?;
-        if entry.invalidated || entry.grant.as_ref().is_some_and(|grant| !grant.is_active()) {
+        if entry.invalidated {
             return Err(RedeemError::Expired);
         }
         if entry.issued.elapsed() > self.inner.ticket_ttl {
@@ -231,7 +227,6 @@ impl DataPlane {
             connection: entry.connection.clone(),
             payload_ws_upstream: pending,
             secret_read_authorization: entry.secret_read_authorization.clone(),
-            grant: entry.grant.clone(),
             started: false,
         })
     }
@@ -256,35 +251,6 @@ impl DataPlane {
             }
             None => false,
         }
-    }
-
-    /// Revoke every ticket and live session issued under one access grant.
-    pub fn close_grant(&self, grant_id: &uuid::Uuid) -> usize {
-        let mut state = self.inner.state.lock().unwrap();
-        for ticket in state.tickets.values_mut() {
-            if ticket
-                .grant
-                .as_ref()
-                .is_some_and(|grant| &grant.id == grant_id)
-            {
-                ticket.invalidated = true;
-                if let TicketPayload::Ws { pending_upstream } = &mut ticket.payload {
-                    *pending_upstream = None;
-                }
-            }
-        }
-        let sessions: Vec<_> = state
-            .sessions
-            .values()
-            .filter(|session| session.grant_id.as_ref() == Some(grant_id))
-            .map(|session| session.close.clone())
-            .collect();
-        let count = sessions.len();
-        drop(state);
-        for close in sessions {
-            close.notify_waiters();
-        }
-        count
     }
 
     /// Invalidate every unredeemed capability and close every live transport
@@ -330,17 +296,6 @@ impl DataPlane {
 }
 
 impl Redemption {
-    /// Access-session expiry is a hard upper bound on the live transport.
-    pub fn max_ttl(&self, configured: Duration) -> Duration {
-        match &self.grant {
-            Some(grant) if grant.is_active() => {
-                configured.min(grant.expires_at.saturating_duration_since(Instant::now()))
-            }
-            Some(_) => Duration::ZERO,
-            None => configured,
-        }
-    }
-
     /// Establishments succeeded: register the live session.
     pub fn start(mut self, kind: ConnectionKind) -> SessionHandle {
         self.started = true;
@@ -365,7 +320,6 @@ impl Redemption {
                 info: info.clone(),
                 ticket: self.ticket.clone(),
                 close: close.clone(),
-                grant_id: self.grant.as_ref().map(|grant| grant.id),
             },
         );
         drop(state);
@@ -582,33 +536,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn grant_revocation_blocks_tickets_and_signals_live_sessions() {
-        let (plane, _dir) = plane(Duration::from_secs(60), 60, 300);
-        let grant_id = Uuid::new_v4();
-        let authorization = crate::authorization::SecretReadAuthorization::for_grant(
-            grant_id,
-            Instant::now() + Duration::from_secs(60),
-        );
-        let ticket = crate::authorization::scope_authorization(authorization, async {
-            plane.issue("codex", &ws_connection(), TicketPayload::Pg)
-        })
-        .await;
-        let session = plane.redeem(&ticket).unwrap().start(ConnectionKind::Pg);
-        let closed = session.close_signal.clone();
-        let notified = closed.notified();
-        assert_eq!(plane.close_grant(&grant_id), 1);
-        tokio::time::timeout(Duration::from_secs(1), notified)
-            .await
-            .expect("live session should receive grant revocation");
-        assert_eq!(expect_err(plane.redeem(&ticket)), RedeemError::Expired);
-        session.finish("grant_revoked");
-    }
-
-    #[tokio::test]
     async fn agent_disconnect_blocks_all_tickets_and_signals_live_sessions() {
         let (plane, _dir) = plane(Duration::from_secs(60), 60, 300);
-        // No grant context: this represents a ticket issued through one-time
-        // or saved access, which must still die with the paired agent.
         let ticket = plane.issue("codex", &ws_connection(), TicketPayload::Pg);
         let other_ticket = plane.issue("claude", &ws_connection(), TicketPayload::Pg);
         let session = plane.redeem(&ticket).unwrap().start(ConnectionKind::Pg);
@@ -625,20 +554,5 @@ mod tests {
             .start(ConnectionKind::Pg);
         session.finish("agent_disconnected");
         other_session.finish("test_complete");
-    }
-
-    #[tokio::test]
-    async fn grant_deadline_caps_live_session_ttl() {
-        let (plane, _dir) = plane(Duration::from_secs(60), 60, 300);
-        let authorization = crate::authorization::SecretReadAuthorization::for_grant(
-            Uuid::new_v4(),
-            Instant::now() + Duration::from_millis(50),
-        );
-        let ticket = crate::authorization::scope_authorization(authorization, async {
-            plane.issue("codex", &ws_connection(), TicketPayload::Pg)
-        })
-        .await;
-        let redemption = plane.redeem(&ticket).unwrap();
-        assert!(redemption.max_ttl(Duration::from_secs(60)) <= Duration::from_millis(50));
     }
 }
