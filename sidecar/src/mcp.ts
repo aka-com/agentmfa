@@ -34,6 +34,28 @@ import {
 export const MCP_PATH = '/mcp';
 
 /**
+ * How many upstream MCP tools are registered as first-class tools before
+ * the rest become searchable-only. Big catalogs must not flood an agent's
+ * context: beyond the budget, tools stay in the search index and are
+ * callable through `multitool_call_tool` — enforcement is unchanged, the
+ * broker still checks the wiring and any curated subset on every call.
+ */
+function upstreamToolBudget(): number {
+  // Read per session build (not at import) so tests and operators can
+  // adjust it without a restart.
+  const raw = Number(process.env.MULTITOOL_TOOL_BUDGET ?? 40);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 40;
+}
+
+/** One upstream tool in the session's search index. */
+interface IndexedTool {
+  connection: BrokerConnection;
+  tool: UpstreamTool;
+  /** The registered MCP tool name, or null when over budget (search-only). */
+  registeredAs: string | null;
+}
+
+/**
  * Reject a request whose `Host` is not the loopback address we bound.
  *
  * The bearer token already stops a web page from doing anything useful,
@@ -164,6 +186,8 @@ interface Registration {
   connection: BrokerConnection;
   /** The MCP tool names registered for it — one, several, or (on failure) none. */
   tools: string[];
+  /** Upstream tool names indexed but not registered (over the tool budget). */
+  withheld?: string[];
   /** Set when an MCP upstream could not be reached at session open. */
   error?: string;
 }
@@ -270,6 +294,10 @@ export async function createToolServer(
         .filter((connection) => !registeredNames.has(connection.name))
         .map((connection) => connection.name);
 
+      const searchOnly = registrations
+        .filter((registration) => liveNames.has(registration.connection.name))
+        .reduce((sum, registration) => sum + (registration.withheld?.length ?? 0), 0);
+
       // One hint, chosen by what is most actionable. Reconnecting re-runs this
       // whole build, so it resolves both pending wirings and dead upstreams.
       let hint: string | undefined;
@@ -298,6 +326,13 @@ export async function createToolServer(
               {
                 agent: principal.agent,
                 tools,
+                ...(searchOnly
+                  ? {
+                      search_only_tools: searchOnly,
+                      search_hint:
+                        'more tools are available via multitool_search_tools',
+                    }
+                  : {}),
                 ...(errors.length ? { errors } : {}),
                 ...(pending.length ? { pending } : {}),
                 ...(hint ? { hint } : {}),
@@ -311,53 +346,27 @@ export async function createToolServer(
     },
   );
 
-  // Always available, including to an agent wired to nothing. This only
-  // files a request for the user; it cannot create or wire a connection.
-  server.registerTool(
-    'multitool_connect',
-    {
-      title: 'Request a new tool',
-      description:
-        'Ask the user to connect a service that is not configured. This only ' +
-        'files a request in Multitool; the user must add and wire the tool.',
-      inputSchema: { service: z.string().min(1).max(120) },
-    },
-    async ({ service }: { service: string }) => {
-      try {
-        const outcome = await broker.requestConnect(principal.token, service);
-        const requested = outcome.status !== 'already_requested';
-        return {
-          content: [{
-            type: 'text' as const,
-            text: requested
-              ? `Requested. Ask the user to add "${service}" in Multitool and wire it to you.`
-              : `Already requested. Ask the user to approve "${service}" in Multitool.`,
-          }],
-        };
-      } catch (error) {
-        return {
-          isError: true,
-          content: [{
-            type: 'text' as const,
-            text: `could not file the request: ${String(error)}`,
-          }],
-        };
-      }
-    },
-  );
-
   // Connection names are freer than MCP tool names, so two of them can slug
   // to the same thing. Registering a duplicate throws, which would fail the
   // whole session — one awkwardly named connection must not cost an agent
   // every other tool it has.
-  const taken = new Set<string>(['multitool_status', 'multitool_connect']);
+  const taken = new Set<string>([
+    'multitool_status', 'multitool_connect', 'multitool_search_tools', 'multitool_call_tool',
+  ]);
+  // Every upstream tool this session knows about, registered or not; the
+  // search and generic-call meta-tools work over it.
+  const upstreamIndex: IndexedTool[] = [];
   for (const connection of wired) {
     // An MCP upstream contributes its own tools rather than one request
     // tool. Its traffic still rides the broker's HTTP plane, so the
     // credential stays where it belongs.
     if (connection.mcp_path) {
-      const outcome = await registerUpstream(server, broker, principal, connection, taken);
-      registrations.push({ connection, tools: outcome.tools, error: outcome.error });
+      const outcome = await registerUpstream(
+        server, broker, principal, connection, taken, upstreamIndex,
+      );
+      registrations.push({
+        connection, tools: outcome.tools, withheld: outcome.withheld, error: outcome.error,
+      });
       continue;
     }
 
@@ -387,7 +396,161 @@ export async function createToolServer(
     registrations.push({ connection, tools: [toolName] });
   }
 
+  registerMetaTools(server, broker, principal, upstreamIndex);
+
   return server;
+}
+
+/**
+ * The discovery meta-tools.
+ *
+ * `multitool_connect` is always present: it is how an agent asks the user
+ * for a tool that is not configured (a request only — the broker audits it
+ * and pokes the app; nothing exists until the user adds and wires it).
+ *
+ * Search and the generic invoker appear once any upstream tool was
+ * withheld over the registration budget, so big catalogs stay reachable
+ * without flooding the agent's context. Every call still crosses the
+ * broker's wiring and allowed-tools checks — these tools change
+ * discovery, never authorization.
+ */
+function registerMetaTools(
+  server: McpServer,
+  broker: BrokerClient,
+  principal: Principal,
+  index: IndexedTool[],
+): void {
+  server.registerTool(
+    'multitool_connect',
+    {
+      title: 'Request a new tool',
+      description:
+        'Ask the user to connect a service that is not configured (for example ' +
+        '"linear" or "https://mcp.example.com/mcp"). This only files a request in ' +
+        'the Multitool app — the user adds and wires the tool there, and its ' +
+        'tools appear on your next session (check with multitool_status).',
+      inputSchema: { service: z.string().min(1).max(120) },
+    },
+    async ({ service }: { service: string }) => {
+      try {
+        const outcome = await broker.requestConnect(principal.token, service);
+        return {
+          content: [{
+            type: 'text' as const,
+            text:
+              outcome.status === 'already_requested'
+                ? `Already requested. Ask the user to approve "${service}" in Multitool; ` +
+                  'its tools appear once they wire it to you.'
+                : `Requested. Ask the user to add "${service}" in the Multitool app and ` +
+                  'wire it to you; then reconnect or call multitool_status.',
+          }],
+        };
+      } catch (error) {
+        return {
+          isError: true,
+          content: [{ type: 'text' as const, text: `could not file the request: ${String(error)}` }],
+        };
+      }
+    },
+  );
+
+  const withheld = index.filter((entry) => entry.registeredAs === null);
+  if (!withheld.length) return;
+
+  server.registerTool(
+    'multitool_search_tools',
+    {
+      title: 'Search available tools',
+      description:
+        `${withheld.length} of this session's upstream tools are not listed here ` +
+        '(tool-budget). Search them by name or purpose; call the results with ' +
+        'multitool_call_tool (or directly, when a tool name is listed).',
+      inputSchema: { query: z.string().min(1).max(200) },
+    },
+    async ({ query }: { query: string }) => {
+      const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+      const scored = index
+        .map((entry) => {
+          const name = entry.tool.name.toLowerCase();
+          const description = (entry.tool.description ?? '').toLowerCase();
+          let score = 0;
+          for (const term of terms) {
+            if (name.includes(term)) score += 2;
+            if (description.includes(term)) score += 1;
+          }
+          return { entry, score };
+        })
+        .filter(({ score }) => score > 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 20);
+      const results = scored.map(({ entry }) => ({
+        tool: entry.tool.name,
+        connection: entry.connection.name,
+        description: entry.tool.description,
+        ...(entry.tool.inputSchema ? { parameters: entry.tool.inputSchema } : {}),
+        call: entry.registeredAs
+          ? { tool: entry.registeredAs }
+          : {
+              tool: 'multitool_call_tool',
+              arguments: { connection: entry.connection.name, tool: entry.tool.name },
+            },
+      }));
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify(
+            results.length ? { results } : { results, hint: 'no tools matched; try broader terms' },
+            null,
+            2,
+          ),
+        }],
+      };
+    },
+  );
+
+  server.registerTool(
+    'multitool_call_tool',
+    {
+      title: 'Call a searchable tool',
+      description:
+        'Invoke an upstream tool found via multitool_search_tools, by connection ' +
+        'and tool name. Subject to the same wiring and tool-selection checks as ' +
+        'every other call.',
+      inputSchema: {
+        connection: z.string().min(1),
+        tool: z.string().min(1),
+        arguments: z.looseObject({}).optional(),
+      },
+    },
+    async ({ connection, tool, arguments: args }:
+      { connection: string; tool: string; arguments?: Record<string, unknown> }) => {
+      const entry = index.find(
+        (candidate) =>
+          candidate.connection.name === connection && candidate.tool.name === tool,
+      );
+      if (!entry) {
+        return {
+          isError: true,
+          content: [{
+            type: 'text' as const,
+            text: `no such tool in this session: ${connection} / ${tool} — ` +
+              'find callable tools with multitool_search_tools',
+          }],
+        };
+      }
+      try {
+        const result = await callUpstreamTool(
+          broker, principal.token, entry.connection, entry.tool.name, args ?? {},
+        );
+        return result as { content: Array<{ type: 'text'; text: string }> };
+      } catch (error) {
+        return {
+          isError: true,
+          content: [{ type: 'text' as const, text: `${connection} failed: ${String(error)}` }],
+        };
+      }
+    },
+  );
 }
 
 /**
@@ -406,6 +569,8 @@ function describeUpstream(connection: BrokerConnection, tool: UpstreamTool): str
 /** What re-exposing one upstream produced: the tool names it added, or why not. */
 interface UpstreamRegistration {
   tools: string[];
+  /** Upstream tools indexed but not registered (over the tool budget). */
+  withheld: string[];
   error?: string;
 }
 
@@ -423,6 +588,7 @@ async function registerUpstream(
   principal: Principal,
   connection: BrokerConnection,
   taken: Set<string>,
+  index: IndexedTool[],
 ): Promise<UpstreamRegistration> {
   let tools: Awaited<ReturnType<typeof listUpstreamTools>> = [];
   try {
@@ -432,7 +598,7 @@ async function registerUpstream(
       connection: connection.name,
       error: String(error),
     });
-    return { tools: [], error: `could not reach the MCP server: ${String(error)}` };
+    return { tools: [], withheld: [], error: `could not reach the MCP server: ${String(error)}` };
   }
 
   // A curated wiring lists only its allowed subset. This mirrors what the
@@ -444,6 +610,7 @@ async function registerUpstream(
   }
 
   const registered: string[] = [];
+  const withheld: string[] = [];
   for (const tool of tools) {
     const toolName = upstreamToolName(connection, tool.name);
     if (taken.has(toolName)) {
@@ -454,7 +621,17 @@ async function registerUpstream(
       });
       continue;
     }
+    // Over the registration budget: the tool stays discoverable through
+    // multitool_search_tools and callable through multitool_call_tool, it
+    // just doesn't occupy a slot in the agent's tool list.
+    const upstreamCount = index.filter((entry) => entry.registeredAs !== null).length;
+    if (upstreamCount >= upstreamToolBudget()) {
+      withheld.push(tool.name);
+      index.push({ connection, tool, registeredAs: null });
+      continue;
+    }
     taken.add(toolName);
+    index.push({ connection, tool, registeredAs: toolName });
 
     server.registerTool(
       toolName,
@@ -497,7 +674,13 @@ async function registerUpstream(
     );
     registered.push(toolName);
   }
-  return { tools: registered };
+  if (withheld.length) {
+    log('info', 'upstream tools over the registration budget are search-only', {
+      connection: connection.name,
+      withheld: withheld.length,
+    });
+  }
+  return { tools: registered, withheld };
 }
 
 /** Mint a transport + server pair for a new session. */

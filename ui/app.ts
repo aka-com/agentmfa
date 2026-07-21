@@ -2870,6 +2870,9 @@ async function boot() {
   await listen('aka://activity-appended', (ev) => receiveActivity(ev.payload));
   await listen('aka://mcp-auth-changed', (ev) => receiveMcpAuth(ev.payload));
   await listen('aka://connect-requested', (ev) => {
+    // An agent asked for a tool that isn't configured: land the user on
+    // the catalog with the ask prefilled. A request only — adding and
+    // wiring stays entirely in the user's hands.
     const { agent, service } = ev.payload;
     state.tab = 'connections';
     state.toolSearch = service;

@@ -902,26 +902,29 @@ async fn post_http(
     .await
 }
 
-/// An authenticated agent can ask the user to connect a missing service.
-/// This is advisory only: it creates no connection or wiring.
+/// `POST /v1/connect-requests`: an agent asks for a service that is not
+/// configured. Advisory only — the broker audits it and pokes the shell;
+/// the user adds and wires the tool (or doesn't) in the app.
 async fn post_connect_request(
     State(state): State<AppState>,
     authed: Authed,
     body: axum::Json<serde_json::Value>,
 ) -> Response {
-    let Some(service) = body.0.get("service").and_then(|value| value.as_str()) else {
+    let broker = &state.broker;
+    let Some(service) = body.0.get("service").and_then(|v| v.as_str()) else {
         return err_detail(
             StatusCode::BAD_REQUEST,
             ErrorReason::InvalidBody,
             "a `service` string is required",
         );
     };
-    match state.broker.agent_connect_request(&authed.agent, service) {
+    match broker.agent_connect_request(&authed.agent, service) {
         Ok(fresh) => (
             StatusCode::ACCEPTED,
             Json(serde_json::json!({
                 "status": if fresh { "requested" } else { "already_requested" },
-                "detail": "Ask the user to add and wire this tool in Multitool; its tools appear once they do.",
+                "detail": "Ask the user to add and wire this tool in Multitool; \
+                           its tools appear once they do.",
             })),
         )
             .into_response(),

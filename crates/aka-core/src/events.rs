@@ -49,8 +49,9 @@ pub trait BrokerEvents: Send + Sync {
         self.confirm_secret_read(secret)
     }
 
-    /// An agent asked for a service that is not configured. Shells may
-    /// surface the request, but it grants no authority by itself.
+    /// An agent asked (via the sidecar's `multitool_connect` tool) for a
+    /// service that is not configured. Purely advisory: shells surface it
+    /// so the user can add the tool; nothing is granted by the request.
     fn connect_requested(&self, _agent: &str, _service: &str) {}
 
     /// A high-consequence configuration action — creating/deleting a

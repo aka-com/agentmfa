@@ -71,8 +71,8 @@ pub struct Broker {
     pub(crate) http_client: reqwest::Client,
     /// Live and recently finished MCP sign-in sessions (`mcp_auth` module).
     pub mcp_auth: crate::mcp_auth::McpAuthSessions,
-    /// Recent agent connect requests, retained only in memory to coalesce
-    /// retries before they can spam the audit log or UI.
+    /// Recent agent connect-requests, so a retrying agent cannot spam the
+    /// activity log or the shell's attention. Never leaves memory.
     connect_request_debounce: Mutex<std::collections::HashMap<(Uuid, String), Instant>>,
     pub(crate) token_limiter: KeyedLimiter,
     pub(crate) discovery_limiter: WindowLimiter,
@@ -646,10 +646,11 @@ impl Broker {
 
     /* ------------------------ agent connect requests ----------------------- */
 
-    /// Record an agent's advisory request for a missing service. Nothing is
-    /// created or wired here; the user remains the only authority that can
-    /// grant access. Repeated requests from one agent are coalesced for a
-    /// minute. Returns true when this call surfaced a fresh request.
+    /// An agent asked for a service that is not configured (the sidecar's
+    /// `multitool_connect` tool). This records the ask and pokes the shell
+    /// so the user can add the tool — nothing is created or granted here,
+    /// and the same agent asking for the same service within a minute is
+    /// coalesced. Returns whether this call surfaced a fresh request.
     pub fn agent_connect_request(&self, agent: &PairedAgent, service: &str) -> Result<bool> {
         const DEBOUNCE: Duration = Duration::from_secs(60);
         let service = service.trim();

@@ -125,7 +125,10 @@ export class BrokerClient {
     return this.json<BrokerConnection[]>('GET', '/v1/connections', token);
   }
 
-  /** Ask the user to connect a missing service; this grants no access. */
+  /**
+   * Ask the user (through the broker and the app) to connect a service
+   * that is not configured. Advisory: nothing is granted by this call.
+   */
   async requestConnect(
     token: string,
     service: string,

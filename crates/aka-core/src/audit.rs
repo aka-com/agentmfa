@@ -155,8 +155,8 @@ pub enum AuditKind {
     /// A silent renewal attempt failed (the status check's Reconnect path
     /// is the recovery).
     McpTokenRefreshFailed,
-    /// An agent asked for a tool that is not configured. This is advisory;
-    /// only the user can add and wire the requested tool.
+    /// An agent asked for a tool that is not configured. A request only:
+    /// nothing exists until the user adds and wires it in the app.
     ConnectRequested,
     SettingsChanged,
     // Rate limiting / budgets
@@ -203,8 +203,8 @@ impl AuditKind {
             AuditKind::McpAuthCompleted => "circleCheck",
             AuditKind::McpAuthFailed => "circleX",
             AuditKind::McpTokenRefreshed => "refresh",
-            AuditKind::McpTokenRefreshFailed => "circleX",
             AuditKind::ConnectRequested => "botMessageSquare",
+            AuditKind::McpTokenRefreshFailed => "circleX",
             AuditKind::SettingsChanged => "gear",
             AuditKind::RateLimited => "gauge",
         }

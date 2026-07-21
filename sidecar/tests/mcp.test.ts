@@ -30,6 +30,9 @@ const WIRED: Record<string, string[]> = {
   'client-bare': [],
   'client-throttled': [],
 };
+/** Connect-requests the fake broker has seen (debounce simulation). */
+const connectRequests = new Set<string>();
+
 const CONNECTIONS = [
   { name: 'prod-db', type: 'pg', target: 'db.internal:5432/app', endpoint: '/v1/pg/open' },
   { name: 'deploy-host', type: 'ssh', target: 'deploy@host.internal', endpoint: '/v1/ssh/open' },
@@ -211,12 +214,11 @@ function fakeBroker(socketPath: string): Promise<Server> {
       const chunks: Buffer[] = [];
       req.on('data', (chunk: Buffer) => chunks.push(chunk));
       req.on('end', () => {
-        const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { service?: string };
-        if (!body.service) {
-          send(400, { reason: 'invalid_body' });
-          return;
-        }
-        send(202, { status: 'requested' });
+        const body = JSON.parse(Buffer.concat(chunks).toString() || '{}') as { service?: string };
+        const key = `${identity.client_id}:${body.service ?? ''}`;
+        const fresh = !connectRequests.has(key);
+        connectRequests.add(key);
+        send(202, { status: fresh ? 'requested' : 'already_requested' });
       });
       return;
     }
@@ -329,6 +331,8 @@ test('an agent wired to nothing is told so, not left guessing', async () => {
   try {
     const client = await app.connect('token-bare');
     const { tools } = await client.listTools();
+    // Even an unwired agent can ask for tools by name (multitool_connect);
+    // status remains the "why can't I see it?" explainer.
     assert.deepEqual(tools.map((tool) => tool.name).sort(), [
       'multitool_connect',
       'multitool_status',
@@ -339,28 +343,6 @@ test('an agent wired to nothing is told so, not left guessing', async () => {
     ) as { tools: unknown[]; hint?: string };
     assert.deepEqual(status.tools, []);
     assert.match(status.hint ?? '', /wire this agent/i);
-  } finally {
-    await app.close();
-  }
-});
-
-test('an agent can request a missing service without gaining access', async () => {
-  const app = await harness();
-  try {
-    const client = await app.connect('token-bare');
-    const result = await client.callTool({
-      name: 'multitool_connect',
-      arguments: { service: 'linear' },
-    }) as { isError?: boolean; content: Array<{ type: string; text: string }> };
-    assert.notEqual(result.isError, true);
-    assert.match(result.content[0].text, /Requested/);
-
-    // The request is advisory: the session still has no connection tools.
-    const { tools } = await client.listTools();
-    assert.deepEqual(tools.map((tool) => tool.name).sort(), [
-      'multitool_connect',
-      'multitool_status',
-    ]);
   } finally {
     await app.close();
   }
@@ -684,4 +666,77 @@ test('the session count is capped', async () => {
   // The most recent survives; the oldest are the ones dropped.
   assert.ok(store.get('e', 'client-1'), 'the newest session should survive');
   assert.equal(store.get('a', 'client-1'), null, 'the oldest should be gone');
+});
+
+test('over-budget upstream tools are searchable and callable, not lost', async () => {
+  // A budget of one: the upstream's first tool registers, the second is
+  // search-only.
+  process.env.MULTITOOL_TOOL_BUDGET = '1';
+  const app = await harness();
+  try {
+    const client = await app.connect('token-mcp');
+    const { tools } = await client.listTools();
+    const names = tools.map((tool) => tool.name).sort();
+    assert.ok(names.includes('multitool_notion_search'), String(names));
+    assert.ok(!names.includes('multitool_notion_create_page'), 'second tool is withheld');
+    assert.ok(names.includes('multitool_search_tools'));
+    assert.ok(names.includes('multitool_call_tool'));
+
+    // Status owns up to the withheld tools instead of hiding them.
+    const status = payload(
+      await client.callTool({ name: 'multitool_status', arguments: {} }),
+    ) as { search_only_tools?: number };
+    assert.equal(status.search_only_tools, 1);
+
+    // Search finds the withheld tool and says how to call it.
+    const found = payload(
+      await client.callTool({
+        name: 'multitool_search_tools',
+        arguments: { query: 'create page' },
+      }),
+    ) as { results: Array<{ tool: string; call: { tool: string } }> };
+    const hit = found.results.find((result) => result.tool === 'create_page');
+    assert.ok(hit, JSON.stringify(found));
+    assert.equal(hit!.call.tool, 'multitool_call_tool');
+
+    // …and the generic invoker reaches it through the broker as usual.
+    const result = await client.callTool({
+      name: 'multitool_call_tool',
+      arguments: { connection: 'notion', tool: 'create_page', arguments: { title: 'Hi' } },
+    });
+    assert.deepEqual((result as { content: Array<{ text: string }> }).content, [
+      { type: 'text', text: 'create_page:{"title":"Hi"}' },
+    ]);
+
+    // An unknown tool is refused with a pointer at search, not a crash.
+    const missing = await client.callTool({
+      name: 'multitool_call_tool',
+      arguments: { connection: 'notion', tool: 'not_a_tool', arguments: {} },
+    });
+    assert.equal((missing as { isError?: boolean }).isError, true);
+  } finally {
+    delete process.env.MULTITOOL_TOOL_BUDGET;
+    await app.close();
+  }
+});
+
+test('multitool_connect files a request with the broker and reports back', async () => {
+  const app = await harness();
+  try {
+    const client = await app.connect('token-bare');
+    const text = (result: unknown): string =>
+      (result as { content: Array<{ text: string }> }).content[0].text;
+    const first = text(await client.callTool({
+      name: 'multitool_connect',
+      arguments: { service: 'linear' },
+    }));
+    assert.match(first, /add "linear" in the Multitool app/i);
+    const again = text(await client.callTool({
+      name: 'multitool_connect',
+      arguments: { service: 'linear' },
+    }));
+    assert.match(again, /already requested/i);
+  } finally {
+    await app.close();
+  }
 });
