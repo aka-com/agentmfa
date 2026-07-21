@@ -400,7 +400,7 @@ function mockStartAuth(draft: McpAuthDraft): McpAuthState {
   if (/-fail$/.test(draft.name)) {
     at(2800, () => mockAuthSet(session, {
       phase: 'failed',
-      message: 'the authorization server does not offer automatic client registration',
+      message: 'The authorization server does not offer automatic client registration',
       hint: 'Add this server with a token instead.',
     } as McpAuthState));
     return session.state;

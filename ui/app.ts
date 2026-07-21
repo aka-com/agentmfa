@@ -816,8 +816,7 @@ function startHTML(): string {
 
   return `<div class="start">
     <div class="start-hero">
-      <h3>Give your agent a real tool</h3>
-      <p>Three steps. Your credentials stay in the Keychain the whole way.</p>
+      <h3>Connect your agent to everything</h3>
       <div class="start-picker" role="group" aria-label="What to set up first">${picker}</div>
       <p class="start-promise">${esc(option.promise)}</p>
     </div>
@@ -1222,9 +1221,12 @@ function connSheet(editing: boolean): string {
           placeholder="${escAttr(quickSetupPlaceholder(t))}" value="${escAttr(state.connImportSource)}">
         <button class="btn" data-act="conn-import" ${state.connImportSource.trim() ? '' : 'disabled'}>Prefill</button></div>
       ${state.connImportError ? `<div class="field-error">${esc(state.connImportError)}</div>` : ''}</div>`;
+  const importDivider = !editing && (t === 'pg' || t === 'ssh')
+    ? '<hr class="sheet-import-divider">'
+    : '';
   let sshHostKeyField = '';
   let pgTlsFields = '';
-  let fields = importRow + importWarnings;
+  let fields = importRow + importDivider + importWarnings;
   const nameTaken = !editing && toolNameIsTaken(d.name ?? '');
   const nameWarning = editing ? ''
     : `<div id="tool-name-warning" class="field-warning" role="status" aria-live="polite"${nameTaken ? '' : ' hidden'}>Name used by an existing tool</div>`;

@@ -777,6 +777,7 @@
 .sheet-import-row input { flex: 1; min-width: 0; }
 .sheet-import-row .btn { flex: 0 0 auto; padding: 0 14px; }
 .sheet-import-row .btn[disabled] { opacity: .45; cursor: default; }
+.sheet-import-divider { margin: 3px 0 14px; border: 0; border-top: 1px solid var(--line); }
 
 /* ------------------------------- MCP status ------------------------------- */
 /* Result line for connection tests and MCP status checks, rendered inside

@@ -891,7 +891,7 @@ async fn register(
 ) -> std::result::Result<Registration, FlowFailure> {
     let Some(registration_endpoint) = &discovered.registration_endpoint else {
         return Err(FlowFailure::hinted(
-            "the authorization server does not offer automatic client registration",
+            "The authorization server does not offer automatic client registration",
             "Add this server with a token instead, or register a client with the provider.",
         ));
     };
