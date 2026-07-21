@@ -145,7 +145,7 @@ async fn agent_revocation_is_immediate_without_confirmation() {
 }
 
 #[tokio::test]
-async fn copy_auth_is_reused_across_secrets_but_not_outside_copying() {
+async fn one_confirmation_opens_the_presence_window_for_reads() {
     let events = Arc::new(UnifiedAuthEvents {
         secret_read_confirms: AtomicUsize::new(0),
     });
@@ -169,13 +169,104 @@ async fn copy_auth_is_reused_across_secrets_but_not_outside_copying() {
     );
     assert_eq!(events.secret_read_confirms.load(Ordering::SeqCst), 1);
 
-    // The copy window is not a general secret-read authorization. A direct
-    // broker read (a UI-plane read) still needs its own gate.
+    // The presence window that one authentication opened also covers other
+    // user-plane reads (reveal, tests) for its duration.
     assert_eq!(
         &*broker.store.secret_value(&first.id).await.unwrap(),
         "first"
     );
-    assert_eq!(events.secret_read_confirms.load(Ordering::SeqCst), 2);
+    assert_eq!(events.secret_read_confirms.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn an_expired_presence_window_prompts_again() {
+    let events = Arc::new(UnifiedAuthEvents {
+        secret_read_confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    // A zero-length window is stale the moment it is noted (store-level:
+    // the UI command only offers the real choices).
+    broker.store.set_presence_window_secs(0).unwrap();
+    let secret = broker
+        .store
+        .add_secret("TOKEN", Zeroizing::new("abcdefghijkl".into()))
+        .unwrap();
+
+    broker.ui_reveal_secret_prefix(&secret.id).await.unwrap();
+    broker.ui_reveal_secret_prefix(&secret.id).await.unwrap();
+    assert_eq!(
+        events.secret_read_confirms.load(Ordering::SeqCst),
+        2,
+        "each read outside the window authenticates"
+    );
+}
+
+#[tokio::test]
+async fn post_save_test_rides_the_add_confirmation() {
+    let events = Arc::new(UnifiedAuthEvents {
+        secret_read_confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    let conn = broker
+        .ui_add_connection_with_secret(
+            "API_KEY",
+            Zeroizing::new("k".into()),
+            ConnectionSpec {
+                name: "local-api".into(),
+                config: ConnectionConfig::Api {
+                    host: "127.0.0.1".into(),
+                    scheme: "http".into(),
+                    port: Some(9),
+                    template: "Authorization: Bearer {{API_KEY}}".into(),
+                    mcp_path: None,
+                    oauth: None,
+                },
+                secrets: vec![],
+            },
+        )
+        .unwrap();
+
+    // The confirmed add opened the presence window: the automatic post-save
+    // test (and any further test within the window) reads without prompting.
+    let _ = broker.ui_test_connection(&conn.id).await.unwrap();
+    let _ = broker.ui_test_connection(&conn.id).await.unwrap();
+    assert_eq!(events.secret_read_confirms.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_manual_test_confirms_once_across_all_template_refs() {
+    let events = Arc::new(UnifiedAuthEvents {
+        secret_read_confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    broker
+        .store
+        .add_secret("A_KEY", Zeroizing::new("a".into()))
+        .unwrap();
+    broker
+        .store
+        .add_secret("B_KEY", Zeroizing::new("b".into()))
+        .unwrap();
+    // Store-level add: no confirmed change on record, so the test must
+    // confirm — but exactly once, not once per referenced secret.
+    let conn = broker
+        .store
+        .add_connection(ConnectionSpec {
+            name: "local-api".into(),
+            config: ConnectionConfig::Api {
+                host: "127.0.0.1".into(),
+                scheme: "http".into(),
+                port: Some(9),
+                template: "Authorization: Bearer {{A_KEY}}.{{B_KEY}}".into(),
+                mcp_path: None,
+                oauth: None,
+            },
+            secrets: vec![],
+        })
+        .unwrap();
+
+    let _ = broker.ui_test_connection(&conn.id).await.unwrap();
+    assert_eq!(events.secret_read_confirms.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -201,10 +292,72 @@ async fn config_actions_confirm_and_record_the_method() {
         .unwrap();
     assert_eq!(deleted.confirmation, Some(ConfirmationMethod::Waived));
 
-    // In-use secrets are refused before the user is asked to authenticate.
+    // The follow-up delete rides the presence window the first one opened,
+    // and the audit trail records that method honestly.
     let secret = broker.store.secret_by_name("GITHUB_API_KEY").unwrap();
     broker.ui_delete_secret(&secret.id).unwrap();
+    assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
+    let recent = broker.audit.recent(5);
+    let deleted_secret = recent
+        .iter()
+        .find(|e| e.text.starts_with("Secret deleted"))
+        .unwrap();
+    assert_eq!(
+        deleted_secret.confirmation,
+        Some(ConfirmationMethod::RecentAuthentication)
+    );
+}
+
+#[tokio::test]
+async fn the_presence_window_never_covers_weakening_the_gates() {
+    let events = Arc::new(GateEvents {
+        allow: true,
+        confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    let conn = add_github(&broker);
+
+    // Open the window with a user-plane action…
+    broker.ui_delete_connection(&conn.id).unwrap();
+    assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
+
+    // …which does not extend to disabling the read gate: that prompts on
+    // its own, like every grant of new agent authority.
+    broker.ui_change_reauth_on_read(false).unwrap();
     assert_eq!(events.confirms.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn presence_window_setting_is_validated_and_persisted() {
+    let events = Arc::new(GateEvents {
+        allow: true,
+        confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    assert_eq!(
+        broker.settings().presence_window_secs,
+        15 * 60,
+        "defaults to 15 minutes"
+    );
+
+    assert!(matches!(
+        broker.ui_set_presence_window(1234),
+        Err(CoreError::InvalidSetting(_))
+    ));
+    assert_eq!(
+        events.confirms.load(Ordering::SeqCst),
+        0,
+        "an invalid choice is refused before authentication"
+    );
+
+    broker.ui_set_presence_window(3600).unwrap();
+    assert_eq!(broker.settings().presence_window_secs, 3600);
+    assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
+
+    // Within the window the change itself rides it.
+    broker.ui_set_presence_window(7200).unwrap();
+    assert_eq!(broker.settings().presence_window_secs, 7200);
+    assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

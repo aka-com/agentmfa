@@ -165,6 +165,7 @@ interface MockArgs {
   input: ConnectionInput & Partial<McpAuthDraft>;
   limit: number;
   on: boolean;
+  secs: number;
   agentId: string;
   connectionId: string;
   wired: boolean;
@@ -200,6 +201,7 @@ const db: MockDatabase = {
     reauth_on_read: true,
     show_websockets: false,
     menu_bar_hides_dock: false,
+    presence_window_secs: 15 * 60,
   },
 };
 function mkSecret(name: string, value: string): MockSecret {
@@ -767,6 +769,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
     case 'set_menu_bar_hides_dock':
       db.settings.menu_bar_hides_dock = args.on;
       return;
+    case 'set_presence_window': db.settings.presence_window_secs = args.secs; return;
     case 'ui_set_mode': case 'ui_hide_main': case 'ui_hide_dropdown':
     case 'ui_set_dropdown_form_active': return;
     default: throw new Error(`mock: unknown command ${cmd}`);

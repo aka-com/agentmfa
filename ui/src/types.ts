@@ -126,6 +126,8 @@ export interface Settings {
   reauth_on_read: boolean;
   show_websockets: boolean;
   menu_bar_hides_dock: boolean;
+  /** Seconds one OS authentication keeps user-plane actions from re-prompting. */
+  presence_window_secs: number;
 }
 
 export interface HostKeyCandidate {
@@ -323,6 +325,7 @@ export interface CommandMap {
   set_reauth_on_read: CommandSpec<{ on: boolean }, void>;
   set_show_websockets: CommandSpec<{ on: boolean }, void>;
   set_menu_bar_hides_dock: CommandSpec<{ on: boolean }, void>;
+  set_presence_window: CommandSpec<{ secs: number }, void>;
   ui_set_mode: CommandSpec<{ mode: string }, void>;
   ui_hide_main: CommandSpec<undefined, void>;
   ui_hide_dropdown: CommandSpec<undefined, void>;

@@ -342,6 +342,7 @@ pub fn get_settings(state: State<AppState>) -> SettingsDto {
         reauth_on_read: s.reauth_on_read,
         show_websockets: s.show_websockets,
         menu_bar_hides_dock: s.menu_bar_hides_dock,
+        presence_window_secs: s.presence_window_secs,
     }
 }
 
@@ -1045,6 +1046,14 @@ pub fn set_menu_bar_hides_dock(state: State<AppState>, on: bool) -> CmdResult<()
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub fn set_presence_window(state: State<AppState>, secs: u64) -> CmdResult<()> {
+    state
+        .broker
+        .ui_set_presence_window(secs)
+        .map_err(|e| e.to_string())
+}
+
 /// Register every command with the Tauri builder.
 pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
@@ -1086,6 +1095,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         set_reauth_on_read,
         set_show_websockets,
         set_menu_bar_hides_dock,
+        set_presence_window,
         crate::windows::ui_set_mode,
         crate::windows::ui_hide_main,
         crate::windows::ui_hide_dropdown,

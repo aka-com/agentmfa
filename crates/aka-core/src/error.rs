@@ -60,6 +60,9 @@ pub enum CoreError {
     #[error("invalid tool config: {0}")]
     InvalidConnectionConfig(String),
 
+    #[error("invalid setting: {0}")]
+    InvalidSetting(String),
+
     #[error("invalid tool field {field:?}: {message}")]
     InvalidConnectionField {
         field: ConnectionField,

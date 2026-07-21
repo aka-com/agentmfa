@@ -27,7 +27,9 @@ use crate::types::{
 };
 use crate::Result;
 
-const COPY_AUTHORIZATION_TTL: Duration = Duration::from_secs(5 * 60);
+/// Presence-window lengths the Settings sheet offers: 15 minutes, 1 hour,
+/// 2 hours.
+pub const PRESENCE_WINDOW_CHOICES: &[u64] = &[15 * 60, 60 * 60, 2 * 60 * 60];
 
 /// Outcome of a UI-initiated connection test: a pass/fail flag plus a short
 /// human-readable summary (never credential material).
@@ -67,10 +69,8 @@ pub struct Broker {
     /// (connection edits, wiring changes) so concurrent UI actions cannot
     /// interleave.
     pub(crate) config_gate: Mutex<()>,
-    /// A successful OS authentication for a user-initiated clipboard copy may
-    /// authorize more clipboard copies briefly. This cache is deliberately
-    /// separate from agent execution authorizations and never leaves memory.
-    copy_authorization_until: Mutex<Option<Instant>>,
+    /// Serializes clipboard-copy authorization checks so simultaneous clicks
+    /// cannot open duplicate native prompts.
     copy_authorization_gate: tokio::sync::Mutex<()>,
     pub pairing: Arc<PairingRegistry>,
     pub executions: Executions,
@@ -192,7 +192,6 @@ impl Broker {
             endpoints,
             endpoint_listeners: Mutex::new(HashMap::new()),
             config_gate: Mutex::new(()),
-            copy_authorization_until: Mutex::new(None),
             copy_authorization_gate: tokio::sync::Mutex::new(()),
             pairing,
             executions,
@@ -213,13 +212,28 @@ impl Broker {
         self.task_runtime.clone()
     }
 
-    /// Demand the shell's native confirmation for a high-consequence
-    /// configuration action. Fails closed when the shell refuses or
-    /// does not implement the gate.
+    /// Demand the shell's native confirmation, regardless of the presence
+    /// window. Fails closed when the shell refuses or does not implement the
+    /// gate. Every action that grants an agent new authority goes through
+    /// here (or calls `events.confirm_action` directly off-runtime).
     fn confirm_action(&self, description: &str) -> Result<crate::types::ConfirmationMethod> {
-        self.events
+        let method = self
+            .events
             .confirm_action(description)
-            .ok_or(CoreError::NotConfirmed)
+            .ok_or(CoreError::NotConfirmed)?;
+        self.store.note_user_presence();
+        Ok(method)
+    }
+
+    /// Confirm a user-plane configuration action (tool and secret CRUD):
+    /// rides the presence window when it is fresh, otherwise prompts and
+    /// opens it. Never used for granting an agent authority.
+    fn confirm_user_action(&self, description: &str) -> Result<crate::types::ConfirmationMethod> {
+        if self.store.user_presence_fresh() {
+            self.store.note_user_presence();
+            return Ok(crate::types::ConfirmationMethod::RecentAuthentication);
+        }
+        self.confirm_action(description)
     }
 
     /* ----------------------- secrets (UI commands) ------------------------ */
@@ -293,7 +307,7 @@ impl Broker {
             return Err(CoreError::SecretInUse(users));
         }
         let confirmation =
-            self.confirm_action(&format!("Delete secret “{}” from the Keychain", meta.name))?;
+            self.confirm_user_action(&format!("Delete secret “{}” from the Keychain", meta.name))?;
         let meta = self.store.delete_secret(id)?;
         self.audit.append(
             AuditEntry::new(
@@ -312,47 +326,34 @@ impl Broker {
     }
 
     /// Fetch a value for the shell's core-side clipboard copy. A successful
-    /// OS authentication authorizes only subsequent user-initiated copies for
-    /// five minutes; agent executions and every other protected action keep
-    /// their own authorization scopes.
+    /// OS authentication opens (or a fresh one extends) the presence window;
+    /// agent executions keep their own authorization scopes.
     pub async fn ui_secret_value_for_copy(&self, id: &Uuid) -> Result<SecretValue> {
         // Serialize copy authorization checks so simultaneous clicks cannot
         // open duplicate native prompts or race to establish the window.
         let _gate = self.copy_authorization_gate.lock().await;
 
         if !self.store.settings().reauth_on_read {
-            *self.copy_authorization_until.lock().unwrap() = None;
             return self.store.secret_value(id).await;
         }
 
-        let authorized = {
-            let mut until = self.copy_authorization_until.lock().unwrap();
-            match *until {
-                Some(deadline) if Instant::now() < deadline => true,
-                _ => {
-                    *until = None;
-                    false
-                }
-            }
-        };
-        if authorized {
+        if self.store.user_presence_fresh() {
+            self.store.note_user_presence();
             return crate::authorization::scope(true, self.store.secret_value(id)).await;
         }
 
         let meta = self.store.secret_by_id(id)?;
+        let window = Duration::from_secs(self.store.settings().presence_window_secs);
         let events = self.events.clone();
-        let confirmed = tokio::task::spawn_blocking(move || {
-            events.confirm_secret_copy(&meta, COPY_AUTHORIZATION_TTL)
-        })
-        .await
-        .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))?;
+        let confirmed =
+            tokio::task::spawn_blocking(move || events.confirm_secret_copy(&meta, window))
+                .await
+                .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))?;
         if !confirmed {
             return Err(CoreError::SecretReadNotAuthenticated);
         }
-        let value = crate::authorization::scope(true, self.store.secret_value(id)).await?;
-        *self.copy_authorization_until.lock().unwrap() =
-            Some(Instant::now() + COPY_AUTHORIZATION_TTL);
-        Ok(value)
+        self.store.note_user_presence();
+        crate::authorization::scope(true, self.store.secret_value(id)).await
     }
 
     /// Audit trail for the core-side clipboard copy; the shell owns the
@@ -375,7 +376,7 @@ impl Broker {
         // authenticate. `add_connection` repeats the state-dependent checks
         // after confirmation in case the index changed while the sheet was up.
         self.store.preflight_add_connection(&spec)?;
-        let confirmation = self.confirm_action(&format!("Add tool “{}”", spec.name))?;
+        let confirmation = self.confirm_user_action(&format!("Add tool “{}”", spec.name))?;
         let conn = self.store.add_connection(spec)?;
         self.audit.append(
             AuditEntry::new(
@@ -401,7 +402,7 @@ impl Broker {
     ) -> Result<Connection> {
         self.store
             .preflight_add_connection_with_secret(secret_name, &spec)?;
-        let confirmation = self.confirm_action(&format!("Add tool “{}”", spec.name))?;
+        let confirmation = self.confirm_user_action(&format!("Add tool “{}”", spec.name))?;
         let (secret, conn) = self
             .store
             .add_connection_with_secret(secret_name, value, spec)?;
@@ -434,7 +435,7 @@ impl Broker {
             old.kind() != ConnectionKind::Api && old.secrets != spec.secrets;
         let capability_changed = old.config != spec.config || explicit_secrets_changed;
         let confirmation = if capability_changed {
-            Some(self.confirm_action(&format!(
+            Some(self.confirm_user_action(&format!(
                 "Change security settings for tool “{}”",
                 spec.name
             ))?)
@@ -507,7 +508,7 @@ impl Broker {
     /// Delete a connection; wirings die with it.
     pub fn ui_delete_connection(&self, id: &Uuid) -> Result<Connection> {
         let conn = self.store.connection_by_id(id)?;
-        let confirmation = self.confirm_action(&format!("Delete tool “{}”", conn.name))?;
+        let confirmation = self.confirm_user_action(&format!("Delete tool “{}”", conn.name))?;
         let _gate = self.config_gate.lock().unwrap();
         if self.store.connection_by_id(id)?.updated_at != conn.updated_at {
             return Err(CoreError::ApprovalConnectionChanged);
@@ -575,6 +576,11 @@ impl Broker {
                 }
             }
         };
+        // One authorization scope per test: a template referencing several
+        // secrets confirms once, not once per secret — and within the
+        // presence window (which the save preceding an automatic post-save
+        // test refreshed) not at all.
+        let test = crate::authorization::scope(false, test);
         let outcome = match tokio::time::timeout(TEST_TIMEOUT, test).await {
             Ok(result) => result,
             Err(_) => Err(format!(
@@ -628,7 +634,7 @@ impl Broker {
         self.store
             .preflight_add_connection_with_secret(secret_name, &spec)?;
         let confirmation =
-            self.confirm_action(&format!("Connect “{}” with your browser", spec.name))?;
+            self.confirm_user_action(&format!("Connect “{}” with your browser", spec.name))?;
         let pending = crate::oauth::begin(&oauth_spec)
             .await
             .map_err(CoreError::OAuth)?;
@@ -682,7 +688,7 @@ impl Broker {
             CoreError::InvalidConnectionConfig("the OAuth connection has no token secret".into())
         })?;
         let confirmation =
-            self.confirm_action(&format!("Reconnect “{}” with your browser", conn.name))?;
+            self.confirm_user_action(&format!("Reconnect “{}” with your browser", conn.name))?;
         // Carry the client secret across (BYO apps that require one at the
         // token endpoint); the old tokens are replaced wholesale.
         let previous = self
@@ -892,6 +898,7 @@ impl Broker {
             .await
             .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))?
             .ok_or(CoreError::NotConfirmed)?;
+        self.store.note_user_presence();
 
         // Mint under the gate; re-check the wiring didn't vanish while the
         // sheet was up.
@@ -1254,6 +1261,7 @@ impl Broker {
             );
             return;
         };
+        self.store.note_user_presence();
 
         let _gate = self.config_gate.lock().unwrap();
         // Re-snapshot under the gate: connections may have changed while the
@@ -1353,10 +1361,28 @@ impl Broker {
 
     pub fn ui_change_reauth_on_read(&self, on: bool) -> Result<()> {
         if !on {
+            // Weakening the read gate always re-prompts; the presence window
+            // does not cover it.
             self.confirm_action("Disable OS authentication requirement for reading secrets")?;
         }
         self.store.set_reauth_on_read(on)?;
-        *self.copy_authorization_until.lock().unwrap() = None;
+        self.store.clear_user_presence();
+        Ok(())
+    }
+
+    /// Change the presence-window length. Restricted to the offered choices;
+    /// the window restarts under the new length immediately.
+    pub fn ui_set_presence_window(&self, secs: u64) -> Result<()> {
+        if !PRESENCE_WINDOW_CHOICES.contains(&secs) {
+            return Err(CoreError::InvalidSetting(format!(
+                "presence window must be 900, 3600, or 7200 seconds, got {secs}"
+            )));
+        }
+        self.confirm_user_action("Change how long Multitool stays unlocked")?;
+        self.store.set_presence_window_secs(secs)?;
+        // Re-anchor the just-confirmed window so a shortened length takes
+        // effect now instead of at the old deadline.
+        self.store.note_user_presence();
         Ok(())
     }
 

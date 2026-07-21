@@ -73,6 +73,10 @@ pub struct Store {
     events: Arc<dyn BrokerEvents>,
     integrity: Arc<StateIntegrity>,
     state: Mutex<IndexState>,
+    /// When the user last passed (or rode) a native authentication, plus the
+    /// presence window: user-plane gates within it skip their prompts, and
+    /// each pass slides it forward. Never persisted.
+    presence_until: Mutex<Option<std::time::Instant>>,
 }
 
 impl Store {
@@ -103,7 +107,31 @@ impl Store {
             events,
             integrity,
             state: Mutex::new(state),
+            presence_until: Mutex::new(None),
         })
+    }
+
+    /* ----------------------------- presence ------------------------------- */
+
+    /// Slide the presence window forward: the user just authenticated, or
+    /// rode a still-fresh authentication.
+    pub fn note_user_presence(&self) {
+        let window = std::time::Duration::from_secs(self.settings().presence_window_secs);
+        *self.presence_until.lock().unwrap() = Some(std::time::Instant::now() + window);
+    }
+
+    /// Whether a recent authentication still covers user-plane gates.
+    pub fn user_presence_fresh(&self) -> bool {
+        matches!(
+            *self.presence_until.lock().unwrap(),
+            Some(deadline) if std::time::Instant::now() < deadline
+        )
+    }
+
+    /// Drop the window so the next gated action re-prompts (e.g. after the
+    /// read-authentication setting changes).
+    pub fn clear_user_presence(&self) {
+        *self.presence_until.lock().unwrap() = None;
     }
 
     fn persist(&self, state: &IndexState) -> Result<()> {
@@ -383,12 +411,20 @@ impl Store {
         }
         let events = self.events.clone();
         crate::authorization::confirm_once(|| async move {
+            // A fresh presence window covers the read; pre-authorized agent
+            // executions never reach this closure, so agent traffic cannot
+            // keep the window alive.
+            if self.user_presence_fresh() {
+                self.note_user_presence();
+                return Ok(());
+            }
             let confirmed = tokio::task::spawn_blocking(move || events.confirm_secret_read(&meta))
                 .await
                 .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))?;
             if !confirmed {
                 return Err(CoreError::SecretReadNotAuthenticated);
             }
+            self.note_user_presence();
             Ok(())
         })
         .await
@@ -770,6 +806,17 @@ impl Store {
         let mut state = self.state.lock().unwrap();
         let mut settings = state.settings();
         settings.menu_bar_hides_dock = on;
+        let mut next = state.clone();
+        next.settings = Some(settings);
+        self.commit(&mut state, next)
+    }
+
+    /// Unvalidated persistence; the broker's UI command restricts the value
+    /// to the offered choices.
+    pub fn set_presence_window_secs(&self, secs: u64) -> Result<()> {
+        let mut state = self.state.lock().unwrap();
+        let mut settings = state.settings();
+        settings.presence_window_secs = secs;
         let mut next = state.clone();
         next.settings = Some(settings);
         self.commit(&mut state, next)

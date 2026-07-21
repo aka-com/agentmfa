@@ -212,6 +212,7 @@ const state: AppState = {
     reauth_on_read: true,
     show_websockets: false,
     menu_bar_hides_dock: false,
+    presence_window_secs: 15 * 60,
   },
   reveal: {},            // secretId -> prefix string (transient)
   // sheet / confirm state
@@ -1631,6 +1632,15 @@ function settingsSheet() {
   const reauthRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Confirm before using saved secrets</div>
       <div class="st-sub">Use OS authentication before showing, copying, or sending a saved credential.</div></div>
       <button class="switch ${s.reauth_on_read ? 'on' : ''}" data-act="toggle-reauth" role="checkbox" aria-checked="${s.reauth_on_read ? 'true' : 'false'}"></button></div>`;
+  const windowBtn = (secs: number, label: string): string =>
+    `<button class="seg-btn ${s.presence_window_secs === secs ? 'on' : ''}" data-act="set-presence-window"
+      data-id="${secs}" role="radio" aria-checked="${s.presence_window_secs === secs}">${label}</button>`;
+  const presenceRow = s.reauth_on_read
+    ? `<div class="set-row"><div class="set-txt"><div class="st-title">Stay unlocked after confirming</div>
+      <div class="st-sub">One confirmation covers your own actions for this long. Giving an agent new access always asks again.</div></div>
+      <div class="seg in-form" role="radiogroup" aria-label="Stay unlocked for">
+      ${windowBtn(15 * 60, '15 min')}${windowBtn(60 * 60, '1 hour')}${windowBtn(2 * 60 * 60, '2 hours')}</div></div>`
+    : '';
   const dockRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Hide Dock icon in the menu bar</div>
       <div class="st-sub">When minimized to the menu bar, hide the Dock icon until the window is reopened.</div></div>
       <button class="switch ${s.menu_bar_hides_dock ? 'on' : ''}" data-act="toggle-menubar-dock" role="checkbox" aria-checked="${s.menu_bar_hides_dock ? 'true' : 'false'}"></button></div>`;
@@ -1639,7 +1649,7 @@ function settingsSheet() {
       <button class="switch ${s.show_websockets ? 'on' : ''}" data-act="toggle-websockets" role="checkbox" aria-checked="${s.show_websockets ? 'true' : 'false'}"></button></div>`;
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
     <div class="sheet wide"><h3>Settings</h3>
-    ${reauthRow}${websocketRow}${dockRow}
+    ${reauthRow}${presenceRow}${websocketRow}${dockRow}
     <div class="sheet-actions"><button class="btn primary" data-act="sheet-cancel">Done</button></div></div>`;
 }
 
@@ -2768,6 +2778,18 @@ document.addEventListener('click', async (e) => {
         if (await run(() => invoke('set_show_websockets', { on }))) {
           state.settings.show_websockets = on;
           toast(on ? '🔌 WebSockets shown in the catalog' : '🔌 WebSockets hidden');
+        }
+      }
+      await refresh('settings');
+      break;
+    case 'set-presence-window':
+      {
+        const secs = Number(id);
+        if (secs !== state.settings.presence_window_secs
+            && await run(() => invoke('set_presence_window', { secs }))) {
+          state.settings.presence_window_secs = secs;
+          const label = secs === 15 * 60 ? '15 minutes' : secs === 60 * 60 ? '1 hour' : '2 hours';
+          toast(`🔓 Stays unlocked for ${label} after confirming`);
         }
       }
       await refresh('settings');

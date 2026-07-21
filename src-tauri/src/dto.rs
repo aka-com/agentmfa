@@ -294,4 +294,5 @@ pub struct SettingsDto {
     pub reauth_on_read: bool,
     pub show_websockets: bool,
     pub menu_bar_hides_dock: bool,
+    pub presence_window_secs: u64,
 }

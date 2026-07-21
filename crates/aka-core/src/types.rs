@@ -530,6 +530,8 @@ pub enum ConfirmationMethod {
     Terminal,
     /// The shell explicitly waived confirmation (auto-approve / dev modes).
     Waived,
+    /// A recent OS authentication was still fresh (the presence window).
+    RecentAuthentication,
 }
 
 /// Attribution carried with every decision: who decided, from where. The
@@ -578,6 +580,16 @@ pub struct Settings {
     /// Dock icon (accessory activation) until the window is reopened.
     #[serde(default)]
     pub menu_bar_hides_dock: bool,
+    /// How long one successful OS authentication keeps Multitool unlocked
+    /// for user-plane actions (reads, copies, tool edits), in seconds; each
+    /// such action slides the window forward. Granting an agent new
+    /// authority always re-prompts regardless. Default 15 minutes.
+    #[serde(default = "default_presence_window_secs")]
+    pub presence_window_secs: u64,
+}
+
+fn default_presence_window_secs() -> u64 {
+    15 * 60
 }
 
 impl Default for Settings {
@@ -587,6 +599,7 @@ impl Default for Settings {
             legacy_pg_trusted_ca_bundle_path: None,
             show_websockets: false,
             menu_bar_hides_dock: false,
+            presence_window_secs: default_presence_window_secs(),
         }
     }
 }
@@ -620,6 +633,11 @@ mod tests {
         assert!(settings.reauth_on_read);
         assert!(!settings.menu_bar_hides_dock);
         assert!(!settings.show_websockets, "a new opt-in defaults off");
+        assert_eq!(
+            settings.presence_window_secs,
+            15 * 60,
+            "the presence window defaults to 15 minutes"
+        );
     }
 
     #[test]
