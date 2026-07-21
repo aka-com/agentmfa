@@ -861,3 +861,17 @@
 
 /* Inline fix action beside the needs-reconnect badge. */
 .cat-meta-fix { padding: 1px 8px; font-size: 12px; }
+
+/* --------------------------- activity filters ----------------------------- */
+.act-filters {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 2px 2px 10px;
+}
+.act-search { flex: 1 1 160px; min-width: 140px; }
+.act-filter { padding: 3px 10px; font-size: 12px; }
+.act-chips { display: flex; gap: 5px; margin-top: 3px; flex-wrap: wrap; }
+.act-chip {
+  font-size: 11px; color: var(--muted); border: 1px solid var(--line);
+  border-radius: 999px; padding: 0 7px; line-height: 16px;
+}
+.act-chip-time { font-variant-numeric: tabular-nums; }

@@ -287,8 +287,11 @@ function audit(
   kind: keyof typeof MOCK_ACTIVITY_META,
   text: string,
   detail: string | null = null,
+  attribution: Pick<ActivityEntry, 'agent' | 'connection' | 'duration_ms'> = {},
 ): ActivityEntry {
-  const entry = { ...MOCK_ACTIVITY_META[kind], text, detail, at: new Date().toISOString() };
+  const entry = {
+    ...MOCK_ACTIVITY_META[kind], text, detail, ...attribution, at: new Date().toISOString(),
+  };
   db.activity.unshift(entry);
   db.activity.length = Math.min(db.activity.length, MOCK_ACTIVITY_LIMIT);
   return entry;
@@ -640,7 +643,8 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         w.client_id === agent.id && w.connection_id === connection.id);
       if (args.wired && !wired) {
         db.wirings.push({ client_id: agent.id, agent: agent.name, connection_id: connection.id });
-        audit('wired', `${agent.name} wired to ${connection.name}`);
+        audit('wired', `${agent.name} wired to ${connection.name}`,
+          null, { agent: agent.name, connection: connection.name });
       } else if (!args.wired && wired) {
         db.wirings = db.wirings.filter((w) =>
           !(w.client_id === agent.id && w.connection_id === connection.id));

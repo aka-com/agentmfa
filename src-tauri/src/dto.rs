@@ -236,6 +236,12 @@ pub struct ActivityDto {
     pub tone: String,
     pub text: String,
     pub detail: Option<String>,
+    /// Structured attribution for filtering: which agent acted and which
+    /// connection was touched (both optional per entry).
+    pub agent: Option<String>,
+    pub connection: Option<String>,
+    /// How long a brokered call or session took, when measured.
+    pub duration_ms: Option<u64>,
     /// RFC 3339 timestamp; the UI renders it relative (<24h) or absolute and
     /// shows the full value in a hover tooltip.
     pub at: String,
@@ -248,6 +254,9 @@ impl From<&AuditEntry> for ActivityDto {
             tone: e.kind.tone().to_string(),
             text: e.text.clone(),
             detail: e.detail.clone(),
+            agent: e.agent.clone(),
+            connection: e.connection.clone(),
+            duration_ms: e.duration_ms,
             at: e.ts.to_rfc3339(),
         }
     }

@@ -155,6 +155,10 @@ interface AppState {
   mcpStatus: Record<string, McpStatusState>;
   /** The open per-wiring tool picker (agent x MCP connection). */
   wiringTools: WiringToolsState | null;
+  /** Activity tab filters (transient; cleared on tab switch is deliberate NOT done — keep across renders). */
+  activityQuery: string;
+  activityAgent: string | null;
+  activityIssuesOnly: boolean;
 }
 
 interface WiringToolsState {
@@ -229,6 +233,9 @@ const state: AppState = {
   mcpAuthOpenedUrl: null,
   mcpStatus: {},
   wiringTools: null,
+  activityQuery: '',
+  activityAgent: null,
+  activityIssuesOnly: false,
 };
 
 // Re-rendering replaces #root wholesale, which would drop the scroll
@@ -741,19 +748,58 @@ function connectionsHTML() {
 // semantic Lucide icon, then plain primary text with optional detail.
 function activityRowHTML(a: ActivityEntry): string {
   const icon = ICONS[a.icon] || '';
+  // Attribution and timing as quiet chips: only what the entry actually
+  // carries, never guessed from the prose.
+  const chips = [
+    a.agent ? `<span class="act-chip" title="Agent">${esc(a.agent)}</span>` : '',
+    a.connection ? `<span class="act-chip" title="Tool">${esc(a.connection)}</span>` : '',
+    typeof a.duration_ms === 'number'
+      ? `<span class="act-chip act-chip-time" title="Duration">${a.duration_ms} ms</span>` : '',
+  ].join('');
   return `<div class="act-row">
     <span class="act-gutter"><span class="act-time" data-tippy-content="${escAttr(absTime(a.at))}" data-tippy-theme="activity-time">${esc(relTime(a.at))}</span></span>
     <span class="act-ico tone-${escAttr(a.tone || 'neutral')}">${icon}</span>
-    <span class="act-txt">${esc(a.text)}${a.detail ? `<div class="act-detail">${esc(a.detail)}</div>` : ''}</span></div>`;
+    <span class="act-txt">${esc(a.text)}${a.detail ? `<div class="act-detail">${esc(a.detail)}</div>` : ''}${chips ? `<div class="act-chips">${chips}</div>` : ''}</span></div>`;
+}
+
+/** The activity entries the current filters keep. */
+function filteredActivity(): ActivityEntry[] {
+  const needle = state.activityQuery.trim().toLowerCase();
+  return state.activity.filter((entry) => {
+    if (state.activityIssuesOnly && entry.tone !== 'danger' && entry.tone !== 'warning') {
+      return false;
+    }
+    if (state.activityAgent && entry.agent !== state.activityAgent) return false;
+    if (!needle) return true;
+    return entry.text.toLowerCase().includes(needle)
+      || (entry.detail || '').toLowerCase().includes(needle)
+      || (entry.agent || '').toLowerCase().includes(needle)
+      || (entry.connection || '').toLowerCase().includes(needle);
+  });
 }
 
 function activityHTML() {
   if (!state.activity.length) {
     return `<div class="muted-note">No activity yet.${mode === 'dropdown' ? '' : '<br>Requests and broker actions will appear here.'}</div>`;
   }
-  return '<div class="act-list">' + state.activity
-    .slice(0, ACTIVITY_RENDER_LIMIT)
-    .map(activityRowHTML).join('') + '</div>';
+  // Agents seen in the loaded window; chips beat a dropdown at this scale.
+  const agents = [...new Set(state.activity.map((entry) => entry.agent).filter(Boolean))] as string[];
+  const chip = (label: string, act: string, on: boolean, value = ''): string =>
+    `<button class="seg-btn act-filter ${on ? 'on' : ''}" data-act="${act}"
+      ${value ? `data-value="${escAttr(value)}"` : ''}>${esc(label)}</button>`;
+  const filterBar = `<div class="act-filters">
+    <input id="activity-search" class="cat-search act-search" type="search"
+      placeholder="Filter activity…" aria-label="Filter activity"
+      value="${escAttr(state.activityQuery)}">
+    ${chip('Issues', 'act-filter-issues', state.activityIssuesOnly)}
+    ${agents.map((agent) =>
+      chip(agent, 'act-filter-agent', state.activityAgent === agent, agent)).join('')}
+  </div>`;
+  const entries = filteredActivity().slice(0, ACTIVITY_RENDER_LIMIT);
+  const list = entries.length
+    ? '<div class="act-list">' + entries.map(activityRowHTML).join('') + '</div>'
+    : '<div class="muted-note">Nothing matches these filters.</div>';
+  return filterBar + list;
 }
 
 async function receiveActivity(entry: ActivityEntry | null | undefined): Promise<void> {
@@ -769,6 +815,11 @@ async function receiveActivity(entry: ActivityEntry | null | undefined): Promise
   state.activity = [entry, ...state.activity].slice(0, ACTIVITY_RENDER_LIMIT);
 
   if (state.tab !== 'activity' || state.sheet || state.menuOpen) return;
+  // With filters active the cheap prepend would bypass them; re-render.
+  if (state.activityQuery || state.activityAgent || state.activityIssuesOnly) {
+    render();
+    return;
+  }
   const list = document.querySelector('.act-list');
   if (!list) {
     render();
@@ -2326,6 +2377,38 @@ document.addEventListener('click', async (e) => {
       });
       break;
     }
+    case 'oauth-scope-toggle': {
+      captureDrafts();
+      const entry = state.draft.entryId ? catalogEntryById(state.draft.entryId) : undefined;
+      const preset = entry?.oauthPreset;
+      if (!preset) break;
+      const scope = btn.dataset.scope || '';
+      const current = state.draft.oauthScopes ?? preset.scopes;
+      state.draft.oauthScopes = current.includes(scope)
+        ? current.filter((candidate) => candidate !== scope)
+        : [...current, scope];
+      render(false);
+      break;
+    }
+    case 'oauth-reconnect': {
+      state.connMenuOpen = null;
+      toast('🌐 Approve access in your browser…');
+      if (await run(() => invoke('oauth_reconnect', { id }))) {
+        toast('🔌 Reconnected');
+        await refresh('all');
+      }
+      break;
+    }
+    case 'act-filter-issues':
+      state.activityIssuesOnly = !state.activityIssuesOnly;
+      render(false);
+      break;
+    case 'act-filter-agent': {
+      const value = btn.dataset.value || '';
+      state.activityAgent = state.activityAgent === value ? null : value;
+      render(false);
+      break;
+    }
     case 'wiring-tools': {
       const agent = state.agents.find((x) => x.id === id);
       const connection = state.connections.find((x) => x.id === btn.dataset.conn);
@@ -2642,6 +2725,11 @@ document.addEventListener('input', (e) => {
   if (target?.id === 'tool-search') {
     state.toolSearch = target.value;
     state.toolOpen = null;
+    render();
+    return;
+  }
+  if (target?.id === 'activity-search') {
+    state.activityQuery = target.value;
     render();
     return;
   }

@@ -75,6 +75,11 @@ export interface ActivityEntry {
   tone: string;
   text: string;
   detail: string | null;
+  /** Which agent acted / which connection was touched, when attributable. */
+  agent?: string | null;
+  connection?: string | null;
+  /** Brokered call / session duration, when measured. */
+  duration_ms?: number | null;
   at: string;
 }
 
