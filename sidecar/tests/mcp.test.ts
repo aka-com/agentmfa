@@ -21,12 +21,14 @@ const AGENTS: Record<string, { client_id: string; agent: string }> = {
   'token-bare': { client_id: 'client-bare', agent: 'other-agent' },
   'token-collide': { client_id: 'client-collide', agent: 'collide-agent' },
   'token-mcp': { client_id: 'client-mcp', agent: 'mcp-agent' },
+  'token-throttled': { client_id: 'client-throttled', agent: 'throttled-agent' },
 };
 const WIRED: Record<string, string[]> = {
   'client-wired': ['prod-db'],
   'client-collide': ['prod.db', 'prod db'],
   'client-mcp': ['notion'],
   'client-bare': [],
+  'client-throttled': [],
 };
 const CONNECTIONS = [
   { name: 'prod-db', type: 'pg', target: 'db.internal:5432/app', endpoint: '/v1/pg/open' },
@@ -80,6 +82,12 @@ function fakeBroker(socketPath: string): Promise<Server> {
       return;
     }
     if (req.url === '/v1/whoami') {
+      // The broker throttles per token; the sidecar hits whoami on every
+      // request, so a busy agent can trip it here while merely authenticating.
+      if (token === 'token-throttled') {
+        send(429, { reason: 'rate_limited', retry_after_seconds: 7 });
+        return;
+      }
       send(200, identity);
       return;
     }
@@ -106,6 +114,12 @@ function fakeBroker(socketPath: string): Promise<Server> {
         }
         if (req.url === '/v1/http' && body.path === '/mcp') {
           send(200, { status: 200, body: upstreamRpc(body.body) });
+          return;
+        }
+        // An MCP upstream that answers, but with an error status — the shape
+        // of a server that is reachable through the broker yet not serving.
+        if (req.url === '/v1/http' && body.path === '/broken') {
+          send(200, { status: 502, body: 'upstream down' });
           return;
         }
         send(200, { endpoint: req.url, body });
@@ -299,6 +313,85 @@ test('an unreachable MCP upstream costs only its own tools', async () => {
       WIRED['client-wired'] = ['prod-db'];
       notion.mcp_path = '/mcp';
     }
+  } finally {
+    await app.close();
+  }
+});
+
+test('status reports an MCP upstream by its real tool names', async () => {
+  // Regression: status used to map every connection through the request-tool
+  // naming convention, so an MCP upstream was advertised as
+  // `multitool_notion_request` — a tool that does not exist. It must report
+  // the names actually registered (`multitool_notion_search`).
+  const app = await harness();
+  try {
+    const client = await app.connect('token-mcp');
+    const status = payload(
+      await client.callTool({ name: 'multitool_status', arguments: {} }),
+    ) as { tools: Array<{ tool: string; name: string }> };
+    assert.deepEqual(
+      status.tools.map((entry) => entry.tool).sort(),
+      ['multitool_notion_search'],
+    );
+    assert.ok(status.tools.every((entry) => entry.name === 'notion'));
+    // The advertised names are exactly the tools the agent can actually call.
+    const { tools } = await client.listTools();
+    const callable = new Set(tools.map((tool) => tool.name));
+    assert.ok(status.tools.every((entry) => callable.has(entry.tool)));
+  } finally {
+    await app.close();
+  }
+});
+
+test('status reports an unreachable MCP upstream as an error, not a phantom tool', async () => {
+  const app = await harness();
+  try {
+    WIRED['client-wired'] = ['prod-db', 'notion'];
+    const notion = CONNECTIONS.find((c) => c.name === 'notion')!;
+    notion.mcp_path = '/broken';
+    try {
+      const client = await app.connect('token-wired');
+      const status = payload(
+        await client.callTool({ name: 'multitool_status', arguments: {} }),
+      ) as {
+        tools: Array<{ tool: string; name: string }>;
+        errors?: Array<{ name: string; error: string }>;
+      };
+      // No phantom tool for the dead upstream…
+      assert.ok(!status.tools.some((entry) => entry.name === 'notion'));
+      // …but the healthy connection is still reported…
+      assert.ok(status.tools.some((entry) => entry.tool === 'multitool_prod-db_open'));
+      // …and the upstream's failure is surfaced, as the docstring promises.
+      assert.deepEqual(status.errors?.map((entry) => entry.name), ['notion']);
+    } finally {
+      WIRED['client-wired'] = ['prod-db'];
+      notion.mcp_path = '/mcp';
+    }
+  } finally {
+    await app.close();
+  }
+});
+
+test('a throttled broker surfaces a retryable 429, not an opaque 500', async () => {
+  // The sidecar resolves the token on every request, so a busy agent can trip
+  // the broker's per-token limit while merely authenticating. That must reach
+  // the agent as a 429 with backoff, not a 500 it will hammer blindly.
+  const app = await harness();
+  try {
+    const response = await fetch(app.url, {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer token-throttled',
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }),
+    });
+    assert.equal(response.status, 429);
+    assert.equal(response.headers.get('retry-after'), '7');
+    const body = (await response.json()) as { error?: { code: number; message: string } };
+    assert.equal(body.error?.code, -32029);
+    assert.match(body.error?.message ?? '', /rate limit/i);
   } finally {
     await app.close();
   }

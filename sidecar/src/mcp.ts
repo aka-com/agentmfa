@@ -159,6 +159,15 @@ export class SessionStore {
   }
 }
 
+/** What a single wired connection actually contributed to the tool surface. */
+interface Registration {
+  connection: BrokerConnection;
+  /** The MCP tool names registered for it — one, several, or (on failure) none. */
+  tools: string[];
+  /** Set when an MCP upstream could not be reached at session open. */
+  error?: string;
+}
+
 /**
  * Build the tool surface for one agent.
  *
@@ -196,6 +205,13 @@ export async function createToolServer(
 
   const wired = connections.filter((candidate) => candidate.wired);
 
+  // Per-connection registration outcomes, filled in by the loop below and
+  // read by `multitool_status`. An MCP upstream contributes many tool names
+  // (or none plus an error, when it is unreachable); a plain connection
+  // contributes exactly one. Status must report the names actually
+  // registered, not what a naming convention would guess them to be.
+  const registrations: Registration[] = [];
+
   // Always registered, for two reasons. It is what installs the MCP tool
   // handlers at all — a server with no tools answers `tools/list` with
   // "Method not found", which is a baffling thing for an agent wired to
@@ -217,10 +233,62 @@ export async function createToolServer(
       const live = (await broker.connections(principal.token)).filter(
         (candidate) => candidate.wired,
       );
-      const registered = new Set(wired.map((connection) => connection.name));
+      const liveNames = new Set(live.map((connection) => connection.name));
+      const registeredNames = new Set(
+        registrations.map((registration) => registration.connection.name),
+      );
+
+      // Report the tools actually registered for connections that are still
+      // wired — an MCP upstream by each of its own tool names, a plain
+      // connection by its one. A connection unwired since session open drops
+      // out (the broker would refuse it now); one wired since shows as pending.
+      const tools = registrations
+        .filter((registration) => liveNames.has(registration.connection.name))
+        .flatMap((registration) =>
+          registration.tools.map((tool) => ({
+            tool,
+            name: registration.connection.name,
+            type: registration.connection.type,
+            target: registration.connection.target,
+          })),
+        );
+
+      // Upstreams that were wired but unreachable when the session opened:
+      // their tools are absent above, so naming them here is how a confused
+      // agent learns the connection exists but is unavailable this session.
+      const errors = registrations
+        .filter(
+          (registration) =>
+            registration.error && liveNames.has(registration.connection.name),
+        )
+        .map((registration) => ({
+          name: registration.connection.name,
+          error: registration.error,
+        }));
+
       const pending = live
-        .filter((connection) => !registered.has(connection.name))
+        .filter((connection) => !registeredNames.has(connection.name))
         .map((connection) => connection.name);
+
+      // One hint, chosen by what is most actionable. Reconnecting re-runs this
+      // whole build, so it resolves both pending wirings and dead upstreams.
+      let hint: string | undefined;
+      if (live.length === 0) {
+        hint =
+          'This agent is not wired to any tools yet. Ask the user to open ' +
+          'Multitool, find the tool under Tools, and wire this agent ' +
+          `("${principal.agent}") to it.`;
+      } else if (pending.length) {
+        hint =
+          `Wired since this session started: ${pending.join(', ')}. ` +
+          'Reconnect to Multitool to use them.';
+      } else if (errors.length) {
+        hint =
+          `Wired but unreachable this session: ${errors
+            .map((entry) => entry.name)
+            .join(', ')}. Reconnect once the server is reachable to use ` +
+          'their tools.';
+      }
 
       return {
         content: [
@@ -229,30 +297,10 @@ export async function createToolServer(
             text: JSON.stringify(
               {
                 agent: principal.agent,
-                tools: live
-                  .filter((connection) => registered.has(connection.name))
-                  .map((connection) => ({
-                    tool: toolNameFor(connection),
-                    name: connection.name,
-                    type: connection.type,
-                    target: connection.target,
-                  })),
-                ...(pending.length
-                  ? {
-                      pending,
-                      hint:
-                        `Wired since this session started: ${pending.join(', ')}. ` +
-                        'Reconnect to Multitool to use them.',
-                    }
-                  : {}),
-                ...(live.length === 0
-                  ? {
-                      hint:
-                        'This agent is not wired to any tools yet. Ask the user to ' +
-                        'open Multitool, find the tool under Tools, and wire this ' +
-                        `agent ("${principal.agent}") to it.`,
-                    }
-                  : {}),
+                tools,
+                ...(errors.length ? { errors } : {}),
+                ...(pending.length ? { pending } : {}),
+                ...(hint ? { hint } : {}),
               },
               null,
               2,
@@ -273,7 +321,8 @@ export async function createToolServer(
     // tool. Its traffic still rides the broker's HTTP plane, so the
     // credential stays where it belongs.
     if (connection.mcp_path) {
-      await registerUpstream(server, broker, principal, connection, taken);
+      const outcome = await registerUpstream(server, broker, principal, connection, taken);
+      registrations.push({ connection, tools: outcome.tools, error: outcome.error });
       continue;
     }
 
@@ -283,6 +332,9 @@ export async function createToolServer(
         connection: connection.name,
         toolName,
       });
+      // A dropped collision registers no tool; record that so status does
+      // not advertise a name that isn't there.
+      registrations.push({ connection, tools: [] });
       continue;
     }
     taken.add(toolName);
@@ -297,6 +349,7 @@ export async function createToolServer(
       async (args: Record<string, unknown>) =>
         invoke(broker, principal.token, connection, args ?? {}),
     );
+    registrations.push({ connection, tools: [toolName] });
   }
 
   return server;
@@ -315,13 +368,19 @@ function describeUpstream(connection: BrokerConnection, tool: UpstreamTool): str
   return `${base} (via ${connection.name}). Parameters: ${JSON.stringify(tool.inputSchema)}`;
 }
 
+/** What re-exposing one upstream produced: the tool names it added, or why not. */
+interface UpstreamRegistration {
+  tools: string[];
+  error?: string;
+}
+
 /**
  * Re-expose an upstream MCP server's tools under this connection's name.
  *
  * A server that cannot be reached costs its own tools and nothing else: the
- * session still opens, and `multitool_status` reports the failure, because
- * one unreachable upstream must not take down every other tool the agent
- * has.
+ * session still opens, and `multitool_status` reports the failure (via the
+ * returned `error`), because one unreachable upstream must not take down
+ * every other tool the agent has.
  */
 async function registerUpstream(
   server: McpServer,
@@ -329,7 +388,7 @@ async function registerUpstream(
   principal: Principal,
   connection: BrokerConnection,
   taken: Set<string>,
-): Promise<void> {
+): Promise<UpstreamRegistration> {
   let tools: Awaited<ReturnType<typeof listUpstreamTools>> = [];
   try {
     tools = await listUpstreamTools(broker, principal.token, connection);
@@ -338,9 +397,10 @@ async function registerUpstream(
       connection: connection.name,
       error: String(error),
     });
-    return;
+    return { tools: [], error: `could not reach the MCP server: ${String(error)}` };
   }
 
+  const registered: string[] = [];
   for (const tool of tools) {
     const toolName = upstreamToolName(connection, tool.name);
     if (taken.has(toolName)) {
@@ -392,7 +452,9 @@ async function registerUpstream(
         }
       },
     );
+    registered.push(toolName);
   }
+  return { tools: registered };
 }
 
 /** Mint a transport + server pair for a new session. */

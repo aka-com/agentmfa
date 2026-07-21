@@ -213,17 +213,17 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
         )
         .route(
             "/whoami",
-        axum::routing::get(move |headers: axum::http::HeaderMap| {
-            let seen = seen.clone();
-            async move {
-                *seen.lock().expect("lock") = headers
-                    .get("authorization")
-                    .and_then(|value| value.to_str().ok())
-                    .map(str::to_string);
-                "ok"
-            }
-        }),
-    );
+            axum::routing::get(move |headers: axum::http::HeaderMap| {
+                let seen = seen.clone();
+                async move {
+                    *seen.lock().expect("lock") = headers
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string);
+                    "ok"
+                }
+            }),
+        );
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
@@ -256,7 +256,7 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
                     scheme: "http".into(),
                     port: Some(upstream_port),
                     template: "Authorization: Bearer {{API_KEY}}".into(),
-                
+
                     mcp_path: None,
                 },
                 secrets: vec![],
@@ -344,7 +344,9 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
         "the broker must inject the credential on the upstream leg"
     );
     assert!(
-        !serde_json::to_string(&result).expect("json").contains("secret-value"),
+        !serde_json::to_string(&result)
+            .expect("json")
+            .contains("secret-value"),
         "the secret must not come back to the agent: {result}"
     );
 
@@ -368,12 +370,36 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
         "the agent's own token must not reach the MCP upstream"
     );
 
+    // `multitool_status` — the tool an agent is told to trust when confused —
+    // names the upstream by its real tool names, not the request-tool naming
+    // convention. Regression: it used to advertise `multitool_notes_request`,
+    // a tool that does not exist.
+    let status = tool_payload(&wired.call_tool("multitool_status", json!({})).await);
+    let named: Vec<&str> = status["tools"]
+        .as_array()
+        .expect("status tools array")
+        .iter()
+        .map(|entry| entry["tool"].as_str().expect("tool name"))
+        .collect();
+    assert!(
+        named.contains(&"multitool_notes_search"),
+        "status must report the upstream by its real tool name: {status}"
+    );
+    assert!(
+        !named.iter().any(|name| name.contains("notes_request")),
+        "status must not advertise a phantom request tool for an MCP upstream: {status}"
+    );
+
     // A second agent, wired to nothing, gets the status tool and nothing else.
     let mut bare = McpClient::new(&endpoint, &second);
     assert_eq!(bare.initialize().await, 200);
     assert_eq!(bare.list_tools().await, vec!["multitool_status"]);
     let status = tool_payload(&bare.call_tool("multitool_status", json!({})).await);
-    assert_eq!(status["tools"], json!([]), "a fresh agent starts with no wirings");
+    assert_eq!(
+        status["tools"],
+        json!([]),
+        "a fresh agent starts with no wirings"
+    );
 
     // An unpaired token cannot open a session at all.
     let mut stranger = McpClient::new(&endpoint, "not-a-real-token");
@@ -389,7 +415,9 @@ async fn pair(socket: &std::path::Path, name: &str) -> String {
 async fn uds_post(socket: &std::path::Path, path: &str, body: &Value) -> Value {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-    let mut stream = tokio::net::UnixStream::connect(socket).await.expect("connect");
+    let mut stream = tokio::net::UnixStream::connect(socket)
+        .await
+        .expect("connect");
     let payload = serde_json::to_vec(body).expect("serialize");
     let request = format!(
         "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\
