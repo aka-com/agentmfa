@@ -17,8 +17,8 @@ function conn(
   wired: string[] = [],
 ): ConnectionSummary {
   return {
-    id: name, name, type, target: name, secret_names: [],
-    wired_agents: wired.map((agent) => ({ agent_id: agent, agent })),
+    id: name, name, type, target: name, secret_names: [], oauth: false,
+    wired_agents: wired.map((agent) => ({ agent_id: agent, agent, mode: 'read-write' as const })),
     host: null, scheme: null, port: null, template: null, dbname: null, user: null,
     host_key_fingerprint: null, destination: null, sslmode: null, url: null,
     trusted_ca_bundle_path: null,

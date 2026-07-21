@@ -29,7 +29,11 @@ pub enum TicketPayload {
         /// claimed by the first redemption.
         pending_upstream: Option<crate::capability::ws::WsUpstream>,
     },
-    Pg,
+    Pg {
+        /// The issuing wiring's attenuation: when true the proxy opens the
+        /// upstream session read-only and refuses attempts to leave it.
+        read_only: bool,
+    },
     Ssh,
 }
 
@@ -111,6 +115,9 @@ pub struct Redemption {
     pub agent: String,
     pub connection: Connection,
     pub payload_ws_upstream: Option<crate::capability::ws::WsUpstream>,
+    /// Postgres attenuation carried from the issuing wiring; `false` for every
+    /// other kind. The proxy opens the upstream read-only when set.
+    pub read_only: bool,
     pub(crate) secret_read_authorization: Option<crate::authorization::SecretReadAuthorization>,
     started: bool,
 }
@@ -216,9 +223,10 @@ impl DataPlane {
             return Err(RedeemError::BrokerSessionLimit);
         }
         entry.active_sessions += 1;
-        let pending = match &mut entry.payload {
-            TicketPayload::Ws { pending_upstream } => pending_upstream.take(),
-            TicketPayload::Pg | TicketPayload::Ssh => None,
+        let (pending, read_only) = match &mut entry.payload {
+            TicketPayload::Ws { pending_upstream } => (pending_upstream.take(), false),
+            TicketPayload::Pg { read_only } => (None, *read_only),
+            TicketPayload::Ssh => (None, false),
         };
         Ok(Redemption {
             plane: self.inner.clone(),
@@ -226,6 +234,7 @@ impl DataPlane {
             agent: entry.agent.clone(),
             connection: entry.connection.clone(),
             payload_ws_upstream: pending,
+            read_only,
             secret_read_authorization: entry.secret_read_authorization.clone(),
             started: false,
         })
@@ -460,7 +469,7 @@ mod tests {
     #[test]
     fn one_ticket_can_open_multiple_sessions() {
         let (plane, _dir) = plane(Duration::from_secs(60), 60, 300);
-        let ticket = plane.issue("claude-code", &ws_connection(), TicketPayload::Pg);
+        let ticket = plane.issue("claude-code", &ws_connection(), TicketPayload::Pg { read_only: false });
         let s1 = plane.redeem(&ticket).unwrap().start(ConnectionKind::Ws);
         let s2 = plane.redeem(&ticket).unwrap().start(ConnectionKind::Ws);
         assert_eq!(plane.sessions().len(), 2);
@@ -483,7 +492,7 @@ mod tests {
     #[test]
     fn tickets_expire() {
         let (plane, _dir) = plane(Duration::from_millis(10), 60, 300);
-        let t = plane.issue("a", &ws_connection(), TicketPayload::Pg);
+        let t = plane.issue("a", &ws_connection(), TicketPayload::Pg { read_only: false });
         std::thread::sleep(Duration::from_millis(30));
         assert_eq!(expect_err(plane.redeem(&t)), RedeemError::Expired);
         assert_eq!(expect_err(plane.redeem("tkt_nope")), RedeemError::Unknown);
@@ -492,7 +501,7 @@ mod tests {
     #[test]
     fn budgets_fail_fast_with_the_right_reason() {
         let (plane, _dir) = plane(Duration::from_secs(60), 1, 300);
-        let t = plane.issue("a", &ws_connection(), TicketPayload::Pg);
+        let t = plane.issue("a", &ws_connection(), TicketPayload::Pg { read_only: false });
         let _s = plane.redeem(&t).unwrap().start(ConnectionKind::Ws);
         assert_eq!(
             expect_err(plane.redeem(&t)),
@@ -500,8 +509,8 @@ mod tests {
         );
 
         let (plane, _dir2) = plane_global_one();
-        let t1 = plane.issue("a", &ws_connection(), TicketPayload::Pg);
-        let t2 = plane.issue("a", &ws_connection(), TicketPayload::Pg);
+        let t1 = plane.issue("a", &ws_connection(), TicketPayload::Pg { read_only: false });
+        let t2 = plane.issue("a", &ws_connection(), TicketPayload::Pg { read_only: false });
         let _s1 = plane.redeem(&t1).unwrap().start(ConnectionKind::Pg);
         assert_eq!(
             expect_err(plane.redeem(&t2)),
@@ -516,7 +525,7 @@ mod tests {
     #[test]
     fn failed_establishment_releases_budget() {
         let (plane, _dir) = plane(Duration::from_secs(60), 1, 300);
-        let t = plane.issue("a", &ws_connection(), TicketPayload::Pg);
+        let t = plane.issue("a", &ws_connection(), TicketPayload::Pg { read_only: false });
         {
             let redemption = plane.redeem(&t).unwrap();
             drop(redemption); // dial failed
@@ -529,7 +538,7 @@ mod tests {
     #[test]
     fn active_sessions_keep_ticket_accounting_alive_past_ttl() {
         let (plane, _dir) = plane(Duration::from_millis(20), 60, 300);
-        let t = plane.issue("a", &ws_connection(), TicketPayload::Pg);
+        let t = plane.issue("a", &ws_connection(), TicketPayload::Pg { read_only: false });
         let s = plane.redeem(&t).unwrap().start(ConnectionKind::Ws);
         std::thread::sleep(Duration::from_millis(40));
         // New redemptions fail (window elapsed) …
@@ -542,8 +551,8 @@ mod tests {
     #[tokio::test]
     async fn agent_disconnect_blocks_all_tickets_and_signals_live_sessions() {
         let (plane, _dir) = plane(Duration::from_secs(60), 60, 300);
-        let ticket = plane.issue("codex", &ws_connection(), TicketPayload::Pg);
-        let other_ticket = plane.issue("claude", &ws_connection(), TicketPayload::Pg);
+        let ticket = plane.issue("codex", &ws_connection(), TicketPayload::Pg { read_only: false });
+        let other_ticket = plane.issue("claude", &ws_connection(), TicketPayload::Pg { read_only: false });
         let session = plane.redeem(&ticket).unwrap().start(ConnectionKind::Pg);
         let closed = session.close_signal.clone();
         let notified = closed.notified();

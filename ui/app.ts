@@ -39,6 +39,7 @@ import type {
   McpStatusReport,
   McpToolInfo,
   WiringSummary,
+  WiringMode,
   SecretSummary,
   SessionSummary,
   Settings,
@@ -140,6 +141,7 @@ interface AppState {
   menuOpen: boolean;
   agentMenuOpen: string | null;
   connMenuOpen: string | null;
+  wiringMenuOpen: string | null;
   copied: string | null;
   readyCopied: boolean;
   connectionReady: ConnectionReadyState | null;
@@ -223,6 +225,8 @@ const state: AppState = {
   menuOpen: false,       // desktop-mode settings popover (gear) open
   agentMenuOpen: null,   // agent id whose ⋯ options menu is open (Agents tab)
   connMenuOpen: null,    // connection id whose ⋯ options menu is open (Tools tab)
+  wiringMenuOpen: null,  // "<agentId>:<connId>" whose ⋮ access-mode menu is open
+
   copied: null,          // secretId whose value was just copied (transient "Copied" flash)
   readyCopied: false,    // transient feedback on the setup-instructions status button
   connectionReady: null,
@@ -461,14 +465,52 @@ function secretsTableHTML() {
 const agentWiringFor = (a: AgentSummary, c: ConnectionSummary): WiringSummary | undefined =>
   (c.wired_agents || []).find((wiring) => wiring.agent_id === a.id);
 
+// Attenuation applies only where the broker can enforce it. Postgres opens the
+// upstream read-only; SSH cannot yet (the broker only signs the login), so its
+// read-only option is shown disabled with a note rather than hidden.
+const ATTENUABLE: Record<ConnectionType, boolean> = { pg: true, ssh: true, api: false, ws: false };
+
+function wiringModeMenuHTML(a: AgentSummary, c: ConnectionSummary, mode: WiringMode): string {
+  const key = `${a.id}:${c.id}`;
+  const open = state.wiringMenuOpen === key;
+  const sshOnly = c.type === 'ssh';
+  const item = (m: WiringMode, label: string, sub: string): string => {
+    const on = mode === m;
+    // SSH read-only isn't enforceable yet: show it, but inert.
+    if (m === 'read-only' && sshOnly) {
+      return `<div class="menu-item disabled" role="menuitemradio" aria-checked="false" aria-disabled="true">
+        <span class="menu-check">${on ? ICONS.check : ''}</span>
+        <span class="menu-lbl">${label}<span class="menu-sub">Not enforceable for SSH yet</span></span></div>`;
+    }
+    return `<button class="menu-item ${on ? 'on' : ''}" role="menuitemradio" aria-checked="${on}"
+      data-act="set-wiring-mode" data-id="${a.id}" data-conn="${c.id}" data-mode="${m}">
+      <span class="menu-check">${on ? ICONS.check : ''}</span>
+      <span class="menu-lbl">${label}<span class="menu-sub">${sub}</span></span></button>`;
+  };
+  return `<div class="wiring-menu-wrap">
+    <button class="icon-btn wiring-menu-btn ${open ? 'on' : ''}" title="Access mode"
+      aria-label="Access mode for ${escAttr(a.name)} on ${escAttr(c.name)}" aria-haspopup="menu"
+      aria-expanded="${open}" data-act="toggle-wiring-menu" data-id="${a.id}" data-conn="${c.id}">${ICONS.ellipsisVertical}</button>
+    ${open ? `<div class="wiring-menu" role="menu" aria-label="Access mode for ${escAttr(c.name)}">
+      <div class="wiring-menu-head">Access</div>
+      ${item('read-write', 'Read-write', 'Full access')}
+      ${item('read-only', 'Read-only', 'Writes are refused by the database')}
+    </div>` : ''}
+  </div>`;
+}
+
 function agentToolRowHTML(a: AgentSummary, c: ConnectionSummary): string {
   const t = TYPES[c.type];
   const wiring = agentWiringFor(a, c);
   const wired = !!wiring;
+  const mode: WiringMode = wiring?.mode ?? 'read-write';
+  const readOnly = wired && mode === 'read-only';
   const live = state.sessions.some((s) => s.agent === a.name && s.connection === c.name);
-  const pill = wired
-    ? '<span class="acc-pill granted">Wired</span>'
-    : '<span class="acc-pill">Not wired</span>';
+  const pill = !wired
+    ? '<span class="acc-pill">Not wired</span>'
+    : readOnly
+      ? '<span class="acc-pill ro" title="Writes are refused by the database">Read-only</span>'
+      : '<span class="acc-pill granted">Wired</span>';
   // A wired MCP connection can be narrowed to a curated tool subset; the
   // chip names the current scope and opens the picker.
   const toolsChip = wired && c.mcp_path
@@ -479,6 +521,8 @@ function agentToolRowHTML(a: AgentSummary, c: ConnectionSummary): string {
             ? `${wiring.allowed_tools.length} tool${wiring.allowed_tools.length === 1 ? '' : 's'}`
             : 'All tools'}</button>`
     : '';
+  // A wired Postgres/SSH row gets the ⋮ access-mode menu, left of Unwire.
+  const modeMenu = wired && ATTENUABLE[c.type] ? wiringModeMenuHTML(a, c, mode) : '';
   const action = wired
     ? `<button class="btn ghost sm" aria-label="Unwire ${escAttr(a.name)} from ${escAttr(c.name)}" data-act="unwire" data-id="${a.id}" data-conn="${c.id}">Unwire</button>`
     : `<button class="btn ghost sm" aria-label="Wire ${escAttr(a.name)} to ${escAttr(c.name)}" data-act="wire" data-id="${a.id}" data-conn="${c.id}">Wire up</button>`;
@@ -486,7 +530,7 @@ function agentToolRowHTML(a: AgentSummary, c: ConnectionSummary): string {
     <span class="badge ${t.cls}">${t.label}</span>
     <div class="acc-svc"><div class="acc-name">${esc(c.name)}${live ? ' <span class="cc-live">● live</span>' : ''}</div>
       <div class="acc-target" title="${escAttr(c.target)}">${esc(c.target)}</div></div>
-    ${pill}${toolsChip}${action}</div>`;
+    ${pill}${toolsChip}${modeMenu}${action}</div>`;
 }
 
 function agentBlockHTML(a: AgentSummary): string {
@@ -562,6 +606,7 @@ function connectionPurpose(c: ConnectionSummary): string {
 
 /** The credential the broker injects; never its value. */
 function connectionCredential(c: ConnectionSummary): string {
+  if (c.oauth) return 'OAuth sign-in (token auto-refreshes)';
   const names = c.secret_names || [];
   if (!names.length) return 'No credential bound';
   return `Uses ${names.join(' + ')}`;
@@ -2054,6 +2099,11 @@ document.addEventListener('click', async (e) => {
     if (!btn) { render(); return; }
     // fall through: the clicked action runs and its render reflects the close
   }
+  if (state.wiringMenuOpen && !target?.closest('.wiring-menu-wrap')) {
+    state.wiringMenuOpen = null;
+    if (!btn) { render(); return; }
+    // fall through: the clicked action runs and its render reflects the close
+  }
   if (state.formMenuOpen && !target?.closest('.cred-select') && !target?.closest('.cred-menu')) {
     state.formMenuOpen = null;
     if (!btn) { render(); return; }
@@ -2070,6 +2120,7 @@ document.addEventListener('click', async (e) => {
       state.confirm = null;
       state.agentMenuOpen = null;
       state.connMenuOpen = null;
+      state.wiringMenuOpen = null;
       render();
       resetScroll();
       break;
@@ -2085,6 +2136,24 @@ document.addEventListener('click', async (e) => {
       state.connMenuOpen = state.connMenuOpen === id ? null : id;
       render();
       break;
+    case 'toggle-wiring-menu': {
+      const key = `${id}:${btn.dataset.conn || ''}`;
+      state.wiringMenuOpen = state.wiringMenuOpen === key ? null : key;
+      render();
+      break;
+    }
+    case 'set-wiring-mode': {
+      const connectionId = btn.dataset.conn || '';
+      const mode = (btn.dataset.mode || 'read-write') as WiringMode;
+      state.wiringMenuOpen = null;
+      if (await run(() => invoke('set_wiring_mode', { agentId: id, connectionId, mode }))) {
+        toast(mode === 'read-only' ? '🔒 Read-only' : '🔓 Read-write');
+        await refresh('all');
+      } else {
+        render();
+      }
+      break;
+    }
     case 'open-settings': state.menuOpen = false; state.sheet = { kind: 'settings' }; render(); break;
     case 'copy-agent-setup':
       if (state.agentMenuOpen) { state.agentMenuOpen = null; render(); }
@@ -2375,28 +2444,6 @@ document.addEventListener('click', async (e) => {
         whoami_tool: template?.whoamiTool ?? null,
         expected_tools: template?.expectedTools ?? [],
       });
-      break;
-    }
-    case 'oauth-scope-toggle': {
-      captureDrafts();
-      const entry = state.draft.entryId ? catalogEntryById(state.draft.entryId) : undefined;
-      const preset = entry?.oauthPreset;
-      if (!preset) break;
-      const scope = btn.dataset.scope || '';
-      const current = state.draft.oauthScopes ?? preset.scopes;
-      state.draft.oauthScopes = current.includes(scope)
-        ? current.filter((candidate) => candidate !== scope)
-        : [...current, scope];
-      render(false);
-      break;
-    }
-    case 'oauth-reconnect': {
-      state.connMenuOpen = null;
-      toast('🌐 Approve access in your browser…');
-      if (await run(() => invoke('oauth_reconnect', { id }))) {
-        toast('🔌 Reconnected');
-        await refresh('all');
-      }
       break;
     }
     case 'act-filter-issues':
@@ -2822,6 +2869,14 @@ async function boot() {
   await listen('aka://connections-changed', () => refresh('connections'));
   await listen('aka://activity-appended', (ev) => receiveActivity(ev.payload));
   await listen('aka://mcp-auth-changed', (ev) => receiveMcpAuth(ev.payload));
+  await listen('aka://connect-requested', (ev) => {
+    const { agent, service } = ev.payload;
+    state.tab = 'connections';
+    state.toolSearch = service;
+    state.toolOpen = null;
+    toast(`🤖 ${agent} asked to connect “${service}”`);
+    render();
+  });
   await listen('aka://activity-changed', () => refresh('activity'));
   await listen('aka://open-settings', () => {
     if (isProtectedFormSheet()) return;

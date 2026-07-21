@@ -600,6 +600,15 @@ async fn expired_tokens_refresh_silently_and_a_dead_refresh_token_falls_back_to_
         .expect("status check");
     assert!(report.ok, "{}", report.detail);
     assert_eq!(vendor.lock().unwrap().refresh_requests, 1);
+    // A silent renewal is observable: its own activity kind, attributed to
+    // the connection.
+    let renewed = broker
+        .audit
+        .recent(10)
+        .into_iter()
+        .find(|entry| matches!(entry.kind, aka_core::audit::AuditKind::McpTokenRefreshed))
+        .expect("renewal audited");
+    assert_eq!(renewed.connection.as_deref(), Some("github-refresh"));
     // The vault-held token was replaced with the renewed one…
     let secret = broker
         .store
@@ -663,6 +672,17 @@ async fn expired_tokens_refresh_silently_and_a_dead_refresh_token_falls_back_to_
         .expect("status check");
     assert!(!report.ok);
     assert!(report.credential_rejected, "{}", report.detail);
+    // The failed renewal is observable too — the activity trail explains
+    // why the row now says "needs reconnect".
+    assert!(
+        broker.audit.recent(10).iter().any(|entry| matches!(
+            entry.kind,
+            aka_core::audit::AuditKind::McpTokenRefreshFailed
+        )),
+        "rejected renewal audited"
+    );
+    let health = broker.health.get(&connection.id).expect("health recorded");
+    assert_eq!(health.status, aka_core::types::HealthStatus::NeedsReconnect);
     let grant: Value = serde_json::from_str(
         &broker
             .store

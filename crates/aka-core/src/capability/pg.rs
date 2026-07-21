@@ -55,6 +55,11 @@ const GSSENC_REQUEST_CODE: i32 = 80877104;
 const MAX_STARTUP_PACKET: usize = 10_000;
 /// Sanity cap on handshake-phase typed messages (the data path never parses).
 const MAX_HANDSHAKE_MESSAGE: usize = 1024 * 1024;
+/// Cap on a single frontend message a read-only session frames whole to
+/// inspect. Read-only sessions never legitimately send frames this large
+/// (results flow the other way, and bulk writes are refused by the engine),
+/// so anything bigger is treated as pathological and tears the session down.
+const MAX_GUARDED_FRAME: usize = 16 * 1024 * 1024;
 
 /* ---------------------------- framing helpers ----------------------------- */
 
@@ -384,6 +389,11 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
         return Ok(());
     };
 
+    // Attenuation carried from the issuing wiring: a read-only session opens
+    // the upstream with `default_transaction_read_only=on` and the splice
+    // refuses statements that try to leave read-only.
+    let read_only = redemption.read_only;
+
     // Upstream handshake: own TCP + TLS + auth with the configured user and
     // the stored password secret. Failure drops the redemption, releasing the
     // reserved budget slot.
@@ -394,6 +404,7 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
             &state.broker.events,
             &redemption.connection,
             &params,
+            read_only,
         ),
     )
     .await
@@ -436,7 +447,7 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
     let max_ttl = state.broker.config.session_max_ttl;
     let session = redemption.start(ConnectionKind::Pg);
     let idle = state.broker.config.session_idle_timeout;
-    splice(client, upstream.stream, session, max_ttl, idle).await;
+    splice(client, upstream.stream, session, max_ttl, idle, read_only).await;
     drop(registration);
     Ok(())
 }
@@ -871,6 +882,7 @@ async fn dial_upstream(
     events: &Arc<dyn BrokerEvents>,
     connection: &Connection,
     client_params: &[(String, String)],
+    read_only: bool,
 ) -> Result<UpstreamSession, String> {
     let ConnectionConfig::Pg {
         host,
@@ -909,12 +921,37 @@ async fn dial_upstream(
     put_cstr(&mut body, user);
     put_cstr(&mut body, "database");
     put_cstr(&mut body, dbname);
+    // `options` is handled last so a read-only wiring can append its GUC after
+    // any client-supplied `-c`, which wins (options are applied left to right).
+    let mut client_options: Option<String> = None;
     for (name, value) in client_params {
         if name == "user" || name == "database" {
             continue;
         }
+        if name == "options" {
+            client_options = Some(value.clone());
+            continue;
+        }
+        // A read-only wiring must not let the client pre-clear the GUC by
+        // sending it as a startup parameter; the broker sets it below.
+        if read_only && name == "default_transaction_read_only" {
+            continue;
+        }
         put_cstr(&mut body, name);
         put_cstr(&mut body, value);
+    }
+    if read_only {
+        let merged = match client_options {
+            Some(opts) if !opts.trim().is_empty() => {
+                format!("{opts} -c default_transaction_read_only=on")
+            }
+            _ => "-c default_transaction_read_only=on".to_string(),
+        };
+        put_cstr(&mut body, "options");
+        put_cstr(&mut body, &merged);
+    } else if let Some(opts) = client_options {
+        put_cstr(&mut body, "options");
+        put_cstr(&mut body, &opts);
     }
     body.push(0);
     let mut startup = Vec::with_capacity(body.len() + 4);
@@ -1037,7 +1074,7 @@ pub async fn test_upstream(
     let ConnectionConfig::Pg { dbname, user, .. } = &connection.config else {
         return Err("not a postgres connection".into());
     };
-    let mut upstream = dial_upstream(store, events, connection, &[]).await?;
+    let mut upstream = dial_upstream(store, events, connection, &[], false).await?;
     let _ = upstream.stream.write_all(&frame(b'X', &[])).await;
     let _ = upstream.stream.shutdown().await;
     Ok(format!("Signed in to {dbname} as {user}"))
@@ -1153,18 +1190,174 @@ async fn sasl_auth(
 
 /* --------------------------------- splice --------------------------------- */
 
+/// Whether a SQL statement tries to leave the session's read-only state.
+///
+/// A read-only wiring opens the upstream with `default_transaction_read_only=on`,
+/// so the engine itself refuses every write — this is *not* a read/write SQL
+/// classifier (that is a tar pit of false allows). It is a narrow denylist for
+/// the handful of statements that would turn read-only *off*: touching the GUC
+/// (`SET`/`RESET`/`set_config`), starting a `READ WRITE` transaction, or
+/// `RESET ALL`/`DISCARD ALL`. Over-blocking a benign statement that merely
+/// mentions these tokens is safe (a false block, never a false allow); the
+/// engine is the real backstop.
+fn attempts_read_write_escape(sql: &str) -> bool {
+    let lower = sql.to_ascii_lowercase();
+    // Tokenize into `[a-z0-9_]` runs so quotes/punctuation split words apart:
+    // `spread writes` yields `spread`,`writes` (no false hit), while
+    // `set_config('default_transaction_read_only',…)` keeps the GUC name whole.
+    let tokens: Vec<&str> = lower
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|t| !t.is_empty())
+        .collect();
+    // Changing the read-only GUC — but not merely reading it, so `SHOW …` and
+    // `current_setting('…')` still pass. Setting it to `on` is redundant in a
+    // read-only session, so blocking that too is a harmless, safe false-block.
+    let touches_guc = tokens.contains(&"default_transaction_read_only");
+    let changes = tokens
+        .iter()
+        .any(|&t| matches!(t, "set" | "reset" | "set_config"));
+    if touches_guc && changes {
+        return true;
+    }
+    tokens.windows(2).any(|w| {
+        matches!(
+            (w[0], w[1]),
+            ("read", "write") | ("reset", "all") | ("discard", "all")
+        )
+    })
+}
+
+/// What the read-only guard decided after draining the frontend buffer.
+enum Verdict {
+    /// Buffer drained to a message boundary; forward what came back and wait.
+    More,
+    /// A message tried to leave read-only; forward nothing further, end the
+    /// session with a FATAL for the client.
+    Escaped,
+    /// The frontend stream was malformed or oversized; tear down.
+    Fatal(&'static str),
+}
+
+/// Frames and inspects the frontend (client→upstream) byte stream of a
+/// read-only session. Post-startup frontend messages are all typed
+/// (tag + i32 length + payload), so complete messages are extracted and
+/// forwarded verbatim; `Query`/`Parse` payloads are checked for read-only
+/// escapes first. The backend direction is never framed.
+struct FrontendGuard {
+    buf: Vec<u8>,
+}
+
+impl FrontendGuard {
+    fn new() -> Self {
+        Self { buf: Vec::new() }
+    }
+
+    /// Append new client bytes, forward every complete non-escaping message to
+    /// the upstream, and act on the verdict. Returns a teardown reason, or
+    /// `Ok(())` to keep going.
+    async fn ingest<U, C>(
+        &mut self,
+        data: &[u8],
+        upstream_tx: &mut U,
+        client_tx: &mut C,
+        session: &SessionHandle,
+    ) -> Result<(), &'static str>
+    where
+        U: AsyncWrite + Unpin,
+        C: AsyncWrite + Unpin,
+    {
+        self.buf.extend_from_slice(data);
+        let (forward, verdict) = self.drain();
+        if !forward.is_empty() {
+            session
+                .bytes_up
+                .fetch_add(forward.len() as u64, Ordering::Relaxed);
+            if upstream_tx.write_all(&forward).await.is_err() {
+                return Err("upstream_closed");
+            }
+        }
+        match verdict {
+            Verdict::More => Ok(()),
+            Verdict::Escaped => {
+                // Nothing of the offending batch was forwarded, so the upstream
+                // stays in sync; a FATAL tells the client why and closes it.
+                let _ = client_tx
+                    .write_all(&error_response(
+                        "FATAL",
+                        "25006", // read_only_sql_transaction
+                        "AKA: this connection is wired read-only; disabling read-only is not permitted",
+                    ))
+                    .await;
+                let _ = client_tx.flush().await;
+                Err("read_only_policy")
+            }
+            Verdict::Fatal(reason) => Err(reason),
+        }
+    }
+
+    /// Pull complete messages off the front of the buffer. Returns the bytes to
+    /// forward (everything up to, but excluding, an escaping message) and the
+    /// verdict.
+    fn drain(&mut self) -> (Vec<u8>, Verdict) {
+        let mut forward = Vec::new();
+        loop {
+            if self.buf.len() < 5 {
+                return (forward, Verdict::More);
+            }
+            let len = be_i32(&self.buf[1..5]);
+            if len < 4 {
+                return (forward, Verdict::Fatal("invalid frontend message length"));
+            }
+            let total = 1 + len as usize;
+            if total > MAX_GUARDED_FRAME {
+                return (
+                    forward,
+                    Verdict::Fatal("frontend message exceeds read-only guard cap"),
+                );
+            }
+            if self.buf.len() < total {
+                return (forward, Verdict::More);
+            }
+            if matches!(self.buf[0], b'Q' | b'P') && self.frame_escapes(total) {
+                return (forward, Verdict::Escaped);
+            }
+            forward.extend_from_slice(&self.buf[..total]);
+            self.buf.drain(..total);
+        }
+    }
+
+    /// Extract the SQL text from a complete `Query`/`Parse` frame at the front
+    /// of the buffer and test it against the escape denylist.
+    fn frame_escapes(&self, total: usize) -> bool {
+        let payload = &self.buf[5..total];
+        let sql = match self.buf[0] {
+            // Simple Query: a single NUL-terminated statement string.
+            b'Q' => take_cstr(payload).map(|(s, _)| s).unwrap_or_default(),
+            // Parse: destination name, then the query string.
+            b'P' => match take_cstr(payload) {
+                Ok((_, rest)) => take_cstr(rest).map(|(s, _)| s).unwrap_or_default(),
+                Err(_) => return false,
+            },
+            _ => return false,
+        };
+        attempts_read_write_escape(&sql)
+    }
+}
+
 /// Byte-forward the established session in both directions with the session
 /// lifetime rules: max TTL, idle timeout, user close, and either leg closing
 /// tears down both. The copy is seeded with any residual bytes each leg's
 /// handshake reader buffered; TCP may have delivered the client's first 'Q'
 /// in the same segment as the startup bytes, and a naive handoff of the bare
-/// sockets would swallow it.
+/// sockets would swallow it. A `read_only` session additionally frames the
+/// frontend direction and refuses statements that try to leave read-only.
 async fn splice(
     client: BufReader<TcpStream>,
     upstream: BufReader<PgStream>,
     session: SessionHandle,
     max_ttl: Duration,
     idle: Duration,
+    read_only: bool,
 ) {
     let client_residual = client.buffer().to_vec();
     let client = client.into_inner();
@@ -1178,13 +1371,27 @@ async fn splice(
     let mut idle_deadline = tokio::time::Instant::now() + idle;
     let close_signal = session.close_signal.clone();
 
+    let mut guard = read_only.then(FrontendGuard::new);
+
     let mut early: Option<&'static str> = None;
     if !client_residual.is_empty() {
-        session
-            .bytes_up
-            .fetch_add(client_residual.len() as u64, Ordering::Relaxed);
-        if upstream_tx.write_all(&client_residual).await.is_err() {
-            early = Some("upstream_closed");
+        match &mut guard {
+            Some(guard) => {
+                if let Err(reason) = guard
+                    .ingest(&client_residual, &mut upstream_tx, &mut client_tx, &session)
+                    .await
+                {
+                    early = Some(reason);
+                }
+            }
+            None => {
+                session
+                    .bytes_up
+                    .fetch_add(client_residual.len() as u64, Ordering::Relaxed);
+                if upstream_tx.write_all(&client_residual).await.is_err() {
+                    early = Some("upstream_closed");
+                }
+            }
         }
     }
     if early.is_none() && !upstream_residual.is_empty() {
@@ -1208,9 +1415,21 @@ async fn splice(
                 read = client_rx.read(&mut client_buf) => match read {
                     Ok(n) if n > 0 => {
                         idle_deadline = tokio::time::Instant::now() + idle;
-                        session.bytes_up.fetch_add(n as u64, Ordering::Relaxed);
-                        if upstream_tx.write_all(&client_buf[..n]).await.is_err() {
-                            break "upstream_closed";
+                        match &mut guard {
+                            Some(guard) => {
+                                if let Err(reason) = guard
+                                    .ingest(&client_buf[..n], &mut upstream_tx, &mut client_tx, &session)
+                                    .await
+                                {
+                                    break reason;
+                                }
+                            }
+                            None => {
+                                session.bytes_up.fetch_add(n as u64, Ordering::Relaxed);
+                                if upstream_tx.write_all(&client_buf[..n]).await.is_err() {
+                                    break "upstream_closed";
+                                }
+                            }
                         }
                     }
                     _ => break "client_closed",
@@ -1284,5 +1503,77 @@ mod tests {
         assert_eq!(msg[0], b'E');
         let text = parse_error_response(&msg[5..]);
         assert_eq!(text, "28P01: AKA: unknown_ticket");
+    }
+
+    #[test]
+    fn read_write_escape_detector_catches_the_ways_out() {
+        // Statements that would leave read-only.
+        for sql in [
+            "SET default_transaction_read_only = off",
+            "set default_transaction_read_only to false",
+            "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE",
+            "set transaction read write",
+            "BEGIN READ WRITE",
+            "start transaction read write",
+            "RESET ALL",
+            "reset  all",
+            "DISCARD ALL",
+            "SELECT set_config('default_transaction_read_only', 'off', false)",
+            "/* c */ set default_transaction_read_only=off",
+            // Re-enabling read-only is redundant but still a write to the GUC;
+            // blocking it is a safe false-block.
+            "SET default_transaction_read_only = on",
+        ] {
+            assert!(attempts_read_write_escape(sql), "should block: {sql:?}");
+        }
+        // Ordinary read (and read-only) traffic passes — including statements
+        // that merely *inspect* the read-only setting.
+        for sql in [
+            "SELECT 1",
+            "SELECT * FROM spread_writes",
+            "SELECT * FROM logs WHERE action = 'spread writes'",
+            "BEGIN",
+            "BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE READ ONLY",
+            "SHOW default_transaction_read_only",
+            "SELECT current_setting('default_transaction_read_only')",
+            "RESET search_path",
+            "DISCARD TEMP",
+        ] {
+            assert!(!attempts_read_write_escape(sql), "should allow: {sql:?}");
+        }
+    }
+
+    #[test]
+    fn guard_forwards_reads_and_blocks_escapes() {
+        // A pipelined batch of two simple queries frames into two forwarded
+        // messages and no verdict trip.
+        let mut guard = FrontendGuard::new();
+        guard.buf.extend_from_slice(&frame(b'Q', b"SELECT 1\0"));
+        guard.buf.extend_from_slice(&frame(b'Q', b"SELECT 2\0"));
+        let (forward, verdict) = guard.drain();
+        assert!(matches!(verdict, Verdict::More));
+        assert_eq!(forward.len(), frame(b'Q', b"SELECT 1\0").len() * 2);
+        assert!(guard.buf.is_empty());
+
+        // A Parse that disables read-only is caught; the innocent query before
+        // it is still forwarded, the offending frame is not.
+        let mut guard = FrontendGuard::new();
+        guard.buf.extend_from_slice(&frame(b'Q', b"SELECT 1\0"));
+        let mut parse = Vec::new();
+        put_cstr(&mut parse, ""); // unnamed statement
+        put_cstr(&mut parse, "SET default_transaction_read_only = off");
+        parse.extend_from_slice(&0i16.to_be_bytes()); // 0 param types
+        guard.buf.extend_from_slice(&frame(b'P', &parse));
+        let (forward, verdict) = guard.drain();
+        assert!(matches!(verdict, Verdict::Escaped));
+        assert_eq!(forward, frame(b'Q', b"SELECT 1\0"));
+
+        // A partial header is retained until the rest of the frame arrives.
+        let mut guard = FrontendGuard::new();
+        guard.buf.extend_from_slice(&[b'Q', 0, 0]);
+        let (forward, verdict) = guard.drain();
+        assert!(matches!(verdict, Verdict::More));
+        assert!(forward.is_empty());
+        assert_eq!(guard.buf.len(), 3);
     }
 }

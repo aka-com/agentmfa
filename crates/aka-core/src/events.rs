@@ -49,6 +49,10 @@ pub trait BrokerEvents: Send + Sync {
         self.confirm_secret_read(secret)
     }
 
+    /// An agent asked for a service that is not configured. Shells may
+    /// surface the request, but it grants no authority by itself.
+    fn connect_requested(&self, _agent: &str, _service: &str) {}
+
     /// A high-consequence configuration action — creating/deleting a
     /// connection, changing its capability, or deleting a secret — is about
     /// to take effect. The core demands it, `None` aborts, and the default

@@ -43,6 +43,8 @@ pub struct WiringChip {
     /// Curated upstream MCP tool subset; absent means all tools.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_tools: Option<Vec<String>>,
+    /// Attenuation of this wiring: `read-write` (default) or `read-only`.
+    pub mode: String,
 }
 
 #[derive(Serialize)]
@@ -54,6 +56,9 @@ pub struct ConnectionDto {
     pub target: String,
     /// Referenced secret names (the 🔑 chips).
     pub secret_names: Vec<String>,
+    /// Whether this connection uses a broker-managed OAuth grant. The grant
+    /// itself lives in the vault and is never exposed to the webview.
+    pub oauth: bool,
     /// Agents wired to this connection.
     pub wired_agents: Vec<WiringChip>,
     // Type-specific config, prefilled into the Edit sheet.
@@ -96,6 +101,7 @@ impl ConnectionDto {
                 agent_id: w.client_id.to_string(),
                 agent: w.agent.clone(),
                 allowed_tools: w.allowed_tools.clone(),
+                mode: w.mode.as_str().to_string(),
             })
             .collect();
         let health = broker.health.get(&conn.id);
@@ -105,6 +111,7 @@ impl ConnectionDto {
             kind: conn.kind().as_str().to_string(),
             target: conn.target(),
             secret_names,
+            oauth: conn.oauth.is_some(),
             wired_agents,
             host: None,
             scheme: None,

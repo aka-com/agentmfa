@@ -400,6 +400,7 @@ pub fn router(broker: Arc<Broker>) -> Router {
         .route("/v1/connections", get(get_connections))
         .route("/v1/whoami", get(get_whoami))
         .route("/v1/http", post(post_http))
+        .route("/v1/connect-requests", post(post_connect_request))
         .route("/v1/ws/open", post(post_ws_open))
         .route("/v1/pg/open", post(post_pg_open))
         .route("/v1/ssh/open", post(post_ssh_open))
@@ -608,6 +609,14 @@ async fn get_connections(State(state): State<AppState>, authed: Authed) -> Respo
                 // agents up in the app.
                 "wired": broker.wirings.is_wired(&authed.agent.id, &c.id),
             });
+            // Attenuation on a Postgres connection this agent is wired to, so
+            // it knows up front that a read-only wiring will refuse writes.
+            // Only Postgres enforces it, so only Postgres advertises it.
+            if c.kind() == ConnectionKind::Pg {
+                if let Some(mode) = broker.wirings.mode(&authed.agent.id, &c.id) {
+                    row["mode"] = json!(mode.as_str());
+                }
+            }
             // Present only when this upstream speaks MCP, so the payload
             // stays exactly as it was for every other connection.
             if let ConnectionConfig::Api {
@@ -891,6 +900,37 @@ async fn post_http(
         },
     )
     .await
+}
+
+/// An authenticated agent can ask the user to connect a missing service.
+/// This is advisory only: it creates no connection or wiring.
+async fn post_connect_request(
+    State(state): State<AppState>,
+    authed: Authed,
+    body: axum::Json<serde_json::Value>,
+) -> Response {
+    let Some(service) = body.0.get("service").and_then(|value| value.as_str()) else {
+        return err_detail(
+            StatusCode::BAD_REQUEST,
+            ErrorReason::InvalidBody,
+            "a `service` string is required",
+        );
+    };
+    match state.broker.agent_connect_request(&authed.agent, service) {
+        Ok(fresh) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "status": if fresh { "requested" } else { "already_requested" },
+                "detail": "Ask the user to add and wire this tool in Multitool; its tools appear once they do.",
+            })),
+        )
+            .into_response(),
+        Err(error) => err_detail(
+            StatusCode::BAD_REQUEST,
+            ErrorReason::InvalidBody,
+            error.to_string(),
+        ),
+    }
 }
 
 /// The tool a JSON-RPC `tools/call` body names, if that is what it is.
@@ -1232,6 +1272,15 @@ async fn post_pg_open(
             .collect::<String>()
     });
 
+    // The wiring's attenuation, resolved now so the ticket carries it: a
+    // read-only wiring makes the proxy open the upstream read-only. An unwired
+    // agent has no mode; `run_wired` refuses it below either way.
+    let read_only = broker
+        .wirings
+        .mode(&agent.id, &conn.id)
+        .map(|m| m.is_read_only())
+        .unwrap_or(false);
+
     // Executor: issue the ticket and hand back the password-less DSN.
     // Unlike WS, nothing is dialed here, the proxy dials upstream at
     // redemption time. The ticket is deliberately NOT embedded in the DSN
@@ -1242,10 +1291,11 @@ async fn post_pg_open(
         let conn = conn.clone();
         let agent_name = agent.name.clone();
         Box::pin(async move {
-            let ticket =
-                broker
-                    .data_plane
-                    .issue(&agent_name, &conn, crate::sessions::TicketPayload::Pg);
+            let ticket = broker.data_plane.issue(
+                &agent_name,
+                &conn,
+                crate::sessions::TicketPayload::Pg { read_only },
+            );
             let dsn = format!("postgres://ticket@127.0.0.1:{proxy_port}/{dbname}?sslmode=disable");
             ExecOutcome {
                 status: 200,

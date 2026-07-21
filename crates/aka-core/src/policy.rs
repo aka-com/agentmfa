@@ -3,7 +3,10 @@
 //! Authorization is a plain persisted set of `(client_id, connection_id)`
 //! pairs, edited only in the app. A wired agent uses the connection without
 //! prompting; an unwired agent is refused (`403 denied_by_policy`). There
-//! are no prompts, scopes, or expiring grants. Wirings persist in
+//! are no prompts or expiring grants. Each wiring additionally carries an
+//! attenuation `mode` (`read-write` by default, or `read-only`); the
+//! capability planes consult it and, where the upstream can enforce it
+//! (Postgres), the broker makes read-only stick. Wirings persist in
 //! `wirings.json`, sealed. Standing rules written by earlier versions
 //! (`rules.json`) are migrated on first open.
 
@@ -14,7 +17,7 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::integrity::StateIntegrity;
-use crate::types::Wiring;
+use crate::types::{Wiring, WiringMode};
 use crate::Result;
 
 pub struct Wirings {
@@ -70,6 +73,9 @@ impl Wirings {
                             agent: rule.agent,
                             connection_id: rule.connection_id,
                             allowed_tools: None,
+                            // Legacy rules carried no attenuation; a wiring was
+                            // full access, so migrate to read-write.
+                            mode: WiringMode::default(),
                             created_at: Utc::now(),
                         });
                     }
@@ -98,6 +104,18 @@ impl Wirings {
             .unwrap()
             .iter()
             .any(|w| &w.client_id == client_id && &w.connection_id == connection_id)
+    }
+
+    /// The attenuation mode of an agent↔connection wiring, or `None` when the
+    /// pair is not wired at all. Capability opens consult this to decide
+    /// whether to enforce read-only.
+    pub fn mode(&self, client_id: &Uuid, connection_id: &Uuid) -> Option<WiringMode> {
+        self.wirings
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|w| &w.client_id == client_id && &w.connection_id == connection_id)
+            .map(|w| w.mode)
     }
 
     pub fn wirings(&self) -> Vec<Wiring> {
@@ -175,6 +193,7 @@ impl Wirings {
             agent: agent.to_string(),
             connection_id,
             allowed_tools: None,
+            mode: WiringMode::default(),
             created_at: Utc::now(),
         };
         let mut next = wirings.clone();
@@ -182,6 +201,33 @@ impl Wirings {
         self.persist(&next)?;
         *wirings = next;
         Ok(wiring)
+    }
+
+    /// Set the attenuation mode of an existing wiring. Idempotent: an
+    /// unchanged mode is a no-op returning the current wiring. Returns `None`
+    /// when the pair is not wired (there is nothing to attenuate).
+    pub fn set_mode(
+        &self,
+        client_id: &Uuid,
+        connection_id: &Uuid,
+        mode: WiringMode,
+    ) -> Result<Option<Wiring>> {
+        let mut wirings = self.wirings.lock().unwrap();
+        let Some(pos) = wirings
+            .iter()
+            .position(|w| &w.client_id == client_id && &w.connection_id == connection_id)
+        else {
+            return Ok(None);
+        };
+        if wirings[pos].mode == mode {
+            return Ok(Some(wirings[pos].clone()));
+        }
+        let mut next = wirings.clone();
+        next[pos].mode = mode;
+        let updated = next[pos].clone();
+        self.persist(&next)?;
+        *wirings = next;
+        Ok(Some(updated))
     }
 
     /// Wire an agent to every listed connection in one persisted write
@@ -208,6 +254,7 @@ impl Wirings {
                 agent: agent.to_string(),
                 connection_id: *connection_id,
                 allowed_tools: None,
+                mode: WiringMode::default(),
                 created_at: Utc::now(),
             };
             next.push(wiring.clone());
@@ -293,6 +340,64 @@ mod tests {
         // Keyed on both halves.
         assert!(!w.is_wired(&codex, &conn));
         assert!(!w.is_wired(&claude, &Uuid::new_v4()));
+    }
+
+    #[test]
+    fn wirings_default_to_read_write_and_mode_is_settable() {
+        let (w, _dir) = table();
+        let conn = Uuid::new_v4();
+        let claude = Uuid::new_v4();
+        // A fresh wiring is full access.
+        w.wire(claude, "claude-code", conn).unwrap();
+        assert_eq!(w.mode(&claude, &conn), Some(WiringMode::ReadWrite));
+        // Attenuate it.
+        let updated = w
+            .set_mode(&claude, &conn, WiringMode::ReadOnly)
+            .unwrap()
+            .expect("wiring exists");
+        assert_eq!(updated.mode, WiringMode::ReadOnly);
+        assert_eq!(w.mode(&claude, &conn), Some(WiringMode::ReadOnly));
+        // Unwired pairs have no mode, and setting one is a no-op.
+        assert_eq!(w.mode(&claude, &Uuid::new_v4()), None);
+        assert!(w
+            .set_mode(&Uuid::new_v4(), &conn, WiringMode::ReadOnly)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn mode_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wirings.json");
+        let conn = Uuid::new_v4();
+        let client = Uuid::new_v4();
+        let integrity = integrity();
+        {
+            let w = Wirings::open(path.clone(), integrity.clone()).unwrap();
+            w.wire(client, "claude-code", conn).unwrap();
+            w.set_mode(&client, &conn, WiringMode::ReadOnly).unwrap();
+        }
+        let w = Wirings::open(path, integrity).unwrap();
+        assert_eq!(w.mode(&client, &conn), Some(WiringMode::ReadOnly));
+    }
+
+    #[test]
+    fn wirings_without_a_mode_field_load_as_read_write() {
+        // A wirings.json written before attenuation has no `mode` key.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wirings.json");
+        let integrity = integrity();
+        let client = Uuid::new_v4();
+        let conn = Uuid::new_v4();
+        let legacy = serde_json::json!([
+            {"id": Uuid::new_v4(), "client_id": client, "agent": "claude-code",
+             "connection_id": conn, "created_at": Utc::now()}
+        ]);
+        integrity
+            .write(&path, &serde_json::to_vec_pretty(&legacy).unwrap())
+            .unwrap();
+        let w = Wirings::open(path, integrity).unwrap();
+        assert_eq!(w.mode(&client, &conn), Some(WiringMode::ReadWrite));
     }
 
     #[test]

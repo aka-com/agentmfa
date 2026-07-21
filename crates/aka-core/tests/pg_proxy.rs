@@ -12,7 +12,7 @@ use aka_core::daemon;
 use aka_core::events::BrokerEvents;
 use aka_core::paths::Paths;
 use aka_core::store::ConnectionSpec;
-use aka_core::types::{ConnectionConfig, ConnectionKind, PgSslMode, SecretMeta};
+use aka_core::types::{ConnectionConfig, ConnectionKind, PgSslMode, SecretMeta, WiringMode};
 use aka_core::vault::MemoryVault;
 use base64::Engine as _;
 use hmac::{Hmac, Mac as _};
@@ -173,6 +173,27 @@ impl Harness {
              application_name=agent-test sslmode=disable",
             self.daemon.pg_proxy_port, ticket
         )
+    }
+
+    /// Attenuate the (auto-wired) first agent's wiring to `prod-db` to
+    /// read-only, the way the app's ⋮ menu does.
+    fn set_prod_db_read_only(&self) {
+        let agent = self
+            .broker
+            .paired_agents()
+            .into_iter()
+            .next()
+            .expect("a paired agent");
+        let conn = self
+            .broker
+            .store
+            .connection_by_name("prod-db")
+            .expect("prod-db connection");
+        let existed = self
+            .broker
+            .ui_set_wiring_mode(&agent.id, &conn.id, WiringMode::ReadOnly)
+            .expect("set wiring mode");
+        assert!(existed, "the first agent is auto-wired to prod-db");
     }
 }
 
@@ -606,6 +627,87 @@ async fn open_flow_end_to_end_with_cleartext_upstream() {
     })
     .await
     .expect("session should end after client drop");
+}
+
+#[tokio::test]
+async fn read_only_wiring_opens_the_upstream_read_only() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let fake = fake_pg(FakeAuth::Cleartext).await;
+    add_pg_connection(&h.broker, fake.port);
+    let token = h.pair().await;
+    h.set_prod_db_read_only();
+    let (_dsn, ticket) = h.open_pg(&token).await;
+
+    let (client, connection) = tokio_postgres::connect(&h.pg_conn_str(&ticket), NoTls)
+        .await
+        .unwrap();
+    let conn_task = tokio::spawn(connection);
+    // Reads still flow through a read-only session.
+    let rows = client.simple_query("SELECT 1").await.unwrap();
+    assert_eq!(row_value(&rows).as_deref(), Some("1"));
+
+    // The upstream startup carried the read-only enforcement in `options`,
+    // appended after (here, in place of) any client options.
+    let startups = fake.state.startups.lock().unwrap().clone();
+    assert_eq!(startups.len(), 1);
+    let options = startups[0]
+        .iter()
+        .find(|(k, _)| k == "options")
+        .map(|(_, v)| v.clone());
+    assert_eq!(
+        options.as_deref(),
+        Some("-c default_transaction_read_only=on"),
+        "startup params: {:?}",
+        startups[0]
+    );
+
+    drop(client);
+    let _ = tokio::time::timeout(Duration::from_secs(3), conn_task).await;
+}
+
+#[tokio::test]
+async fn read_only_session_refuses_to_leave_read_only() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let fake = fake_pg(FakeAuth::Cleartext).await;
+    add_pg_connection(&h.broker, fake.port);
+    let token = h.pair().await;
+    h.set_prod_db_read_only();
+    let (_dsn, ticket) = h.open_pg(&token).await;
+
+    let (client, connection) = tokio_postgres::connect(&h.pg_conn_str(&ticket), NoTls)
+        .await
+        .unwrap();
+    let conn_task = tokio::spawn(connection);
+    // A normal read first, to prove the session is live.
+    client.simple_query("SELECT 1").await.unwrap();
+    // Trying to disable read-only is refused and tears the session down.
+    let escaped = client
+        .simple_query("SET default_transaction_read_only = off")
+        .await;
+    assert!(escaped.is_err(), "escape attempt must be refused");
+
+    // The upstream never saw the offending statement.
+    let queries = fake.state.queries.lock().unwrap().clone();
+    assert!(
+        queries.iter().any(|q| q.contains("SELECT 1")),
+        "the read should have reached upstream: {queries:?}"
+    );
+    assert!(
+        !queries
+            .iter()
+            .any(|q| q.contains("default_transaction_read_only")),
+        "the escape must not reach upstream: {queries:?}"
+    );
+
+    // The live session ends.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !h.broker.sessions().is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("session should end after a refused escape");
+    let _ = tokio::time::timeout(Duration::from_secs(3), conn_task).await;
 }
 
 #[tokio::test]

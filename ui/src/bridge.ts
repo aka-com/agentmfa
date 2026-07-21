@@ -23,6 +23,7 @@ import type {
   SessionSummary,
   Settings,
   Unlisten,
+  WiringMode,
 } from './types';
 
 const tauri = typeof window !== 'undefined' ? window.__TAURI__ : undefined;
@@ -114,6 +115,7 @@ interface MockConnection {
   type: ConnectionType;
   secret_names: string[];
   secret_ids: string[];
+  oauth?: boolean;
   destination?: string | null;
   host?: string | null;
   scheme?: string | null;
@@ -134,6 +136,7 @@ interface MockWiring {
   agent: string;
   connection_id: string;
   allowed_tools?: string[];
+  mode: WiringMode;
 }
 
 type MockAgent = Omit<AgentSummary, 'wiring_count'>;
@@ -165,6 +168,7 @@ interface MockArgs {
   connectionId: string;
   wired: boolean;
   tools?: string[] | null;
+  mode: WiringMode;
   source: string;
   host: string;
   port: number;
@@ -243,8 +247,12 @@ seedFixtures();
 // Illustrative broker state so the standalone dev page exercises every layout
 // affordance: ongoing access, temporary access, an open connection, and activity.
 function seedFixtures() {
-  db.wirings.push({ client_id: db.agents[0].id, agent: 'claude-code', connection_id: db.connections[0].id });
-  db.wirings.push({ client_id: db.agents[0].id, agent: 'claude-code', connection_id: db.connections[1].id });
+  const wire = (i: number, mode: WiringMode = 'read-write') =>
+    db.wirings.push({ client_id: db.agents[0].id, agent: 'claude-code', connection_id: db.connections[i].id, mode });
+  wire(0); // github
+  wire(1); // notion
+  wire(2, 'read-only'); // prod-db, attenuated so the ⋮ menu has something to show
+  wire(5); // prod-ssh
   db.sessions.push({
     id: 1,
     type: 'ws',
@@ -300,9 +308,10 @@ function connDto(c: MockConnection): ConnectionSummary {
   return {
     id: c.id, name: c.name, type: c.type, target: connTarget(c),
     secret_names: c.secret_names,
+    oauth: c.oauth ?? false,
     wired_agents: db.wirings
       .filter((w) => w.connection_id === c.id)
-      .map((w) => ({ agent_id: w.client_id, agent: w.agent, allowed_tools: w.allowed_tools ?? null })),
+      .map((w) => ({ agent_id: w.client_id, agent: w.agent, allowed_tools: w.allowed_tools ?? null, mode: w.mode })),
     host: c.host || null, scheme: c.scheme || null, port: c.port || null, template: c.template || null,
     mcp_path: c.mcp_path || null, account: c.account || null,
     dbname: c.dbname || null, user: c.user || null, host_key_fingerprint: c.host_key_fingerprint || null,
@@ -362,14 +371,11 @@ function mockAuthFinish(session: MockAuthSession): void {
     } as McpAuthState);
     return;
   }
-  const secretName = `${draft.name.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_MCP_TOKEN`;
-  const secret = mkSecret(secretName, 'mcp-oauth-token-demo');
-  db.secrets.push(secret);
   const conn: MockConnection = {
     id: uid(), name: draft.name, type: 'api',
-    secret_names: [secretName], secret_ids: [secret.id],
+    secret_names: [], secret_ids: [], oauth: true,
     host: draft.host, scheme: draft.scheme, port: draft.port ?? null,
-    template: `Authorization: Bearer {{${secretName}}}`,
+    template: '',
     mcp_path: draft.mcp_path, account,
   };
   db.connections.push(conn);
@@ -642,7 +648,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       const wired = db.wirings.some((w) =>
         w.client_id === agent.id && w.connection_id === connection.id);
       if (args.wired && !wired) {
-        db.wirings.push({ client_id: agent.id, agent: agent.name, connection_id: connection.id });
+        db.wirings.push({ client_id: agent.id, agent: agent.name, connection_id: connection.id, mode: 'read-write' });
         audit('wired', `${agent.name} wired to ${connection.name}`,
           null, { agent: agent.name, connection: connection.name });
       } else if (!args.wired && wired) {
@@ -674,6 +680,18 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         name,
         description: `The server's ${name.replace(/[_-]/g, ' ')} tool`,
       }));
+    }
+    case 'set_wiring_mode': {
+      const wiring = db.wirings.find((w) =>
+        w.client_id === args.agentId && w.connection_id === args.connectionId);
+      if (!wiring) return false;
+      if (wiring.mode !== args.mode) {
+        wiring.mode = args.mode;
+        const connection = db.connections.find((c) => c.id === args.connectionId);
+        audit('wired', `${wiring.agent} → ${connection?.name ?? 'tool'} set to ${args.mode}`);
+        emit('aka://wirings-changed', {});
+      }
+      return true;
     }
     case 'confirm_agent_disconnect':
       return window.confirm('Disconnect agent\n\nDisconnect this agent? Its wirings and active sessions will end.');

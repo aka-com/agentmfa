@@ -9,12 +9,17 @@ export interface SecretSummary {
   updated_at: string;
 }
 
+/** Attenuation of a wiring. `read-write` is full access (the default). */
+export type WiringMode = 'read-only' | 'read-write';
+
 /** One agent wired to a connection. */
 export interface WiringSummary {
   agent_id: string;
   agent: string;
   /** Curated upstream MCP tool subset for this agent; absent means all. */
   allowed_tools?: string[] | null;
+  /** Attenuation; only Postgres enforces `read-only` today. */
+  mode: WiringMode;
 }
 
 export interface ConnectionSummary {
@@ -31,6 +36,8 @@ export interface ConnectionSummary {
   account?: string | null;
   target: string;
   secret_names: string[];
+  /** True when the broker injects and refreshes a vault-backed OAuth grant. */
+  oauth: boolean;
   wired_agents: WiringSummary[];
   host: string | null;
   scheme: string | null;
@@ -288,6 +295,11 @@ export interface CommandMap {
     connectionId: string;
     wired: boolean;
   }, boolean>;
+  set_wiring_mode: CommandSpec<{
+    agentId: string;
+    connectionId: string;
+    mode: WiringMode;
+  }, boolean>;
   confirm_agent_disconnect: CommandSpec<undefined, boolean>;
   revoke_agent: CommandSpec<{ id: string }, boolean>;
   close_session: CommandSpec<{ id: number }, boolean>;
@@ -321,6 +333,7 @@ export interface EventMap {
   'aka://elicitations-changed': Record<string, never>;
   'aka://settings-changed': Record<string, never>;
   'aka://mcp-auth-changed': McpAuthState;
+  'aka://connect-requested': { agent: string; service: string };
   'aka://open-settings': Record<string, never>;
   'aka://dropdown-hidden': Record<string, never>;
   'aka://dropdown-shown': Record<string, never>;

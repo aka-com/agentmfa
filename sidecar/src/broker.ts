@@ -125,6 +125,19 @@ export class BrokerClient {
     return this.json<BrokerConnection[]>('GET', '/v1/connections', token);
   }
 
+  /** Ask the user to connect a missing service; this grants no access. */
+  async requestConnect(
+    token: string,
+    service: string,
+  ): Promise<{ status: string; detail?: string }> {
+    return this.json<{ status: string; detail?: string }>(
+      'POST',
+      '/v1/connect-requests',
+      token,
+      { service },
+    );
+  }
+
   /**
    * Call a data plane on the agent's behalf.
    *

@@ -21,7 +21,7 @@ use crate::ratelimit::{KeyedLimiter, WindowLimiter};
 use crate::sessions::{DataPlane, SessionInfo};
 use crate::store::{ConnectionSpec, Store};
 use crate::types::{
-    Connection, ConnectionKind, PairedAgent, SecretMeta, SecretValue, Settings, Wiring,
+    Connection, ConnectionKind, PairedAgent, SecretMeta, SecretValue, Settings, Wiring, WiringMode,
 };
 use crate::Result;
 
@@ -71,6 +71,9 @@ pub struct Broker {
     pub(crate) http_client: reqwest::Client,
     /// Live and recently finished MCP sign-in sessions (`mcp_auth` module).
     pub mcp_auth: crate::mcp_auth::McpAuthSessions,
+    /// Recent agent connect requests, retained only in memory to coalesce
+    /// retries before they can spam the audit log or UI.
+    connect_request_debounce: Mutex<std::collections::HashMap<(Uuid, String), Instant>>,
     pub(crate) token_limiter: KeyedLimiter,
     pub(crate) discovery_limiter: WindowLimiter,
     pub(crate) pairing_limiter: WindowLimiter,
@@ -141,6 +144,7 @@ impl Broker {
         let broker = Arc::new(Self {
             data_plane,
             mcp_auth: crate::mcp_auth::McpAuthSessions::default(),
+            connect_request_debounce: Mutex::new(std::collections::HashMap::new()),
             ws_bridge_port: std::sync::OnceLock::new(),
             pg_proxy_port: std::sync::OnceLock::new(),
             token_limiter: KeyedLimiter::new(
@@ -640,6 +644,46 @@ impl Broker {
         Ok(report)
     }
 
+    /* ------------------------ agent connect requests ----------------------- */
+
+    /// Record an agent's advisory request for a missing service. Nothing is
+    /// created or wired here; the user remains the only authority that can
+    /// grant access. Repeated requests from one agent are coalesced for a
+    /// minute. Returns true when this call surfaced a fresh request.
+    pub fn agent_connect_request(&self, agent: &PairedAgent, service: &str) -> Result<bool> {
+        const DEBOUNCE: Duration = Duration::from_secs(60);
+        let service = service.trim();
+        if service.is_empty()
+            || service.len() > 120
+            || !service.chars().all(|c| c.is_ascii_graphic() || c == ' ')
+        {
+            return Err(CoreError::InvalidConnectionConfig(
+                "the requested service name must be short printable text".into(),
+            ));
+        }
+        {
+            let mut recent = self.connect_request_debounce.lock().unwrap();
+            let now = Instant::now();
+            recent.retain(|_, at| now.duration_since(*at) < DEBOUNCE);
+            let key = (agent.id, service.to_ascii_lowercase());
+            if recent.contains_key(&key) {
+                return Ok(false);
+            }
+            recent.insert(key, now);
+        }
+        self.audit.append(
+            AuditEntry::new(
+                AuditKind::ConnectRequested,
+                format!("{} asked to connect: {service}", agent.name),
+            )
+            .agent(agent.name.clone())
+            .detail("A request only — add and wire the tool in Multitool to grant it")
+            .field("service", service),
+        );
+        self.events.connect_requested(&agent.name, service);
+        Ok(true)
+    }
+
     /* ---------------------------- wirings (UI) ----------------------------- */
 
     pub fn wirings(&self) -> Vec<Wiring> {
@@ -751,6 +795,45 @@ impl Broker {
         crate::mcp::list_tools(&self.store, &self.http_client, &connection)
             .await
             .map_err(CoreError::InvalidConnectionConfig)
+    }
+
+    /// Set a wiring's attenuation mode from the app. `read-only` narrows what
+    /// the agent may do; for Postgres the broker enforces it structurally on
+    /// the next open (upstream opened `default_transaction_read_only=on`).
+    /// Returns whether a wiring existed to change.
+    pub fn ui_set_wiring_mode(
+        &self,
+        client_id: &Uuid,
+        connection_id: &Uuid,
+        mode: WiringMode,
+    ) -> Result<bool> {
+        let _gate = self.config_gate.lock().unwrap();
+        let Some(agent) = self.pairing.get_by_id(client_id) else {
+            return Ok(false);
+        };
+        let connection = self.store.connection_by_id(connection_id)?;
+        let changed = self.wirings.mode(client_id, connection_id) != Some(mode);
+        if self.wirings.set_mode(client_id, connection_id, mode)?.is_none() {
+            return Ok(false);
+        }
+        if changed {
+            self.audit.append(
+                AuditEntry::new(
+                    AuditKind::Wired,
+                    format!(
+                        "{} → {} set to {}",
+                        agent.name,
+                        connection.name,
+                        mode.as_str()
+                    ),
+                )
+                .agent(agent.name.clone())
+                .connection(connection.name.clone())
+                .field("mode", mode.as_str()),
+            );
+            self.events.wirings_changed();
+        }
+        Ok(true)
     }
 
     /// The very first agent to register is wired to every existing

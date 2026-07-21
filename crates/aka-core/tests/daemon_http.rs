@@ -11,7 +11,7 @@ use aka_core::daemon;
 use aka_core::events::BrokerEvents;
 use aka_core::paths::Paths;
 use aka_core::store::ConnectionSpec;
-use aka_core::types::{ConfirmationMethod, ConnectionConfig, PgSslMode, SecretMeta};
+use aka_core::types::{ConfirmationMethod, ConnectionConfig, PgSslMode, SecretMeta, WiringMode};
 use aka_core::vault::MemoryVault;
 use aka_core::wire::REQUEST_ID_MAX_BYTES;
 use axum::routing::{any, get, post};
@@ -595,19 +595,44 @@ async fn connections_listing_shows_targets_only() {
     )
     .await;
     assert_eq!(status, 200);
+    // The auto-wired first agent sees its Postgres attenuation (`mode`) so it
+    // knows up front whether writes will be refused; only Postgres advertises
+    // it (only Postgres enforces it).
     assert_eq!(
         list,
         json!([
             {"name": "github", "type": "api", "target": format!("http://127.0.0.1:{}", up.port),
              "endpoint": "/v1/http", "wired": true},
             {"name": "prod-db", "type": "pg", "target": "app@db.internal.aka.com:5432/app_production",
-             "endpoint": "/v1/pg/open", "wired": true},
+             "endpoint": "/v1/pg/open", "wired": true, "mode": "read-write"},
         ])
     );
     // No secret names, ids, or templates anywhere in the response.
     let raw = list.to_string();
     assert!(!raw.contains("GITHUB_API_KEY"));
     assert!(!raw.contains("Bearer {{"));
+
+    // Attenuating the wiring is reflected in the next listing.
+    let agent = h.broker.paired_agents().into_iter().next().unwrap();
+    let prod_db = h.broker.store.connection_by_name("prod-db").unwrap();
+    h.broker
+        .ui_set_wiring_mode(&agent.id, &prod_db.id, WiringMode::ReadOnly)
+        .unwrap();
+    let (_status, list) = uds_request(
+        &h.socket,
+        "GET",
+        "/v1/connections",
+        &[("authorization", &auth)],
+        None,
+    )
+    .await;
+    let pg_row = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == "prod-db")
+        .unwrap();
+    assert_eq!(pg_row["mode"], "read-only");
 
     // A later agent starts unwired: it sees the catalog but `wired` is
     // false everywhere.
@@ -1486,4 +1511,87 @@ async fn a_curated_wiring_refuses_tools_outside_its_subset() {
     )
     .await;
     assert_eq!(status, 200, "no subset means every tool is callable");
+}
+
+#[tokio::test]
+async fn agent_connect_requests_are_audited_and_debounced() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let token = h.pair("claude-code").await;
+    let auth = format!("Bearer {token}");
+
+    let (status, body) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/connect-requests",
+        &[("authorization", &auth)],
+        Some(json!({ "service": "linear" })),
+    )
+    .await;
+    assert_eq!(status, 202, "{body}");
+    assert_eq!(body["status"], "requested");
+
+    // The ask is observable: an audit entry names the agent and service.
+    let entries = h.broker.audit.recent(10);
+    let entry = entries
+        .iter()
+        .find(|entry| matches!(entry.kind, aka_core::audit::AuditKind::ConnectRequested))
+        .expect("connect request audited");
+    assert_eq!(entry.agent.as_deref(), Some("claude-code"));
+    assert_eq!(entry.fields["service"], json!("linear"));
+
+    // The same agent asking again within the window is coalesced.
+    let (status, body) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/connect-requests",
+        &[("authorization", &auth)],
+        Some(json!({ "service": "linear" })),
+    )
+    .await;
+    assert_eq!(status, 202);
+    assert_eq!(body["status"], "already_requested");
+
+    // Garbage service names are refused, not audited.
+    let (status, _) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/connect-requests",
+        &[("authorization", &auth)],
+        Some(json!({ "service": "" })),
+    )
+    .await;
+    assert_eq!(status, 400);
+}
+
+#[tokio::test]
+async fn brokered_calls_audit_attribution_duration_and_outcome() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let up = upstream().await;
+    api_connection(&h, "github", up.port);
+    let token = h.pair("claude-code").await;
+    let auth = format!("Bearer {token}");
+
+    let (status, _) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(json!({ "connection": "github", "method": "GET", "path": "/user/repos" })),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    // The activity view filters and chips on these columns; they are a
+    // contract, not decoration.
+    let entries = h.broker.audit.recent(10);
+    let call = entries
+        .iter()
+        .find(|entry| matches!(entry.kind, aka_core::audit::AuditKind::HttpExecuted))
+        .expect("brokered call audited");
+    assert_eq!(call.agent.as_deref(), Some("claude-code"));
+    assert_eq!(call.connection.as_deref(), Some("github"));
+    assert_eq!(call.outcome.as_deref(), Some("200"));
+    assert!(call.duration_ms.is_some(), "duration is measured");
+    assert_eq!(call.fields["method"], json!("GET"));
+    assert_eq!(call.fields["path"], json!("/user/repos"));
 }

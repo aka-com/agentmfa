@@ -311,11 +311,46 @@ export async function createToolServer(
     },
   );
 
+  // Always available, including to an agent wired to nothing. This only
+  // files a request for the user; it cannot create or wire a connection.
+  server.registerTool(
+    'multitool_connect',
+    {
+      title: 'Request a new tool',
+      description:
+        'Ask the user to connect a service that is not configured. This only ' +
+        'files a request in Multitool; the user must add and wire the tool.',
+      inputSchema: { service: z.string().min(1).max(120) },
+    },
+    async ({ service }: { service: string }) => {
+      try {
+        const outcome = await broker.requestConnect(principal.token, service);
+        const requested = outcome.status !== 'already_requested';
+        return {
+          content: [{
+            type: 'text' as const,
+            text: requested
+              ? `Requested. Ask the user to add "${service}" in Multitool and wire it to you.`
+              : `Already requested. Ask the user to approve "${service}" in Multitool.`,
+          }],
+        };
+      } catch (error) {
+        return {
+          isError: true,
+          content: [{
+            type: 'text' as const,
+            text: `could not file the request: ${String(error)}`,
+          }],
+        };
+      }
+    },
+  );
+
   // Connection names are freer than MCP tool names, so two of them can slug
   // to the same thing. Registering a duplicate throws, which would fail the
   // whole session — one awkwardly named connection must not cost an agent
   // every other tool it has.
-  const taken = new Set<string>(['multitool_status']);
+  const taken = new Set<string>(['multitool_status', 'multitool_connect']);
   for (const connection of wired) {
     // An MCP upstream contributes its own tools rather than one request
     // tool. Its traffic still rides the broker's HTTP plane, so the

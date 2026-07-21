@@ -207,6 +207,19 @@ function fakeBroker(socketPath: string): Promise<Server> {
       );
       return;
     }
+    if (req.method === 'POST' && req.url === '/v1/connect-requests') {
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      req.on('end', () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { service?: string };
+        if (!body.service) {
+          send(400, { reason: 'invalid_body' });
+          return;
+        }
+        send(202, { status: 'requested' });
+      });
+      return;
+    }
     // Data planes: echo what arrived so the test can assert on it, but
     // only for a connection this agent is actually wired to.
     if (req.method === 'POST' && req.url?.startsWith('/v1/')) {
@@ -300,6 +313,7 @@ test('wired connections appear in tools/list as real tools', async () => {
     const { tools } = await client.listTools();
     // `prod-db` is wired and `deploy-host` is not, so exactly one tool.
     assert.deepEqual(tools.map((tool) => tool.name).sort(), [
+      'multitool_connect',
       'multitool_prod-db_open',
       'multitool_status',
     ]);
@@ -315,13 +329,38 @@ test('an agent wired to nothing is told so, not left guessing', async () => {
   try {
     const client = await app.connect('token-bare');
     const { tools } = await client.listTools();
-    assert.deepEqual(tools.map((tool) => tool.name), ['multitool_status']);
+    assert.deepEqual(tools.map((tool) => tool.name).sort(), [
+      'multitool_connect',
+      'multitool_status',
+    ]);
 
     const status = payload(
       await client.callTool({ name: 'multitool_status', arguments: {} }),
     ) as { tools: unknown[]; hint?: string };
     assert.deepEqual(status.tools, []);
     assert.match(status.hint ?? '', /wire this agent/i);
+  } finally {
+    await app.close();
+  }
+});
+
+test('an agent can request a missing service without gaining access', async () => {
+  const app = await harness();
+  try {
+    const client = await app.connect('token-bare');
+    const result = await client.callTool({
+      name: 'multitool_connect',
+      arguments: { service: 'linear' },
+    }) as { isError?: boolean; content: Array<{ type: string; text: string }> };
+    assert.notEqual(result.isError, true);
+    assert.match(result.content[0].text, /Requested/);
+
+    // The request is advisory: the session still has no connection tools.
+    const { tools } = await client.listTools();
+    assert.deepEqual(tools.map((tool) => tool.name).sort(), [
+      'multitool_connect',
+      'multitool_status',
+    ]);
   } finally {
     await app.close();
   }
@@ -335,6 +374,7 @@ test('a colliding tool name costs one tool, not the whole session', async () => 
     // The session works, and the second colliding connection is dropped
     // rather than taking every other tool down with it.
     assert.deepEqual(tools.map((tool) => tool.name).sort(), [
+      'multitool_connect',
       'multitool_prod_db_open',
       'multitool_status',
     ]);
@@ -370,6 +410,7 @@ test("an MCP upstream's own tools are re-exposed, credential-side untouched", as
     const { tools } = await client.listTools();
     // Both pages of the upstream's paginated `tools/list` are present.
     assert.deepEqual(tools.map((tool) => tool.name).sort(), [
+      'multitool_connect',
       'multitool_notion_create_page',
       'multitool_notion_search',
       'multitool_status',
@@ -401,6 +442,7 @@ test('a curated wiring lists only its allowed subset of upstream tools', async (
     const client = await app.connect('token-mcp');
     const { tools } = await client.listTools();
     assert.deepEqual(tools.map((tool) => tool.name).sort(), [
+      'multitool_connect',
       'multitool_notion_search',
       'multitool_status',
     ]);

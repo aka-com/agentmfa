@@ -20,6 +20,7 @@ pub const EVT_CONNECTIONS: &str = "aka://connections-changed";
 pub const EVT_ACTIVITY: &str = "aka://activity-appended";
 pub const EVT_ACTIVITY_CHANGED: &str = "aka://activity-changed";
 pub const EVT_MCP_AUTH: &str = "aka://mcp-auth-changed";
+pub const EVT_CONNECT_REQUESTED: &str = "aka://connect-requested";
 
 fn copy_authorization_reason(duration: Duration) -> String {
     let seconds = duration.as_secs();
@@ -65,6 +66,13 @@ impl BrokerEvents for TauriEvents {
 
     fn mcp_auth_changed(&self, state: &aka_core::mcp_auth::McpAuthState) {
         let _ = self.app.emit(EVT_MCP_AUTH, state);
+    }
+
+    fn connect_requested(&self, agent: &str, service: &str) {
+        let _ = self.app.emit(
+            EVT_CONNECT_REQUESTED,
+            serde_json::json!({ "agent": agent, "service": service }),
+        );
     }
 
     fn confirm_secret_read(&self, secret: &SecretMeta) -> bool {
