@@ -14,11 +14,16 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 
-import { BrokerClient } from './broker';
+import { BrokerClient, BrokerError } from './broker';
 import { log } from './log';
 import { BrokerAuthProvider, MCP_PATH, SessionStore, hostIsLoopback, openSession } from './mcp';
 
 export const SIDECAR_VERSION = '0.1.0';
+
+// A server-error JSON-RPC code (the -32000..-32099 range is reserved for
+// implementation-defined errors) mirroring HTTP 429, so a rate-limited agent
+// meets a distinct, retryable error rather than an opaque "Internal error".
+const RPC_RATE_LIMITED = -32029;
 
 export interface SidecarEnv {
   /** Shared secret minted by the supervisor and passed in the environment. */
@@ -77,8 +82,20 @@ export function createSidecarServer(env: SidecarEnv): Server {
 
     if (path === MCP_PATH) {
       handleMcp(req, res, { broker, auth, sessions }).catch((error) => {
+        if (res.headersSent) return;
+        // The broker throttles per token. Because the sidecar resolves the
+        // token on every request, a busy agent can trip that limit while
+        // merely authenticating — surface it as a retryable 429, not a 500
+        // the agent will hammer blindly.
+        if (error instanceof BrokerError && error.status === 429) {
+          if (error.retryAfterSeconds !== undefined) {
+            res.setHeader('retry-after', String(error.retryAfterSeconds));
+          }
+          rpcError(res, 429, RPC_RATE_LIMITED, 'Rate limited by Multitool; retry after a short delay');
+          return;
+        }
         log('error', 'mcp request failed', { error: String(error) });
-        if (!res.headersSent) rpcError(res, 500, -32603, 'Internal error');
+        rpcError(res, 500, -32603, 'Internal error');
       });
       return;
     }

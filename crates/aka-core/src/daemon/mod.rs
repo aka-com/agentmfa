@@ -628,11 +628,16 @@ async fn get_connections(State(state): State<AppState>, authed: Authed) -> Respo
 /// spammed the audit trail with health checks; this endpoint is deliberately
 /// not audited on success (failures are audited by the extractor like any
 /// other call).
+///
+/// Deliberately exempt from the per-token capability limiter. The MCP sidecar
+/// resolves the agent's token here on *every* request it serves (no caching,
+/// so a revoked token stops working at once), so charging whoami against the
+/// 60/min budget would halve an agent's real tool-call rate and surface as a
+/// mystifying rate-limit. This is safe because whoami is read-only, cheap, and
+/// already fronted by the 0600 socket's own access ceiling — it grants nothing
+/// a capability call would, so it needs no throttle of its own.
 async fn get_whoami(State(state): State<AppState>, authed: Authed) -> Response {
     let broker = &state.broker;
-    if let Err(wait) = broker.token_limiter.check(&authed.agent.token_hash) {
-        return err_rate_limited(ErrorReason::RateLimited, wait);
-    }
     let expires_at = authed.agent.last_used
         + chrono::Duration::from_std(broker.config.token_ttl)
             .unwrap_or_else(|_| chrono::Duration::days(30));

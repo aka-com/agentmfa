@@ -221,7 +221,7 @@ fn api_connection(harness: &Harness, name: &str, port: u16) {
                 scheme: "http".into(),
                 port: Some(port),
                 template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
-            
+
                 mcp_path: None,
             },
             secrets: vec![],
@@ -791,7 +791,7 @@ async fn query_injected_secret_not_leaked_in_upstream_error() {
                 scheme: "http".into(),
                 port: Some(dead_port),
                 template: "?token={{url(STREAM_TOKEN)}}".into(),
-            
+
                 mcp_path: None,
             },
             secrets: vec![],
@@ -969,7 +969,7 @@ async fn mutating_request_id_is_scoped_to_connection() {
                 scheme: "http".into(),
                 port: Some(up.port),
                 template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
-            
+
                 mcp_path: None,
             },
             secrets: vec![],
@@ -1128,7 +1128,11 @@ async fn unwired_agent_is_refused_until_wired() {
         body["detail"].as_str().unwrap().contains("not wired"),
         "refusal should explain the wiring model: {body}"
     );
-    assert_eq!(up.hits.load(Ordering::SeqCst), 0, "nothing reached upstream");
+    assert_eq!(
+        up.hits.load(Ordering::SeqCst),
+        0,
+        "nothing reached upstream"
+    );
 
     // Wiring the agent in the app flips the same call to allowed…
     let codex = h.broker.pairing.get("codex").unwrap();
@@ -1217,6 +1221,59 @@ async fn whoami_probes_a_stored_token() {
 }
 
 #[tokio::test]
+async fn whoami_is_exempt_from_the_per_token_limit() {
+    // The MCP sidecar resolves the token via whoami on *every* request it
+    // serves (no caching, so a revoked token stops working at once). Charging
+    // whoami against the capability budget would halve an agent's real
+    // tool-call rate and surface as a mystifying rate limit, so whoami is
+    // exempt — while capability calls stay limited.
+    let config = BrokerConfig {
+        per_token_per_min: 1,
+        ..BrokerConfig::default()
+    };
+    let mut h = harness(config).await;
+    let up = upstream().await;
+    api_connection(&h, "github", up.port);
+    let token = h.pair("claude-code").await;
+    let auth = format!("Bearer {token}");
+
+    // Far more whoami calls than the limit; every one succeeds.
+    for _ in 0..5 {
+        let (status, body) = uds_request(
+            &h.socket,
+            "GET",
+            "/v1/whoami",
+            &[("authorization", &auth)],
+            None,
+        )
+        .await;
+        assert_eq!(status, 200, "whoami must not be rate limited: {body}");
+    }
+
+    // The limiter is still armed for capability traffic: the first listing
+    // passes, the next 429s, proving whoami's exemption did not disarm it.
+    let (status, _) = uds_request(
+        &h.socket,
+        "GET",
+        "/v1/connections",
+        &[("authorization", &auth)],
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (status, body) = uds_request(
+        &h.socket,
+        "GET",
+        "/v1/connections",
+        &[("authorization", &auth)],
+        None,
+    )
+    .await;
+    assert_eq!(status, 429);
+    assert_eq!(body["reason"], "rate_limited");
+}
+
+#[tokio::test]
 async fn superseded_token_gets_a_distinct_reason() {
     let mut h = harness(BrokerConfig::default()).await;
     let token1 = h.pair("claude-code").await;
@@ -1289,4 +1346,3 @@ async fn repairing_supersedes_the_previous_token() {
     .await;
     assert_eq!(status, 200);
 }
-

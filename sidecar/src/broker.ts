@@ -32,6 +32,8 @@ export class BrokerError extends Error {
     readonly status: number,
     readonly reason: string,
     readonly detail?: string,
+    /** Seconds to back off, from a 429's `retry_after_seconds` body field. */
+    readonly retryAfterSeconds?: number,
   ) {
     super(detail ? `${reason}: ${detail}` : reason);
     this.name = 'BrokerError';
@@ -91,8 +93,17 @@ export class BrokerClient {
       throw new BrokerError(response.status, 'invalid_response', 'the broker returned malformed JSON');
     }
     if (response.status < 200 || response.status >= 300) {
-      const error = (parsed ?? {}) as { reason?: string; detail?: string };
-      throw new BrokerError(response.status, error.reason ?? 'broker_error', error.detail);
+      const error = (parsed ?? {}) as {
+        reason?: string;
+        detail?: string;
+        retry_after_seconds?: number;
+      };
+      throw new BrokerError(
+        response.status,
+        error.reason ?? 'broker_error',
+        error.detail,
+        error.retry_after_seconds,
+      );
     }
     return parsed as T;
   }
