@@ -27,6 +27,11 @@ pub trait BrokerEvents: Send + Sync {
     /// A new audit entry was appended (drives the activity view).
     fn audit_appended(&self, _entry: &crate::audit::AuditEntry) {}
 
+    /// An MCP sign-in session advanced (probing → … → succeeded/failed).
+    /// The state carries no token material; shells forward it to the UI's
+    /// live auth-progress view.
+    fn mcp_auth_changed(&self, _state: &crate::mcp_auth::McpAuthState) {}
+
     /// A secret value is about to be read from the vault for a
     /// user-initiated action while the re-auth-on-read setting is enabled.
     /// Product shells should show their native authentication gate here.

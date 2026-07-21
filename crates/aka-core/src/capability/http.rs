@@ -161,7 +161,7 @@ pub fn injection_form(template_src: &str) -> Option<InjectionForm> {
 }
 
 /// The rendered credential, applied fresh to every hop.
-enum RenderedInjection {
+pub(crate) enum RenderedInjection {
     Header(HeaderName, HeaderValue),
     /// Raw query-string fragment (already percent-encoded by the template's
     /// `url(…)` transform), e.g. `token=abc%20def`.
@@ -532,7 +532,10 @@ pub async fn test_upstream(
     Ok(format!("GET {scheme}://{host}/ answered HTTP {status}"))
 }
 
-async fn render_injection(store: &Store, template_src: &str) -> Result<RenderedInjection, String> {
+pub(crate) async fn render_injection(
+    store: &Store,
+    template_src: &str,
+) -> Result<RenderedInjection, String> {
     let template = Template::parse(template_src).map_err(|e| e.to_string())?;
     let rendered = store
         .render_template(&template)

@@ -422,6 +422,7 @@ mod tests {
                 template: None,
             },
             secrets: vec![],
+            account: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -439,6 +440,7 @@ mod tests {
                 host_key_fingerprint: "SHA256:test".into(),
             },
             secrets: vec![],
+            account: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

@@ -20,6 +20,8 @@ pub mod error;
 pub mod events;
 pub mod executions;
 pub mod integrity;
+pub mod mcp;
+pub mod mcp_auth;
 pub mod pairing;
 pub mod paths;
 pub mod policy;

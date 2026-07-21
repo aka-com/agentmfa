@@ -21,6 +21,12 @@ export interface ConnectionSummary {
   type: ConnectionType;
   /** Set when an API upstream speaks MCP at that path. */
   mcp_path?: string | null;
+  /**
+   * The upstream account this connection's credential was last verified as
+   * (an MCP whoami answer). Display metadata — it tells two connections to
+   * the same service apart; it is never authorization.
+   */
+  account?: string | null;
   target: string;
   secret_names: string[];
   wired_agents: WiringSummary[];
@@ -145,6 +151,72 @@ export interface ConnectionTestReport {
   detail: string;
 }
 
+/* ------------------------------- MCP types -------------------------------- */
+
+/** What the UI submits to start (or restart) an MCP sign-in. */
+export interface McpAuthDraft {
+  name: string;
+  scheme: string;
+  host: string;
+  port?: number | null;
+  mcp_path: string;
+  /** Re-authenticate an existing connection instead of creating one. */
+  reauth_connection_id?: string | null;
+  whoami_tool?: string | null;
+  expected_tools?: string[];
+}
+
+/** One step of the sign-in flow, tagged the way the broker serializes it. */
+export type McpAuthPhase =
+  | { phase: 'probing' }
+  | { phase: 'discovering' }
+  | { phase: 'registering' }
+  | { phase: 'awaiting_authorization'; authorization_url: string }
+  | { phase: 'exchanging' }
+  | { phase: 'verifying' }
+  | {
+      phase: 'succeeded';
+      connection_id: string;
+      connection_name: string;
+      account?: string;
+      expires_in?: number;
+      warning?: string;
+    }
+  | { phase: 'failed'; message: string; hint?: string }
+  | { phase: 'cancelled' };
+
+export type McpAuthState = {
+  /** Auth-session id (not a connection id). */
+  id: string;
+  name: string;
+  target: string;
+  updated_at: string;
+} & McpAuthPhase;
+
+export interface McpResourceInfo {
+  uri: string;
+  name: string;
+  description?: string;
+}
+
+/** Broker-side MCP status check result. Never credential material. */
+export interface McpStatusReport {
+  ok: boolean;
+  detail: string;
+  server?: string;
+  protocol_version?: string;
+  account?: string;
+  tools: string[];
+  missing_tools: string[];
+  resources_supported: boolean;
+  resources: McpResourceInfo[];
+}
+
+export interface McpCheckOptions {
+  whoami_tool?: string | null;
+  expected_tools?: string[];
+}
+
 interface CommandSpec<Args, Result> {
   args: Args;
   result: Result;
@@ -175,6 +247,11 @@ export interface CommandMap {
   edit_connection: CommandSpec<{ id: string; input: ConnectionInput }, void>;
   delete_connection: CommandSpec<{ id: string }, void>;
   test_connection: CommandSpec<{ id: string }, ConnectionTestReport>;
+  start_mcp_auth: CommandSpec<{ input: McpAuthDraft }, McpAuthState>;
+  get_mcp_auth: CommandSpec<{ id: string }, McpAuthState | null>;
+  cancel_mcp_auth: CommandSpec<{ id: string }, boolean>;
+  mcp_status: CommandSpec<{ id: string; options?: McpCheckOptions | null }, McpStatusReport>;
+  open_url: CommandSpec<{ url: string }, void>;
   set_wiring: CommandSpec<{
     agentId: string;
     connectionId: string;
@@ -212,6 +289,7 @@ export interface EventMap {
   'aka://sessions-changed': Record<string, never>;
   'aka://elicitations-changed': Record<string, never>;
   'aka://settings-changed': Record<string, never>;
+  'aka://mcp-auth-changed': McpAuthState;
   'aka://open-settings': Record<string, never>;
   'aka://dropdown-hidden': Record<string, never>;
   'aka://dropdown-shown': Record<string, never>;

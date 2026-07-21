@@ -1,0 +1,1175 @@
+//! Sign-in flow for MCP servers: OAuth 2.1 with discovery, dynamic client
+//! registration, and PKCE.
+//!
+//! Adding a templated MCP server (GitHub, Notion, …) should not require the
+//! user to mint a token by hand. This module drives the standard remote-MCP
+//! authorization dance end to end:
+//!
+//! 1. **Probe** — POST an unauthenticated `initialize`; a conforming server
+//!    answers 401 with a `WWW-Authenticate` pointer to its protected
+//!    resource metadata (RFC 9728).
+//! 2. **Discover** — fetch the resource metadata, then the authorization
+//!    server metadata (RFC 8414).
+//! 3. **Register** — dynamic client registration (RFC 7591), a public
+//!    client with a loopback redirect.
+//! 4. **Authorize** — open the system browser at the authorization URL
+//!    (PKCE S256 + `state`), and catch the redirect on a one-shot loopback
+//!    listener.
+//! 5. **Exchange** — trade the code for tokens at the token endpoint.
+//! 6. **Store & verify** — save the access token to the vault, create the
+//!    connection (or replace an existing connection's token on
+//!    reconnect), then run the MCP status check to acknowledge the
+//!    account the credential belongs to.
+//!
+//! Every step is a visible state: the UI renders progress, errors carry a
+//! actionable hint (e.g. "this server has no automatic registration — use
+//! a token instead"), and cancel works at any point. The access token
+//! never crosses to the webview: it goes straight into the vault and rides
+//! only the upstream leg, like every other credential here.
+//!
+//! Because a connection is only created once its token exists, connecting
+//! the same service twice simply runs the flow twice — two connections,
+//! two vault items, two accounts. Nothing in the model limits how many
+//! tokens one upstream host can have.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use base64::Engine as _;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use sha2::Digest as _;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use url::Url;
+use uuid::Uuid;
+use zeroize::Zeroizing;
+
+use crate::audit::{AuditEntry, AuditKind};
+use crate::broker::Broker;
+use crate::error::CoreError;
+use crate::mcp::{self, McpCheckOptions};
+use crate::store::ConnectionSpec;
+use crate::types::ConnectionConfig;
+use crate::Result;
+
+/// How long each discovery/registration/exchange request may take.
+const STEP_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long the user has to approve in the browser.
+const BROWSER_TIMEOUT: Duration = Duration::from_secs(300);
+/// Terminal sessions kept for the UI to read back before pruning.
+const MAX_FINISHED_SESSIONS: usize = 16;
+
+/* --------------------------------- state --------------------------------- */
+
+/// Everything the UI needs to render one step of the flow. Serialized to
+/// the webview verbatim — no token material may ever appear here.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum McpAuthPhase {
+    /// Asking the server whether (and how) it wants authentication.
+    Probing,
+    /// Reading protected-resource and authorization-server metadata.
+    Discovering,
+    /// Dynamic client registration.
+    Registering,
+    /// The browser is open; waiting for the user to approve.
+    AwaitingAuthorization { authorization_url: String },
+    /// Trading the authorization code for tokens.
+    Exchanging,
+    /// Token stored; running the status check to acknowledge the account.
+    Verifying,
+    Succeeded {
+        connection_id: String,
+        connection_name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        expires_in: Option<u64>,
+        /// Set when the token was stored but post-auth verification could
+        /// not confirm the server (the connection still exists).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        warning: Option<String>,
+    },
+    Failed {
+        message: String,
+        /// What to try instead, when there is a sensible fallback.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
+    },
+    Cancelled,
+}
+
+impl McpAuthPhase {
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            McpAuthPhase::Succeeded { .. } | McpAuthPhase::Failed { .. } | McpAuthPhase::Cancelled
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct McpAuthState {
+    /// Auth-session id (not a connection id).
+    pub id: String,
+    /// The connection name being created or reconnected.
+    pub name: String,
+    /// Pinned destination, e.g. `https://mcp.notion.com/mcp`.
+    pub target: String,
+    #[serde(flatten)]
+    pub phase: McpAuthPhase,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// What the UI submits to start a sign-in.
+#[derive(Debug, Clone, Deserialize)]
+pub struct McpAuthDraft {
+    pub name: String,
+    pub scheme: String,
+    pub host: String,
+    #[serde(default)]
+    pub port: Option<u16>,
+    pub mcp_path: String,
+    /// Re-authenticate an existing connection instead of creating one: the
+    /// flow targets that connection's pinned destination and replaces its
+    /// bound token. The other destination fields are ignored.
+    #[serde(default)]
+    pub reauth_connection_id: Option<String>,
+    /// Template expectations carried into the post-auth verification.
+    #[serde(default)]
+    pub whoami_tool: Option<String>,
+    #[serde(default)]
+    pub expected_tools: Vec<String>,
+}
+
+/// Where the token lands when the dance completes.
+enum CompletionPlan {
+    /// Create `secret_name` + a fresh connection from `spec`.
+    New {
+        secret_name: String,
+        spec: ConnectionSpec,
+    },
+    /// Replace the token bound to an existing connection.
+    Reauth {
+        connection_id: Uuid,
+        secret_id: Uuid,
+    },
+}
+
+struct SessionSlot {
+    state: McpAuthState,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// Live and recently finished auth sessions, owned by the broker.
+#[derive(Default)]
+pub struct McpAuthSessions {
+    slots: Mutex<HashMap<Uuid, SessionSlot>>,
+}
+
+impl McpAuthSessions {
+    fn insert(&self, id: Uuid, state: McpAuthState) {
+        let mut slots = self.slots.lock().unwrap();
+        // Prune old terminal sessions so the map cannot grow unbounded.
+        if slots.len() >= MAX_FINISHED_SESSIONS {
+            let stale: Vec<Uuid> = slots
+                .iter()
+                .filter(|(_, slot)| slot.state.phase.is_terminal())
+                .map(|(id, _)| *id)
+                .collect();
+            for id in stale {
+                slots.remove(&id);
+            }
+        }
+        slots.insert(id, SessionSlot { state, task: None });
+    }
+
+    fn attach_task(&self, id: &Uuid, task: tokio::task::JoinHandle<()>) {
+        if let Some(slot) = self.slots.lock().unwrap().get_mut(id) {
+            slot.task = Some(task);
+        }
+    }
+
+    pub fn get(&self, id: &Uuid) -> Option<McpAuthState> {
+        self.slots
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|slot| slot.state.clone())
+    }
+
+    /// Set a session's phase unless it already ended (a cancel must not be
+    /// overwritten by the aborted task's final write). Returns the updated
+    /// state for event fan-out.
+    fn set_phase(&self, id: &Uuid, phase: McpAuthPhase) -> Option<McpAuthState> {
+        let mut slots = self.slots.lock().unwrap();
+        let slot = slots.get_mut(id)?;
+        if slot.state.phase.is_terminal() {
+            return None;
+        }
+        slot.state.phase = phase;
+        slot.state.updated_at = Utc::now();
+        if slot.state.phase.is_terminal() {
+            slot.task = None;
+        }
+        Some(slot.state.clone())
+    }
+
+    fn cancel(&self, id: &Uuid) -> Option<McpAuthState> {
+        let handle = {
+            let mut slots = self.slots.lock().unwrap();
+            let slot = slots.get_mut(id)?;
+            if slot.state.phase.is_terminal() {
+                return None;
+            }
+            slot.task.take()
+        };
+        if let Some(handle) = handle {
+            handle.abort();
+        }
+        self.set_phase(id, McpAuthPhase::Cancelled)
+    }
+}
+
+/* ------------------------------ broker API -------------------------------- */
+
+impl Broker {
+    /// Begin the sign-in flow. Validates the draft, reserves nothing, and
+    /// returns the session's initial state; progress arrives through
+    /// [`crate::events::BrokerEvents::mcp_auth_changed`] and
+    /// [`Broker::ui_mcp_auth_state`].
+    pub fn ui_start_mcp_auth(self: &Arc<Self>, draft: McpAuthDraft) -> Result<McpAuthState> {
+        let (name, config, plan) = self.plan_auth(&draft)?;
+        let endpoint = endpoint_for(&config)?;
+
+        let session_id = Uuid::new_v4();
+        let state = McpAuthState {
+            id: session_id.to_string(),
+            name: name.clone(),
+            target: endpoint.to_string(),
+            phase: McpAuthPhase::Probing,
+            updated_at: Utc::now(),
+        };
+        self.mcp_auth.insert(session_id, state.clone());
+        self.events.mcp_auth_changed(&state);
+
+        let broker = self.clone();
+        let options = McpCheckOptions {
+            whoami_tool: draft.whoami_tool.clone(),
+            expected_tools: draft.expected_tools.clone(),
+        };
+        let task = tokio::spawn(async move {
+            let outcome = run_flow(&broker, session_id, endpoint, plan, options).await;
+            let phase = match outcome {
+                Ok(phase) => phase,
+                Err(failure) => {
+                    broker.audit.append(
+                        AuditEntry::new(
+                            AuditKind::McpAuthFailed,
+                            format!("MCP sign-in failed: {name}"),
+                        )
+                        .connection(name.clone())
+                        .detail(failure.message.clone()),
+                    );
+                    McpAuthPhase::Failed {
+                        message: failure.message,
+                        hint: failure.hint,
+                    }
+                }
+            };
+            broadcast(&broker, &session_id, phase);
+        });
+        self.mcp_auth.attach_task(&session_id, task);
+        Ok(state)
+    }
+
+    pub fn ui_mcp_auth_state(&self, id: &Uuid) -> Option<McpAuthState> {
+        self.mcp_auth.get(id)
+    }
+
+    /// Abort a running sign-in. Terminal sessions are left as they ended.
+    pub fn ui_cancel_mcp_auth(&self, id: &Uuid) -> bool {
+        match self.mcp_auth.cancel(id) {
+            Some(state) => {
+                self.events.mcp_auth_changed(&state);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Validate a draft into the connection config the flow will pin and
+    /// the completion plan (create vs. reconnect).
+    fn plan_auth(
+        &self,
+        draft: &McpAuthDraft,
+    ) -> Result<(String, ConnectionConfig, CompletionPlan)> {
+        if let Some(raw) = &draft.reauth_connection_id {
+            let id = Uuid::parse_str(raw).map_err(|_| CoreError::ConnectionNotFound)?;
+            let connection = self.store.connection_by_id(&id)?;
+            let ConnectionConfig::Api {
+                mcp_path: Some(_), ..
+            } = &connection.config
+            else {
+                return Err(CoreError::InvalidConnectionConfig(
+                    "not an MCP connection".into(),
+                ));
+            };
+            let secret_id = *connection.secrets.first().ok_or_else(|| {
+                CoreError::InvalidConnectionConfig(
+                    "this connection has no bound credential to replace".into(),
+                )
+            })?;
+            return Ok((
+                connection.name.clone(),
+                connection.config.clone(),
+                CompletionPlan::Reauth {
+                    connection_id: id,
+                    secret_id,
+                },
+            ));
+        }
+
+        let name = draft.name.trim().to_string();
+        let secret_name = self.available_secret_name(&name);
+        let config = ConnectionConfig::Api {
+            host: draft.host.clone(),
+            scheme: draft.scheme.clone(),
+            port: draft.port,
+            template: format!("Authorization: Bearer {{{{{secret_name}}}}}"),
+            mcp_path: Some(draft.mcp_path.clone()),
+        };
+        let spec = ConnectionSpec {
+            name: name.clone(),
+            config: config.clone(),
+            secrets: vec![],
+        };
+        // Surface invalid input (bad host, taken name) before any browser
+        // opens; `add_connection_with_secret` re-checks at completion.
+        self.store
+            .preflight_add_connection_with_secret(&secret_name, &spec)?;
+        Ok((name, config, CompletionPlan::New { secret_name, spec }))
+    }
+
+    /// `github` → `GITHUB_MCP_TOKEN`, suffixed if taken.
+    fn available_secret_name(&self, connection_name: &str) -> String {
+        let mut base: String = connection_name
+            .to_uppercase()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        base.truncate(48);
+        let base = base.trim_matches('_');
+        let base = if base.is_empty() || base.starts_with(|c: char| c.is_ascii_digit()) {
+            format!("MCP_{base}")
+        } else {
+            base.to_string()
+        };
+        let taken: std::collections::HashSet<String> = self
+            .store
+            .list_secrets()
+            .into_iter()
+            .map(|meta| meta.name)
+            .collect();
+        let candidate = format!("{base}_MCP_TOKEN");
+        if !taken.contains(&candidate) {
+            return candidate;
+        }
+        for n in 2..100 {
+            let candidate = format!("{base}_MCP_TOKEN_{n}");
+            if !taken.contains(&candidate) {
+                return candidate;
+            }
+        }
+        format!("{base}_MCP_TOKEN_{}", Uuid::new_v4().simple())
+    }
+}
+
+fn broadcast(broker: &Broker, session_id: &Uuid, phase: McpAuthPhase) {
+    if let Some(state) = broker.mcp_auth.set_phase(session_id, phase) {
+        broker.events.mcp_auth_changed(&state);
+    }
+}
+
+fn endpoint_for(config: &ConnectionConfig) -> Result<Url> {
+    let ConnectionConfig::Api {
+        host,
+        scheme,
+        port,
+        mcp_path: Some(path),
+        ..
+    } = config
+    else {
+        return Err(CoreError::InvalidConnectionConfig(
+            "not an MCP connection".into(),
+        ));
+    };
+    if scheme != "https" && !is_loopback_host(host) {
+        return Err(CoreError::InvalidConnectionConfig(
+            "MCP sign-in requires an https server URL".into(),
+        ));
+    }
+    if !path.starts_with('/') {
+        return Err(CoreError::InvalidConnectionConfig(
+            "the MCP path must start with /".into(),
+        ));
+    }
+    let mut base = Url::parse(&format!("{scheme}://{host}"))
+        .map_err(|e| CoreError::InvalidConnectionConfig(format!("bad origin: {e}")))?;
+    if base.set_port(*port).is_err() {
+        return Err(CoreError::InvalidConnectionConfig("cannot set port".into()));
+    }
+    base.join(path)
+        .map_err(|e| CoreError::InvalidConnectionConfig(format!("bad MCP path: {e}")))
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
+}
+
+/// Discovery, registration and token URLs must not lead the flow onto
+/// plaintext transports (loopback excepted, for tests and local servers).
+fn require_secure(url: &Url, what: &str) -> std::result::Result<(), FlowFailure> {
+    let host = url.host_str().unwrap_or("");
+    if url.scheme() == "https" || (url.scheme() == "http" && is_loopback_host(host)) {
+        return Ok(());
+    }
+    Err(FlowFailure::plain(format!(
+        "{what} is not an https URL ({url})"
+    )))
+}
+
+/* ------------------------------ flow driver ------------------------------- */
+
+struct FlowFailure {
+    message: String,
+    hint: Option<String>,
+}
+
+impl FlowFailure {
+    fn plain(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            hint: None,
+        }
+    }
+    fn hinted(message: impl Into<String>, hint: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            hint: Some(hint.into()),
+        }
+    }
+}
+
+async fn step<T, F>(what: &str, future: F) -> std::result::Result<T, FlowFailure>
+where
+    F: std::future::Future<Output = std::result::Result<T, FlowFailure>>,
+{
+    match tokio::time::timeout(STEP_TIMEOUT, future).await {
+        Ok(result) => result,
+        Err(_) => Err(FlowFailure::plain(format!(
+            "{what} did not answer within {} seconds",
+            STEP_TIMEOUT.as_secs()
+        ))),
+    }
+}
+
+async fn run_flow(
+    broker: &Arc<Broker>,
+    session_id: Uuid,
+    endpoint: Url,
+    plan: CompletionPlan,
+    options: McpCheckOptions,
+) -> std::result::Result<McpAuthPhase, FlowFailure> {
+    // The flow follows cross-origin hops (resource → authorization server),
+    // so it uses its own client with bounded redirects rather than the
+    // broker's no-redirect upstream client. No stored credential ever rides
+    // these requests.
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()
+        .map_err(|e| FlowFailure::plain(format!("http client: {e}")))?;
+
+    /* 1 — probe */
+    let www_authenticate = step("the MCP server", probe(&client, &endpoint)).await?;
+
+    /* 2 — discover */
+    broadcast(broker, &session_id, McpAuthPhase::Discovering);
+    let discovered = step(
+        "authorization discovery",
+        discover(&client, &endpoint, www_authenticate.as_deref()),
+    )
+    .await?;
+
+    /* 3 — register (loopback first: registration pins the redirect URI) */
+    broadcast(broker, &session_id, McpAuthPhase::Registering);
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .map_err(|e| FlowFailure::plain(format!("could not open a loopback listener: {e}")))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| FlowFailure::plain(format!("loopback listener: {e}")))?
+        .port();
+    let redirect_uri = format!("http://127.0.0.1:{port}/callback");
+    let registration = step(
+        "client registration",
+        register(&client, &discovered, &redirect_uri),
+    )
+    .await?;
+
+    /* 4 — authorize in the browser */
+    let pkce_verifier = random_urlsafe(48);
+    let pkce_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(sha2::Sha256::digest(pkce_verifier.as_bytes()));
+    let state_nonce = random_urlsafe(24);
+    let mut authorize = discovered.authorization_endpoint.clone();
+    {
+        let mut query = authorize.query_pairs_mut();
+        query
+            .append_pair("response_type", "code")
+            .append_pair("client_id", &registration.client_id)
+            .append_pair("redirect_uri", &redirect_uri)
+            .append_pair("state", &state_nonce)
+            .append_pair("code_challenge", &pkce_challenge)
+            .append_pair("code_challenge_method", "S256")
+            .append_pair("resource", &discovered.resource);
+        if let Some(scope) = &discovered.scope {
+            query.append_pair("scope", scope);
+        }
+    }
+    broadcast(
+        broker,
+        &session_id,
+        McpAuthPhase::AwaitingAuthorization {
+            authorization_url: authorize.to_string(),
+        },
+    );
+    let code = match tokio::time::timeout(
+        BROWSER_TIMEOUT,
+        wait_for_callback(listener, &state_nonce),
+    )
+    .await
+    {
+        Ok(result) => result?,
+        Err(_) => {
+            return Err(FlowFailure::hinted(
+                "the browser approval did not complete in time",
+                "Run the sign-in again and approve the request in your browser.",
+            ))
+        }
+    };
+
+    /* 5 — exchange */
+    broadcast(broker, &session_id, McpAuthPhase::Exchanging);
+    let tokens = step(
+        "the token endpoint",
+        exchange(
+            &client,
+            &discovered,
+            &registration,
+            &redirect_uri,
+            &code,
+            &pkce_verifier,
+        ),
+    )
+    .await?;
+
+    /* 6 — store & verify */
+    broadcast(broker, &session_id, McpAuthPhase::Verifying);
+    let (connection_id, connection_name) = match plan {
+        CompletionPlan::New { secret_name, spec } => {
+            let blocking_broker = broker.clone();
+            let value = Zeroizing::new(tokens.access_token.to_string());
+            let name_for_error = spec.name.clone();
+            let connection = tokio::task::spawn_blocking(move || {
+                blocking_broker.ui_add_connection_with_secret(&secret_name, value, spec)
+            })
+            .await
+            .map_err(|e| FlowFailure::plain(format!("confirmation task failed: {e}")))?
+            .map_err(|error| match error {
+                CoreError::NotConfirmed => FlowFailure::plain(format!(
+                    "you declined the confirmation for “{name_for_error}”; nothing was saved"
+                )),
+                other => FlowFailure::plain(other.to_string()),
+            })?;
+            // This creation happened outside a UI command round-trip, so
+            // push the refresh to every window.
+            broker.events.connections_changed();
+            (connection.id, connection.name)
+        }
+        CompletionPlan::Reauth {
+            connection_id,
+            secret_id,
+        } => {
+            let connection = broker
+                .store
+                .connection_by_id(&connection_id)
+                .map_err(|e| FlowFailure::plain(e.to_string()))?;
+            broker
+                .store
+                .replace_secret_value(&secret_id, Zeroizing::new(tokens.access_token.to_string()))
+                .map_err(|e| FlowFailure::plain(format!("could not store the new token: {e}")))?;
+            broker.events.connections_changed();
+            (connection.id, connection.name)
+        }
+    };
+
+    let report = mcp::check_with_bearer(
+        client.clone(),
+        endpoint.clone(),
+        &tokens.access_token,
+        &options,
+    )
+    .await;
+    let (account, warning) = if report.ok {
+        if report.account.is_some() {
+            let _ = broker
+                .store
+                .set_connection_account(&connection_id, report.account.clone());
+            broker.events.connections_changed();
+        }
+        (report.account, None)
+    } else {
+        (None, Some(report.detail))
+    };
+
+    broker.audit.append(
+        AuditEntry::new(
+            AuditKind::McpAuthCompleted,
+            format!("MCP sign-in completed: {connection_name}"),
+        )
+        .connection(connection_name.clone())
+        .detail(match &account {
+            Some(account) => format!("Connected as {account}"),
+            None => "Token stored".to_string(),
+        }),
+    );
+
+    Ok(McpAuthPhase::Succeeded {
+        connection_id: connection_id.to_string(),
+        connection_name,
+        account,
+        expires_in: tokens.expires_in,
+        warning,
+    })
+}
+
+/* ------------------------------- the steps -------------------------------- */
+
+/// POST an unauthenticated `initialize`. 401 hands back `WWW-Authenticate`
+/// (or None when absent — discovery falls back to well-known locations); a
+/// 2xx answer means there is no account to connect.
+async fn probe(
+    client: &reqwest::Client,
+    endpoint: &Url,
+) -> std::result::Result<Option<String>, FlowFailure> {
+    let body = json!({
+        "jsonrpc": "2.0", "id": 0, "method": "initialize",
+        "params": {
+            "protocolVersion": mcp::PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": { "name": "aka-multitool", "version": env!("CARGO_PKG_VERSION") },
+        },
+    });
+    let response = client
+        .post(endpoint.clone())
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .header(http::header::ACCEPT, "application/json, text/event-stream")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| FlowFailure::plain(format!("could not reach the server: {}", e.without_url())))?;
+    let status = response.status();
+    if status.is_success() {
+        return Err(FlowFailure::hinted(
+            "the server answered without asking for authentication",
+            "There is no account to sign in to — add this server with a token instead.",
+        ));
+    }
+    if status.as_u16() != 401 {
+        return Err(FlowFailure::plain(format!(
+            "the server answered HTTP {status} instead of requesting authentication"
+        )));
+    }
+    Ok(response
+        .headers()
+        .get(http::header::WWW_AUTHENTICATE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string))
+}
+
+struct Discovered {
+    authorization_endpoint: Url,
+    token_endpoint: Url,
+    registration_endpoint: Option<Url>,
+    /// RFC 8707 resource indicator carried through authorize + exchange.
+    resource: String,
+    scope: Option<String>,
+}
+
+async fn discover(
+    client: &reqwest::Client,
+    endpoint: &Url,
+    www_authenticate: Option<&str>,
+) -> std::result::Result<Discovered, FlowFailure> {
+    // Protected resource metadata (RFC 9728): from the challenge parameter
+    // when present, else the path-aware well-known fallback.
+    let mut metadata_urls: Vec<Url> = Vec::new();
+    if let Some(challenge) = www_authenticate {
+        if let Some(explicit) = challenge_param(challenge, "resource_metadata") {
+            if let Ok(url) = Url::parse(&explicit) {
+                metadata_urls.push(url);
+            }
+        }
+    }
+    let origin = origin_of(endpoint);
+    for candidate in [
+        format!(
+            "{origin}/.well-known/oauth-protected-resource{}",
+            endpoint.path()
+        ),
+        format!("{origin}/.well-known/oauth-protected-resource"),
+    ] {
+        if let Ok(url) = Url::parse(&candidate) {
+            if !metadata_urls.contains(&url) {
+                metadata_urls.push(url);
+            }
+        }
+    }
+
+    let mut resource = endpoint.to_string();
+    let mut scope: Option<String> = None;
+    let mut issuer: Option<Url> = None;
+    for url in metadata_urls {
+        if require_secure(&url, "the resource metadata URL").is_err() {
+            continue;
+        }
+        let Ok(response) = client.get(url).send().await else {
+            continue;
+        };
+        if !response.status().is_success() {
+            continue;
+        }
+        let Ok(metadata) = response.json::<Value>().await else {
+            continue;
+        };
+        if let Some(value) = metadata.get("resource").and_then(Value::as_str) {
+            resource = value.to_string();
+        }
+        scope = metadata
+            .get("scopes_supported")
+            .and_then(Value::as_array)
+            .map(|scopes| {
+                scopes
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .filter(|joined| !joined.is_empty());
+        issuer = metadata
+            .get("authorization_servers")
+            .and_then(Value::as_array)
+            .and_then(|servers| servers.first())
+            .and_then(Value::as_str)
+            .and_then(|raw| Url::parse(raw).ok());
+        break;
+    }
+    // No resource metadata at all: per the MCP fallback, the server's own
+    // origin acts as the authorization server.
+    let issuer = issuer
+        .or_else(|| Url::parse(&origin).ok())
+        .ok_or_else(|| FlowFailure::plain("could not determine the authorization server"))?;
+    require_secure(&issuer, "the authorization server")?;
+
+    // Authorization server metadata (RFC 8414, then OIDC discovery).
+    let issuer_origin = origin_of(&issuer);
+    let issuer_path = issuer.path().trim_end_matches('/');
+    let mut candidates = vec![
+        format!("{issuer_origin}/.well-known/oauth-authorization-server{issuer_path}"),
+        format!("{issuer_origin}/.well-known/openid-configuration{issuer_path}"),
+    ];
+    if !issuer_path.is_empty() {
+        candidates.push(format!(
+            "{issuer_origin}{issuer_path}/.well-known/openid-configuration"
+        ));
+    }
+    for candidate in candidates {
+        let Ok(url) = Url::parse(&candidate) else {
+            continue;
+        };
+        let Ok(response) = client.get(url).send().await else {
+            continue;
+        };
+        if !response.status().is_success() {
+            continue;
+        }
+        let Ok(metadata) = response.json::<Value>().await else {
+            continue;
+        };
+        let Some(authorization_endpoint) = metadata
+            .get("authorization_endpoint")
+            .and_then(Value::as_str)
+            .and_then(|raw| Url::parse(raw).ok())
+        else {
+            continue;
+        };
+        let Some(token_endpoint) = metadata
+            .get("token_endpoint")
+            .and_then(Value::as_str)
+            .and_then(|raw| Url::parse(raw).ok())
+        else {
+            continue;
+        };
+        require_secure(&authorization_endpoint, "the authorization endpoint")?;
+        require_secure(&token_endpoint, "the token endpoint")?;
+        let registration_endpoint = metadata
+            .get("registration_endpoint")
+            .and_then(Value::as_str)
+            .and_then(|raw| Url::parse(raw).ok());
+        if let Some(registration) = &registration_endpoint {
+            require_secure(registration, "the registration endpoint")?;
+        }
+        return Ok(Discovered {
+            authorization_endpoint,
+            token_endpoint,
+            registration_endpoint,
+            resource,
+            scope,
+        });
+    }
+    Err(FlowFailure::hinted(
+        "the authorization server published no usable metadata",
+        "The server may not support browser sign-in — add it with a token instead.",
+    ))
+}
+
+struct Registration {
+    client_id: String,
+    client_secret: Option<Zeroizing<String>>,
+}
+
+async fn register(
+    client: &reqwest::Client,
+    discovered: &Discovered,
+    redirect_uri: &str,
+) -> std::result::Result<Registration, FlowFailure> {
+    let Some(registration_endpoint) = &discovered.registration_endpoint else {
+        return Err(FlowFailure::hinted(
+            "the authorization server does not offer automatic client registration",
+            "Add this server with a token instead, or register a client with the provider.",
+        ));
+    };
+    let mut body = json!({
+        "client_name": "AKA Multitool",
+        "redirect_uris": [redirect_uri],
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+    });
+    if let Some(scope) = &discovered.scope {
+        body["scope"] = json!(scope);
+    }
+    let response = client
+        .post(registration_endpoint.clone())
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| {
+            FlowFailure::plain(format!("client registration failed: {}", e.without_url()))
+        })?;
+    let status = response.status();
+    let payload: Value = response.json().await.unwrap_or(Value::Null);
+    if !status.is_success() {
+        let detail = payload
+            .get("error_description")
+            .or_else(|| payload.get("error"))
+            .and_then(Value::as_str)
+            .unwrap_or("no detail");
+        return Err(FlowFailure::hinted(
+            format!("client registration was refused (HTTP {status}: {detail})"),
+            "Add this server with a token instead.",
+        ));
+    }
+    let client_id = payload
+        .get("client_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| FlowFailure::plain("client registration returned no client_id"))?
+        .to_string();
+    let client_secret = payload
+        .get("client_secret")
+        .and_then(Value::as_str)
+        .map(|secret| Zeroizing::new(secret.to_string()));
+    Ok(Registration {
+        client_id,
+        client_secret,
+    })
+}
+
+/// Accept loopback connections until the OAuth redirect for our `state`
+/// arrives. Anything else (favicons, port scans, mismatched state) is
+/// answered and ignored — a stray request must not consume the flow.
+async fn wait_for_callback(
+    listener: TcpListener,
+    expected_state: &str,
+) -> std::result::Result<String, FlowFailure> {
+    for _ in 0..64 {
+        let Ok((mut stream, _)) = listener.accept().await else {
+            continue;
+        };
+        let mut buf = vec![0u8; 8192];
+        let mut read = 0usize;
+        let header_end = loop {
+            match stream.read(&mut buf[read..]).await {
+                Ok(0) => break None,
+                Ok(n) => {
+                    read += n;
+                    if let Some(pos) = find_header_end(&buf[..read]) {
+                        break Some(pos);
+                    }
+                    if read == buf.len() {
+                        break None;
+                    }
+                }
+                Err(_) => break None,
+            }
+        };
+        let Some(_) = header_end else {
+            let _ = respond(&mut stream, 400, "Bad request").await;
+            continue;
+        };
+        let request_line = String::from_utf8_lossy(&buf[..read]);
+        let path = request_line
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap_or("");
+        let Ok(url) = Url::parse(&format!("http://127.0.0.1{path}")) else {
+            let _ = respond(&mut stream, 400, "Bad request").await;
+            continue;
+        };
+        if url.path() != "/callback" {
+            let _ = respond(&mut stream, 404, "Not found").await;
+            continue;
+        }
+        let mut code = None;
+        let mut state = None;
+        let mut error = None;
+        let mut error_description = None;
+        for (key, value) in url.query_pairs() {
+            match key.as_ref() {
+                "code" => code = Some(value.to_string()),
+                "state" => state = Some(value.to_string()),
+                "error" => error = Some(value.to_string()),
+                "error_description" => error_description = Some(value.to_string()),
+                _ => {}
+            }
+        }
+        if state.as_deref() != Some(expected_state) {
+            // Not our redirect (or a forgery): answer and keep waiting.
+            let _ = respond(&mut stream, 400, "State mismatch").await;
+            continue;
+        }
+        if let Some(error) = error {
+            let description = error_description.unwrap_or_else(|| "no detail".into());
+            let _ = respond(
+                &mut stream,
+                200,
+                "Sign-in was not completed. You can close this tab.",
+            )
+            .await;
+            if error == "access_denied" {
+                return Err(FlowFailure::plain(
+                    "you declined the authorization in the browser",
+                ));
+            }
+            return Err(FlowFailure::plain(format!(
+                "the authorization server reported {error}: {description}"
+            )));
+        }
+        let Some(code) = code else {
+            let _ = respond(&mut stream, 400, "Missing code").await;
+            continue;
+        };
+        let _ = respond(
+            &mut stream,
+            200,
+            "You’re connected. You can close this tab and return to Multitool.",
+        )
+        .await;
+        return Ok(code);
+    }
+    Err(FlowFailure::plain(
+        "too many unrelated requests hit the sign-in listener",
+    ))
+}
+
+fn find_header_end(bytes: &[u8]) -> Option<usize> {
+    bytes.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+async fn respond(
+    stream: &mut tokio::net::TcpStream,
+    status: u16,
+    message: &str,
+) -> std::io::Result<()> {
+    let reason = match status {
+        200 => "OK",
+        404 => "Not Found",
+        _ => "Bad Request",
+    };
+    let body = format!(
+        "<!doctype html><meta charset=\"utf-8\"><title>Multitool</title>\
+         <body style=\"font-family:system-ui;display:grid;place-items:center;height:100vh;margin:0\">\
+         <p>{message}</p></body>"
+    );
+    let response = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(response.as_bytes()).await?;
+    stream.shutdown().await
+}
+
+struct Tokens {
+    access_token: Zeroizing<String>,
+    expires_in: Option<u64>,
+}
+
+async fn exchange(
+    client: &reqwest::Client,
+    discovered: &Discovered,
+    registration: &Registration,
+    redirect_uri: &str,
+    code: &str,
+    pkce_verifier: &str,
+) -> std::result::Result<Tokens, FlowFailure> {
+    let mut form: Vec<(&str, &str)> = vec![
+        ("grant_type", "authorization_code"),
+        ("code", code),
+        ("redirect_uri", redirect_uri),
+        ("client_id", &registration.client_id),
+        ("code_verifier", pkce_verifier),
+        ("resource", &discovered.resource),
+    ];
+    if let Some(secret) = &registration.client_secret {
+        form.push(("client_secret", secret));
+    }
+    let response = client
+        .post(discovered.token_endpoint.clone())
+        .form(&form)
+        .send()
+        .await
+        .map_err(|e| FlowFailure::plain(format!("token exchange failed: {}", e.without_url())))?;
+    let status = response.status();
+    let payload: Value = response
+        .json()
+        .await
+        .map_err(|e| FlowFailure::plain(format!("token endpoint returned invalid JSON: {e}")))?;
+    if !status.is_success() {
+        let detail = payload
+            .get("error_description")
+            .or_else(|| payload.get("error"))
+            .and_then(Value::as_str)
+            .unwrap_or("no detail");
+        return Err(FlowFailure::plain(format!(
+            "the token endpoint refused the exchange (HTTP {status}: {detail})"
+        )));
+    }
+    let token_type = payload
+        .get("token_type")
+        .and_then(Value::as_str)
+        .unwrap_or("bearer");
+    if !token_type.eq_ignore_ascii_case("bearer") {
+        return Err(FlowFailure::plain(format!(
+            "unsupported token type {token_type:?}"
+        )));
+    }
+    let access_token = payload
+        .get("access_token")
+        .and_then(Value::as_str)
+        .map(|token| Zeroizing::new(token.to_string()))
+        .ok_or_else(|| FlowFailure::plain("the token endpoint returned no access token"))?;
+    Ok(Tokens {
+        access_token,
+        expires_in: payload.get("expires_in").and_then(Value::as_u64),
+    })
+}
+
+/* -------------------------------- helpers --------------------------------- */
+
+fn origin_of(url: &Url) -> String {
+    let mut origin = format!("{}://{}", url.scheme(), url.host_str().unwrap_or(""));
+    if let Some(port) = url.port() {
+        origin.push_str(&format!(":{port}"));
+    }
+    origin
+}
+
+/// Pull a quoted parameter out of a `WWW-Authenticate` challenge.
+fn challenge_param(challenge: &str, name: &str) -> Option<String> {
+    let lower = challenge.to_ascii_lowercase();
+    let needle = format!("{name}=");
+    let start = lower.find(&needle)? + needle.len();
+    let rest = &challenge[start..];
+    if let Some(stripped) = rest.strip_prefix('"') {
+        return stripped.split('"').next().map(str::to_string);
+    }
+    rest.split([',', ' '])
+        .next()
+        .map(|value| value.trim().to_string())
+}
+
+fn random_urlsafe(bytes: usize) -> String {
+    let mut buf = vec![0u8; bytes];
+    getrandom::fill(&mut buf).expect("os rng");
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn challenge_params_parse_quoted_and_bare_forms() {
+        let quoted = r#"Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource", error="invalid_token""#;
+        assert_eq!(
+            challenge_param(quoted, "resource_metadata").unwrap(),
+            "https://mcp.example.com/.well-known/oauth-protected-resource"
+        );
+        let bare = "Bearer realm=mcp, resource_metadata=https://x.test/meta";
+        assert_eq!(
+            challenge_param(bare, "resource_metadata").unwrap(),
+            "https://x.test/meta"
+        );
+        assert!(challenge_param("Bearer realm=mcp", "resource_metadata").is_none());
+    }
+
+    #[test]
+    fn secure_urls_are_https_or_loopback() {
+        let ok = Url::parse("https://auth.example.com/authorize").unwrap();
+        assert!(require_secure(&ok, "x").is_ok());
+        let local = Url::parse("http://127.0.0.1:8080/authorize").unwrap();
+        assert!(require_secure(&local, "x").is_ok());
+        let plain = Url::parse("http://auth.example.com/authorize").unwrap();
+        assert!(require_secure(&plain, "x").is_err());
+    }
+
+    #[test]
+    fn header_end_detection() {
+        assert_eq!(find_header_end(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"), Some(23));
+        assert_eq!(find_header_end(b"GET / HTTP/1.1\r\n"), None);
+    }
+
+    #[test]
+    fn pkce_material_is_urlsafe() {
+        let verifier = random_urlsafe(48);
+        assert_eq!(verifier.len(), 64);
+        assert!(verifier
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+    }
+}

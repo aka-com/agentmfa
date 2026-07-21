@@ -9,6 +9,7 @@
 import { invoke, listen, mode } from '/src/bridge';
 import {
   CATALOG, CATALOG_SECTIONS, catalogNameForType, connectionsForEntry, entryForConnection,
+  mcpTemplateForConnection,
   visibleCatalog,
 } from '/src/catalog';
 import type { ConnectionPreset } from '/src/catalog';
@@ -33,6 +34,9 @@ import type {
   ConnectionSummary,
   ConnectionType,
   ElicitationRequest,
+  McpAuthDraft,
+  McpAuthState,
+  McpStatusReport,
   WiringSummary,
   SecretSummary,
   SessionSummary,
@@ -51,7 +55,7 @@ type Tab = typeof TABS[number];
 
 interface SheetState {
   kind: 'add-secret' | 'edit-secret' | 'add-conn' | 'edit-conn' | 'settings' | 'clear-activity'
-    | 'elicitation';
+    | 'elicitation' | 'mcp-auth';
   id?: string;
 }
 
@@ -68,6 +72,8 @@ interface ConnectionDraft {
   origin?: string | null;
   /** This draft is an MCP server, so the origin field is a full server URL. */
   isMcp?: boolean;
+  /** Catalog row that opened the sheet (template lookup for MCP rows). */
+  entryId?: string;
   mcpPath?: string | null;
   scheme?: string | null;
   host?: string | null;
@@ -137,6 +143,20 @@ interface AppState {
   connectionReady: ConnectionReadyState | null;
   connectionTaskCopied: boolean;
   connTests: Record<string, ConnectionTestState>;
+  /** Live MCP sign-in session shown by the mcp-auth sheet. */
+  mcpAuth: McpAuthState | null;
+  /** The submitted draft, kept for Try again. */
+  mcpAuthDraft: McpAuthDraft | null;
+  /** Authorization URL already auto-opened, so re-renders don't re-open. */
+  mcpAuthOpenedUrl: string | null;
+  /** connectionId -> in-flight/last MCP status check (transient). */
+  mcpStatus: Record<string, McpStatusState>;
+}
+
+interface McpStatusState {
+  running: boolean;
+  report?: McpStatusReport;
+  error?: string;
 }
 
 interface ConnectionTestState {
@@ -186,6 +206,10 @@ const state: AppState = {
   connectionReady: null,
   connectionTaskCopied: false,
   connTests: {},         // connectionId -> in-flight/last test result (transient)
+  mcpAuth: null,
+  mcpAuthDraft: null,
+  mcpAuthOpenedUrl: null,
+  mcpStatus: {},
 };
 
 // Re-rendering replaces #root wholesale, which would drop the scroll
@@ -518,6 +542,7 @@ const connTestResultHTML = (c: ConnectionSummary): string => {
 // What a connection actually lets an agent do, in plain words — the
 // expansion has to answer "what is this for?" without opening the editor.
 function connectionPurpose(c: ConnectionSummary): string {
+  if (c.type === 'api' && c.mcp_path) return 'Exposes this MCP server’s tools to wired agents';
   if (c.type === 'pg') return `Runs SQL against ${c.dbname || 'the database'}`;
   if (c.type === 'ssh') return `Shell, git, and file transfer as ${c.user || 'the pinned user'}`;
   if (c.type === 'ws') return 'Streams WebSocket messages';
@@ -554,6 +579,18 @@ function catalogConnRowHTML(c: ConnectionSummary): string {
   const menuOpen = state.connMenuOpen === c.id;
   const live = liveCount(c);
   const wiring = connectionWiring(c);
+  const mcpStatus = c.mcp_path ? state.mcpStatus[c.id] : undefined;
+  const account = c.mcp_path && c.account
+    ? `<span class="cat-meta-account" title="Verified by the status check">${esc(`Connected as ${c.account}`)}</span>`
+    : '';
+  const statusBtn = c.mcp_path
+    ? `<button class="icon-btn mcp-status-btn" title="Check server & account"
+        aria-label="Check status of ${escAttr(c.name)}" data-act="mcp-status" data-id="${c.id}"
+        ${mcpStatus && mcpStatus.running ? 'disabled' : ''}>${ICONS.refresh}</button>`
+    : '';
+  const reconnectItem = c.mcp_path
+    ? `<button class="menu-item" role="menuitem" data-act="reconnect-mcp" data-id="${c.id}">${ICONS.logIn} Reconnect (sign in again)…</button>`
+    : '';
   // Only call out TLS when it is weaker than the default.
   const tls = c.type === 'pg' && c.sslmode && c.sslmode !== 'verify-full'
     ? `<span class="cat-meta-warn">TLS ${esc(c.sslmode)}</span>` : '';
@@ -567,18 +604,50 @@ function catalogConnRowHTML(c: ConnectionSummary): string {
         <span>${esc(connectionPurpose(c))}</span>
         <span>${esc(connectionCredential(c))}</span>
         <span class="${wiring.wired ? '' : 'cat-meta-idle'}">${esc(wiring.text)}</span>
-        ${tls}${hostKey}
-      </div>${connTestResultHTML(c)}</div>
-    <div class="tile-menu-wrap">
+        ${account}${tls}${hostKey}
+      </div>${connTestResultHTML(c)}${mcpStatusHTML(c)}</div>
+    ${statusBtn}<div class="tile-menu-wrap">
       <button class="icon-btn tile-menu-btn ${menuOpen ? 'on' : ''}" title="Tool options"
         aria-label="Options for ${escAttr(c.name)}" aria-haspopup="menu"
         aria-expanded="${menuOpen}" data-act="toggle-conn-menu" data-id="${c.id}">${ICONS.ellipsis}</button>
       ${menuOpen ? `<div class="tile-menu" role="menu" aria-label="Options for ${escAttr(c.name)}">
         <button class="menu-item" role="menuitem" data-act="test-conn" data-id="${c.id}" ${test && test.running ? 'disabled' : ''}>${ICONS.flaskConical} ${test && test.running ? 'Testing…' : 'Test connection'}</button>
+        ${reconnectItem}
         <button class="menu-item" role="menuitem" data-act="edit-conn" data-id="${c.id}">${ICONS.pencil} Edit…</button>
         <button class="menu-item danger" role="menuitem" data-act="del-conn-ask" data-id="${c.id}">${ICONS.trash} Delete…</button>
       </div>` : ''}
     </div></div>`;
+}
+
+// The status check's result, rendered under the MCP connection it belongs
+// to — reachability and account first, then the server's resources the
+// same way credentials and wirings are listed.
+function mcpStatusHTML(c: ConnectionSummary): string {
+  if (!c.mcp_path) return '';
+  const status = state.mcpStatus[c.id];
+  if (!status) return '';
+  if (status.running) return '<div class="cc-test running">Checking the server…</div>';
+  if (status.error) {
+    return `<div class="cc-test err">${ICONS.circleX}<span>${esc(status.error)}</span></div>`;
+  }
+  const report = status.report;
+  if (!report) return '';
+  const head = `<div class="cc-test ${report.ok ? 'ok' : 'err'}">${report.ok ? ICONS.circleCheck : ICONS.circleX}<span>${esc(report.detail)}</span></div>`;
+  if (!report.ok) return head;
+  const missing = report.missing_tools.length
+    ? `<div class="mcp-missing">${ICONS.circleQuestion}<span>Expected tools not advertised: ${esc(report.missing_tools.join(', '))}</span></div>`
+    : '';
+  let resources = '';
+  if (report.resources_supported) {
+    const shown = report.resources.slice(0, 8);
+    const rows = shown.map((resource) =>
+      `<div class="mcp-res"><b>${esc(resource.name)}</b><code title="${escAttr(resource.uri)}">${esc(resource.uri)}</code></div>`).join('');
+    const more = report.resources.length > shown.length
+      ? `<div class="mcp-res-more">+ ${report.resources.length - shown.length} more</div>` : '';
+    resources = `<div class="mcp-res-head">Resources (${report.resources.length})</div>
+      ${rows || '<div class="mcp-res-more">None listed by the server.</div>'}${more}`;
+  }
+  return `${head}${missing}${resources}`;
 }
 
 // The built-in credentials store, expanded inline: the same secrets table
@@ -835,6 +904,7 @@ function sheetsHTML() {
     case 'settings': return settingsSheet();
     case 'clear-activity': return clearActivitySheet();
     case 'elicitation': return elicitationSheet();
+    case 'mcp-auth': return mcpAuthSheet();
     default: return '';
   }
 }
@@ -1100,9 +1170,12 @@ function connSheet(editing: boolean): string {
       ?? (d.host
         ? `${apiOriginFromParts(d.scheme ?? undefined, d.host, d.port ?? null)}${d.mcpPath ?? ''}`
         : '');
+    const entry = d.entryId ? CATALOG.find((candidate) => candidate.id === d.entryId) : undefined;
+    const hint = entry?.mcpTemplate?.urlHint
+      ?? 'The URL your provider gave you. Its tools appear to wired agents automatically; the credential below is injected on the way out and never reaches the agent.';
     fields += `<div class="f-row"><label for="f-origin">MCP server URL</label>
       <input id="f-origin" class="${fieldCls('origin')}" placeholder="https://mcp.example.com/mcp" value="${escAttr(url)}">${fieldErr('origin')}
-      <div class="rule-note">The URL your provider gave you. Its tools appear to wired agents automatically; the credential below is injected on the way out and never reaches the agent.</div></div>`;
+      <div class="rule-note">${esc(hint)}</div></div>`;
   } else if (t === 'api') {
     const origin = d.origin ?? apiOriginFromParts(d.scheme ?? undefined, d.host ?? undefined, d.port ?? null);
     fields += `<div class="f-row"><label for="f-origin">API root</label><input id="f-origin" class="${fieldCls('origin')}" placeholder="https://api.github.com" value="${escAttr(origin)}">${fieldErr('origin')}</div>`;
@@ -1151,8 +1224,12 @@ function connSheet(editing: boolean): string {
         <input id="c-template" class="${fieldCls('template')}" placeholder="Authorization: Bearer {{TOKEN_NAME}}" value="${escAttr(d.template ?? '')}">${fieldErr('template')}</div></div></details>`;
     }
   } else if (t === 'api' || t === 'ws') {
-    const modeValue = d.authMode || 'bearer';
+    const mcpAdd = t === 'api' && isMcpDraft(d);
+    const modeValue = d.authMode || (mcpAdd ? 'oauth' : 'bearer');
     const recipes: Array<[string, string]> = [
+      // MCP servers advertise their own sign-in flow; the browser dance is
+      // the default and a pasted token stays one select away.
+      ...(mcpAdd ? [['oauth', 'Sign in with your account (OAuth)'] as [string, string]] : []),
       ['bearer', 'Bearer token'], ['header', 'Custom header'],
       ...(t === 'api' ? [['query', 'Query parameter'] as [string, string]] : []),
       ['advanced', 'Bearer token + template'],
@@ -1160,7 +1237,11 @@ function connSheet(editing: boolean): string {
     // Decision first: the authentication type governs which detail field and
     // credential inputs appear, so those render beneath the select.
     fields += `<div class="f-row"><label for="c-auth-mode">Authentication type</label>${customSelectHTML('c-auth-mode', recipes, modeValue)}</div>`;
-    if (modeValue === 'header') {
+    if (modeValue === 'oauth') {
+      fields += `<div class="rule-note oauth-note">You’ll approve access in your browser. The token is saved
+        to your Keychain and injected by the broker — agents never see it. Run this again to connect
+        a second account.</div>`;
+    } else if (modeValue === 'header') {
       fields += `<div class="f-row"><label for="c-auth-detail">Header name</label><input id="c-auth-detail" class="${fieldCls('authDetail')}" placeholder="X-API-Key" value="${escAttr(d.authDetail ?? '')}">${fieldErr('authDetail')}</div>`;
     } else if (modeValue === 'query') {
       fields += `<div class="f-row"><label for="c-auth-detail">Query parameter</label><input id="c-auth-detail" class="${fieldCls('authDetail')}" placeholder="api_key" value="${escAttr(d.authDetail ?? '')}">${fieldErr('authDetail')}</div>`;
@@ -1168,12 +1249,12 @@ function connSheet(editing: boolean): string {
     if (modeValue === 'advanced') {
       fields += `<div class="f-row"><label for="c-template">Injection template</label><input id="c-template" class="${fieldCls('template')}" placeholder="Authorization: Bearer {{TOKEN_NAME}}" value="${escAttr(d.template ?? '')}">${fieldErr('template')}
         <div class="rule-note">References credentials by name using <code>{{ … }}</code>. Use this for Basic auth or composed credentials.</div></div>`;
-    } else {
+    } else if (modeValue !== 'oauth') {
       fields += credentialChooserHTML(t, d, true, state.connPreset?.credentialHint);
     }
     // Branded rows say where the credential comes from — the equivalent of a
     // provider's "get your API key" page, as plain text (no live links here).
-    if (state.connPreset?.docsUrl) {
+    if (state.connPreset?.docsUrl && modeValue !== 'oauth') {
       fields += `<div class="rule-note">Create or find your ${esc(state.connEntryName || 'API')} key at <code>${esc(state.connPreset.docsUrl)}</code></div>`;
     }
   } else {
@@ -1195,7 +1276,9 @@ function connSheet(editing: boolean): string {
     fields += `<div class="rule-note">Changing the destination unwires affected agents.</div>`;
   }
   const label = (!editing && state.connEntryName) || catalogNameForType(t);
-  const title = `${editing ? 'Edit' : 'Add'} ${label}`;
+  const oauthSelected = !editing && t === 'api' && isMcpDraft(d)
+    && (d.authMode || 'oauth') === 'oauth';
+  const title = `${editing ? 'Edit' : oauthSelected ? 'Connect' : 'Add'} ${label}`;
   const discardConfirm = state.confirmDiscard ? `
     <div class="sheet-backdrop over-sheet" data-act="discard-keep"></div>
     <div class="sheet wide confirm-sheet discard-confirm" role="dialog" aria-modal="true" aria-labelledby="discard-conn-title">
@@ -1208,7 +1291,109 @@ function connSheet(editing: boolean): string {
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
     <div class="sheet wide"><h3>${title}</h3>${fields}
     <div class="sheet-actions"><button class="btn" data-act="sheet-cancel">Cancel</button>
-      <button class="btn primary" data-act="save-conn">${editing ? 'Save' : `Add ${label}`}</button></div></div>${discardConfirm}`;
+      <button class="btn primary" data-act="save-conn">${editing ? 'Save' : oauthSelected ? 'Sign in & connect' : `Add ${label}`}</button></div></div>${discardConfirm}`;
+}
+
+/* ------------------------- MCP sign-in sheet ------------------------------ */
+
+const AUTH_STEPS: Array<[string, string]> = [
+  ['probing', 'Contacting the server'],
+  ['discovering', 'Reading how to sign in'],
+  ['registering', 'Registering Multitool'],
+  ['awaiting_authorization', 'Approving in your browser'],
+  ['exchanging', 'Finishing sign-in'],
+  ['verifying', 'Confirming the account'],
+];
+
+function isTerminalAuth(auth: McpAuthState): boolean {
+  return auth.phase === 'succeeded' || auth.phase === 'failed' || auth.phase === 'cancelled';
+}
+
+// Every intermediate state of the sign-in flow, live: the step list shows
+// where the dance is, and the terminal states (connected / failed /
+// cancelled) each carry their own actions.
+function mcpAuthSheet(): string {
+  const auth = state.mcpAuth;
+  if (!auth) return '';
+  const stepIndex = AUTH_STEPS.findIndex(([phase]) => phase === auth.phase);
+  const succeeded = auth.phase === 'succeeded';
+  const steps = AUTH_STEPS.map(([, label], index) => {
+    const done = succeeded || (stepIndex > index);
+    const current = !isTerminalAuth(auth) && stepIndex === index;
+    return `<li class="auth-step ${done ? 'done' : ''} ${current ? 'current' : ''}">
+      <span class="auth-step-mark" aria-hidden="true">${done ? ICONS.check : current ? '<span class="auth-spinner"></span>' : ''}</span>
+      <span>${esc(label)}</span></li>`;
+  }).join('');
+
+  let body = '';
+  let actions = `<button class="btn" data-act="mcp-auth-cancel">Cancel</button>`;
+  if (auth.phase === 'awaiting_authorization') {
+    body = `<div class="auth-note">Your browser should have opened. Approve the request there,
+        then come back — this dialog follows along by itself.</div>
+      <div class="auth-url"><code title="${escAttr(auth.authorization_url)}">${esc(auth.authorization_url)}</code></div>`;
+    actions = `<button class="btn" data-act="mcp-auth-cancel">Cancel</button>
+      <button class="btn primary" data-act="mcp-open-browser" data-url="${escAttr(auth.authorization_url)}">Open browser again</button>`;
+  } else if (auth.phase === 'succeeded') {
+    body = `<div class="auth-done">${ICONS.circleCheck}
+      <div><b>${esc(auth.connection_name)} is connected${auth.account ? ` as ${esc(auth.account)}` : ''}.</b>
+      ${auth.warning
+        ? `<div class="auth-warning">Token saved, but verification did not complete: ${esc(auth.warning)}</div>`
+        : '<div class="auth-sub">Use the status button on the tool any time to re-check the server and account.</div>'}
+      </div></div>`;
+    actions = `<button class="btn primary" data-act="mcp-auth-done">Done</button>`;
+  } else if (auth.phase === 'failed') {
+    body = `<div class="auth-failed">${ICONS.circleX}
+      <div><b>${esc(auth.message)}</b>
+      ${auth.hint ? `<div class="auth-sub">${esc(auth.hint)}</div>` : ''}</div></div>`;
+    actions = `${state.mcpAuthDraft && !state.mcpAuthDraft.reauth_connection_id
+        ? '<button class="btn" data-act="mcp-auth-token">Use a token instead</button>'
+        : '<button class="btn" data-act="sheet-cancel">Close</button>'}
+      ${state.mcpAuthDraft ? '<button class="btn primary" data-act="mcp-auth-retry">Try again</button>' : ''}`;
+  } else if (auth.phase === 'cancelled') {
+    body = '<div class="auth-note">Sign-in cancelled. Nothing was saved.</div>';
+    actions = `<button class="btn" data-act="sheet-cancel">Close</button>
+      ${state.mcpAuthDraft ? '<button class="btn primary" data-act="mcp-auth-retry">Try again</button>' : ''}`;
+  }
+  return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
+    <div class="sheet wide auth-sheet" role="dialog" aria-modal="true" aria-labelledby="mcp-auth-title">
+      <h3 id="mcp-auth-title">Connect ${esc(auth.name)}</h3>
+      <div class="auth-target"><code>${esc(auth.target)}</code></div>
+      <ol class="auth-steps">${steps}</ol>
+      ${body}
+      <div class="sheet-actions">${actions}</div></div>`;
+}
+
+/** Kick off (or restart) a sign-in and switch to the progress sheet. */
+async function startMcpAuth(draft: McpAuthDraft): Promise<boolean> {
+  try {
+    const auth = await invoke('start_mcp_auth', { input: draft });
+    state.mcpAuthDraft = draft;
+    state.mcpAuth = auth;
+    state.mcpAuthOpenedUrl = null;
+    state.sheet = { kind: 'mcp-auth' };
+    state.sheetErrors = {};
+    state.confirmDiscard = false;
+    state.formMenuOpen = null;
+    render();
+    return true;
+  } catch (error) {
+    showFormError(error);
+    return false;
+  }
+}
+
+function receiveMcpAuth(auth: McpAuthState): void {
+  if (!state.mcpAuth || state.mcpAuth.id !== auth.id) return;
+  state.mcpAuth = auth;
+  // First arrival in the browser step opens the system browser once;
+  // "Open browser again" covers the blocked-popup / closed-tab cases.
+  if (auth.phase === 'awaiting_authorization'
+      && state.mcpAuthOpenedUrl !== auth.authorization_url) {
+    state.mcpAuthOpenedUrl = auth.authorization_url;
+    void invoke('open_url', { url: auth.authorization_url })
+      .catch(() => toast('⚠ Could not open the browser — use the button in the dialog'));
+  }
+  if (state.sheet && state.sheet.kind === 'mcp-auth') render();
 }
 
 function settingsSheet() {
@@ -1394,7 +1579,8 @@ async function run(fn: () => Promise<unknown>): Promise<boolean> {
 
 function isProtectedFormSheet(sheet: SheetState | null = state.sheet): boolean {
   return sheet?.kind === 'add-secret' || sheet?.kind === 'edit-secret'
-    || sheet?.kind === 'add-conn' || sheet?.kind === 'edit-conn';
+    || sheet?.kind === 'add-conn' || sheet?.kind === 'edit-conn'
+    || sheet?.kind === 'mcp-auth';
 }
 
 // Test a connection broker-side and pin the result to its catalog row.
@@ -1471,7 +1657,9 @@ async function saveConn(): Promise<void> {
   const t = state.connType;
   const adding = sheet.kind === 'add-conn';
   const toolNameTaken = adding && toolNameIsTaken(name);
-  const authMode = d.authMode || 'bearer';
+  const mcpAdd = adding && t === 'api' && isMcpDraft(d);
+  const authMode = d.authMode || (mcpAdd ? 'oauth' : 'bearer');
+  const usesOauth = mcpAdd && authMode === 'oauth';
   const errs: Record<string, string> = {};
   if (!name) errs.name = 'Name is required';
   if (t === 'api' || t === 'pg' || t === 'ssh') {
@@ -1506,9 +1694,11 @@ async function saveConn(): Promise<void> {
     try { apiOrigin = parseApiOrigin(d.origin || ''); }
     catch (error) { errs.origin = errorMessage(error); }
   }
-  const usesRecipe = adding && (t === 'api' || t === 'ws') && authMode !== 'advanced';
-  const needsCredentialChoice = (adding && !((t === 'api' || t === 'ws') && authMode === 'advanced')) ||
-    (!adding && t !== 'api');
+  const usesRecipe = adding && (t === 'api' || t === 'ws')
+    && authMode !== 'advanced' && !usesOauth;
+  const needsCredentialChoice = !usesOauth && (
+    (adding && !((t === 'api' || t === 'ws') && authMode === 'advanced')) ||
+    (!adding && t !== 'api'));
   const secretSource = adding
     ? (d.secretSource || (d.importedCredential || d.sshImportId || !state.secrets.length ? 'new' : 'existing'))
     : 'existing';
@@ -1543,6 +1733,22 @@ async function saveConn(): Promise<void> {
     render();
     if (toolNameTaken) focusField('f-cname');
     else if (newSecretNameTaken) focusField('c-new-secret-name');
+    return;
+  }
+  if (usesOauth) {
+    // No credential to collect: the sign-in flow mints the token, stores
+    // it, and creates the connection only once authentication completed.
+    const entry = d.entryId ? CATALOG.find((candidate) => candidate.id === d.entryId) : undefined;
+    const template = entry?.mcpTemplate;
+    await startMcpAuth({
+      name,
+      scheme: apiOrigin!.scheme,
+      host: apiOrigin!.host,
+      port: apiOrigin!.port,
+      mcp_path: mcpPath!,
+      whoami_tool: template?.whoamiTool ?? null,
+      expected_tools: template?.expectedTools ?? [],
+    });
     return;
   }
   const input: ConnectionInput = { name, type: t };
@@ -1617,6 +1823,13 @@ async function saveConn(): Promise<void> {
 
 function closeSheet() {
   const releaseDropdown = isProtectedFormSheet();
+  // Closing the sign-in sheet mid-flow aborts the flow: no listener stays
+  // behind waiting for a browser approval the user walked away from.
+  if (state.sheet?.kind === 'mcp-auth' && state.mcpAuth && !isTerminalAuth(state.mcpAuth)) {
+    const id = state.mcpAuth.id;
+    void invoke('cancel_mcp_auth', { id }).catch(() => {});
+  }
+  state.mcpAuth = null;
   state.sheet = null;
   state.draft = {};
   state.sheetErrors = {};
@@ -1851,7 +2064,14 @@ document.addEventListener('click', async (e) => {
       // the row the user clicked, not the protocol underneath it.
       state.connEntryName = entry.name;
       state.connPreset = entry.preset ?? null;
-      if (entry.mcp) state.draft.isMcp = true;
+      if (entry.mcp) {
+        state.draft.isMcp = true;
+        state.draft.entryId = entry.id;
+        // Sign-in first; a pasted token stays one select away. The
+        // template's published URL prefills the field but stays editable.
+        state.draft.authMode = 'oauth';
+        if (entry.mcpTemplate?.serverUrl) state.draft.origin = entry.mcpTemplate.serverUrl;
+      }
       // A branded row prefills everything but the credential: the documented
       // API root, the vendor's auth recipe, and a suggested name — all into
       // ordinary, editable form fields.
@@ -1950,6 +2170,7 @@ document.addEventListener('click', async (e) => {
       if (await run(() => invoke('delete_connection', { id }))) {
         state.confirm = null;
         delete state.connTests[id];
+        delete state.mcpStatus[id];
         toast('🗑 Tool removed');
         await refresh('all');
       }
@@ -1957,6 +2178,77 @@ document.addEventListener('click', async (e) => {
     case 'test-conn':
       state.connMenuOpen = null;
       void runConnectionTest(id);
+      break;
+    case 'mcp-status': {
+      if (state.mcpStatus[id] && state.mcpStatus[id].running) break;
+      state.connMenuOpen = null;
+      const connection = state.connections.find((x) => x.id === id);
+      if (!connection) break;
+      state.mcpStatus[id] = { running: true };
+      render();
+      const template = mcpTemplateForConnection(connection);
+      try {
+        const report = await invoke('mcp_status', {
+          id,
+          options: {
+            whoami_tool: template?.whoamiTool ?? null,
+            expected_tools: template?.expectedTools ?? [],
+          },
+        });
+        state.mcpStatus[id] = { running: false, report };
+      } catch (error) {
+        state.mcpStatus[id] = { running: false, error: errorMessage(error) };
+      }
+      // The check can update the stored account acknowledgment.
+      await load('connections', 'list_connections');
+      render();
+      break;
+    }
+    case 'reconnect-mcp': {
+      const connection = state.connections.find((x) => x.id === id);
+      if (!connection || !connection.mcp_path) break;
+      state.connMenuOpen = null;
+      if (!await holdDropdownFormOpen()) break;
+      const template = mcpTemplateForConnection(connection);
+      await startMcpAuth({
+        name: connection.name,
+        scheme: connection.scheme || 'https',
+        host: connection.host || '',
+        port: connection.port ?? null,
+        mcp_path: connection.mcp_path,
+        reauth_connection_id: connection.id,
+        whoami_tool: template?.whoamiTool ?? null,
+        expected_tools: template?.expectedTools ?? [],
+      });
+      break;
+    }
+    case 'mcp-open-browser':
+      await run(() => invoke('open_url', { url: btn.dataset.url || '' }));
+      break;
+    case 'mcp-auth-cancel': {
+      const auth = state.mcpAuth;
+      if (!auth || isTerminalAuth(auth)) { closeSheet(); break; }
+      // The resulting mcp-auth-changed event flips the sheet to Cancelled.
+      await run(() => invoke('cancel_mcp_auth', { id: auth.id }));
+      break;
+    }
+    case 'mcp-auth-retry':
+      if (state.mcpAuthDraft) await startMcpAuth(state.mcpAuthDraft);
+      break;
+    case 'mcp-auth-token':
+      // Back to the add form with the same draft, token mode selected.
+      state.mcpAuth = null;
+      state.sheet = { kind: 'add-conn' };
+      state.draft.authMode = 'bearer';
+      state.sheetErrors = {};
+      state.sheetBaseline = null;
+      render();
+      focusField('f-origin');
+      break;
+    case 'mcp-auth-done':
+      toast('🔌 Connected');
+      closeSheet();
+      await refresh('all');
       break;
     case 'wire':
       await run(() => invoke('set_wiring', { agentId: id, connectionId: btn.dataset.conn || '', wired: true }));
@@ -2274,6 +2566,7 @@ async function boot() {
   // originating UI command to refresh after; reload the services list.
   await listen('aka://connections-changed', () => refresh('connections'));
   await listen('aka://activity-appended', (ev) => receiveActivity(ev.payload));
+  await listen('aka://mcp-auth-changed', (ev) => receiveMcpAuth(ev.payload));
   await listen('aka://activity-changed', () => refresh('activity'));
   await listen('aka://open-settings', () => {
     if (isProtectedFormSheet()) return;

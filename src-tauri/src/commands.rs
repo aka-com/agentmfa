@@ -714,6 +714,81 @@ pub async fn test_connection(
         .map_err(|e| e.to_string())
 }
 
+/* -------------------------------- MCP ------------------------------------ */
+
+/// Begin the MCP sign-in flow (OAuth with discovery + PKCE). The token
+/// never enters the webview: progress is observed through
+/// `aka://mcp-auth-changed` events and `get_mcp_auth`.
+#[tauri::command]
+pub fn start_mcp_auth(
+    state: State<AppState>,
+    input: aka_core::mcp_auth::McpAuthDraft,
+) -> FormResult<aka_core::mcp_auth::McpAuthState> {
+    state.broker.ui_start_mcp_auth(input).map_err(|error| {
+        FormError::from_core(
+            error,
+            FormContext::Connection {
+                kind: "api",
+                includes_new_secret: true,
+            },
+        )
+    })
+}
+
+#[tauri::command]
+pub fn get_mcp_auth(
+    state: State<AppState>,
+    id: String,
+) -> CmdResult<Option<aka_core::mcp_auth::McpAuthState>> {
+    let id = parse_id(&id)?;
+    Ok(state.broker.ui_mcp_auth_state(&id))
+}
+
+#[tauri::command]
+pub fn cancel_mcp_auth(state: State<AppState>, id: String) -> CmdResult<bool> {
+    let id = parse_id(&id)?;
+    Ok(state.broker.ui_cancel_mcp_auth(&id))
+}
+
+/// Broker-side MCP status check: reachability, acknowledged account,
+/// tools vs. the template's expectations, and available resources. Only
+/// the summary reaches the webview.
+#[tauri::command]
+pub async fn mcp_status(
+    state: State<'_, AppState>,
+    id: String,
+    options: Option<aka_core::mcp::McpCheckOptions>,
+) -> CmdResult<aka_core::mcp::McpStatusReport> {
+    let id = parse_id(&id)?;
+    state
+        .broker
+        .ui_mcp_check(&id, options.unwrap_or_default())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Open the sign-in URL in the system browser. Restricted to http(s) so
+/// the webview cannot launch arbitrary schemes.
+#[tauri::command]
+pub fn open_url(url: String) -> CmdResult<()> {
+    let url = url.trim().to_string();
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("only http(s) URLs can be opened".into());
+    }
+    if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("invalid URL".into());
+    }
+    #[cfg(target_os = "macos")]
+    let launcher = "open";
+    #[cfg(not(target_os = "macos"))]
+    let launcher = "xdg-open";
+    std::process::Command::new(launcher)
+        .arg(&url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("could not open the browser: {e}"))
+}
+
 /* ------------------------------- wirings ---------------------------------- */
 
 /// Wire or unwire an agent from a connection. Editing the wiring table is
@@ -813,6 +888,11 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         edit_connection,
         delete_connection,
         test_connection,
+        start_mcp_auth,
+        get_mcp_auth,
+        cancel_mcp_auth,
+        mcp_status,
+        open_url,
         set_wiring,
         confirm_agent_disconnect,
         revoke_agent,

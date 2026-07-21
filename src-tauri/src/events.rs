@@ -19,6 +19,7 @@ pub const EVT_WIRINGS: &str = "aka://wirings-changed";
 pub const EVT_CONNECTIONS: &str = "aka://connections-changed";
 pub const EVT_ACTIVITY: &str = "aka://activity-appended";
 pub const EVT_ACTIVITY_CHANGED: &str = "aka://activity-changed";
+pub const EVT_MCP_AUTH: &str = "aka://mcp-auth-changed";
 
 fn copy_authorization_reason(duration: Duration) -> String {
     let seconds = duration.as_secs();
@@ -60,6 +61,10 @@ impl BrokerEvents for TauriEvents {
 
     fn audit_appended(&self, entry: &AuditEntry) {
         let _ = self.app.emit(EVT_ACTIVITY, ActivityDto::from(entry));
+    }
+
+    fn mcp_auth_changed(&self, state: &aka_core::mcp_auth::McpAuthState) {
+        let _ = self.app.emit(EVT_MCP_AUTH, state);
     }
 
     fn confirm_secret_read(&self, secret: &SecretMeta) -> bool {

@@ -305,6 +305,12 @@ pub struct Connection {
     /// Referenced secret ids. API connections may compose several (derived
     /// from the template's refs); pg/ws/ssh bind exactly one.
     pub secrets: Vec<Uuid>,
+    /// The upstream account this connection's credential was last verified
+    /// as (an MCP server's whoami answer). Display metadata, never
+    /// authorization — it distinguishes several connections to the same
+    /// service (multiple GitHub accounts, say) in the UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

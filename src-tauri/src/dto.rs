@@ -68,6 +68,9 @@ pub struct ConnectionDto {
     /// Set when an API upstream speaks MCP at that path; the sidecar
     /// re-exposes its tools under this connection's name.
     pub mcp_path: Option<String>,
+    /// The upstream account this connection's credential was last verified
+    /// as (an MCP whoami answer). Display metadata, never authorization.
+    pub account: Option<String>,
 }
 
 impl ConnectionDto {
@@ -105,6 +108,7 @@ impl ConnectionDto {
             trusted_ca_bundle_path: None,
             url: None,
             mcp_path: None,
+            account: conn.account.clone(),
         };
         match &conn.config {
             Api {

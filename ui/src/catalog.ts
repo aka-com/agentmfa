@@ -12,15 +12,18 @@
 // same pinned host, same credential injected on the upstream leg — with an
 // MCP path set, which is what lets the sidecar re-expose their tools.
 //
-// We do not ship endpoint URLs for these: the user supplies the server URL
-// their vendor gave them. A branded row is a labelled shortcut, not a claim
-// about someone else's infrastructure.
+// Vendors with an *official, documented* hosted MCP server carry an
+// `mcpTemplate`: the server URL is prefilled (still editable), the tools we
+// expect the server to advertise are checked by the status button, and the
+// whoami tool acknowledges which account a credential belongs to. A vendor
+// without a published endpoint (Gmail today) keeps the template minus the
+// URL — the user pastes the one their provider gave them.
 //
 // Branded API rows (Stripe, OpenAI, …) carry a `preset` instead: the
 // vendor's *documented public API root* and auth recipe, prefilled into the
-// add form where they stay visible and editable. That is different in kind
-// from an MCP endpoint guess — these roots are the vendor's published API
-// contract, and the user still sees exactly what gets pinned before saving.
+// add form where they stay visible and editable. Like template endpoints,
+// these roots are the vendor's published contract, and the user still sees
+// exactly what gets pinned before saving.
 
 import type { ConnectionSummary, ConnectionType } from './types';
 
@@ -46,6 +49,22 @@ export interface ConnectionPreset {
   credentialHint?: string;
 }
 
+/**
+ * A branded MCP server the catalog knows how to reach and talk to.
+ *
+ * `serverUrl` is the vendor's published endpoint, prefilled into the add
+ * form but always editable. `expectedTools` is advisory: the status check
+ * reports (never blocks on) tools the server stopped advertising.
+ * `whoamiTool` names the tool that identifies the connected account.
+ */
+export interface McpTemplate {
+  serverUrl?: string;
+  expectedTools: string[];
+  whoamiTool?: string;
+  /** Copy shown under the URL field in the add form. */
+  urlHint?: string;
+}
+
 export interface CatalogEntry {
   id: string;
   name: string;
@@ -62,6 +81,8 @@ export interface CatalogEntry {
   mcp?: boolean;
   /** Prefill for a branded API row; see ConnectionPreset. */
   preset?: ConnectionPreset;
+  /** Branded MCP details (endpoint, expected tools, whoami). */
+  mcpTemplate?: McpTemplate;
   /** Extra search terms ("payments", "email") the row answers to. */
   keywords?: string[];
 }
@@ -77,6 +98,15 @@ export const CATALOG: CatalogEntry[] = [
     connType: 'api',
     mcp: true,
     keywords: ['git', 'repos', 'issues', 'pull requests', 'code'],
+    mcpTemplate: {
+      serverUrl: 'https://api.githubcopilot.com/mcp/',
+      expectedTools: [
+        'get_me', 'search_repositories', 'get_file_contents',
+        'list_issues', 'create_issue', 'create_pull_request',
+      ],
+      whoamiTool: 'get_me',
+      urlHint: 'GitHub’s hosted MCP server. Sign in with your GitHub account, or paste a personal access token.',
+    },
   },
   {
     id: 'gmail',
@@ -88,6 +118,13 @@ export const CATALOG: CatalogEntry[] = [
     connType: 'api',
     mcp: true,
     keywords: ['email', 'mail', 'google', 'inbox'],
+    // Google publishes no hosted Gmail MCP endpoint yet, so there is no URL
+    // to encode — paste the one your provider gave you. Sign-in and status
+    // checks work the same once the URL is known.
+    mcpTemplate: {
+      expectedTools: [],
+      urlHint: 'Google doesn’t publish a hosted Gmail MCP endpoint yet — paste the server URL from your Gmail MCP provider.',
+    },
   },
   {
     id: 'notion',
@@ -99,6 +136,15 @@ export const CATALOG: CatalogEntry[] = [
     connType: 'api',
     mcp: true,
     keywords: ['docs', 'wiki', 'notes', 'pages'],
+    mcpTemplate: {
+      serverUrl: 'https://mcp.notion.com/mcp',
+      expectedTools: [
+        'notion-search', 'notion-fetch', 'notion-create-pages',
+        'notion-update-page', 'notion-get-self',
+      ],
+      whoamiTool: 'notion-get-self',
+      urlHint: 'Notion’s hosted MCP server. Sign in with your Notion account to pick the workspace.',
+    },
   },
   {
     id: 'airtable',
@@ -318,19 +364,30 @@ export function presetHost(preset: ConnectionPreset): string {
   try { return new URL(preset.origin).hostname; } catch { return ''; }
 }
 
+/** Hostname of a template's published server URL, lowercased. */
+function templateHost(entry: CatalogEntry): string | null {
+  const raw = entry.mcpTemplate?.serverUrl;
+  if (!raw) return null;
+  try { return new URL(raw).hostname.toLowerCase(); } catch { return null; }
+}
+
 /**
  * Which catalog row owns a connection.
  *
- * A stored connection does not remember which shortcut created it — a
- * GitHub MCP server and a Notion one are both an API connection with an
- * `mcp_path`. So every MCP connection lists under the generic MCP row.
- * A plain API connection whose pinned host equals a branded row's preset
- * root lists under that row (an exact host match is deterministic, not a
- * guess); everything else lists under the row for its protocol.
+ * An MCP connection whose pinned host matches a branded template's
+ * published endpoint lists under that brand — that is what lets several
+ * GitHub accounts stack under the GitHub row. Every other MCP connection
+ * lists under the generic MCP row (deterministic beats guessing at a
+ * vendor from an arbitrary hostname). A plain API connection whose pinned
+ * host equals a branded row's preset root lists under that row (an exact
+ * host match is deterministic, not a guess); everything else lists under
+ * the row for its protocol.
  */
 export function entryForConnection(connection: ConnectionSummary): CatalogEntry | undefined {
   if (connection.type === 'api' && connection.mcp_path) {
-    return CATALOG.find((entry) => entry.id === 'mcp');
+    const host = (connection.host || '').toLowerCase();
+    const branded = CATALOG.find((entry) => entry.mcp && host && templateHost(entry) === host);
+    return branded ?? CATALOG.find((entry) => entry.id === 'mcp');
   }
   if (connection.type === 'api' && connection.host) {
     const branded = CATALOG.find(
@@ -342,6 +399,18 @@ export function entryForConnection(connection: ConnectionSummary): CatalogEntry 
     (entry) => entry.via === 'connection' && entry.connType === connection.type
       && !entry.mcp && !entry.preset,
   );
+}
+
+/**
+ * The branded template covering a connection, when its pinned host matches
+ * a template's published endpoint. Feeds the status check's expectations
+ * (whoami tool, expected tools) and the reconnect flow.
+ */
+export function mcpTemplateForConnection(connection: ConnectionSummary): McpTemplate | undefined {
+  if (connection.type !== 'api' || !connection.mcp_path) return undefined;
+  const host = (connection.host || '').toLowerCase();
+  if (!host) return undefined;
+  return CATALOG.find((entry) => entry.mcp && templateHost(entry) === host)?.mcpTemplate;
 }
 
 export function connectionsForEntry(

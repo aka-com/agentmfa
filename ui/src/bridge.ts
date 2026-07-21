@@ -17,6 +17,9 @@ import type {
   EventMap,
   EventName,
   EventPayload,
+  McpAuthDraft,
+  McpAuthState,
+  McpStatusReport,
   SessionSummary,
   Settings,
   Unlisten,
@@ -115,6 +118,7 @@ interface MockConnection {
   host?: string | null;
   scheme?: string | null;
   mcp_path?: string | null;
+  account?: string | null;
   port?: number | null;
   template?: string | null;
   dbname?: string | null;
@@ -148,9 +152,12 @@ interface MockArgs {
   id: string | number;
   name: string;
   value: string;
+  input2?: never;
+  url?: string;
+  options?: { whoami_tool?: string | null; expected_tools?: string[] } | null;
   newName?: string | null;
   newValue?: string | null;
-  input: ConnectionInput;
+  input: ConnectionInput & Partial<McpAuthDraft>;
   limit: number;
   on: boolean;
   agentId: string;
@@ -205,7 +212,7 @@ function seedConnections() {
     mkConn('github', 'api', ['GITHUB_API_KEY'], { host: 'api.github.com', scheme: 'https', template: 'Authorization: Bearer {{GITHUB_API_KEY}}' }),
     // An MCP server, so the catalog's MCP row has something under it in
     // frontend-only mode.
-    mkConn('notion', 'api', ['NOTION_TOKEN'], { host: 'mcp.notion.com', scheme: 'https', template: 'Authorization: Bearer {{NOTION_TOKEN}}', mcp_path: '/mcp' }),
+    mkConn('notion', 'api', ['NOTION_TOKEN'], { host: 'mcp.notion.com', scheme: 'https', template: 'Authorization: Bearer {{NOTION_TOKEN}}', mcp_path: '/mcp', account: 'Raymond (raymond@aka.com)' }),
     mkConn('prod-db', 'pg', ['DATABASE_PASSWORD'], { host: 'db.internal.aka.com', port: 5432, dbname: 'app_production', user: 'app', sslmode: 'verify-full', trusted_ca_bundle_path: null }),
     mkConn('market-feed', 'ws', ['STREAM_TOKEN'], { url: 'wss://stream.example.com/feed' }),
     mkConn('internal-api', 'api', ['SERVICE_USER', 'SERVICE_PASSWORD'], { host: 'internal.aka.com', scheme: 'https', template: 'Authorization: Basic {{base64(SERVICE_USER ":" SERVICE_PASSWORD)}}' }),
@@ -292,6 +299,7 @@ function connDto(c: MockConnection): ConnectionSummary {
       .filter((w) => w.connection_id === c.id)
       .map((w) => ({ agent_id: w.client_id, agent: w.agent })),
     host: c.host || null, scheme: c.scheme || null, port: c.port || null, template: c.template || null,
+    mcp_path: c.mcp_path || null, account: c.account || null,
     dbname: c.dbname || null, user: c.user || null, host_key_fingerprint: c.host_key_fingerprint || null,
     destination: c.destination || null,
     sslmode: c.sslmode || null, url: c.url || null,
@@ -311,6 +319,135 @@ function connTarget(c: MockConnection): string {
 function revealPrefix(value: string): string {
   const n = Math.min(6, Math.floor(value.length / 2));
   return n < value.length ? value.slice(0, n) + '…' : value;
+}
+
+/* --------------------------- mock MCP sign-in ----------------------------- */
+// A timer-driven walk through every phase of the broker's OAuth state
+// machine so the standalone dev page exercises the whole auth UI. Names
+// ending in "-fail" exercise the failure state.
+interface MockAuthSession {
+  state: McpAuthState;
+  draft: McpAuthDraft;
+  timers: Array<ReturnType<typeof setTimeout>>;
+}
+const mockAuthSessions: Record<string, MockAuthSession> = {};
+
+function mockAuthSet(session: MockAuthSession, phase: Partial<McpAuthState>): void {
+  session.state = {
+    ...session.state, ...phase, updated_at: new Date().toISOString(),
+  } as McpAuthState;
+  emit('aka://mcp-auth-changed', session.state);
+}
+
+function mockAuthFinish(session: MockAuthSession): void {
+  const draft = session.draft;
+  const account = 'Raymond (raymond@aka.com)';
+  if (draft.reauth_connection_id) {
+    const conn = db.connections.find((c) => c.id === draft.reauth_connection_id);
+    if (!conn) {
+      mockAuthSet(session, { phase: 'failed', message: 'connection disappeared' } as McpAuthState);
+      return;
+    }
+    conn.account = account;
+    audit('connectionUpdated', `MCP sign-in completed: ${conn.name}`, `Connected as ${account}`);
+    emit('aka://connections-changed', {});
+    mockAuthSet(session, {
+      phase: 'succeeded', connection_id: conn.id, connection_name: conn.name,
+      account, expires_in: 28800,
+    } as McpAuthState);
+    return;
+  }
+  const secretName = `${draft.name.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_MCP_TOKEN`;
+  const secret = mkSecret(secretName, 'mcp-oauth-token-demo');
+  db.secrets.push(secret);
+  const conn: MockConnection = {
+    id: uid(), name: draft.name, type: 'api',
+    secret_names: [secretName], secret_ids: [secret.id],
+    host: draft.host, scheme: draft.scheme, port: draft.port ?? null,
+    template: `Authorization: Bearer {{${secretName}}}`,
+    mcp_path: draft.mcp_path, account,
+  };
+  db.connections.push(conn);
+  audit('connectionAdded', `Tool added: ${conn.name}`, `Connected as ${account}`);
+  emit('aka://connections-changed', {});
+  mockAuthSet(session, {
+    phase: 'succeeded', connection_id: conn.id, connection_name: conn.name,
+    account, expires_in: 28800,
+  } as McpAuthState);
+}
+
+function mockStartAuth(draft: McpAuthDraft): McpAuthState {
+  const id = uid();
+  const session: MockAuthSession = {
+    draft,
+    timers: [],
+    state: {
+      id, name: draft.name,
+      target: `${draft.scheme}://${draft.host}${draft.port ? `:${draft.port}` : ''}${draft.mcp_path}`,
+      phase: 'probing', updated_at: new Date().toISOString(),
+    },
+  };
+  mockAuthSessions[id] = session;
+  const at = (ms: number, run: () => void): void => { session.timers.push(setTimeout(run, ms)); };
+  at(350, () => mockAuthSet(session, { phase: 'discovering' } as McpAuthState));
+  at(800, () => mockAuthSet(session, { phase: 'registering' } as McpAuthState));
+  at(1250, () => mockAuthSet(session, {
+    phase: 'awaiting_authorization',
+    authorization_url: `https://auth.${draft.host}/authorize?client_id=mock&state=demo`,
+  } as McpAuthState));
+  if (/-fail$/.test(draft.name)) {
+    at(2800, () => mockAuthSet(session, {
+      phase: 'failed',
+      message: 'the authorization server does not offer automatic client registration',
+      hint: 'Add this server with a token instead.',
+    } as McpAuthState));
+    return session.state;
+  }
+  at(2800, () => mockAuthSet(session, { phase: 'exchanging' } as McpAuthState));
+  at(3300, () => mockAuthSet(session, { phase: 'verifying' } as McpAuthState));
+  at(3900, () => mockAuthFinish(session));
+  return session.state;
+}
+
+function mockStatusReport(c: MockConnection): McpStatusReport {
+  const account = c.account || 'Raymond (raymond@aka.com)';
+  if ((c.host || '').includes('notion')) {
+    return {
+      ok: true,
+      detail: `Notion MCP answered as ${account} with 12 tools and 3 resources`,
+      server: 'Notion MCP 1.4.0', protocol_version: '2025-06-18', account,
+      tools: ['notion-search', 'notion-fetch', 'notion-create-pages',
+        'notion-update-page', 'notion-get-self', 'notion-create-comment'],
+      missing_tools: [],
+      resources_supported: true,
+      resources: [
+        { uri: 'notion://workspaces/demo', name: 'Demo workspace' },
+        { uri: 'notion://databases/roadmap', name: 'Roadmap', description: 'Product roadmap database' },
+        { uri: 'notion://pages/handbook', name: 'Handbook' },
+      ],
+    };
+  }
+  if ((c.host || '').includes('github')) {
+    return {
+      ok: true,
+      detail: `github-mcp-server answered as ${account} with 41 tools`,
+      server: 'github-mcp-server 0.9.1', protocol_version: '2025-06-18', account,
+      tools: ['get_me', 'search_repositories', 'get_file_contents',
+        'list_issues', 'create_issue', 'create_pull_request'],
+      missing_tools: [],
+      resources_supported: true,
+      resources: [
+        { uri: 'repo://aka-com/multitool/contents', name: 'aka-com/multitool' },
+      ],
+    };
+  }
+  return {
+    ok: true,
+    detail: 'The server answered with 3 tools',
+    server: 'mock-mcp 0.1.0', protocol_version: '2025-06-18',
+    account, tools: ['echo', 'search', 'fetch'], missing_tools: [],
+    resources_supported: false, resources: [],
+  };
 }
 
 async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
@@ -414,7 +551,8 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         secret_ids: i.secret_id ? [i.secret_id] : [],
         destination: i.destination, host: i.host, scheme: i.scheme, port: i.port, template: i.template, dbname: i.dbname, user: i.user,
         host_key_fingerprint: i.host_key_fingerprint, sslmode: i.sslmode,
-        trusted_ca_bundle_path: i.trusted_ca_bundle_path, url: i.url });
+        trusted_ca_bundle_path: i.trusted_ca_bundle_path, url: i.url,
+        mcp_path: i.mcp_path });
       audit('connectionAdded', `Tool added: ${i.name}`); return;
     }
     case 'edit_connection': {
@@ -431,7 +569,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         destination: i.destination,
         dbname: i.dbname, user: i.user, sslmode: i.sslmode, trusted_ca_bundle_path: i.trusted_ca_bundle_path,
         host_key_fingerprint: i.host_key_fingerprint, url: i.url,
-        template: i.template });
+        template: i.template, mcp_path: i.mcp_path });
       if (i.secret_id) {
         c.secret_names = [db.secrets.find((s) => s.id === i.secret_id)?.name]
           .filter((name): name is string => Boolean(name));
@@ -458,6 +596,39 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         : `GET https://${c.host}/ answered HTTP 200 OK`;
       return { ok, detail };
     }
+    case 'start_mcp_auth': {
+      const draft = args.input as unknown as McpAuthDraft;
+      if (!draft.reauth_connection_id && db.connections.some((c) => c.name === draft.name)) {
+        throw formError('conflict', 'connection_name_taken', 'name', 'That tool name is already in use');
+      }
+      return mockStartAuth(draft);
+    }
+    case 'get_mcp_auth':
+      return mockAuthSessions[args.id as string]?.state ?? null;
+    case 'cancel_mcp_auth': {
+      const session = mockAuthSessions[args.id as string];
+      if (!session || ['succeeded', 'failed', 'cancelled'].includes(session.state.phase)) return false;
+      session.timers.forEach(clearTimeout);
+      mockAuthSet(session, { phase: 'cancelled' } as McpAuthState);
+      return true;
+    }
+    case 'mcp_status': {
+      const c = db.connections.find((x) => x.id === args.id); if (!c) throw new Error('no such connection');
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      if (!c.mcp_path) {
+        return {
+          ok: false, detail: 'this connection has no MCP path', tools: [], missing_tools: [],
+          resources_supported: false, resources: [],
+        };
+      }
+      const report = mockStatusReport(c);
+      if (report.account && c.account !== report.account) {
+        c.account = report.account;
+        emit('aka://connections-changed', {});
+      }
+      return report;
+    }
+    case 'open_url': return;
     case 'set_wiring': {
       const agent = db.agents.find((a) => a.id === args.agentId);
       const connection = db.connections.find((c) => c.id === args.connectionId);

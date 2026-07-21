@@ -8,6 +8,7 @@ import {
   connectionsForEntry,
   entryForConnection,
   filterCatalog,
+  mcpTemplateForConnection,
   presetHost,
   visibleCatalog,
 } from '../src/catalog';
@@ -42,15 +43,58 @@ test('branded apps are added as MCP servers, not raw API origins', () => {
   }
 });
 
-test('an MCP connection lists under the generic MCP row', () => {
+test('an unbranded MCP connection lists under the generic MCP row', () => {
   const mcp = entryForConnection({
-    type: 'api', mcp_path: '/mcp',
+    type: 'api', mcp_path: '/mcp', host: 'mcp.internal.example.com',
   } as never);
   assert.equal(mcp?.id, 'mcp');
 
   // …and a plain API connection still lists under Custom API.
   const plain = entryForConnection({ type: 'api' } as never);
   assert.equal(plain?.id, 'http');
+});
+
+test('templated vendors ship a server URL, expected tools, and a whoami tool', () => {
+  for (const id of ['github', 'notion']) {
+    const template = CATALOG.find((entry) => entry.id === id)?.mcpTemplate;
+    assert.ok(template?.serverUrl?.startsWith('https://'), id);
+    assert.ok((template?.expectedTools.length ?? 0) > 0, id);
+    assert.ok(template?.whoamiTool, id);
+    assert.ok(template?.expectedTools.includes(template.whoamiTool!), id);
+  }
+  // Gmail has no published endpoint to encode: template without a URL, so
+  // the form still asks for the provider's server URL.
+  const gmail = CATALOG.find((entry) => entry.id === 'gmail')?.mcpTemplate;
+  assert.ok(gmail);
+  assert.equal(gmail?.serverUrl, undefined);
+});
+
+test('MCP connections group under the brand whose endpoint they pin', () => {
+  const github = conn('api', 'api.githubcopilot.com', 'github-work');
+  github.mcp_path = '/mcp';
+  assert.equal(entryForConnection(github)?.id, 'github');
+  assert.equal(mcpTemplateForConnection(github)?.whoamiTool, 'get_me');
+
+  // Host matching is case-insensitive (DNS semantics).
+  const shouty = conn('api', 'MCP.NOTION.COM', 'notion-1');
+  shouty.mcp_path = '/mcp';
+  assert.equal(entryForConnection(shouty)?.id, 'notion');
+
+  // Two accounts on one service are two connections under one brand row.
+  const second = conn('api', 'mcp.notion.com', 'notion-personal');
+  second.mcp_path = '/mcp';
+  const notionEntry = CATALOG.find((entry) => entry.id === 'notion')!;
+  assert.deepEqual(
+    connectionsForEntry(notionEntry, [shouty, second, conn('api', 'api.example.com')])
+      .map((connection) => connection.name),
+    ['notion-1', 'notion-personal'],
+  );
+
+  // A non-MCP API connection to the same host stays a Custom API: the
+  // template covers MCP connections only.
+  const rawApi = conn('api', 'mcp.notion.com', 'raw');
+  assert.equal(entryForConnection(rawApi)?.id, 'http');
+  assert.equal(mcpTemplateForConnection(rawApi), undefined);
 });
 
 test('the built-in credentials store is a Secrets row', () => {

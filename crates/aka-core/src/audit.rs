@@ -146,6 +146,9 @@ pub enum AuditKind {
     /// Retained so activity logs written by older versions still deserialize.
     /// New service tests do not create activity entries.
     ConnectionTested,
+    // MCP sign-in (OAuth) outcomes
+    McpAuthCompleted,
+    McpAuthFailed,
     SettingsChanged,
     // Rate limiting / budgets
     RateLimited,
@@ -188,6 +191,8 @@ impl AuditKind {
             AuditKind::ConnectionUpdated => "pencil",
             AuditKind::ConnectionDeleted => "unplug",
             AuditKind::ConnectionTested => "flaskConical",
+            AuditKind::McpAuthCompleted => "circleCheck",
+            AuditKind::McpAuthFailed => "circleX",
             AuditKind::SettingsChanged => "gear",
             AuditKind::RateLimited => "gauge",
         }
@@ -197,7 +202,10 @@ impl AuditKind {
     /// stay neutral; color is reserved for outcomes that benefit from it.
     pub fn tone(&self) -> &'static str {
         match self {
-            AuditKind::Paired | AuditKind::AllowedOnce | AuditKind::AutoAllowed => "success",
+            AuditKind::Paired
+            | AuditKind::AllowedOnce
+            | AuditKind::AutoAllowed
+            | AuditKind::McpAuthCompleted => "success",
             AuditKind::PairRequested | AuditKind::Requested | AuditKind::GrantStarted => "warning",
             AuditKind::PairDenied
             | AuditKind::TokenRevoked
@@ -205,6 +213,7 @@ impl AuditKind {
             | AuditKind::GrantRevoked
             | AuditKind::Denied
             | AuditKind::ApprovalTimeout
+            | AuditKind::McpAuthFailed
             | AuditKind::RateLimited => "danger",
             _ => "neutral",
         }

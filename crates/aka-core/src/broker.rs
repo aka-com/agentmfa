@@ -62,6 +62,8 @@ pub struct Broker {
     /// surfaced only in open responses' DSNs.
     pub(crate) pg_proxy_port: std::sync::OnceLock<u16>,
     pub(crate) http_client: reqwest::Client,
+    /// Live and recently finished MCP sign-in sessions (`mcp_auth` module).
+    pub mcp_auth: crate::mcp_auth::McpAuthSessions,
     pub(crate) token_limiter: KeyedLimiter,
     pub(crate) discovery_limiter: WindowLimiter,
     pub(crate) pairing_limiter: WindowLimiter,
@@ -126,6 +128,7 @@ impl Broker {
         );
         Ok(Arc::new(Self {
             data_plane,
+            mcp_auth: crate::mcp_auth::McpAuthSessions::default(),
             ws_bridge_port: std::sync::OnceLock::new(),
             pg_proxy_port: std::sync::OnceLock::new(),
             token_limiter: KeyedLimiter::new(
@@ -503,6 +506,48 @@ impl Broker {
             Err(detail) => (false, detail),
         };
         Ok(ConnectionTestReport { ok, detail })
+    }
+
+    /// UI-initiated MCP status check: reach the connection's MCP endpoint
+    /// with its own injected credential, acknowledge the account (via the
+    /// template's whoami tool, when one is configured), list tools against
+    /// the template's expectations, and enumerate resources. The account is
+    /// persisted on the connection so several connections to the same
+    /// service stay tellable apart; only the summary reaches the webview.
+    pub async fn ui_mcp_check(
+        &self,
+        id: &Uuid,
+        options: crate::mcp::McpCheckOptions,
+    ) -> Result<crate::mcp::McpStatusReport> {
+        const CHECK_TIMEOUT: Duration = Duration::from_secs(45);
+        let connection = self.store.connection_by_id(id)?;
+        let report = match tokio::time::timeout(
+            CHECK_TIMEOUT,
+            crate::mcp::check_connection(&self.store, &self.http_client, &connection, &options),
+        )
+        .await
+        {
+            Ok(report) => report,
+            Err(_) => {
+                return Ok(crate::mcp::McpStatusReport {
+                    ok: false,
+                    detail: format!("no answer within {} seconds", CHECK_TIMEOUT.as_secs()),
+                    server: None,
+                    protocol_version: None,
+                    account: None,
+                    tools: Vec::new(),
+                    missing_tools: Vec::new(),
+                    resources_supported: false,
+                    resources: Vec::new(),
+                })
+            }
+        };
+        if report.ok && report.account.is_some() && report.account != connection.account {
+            self.store
+                .set_connection_account(id, report.account.clone())?;
+            self.events.connections_changed();
+        }
+        Ok(report)
     }
 
     /* ---------------------------- wirings (UI) ----------------------------- */

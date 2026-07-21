@@ -577,6 +577,27 @@ impl Store {
         Ok(renamed)
     }
 
+    /// Record which upstream account a connection's credential was last
+    /// verified as (an MCP whoami answer). Display metadata only: it does
+    /// not touch the capability config or `updated_at`, so it never trips
+    /// the edit-conflict check or drops wirings.
+    pub fn set_connection_account(&self, id: &Uuid, account: Option<String>) -> Result<Connection> {
+        let mut state = self.state.lock().unwrap();
+        let mut next = state.clone();
+        let connection = next
+            .connections
+            .iter_mut()
+            .find(|connection| &connection.id == id)
+            .ok_or(CoreError::ConnectionNotFound)?;
+        if connection.account == account {
+            return Ok(connection.clone());
+        }
+        connection.account = account;
+        let updated = connection.clone();
+        self.commit(&mut state, next)?;
+        Ok(updated)
+    }
+
     /// Pin an SSH connection's host key, trust-on-first-use. Called by the
     /// SSH agent adapter after the user approves the first-connection trust
     /// prompt; the human factor is the approval decision itself, so there is
@@ -717,6 +738,7 @@ fn prepare_connection(state: &IndexState, spec: ConnectionSpec) -> Result<Connec
         name: spec.name,
         config: spec.config,
         secrets,
+        account: None,
         created_at: now,
         updated_at: now,
     })
@@ -765,6 +787,7 @@ fn prepare_connection_with_secret(
         name: spec.name,
         config: spec.config,
         secrets,
+        account: None,
         created_at: now,
         updated_at: now,
     };
