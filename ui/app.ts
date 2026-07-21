@@ -7,6 +7,8 @@
 // UI is developable standalone.
 
 import { invoke, listen, mode } from '/src/bridge';
+import { CATALOG, CATALOG_SECTIONS, connectionsForEntry, filterCatalog } from '/src/catalog';
+import type { CatalogEntry } from '/src/catalog';
 import { ICONS, TYPES, esc, escAttr, toast, relTime, absTime } from '/src/util';
 import {
   apiOriginFromParts, authTemplate, firstTaskPrompt, parseApiOrigin, parseConnectionImport,
@@ -39,7 +41,7 @@ const EDIT_SECRET_MASK = '••••••••••••';
 const ACTIVITY_RENDER_LIMIT = 200;
 
 // The left-nav tabs, in order — also the cycle order for Ctrl-Tab.
-const TABS = ['agents', 'connections', 'secrets', 'activity'] as const;
+const TABS = ['connections', 'agents', 'secrets', 'activity'] as const;
 type Tab = typeof TABS[number];
 
 
@@ -110,6 +112,8 @@ interface AppState {
   connAdvancedOpen: boolean;
   connType: ConnectionType;
   confirm: ConfirmState | null;
+  toolSearch: string;
+  toolOpen: string | null;
   menuOpen: boolean;
   walkthroughMenuOpen: boolean;
   agentMenuOpen: string | null;
@@ -136,7 +140,7 @@ interface ConnectionTestState {
 
 /* ------------------------------ local state ------------------------------ */
 const state: AppState = {
-  tab: 'agents',
+  tab: 'connections',
   secrets: [],
   connections: [],
   agents: [],
@@ -161,6 +165,8 @@ const state: AppState = {
   connAdvancedOpen: false, // "Advanced" disclosure in the service sheet
   connType: 'api',
   confirm: null,         // {kind, id/name}
+  toolSearch: '',        // Add-tools catalog search query
+  toolOpen: null,        // catalog entry id whose connections are expanded
   menuOpen: false,       // desktop-mode settings popover (gear) open
   walkthroughMenuOpen: false,
   agentMenuOpen: null,   // agent id whose ⋯ options menu is open (Agents tab)
@@ -594,13 +600,31 @@ function connTileHTML(c: ConnectionSummary): string {
     </div></div>`;
 }
 
+// One catalog row: icon chip, name, one-line description, and either an
+// Add button, a "Soon" chip (MCP-backed, not addable yet), or a count
+// badge that expands the row into its configured connections.
+function catalogRowHTML(entry: CatalogEntry): string {
+  const conns = connectionsForEntry(entry, state.connections);
+  const open = state.toolOpen === entry.id && conns.length > 0;
+  const action = conns.length
+    ? `<button class="cat-count ${open ? 'on' : ''}" data-act="catalog-toggle" data-id="${entry.id}"
+        aria-expanded="${open}" title="${conns.length} configured connection${conns.length === 1 ? '' : 's'}">${ICONS.plug} ${conns.length}</button>`
+    : entry.via === 'connection'
+    ? `<button class="btn cat-add" data-act="catalog-add" data-id="${entry.id}">Add</button>`
+    : `<span class="cat-soon" title="Arrives with the MCP layer">Soon</span>`;
+  const expansion = open ? `<div class="cat-conns">
+      <div class="conn-tiles">${conns.map(connTileHTML).join('')}</div>
+      <button class="btn ghost sm cat-add-another" data-act="catalog-add" data-id="${entry.id}">＋ Add another ${esc(entry.name)}</button>
+    </div>` : '';
+  return `<div class="cat-row-wrap ${open ? 'open' : ''}">
+    <div class="cat-row">
+      <span class="cat-ico" aria-hidden="true">${esc(entry.chip)}</span>
+      <div class="cat-tx"><b>${esc(entry.name)}</b><span>${esc(entry.description)}</span></div>
+      ${action}
+    </div>${expansion}</div>`;
+}
+
 function connectionsHTML() {
-  if (!state.connections.length) {
-    const detail = mode === 'dropdown' ? '' : `
-      <p>Add APIs, databases, SSH servers, and WebSockets.</p>
-      <button class="btn primary" data-act="open-add-conn">＋ Add service</button>`;
-    return `<div class="empty"><div class="empty-ico">🔌</div><h3>No services</h3>${detail}</div>`;
-  }
   const ready = state.connectionReady;
   const readyPrompt = ready ? firstTaskPrompt(ready.name, ready.type) : '';
   // The guided panel's First-task step carries the same prompt; don't
@@ -613,8 +637,18 @@ function connectionsHTML() {
       <button class="btn sm" data-act="copy-first-task">${state.connectionTaskCopied ? `${ICONS.check} Copied` : 'Copy task'}</button>
       <button class="icon-btn" title="Dismiss" aria-label="Dismiss service ready message" data-act="dismiss-connection-ready">${ICONS.circleX}</button>
     </div></div>` : '';
-  return readyCard + `<div class="conn-tiles">` +
-    state.connections.map(connTileHTML).join('') + `</div>`;
+  const entries = filterCatalog(state.toolSearch);
+  const sections = CATALOG_SECTIONS.map((section) => {
+    const rows = entries.filter((entry) => entry.section === section);
+    if (!rows.length) return '';
+    return `<div class="cat-section"><div class="cat-section-h">${section.toUpperCase()}</div>
+      <div class="cat-rows">${rows.map(catalogRowHTML).join('')}</div></div>`;
+  }).join('');
+  return readyCard + `<div class="catalog">
+    <input id="tool-search" class="cat-search" type="search" placeholder="Search tools…"
+      aria-label="Search tools" value="${escAttr(state.toolSearch)}">
+    ${sections || '<div class="muted-note">No tools match your search.</div>'}
+  </div>`;
 }
 
 // Console.app-style rows: a proportional timestamp gutter, restrained
@@ -696,7 +730,7 @@ function renderMainWindow() {
   const activityNav = navItem('activity');
   // One view-specific action, always in the header row next to the title.
   const actionBtn = state.tab === 'connections'
-    ? `<div class="dw-head-actions">${walkthroughMenuHTML()}<button class="btn" data-act="open-add-conn">＋ Add service</button></div>`
+    ? `<div class="dw-head-actions">${walkthroughMenuHTML()}<button class="btn" data-act="open-add-conn">＋ Add tool</button></div>`
     : state.tab === 'agents'
     ? `<div class="dw-head-actions">${walkthroughMenuHTML()}<button class="btn" data-act="copy-agent-setup">Copy setup instructions</button></div>`
     : state.tab === 'secrets'
@@ -720,7 +754,7 @@ function renderMainWindow() {
         </div>
       </div>
       <div class="dw-main">
-        <div class="dw-head"><h2>${tabLabel(state.tab)}</h2>${actionBtn}</div>
+        <div class="dw-head"><h2>${state.tab === 'connections' ? 'Add tools' : tabLabel(state.tab)}</h2>${actionBtn}</div>
         ${globalSectionsHTML()}
         <div class="content">${tabContentHTML()}</div>
       </div>
@@ -733,7 +767,7 @@ function renderDropdown() {
   const footer = state.tab === 'secrets'
     ? '<div class="dd-footer"><button class="btn block" data-act="open-add-secret">＋ Add secret</button></div>'
     : state.tab === 'connections'
-    ? '<div class="dd-footer"><button class="btn block" data-act="open-add-conn">＋ Add service</button></div>' : '';
+    ? '<div class="dd-footer"><button class="btn block" data-act="open-add-conn">＋ Add tool</button></div>' : '';
   root().innerHTML = `<div class="surface dropdown-surface">
     <div class="dd-head"><div class="dd-appicon">🔐</div>
       <div class="dd-identity"><div class="dd-title">AKA Desktop</div>${brokerReadyHTML()}</div>
@@ -1091,7 +1125,7 @@ function settingsSheet() {
 
 /* --------------------------------- helpers ------------------------------- */
 const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
-const tabLabel = (tab: Tab): string => tab === 'connections' ? 'Services' : cap(tab);
+const tabLabel = (tab: Tab): string => tab === 'connections' ? 'Tools' : cap(tab);
 
 // Flash "Copied" in place of the masked value for a moment after a copy.
 let copiedTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1796,6 +1830,23 @@ document.addEventListener('click', async (e) => {
       state.sheet = { kind: 'add-conn' }; state.connType = 'api'; state.draft = {};
       state.sheetErrors = {}; state.sheetBaseline = null; state.connAdvancedOpen = false;
       render(); focusField('f-cname'); break;
+    case 'catalog-toggle':
+      state.toolOpen = state.toolOpen === id ? null : id;
+      render(); break;
+    case 'catalog-add': {
+      const entry = CATALOG.find((candidate) => candidate.id === id);
+      if (!entry || entry.via !== 'connection' || !entry.connType) break;
+      if (!await holdDropdownFormOpen()) break;
+      state.sheet = { kind: 'add-conn' };
+      state.connType = entry.connType;
+      state.draft = entry.prefill
+        ? { name: entry.prefill.name, origin: entry.prefill.origin, template: entry.prefill.template }
+        : {};
+      if (entry.connType === 'pg') state.draft.port = '5432';
+      if (entry.connType === 'ssh') state.draft.port = '22';
+      state.sheetErrors = {}; state.sheetBaseline = null; state.connAdvancedOpen = false;
+      render(); focusField('f-cname'); break;
+    }
     case 'edit-conn': {
       const c = state.connections.find((x) => x.id === id);
       if (!c) break;
@@ -2075,6 +2126,12 @@ document.addEventListener('input', (e) => {
   if (target?.id === 'quick-setup-source') {
     state.quickSetupSource = target.value;
     state.quickSetupError = null;
+  }
+  if (target?.id === 'tool-search') {
+    state.toolSearch = target.value;
+    state.toolOpen = null;
+    render();
+    return;
   }
   if (target?.id === 'f-cname') {
     updateCredentialNamePlaceholder(target.value);
