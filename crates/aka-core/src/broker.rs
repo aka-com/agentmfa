@@ -3,6 +3,7 @@
 //! and the shell (UI-facing Tauri commands, tests, dev harness) both drive
 //! it.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -21,8 +22,8 @@ use crate::ratelimit::{KeyedLimiter, WindowLimiter};
 use crate::sessions::{DataPlane, SessionInfo};
 use crate::store::{ConnectionSpec, Store};
 use crate::types::{
-    Connection, ConnectionKind, PairedAgent, SecretMeta, SecretValue, Settings, Wiring,
-    WiringEndpoint, WiringMode,
+    Connection, ConnectionConfig, ConnectionKind, PairedAgent, SecretMeta, SecretValue, Settings,
+    Wiring, WiringEndpoint, WiringMode,
 };
 use crate::Result;
 
@@ -36,6 +37,21 @@ pub struct ConnectionTestReport {
     pub detail: String,
 }
 
+/// The result of issuing a direct endpoint: the pasteable connection string
+/// and the one-time secret. The secret is returned exactly once; it is not
+/// recoverable afterward (re-issuing rotates it).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IssuedEndpointInfo {
+    pub endpoint_id: Uuid,
+    pub kind: ConnectionKind,
+    /// Pasteable connection string (a Postgres DSN today).
+    pub dsn: String,
+    /// The one-time secret to supply out-of-band (`PGPASSWORD`).
+    pub secret: String,
+    /// Ready-to-adapt invocation, e.g. `PGPASSWORD=… psql "…"`.
+    pub example: String,
+}
+
 pub struct Broker {
     pub config: BrokerConfig,
     pub paths: Paths,
@@ -44,6 +60,9 @@ pub struct Broker {
     /// Per-wiring direct endpoints (stable DSN/URL issuance). Bounds and
     /// teardown ride alongside the wiring table.
     pub endpoints: Arc<crate::endpoints::EndpointRegistry>,
+    /// Live per-wiring endpoint listeners, keyed on endpoint id. Runtime only:
+    /// re-established from `endpoints` at daemon start, stopped on teardown.
+    endpoint_listeners: Mutex<HashMap<Uuid, crate::endpoints::EndpointListenerHandle>>,
     /// Serializes configuration mutations that read-then-write shared state
     /// (connection edits, wiring changes) so concurrent UI actions cannot
     /// interleave.
@@ -171,6 +190,7 @@ impl Broker {
             store,
             wirings,
             endpoints,
+            endpoint_listeners: Mutex::new(HashMap::new()),
             config_gate: Mutex::new(()),
             copy_authorization_until: Mutex::new(None),
             copy_authorization_gate: tokio::sync::Mutex::new(()),
@@ -838,6 +858,159 @@ impl Broker {
         self.endpoints.list()
     }
 
+    /// Issue (or rotate) a direct endpoint for a wiring: mint the per-wiring
+    /// secret, bind its listener, and hand back the pasteable DSN. The secret
+    /// leaves the broker exactly once, here. Gated behind the native
+    /// confirmation because it grants standing access; the wiring must already
+    /// exist.
+    pub async fn ui_issue_endpoint(
+        self: &Arc<Self>,
+        client_id: &Uuid,
+        connection_id: &Uuid,
+    ) -> Result<IssuedEndpointInfo> {
+        let connection = self.store.connection_by_id(connection_id)?;
+        // Only Postgres endpoints exist so far; other kinds land in later work.
+        if connection.kind() != ConnectionKind::Pg {
+            return Err(CoreError::EndpointUnsupportedKind(connection.kind().label()));
+        }
+        if !self.wirings.is_wired(client_id, connection_id) {
+            return Err(CoreError::EndpointRequiresWiring);
+        }
+        let agent = self
+            .pairing
+            .get_by_id(client_id)
+            .ok_or(CoreError::EndpointRequiresWiring)?;
+
+        // Confirm off the async runtime: the native sheet blocks its thread.
+        let events = self.events.clone();
+        let description = format!(
+            "Issue a direct endpoint for “{}” → {}",
+            agent.name, connection.name
+        );
+        let confirmation = tokio::task::spawn_blocking(move || events.confirm_action(&description))
+            .await
+            .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))?
+            .ok_or(CoreError::NotConfirmed)?;
+
+        // Mint under the gate; re-check the wiring didn't vanish while the
+        // sheet was up.
+        let issued = {
+            let _gate = self.config_gate.lock().unwrap();
+            if !self.wirings.is_wired(client_id, connection_id) {
+                return Err(CoreError::EndpointRequiresWiring);
+            }
+            self.endpoints
+                .issue(*client_id, &agent.name, *connection_id, connection.kind())?
+        };
+
+        // Bind the listener outside the gate (it awaits). A bind failure rolls
+        // the record back so we never advertise a dead endpoint.
+        if let Err(error) = self.bind_endpoint_listener(&issued.endpoint, &connection).await {
+            let _ = self.endpoints.revoke(&issued.endpoint.id);
+            return Err(CoreError::Io(error));
+        }
+
+        let ConnectionConfig::Pg { user, dbname, .. } = &connection.config else {
+            unreachable!("kind checked above")
+        };
+        let dir = self.paths.endpoint_dir(&issued.endpoint.id);
+        let dsn = crate::capability::pg::endpoint_dsn(dir.as_path(), user, dbname);
+        let example = format!("PGPASSWORD={} psql \"{dsn}\"", issued.secret);
+        self.audit.append(
+            AuditEntry::new(
+                AuditKind::Wired,
+                format!(
+                    "Direct endpoint issued: {} → {}",
+                    agent.name, connection.name
+                ),
+            )
+            .agent(agent.name.clone())
+            .connection(connection.name.clone())
+            .confirmation(confirmation)
+            .field("endpoint_id", issued.endpoint.id.to_string())
+            .field("kind", connection.kind().as_str()),
+        );
+        self.events.wirings_changed();
+        Ok(IssuedEndpointInfo {
+            endpoint_id: issued.endpoint.id,
+            kind: connection.kind(),
+            dsn,
+            secret: issued.secret,
+            example,
+        })
+    }
+
+    /// Revoke one direct endpoint: drop the record, stop its listener, and
+    /// close any live sessions it was serving.
+    pub fn ui_revoke_endpoint(&self, endpoint_id: &Uuid) -> Result<bool> {
+        let _gate = self.config_gate.lock().unwrap();
+        let Some(endpoint) = self.endpoints.revoke(endpoint_id)? else {
+            return Ok(false);
+        };
+        self.teardown_endpoints(std::slice::from_ref(&endpoint));
+        self.audit.append(
+            AuditEntry::new(
+                AuditKind::Unwired,
+                format!("Direct endpoint revoked: {}", endpoint.agent),
+            )
+            .agent(endpoint.agent.clone())
+            .field("endpoint_id", endpoint.id.to_string()),
+        );
+        self.events.wirings_changed();
+        Ok(true)
+    }
+
+    /// Re-establish every persisted endpoint's listener at daemon start.
+    /// Endpoints whose connection has since disappeared or changed kind are
+    /// stale and dropped rather than rebound.
+    pub async fn rebind_endpoints(self: &Arc<Self>) {
+        for endpoint in self.endpoints.list() {
+            match self.store.connection_by_id(&endpoint.connection_id) {
+                Ok(connection) if connection.kind() == endpoint.kind => {
+                    if let Err(error) = self.bind_endpoint_listener(&endpoint, &connection).await {
+                        tracing::warn!("could not rebind endpoint {}: {error}", endpoint.id);
+                    }
+                }
+                _ => {
+                    tracing::info!(
+                        "dropping stale endpoint {} (connection missing or kind changed)",
+                        endpoint.id
+                    );
+                    if let Ok(Some(removed)) = self.endpoints.revoke(&endpoint.id) {
+                        self.teardown_endpoints(std::slice::from_ref(&removed));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Bind (or rebind) the listener for one endpoint and record its handle,
+    /// stopping any prior listener for the same endpoint id.
+    async fn bind_endpoint_listener(
+        self: &Arc<Self>,
+        endpoint: &WiringEndpoint,
+        connection: &Connection,
+    ) -> std::io::Result<()> {
+        let handle = match connection.kind() {
+            ConnectionKind::Pg => crate::capability::pg::bind_endpoint(self.clone(), endpoint).await?,
+            other => {
+                return Err(std::io::Error::other(format!(
+                    "direct endpoints are not supported for {} tools",
+                    other.as_str()
+                )))
+            }
+        };
+        if let Some(old) = self
+            .endpoint_listeners
+            .lock()
+            .unwrap()
+            .insert(endpoint.id, handle)
+        {
+            old.stop();
+        }
+        Ok(())
+    }
+
     /// Tear down endpoints whose wiring just went away. Removing the persisted
     /// record already happened; this releases the runtime resources tied to it
     /// (the per-wiring listener and its socket directory) and closes any live
@@ -845,6 +1018,9 @@ impl Broker {
     /// unlike a ticket, its access is standing and cannot be left to expire.
     fn teardown_endpoints(&self, removed: &[WiringEndpoint]) {
         for endpoint in removed {
+            if let Some(handle) = self.endpoint_listeners.lock().unwrap().remove(&endpoint.id) {
+                handle.stop();
+            }
             self.data_plane.close_endpoint_sessions(&endpoint.id);
             let dir = self.paths.endpoint_dir(&endpoint.id);
             if let Err(error) = std::fs::remove_dir_all(&dir) {

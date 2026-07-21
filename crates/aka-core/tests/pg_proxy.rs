@@ -195,6 +195,29 @@ impl Harness {
             .expect("set wiring mode");
         assert!(existed, "the first agent is auto-wired to prod-db");
     }
+
+    /// Issue a direct endpoint for the first (auto-wired) agent on `prod-db`.
+    async fn issue_endpoint(&self) -> aka_core::broker::IssuedEndpointInfo {
+        let client = self.broker.pairing.get("claude-code").unwrap();
+        let conn = self.broker.store.connection_by_name("prod-db").unwrap();
+        self.broker
+            .ui_issue_endpoint(&client.id, &conn.id)
+            .await
+            .unwrap()
+    }
+
+    /// A `tokio-postgres` conn string reaching an endpoint's Unix socket. The
+    /// per-wiring secret is the password; libpq derives the socket path from
+    /// `host` + `port`.
+    fn endpoint_conn_str(&self, info: &aka_core::broker::IssuedEndpointInfo) -> String {
+        let dir = self.broker.paths.endpoint_dir(&info.endpoint_id);
+        format!(
+            "host={} port=5432 user=app password={} dbname=app_production \
+             application_name=agent-test sslmode=disable",
+            dir.display(),
+            info.secret
+        )
+    }
 }
 
 /* ------------------------------ wire helpers ------------------------------ */
@@ -708,6 +731,155 @@ async fn read_only_session_refuses_to_leave_read_only() {
     .await
     .expect("session should end after a refused escape");
     let _ = tokio::time::timeout(Duration::from_secs(3), conn_task).await;
+}
+
+#[tokio::test]
+async fn direct_endpoint_serves_an_unmodified_client() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let fake = fake_pg(FakeAuth::Cleartext).await;
+    add_pg_connection(&h.broker, fake.port);
+    h.pair().await;
+    let info = h.issue_endpoint().await;
+
+    // The DSN is a stable, pasteable socket path; the secret is out-of-band.
+    assert!(info.dsn.contains("host="));
+    assert!(info.dsn.contains(".aka/endpoints") || info.dsn.contains("/endpoints/"));
+    assert!(info.secret.starts_with("end_"));
+    assert!(!info.dsn.contains(&info.secret), "secret must not be in the DSN");
+
+    let (client, connection) = tokio_postgres::connect(&h.endpoint_conn_str(&info), NoTls)
+        .await
+        .unwrap();
+    let conn_task = tokio::spawn(connection);
+    let rows = client.simple_query("SELECT 1").await.unwrap();
+    assert_eq!(row_value(&rows).as_deref(), Some("1"));
+
+    // The upstream saw the CONFIGURED user and the REAL password, never the
+    // endpoint secret.
+    let startups = fake.state.startups.lock().unwrap().clone();
+    assert_eq!(startups.len(), 1);
+    assert!(startups[0]
+        .iter()
+        .any(|(k, v)| k == "user" && v == "app"));
+    assert_eq!(
+        fake.state.passwords.lock().unwrap().clone(),
+        vec![REAL_PG_PASSWORD.to_string()]
+    );
+
+    // Listed as a live session tagged as endpoint-served.
+    let sessions = h.broker.sessions();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].connection, "prod-db");
+
+    drop(client);
+    let _ = tokio::time::timeout(Duration::from_secs(3), conn_task).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !h.broker.sessions().is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("session should end after client drop");
+}
+
+#[tokio::test]
+async fn wrong_endpoint_secret_is_rejected() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let fake = fake_pg(FakeAuth::Cleartext).await;
+    add_pg_connection(&h.broker, fake.port);
+    h.pair().await;
+    let info = h.issue_endpoint().await;
+
+    let dir = h.broker.paths.endpoint_dir(&info.endpoint_id);
+    let bogus = format!(
+        "host={} port=5432 user=app password=end_bogus dbname=app_production sslmode=disable",
+        dir.display()
+    );
+    let err = match tokio_postgres::connect(&bogus, NoTls).await {
+        Ok(_) => panic!("a bogus endpoint secret must be refused"),
+        Err(e) => e,
+    };
+    assert_eq!(
+        err.as_db_error().map(|d| d.code()),
+        Some(&SqlState::INVALID_PASSWORD)
+    );
+    // The upstream was never dialed.
+    assert!(fake.state.startups.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn revoking_an_endpoint_closes_sessions_and_refuses_new_ones() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let fake = fake_pg(FakeAuth::Cleartext).await;
+    add_pg_connection(&h.broker, fake.port);
+    h.pair().await;
+    let info = h.issue_endpoint().await;
+
+    let (client, connection) = tokio_postgres::connect(&h.endpoint_conn_str(&info), NoTls)
+        .await
+        .unwrap();
+    let conn_task = tokio::spawn(connection);
+    assert!(!client.simple_query("SELECT 1").await.unwrap().is_empty());
+    assert_eq!(h.broker.sessions().len(), 1);
+
+    // Revoking the endpoint tears down its listener and closes live sessions.
+    assert!(h.broker.ui_revoke_endpoint(&info.endpoint_id).unwrap());
+    let _ = tokio::time::timeout(Duration::from_secs(3), conn_task)
+        .await
+        .expect("revoke must drop the live session");
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !h.broker.sessions().is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("session should end on revoke");
+
+    // A fresh connect no longer reaches the (removed) socket.
+    assert!(tokio_postgres::connect(&h.endpoint_conn_str(&info), NoTls)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn unwiring_tears_down_the_endpoint() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let fake = fake_pg(FakeAuth::Cleartext).await;
+    add_pg_connection(&h.broker, fake.port);
+    h.pair().await;
+    let info = h.issue_endpoint().await;
+    // It works while wired …
+    let (_client, _connection) = tokio_postgres::connect(&h.endpoint_conn_str(&info), NoTls)
+        .await
+        .unwrap();
+
+    // … and is gone the moment the wiring is removed.
+    let client = h.broker.pairing.get("claude-code").unwrap();
+    let conn = h.broker.store.connection_by_name("prod-db").unwrap();
+    h.broker.ui_set_wiring(&client.id, &conn.id, false).unwrap();
+    assert!(h.broker.endpoints().is_empty());
+    assert!(tokio_postgres::connect(&h.endpoint_conn_str(&info), NoTls)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn rebind_reestablishes_a_persisted_endpoint() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let fake = fake_pg(FakeAuth::Cleartext).await;
+    add_pg_connection(&h.broker, fake.port);
+    h.pair().await;
+    let info = h.issue_endpoint().await;
+
+    // Rebinding from the persisted registry (as a restart does) replaces the
+    // listener; the same pasted DSN keeps working with no re-issue.
+    h.broker.rebind_endpoints().await;
+    let (client, connection) = tokio_postgres::connect(&h.endpoint_conn_str(&info), NoTls)
+        .await
+        .unwrap();
+    tokio::spawn(connection);
+    let rows = client.simple_query("SELECT 1").await.unwrap();
+    assert_eq!(row_value(&rows).as_deref(), Some("1"));
 }
 
 #[tokio::test]

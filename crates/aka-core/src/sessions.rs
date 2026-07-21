@@ -246,6 +246,74 @@ impl DataPlane {
         })
     }
 
+    /// Register a live session served by a per-wiring **direct endpoint**.
+    /// Unlike the ticket path there is no redemption to reserve a slot ahead
+    /// of the upstream dial, so the global backstop is enforced here at
+    /// registration (the per-ticket cap does not apply — an endpoint is not a
+    /// ticket). The session is tagged with its `endpoint_id` so revoking the
+    /// wiring can close exactly its sessions.
+    pub fn start_endpoint_session(
+        &self,
+        agent: &str,
+        connection: &Connection,
+        endpoint_id: Uuid,
+        kind: ConnectionKind,
+    ) -> Result<SessionHandle, RedeemError> {
+        let inner = self.inner.clone();
+        let mut state = inner.state.lock().unwrap();
+        Self::sweep(&inner, &mut state);
+        if state.sessions.len() >= inner.global {
+            return Err(RedeemError::BrokerSessionLimit);
+        }
+        state.next_session += 1;
+        let id = state.next_session;
+        let info = SessionInfo {
+            id,
+            kind,
+            agent: agent.to_string(),
+            connection: connection.name.clone(),
+            detail: connection.target(),
+            opened_at: Utc::now(),
+        };
+        let close = Arc::new(Notify::new());
+        let bytes_up = Arc::new(AtomicU64::new(0));
+        let bytes_down = Arc::new(AtomicU64::new(0));
+        state.sessions.insert(
+            id,
+            SessionEntry {
+                info: info.clone(),
+                ticket: None,
+                endpoint_id: Some(endpoint_id),
+                close: close.clone(),
+            },
+        );
+        drop(state);
+        inner.audit.append(
+            AuditEntry::new(
+                AuditKind::SessionOpened,
+                format!("{} session opened: {}", kind_label(kind), info.connection),
+            )
+            .agent(info.agent.clone())
+            .connection(info.connection.clone())
+            .detail(info.detail.clone())
+            .field("kind", kind.as_str())
+            .field("target", info.detail.clone())
+            .field("session_id", id)
+            .field("via", "endpoint"),
+        );
+        inner.events.sessions_changed();
+        Ok(SessionHandle {
+            plane: inner,
+            id,
+            close_signal: close,
+            bytes_up,
+            bytes_down,
+            kind,
+            agent: agent.to_string(),
+            connection: connection.name.clone(),
+        })
+    }
+
     /// Live sessions for the UI band.
     pub fn sessions(&self) -> Vec<SessionInfo> {
         let state = self.inner.state.lock().unwrap();

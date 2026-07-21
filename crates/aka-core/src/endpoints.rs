@@ -248,6 +248,23 @@ impl EndpointRegistry {
     }
 }
 
+/// A running per-wiring endpoint listener: its accept-loop task and a
+/// shutdown signal. The broker holds one per live endpoint, keyed on the
+/// endpoint id, and stops it when the wiring goes away.
+pub struct EndpointListenerHandle {
+    pub shutdown: Arc<tokio::sync::Notify>,
+    pub task: tokio::task::JoinHandle<()>,
+}
+
+impl EndpointListenerHandle {
+    /// Stop accepting new connections and abort the accept loop. Established
+    /// sessions are closed separately via `DataPlane::close_endpoint_sessions`.
+    pub fn stop(self) {
+        self.shutdown.notify_waiters();
+        self.task.abort();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

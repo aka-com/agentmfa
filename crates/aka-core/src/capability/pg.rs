@@ -36,13 +36,15 @@ use postgres_protocol::authentication::sasl::{
     ChannelBinding, ScramSha256, SCRAM_SHA_256, SCRAM_SHA_256_PLUS,
 };
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, BufReader, ReadBuf};
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, UnixListener, UnixStream};
+use tokio::sync::Notify;
 
 use crate::broker::Broker;
+use crate::endpoints::EndpointListenerHandle;
 use crate::events::BrokerEvents;
 use crate::sessions::{RedeemError, SessionHandle};
 use crate::store::Store;
-use crate::types::{Connection, ConnectionConfig, ConnectionKind, PgSslMode};
+use crate::types::{Connection, ConnectionConfig, ConnectionKind, PgSslMode, WiringEndpoint};
 
 /* ---------------------------- wire constants ------------------------------ */
 
@@ -285,7 +287,302 @@ pub async fn start_proxy(broker: Arc<Broker>) -> io::Result<(u16, tokio::task::J
     Ok((port, task))
 }
 
+/* --------------------------- per-wiring endpoint -------------------------- */
+
+/// The synthetic port in a PG endpoint's Unix socket filename
+/// (`.s.PGSQL.<port>`, libpq's convention) and echoed in the pasteable DSN.
+/// The upstream port always comes from the connection, never from this.
+pub const PG_ENDPOINT_PORT: u16 = 5432;
+
+/// The pasteable connection string for a Postgres endpoint bound under `dir`.
+/// libpq derives the socket path from `host` + `port` as
+/// `<host>/.s.PGSQL.<port>`, so pointing `host` at the endpoint directory
+/// reaches the per-wiring listener with an unmodified client. The secret
+/// travels out-of-band as `PGPASSWORD` (never argv), exactly like the ticket.
+pub fn endpoint_dsn(dir: &std::path::Path, user: &str, dbname: &str) -> String {
+    format!(
+        "postgresql://{user}@/{dbname}?host={}&port={PG_ENDPOINT_PORT}&sslmode=disable",
+        dir.display()
+    )
+}
+
+/// Bind a per-wiring Postgres endpoint: a private Unix-domain listener at
+/// `<endpoint-dir>/.s.PGSQL.5432` that an unmodified `psql`/driver reaches
+/// with `host=<endpoint-dir>`. Attribution is the per-wiring secret presented
+/// as the password; filesystem permissions keep other users out. Returns the
+/// running listener handle for the broker to hold and later stop.
+pub async fn bind_endpoint(
+    broker: Arc<Broker>,
+    endpoint: &WiringEndpoint,
+) -> io::Result<EndpointListenerHandle> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = broker.paths.endpoint_dir(&endpoint.id);
+    crate::paths::create_private_dir(&dir)?;
+    let sock_path = dir.join(format!(".s.PGSQL.{PG_ENDPOINT_PORT}"));
+    // A leftover socket from a previous run would fail the bind.
+    if let Err(e) = std::fs::remove_file(&sock_path) {
+        if e.kind() != io::ErrorKind::NotFound {
+            return Err(e);
+        }
+    }
+    let listener = UnixListener::bind(&sock_path)?;
+    std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600))?;
+
+    let state = Arc::new(ProxyState {
+        broker,
+        cancels: Mutex::new(HashMap::new()),
+    });
+    let endpoint_id = endpoint.id;
+    let shutdown = Arc::new(Notify::new());
+    let sd = shutdown.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = sd.notified() => break,
+                accepted = listener.accept() => match accepted {
+                    Ok((stream, _)) => {
+                        let state = state.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = handle_endpoint_conn(state, stream, endpoint_id).await {
+                                tracing::debug!("pg endpoint connection ended: {e}");
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        tracing::error!("pg endpoint accept failed: {e}");
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    Ok(EndpointListenerHandle { shutdown, task })
+}
+
+/// One accepted endpoint connection: probes → startup (or cancel) → endpoint
+/// secret auth (with a live-wiring re-check) → upstream handshake → splice.
+/// Mirrors `handle_conn`, but the presented password is the per-wiring secret
+/// rather than a ticket, and authorization is re-verified here at connect time
+/// rather than at a control-plane open.
+async fn handle_endpoint_conn(
+    state: Arc<ProxyState>,
+    stream: UnixStream,
+    endpoint_id: uuid::Uuid,
+) -> io::Result<()> {
+    let mut client = BufReader::new(stream);
+
+    let params = match read_startup_phase(&mut client, &state).await? {
+        StartupPhase::Startup(params) => params,
+        StartupPhase::Cancelled => return Ok(()),
+    };
+
+    // The presented password IS the per-wiring endpoint secret.
+    client.write_all(&frame(b'R', &3i32.to_be_bytes())).await?;
+    let (tag, payload) = read_message(&mut client).await?;
+    if tag != b'p' {
+        client
+            .write_all(&error_response("FATAL", "08P01", "expected PasswordMessage"))
+            .await?;
+        return Ok(());
+    }
+    let (presented, _) = take_cstr(&payload)?;
+
+    // Attribute the secret to THIS endpoint. A secret that resolves to another
+    // endpoint (or to nothing) is refused as an invalid password.
+    let Some(endpoint) = state
+        .broker
+        .endpoints
+        .resolve_secret(&presented)
+        .filter(|e| e.id == endpoint_id)
+    else {
+        client
+            .write_all(&error_response(
+                "FATAL",
+                "28P01",
+                "AKA: invalid endpoint secret",
+            ))
+            .await?;
+        return Ok(());
+    };
+
+    // Re-check the wiring at connect time: an unwired agent must be refused
+    // even if a stale listener briefly outlived its teardown.
+    if !state
+        .broker
+        .wirings
+        .is_wired(&endpoint.client_id, &endpoint.connection_id)
+    {
+        client
+            .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
+            .await?;
+        return Ok(());
+    }
+
+    // Carry the wiring's attenuation, exactly as the ticket path does: a
+    // read-only wiring opens the upstream `default_transaction_read_only=on`
+    // and frames the frontend leg to refuse escapes.
+    let read_only = state
+        .broker
+        .wirings
+        .mode(&endpoint.client_id, &endpoint.connection_id)
+        .map(|m| m.is_read_only())
+        .unwrap_or(false);
+
+    // Resolve the connection fresh; it may have been edited since issue.
+    let Ok(connection) = state.broker.store.connection_by_id(&endpoint.connection_id) else {
+        client
+            .write_all(&error_response("FATAL", "08006", "AKA: unknown_connection"))
+            .await?;
+        return Ok(());
+    };
+    let ConnectionConfig::Pg {
+        host,
+        port,
+        sslmode,
+        trusted_ca_bundle_path,
+        ..
+    } = connection.config.clone()
+    else {
+        client
+            .write_all(&error_response(
+                "FATAL",
+                "08P01",
+                "AKA: connection is no longer Postgres",
+            ))
+            .await?;
+        return Ok(());
+    };
+
+    // Dial upstream with the stored password secret. The wiring is the
+    // authorization, so the secret read is pre-authorized (scope confirmed).
+    let upstream = match crate::authorization::scope(
+        true,
+        dial_upstream(
+            &state.broker.store,
+            &state.broker.events,
+            &connection,
+            &params,
+            read_only,
+        ),
+    )
+    .await
+    {
+        Ok(upstream) => upstream,
+        Err(detail) => {
+            client
+                .write_all(&error_response(
+                    "FATAL",
+                    "08001",
+                    &format!("AKA: upstream_connect_failed: {detail}"),
+                ))
+                .await?;
+            return Ok(());
+        }
+    };
+
+    // Reserve the live-session slot (global backstop) before committing the
+    // downstream handshake, so exhaustion is a clean pre-ReadyForQuery error.
+    let session = match state.broker.data_plane.start_endpoint_session(
+        &endpoint.agent,
+        &connection,
+        endpoint_id,
+        ConnectionKind::Pg,
+    ) {
+        Ok(session) => session,
+        Err(_) => {
+            client
+                .write_all(&error_response(
+                    "FATAL",
+                    "53300",
+                    "AKA: broker_session_limit",
+                ))
+                .await?;
+            return Ok(());
+        }
+    };
+
+    let registration = state.register_cancel(CancelTarget {
+        host,
+        port,
+        sslmode,
+        trusted_ca_bundle_path,
+        backend_pid: upstream.backend_pid,
+        backend_key: upstream.backend_key,
+    });
+    let (synth_pid, synth_key) = registration.key;
+    let mut completion = frame(b'R', &0i32.to_be_bytes());
+    completion.extend_from_slice(&upstream.forward);
+    let mut keydata = Vec::with_capacity(8);
+    put_i32(&mut keydata, synth_pid);
+    put_i32(&mut keydata, synth_key);
+    completion.extend_from_slice(&frame(b'K', &keydata));
+    completion.extend_from_slice(&frame(b'Z', &[upstream.ready_status]));
+    if client.write_all(&completion).await.is_err() {
+        // The client vanished after auth: retire the session we just opened.
+        session.finish("client_closed");
+        return Ok(());
+    }
+
+    let max_ttl = state.broker.config.session_max_ttl;
+    let idle = state.broker.config.session_idle_timeout;
+    splice(client, upstream.stream, session, max_ttl, idle, read_only).await;
+    drop(registration);
+    Ok(())
+}
+
 /* ------------------------- downstream state machine ----------------------- */
+
+/// Outcome of the Postgres pre-startup phase, shared by the ticket proxy and
+/// the per-wiring endpoint listeners: either a real `StartupMessage` (with its
+/// parameters) or a `CancelRequest` connection that carried no startup and was
+/// already relayed to the upstream.
+enum StartupPhase {
+    Startup(Vec<(String, String)>),
+    Cancelled,
+}
+
+/// Drive the pre-startup phase on any downstream transport: a client may probe
+/// `SSLRequest`/`GSSENCRequest` (each declined with a single `N`, the loopback
+/// leg is plaintext by contract) before the `StartupMessage`, and a
+/// `CancelRequest` connection carries no `StartupMessage` at all.
+async fn read_startup_phase<S>(
+    client: &mut BufReader<S>,
+    state: &Arc<ProxyState>,
+) -> io::Result<StartupPhase>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut probes = 0;
+    loop {
+        let payload = read_startup_packet(client).await?;
+        match be_i32(&payload[..4]) {
+            SSL_REQUEST_CODE | GSSENC_REQUEST_CODE => {
+                probes += 1;
+                if probes > 4 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "too many pre-startup probes",
+                    ));
+                }
+                client.write_all(b"N").await?;
+            }
+            CANCEL_REQUEST_CODE => {
+                if payload.len() >= 12 {
+                    handle_cancel(state, be_i32(&payload[4..8]), be_i32(&payload[8..12])).await;
+                }
+                return Ok(StartupPhase::Cancelled);
+            }
+            PROTOCOL_V3 => return Ok(StartupPhase::Startup(parse_startup_params(&payload[4..])?)),
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("unsupported protocol code {other}"),
+                ));
+            }
+        }
+    }
+}
 
 /// One accepted loopback connection: probes → startup (or cancel) → ticket
 /// auth → upstream handshake → completion → splice.
@@ -298,37 +595,9 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
     // (the loopback leg is plaintext by contract, the DSN pins
     // `sslmode=disable`). A CancelRequest connection carries no
     // StartupMessage at all.
-    let params = {
-        let mut probes = 0;
-        loop {
-            let payload = read_startup_packet(&mut client).await?;
-            match be_i32(&payload[..4]) {
-                SSL_REQUEST_CODE | GSSENC_REQUEST_CODE => {
-                    probes += 1;
-                    if probes > 4 {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "too many pre-startup probes",
-                        ));
-                    }
-                    client.write_all(b"N").await?;
-                }
-                CANCEL_REQUEST_CODE => {
-                    if payload.len() >= 12 {
-                        handle_cancel(&state, be_i32(&payload[4..8]), be_i32(&payload[8..12]))
-                            .await;
-                    }
-                    return Ok(());
-                }
-                PROTOCOL_V3 => break parse_startup_params(&payload[4..])?,
-                other => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("unsupported protocol code {other}"),
-                    ));
-                }
-            }
-        }
+    let params = match read_startup_phase(&mut client, &state).await? {
+        StartupPhase::Startup(params) => params,
+        StartupPhase::Cancelled => return Ok(()),
     };
 
     // The presented password IS the ticket.
@@ -1351,14 +1620,16 @@ impl FrontendGuard {
 /// in the same segment as the startup bytes, and a naive handoff of the bare
 /// sockets would swallow it. A `read_only` session additionally frames the
 /// frontend direction and refuses statements that try to leave read-only.
-async fn splice(
-    client: BufReader<TcpStream>,
+async fn splice<C>(
+    client: BufReader<C>,
     upstream: BufReader<PgStream>,
     session: SessionHandle,
     max_ttl: Duration,
     idle: Duration,
     read_only: bool,
-) {
+) where
+    C: AsyncRead + AsyncWrite + Unpin,
+{
     let client_residual = client.buffer().to_vec();
     let client = client.into_inner();
     let upstream_residual = upstream.buffer().to_vec();

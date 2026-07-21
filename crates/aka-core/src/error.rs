@@ -75,6 +75,12 @@ pub enum CoreError {
     #[error("too many direct endpoints ({0}); revoke one before issuing another")]
     EndpointLimit(usize),
 
+    #[error("wire the agent to this tool before issuing a direct endpoint")]
+    EndpointRequiresWiring,
+
+    #[error("direct endpoints are not available for {0} tools")]
+    EndpointUnsupportedKind(&'static str),
+
     #[error("Secret read was not authenticated")]
     SecretReadNotAuthenticated,
 

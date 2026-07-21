@@ -455,6 +455,9 @@ pub async fn serve(broker: Arc<Broker>) -> crate::Result<DaemonHandle> {
         }
     };
     let _ = broker.pg_proxy_port.set(pg_proxy_port);
+    // Re-establish per-wiring direct-endpoint listeners persisted from a prior
+    // run, so a stable DSN survives a broker restart with no agent lifecycle.
+    broker.rebind_endpoints().await;
 
     let app = router(broker);
     let task = tokio::spawn(async move {
