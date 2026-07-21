@@ -40,6 +40,7 @@ import type {
   McpToolInfo,
   WiringSummary,
   WiringMode,
+  IssuedEndpoint,
   SecretSummary,
   SessionSummary,
   Settings,
@@ -57,8 +58,10 @@ type Tab = typeof TABS[number];
 
 interface SheetState {
   kind: 'add-secret' | 'edit-secret' | 'add-conn' | 'edit-conn' | 'settings' | 'clear-activity'
-    | 'elicitation' | 'mcp-auth' | 'wiring-tools';
+    | 'elicitation' | 'mcp-auth' | 'wiring-tools' | 'endpoint-issued';
   id?: string;
+  /** The one-time issue result, for the 'endpoint-issued' sheet. */
+  endpoint?: IssuedEndpoint;
 }
 
 interface ConfirmState {
@@ -479,12 +482,20 @@ const agentWiringFor = (a: AgentSummary, c: ConnectionSummary): WiringSummary | 
 // upstream read-only; SSH cannot yet (the broker only signs the login), so its
 // read-only option is shown disabled with a note rather than hidden.
 const ATTENUABLE: Record<ConnectionType, boolean> = { pg: true, ssh: true, api: false, ws: false };
+// Kinds that can be issued a stable, per-wiring direct endpoint (a pasteable
+// DSN/socket/URL an unmodified tool uses). WebSocket lands later.
+const ENDPOINTABLE: Record<ConnectionType, boolean> = { pg: true, ssh: true, api: true, ws: false };
 
-function wiringModeMenuHTML(a: AgentSummary, c: ConnectionSummary, mode: WiringMode): string {
+function wiringMenuHTML(
+  a: AgentSummary,
+  c: ConnectionSummary,
+  mode: WiringMode,
+  wiring: WiringSummary | undefined,
+): string {
   const key = `${a.id}:${c.id}`;
   const open = state.wiringMenuOpen === key;
   const sshOnly = c.type === 'ssh';
-  const item = (m: WiringMode, label: string, sub: string): string => {
+  const modeItem = (m: WiringMode, label: string, sub: string): string => {
     const on = mode === m;
     // SSH read-only isn't enforceable yet: show it, but inert.
     if (m === 'read-only' && sshOnly) {
@@ -497,14 +508,26 @@ function wiringModeMenuHTML(a: AgentSummary, c: ConnectionSummary, mode: WiringM
       <span class="menu-check">${on ? ICONS.check : ''}</span>
       <span class="menu-lbl">${label}<span class="menu-sub">${sub}</span></span></button>`;
   };
+  const accessSection = ATTENUABLE[c.type]
+    ? `<div class="wiring-menu-head">Access</div>
+       ${modeItem('read-write', 'Read-write', 'Full access')}
+       ${modeItem('read-only', 'Read-only', 'Writes are refused by the database')}`
+    : '';
+  const endpoint = wiring?.endpoint ?? null;
+  const endpointSection = ENDPOINTABLE[c.type]
+    ? `<div class="wiring-menu-head">Direct endpoint</div>
+       <button class="menu-item" role="menuitem" data-act="issue-endpoint" data-id="${a.id}" data-conn="${c.id}">
+         <span class="menu-lbl">${endpoint ? 'Reissue (new secret)' : 'Issue direct endpoint'}<span class="menu-sub">${
+           endpoint ? 'Rotates the secret; the old one stops working' : 'A pasteable address for an unmodified tool'}</span></span></button>
+       ${endpoint ? `<button class="menu-item danger" role="menuitem" data-act="revoke-endpoint" data-endpoint="${endpoint.endpoint_id}">
+         <span class="menu-lbl">Revoke endpoint<span class="menu-sub">Stops the listener and open sessions</span></span></button>` : ''}`
+    : '';
   return `<div class="wiring-menu-wrap">
-    <button class="icon-btn wiring-menu-btn ${open ? 'on' : ''}" title="Access mode"
-      aria-label="Access mode for ${escAttr(a.name)} on ${escAttr(c.name)}" aria-haspopup="menu"
+    <button class="icon-btn wiring-menu-btn ${open ? 'on' : ''}" title="Access &amp; endpoint"
+      aria-label="Access and endpoint for ${escAttr(a.name)} on ${escAttr(c.name)}" aria-haspopup="menu"
       aria-expanded="${open}" data-act="toggle-wiring-menu" data-id="${a.id}" data-conn="${c.id}">${ICONS.ellipsisVertical}</button>
-    ${open ? `<div class="wiring-menu" role="menu" aria-label="Access mode for ${escAttr(c.name)}">
-      <div class="wiring-menu-head">Access</div>
-      ${item('read-write', 'Read-write', 'Full access')}
-      ${item('read-only', 'Read-only', 'Writes are refused by the database')}
+    ${open ? `<div class="wiring-menu" role="menu" aria-label="Access and endpoint for ${escAttr(c.name)}">
+      ${accessSection}${endpointSection}
     </div>` : ''}
   </div>`;
 }
@@ -531,8 +554,15 @@ function agentToolRowHTML(a: AgentSummary, c: ConnectionSummary): string {
             ? `${wiring.allowed_tools.length} tool${wiring.allowed_tools.length === 1 ? '' : 's'}`
             : 'All tools'}</button>`
     : '';
-  // A wired Postgres/SSH row gets the ⋮ access-mode menu, left of Unwire.
-  const modeMenu = wired && ATTENUABLE[c.type] ? wiringModeMenuHTML(a, c, mode) : '';
+  // A wired Postgres/SSH/HTTP row gets the ⋮ menu (access mode + direct
+  // endpoint), left of Unwire.
+  const wiringMenu = wired && (ATTENUABLE[c.type] || ENDPOINTABLE[c.type])
+    ? wiringMenuHTML(a, c, mode, wiring)
+    : '';
+  // A small chip when a direct endpoint is issued for this wiring.
+  const endpointChip = wiring?.endpoint
+    ? '<span class="acc-pill ep" title="A direct endpoint is issued for this wiring">Endpoint</span>'
+    : '';
   const action = wired
     ? `<button class="btn ghost sm" aria-label="Unwire ${escAttr(a.name)} from ${escAttr(c.name)}" data-act="unwire" data-id="${a.id}" data-conn="${c.id}">Unwire</button>`
     : `<button class="btn ghost sm" aria-label="Wire ${escAttr(a.name)} to ${escAttr(c.name)}" data-act="wire" data-id="${a.id}" data-conn="${c.id}">Wire up</button>`;
@@ -540,7 +570,7 @@ function agentToolRowHTML(a: AgentSummary, c: ConnectionSummary): string {
     <span class="badge ${t.cls}">${t.label}</span>
     <div class="acc-svc"><div class="acc-name">${esc(c.name)}${live ? ' <span class="cc-live">● live</span>' : ''}</div>
       <div class="acc-target" title="${escAttr(c.target)}">${esc(c.target)}</div></div>
-    ${pill}${toolsChip}${modeMenu}${action}</div>`;
+    ${pill}${endpointChip}${toolsChip}${wiringMenu}${action}</div>`;
 }
 
 function agentBlockHTML(a: AgentSummary): string {
@@ -1020,6 +1050,31 @@ function renderDropdown() {
 }
 
 /* --------------------------------- sheets -------------------------------- */
+// Shown once, right after issuing a direct endpoint: the pasteable address,
+// a ready-to-run example, and the secret (never recoverable later). Copy
+// buttons write to the clipboard; the text is also selectable as a fallback.
+function endpointIssuedSheet(): string {
+  const info = state.sheet?.endpoint;
+  if (!info) return '';
+  const addressLabel = info.type === 'ssh' ? 'Agent socket' : info.type === 'pg' ? 'DSN' : 'Base URL';
+  const field = (label: string, value: string, fieldKey: string, note = ''): string =>
+    `<div class="ep-field"><div class="ep-label">${label}${note ? ` <span class="ep-note">${note}</span>` : ''}</div>
+      <div class="ep-row"><code class="ep-code">${esc(value)}</code>
+      <button class="btn ghost sm" data-act="copy-endpoint" data-field="${fieldKey}" aria-label="Copy ${label}">Copy</button></div></div>`;
+  const secretField = info.secret
+    ? field('Secret', info.secret, 'secret', 'shown once')
+    : '<div class="ep-note">SSH endpoints present no secret — the socket path is the whole capability.</div>';
+  return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
+    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="ep-title">
+      <h3 id="ep-title">Direct endpoint issued</h3>
+      <p class="sheet-sub">Paste this into your tool's config.${info.secret ? ' The secret is shown only now — copy it somewhere safe.' : ''}</p>
+      ${field(addressLabel, info.dsn, 'dsn')}
+      ${secretField}
+      ${field('Example', info.example, 'example')}
+      <div class="sheet-actions"><button class="btn" data-act="sheet-cancel">Done</button></div>
+    </div>`;
+}
+
 function sheetsHTML() {
   if (!state.sheet) return '';
   switch (state.sheet.kind) {
@@ -1032,6 +1087,7 @@ function sheetsHTML() {
     case 'elicitation': return elicitationSheet();
     case 'mcp-auth': return mcpAuthSheet();
     case 'wiring-tools': return wiringToolsSheet();
+    case 'endpoint-issued': return endpointIssuedSheet();
     default: return '';
   }
 }
@@ -2269,6 +2325,45 @@ document.addEventListener('click', async (e) => {
         await refresh('all');
       } else {
         render();
+      }
+      break;
+    }
+    case 'issue-endpoint': {
+      const connectionId = btn.dataset.conn || '';
+      state.wiringMenuOpen = null;
+      // Not via run(): we need the one-time result to show its secret.
+      try {
+        const info = await invoke('issue_endpoint', { agentId: id, connectionId });
+        state.sheet = { kind: 'endpoint-issued', endpoint: info };
+        await refresh('all');
+      } catch (error) {
+        toast('⚠ ' + errorMessage(error));
+        render();
+      }
+      break;
+    }
+    case 'revoke-endpoint': {
+      const endpointId = btn.dataset.endpoint || '';
+      state.wiringMenuOpen = null;
+      if (await run(() => invoke('revoke_endpoint', { endpointId }))) {
+        toast('Endpoint revoked');
+        await refresh('all');
+      } else {
+        render();
+      }
+      break;
+    }
+    case 'copy-endpoint': {
+      const info = state.sheet?.endpoint;
+      const key = btn.dataset.field;
+      if (info) {
+        const text = key === 'secret' ? info.secret : key === 'dsn' ? info.dsn : info.example;
+        try {
+          await navigator.clipboard.writeText(text);
+          toast('📋 Copied');
+        } catch {
+          toast('⚠ Copy failed — select the text and copy it manually');
+        }
       }
       break;
     }

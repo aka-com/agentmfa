@@ -138,6 +138,7 @@ interface MockWiring {
   connection_id: string;
   allowed_tools?: string[];
   mode: WiringMode;
+  endpoint?: { endpoint_id: string; type: ConnectionType };
 }
 
 type MockAgent = Omit<AgentSummary, 'wiring_count'>;
@@ -177,6 +178,7 @@ interface MockArgs {
   port: number;
   approved: boolean;
   values?: Record<string, string>;
+  endpointId?: string;
 }
 
 const db: MockDatabase = {
@@ -315,7 +317,7 @@ function connDto(c: MockConnection): ConnectionSummary {
     oauth: c.oauth ?? false,
     wired_agents: db.wirings
       .filter((w) => w.connection_id === c.id)
-      .map((w) => ({ agent_id: w.client_id, agent: w.agent, allowed_tools: w.allowed_tools ?? null, mode: w.mode })),
+      .map((w) => ({ agent_id: w.client_id, agent: w.agent, allowed_tools: w.allowed_tools ?? null, mode: w.mode, endpoint: w.endpoint ?? null })),
     host: c.host || null, scheme: c.scheme || null, port: c.port || null, template: c.template || null,
     mcp_path: c.mcp_path || null, account: c.account || null, oauth_spec: c.oauth_spec || null,
     dbname: c.dbname || null, user: c.user || null, host_key_fingerprint: c.host_key_fingerprint || null,
@@ -734,6 +736,46 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         audit('wired', `${wiring.agent} → ${connection?.name ?? 'tool'} set to ${args.mode}`);
         emit('aka://wirings-changed', {});
       }
+      return true;
+    }
+    case 'issue_endpoint': {
+      const wiring = db.wirings.find((w) =>
+        w.client_id === args.agentId && w.connection_id === args.connectionId);
+      if (!wiring) throw new Error('wire the agent to this tool before issuing a direct endpoint');
+      const connection = db.connections.find((c) => c.id === args.connectionId);
+      if (!connection) throw new Error('no such tool');
+      const kind = connection.type;
+      if (kind === 'ws') throw new Error(`direct endpoints are not available for ${kind} tools`);
+      const endpointId = wiring.endpoint?.endpoint_id ?? `mock-endpoint-${connection.id}-${wiring.client_id}`;
+      const secret = 'end_' + 'demo0'.repeat(12) + '0000';
+      const dir = `~/.aka/endpoints/${endpointId}`;
+      let dsn: string;
+      let example: string;
+      let shownSecret = secret;
+      if (kind === 'pg') {
+        dsn = `postgresql://${connection.user ?? 'app'}@/${connection.dbname ?? 'app'}?host=${dir}&port=5432&sslmode=disable`;
+        example = `PGPASSWORD=${secret} psql "${dsn}"`;
+      } else if (kind === 'ssh') {
+        dsn = `${dir}/agent.sock`;
+        const dest = connection.destination ?? `${connection.user ?? 'deploy'}@${connection.host ?? 'host'}`;
+        example = `SSH_AUTH_SOCK="${dsn}" ssh ${dest}`;
+        shownSecret = ''; // ssh-agent has no presented secret
+      } else {
+        dsn = 'http://127.0.0.1:52000';
+        example = `curl -H "Authorization: Bearer ${secret}" ${dsn}/<path>`;
+      }
+      wiring.endpoint = { endpoint_id: endpointId, type: kind };
+      audit('wired', `Direct endpoint issued: ${wiring.agent} → ${connection.name}`);
+      emit('aka://wirings-changed', {});
+      return { endpoint_id: endpointId, type: kind, dsn, secret: shownSecret, example };
+    }
+    case 'revoke_endpoint': {
+      const wiring = db.wirings.find((w) => w.endpoint?.endpoint_id === args.endpointId);
+      if (!wiring) return false;
+      const connection = db.connections.find((c) => c.id === wiring.connection_id);
+      delete wiring.endpoint;
+      audit('unwired', `Direct endpoint revoked: ${wiring.agent}${connection ? ` → ${connection.name}` : ''}`);
+      emit('aka://wirings-changed', {});
       return true;
     }
     case 'confirm_agent_disconnect':

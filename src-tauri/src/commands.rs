@@ -990,6 +990,35 @@ pub fn set_wiring_mode(
         .map_err(|e| e.to_string())
 }
 
+/// Issue (or rotate) a direct endpoint for a wiring. The broker gates this
+/// behind the native confirmation; the returned secret is shown to the user
+/// exactly once and never persisted in a recoverable form.
+#[tauri::command]
+pub async fn issue_endpoint(
+    state: State<'_, AppState>,
+    agent_id: String,
+    connection_id: String,
+) -> CmdResult<IssuedEndpointDto> {
+    let agent_id = parse_id(&agent_id)?;
+    let connection_id = parse_id(&connection_id)?;
+    state
+        .broker
+        .ui_issue_endpoint(&agent_id, &connection_id)
+        .await
+        .map(IssuedEndpointDto::from)
+        .map_err(|e| e.to_string())
+}
+
+/// Revoke a direct endpoint: stop its listener and close its live sessions.
+#[tauri::command]
+pub fn revoke_endpoint(state: State<AppState>, endpoint_id: String) -> CmdResult<bool> {
+    let endpoint_id = parse_id(&endpoint_id)?;
+    state
+        .broker
+        .ui_revoke_endpoint(&endpoint_id)
+        .map_err(|e| e.to_string())
+}
+
 /* ----------------------------- paired agents ----------------------------- */
 
 #[tauri::command]
@@ -1089,6 +1118,8 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         set_wiring_tools,
         list_mcp_tools,
         set_wiring_mode,
+        issue_endpoint,
+        revoke_endpoint,
         confirm_agent_disconnect,
         revoke_agent,
         close_session,

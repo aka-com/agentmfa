@@ -20,6 +20,25 @@ export interface WiringSummary {
   allowed_tools?: string[] | null;
   /** Attenuation; only Postgres enforces `read-only` today. */
   mode: WiringMode;
+  /**
+   * The direct endpoint issued for this wiring, if any. Its presence flips
+   * the row's control from "Issue" to "Copy / Revoke". Never carries the
+   * secret — that leaves the broker once, at issue.
+   */
+  endpoint?: { endpoint_id: string; type: ConnectionType } | null;
+}
+
+/**
+ * The one-time result of issuing a direct endpoint: the pasteable address, a
+ * ready-to-run example, and the secret shown exactly once (empty for SSH,
+ * whose socket path is the whole capability).
+ */
+export interface IssuedEndpoint {
+  endpoint_id: string;
+  type: ConnectionType;
+  dsn: string;
+  secret: string;
+  example: string;
 }
 
 export interface ConnectionSummary {
@@ -312,6 +331,8 @@ export interface CommandMap {
     connectionId: string;
     mode: WiringMode;
   }, boolean>;
+  issue_endpoint: CommandSpec<{ agentId: string; connectionId: string }, IssuedEndpoint>;
+  revoke_endpoint: CommandSpec<{ endpointId: string }, boolean>;
   confirm_agent_disconnect: CommandSpec<undefined, boolean>;
   revoke_agent: CommandSpec<{ id: string }, boolean>;
   close_session: CommandSpec<{ id: number }, boolean>;

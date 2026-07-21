@@ -55,6 +55,44 @@ pub struct WiringChip {
     pub allowed_tools: Option<Vec<String>>,
     /// Attenuation of this wiring: `read-write` (default) or `read-only`.
     pub mode: String,
+    /// The direct endpoint issued for this wiring, if any. Its presence flips
+    /// the row's control from "Issue" to "Copy / Revoke"; the secret is never
+    /// carried here (it left the broker once, at issue).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<EndpointChip>,
+}
+
+/// The direct endpoint on a wiring row: enough to address and revoke it, never
+/// the secret.
+#[derive(Serialize)]
+pub struct EndpointChip {
+    pub endpoint_id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+}
+
+/// The one-time result of issuing a direct endpoint: the pasteable address, a
+/// ready-to-run example, and the secret shown exactly once.
+#[derive(Serialize)]
+pub struct IssuedEndpointDto {
+    pub endpoint_id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub dsn: String,
+    pub secret: String,
+    pub example: String,
+}
+
+impl From<aka_core::broker::IssuedEndpointInfo> for IssuedEndpointDto {
+    fn from(info: aka_core::broker::IssuedEndpointInfo) -> Self {
+        Self {
+            endpoint_id: info.endpoint_id.to_string(),
+            kind: info.kind.as_str().to_string(),
+            dsn: info.dsn,
+            secret: info.secret,
+            example: info.example,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -114,6 +152,13 @@ impl ConnectionDto {
                 agent: w.agent.clone(),
                 allowed_tools: w.allowed_tools.clone(),
                 mode: w.mode.as_str().to_string(),
+                endpoint: broker
+                    .endpoints
+                    .get_for_wiring(&w.client_id, &conn.id)
+                    .map(|e| EndpointChip {
+                        endpoint_id: e.id.to_string(),
+                        kind: e.kind.as_str().to_string(),
+                    }),
             })
             .collect();
         let health = broker.health.get(&conn.id);

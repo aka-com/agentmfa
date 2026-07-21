@@ -500,7 +500,22 @@
   .acc-pill.rule{ background: var(--amber-wash); border: 1px solid var(--amber-border); color: var(--amber-ink); }
   /* Read-only attenuation: a restricted-but-fine state, dressed in amber. */
   .acc-pill.ro{ background: var(--amber-wash); border: 1px solid var(--amber-border); color: var(--amber-ink); }
+  /* A direct endpoint has been issued for this wiring. */
+  .acc-pill.ep{ background: var(--ok-wash); border: 1px solid var(--ok-border); color: var(--ok-ink); }
   .acc-row .btn{ flex: 0 0 auto; }
+
+  /* Issued-endpoint sheet: pasteable address / secret / example, each with a
+     copy button; the code wraps so long DSNs stay readable. */
+  .ep-field{ margin: 12px 0; }
+  .ep-label{ font-size: 12px; font-weight: 600; color: var(--muted-ink); margin-bottom: 4px; }
+  .ep-note{ font-weight: 500; color: var(--amber-ink); }
+  .ep-row{ display: flex; align-items: flex-start; gap: 8px; }
+  .ep-code{
+    flex: 1 1 auto; min-width: 0; padding: 8px 10px; border-radius: 8px;
+    background: var(--chip-bg); border: 1px solid var(--hair);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+    overflow-wrap: anywhere; white-space: pre-wrap; user-select: all;
+  }
   /* ⋮ access-mode menu on a wired Postgres/SSH row, left of Unwire. */
   .wiring-menu-wrap{ position: relative; flex: 0 0 auto; }
   .wiring-menu-btn{ opacity: .55; transition: opacity .12s ease; }
