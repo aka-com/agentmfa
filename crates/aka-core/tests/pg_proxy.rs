@@ -97,6 +97,24 @@ fn add_pg_connection(broker: &Broker, upstream_port: u16) {
         .unwrap();
 }
 
+fn add_passwordless_pg_connection(broker: &Broker, upstream_port: u16) {
+    broker
+        .store
+        .add_connection(ConnectionSpec {
+            name: "prod-db".into(),
+            config: ConnectionConfig::Pg {
+                host: "127.0.0.1".into(),
+                port: upstream_port,
+                dbname: "app_production".into(),
+                user: "app".into(),
+                sslmode: PgSslMode::Disable,
+                trusted_ca_bundle_path: None,
+            },
+            secrets: vec![],
+        })
+        .unwrap();
+}
+
 async fn uds_request(
     socket: &std::path::Path,
     method: &str,
@@ -332,6 +350,7 @@ fn select_one() -> Vec<u8> {
 
 #[derive(Clone, Copy, PartialEq)]
 enum FakeAuth {
+    Trust,
     Cleartext,
     Scram,
 }
@@ -391,6 +410,7 @@ async fn fake_conn(mut s: TcpStream, auth: FakeAuth, st: FakeState) -> std::io::
     st.startups.lock().unwrap().push(params);
 
     match auth {
+        FakeAuth::Trust => {}
         FakeAuth::Cleartext => {
             s.write_all(&frame(b'R', &3i32.to_be_bytes())).await?;
             let (tag, payload) = read_msg(&mut s).await?;
@@ -589,6 +609,27 @@ fn row_value(messages: &[SimpleQueryMessage]) -> Option<String> {
         SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
         _ => None,
     })
+}
+
+#[tokio::test]
+async fn passwordless_connection_uses_postgres_trust_auth() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let fake = fake_pg(FakeAuth::Trust).await;
+    add_passwordless_pg_connection(&h.broker, fake.port);
+    let token = h.pair().await;
+    let (_, ticket) = h.open_pg(&token).await;
+
+    let (client, connection) = tokio_postgres::connect(&h.pg_conn_str(&ticket), NoTls)
+        .await
+        .unwrap();
+    let conn_task = tokio::spawn(connection);
+    let rows = client.simple_query("SELECT 1").await.unwrap();
+    assert_eq!(row_value(&rows).as_deref(), Some("1"));
+    assert!(fake.state.passwords.lock().unwrap().is_empty());
+    assert_eq!(h.secret_read_confirmations.load(Ordering::SeqCst), 0);
+
+    drop(client);
+    let _ = tokio::time::timeout(Duration::from_secs(3), conn_task).await;
 }
 
 #[tokio::test]

@@ -122,7 +122,7 @@ test('every preset is a valid, addable API prefill', () => {
       () => authTemplate('api', preset.authMode, 'A_TOKEN', preset.authDetail ?? ''),
       entry.id,
     );
-    assert.ok(preset.name, entry.id);
+    assert.equal(preset.name, entry.name, entry.id);
   }
 });
 

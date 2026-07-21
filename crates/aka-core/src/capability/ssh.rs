@@ -4,8 +4,8 @@
 //! therefore `git`, `scp`, `rsync`, `ssh -L`, …) authenticates by talking
 //! the **ssh-agent protocol** over the socket named by `SSH_AUTH_SOCK`. So
 //! the broker acts as a **scoped signing oracle**: on an approved open it
-//! reads the connection's private key from the vault, binds a fresh
-//! agent socket, and hands the agent back its path. The agent points
+//! reads the connection's private key from the vault when one is configured,
+//! binds a fresh agent socket, and hands the agent back its path. The agent points
 //! `SSH_AUTH_SOCK` at it and runs any unmodified SSH client — the key never
 //! leaves the broker.
 //!
@@ -17,7 +17,8 @@
 //! it, a strictly tighter boundary than the loopback-TCP data planes.
 //!
 //! What the oracle will and won't do:
-//! - **REQUEST_IDENTITIES** returns exactly the one pinned public key.
+//! - **REQUEST_IDENTITIES** returns the pinned public key, or an empty list
+//!   for a connection configured without a brokered secret.
 //! - **session-bind@openssh.com** must prove possession of the configured
 //!   host key for this SSH transport.
 //! - **SIGN_REQUEST** is honored only for host-bound public-key userauth that
@@ -205,6 +206,14 @@ fn parse_supported_private_key(pem: &[u8]) -> Result<PrivateKey, String> {
 }
 
 impl SshSigner {
+    async fn load_optional(store: &Store, connection: &Connection) -> Result<Option<Self>, String> {
+        if connection.secrets.is_empty() {
+            Ok(None)
+        } else {
+            Self::load(store, connection).await.map(Some)
+        }
+    }
+
     /// Read and parse the connection's bound private key. Fails the open (not
     /// each later signature) on a missing, encrypted, or unsupported key.
     pub async fn load(store: &Store, connection: &Connection) -> Result<Self, String> {
@@ -417,23 +426,24 @@ struct AgentState {
     connection_id: Uuid,
     connection_name: String,
     comment: String,
-    signer: Arc<SshSigner>,
+    signer: Option<Arc<SshSigner>>,
 }
 
-/// UI-initiated reachability test: load the stored key (validating that it
-/// parses) and read the server's version banner from the pinned host:port.
+/// UI-initiated reachability test: load a stored key when configured
+/// (validating that it parses) and read the server's version banner.
 /// No key exchange is performed, so login and the host key stay unverified.
 pub async fn test_reachability(store: &Store, connection: &Connection) -> Result<String, String> {
     let ConnectionConfig::Ssh { host, port, .. } = &connection.config else {
         return Err("not an ssh connection".into());
     };
-    SshSigner::load(store, connection).await?;
+    let has_key = SshSigner::load_optional(store, connection).await?.is_some();
     let stream = tokio::net::TcpStream::connect((host.as_str(), *port))
         .await
         .map_err(|e| format!("could not reach {host}:{port}: {e}"))?;
     let banner = read_version_banner(stream).await?;
+    let key_detail = if has_key { "Key loaded; " } else { "" };
     Ok(format!(
-        "Key loaded; {host}:{port} answered with {banner}. Login and host key are not verified by this test."
+        "{key_detail}{host}:{port} answered with {banner}. Login and host key are not verified by this test."
     ))
 }
 
@@ -498,7 +508,9 @@ pub async fn open_agent(
                 .map_err(|e| format!("SSH host key fingerprint is invalid: {e}"))?,
         )
     };
-    let signer = Arc::new(SshSigner::load(&broker.store, &connection).await?);
+    let signer = SshSigner::load_optional(&broker.store, &connection)
+        .await?
+        .map(Arc::new);
 
     let ticket = broker.data_plane.issue(
         &agent_name,
@@ -658,11 +670,10 @@ pub async fn bind_endpoint(
     };
     // Parse the key up front so a broken key fails issuance, not every later
     // signature.
-    let signer = Arc::new(
-        SshSigner::load(&broker.store, &connection)
-            .await
-            .map_err(std::io::Error::other)?,
-    );
+    let signer = SshSigner::load_optional(&broker.store, &connection)
+        .await
+        .map_err(std::io::Error::other)?
+        .map(Arc::new);
 
     let dir = broker.paths.endpoint_dir(&endpoint.id);
     crate::paths::create_private_dir(&dir)?;
@@ -812,10 +823,14 @@ async fn handle_request(
     payload: &[u8],
 ) -> Vec<u8> {
     match kind {
-        SSH_AGENTC_REQUEST_IDENTITIES => frame(
-            SSH_AGENT_IDENTITIES_ANSWER,
-            &state.signer.identities_answer(&state.comment),
-        ),
+        SSH_AGENTC_REQUEST_IDENTITIES => {
+            let body = state
+                .signer
+                .as_ref()
+                .map(|signer| signer.identities_answer(&state.comment))
+                .unwrap_or_else(|| 0u32.to_be_bytes().to_vec());
+            frame(SSH_AGENT_IDENTITIES_ANSWER, &body)
+        }
         SSH_AGENTC_EXTENSION => {
             if binding.is_some() {
                 return refuse(state, "agent connection is already session-bound");
@@ -960,6 +975,9 @@ async fn sign_response(
     binding: Option<&SessionBinding>,
     payload: &[u8],
 ) -> Vec<u8> {
+    let Some(signer) = state.signer.as_ref() else {
+        return refuse(state, "connection has no SSH private key");
+    };
     let Some(binding) = binding else {
         return refuse(state, "SSH client did not bind the configured host key");
     };
@@ -970,10 +988,10 @@ async fn sign_response(
     if !r.is_empty() {
         return refuse(state, "malformed sign request");
     }
-    if key_blob != state.signer.public_blob {
+    if key_blob != signer.public_blob {
         return refuse(state, "sign request names a different key");
     }
-    let Some(auth) = hostbound_userauth(data, &state.signer.public_blob) else {
+    let Some(auth) = hostbound_userauth(data, &signer.public_blob) else {
         return refuse(
             state,
             "data is not host-bound publickey userauth for the pinned key",
@@ -1005,7 +1023,7 @@ async fn sign_response(
         .map(|fingerprint| fingerprint.to_string())
         .unwrap_or_else(|| "(unpinned)".into());
 
-    match sign_on_blocking_thread(state.signer.clone(), data, flags).await {
+    match sign_on_blocking_thread(signer.clone(), data, flags).await {
         Ok(sig_blob) => {
             state.broker.audit.append(
                 AuditEntry::new(

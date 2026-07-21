@@ -19,7 +19,7 @@ import {
 import type { CatalogEntry } from '/src/catalog';
 import { ICONS, TYPES, esc, escAttr, toast, relTime, absTime } from '/src/util';
 import {
-  apiOriginFromParts, authTemplate, parseApiOrigin, parseConnectionImport,
+  apiOriginFromParts, authTemplate, defaultConnectionName, parseApiOrigin, parseConnectionImport,
   parseMcpServerUrl,
   quickSetupPlaceholder, shouldResolveSshImport, sshImportFromPreview, suggestedSecretName,
 } from '/src/connection-input';
@@ -69,6 +69,8 @@ interface ConfirmState {
 
 interface ConnectionDraft {
   name?: string;
+  /** The form may keep deriving the name until the user edits it directly. */
+  nameIsAutomatic?: boolean;
   value?: string;
   importWarnings?: string[];
   origin?: string | null;
@@ -89,7 +91,7 @@ interface ConnectionDraft {
   url?: string | null;
   template?: string | null;
   secretId?: string | null;
-  secretSource?: string;
+  secretSource?: 'existing' | 'new' | 'none';
   newSecretName?: string;
   newSecretValue?: string;
   importedCredential?: string | null;
@@ -603,9 +605,9 @@ const connTestResultHTML = (c: ConnectionSummary): string => {
 
 // What a connection actually lets an agent do, in plain words — the
 // expansion has to answer "what is this for?" without opening the editor.
-function connectionPurpose(c: ConnectionSummary): string {
+function connectionPurpose(c: ConnectionSummary): string | null {
   if (c.type === 'api' && c.mcp_path) return 'Exposes this MCP server’s tools to wired agents';
-  if (c.type === 'pg') return `Runs SQL against ${c.dbname || 'the database'}`;
+  if (c.type === 'pg') return null;
   if (c.type === 'ssh') return `Shell, git, and file transfer as ${c.user || 'the pinned user'}`;
   if (c.type === 'ws') return 'Streams WebSocket messages';
   return 'Makes HTTP requests to this origin';
@@ -672,12 +674,13 @@ function catalogConnRowHTML(c: ConnectionSummary): string {
          ? `<button class="btn ghost sm cat-meta-fix" data-act="oauth-reconnect" data-id="${c.id}">Reconnect…</button>`
          : `<button class="btn ghost sm cat-meta-fix" data-act="test-conn" data-id="${c.id}">Test again</button>`}`
     : '';
+  const purpose = connectionPurpose(c);
   return `<div class="cat-conn">
     <div class="cat-conn-tx">
       <div class="cat-conn-head"><b>${esc(c.name)}</b>${live ? ` <span class="cc-live">● ${live} live</span>` : ''}</div>
       <code title="${escAttr(c.target)}">${esc(c.target)}</code>
       <div class="cat-conn-meta">
-        <span>${esc(connectionPurpose(c))}</span>
+        ${purpose ? `<span>${esc(purpose)}</span>` : ''}
         <span>${esc(connectionCredential(c))}</span>
         <span class="${wiring.wired ? '' : 'cat-meta-idle'}">${esc(wiring.text)}</span>
         ${account}${tls}${hostKey}${needsReconnect}
@@ -758,8 +761,11 @@ function catalogRowHTML(entry: CatalogEntry): string {
       <div class="cat-conn-list">${connectionsForEntry(entry, state.connections).map(catalogConnRowHTML).join('')}</div>
       <button class="btn ghost sm cat-add-another" data-act="catalog-add" data-id="${entry.id}">＋ Add another ${esc(entry.name)}</button>
     </div>`;
+  const rowToggle = count || builtin
+    ? ` data-act="catalog-toggle" data-id="${entry.id}"`
+    : '';
   return `<div class="cat-row-wrap ${open ? 'open' : ''}">
-    <div class="cat-row">
+    <div class="cat-row ${rowToggle ? 'is-toggle' : ''}"${rowToggle}>
       <span class="cat-ico" aria-hidden="true">${ICONS[entry.icon] || ''}</span>
       <div class="cat-tx"><b>${esc(entry.name)}</b><span>${esc(entry.description)}</span></div>
       ${action}
@@ -1189,6 +1195,7 @@ function addSecretSheet(editing: boolean): string {
 // Sentinel option value in the saved-credential select that switches the
 // chooser into "create a new credential" mode.
 const NEW_CREDENTIAL_OPTION = '__new__';
+const NO_CREDENTIAL_OPTION = '__none__';
 
 function credentialNameIsTaken(name: string): boolean {
   const candidate = name.trim();
@@ -1200,25 +1207,29 @@ function toolNameIsTaken(name: string): boolean {
   return Boolean(candidate) && state.connections.some((connection) => connection.name === candidate);
 }
 
+function automaticConnectionName(draft: ConnectionDraft = state.draft): string {
+  return defaultConnectionName(
+    state.connType,
+    state.connEntryName || catalogNameForType(state.connType),
+    { user: draft.user, host: draft.host, port: draft.port },
+  );
+}
+
 function credentialChooserHTML(
   type: ConnectionType,
   draft: ConnectionDraft,
   allowNew = true,
   valueHint?: string,
 ): string {
+  const allowNone = type === 'pg' || type === 'ssh';
   const source = allowNew
     ? (draft.secretSource || (draft.importedCredential || draft.sshImportId || !state.secrets.length ? 'new' : 'existing'))
-    : 'existing';
+    : (draft.secretSource || 'existing');
   const secretLabel = type === 'pg' ? 'Database password'
     : type === 'ssh' ? 'SSH private key'
     : 'Token or API key';
   let picker = '';
-  if (state.secrets.length) {
-    // Usage detail disambiguates similarly named credentials without
-    // touching secret values (revealing those is a separate explicit call).
-    const usageDetail = (secret: SecretSummary): string => !secret.used_by ? ''
-      : secret.used_by === 1 && secret.used_by_names.length ? `used by ${secret.used_by_names[0]}`
-      : `used by ${secret.used_by} tools`;
+  if (state.secrets.length || allowNew || allowNone) {
     // No default selection: a wrong prefilled secret (a password where a
     // private key belongs, or vice versa) is worse than an explicit choice.
     const selected = source === 'existing'
@@ -1227,41 +1238,48 @@ function credentialChooserHTML(
     const keyBadge = `<span class="cred-badge" aria-hidden="true">${ICONS.keyRound}</span>`;
     const plusBadge = `<span class="cred-badge plus" aria-hidden="true">${ICONS.plus}</span>`;
     const triggerContent = selected
-      ? `${keyBadge}<span class="cred-name">${esc(selected.name)}</span>
-         ${selected.used_by ? `<span class="cred-detail">${esc(usageDetail(selected))}</span>` : ''}`
+      ? `${keyBadge}<span class="cred-name">${esc(selected.name)}</span>`
       : source === 'new'
       ? `${plusBadge}<span class="cred-name">New secret…</span>`
+      : source === 'none'
+      ? `<span class="cred-name">None</span>`
       : `<span class="cred-name cred-placeholder">Choose a secret…</span>`;
     const options = state.secrets.map((secret) => {
       const picked = selected !== null && selected.id === secret.id;
       return `<button type="button" class="cred-opt" role="option" data-act="credential-pick"
         data-id="${escAttr(secret.id)}" aria-selected="${picked}">${keyBadge}
-        <span class="cred-opt-col"><span class="cred-name">${esc(secret.name)}</span>
-          ${secret.used_by ? `<span class="cred-opt-sub">${esc(usageDetail(secret))}</span>` : ''}</span>
+        <span class="cred-opt-col"><span class="cred-name">${esc(secret.name)}</span></span>
         ${picked ? `<span class="cred-opt-check">${ICONS.check}</span>` : ''}</button>`;
     }).join('');
     const newOption = allowNew
-      ? `<div class="cred-menu-divider"></div>
+      ? `${state.secrets.length ? '<div class="cred-menu-divider"></div>' : ''}
         <button type="button" class="cred-opt" role="option" data-act="credential-pick"
           data-id="${NEW_CREDENTIAL_OPTION}" aria-selected="${source === 'new'}">${plusBadge}
           <span class="cred-opt-col"><span class="cred-name">New secret…</span></span></button>`
       : '';
+    const noneOption = allowNone
+      ? `${allowNew || !state.secrets.length ? '' : '<div class="cred-menu-divider"></div>'}
+        <button type="button" class="cred-opt" role="option" data-act="credential-pick"
+          data-id="${NO_CREDENTIAL_OPTION}" aria-selected="${source === 'none'}">
+          <span class="cred-opt-col"><span class="cred-name">None</span></span>
+          ${source === 'none' ? `<span class="cred-opt-check">${ICONS.check}</span>` : ''}</button>`
+      : '';
     const menu = state.formMenuOpen === 'c-secret'
-      ? `<div class="cred-menu" role="listbox">${options}${newOption}</div>`
+      ? `<div class="cred-menu" role="listbox">${options}${newOption}${noneOption}</div>`
       : '';
     // The trigger carries the selection as its value so captureDrafts and the
     // sheet-open baseline read it exactly like the native select it replaced.
     picker = `<div class="f-row"><label for="c-secret">${secretLabel}</label>
       <div class="cred-select">
         <button type="button" id="c-secret" class="cred-trigger ${fieldCls('secret')}"
-          value="${escAttr(selected ? selected.id : source === 'new' ? NEW_CREDENTIAL_OPTION : '')}" data-act="select-toggle" data-menu="c-secret"
+          value="${escAttr(selected ? selected.id : source === 'new' ? NEW_CREDENTIAL_OPTION : source === 'none' ? NO_CREDENTIAL_OPTION : '')}" data-act="select-toggle" data-menu="c-secret"
           aria-haspopup="listbox" aria-expanded="${state.formMenuOpen === 'c-secret'}">
           ${triggerContent}<span class="cred-chevron" aria-hidden="true">${ICONS.chevronDown}</span></button>
         ${menu}</div>${fieldErr('secret')}</div>`;
   } else if (source === 'new') {
     picker = `<div class="f-row"><label>${secretLabel}</label></div>`;
   }
-  if (source === 'existing') {
+  if (source !== 'new') {
     return `<div class="credential-group">${picker}</div>`;
   }
   const suggested = suggestedSecretName(draft.name ?? '', type);
@@ -1343,7 +1361,8 @@ function connSheet(editing: boolean): string {
   const nameTaken = !editing && toolNameIsTaken(d.name ?? '');
   const nameWarning = editing ? ''
     : `<div id="tool-name-warning" class="field-warning" role="status" aria-live="polite"${nameTaken ? '' : ' hidden'}>Name used by an existing tool</div>`;
-  fields += `<div class="f-row"><label for="f-cname">Name</label><input id="f-cname" class="${fieldCls('name')} ${nameTaken ? 'name-conflict-warning' : ''}"${editing ? '' : ' aria-describedby="tool-name-warning"'} placeholder="e.g. github" value="${escAttr(d.name ?? '')}">${fieldErr('name')}${nameWarning}</div>`;
+  const namePlaceholder = (!editing && state.connEntryName) || catalogNameForType(t);
+  fields += `<div class="f-row"><label for="f-cname">Name</label><input id="f-cname" class="${fieldCls('name')} ${nameTaken ? 'name-conflict-warning' : ''}"${editing ? '' : ' aria-describedby="tool-name-warning"'} placeholder="${escAttr(namePlaceholder)}" value="${escAttr(d.name ?? '')}">${fieldErr('name')}${nameWarning}</div>`;
   if (t === 'api' && isMcpDraft(d)) {
     const url = d.origin
       ?? (d.host
@@ -1460,9 +1479,13 @@ function connSheet(editing: boolean): string {
       fields += credentialChooserHTML(t, d, true, state.connPreset?.credentialHint);
     }
     // Branded rows say where the credential comes from — the equivalent of a
-    // provider's "get your API key" page, as plain text (no live links here).
+    // provider's "get your API key" page, opened outside the app.
     if (state.connPreset?.docsUrl && modeValue !== 'oauth') {
-      fields += `<div class="rule-note">Create or find your ${esc(state.connEntryName || 'API')} key at <code>${esc(state.connPreset.docsUrl)}</code></div>`;
+      const docsLabel = state.connPreset.docsUrl;
+      const docsUrl = /^https?:\/\//i.test(docsLabel) ? docsLabel : `https://${docsLabel}`;
+      fields += `<div class="rule-note">Create or find your ${esc(state.connEntryName || 'API')} key at
+        <code><a class="external-doc-link" href="${escAttr(docsUrl)}" data-act="open-external-url"
+          data-url="${escAttr(docsUrl)}">${esc(docsLabel)}</a></code></div>`;
     }
   } else {
     fields += credentialChooserHTML(t, d);
@@ -1758,6 +1781,9 @@ function captureDrafts(): void {
     if (secretChoice !== undefined) {
       if (secretChoice === NEW_CREDENTIAL_OPTION) {
         state.draft.secretSource = 'new';
+      } else if (secretChoice === NO_CREDENTIAL_OPTION) {
+        state.draft.secretSource = 'none';
+        state.draft.secretId = null;
       } else if (secretChoice) {
         state.draft.secretId = secretChoice;
         state.draft.secretSource = 'existing';
@@ -1938,16 +1964,16 @@ async function saveConn(): Promise<void> {
   const needsCredentialChoice = !usesOauth && !byoOauth && (
     (adding && !((t === 'api' || t === 'ws') && authMode === 'advanced')) ||
     (!adding && t !== 'api'));
-  const secretSource = adding
-    ? (d.secretSource || (d.importedCredential || d.sshImportId || !state.secrets.length ? 'new' : 'existing'))
-    : 'existing';
+  const secretSource = d.secretSource || (adding
+    ? (d.importedCredential || d.sshImportId || !state.secrets.length ? 'new' : 'existing')
+    : 'existing');
   let selectedSecret: SecretSummary | null = null;
   let newSecretName: string | null = null;
   let newSecretNameTaken = false;
   if (needsCredentialChoice && secretSource === 'existing') {
     selectedSecret = state.secrets.find((secret) => secret.id === d.secretId) || null;
     if (!selectedSecret) errs.secret = 'Choose a saved credential or save a new one';
-  } else if (needsCredentialChoice) {
+  } else if (needsCredentialChoice && secretSource === 'new') {
     newSecretName = (d.newSecretName || suggestedSecretName(name, t)).trim();
     const hasImportedIdentity = t === 'ssh' && d.sshImportId && d.identityFile;
     const newSecretValue = d.newSecretValue ?? d.importedCredential ?? '';
@@ -2162,6 +2188,7 @@ window.addEventListener('focus', () => {
 document.addEventListener('click', async (e) => {
   const target = e.target instanceof Element ? e.target : null;
   const btn = target?.closest<HTMLElement>('[data-act]') ?? null;
+  if (btn?.dataset.act === 'open-external-url') e.preventDefault();
   // Dismiss the desktop settings popover on any click outside it (its own
   // toggle handles itself; menu-item clicks close it in their handlers).
   if (state.menuOpen && !target?.closest('.settings-menu') &&
@@ -2307,6 +2334,7 @@ document.addEventListener('click', async (e) => {
           break;
         }
         state.draft = imported.draft;
+        if (state.draft.nameIsAutomatic) state.draft.name = automaticConnectionName();
         state.connImportError = null;
         state.sheetErrors = {};
         state.connAdvancedOpen = draftUsesAdvancedFields(state.draft, state.connType);
@@ -2363,7 +2391,7 @@ document.addEventListener('click', async (e) => {
       if (!await holdDropdownFormOpen()) break;
       state.sheet = { kind: 'add-conn' };
       state.connType = entry.connType;
-      state.draft = {};
+      state.draft = { nameIsAutomatic: true };
       // An MCP row stores an API connection, but the form asks for a
       // server URL rather than an API root — and the dialog is named after
       // the row the user clicked, not the protocol underneath it.
@@ -2381,13 +2409,13 @@ document.addEventListener('click', async (e) => {
       // API root, the vendor's auth recipe, and a suggested name — all into
       // ordinary, editable form fields.
       if (entry.preset) {
-        state.draft.name = entry.preset.name;
         state.draft.origin = entry.preset.origin;
         state.draft.authMode = entry.preset.authMode;
         state.draft.authDetail = entry.preset.authDetail;
       }
       if (entry.connType === 'pg') state.draft.port = '5432';
       if (entry.connType === 'ssh') state.draft.port = '22';
+      state.draft.name = automaticConnectionName();
       state.sheetErrors = {}; state.sheetBaseline = null; state.connAdvancedOpen = false;
       state.connImportSource = ''; state.connImportError = null;
       render();
@@ -2420,7 +2448,8 @@ document.addEventListener('click', async (e) => {
         destination: c.destination,
         hostKeyFingerprint: c.host_key_fingerprint,
         sslmode: c.sslmode || 'verify-full', pgCaBundlePath: c.trusted_ca_bundle_path,
-        secretId: null };
+        secretId: null,
+        secretSource: c.type !== 'api' && !c.secret_names.length ? 'none' : 'existing' };
       // best-effort: prefill single-secret binding by name→id
       if (c.type !== 'api' && c.secret_names.length) {
         const s = state.secrets.find((s) => s.name === c.secret_names[0]);
@@ -2462,6 +2491,9 @@ document.addEventListener('click', async (e) => {
       delete state.sheetErrors.secret;
       if (id === NEW_CREDENTIAL_OPTION) {
         state.draft.secretSource = 'new';
+      } else if (id === NO_CREDENTIAL_OPTION) {
+        state.draft.secretSource = 'none';
+        state.draft.secretId = null;
       } else {
         state.draft.secretSource = 'existing';
         state.draft.secretId = id;
@@ -2622,6 +2654,9 @@ document.addEventListener('click', async (e) => {
       break;
     }
     case 'mcp-open-browser':
+      await run(() => invoke('open_url', { url: btn.dataset.url || '' }));
+      break;
+    case 'open-external-url':
       await run(() => invoke('open_url', { url: btn.dataset.url || '' }));
       break;
     case 'mcp-auth-cancel': {
@@ -2857,6 +2892,18 @@ function updateToolNameWarning(): void {
   hint.hidden = !nameTaken;
 }
 
+function updateAutomaticConnectionName(): void {
+  if (state.sheet?.kind !== 'add-conn' || !state.draft.nameIsAutomatic) return;
+  const input = document.getElementById('f-cname') as HTMLInputElement | null;
+  if (!input) return;
+  const name = automaticConnectionName();
+  state.draft.name = name;
+  input.value = name;
+  updateCredentialNamePlaceholder(name);
+  updateCredentialNameWarning();
+  updateToolNameWarning();
+}
+
 document.addEventListener('input', (e) => {
   const target = e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement
     ? e.target
@@ -2884,9 +2931,23 @@ document.addEventListener('input', (e) => {
     return;
   }
   if (target?.id === 'f-cname') {
+    state.draft.name = target.value;
+    state.draft.nameIsAutomatic = false;
     updateCredentialNamePlaceholder(target.value);
     updateCredentialNameWarning();
     updateToolNameWarning();
+  }
+  if (target?.id === 'f-user') {
+    state.draft.user = target.value;
+    updateAutomaticConnectionName();
+  }
+  if (target?.id === 'f-host') {
+    state.draft.host = target.value;
+    updateAutomaticConnectionName();
+  }
+  if (target?.id === 'f-port') {
+    state.draft.port = target.value;
+    updateAutomaticConnectionName();
   }
   if (target?.id === 'c-new-secret-name') updateCredentialNameWarning();
   if (key && state.sheetErrors[key]) {

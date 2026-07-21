@@ -44,7 +44,7 @@ pub enum CoreError {
     InvalidSecretName(String),
 
     #[error(
-        "invalid tool name {0:?}: use 1-64 ASCII letters, numbers, spaces, hyphens, or underscores; start with a letter or number and do not end with a space"
+        "invalid tool name {0:?}: use 1-64 ASCII letters, numbers, spaces, or safe endpoint punctuation; start with a letter or number and do not end with a space"
     )]
     InvalidConnectionName(String),
 

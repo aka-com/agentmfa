@@ -42,9 +42,9 @@ export interface ConnectionPreset {
   authMode: 'bearer' | 'header' | 'query';
   /** Header or query-parameter name when the recipe needs one. */
   authDetail?: string;
-  /** Suggested tool name, e.g. 'stripe'. */
+  /** Display-name fallback for consumers outside the catalog row. */
   name: string;
-  /** Where to create or find the credential (shown as plain text, not a link). */
+  /** Where to create or find the credential (opened as an external link). */
   docsUrl?: string;
   /** Placeholder for the credential value input, e.g. 'sk_live_…'. */
   credentialHint?: string;
@@ -179,7 +179,7 @@ export const CATALOG: CatalogEntry[] = [
     preset: {
       origin: 'https://api.airtable.com',
       authMode: 'bearer',
-      name: 'airtable',
+      name: 'Airtable',
       docsUrl: 'airtable.com/create/tokens',
       credentialHint: 'pat…',
     },
@@ -197,7 +197,7 @@ export const CATALOG: CatalogEntry[] = [
       origin: 'https://api.anthropic.com',
       authMode: 'header',
       authDetail: 'x-api-key',
-      name: 'anthropic',
+      name: 'Anthropic',
       docsUrl: 'console.anthropic.com/settings/keys',
       credentialHint: 'sk-ant-…',
     },
@@ -215,7 +215,7 @@ export const CATALOG: CatalogEntry[] = [
       origin: 'https://api.linear.app',
       authMode: 'header',
       authDetail: 'Authorization',
-      name: 'linear',
+      name: 'Linear',
       docsUrl: 'linear.app/settings/api',
       credentialHint: 'lin_api_…',
     },
@@ -238,7 +238,7 @@ export const CATALOG: CatalogEntry[] = [
     preset: {
       origin: 'https://api.openai.com',
       authMode: 'bearer',
-      name: 'openai',
+      name: 'OpenAI',
       docsUrl: 'platform.openai.com/api-keys',
       credentialHint: 'sk-…',
     },
@@ -255,7 +255,7 @@ export const CATALOG: CatalogEntry[] = [
     preset: {
       origin: 'https://sentry.io',
       authMode: 'bearer',
-      name: 'sentry',
+      name: 'Sentry',
       docsUrl: 'sentry.io/settings/account/api/auth-tokens',
       credentialHint: 'sntrys_…',
     },
@@ -272,7 +272,7 @@ export const CATALOG: CatalogEntry[] = [
     preset: {
       origin: 'https://slack.com',
       authMode: 'bearer',
-      name: 'slack',
+      name: 'Slack',
       docsUrl: 'api.slack.com/apps',
       credentialHint: 'xoxb-…',
     },
@@ -295,7 +295,7 @@ export const CATALOG: CatalogEntry[] = [
     preset: {
       origin: 'https://api.stripe.com',
       authMode: 'bearer',
-      name: 'stripe',
+      name: 'Stripe',
       docsUrl: 'dashboard.stripe.com/apikeys',
       credentialHint: 'sk_live_… or rk_live_…',
     },
@@ -312,7 +312,7 @@ export const CATALOG: CatalogEntry[] = [
     preset: {
       origin: 'https://api.vercel.com',
       authMode: 'bearer',
-      name: 'vercel',
+      name: 'Vercel',
       docsUrl: 'vercel.com/account/settings/tokens',
       credentialHint: 'Vercel access token',
     },

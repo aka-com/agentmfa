@@ -384,7 +384,7 @@ pub struct Connection {
     pub name: String,
     pub config: ConnectionConfig,
     /// Referenced secret ids. API connections may compose several (derived
-    /// from the template's refs); pg/ws/ssh bind exactly one.
+    /// from the template's refs); pg/ssh bind zero or one, and ws binds one.
     pub secrets: Vec<Uuid>,
     /// The upstream account this connection's credential was last verified
     /// as (an MCP server's whoami answer). Display metadata, never

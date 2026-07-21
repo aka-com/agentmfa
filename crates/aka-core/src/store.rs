@@ -9,7 +9,7 @@
 //!   atomically with the rename;
 //! - deleting a secret still referenced by a connection is refused;
 //! - API connections' secret list is derived from their template's refs;
-//!   pg/ws/ssh connections bind exactly one secret;
+//!   pg/ssh connections bind at most one secret; ws binds exactly one;
 //! - a connection's type is fixed after creation.
 
 use std::sync::Arc;
@@ -62,8 +62,8 @@ pub enum PinOutcome {
 pub struct ConnectionSpec {
     pub name: String,
     pub config: ConnectionConfig,
-    /// For pg/ws/ssh: the single bound secret. Ignored for api connections,
-    /// whose secret list is derived from the template's refs.
+    /// For pg/ssh: the optional single bound secret; ws binds one. Ignored for
+    /// api connections, whose secret list is derived from the template's refs.
     pub secrets: Vec<Uuid>,
 }
 
@@ -871,9 +871,10 @@ fn prepare_connection_with_secret(
 fn validate_connection_name(name: &str) -> Result<()> {
     let ok = !name.is_empty()
         && name.len() <= 64
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == ' ' || c == '-' || c == '_')
+        && name.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(c, ' ' | '-' | '_' | '(' | ')' | '@' | '.' | ':' | '[' | ']')
+        })
         && name
             .chars()
             .next()
@@ -887,8 +888,8 @@ fn validate_connection_name(name: &str) -> Result<()> {
 }
 
 /// Validate the type-specific config and resolve the connection's bound
-/// secrets: API secret lists are derived from the template's refs; pg/ws
-/// bind exactly one secret.
+/// secrets: API secret lists are derived from the template's refs; pg/ssh
+/// bind at most one secret, while ws binds exactly one.
 fn validate_config_and_bind_secrets(
     state: &IndexState,
     spec: &ConnectionSpec,
@@ -979,7 +980,7 @@ fn validate_config_and_bind_secrets(
                     message: message.into(),
                 });
             }
-            bind_single_secret(state, spec)
+            bind_optional_secret(state, spec)
         }
         ConnectionConfig::Ws { url, template } => {
             let parsed_url =
@@ -1052,26 +1053,40 @@ fn validate_config_and_bind_secrets(
                         message: "Enter an OpenSSH SHA-256 or SHA-512 fingerprint".into(),
                     })?;
             }
-            bind_single_secret(state, spec)
+            bind_optional_secret(state, spec)
         }
     }
 }
 
-fn bind_single_secret(state: &IndexState, spec: &ConnectionSpec) -> Result<Vec<Uuid>> {
+fn bind_optional_secret(state: &IndexState, spec: &ConnectionSpec) -> Result<Vec<Uuid>> {
     let kind = match spec.config.kind() {
         ConnectionKind::Pg => "postgres",
         ConnectionKind::Ws => "websocket",
         ConnectionKind::Ssh => "ssh",
         ConnectionKind::Api => unreachable!(),
     };
-    if spec.secrets.len() != 1 {
+    if spec.secrets.len() > 1 {
         return Err(CoreError::WrongSecretCount { kind });
     }
-    let id = spec.secrets[0];
-    if !state.secrets.iter().any(|s| s.id == id) {
-        return Err(CoreError::SecretNotFound);
+    if let Some(id) = spec.secrets.first() {
+        if !state.secrets.iter().any(|s| &s.id == id) {
+            return Err(CoreError::SecretNotFound);
+        }
     }
-    Ok(vec![id])
+    Ok(spec.secrets.clone())
+}
+
+fn bind_single_secret(state: &IndexState, spec: &ConnectionSpec) -> Result<Vec<Uuid>> {
+    if spec.secrets.len() != 1 {
+        let kind = match spec.config.kind() {
+            ConnectionKind::Ws => "websocket",
+            ConnectionKind::Pg => "postgres",
+            ConnectionKind::Ssh => "ssh",
+            ConnectionKind::Api => unreachable!(),
+        };
+        return Err(CoreError::WrongSecretCount { kind });
+    }
+    bind_optional_secret(state, spec)
 }
 
 #[cfg(test)]
@@ -1278,6 +1293,8 @@ mod tests {
         assert!(validate_connection_name("Internal API").is_ok());
         assert!(validate_connection_name("Production Database 2").is_ok());
         assert!(validate_connection_name("two  spaces").is_ok());
+        assert!(validate_connection_name("SSH (root@localhost:7878)").is_ok());
+        assert!(validate_connection_name("Postgres (app@db.example.com:5432)").is_ok());
 
         for invalid in [
             " leading",
@@ -1412,7 +1429,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pg_and_ws_bind_exactly_one_secret() {
+    async fn pg_allows_no_secret_but_rejects_multiple() {
         let (store, _, _dir) = store().await;
         let pw = store.add_secret("DATABASE_PASSWORD", val("pw")).unwrap();
         let conn = store
@@ -1431,10 +1448,27 @@ mod tests {
             .unwrap();
         assert_eq!(conn.target(), "app@db.internal.aka.com:5432/app_production");
 
+        let passwordless = store
+            .add_connection(ConnectionSpec {
+                name: "passwordless".into(),
+                config: ConnectionConfig::Pg {
+                    host: "h".into(),
+                    port: 5432,
+                    dbname: "d".into(),
+                    user: "u".into(),
+                    sslmode: PgSslMode::Prefer,
+                    trusted_ca_bundle_path: None,
+                },
+                secrets: vec![],
+            })
+            .expect("postgres may use trust or certificate authentication");
+        assert!(passwordless.secrets.is_empty());
+
+        let other = store.add_secret("OTHER_PASSWORD", val("pw2")).unwrap();
         assert!(matches!(
             store
                 .add_connection(ConnectionSpec {
-                    name: "bad".into(),
+                    name: "too-many".into(),
                     config: ConnectionConfig::Pg {
                         host: "h".into(),
                         port: 5432,
@@ -1443,7 +1477,7 @@ mod tests {
                         sslmode: PgSslMode::Prefer,
                         trusted_ca_bundle_path: None,
                     },
-                    secrets: vec![],
+                    secrets: vec![pw.id, other.id],
                 })
                 .unwrap_err(),
             CoreError::WrongSecretCount { .. }
@@ -1451,7 +1485,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ssh_binds_exactly_one_secret_and_validates_host() {
+    async fn ssh_allows_no_secret_and_validates_host() {
         let (store, _, _dir) = store().await;
         let key = store
             .add_secret(
@@ -1527,22 +1561,20 @@ mod tests {
             }
         ));
 
-        assert!(matches!(
-            store
-                .add_connection(ConnectionSpec {
-                    name: "no-secret".into(),
-                    config: ConnectionConfig::Ssh {
-                        destination: None,
-                        host: "h.example.com".into(),
-                        port: 22,
-                        user: "u".into(),
-                        host_key_fingerprint: SSH_HOST_FP.into(),
-                    },
-                    secrets: vec![],
-                })
-                .unwrap_err(),
-            CoreError::WrongSecretCount { kind: "ssh" }
-        ));
+        let passwordless = store
+            .add_connection(ConnectionSpec {
+                name: "no-secret".into(),
+                config: ConnectionConfig::Ssh {
+                    destination: None,
+                    host: "h.example.com".into(),
+                    port: 22,
+                    user: "u".into(),
+                    host_key_fingerprint: SSH_HOST_FP.into(),
+                },
+                secrets: vec![],
+            })
+            .expect("SSH may authenticate without a brokered private key");
+        assert!(passwordless.secrets.is_empty());
         // Host must be a bare hostname; user is required.
         for (host, user) in [
             ("prod.example.com:22", "deploy"),

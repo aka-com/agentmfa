@@ -170,6 +170,28 @@ fn add_ssh_connection(broker: &Broker, key: &PrivateKey, user: &str) -> PrivateK
     host_key
 }
 
+fn add_passwordless_ssh_connection(broker: &Broker) -> PrivateKey {
+    let host_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    broker
+        .store
+        .add_connection(ConnectionSpec {
+            name: "prod-ssh".into(),
+            config: ConnectionConfig::Ssh {
+                destination: Some("prod".into()),
+                host: "prod.example.com".into(),
+                port: 22,
+                user: "deploy".into(),
+                host_key_fingerprint: host_key
+                    .public_key()
+                    .fingerprint(HashAlg::Sha256)
+                    .to_string(),
+            },
+            secrets: vec![],
+        })
+        .unwrap();
+    host_key
+}
+
 /// The `prod-ssh` connection's stored fingerprint ("" while unpinned).
 fn stored_fingerprint(broker: &Broker) -> String {
     let conn = broker.store.connection_by_name("prod-ssh").unwrap();
@@ -336,6 +358,23 @@ fn verify_signature(public: &PublicKey, response_body: &[u8], data: &[u8]) {
 }
 
 /* --------------------------------- tests ---------------------------------- */
+
+#[tokio::test]
+async fn no_secret_exposes_an_empty_agent() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let host_key = add_passwordless_ssh_connection(&h.broker);
+    let token = h.pair().await;
+    let (auth_sock, _) = h.open_ssh(&token).await;
+
+    let mut stream = bound_stream(&auth_sock, &host_key).await;
+    write_message(&mut stream, SSH_AGENTC_REQUEST_IDENTITIES, &[]).await;
+    let (kind, body) = read_message(&mut stream).await;
+    assert_eq!(kind, SSH_AGENT_IDENTITIES_ANSWER);
+    assert_eq!(body, 0u32.to_be_bytes());
+
+    let (kind, _) = sign(&mut stream, b"unknown-key", b"anything", 0).await;
+    assert_eq!(kind, SSH_AGENT_FAILURE);
+}
 
 #[tokio::test]
 async fn ed25519_lists_signs_and_pins_user() {

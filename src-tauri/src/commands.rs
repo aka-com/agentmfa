@@ -135,7 +135,7 @@ impl FormError {
             CoreError::InvalidConnectionName(_) => Self::validation(
                 "invalid_connection_name",
                 "name",
-                "Use 1–64 letters, numbers, spaces, hyphens, or underscores; start with a letter or number and don’t end with a space",
+                "Use 1–64 letters, numbers, spaces, or endpoint punctuation; start with a letter or number and don’t end with a space",
             ),
             CoreError::Template(error) => Self::validation(
                 "invalid_template",
@@ -600,8 +600,8 @@ impl ConnectionInput {
     }
 }
 
-/// Creating a connection binds a secret to a destination; the core demands
-/// the native OS confirmation before it takes effect.
+/// Creating a connection optionally binds a secret to a destination; the core
+/// demands native OS confirmation before it takes effect.
 #[tauri::command]
 pub fn add_connection(state: State<AppState>, mut input: ConnectionInput) -> FormResult<()> {
     let kind = input.kind.clone();

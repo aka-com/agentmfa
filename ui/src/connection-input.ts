@@ -14,6 +14,23 @@ export function quickSetupPlaceholder(type: ConnectionType): string {
   return QUICK_SETUP_PLACEHOLDERS[type];
 }
 
+export function defaultConnectionName(
+  type: ConnectionType,
+  label: string,
+  endpoint: { user?: string | null; host?: string | null; port?: string | number | null } = {},
+): string {
+  const base = label.trim() || (type === 'pg' ? 'Postgres' : type === 'ssh' ? 'SSH' : 'Connection');
+  if (type !== 'pg' && type !== 'ssh') return base;
+  const user = String(endpoint.user || '').trim();
+  const rawHost = String(endpoint.host || '').trim();
+  if (!user || !rawHost) return base;
+  const host = rawHost.includes(':') && !(rawHost.startsWith('[') && rawHost.endsWith(']'))
+    ? `[${rawHost}]`
+    : rawHost;
+  const port = String(endpoint.port || '').trim();
+  return `${base} (${user}@${host}${port ? `:${port}` : ''})`;
+}
+
 export interface HostKeyCandidate {
   fingerprint: string;
   algorithm: string;

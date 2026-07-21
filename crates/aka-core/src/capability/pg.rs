@@ -12,7 +12,8 @@
 //!   (cleartext password exchange on the loopback leg).
 //! - **Upstream** the proxy *is* a Postgres client: its own TCP connection,
 //!   its own TLS per the connection's `sslmode`, and SCRAM-SHA-256 (or
-//!   md5/cleartext) with the configured user and the stored password secret.
+//!   md5/cleartext) with the configured user and optional stored password.
+//!   Servers using trust or certificate authentication need no secret.
 //! - Once both complete, the two legs speak byte-identical Postgres v3
 //!   framing and are spliced with a plain bidirectional copy, seeded with
 //!   any residual bytes the handshake readers buffered, so a pipelined
@@ -1142,7 +1143,7 @@ struct UpstreamSession {
     ready_status: u8,
 }
 
-/// Dial the connection's configured host:port with the stored password secret
+/// Dial the connection's configured host:port with the optional stored password
 /// and drive the client side of the startup/auth exchange up to ReadyForQuery.
 /// The client's non-auth startup parameters (application_name,
 /// client_encoding, options, search_path, …) are forwarded for fidelity.
@@ -1164,14 +1165,15 @@ async fn dial_upstream(
     else {
         return Err("not a postgres connection".into());
     };
-    let secret_id = *connection
-        .secrets
-        .first()
-        .ok_or_else(|| "connection binds no secret".to_string())?;
-    let password = store
-        .secret_value(&secret_id)
-        .await
-        .map_err(|e| format!("credential unavailable: {e}"))?;
+    let password = match connection.secrets.first() {
+        Some(secret_id) => Some(
+            store
+                .secret_value(secret_id)
+                .await
+                .map_err(|e| format!("credential unavailable: {e}"))?,
+        ),
+        None => None,
+    };
     let (stream, cert_digest) = tls_connect(
         host,
         *port,
@@ -1248,8 +1250,12 @@ async fn dial_upstream(
                 0 => break, // AuthenticationOk
                 3 => {
                     // AuthenticationCleartextPassword
+                    let password = password.as_ref().ok_or_else(|| {
+                        "upstream requires a password, but this connection has no secret"
+                            .to_string()
+                    })?;
                     let mut p = Vec::new();
-                    put_cstr(&mut p, &password);
+                    put_cstr(&mut p, password);
                     stream
                         .write_all(&frame(b'p', &p))
                         .await
@@ -1257,6 +1263,10 @@ async fn dial_upstream(
                 }
                 5 => {
                     // AuthenticationMD5Password: md5(md5(password + user) + salt).
+                    let password = password.as_ref().ok_or_else(|| {
+                        "upstream requires a password, but this connection has no secret"
+                            .to_string()
+                    })?;
                     if payload.len() < 8 {
                         return Err("short md5 auth request".into());
                     }
@@ -1271,6 +1281,10 @@ async fn dial_upstream(
                 10 => {
                     // AuthenticationSASL, SCRAM-SHA-256(-PLUS), the design's
                     // primary path.
+                    let password = password.as_ref().ok_or_else(|| {
+                        "upstream requires a password, but this connection has no secret"
+                            .to_string()
+                    })?;
                     sasl_auth(
                         &mut stream,
                         &payload[4..],

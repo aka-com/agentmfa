@@ -584,9 +584,12 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         dbname: i.dbname, user: i.user, sslmode: i.sslmode, trusted_ca_bundle_path: i.trusted_ca_bundle_path,
         host_key_fingerprint: i.host_key_fingerprint, url: i.url,
         template: i.template, mcp_path: i.mcp_path });
-      if (i.secret_id) {
-        c.secret_names = [db.secrets.find((s) => s.id === i.secret_id)?.name]
-          .filter((name): name is string => Boolean(name));
+      if (i.type !== 'api') {
+        c.secret_names = i.secret_id
+          ? [db.secrets.find((s) => s.id === i.secret_id)?.name]
+              .filter((name): name is string => Boolean(name))
+          : [];
+        c.secret_ids = i.secret_id ? [i.secret_id] : [];
       }
       audit('connectionUpdated', `Tool updated: ${i.name}`); return;
     }

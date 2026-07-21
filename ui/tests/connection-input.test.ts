@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   apiOriginFromParts,
   authTemplate,
+  defaultConnectionName,
   parseConnectionImport,
   parseApiOrigin,
   quickSetupPlaceholder,
@@ -15,6 +16,23 @@ import {
 test('provides a quick-setup placeholder for every connection type', () => {
   assert.equal(quickSetupPlaceholder('pg'), 'postgresql://app@db.example.com/production');
   assert.equal(quickSetupPlaceholder('ssh'), 'ssh deploy@prod.example.com');
+});
+
+test('builds display names for services and infrastructure endpoints', () => {
+  assert.equal(defaultConnectionName('api', 'GitHub'), 'GitHub');
+  assert.equal(
+    defaultConnectionName('ssh', 'SSH', { user: 'root', host: 'localhost', port: 7878 }),
+    'SSH (root@localhost:7878)',
+  );
+  assert.equal(
+    defaultConnectionName('pg', 'Postgres', { user: 'app', host: 'db.example.com', port: 5432 }),
+    'Postgres (app@db.example.com:5432)',
+  );
+  assert.equal(defaultConnectionName('ssh', 'SSH', { host: 'localhost', port: 22 }), 'SSH');
+  assert.equal(
+    defaultConnectionName('ssh', 'SSH', { user: 'root', host: '::1', port: 22 }),
+    'SSH (root@[::1]:22)',
+  );
 });
 
 test('API origins preserve scheme and custom port', () => {

@@ -590,7 +590,6 @@
 }
   .cred-badge.plus{ background: var(--seg-bg); color: var(--muted); }
   .cred-name{ font-size: 13.5px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .cred-detail{ font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .cred-placeholder{ color: var(--muted); font-weight: 400; }
   .cred-menu{
   /* app.ts portals this under #root so the scrolling sheet cannot clip it,
@@ -610,11 +609,15 @@
   .cred-opt:focus-visible{ outline: none; background: var(--hover); }
   .cred-opt-col{ flex: 1; min-width: 0; }
   .cred-opt-col .cred-name{ display: block; }
-  .cred-opt-sub{ display: block; font-size: 11.5px; color: var(--muted); margin-top: 1px; }
   .cred-opt-check{ display: inline-flex; color: var(--accent-text); }
   .cred-menu-divider{ height: 1px; margin: 4px 6px; background: var(--line-soft); }.sheet-actions{ display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 14px; }
   .confirm-sheet p{ margin-top: 8px; color: var(--muted); font-size: 13.5px; line-height: 1.45; }
   .rule-note{ font-size: 12.5px; color: var(--muted); margin: 4px 0 8px; line-height: 1.4; }
+  .external-doc-link {
+    color: inherit; text-decoration: underline; text-decoration-color: currentColor;
+    text-underline-offset: 2px;
+  }
+  .external-doc-link:hover { color: color-mix(in srgb, var(--muted) 75%, var(--ink)); }
   /* ---- settings --------------------------------------------------------- */
 .set-row{ display: flex; align-items: flex-start; gap: 12px; padding: 10px 2px; border-bottom: 1px solid var(--line-soft); }
   .set-txt{ flex: 1; }
@@ -728,6 +731,7 @@
   display: flex; align-items: center; gap: 12px; padding: 12px 14px; min-width: 0;
   transition: background .12s ease;
 }
+.cat-row.is-toggle { cursor: pointer; }
 .cat-row-wrap:not(.is-soon) .cat-row:hover { background: var(--hover); }
 .cat-row-wrap.open .cat-row { background: var(--hover); }
 /* MCP-backed rows are visibly not-yet-available without needing a hover. */
@@ -792,7 +796,7 @@
 .cat-conns .sec-table td:last-child { padding-right: 14px; }
 .cat-conns .sec-table tr:last-child td { border-bottom: 0; }
 .cat-conns > .muted-note { padding: 10px 14px; }
-.cat-conns .cat-add-another { margin: 8px 14px 10px; }
+.cat-conns .cat-add-another { margin: 8px 14px 10px 64px; }
 .dropdown-surface .catalog { gap: 12px; }
 .dropdown-surface .cat-search { width: 100%; }
 
