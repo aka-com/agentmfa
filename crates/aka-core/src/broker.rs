@@ -1223,14 +1223,22 @@ impl Broker {
         Ok(true)
     }
 
-    /// The very first agent to register is offered a wire-to-everything grant
-    /// so a fresh install works end-to-end without a wiring trip through the
-    /// app. Because that grant is *standing* access to every existing tool, it
-    /// is gated behind the shell's native confirmation — the only
-    /// agent-initiated path that prompts the user. Declining (or a shell with
-    /// no confirmation gate) leaves the agent unwired, exactly like any later
-    /// agent; the pairing itself has already succeeded. Later agents never
-    /// reach here.
+    /// Schedule the first agent's optional wire-to-everything grant without
+    /// holding open the pairing response. The native confirmation is a
+    /// separate UI step and may remain open indefinitely.
+    pub(crate) fn schedule_first_agent_wirings(self: &Arc<Self>, agent: PairedAgent) {
+        let broker = self.clone();
+        self.task_runtime.spawn(async move {
+            broker.bootstrap_first_agent_wirings(&agent).await;
+        });
+    }
+
+    /// Offer the very first agent a wire-to-everything grant so a fresh
+    /// install can work end-to-end without a wiring trip through the app.
+    /// Because that grant is *standing* access to every existing tool, it is
+    /// gated behind the shell's native confirmation. Declining (or a shell
+    /// with no confirmation gate) leaves the agent unwired, exactly like any
+    /// later agent.
     pub(crate) async fn bootstrap_first_agent_wirings(&self, agent: &PairedAgent) {
         let connection_count = {
             let _gate = self.config_gate.lock().unwrap();
@@ -1241,8 +1249,7 @@ impl Broker {
         }
 
         // Confirm off the async runtime: the native sheet blocks its thread
-        // until the user answers, and the pairing response deliberately waits
-        // on that decision.
+        // until the user answers, while pairing has already returned.
         let events = self.events.clone();
         let agent_name = agent.name.clone();
         let confirmation = tokio::task::spawn_blocking(move || {
@@ -1261,6 +1268,17 @@ impl Broker {
             );
             return;
         };
+
+        // Pairing and confirmation are deliberately decoupled. The user may
+        // disconnect the agent while the sheet is open; never recreate an
+        // orphaned wiring after that revocation.
+        if self.pairing.get_by_id(&agent.id).is_none() {
+            tracing::info!(
+                "first-agent auto-wire skipped for {}; agent was disconnected",
+                agent.name
+            );
+            return;
+        }
         self.store.note_user_presence();
 
         let _gate = self.config_gate.lock().unwrap();

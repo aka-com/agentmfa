@@ -534,9 +534,6 @@ async fn post_pair(State(state): State<AppState>, ApiJson(body): ApiJson<PairBod
     let replaces_existing_agent = broker.pairing.get(&name).is_some();
     match broker.pairing.pair(&name) {
         Ok((token, agent)) => {
-            if is_first_agent {
-                broker.bootstrap_first_agent_wirings(&agent).await;
-            }
             if replaces_existing_agent {
                 // A re-pair invalidates the prior token generation; close
                 // the transports it carried.
@@ -555,6 +552,9 @@ async fn post_pair(State(state): State<AppState>, ApiJson(body): ApiJson<PairBod
                 );
             }
             broker.events.agents_changed();
+            if is_first_agent {
+                broker.schedule_first_agent_wirings(agent.clone());
+            }
             (
                 StatusCode::OK,
                 Json(json!({

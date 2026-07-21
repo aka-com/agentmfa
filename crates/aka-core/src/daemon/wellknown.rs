@@ -84,8 +84,16 @@ when one exists:
        → 200 {{"client_id": "<uuid>", "agent": "<your-name>",
                "expires_at": "…"}}
 
-   `200` means the token works: skip pairing. Any `401` means it does
-   not: fall through to pairing.
+   Follow the response-specific recovery action; do not treat every `401`
+   as permission to re-pair:
+
+   | `/v1/whoami` result | Action |
+   | --- | --- |
+   | `200` | Reuse the stored token and skip pairing. |
+   | `401 token_superseded` | Re-read the token from the response's `store_at` path and retry. Do **not** pair. |
+   | `401 token_expired` | Pair again, then replace the stored token. |
+   | `401 invalid_token` | Pair again, then replace the stored token. |
+   | Any other `401` | Correct the Authorization header or bearer credential first; do not pair automatically. |
 
 2. Pair:
 
@@ -419,6 +427,11 @@ mod tests {
         ] {
             assert!(text.contains(needle), "instructions missing {needle:?}");
         }
+        assert!(text.contains(
+            "`401 token_superseded` | Re-read the token from the response's `store_at` path"
+        ));
+        assert!(text.contains("Do **not** pair"));
+        assert!(!text.contains("Any `401` means"));
         // Config-derived numbers are rendered, not hard-coded prose.
         assert!(text.contains("Tokens last\n30 days") || text.contains("30 days"));
     }

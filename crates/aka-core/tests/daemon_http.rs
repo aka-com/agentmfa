@@ -2,8 +2,9 @@
 //! real upstream HTTP server, and a scripted "user" deciding approvals.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use aka_core::broker::Broker;
 use aka_core::config::BrokerConfig;
@@ -46,18 +47,49 @@ impl BrokerEvents for DecliningEvents {
     }
 }
 
+/// Holds the first-agent wiring sheet open so the test can prove pairing
+/// returns independently of the user's eventual decision.
+#[derive(Default)]
+struct BlockingEvents {
+    entered: AtomicBool,
+    release: AtomicBool,
+}
+
+impl BrokerEvents for BlockingEvents {
+    fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
+        true
+    }
+
+    fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
+        self.entered.store(true, Ordering::SeqCst);
+        while !self.release.load(Ordering::SeqCst) {
+            std::thread::park_timeout(Duration::from_millis(5));
+        }
+        Some(ConfirmationMethod::Waived)
+    }
+}
+
 struct Harness {
     broker: Arc<Broker>,
     _daemon: daemon::DaemonHandle,
     socket: std::path::PathBuf,
     _dir: tempfile::TempDir,
+    expect_first_agent_auto_wire: bool,
 }
 
 async fn harness(config: BrokerConfig) -> Harness {
-    harness_with_events(config, Arc::new(TestEvents)).await
+    harness_inner(config, Arc::new(TestEvents), true).await
 }
 
-async fn harness_with_events(mut config: BrokerConfig, events: Arc<dyn BrokerEvents>) -> Harness {
+async fn harness_with_events(config: BrokerConfig, events: Arc<dyn BrokerEvents>) -> Harness {
+    harness_inner(config, events, false).await
+}
+
+async fn harness_inner(
+    mut config: BrokerConfig,
+    events: Arc<dyn BrokerEvents>,
+    expect_first_agent_auto_wire: bool,
+) -> Harness {
     config.version = "test".into();
     let dir = tempfile::tempdir().unwrap();
     let paths = Paths::under(dir.path());
@@ -71,6 +103,7 @@ async fn harness_with_events(mut config: BrokerConfig, events: Arc<dyn BrokerEve
         _daemon: handle,
         socket,
         _dir: dir,
+        expect_first_agent_auto_wire,
     }
 }
 
@@ -78,6 +111,14 @@ impl Harness {
     /// Registration is immediate: no prompt to decide. The first agent to
     /// pair is auto-wired to every existing connection.
     async fn pair(&mut self, name: &str) -> String {
+        let is_first_agent = self.broker.pairing.list().is_empty();
+        let connection_ids: Vec<_> = self
+            .broker
+            .store
+            .list_connections()
+            .into_iter()
+            .map(|connection| connection.id)
+            .collect();
         let (status, body) = uds_request(
             &self.socket,
             "POST",
@@ -87,6 +128,22 @@ impl Harness {
         )
         .await;
         assert_eq!(status, 200, "pair failed: {body}");
+        if is_first_agent
+            && self.expect_first_agent_auto_wire
+            && !connection_ids.is_empty()
+        {
+            let client = self.broker.pairing.get(name).unwrap();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while connection_ids
+                    .iter()
+                    .any(|id| !self.broker.wirings.is_wired(&client.id, id))
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("first-agent wiring was not applied asynchronously");
+        }
         body["token"].as_str().unwrap().to_string()
     }
 }
@@ -1175,6 +1232,57 @@ async fn first_agent_bootstrap_prompts_and_cancel_leaves_it_unwired() {
     .await;
     assert_eq!(status, 403, "unwired first agent must be refused: {body}");
     assert_eq!(body["reason"], "denied_by_policy");
+}
+
+#[tokio::test]
+async fn pairing_returns_while_first_agent_wiring_confirmation_is_open() {
+    let events = Arc::new(BlockingEvents::default());
+    let h = harness_with_events(BrokerConfig::default(), events.clone()).await;
+    let up = upstream().await;
+    api_connection(&h, "github", up.port);
+    let conn = h.broker.store.connection_by_name("github").unwrap();
+    let socket = h.socket.clone();
+
+    let pair = tokio::spawn(async move {
+        uds_request(
+            &socket,
+            "POST",
+            "/v1/pair",
+            &[],
+            Some(json!({"agent_name": "claude-code"})),
+        )
+        .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !events.entered.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first-agent wiring confirmation never opened");
+
+    // The confirmation is still blocked, but pairing must already be able to
+    // return the token. Release the sheet only after observing the response.
+    let response = tokio::time::timeout(Duration::from_secs(1), pair).await;
+    events.release.store(true, Ordering::SeqCst);
+    let (status, body) = response
+        .expect("pairing waited for the wiring confirmation")
+        .expect("pair request task failed");
+    assert_eq!(status, 200, "pair failed: {body}");
+    assert!(body["token"].as_str().unwrap().starts_with("aka_"));
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let client = h.broker.pairing.get("claude-code").unwrap();
+            if h.broker.wirings.is_wired(&client.id, &conn.id) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("approved first-agent wiring was not applied asynchronously");
 }
 
 #[tokio::test]

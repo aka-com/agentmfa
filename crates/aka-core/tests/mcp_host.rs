@@ -20,13 +20,17 @@ use aka_core::events::BrokerEvents;
 use aka_core::paths::Paths;
 use aka_core::sidecar::{Sidecar, SidecarConfig, SidecarEndpoint};
 use aka_core::store::ConnectionSpec;
-use aka_core::types::ConnectionConfig;
+use aka_core::types::{ConfirmationMethod, ConnectionConfig};
 use aka_core::vault::MemoryVault;
 use serde_json::{json, Value};
 use zeroize::Zeroizing;
 
 struct NoopEvents;
-impl BrokerEvents for NoopEvents {}
+impl BrokerEvents for NoopEvents {
+    fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
+        Some(ConfirmationMethod::Waived)
+    }
+}
 
 fn bundle() -> Option<PathBuf> {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -284,6 +288,21 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
     // The first agent is auto-wired to everything by design; the second
     // starts with nothing. That asymmetry is exactly what we want to test.
     let first = pair(&daemon.socket_path, "claude-code").await;
+    let claude = broker
+        .pairing
+        .get("claude-code")
+        .expect("paired first agent");
+    let all_connections = broker.store.list_connections();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while all_connections
+            .iter()
+            .any(|connection| !broker.wirings.is_wired(&claude.id, &connection.id))
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first-agent wiring was not applied asynchronously");
     let second = pair(&daemon.socket_path, "other-agent").await;
 
     // Narrow the first agent down to one connection so "wired" and
