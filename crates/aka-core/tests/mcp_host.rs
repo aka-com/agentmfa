@@ -320,6 +320,7 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
     assert_eq!(
         tools,
         vec![
+            "multitool_connect",
             "multitool_notes_search",
             "multitool_prod-db_request",
             "multitool_status"
@@ -390,10 +391,14 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
         "status must not advertise a phantom request tool for an MCP upstream: {status}"
     );
 
-    // A second agent, wired to nothing, gets the status tool and nothing else.
+    // A second agent, wired to nothing, gets the status + connect-request
+    // tools and nothing else.
     let mut bare = McpClient::new(&endpoint, &second);
     assert_eq!(bare.initialize().await, 200);
-    assert_eq!(bare.list_tools().await, vec!["multitool_status"]);
+    assert_eq!(
+        bare.list_tools().await,
+        vec!["multitool_connect", "multitool_status"]
+    );
     let status = tool_payload(&bare.call_tool("multitool_status", json!({})).await);
     assert_eq!(
         status["tools"],
