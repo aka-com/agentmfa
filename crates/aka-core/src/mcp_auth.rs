@@ -152,7 +152,7 @@ enum CompletionPlan {
     /// Create `secret_name` + a fresh connection from `spec`.
     New {
         secret_name: String,
-        spec: ConnectionSpec,
+        spec: Box<ConnectionSpec>,
     },
     /// Replace the token bound to an existing connection.
     Reauth {
@@ -346,6 +346,7 @@ impl Broker {
             port: draft.port,
             template: format!("Authorization: Bearer {{{{{secret_name}}}}}"),
             mcp_path: Some(draft.mcp_path.clone()),
+            oauth: None,
         };
         let spec = ConnectionSpec {
             name: name.clone(),
@@ -356,7 +357,14 @@ impl Broker {
         // opens; `add_connection_with_secret` re-checks at completion.
         self.store
             .preflight_add_connection_with_secret(&secret_name, &spec)?;
-        Ok((name, config, CompletionPlan::New { secret_name, spec }))
+        Ok((
+            name,
+            config,
+            CompletionPlan::New {
+                secret_name,
+                spec: Box::new(spec),
+            },
+        ))
     }
 
     /// `github` → `GITHUB_MCP_TOKEN`, suffixed if taken.
@@ -586,6 +594,7 @@ async fn run_flow(
     broadcast(broker, &session_id, McpAuthPhase::Verifying);
     let (connection_id, connection_name) = match plan {
         CompletionPlan::New { secret_name, spec } => {
+            let spec = *spec;
             let blocking_broker = broker.clone();
             let value = Zeroizing::new(tokens.access_token.to_string());
             let name_for_error = spec.name.clone();

@@ -92,6 +92,22 @@ impl BrokerEvents for TauriEvents {
             .map(|_| ConfirmationMethod::OsAuthentication)
     }
 
+    /// Open the OAuth authorize page in the user's default browser.
+    fn open_external_url(&self, url: &str) -> bool {
+        // Only web URLs, ever: this hook exists for the OAuth consent page.
+        if !url.starts_with("https://") {
+            return false;
+        }
+        #[cfg(target_os = "macos")]
+        let launcher = "open";
+        #[cfg(not(target_os = "macos"))]
+        let launcher = "xdg-open";
+        std::process::Command::new(launcher)
+            .arg(url)
+            .spawn()
+            .is_ok()
+    }
+
     fn confirm_unverified_pg_tls(
         &self,
         host: &str,

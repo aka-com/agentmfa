@@ -258,6 +258,7 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
                     template: "Authorization: Bearer {{API_KEY}}".into(),
 
                     mcp_path: None,
+                    oauth: None,
                 },
                 secrets: vec![],
             })
@@ -274,6 +275,7 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
                 port: Some(upstream_port),
                 template: "Authorization: Bearer {{API_KEY}}".into(),
                 mcp_path: Some("/mcp".into()),
+                oauth: None,
             },
             secrets: vec![],
         })

@@ -99,6 +99,12 @@ pub enum ConnectionConfig {
         /// sidecar: the MCP traffic rides the existing HTTP plane.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mcp_path: Option<String>,
+        /// When set, the credential is an OAuth 2.0 token set minted by a
+        /// browser sign-in against the user's own OAuth app (BYO-app,
+        /// loopback PKCE). The bound secret holds the JSON token set; the
+        /// upstream leg injects a live bearer, refreshing on expiry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        oauth: Option<OAuthSpec>,
     },
     Pg {
         host: String,
@@ -292,6 +298,32 @@ impl ConnectionConfig {
             _ => None,
         }
     }
+}
+
+/// A connection's OAuth 2.0 provider configuration (BYO app + loopback
+/// PKCE), for plain REST upstreams with no MCP discovery to lean on.
+///
+/// Only non-secret coordinates live here: endpoints, the public client id,
+/// and the granted scopes. The tokens (and an optional client secret) live
+/// in the vault, inside the connection's bound token secret. Living in the
+/// sealed index means the token endpoint the refresh token is sent to
+/// cannot be repointed on disk.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OAuthSpec {
+    /// Provider authorization endpoint, e.g. "https://slack.com/oauth/v2/authorize".
+    pub auth_url: String,
+    /// Provider token endpoint, e.g. "https://slack.com/api/oauth.v2.access".
+    pub token_url: String,
+    /// The user's own OAuth app client id (public).
+    pub client_id: String,
+    /// Scopes granted at connect time; space-joined on the wire.
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// Extra authorize-endpoint query parameters some providers require to
+    /// return a refresh token (e.g. Google's `access_type=offline` and
+    /// `prompt=consent`). Applied verbatim to the authorize URL.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_auth_params: Vec<(String, String)>,
 }
 
 /// Persisted per-connection health, updated by tests and brokered calls.
@@ -579,6 +611,7 @@ mod tests {
             template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
 
             mcp_path: None,
+            oauth: None,
         };
         assert_eq!(api.target(), "https://api.github.com");
         let pg = ConnectionConfig::Pg {
@@ -655,6 +688,7 @@ mod tests {
             template: "Authorization: Bearer {{A}}".into(),
 
             mcp_path: None,
+            oauth: None,
         };
         let api_b = ConnectionConfig::Api {
             host: "api.example.com".into(),
@@ -663,6 +697,7 @@ mod tests {
             template: "Authorization: Bearer {{B}}".into(),
 
             mcp_path: None,
+            oauth: None,
         };
         assert!(api_a.has_equivalent_target(&api_b));
 

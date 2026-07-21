@@ -136,7 +136,7 @@ pub(crate) async fn ensure_fresh(ctx: &RefreshContext<'_>, connection: &Connecti
 /// One process-wide async lock per connection. The broker instance lock
 /// guarantees a single broker per state dir, so process-wide is
 /// grant-wide.
-fn connection_lock(id: &Uuid) -> Arc<tokio::sync::Mutex<()>> {
+pub(crate) fn connection_lock(id: &Uuid) -> Arc<tokio::sync::Mutex<()>> {
     static LOCKS: OnceLock<Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
     LOCKS
         .get_or_init(Default::default)

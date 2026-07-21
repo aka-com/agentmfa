@@ -227,6 +227,7 @@ fn api_connection(harness: &Harness, name: &str, port: u16) {
                 template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
 
                 mcp_path: None,
+                oauth: None,
             },
             secrets: vec![],
         })
@@ -822,6 +823,7 @@ async fn query_injected_secret_not_leaked_in_upstream_error() {
                 template: "?token={{url(STREAM_TOKEN)}}".into(),
 
                 mcp_path: None,
+                oauth: None,
             },
             secrets: vec![],
         })
@@ -1000,6 +1002,7 @@ async fn mutating_request_id_is_scoped_to_connection() {
                 template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
 
                 mcp_path: None,
+                oauth: None,
             },
             secrets: vec![],
         })
@@ -1437,6 +1440,7 @@ async fn a_curated_wiring_refuses_tools_outside_its_subset() {
                 port: Some(up.port),
                 template: "Authorization: Bearer {{MCP_TOKEN}}".into(),
                 mcp_path: Some("/echo".into()),
+                oauth: None,
             },
             secrets: vec![],
         })

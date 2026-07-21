@@ -50,6 +50,8 @@ export interface ConnectionSummary {
   sslmode: string | null;
   url: string | null;
   trusted_ca_bundle_path: string | null;
+  /** Set when the credential is a BYO-app OAuth token set (never tokens). */
+  oauth_spec?: { auth_url: string; token_url: string; client_id: string; scopes: string[] } | null;
   /**
    * Last-known health, learned passively (brokered calls) and from tests
    * and status checks: 'ok' | 'failed' | 'needs_reconnect'. All absent
@@ -158,6 +160,12 @@ export interface ConnectionInput {
   port?: number | null;
   /** Set when this API upstream speaks MCP at that path. */
   mcp_path?: string | null;
+  // BYO-app OAuth (plain REST rows): non-secret provider coordinates.
+  oauth_auth_url?: string | null;
+  oauth_token_url?: string | null;
+  oauth_client_id?: string | null;
+  oauth_scopes?: string[] | null;
+  oauth_extra_params?: Array<[string, string]> | null;
   template?: string | null;
   dbname?: string | null;
   user?: string | null;
@@ -289,6 +297,8 @@ export interface CommandMap {
     boolean
   >;
   list_mcp_tools: CommandSpec<{ id: string }, McpToolInfo[]>;
+  oauth_connect: CommandSpec<{ input: ConnectionInput; clientSecret?: string | null }, void>;
+  oauth_reconnect: CommandSpec<{ id: string }, void>;
   open_url: CommandSpec<{ url: string }, void>;
   set_wiring: CommandSpec<{
     agentId: string;

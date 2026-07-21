@@ -129,6 +129,7 @@ interface MockConnection {
   sslmode?: string | null;
   trusted_ca_bundle_path?: string | null;
   url?: string | null;
+  oauth_spec?: { auth_url: string; token_url: string; client_id: string; scopes: string[] } | null;
 }
 
 interface MockWiring {
@@ -169,6 +170,7 @@ interface MockArgs {
   wired: boolean;
   tools?: string[] | null;
   mode: WiringMode;
+  clientSecret?: string | null;
   source: string;
   host: string;
   port: number;
@@ -313,7 +315,7 @@ function connDto(c: MockConnection): ConnectionSummary {
       .filter((w) => w.connection_id === c.id)
       .map((w) => ({ agent_id: w.client_id, agent: w.agent, allowed_tools: w.allowed_tools ?? null, mode: w.mode })),
     host: c.host || null, scheme: c.scheme || null, port: c.port || null, template: c.template || null,
-    mcp_path: c.mcp_path || null, account: c.account || null,
+    mcp_path: c.mcp_path || null, account: c.account || null, oauth_spec: c.oauth_spec || null,
     dbname: c.dbname || null, user: c.user || null, host_key_fingerprint: c.host_key_fingerprint || null,
     destination: c.destination || null,
     sslmode: c.sslmode || null, url: c.url || null,
@@ -658,6 +660,42 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       }
       emit('aka://wirings-changed', {});
       return true;
+    }
+    case 'oauth_connect': {
+      const input = args.input;
+      if (db.connections.some((c) => c.name === input.name)) {
+        throw formError('conflict', 'connection_name_taken', 'name', 'That tool name is already in use');
+      }
+      // Stand in for the whole browser dance.
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      const secretName = `${input.name.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_OAUTH_TOKEN`;
+      db.secrets.push(mkSecret(secretName, 'oauth-token-set-demo'));
+      db.connections.push({
+        id: `conn-${Math.random().toString(36).slice(2, 8)}`,
+        name: input.name,
+        type: 'api',
+        secret_names: [secretName],
+        secret_ids: [],
+        host: input.host, scheme: input.scheme || 'https', port: input.port ?? null,
+        template: `Authorization: Bearer {{${secretName}}}`,
+        oauth_spec: {
+          auth_url: input.oauth_auth_url || '',
+          token_url: input.oauth_token_url || '',
+          client_id: input.oauth_client_id || '',
+          scopes: input.oauth_scopes || [],
+        },
+      });
+      audit('connectionAdded', `Tool connected via OAuth: ${input.name}`);
+      emit('aka://connections-changed', {});
+      return;
+    }
+    case 'oauth_reconnect': {
+      const c = db.connections.find((x) => x.id === args.id);
+      if (!c || !c.oauth_spec) throw new Error('this tool is not an OAuth connection');
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      audit('connectionUpdated', `Tool reconnected via OAuth: ${c.name}`);
+      emit('aka://connections-changed', {});
+      return;
     }
     case 'set_wiring_tools': {
       const wiring = db.wirings.find((w) =>

@@ -344,7 +344,29 @@ impl HttpExecution {
                 format!("The destination answered but rejected the credential (HTTP {status})"),
             ),
             Some(_) => health.record_ok_if_changed(&id, "A brokered call reached the destination"),
-            None => {}
+            None => {
+                let oauth = matches!(
+                    &self.connection.config,
+                    ConnectionConfig::Api { oauth: Some(_), .. }
+                );
+                let render_failed = outcome
+                    .body
+                    .get("reason")
+                    .and_then(|r| r.as_str())
+                    .is_some_and(|r| r == "credential_render_failed");
+                if oauth && render_failed {
+                    let detail = outcome
+                        .body
+                        .get("detail")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("The OAuth token could not be refreshed");
+                    health.record(
+                        &id,
+                        crate::types::HealthStatus::NeedsReconnect,
+                        detail.to_string(),
+                    );
+                }
+            }
         }
     }
 
@@ -364,19 +386,20 @@ impl HttpExecution {
         }
         // Render the credential as late as possible; values are zeroized on
         // drop.
-        let ConnectionConfig::Api { template, .. } = &self.connection.config else {
+        if !matches!(&self.connection.config, ConnectionConfig::Api { .. }) {
             return broker_error(
                 500,
                 ErrorReason::WrongConnectionType,
                 "not an api connection",
             );
-        };
+        }
         let (scheme, host, port) = pinned_base(&self.connection.config).expect("api config");
 
-        let injection = match render_injection(&self.store, template).await {
-            Ok(i) => i,
-            Err(e) => return broker_error(502, ErrorReason::CredentialRenderFailed, e),
-        };
+        let injection =
+            match render_connection_injection(&self.store, &self.client, &self.connection).await {
+                Ok(i) => i,
+                Err(e) => return broker_error(502, ErrorReason::CredentialRenderFailed, e),
+            };
         let redactions = Redactions::from_injection(&injection);
 
         // Build the initial URL from parsed components, never string
@@ -532,11 +555,11 @@ pub async fn test_upstream(
     timeout: std::time::Duration,
     connection: &Connection,
 ) -> Result<String, String> {
-    let ConnectionConfig::Api { template, .. } = &connection.config else {
+    if !matches!(&connection.config, ConnectionConfig::Api { .. }) {
         return Err("not an api connection".into());
-    };
+    }
     let (scheme, host, port) = pinned_base(&connection.config).expect("api config");
-    let injection = render_injection(store, template).await?;
+    let injection = render_connection_injection(store, client, connection).await?;
     let mut url =
         Url::parse(&format!("{scheme}://{host}/")).map_err(|e| format!("bad origin: {e}"))?;
     if url.set_port(port).is_err() {
@@ -565,6 +588,33 @@ pub async fn test_upstream(
         ));
     }
     Ok(format!("GET {scheme}://{host}/ answered HTTP {status}"))
+}
+
+/// The credential for a connection's upstream leg: a fresh OAuth bearer
+/// for BYO-app OAuth connections (refreshing on expiry), the rendered
+/// injection template otherwise.
+pub(crate) async fn render_connection_injection(
+    store: &Arc<Store>,
+    client: &reqwest::Client,
+    connection: &Connection,
+) -> Result<RenderedInjection, String> {
+    let ConnectionConfig::Api {
+        template, oauth, ..
+    } = &connection.config
+    else {
+        return Err("not an api connection".into());
+    };
+    if oauth.is_some() {
+        let token = crate::oauth::fresh_bearer(store, client, connection).await?;
+        let mut value = HeaderValue::from_str(&format!("Bearer {}", &*token))
+            .map_err(|_| "the stored access token is not a valid header value".to_string())?;
+        value.set_sensitive(true);
+        return Ok(RenderedInjection::Header(
+            HeaderName::from_static("authorization"),
+            value,
+        ));
+    }
+    render_injection(store, template).await
 }
 
 pub(crate) async fn render_injection(

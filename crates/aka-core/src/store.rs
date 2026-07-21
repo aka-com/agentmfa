@@ -908,6 +908,7 @@ fn validate_config_and_bind_secrets(
             port: _,
             template,
             mcp_path,
+            oauth,
         } => {
             if host.is_empty() || host.contains('/') || host.contains('@') || host.contains(':') {
                 return Err(CoreError::InvalidConnectionField {
@@ -927,6 +928,22 @@ fn validate_config_and_bind_secrets(
                     return Err(CoreError::InvalidConnectionField {
                         field: ConnectionField::Url,
                         message: "The MCP path must start with / (for example /mcp)".into(),
+                    });
+                }
+            }
+            if let Some(oauth) = oauth {
+                let https_url =
+                    |value: &str| url::Url::parse(value).is_ok_and(|url| url.scheme() == "https");
+                if !https_url(&oauth.auth_url) || !https_url(&oauth.token_url) {
+                    return Err(CoreError::InvalidConnectionField {
+                        field: ConnectionField::Url,
+                        message: "OAuth endpoints must be complete https:// URLs".into(),
+                    });
+                }
+                if oauth.client_id.trim().is_empty() {
+                    return Err(CoreError::InvalidConnectionField {
+                        field: ConnectionField::Template,
+                        message: "The OAuth client ID is required".into(),
                     });
                 }
             }
@@ -1103,6 +1120,7 @@ mod tests {
                 template: template.into(),
 
                 mcp_path: None,
+                oauth: None,
             },
             secrets: vec![],
         }
@@ -1549,6 +1567,63 @@ mod tests {
                 CoreError::InvalidConnectionField { .. }
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn oauth_specs_validate_endpoints_and_client_id() {
+        let (store, _, _dir) = store().await;
+        store.add_secret("SLACK_OAUTH_TOKEN", val("{}")).unwrap();
+        let spec = |auth: &str, token: &str, client: &str| ConnectionSpec {
+            name: "slack".into(),
+            config: ConnectionConfig::Api {
+                host: "slack.com".into(),
+                scheme: "https".into(),
+                port: None,
+                template: "Authorization: Bearer {{SLACK_OAUTH_TOKEN}}".into(),
+                mcp_path: None,
+                oauth: Some(crate::types::OAuthSpec {
+                    auth_url: auth.into(),
+                    token_url: token.into(),
+                    client_id: client.into(),
+                    scopes: vec!["chat:write".into()],
+                    extra_auth_params: vec![],
+                }),
+            },
+            secrets: vec![],
+        };
+        // Plain-http endpoints and a blank client id are refused…
+        assert!(store
+            .add_connection(spec(
+                "http://slack.com/authorize",
+                "https://slack.com/token",
+                "id"
+            ))
+            .is_err());
+        assert!(store
+            .add_connection(spec("https://slack.com/authorize", "not a url", "id"))
+            .is_err());
+        assert!(store
+            .add_connection(spec(
+                "https://slack.com/authorize",
+                "https://slack.com/token",
+                "  "
+            ))
+            .is_err());
+        // …while a complete spec saves and round-trips.
+        let saved = store
+            .add_connection(spec(
+                "https://slack.com/oauth/v2/authorize",
+                "https://slack.com/api/oauth.v2.access",
+                "1234.5678",
+            ))
+            .unwrap();
+        let ConnectionConfig::Api {
+            oauth: Some(oauth), ..
+        } = saved.config
+        else {
+            panic!("oauth spec lost");
+        };
+        assert_eq!(oauth.client_id, "1234.5678");
     }
 
     #[tokio::test]

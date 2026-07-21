@@ -564,6 +564,131 @@ impl Broker {
         Ok(ConnectionTestReport { ok, detail })
     }
 
+    /* ---------------------- OAuth (BYO app, REST rows) --------------------- */
+
+    /// Connect a new OAuth tool: confirm, open the provider's consent page
+    /// in the user's browser, catch the loopback redirect, exchange the
+    /// code (PKCE), and store the token set + connection atomically. The
+    /// token secret named `secret_name` is what the connection's template
+    /// references; the tokens never leave the vault.
+    pub async fn ui_oauth_connect(
+        &self,
+        secret_name: &str,
+        client_secret: Option<SecretValue>,
+        spec: ConnectionSpec,
+    ) -> Result<Connection> {
+        let crate::types::ConnectionConfig::Api {
+            oauth: Some(oauth_spec),
+            mcp_path: None,
+            ..
+        } = spec.config.clone()
+        else {
+            return Err(CoreError::InvalidConnectionConfig(
+                "OAuth connect requires a plain api config with an oauth section                  (MCP servers use the sign-in flow instead)"
+                    .into(),
+            ));
+        };
+        self.store
+            .preflight_add_connection_with_secret(secret_name, &spec)?;
+        let confirmation =
+            self.confirm_action(&format!("Connect “{}” with your browser", spec.name))?;
+        let pending = crate::oauth::begin(&oauth_spec)
+            .await
+            .map_err(CoreError::OAuth)?;
+        if !self.events.open_external_url(&pending.authorize_url) {
+            return Err(CoreError::OAuth(format!(
+                "could not open the browser; open this URL yourself: {}",
+                pending.authorize_url
+            )));
+        }
+        let tokens = crate::oauth::finish(pending, &oauth_spec, client_secret, &self.http_client)
+            .await
+            .map_err(CoreError::OAuth)?;
+        let (_, conn) =
+            self.store
+                .add_connection_with_secret(secret_name, tokens.to_secret_value(), spec)?;
+        self.health.record(
+            &conn.id,
+            crate::types::HealthStatus::Ok,
+            "Connected via OAuth",
+        );
+        self.audit.append(
+            AuditEntry::new(
+                AuditKind::ConnectionAdded,
+                format!("Tool connected via OAuth: {}", conn.name),
+            )
+            .connection(conn.name.clone())
+            .detail(format!("{} → {}", conn.kind().label(), conn.target()))
+            .field("kind", conn.kind().as_str())
+            .field("target", conn.target())
+            .field("oauth", true)
+            .confirmation(confirmation),
+        );
+        self.events.connections_changed();
+        Ok(conn)
+    }
+
+    /// Re-run the OAuth flow for an existing connection whose token was
+    /// rejected or expired, replacing the stored token set in place.
+    pub async fn ui_oauth_reconnect(&self, id: &Uuid) -> Result<Connection> {
+        let conn = self.store.connection_by_id(id)?;
+        let crate::types::ConnectionConfig::Api {
+            oauth: Some(oauth_spec),
+            ..
+        } = conn.config.clone()
+        else {
+            return Err(CoreError::InvalidConnectionConfig(
+                "this tool is not an OAuth connection".into(),
+            ));
+        };
+        let secret_id = *conn.secrets.first().ok_or_else(|| {
+            CoreError::InvalidConnectionConfig("the OAuth connection has no token secret".into())
+        })?;
+        let confirmation =
+            self.confirm_action(&format!("Reconnect “{}” with your browser", conn.name))?;
+        // Carry the client secret across (BYO apps that require one at the
+        // token endpoint); the old tokens are replaced wholesale.
+        let previous = self
+            .store
+            .secret_value(&secret_id)
+            .await
+            .ok()
+            .and_then(|value| crate::oauth::TokenSet::from_secret_value(&value).ok());
+        let client_secret = previous
+            .and_then(|tokens| tokens.client_secret)
+            .map(zeroize::Zeroizing::new);
+        let pending = crate::oauth::begin(&oauth_spec)
+            .await
+            .map_err(CoreError::OAuth)?;
+        if !self.events.open_external_url(&pending.authorize_url) {
+            return Err(CoreError::OAuth(format!(
+                "could not open the browser; open this URL yourself: {}",
+                pending.authorize_url
+            )));
+        }
+        let tokens = crate::oauth::finish(pending, &oauth_spec, client_secret, &self.http_client)
+            .await
+            .map_err(CoreError::OAuth)?;
+        self.store
+            .replace_secret_value(&secret_id, tokens.to_secret_value())?;
+        self.health.record(
+            &conn.id,
+            crate::types::HealthStatus::Ok,
+            "Reconnected via OAuth",
+        );
+        self.audit.append(
+            AuditEntry::new(
+                AuditKind::ConnectionUpdated,
+                format!("Tool reconnected via OAuth: {}", conn.name),
+            )
+            .connection(conn.name.clone())
+            .field("oauth", true)
+            .confirmation(confirmation),
+        );
+        self.events.connections_changed();
+        Ok(conn)
+    }
+
     /// UI-initiated MCP status check: reach the connection's MCP endpoint
     /// with its own injected credential, acknowledge the account (via the
     /// template's whoami tool, when one is configured), list tools against

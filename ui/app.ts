@@ -98,6 +98,13 @@ interface ConnectionDraft {
   sshImportId?: string;
   destination?: string | null;
   authMode?: string;
+  // BYO-app OAuth (plain REST rows).
+  oauthClientId?: string;
+  oauthClientSecret?: string;
+  oauthAuthUrl?: string;
+  oauthTokenUrl?: string;
+  /** Checked scopes; undefined means "preset defaults, all on". */
+  oauthScopes?: string[];
   authDetail?: string;
   import?: string;
   setupSource?: 'manual' | 'import';
@@ -606,7 +613,7 @@ function connectionPurpose(c: ConnectionSummary): string {
 
 /** The credential the broker injects; never its value. */
 function connectionCredential(c: ConnectionSummary): string {
-  if (c.oauth) return 'OAuth sign-in (token auto-refreshes)';
+  if (c.oauth || c.oauth_spec) return 'OAuth sign-in (token auto-refreshes)';
   const names = c.secret_names || [];
   if (!names.length) return 'No credential bound';
   return `Uses ${names.join(' + ')}`;
@@ -646,6 +653,8 @@ function catalogConnRowHTML(c: ConnectionSummary): string {
     : '';
   const reconnectItem = c.mcp_path
     ? `<button class="menu-item" role="menuitem" data-act="reconnect-mcp" data-id="${c.id}">${ICONS.logIn} Reconnect (sign in again)…</button>`
+    : c.oauth_spec
+    ? `<button class="menu-item" role="menuitem" data-act="oauth-reconnect" data-id="${c.id}">${ICONS.logIn} Reconnect (sign in again)…</button>`
     : '';
   // Only call out TLS when it is weaker than the default.
   const tls = c.type === 'pg' && c.sslmode && c.sslmode !== 'verify-full'
@@ -659,6 +668,8 @@ function catalogConnRowHTML(c: ConnectionSummary): string {
     ? `<span class="cat-meta-warn" title="${escAttr(c.last_detail || '')}">Needs reconnect</span>
        ${c.mcp_path
          ? `<button class="btn ghost sm cat-meta-fix" data-act="reconnect-mcp" data-id="${c.id}">Reconnect…</button>`
+         : c.oauth_spec
+         ? `<button class="btn ghost sm cat-meta-fix" data-act="oauth-reconnect" data-id="${c.id}">Reconnect…</button>`
          : `<button class="btn ghost sm cat-meta-fix" data-act="test-conn" data-id="${c.id}">Test again</button>`}`
     : '';
   return `<div class="cat-conn">
@@ -1393,6 +1404,8 @@ function connSheet(editing: boolean): string {
     }
   } else if (t === 'api' || t === 'ws') {
     const mcpAdd = t === 'api' && isMcpDraft(d);
+    const oauthPreset = !mcpAdd && t === 'api' && d.entryId
+      ? catalogEntryById(d.entryId)?.oauthPreset : undefined;
     const modeValue = d.authMode || (mcpAdd ? 'oauth' : 'bearer');
     const recipes: Array<[string, string]> = [
       // MCP servers advertise their own sign-in flow; the browser dance is
@@ -1400,12 +1413,38 @@ function connSheet(editing: boolean): string {
       ...(mcpAdd ? [['oauth', 'Sign in with your account (OAuth)'] as [string, string]] : []),
       ['bearer', 'Bearer token'], ['header', 'Custom header'],
       ...(t === 'api' ? [['query', 'Query parameter'] as [string, string]] : []),
+      // Plain REST rows with documented OAuth endpoints offer a browser
+      // sign-in against the user's own OAuth app (BYO-app, loopback PKCE).
+      ...(oauthPreset ? [['oauth', 'Sign in with your browser (your OAuth app)'] as [string, string]] : []),
       ['advanced', 'Bearer token + template'],
     ];
     // Decision first: the authentication type governs which detail field and
     // credential inputs appear, so those render beneath the select.
     fields += `<div class="f-row"><label for="c-auth-mode">Authentication type</label>${customSelectHTML('c-auth-mode', recipes, modeValue)}</div>`;
-    if (modeValue === 'oauth') {
+    if (modeValue === 'oauth' && oauthPreset) {
+      const checked = d.oauthScopes ?? oauthPreset.scopes;
+      const scopeBoxes = oauthPreset.scopes.map((scope) => `<label class="wt-row">
+          <input type="checkbox" data-act="oauth-scope-toggle" data-scope="${escAttr(scope)}"
+            ${checked.includes(scope) ? 'checked' : ''}>
+          <span class="wt-name"><code>${esc(scope)}</code></span>
+        </label>`).join('');
+      fields += `<div class="rule-note oauth-note">Uses your own OAuth app: create one at
+          <code>${esc(oauthPreset.appDocsUrl || 'the provider')}</code>, allow a
+          <code>http://127.0.0.1</code> redirect, and paste its client ID. You’ll approve access in
+          your browser; tokens live in your Keychain and refresh automatically.</div>
+        <div class="f-row"><label for="c-oauth-client-id">Client ID</label>
+          <input id="c-oauth-client-id" class="${fieldCls('oauthClientId')}" value="${escAttr(d.oauthClientId ?? '')}">${fieldErr('oauthClientId')}</div>
+        <div class="f-row"><label for="c-oauth-client-secret">Client secret <span class="label-detail">(only if your provider requires one)</span></label>
+          <input id="c-oauth-client-secret" type="password" value="${escAttr(d.oauthClientSecret ?? '')}"></div>
+        <div class="f-row"><label>Scopes</label><div class="wt-list">${scopeBoxes}</div></div>
+        <div class="adv-collapse"><details class="set-collapse"><summary>OAuth endpoints</summary>
+          <div class="set-panel">
+          <div class="f-row"><label for="c-oauth-auth-url">Authorization URL</label>
+            <input id="c-oauth-auth-url" class="${fieldCls('oauthAuthUrl')}" value="${escAttr(d.oauthAuthUrl ?? oauthPreset.authUrl)}">${fieldErr('oauthAuthUrl')}</div>
+          <div class="f-row"><label for="c-oauth-token-url">Token URL</label>
+            <input id="c-oauth-token-url" class="${fieldCls('oauthTokenUrl')}" value="${escAttr(d.oauthTokenUrl ?? oauthPreset.tokenUrl)}">${fieldErr('oauthTokenUrl')}</div>
+          </div></details></div>`;
+    } else if (modeValue === 'oauth') {
       fields += `<div class="rule-note oauth-note">You’ll approve access in your browser. The token is saved
         to your Keychain and injected by the broker — agents never see it. Run this again to connect
         a second account.</div>`;
@@ -1733,6 +1772,10 @@ function captureDrafts(): void {
     }
     if (g('c-auth-mode') !== undefined) state.draft.authMode = g('c-auth-mode');
     if (g('c-auth-detail') !== undefined) state.draft.authDetail = g('c-auth-detail');
+    if (g('c-oauth-client-id') !== undefined) state.draft.oauthClientId = g('c-oauth-client-id');
+    if (g('c-oauth-client-secret') !== undefined) state.draft.oauthClientSecret = g('c-oauth-client-secret');
+    if (g('c-oauth-auth-url') !== undefined) state.draft.oauthAuthUrl = g('c-oauth-auth-url');
+    if (g('c-oauth-token-url') !== undefined) state.draft.oauthTokenUrl = g('c-oauth-token-url');
   }
 }
 
@@ -1844,6 +1887,9 @@ async function saveConn(): Promise<void> {
   const mcpAdd = adding && t === 'api' && isMcpDraft(d);
   const authMode = d.authMode || (mcpAdd ? 'oauth' : 'bearer');
   const usesOauth = mcpAdd && authMode === 'oauth';
+  const oauthPreset = adding && t === 'api' && !mcpAdd && d.entryId
+    ? catalogEntryById(d.entryId)?.oauthPreset : undefined;
+  const byoOauth = !!oauthPreset && authMode === 'oauth';
   const errs: Record<string, string> = {};
   if (!name) errs.name = 'Name is required';
   if (t === 'api' || t === 'pg' || t === 'ssh') {
@@ -1878,9 +1924,18 @@ async function saveConn(): Promise<void> {
     try { apiOrigin = parseApiOrigin(d.origin || ''); }
     catch (error) { errs.origin = errorMessage(error); }
   }
+  if (byoOauth) {
+    if (!(d.oauthClientId || '').trim()) errs.oauthClientId = 'The OAuth client ID is required';
+    for (const [key, value] of [
+      ['oauthAuthUrl', d.oauthAuthUrl ?? oauthPreset!.authUrl],
+      ['oauthTokenUrl', d.oauthTokenUrl ?? oauthPreset!.tokenUrl],
+    ] as const) {
+      if (!/^https:\/\//.test((value || '').trim())) errs[key] = 'Must be a complete https:// URL';
+    }
+  }
   const usesRecipe = adding && (t === 'api' || t === 'ws')
-    && authMode !== 'advanced' && !usesOauth;
-  const needsCredentialChoice = !usesOauth && (
+    && authMode !== 'advanced' && !usesOauth && !byoOauth;
+  const needsCredentialChoice = !usesOauth && !byoOauth && (
     (adding && !((t === 'api' || t === 'ws') && authMode === 'advanced')) ||
     (!adding && t !== 'api'));
   const secretSource = adding
@@ -1933,6 +1988,32 @@ async function saveConn(): Promise<void> {
       whoami_tool: template?.whoamiTool ?? null,
       expected_tools: template?.expectedTools ?? [],
     });
+    return;
+  }
+  if (byoOauth) {
+    // The token is minted by the browser dance; the broker stores it and
+    // creates the connection only once authentication completed.
+    const scopes = d.oauthScopes ?? oauthPreset!.scopes;
+    const input: ConnectionInput = {
+      name,
+      type: t,
+      host: apiOrigin!.host,
+      scheme: apiOrigin!.scheme,
+      port: apiOrigin!.port,
+      oauth_auth_url: (d.oauthAuthUrl ?? oauthPreset!.authUrl).trim(),
+      oauth_token_url: (d.oauthTokenUrl ?? oauthPreset!.tokenUrl).trim(),
+      oauth_client_id: (d.oauthClientId || '').trim(),
+      oauth_scopes: scopes,
+      oauth_extra_params: oauthPreset!.extraAuthParams ?? [],
+    };
+    toast('🌐 Approve access in your browser…');
+    if (await run(() => invoke('oauth_connect', {
+      input, clientSecret: (d.oauthClientSecret || '').trim() || null,
+    }))) {
+      toast('🔌 Connected');
+      closeSheet();
+      await refresh('all');
+    }
     return;
   }
   const input: ConnectionInput = { name, type: t };
@@ -2454,6 +2535,28 @@ document.addEventListener('click', async (e) => {
       const value = btn.dataset.value || '';
       state.activityAgent = state.activityAgent === value ? null : value;
       render(false);
+      break;
+    }
+    case 'oauth-scope-toggle': {
+      captureDrafts();
+      const entry = state.draft.entryId ? catalogEntryById(state.draft.entryId) : undefined;
+      const preset = entry?.oauthPreset;
+      if (!preset) break;
+      const scope = btn.dataset.scope || '';
+      const current = state.draft.oauthScopes ?? preset.scopes;
+      state.draft.oauthScopes = current.includes(scope)
+        ? current.filter((candidate) => candidate !== scope)
+        : [...current, scope];
+      render(false);
+      break;
+    }
+    case 'oauth-reconnect': {
+      state.connMenuOpen = null;
+      toast('🌐 Approve access in your browser…');
+      if (await run(() => invoke('oauth_reconnect', { id }))) {
+        toast('🔌 Reconnected');
+        await refresh('all');
+      }
       break;
     }
     case 'wiring-tools': {

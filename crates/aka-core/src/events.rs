@@ -54,6 +54,15 @@ pub trait BrokerEvents: Send + Sync {
     /// so the user can add the tool; nothing is granted by the request.
     fn connect_requested(&self, _agent: &str, _service: &str) {}
 
+    /// Open a URL in the user's default browser (a BYO-app OAuth consent
+    /// page; the MCP sign-in flow opens URLs from the UI instead). Returning
+    /// false means the shell could not open it; the caller surfaces the URL
+    /// so the user can open it by hand. The default is fail-closed for tests
+    /// and headless use.
+    fn open_external_url(&self, _url: &str) -> bool {
+        false
+    }
+
     /// A high-consequence configuration action — creating/deleting a
     /// connection, changing its capability, or deleting a secret — is about
     /// to take effect. The core demands it, `None` aborts, and the default

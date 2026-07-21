@@ -85,6 +85,7 @@ fn add_github(broker: &Broker) -> Connection {
                 template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
 
                 mcp_path: None,
+                oauth: None,
             },
             secrets: vec![],
         })
@@ -223,6 +224,7 @@ async fn connection_add_preflight_rejects_failures_before_confirmation() {
             template: template.into(),
 
             mcp_path: None,
+            oauth: None,
         },
         secrets: vec![],
     };
@@ -366,6 +368,7 @@ async fn connection_renames_skip_confirmation_but_capability_changes_do_not() {
                     template,
 
                     mcp_path: None,
+                    oauth: None,
                 },
                 secrets: renamed.secrets.clone(),
             },
@@ -519,6 +522,7 @@ async fn service_tests_are_not_added_to_the_activity_log() {
                 template: "Authorization: Bearer {{API_KEY}}".into(),
 
                 mcp_path: None,
+                oauth: None,
             },
             secrets: vec![],
         })
@@ -590,6 +594,7 @@ async fn target_changes_drop_the_connection_wirings() {
                     template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
 
                     mcp_path: None,
+                    oauth: None,
                 },
                 secrets: vec![],
             },

@@ -35,6 +35,16 @@ impl SecretDto {
     }
 }
 
+/// Non-secret OAuth coordinates, so the UI can label the connection and
+/// offer Reconnect. Never token material.
+#[derive(Serialize)]
+pub struct OAuthDto {
+    pub auth_url: String,
+    pub token_url: String,
+    pub client_id: String,
+    pub scopes: Vec<String>,
+}
+
 /// One agent wired to a connection, as the UI toggles it.
 #[derive(Serialize)]
 pub struct WiringChip {
@@ -79,6 +89,8 @@ pub struct ConnectionDto {
     /// The upstream account this connection's credential was last verified
     /// as (an MCP whoami answer). Display metadata, never authorization.
     pub account: Option<String>,
+    /// Set when the credential is a BYO-app OAuth token set.
+    pub oauth_spec: Option<OAuthDto>,
     /// Last-known health: "ok" | "failed" | "needs_reconnect", with the
     /// check's summary and timestamp. All absent while untested.
     pub last_status: Option<String>,
@@ -126,6 +138,7 @@ impl ConnectionDto {
             url: None,
             mcp_path: None,
             account: conn.account.clone(),
+            oauth_spec: None,
             last_status: health.as_ref().map(|h| h.status.as_str().to_string()),
             last_detail: health.as_ref().map(|h| h.detail.clone()),
             last_checked_at: health.as_ref().map(|h| h.checked_at.to_rfc3339()),
@@ -137,12 +150,19 @@ impl ConnectionDto {
                 port,
                 template,
                 mcp_path,
+                oauth,
             } => {
                 dto.host = Some(host.clone());
                 dto.scheme = Some(scheme.clone());
                 dto.port = *port;
                 dto.template = Some(template.clone());
                 dto.mcp_path = mcp_path.clone();
+                dto.oauth_spec = oauth.as_ref().map(|o| OAuthDto {
+                    auth_url: o.auth_url.clone(),
+                    token_url: o.token_url.clone(),
+                    client_id: o.client_id.clone(),
+                    scopes: o.scopes.clone(),
+                });
             }
             Pg {
                 host,

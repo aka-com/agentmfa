@@ -477,6 +477,12 @@ pub struct ConnectionInput {
     pub template: Option<String>,
     /// Set when this API upstream speaks MCP at that path.
     pub mcp_path: Option<String>,
+    // BYO-app OAuth (plain REST rows): non-secret provider coordinates.
+    pub oauth_auth_url: Option<String>,
+    pub oauth_token_url: Option<String>,
+    pub oauth_client_id: Option<String>,
+    pub oauth_scopes: Option<Vec<String>>,
+    pub oauth_extra_params: Option<Vec<(String, String)>>,
     // PG
     pub dbname: Option<String>,
     pub user: Option<String>,
@@ -526,6 +532,18 @@ impl ConnectionInput {
                     .mcp_path
                     .map(|path| path.trim().to_string())
                     .filter(|path| !path.is_empty()),
+                oauth: match (self.oauth_auth_url, self.oauth_token_url, self.oauth_client_id) {
+                    (Some(auth_url), Some(token_url), Some(client_id)) => {
+                        Some(aka_core::types::OAuthSpec {
+                            auth_url: auth_url.trim().to_string(),
+                            token_url: token_url.trim().to_string(),
+                            client_id: client_id.trim().to_string(),
+                            scopes: self.oauth_scopes.unwrap_or_default(),
+                            extra_auth_params: self.oauth_extra_params.unwrap_or_default(),
+                        })
+                    }
+                    _ => None,
+                },
             },
             "pg" => ConnectionConfig::Pg {
                 host: self.host.unwrap_or_default(),
@@ -801,6 +819,94 @@ pub fn open_url(url: String) -> CmdResult<()> {
         .map_err(|e| format!("could not open the browser: {e}"))
 }
 
+/// Connect a tool with the user's own OAuth app: opens the provider's
+/// consent page in the browser, exchanges the code (loopback PKCE), and
+/// stores the token set + connection atomically. Long-running: it resolves
+/// only when the browser dance completes or times out.
+#[tauri::command]
+pub async fn oauth_connect(
+    state: State<'_, AppState>,
+    input: ConnectionInput,
+    client_secret: Option<String>,
+) -> FormResult<()> {
+    let name = input.name.clone();
+    let secret_name = suggested_oauth_secret_name(&state, &name);
+    let mut input = input;
+    // The token secret does not exist yet; the template is synthesized to
+    // reference it (binding + display), while the upstream leg injects a
+    // live bearer from the token set directly.
+    input.template = Some(format!("Authorization: Bearer {{{{{secret_name}}}}}"));
+    let kind = input.kind.clone();
+    let spec = input.into_spec()?;
+    state
+        .broker
+        .ui_oauth_connect(
+            &secret_name,
+            client_secret
+                .filter(|value| !value.trim().is_empty())
+                .map(Zeroizing::new),
+            spec,
+        )
+        .await
+        .map_err(|error| {
+            FormError::from_core(
+                error,
+                FormContext::Connection {
+                    kind: &kind,
+                    includes_new_secret: true,
+                },
+            )
+        })?;
+    Ok(())
+}
+
+/// `github` → `GITHUB_OAUTH_TOKEN`, suffixed if taken.
+fn suggested_oauth_secret_name(state: &State<AppState>, connection_name: &str) -> String {
+    let mut base: String = connection_name
+        .to_uppercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    base.truncate(48);
+    let base = base.trim_matches('_');
+    let base = if base.is_empty() || base.starts_with(|c: char| c.is_ascii_digit()) {
+        format!("OAUTH_{base}")
+    } else {
+        base.to_string()
+    };
+    let taken: std::collections::HashSet<String> = state
+        .broker
+        .store
+        .list_secrets()
+        .into_iter()
+        .map(|meta| meta.name)
+        .collect();
+    let candidate = format!("{base}_OAUTH_TOKEN");
+    if !taken.contains(&candidate) {
+        return candidate;
+    }
+    for n in 2..100 {
+        let candidate = format!("{base}_OAUTH_TOKEN_{n}");
+        if !taken.contains(&candidate) {
+            return candidate;
+        }
+    }
+    format!("{base}_OAUTH_TOKEN_{}", uuid::Uuid::new_v4().simple())
+}
+
+/// Re-run the OAuth flow for a connection whose token was rejected or
+/// expired, replacing the stored token set in place.
+#[tauri::command]
+pub async fn oauth_reconnect(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    let id = parse_id(&id)?;
+    state
+        .broker
+        .ui_oauth_reconnect(&id)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 /* ------------------------------- wirings ---------------------------------- */
 
 /// Wire or unwire an agent from a connection. Editing the wiring table is
@@ -968,6 +1074,8 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         cancel_mcp_auth,
         mcp_status,
         open_url,
+        oauth_connect,
+        oauth_reconnect,
         set_wiring,
         set_wiring_tools,
         list_mcp_tools,

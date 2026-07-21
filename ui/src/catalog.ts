@@ -51,6 +51,22 @@ export interface ConnectionPreset {
 }
 
 /**
+ * Prefill for a browser sign-in against the user's own OAuth app (BYO-app
+ * loopback PKCE) on a plain REST row: the provider's documented endpoints
+ * and sensible default scopes, all editable in the form.
+ */
+export interface OAuthPreset {
+  authUrl: string;
+  tokenUrl: string;
+  /** Default scopes, offered as checkboxes (all on by default). */
+  scopes: string[];
+  /** Extra authorize-URL params some providers need for a refresh token. */
+  extraAuthParams?: Array<[string, string]>;
+  /** Where to create the OAuth app (shown as plain text, not a link). */
+  appDocsUrl?: string;
+}
+
+/**
  * A branded MCP server the catalog knows how to reach and talk to.
  *
  * `serverUrl` is the vendor's published endpoint, prefilled into the add
@@ -84,6 +100,8 @@ export interface CatalogEntry {
   preset?: ConnectionPreset;
   /** Branded MCP details (endpoint, expected tools, whoami). */
   mcpTemplate?: McpTemplate;
+  /** BYO-app OAuth prefill for a plain REST row; see OAuthPreset. */
+  oauthPreset?: OAuthPreset;
   /** Extra search terms ("payments", "email") the row answers to. */
   keywords?: string[];
   /** From the generated MCP-registry tail, not the curated catalog. */
@@ -201,6 +219,12 @@ export const CATALOG: CatalogEntry[] = [
       docsUrl: 'linear.app/settings/api',
       credentialHint: 'lin_api_…',
     },
+    oauthPreset: {
+      authUrl: 'https://linear.app/oauth/authorize',
+      tokenUrl: 'https://api.linear.app/oauth/token',
+      scopes: ['read', 'write'],
+      appDocsUrl: 'linear.app/settings/api/applications',
+    },
   },
   {
     id: 'openai',
@@ -251,6 +275,12 @@ export const CATALOG: CatalogEntry[] = [
       name: 'slack',
       docsUrl: 'api.slack.com/apps',
       credentialHint: 'xoxb-…',
+    },
+    oauthPreset: {
+      authUrl: 'https://slack.com/oauth/v2/authorize',
+      tokenUrl: 'https://slack.com/api/oauth.v2.access',
+      scopes: ['channels:history', 'channels:read', 'chat:write', 'users:read'],
+      appDocsUrl: 'api.slack.com/apps (create an app, add a redirect URL later)',
     },
   },
   {

@@ -734,6 +734,7 @@ mod tests {
                 port: None,
                 template: "Authorization: Bearer {{T}}".into(),
                 mcp_path: Some("/mcp".into()),
+                oauth: None,
             },
             secrets: vec![],
             account: None,

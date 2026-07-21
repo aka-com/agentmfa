@@ -418,6 +418,7 @@ fn conn_config(args: &ConnAdd) -> Result<ConnectionConfig, String> {
                 template: require("template", &args.template)?,
 
                 mcp_path: None,
+                oauth: None,
             })
         }
         ConnKind::Pg => {

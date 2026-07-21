@@ -84,6 +84,9 @@ pub enum CoreError {
     #[error("another broker is already listening on {0}")]
     BrokerAlreadyRunning(String),
 
+    #[error("OAuth: {0}")]
+    OAuth(String),
+
     #[error("keychain: {0}")]
     Vault(String),
 
