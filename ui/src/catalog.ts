@@ -18,8 +18,8 @@ export type CatalogSection = 'Apps' | 'Infrastructure' | 'Secrets';
 export interface CatalogEntry {
   id: string;
   name: string;
-  /** Short chip label rendered as the row icon (GH, PG, SSH, …). */
-  chip: string;
+  /** Key into ICONS (Lucide) or BRAND_ICONS (Simple Icons brand marks). */
+  icon: string;
   description: string;
   section: CatalogSection;
   via: 'connection' | 'builtin' | 'mcp';
@@ -30,7 +30,7 @@ export const CATALOG: CatalogEntry[] = [
   {
     id: 'github',
     name: 'GitHub',
-    chip: 'GH',
+    icon: 'github',
     description: 'Repos, issues, PRs',
     section: 'Apps',
     via: 'mcp',
@@ -38,7 +38,7 @@ export const CATALOG: CatalogEntry[] = [
   {
     id: 'gmail',
     name: 'Gmail',
-    chip: 'G',
+    icon: 'gmail',
     description: 'Read & send email',
     section: 'Apps',
     via: 'mcp',
@@ -46,7 +46,7 @@ export const CATALOG: CatalogEntry[] = [
   {
     id: 'notion',
     name: 'Notion',
-    chip: 'N',
+    icon: 'notion',
     description: 'Pages & databases',
     section: 'Apps',
     via: 'mcp',
@@ -54,7 +54,7 @@ export const CATALOG: CatalogEntry[] = [
   {
     id: 'postgres',
     name: 'Postgres',
-    chip: 'PG',
+    icon: 'postgres',
     description: 'Query your database',
     section: 'Infrastructure',
     via: 'connection',
@@ -63,7 +63,7 @@ export const CATALOG: CatalogEntry[] = [
   {
     id: 'ssh',
     name: 'SSH',
-    chip: 'SSH',
+    icon: 'terminal',
     description: 'Remote shell access',
     section: 'Infrastructure',
     via: 'connection',
@@ -72,7 +72,7 @@ export const CATALOG: CatalogEntry[] = [
   {
     id: 'http',
     name: 'Custom API',
-    chip: 'API',
+    icon: 'globe',
     description: 'Any credentialed REST API',
     section: 'Infrastructure',
     via: 'connection',
@@ -81,7 +81,7 @@ export const CATALOG: CatalogEntry[] = [
   {
     id: 'websocket',
     name: 'Custom WebSocket',
-    chip: 'WS',
+    icon: 'radioTower',
     description: 'Streaming connections',
     section: 'Infrastructure',
     via: 'connection',
@@ -90,7 +90,7 @@ export const CATALOG: CatalogEntry[] = [
   {
     id: 'credentials',
     name: 'Saved credentials',
-    chip: 'KEY',
+    icon: 'keyRound',
     description: 'API keys, passwords, and private keys in your Keychain',
     section: 'Secrets',
     via: 'builtin',
@@ -98,7 +98,7 @@ export const CATALOG: CatalogEntry[] = [
   {
     id: 'onepassword',
     name: '1Password',
-    chip: '1P',
+    icon: 'onepassword',
     description: 'Vault & credentials',
     section: 'Secrets',
     via: 'mcp',
@@ -127,4 +127,15 @@ export function filterCatalog(query: string): CatalogEntry[] {
     entry.name.toLowerCase().includes(needle) ||
     entry.description.toLowerCase().includes(needle) ||
     entry.id.includes(needle));
+}
+
+/** The catalog's name for a connection type — the dialog titles reuse it. */
+export function catalogNameForType(type: ConnectionType): string {
+  return CATALOG.find((entry) => entry.via === 'connection' && entry.connType === type)?.name
+    ?? 'tool';
+}
+
+/** Catalog entries that can be added today, in display order. */
+export function addableEntries(): CatalogEntry[] {
+  return CATALOG.filter((entry) => entry.via === 'connection');
 }

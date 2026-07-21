@@ -7,7 +7,6 @@ import {
   firstTaskPrompt,
   parseConnectionImport,
   parseApiOrigin,
-  portForTypeSwitch,
   quickSetupPlaceholder,
   shouldResolveSshImport,
   sshImportFromPreview,
@@ -31,12 +30,6 @@ test('API origins preserve scheme and custom port', () => {
 test('API origins reject paths and embedded credentials', () => {
   assert.throws(() => parseApiOrigin('https://api.example.com/v1'), /cannot contain a path/);
   assert.throws(() => parseApiOrigin('https://token@api.example.com'), /must not contain credentials/);
-});
-
-test('switching PG and SSH only replaces a carried default port', () => {
-  assert.equal(portForTypeSwitch('pg', 'ssh', '5432'), '22');
-  assert.equal(portForTypeSwitch('ssh', 'pg', '22'), '5432');
-  assert.equal(portForTypeSwitch('pg', 'ssh', '6543'), '6543');
 });
 
 test('imports a percent-encoded Postgres DSN without putting its password in fields', () => {

@@ -110,17 +110,6 @@ export function parseApiOrigin(value: unknown): {
   };
 }
 
-export function portForTypeSwitch(
-  currentType: ConnectionType,
-  nextType: ConnectionType,
-  currentPort: number | string | null,
-): string {
-  const defaults: Partial<Record<ConnectionType, string>> = { pg: '5432', ssh: '22' };
-  const value = currentPort == null ? '' : String(currentPort);
-  if (value === (defaults[currentType] || '')) return defaults[nextType] || '';
-  return value || defaults[nextType] || '';
-}
-
 function decoded(value: string, label: string): string {
   try { return decodeURIComponent(value); }
   catch { throw new Error(`${label} contains invalid percent encoding`); }

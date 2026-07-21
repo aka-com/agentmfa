@@ -1,3 +1,4 @@
+import { BRAND_ICONS } from './brand-icons';
 import { LUCIDE_ICONS } from './icons';
 
 // Small shared helpers.
@@ -44,7 +45,9 @@ export const TYPES = {
   ssh: { label: 'SSH', cls: 'b-ssh' },
 };
 
-export const ICONS: Record<string, string> = LUCIDE_ICONS;
+// Lucide line icons plus the inlined Simple Icons brand marks, under one
+// lookup so a catalog entry just names its icon.
+export const ICONS: Record<string, string> = { ...LUCIDE_ICONS, ...BRAND_ICONS };
 
 let toastHost: HTMLElement | null = null;
 export function toast(msg: string): void {

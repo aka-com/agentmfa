@@ -7,13 +7,14 @@
 // UI is developable standalone.
 
 import { invoke, listen, mode } from '/src/bridge';
-import { CATALOG, CATALOG_SECTIONS, connectionsForEntry, filterCatalog } from '/src/catalog';
+import {
+  CATALOG, CATALOG_SECTIONS, catalogNameForType, connectionsForEntry, filterCatalog,
+} from '/src/catalog';
 import type { CatalogEntry } from '/src/catalog';
 import { ICONS, TYPES, esc, escAttr, toast, relTime, absTime } from '/src/util';
 import {
   apiOriginFromParts, authTemplate, firstTaskPrompt, parseApiOrigin, parseConnectionImport,
-  portForTypeSwitch, quickSetupPlaceholder, shouldResolveSshImport, sshImportFromPreview,
-  suggestedSecretName,
+  quickSetupPlaceholder, shouldResolveSshImport, sshImportFromPreview, suggestedSecretName,
 } from '/src/connection-input';
 import { formErrorKind, formErrorMessage, inlineFormError } from '/src/form-errors';
 import type { HostKeyCandidate } from '/src/connection-input';
@@ -539,7 +540,7 @@ function catalogRowHTML(entry: CatalogEntry): string {
     </div>`;
   return `<div class="cat-row-wrap ${open ? 'open' : ''} ${entry.via === 'mcp' ? 'is-soon' : ''}">
     <div class="cat-row">
-      <span class="cat-ico" aria-hidden="true">${esc(entry.chip)}</span>
+      <span class="cat-ico" aria-hidden="true">${ICONS[entry.icon] || ''}</span>
       <div class="cat-tx"><b>${esc(entry.name)}</b><span>${esc(entry.description)}</span></div>
       ${action}
     </div>${expansion}</div>`;
@@ -635,8 +636,7 @@ function renderMainWindow() {
   const actionBtn = state.tab === 'connections'
     ? `<div class="dw-head-actions">
         <input id="tool-search" class="cat-search" type="search" placeholder="Search tools…"
-          aria-label="Search tools" value="${escAttr(state.toolSearch)}">
-        <button class="btn" data-act="open-add-conn">＋ Add tool</button></div>`
+          aria-label="Search tools" value="${escAttr(state.toolSearch)}"></div>`
     : state.tab === 'agents'
     ? (state.settings.show_agent_walkthrough
         ? ''
@@ -670,8 +670,7 @@ function renderMainWindow() {
 function renderDropdown() {
   const tabs = TABS.map((tb) =>
     `<button class="seg-btn ${state.tab === tb ? 'on' : ''}" data-act="tab" data-tab="${tb}">${tabLabel(tb)}</button>`).join('');
-  const footer = state.tab === 'connections'
-    ? '<div class="dd-footer"><button class="btn block" data-act="open-add-conn">＋ Add tool</button></div>' : '';
+  const footer = '';
   root().innerHTML = `<div class="surface dropdown-surface">
     <div class="dd-head"><div class="dd-appicon">🔐</div>
       <div class="dd-identity"><div class="dd-title">Multitool</div>${brokerReadyHTML()}</div>
@@ -872,12 +871,6 @@ async function connectionDraftFromImport(
   };
 }
 
-function connectionTypeLabel(type: ConnectionType): string {
-  return type === 'pg' ? 'Postgres'
-    : type === 'ssh' ? 'SSH'
-    : type === 'ws' ? 'WebSocket'
-    : 'API';
-}
 
 // Whether the draft carries a non-default value in one of the fields hidden
 // behind the "Advanced" disclosure, so opening the sheet shows what is set.
@@ -895,19 +888,17 @@ function connSheet(editing: boolean): string {
   const t = state.connType;
   const sheetId = state.sheet?.id;
   const conn = editing ? state.connections.find((c) => c.id === sheetId) : null;
-  const typeBtn = (val: ConnectionType, label: string): string => {
-    if (editing) return `<button type="button" class="seg-btn ${t === val ? 'on' : ''}" disabled ${t === val ? '' : 'style="opacity:.35"'}>${label}</button>`;
-    return `<button type="button" class="seg-btn ${t === val ? 'on' : ''}" data-act="conn-type" data-type="${val}">${label}</button>`;
-  };
   const importWarnings = !editing && d.importWarnings && d.importWarnings.length
     ? `<div class="pair-identity-warning import-warning"><b>Review imported details</b><ul>${d.importWarnings.map((warning) => `<li>${esc(warning)}</li>`).join('')}</ul></div>` : '';
   // Paste-to-prefill: a DSN, URL, or `ssh` command fills the form below
   // instead of making the user retype what they already have.
-  const importRow = editing ? '' : `<div class="sheet-import">
+  const importRow = editing ? '' : `<div class="f-row sheet-import">
       <label for="conn-import">Paste a connection string <span class="label-detail">(optional)</span></label>
       <div class="sheet-import-row">
-        <input id="conn-import" placeholder="${escAttr(quickSetupPlaceholder(t))}" value="${escAttr(state.connImportSource)}">
-        <button class="btn sm" data-act="conn-import">Prefill</button></div>
+        <input id="conn-import" class="${state.connImportError ? 'field-invalid' : ''}" type="text"
+          spellcheck="false" autocapitalize="off" autocorrect="off"
+          placeholder="${escAttr(quickSetupPlaceholder(t))}" value="${escAttr(state.connImportSource)}">
+        <button class="btn" data-act="conn-import" ${state.connImportSource.trim() ? '' : 'disabled'}>Prefill</button></div>
       ${state.connImportError ? `<div class="field-error">${esc(state.connImportError)}</div>` : ''}</div>`;
   let sshHostKeyField = '';
   let pgTlsFields = '';
@@ -915,9 +906,7 @@ function connSheet(editing: boolean): string {
   const nameTaken = !editing && toolNameIsTaken(d.name ?? '');
   const nameWarning = editing ? ''
     : `<div id="tool-name-warning" class="field-warning" role="status" aria-live="polite"${nameTaken ? '' : ' hidden'}>Name used by an existing tool</div>`;
-  fields += `<div class="f-row"><label for="f-cname">Name</label><input id="f-cname" class="${fieldCls('name')} ${nameTaken ? 'name-conflict-warning' : ''}"${editing ? '' : ' aria-describedby="tool-name-warning"'} placeholder="e.g. github" value="${escAttr(d.name ?? '')}">${fieldErr('name')}${nameWarning}</div>
-    <div class="f-row"><label>Type${editing ? ': fixed after creation' : ''}</label>
-    <div class="seg in-form">${typeBtn('pg', 'Postgres')}${typeBtn('ssh', 'SSH')}${typeBtn('api', 'HTTP API')}${typeBtn('ws', 'WebSocket')}</div></div>`;
+  fields += `<div class="f-row"><label for="f-cname">Name</label><input id="f-cname" class="${fieldCls('name')} ${nameTaken ? 'name-conflict-warning' : ''}"${editing ? '' : ' aria-describedby="tool-name-warning"'} placeholder="e.g. github" value="${escAttr(d.name ?? '')}">${fieldErr('name')}${nameWarning}</div>`;
   if (t === 'api') {
     const origin = d.origin ?? apiOriginFromParts(d.scheme ?? undefined, d.host ?? undefined, d.port ?? null);
     fields += `<div class="f-row"><label for="f-origin">API root</label><input id="f-origin" class="${fieldCls('origin')}" placeholder="https://api.github.com" value="${escAttr(origin)}">${fieldErr('origin')}</div>`;
@@ -1004,10 +993,7 @@ function connSheet(editing: boolean): string {
   if (editing && conn && (conn.wired_agents || []).length) {
     fields += `<div class="rule-note">Changing the destination unwires affected agents.</div>`;
   }
-  const title = editing ? 'Edit tool'
-    : d.setupSource === 'import' ? `Review ${connectionTypeLabel(t)} tool`
-    : d.setupSource === 'manual' ? `Add ${connectionTypeLabel(t)} tool`
-    : 'Add tool';
+  const title = `${editing ? 'Edit' : 'Add'} ${catalogNameForType(t)}`;
   const discardConfirm = state.confirmDiscard ? `
     <div class="sheet-backdrop over-sheet" data-act="discard-keep"></div>
     <div class="sheet wide confirm-sheet discard-confirm" role="dialog" aria-modal="true" aria-labelledby="discard-conn-title">
@@ -1020,7 +1006,7 @@ function connSheet(editing: boolean): string {
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
     <div class="sheet wide"><h3>${title}</h3>${fields}
     <div class="sheet-actions"><button class="btn" data-act="sheet-cancel">Cancel</button>
-      <button class="btn primary" data-act="save-conn">${editing ? 'Save' : 'Add tool'}</button></div></div>${discardConfirm}`;
+      <button class="btn primary" data-act="save-conn">${editing ? 'Save' : `Add ${catalogNameForType(t)}`}</button></div></div>${discardConfirm}`;
 }
 
 function settingsSheet() {
@@ -1567,7 +1553,15 @@ document.addEventListener('click', async (e) => {
       if (!source.trim()) break;
       try {
         const imported = await connectionDraftFromImport(source, state.draft);
-        state.connType = imported.type;
+        if (imported.type !== state.connType) {
+          // The row you opened decided the type; a mismatched paste belongs
+          // to a different tool rather than silently switching this one.
+          state.connImportError =
+            `That looks like a ${catalogNameForType(imported.type)} connection — add it from the ${catalogNameForType(imported.type)} row.`;
+          render();
+          focusField('conn-import');
+          break;
+        }
         state.draft = imported.draft;
         state.connImportError = null;
         state.sheetErrors = {};
@@ -1599,12 +1593,6 @@ document.addEventListener('click', async (e) => {
       state.connectionTaskCopied = false;
       render();
       break;
-    case 'open-add-conn':
-      if (!await holdDropdownFormOpen()) break;
-      state.sheet = { kind: 'add-conn' }; state.connType = 'api'; state.draft = {};
-      state.sheetErrors = {}; state.sheetBaseline = null; state.connAdvancedOpen = false;
-      state.connImportSource = ''; state.connImportError = null;
-      render(); focusField('f-cname'); break;
     case 'catalog-toggle':
       state.toolOpen = state.toolOpen === id ? null : id;
       render(); break;
@@ -1646,22 +1634,6 @@ document.addEventListener('click', async (e) => {
       }
       state.connAdvancedOpen = draftUsesAdvancedFields(state.draft, state.connType);
       render(); focusField('f-cname'); break;
-    }
-    case 'conn-type': {
-      captureDrafts();
-      const nextType = btn.dataset.type;
-      if (!nextType || !['api', 'pg', 'ws', 'ssh'].includes(nextType)) break;
-      const typedNextType = nextType as ConnectionType;
-      state.draft.port = portForTypeSwitch(
-        state.connType,
-        typedNextType,
-        state.draft.port ?? null,
-      );
-      state.connType = typedNextType;
-      state.sheetErrors = {};
-      state.formMenuOpen = null;
-      render(false);
-      break;
     }
     case 'toggle-conn-advanced':
       captureDrafts();
@@ -1894,6 +1866,10 @@ document.addEventListener('input', (e) => {
   if (target?.id === 'conn-import') {
     state.connImportSource = target.value;
     state.connImportError = null;
+    // Toggle the button in place: a full re-render per keystroke would be
+    // wasteful, and leaving it stale would make Prefill permanently dead.
+    document.querySelector('[data-act="conn-import"]')
+      ?.toggleAttribute('disabled', !target.value.trim());
   }
   if (target?.id === 'tool-search') {
     state.toolSearch = target.value;
