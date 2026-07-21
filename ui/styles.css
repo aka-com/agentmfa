@@ -9,6 +9,10 @@
 :root{
   color-scheme: light dark;
 
+  /* layout */
+  --content-max: 760px;    /* main-window column cap (head + listing share it) */
+  --traffic-lights: 54px;  /* width of the macOS traffic-light cluster */
+
   /* text */
   --ink: #1d1d1f;          /* primary text */
   --ink-2: #2c2c30;        /* activity/menu text, code values */
@@ -153,6 +157,7 @@
   padding: 14px 10px 10px;
   border-right: 1px solid var(--line);
   background: var(--wash);
+  -webkit-user-select: none; user-select: none;
 }
   .dw-brand{ display: flex; align-items: center; gap: 9px; padding: 2px 4px 14px; }
   .dw-brand .dd-title{ font-size: 14.5px; }
@@ -167,7 +172,10 @@
 }
   .nav-item:hover{ background: var(--hover); }
   .nav-item.on{ background: var(--accent-wash-2); color: var(--accent-ink); font-weight: 600; }
-  .dw-main{ flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .dw-main{
+  flex: 1; display: flex; flex-direction: column; min-width: 0;
+  width: 100%; max-width: var(--content-max); margin: 0 auto;
+}
   .dw-head{
   flex: 0 0 44px;
   height: 44px;
@@ -186,7 +194,12 @@
   background: var(--wash);
   user-select: none;
 }
-  .dw-titlebar .dw-title{ font-size: 13px; font-weight: 600; color: var(--ink-3); }
+  .dw-titlebar .dw-title{
+  font-size: 13px; font-weight: 600; color: var(--ink-3);
+  /* Nudge the centered title clear of the traffic lights by half their width. */
+  transform: translateX(calc(var(--traffic-lights) / 2));
+  -webkit-user-select: none; user-select: none;
+}
   /* ---- settings popover (gear, sidebar bottom) ------------------------- */
 .dw-settings{ position: relative; }
   .gear-btn{ justify-content: center; }
