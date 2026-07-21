@@ -85,6 +85,28 @@
   code{ font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace; font-size: calc(1em - 1px); }
   input::placeholder, textarea::placeholder{ color: var(--muted); opacity: .7; }
   #root{ height: 100%; }
+  /* ---- initial load placeholder ----------------------------------------- */
+  /* index.html renders .app-loading inside #root so the first paint fills the
+     window with the surface instead of a blank white webview. render() swaps
+     #root's contents on the first paint, so this only shows briefly — most
+     noticeably in dev, where Vite transpiles each module on demand. Colors are
+     tokens, so it tracks light/dark like the rest of the app. */
+.app-loading{
+  height: 100%;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--surface);
+}
+.app-loading-spinner{
+  width: 24px; height: 24px; border-radius: 999px;
+  border: 2.5px solid var(--line-strong);
+  border-top-color: var(--accent);
+  animation: app-loading-spin .7s linear infinite;
+}
+@keyframes app-loading-spin{ to{ transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce){
+  /* No rotation for reduced-motion users; pulse the ring instead. */
+  .app-loading-spinner{ animation: auth-pulse 1.2s ease-in-out infinite; }
+}
   /* ---- surfaces --------------------------------------------------------- */
 .surface{
   height: 100%;
