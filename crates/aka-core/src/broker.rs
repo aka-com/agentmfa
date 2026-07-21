@@ -875,9 +875,9 @@ impl Broker {
         connection_id: &Uuid,
     ) -> Result<IssuedEndpointInfo> {
         let connection = self.store.connection_by_id(connection_id)?;
-        // Direct endpoints exist for Postgres and SSH so far; API/WS land later.
+        // Direct endpoints exist for Postgres, SSH, and HTTP; WebSocket later.
         match connection.kind() {
-            ConnectionKind::Pg | ConnectionKind::Ssh => {}
+            ConnectionKind::Pg | ConnectionKind::Ssh | ConnectionKind::Api => {}
             other => return Err(CoreError::EndpointUnsupportedKind(other.label())),
         }
         if !self.wirings.is_wired(client_id, connection_id) {
@@ -958,7 +958,31 @@ impl Broker {
                     example: format!("SSH_AUTH_SOCK=\"{sock}\" {target}"),
                 }
             }
-            _ => unreachable!("kind checked above"),
+            ConnectionConfig::Api { .. } => {
+                // The loopback port was assigned (and persisted) during bind.
+                let port = self
+                    .endpoints
+                    .get(&issued.endpoint.id)
+                    .and_then(|e| e.port)
+                    .ok_or_else(|| {
+                        CoreError::Vault("http endpoint bound no port".to_string())
+                    })?;
+                let base = format!("http://127.0.0.1:{port}");
+                IssuedEndpointInfo {
+                    endpoint_id: issued.endpoint.id,
+                    kind: ConnectionKind::Api,
+                    dsn: base.clone(),
+                    secret: issued.secret.clone(),
+                    // The secret rides an Authorization header, not the URL, so
+                    // it stays out of argv and shell history; the proxy strips
+                    // it and injects the real credential upstream.
+                    example: format!(
+                        "curl -H \"Authorization: Bearer {}\" {base}/<path>",
+                        issued.secret
+                    ),
+                }
+            }
+            ConnectionConfig::Ws { .. } => unreachable!("kind checked above"),
         };
         self.audit.append(
             AuditEntry::new(
@@ -1033,6 +1057,16 @@ impl Broker {
             ConnectionKind::Pg => crate::capability::pg::bind_endpoint(self.clone(), endpoint).await?,
             ConnectionKind::Ssh => {
                 crate::capability::ssh::bind_endpoint(self.clone(), endpoint).await?
+            }
+            ConnectionKind::Api => {
+                let (handle, port) =
+                    crate::capability::http::bind_endpoint(self.clone(), endpoint).await?;
+                // Pin the assigned loopback port so a pasted base URL survives
+                // a restart (rebind reuses it).
+                if endpoint.port != Some(port) {
+                    let _ = self.endpoints.set_port(&endpoint.id, port);
+                }
+                handle
             }
             other => {
                 return Err(std::io::Error::other(format!(

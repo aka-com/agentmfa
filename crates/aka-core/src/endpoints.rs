@@ -141,12 +141,30 @@ impl EndpointRegistry {
             connection_id,
             kind,
             secret_hash,
+            port: None,
             created_at: Utc::now(),
         };
         next.push(endpoint.clone());
         self.persist(&next)?;
         *endpoints = next;
         Ok(IssuedEndpoint { endpoint, secret })
+    }
+
+    /// Pin an endpoint's loopback port (HTTP reverse-proxy endpoints), so a
+    /// pasted base URL survives a restart. Idempotent; a no-op if unchanged.
+    pub fn set_port(&self, id: &Uuid, port: u16) -> Result<()> {
+        let mut endpoints = self.endpoints.lock().unwrap();
+        let Some(pos) = endpoints.iter().position(|e| &e.id == id) else {
+            return Ok(());
+        };
+        if endpoints[pos].port == Some(port) {
+            return Ok(());
+        }
+        let mut next = endpoints.clone();
+        next[pos].port = Some(port);
+        self.persist(&next)?;
+        *endpoints = next;
+        Ok(())
     }
 
     /// Revoke one endpoint by id. Returns it when it existed so the caller can

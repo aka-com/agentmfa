@@ -19,12 +19,14 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::audit::{AuditEntry, AuditKind, AuditLog};
+use crate::broker::Broker;
 use crate::capability::SpooledBody;
 use crate::config::BrokerConfig;
+use crate::endpoints::EndpointListenerHandle;
 use crate::executions::ExecOutcome;
 use crate::store::Store;
 use crate::template::Template;
-use crate::types::{Connection, ConnectionConfig};
+use crate::types::{Connection, ConnectionConfig, ConnectionKind, WiringEndpoint};
 use crate::wire::ErrorReason;
 
 /// Machine-readable validation failure (wire: `400 {"reason": …}`).
@@ -745,6 +747,270 @@ pub fn payload_hash(
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
+}
+
+/* --------------------------- per-wiring endpoint -------------------------- */
+
+/// State shared by one HTTP reverse-proxy endpoint's request handler.
+struct HttpEndpointState {
+    broker: Arc<Broker>,
+    endpoint_id: Uuid,
+}
+
+/// Bind a per-wiring HTTP reverse proxy on a loopback TCP port. An unmodified
+/// HTTP client reaches the pinned origin with `http://127.0.0.1:<port>/<path>`,
+/// presenting the per-wiring secret as `Authorization: Bearer <secret>`; the
+/// proxy authenticates and strips it, re-checks the wiring, injects the
+/// connection's real credential on the upstream leg (origin-pinned, with the
+/// same redirect and response-redaction rules as `/v1/http`), and relays the
+/// response. This is the one direct endpoint that reuses `/v1/http`'s whole
+/// execution core — so it also *loses* that path's `request_id` idempotency
+/// and reserved-header validation; agents that need coalescing keep using
+/// `/v1/http`.
+///
+/// The 256-bit secret is the capability. A loopback port is reachable by any
+/// local process (even another user), so — unlike the PG/SSH sockets, which
+/// filesystem permissions restrict to the owner — the secret is the *only*
+/// boundary here, exactly as the WS/PG ticket data planes rely on an
+/// unguessable ticket over loopback. Returns the handle and the bound port
+/// (persisted so a pasted base URL survives a restart).
+pub async fn bind_endpoint(
+    broker: Arc<Broker>,
+    endpoint: &WiringEndpoint,
+) -> std::io::Result<(EndpointListenerHandle, u16)> {
+    let requested_port = endpoint.port.unwrap_or(0);
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", requested_port)).await?;
+    let port = listener.local_addr()?.port();
+
+    let state = Arc::new(HttpEndpointState {
+        broker,
+        endpoint_id: endpoint.id,
+    });
+    let app = axum::Router::new()
+        .fallback(proxy_handler)
+        .with_state(state);
+    let shutdown = Arc::new(tokio::sync::Notify::new());
+    let sd = shutdown.clone();
+    let task = tokio::spawn(async move {
+        let served = axum::serve(listener, app)
+            .with_graceful_shutdown(async move { sd.notified().await });
+        if let Err(e) = served.await {
+            tracing::error!("http endpoint serve ended: {e}");
+        }
+    });
+    Ok((EndpointListenerHandle { shutdown, task }, port))
+}
+
+/// A machine-readable endpoint-plane error, mirroring the control plane's
+/// `{"reason","detail"}` shape.
+fn endpoint_error(
+    status: axum::http::StatusCode,
+    reason: &str,
+    detail: &str,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    (status, axum::Json(json!({ "reason": reason, "detail": detail }))).into_response()
+}
+
+async fn proxy_handler(
+    axum::extract::State(state): axum::extract::State<Arc<HttpEndpointState>>,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    let broker = &state.broker;
+    let (parts, body) = req.into_parts();
+
+    // Authenticate the per-wiring secret (Authorization: Bearer …) to THIS
+    // endpoint; a secret for another endpoint (or none) is refused.
+    let presented = parts
+        .headers
+        .get(http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            v.strip_prefix("Bearer ")
+                .or_else(|| v.strip_prefix("bearer "))
+        })
+        .map(str::trim);
+    let Some(presented) = presented.filter(|s| !s.is_empty()) else {
+        return endpoint_error(
+            StatusCode::UNAUTHORIZED,
+            "missing_secret",
+            "present the endpoint secret as `Authorization: Bearer <secret>`",
+        );
+    };
+    let Some(endpoint) = broker
+        .endpoints
+        .resolve_secret(presented)
+        .filter(|e| e.id == state.endpoint_id)
+    else {
+        return endpoint_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid_secret",
+            "the endpoint secret is not recognized",
+        );
+    };
+
+    // Authorization is enforced here, on every request, at connect time.
+    if !broker
+        .wirings
+        .is_wired(&endpoint.client_id, &endpoint.connection_id)
+    {
+        return endpoint_error(
+            StatusCode::FORBIDDEN,
+            "denied_by_policy",
+            "this agent is no longer wired to the tool",
+        );
+    }
+    let Ok(connection) = broker.store.connection_by_id(&endpoint.connection_id) else {
+        return endpoint_error(
+            StatusCode::BAD_GATEWAY,
+            "unknown_connection",
+            "the connection has been removed",
+        );
+    };
+    if connection.kind() != ConnectionKind::Api {
+        return endpoint_error(
+            StatusCode::BAD_GATEWAY,
+            "wrong_connection_type",
+            "the connection is no longer an HTTP tool",
+        );
+    }
+
+    let method = parts.method.clone();
+    let path = parts
+        .uri
+        .path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or_else(|| "/".to_string());
+    if validate_path(&path).is_err() {
+        return endpoint_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_path",
+            "the path must begin with a single `/`",
+        );
+    }
+
+    // Forward the client's headers minus the endpoint auth, the proxy's own
+    // Host, and framing/encoding headers the upstream leg recomputes. The real
+    // credential is injected on the upstream leg by the shared core.
+    let mut headers = HeaderMap::new();
+    for (name, value) in parts.headers.iter() {
+        if matches!(
+            name.as_str(),
+            "authorization"
+                | "host"
+                | "content-length"
+                | "connection"
+                | "transfer-encoding"
+                | "accept-encoding"
+        ) {
+            continue;
+        }
+        headers.insert(name.clone(), value.clone());
+    }
+
+    let bytes = match axum::body::to_bytes(body, broker.config.request_cap).await {
+        Ok(b) => b,
+        Err(_) => {
+            return endpoint_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "request_too_large",
+                "the request body exceeds the configured cap",
+            )
+        }
+    };
+    let spooled = match SpooledBody::from_bytes(bytes.to_vec(), broker.config.spool_threshold) {
+        Ok(b) => Arc::new(b),
+        Err(e) => {
+            return endpoint_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "spool_failed",
+                &e.to_string(),
+            )
+        }
+    };
+
+    // Reuse `/v1/http`'s whole execution core. The wiring is the
+    // authorization, so the vault read is pre-authorized (scope confirmed).
+    let execution = HttpExecution {
+        store: broker.store.clone(),
+        audit: broker.audit.clone(),
+        client: broker.http_client.clone(),
+        config: broker.config.clone(),
+        agent: endpoint.agent.clone(),
+        connection,
+        method,
+        path,
+        headers,
+        body: spooled,
+        health: Some(broker.health.clone()),
+    };
+    let outcome = crate::authorization::scope(true, execution.run()).await;
+    translate_outcome(outcome)
+}
+
+/// Translate `/v1/http`'s relayed `{status, headers, body, body_encoding}`
+/// envelope back into a raw HTTP response for the reverse-proxy client. A
+/// broker-side error (`status != 200`, a `{reason, detail}` body) is returned
+/// as that status directly.
+fn translate_outcome(outcome: ExecOutcome) -> axum::response::Response {
+    use axum::http::StatusCode;
+    if outcome.status != 200 {
+        let status = StatusCode::from_u16(outcome.status).unwrap_or(StatusCode::BAD_GATEWAY);
+        return endpoint_error(
+            status,
+            outcome
+                .body
+                .get("reason")
+                .and_then(|r| r.as_str())
+                .unwrap_or("upstream_error"),
+            outcome
+                .body
+                .get("detail")
+                .and_then(|d| d.as_str())
+                .unwrap_or(""),
+        );
+    }
+    let env = outcome.body;
+    let status = env
+        .get("status")
+        .and_then(|s| s.as_u64())
+        .and_then(|s| StatusCode::from_u16(s as u16).ok())
+        .unwrap_or(StatusCode::BAD_GATEWAY);
+    let body_str = env.get("body").and_then(|b| b.as_str()).unwrap_or("");
+    let body_bytes: Vec<u8> = match env.get("body_encoding").and_then(|e| e.as_str()) {
+        Some("base64") => {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD
+                .decode(body_str)
+                .unwrap_or_default()
+        }
+        _ => body_str.as_bytes().to_vec(),
+    };
+
+    let mut response = axum::response::Response::builder().status(status);
+    if let Some(headers) = env.get("headers").and_then(|h| h.as_object()) {
+        for (name, value) in headers {
+            // Framing/length headers are recomputed for the client leg.
+            if matches!(
+                name.to_ascii_lowercase().as_str(),
+                "content-length" | "transfer-encoding" | "connection"
+            ) {
+                continue;
+            }
+            if let (Ok(hn), Some(vs)) = (HeaderName::from_bytes(name.as_bytes()), value.as_str()) {
+                if let Ok(hv) = HeaderValue::from_str(vs) {
+                    response = response.header(hn, hv);
+                }
+            }
+        }
+    }
+    response
+        .body(axum::body::Body::from(body_bytes))
+        .unwrap_or_else(|_| {
+            use axum::response::IntoResponse as _;
+            StatusCode::BAD_GATEWAY.into_response()
+        })
 }
 
 #[cfg(test)]

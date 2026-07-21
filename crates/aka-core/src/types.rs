@@ -505,6 +505,11 @@ pub struct WiringEndpoint {
     /// SHA-256 of the per-wiring secret, hex-encoded. The plaintext leaves the
     /// broker exactly once, in the issue response.
     pub secret_hash: String,
+    /// The loopback port an HTTP reverse-proxy endpoint is pinned to, so a
+    /// pasted `http://…:<port>/…` base URL survives a broker restart. `None`
+    /// for PG/SSH endpoints, whose stable socket path derives from the id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
     pub created_at: DateTime<Utc>,
 }
 

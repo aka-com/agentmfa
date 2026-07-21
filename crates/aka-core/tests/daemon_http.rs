@@ -12,7 +12,9 @@ use aka_core::daemon;
 use aka_core::events::BrokerEvents;
 use aka_core::paths::Paths;
 use aka_core::store::ConnectionSpec;
-use aka_core::types::{ConfirmationMethod, ConnectionConfig, PgSslMode, SecretMeta, WiringMode};
+use aka_core::types::{
+    ConfirmationMethod, ConnectionConfig, ConnectionKind, PgSslMode, SecretMeta, WiringMode,
+};
 use aka_core::vault::MemoryVault;
 use aka_core::wire::REQUEST_ID_MAX_BYTES;
 use axum::routing::{any, get, post};
@@ -1750,4 +1752,151 @@ async fn brokered_calls_audit_attribution_duration_and_outcome() {
     assert!(call.duration_ms.is_some(), "duration is measured");
     assert_eq!(call.fields["method"], json!("GET"));
     assert_eq!(call.fields["path"], json!("/user/repos"));
+}
+
+/* -------------------------- HTTP direct endpoint -------------------------- */
+
+/// Minimal HTTP/1.1 client over a loopback TCP port (the reverse-proxy
+/// endpoint). Returns (status, parsed-json-or-string body).
+async fn loopback_request(
+    port: u16,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: Option<&str>,
+) -> (u16, Value) {
+    let stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    let io = hyper_util::rt::TokioIo::new(stream);
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await.unwrap();
+    tokio::spawn(conn);
+    let mut builder = hyper::Request::builder()
+        .method(method)
+        .uri(path)
+        .header("host", "localhost");
+    for (k, v) in headers {
+        builder = builder.header(*k, *v);
+    }
+    let request = builder.body(body.unwrap_or("").to_string()).unwrap();
+    let response = sender.send_request(request).await.unwrap();
+    let status = response.status().as_u16();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes)
+            .unwrap_or(Value::String(String::from_utf8_lossy(&bytes).into_owned()))
+    };
+    (status, value)
+}
+
+/// Issue an HTTP endpoint for the (auto-wired) first agent on `github`;
+/// returns (info, port).
+async fn issue_http_endpoint(h: &Harness) -> (aka_core::broker::IssuedEndpointInfo, u16) {
+    let client = h.broker.pairing.get("claude-code").unwrap();
+    let conn = h.broker.store.connection_by_name("github").unwrap();
+    let info = h
+        .broker
+        .ui_issue_endpoint(&client.id, &conn.id)
+        .await
+        .unwrap();
+    let port: u16 = info.dsn.rsplit(':').next().unwrap().parse().unwrap();
+    (info, port)
+}
+
+#[tokio::test]
+async fn http_direct_endpoint_proxies_with_injected_credential() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let up = upstream().await;
+    api_connection(&h, "github", up.port);
+    h.pair("claude-code").await;
+    let (info, port) = issue_http_endpoint(&h).await;
+
+    assert_eq!(info.kind, ConnectionKind::Api);
+    assert!(info.dsn.starts_with("http://127.0.0.1:"));
+    assert!(info.secret.starts_with("end_"));
+    // The secret is not in the pasteable base URL (it rides a header).
+    assert!(!info.dsn.contains(&info.secret));
+
+    let auth = format!("Bearer {}", info.secret);
+    let (status, body) = loopback_request(
+        port,
+        "GET",
+        "/echo",
+        &[("authorization", &auth), ("x-test", "hello")],
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "proxied response: {body}");
+    // The request reached the pinned upstream (echo reflects our header) …
+    assert_eq!(body["headers"]["x-test"], "hello");
+    // … the broker injected the real credential on the upstream leg …
+    assert!(
+        body["headers"]["authorization"].as_str().is_some(),
+        "an Authorization header should have been injected: {body}"
+    );
+    // … and the credential is redacted out of the relayed response.
+    assert!(
+        !body.to_string().contains("ghp_test_secret_value"),
+        "the injected credential must be redacted: {body}"
+    );
+}
+
+#[tokio::test]
+async fn http_direct_endpoint_rejects_missing_or_wrong_secret() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let up = upstream().await;
+    api_connection(&h, "github", up.port);
+    h.pair("claude-code").await;
+    let (_info, port) = issue_http_endpoint(&h).await;
+
+    // No secret.
+    let (status, body) = loopback_request(port, "GET", "/echo", &[], None).await;
+    assert_eq!(status, 401);
+    assert_eq!(body["reason"], "missing_secret");
+
+    // Wrong secret.
+    let (status, body) = loopback_request(
+        port,
+        "GET",
+        "/echo",
+        &[("authorization", "Bearer end_bogus0000")],
+        None,
+    )
+    .await;
+    assert_eq!(status, 401);
+    assert_eq!(body["reason"], "invalid_secret");
+    // The upstream was never dialed on a refused request.
+    assert_eq!(up.hits.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn http_endpoint_survives_rebind_and_revoke_frees_the_port() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let up = upstream().await;
+    api_connection(&h, "github", up.port);
+    h.pair("claude-code").await;
+    let (info, port) = issue_http_endpoint(&h).await;
+    let auth = format!("Bearer {}", info.secret);
+
+    // Rebinding (as a restart does) reuses the persisted port; the same base
+    // URL keeps working.
+    h.broker.rebind_endpoints().await;
+    let (status, _) = loopback_request(port, "POST", "/dispatch", &[("authorization", &auth)], None).await;
+    assert_eq!(status, 204);
+    assert_eq!(up.hits.load(Ordering::SeqCst), 1);
+
+    // Revoking stops the listener and frees the loopback port.
+    assert!(h.broker.ui_revoke_endpoint(&info.endpoint_id).unwrap());
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok()
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the port should be refused after revoke");
 }
