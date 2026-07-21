@@ -37,6 +37,7 @@ import type {
   McpAuthDraft,
   McpAuthState,
   McpStatusReport,
+  McpToolInfo,
   WiringSummary,
   SecretSummary,
   SessionSummary,
@@ -55,7 +56,7 @@ type Tab = typeof TABS[number];
 
 interface SheetState {
   kind: 'add-secret' | 'edit-secret' | 'add-conn' | 'edit-conn' | 'settings' | 'clear-activity'
-    | 'elicitation' | 'mcp-auth';
+    | 'elicitation' | 'mcp-auth' | 'wiring-tools';
   id?: string;
 }
 
@@ -151,6 +152,21 @@ interface AppState {
   mcpAuthOpenedUrl: string | null;
   /** connectionId -> in-flight/last MCP status check (transient). */
   mcpStatus: Record<string, McpStatusState>;
+  /** The open per-wiring tool picker (agent x MCP connection). */
+  wiringTools: WiringToolsState | null;
+}
+
+interface WiringToolsState {
+  agentId: string;
+  agentName: string;
+  connectionId: string;
+  connectionName: string;
+  loading: boolean;
+  error?: string;
+  tools?: McpToolInfo[];
+  /** Checked tool names; null means "all tools" (no curation). */
+  selected: string[] | null;
+  saving: boolean;
 }
 
 interface McpStatusState {
@@ -210,6 +226,7 @@ const state: AppState = {
   mcpAuthDraft: null,
   mcpAuthOpenedUrl: null,
   mcpStatus: {},
+  wiringTools: null,
 };
 
 // Re-rendering replaces #root wholesale, which would drop the scroll
@@ -433,11 +450,22 @@ const agentWiringFor = (a: AgentSummary, c: ConnectionSummary): WiringSummary | 
 
 function agentToolRowHTML(a: AgentSummary, c: ConnectionSummary): string {
   const t = TYPES[c.type];
-  const wired = !!agentWiringFor(a, c);
+  const wiring = agentWiringFor(a, c);
+  const wired = !!wiring;
   const live = state.sessions.some((s) => s.agent === a.name && s.connection === c.name);
   const pill = wired
     ? '<span class="acc-pill granted">Wired</span>'
     : '<span class="acc-pill">Not wired</span>';
+  // A wired MCP connection can be narrowed to a curated tool subset; the
+  // chip names the current scope and opens the picker.
+  const toolsChip = wired && c.mcp_path
+    ? `<button class="btn ghost sm" data-act="wiring-tools" data-id="${a.id}" data-conn="${c.id}"
+        aria-label="Choose which tools ${escAttr(a.name)} may call on ${escAttr(c.name)}"
+        title="Choose which of this server’s tools ${escAttr(a.name)} may call">${
+          wiring?.allowed_tools
+            ? `${wiring.allowed_tools.length} tool${wiring.allowed_tools.length === 1 ? '' : 's'}`
+            : 'All tools'}</button>`
+    : '';
   const action = wired
     ? `<button class="btn ghost sm" aria-label="Unwire ${escAttr(a.name)} from ${escAttr(c.name)}" data-act="unwire" data-id="${a.id}" data-conn="${c.id}">Unwire</button>`
     : `<button class="btn ghost sm" aria-label="Wire ${escAttr(a.name)} to ${escAttr(c.name)}" data-act="wire" data-id="${a.id}" data-conn="${c.id}">Wire up</button>`;
@@ -445,7 +473,7 @@ function agentToolRowHTML(a: AgentSummary, c: ConnectionSummary): string {
     <span class="badge ${t.cls}">${t.label}</span>
     <div class="acc-svc"><div class="acc-name">${esc(c.name)}${live ? ' <span class="cc-live">● live</span>' : ''}</div>
       <div class="acc-target" title="${escAttr(c.target)}">${esc(c.target)}</div></div>
-    ${pill}${action}</div>`;
+    ${pill}${toolsChip}${action}</div>`;
 }
 
 function agentBlockHTML(a: AgentSummary): string {
@@ -567,10 +595,13 @@ function catalogConnRowHTML(c: ConnectionSummary): string {
   const hostKey = c.type === 'ssh' && !c.host_key_fingerprint
     ? '<span class="cat-meta-warn">Host key not pinned yet</span>' : '';
   // Passive health: brokered agent calls and background token renewals
-  // record a rejected credential without anyone pressing Test. Only the
-  // actionable state is surfaced; the tooltip carries the check's detail.
+  // record a rejected credential without anyone pressing Test. The badge
+  // carries the fix: sign in again for MCP connections, re-test otherwise.
   const needsReconnect = c.last_status === 'needs_reconnect'
-    ? `<span class="cat-meta-warn" title="${escAttr(c.last_detail || '')}">Needs reconnect</span>`
+    ? `<span class="cat-meta-warn" title="${escAttr(c.last_detail || '')}">Needs reconnect</span>
+       ${c.mcp_path
+         ? `<button class="btn ghost sm cat-meta-fix" data-act="reconnect-mcp" data-id="${c.id}">Reconnect…</button>`
+         : `<button class="btn ghost sm cat-meta-fix" data-act="test-conn" data-id="${c.id}">Test again</button>`}`
     : '';
   return `<div class="cat-conn">
     <div class="cat-conn-tx">
@@ -881,6 +912,7 @@ function sheetsHTML() {
     case 'clear-activity': return clearActivitySheet();
     case 'elicitation': return elicitationSheet();
     case 'mcp-auth': return mcpAuthSheet();
+    case 'wiring-tools': return wiringToolsSheet();
     default: return '';
   }
 }
@@ -926,6 +958,62 @@ function elicitationSheet(): string {
         <button class="btn primary" data-act="elicit-send" data-id="${escAttr(request.id)}">Send to ${esc(request.connection)}</button>
       </div>
     </div>`;
+}
+
+/**
+ * Per-wiring tool picker: which of an MCP server's tools one agent may
+ * call. "All tools" is the default and the reset; a curated subset is
+ * enforced broker-side on every tools/call, and the sidecar lists only
+ * what is callable.
+ */
+function wiringToolsSheet(): string {
+  const wt = state.wiringTools;
+  if (!wt) return '';
+  const title = `Tools for ${wt.agentName} on ${wt.connectionName}`;
+  let body = '';
+  if (wt.loading) {
+    body = '<div class="cc-test running">Asking the server for its tools…</div>';
+  } else if (wt.error) {
+    body = `<div class="cc-test err">${ICONS.circleX}<span>${esc(wt.error)}</span></div>`;
+  } else {
+    const tools = wt.tools || [];
+    const allChecked = wt.selected === null;
+    const isChecked = (name: string): boolean => allChecked || (wt.selected || []).includes(name);
+    const rows = tools.map((tool) => `<label class="wt-row">
+        <input type="checkbox" data-act="wt-toggle" data-tool="${escAttr(tool.name)}"
+          ${isChecked(tool.name) ? 'checked' : ''}>
+        <span class="wt-name"><code>${esc(tool.name)}</code>
+          ${tool.description ? `<span class="wt-desc">${esc(tool.description)}</span>` : ''}</span>
+      </label>`).join('');
+    // A curated subset may name tools the server no longer advertises;
+    // keep them visible so unchecking them is possible.
+    const stale = (wt.selected || []).filter((name) => !tools.some((tool) => tool.name === name));
+    const staleRows = stale.map((name) => `<label class="wt-row wt-stale">
+        <input type="checkbox" data-act="wt-toggle" data-tool="${escAttr(name)}" checked>
+        <span class="wt-name"><code>${esc(name)}</code>
+          <span class="wt-desc">No longer advertised by the server</span></span>
+      </label>`).join('');
+    body = `<label class="wt-row wt-all">
+        <input type="checkbox" data-act="wt-all" ${allChecked ? 'checked' : ''}>
+        <span class="wt-name"><b>All tools</b>
+          <span class="wt-desc">New tools the server adds later are callable too</span></span>
+      </label>
+      <div class="wt-list ${allChecked ? 'wt-dim' : ''}">${rows}${staleRows}</div>`;
+  }
+  const count = wt.selected === null
+    ? 'every tool'
+    : `${wt.selected.length} tool${wt.selected.length === 1 ? '' : 's'}`;
+  return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
+    <div class="sheet wide" role="dialog" aria-modal="true" aria-labelledby="wt-title">
+      <h3 id="wt-title">${esc(title)}</h3>
+      <p class="wt-sub">${esc(wt.agentName)} can call ${esc(count)} on this server. Everything
+        unchecked is refused by the broker and hidden from the agent's tool list.</p>
+      ${body}
+      <div class="sheet-actions">
+        <button class="btn" data-act="sheet-cancel">Cancel</button>
+        <button class="btn primary" data-act="wt-save" ${wt.loading || wt.saving ? 'disabled' : ''}>
+          ${wt.saving ? 'Saving…' : 'Save'}</button>
+      </div></div>`;
 }
 
 function clearActivitySheet() {
@@ -1574,6 +1662,22 @@ async function runConnectionTest(id: string): Promise<void> {
   render();
 }
 
+async function loadWiringTools(connectionId: string): Promise<void> {
+  try {
+    const tools = await invoke('list_mcp_tools', { id: connectionId });
+    const wt = state.wiringTools;
+    if (!wt || wt.connectionId !== connectionId) return;
+    wt.loading = false;
+    wt.tools = tools;
+  } catch (error) {
+    const wt = state.wiringTools;
+    if (!wt || wt.connectionId !== connectionId) return;
+    wt.loading = false;
+    wt.error = errorMessage(error);
+  }
+  render(false);
+}
+
 async function holdDropdownFormOpen(): Promise<boolean> {
   if (mode !== 'dropdown') return true;
   try {
@@ -1806,6 +1910,7 @@ function closeSheet() {
     void invoke('cancel_mcp_auth', { id }).catch(() => {});
   }
   state.mcpAuth = null;
+  state.wiringTools = null;
   state.sheet = null;
   state.draft = {};
   state.sheetErrors = {};
@@ -1854,6 +1959,21 @@ function requestCloseSheet(): void {
 }
 
 /* --------------------------------- events -------------------------------- */
+// Opportunistic re-check: coming back to the app re-tests anything the
+// broker last saw unhealthy, so a fixed credential clears its badge
+// without a manual test. Throttled so window-switching stays free.
+let lastFocusRecheck = 0;
+window.addEventListener('focus', () => {
+  if (Date.now() - lastFocusRecheck < 60_000) return;
+  lastFocusRecheck = Date.now();
+  for (const connection of state.connections) {
+    if ((connection.last_status === 'needs_reconnect' || connection.last_status === 'failed')
+      && !state.connTests[connection.id]?.running) {
+      void runConnectionTest(connection.id);
+    }
+  }
+});
+
 document.addEventListener('click', async (e) => {
   const target = e.target instanceof Element ? e.target : null;
   const btn = target?.closest<HTMLElement>('[data-act]') ?? null;
@@ -2196,6 +2316,68 @@ document.addEventListener('click', async (e) => {
         whoami_tool: template?.whoamiTool ?? null,
         expected_tools: template?.expectedTools ?? [],
       });
+      break;
+    }
+    case 'wiring-tools': {
+      const agent = state.agents.find((x) => x.id === id);
+      const connection = state.connections.find((x) => x.id === btn.dataset.conn);
+      if (!agent || !connection) break;
+      const wiring = (connection.wired_agents || []).find((w) => w.agent_id === agent.id);
+      state.sheet = { kind: 'wiring-tools' };
+      state.wiringTools = {
+        agentId: agent.id,
+        agentName: agent.name,
+        connectionId: connection.id,
+        connectionName: connection.name,
+        loading: true,
+        selected: wiring?.allowed_tools ? [...wiring.allowed_tools] : null,
+        saving: false,
+      };
+      render();
+      void loadWiringTools(connection.id);
+      break;
+    }
+    case 'wt-all': {
+      const wt = state.wiringTools;
+      if (!wt) break;
+      // Checking "All tools" clears curation; unchecking starts a subset
+      // from everything currently advertised.
+      wt.selected = wt.selected === null ? (wt.tools || []).map((t) => t.name) : null;
+      render(false);
+      break;
+    }
+    case 'wt-toggle': {
+      const wt = state.wiringTools;
+      if (!wt) break;
+      const tool = btn.dataset.tool || '';
+      if (wt.selected === null) {
+        // Unchecking one tool from "all" starts a subset of the rest.
+        wt.selected = (wt.tools || []).map((t) => t.name).filter((name) => name !== tool);
+      } else if (wt.selected.includes(tool)) {
+        wt.selected = wt.selected.filter((name) => name !== tool);
+      } else {
+        wt.selected = [...wt.selected, tool];
+      }
+      render(false);
+      break;
+    }
+    case 'wt-save': {
+      const wt = state.wiringTools;
+      if (!wt || wt.saving) break;
+      wt.saving = true;
+      render(false);
+      if (await run(() => invoke('set_wiring_tools', {
+        agentId: wt.agentId, connectionId: wt.connectionId, tools: wt.selected,
+      }))) {
+        toast(wt.selected === null
+          ? '🔧 All tools allowed'
+          : `🔧 ${wt.selected.length} tool${wt.selected.length === 1 ? '' : 's'} allowed`);
+        closeSheet();
+        await refresh('all');
+      } else {
+        wt.saving = false;
+        render(false);
+      }
       break;
     }
     case 'mcp-open-browser':

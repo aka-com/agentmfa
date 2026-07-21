@@ -133,6 +133,7 @@ interface MockWiring {
   client_id: string;
   agent: string;
   connection_id: string;
+  allowed_tools?: string[];
 }
 
 type MockAgent = Omit<AgentSummary, 'wiring_count'>;
@@ -163,6 +164,7 @@ interface MockArgs {
   agentId: string;
   connectionId: string;
   wired: boolean;
+  tools?: string[] | null;
   source: string;
   host: string;
   port: number;
@@ -297,7 +299,7 @@ function connDto(c: MockConnection): ConnectionSummary {
     secret_names: c.secret_names,
     wired_agents: db.wirings
       .filter((w) => w.connection_id === c.id)
-      .map((w) => ({ agent_id: w.client_id, agent: w.agent })),
+      .map((w) => ({ agent_id: w.client_id, agent: w.agent, allowed_tools: w.allowed_tools ?? null })),
     host: c.host || null, scheme: c.scheme || null, port: c.port || null, template: c.template || null,
     mcp_path: c.mcp_path || null, account: c.account || null,
     dbname: c.dbname || null, user: c.user || null, host_key_fingerprint: c.host_key_fingerprint || null,
@@ -645,6 +647,28 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       }
       emit('aka://wirings-changed', {});
       return true;
+    }
+    case 'set_wiring_tools': {
+      const wiring = db.wirings.find((w) =>
+        w.client_id === args.agentId && w.connection_id === args.connectionId);
+      if (!wiring) return false;
+      const tools = args.tools;
+      if (tools == null) delete wiring.allowed_tools;
+      else wiring.allowed_tools = [...tools];
+      emit('aka://wirings-changed', {});
+      emit('aka://connections-changed', {});
+      return true;
+    }
+    case 'list_mcp_tools': {
+      const c = db.connections.find((x) => x.id === args.id);
+      if (!c || !c.mcp_path) throw new Error('this connection has no MCP path');
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      // The status-report mock already knows each brand's tools; dress
+      // them with light descriptions for the picker.
+      return mockStatusReport(c).tools.map((name) => ({
+        name,
+        description: `The server's ${name.replace(/[_-]/g, ' ')} tool`,
+      }));
     }
     case 'confirm_agent_disconnect':
       return window.confirm('Disconnect agent\n\nDisconnect this agent? Its wirings and active sessions will end.');
