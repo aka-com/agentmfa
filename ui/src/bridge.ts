@@ -454,6 +454,7 @@ function mockStatusReport(c: MockConnection): McpStatusReport {
 
 async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
   switch (cmd) {
+    case 'get_local_username': return 'satoshi';
     case 'list_secrets':
       return db.secrets.map((s) => {
         const names = db.connections.filter((c) => c.secret_names.includes(s.name)).map((c) => c.name);

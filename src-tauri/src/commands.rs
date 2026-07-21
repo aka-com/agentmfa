@@ -42,6 +42,18 @@ type CmdResult<T> = Result<T, String>;
 type FormResult<T> = Result<T, FormError>;
 const ACTIVITY_VIEW_LIMIT: usize = 200;
 
+/// The local OS account name is presentation-only: connection forms use it
+/// as a hint, never as a submitted or persisted value.
+#[tauri::command]
+pub fn get_local_username() -> String {
+    ["USER", "LOGNAME", "USERNAME"]
+        .into_iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .find(|name| !name.trim().is_empty())
+        .map(|name| name.trim().to_string())
+        .unwrap_or_default()
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FormError {
@@ -901,6 +913,7 @@ pub fn set_menu_bar_hides_dock(state: State<AppState>, on: bool) -> CmdResult<()
 /// Register every command with the Tauri builder.
 pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
+        get_local_username,
         list_secrets,
         list_connections,
         list_agents,

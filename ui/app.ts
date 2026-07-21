@@ -109,6 +109,7 @@ interface ConnectionReadyState {
 
 interface AppState {
   tab: Tab;
+  localUsername: string;
   secrets: SecretSummary[];
   connections: ConnectionSummary[];
   agents: AgentSummary[];
@@ -184,6 +185,7 @@ interface ConnectionTestState {
 /* ------------------------------ local state ------------------------------ */
 const state: AppState = {
   tab: 'connections',
+  localUsername: '',
   secrets: [],
   connections: [],
   agents: [],
@@ -299,6 +301,10 @@ async function load<K extends CommandName>(
 }
 async function loadSettings(): Promise<void> {
   try { state.settings = await invoke('get_settings'); } catch (e) { console.error(e); }
+}
+async function loadLocalUsername(): Promise<void> {
+  try { state.localUsername = await invoke('get_local_username'); }
+  catch (e) { console.error('get_local_username', e); }
 }
 async function refreshAgentsView(): Promise<void> {
   await Promise.all([
@@ -1247,7 +1253,7 @@ function connSheet(editing: boolean): string {
     fields += `<div class="f-row"><label for="f-origin">API root</label><input id="f-origin" class="${fieldCls('origin')}" placeholder="https://api.github.com" value="${escAttr(origin)}">${fieldErr('origin')}</div>`;
   } else if (t === 'ssh') {
     fields += `<div class="f-2col compact-field-row">
-      <div class="f-row" style="flex:0 0 90px"><label for="f-user">User</label><input id="f-user" class="${fieldCls('user')}" placeholder="satoshi" value="${escAttr(d.user ?? '')}">${fieldErr('user')}</div>
+      <div class="f-row" style="flex:0 0 90px"><label for="f-user">User</label><input id="f-user" class="${fieldCls('user')}" placeholder="${escAttr(state.localUsername)}" value="${escAttr(d.user ?? '')}">${fieldErr('user')}</div>
       <div class="f-row"><label for="f-host">Host</label><input id="f-host" class="${fieldCls('host')}" placeholder="prod.example.com" value="${escAttr(d.host ?? '')}">${fieldErr('host')}</div>
       <div class="f-row" style="flex:0 0 90px"><label for="f-port">Port</label><input id="f-port" class="${fieldCls('port')}" inputmode="numeric" value="${escAttr(d.port ?? '22')}">${fieldErr('port')}</div></div>`;
     fields += d.proxyJump ? `<div class="rule-note">ProxyJump: ${esc(d.proxyJump)}</div>` : '';
@@ -1268,7 +1274,7 @@ function connSheet(editing: boolean): string {
       <div class="f-row" style="flex:0 0 90px"><label for="f-port">Port</label><input id="f-port" class="${fieldCls('port')}" inputmode="numeric" value="${escAttr(d.port ?? '5432')}">${fieldErr('port')}</div></div>
       <div class="f-2col compact-field-row">
       <div class="f-row"><label for="f-db">Database</label><input id="f-db" class="${fieldCls('dbname')}" placeholder="app_production" value="${escAttr(d.dbname ?? '')}">${fieldErr('dbname')}</div>
-      <div class="f-row" style="flex:0 0 90px"><label for="f-user">User</label><input id="f-user" class="${fieldCls('user')}" placeholder="app" value="${escAttr(d.user ?? '')}">${fieldErr('user')}</div></div>`;
+      <div class="f-row" style="flex:0 0 90px"><label for="f-user">User</label><input id="f-user" class="${fieldCls('user')}" placeholder="${escAttr(state.localUsername)}" value="${escAttr(d.user ?? '')}">${fieldErr('user')}</div></div>`;
     pgTlsFields = `<div class="f-row"><label for="f-sslmode">TLS mode</label>${customSelectHTML('f-sslmode', sslOpts, sslmode, fieldCls('sslmode'))}${fieldErr('sslmode')}
         ${sslmode === 'require' ? '<div class="pair-identity-warning">The server certificate will not be verified.</div>' : ''}</div>
       <div class="f-row"><label for="f-pg-ca-bundle">Trusted CA bundle <span class="label-detail">(optional)</span></label>
@@ -2680,6 +2686,7 @@ async function boot() {
   // Choose the landing tab before the first paint: nothing configured yet
   // means the walkthrough is the useful screen.
   await Promise.all([
+    loadLocalUsername(),
     load('connections', 'list_connections'),
     load('agents', 'list_agents'),
   ]);

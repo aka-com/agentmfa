@@ -243,6 +243,7 @@ interface CommandSpec<Args, Result> {
 }
 
 export interface CommandMap {
+  get_local_username: CommandSpec<undefined, string>;
   list_secrets: CommandSpec<undefined, SecretSummary[]>;
   list_connections: CommandSpec<undefined, ConnectionSummary[]>;
   list_agents: CommandSpec<undefined, AgentSummary[]>;
