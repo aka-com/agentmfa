@@ -1,7 +1,7 @@
 # AKA Multitool
 
 Multitool lets agents make API calls, open database connections,
-access SSH servers, and (soon) interface with MCP servers. In many
+access SSH servers, and interface with MCP servers. In many
 cases it allows agents to use unmodified tools like `curl`, `psql`,
 and `git` without raw credentials. This is done through a connection
 broker — keys are kept in a local secret store, encrypted on-disk, and
@@ -17,7 +17,10 @@ The tool supports most common workflows:
   the first connection)
 - **WebSocket**: the agent gets a short-lived `ws://127.0.0.1:…` bridge
   URL usable by any stock WS client
-- **MCP**: coming soon, via https://executor.sh
+- **MCP**: the agent's wired connections appear as MCP tools, and any
+  remote (HTTP) MCP server can itself be added as a connection and
+  re-exposed — served by a bundled Node sidecar built on
+  [executor](https://executor.sh)
 
 ## Tools and wiring
 
@@ -40,9 +43,13 @@ are authorized by their wiring instead.
 
 ## MCP Support
 
-MCP is being added through a supervised Node sidecar that hosts the
-[executor](https://executor.sh) engine; see `EXECUTOR.md` for the design
-and the phase plan. The sidecar is not yet wired to any tools.
+Agents reach Multitool over MCP through a supervised Node sidecar that
+embeds the [executor](https://executor.sh) engine; see `EXECUTOR.md` for
+the design and the phase plan. The sidecar serves streamable HTTP on
+loopback and authorizes nothing itself: each request carries the agent's
+own broker bearer token, and the broker re-checks the wiring on every
+call. Secrets stay in the broker — MCP traffic rides the existing broker
+planes, so the sidecar never sees a credential.
 
 ```sh
 npm run sidecar:build    # bundle sidecar/ to dist/sidecar/main.mjs
@@ -50,11 +57,23 @@ npm run sidecar:vendor   # fetch the pinned Node the .app ships (macOS)
 npm run test:sidecar     # the sidecar's own tests
 ```
 
-Once an agent is paired and wired, its tools appear over MCP: an API
+Once an agent is paired and wired, its connections appear over MCP: an API
 connection becomes `multitool_<name>_request`, and Postgres/SSH/WebSocket
 connections become `multitool_<name>_open`, which hand back the same
 password-less DSN, agent socket, or bridge URL the CLI path returns.
-`multitool_status` is always present and reports what the agent may use.
+Unwired connections are never registered. `multitool_status` is always
+present and reports who the agent is and what it may use.
+
+**Remote MCP servers are connections too.** An API connection may carry an
+`mcp_path` (e.g. `/mcp`); when it does, that upstream speaks MCP and the
+sidecar re-exposes its tools as `multitool_<namespace>_<tool>`. This is
+not a new connection kind — an HTTP MCP server is a pinned-host API
+connection whose JSON-RPC rides the existing `/v1/http` plane, which is
+exactly what keeps its credential out of the sidecar. Stdio MCP servers
+are not supported. In the app, GitHub, Gmail, Notion and 1Password are
+branded shortcuts for adding one (you supply the server URL your provider
+gave you — no endpoints are hard-coded), and a generic **MCP server** row
+adds any other by URL.
 
 The app starts the sidecar when `dist/sidecar/main.mjs` exists and runs
 without it otherwise, so a checkout that skips `sidecar:build` still
