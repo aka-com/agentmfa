@@ -13,6 +13,7 @@ import type {
   ConnectionInput,
   ConnectionSummary,
   ConnectionType,
+  ElicitationRequest,
   EventMap,
   EventName,
   EventPayload,
@@ -72,6 +73,8 @@ const MOCK_ACTIVITY_META = {
   wired: { icon: 'plug', tone: 'neutral' },
   unwired: { icon: 'unplug', tone: 'neutral' },
   tokenRevoked: { icon: 'unplug', tone: 'danger' },
+  inputProvided: { icon: 'circleCheck', tone: 'success' },
+  inputRefused: { icon: 'circleX', tone: 'danger' },
 };
 const MOCK_AGENT_SETUP = 'Connect to the local Multitool broker. Read its current instructions, then list what connections are currently available:\n\ncurl -fsS --unix-socket ~/.aka/broker.sock http://localhost/instructions';
 function emit<K extends EventName>(event: K, payload: EventMap[K]): void {
@@ -137,6 +140,7 @@ interface MockDatabase {
   agents: MockAgent[];
   sessions: SessionSummary[];
   activity: ActivityEntry[];
+  elicitations: ElicitationRequest[];
   settings: Settings;
 }
 
@@ -155,6 +159,8 @@ interface MockArgs {
   source: string;
   host: string;
   port: number;
+  approved: boolean;
+  values?: Record<string, string>;
 }
 
 const db: MockDatabase = {
@@ -174,6 +180,7 @@ const db: MockDatabase = {
   ],
   sessions: [],
   activity: [],
+  elicitations: [],
   settings: {
     reauth_on_read: true,
     show_websockets: false,
@@ -253,6 +260,19 @@ function seedFixtures() {
   ];
   fixtures.forEach(([kind, text, detail, minutes]) =>
     db.activity.push({ ...MOCK_ACTIVITY_META[kind], text, detail, at: t(minutes) }));
+  // DESIGN MOCK (SEP-2322, see ELICITATION.md): a tool call paused on user
+  // input. The broker does not produce these yet; this fixture exists so the
+  // trusted-UI answering flow is designable and reviewable standalone.
+  db.elicitations.push({
+    id: uid(),
+    agent: 'claude-code',
+    connection: 'notion',
+    tool: 'multitool_notion_search',
+    prompt: 'Notion needs to know where to search: which workspace should this query run against?',
+    fields: [{ name: 'workspace', label: 'Workspace' }],
+    requested_at: t(1),
+    expires_at: new Date(Date.now() + 9 * 60000).toISOString(),
+  });
 }
 function audit(
   kind: keyof typeof MOCK_ACTIVITY_META,
@@ -467,6 +487,22 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       emit('aka://sessions-changed', {});
       return true;
     case 'close_session': db.sessions = db.sessions.filter((s) => s.id !== args.id); emit('aka://sessions-changed', {}); return true;
+    case 'list_elicitations': return db.elicitations.slice();
+    case 'respond_elicitation': {
+      const request = db.elicitations.find((r) => r.id === args.id);
+      if (!request) throw new Error('no such elicitation (answered elsewhere or expired)');
+      db.elicitations = db.elicitations.filter((r) => r.id !== args.id);
+      // The values themselves are deliberately NOT audited — like a secret,
+      // an answer may be sensitive; the record is that it was provided.
+      const entry = args.approved
+        ? audit('inputProvided', `Input provided: ${request.connection} ← you`,
+            `${request.agent} · ${request.tool} resumes with your answer`)
+        : audit('inputRefused', `Input refused: ${request.connection}`,
+            `${request.agent} · ${request.tool} is told the user declined`);
+      emit('aka://elicitations-changed', {});
+      emit('aka://activity-appended', entry);
+      return;
+    }
     case 'set_reauth_on_read': db.settings.reauth_on_read = args.on; return;
     case 'set_show_websockets': db.settings.show_websockets = args.on; return;
     case 'set_menu_bar_hides_dock':

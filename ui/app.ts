@@ -32,6 +32,7 @@ import type {
   ConnectionInput,
   ConnectionSummary,
   ConnectionType,
+  ElicitationRequest,
   WiringSummary,
   SecretSummary,
   SessionSummary,
@@ -49,7 +50,8 @@ type Tab = typeof TABS[number];
 
 
 interface SheetState {
-  kind: 'add-secret' | 'edit-secret' | 'add-conn' | 'edit-conn' | 'settings' | 'clear-activity';
+  kind: 'add-secret' | 'edit-secret' | 'add-conn' | 'edit-conn' | 'settings' | 'clear-activity'
+    | 'elicitation';
   id?: string;
 }
 
@@ -105,6 +107,7 @@ interface AppState {
   agents: AgentSummary[];
   sessions: SessionSummary[];
   activity: ActivityEntry[];
+  elicitations: ElicitationRequest[];
   agentSetupInstructions: string;
   settings: Settings;
   reveal: Record<string, string>;
@@ -150,6 +153,7 @@ const state: AppState = {
   agents: [],
   sessions: [],
   activity: [],
+  elicitations: [],      // paused upstream tool calls awaiting the user (SEP-2322)
   agentSetupInstructions: '', // short paste-ready setup message (lazy-loaded)
   settings: {
     reauth_on_read: true,
@@ -215,8 +219,9 @@ const root = (): HTMLElement => {
 };
 /* ------------------------------ data loading ----------------------------- */
 type RefreshTarget = 'all' | 'secrets' | 'connections' | 'agents' | 'sessions' |
-  'activity' | 'settings';
-type LoadKey = 'secrets' | 'connections' | 'agents' | 'sessions' | 'activity';
+  'activity' | 'settings' | 'elicitations';
+type LoadKey = 'secrets' | 'connections' | 'agents' | 'sessions' | 'activity' |
+  'elicitations';
 
 async function refresh(which: RefreshTarget = 'all'): Promise<void> {
   const jobs: Promise<void>[] = [];
@@ -224,6 +229,7 @@ async function refresh(which: RefreshTarget = 'all'): Promise<void> {
   if (which === 'all' || which === 'connections') jobs.push(load('connections', 'list_connections'));
   if (which === 'all' || which === 'agents') jobs.push(load('agents', 'list_agents'));
   if (which === 'all' || which === 'sessions') jobs.push(load('sessions', 'list_sessions'));
+  if (which === 'all' || which === 'elicitations') jobs.push(load('elicitations', 'list_elicitations'));
   if (which === 'all' || which === 'activity') {
     jobs.push(load('activity', 'list_activity', { limit: ACTIVITY_RENDER_LIMIT }));
   }
@@ -244,6 +250,7 @@ async function load<K extends CommandName>(
       case 'agents': state.agents = result as AgentSummary[]; break;
       case 'sessions': state.sessions = result as SessionSummary[]; break;
       case 'activity': state.activity = result as ActivityEntry[]; break;
+      case 'elicitations': state.elicitations = result as ElicitationRequest[]; break;
     }
   } catch (error) {
     console.error(cmd, error);
@@ -304,9 +311,34 @@ function render(capture = true): void {
   }
 }
 
+/**
+ * A paused upstream tool call asking the user for input (SEP-2322).
+ *
+ * DESIGN MOCK — see ELICITATION.md. This is the trusted surface the plan's
+ * "approval routing" risk demands: the upstream's prompt is answered here,
+ * in the app, and never through the agent. The queue shows a one-line
+ * notification; the question itself is asked in a dialog (`elicitationSheet`).
+ */
+function elicitationNoteHTML(request: ElicitationRequest): string {
+  return `<button class="elicit-note" data-act="elicit-open" data-id="${escAttr(request.id)}"
+    aria-label="Answer the input request from ${escAttr(request.connection)}">
+    <span class="elicit-ico">${ICONS.bell}</span>
+    <span class="elicit-note-txt"><b>${esc(request.connection)}</b> asked for input —
+      ${esc(request.agent)} is paused</span>
+    <span class="elicit-when" data-tippy-content="${escAttr(absTime(request.requested_at))}">${esc(relTime(request.requested_at))}</span>
+    <span class="elicit-note-cta">Answer…</span>
+  </button>`;
+}
+
 function globalSectionsHTML() {
   let out = '';
   const hasOnboarding = false;
+  // Pending input requests outrank everything: an agent is paused on them.
+  // They show on every tab, in both the window and the dropdown.
+  if (state.elicitations.length) {
+    out += '<div class="live-head">Waiting on you</div>'
+      + state.elicitations.map(elicitationNoteHTML).join('');
+  }
   // Live sessions answer "what is my agent doing right now?", so they sit
   // with the agents rather than above every screen.
   if (state.tab === 'agents' && state.sessions.length) {
@@ -802,8 +834,52 @@ function sheetsHTML() {
     case 'edit-conn': return connSheet(true);
     case 'settings': return settingsSheet();
     case 'clear-activity': return clearActivitySheet();
+    case 'elicitation': return elicitationSheet();
     default: return '';
   }
+}
+
+/**
+ * The elicitation dialog (SEP-2322 design mock, see ELICITATION.md).
+ *
+ * Shaped like a native macOS alert: symbol on top, a bold one-line message
+ * naming who is asking, then the upstream's own question as the quiet
+ * informative text, the fields, and a right-aligned button row with the
+ * default action last. The prompt is third-party text: rendered verbatim
+ * and inert, and the chrome (title, not prompt) is what says who is asking.
+ */
+function elicitationSheet(): string {
+  const request = state.elicitations.find((r) => r.id === state.sheet?.id);
+  if (!request) {
+    return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
+      <div class="sheet elicit-sheet" role="alertdialog" aria-modal="true" aria-labelledby="elicit-title">
+        <div class="elicit-dlg-ico">${ICONS.bell}</div>
+        <h3 id="elicit-title" class="elicit-dlg-title">This request is gone</h3>
+        <div class="elicit-dlg-context">It was answered somewhere else or expired.</div>
+        <div class="sheet-actions elicit-dlg-actions">
+          <button class="btn primary" data-act="sheet-cancel">OK</button>
+        </div></div>`;
+  }
+  const fields = request.fields.map((field) => `
+    <label class="elicit-field">
+      <span>${esc(field.label)}</span>
+      <input id="elicit-${escAttr(request.id)}-${escAttr(field.name)}"
+        type="${field.secret ? 'password' : 'text'}"
+        autocomplete="off" spellcheck="false">
+    </label>`).join('');
+  return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
+    <div class="sheet elicit-sheet" role="alertdialog" aria-modal="true" aria-labelledby="elicit-title">
+      <div class="elicit-dlg-ico">${ICONS.bell}</div>
+      <h3 id="elicit-title" class="elicit-dlg-title">${esc(request.connection)} asked for input</h3>
+      <div class="elicit-dlg-question">${esc(request.prompt)}</div>
+      <div class="elicit-dlg-fields">${fields}</div>
+      <div class="sheet-actions elicit-dlg-actions">
+        <button class="btn elicit-refuse-btn" data-act="elicit-refuse" data-id="${escAttr(request.id)}">Refuse</button>
+        <span class="elicit-dlg-spacer"></span>
+        <button class="btn" data-act="sheet-cancel">Cancel</button>
+        <button class="btn primary" data-act="elicit-send" data-id="${escAttr(request.id)}">Send to ${esc(request.connection)}</button>
+      </div>
+    </div>`;
 }
 
 function clearActivitySheet() {
@@ -1908,6 +1984,47 @@ document.addEventListener('click', async (e) => {
       break;
     case 'confirm-cancel': state.confirm = null; render(); break;
 
+    // SEP-2322 elicitation (DESIGN MOCK, see ELICITATION.md): the queue row
+    // opens the dialog; answering or refusing there resumes the paused
+    // upstream call broker-side. Values are read from the DOM at click time
+    // and handed straight to the command — they are never mirrored into
+    // state, so a re-render cannot repaint them.
+    case 'elicit-open': {
+      state.sheet = { kind: 'elicitation', id };
+      render();
+      const request = state.elicitations.find((r) => r.id === id);
+      if (request?.fields[0]) focusField(`elicit-${id}-${request.fields[0].name}`);
+      break;
+    }
+    case 'elicit-send': {
+      const request = state.elicitations.find((r) => r.id === id);
+      if (!request) break;
+      const values: Record<string, string> = {};
+      let missing = false;
+      for (const field of request.fields) {
+        const input = document.getElementById(`elicit-${id}-${field.name}`) as HTMLInputElement | null;
+        const value = input?.value.trim() ?? '';
+        if (!value) { missing = true; input?.focus(); break; }
+        values[field.name] = value;
+      }
+      if (missing) break;
+      if (await run(() => invoke('respond_elicitation', { id, approved: true, values }))) {
+        toast(`📨 Sent to ${request.connection} — ${request.agent} resumes`);
+        closeSheet();
+        await refresh('elicitations');
+      }
+      break;
+    }
+    case 'elicit-refuse': {
+      const request = state.elicitations.find((r) => r.id === id);
+      if (await run(() => invoke('respond_elicitation', { id, approved: false }))) {
+        toast(`🚫 Refused — ${request?.agent ?? 'the agent'} is told no, without your reasons`);
+        closeSheet();
+        await refresh('elicitations');
+      }
+      break;
+    }
+
     case 'sheet-cancel': requestCloseSheet(); break;
     case 'discard-keep': state.confirmDiscard = false; render(false); break;
     case 'discard-confirm': closeSheet(); break;
@@ -2138,6 +2255,12 @@ async function boot() {
   }, 60000);
   // Live updates from the core.
   await listen('aka://sessions-changed', () => refresh('sessions'));
+  await listen('aka://elicitations-changed', async () => {
+    await refresh('elicitations');
+    // The open dialog's request may have been answered elsewhere or
+    // expired; the sheet re-renders as "gone" via elicitationSheet, which
+    // is correct — nothing to close here, the user dismisses it informed.
+  });
   await listen('aka://agents-changed', async () => {
     const before = new Map(state.agents.map((agent) => [agent.name, agent.paired_at]));
     await load('agents', 'list_agents');

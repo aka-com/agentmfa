@@ -62,6 +62,36 @@ export interface ActivityEntry {
   at: string;
 }
 
+/**
+ * One input the upstream asked for (SEP-2322 `InputRequiredResult`).
+ *
+ * DESIGN MOCK — the broker does not produce these yet. The shape mirrors
+ * what `/v1/elicitations` is proposed to return; see ELICITATION.md.
+ */
+export interface ElicitationField {
+  name: string;
+  label: string;
+  /** Render as a password field; the value is sent upstream, never shown again. */
+  secret?: boolean;
+}
+
+/** A paused upstream MCP tool call waiting on the user (SEP-2322). */
+export interface ElicitationRequest {
+  id: string;
+  /** Agent whose tool call is paused. It cannot see this prompt or its answer. */
+  agent: string;
+  /** Connection (upstream MCP server) that asked. */
+  connection: string;
+  /** The MCP tool name the agent called. */
+  tool: string;
+  /** The upstream's own prompt, shown verbatim but never interpreted. */
+  prompt: string;
+  fields: ElicitationField[];
+  requested_at: string;
+  /** The request disappears on its own at this time. */
+  expires_at: string;
+}
+
 export interface Settings {
   reauth_on_read: boolean;
   show_websockets: boolean;
@@ -153,6 +183,13 @@ export interface CommandMap {
   confirm_agent_disconnect: CommandSpec<undefined, boolean>;
   revoke_agent: CommandSpec<{ id: string }, boolean>;
   close_session: CommandSpec<{ id: number }, boolean>;
+  list_elicitations: CommandSpec<undefined, ElicitationRequest[]>;
+  respond_elicitation: CommandSpec<{
+    id: string;
+    approved: boolean;
+    /** Field name -> value; required when approved, forbidden otherwise. */
+    values?: Record<string, string>;
+  }, void>;
   set_reauth_on_read: CommandSpec<{ on: boolean }, void>;
   set_show_websockets: CommandSpec<{ on: boolean }, void>;
   set_menu_bar_hides_dock: CommandSpec<{ on: boolean }, void>;
@@ -173,6 +210,7 @@ export interface EventMap {
   'aka://connections-changed': Record<string, never>;
   'aka://wirings-changed': Record<string, never>;
   'aka://sessions-changed': Record<string, never>;
+  'aka://elicitations-changed': Record<string, never>;
   'aka://settings-changed': Record<string, never>;
   'aka://open-settings': Record<string, never>;
   'aka://dropdown-hidden': Record<string, never>;
