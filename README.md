@@ -70,9 +70,9 @@ npm run frontend:dev   # vite dev server with hot reload
 
 Then open:
 
-- <http://localhost:5173/> — the main window (Tools catalog, Agents,
+- <http://127.0.0.1:1420/> — the main window (Tools catalog, Agents,
   Secrets, Activity)
-- <http://localhost:5173/#dropdown> — the compact menu-bar dropdown
+- <http://127.0.0.1:1420/#dropdown> — the compact menu-bar dropdown
 
 The window chrome is chosen from the URL hash; edits to `ui/` hot-reload
 in place.

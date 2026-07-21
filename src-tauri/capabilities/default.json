@@ -1,8 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "AKA's minimal command surface.",
-  "windows": ["main", "dropdown", "approval"],
+  "description": "Multitool's minimal command surface.",
+  "windows": [
+    "main",
+    "dropdown"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-show",
