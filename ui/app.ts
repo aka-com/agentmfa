@@ -481,51 +481,21 @@ function agentBlockHTML(a: AgentSummary): string {
   </div>`;
 }
 
-// With no agent registered there is nothing to wire, so the tab explains how
-// an agent connects instead of showing an empty shelf. The steps mirror what
-// the broker actually does: the agent calls POST /v1/pair itself, appears
-// here immediately, and starts with no access until it is wired.
-function connectAgentWalkthroughHTML(): string {
-  if (mode === 'dropdown') {
-    return `<div class="empty"><div class="empty-ico">${ICONS.botMessageSquare}</div>
-      <h3>No agents connected</h3>
-      <p>Open the window and follow Get started.</p></div>`;
-  }
-  const step = (n: number, title: string, body: string): string =>
-    `<li class="start-step">
-      <span class="start-num" aria-hidden="true">${n}</span>
-      <div class="start-body"><b>${esc(title)}</b>${body}</div></li>`;
-  const hasTools = state.connections.length > 0;
-  return `<div class="start connect-walkthrough">
-    <div class="start-hero">
-      <div class="empty-ico">${ICONS.botMessageSquare}</div>
-      <h3>No agents connected yet</h3>
-      <p>An agent registers itself — you never copy a token by hand.</p>
-    </div>
-    <ol class="start-steps">
-      ${step(1, 'Give your agent the setup message', `<p>Paste this into the coding agent you want to
-        use. It tells the agent where the broker's socket is and how to read its instructions.</p>
-        <pre class="setup-instructions"><code>${esc(state.agentSetupInstructions || 'Loading…')}</code></pre>
-        <div class="start-actions">
-          <button class="btn primary sm" data-act="copy-agent-setup">Copy setup instructions</button>
-        </div>`)}
-      ${step(2, 'Let it register itself', `<p>The agent calls the broker once and is registered on the
-        spot — no approval prompt, no pasted token. It appears on this tab within a second or two,
-        able to list your tools but not to use any of them.</p>`)}
-      ${step(3, 'Wire it to the tools it should reach', `<p>Each agent starts with no access. Wiring is
-        the permission model: a wired tool works with no prompt, and everything else is refused.
-        ${hasTools
-          ? 'Your tools will appear under the agent here, each with a Wire up button.'
-          : 'Add a tool first — there is nothing to wire an agent to yet.'}</p>
-        <div class="start-actions">
-          <button class="btn ${hasTools ? 'ghost' : 'primary'} sm" data-act="tab" data-tab="${hasTools ? 'start' : 'connections'}">${hasTools ? 'Open Get started' : 'Add your first tool'}</button>
-        </div>`)}
-    </ol>
-  </div>`;
+// With no agent registered there is nothing to wire. Get started owns the
+// onboarding narrative — how an agent self-registers (POST /v1/pair) and gets
+// wired — so this is a plain empty state that points there rather than a
+// second copy of the walkthrough.
+function agentsEmptyHTML(): string {
+  const pointer = mode === 'dropdown'
+    ? 'Open the window and follow Get started.'
+    : 'Follow Get started to connect your first agent.';
+  return `<div class="empty"><div class="empty-ico">${ICONS.botMessageSquare}</div>
+    <h3>No agents connected</h3>
+    <p>${pointer}</p></div>`;
 }
 
 function agentsHTML(): string {
-  if (!state.agents.length) return connectAgentWalkthroughHTML();
+  if (!state.agents.length) return agentsEmptyHTML();
   return state.agents.map(agentBlockHTML).join('');
 }
 const liveCount = (c: ConnectionSummary): number =>
