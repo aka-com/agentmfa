@@ -19,6 +19,8 @@ export interface ConnectionSummary {
   id: string;
   name: string;
   type: ConnectionType;
+  /** Set when an API upstream speaks MCP at that path. */
+  mcp_path?: string | null;
   target: string;
   secret_names: string[];
   wired_agents: WiringSummary[];
@@ -96,6 +98,8 @@ export interface ConnectionInput {
   host?: string | null;
   scheme?: string | null;
   port?: number | null;
+  /** Set when this API upstream speaks MCP at that path. */
+  mcp_path?: string | null;
   template?: string | null;
   dbname?: string | null;
   user?: string | null;

@@ -15,6 +15,13 @@ export interface StartOption {
   connType: ConnectionType | null;
   /** Catalog row the Add button opens. */
   catalogId: string | null;
+  /**
+   * This option is satisfied only by an MCP connection. Both this and the
+   * Custom API option store `api` connections, so type alone cannot tell
+   * them apart — without this, adding a plain API would tick the MCP
+   * option's first step.
+   */
+  mcp?: boolean;
   /** Why this is worth wiring up, in one line. */
   promise: string;
   /** The first ask — chosen to be immediately useful, not a hello-world. */
@@ -54,13 +61,14 @@ export const START_OPTIONS: StartOption[] = [
   },
   {
     id: 'mcp',
-    label: 'MCP app',
-    connType: null,
-    catalogId: null,
-    promise: 'GitHub, Gmail, Notion and 1Password arrive as MCP servers — not yet available.',
+    label: 'MCP server',
+    connType: 'api',
+    catalogId: 'mcp',
+    mcp: true,
+    promise: "Give your agent a whole app's tools — GitHub, Notion, anything with an MCP server.",
     task: (name) =>
-      `Using my Multitool tool "${name}", summarize what I missed today and draft replies ` +
-      `to anything urgent.`,
+      `Using my Multitool tool "${name}", list the tools it exposes, then use them to ` +
+      `summarize what changed this week.`,
   },
 ];
 
@@ -88,7 +96,11 @@ export function startProgress(
   agents: AgentSummary[],
 ): StartProgress {
   const matching = option.connType
-    ? connections.filter((connection) => connection.type === option.connType)
+    ? connections.filter(
+      (connection) =>
+        connection.type === option.connType
+        && Boolean(connection.mcp_path) === Boolean(option.mcp),
+    )
     : [];
   // Prefer showing a tool that is already usable by an agent.
   const wiredTool = matching.find((connection) => (connection.wired_agents || []).length > 0);

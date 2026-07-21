@@ -463,6 +463,8 @@ pub struct ConnectionInput {
     pub scheme: Option<String>,
     pub port: Option<u16>,
     pub template: Option<String>,
+    /// Set when this API upstream speaks MCP at that path.
+    pub mcp_path: Option<String>,
     // PG
     pub dbname: Option<String>,
     pub user: Option<String>,
@@ -506,8 +508,12 @@ impl ConnectionInput {
                 scheme: self.scheme.unwrap_or_else(|| "https".into()),
                 port: self.port,
                 template: self.template.unwrap_or_default(),
-            
-                mcp_path: None,
+                // Blank is treated as absent: an empty string here would
+                // make the sidecar post JSON-RPC to the upstream's root.
+                mcp_path: self
+                    .mcp_path
+                    .map(|path| path.trim().to_string())
+                    .filter(|path| !path.is_empty()),
             },
             "pg" => ConnectionConfig::Pg {
                 host: self.host.unwrap_or_default(),
@@ -844,9 +850,60 @@ mod tests {
         assert_eq!(activity_view_limit(Some(0)), 0);
     }
 
+    /// A minimal API input the MCP tests vary one field of.
+    fn api_input() -> ConnectionInput {
+        ConnectionInput {
+            mcp_path: None,
+            name: "notion".into(),
+            kind: "api".into(),
+            host: Some("mcp.notion.com".into()),
+            scheme: Some("https".into()),
+            port: None,
+            template: Some("Authorization: Bearer {{TOKEN}}".into()),
+            dbname: None,
+            user: None,
+            host_key_fingerprint: None,
+            destination: None,
+            sslmode: None,
+            trusted_ca_bundle_path: None,
+            url: None,
+            secret_id: None,
+            new_secret_name: None,
+            new_secret_value: None,
+            ssh_import_id: None,
+            identity_file: None,
+        }
+    }
+
+    #[test]
+    fn an_mcp_path_round_trips_and_blank_means_absent() {
+        let with_path = ConnectionInput {
+            mcp_path: Some("/mcp".into()),
+            ..api_input()
+        };
+        assert!(matches!(
+            with_path.into_spec().unwrap().config,
+            ConnectionConfig::Api { mcp_path: Some(path), .. } if path == "/mcp"
+        ));
+
+        // A blank field is absent, not an empty path: an empty string would
+        // post JSON-RPC to the upstream's root.
+        for blank in ["", "   "] {
+            let input = ConnectionInput {
+                mcp_path: Some(blank.into()),
+                ..api_input()
+            };
+            assert!(matches!(
+                input.into_spec().unwrap().config,
+                ConnectionConfig::Api { mcp_path: None, .. }
+            ));
+        }
+    }
+
     #[test]
     fn connection_input_preserves_api_origin_and_ws_template() {
         let api = ConnectionInput {
+            mcp_path: None,
             name: "local-api".into(),
             kind: "api".into(),
             host: Some("localhost".into()),
@@ -876,6 +933,7 @@ mod tests {
 
         let secret_id = Uuid::new_v4();
         let ws = ConnectionInput {
+            mcp_path: None,
             name: "stream".into(),
             kind: "ws".into(),
             host: None,

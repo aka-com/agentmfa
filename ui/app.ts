@@ -17,6 +17,7 @@ import type { CatalogEntry } from '/src/catalog';
 import { ICONS, TYPES, esc, escAttr, toast, relTime, absTime } from '/src/util';
 import {
   apiOriginFromParts, authTemplate, firstTaskPrompt, parseApiOrigin, parseConnectionImport,
+  parseMcpServerUrl,
   quickSetupPlaceholder, shouldResolveSshImport, sshImportFromPreview, suggestedSecretName,
 } from '/src/connection-input';
 import { formErrorKind, formErrorMessage, inlineFormError } from '/src/form-errors';
@@ -61,6 +62,9 @@ interface ConnectionDraft {
   value?: string;
   importWarnings?: string[];
   origin?: string | null;
+  /** This draft is an MCP server, so the origin field is a full server URL. */
+  isMcp?: boolean;
+  mcpPath?: string | null;
   scheme?: string | null;
   host?: string | null;
   port?: string;
@@ -110,6 +114,8 @@ interface AppState {
   formMenuOpen: string | null;
   connAdvancedOpen: boolean;
   connType: ConnectionType;
+  /** The catalog row that opened the add sheet; names the dialog. */
+  connEntryName: string | null;
   confirm: ConfirmState | null;
   toolSearch: string;
   toolOpen: string | null;
@@ -156,6 +162,7 @@ const state: AppState = {
   formMenuOpen: null,    // id of the open custom-select listbox in the sheet
   connAdvancedOpen: false, // "Advanced" disclosure in the tool sheet
   connType: 'api',
+  connEntryName: null,
   confirm: null,         // {kind, id/name}
   toolSearch: '',        // Add-tools catalog search query
   toolOpen: null,        // catalog entry id whose connections are expanded
@@ -569,12 +576,17 @@ function catalogRowHTML(entry: CatalogEntry): string {
       <div class="cat-conn-list">${connectionsForEntry(entry, state.connections).map(catalogConnRowHTML).join('')}</div>
       <button class="btn ghost sm cat-add-another" data-act="catalog-add" data-id="${entry.id}">＋ Add another ${esc(entry.name)}</button>
     </div>`;
-  return `<div class="cat-row-wrap ${open ? 'open' : ''} ${entry.via === 'mcp' ? 'is-soon' : ''}">
+  return `<div class="cat-row-wrap ${open ? 'open' : ''}">
     <div class="cat-row">
       <span class="cat-ico" aria-hidden="true">${ICONS[entry.icon] || ''}</span>
       <div class="cat-tx"><b>${esc(entry.name)}</b><span>${esc(entry.description)}</span></div>
       ${action}
     </div>${expansion}</div>`;
+}
+
+/** Whether a draft is being edited as an MCP server rather than a raw API. */
+function isMcpDraft(draft: { isMcp?: boolean; mcpPath?: string | null }): boolean {
+  return Boolean(draft.isMcp || draft.mcpPath);
 }
 
 function connectionsHTML() {
@@ -650,7 +662,6 @@ async function receiveActivity(entry: ActivityEntry | null | undefined): Promise
 function startHTML(): string {
   const option = startOptionById(state.startOption);
   const progress = startProgress(option, state.connections, state.agents);
-  const unavailable = !option.connType;
 
   const picker = START_OPTIONS.map((candidate) =>
     `<button class="start-pick ${candidate.id === option.id ? 'on' : ''}"
@@ -662,11 +673,7 @@ function startHTML(): string {
       <span class="start-num" aria-hidden="true">${done ? ICONS.check : n}</span>
       <div class="start-body"><b>${esc(title)}</b>${body}</div></li>`;
 
-  const addBody = unavailable
-    ? `<p>The MCP layer is not built yet, so there is nothing to add here. Everything below
-        already works — set up Postgres, SSH, or a custom API and an agent wired to one of
-        those behaves exactly the same way.</p>`
-    : `<p>Save the destination and its credential. The credential goes to your Keychain;
+  const addBody = `<p>Save the destination and its credential. The credential goes to your Keychain;
         agents can use it but never read it.</p>
       <div class="start-actions">
         <button class="btn primary sm" data-act="catalog-add" data-id="${option.catalogId}">Add ${esc(option.label)}</button>
@@ -1005,7 +1012,15 @@ function connSheet(editing: boolean): string {
   const nameWarning = editing ? ''
     : `<div id="tool-name-warning" class="field-warning" role="status" aria-live="polite"${nameTaken ? '' : ' hidden'}>Name used by an existing tool</div>`;
   fields += `<div class="f-row"><label for="f-cname">Name</label><input id="f-cname" class="${fieldCls('name')} ${nameTaken ? 'name-conflict-warning' : ''}"${editing ? '' : ' aria-describedby="tool-name-warning"'} placeholder="e.g. github" value="${escAttr(d.name ?? '')}">${fieldErr('name')}${nameWarning}</div>`;
-  if (t === 'api') {
+  if (t === 'api' && isMcpDraft(d)) {
+    const url = d.origin
+      ?? (d.host
+        ? `${apiOriginFromParts(d.scheme ?? undefined, d.host, d.port ?? null)}${d.mcpPath ?? ''}`
+        : '');
+    fields += `<div class="f-row"><label for="f-origin">MCP server URL</label>
+      <input id="f-origin" class="${fieldCls('origin')}" placeholder="https://mcp.example.com/mcp" value="${escAttr(url)}">${fieldErr('origin')}
+      <div class="rule-note">The URL your provider gave you. Its tools appear to wired agents automatically; the credential below is injected on the way out and never reaches the agent.</div></div>`;
+  } else if (t === 'api') {
     const origin = d.origin ?? apiOriginFromParts(d.scheme ?? undefined, d.host ?? undefined, d.port ?? null);
     fields += `<div class="f-row"><label for="f-origin">API root</label><input id="f-origin" class="${fieldCls('origin')}" placeholder="https://api.github.com" value="${escAttr(origin)}">${fieldErr('origin')}</div>`;
   } else if (t === 'ssh') {
@@ -1091,7 +1106,8 @@ function connSheet(editing: boolean): string {
   if (editing && conn && (conn.wired_agents || []).length) {
     fields += `<div class="rule-note">Changing the destination unwires affected agents.</div>`;
   }
-  const title = `${editing ? 'Edit' : 'Add'} ${catalogNameForType(t)}`;
+  const label = (!editing && state.connEntryName) || catalogNameForType(t);
+  const title = `${editing ? 'Edit' : 'Add'} ${label}`;
   const discardConfirm = state.confirmDiscard ? `
     <div class="sheet-backdrop over-sheet" data-act="discard-keep"></div>
     <div class="sheet wide confirm-sheet discard-confirm" role="dialog" aria-modal="true" aria-labelledby="discard-conn-title">
@@ -1104,7 +1120,7 @@ function connSheet(editing: boolean): string {
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
     <div class="sheet wide"><h3>${title}</h3>${fields}
     <div class="sheet-actions"><button class="btn" data-act="sheet-cancel">Cancel</button>
-      <button class="btn primary" data-act="save-conn">${editing ? 'Save' : `Add ${catalogNameForType(t)}`}</button></div></div>${discardConfirm}`;
+      <button class="btn primary" data-act="save-conn">${editing ? 'Save' : `Add ${label}`}</button></div></div>${discardConfirm}`;
 }
 
 function settingsSheet() {
@@ -1375,8 +1391,15 @@ async function saveConn(): Promise<void> {
     if (!url) errs.url = 'URL is required';
     else if (!/^wss?:\/\//i.test(url)) errs.url = 'Must start with ws:// or wss://';
   }
-  let apiOrigin = null;
-  if (t === 'api') {
+  let apiOrigin: { scheme: string; host: string; port: number | null } | null = null;
+  let mcpPath: string | null = null;
+  if (t === 'api' && isMcpDraft(d)) {
+    try {
+      const server = parseMcpServerUrl(d.origin || '');
+      apiOrigin = { scheme: server.scheme, host: server.host, port: server.port };
+      mcpPath = server.mcpPath;
+    } catch (error) { errs.origin = errorMessage(error); }
+  } else if (t === 'api') {
     try { apiOrigin = parseApiOrigin(d.origin || ''); }
     catch (error) { errs.origin = errorMessage(error); }
   }
@@ -1434,6 +1457,7 @@ async function saveConn(): Promise<void> {
     input.scheme = apiOrigin!.scheme;
     input.port = apiOrigin!.port;
     input.template = injectionTemplate;
+    input.mcp_path = mcpPath;
   } else if (t === 'pg') {
     input.host = (d.host || '').trim();
     input.port = port;
@@ -1705,6 +1729,11 @@ document.addEventListener('click', async (e) => {
       state.sheet = { kind: 'add-conn' };
       state.connType = entry.connType;
       state.draft = {};
+      // An MCP row stores an API connection, but the form asks for a
+      // server URL rather than an API root — and the dialog is named after
+      // the row the user clicked, not the protocol underneath it.
+      state.connEntryName = entry.name;
+      if (entry.mcp) state.draft.isMcp = true;
       if (entry.connType === 'pg') state.draft.port = '5432';
       if (entry.connType === 'ssh') state.draft.port = '22';
       state.sheetErrors = {}; state.sheetBaseline = null; state.connAdvancedOpen = false;
@@ -1717,12 +1746,19 @@ document.addEventListener('click', async (e) => {
       state.connMenuOpen = null;
       if (!await holdDropdownFormOpen()) break;
       state.sheet = { kind: 'edit-conn', id }; state.connType = c.type;
+      state.connEntryName = null;
       state.sheetErrors = {};
       state.sheetBaseline = null;
       state.draft = { name: c.name, host: c.host, scheme: c.scheme,
         origin: c.type === 'api'
+          // An MCP connection round-trips as the full server URL it was
+          // entered as, so editing shows what was typed rather than a
+          // stripped origin.
           ? apiOriginFromParts(c.scheme ?? undefined, c.host ?? undefined, c.port)
+            + (c.mcp_path ?? '')
           : null,
+        isMcp: Boolean(c.mcp_path),
+        mcpPath: c.mcp_path ?? null,
         port: c.port ? String(c.port) : (c.type === 'ssh' ? '22' : '5432'),
         dbname: c.dbname, user: c.user, url: c.url, template: c.template,
         destination: c.destination,

@@ -168,9 +168,22 @@ argument, which we then forwarded upstream as tool arguments. Declaring a
 permissive `z.looseObject({})` fixes it; a regression test asserts the
 agent's token never appears in what the upstream receives.
 
-**Phase 5 — UI.** MCP catalog rows become addable, the dimmed
-GitHub/Gmail/Notion/1Password rows light up, and the Get Started "MCP
-app" option stops saying *not yet available*.
+**Phase 5 — UI. Done.** GitHub, Gmail, Notion and 1Password are no longer
+dimmed: they are `mcp: true` catalog rows that add an API connection with
+an `mcp_path`. A generic **MCP server** row covers anything else. The add
+form asks for a server URL rather than an API root, splits it into a
+pinned origin plus the MCP path, and defaults a bare origin to `/mcp`.
+The Get Started "MCP server" option is real.
+
+No vendor endpoint URLs are shipped. A branded row is a labelled
+shortcut; the user supplies the server URL their provider gave them,
+because guessing at someone else's infrastructure is not something to
+hard-code.
+
+Two things the headless UI pass caught: the dialog was titled "Add Custom
+API" for the Notion row (it now names the row the user clicked), and a
+dev fixture referencing an unseeded secret left frontend-only mode on a
+blank page — that lookup now says what is wrong instead of throwing.
 
 ## Risks
 

@@ -110,6 +110,43 @@ export function parseApiOrigin(value: unknown): {
   };
 }
 
+/**
+ * Split an MCP server URL into the parts a connection stores.
+ *
+ * An MCP server is an API connection whose path matters, so unlike
+ * `parseApiOrigin` this keeps the path — that is the `mcp_path` the sidecar
+ * posts JSON-RPC to. A bare origin means `/mcp`, the conventional default.
+ */
+export function parseMcpServerUrl(value: unknown): {
+  scheme: string;
+  host: string;
+  port: number | null;
+  mcpPath: string;
+} {
+  let parsed: URL;
+  try {
+    parsed = new URL(String(value).trim());
+  } catch {
+    throw new Error('Enter a complete server URL such as https://mcp.example.com/mcp');
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new Error('Server URL must start with https:// or http://');
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error('Server URL must not contain credentials');
+  }
+  if (parsed.hash) {
+    throw new Error('Server URL cannot contain a fragment');
+  }
+  const path = parsed.pathname === '/' ? '/mcp' : parsed.pathname.replace(/\/$/, '');
+  return {
+    scheme: parsed.protocol.slice(0, -1),
+    host: parsed.hostname,
+    port: parsed.port ? Number(parsed.port) : null,
+    mcpPath: `${path}${parsed.search}`,
+  };
+}
+
 function decoded(value: string, label: string): string {
   try { return decodeURIComponent(value); }
   catch { throw new Error(`${label} contains invalid percent encoding`); }

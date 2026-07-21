@@ -2,14 +2,19 @@
 //
 // Connections are stored by protocol (api/pg/ws/ssh); the catalog presents
 // them as tools grouped into sections. Each entry either maps to a
-// connection type the broker serves today (`via: 'connection'`), fronts a
-// built-in store (`via: 'builtin'` — the Keychain-backed saved
-// credentials), or names an integration that arrives later through the MCP
-// layer (`via: 'mcp'`, shown dimmed and not yet addable).
+// connection type the broker serves today (`via: 'connection'`) or fronts
+// a built-in store (`via: 'builtin'` — the Keychain-backed saved
+// credentials).
 //
-// Branded apps (GitHub, Gmail, Notion, 1Password) are all MCP-bound: they
-// are richer than a single credentialed origin, so they wait for the MCP
-// layer rather than being approximated by a raw HTTP connection.
+// Branded apps (GitHub, Gmail, Notion, 1Password) are `mcp: true`: they are
+// richer than a single credentialed origin, so they are added by pointing
+// at that service's MCP server. Underneath they are still API connections —
+// same pinned host, same credential injected on the upstream leg — with an
+// MCP path set, which is what lets the sidecar re-expose their tools.
+//
+// We do not ship endpoint URLs for these: the user supplies the server URL
+// their vendor gave them. A branded row is a labelled shortcut, not a claim
+// about someone else's infrastructure.
 
 import type { ConnectionSummary, ConnectionType } from './types';
 
@@ -22,8 +27,13 @@ export interface CatalogEntry {
   icon: string;
   description: string;
   section: CatalogSection;
-  via: 'connection' | 'builtin' | 'mcp';
+  via: 'connection' | 'builtin';
   connType?: ConnectionType;
+  /**
+   * Added by pointing at an MCP server. Stored as an API connection with
+   * `mcp_path` set; the form asks for a server URL rather than an API root.
+   */
+  mcp?: boolean;
 }
 
 export const CATALOG: CatalogEntry[] = [
@@ -31,25 +41,41 @@ export const CATALOG: CatalogEntry[] = [
     id: 'github',
     name: 'GitHub',
     icon: 'github',
-    description: 'Repos, issues, PRs',
+    description: 'Repos, issues, PRs — via MCP',
     section: 'Apps',
-    via: 'mcp',
+    via: 'connection',
+    connType: 'api',
+    mcp: true,
   },
   {
     id: 'gmail',
     name: 'Gmail',
     icon: 'gmail',
-    description: 'Read & send email',
+    description: 'Read & send email — via MCP',
     section: 'Apps',
-    via: 'mcp',
+    via: 'connection',
+    connType: 'api',
+    mcp: true,
   },
   {
     id: 'notion',
     name: 'Notion',
     icon: 'notion',
-    description: 'Pages & databases',
+    description: 'Pages & databases — via MCP',
     section: 'Apps',
-    via: 'mcp',
+    via: 'connection',
+    connType: 'api',
+    mcp: true,
+  },
+  {
+    id: 'mcp',
+    name: 'MCP server',
+    icon: 'plug',
+    description: 'Any MCP server, by URL',
+    section: 'Apps',
+    via: 'connection',
+    connType: 'api',
+    mcp: true,
   },
   {
     id: 'postgres',
@@ -99,17 +125,32 @@ export const CATALOG: CatalogEntry[] = [
     id: 'onepassword',
     name: '1Password',
     icon: 'onepassword',
-    description: 'Vault & credentials',
+    description: 'Vault & credentials — via MCP',
     section: 'Secrets',
-    via: 'mcp',
+    via: 'connection',
+    connType: 'api',
+    mcp: true,
   },
 ];
 
 export const CATALOG_SECTIONS: CatalogSection[] = ['Apps', 'Infrastructure', 'Secrets'];
 
-/** Which catalog row owns a connection: the row for its protocol. */
+/**
+ * Which catalog row owns a connection.
+ *
+ * A stored connection does not remember which shortcut created it — a
+ * GitHub MCP server and a Notion one are both an API connection with an
+ * `mcp_path`. So every MCP connection lists under the generic MCP row, and
+ * everything else under the row for its protocol. Deterministic beats
+ * guessing at a vendor from a hostname.
+ */
 export function entryForConnection(connection: ConnectionSummary): CatalogEntry | undefined {
-  return CATALOG.find((entry) => entry.via === 'connection' && entry.connType === connection.type);
+  if (connection.type === 'api' && connection.mcp_path) {
+    return CATALOG.find((entry) => entry.id === 'mcp');
+  }
+  return CATALOG.find(
+    (entry) => entry.via === 'connection' && entry.connType === connection.type && !entry.mcp,
+  );
 }
 
 export function connectionsForEntry(
@@ -151,8 +192,14 @@ export function visibleCatalog(query: string, visibility: CatalogVisibility): Ca
 
 /** The catalog's name for a connection type — the dialog titles reuse it. */
 export function catalogNameForType(type: ConnectionType): string {
-  return CATALOG.find((entry) => entry.via === 'connection' && entry.connType === type)?.name
-    ?? 'tool';
+  return CATALOG.find(
+    (entry) => entry.via === 'connection' && entry.connType === type && !entry.mcp,
+  )?.name ?? 'tool';
+}
+
+/** The dialog title for a row: branded MCP rows keep their own name. */
+export function catalogNameForEntry(entry: CatalogEntry): string {
+  return entry.name;
 }
 
 /** Catalog entries that can be added today, in display order. */

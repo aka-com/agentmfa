@@ -28,10 +28,26 @@ test('every entry lives in a known section; only connection entries are addable'
   }
 });
 
-test('branded apps are MCP-bound, not raw connections', () => {
+test('branded apps are added as MCP servers, not raw API origins', () => {
   for (const id of ['github', 'gmail', 'notion', 'onepassword']) {
-    assert.equal(CATALOG.find((entry) => entry.id === id)?.via, 'mcp', id);
+    const entry = CATALOG.find((candidate) => candidate.id === id);
+    assert.equal(entry?.via, 'connection', id);
+    assert.equal(entry?.mcp, true, id);
+    // Stored as an API connection underneath — same pinned host and same
+    // upstream credential injection as any other API tool.
+    assert.equal(entry?.connType, 'api', id);
   }
+});
+
+test('an MCP connection lists under the generic MCP row', () => {
+  const mcp = entryForConnection({
+    type: 'api', mcp_path: '/mcp',
+  } as never);
+  assert.equal(mcp?.id, 'mcp');
+
+  // …and a plain API connection still lists under Custom API.
+  const plain = entryForConnection({ type: 'api' } as never);
+  assert.equal(plain?.id, 'http');
 });
 
 test('the built-in credentials store is a Secrets row', () => {

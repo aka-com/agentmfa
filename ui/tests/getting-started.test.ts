@@ -90,3 +90,19 @@ test('the task reads sensibly before any tool exists', () => {
   assert.match(task, /my-tool/);
   assert.match(task, /disk and memory/);
 });
+
+test('the MCP option is not satisfied by a plain API connection', () => {
+  const mcp = startOptionById('mcp');
+  const plainApi = conn('api', 'billing-api');
+  assert.equal(startProgress(mcp, [plainApi], []).added, false);
+
+  const server = { ...conn('api', 'notion'), mcp_path: '/mcp' };
+  assert.equal(startProgress(mcp, [server], []).added, true);
+});
+
+test('the Custom API option is not satisfied by an MCP server', () => {
+  const api = startOptionById('api');
+  const server = { ...conn('api', 'notion'), mcp_path: '/mcp' };
+  assert.equal(startProgress(api, [server], []).added, false);
+  assert.equal(startProgress(api, [conn('api', 'billing-api')], []).added, true);
+});
