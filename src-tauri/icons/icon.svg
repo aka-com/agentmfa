@@ -1,10 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Source artwork for the full-color application and Dock icon. -->
+<!-- The rounded-square body fills an 824x824 region centered in the 1024
+     canvas (100px margin), matching Apple's macOS icon grid so the icon
+     renders at the same visual size as neighbouring apps in the Dock and
+     app switcher. -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
-  <rect x="48" y="48" width="928" height="928" rx="220" fill="#26262c"/>
-  <rect x="96" y="96" width="832" height="832" rx="180" fill="#303038"/>
-  <path d="M350 462V352c0-102 72-168 162-168s162 66 162 168v110" fill="none" stroke="#f5bc52" stroke-linecap="round" stroke-width="72"/>
-  <rect x="260" y="430" width="504" height="354" rx="72" fill="#f5bc52"/>
-  <circle cx="512" cy="585" r="44" fill="#26262c"/>
-  <rect x="486" y="584" width="52" height="105" rx="26" fill="#26262c"/>
+  <g transform="translate(57.379 57.379) scale(0.887931)">
+    <rect x="48" y="48" width="928" height="928" rx="220" fill="#26262c"/>
+    <rect x="96" y="96" width="832" height="832" rx="180" fill="#303038"/>
+    <path d="M350 462V352c0-102 72-168 162-168s162 66 162 168v110" fill="none" stroke="#f5bc52" stroke-linecap="round" stroke-width="72"/>
+    <rect x="260" y="430" width="504" height="354" rx="72" fill="#f5bc52"/>
+    <circle cx="512" cy="585" r="44" fill="#26262c"/>
+    <rect x="486" y="584" width="52" height="105" rx="26" fill="#26262c"/>
+  </g>
 </svg>
