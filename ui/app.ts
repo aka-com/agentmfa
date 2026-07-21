@@ -418,7 +418,7 @@ function agentsHTML(): string {
       <p>Pair a coding agent to see and control what it can reach.</p>
       <p class="empty-tip">Copy the setup instructions into your agent to get started.</p>
       <button class="btn primary" data-act="copy-agent-setup">Copy setup instructions</button>`;
-    return `<div class="empty"><div class="empty-ico">🤖</div><h3>No agents connected</h3>${detail}</div>`;
+    return `<div class="empty"><div class="empty-ico">${ICONS.botMessageSquare}</div><h3>No agents connected</h3>${detail}</div>`;
   }
   return state.agents.map(agentBlockHTML).join('');
 }
@@ -707,7 +707,7 @@ function renderMainWindow() {
     <div class="dw-titlebar" data-tauri-drag-region><span class="dw-title">Multitool</span></div>
     <div class="dw-body">
       <div class="dw-side">
-        <div class="dw-brand"><div class="dd-appicon">🔐</div>
+        <div class="dw-brand"><div class="dd-appicon">${ICONS.blocks}</div>
           <div><div class="dd-title">Multitool</div>${brokerReadyHTML()}</div></div>
         <div class="dw-nav">${nav}</div>
         <div class="dw-secondary-nav">${activityNav}</div>
@@ -729,7 +729,7 @@ function renderDropdown() {
     `<button class="seg-btn ${state.tab === tb ? 'on' : ''}" data-act="tab" data-tab="${tb}">${tabLabel(tb)}</button>`).join('');
   const footer = '';
   root().innerHTML = `<div class="surface dropdown-surface">
-    <div class="dd-head"><div class="dd-appicon">🔐</div>
+    <div class="dd-head"><div class="dd-appicon">${ICONS.blocks}</div>
       <div class="dd-identity"><div class="dd-title">Multitool</div>${brokerReadyHTML()}</div>
       <button class="icon-btn" title="Open as a window" aria-label="Open as a window" data-act="mode-window">${ICONS.expand}</button>
       <button class="icon-btn" title="Settings" aria-label="Settings" data-act="open-settings">${ICONS.gear}</button></div>
