@@ -188,11 +188,21 @@ async fn run_once(
         .arg(&config.script)
         .env("AKA_SIDECAR_TOKEN", &token)
         .env("AKA_BROKER_SOCKET", &config.broker_socket)
-        .stdin(Stdio::null())
+        // Piped, not null: the sidecar treats its stdin as a liveness
+        // channel. Nothing is ever written to it, but the moment this
+        // process goes away the OS closes the write end and the sidecar
+        // sees EOF. `kill_on_drop` alone is not enough — a real app exit
+        // does not necessarily drop the `Child`, which orphaned the
+        // sidecar every time the app quit.
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()?;
+
+    // Held for the lifetime of the child: dropping it early would signal
+    // our own death to a sidecar we still want running.
+    let _stdin = child.stdin.take();
 
     // Both pipes must be drained for the lifetime of the process, or the
     // sidecar blocks on a full buffer the moment it logs enough.

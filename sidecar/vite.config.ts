@@ -19,7 +19,15 @@ export default defineConfig({
     target: 'node22',
     minify: false,
     rollupOptions: {
-      output: { entryFileNames: 'main.js', format: 'esm' },
+      output: {
+        entryFileNames: 'main.mjs',
+        format: 'esm',
+        // One file, enforced. The Rust side resolves exactly
+        // `dist/sidecar/main.js` and Tauri ships exactly that path as a
+        // resource, so a build that split out a lazy chunk would package an
+        // app whose sidecar could not load it.
+        inlineDynamicImports: true,
+      },
     },
   },
 });

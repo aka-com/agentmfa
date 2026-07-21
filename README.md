@@ -45,7 +45,7 @@ MCP is being added through a supervised Node sidecar that hosts the
 and the phase plan. The sidecar is not yet wired to any tools.
 
 ```sh
-npm run sidecar:build    # bundle sidecar/ to dist/sidecar/main.js
+npm run sidecar:build    # bundle sidecar/ to dist/sidecar/main.mjs
 npm run sidecar:vendor   # fetch the pinned Node the .app ships (macOS)
 npm run test:sidecar     # the sidecar's own tests
 ```
@@ -56,7 +56,7 @@ connections become `multitool_<name>_open`, which hand back the same
 password-less DSN, agent socket, or bridge URL the CLI path returns.
 `multitool_status` is always present and reports what the agent may use.
 
-The app starts the sidecar when `dist/sidecar/main.js` exists and runs
+The app starts the sidecar when `dist/sidecar/main.mjs` exists and runs
 without it otherwise, so a checkout that skips `sidecar:build` still
 works. `AKA_SIDECAR_NODE` and `AKA_SIDECAR_SCRIPT` override what gets
 run. `npm run build` performs both sidecar steps for you.

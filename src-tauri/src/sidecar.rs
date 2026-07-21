@@ -40,7 +40,7 @@ fn resolve_script(app: &AppHandle) -> Option<PathBuf> {
         return Some(PathBuf::from(path));
     }
     if let Ok(dir) = app.path().resource_dir() {
-        let bundled = dir.join("sidecar/main.js");
+        let bundled = dir.join("sidecar/main.mjs");
         if bundled.is_file() {
             return Some(bundled);
         }
@@ -48,13 +48,13 @@ fn resolve_script(app: &AppHandle) -> Option<PathBuf> {
     script_near(&std::env::current_exe().ok()?)
 }
 
-/// Find `dist/sidecar/main.js` by walking up from the executable — the
+/// Find `dist/sidecar/main.mjs` by walking up from the executable — the
 /// layout of a source checkout, where the shell runs out of
 /// `src-tauri/target/<profile>/`. Walking rather than counting levels,
 /// because a `--target` build nests one directory deeper.
 fn script_near(exe: &std::path::Path) -> Option<PathBuf> {
     exe.ancestors()
-        .map(|dir| dir.join("dist/sidecar/main.js"))
+        .map(|dir| dir.join("dist/sidecar/main.mjs"))
         .find(|candidate| candidate.is_file())
 }
 
@@ -101,7 +101,7 @@ mod tests {
     #[test]
     fn the_checkout_script_is_found_at_either_build_depth() {
         let root = tempfile::tempdir().expect("tempdir");
-        let script = root.path().join("dist/sidecar/main.js");
+        let script = root.path().join("dist/sidecar/main.mjs");
         std::fs::create_dir_all(script.parent().expect("parent")).expect("mkdir");
         std::fs::write(&script, "// bundle").expect("write");
 

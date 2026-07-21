@@ -48,6 +48,14 @@ function main(): void {
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
+
+  // Stdin is a liveness channel, never a data one: the broker holds the
+  // write end open and never writes. EOF therefore means the broker is
+  // gone, and a sidecar with no broker has nothing to serve — so it exits
+  // rather than lingering as an orphan holding a loopback port.
+  process.stdin.resume();
+  process.stdin.on('end', () => shutdown('broker-exit'));
+  process.stdin.on('close', () => shutdown('broker-exit'));
 }
 
 try {

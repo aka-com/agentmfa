@@ -13,7 +13,7 @@ use aka_core::sidecar::{Sidecar, SidecarConfig};
 
 fn bundle() -> Option<PathBuf> {
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../dist/sidecar/main.js")
+        .join("../../dist/sidecar/main.mjs")
         .canonicalize()
         .ok()?;
     script.is_file().then_some(script)
@@ -29,7 +29,7 @@ fn have_node() -> bool {
 #[tokio::test]
 async fn the_real_sidecar_announces_a_port_and_serves_health() {
     let Some(script) = bundle() else {
-        eprintln!("skipping: no dist/sidecar/main.js (run `npm run sidecar:build`)");
+        eprintln!("skipping: no dist/sidecar/main.mjs (run `npm run sidecar:build`)");
         return;
     };
     if !have_node() {

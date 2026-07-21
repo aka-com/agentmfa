@@ -63,10 +63,11 @@
       "icons/icon.icns"
     ],
     "macOS": {
-      "minimumSystemVersion": "13.0"
+      "minimumSystemVersion": "13.0",
+      "entitlements": "entitlements.plist"
     },
     "resources": {
-      "../dist/sidecar/main.js": "sidecar/main.js"
+      "../dist/sidecar/main.mjs": "sidecar/main.mjs"
     }
   }
 }

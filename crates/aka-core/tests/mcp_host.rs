@@ -30,7 +30,7 @@ impl BrokerEvents for NoopEvents {}
 
 fn bundle() -> Option<PathBuf> {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../dist/sidecar/main.js")
+        .join("../../dist/sidecar/main.mjs")
         .canonicalize()
         .ok()
         .filter(|path| path.is_file())
@@ -152,7 +152,7 @@ fn tool_payload(result: &Value) -> Value {
 #[tokio::test]
 async fn the_broker_decides_what_an_agent_sees_over_mcp() {
     let Some(script) = bundle() else {
-        eprintln!("skipping: no dist/sidecar/main.js (run `npm run sidecar:build`)");
+        eprintln!("skipping: no dist/sidecar/main.mjs (run `npm run sidecar:build`)");
         return;
     };
     if !have_node() {
