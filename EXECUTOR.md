@@ -77,10 +77,12 @@ Three rules keep the security model intact:
    is that they never arrive — the broker injects on the upstream leg as
    it does today.
 
-Per-agent identity: `POST /v1/pair` already mints a stable `client_id`.
-It additionally mints an MCP bearer token. Our `McpAuthProvider`
-resolves token → `client_id` against the broker on every request, which
-is what makes wiring enforcement work over MCP.
+Per-agent identity: `POST /v1/pair` already mints a stable `client_id`
+and a bearer token, and that existing token *is* the MCP credential.
+Phase 2 found no reason to mint a second one — the sidecar simply passes
+the agent's token through, and the broker resolves it on every request.
+One credential, one lifecycle, and revoking it in the app takes effect
+on the next call rather than whenever a cache expires.
 
 ## Phases
 

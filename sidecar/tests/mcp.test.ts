@@ -10,6 +10,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
 import { createSidecarServer } from '../src/server';
+import { SessionStore } from '../src/mcp';
 
 const SUPERVISOR_TOKEN = 'a'.repeat(64);
 
@@ -222,4 +223,26 @@ test("one agent cannot ride another agent's session id", async () => {
   } finally {
     await app.close();
   }
+});
+
+test('idle sessions are evicted rather than accumulating forever', async () => {
+  // Agents crash without closing; only a clean shutdown fires `onclose`.
+  const store = new SessionStore(5, 10);
+  const fake = { close: () => Promise.resolve() } as never;
+  store.put('a', 'client-1', fake);
+  assert.equal(store.size, 1);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  store.put('b', 'client-1', fake);
+  assert.equal(store.size, 1, 'the idle session should have been swept');
+  assert.equal(store.get('a', 'client-1'), null);
+});
+
+test('the session count is capped', async () => {
+  const store = new SessionStore(60_000, 3);
+  const fake = { close: () => Promise.resolve() } as never;
+  for (const id of ['a', 'b', 'c', 'd', 'e']) store.put(id, 'client-1', fake);
+  assert.ok(store.size <= 3, `expected at most 3 sessions, got ${store.size}`);
+  // The most recent survives; the oldest are the ones dropped.
+  assert.ok(store.get('e', 'client-1'), 'the newest session should survive');
+  assert.equal(store.get('a', 'client-1'), null, 'the oldest should be gone');
 });

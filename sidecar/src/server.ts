@@ -15,7 +15,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { timingSafeEqual } from 'node:crypto';
 
 import { BrokerClient } from './broker';
-import { BrokerAuthProvider, MCP_PATH, SessionStore, openSession } from './mcp';
+import { BrokerAuthProvider, MCP_PATH, SessionStore, hostIsLoopback, openSession } from './mcp';
 
 export const SIDECAR_VERSION = '0.1.0';
 
@@ -120,6 +120,11 @@ async function handleMcp(
   res: ServerResponse,
   { broker, auth, sessions }: McpDeps,
 ): Promise<void> {
+  if (!hostIsLoopback(req.headers.host, req.socket.localPort ?? 0)) {
+    rpcError(res, 421, -32000, 'Misdirected request');
+    return;
+  }
+
   // Every request, including one carrying a live session id: a token
   // revoked in the app must stop working on the very next call.
   const principal = await auth.authenticate(bearer(req));
