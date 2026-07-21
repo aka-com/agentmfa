@@ -2,10 +2,10 @@
 //!
 //! This module is the in-code source of truth for the protocol surface the
 //! manifest advertises and PROTOCOL.md specifies in prose: the protocol
-//! version, the **closed registry** of machine-readable error reasons, the
-//! approval lifecycle states, and the capability flags (auth schemes,
-//! approval modes). Everything an agent can observe on the wire is named
-//! here, so the vocabulary is reviewable and freezable as a unit.
+//! version, the **closed registry** of machine-readable error reasons, and
+//! the capability flags (auth schemes). Everything an agent can observe on
+//! the wire is named here, so the vocabulary is reviewable and freezable as
+//! a unit.
 //!
 //! Compatibility rules: renaming or removing anything here is a breaking
 //! protocol change; additions are backwards-compatible but bump

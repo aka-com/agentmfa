@@ -3,9 +3,9 @@
 //! - `aka skill` emits the `/instructions` content as a checked-in
 //!   skill file, the same content the daemon serves, so the convention
 //!   layer can't drift from the daemon.
-//! - `aka serve` runs the broker headless with a terminal approver, so
-//!   the whole control plane + WS/PG data planes can be exercised without
-//!   the desktop UI (useful for agent integration and CI).
+//! - `aka serve` runs the broker headless, so the whole control plane +
+//!   WS/PG data planes can be exercised without the desktop UI (useful for
+//!   agent integration and CI).
 //! - `aka secret add` / `aka conn add` / `aka conn list`
 //!   seed the store from the terminal — the dev/headless counterpart of the
 //!   app's Secrets and Connections tabs — with the same validation, so a
@@ -37,6 +37,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)] // one short-lived instance per invocation
 enum Command {
     /// Emit the /instructions content as a skill file. Prints to stdout by
     /// default; `--write` writes .claude/skills/aka/SKILL.md.
@@ -146,8 +147,8 @@ struct ConnAdd {
     #[arg(long)]
     user: Option<String>,
     /// ssh: pinned server host key fingerprint (SHA256:... or SHA512:...).
-    /// Omit it to trust on first use: the key is confirmed with the user and
-    /// pinned at the first agent connection.
+    /// Omit it to trust on first use: the key the server presents at the
+    /// first agent connection is pinned automatically.
     #[arg(long)]
     host_key_fingerprint: Option<String>,
     /// pg/ws/ssh: name of the one bound secret (api connections derive

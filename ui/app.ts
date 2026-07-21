@@ -1,5 +1,5 @@
 // AKA Desktop frontend. One file drives all Tauri windows (main, tray
-// dropdown, and approval), chosen from location.hash.
+// and dropdown), chosen from location.hash.
 //
 // Every mutation and read goes through the Rust core via Tauri
 // commands; the webview never holds a secret value. When run outside
@@ -367,7 +367,7 @@ function guideDoneStepHTML(): string {
   }
   return `<div class="guide-done">
     <b>Setup complete</b>
-    <p>Your agent can now ask to use your services — every request still comes back to you for approval. Re-run this walkthrough any time from the walkthrough menu.</p>
+    <p>Your agent can now use the services you wire it to — manage wirings from the Agents tab. Re-run this walkthrough any time from the walkthrough menu.</p>
     <div class="guide-done-actions">
       <button class="btn" data-act="guide-step" data-step="connect">Back to the beginning</button>
       <button class="btn primary" data-act="guide-dismiss">Dismiss walkthrough</button>
@@ -404,7 +404,7 @@ function globalSectionsHTML() {
     out += `<div class="agent-onboarding walkthrough-card">
       <div class="walkthrough-head">
         <div class="onboarding-copy"><b>Let your agent set this up</b>
-          <span>Copy a short setup message into your coding agent. After you paste and run it, your agent will walk you through setup. Every requests still comes back to you for approval.</span></div>
+          <span>Copy a short setup message into your coding agent. After you paste and run it, your agent registers itself and appears here.</span></div>
         <button class="icon-btn walkthrough-close" title="Hide this walkthrough" aria-label="Hide Let your agent set this up walkthrough" data-act="hide-agent-walkthrough">${ICONS.x}</button>
       </div>
       <div class="onboarding-actions">
@@ -639,7 +639,7 @@ function activityHTML() {
 async function receiveActivity(entry: ActivityEntry | null | undefined): Promise<void> {
   if (!entry || !entry.at || !entry.text) {
     await load('activity', 'list_activity', { limit: ACTIVITY_RENDER_LIMIT });
-    if (mode !== 'approval' && state.tab === 'activity' && !state.sheet && !state.menuOpen) render();
+    if (state.tab === 'activity' && !state.sheet && !state.menuOpen) render();
     return;
   }
 
@@ -648,7 +648,7 @@ async function receiveActivity(entry: ActivityEntry | null | undefined): Promise
   if (duplicate) return;
   state.activity = [entry, ...state.activity].slice(0, ACTIVITY_RENDER_LIMIT);
 
-  if (mode === 'approval' || state.tab !== 'activity' || state.sheet || state.menuOpen) return;
+  if (state.tab !== 'activity' || state.sheet || state.menuOpen) return;
   const list = document.querySelector('.act-list');
   if (!list) {
     render();

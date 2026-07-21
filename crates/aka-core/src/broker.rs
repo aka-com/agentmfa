@@ -509,9 +509,9 @@ impl Broker {
         self.wirings.wirings()
     }
 
-    /// Wire or unwire an agent from the app. Unwiring closes the agent's
-    /// live transports to the connection is *not* attempted here — transports
-    /// are short-lived tickets; the next open is refused.
+    /// Wire or unwire an agent from the app. Unwiring does not chase down
+    /// live transports — tickets are short-lived, and the next open is
+    /// refused.
     pub fn ui_set_wiring(&self, client_id: &Uuid, connection_id: &Uuid, wired: bool) -> Result<bool> {
         let _gate = self.config_gate.lock().unwrap();
         let Some(agent) = self.pairing.get_by_id(client_id) else {

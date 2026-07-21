@@ -710,12 +710,11 @@ async fn post_http(
             ),
         );
     }
-    let ConnectionConfig::Api { template, host, .. } = &conn.config else {
+    let ConnectionConfig::Api { template, .. } = &conn.config else {
         unreachable!()
     };
 
-    // Validate the *what*. Validation runs before any prompt, so a
-    // rejected request never costs the user an approval.
+    // Validate the *what* before touching the wiring or executing.
     let method = match parse_method(&call.method) {
         Ok(m) => m,
         Err(e) => return err_detail(StatusCode::BAD_REQUEST, e.reason(), e.detail()),
@@ -789,7 +788,6 @@ async fn post_http(
     };
 
     let mutating = is_mutating(&method);
-    let _ = host;
 
     // Coalescing is keyed on (agent, request_id) for mutating calls only;
     // GET/HEAD are never coalesced, a request_id there is ignored.
