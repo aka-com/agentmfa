@@ -9,7 +9,8 @@
 //   * JSON log lines on stderr, forwarded into the broker's tracing output;
 //   * SIGTERM closes the listener and exits 0.
 
-import { createSidecarServer, log, type SidecarEnv } from './server';
+import { log } from './log';
+import { createSidecarServer, type SidecarEnv } from './server';
 
 function readEnv(): SidecarEnv {
   const token = process.env.AKA_SIDECAR_TOKEN;

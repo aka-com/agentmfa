@@ -18,9 +18,10 @@ import { randomUUID } from 'node:crypto';
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { z } from 'zod';
 
 import { BrokerClient, BrokerError, type BrokerConnection, type BrokerIdentity } from './broker';
+import { log } from './log';
+import { describe, invoke, schemaFor, toolNameFor } from './tools';
 
 export const MCP_PATH = '/mcp';
 
@@ -150,109 +151,99 @@ export class SessionStore {
   }
 }
 
-/** The MCP tool name for a connection. Kept stable and legible. */
-export function toolNameFor(connection: BrokerConnection): string {
-  return `multitool_${connection.name}`.replace(/[^a-zA-Z0-9_-]/g, '_');
-}
-
 /**
  * Build the tool surface for one agent.
  *
- * Phase 2 exposes description only — the data planes arrive in phase 3.
- * What is real here is the gate: unwired connections are not listed, and
- * naming one anyway is refused.
+ * Every connection the broker reports as wired becomes a tool; unwired
+ * ones are never registered. The list is fixed for the life of the
+ * session — a wiring changed in the app takes effect when the agent
+ * reconnects, and the broker refuses anything stale in the meantime.
  */
-export function createToolServer(broker: BrokerClient, principal: Principal): McpServer {
+export async function createToolServer(
+  broker: BrokerClient,
+  principal: Principal,
+): Promise<McpServer> {
   const server = new McpServer(
     { name: 'multitool', version: '0.1.0' },
     {
+      // Declared up front rather than implied by the first `registerTool`.
+      // An agent wired to nothing has zero tools, and without this it would
+      // meet `Method not found` on `tools/list` instead of an empty list.
+      capabilities: { tools: {} },
       instructions:
-        'Multitool brokers database, SSH, and API access. Tools appear here only ' +
-        'when the user has wired this agent to them in the Multitool app.',
+        'Multitool brokers database, SSH, API and WebSocket access. Tools appear ' +
+        'here only when the user has wired this agent to them in the Multitool ' +
+        'app. Credentials are injected by the broker and never visible to you.',
     },
   );
 
+  let connections: BrokerConnection[] = [];
+  try {
+    connections = await broker.connections(principal.token);
+  } catch (error) {
+    // A broker that cannot be listed yields a session with no tools rather
+    // than a failed connection: the agent gets a usable, empty surface.
+    log('warn', 'could not list connections', { error: String(error) });
+  }
+
+  const wired = connections.filter((candidate) => candidate.wired);
+
+  // Always registered, for two reasons. It is what installs the MCP tool
+  // handlers at all — a server with no tools answers `tools/list` with
+  // "Method not found", which is a baffling thing for an agent wired to
+  // nothing to meet. And it gives that agent somewhere to look: the reply
+  // says who it is and what to ask the user for.
   server.registerTool(
-    'multitool_list_tools',
+    'multitool_status',
     {
-      title: 'List Multitool tools',
+      title: 'Multitool status',
       description:
-        'List the tools this agent is wired to, with what each one connects to. ' +
-        'Tools the user has not wired are not returned.',
+        'Report which Multitool tools this agent can use, and what to do when ' +
+        'there are none.',
       inputSchema: {},
     },
-    async () => {
-      const connections = await broker.connections(principal.token);
-      const wired = connections.filter((connection) => connection.wired);
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: JSON.stringify(
-              wired.map((connection) => ({
+    async () => ({
+      content: [
+        {
+          type: 'text' as const,
+          text: JSON.stringify(
+            {
+              agent: principal.agent,
+              tools: wired.map((connection) => ({
                 tool: toolNameFor(connection),
                 name: connection.name,
                 type: connection.type,
                 target: connection.target,
               })),
-              null,
-              2,
-            ),
-          },
-        ],
-      };
-    },
-  );
-
-  server.registerTool(
-    'multitool_describe_tool',
-    {
-      title: 'Describe a Multitool tool',
-      description: 'Describe one tool this agent is wired to.',
-      inputSchema: { name: z.string().describe('The tool name as shown by multitool_list_tools') },
-    },
-    async ({ name }) => {
-      const connections = await broker.connections(principal.token);
-      const match = connections.find(
-        (connection) => connection.name === name || toolNameFor(connection) === name,
-      );
-
-      // Unwired and unknown are answered the same way on purpose: an agent
-      // should not be able to enumerate what the user has declined to wire.
-      if (!match || !match.wired) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: 'text' as const,
-              text:
-                `No tool named "${name}" is available to this agent. ` +
-                'Ask the user to wire it in the Multitool app.',
+              ...(wired.length === 0
+                ? {
+                    hint:
+                      'This agent is not wired to any tools yet. Ask the user to ' +
+                      'open Multitool, find the tool under Tools, and wire this ' +
+                      `agent ("${principal.agent}") to it.`,
+                  }
+                : {}),
             },
-          ],
-        };
-      }
-
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: JSON.stringify(
-              {
-                tool: toolNameFor(match),
-                name: match.name,
-                type: match.type,
-                target: match.target,
-                endpoint: match.endpoint,
-              },
-              null,
-              2,
-            ),
-          },
-        ],
-      };
-    },
+            null,
+            2,
+          ),
+        },
+      ],
+    }),
   );
+
+  for (const connection of wired) {
+    server.registerTool(
+      toolNameFor(connection),
+      {
+        title: connection.name,
+        description: describe(connection),
+        inputSchema: schemaFor(connection),
+      },
+      async (args: Record<string, unknown>) =>
+        invoke(broker, principal.token, connection, args ?? {}),
+    );
+  }
 
   return server;
 }
@@ -270,6 +261,6 @@ export async function openSession(
   transport.onclose = () => {
     if (transport.sessionId) store.delete(transport.sessionId);
   };
-  await createToolServer(broker, principal).connect(transport);
+  await (await createToolServer(broker, principal)).connect(transport);
   return transport;
 }

@@ -60,6 +60,21 @@ function fakeBroker(socketPath: string): Promise<Server> {
       );
       return;
     }
+    // Data planes: echo what arrived so the test can assert on it, but
+    // only for a connection this agent is actually wired to.
+    if (req.method === 'POST' && req.url?.startsWith('/v1/')) {
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      req.on('end', () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        if (!WIRED[identity.client_id].includes(body.connection)) {
+          send(403, { reason: 'denied_by_policy' });
+          return;
+        }
+        send(200, { endpoint: req.url, body });
+      });
+      return;
+    }
     send(404, { reason: 'not_found' });
   });
   return new Promise((resolve) => server.listen(socketPath, () => resolve(server)));
@@ -112,15 +127,35 @@ function payload(result: unknown): unknown {
   return JSON.parse(content[0].text);
 }
 
-test('a paired agent can open a session and list tools', async () => {
+test('wired connections appear in tools/list as real tools', async () => {
   const app = await harness();
   try {
     const client = await app.connect('token-wired');
     const { tools } = await client.listTools();
-    assert.deepEqual(
-      tools.map((tool) => tool.name).sort(),
-      ['multitool_describe_tool', 'multitool_list_tools'],
-    );
+    // `prod-db` is wired and `deploy-host` is not, so exactly one tool.
+    assert.deepEqual(tools.map((tool) => tool.name).sort(), [
+      'multitool_prod-db_open',
+      'multitool_status',
+    ]);
+    const db = tools.find((tool) => tool.name === 'multitool_prod-db_open');
+    assert.match(db?.description ?? '', /Postgres/);
+  } finally {
+    await app.close();
+  }
+});
+
+test('an agent wired to nothing is told so, not left guessing', async () => {
+  const app = await harness();
+  try {
+    const client = await app.connect('token-bare');
+    const { tools } = await client.listTools();
+    assert.deepEqual(tools.map((tool) => tool.name), ['multitool_status']);
+
+    const status = payload(
+      await client.callTool({ name: 'multitool_status', arguments: {} }),
+    ) as { tools: unknown[]; hint?: string };
+    assert.deepEqual(status.tools, []);
+    assert.match(status.hint ?? '', /wire this agent/i);
   } finally {
     await app.close();
   }
@@ -135,65 +170,35 @@ test('an unpaired token cannot open a session at all', async () => {
   }
 });
 
-test('only wired tools are listed to the agent', async () => {
-  const app = await harness();
-  try {
-    const wired = await app.connect('token-wired');
-    const listed = payload(await wired.callTool({ name: 'multitool_list_tools', arguments: {} }));
-    assert.deepEqual(listed, [
-      {
-        tool: 'multitool_prod-db',
-        name: 'prod-db',
-        type: 'pg',
-        target: 'db.internal:5432/app',
-      },
-    ]);
 
-    // Same broker, same connections, no wirings: the agent sees nothing.
-    const bare = await app.connect('token-bare');
-    assert.deepEqual(payload(await bare.callTool({ name: 'multitool_list_tools', arguments: {} })), []);
-  } finally {
-    await app.close();
-  }
-});
 
-test('an unwired tool is refused even when named directly', async () => {
+
+test('an unwired connection is never even registered as a tool', async () => {
   const app = await harness();
   try {
     const client = await app.connect('token-wired');
+    // Calling it by the name it *would* have had must fail at the protocol
+    // level: there is no such tool to invoke.
     const result = await client.callTool({
-      name: 'multitool_describe_tool',
-      arguments: { name: 'deploy-host' },
+      name: 'multitool_deploy-host_open',
+      arguments: {},
     });
     assert.equal((result as { isError?: boolean }).isError, true);
-
-    // Refused identically to a name that does not exist, so the reply
-    // cannot be used to enumerate what the user declined to wire.
-    const unknown = await client.callTool({
-      name: 'multitool_describe_tool',
-      arguments: { name: 'no-such-thing' },
-    });
-    const refusal = (r: unknown) =>
-      (r as { content: Array<{ text: string }> }).content[0].text.replace(/"[^"]*"/, '"X"');
-    assert.equal(refusal(result), refusal(unknown));
   } finally {
     await app.close();
   }
 });
 
-test('a wired tool describes itself', async () => {
+test('invoking a tool proxies to the broker data plane', async () => {
   const app = await harness();
   try {
     const client = await app.connect('token-wired');
-    const described = payload(
-      await client.callTool({ name: 'multitool_describe_tool', arguments: { name: 'prod-db' } }),
-    );
-    assert.deepEqual(described, {
-      tool: 'multitool_prod-db',
-      name: 'prod-db',
-      type: 'pg',
-      target: 'db.internal:5432/app',
+    const result = await client.callTool({ name: 'multitool_prod-db_open', arguments: {} });
+    // The fake broker echoes the request it received, which is how we can
+    // see the sidecar named the right connection on the right endpoint.
+    assert.deepEqual(payload(result), {
       endpoint: '/v1/pg/open',
+      body: { connection: 'prod-db' },
     });
   } finally {
     await app.close();

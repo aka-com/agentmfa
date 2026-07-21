@@ -1,0 +1,163 @@
+// Multitool's tools, as MCP sees them.
+//
+// This is the `plugin-multitool` role from the plan: every connection the
+// broker knows becomes an MCP tool whose invocation proxies to the broker's
+// existing data planes. The shape of each tool follows what its plane
+// actually does:
+//
+//   * `api` connections are *called* — the agent supplies method/path and
+//     the broker injects the credential on the upstream leg. One round
+//     trip, one result.
+//   * `pg` / `ssh` / `ws` connections are *opened* — the broker hands back
+//     a password-less DSN and ticket, an `SSH_AUTH_SOCK` path, or a bridge
+//     URL, which the agent then uses with stock tools. Nothing sensitive
+//     crosses into the agent.
+//
+// No authorization happens here. An unwired connection never becomes a
+// tool, and if one slipped through, the broker would still refuse it.
+
+import { z } from 'zod';
+
+import type { BrokerClient, BrokerConnection } from './broker';
+
+/** MCP tool names allow `[a-zA-Z0-9_-]`; connection names are freer. */
+export function toolNameFor(connection: BrokerConnection): string {
+  const slug = connection.name.replace(/[^a-zA-Z0-9_-]/g, '_');
+  return connection.type === 'api' ? `multitool_${slug}_request` : `multitool_${slug}_open`;
+}
+
+/** What an agent is told a tool is for, before it calls it. */
+export function describe(connection: BrokerConnection): string {
+  switch (connection.type) {
+    case 'api':
+      return (
+        `Make an HTTP request to ${connection.target} through Multitool. ` +
+        'The API credential is injected by the broker and never exposed here.'
+      );
+    case 'pg':
+      return (
+        `Open a Postgres session on ${connection.target}. Returns a password-less ` +
+        'DSN and a short-lived ticket to use as PGPASSWORD with psql or any ' +
+        'standard client.'
+      );
+    case 'ssh':
+      return (
+        `Open an SSH session to ${connection.target}. Returns an SSH_AUTH_SOCK ` +
+        'path that ssh, git and rsync can use; the private key stays in the broker.'
+      );
+    case 'ws':
+      return (
+        `Open a WebSocket bridge to ${connection.target}. Returns a short-lived ` +
+        'ws://127.0.0.1 URL usable by any standard client.'
+      );
+    default:
+      return `Use the Multitool connection "${connection.name}" (${connection.target}).`;
+  }
+}
+
+/** The input schema for a tool, by connection type. */
+export function schemaFor(connection: BrokerConnection): Record<string, z.ZodTypeAny> {
+  if (connection.type !== 'api') {
+    return {
+      request_id: z
+        .string()
+        .optional()
+        .describe('Idempotency key; a retry with the same value will not open a second session'),
+    };
+  }
+  return {
+    method: z.string().describe('HTTP method, e.g. GET or POST'),
+    path: z.string().describe('Path and query, e.g. /repos/owner/name/issues?state=open'),
+    headers: z.record(z.string(), z.string()).optional().describe('Extra request headers'),
+    body: z.unknown().optional().describe('JSON body; a string is sent as raw bytes'),
+    request_id: z
+      .string()
+      .optional()
+      .describe('Idempotency key; a retried mutating call with the same value is coalesced'),
+  };
+}
+
+/** The broker call a tool invocation turns into. */
+export function callFor(
+  connection: BrokerConnection,
+  args: Record<string, unknown>,
+): { path: string; body: Record<string, unknown> } {
+  if (connection.type === 'api') {
+    const { method, path, headers, body, request_id: requestId } = args as {
+      method: string;
+      path: string;
+      headers?: Record<string, string>;
+      body?: unknown;
+      request_id?: string;
+    };
+    return {
+      path: connection.endpoint,
+      body: {
+        connection: connection.name,
+        method,
+        path,
+        ...(headers ? { headers } : {}),
+        ...(body === undefined ? {} : { body }),
+        ...(requestId ? { request_id: requestId } : {}),
+      },
+    };
+  }
+  const requestId = (args as { request_id?: string }).request_id;
+  return {
+    path: connection.endpoint,
+    body: {
+      connection: connection.name,
+      ...(requestId ? { request_id: requestId } : {}),
+    },
+  };
+}
+
+/** The MCP SDK's result type carries an index signature; match it. */
+export interface ToolResult {
+  [key: string]: unknown;
+  isError?: boolean;
+  content: Array<{ type: 'text'; text: string }>;
+}
+
+function text(value: unknown): ToolResult {
+  return {
+    content: [
+      {
+        type: 'text',
+        text: typeof value === 'string' ? value : JSON.stringify(value, null, 2),
+      },
+    ],
+  };
+}
+
+export function toolError(message: string): ToolResult {
+  return { isError: true, content: [{ type: 'text', text: message }] };
+}
+
+/**
+ * Invoke one tool against the broker.
+ *
+ * A broker refusal is returned as a tool error rather than thrown: the
+ * agent should be told it lacks access and why, not handed a transport
+ * failure it will retry blindly.
+ */
+export async function invoke(
+  broker: BrokerClient,
+  token: string,
+  connection: BrokerConnection,
+  args: Record<string, unknown>,
+): Promise<ToolResult> {
+  const { path, body } = callFor(connection, args);
+  try {
+    return text(await broker.invoke(path, token, body));
+  } catch (error) {
+    const failure = error as { status?: number; reason?: string; message?: string };
+    if (failure.status === 403) {
+      return toolError(
+        `Multitool refused this call: ${failure.reason ?? 'denied_by_policy'}. ` +
+          `Ask the user to wire this agent to "${connection.name}" in the Multitool app.`,
+      );
+    }
+    return toolError(`Multitool call failed: ${failure.message ?? String(error)}`);
+  }
+}

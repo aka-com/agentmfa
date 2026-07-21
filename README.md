@@ -50,6 +50,12 @@ npm run sidecar:vendor   # fetch the pinned Node the .app ships (macOS)
 npm run test:sidecar     # the sidecar's own tests
 ```
 
+Once an agent is paired and wired, its tools appear over MCP: an API
+connection becomes `multitool_<name>_request`, and Postgres/SSH/WebSocket
+connections become `multitool_<name>_open`, which hand back the same
+password-less DSN, agent socket, or bridge URL the CLI path returns.
+`multitool_status` is always present and reports what the agent may use.
+
 The app starts the sidecar when `dist/sidecar/main.js` exists and runs
 without it otherwise, so a checkout that skips `sidecar:build` still
 works. `AKA_SIDECAR_NODE` and `AKA_SIDECAR_SCRIPT` override what gets

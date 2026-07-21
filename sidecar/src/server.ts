@@ -15,6 +15,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { timingSafeEqual } from 'node:crypto';
 
 import { BrokerClient } from './broker';
+import { log } from './log';
 import { BrokerAuthProvider, MCP_PATH, SessionStore, hostIsLoopback, openSession } from './mcp';
 
 export const SIDECAR_VERSION = '0.1.0';
@@ -24,13 +25,6 @@ export interface SidecarEnv {
   token: string;
   /** Path to the broker's Unix socket — the sidecar's only way back in. */
   brokerSocket: string;
-}
-
-export type Level = 'info' | 'warn' | 'error';
-
-/** Structured log line on stderr; the supervisor forwards these to tracing. */
-export function log(level: Level, msg: string, fields: Record<string, unknown> = {}): void {
-  process.stderr.write(`${JSON.stringify({ level, msg, ...fields })}\n`);
 }
 
 /** Constant-time compare that also tolerates a length mismatch. */

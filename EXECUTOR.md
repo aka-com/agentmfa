@@ -118,11 +118,22 @@ connections are not listed, and naming one directly is refused with the
 same message as a name that does not exist — an agent cannot enumerate
 what the user declined to wire.
 
-**Phase 3 — `plugin-multitool`.** Postgres, SSH, Custom API and Custom
-WebSocket surface as executor tools whose `invokeTool` proxies to the
-broker's existing data planes over ABP. *Verify:* a real query runs
-through MCP end to end, with the password never leaving the broker;
-audit entries land; the existing CLI path still works unchanged.
+**Phase 3 — `plugin-multitool`. Done.** Every wired connection is now a
+real MCP tool in `tools/list`, shaped by what its plane does: `api`
+connections are *called* (`multitool_<name>_request`, method/path/body,
+one round trip), while `pg`/`ssh`/`ws` are *opened*
+(`multitool_<name>_open`, returning a password-less DSN and ticket, an
+`SSH_AUTH_SOCK` path, or a bridge URL). Unwired connections are never
+registered at all.
+
+`multitool_status` is always registered. It is what installs the MCP tool
+handlers — a server with zero tools answers `tools/list` with "Method not
+found", a baffling thing for an agent wired to nothing to meet — and it
+tells that agent who it is and what to ask the user for.
+
+Verified end to end against a real broker and a real upstream: the
+`Authorization` header arrives upstream with the injected credential, and
+the same secret is absent from everything the agent sees.
 
 **Phase 4 — real MCP.** `@executor-js/plugin-mcp` lets a catalog row be
 an external MCP server, with our vault behind `CredentialProvider` for

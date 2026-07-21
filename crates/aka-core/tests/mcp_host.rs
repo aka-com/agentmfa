@@ -91,6 +91,20 @@ impl McpClient {
         (status, parse_body(&body))
     }
 
+    /// The names of every tool this session exposes, sorted.
+    async fn list_tools(&mut self) -> Vec<String> {
+        let (status, body) = self.send("tools/list", json!({})).await;
+        assert_eq!(status, 200, "tools/list failed: {body}");
+        let mut names: Vec<String> = body["result"]["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("name").to_string())
+            .collect();
+        names.sort();
+        names
+    }
+
     async fn initialize(&mut self) -> u16 {
         let (status, _) = self
             .send(
@@ -146,6 +160,31 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
         return;
     }
 
+    // A real upstream, so the credential injection is observable rather
+    // than assumed.
+    let upstream_auth: Arc<std::sync::Mutex<Option<String>>> = Arc::default();
+    let seen = upstream_auth.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind upstream");
+    let upstream_port = listener.local_addr().expect("addr").port();
+    let app = axum::Router::new().route(
+        "/whoami",
+        axum::routing::get(move |headers: axum::http::HeaderMap| {
+            let seen = seen.clone();
+            async move {
+                *seen.lock().expect("lock") = headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string);
+                "ok"
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
     let dir = tempfile::tempdir().expect("tempdir");
     let paths = Paths::under(dir.path());
     paths.ensure().expect("paths");
@@ -170,9 +209,9 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
             .add_connection(ConnectionSpec {
                 name: name.into(),
                 config: ConnectionConfig::Api {
-                    host: "example.invalid".into(),
-                    scheme: "https".into(),
-                    port: None,
+                    host: "127.0.0.1".into(),
+                    scheme: "http".into(),
+                    port: Some(upstream_port),
                     template: "Authorization: Bearer {{API_KEY}}".into(),
                 },
                 secrets: vec![],
@@ -216,30 +255,41 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
     let mut wired = McpClient::new(&endpoint, &first);
     assert_eq!(wired.initialize().await, 200);
 
-    // …and sees only what the broker says it is wired to.
-    let listed = tool_payload(&wired.call_tool("multitool_list_tools", json!({})).await);
-    let names: Vec<&str> = listed
-        .as_array()
-        .expect("array")
-        .iter()
-        .map(|entry| entry["name"].as_str().expect("name"))
-        .collect();
-    assert_eq!(names, vec!["prod-db"], "unwired connections must not appear");
-
-    // Naming the unwired one directly is still refused.
-    let refused = wired
-        .call_tool("multitool_describe_tool", json!({"name": "deploy-host"}))
-        .await;
+    // …whose tool list is exactly what the broker says it is wired to.
+    let tools = wired.list_tools().await;
     assert_eq!(
-        refused["isError"], true,
-        "an unwired connection must be refused: {refused}"
+        tools,
+        vec!["multitool_prod-db_request", "multitool_status"],
+        "unwired connections must not become tools"
     );
 
-    // A second agent, wired to nothing, sees nothing.
+    // The real thing: a call that reaches the upstream server, with the
+    // credential injected by the broker and never seen by the agent.
+    let result = wired
+        .call_tool(
+            "multitool_prod-db_request",
+            json!({"method": "GET", "path": "/whoami"}),
+        )
+        .await;
+    let response = tool_payload(&result);
+    assert_eq!(response["status"], 200, "upstream call failed: {response}");
+    let seen = upstream_auth.lock().expect("lock").clone();
+    assert_eq!(
+        seen.as_deref(),
+        Some("Bearer secret-value"),
+        "the broker must inject the credential on the upstream leg"
+    );
+    assert!(
+        !serde_json::to_string(&result).expect("json").contains("secret-value"),
+        "the secret must not come back to the agent: {result}"
+    );
+
+    // A second agent, wired to nothing, gets the status tool and nothing else.
     let mut bare = McpClient::new(&endpoint, &second);
     assert_eq!(bare.initialize().await, 200);
-    let empty = tool_payload(&bare.call_tool("multitool_list_tools", json!({})).await);
-    assert_eq!(empty, json!([]), "a fresh agent starts with no wirings");
+    assert_eq!(bare.list_tools().await, vec!["multitool_status"]);
+    let status = tool_payload(&bare.call_tool("multitool_status", json!({})).await);
+    assert_eq!(status["tools"], json!([]), "a fresh agent starts with no wirings");
 
     // An unpaired token cannot open a session at all.
     let mut stranger = McpClient::new(&endpoint, "not-a-real-token");

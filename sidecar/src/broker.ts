@@ -109,4 +109,14 @@ export class BrokerClient {
   async connections(token: string): Promise<BrokerConnection[]> {
     return this.json<BrokerConnection[]>('GET', '/v1/connections', token);
   }
+
+  /**
+   * Call a data plane on the agent's behalf.
+   *
+   * The wiring check happens on the far side of this call, which is the
+   * point: the sidecar cannot skip it, and a bug here cannot widen access.
+   */
+  async invoke(path: string, token: string, body: unknown): Promise<unknown> {
+    return this.json<unknown>('POST', path, token, body);
+  }
 }
