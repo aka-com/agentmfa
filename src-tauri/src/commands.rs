@@ -340,12 +340,6 @@ pub fn get_agent_setup(state: State<AppState>) -> String {
     agent_setup_instructions(&state.broker.paths.socket_display())
 }
 
-/// The full agent-facing walkthrough the daemon serves at `GET /instructions`.
-#[tauri::command]
-pub fn get_broker_instructions(state: State<AppState>) -> String {
-    aka_core::daemon::wellknown::instructions(&state.broker.config, &state.broker.paths)
-}
-
 #[tauri::command]
 pub fn copy_agent_setup(app: AppHandle, state: State<AppState>) -> CmdResult<()> {
     let instructions = agent_setup_instructions(&state.broker.paths.socket_display());
@@ -795,7 +789,6 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         clear_activity,
         get_settings,
         get_agent_setup,
-        get_broker_instructions,
         copy_agent_setup,
         inspect_ssh_import,
         check_known_hosts,

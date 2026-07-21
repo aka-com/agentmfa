@@ -94,7 +94,6 @@ interface AppState {
   sessions: SessionSummary[];
   activity: ActivityEntry[];
   agentSetupInstructions: string;
-  brokerInstructions: string;
   settings: Settings;
   reveal: Record<string, string>;
   sheet: SheetState | null;
@@ -115,8 +114,6 @@ interface AppState {
   connMenuOpen: string | null;
   copied: string | null;
   readyCopied: boolean;
-  setupInstructionsOpen: boolean;
-  showFullInstructions: boolean;
   connectionReady: ConnectionReadyState | null;
   connectionTaskCopied: boolean;
   connTests: Record<string, ConnectionTestState>;
@@ -137,7 +134,6 @@ const state: AppState = {
   sessions: [],
   activity: [],
   agentSetupInstructions: '', // short paste-ready setup message (lazy-loaded)
-  brokerInstructions: '', // full GET /instructions body (lazy-loaded)
   settings: {
     reauth_on_read: true,
     menu_bar_hides_dock: false,
@@ -163,12 +159,34 @@ const state: AppState = {
   connMenuOpen: null,    // connection id whose ⋯ options menu is open (Tools tab)
   copied: null,          // secretId whose value was just copied (transient "Copied" flash)
   readyCopied: false,    // transient feedback on the setup-instructions status button
-  setupInstructionsOpen: false,
-  showFullInstructions: false, // short setup vs full /instructions body
   connectionReady: null,
   connectionTaskCopied: false,
   connTests: {},         // connectionId -> in-flight/last test result (transient)
 };
+
+// Re-rendering replaces #root wholesale, which would drop the scroll
+// position of the scrolling panes — expanding a catalog row would jump you
+// back to the top. Snapshot and restore them around every render.
+const SCROLLERS = ['.content', '.dd-global'];
+function captureScroll(): Array<[string, number]> {
+  return SCROLLERS.flatMap((sel): Array<[string, number]> => {
+    const el = document.querySelector(sel);
+    return el && el.scrollTop ? [[sel, el.scrollTop]] : [];
+  });
+}
+function restoreScroll(saved: Array<[string, number]>): void {
+  for (const [sel, top] of saved) {
+    const el = document.querySelector(sel);
+    if (el) el.scrollTop = top;
+  }
+}
+/** Switching tabs should start at the top, not inherit the old offset. */
+function resetScroll(): void {
+  for (const sel of SCROLLERS) {
+    const el = document.querySelector(sel);
+    if (el) el.scrollTop = 0;
+  }
+}
 
 const root = (): HTMLElement => {
   const element = document.getElementById('root');
@@ -238,9 +256,12 @@ function render(capture = true): void {
   const sel = active && focusId && typeof active.selectionStart === 'number'
     ? { start: active.selectionStart, end: active.selectionEnd, dir: active.selectionDirection }
     : null;
+  const scroll = captureScroll();
 
   if (mode === 'dropdown') renderDropdown();
   else renderMainWindow();
+
+  restoreScroll(scroll);
 
   if (focusId) {
     const el = document.getElementById(focusId) as HTMLInputElement | HTMLTextAreaElement | null;
@@ -268,38 +289,20 @@ function globalSectionsHTML() {
   let hasOnboarding = false;
   if (state.tab === 'agents' && state.settings.show_agent_walkthrough) {
     hasOnboarding = true;
-    const instructionBody = state.showFullInstructions
-      ? (state.brokerInstructions || 'Loading…')
-      : (state.agentSetupInstructions || 'Loading…');
     out += `<div class="agent-onboarding walkthrough-card">
       <div class="walkthrough-head">
         <div class="onboarding-copy"><b>Let your agent set this up</b>
-          <span>Copy a short setup message into your coding agent. After you paste and run it, your agent registers itself and appears here.</span></div>
+          <span>Paste this into your coding agent. Once it runs, the agent registers itself and appears below, ready to wire up.</span></div>
         <button class="icon-btn walkthrough-close" title="Hide this walkthrough" aria-label="Hide Let your agent set this up walkthrough" data-act="hide-agent-walkthrough">${ICONS.x}</button>
       </div>
+      <pre class="setup-instructions"><code>${esc(state.agentSetupInstructions || 'Loading…')}</code></pre>
       <div class="onboarding-actions">
         <button class="btn primary sm" data-act="copy-agent-setup">Copy setup instructions</button>
-        <button class="setup-toggle" data-act="toggle-setup-instructions"
-          aria-expanded="${state.setupInstructionsOpen}">${mode === 'dropdown' ? 'View' : 'View instructions'}<span class="setup-toggle-icon">${ICONS.chevronDown}</span></button>
-        ${state.setupInstructionsOpen
-          ? `<div class="seg instructions-seg" role="group" aria-label="Instruction detail">
-              <button class="seg-btn ${state.showFullInstructions ? '' : 'on'}" data-act="set-instructions-detail" data-full="false" aria-pressed="${!state.showFullInstructions}">Short</button>
-              <button class="seg-btn ${state.showFullInstructions ? 'on' : ''}" data-act="set-instructions-detail" data-full="true" aria-pressed="${state.showFullInstructions}">Full</button></div>`
-          : ''}
-      </div>
-      ${state.setupInstructionsOpen
-        ? state.showFullInstructions
-          ? `<div class="setup-instructions is-full">
-              <div class="full-instructions-banner">
-                <p>These are the instructions that the agent will see.</p>
-              </div>
-              <pre class="full-instructions-code"><code>${esc(instructionBody)}</code></pre>
-            </div>`
-          : `<pre class="setup-instructions"><code>${esc(instructionBody)}</code></pre>`
-        : ''}
-      </div>`;
+      </div></div>`;
   }
-  if (state.sessions.length) {
+  // Live sessions answer "what is my agent doing right now?", so they sit
+  // with the agents rather than above every screen.
+  if (state.tab === 'agents' && state.sessions.length) {
     out += '<div class="live-head">Active sessions</div>' + state.sessions.map((s) => {
       const t = TYPES[s.type];
       // who holds the session matters as much as what it's connected to
@@ -370,7 +373,7 @@ function agentToolRowHTML(a: AgentSummary, c: ConnectionSummary): string {
   const wired = !!agentWiringFor(a, c);
   const live = state.sessions.some((s) => s.agent === a.name && s.connection === c.name);
   const pill = wired
-    ? '<span class="acc-pill granted">Wired · can use this tool</span>'
+    ? '<span class="acc-pill granted">Wired</span>'
     : '<span class="acc-pill">Not wired</span>';
   const action = wired
     ? `<button class="btn ghost sm" aria-label="Unwire ${escAttr(a.name)} from ${escAttr(c.name)}" data-act="unwire" data-id="${a.id}" data-conn="${c.id}">Unwire</button>`
@@ -435,53 +438,61 @@ const connTestResultHTML = (c: ConnectionSummary): string => {
   return `<div class="cc-test ${test.ok ? 'ok' : 'err'}">${test.ok ? ICONS.circleCheck : ICONS.circleX}<span>${esc(test.detail)}</span></div>`;
 };
 
-// Compact tile per connection: badge, name, target — identity only. All
-// actions live in a hover-revealed ⋯ menu, and grants live on the Agents
-// tab, so the inventory stays quiet no matter how many services exist.
-function connTileHTML(c: ConnectionSummary): string {
-  const t = TYPES[c.type];
-  if (state.confirm && state.confirm.kind === 'del-conn' && state.confirm.id === c.id) {
-    return `<div class="tile confirm-tile">
-      <span class="badge ${t.cls}">${t.label}</span>
-      <div class="tile-tx"><b title="${escAttr(c.name)}">${esc(c.name)}</b>
-        <span class="tile-confirm">Delete this tool?${(c.wired_agents || []).length ? ' Wired agents will lose access.' : ''}</span>
-        <span class="tile-confirm-actions"><button class="btn sm" data-act="confirm-cancel">Cancel</button>
-          <button class="btn sm danger" data-act="del-conn-confirm" data-id="${c.id}">Delete</button></span></div></div>`;
-  }
-  const test = state.connTests[c.id];
-  const menuOpen = state.connMenuOpen === c.id;
-  return `<div class="tile">
-    <span class="badge ${t.cls}">${t.label}</span>
-    <div class="tile-tx"><b title="${escAttr(c.name)}">${esc(c.name)}${liveCount(c) ? ' <span class="cc-live">● live</span>' : ''}</b>
-      <code title="${escAttr(c.target)}">${esc(c.target)}</code>${connTestResultHTML(c)}</div>
-    <div class="tile-menu-wrap">
-      <button class="icon-btn tile-menu-btn ${menuOpen ? 'on' : ''}" title="Tool options"
-        aria-label="Options for ${escAttr(c.name)}" aria-haspopup="menu"
-        aria-expanded="${menuOpen}" data-act="toggle-conn-menu" data-id="${c.id}">${ICONS.ellipsis}</button>
-      ${menuOpen ? `<div class="tile-menu" role="menu" aria-label="Options for ${escAttr(c.name)}">
-        <button class="menu-item" role="menuitem" data-act="test-conn" data-id="${c.id}" ${test && test.running ? 'disabled' : ''}>${ICONS.flaskConical} ${test && test.running ? 'Testing…' : 'Test connection'}</button>
-        <button class="menu-item" role="menuitem" data-act="edit-conn" data-id="${c.id}">${ICONS.pencil} Edit…</button>
-        <button class="menu-item danger" role="menuitem" data-act="del-conn-ask" data-id="${c.id}">${ICONS.trash} Delete…</button>
-      </div>` : ''}
-    </div></div>`;
+
+// What a connection actually lets an agent do, in plain words — the
+// expansion has to answer "what is this for?" without opening the editor.
+function connectionPurpose(c: ConnectionSummary): string {
+  if (c.type === 'pg') return `Runs SQL against ${c.dbname || 'the database'}`;
+  if (c.type === 'ssh') return `Shell, git, and file transfer as ${c.user || 'the pinned user'}`;
+  if (c.type === 'ws') return 'Streams WebSocket messages';
+  return 'Makes HTTP requests to this origin';
 }
 
-// One flat row inside an expanded catalog entry: name, target, and the
-// same ⋯ menu the tool tiles carried. Quieter than a card grid because the
-// parent row already establishes the tool's identity.
+/** The credential the broker injects; never its value. */
+function connectionCredential(c: ConnectionSummary): string {
+  const names = c.secret_names || [];
+  if (!names.length) return 'No credential bound';
+  return `Uses ${names.join(' + ')}`;
+}
+
+/** Who may use it — the wiring is the whole authorization model. */
+function connectionWiring(c: ConnectionSummary): { text: string; wired: boolean } {
+  const names = (c.wired_agents || []).map((w) => w.agent);
+  return names.length
+    ? { text: `Wired to ${names.join(', ')}`, wired: true }
+    : { text: 'Not wired to any agent', wired: false };
+}
+
+// One row inside an expanded catalog entry. It spans the full card width and
+// carries enough to identify the connection without opening it: name, where
+// it points, what it does, which credential it injects, and who is wired.
 function catalogConnRowHTML(c: ConnectionSummary): string {
   if (state.confirm && state.confirm.kind === 'del-conn' && state.confirm.id === c.id) {
     return `<div class="cat-conn confirm-conn">
       <div class="cat-conn-tx"><b>${esc(c.name)}</b>
-        <span>Delete this tool?${(c.wired_agents || []).length ? ' Wired agents will lose access.' : ''}</span></div>
+        <span class="cat-conn-danger">Delete this tool?${(c.wired_agents || []).length ? ' Wired agents will lose access.' : ''}</span></div>
       <button class="btn sm" data-act="confirm-cancel">Cancel</button>
       <button class="btn sm danger" data-act="del-conn-confirm" data-id="${c.id}">Delete</button></div>`;
   }
   const test = state.connTests[c.id];
   const menuOpen = state.connMenuOpen === c.id;
+  const live = liveCount(c);
+  const wiring = connectionWiring(c);
+  // Only call out TLS when it is weaker than the default.
+  const tls = c.type === 'pg' && c.sslmode && c.sslmode !== 'verify-full'
+    ? `<span class="cat-meta-warn">TLS ${esc(c.sslmode)}</span>` : '';
+  const hostKey = c.type === 'ssh' && !c.host_key_fingerprint
+    ? '<span class="cat-meta-warn">Host key not pinned yet</span>' : '';
   return `<div class="cat-conn">
-    <div class="cat-conn-tx"><b>${esc(c.name)}${liveCount(c) ? ' <span class="cc-live">● live</span>' : ''}</b>
-      <code title="${escAttr(c.target)}">${esc(c.target)}</code>${connTestResultHTML(c)}</div>
+    <div class="cat-conn-tx">
+      <div class="cat-conn-head"><b>${esc(c.name)}</b>${live ? ` <span class="cc-live">● ${live} live</span>` : ''}</div>
+      <code title="${escAttr(c.target)}">${esc(c.target)}</code>
+      <div class="cat-conn-meta">
+        <span>${esc(connectionPurpose(c))}</span>
+        <span>${esc(connectionCredential(c))}</span>
+        <span class="${wiring.wired ? '' : 'cat-meta-idle'}">${esc(wiring.text)}</span>
+        ${tls}${hostKey}
+      </div>${connTestResultHTML(c)}</div>
     <div class="tile-menu-wrap">
       <button class="icon-btn tile-menu-btn ${menuOpen ? 'on' : ''}" title="Tool options"
         aria-label="Options for ${escAttr(c.name)}" aria-haspopup="menu"
@@ -551,9 +562,11 @@ function connectionsHTML() {
     return `<div class="cat-section"><div class="cat-section-h">${section.toUpperCase()}</div>
       <div class="cat-rows">${rows.map(catalogRowHTML).join('')}</div></div>`;
   }).join('');
-  return readyCard + `<div class="catalog">
-    <input id="tool-search" class="cat-search" type="search" placeholder="Search tools…"
-      aria-label="Search tools" value="${escAttr(state.toolSearch)}">
+  const search = mode === 'dropdown'
+    ? `<input id="tool-search" class="cat-search" type="search" placeholder="Search tools…"
+        aria-label="Search tools" value="${escAttr(state.toolSearch)}">`
+    : '';
+  return readyCard + `<div class="catalog">${search}
     ${sections || '<div class="muted-note">No tools match your search.</div>'}
   </div>`;
 }
@@ -620,9 +633,14 @@ function renderMainWindow() {
   const activityNav = navItem('activity');
   // One view-specific action, always in the header row next to the title.
   const actionBtn = state.tab === 'connections'
-    ? `<button class="btn" data-act="open-add-conn">＋ Add tool</button>`
+    ? `<div class="dw-head-actions">
+        <input id="tool-search" class="cat-search" type="search" placeholder="Search tools…"
+          aria-label="Search tools" value="${escAttr(state.toolSearch)}">
+        <button class="btn" data-act="open-add-conn">＋ Add tool</button></div>`
     : state.tab === 'agents'
-    ? `<button class="btn" data-act="copy-agent-setup">Copy setup instructions</button>`
+    ? (state.settings.show_agent_walkthrough
+        ? ''
+        : `<button class="btn" data-act="copy-agent-setup">Copy setup instructions</button>`)
     : `<button class="btn" data-act="clear-activity-ask" ${state.activity.length ? '' : 'disabled'}>Clear activity</button>`;
   const menu = state.menuOpen
     ? `<div class="settings-menu">
@@ -855,7 +873,10 @@ async function connectionDraftFromImport(
 }
 
 function connectionTypeLabel(type: ConnectionType): string {
-  return TYPES[type]?.label || 'tool';
+  return type === 'pg' ? 'Postgres'
+    : type === 'ssh' ? 'SSH'
+    : type === 'ws' ? 'WebSocket'
+    : 'API';
 }
 
 // Whether the draft carries a non-default value in one of the fields hidden
@@ -1456,6 +1477,7 @@ document.addEventListener('click', async (e) => {
       state.agentMenuOpen = null;
       state.connMenuOpen = null;
       render();
+      resetScroll();
       break;
     }
     case 'mode-tray': state.menuOpen = false; run(() => invoke('ui_set_mode', { mode: 'tray' })); break;
@@ -1473,7 +1495,6 @@ document.addEventListener('click', async (e) => {
       const on = !state.settings.show_agent_walkthrough;
       if (await run(() => invoke('set_agent_walkthrough_visible', { on }))) {
         state.settings.show_agent_walkthrough = on;
-        if (!on) state.setupInstructionsOpen = false;
         render();
       }
       break;
@@ -1481,7 +1502,6 @@ document.addEventListener('click', async (e) => {
     case 'hide-agent-walkthrough':
       if (await run(() => invoke('set_agent_walkthrough_visible', { on: false }))) {
         state.settings.show_agent_walkthrough = false;
-        state.setupInstructionsOpen = false;
         render();
       }
       break;
@@ -1490,43 +1510,6 @@ document.addEventListener('click', async (e) => {
       if (state.agentMenuOpen) { state.agentMenuOpen = null; render(); }
       if (await run(() => invoke('copy_agent_setup'))) toast('📋 Setup instructions copied');
       break;
-    case 'toggle-setup-instructions':
-      state.setupInstructionsOpen = !state.setupInstructionsOpen;
-      if (state.setupInstructionsOpen) {
-        render();
-        if (!state.showFullInstructions && !state.agentSetupInstructions) {
-          await run(async () => {
-            state.agentSetupInstructions = await invoke('get_agent_setup');
-          });
-        } else if (state.showFullInstructions && !state.brokerInstructions) {
-          const ok = await run(async () => {
-            state.brokerInstructions = await invoke('get_broker_instructions');
-          });
-          if (!ok) state.showFullInstructions = false;
-        }
-      }
-      render();
-      break;
-    case 'set-instructions-detail': {
-      if (!state.setupInstructionsOpen) break;
-      const full = btn.dataset.full === 'true';
-      if (full === state.showFullInstructions) break;
-      state.showFullInstructions = full;
-      if (full && !state.brokerInstructions) {
-        render();
-        const ok = await run(async () => {
-          state.brokerInstructions = await invoke('get_broker_instructions');
-        });
-        if (!ok) state.showFullInstructions = false;
-      } else if (!full && !state.agentSetupInstructions) {
-        render();
-        await run(async () => {
-          state.agentSetupInstructions = await invoke('get_agent_setup');
-        });
-      }
-      render();
-      break;
-    }
     case 'copy-ready-setup':
       if (await run(() => invoke('copy_agent_setup'))) flashReadyCopied();
       break;
@@ -1631,9 +1614,7 @@ document.addEventListener('click', async (e) => {
       if (!await holdDropdownFormOpen()) break;
       state.sheet = { kind: 'add-conn' };
       state.connType = entry.connType;
-      state.draft = entry.prefill
-        ? { name: entry.prefill.name, origin: entry.prefill.origin, template: entry.prefill.template }
-        : {};
+      state.draft = {};
       if (entry.connType === 'pg') state.draft.port = '5432';
       if (entry.connType === 'ssh') state.draft.port = '22';
       state.sheetErrors = {}; state.sheetBaseline = null; state.connAdvancedOpen = false;
@@ -1959,6 +1940,9 @@ async function boot() {
   // it again before they are shown.
   if (mode === 'dropdown') await invoke('ui_set_dropdown_form_active', { active: false });
   await refresh('all');
+  // The setup card always shows the paste-ready message.
+  try { state.agentSetupInstructions = await invoke('get_agent_setup'); render(); }
+  catch (error) { console.error('get_agent_setup', error); }
   // Hover tooltips (absolute timestamps on activity rows, etc.). Delegated
   // from #root so they survive re-renders; content is each element's
   // data-tippy-content. Vendored Tippy.js (self-hosted for the 'self' CSP).

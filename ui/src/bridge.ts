@@ -74,17 +74,6 @@ const MOCK_ACTIVITY_META = {
   tokenRevoked: { icon: 'unplug', tone: 'danger' },
 };
 const MOCK_AGENT_SETUP = 'Connect to the local Multitool broker. Read its current instructions, then list what connections are currently available:\n\ncurl -fsS --unix-socket ~/.aka/broker.sock http://localhost/instructions';
-const MOCK_BROKER_INSTRUCTIONS = `# Multitool: broker instructions
-
-Multitool holds this developer's secrets and brokers their use.
-Transport: HTTP over the Unix domain socket \`~/.aka/broker.sock\`.
-
-## 1. Authenticate
-Reuse a stored token via GET /v1/whoami, or POST /v1/pair when you must.
-
-## 2. Discover
-GET /v1/connections lists named destinations without exposing secrets.
-`;
 function emit<K extends EventName>(event: K, payload: EventMap[K]): void {
   (listeners[event] || []).forEach((callback) => callback({ event, payload }));
 }
@@ -307,7 +296,6 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
     case 'clear_activity': db.activity = []; emit('aka://activity-changed', {}); return;
     case 'get_settings': return { ...db.settings };
     case 'get_agent_setup': return MOCK_AGENT_SETUP;
-    case 'get_broker_instructions': return MOCK_BROKER_INSTRUCTIONS;
     case 'copy_agent_setup': return;
     case 'inspect_ssh_import':
       return {

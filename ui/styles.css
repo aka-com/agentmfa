@@ -213,22 +213,7 @@
   .onboarding-copy b, .onboarding-copy span{ display: block; }
   .onboarding-copy b{ font-size: 14px; }
   .onboarding-copy span{ margin: 3px 0 9px; color: var(--muted); font-size: 12.5px; line-height: 1.4; }
-  .onboarding-actions{ display: flex; align-items: center; gap: 12px; }/* ---- guided setup: centered breadcrumbs over the walkthrough panel, a
-   link-styled fallback affordance{ position: relative; display: flex; justify-content: center; min-height: 20px; }.setup-toggle{
-  display: inline-flex; align-items: center; gap: 4px;
-  padding: 3px 1px; border: 0; background: transparent;
-  color: var(--ink); font-size: 12.5px; line-height: normal;
-  cursor: pointer;
-}
-  .setup-toggle-icon{ display: inline-flex; transition: transform .14s ease; }
-  .setup-toggle-icon svg{ width: 13px; height: 13px; }
-  .onboarding-actions .setup-toggle{ gap: 2px; color: var(--muted); }
-  .onboarding-actions .setup-toggle-icon svg{ width: 10px; height: 10px; }
-  .setup-toggle[aria-expanded="true"] .setup-toggle-icon{ transform: rotate(180deg); }
-  .setup-toggle:hover{ text-decoration: underline; }
-  .setup-toggle:focus-visible{ outline: 2px solid var(--ink); outline-offset: 2px; border-radius: 3px; }
-  .onboarding-actions .instructions-seg{ margin: 0 0 0 auto; }
-  .instructions-seg .seg-btn{ flex: 0 0 auto; padding: 2px 9px; font-size: 12px; }
+  .onboarding-actions{ display: flex; align-items: center; gap: 12px; }/* The paste-ready setup message shown in the agent card. */
   .setup-instructions{
   margin-top: 11px; padding: 8px 9px;
   overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere;
@@ -237,22 +222,8 @@
   font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12.5px; line-height: 1.45;
 }
-  .setup-instructions.is-full{
-  max-height: 320px; padding: 0; overflow-y: auto;
-  white-space: normal;
-}
   .setup-instructions code{ font: inherit; }
-  .full-instructions-banner{
-  padding: 11px 12px 12px;
-  border-bottom: 1px solid var(--line);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 12.5px; line-height: 1.4; text-align: center;
-}
-  .full-instructions-code{
-  padding: 8px 9px;
-  white-space: pre-wrap; overflow-wrap: anywhere;
-  font: inherit;
-}
+  
   /* ---- tables ----------------------------------------------------------- */
 .sec-table{ width: 100%; border-collapse: collapse; font-size: 13.5px; }
   .sec-table td{ padding: 8px 6px; border-bottom: 1px solid var(--line-soft); vertical-align: middle; }
@@ -339,8 +310,7 @@
   .act-ico.tone-danger{ color: var(--danger-ink); }
   .act-txt{ flex: 1; line-height: 18px; color: var(--ink-2); word-break: break-word; }
   .act-detail{ font-size: 12px; color: var(--faint); line-height: 1.4; margin-top: 2px; }
-  /* ---- connections (compact tile grid): a tile carries identity only —
-   badge, name, target — and every action sits in a hover-revealed ⋯ menu{ display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 8px; padding-top: 4px; }
+  /* ---- the “tool is ready” nudge shown after the first tool ---- */
   .connection-ready{
   display: flex; align-items: center; gap: 12px; margin: 3px 0 9px; padding: 10px 11px;
   border: 1px solid var(--ok-border); border-radius: 10px; background: var(--ok-wash);
@@ -354,31 +324,12 @@
   text-overflow: ellipsis; white-space: nowrap;
 }
   .connection-ready-actions{ display: flex; align-items: center; gap: 3px; flex: 0 0 auto; }
-  .tile{
-  display: flex; align-items: center; gap: 10px;
-  padding: 9px 12px; min-width: 0;
-  background: var(--card-bg); border: 1px solid var(--line);
-  border-radius: 10px; box-shadow: 0 1px 3px rgba(20,24,50,.06);
-}
-  .tile > .badge{ flex: 0 0 auto; }
-  .tile-tx{ flex: 1; min-width: 0; }
-  .tile-tx b{ display: block; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .tile-tx code{
-  display: block; margin-top: 1px;
-  font-size: 11.5px; color: var(--muted-2);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-  .cc-live{ font-size: 11.5px; color: var(--ok-ink); font-weight: 600; }
-  /* pass/fail summary of the last broker-side test, inside the tile border */
-.cc-test{ display: flex; align-items: flex-start; gap: 5px; margin-top: 3px; font-size: 12px; line-height: 1.4; }
-  .cc-test svg{ flex: 0 0 13px; width: 13px; height: 13px; margin-top: 2px; }
-  .cc-test.ok{ color: var(--ok-ink); }
-  .cc-test.err{ color: var(--danger-ink); }
-  .cc-test.running{ color: var(--muted); }
-  /* the ⋯ menu surfaces on hover, keyboard focus, or while open */
 .tile-menu-wrap{ position: relative; flex: 0 0 auto; }
-  .tile-menu-btn{ opacity: 0; transition: opacity .12s ease; }
-  .tile:hover .tile-menu-btn, .tile-menu-btn:focus-visible, .tile-menu-btn.on{ opacity: 1; }
+  /* Present but quiet by default: these rows have no other route to
+     test/edit/delete, so the menu must be discoverable without a hover. */
+  .tile-menu-btn{ opacity: .5; transition: opacity .12s ease; }
+  .cat-conn:hover .tile-menu-btn, .tile-menu-btn:hover,
+  .tile-menu-btn:focus-visible, .tile-menu-btn.on{ opacity: 1; }
   .tile-menu-btn.on{ background: var(--hover-2); color: var(--ink-2); }
   .tile-menu{
   position: absolute; right: 0; top: calc(100% + 4px); z-index: 14;
@@ -389,9 +340,6 @@
   .menu-item:disabled{ opacity: .5; cursor: default; }
   .menu-item:disabled:hover{ background: transparent; }
   /* delete-confirm state of a tile: same object, danger dress, Cancel/Delete */
-.tile.confirm-tile{ border-color: var(--danger-border); background: var(--danger-wash); align-items: flex-start; }
-  .tile-confirm{ display: block; margin-top: 2px; font-size: 12.5px; line-height: 1.4; color: var(--danger-text); white-space: normal; }
-  .tile-confirm-actions{ display: flex; gap: 6px; margin-top: 7px; }
   /* ---- agents tab: one block per agent (identity card + a row per service
    stating what the agent can do right now, with the revoke control beside
    the state it revokes) ------------------------------------------------- */
@@ -542,8 +490,6 @@
   .set-collapse{ border-bottom: 1px solid var(--line-soft); padding: 8px 2px; }
   .set-collapse summary{ cursor: pointer; font-size: 14px; font-weight: 600; list-style-position: inside; }
   .set-panel{ padding: 9px 0 2px; }
-  /* The native window fits ordinary approvals to their content. For unusually
-   tall requests it is capped to the display and this middle section scrolls{ flex: 0 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; }
   .pair-identity-warning{ margin: 0 0 12px; padding: 9px 11px; border-radius: 8px; font-size: 12.5px; line-height: 1.4; }
   .pair-identity-warning{ background: var(--amber-wash); border: 1px solid var(--amber-border); color: var(--amber-ink); }
   .import-warning b{ display: block; }
@@ -616,7 +562,11 @@
     --b-agent-bg: rgba(255,255,255,.10); --b-agent-ink: #b8b8c0;
   }
 }
-  /* ------------------------------ Add-tools catalog ------------------------ */
+  /* The header's trailing controls: search sits beside the primary action. */
+.dw-head-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.dw-head-actions .cat-search { width: 210px; }
+
+/* ------------------------------ Add-tools catalog ------------------------ */
 /* The default page: a searchable, sectioned registry of tools. Rows show an
    icon chip + name + one-line description, then either an Add button, a
    dimmed "Soon" chip (MCP-backed integrations), or a count badge that
@@ -674,21 +624,38 @@
    flips when the row is open. */
 .cat-chev { display: inline-flex; transition: transform .15s ease; opacity: .8; }
 .cat-count.on .cat-chev { transform: rotate(180deg); }
-.cat-conns { padding: 2px 14px 12px; background: var(--wash); }
+/* Expanded rows are full-bleed: they span the whole card and align with the
+   parent row's text, so a tool reads as one object rather than a card-in-card. */
+.cat-conns { background: var(--wash); border-top: 1px solid var(--line); }
 .cat-conn-list { display: flex; flex-direction: column; }
 .cat-conn {
-  display: flex; align-items: center; gap: 10px; padding: 8px 0; min-width: 0;
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 10px 14px 10px 64px; min-width: 0;
 }
-.cat-conn + .cat-conn { border-top: 1px solid var(--line); }
+.cat-conn + .cat-conn { border-top: 1px solid var(--line-soft); }
 .cat-conn-tx { flex: 1; min-width: 0; }
-.cat-conn-tx b { display: block; font-size: 13px; font-weight: 600; }
-.cat-conn-tx code, .cat-conn-tx span {
+.cat-conn-head { display: flex; align-items: center; gap: 6px; }
+.cat-conn-tx b { font-size: 13px; font-weight: 600; }
+.cat-conn-tx code {
   display: block; margin-top: 1px; overflow: hidden; color: var(--muted-2);
   font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap;
 }
-.cat-conn.confirm-conn .cat-conn-tx span { color: var(--danger-ink); }
+.cat-conn-meta {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 4px;
+  color: var(--muted); font-size: 11.5px;
+}
+/* Dot separators between facts, without markup for them. */
+.cat-conn-meta > span + span::before { content: '·'; margin-right: 8px; opacity: .6; }
+.cat-meta-idle { color: var(--amber-ink); }
+.cat-meta-warn { color: var(--amber-strong); font-weight: 600; }
+.cat-conn-danger { display: block; margin-top: 2px; color: var(--danger-ink); font-size: 11.5px; }
 .cat-conns .sec-table { margin: 0; }
-.cat-add-another { margin-top: 8px; }
+/* Align the credential table with the connection rows' text spine. */
+.cat-conns .sec-table td:first-child { padding-left: 64px; }
+.cat-conns .sec-table td:last-child { padding-right: 14px; }
+.cat-conns .sec-table tr:last-child td { border-bottom: 0; }
+.cat-conns > .muted-note { padding: 10px 14px; }
+.cat-conns .cat-add-another { margin: 8px 14px 10px; }
 .dropdown-surface .catalog { gap: 12px; }
 .dropdown-surface .cat-search { width: 100%; }
 

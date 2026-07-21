@@ -125,7 +125,6 @@ export interface CommandMap {
   clear_activity: CommandSpec<undefined, void>;
   get_settings: CommandSpec<undefined, Settings>;
   get_agent_setup: CommandSpec<undefined, string>;
-  get_broker_instructions: CommandSpec<undefined, string>;
   copy_agent_setup: CommandSpec<undefined, void>;
   inspect_ssh_import: CommandSpec<{ source: string }, SshImportPreview>;
   check_known_hosts: CommandSpec<{ host: string; port: number }, HostKeyCandidate[]>;

@@ -1,23 +1,19 @@
 // The tool catalog: the static registry behind the "Add tools" screen.
 //
 // Connections are stored by protocol (api/pg/ws/ssh); the catalog presents
-// them as branded tools grouped into sections. Each entry maps to a
-// connection type the broker can serve today (`via: 'connection'`, with an
-// optional prefill for the add sheet), fronts a built-in store
-// (`via: 'builtin'` — today the Keychain-backed saved credentials), or
-// names an integration arriving later through the MCP layer
-// (`via: 'mcp'`, shown dimmed and not yet addable).
+// them as tools grouped into sections. Each entry either maps to a
+// connection type the broker serves today (`via: 'connection'`), fronts a
+// built-in store (`via: 'builtin'` — the Keychain-backed saved
+// credentials), or names an integration that arrives later through the MCP
+// layer (`via: 'mcp'`, shown dimmed and not yet addable).
+//
+// Branded apps (GitHub, Gmail, Notion, 1Password) are all MCP-bound: they
+// are richer than a single credentialed origin, so they wait for the MCP
+// layer rather than being approximated by a raw HTTP connection.
 
 import type { ConnectionSummary, ConnectionType } from './types';
 
 export type CatalogSection = 'Apps' | 'Infrastructure' | 'Secrets';
-
-/** Values dropped into the add-connection sheet when a row's Add is used. */
-export interface CatalogPrefill {
-  name?: string;
-  origin?: string;
-  template?: string;
-}
 
 export interface CatalogEntry {
   id: string;
@@ -28,9 +24,6 @@ export interface CatalogEntry {
   section: CatalogSection;
   via: 'connection' | 'builtin' | 'mcp';
   connType?: ConnectionType;
-  /** api entries only: claim api connections whose host contains this. */
-  hostHint?: string;
-  prefill?: CatalogPrefill;
 }
 
 export const CATALOG: CatalogEntry[] = [
@@ -40,14 +33,7 @@ export const CATALOG: CatalogEntry[] = [
     chip: 'GH',
     description: 'Repos, issues, PRs',
     section: 'Apps',
-    via: 'connection',
-    connType: 'api',
-    hostHint: 'github',
-    prefill: {
-      name: 'github',
-      origin: 'https://api.github.com',
-      template: 'Authorization: Bearer {{GITHUB_API_KEY}}',
-    },
+    via: 'mcp',
   },
   {
     id: 'gmail',
@@ -63,14 +49,7 @@ export const CATALOG: CatalogEntry[] = [
     chip: 'N',
     description: 'Pages & databases',
     section: 'Apps',
-    via: 'connection',
-    connType: 'api',
-    hostHint: 'notion',
-    prefill: {
-      name: 'notion',
-      origin: 'https://api.notion.com',
-      template: 'Authorization: Bearer {{NOTION_API_KEY}}',
-    },
+    via: 'mcp',
   },
   {
     id: 'postgres',
@@ -92,7 +71,7 @@ export const CATALOG: CatalogEntry[] = [
   },
   {
     id: 'http',
-    name: 'HTTP API',
+    name: 'Custom API',
     chip: 'API',
     description: 'Any credentialed REST API',
     section: 'Infrastructure',
@@ -101,7 +80,7 @@ export const CATALOG: CatalogEntry[] = [
   },
   {
     id: 'websocket',
-    name: 'WebSocket',
+    name: 'Custom WebSocket',
     chip: 'WS',
     description: 'Streaming connections',
     section: 'Infrastructure',
@@ -128,16 +107,8 @@ export const CATALOG: CatalogEntry[] = [
 
 export const CATALOG_SECTIONS: CatalogSection[] = ['Apps', 'Infrastructure', 'Secrets'];
 
-/** Which catalog row owns a connection. Branded api entries claim api
- * connections by host hint; the generic HTTP API row takes the rest. */
+/** Which catalog row owns a connection: the row for its protocol. */
 export function entryForConnection(connection: ConnectionSummary): CatalogEntry | undefined {
-  if (connection.type === 'api') {
-    const host = (connection.host || '').toLowerCase();
-    const branded = CATALOG.find((entry) =>
-      entry.connType === 'api' && entry.hostHint && host.includes(entry.hostHint));
-    if (branded) return branded;
-    return CATALOG.find((entry) => entry.id === 'http');
-  }
   return CATALOG.find((entry) => entry.via === 'connection' && entry.connType === connection.type);
 }
 

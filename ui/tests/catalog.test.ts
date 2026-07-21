@@ -27,19 +27,21 @@ test('every entry lives in a known section; only connection entries are addable'
   }
 });
 
+test('branded apps are MCP-bound, not raw connections', () => {
+  for (const id of ['github', 'gmail', 'notion', 'onepassword']) {
+    assert.equal(CATALOG.find((entry) => entry.id === id)?.via, 'mcp', id);
+  }
+});
+
 test('the built-in credentials store is a Secrets row', () => {
   const credentials = CATALOG.find((entry) => entry.id === 'credentials');
   assert.equal(credentials?.via, 'builtin');
   assert.equal(credentials?.section, 'Secrets');
 });
 
-test('branded api hosts claim their row; other api hosts fall to HTTP API', () => {
-  assert.equal(entryForConnection(conn('api', 'api.github.com'))?.id, 'github');
-  assert.equal(entryForConnection(conn('api', 'api.notion.com'))?.id, 'notion');
+test('each protocol maps to exactly one infrastructure row', () => {
+  assert.equal(entryForConnection(conn('api', 'api.github.com'))?.id, 'http');
   assert.equal(entryForConnection(conn('api', 'internal.example.com'))?.id, 'http');
-});
-
-test('protocol types map to their infrastructure rows', () => {
   assert.equal(entryForConnection(conn('pg', 'db.internal'))?.id, 'postgres');
   assert.equal(entryForConnection(conn('ssh', 'prod.example.com'))?.id, 'ssh');
   assert.equal(entryForConnection(conn('ws', null))?.id, 'websocket');
@@ -48,7 +50,6 @@ test('protocol types map to their infrastructure rows', () => {
 test('every connection is counted by exactly one row', () => {
   const connections = [
     conn('api', 'api.github.com', 'gh-1'),
-    conn('api', 'API.GitHub.com', 'gh-2'),
     conn('api', 'internal.example.com', 'internal'),
     conn('pg', 'db.internal', 'db'),
     conn('ssh', 'prod', 'prod-ssh'),
@@ -56,13 +57,14 @@ test('every connection is counted by exactly one row', () => {
   ];
   const counted = CATALOG.flatMap((entry) => connectionsForEntry(entry, connections));
   assert.equal(counted.length, connections.length);
-  const github = CATALOG.find((entry) => entry.id === 'github')!;
-  assert.deepEqual(connectionsForEntry(github, connections).map((c) => c.name), ['gh-1', 'gh-2']);
+  const api = CATALOG.find((entry) => entry.id === 'http')!;
+  assert.deepEqual(connectionsForEntry(api, connections).map((c) => c.name), ['gh-1', 'internal']);
 });
 
 test('search filters by name and description, empty query returns all', () => {
   assert.equal(filterCatalog('').length, CATALOG.length);
   assert.deepEqual(filterCatalog('git').map((entry) => entry.id), ['github']);
   assert.ok(filterCatalog('database').some((entry) => entry.id === 'postgres'));
+  assert.ok(filterCatalog('custom').some((entry) => entry.id === 'websocket'));
   assert.equal(filterCatalog('zzz-nothing').length, 0);
 });
