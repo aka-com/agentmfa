@@ -3,8 +3,16 @@
 <!-- The rounded-square body fills an 824x824 region centered in the 1024
      canvas (100px margin), matching Apple's macOS icon grid so the icon
      renders at the same visual size as neighbouring apps in the Dock and
-     app switcher. -->
+     app switcher. A soft drop shadow is baked into the surrounding margin
+     (as Apple's own icons do) so the body reads as grounded rather than
+     bare when macOS draws a selection/focus highlight around the frame. -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <filter id="grid-shadow" x="-25%" y="-25%" width="150%" height="150%" color-interpolation-filters="sRGB">
+    <feGaussianBlur in="SourceAlpha" stdDeviation="19"/>
+    <feOffset dy="11"/>
+    <feComponentTransfer><feFuncA type="linear" slope="0.26"/></feComponentTransfer>
+  </filter>
+  <rect x="100" y="100" width="824" height="824" rx="195" filter="url(#grid-shadow)"/>
   <g transform="translate(57.379 57.379) scale(0.887931)">
     <rect x="48" y="48" width="928" height="928" rx="220" fill="#26262c"/>
     <rect x="96" y="96" width="832" height="832" rx="180" fill="#303038"/>
