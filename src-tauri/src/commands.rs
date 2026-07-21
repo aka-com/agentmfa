@@ -26,6 +26,10 @@ use crate::dto::*;
 pub struct AppState {
     pub broker: std::sync::Arc<Broker>,
     pub ssh_imports: std::sync::Mutex<crate::ssh_import::ImportCache>,
+    // Keeps the Node sidecar supervised; dropping it kills the process and
+    // stops restarting it. `None` when no sidecar script is installed.
+    // Declared before the runtime it spawned its supervisor on.
+    pub _sidecar: Option<aka_core::sidecar::Sidecar>,
     // Keeps the daemon (control plane + WS/PG data planes) alive; dropping
     // it aborts the listeners.
     pub _daemon: aka_core::daemon::DaemonHandle,

@@ -42,6 +42,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "keyring",
+ "libc",
  "md-5 0.10.6",
  "percent-encoding",
  "postgres-protocol",

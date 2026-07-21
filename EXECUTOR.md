@@ -86,11 +86,18 @@ is what makes wiring enforcement work over MCP.
 
 Each phase ends with a commit and a review pass before the next starts.
 
-**Phase 1 — sidecar lifecycle.** A Node process supervised by the Rust
-shell: spawn on start, health endpoint on loopback, structured logs into
-our activity log, dies with the app, restarts on crash with backoff. No
-tools yet. *Verify:* app start brings it up, `/health` answers, app quit
-reaps it, `kill -9` triggers one clean restart.
+**Phase 1 — sidecar lifecycle. Done.** A Node process supervised by
+`aka_core::sidecar`: spawned on start, announcing an ephemeral loopback
+port on stdout, gated by a per-process bearer token, forwarding JSON log
+lines into our tracing output, restarted with backoff, and reaped on
+drop. Path policy lives in the shell (`src-tauri/src/sidecar.rs`), so the
+core stays testable without a Node toolchain. A missing bundle is not an
+error — the app runs without MCP.
+
+Shipping: the bundle is a Tauri resource; the pinned Node is an
+`externalBin` declared in `tauri.bundle.conf.json` rather than the base
+config, because Tauri validates external binaries on *every* build of the
+shell crate and that would make `cargo test` require the download.
 
 **Phase 2 — the reimplemented MCP host.** `McpAuthProvider` (bearer →
 `client_id` via broker) and an in-process `McpSessionStore`, serving

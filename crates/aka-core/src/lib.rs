@@ -25,6 +25,7 @@ pub mod paths;
 pub mod policy;
 pub mod ratelimit;
 pub mod sessions;
+pub mod sidecar;
 pub mod store;
 pub mod template;
 pub mod types;

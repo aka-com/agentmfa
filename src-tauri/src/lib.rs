@@ -12,6 +12,7 @@ mod clipboard;
 mod commands;
 mod dto;
 mod events;
+mod sidecar;
 mod ssh_import;
 mod windows;
 
@@ -269,6 +270,13 @@ pub fn run() {
                 daemon.socket_path.display()
             );
 
+            // Supervised on the broker's runtime, so it is torn down with
+            // everything else it depends on. `block_on` is only for the
+            // spawn context — starting the sidecar does not block.
+            let sidecar = runtime.block_on(async {
+                sidecar::start(&handle, daemon.socket_path.clone())
+            });
+
             windows::setup_app_menu(&handle)?;
             windows::setup_dropdown_panel(&handle)?;
             windows::setup_tray(&handle)?;
@@ -305,6 +313,7 @@ pub fn run() {
             app.manage(AppState {
                 broker,
                 ssh_imports: Default::default(),
+                _sidecar: sidecar,
                 _daemon: daemon,
                 _runtime: runtime,
             });

@@ -50,6 +50,7 @@ keyring = { version = "3", features = ["apple-native"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+libc = { workspace = true }
 tokio-postgres = { workspace = true }
 # Test-only key generation for the SSH agent tests (OsRng via ssh-key's
 # re-exported rand_core).

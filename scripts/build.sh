@@ -11,6 +11,17 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
 repo_root="$(cd "$script_dir/.." >/dev/null && pwd)"
 cd "$repo_root"
 
+# The sidecar bundle rides along as a Tauri resource, and the pinned Node it
+# runs on is an externalBin. Both must exist before the bundler looks for
+# them, or the build fails late with a missing-file error.
+#
+# The externalBin declaration lives in a separate config merged in here,
+# not in tauri.conf.json: Tauri validates external binaries on *every*
+# build of the shell crate, so declaring it in the base config would make
+# `cargo test` require the vendored Node download.
+npm run sidecar:build
+npm run sidecar:vendor
+
 target_args=()
 if [[ "$(uname)" == "Darwin" ]]; then
   if [[ -z "${APPLE_SIGNING_IDENTITY:-}" ]]; then
@@ -33,4 +44,4 @@ fi
 # CI=true makes the DMG bundler skip the Finder/AppleScript window-layout
 # step, which needs Apple-Events automation access and can hang a headless
 # or unattended build.
-exec env CI=true "$repo_root/node_modules/.bin/tauri" build --bundles app,dmg "${target_args[@]}" "$@"
+exec env CI=true "$repo_root/node_modules/.bin/tauri" build --config src-tauri/tauri.bundle.conf.json --bundles app,dmg "${target_args[@]}" "$@"

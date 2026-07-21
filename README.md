@@ -40,13 +40,26 @@ are authorized by their wiring instead.
 
 ## MCP Support
 
-MCP support is not yet implemented.
+MCP is being added through a supervised Node sidecar that hosts the
+[executor](https://executor.sh) engine; see `EXECUTOR.md` for the design
+and the phase plan. The sidecar is not yet wired to any tools.
+
+```sh
+npm run sidecar:build    # bundle sidecar/ to dist/sidecar/main.js
+npm run sidecar:vendor   # fetch the pinned Node the .app ships (macOS)
+npm run test:sidecar     # the sidecar's own tests
+```
+
+The app starts the sidecar when `dist/sidecar/main.js` exists and runs
+without it otherwise, so a checkout that skips `sidecar:build` still
+works. `AKA_SIDECAR_NODE` and `AKA_SIDECAR_SCRIPT` override what gets
+run. `npm run build` performs both sidecar steps for you.
 
 ## Developing
 
 ```sh
 npm install        # Install the pinned Tauri and TypeScript toolchain
-npm test           # Type-check, then test the core, CLI, desktop commands, and UI helpers
+npm test           # Type-check, then test the core, CLI, desktop commands, UI helpers, and sidecar
 npm run test:ui    # Run only the TypeScript UI helper tests
 npm run lint       # Lint the workspace and the separate Tauri app crate
 npm run typecheck  # Type-check the frontend without emitting files

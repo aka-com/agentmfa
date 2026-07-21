@@ -64,6 +64,9 @@
     ],
     "macOS": {
       "minimumSystemVersion": "13.0"
+    },
+    "resources": {
+      "../dist/sidecar/main.js": "sidecar/main.js"
     }
   }
 }
