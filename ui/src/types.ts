@@ -62,6 +62,7 @@ export interface ActivityEntry {
 
 export interface Settings {
   reauth_on_read: boolean;
+  show_websockets: boolean;
   menu_bar_hides_dock: boolean;
 }
 
@@ -149,6 +150,7 @@ export interface CommandMap {
   revoke_agent: CommandSpec<{ id: string }, boolean>;
   close_session: CommandSpec<{ id: number }, boolean>;
   set_reauth_on_read: CommandSpec<{ on: boolean }, void>;
+  set_show_websockets: CommandSpec<{ on: boolean }, void>;
   set_menu_bar_hides_dock: CommandSpec<{ on: boolean }, void>;
   ui_set_mode: CommandSpec<{ mode: string }, void>;
   ui_hide_main: CommandSpec<undefined, void>;

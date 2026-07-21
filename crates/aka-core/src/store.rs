@@ -664,6 +664,15 @@ impl Store {
         self.commit(&mut state, next)
     }
 
+    pub fn set_show_websockets(&self, on: bool) -> Result<()> {
+        let mut state = self.state.lock().unwrap();
+        let mut settings = state.settings();
+        settings.show_websockets = on;
+        let mut next = state.clone();
+        next.settings = Some(settings);
+        self.commit(&mut state, next)
+    }
+
     pub fn set_menu_bar_hides_dock(&self, on: bool) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         let mut settings = state.settings();

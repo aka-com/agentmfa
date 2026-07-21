@@ -399,6 +399,11 @@ pub struct Settings {
         skip_serializing_if = "Option::is_none"
     )]
     pub(crate) legacy_pg_trusted_ca_bundle_path: Option<String>,
+    /// "Show WebSockets" in the tool catalog, default off: the capability
+    /// works, but most setups never need it, so it stays out of the way
+    /// until asked for.
+    #[serde(default)]
+    pub show_websockets: bool,
     /// "Hide the Dock icon when minimized to the menu bar", default off.
     /// The app is a regular windowed app by default (Dock + app switcher);
     /// with this on, explicitly minimizing to the menu bar also drops the
@@ -412,6 +417,7 @@ impl Default for Settings {
         Self {
             reauth_on_read: true,
             legacy_pg_trusted_ca_bundle_path: None,
+            show_websockets: false,
             menu_bar_hides_dock: false,
         }
     }
@@ -445,6 +451,7 @@ mod tests {
         .unwrap();
         assert!(settings.reauth_on_read);
         assert!(!settings.menu_bar_hides_dock);
+        assert!(!settings.show_websockets, "a new opt-in defaults off");
     }
 
     #[test]

@@ -7,6 +7,7 @@ import {
   connectionsForEntry,
   entryForConnection,
   filterCatalog,
+  visibleCatalog,
 } from '../src/catalog';
 import type { ConnectionSummary, ConnectionType } from '../src/types';
 
@@ -67,4 +68,29 @@ test('search filters by name and description, empty query returns all', () => {
   assert.ok(filterCatalog('database').some((entry) => entry.id === 'postgres'));
   assert.ok(filterCatalog('custom').some((entry) => entry.id === 'websocket'));
   assert.equal(filterCatalog('zzz-nothing').length, 0);
+});
+
+test('WebSockets are hidden until the setting is on', () => {
+  const ids = (entries: { id: string }[]) => entries.map((entry) => entry.id);
+
+  const off = visibleCatalog('', { showWebsockets: false, connections: [] });
+  assert.ok(!ids(off).includes('websocket'));
+  assert.ok(ids(off).includes('postgres'), 'only WebSocket is affected');
+
+  const on = visibleCatalog('', { showWebsockets: true, connections: [] });
+  assert.ok(ids(on).includes('websocket'));
+});
+
+test('a configured WebSocket tool stays visible even with the setting off', () => {
+  // Hiding a row must never strand a tool the user already has.
+  const entries = visibleCatalog('', {
+    showWebsockets: false,
+    connections: [conn('ws', null, 'market-feed')],
+  });
+  assert.ok(entries.map((entry) => entry.id).includes('websocket'));
+});
+
+test('search still respects the WebSocket setting', () => {
+  const hidden = visibleCatalog('websocket', { showWebsockets: false, connections: [] });
+  assert.equal(hidden.length, 0);
 });

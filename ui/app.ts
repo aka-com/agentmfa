@@ -8,7 +8,7 @@
 
 import { invoke, listen, mode } from '/src/bridge';
 import {
-  CATALOG, CATALOG_SECTIONS, catalogNameForType, connectionsForEntry, filterCatalog,
+  CATALOG, CATALOG_SECTIONS, catalogNameForType, connectionsForEntry, visibleCatalog,
 } from '/src/catalog';
 import {
   START_OPTIONS, startOptionById, startProgress, startTask,
@@ -143,6 +143,7 @@ const state: AppState = {
   agentSetupInstructions: '', // short paste-ready setup message (lazy-loaded)
   settings: {
     reauth_on_read: true,
+    show_websockets: false,
     menu_bar_hides_dock: false,
   },
   reveal: {},            // secretId -> prefix string (transient)
@@ -586,7 +587,10 @@ function connectionsHTML() {
       <button class="btn sm" data-act="copy-first-task">${state.connectionTaskCopied ? `${ICONS.check} Copied` : 'Copy task'}</button>
       <button class="icon-btn" title="Dismiss" aria-label="Dismiss tool ready message" data-act="dismiss-connection-ready">${ICONS.circleX}</button>
     </div></div>` : '';
-  const entries = filterCatalog(state.toolSearch);
+  const entries = visibleCatalog(state.toolSearch, {
+    showWebsockets: state.settings.show_websockets,
+    connections: state.connections,
+  });
   const sections = CATALOG_SECTIONS.map((section) => {
     const rows = entries.filter((entry) => entry.section === section);
     if (!rows.length) return '';
@@ -1111,9 +1115,12 @@ function settingsSheet() {
   const dockRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Hide Dock icon in the menu bar</div>
       <div class="st-sub">When minimized to the menu bar, hide the Dock icon until the window is reopened.</div></div>
       <button class="switch ${s.menu_bar_hides_dock ? 'on' : ''}" data-act="toggle-menubar-dock" role="checkbox" aria-checked="${s.menu_bar_hides_dock ? 'true' : 'false'}"></button></div>`;
+  const websocketRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Show WebSockets</div>
+      <div class="st-sub">Adds Custom WebSocket to the tool catalog. Tools you already have stay visible either way.</div></div>
+      <button class="switch ${s.show_websockets ? 'on' : ''}" data-act="toggle-websockets" role="checkbox" aria-checked="${s.show_websockets ? 'true' : 'false'}"></button></div>`;
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
     <div class="sheet wide"><h3>Settings</h3>
-    ${reauthRow}${dockRow}
+    ${reauthRow}${websocketRow}${dockRow}
     <div class="sheet-actions"><button class="btn primary" data-act="sheet-cancel">Done</button></div></div>`;
 }
 
@@ -1828,6 +1835,16 @@ document.addEventListener('click', async (e) => {
         const on = !state.settings.reauth_on_read;
         await run(() => invoke('set_reauth_on_read', { on }));
         toast(on ? '💳 Confirmation required before using saved secrets' : '💳 Extra confirmation removed');
+      }
+      await refresh('settings');
+      break;
+    case 'toggle-websockets':
+      {
+        const on = !state.settings.show_websockets;
+        if (await run(() => invoke('set_show_websockets', { on }))) {
+          state.settings.show_websockets = on;
+          toast(on ? '🔌 WebSockets shown in the catalog' : '🔌 WebSockets hidden');
+        }
       }
       await refresh('settings');
       break;

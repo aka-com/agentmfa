@@ -174,6 +174,7 @@ const db: MockDatabase = {
   activity: [],
   settings: {
     reauth_on_read: true,
+    show_websockets: false,
     menu_bar_hides_dock: false,
   },
 };
@@ -454,6 +455,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       return true;
     case 'close_session': db.sessions = db.sessions.filter((s) => s.id !== args.id); emit('aka://sessions-changed', {}); return true;
     case 'set_reauth_on_read': db.settings.reauth_on_read = args.on; return;
+    case 'set_show_websockets': db.settings.show_websockets = args.on; return;
     case 'set_menu_bar_hides_dock':
       db.settings.menu_bar_hides_dock = args.on;
       return;

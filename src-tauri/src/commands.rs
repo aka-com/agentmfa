@@ -324,6 +324,7 @@ pub fn get_settings(state: State<AppState>) -> SettingsDto {
     let s = state.broker.settings();
     SettingsDto {
         reauth_on_read: s.reauth_on_read,
+        show_websockets: s.show_websockets,
         menu_bar_hides_dock: s.menu_bar_hides_dock,
     }
 }
@@ -762,6 +763,14 @@ pub fn set_reauth_on_read(state: State<AppState>, on: bool) -> CmdResult<()> {
 }
 
 #[tauri::command]
+pub fn set_show_websockets(state: State<AppState>, on: bool) -> CmdResult<()> {
+    state
+        .broker
+        .ui_set_show_websockets(on)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn set_menu_bar_hides_dock(state: State<AppState>, on: bool) -> CmdResult<()> {
     state
         .broker
@@ -797,6 +806,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         revoke_agent,
         close_session,
         set_reauth_on_read,
+        set_show_websockets,
         set_menu_bar_hides_dock,
         crate::windows::ui_set_mode,
         crate::windows::ui_hide_main,

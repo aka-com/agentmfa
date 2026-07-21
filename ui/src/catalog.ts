@@ -129,6 +129,26 @@ export function filterCatalog(query: string): CatalogEntry[] {
     entry.id.includes(needle));
 }
 
+export interface CatalogVisibility {
+  /** The "Show WebSockets" setting; off by default. */
+  showWebsockets: boolean;
+  connections: ConnectionSummary[];
+}
+
+/**
+ * The rows to render: the search filter, minus anything switched off.
+ *
+ * A hidden row still appears when something is configured under it — a tool
+ * you already have must never become invisible (and therefore unmanageable)
+ * because of a display preference.
+ */
+export function visibleCatalog(query: string, visibility: CatalogVisibility): CatalogEntry[] {
+  return filterCatalog(query).filter((entry) => {
+    if (entry.id !== 'websocket' || visibility.showWebsockets) return true;
+    return connectionsForEntry(entry, visibility.connections).length > 0;
+  });
+}
+
 /** The catalog's name for a connection type — the dialog titles reuse it. */
 export function catalogNameForType(type: ConnectionType): string {
   return CATALOG.find((entry) => entry.via === 'connection' && entry.connType === type)?.name

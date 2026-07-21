@@ -654,6 +654,10 @@ impl Broker {
         Ok(())
     }
 
+    pub fn ui_set_show_websockets(&self, on: bool) -> Result<()> {
+        self.store.set_show_websockets(on)
+    }
+
     pub fn ui_set_menu_bar_hides_dock(&self, on: bool) -> Result<()> {
         self.store.set_menu_bar_hides_dock(on)
     }
