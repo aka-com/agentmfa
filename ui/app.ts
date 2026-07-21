@@ -513,7 +513,7 @@ function agentServiceRowHTML(a: AgentSummary, c: ConnectionSummary): string {
   const wired = !!agentWiringFor(a, c);
   const live = state.sessions.some((s) => s.agent === a.name && s.connection === c.name);
   const pill = wired
-    ? '<span class="acc-pill rule">Wired · can use this service</span>'
+    ? '<span class="acc-pill granted">Wired · can use this service</span>'
     : '<span class="acc-pill">Not wired</span>';
   const action = wired
     ? `<button class="btn ghost sm" aria-label="Unwire ${escAttr(a.name)} from ${escAttr(c.name)}" data-act="unwire" data-id="${a.id}" data-conn="${c.id}">Unwire</button>`

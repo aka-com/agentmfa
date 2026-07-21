@@ -55,6 +55,28 @@ npm start          # start Vite and launch the desktop app
 npm run build      # build .app and .dmg bundles
 ```
 
+### Frontend-only mode (browser, no broker)
+
+The UI runs standalone in a plain browser against a self-contained dev
+mock (`ui/src/bridge.ts`): outside Tauri, every command is served from an
+in-memory fixture store — seeded secrets, connections, an agent, a wiring,
+a live session, and activity — so screens are reviewable and adjustable
+without the Rust core. Nothing is enforced (no Keychain, no daemon, no
+native authentication).
+
+```sh
+npm run frontend:dev   # vite dev server with hot reload
+```
+
+Then open:
+
+- <http://localhost:5173/> — the main window (Tools catalog, Agents,
+  Secrets, Activity)
+- <http://localhost:5173/#dropdown> — the compact menu-bar dropdown
+
+The window chrome is chosen from the URL hash; edits to `ui/` hot-reload
+in place.
+
 ## Publishing the CLI
 
 ```sh
