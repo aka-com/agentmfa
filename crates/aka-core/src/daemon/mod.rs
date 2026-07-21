@@ -521,17 +521,18 @@ async fn post_pair(State(state): State<AppState>, ApiJson(body): ApiJson<PairBod
         );
     }
 
-    // Registration is immediate: no approval prompt. The new agent simply
+    // Registration is immediate: pairing is never gated. The new agent simply
     // appears in the app, unwired — it can list connections but cannot use
-    // any until the user wires it up. The one exception: the very first
-    // agent is wired to every existing connection, so a fresh install works
-    // end-to-end without a trip through the app.
+    // any until the user wires it up. The one exception is the very first
+    // agent: the app offers to wire it to every existing connection so a fresh
+    // install works end-to-end without a trip through the app. That standing
+    // grant is confirmed with the user (below); declining leaves it unwired.
     let is_first_agent = broker.pairing.list().is_empty();
     let replaces_existing_agent = broker.pairing.get(&name).is_some();
     match broker.pairing.pair(&name) {
         Ok((token, agent)) => {
             if is_first_agent {
-                broker.bootstrap_first_agent_wirings(&agent);
+                broker.bootstrap_first_agent_wirings(&agent).await;
             }
             if replaces_existing_agent {
                 // A re-pair invalidates the prior token generation; close

@@ -962,11 +962,48 @@ impl Broker {
         Ok(true)
     }
 
-    /// The very first agent to register is wired to every existing
-    /// connection, so a fresh install works end-to-end without a wiring
-    /// trip through the app. Later agents start unwired.
-    pub(crate) fn bootstrap_first_agent_wirings(&self, agent: &PairedAgent) {
+    /// The very first agent to register is offered a wire-to-everything grant
+    /// so a fresh install works end-to-end without a wiring trip through the
+    /// app. Because that grant is *standing* access to every existing tool, it
+    /// is gated behind the shell's native confirmation — the only
+    /// agent-initiated path that prompts the user. Declining (or a shell with
+    /// no confirmation gate) leaves the agent unwired, exactly like any later
+    /// agent; the pairing itself has already succeeded. Later agents never
+    /// reach here.
+    pub(crate) async fn bootstrap_first_agent_wirings(&self, agent: &PairedAgent) {
+        let connection_count = {
+            let _gate = self.config_gate.lock().unwrap();
+            self.store.list_connections().len()
+        };
+        if connection_count == 0 {
+            return;
+        }
+
+        // Confirm off the async runtime: the native sheet blocks its thread
+        // until the user answers, and the pairing response deliberately waits
+        // on that decision.
+        let events = self.events.clone();
+        let agent_name = agent.name.clone();
+        let confirmation = tokio::task::spawn_blocking(move || {
+            events.confirm_action(&format!(
+                "Wire new agent “{agent_name}” to all {connection_count} tool{}",
+                if connection_count == 1 { "" } else { "s" }
+            ))
+        })
+        .await
+        .ok()
+        .flatten();
+        let Some(confirmation) = confirmation else {
+            tracing::info!(
+                "first-agent auto-wire declined for {}; agent left unwired",
+                agent.name
+            );
+            return;
+        };
+
         let _gate = self.config_gate.lock().unwrap();
+        // Re-snapshot under the gate: connections may have changed while the
+        // confirmation sheet was up.
         let connection_ids: Vec<Uuid> = self
             .store
             .list_connections()
@@ -992,6 +1029,7 @@ impl Broker {
                         ),
                     )
                     .agent(agent.name.clone())
+                    .confirmation(confirmation)
                     .field("wirings_added", added.len()),
                 );
                 self.events.wirings_changed();

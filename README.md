@@ -28,9 +28,12 @@ Tools (connections) are added in the app, globally — they belong to
 Multitool, not to any particular agent. Agents register themselves with
 one `POST /v1/pair` call (no approval step) and appear in the app; you
 then **wire** an agent to the tools it may use. A wired call executes
-immediately with no prompt; an unwired call is refused. The very first
-agent to register is wired to everything that exists at that moment, so
-a fresh setup works end-to-end.
+immediately with no prompt; an unwired call is refused. When the very first
+agent registers, the app offers to wire it to everything that exists at that
+moment — confirmed with a native OS-authentication sheet, since it grants
+standing access to every tool — so a fresh setup can work end-to-end. Decline
+and the agent stays unwired like any other; only that first auto-wiring is
+gated, never the pairing itself.
 
 Wirings bind to a stable client ID and to the connection's pinned
 destination: deleting a connection or changing its target drops its

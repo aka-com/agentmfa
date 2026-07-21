@@ -33,6 +33,19 @@ impl BrokerEvents for TestEvents {
     }
 }
 
+/// A shell whose user declines every native confirmation. Used to exercise
+/// the first-agent bootstrap prompt's cancel path.
+struct DecliningEvents;
+
+impl BrokerEvents for DecliningEvents {
+    fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
+        true
+    }
+    fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
+        None
+    }
+}
+
 struct Harness {
     broker: Arc<Broker>,
     _daemon: daemon::DaemonHandle,
@@ -40,18 +53,17 @@ struct Harness {
     _dir: tempfile::TempDir,
 }
 
-async fn harness(mut config: BrokerConfig) -> Harness {
+async fn harness(config: BrokerConfig) -> Harness {
+    harness_with_events(config, Arc::new(TestEvents)).await
+}
+
+async fn harness_with_events(mut config: BrokerConfig, events: Arc<dyn BrokerEvents>) -> Harness {
     config.version = "test".into();
     let dir = tempfile::tempdir().unwrap();
     let paths = Paths::under(dir.path());
-    let broker = Broker::new(
-        paths,
-        Arc::new(MemoryVault::new()),
-        config,
-        Arc::new(TestEvents),
-    )
-    .await
-    .unwrap();
+    let broker = Broker::new(paths, Arc::new(MemoryVault::new()), config, events)
+        .await
+        .unwrap();
     let handle = daemon::serve(broker.clone()).await.unwrap();
     let socket = handle.socket_path.clone();
     Harness {
@@ -1131,6 +1143,38 @@ async fn repairing_preserves_client_id_and_wirings() {
     assert_eq!(repaired.id, client.id);
     assert!(h.broker.wirings.is_wired(&repaired.id, &conn.id));
     assert_eq!(h.broker.wirings().len(), 1);
+}
+
+#[tokio::test]
+async fn first_agent_bootstrap_prompts_and_cancel_leaves_it_unwired() {
+    // A shell whose user cancels the "wire to everything" prompt: the first
+    // agent still pairs (the token comes back) but is wired to nothing, so it
+    // is refused exactly like any later agent until wired in the app.
+    let mut h = harness_with_events(BrokerConfig::default(), Arc::new(DecliningEvents)).await;
+    let up = upstream().await;
+    api_connection(&h, "github", up.port);
+    let conn = h.broker.store.connection_by_name("github").unwrap();
+
+    let token = h.pair("claude-code").await;
+    let client = h.broker.pairing.get("claude-code").unwrap();
+    assert!(
+        !h.broker.wirings.is_wired(&client.id, &conn.id),
+        "a cancelled bootstrap must not wire the first agent"
+    );
+    assert_eq!(h.broker.wirings().len(), 0);
+
+    let auth = format!("Bearer {token}");
+    let call = json!({"connection": "github", "method": "GET", "path": "/echo"});
+    let (status, body) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(call),
+    )
+    .await;
+    assert_eq!(status, 403, "unwired first agent must be refused: {body}");
+    assert_eq!(body["reason"], "denied_by_policy");
 }
 
 #[tokio::test]
