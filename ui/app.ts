@@ -8,7 +8,7 @@
 
 import { invoke, listen, mode } from '/src/bridge';
 import {
-  CATALOG, CATALOG_SECTIONS, catalogNameForType, connectionsForEntry, entryForConnection,
+  CATALOG_SECTIONS, catalogEntryById, catalogNameForType, connectionsForEntry, entryForConnection,
   mcpTemplateForConnection,
   visibleCatalog,
 } from '/src/catalog';
@@ -1338,7 +1338,7 @@ function connSheet(editing: boolean): string {
       ?? (d.host
         ? `${apiOriginFromParts(d.scheme ?? undefined, d.host, d.port ?? null)}${d.mcpPath ?? ''}`
         : '');
-    const entry = d.entryId ? CATALOG.find((candidate) => candidate.id === d.entryId) : undefined;
+    const entry = d.entryId ? catalogEntryById(d.entryId) : undefined;
     const hint = entry?.mcpTemplate?.urlHint
       ?? 'The URL your provider gave you. Its tools appear to wired agents automatically; the credential below is injected on the way out and never reaches the agent.';
     fields += `<div class="f-row"><label for="f-origin">MCP server URL</label>
@@ -1922,7 +1922,7 @@ async function saveConn(): Promise<void> {
   if (usesOauth) {
     // No credential to collect: the sign-in flow mints the token, stores
     // it, and creates the connection only once authentication completed.
-    const entry = d.entryId ? CATALOG.find((candidate) => candidate.id === d.entryId) : undefined;
+    const entry = d.entryId ? catalogEntryById(d.entryId) : undefined;
     const template = entry?.mcpTemplate;
     await startMcpAuth({
       name,
@@ -2277,7 +2277,7 @@ document.addEventListener('click', async (e) => {
       state.toolOpen = state.toolOpen === id ? null : id;
       render(); break;
     case 'catalog-add': {
-      const entry = CATALOG.find((candidate) => candidate.id === id);
+      const entry = catalogEntryById(id);
       if (!entry || entry.via !== 'connection' || !entry.connType) break;
       if (!await holdDropdownFormOpen()) break;
       state.sheet = { kind: 'add-conn' };

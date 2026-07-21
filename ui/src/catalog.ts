@@ -26,8 +26,9 @@
 // exactly what gets pinned before saving.
 
 import type { ConnectionSummary, ConnectionType } from './types';
+import { REGISTRY_SERVERS } from './registry-data';
 
-export type CatalogSection = 'Apps' | 'Infrastructure' | 'Secrets';
+export type CatalogSection = 'Apps' | 'Infrastructure' | 'Secrets' | 'MCP registry';
 
 /**
  * Prefill for a branded API row: everything the add form needs so the user
@@ -85,6 +86,8 @@ export interface CatalogEntry {
   mcpTemplate?: McpTemplate;
   /** Extra search terms ("payments", "email") the row answers to. */
   keywords?: string[];
+  /** From the generated MCP-registry tail, not the curated catalog. */
+  registry?: boolean;
 }
 
 export const CATALOG: CatalogEntry[] = [
@@ -357,7 +360,38 @@ export const CATALOG: CatalogEntry[] = [
   },
 ];
 
-export const CATALOG_SECTIONS: CatalogSection[] = ['Apps', 'Infrastructure', 'Secrets'];
+export const CATALOG_SECTIONS: CatalogSection[] =
+  ['Apps', 'Infrastructure', 'MCP registry', 'Secrets'];
+
+/**
+ * The registry tail: hosted MCP servers from the public index, each an
+ * ordinary addable MCP row (OAuth-first, endpoint prefilled but editable).
+ * They surface on search — and whenever one is configured — rather than
+ * padding the default catalog view.
+ */
+export const REGISTRY_CATALOG: CatalogEntry[] = REGISTRY_SERVERS.map((server) => ({
+  id: server.id,
+  name: server.name,
+  icon: server.icon,
+  description: server.description,
+  section: 'MCP registry',
+  via: 'connection',
+  connType: 'api',
+  mcp: true,
+  registry: true,
+  keywords: [...server.keywords, 'mcp', 'registry'],
+  mcpTemplate: {
+    serverUrl: server.serverUrl,
+    expectedTools: [],
+    urlHint: 'The vendor’s published MCP endpoint, from the public MCP registry. Sign in, or paste a token.',
+  },
+}));
+
+/** Every row Add can act on: the curated catalog plus the registry tail. */
+export function catalogEntryById(id: string): CatalogEntry | undefined {
+  return CATALOG.find((entry) => entry.id === id)
+    ?? REGISTRY_CATALOG.find((entry) => entry.id === id);
+}
 
 /** The pinned host of a preset's API root, e.g. 'api.stripe.com'. */
 export function presetHost(preset: ConnectionPreset): string {
@@ -386,7 +420,8 @@ function templateHost(entry: CatalogEntry): string | null {
 export function entryForConnection(connection: ConnectionSummary): CatalogEntry | undefined {
   if (connection.type === 'api' && connection.mcp_path) {
     const host = (connection.host || '').toLowerCase();
-    const branded = CATALOG.find((entry) => entry.mcp && host && templateHost(entry) === host);
+    const branded = CATALOG.find((entry) => entry.mcp && host && templateHost(entry) === host)
+      ?? REGISTRY_CATALOG.find((entry) => host && templateHost(entry) === host);
     return branded ?? CATALOG.find((entry) => entry.id === 'mcp');
   }
   if (connection.type === 'api' && connection.host) {
@@ -410,7 +445,8 @@ export function mcpTemplateForConnection(connection: ConnectionSummary): McpTemp
   if (connection.type !== 'api' || !connection.mcp_path) return undefined;
   const host = (connection.host || '').toLowerCase();
   if (!host) return undefined;
-  return CATALOG.find((entry) => entry.mcp && templateHost(entry) === host)?.mcpTemplate;
+  return (CATALOG.find((entry) => entry.mcp && templateHost(entry) === host)
+    ?? REGISTRY_CATALOG.find((entry) => templateHost(entry) === host))?.mcpTemplate;
 }
 
 export function connectionsForEntry(
@@ -425,14 +461,17 @@ export function connectionsForEntry(
  * description, id, and each keyword — so "payments" finds Stripe and
  * "email" finds Gmail without the user knowing the vendor first.
  */
+function matchesQuery(entry: CatalogEntry, needle: string): boolean {
+  return entry.name.toLowerCase().includes(needle) ||
+    entry.description.toLowerCase().includes(needle) ||
+    entry.id.includes(needle) ||
+    (entry.keywords || []).some((keyword) => keyword.toLowerCase().includes(needle));
+}
+
 export function filterCatalog(query: string): CatalogEntry[] {
   const needle = query.trim().toLowerCase();
   if (!needle) return CATALOG;
-  return CATALOG.filter((entry) =>
-    entry.name.toLowerCase().includes(needle) ||
-    entry.description.toLowerCase().includes(needle) ||
-    entry.id.includes(needle) ||
-    (entry.keywords || []).some((keyword) => keyword.toLowerCase().includes(needle)));
+  return CATALOG.filter((entry) => matchesQuery(entry, needle));
 }
 
 export interface CatalogVisibility {
@@ -449,10 +488,18 @@ export interface CatalogVisibility {
  * because of a display preference.
  */
 export function visibleCatalog(query: string, visibility: CatalogVisibility): CatalogEntry[] {
-  return filterCatalog(query).filter((entry) => {
+  const needle = query.trim().toLowerCase();
+  const curated = filterCatalog(query).filter((entry) => {
     if (entry.id !== 'websocket' || visibility.showWebsockets) return true;
     return connectionsForEntry(entry, visibility.connections).length > 0;
   });
+  // The registry tail stays out of the default view — search brings it in,
+  // and a row with something configured under it must never be invisible.
+  const registry = REGISTRY_CATALOG.filter((entry) =>
+    needle
+      ? matchesQuery(entry, needle)
+      : connectionsForEntry(entry, visibility.connections).length > 0);
+  return [...curated, ...registry];
 }
 
 /** The catalog's name for a connection type — the dialog titles reuse it. */

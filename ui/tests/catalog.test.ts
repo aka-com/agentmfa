@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import {
   CATALOG,
   CATALOG_SECTIONS,
+  REGISTRY_CATALOG,
+  catalogEntryById,
   catalogNameForType,
   connectionsForEntry,
   entryForConnection,
@@ -205,4 +207,42 @@ test('a configured WebSocket tool stays visible even with the setting off', () =
 test('search still respects the WebSocket setting', () => {
   const hidden = visibleCatalog('websocket', { showWebsockets: false, connections: [] });
   assert.equal(hidden.length, 0);
+});
+
+test('the registry tail is searchable, not default-view padding', () => {
+  const none = visibleCatalog('', { showWebsockets: true, connections: [] });
+  assert.ok(none.every((entry) => !entry.registry), 'empty query hides the registry tail');
+
+  const hits = visibleCatalog('paypal', { showWebsockets: true, connections: [] });
+  assert.ok(hits.some((entry) => entry.id === 'mcp-paypal'));
+
+  // Registry rows are ordinary addable MCP rows.
+  for (const entry of REGISTRY_CATALOG) {
+    assert.equal(entry.via, 'connection', entry.id);
+    assert.equal(entry.connType, 'api', entry.id);
+    assert.equal(entry.mcp, true, entry.id);
+    assert.equal(entry.section, 'MCP registry', entry.id);
+    assert.ok(CATALOG_SECTIONS.includes(entry.section), entry.id);
+    const url = new URL(entry.mcpTemplate!.serverUrl!);
+    assert.equal(url.protocol, 'https:', entry.id);
+    // Ids never collide with the curated catalog (some brands appear in
+    // both: a REST preset row and a hosted-MCP registry row).
+    assert.ok(!CATALOG.some((curated) => curated.id === entry.id), entry.id);
+    assert.ok(catalogEntryById(entry.id) === entry, entry.id);
+  }
+});
+
+test('a configured registry server stays visible and groups under its row', () => {
+  const linear = conn('api', 'mcp.linear.app', 'linear-work');
+  (linear as { mcp_path?: string }).mcp_path = '/mcp';
+
+  // Host-matching is deterministic: the connection lists under the
+  // registry row, not the generic MCP row…
+  assert.equal(entryForConnection(linear)?.id, 'mcp-linear');
+  // …and the row surfaces even with no search query, so a configured tool
+  // never becomes unreachable.
+  const rows = visibleCatalog('', { showWebsockets: true, connections: [linear] });
+  assert.ok(rows.some((entry) => entry.id === 'mcp-linear'));
+  const row = REGISTRY_CATALOG.find((entry) => entry.id === 'mcp-linear')!;
+  assert.deepEqual(connectionsForEntry(row, [linear]).map((c) => c.name), ['linear-work']);
 });
