@@ -51,6 +51,11 @@ pub struct Broker {
     copy_authorization_gate: tokio::sync::Mutex<()>,
     pub pairing: Arc<PairingRegistry>,
     pub executions: Executions,
+    /// Runtime that owns broker background work. UI entry points can be
+    /// called from threads without an entered Tokio context (notably
+    /// synchronous Tauri commands), so they must not rely on
+    /// `tokio::spawn` finding the caller's runtime.
+    task_runtime: tokio::runtime::Handle,
     pub audit: Arc<AuditLog>,
     pub events: Arc<dyn BrokerEvents>,
     /// Last-known per-connection health (tests + brokered-call outcomes).
@@ -117,6 +122,7 @@ impl Broker {
             config.outcome_retention_max_entries,
             config.outcome_retention_max_bytes,
         );
+        let task_runtime = tokio::runtime::Handle::current();
         let http_client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none()) // hand-rolled loop
             .build()
@@ -155,6 +161,7 @@ impl Broker {
             copy_authorization_gate: tokio::sync::Mutex::new(()),
             pairing,
             executions,
+            task_runtime,
             audit,
             events,
             health,
@@ -165,6 +172,10 @@ impl Broker {
         // task holds only a weak reference and exits when the broker drops.
         crate::mcp_refresh::spawn_refresh_sweeper(&broker);
         Ok(broker)
+    }
+
+    pub(crate) fn task_runtime(&self) -> tokio::runtime::Handle {
+        self.task_runtime.clone()
     }
 
     /// Demand the shell's native confirmation for a high-consequence

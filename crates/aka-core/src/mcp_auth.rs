@@ -263,7 +263,10 @@ impl Broker {
             whoami_tool: draft.whoami_tool.clone(),
             expected_tools: draft.expected_tools.clone(),
         };
-        let task = tokio::spawn(async move {
+        // This is also called by a synchronous Tauri command on the app's
+        // main thread, where no Tokio reactor is entered. Always put the
+        // flow on the broker-owned runtime instead of the caller's context.
+        let task = broker.task_runtime().spawn(async move {
             let outcome = run_flow(&broker, session_id, endpoint, plan, options).await;
             let phase = match outcome {
                 Ok(phase) => phase,

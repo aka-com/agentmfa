@@ -376,6 +376,32 @@ async fn complete_sign_in(
 }
 
 #[tokio::test]
+async fn auth_can_be_started_from_a_thread_without_a_tokio_context() {
+    let (broker, _dir) = test_broker().await;
+    let caller = broker.clone();
+
+    let started = std::thread::spawn(move || {
+        caller.ui_start_mcp_auth(McpAuthDraft {
+            name: "Threaded MCP".into(),
+            scheme: "http".into(),
+            host: "127.0.0.1".into(),
+            port: Some(9),
+            mcp_path: "/mcp".into(),
+            reauth_connection_id: None,
+            whoami_tool: None,
+            expected_tools: vec![],
+        })
+    })
+    .join()
+    .expect("MCP auth start must not panic without an entered Tokio runtime")
+    .expect("start auth");
+
+    assert!(matches!(started.phase, McpAuthPhase::Probing));
+    let session_id = Uuid::parse_str(&started.id).expect("session id");
+    assert!(broker.ui_cancel_mcp_auth(&session_id));
+}
+
+#[tokio::test]
 async fn oauth_sign_in_mints_a_connection_and_the_status_check_acknowledges_it() {
     let (port, vendor) = spawn_mock_vendor().await;
     let (broker, _dir) = test_broker().await;
