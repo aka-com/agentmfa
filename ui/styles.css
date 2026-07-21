@@ -208,8 +208,44 @@
   .agent-onboarding{ margin: 9px 0; padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--card-bg); }
   /* The Get started tab: a centered column so the walkthrough reads as a
      document rather than a dashboard. */
-  .start{ max-width: 640px; margin: 0 auto; padding-top: 4px; }
-  .start .agent-onboarding{ margin: 0; }
+  .start{ max-width: 620px; margin: 0 auto; padding: 6px 0 24px; }
+  .start-hero{ text-align: center; }
+  .start-hero h3{ font-size: 19px; }
+  .start-hero > p{ margin-top: 5px; color: var(--muted); font-size: 13px; }
+  /* Small toggle row: which tool the walkthrough is written for. */
+  .start-picker{ display: flex; justify-content: center; flex-wrap: wrap; gap: 6px; margin: 14px 0 10px; }
+  .start-pick{
+    padding: 5px 13px; border: 1px solid var(--line); border-radius: 999px;
+    background: var(--btn-bg); color: var(--ink-3);
+    font-size: 12.5px; font-weight: 600; cursor: pointer;
+  }
+  .start-pick:hover{ background: var(--btn-hover); }
+  .start-pick.on{ border-color: var(--accent); background: var(--accent-wash); color: var(--accent-ink); }
+  .start-promise{ margin: 0 auto; max-width: 460px; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+  .start-steps{ margin: 18px 0 0; padding: 0; list-style: none; }
+  .start-step{ display: flex; gap: 12px; padding: 14px 0; border-top: 1px solid var(--line); }
+  .start-num{
+    display: flex; align-items: center; justify-content: center; flex: 0 0 auto;
+    width: 24px; height: 24px; margin-top: 1px; border-radius: 50%;
+    background: var(--chip-bg); color: var(--ink-2); font-size: 12.5px; font-weight: 700;
+  }
+  .start-step.done .start-num{ background: var(--ok-wash); color: var(--ok-ink); border: 1px solid var(--ok-border); }
+  .start-step.done .start-num svg{ width: 13px; height: 13px; }
+  .start-body{ flex: 1; min-width: 0; }
+  .start-body > b:first-child{ display: block; font-size: 14px; }
+  .start-body p{ margin-top: 4px; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+  .start-body > b:first-child + p{ margin-top: 3px; }
+  .start-actions{ display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 9px; }
+  .start-note{ color: var(--ok-ink); font-size: 12px; font-weight: 600; }
+  .start-task{
+    margin-top: 9px; padding: 8px 9px;
+    white-space: pre-wrap; overflow-wrap: anywhere;
+    border: 1px solid var(--line); border-radius: 7px;
+    background: var(--wash-2); color: var(--ink-2);
+    font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12.5px; line-height: 1.45;
+  }
+  .start .setup-instructions{ margin-top: 9px; }
   .walkthrough-head{ display: flex; align-items: flex-start; gap: 8px; }
   .walkthrough-head .onboarding-copy{ flex: 1; min-width: 0; }
   .walkthrough-close{ flex: 0 0 auto; margin: -4px -5px 0 0; }

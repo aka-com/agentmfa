@@ -10,6 +10,9 @@ import { invoke, listen, mode } from '/src/bridge';
 import {
   CATALOG, CATALOG_SECTIONS, catalogNameForType, connectionsForEntry, filterCatalog,
 } from '/src/catalog';
+import {
+  START_OPTIONS, startOptionById, startProgress, startTask,
+} from '/src/getting-started';
 import type { CatalogEntry } from '/src/catalog';
 import { ICONS, TYPES, esc, escAttr, toast, relTime, absTime } from '/src/util';
 import {
@@ -110,6 +113,7 @@ interface AppState {
   confirm: ConfirmState | null;
   toolSearch: string;
   toolOpen: string | null;
+  startOption: string;
   connImportSource: string;
   connImportError: string | null;
   menuOpen: boolean;
@@ -154,6 +158,7 @@ const state: AppState = {
   confirm: null,         // {kind, id/name}
   toolSearch: '',        // Add-tools catalog search query
   toolOpen: null,        // catalog entry id whose connections are expanded
+  startOption: 'postgres', // which walkthrough the Get started tab shows
   connImportSource: '',  // paste-to-prefill field in the add sheet
   connImportError: null,
   menuOpen: false,       // desktop-mode settings popover (gear) open
@@ -601,19 +606,66 @@ async function receiveActivity(entry: ActivityEntry | null | undefined): Promise
   while (list.children.length > ACTIVITY_RENDER_LIMIT) list.lastElementChild?.remove();
 }
 
-/** The paste-ready message that registers an agent with this broker. */
-function agentSetupCardHTML(): string {
-  return `<div class="agent-onboarding">
-    <div class="onboarding-copy"><b>Let your agent set this up</b>
-      <span>Paste this into your coding agent. Once it runs, the agent registers itself and appears on the Agents tab, ready to wire up.</span></div>
-    <pre class="setup-instructions"><code>${esc(state.agentSetupInstructions || 'Loading…')}</code></pre>
-    <div class="onboarding-actions">
-      <button class="btn primary sm" data-act="copy-agent-setup">Copy setup instructions</button>
-    </div></div>`;
-}
-
 function startHTML(): string {
-  return `<div class="start">${agentSetupCardHTML()}</div>`;
+  const option = startOptionById(state.startOption);
+  const progress = startProgress(option, state.connections, state.agents);
+  const unavailable = !option.connType;
+
+  const picker = START_OPTIONS.map((candidate) =>
+    `<button class="start-pick ${candidate.id === option.id ? 'on' : ''}"
+      aria-pressed="${candidate.id === option.id}"
+      data-act="start-option" data-id="${candidate.id}">${esc(candidate.label)}</button>`).join('');
+
+  const step = (n: number, title: string, done: boolean, body: string): string =>
+    `<li class="start-step ${done ? 'done' : ''}">
+      <span class="start-num" aria-hidden="true">${done ? ICONS.check : n}</span>
+      <div class="start-body"><b>${esc(title)}</b>${body}</div></li>`;
+
+  const addBody = unavailable
+    ? `<p>The MCP layer is not built yet, so there is nothing to add here. Everything below
+        already works — set up Postgres, SSH, or a custom API and an agent wired to one of
+        those behaves exactly the same way.</p>`
+    : `<p>Save the destination and its credential. The credential goes to your Keychain;
+        agents can use it but never read it.</p>
+      <div class="start-actions">
+        <button class="btn primary sm" data-act="catalog-add" data-id="${option.catalogId}">Add ${esc(option.label)}</button>
+        ${progress.added && progress.toolName
+          ? `<span class="start-note">${esc(progress.toolName)} is saved.</span>` : ''}
+      </div>`;
+
+  const connectBody = `<p>Paste this into your coding agent. It registers itself and shows up on
+      the Agents tab — with no access to anything yet.</p>
+    <pre class="setup-instructions"><code>${esc(state.agentSetupInstructions || 'Loading…')}</code></pre>
+    <div class="start-actions">
+      <button class="btn primary sm" data-act="copy-agent-setup">Copy setup instructions</button>
+      ${progress.connected && progress.agentName
+        ? `<span class="start-note">${esc(progress.agentName)} is connected.</span>` : ''}
+    </div>`;
+
+  const task = startTask(option, progress);
+  const wireWhat = `wire ${progress.agentName ? `<b>${esc(progress.agentName)}</b>` : 'your agent'} `
+    + `to ${progress.toolName ? `<b>${esc(progress.toolName)}</b>` : 'the tool'}`;
+  const wireBody = `<p>On the Agents tab, ${wireWhat}. Wiring is the whole permission model:
+      a wired tool works with no prompt, everything else is refused.</p>
+    <pre class="start-task"><code>${esc(task)}</code></pre>
+    <div class="start-actions">
+      <button class="btn sm" data-act="copy-text" data-text="${escAttr(task)}">Copy this task</button>
+      <button class="btn ghost sm" data-act="tab" data-tab="agents">Open Agents</button>
+    </div>`;
+
+  return `<div class="start">
+    <div class="start-hero">
+      <h3>Give your agent a real tool</h3>
+      <p>Three steps. Your credentials stay in the Keychain the whole way.</p>
+      <div class="start-picker" role="group" aria-label="What to set up first">${picker}</div>
+      <p class="start-promise">${esc(option.promise)}</p>
+    </div>
+    <ol class="start-steps">
+      ${step(1, option.connType ? `Add the ${option.label} tool` : `Add an ${option.label}`, progress.added, addBody)}
+      ${step(2, 'Connect your agent', progress.connected, connectBody)}
+      ${step(3, 'Wire them together, then ask for something useful', progress.wired, wireBody)}
+    </ol>
+  </div>`;
 }
 
 function tabContentHTML() {
@@ -1582,6 +1634,23 @@ document.addEventListener('click', async (e) => {
       state.connectionTaskCopied = false;
       render();
       break;
+    case 'start-option':
+      if (id && START_OPTIONS.some((option) => option.id === id)) {
+        state.startOption = id;
+        render();
+      }
+      break;
+    case 'copy-text': {
+      const text = btn.dataset.text ?? '';
+      if (!text) break;
+      try {
+        await navigator.clipboard.writeText(text);
+        toast('📋 Copied');
+      } catch {
+        toast('⚠ Could not copy');
+      }
+      break;
+    }
     case 'catalog-toggle':
       state.toolOpen = state.toolOpen === id ? null : id;
       render(); break;
