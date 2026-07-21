@@ -4,7 +4,6 @@ import assert from 'node:assert/strict';
 import {
   apiOriginFromParts,
   authTemplate,
-  firstTaskPrompt,
   parseConnectionImport,
   parseApiOrigin,
   quickSetupPlaceholder,
@@ -13,11 +12,9 @@ import {
   suggestedSecretName,
 } from '../src/connection-input';
 
-test('provides task-first examples for every connection type', () => {
+test('provides a quick-setup placeholder for every connection type', () => {
   assert.equal(quickSetupPlaceholder('pg'), 'postgresql://app@db.example.com/production');
   assert.equal(quickSetupPlaceholder('ssh'), 'ssh deploy@prod.example.com');
-  assert.match(firstTaskPrompt('prod-db', 'pg'), /SELECT current_database\(\)/);
-  assert.match(firstTaskPrompt('prod-ssh', 'ssh'), /uname -a/);
 });
 
 test('API origins preserve scheme and custom port', () => {

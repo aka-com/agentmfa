@@ -14,14 +14,6 @@ export function quickSetupPlaceholder(type: ConnectionType): string {
   return QUICK_SETUP_PLACEHOLDERS[type];
 }
 
-export function firstTaskPrompt(name: string, type: ConnectionType): string {
-  const tool = `Multitool tool ${name}`;
-  if (type === 'pg') return `Using my ${tool}, run SELECT current_database().`;
-  if (type === 'ssh') return `Using my ${tool}, run uname -a on the remote server.`;
-  if (type === 'api') return `Using my ${tool}, make a GET request to / and summarize the response.`;
-  return `Using my ${tool}, connect to the WebSocket and report the first message.`;
-}
-
 export interface HostKeyCandidate {
   fingerprint: string;
   algorithm: string;

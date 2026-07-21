@@ -14,12 +14,12 @@ import {
 } from '/src/catalog';
 import type { ConnectionPreset } from '/src/catalog';
 import {
-  START_OPTIONS, startOptionById, startProgress, startTask,
+  START_OPTIONS, firstTaskPrompt, startOptionById, startProgress, startTask,
 } from '/src/getting-started';
 import type { CatalogEntry } from '/src/catalog';
 import { ICONS, TYPES, esc, escAttr, toast, relTime, absTime } from '/src/util';
 import {
-  apiOriginFromParts, authTemplate, firstTaskPrompt, parseApiOrigin, parseConnectionImport,
+  apiOriginFromParts, authTemplate, parseApiOrigin, parseConnectionImport,
   parseMcpServerUrl,
   quickSetupPlaceholder, shouldResolveSshImport, sshImportFromPreview, suggestedSecretName,
 } from '/src/connection-input';

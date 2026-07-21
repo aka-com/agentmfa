@@ -105,16 +105,36 @@ export function startProgress(
   // Prefer showing a tool that is already usable by an agent.
   const wiredTool = matching.find((connection) => (connection.wired_agents || []).length > 0);
   const tool = wiredTool ?? matching[0] ?? null;
+  // Name the agent that actually holds the wiring when one exists — with more
+  // than one registered agent, agents[0] need not be the wired one, and the
+  // wire step would otherwise name an agent that isn't connected to the tool.
+  const wiredAgent = wiredTool ? (wiredTool.wired_agents || [])[0]?.agent : undefined;
   return {
     added: matching.length > 0,
     connected: agents.length > 0,
     wired: Boolean(wiredTool),
     toolName: tool ? tool.name : null,
-    agentName: agents.length ? agents[0].name : null,
+    agentName: wiredAgent ?? (agents.length ? agents[0].name : null),
   };
 }
 
 /** The example task, with a placeholder while no tool exists yet. */
 export function startTask(option: StartOption, progress: StartProgress): string {
   return option.task(progress.toolName ?? 'my-tool');
+}
+
+/**
+ * The first ask for a freshly-added tool, keyed by its connection type. The
+ * Get started walkthrough (through each option's own task) and the Tools-tab
+ * "ready" nudge both resolve their prompt here, so the two can never suggest a
+ * different first task for the same kind of tool.
+ */
+export function firstTaskPrompt(name: string, type: ConnectionType): string {
+  const option = START_OPTIONS.find(
+    (candidate) => candidate.connType === type && !candidate.mcp,
+  );
+  if (option) return option.task(name);
+  // No walkthrough option enumerates this type (only WebSockets today), so
+  // fall back to a generic read-only ask rather than borrow another type's copy.
+  return `Using my Multitool tool "${name}", make one read-only request and summarize what comes back.`;
 }

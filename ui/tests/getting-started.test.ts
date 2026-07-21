@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   START_OPTIONS,
+  firstTaskPrompt,
   startOptionById,
   startProgress,
   startTask,
@@ -82,6 +83,34 @@ test('the example names a wired tool when there is one', () => {
     [agent('claude-code')],
   );
   assert.equal(progress.toolName, 'prod-db');
+});
+
+test('the wire step names the agent that actually holds the wiring', () => {
+  // Two agents registered; only the second is wired. The step must name the
+  // wired one, not agents[0].
+  const progress = startProgress(
+    startOptionById('postgres'),
+    [conn('pg', 'prod-db', ['ci-bot'])],
+    [agent('claude-code'), agent('ci-bot')],
+  );
+  assert.ok(progress.wired);
+  assert.equal(progress.agentName, 'ci-bot');
+});
+
+test('the ready nudge and the walkthrough resolve to the same first task', () => {
+  // Both surfaces route through firstTaskPrompt / the option task, so a given
+  // connection type can never show two different first asks.
+  for (const type of ['pg', 'ssh', 'api'] as const) {
+    const option = START_OPTIONS.find((o) => o.connType === type && !o.mcp);
+    assert.ok(option, `an option exists for ${type}`);
+    assert.equal(firstTaskPrompt('prod', type), option!.task('prod'));
+  }
+});
+
+test('an unenumerated type (ws) gets a generic read-only first task', () => {
+  const task = firstTaskPrompt('feed', 'ws');
+  assert.match(task, /feed/);
+  assert.match(task, /read-only/);
 });
 
 test('the task reads sensibly before any tool exists', () => {
