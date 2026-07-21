@@ -18,7 +18,7 @@
     "npm:dist": "bash scripts/npm-dist.sh --all --pack",
     "npm:publish": "bash scripts/npm-publish.sh",
     "test": "npm run npm:check && npm run typecheck && cargo test --workspace && cargo test --manifest-path src-tauri/Cargo.toml && npm run test:ui",
-    "clippy": "cargo clippy --workspace --all-targets && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets"
+    "lint": "cargo clippy --workspace --all-targets && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

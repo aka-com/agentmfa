@@ -1,17 +1,13 @@
-# Multitool
+# AKA Multitool
 
-The AKA credential server allows agents to make API calls, open
-database connections, and access SSH servers, using unmodified tools
-like `curl`, `psql`, and `git` without exposing raw credentials.
+Multitool allows agents to make API calls, open database connections,
+access SSH servers, and interface with MCP servers. In many cases it
+allows agents to use unmodified tools like `curl`, `psql`, and `git`.
+without raw credentials. This is done through a connection broker --
+keys are kept in a local secret store, encrypted on-disk, and injected
+into requests following user approval.
 
-1. Agents make calls through a connection broker, which keeps keys in
-   a local secret store, where they are encrypted on-disk and injected
-   into requests, only following user approval.
-2. Secrets are synced between different backing stores, like the macOS
-   Keychain, Hashicorp Vault (coming soon), 1Password (coming soon), or
-   AWS KMS (coming soon).
-
-AKA supports most common workflows:
+The tool supports most common workflows:
 
 - **HTTP**: the agent supplies method/path/headers/body to a pinned host
 - **Postgres**: the agent gets a password-less DSN + short-lived ticket
@@ -23,8 +19,13 @@ AKA supports most common workflows:
   URL usable by any stock WS client
 - **MCP**: coming soon, via https://executor.sh
 
-The default approval creates fixed 15-minute sessions. Try a GET/HEAD
-request, a POST request, or open a Postgres or SSH connection.
+## Agent Pairing
+
+The default approval flow relies on agents pairing with Multitool,
+which creates fixed 15-minute sessions.
+
+Once paired, try a GET/HEAD request, a POST request, or open a
+Postgres or SSH connection.
 
 Pair tokens are checked against the code-signing identity observed
 during pairing, or a best-effort local executable fingerprint for
@@ -40,13 +41,17 @@ read is enforced by the broker before app-initiated vault reads; true
 Keychain-enforced per-item ACL semantics require direct
 Security.framework calls and corresponding signing entitlements.
 
+## MCP Support
+
+MCP support is not yet implemented.
+
 ## Developing
 
 ```sh
 npm install        # Install the pinned Tauri and TypeScript toolchain
 npm test           # Type-check, then test the core, CLI, desktop commands, and UI helpers
 npm run test:ui    # Run only the TypeScript UI helper tests
-npm run clippy     # Lint the workspace and the separate Tauri app crate
+npm run lint       # Lint the workspace and the separate Tauri app crate
 npm run typecheck  # Type-check the frontend without emitting files
 
 npm start          # start Vite and launch the desktop app
@@ -236,7 +241,3 @@ Other features:
   identity: a machine-in-the-middle present at that first connection would
   be pinned. Enter the fingerprint manually (or verify the prompt's value
   out-of-band) when first-connection integrity matters.
-
-## License
-
-MIT (C) 2026

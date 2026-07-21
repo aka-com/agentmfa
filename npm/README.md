@@ -1,9 +1,8 @@
-# npm distribution
+# AKA Broker Client
 
 This directory is the npm distribution of the `aka` CLI, published as
-[`agentmfa`](https://www.npmjs.com/package/agentmfa).
-
-It follows the esbuild-style layout:
+[`agentmfa`](https://www.npmjs.com/package/agentmfa). This is an open-source
+package published under the MIT License that follows an esbuild-style layout:
 
 - `agentmfa/` — the package users install. It contains only a Node launcher
   (`bin/agentmfa.js`, exposed as both `agentmfa` and `aka`) that resolves and
