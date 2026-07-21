@@ -99,11 +99,22 @@ Shipping: the bundle is a Tauri resource; the pinned Node is an
 config, because Tauri validates external binaries on *every* build of the
 shell crate and that would make `cargo test` require the download.
 
-**Phase 2 — the reimplemented MCP host.** `McpAuthProvider` (bearer →
-`client_id` via broker) and an in-process `McpSessionStore`, serving
-`tools/list` and `tools/call` over `@modelcontextprotocol/sdk` against a
-stub tool source. *Verify:* Claude Code connects and lists tools; a
-wired agent calls the stub; an unwired agent gets `denied_by_policy`.
+**Phase 2 — the reimplemented MCP host. Done.** The two seams, ours:
+`BrokerAuthProvider` resolves a bearer token by asking the broker, and
+`SessionStore` owns sessions keyed to the principal that opened them.
+Streamable HTTP at `/mcp` via `@modelcontextprotocol/sdk`.
+
+The simplification that made this small: **agents already hold a broker
+token**, so the sidecar proxies that same credential rather than minting
+a second one. No new token type, no new lifecycle, and revocation is
+immediate because the token is re-resolved on every request. `/health`
+(supervisor token) and `/mcp` (agent token) authenticate separately, so
+routing precedes authentication.
+
+Two audiences, two credentials, one decision-maker: the broker. Unwired
+connections are not listed, and naming one directly is refused with the
+same message as a name that does not exist — an agent cannot enumerate
+what the user declined to wire.
 
 **Phase 3 — `plugin-multitool`.** Postgres, SSH, Custom API and Custom
 WebSocket surface as executor tools whose `invokeTool` proxies to the
