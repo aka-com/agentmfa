@@ -22,6 +22,7 @@ pub mod executions;
 pub mod integrity;
 pub mod mcp;
 pub mod mcp_auth;
+pub(crate) mod mcp_refresh;
 pub mod pairing;
 pub mod paths;
 pub mod policy;

@@ -203,6 +203,10 @@ export interface McpResourceInfo {
 export interface McpStatusReport {
   ok: boolean;
   detail: string;
+  /** The server answered but refused the credential (401/403). The broker
+   * already tried a silent token refresh before reporting this, so seeing
+   * it means Reconnect is the remaining remedy. */
+  credential_rejected?: boolean;
   server?: string;
   protocol_version?: string;
   account?: string;

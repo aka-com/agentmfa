@@ -294,6 +294,22 @@ impl ConnectionConfig {
     }
 }
 
+/// The index-side half of an OAuth-connected MCP connection: which vault
+/// item holds the refresh grant, and when the access token expires. The
+/// secret material (refresh token, client secret) lives in the vault item;
+/// this record only schedules and locates it. Living in the sealed index
+/// means the linkage cannot be repointed at another vault item on disk.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConnectionOAuth {
+    /// Vault item holding the JSON refresh grant. Not a user-visible
+    /// secret: it appears in no secrets list and dies with the connection.
+    pub grant_id: Uuid,
+    /// When the current access token expires; `None` when the provider
+    /// did not say. Drives the silent background refresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
 /// A connection binds secret(s) to a destination.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Connection {
@@ -311,6 +327,10 @@ pub struct Connection {
     /// service (multiple GitHub accounts, say) in the UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// OAuth refresh linkage for MCP sign-in connections; `None` for
+    /// everything added with a pasted credential.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<ConnectionOAuth>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

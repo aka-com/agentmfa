@@ -126,7 +126,7 @@ impl Broker {
             audit.clone(),
             events.clone(),
         );
-        Ok(Arc::new(Self {
+        let broker = Arc::new(Self {
             data_plane,
             mcp_auth: crate::mcp_auth::McpAuthSessions::default(),
             ws_bridge_port: std::sync::OnceLock::new(),
@@ -153,7 +153,11 @@ impl Broker {
             events,
             http_client,
             _instance_lock: instance_lock,
-        }))
+        });
+        // Keeps OAuth-minted MCP access tokens fresh in the background; the
+        // task holds only a weak reference and exits when the broker drops.
+        crate::mcp_refresh::spawn_refresh_sweeper(&broker);
+        Ok(broker)
     }
 
     /// Demand the shell's native confirmation for a high-consequence
@@ -520,28 +524,49 @@ impl Broker {
         options: crate::mcp::McpCheckOptions,
     ) -> Result<crate::mcp::McpStatusReport> {
         const CHECK_TIMEOUT: Duration = Duration::from_secs(45);
-        let connection = self.store.connection_by_id(id)?;
-        let report = match tokio::time::timeout(
+        let mut connection = self.store.connection_by_id(id)?;
+        // An access token at (or past) expiry is renewed silently before
+        // the check, so an aged token reads as healthy rather than
+        // "credential rejected".
+        let mut refreshed = false;
+        if crate::mcp_refresh::wants_refresh(&connection)
+            && crate::mcp_refresh::refresh_connection_token(self, &connection)
+                .await
+                .is_ok()
+        {
+            connection = self.store.connection_by_id(id)?;
+            refreshed = true;
+        }
+        let mut report = match tokio::time::timeout(
             CHECK_TIMEOUT,
             crate::mcp::check_connection(&self.store, &self.http_client, &connection, &options),
         )
         .await
         {
             Ok(report) => report,
-            Err(_) => {
-                return Ok(crate::mcp::McpStatusReport {
-                    ok: false,
-                    detail: format!("no answer within {} seconds", CHECK_TIMEOUT.as_secs()),
-                    server: None,
-                    protocol_version: None,
-                    account: None,
-                    tools: Vec::new(),
-                    missing_tools: Vec::new(),
-                    resources_supported: false,
-                    resources: Vec::new(),
-                })
-            }
+            Err(_) => crate::mcp::McpStatusReport::timed_out(CHECK_TIMEOUT),
         };
+        // Rescue: a rejected credential on an OAuth connection usually just
+        // means the token aged out between sweeps — renew and retry once
+        // instead of sending the user through the browser again.
+        if !report.ok
+            && report.credential_rejected
+            && !refreshed
+            && crate::mcp_refresh::refresh_connection_token(self, &connection)
+                .await
+                .is_ok()
+        {
+            connection = self.store.connection_by_id(id)?;
+            report = match tokio::time::timeout(
+                CHECK_TIMEOUT,
+                crate::mcp::check_connection(&self.store, &self.http_client, &connection, &options),
+            )
+            .await
+            {
+                Ok(report) => report,
+                Err(_) => crate::mcp::McpStatusReport::timed_out(CHECK_TIMEOUT),
+            };
+        }
         if report.ok && report.account.is_some() && report.account != connection.account {
             self.store
                 .set_connection_account(id, report.account.clone())?;

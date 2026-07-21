@@ -48,6 +48,11 @@ pub struct McpStatusReport {
     pub ok: bool,
     /// One-line human summary (success or the failure reason).
     pub detail: String,
+    /// The upstream answered but refused the credential (401/403) — the
+    /// signal for the broker's silent-refresh rescue, and for the UI's
+    /// Reconnect affordance when no refresh is possible.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub credential_rejected: bool,
     /// `serverInfo.name (version)` from initialize.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server: Option<String>,
@@ -65,11 +70,17 @@ pub struct McpStatusReport {
     pub resources: Vec<McpResourceInfo>,
 }
 
+/// The marker `post` puts in a 401/403 failure; `failed` keys the
+/// `credential_rejected` flag off it so both stay in one module.
+const CREDENTIAL_REJECTED_MARKER: &str = "rejected the credential";
+
 impl McpStatusReport {
     fn failed(detail: impl Into<String>) -> Self {
+        let detail = detail.into();
         Self {
             ok: false,
-            detail: detail.into(),
+            credential_rejected: detail.contains(CREDENTIAL_REJECTED_MARKER),
+            detail,
             server: None,
             protocol_version: None,
             account: None,
@@ -78,6 +89,11 @@ impl McpStatusReport {
             resources_supported: false,
             resources: Vec::new(),
         }
+    }
+
+    /// The whole check ran out of time (the caller's outer timeout).
+    pub fn timed_out(after: Duration) -> Self {
+        Self::failed(format!("no answer within {} seconds", after.as_secs()))
     }
 }
 
@@ -203,7 +219,7 @@ impl McpSession {
         let status = response.status();
         if status.as_u16() == 401 || status.as_u16() == 403 {
             return Err(format!(
-                "the server answered but rejected the credential (HTTP {status})"
+                "the server answered but {CREDENTIAL_REJECTED_MARKER} (HTTP {status})"
             ));
         }
         if status.as_u16() == 202 || status.as_u16() == 204 {
@@ -318,7 +334,9 @@ pub async fn check_connection(
     };
     let credential = match render_injection(store, template).await {
         Ok(rendered) => Credential::from_rendered(rendered),
-        Err(detail) => return McpStatusReport::failed(format!("could not render credential: {detail}")),
+        Err(detail) => {
+            return McpStatusReport::failed(format!("could not render credential: {detail}"))
+        }
     };
     check_endpoint(client.clone(), endpoint, credential, options).await
 }
@@ -499,6 +517,7 @@ async fn check_endpoint(
 
     McpStatusReport {
         ok: true,
+        credential_rejected: false,
         detail,
         server,
         protocol_version,
@@ -584,7 +603,8 @@ mod tests {
 
     #[test]
     fn sse_frames_are_scanned_for_the_matching_id() {
-        let bytes = b"event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"ok\":true}}\n\n";
+        let bytes =
+            b"event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"ok\":true}}\n\n";
         let found = find_sse_response(bytes, 7).unwrap();
         assert_eq!(found["result"]["ok"], json!(true));
         assert!(find_sse_response(bytes, 8).is_none());
@@ -623,7 +643,10 @@ mod tests {
         let prose = json!({
             "content": [{ "type": "text", "text": "You are signed\nin as demo." }]
         });
-        assert_eq!(extract_account(&prose).unwrap(), "You are signed in as demo.");
+        assert_eq!(
+            extract_account(&prose).unwrap(),
+            "You are signed in as demo."
+        );
     }
 
     #[test]
@@ -640,6 +663,7 @@ mod tests {
             },
             secrets: vec![],
             account: None,
+            oauth: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

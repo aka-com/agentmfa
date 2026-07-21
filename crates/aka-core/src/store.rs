@@ -598,6 +598,66 @@ impl Store {
         Ok(updated)
     }
 
+    /// Attach (or replace) a connection's OAuth refresh grant: the JSON
+    /// payload lands in its own vault item — never listed as a user-visible
+    /// secret — and the sealed index records the linkage plus the access
+    /// token's expiry. Like `set_connection_account`, this is maintenance
+    /// metadata: it does not touch the capability config or `updated_at`.
+    pub fn set_connection_oauth(
+        &self,
+        id: &Uuid,
+        payload: SecretValue,
+        expires_at: Option<chrono::DateTime<Utc>>,
+    ) -> Result<Connection> {
+        let mut state = self.state.lock().unwrap();
+        let mut next = state.clone();
+        let connection = next
+            .connections
+            .iter_mut()
+            .find(|connection| &connection.id == id)
+            .ok_or(CoreError::ConnectionNotFound)?;
+        let existing = connection.oauth.as_ref().map(|oauth| oauth.grant_id);
+        let grant_id = existing.unwrap_or_else(Uuid::new_v4);
+        connection.oauth = Some(crate::types::ConnectionOAuth {
+            grant_id,
+            expires_at,
+        });
+        let updated = connection.clone();
+        let attrs = VaultAttrs {
+            name: format!("{} OAuth grant", updated.name),
+            created_at: Utc::now(),
+        };
+        self.vault.set(&grant_id, &attrs, &payload)?;
+        drop(payload);
+        if let Err(error) = self.persist(&next) {
+            // A fresh grant item with no index linkage would be orphaned.
+            if existing.is_none() {
+                if let Err(rollback) = self.vault.delete(&grant_id) {
+                    tracing::error!("failed to roll back vault item {grant_id}: {rollback}");
+                }
+            }
+            return Err(error);
+        }
+        *state = next;
+        Ok(updated)
+    }
+
+    /// Read a connection's OAuth refresh grant straight from the vault.
+    ///
+    /// This deliberately bypasses the re-auth-on-read confirmation gate:
+    /// the grant is broker maintenance material, read only by the silent
+    /// token refresh, and its contents leave the process solely toward the
+    /// grant's own pinned https token endpoint — never to an agent, the
+    /// webview, or the clipboard. There is no command that returns it.
+    pub async fn connection_oauth_grant(&self, id: &Uuid) -> Result<SecretValue> {
+        let grant_id = self
+            .connection_by_id(id)?
+            .oauth
+            .ok_or(CoreError::SecretNotFound)?
+            .grant_id;
+        self.vault.get(&grant_id).await
+    }
+
     /// Pin an SSH connection's host key, trust-on-first-use. Called by the
     /// SSH agent adapter after the user approves the first-connection trust
     /// prompt; the human factor is the approval decision itself, so there is
@@ -667,6 +727,18 @@ impl Store {
         let mut next = state.clone();
         let conn = next.connections.remove(pos);
         self.commit(&mut state, next)?;
+        // The OAuth refresh grant is not a listed secret; it dies with the
+        // connection. Best-effort: a stale vault item cannot be reached
+        // again once the index linkage is gone.
+        if let Some(oauth) = &conn.oauth {
+            if let Err(error) = self.vault.delete(&oauth.grant_id) {
+                tracing::warn!(
+                    "could not delete OAuth grant {} for removed connection {}: {error}",
+                    oauth.grant_id,
+                    conn.name
+                );
+            }
+        }
         Ok(conn)
     }
 
@@ -739,6 +811,7 @@ fn prepare_connection(state: &IndexState, spec: ConnectionSpec) -> Result<Connec
         config: spec.config,
         secrets,
         account: None,
+        oauth: None,
         created_at: now,
         updated_at: now,
     })
@@ -788,6 +861,7 @@ fn prepare_connection_with_secret(
         config: spec.config,
         secrets,
         account: None,
+        oauth: None,
         created_at: now,
         updated_at: now,
     };
@@ -1475,6 +1549,54 @@ mod tests {
                 CoreError::InvalidConnectionField { .. }
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn oauth_grants_live_outside_the_secret_list_and_die_with_the_connection() {
+        let (store, vault, _dir) = store().await;
+        store.add_secret("GITHUB_MCP_TOKEN", val("at-1")).unwrap();
+        let conn = store
+            .add_connection(api_spec(
+                "github",
+                "api.githubcopilot.com",
+                "Authorization: Bearer {{GITHUB_MCP_TOKEN}}",
+            ))
+            .unwrap();
+        let secrets_before = store.list_secrets().len();
+        let vault_before = vault.len();
+
+        let expires = Utc::now() + chrono::Duration::hours(1);
+        let updated = store
+            .set_connection_oauth(&conn.id, val(r#"{"refresh_token":"rt-1"}"#), Some(expires))
+            .unwrap();
+        let oauth = updated.oauth.clone().expect("oauth linkage");
+        assert_eq!(oauth.expires_at, Some(expires));
+        // The grant is a vault item but never a listed secret.
+        assert_eq!(vault.len(), vault_before + 1);
+        assert_eq!(store.list_secrets().len(), secrets_before);
+        assert_eq!(
+            &*store.connection_oauth_grant(&conn.id).await.unwrap(),
+            r#"{"refresh_token":"rt-1"}"#
+        );
+
+        // Replacing the grant reuses the same vault item.
+        let replaced = store
+            .set_connection_oauth(&conn.id, val(r#"{"refresh_token":"rt-2"}"#), None)
+            .unwrap();
+        assert_eq!(replaced.oauth.as_ref().unwrap().grant_id, oauth.grant_id);
+        assert_eq!(replaced.oauth.as_ref().unwrap().expires_at, None);
+        assert_eq!(vault.len(), vault_before + 1);
+        assert_eq!(
+            &*store.connection_oauth_grant(&conn.id).await.unwrap(),
+            r#"{"refresh_token":"rt-2"}"#
+        );
+
+        // The linkage is maintenance metadata: it must not look like an
+        // edit (that would trip conflict checks and drop wirings).
+        assert_eq!(replaced.updated_at, conn.updated_at);
+
+        store.delete_connection(&conn.id).unwrap();
+        assert_eq!(vault.len(), vault_before);
     }
 
     #[tokio::test]

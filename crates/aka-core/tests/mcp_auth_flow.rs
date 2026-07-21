@@ -29,13 +29,34 @@ use sha2::Digest as _;
 use uuid::Uuid;
 
 const ACCESS_TOKEN: &str = "test-token-issued-by-mock";
+const RENEWED_TOKEN: &str = "test-token-renewed-by-refresh";
+const REFRESH_TOKEN: &str = "test-refresh-token-1";
+const ROTATED_REFRESH_TOKEN: &str = "test-refresh-token-2";
 const AUTH_CODE: &str = "test-code-1";
 
-#[derive(Default)]
 struct MockAuthServer {
     code_challenge: Option<String>,
     registered_redirect: Option<String>,
     token_requests: u32,
+    refresh_requests: u32,
+    /// The bearer the MCP resource currently accepts; refresh rotates it.
+    current_access: String,
+    /// The refresh token the token endpoint currently honors; `None`
+    /// makes every refresh answer 400 invalid_grant.
+    valid_refresh: Option<String>,
+}
+
+impl Default for MockAuthServer {
+    fn default() -> Self {
+        Self {
+            code_challenge: None,
+            registered_redirect: None,
+            token_requests: 0,
+            refresh_requests: 0,
+            current_access: ACCESS_TOKEN.into(),
+            valid_refresh: Some(REFRESH_TOKEN.into()),
+        }
+    }
 }
 
 fn mcp_result(method: Option<&str>) -> Value {
@@ -76,13 +97,16 @@ async fn spawn_mock_vendor() -> (u16, Arc<Mutex<MockAuthServer>>) {
     let base = format!("http://127.0.0.1:{port}");
 
     let mcp = {
+        let state = state.clone();
         move |headers: axum::http::HeaderMap, body: axum::Json<Value>| {
             let base = base.clone();
+            let state = state.clone();
             async move {
+                let expected = format!("Bearer {}", state.lock().unwrap().current_access);
                 let authorized = headers
                     .get("authorization")
                     .and_then(|value| value.to_str().ok())
-                    == Some(&format!("Bearer {ACCESS_TOKEN}"));
+                    == Some(expected.as_str());
                 if !authorized {
                     return axum::http::Response::builder()
                         .status(401)
@@ -169,7 +193,10 @@ async fn spawn_mock_vendor() -> (u16, Arc<Mutex<MockAuthServer>>) {
             let state = state.clone();
             async move {
                 assert_eq!(query.get("response_type").map(String::as_str), Some("code"));
-                assert_eq!(query.get("client_id").map(String::as_str), Some("client-abc"));
+                assert_eq!(
+                    query.get("client_id").map(String::as_str),
+                    Some("client-abc")
+                );
                 assert_eq!(
                     query.get("code_challenge_method").map(String::as_str),
                     Some("S256")
@@ -179,9 +206,7 @@ async fn spawn_mock_vendor() -> (u16, Arc<Mutex<MockAuthServer>>) {
                 let nonce = query.get("state").expect("state").clone();
                 state.lock().unwrap().code_challenge =
                     Some(query.get("code_challenge").expect("challenge").clone());
-                axum::response::Redirect::to(&format!(
-                    "{redirect}?code={AUTH_CODE}&state={nonce}"
-                ))
+                axum::response::Redirect::to(&format!("{redirect}?code={AUTH_CODE}&state={nonce}"))
             }
         }
     };
@@ -190,6 +215,42 @@ async fn spawn_mock_vendor() -> (u16, Arc<Mutex<MockAuthServer>>) {
         move |axum::extract::Form(form): axum::extract::Form<HashMap<String, String>>| {
             let state = state.clone();
             async move {
+                // A silent renewal: honor the current refresh token, rotate
+                // both tokens, and start rejecting the previous bearer.
+                if form.get("grant_type").map(String::as_str) == Some("refresh_token") {
+                    assert_eq!(
+                        form.get("client_id").map(String::as_str),
+                        Some("client-abc")
+                    );
+                    let mut locked = state.lock().unwrap();
+                    locked.refresh_requests += 1;
+                    if locked.valid_refresh.as_deref()
+                        != form.get("refresh_token").map(String::as_str)
+                    {
+                        return axum::http::Response::builder()
+                            .status(400)
+                            .header("content-type", "application/json")
+                            .body(axum::body::Body::from(
+                                json!({ "error": "invalid_grant" }).to_string(),
+                            ))
+                            .unwrap();
+                    }
+                    locked.current_access = RENEWED_TOKEN.into();
+                    locked.valid_refresh = Some(ROTATED_REFRESH_TOKEN.into());
+                    return axum::http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(
+                            json!({
+                                "access_token": RENEWED_TOKEN,
+                                "refresh_token": ROTATED_REFRESH_TOKEN,
+                                "token_type": "Bearer",
+                                "expires_in": 3600,
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap();
+                }
                 assert_eq!(
                     form.get("grant_type").map(String::as_str),
                     Some("authorization_code")
@@ -203,11 +264,19 @@ async fn spawn_mock_vendor() -> (u16, Arc<Mutex<MockAuthServer>>) {
                 let mut locked = state.lock().unwrap();
                 assert_eq!(Some(hashed), locked.code_challenge);
                 locked.token_requests += 1;
-                axum::Json(json!({
-                    "access_token": ACCESS_TOKEN,
-                    "token_type": "Bearer",
-                    "expires_in": 3600,
-                }))
+                axum::http::Response::builder()
+                    .status(200)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        json!({
+                            "access_token": ACCESS_TOKEN,
+                            "refresh_token": REFRESH_TOKEN,
+                            "token_type": "Bearer",
+                            "expires_in": 3600,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap()
             }
         }
     };
@@ -264,6 +333,48 @@ where
     panic!("timed out waiting for {what}");
 }
 
+/// Drive one full sign-in (playing the browser's part) and return the
+/// minted connection.
+async fn complete_sign_in(
+    broker: &Arc<Broker>,
+    port: u16,
+    name: &str,
+) -> aka_core::types::Connection {
+    let started = broker
+        .ui_start_mcp_auth(McpAuthDraft {
+            name: name.into(),
+            scheme: "http".into(),
+            host: "127.0.0.1".into(),
+            port: Some(port),
+            mcp_path: "/mcp".into(),
+            reauth_connection_id: None,
+            whoami_tool: None,
+            expected_tools: vec![],
+        })
+        .expect("start auth");
+    let session_id = Uuid::parse_str(&started.id).expect("session id");
+    let awaiting = wait_for(broker, &session_id, "the browser step", |state| {
+        matches!(state.phase, McpAuthPhase::AwaitingAuthorization { .. })
+    })
+    .await;
+    let McpAuthPhase::AwaitingAuthorization { authorization_url } = &awaiting.phase else {
+        unreachable!();
+    };
+    reqwest::Client::new()
+        .get(authorization_url)
+        .send()
+        .await
+        .expect("authorize hop");
+    wait_for(broker, &session_id, "completion", |state| {
+        matches!(state.phase, McpAuthPhase::Succeeded { .. })
+    })
+    .await;
+    broker
+        .store
+        .connection_by_name(name)
+        .expect("connection created")
+}
+
 #[tokio::test]
 async fn oauth_sign_in_mints_a_connection_and_the_status_check_acknowledges_it() {
     let (port, vendor) = spawn_mock_vendor().await;
@@ -302,7 +413,11 @@ async fn oauth_sign_in_mints_a_connection_and_the_status_check_acknowledges_it()
         .await
         .expect("authorize hop");
     assert!(landing.status().is_success());
-    assert!(landing.text().await.expect("landing page").contains("connected"));
+    assert!(landing
+        .text()
+        .await
+        .expect("landing page")
+        .contains("connected"));
 
     let done = wait_for(&broker, &session_id, "completion", |state| {
         state.phase.is_terminal()
@@ -421,6 +536,119 @@ async fn oauth_sign_in_mints_a_connection_and_the_status_check_acknowledges_it()
 }
 
 #[tokio::test]
+async fn expired_tokens_refresh_silently_and_a_dead_refresh_token_falls_back_to_reconnect() {
+    let (port, vendor) = spawn_mock_vendor().await;
+    let (broker, _dir) = test_broker().await;
+    let connection = complete_sign_in(&broker, port, "github-refresh").await;
+
+    // Sign-in stored the refresh grant: the linkage and expiry on the
+    // connection, and the grant JSON (refresh token, client identity,
+    // token endpoint) in its own vault item — never a listed secret.
+    let oauth = connection.oauth.clone().expect("refresh grant linkage");
+    assert!(oauth.expires_at.is_some());
+    let secret_names: Vec<String> = broker
+        .store
+        .list_secrets()
+        .into_iter()
+        .map(|meta| meta.name)
+        .collect();
+    assert_eq!(secret_names, ["GITHUB_REFRESH_MCP_TOKEN"]);
+    let grant: Value = serde_json::from_str(
+        &broker
+            .store
+            .connection_oauth_grant(&connection.id)
+            .await
+            .expect("grant stored"),
+    )
+    .expect("grant is JSON");
+    assert_eq!(grant["refresh_token"], json!(REFRESH_TOKEN));
+    assert_eq!(grant["client_id"], json!("client-abc"));
+
+    // The upstream stops accepting the access token mid-life. The status
+    // check does not surface "credential rejected": it renews silently
+    // with the stored refresh token and retries.
+    vendor.lock().unwrap().current_access = "no-longer-accepted".into();
+    let report = broker
+        .ui_mcp_check(&connection.id, McpCheckOptions::default())
+        .await
+        .expect("status check");
+    assert!(report.ok, "{}", report.detail);
+    assert_eq!(vendor.lock().unwrap().refresh_requests, 1);
+    // The vault-held token was replaced with the renewed one…
+    let secret = broker
+        .store
+        .list_secrets()
+        .into_iter()
+        .find(|meta| meta.name == "GITHUB_REFRESH_MCP_TOKEN")
+        .expect("token secret");
+    assert_eq!(
+        &*broker.store.secret_value(&secret.id).await.expect("value"),
+        RENEWED_TOKEN
+    );
+    // …and the rotated refresh token was kept for next time.
+    let grant: Value = serde_json::from_str(
+        &broker
+            .store
+            .connection_oauth_grant(&connection.id)
+            .await
+            .expect("grant"),
+    )
+    .expect("grant is JSON");
+    assert_eq!(grant["refresh_token"], json!(ROTATED_REFRESH_TOKEN));
+
+    // Pre-emptive path: an expiry inside the refresh window renews before
+    // the check runs, even though the upstream still accepts the token.
+    let raw = broker
+        .store
+        .connection_oauth_grant(&connection.id)
+        .await
+        .expect("grant");
+    broker
+        .store
+        .set_connection_oauth(&connection.id, raw, Some(chrono::Utc::now()))
+        .expect("age the token");
+    let report = broker
+        .ui_mcp_check(&connection.id, McpCheckOptions::default())
+        .await
+        .expect("status check");
+    assert!(report.ok, "{}", report.detail);
+    assert_eq!(vendor.lock().unwrap().refresh_requests, 2);
+
+    // A dead refresh token: the provider answers invalid_grant, the broker
+    // retires the stored refresh token (no endless replays), and the check
+    // finally reports the rejected credential — the Reconnect path.
+    {
+        let mut locked = vendor.lock().unwrap();
+        locked.valid_refresh = None;
+        locked.current_access = "rotated-away".into();
+    }
+    let raw = broker
+        .store
+        .connection_oauth_grant(&connection.id)
+        .await
+        .expect("grant");
+    broker
+        .store
+        .set_connection_oauth(&connection.id, raw, Some(chrono::Utc::now()))
+        .expect("age the token");
+    let report = broker
+        .ui_mcp_check(&connection.id, McpCheckOptions::default())
+        .await
+        .expect("status check");
+    assert!(!report.ok);
+    assert!(report.credential_rejected, "{}", report.detail);
+    let grant: Value = serde_json::from_str(
+        &broker
+            .store
+            .connection_oauth_grant(&connection.id)
+            .await
+            .expect("grant"),
+    )
+    .expect("grant is JSON");
+    assert_eq!(grant["refresh_token"], json!(null), "refresh token retired");
+}
+
+#[tokio::test]
 async fn a_server_that_never_asks_for_auth_fails_with_a_token_hint() {
     // A wide-open server: initialize answers 200 with no challenge.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -461,8 +689,14 @@ async fn a_server_that_never_asks_for_auth_fails_with_a_token_hint() {
     let McpAuthPhase::Failed { message, hint } = &done.phase else {
         panic!("expected failure, got {:?}", done.phase);
     };
-    assert!(message.contains("without asking for authentication"), "{message}");
-    assert!(hint.as_deref().unwrap_or_default().contains("token"), "{hint:?}");
+    assert!(
+        message.contains("without asking for authentication"),
+        "{message}"
+    );
+    assert!(
+        hint.as_deref().unwrap_or_default().contains("token"),
+        "{hint:?}"
+    );
     assert!(broker.store.connection_by_name("open-server").is_none());
 }
 

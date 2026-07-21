@@ -149,6 +149,12 @@ pub enum AuditKind {
     // MCP sign-in (OAuth) outcomes
     McpAuthCompleted,
     McpAuthFailed,
+    /// An expiring MCP access token was silently renewed with the stored
+    /// refresh token.
+    McpTokenRefreshed,
+    /// A silent renewal attempt failed (the status check's Reconnect path
+    /// is the recovery).
+    McpTokenRefreshFailed,
     SettingsChanged,
     // Rate limiting / budgets
     RateLimited,
@@ -193,6 +199,8 @@ impl AuditKind {
             AuditKind::ConnectionTested => "flaskConical",
             AuditKind::McpAuthCompleted => "circleCheck",
             AuditKind::McpAuthFailed => "circleX",
+            AuditKind::McpTokenRefreshed => "refresh",
+            AuditKind::McpTokenRefreshFailed => "circleX",
             AuditKind::SettingsChanged => "gear",
             AuditKind::RateLimited => "gauge",
         }
@@ -214,6 +222,7 @@ impl AuditKind {
             | AuditKind::Denied
             | AuditKind::ApprovalTimeout
             | AuditKind::McpAuthFailed
+            | AuditKind::McpTokenRefreshFailed
             | AuditKind::RateLimited => "danger",
             _ => "neutral",
         }

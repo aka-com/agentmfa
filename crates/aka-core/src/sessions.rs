@@ -423,6 +423,7 @@ mod tests {
             },
             secrets: vec![],
             account: None,
+            oauth: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -441,6 +442,7 @@ mod tests {
             },
             secrets: vec![],
             account: None,
+            oauth: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

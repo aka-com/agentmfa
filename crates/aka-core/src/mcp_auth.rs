@@ -76,7 +76,9 @@ pub enum McpAuthPhase {
     /// Dynamic client registration.
     Registering,
     /// The browser is open; waiting for the user to approve.
-    AwaitingAuthorization { authorization_url: String },
+    AwaitingAuthorization {
+        authorization_url: String,
+    },
     /// Trading the authorization code for tokens.
     Exchanging,
     /// Token stored; running the status check to acknowledge the account.
@@ -426,7 +428,7 @@ fn endpoint_for(config: &ConnectionConfig) -> Result<Url> {
         .map_err(|e| CoreError::InvalidConnectionConfig(format!("bad MCP path: {e}")))
 }
 
-fn is_loopback_host(host: &str) -> bool {
+pub(crate) fn is_loopback_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
 }
 
@@ -617,6 +619,31 @@ async fn run_flow(
         }
     };
 
+    // Persist the refresh grant so the access token can be renewed
+    // silently when it expires. Best-effort: sign-in already succeeded,
+    // and without a grant the status check's Reconnect path still works.
+    let grant = McpOAuthGrant {
+        refresh_token: tokens.refresh_token.as_ref().map(|token| token.to_string()),
+        client_id: registration.client_id.clone(),
+        client_secret: registration
+            .client_secret
+            .as_ref()
+            .map(|secret| secret.to_string()),
+        token_endpoint: discovered.token_endpoint.to_string(),
+        resource: discovered.resource.clone(),
+    };
+    let expires_at = tokens
+        .expires_in
+        .and_then(|seconds| i64::try_from(seconds).ok())
+        .map(|seconds| Utc::now() + chrono::Duration::seconds(seconds));
+    if let Err(error) =
+        broker
+            .store
+            .set_connection_oauth(&connection_id, grant.to_secret_value(), expires_at)
+    {
+        tracing::warn!("could not store the OAuth refresh grant for {connection_name}: {error}");
+    }
+
     let report = mcp::check_with_bearer(
         client.clone(),
         endpoint.clone(),
@@ -681,7 +708,9 @@ async fn probe(
         .json(&body)
         .send()
         .await
-        .map_err(|e| FlowFailure::plain(format!("could not reach the server: {}", e.without_url())))?;
+        .map_err(|e| {
+            FlowFailure::plain(format!("could not reach the server: {}", e.without_url()))
+        })?;
     let status = response.status();
     if status.is_success() {
         return Err(FlowFailure::hinted(
@@ -1034,9 +1063,37 @@ async fn respond(
     stream.shutdown().await
 }
 
-struct Tokens {
-    access_token: Zeroizing<String>,
-    expires_in: Option<u64>,
+pub(crate) struct Tokens {
+    pub(crate) access_token: Zeroizing<String>,
+    pub(crate) refresh_token: Option<Zeroizing<String>>,
+    pub(crate) expires_in: Option<u64>,
+}
+
+/// The vault payload behind a connection's silent token refresh: the
+/// refresh token together with everything a `refresh_token` grant needs
+/// (client identity, token endpoint, RFC 8707 resource). Stored as JSON in
+/// its own vault item — it is not a listed secret, and no command returns
+/// it — so an expiring access token can be renewed without re-running the
+/// browser dance.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct McpOAuthGrant {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+    pub client_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+    pub token_endpoint: String,
+    pub resource: String,
+}
+
+impl McpOAuthGrant {
+    pub fn to_secret_value(&self) -> Zeroizing<String> {
+        Zeroizing::new(serde_json::to_string(self).expect("grant serializes"))
+    }
+
+    pub fn from_secret_value(value: &str) -> std::result::Result<Self, String> {
+        serde_json::from_str(value).map_err(|_| "stored OAuth grant is unreadable".to_string())
+    }
 }
 
 async fn exchange(
@@ -1060,6 +1117,9 @@ async fn exchange(
     }
     let response = client
         .post(discovered.token_endpoint.clone())
+        // GitHub's token endpoint answers form-encoded unless JSON is
+        // requested explicitly.
+        .header(http::header::ACCEPT, "application/json")
         .form(&form)
         .send()
         .await
@@ -1079,22 +1139,30 @@ async fn exchange(
             "the token endpoint refused the exchange (HTTP {status}: {detail})"
         )));
     }
+    parse_token_payload(&payload).map_err(FlowFailure::plain)
+}
+
+/// Shared shape of a successful token-endpoint answer, used by the
+/// authorization-code exchange and the silent refresh alike.
+pub(crate) fn parse_token_payload(payload: &Value) -> std::result::Result<Tokens, String> {
     let token_type = payload
         .get("token_type")
         .and_then(Value::as_str)
         .unwrap_or("bearer");
     if !token_type.eq_ignore_ascii_case("bearer") {
-        return Err(FlowFailure::plain(format!(
-            "unsupported token type {token_type:?}"
-        )));
+        return Err(format!("unsupported token type {token_type:?}"));
     }
     let access_token = payload
         .get("access_token")
         .and_then(Value::as_str)
         .map(|token| Zeroizing::new(token.to_string()))
-        .ok_or_else(|| FlowFailure::plain("the token endpoint returned no access token"))?;
+        .ok_or_else(|| "the token endpoint returned no access token".to_string())?;
     Ok(Tokens {
         access_token,
+        refresh_token: payload
+            .get("refresh_token")
+            .and_then(Value::as_str)
+            .map(|token| Zeroizing::new(token.to_string())),
         expires_in: payload.get("expires_in").and_then(Value::as_u64),
     })
 }
@@ -1160,7 +1228,10 @@ mod tests {
 
     #[test]
     fn header_end_detection() {
-        assert_eq!(find_header_end(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"), Some(23));
+        assert_eq!(
+            find_header_end(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"),
+            Some(23)
+        );
         assert_eq!(find_header_end(b"GET / HTTP/1.1\r\n"), None);
     }
 
