@@ -19,12 +19,18 @@ function conn(type: ConnectionType, host: string | null, name = 'x'): Connection
   };
 }
 
-test('every entry lives in a known section and mcp entries are not addable', () => {
+test('every entry lives in a known section; only connection entries are addable', () => {
   for (const entry of CATALOG) {
     assert.ok(CATALOG_SECTIONS.includes(entry.section), entry.id);
-    if (entry.via === 'mcp') assert.equal(entry.connType, undefined);
     if (entry.via === 'connection') assert.ok(entry.connType, entry.id);
+    else assert.equal(entry.connType, undefined, entry.id);
   }
+});
+
+test('the built-in credentials store is a Secrets row', () => {
+  const credentials = CATALOG.find((entry) => entry.id === 'credentials');
+  assert.equal(credentials?.via, 'builtin');
+  assert.equal(credentials?.section, 'Secrets');
 });
 
 test('branded api hosts claim their row; other api hosts fall to HTTP API', () => {

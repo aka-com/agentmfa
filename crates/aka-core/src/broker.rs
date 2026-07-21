@@ -313,12 +313,12 @@ impl Broker {
         // authenticate. `add_connection` repeats the state-dependent checks
         // after confirmation in case the index changed while the sheet was up.
         self.store.preflight_add_connection(&spec)?;
-        let confirmation = self.confirm_action(&format!("Add service “{}”", spec.name))?;
+        let confirmation = self.confirm_action(&format!("Add tool “{}”", spec.name))?;
         let conn = self.store.add_connection(spec)?;
         self.audit.append(
             AuditEntry::new(
                 AuditKind::ConnectionAdded,
-                format!("Service added: {}", conn.name),
+                format!("Tool added: {}", conn.name),
             )
             .connection(conn.name.clone())
             .detail(format!("{} → {}", conn.kind().label(), conn.target()))
@@ -339,7 +339,7 @@ impl Broker {
     ) -> Result<Connection> {
         self.store
             .preflight_add_connection_with_secret(secret_name, &spec)?;
-        let confirmation = self.confirm_action(&format!("Add service “{}”", spec.name))?;
+        let confirmation = self.confirm_action(&format!("Add tool “{}”", spec.name))?;
         let (secret, conn) = self
             .store
             .add_connection_with_secret(secret_name, value, spec)?;
@@ -350,7 +350,7 @@ impl Broker {
         self.audit.append(
             AuditEntry::new(
                 AuditKind::ConnectionAdded,
-                format!("Service added: {}", conn.name),
+                format!("Tool added: {}", conn.name),
             )
             .connection(conn.name.clone())
             .detail(format!("{} → {}", conn.kind().label(), conn.target()))
@@ -373,7 +373,7 @@ impl Broker {
         let capability_changed = old.config != spec.config || explicit_secrets_changed;
         let confirmation = if capability_changed {
             Some(self.confirm_action(&format!(
-                "Change security settings for service “{}”",
+                "Change security settings for tool “{}”",
                 spec.name
             ))?)
         } else {
@@ -398,7 +398,7 @@ impl Broker {
         let mut entry = AuditEntry::new(
             AuditKind::ConnectionUpdated,
             format!(
-                "Service updated: {}",
+                "Tool updated: {}",
                 if old.name != conn.name {
                     format!("{} → {}", old.name, conn.name)
                 } else {
@@ -438,7 +438,7 @@ impl Broker {
     /// Delete a connection; wirings die with it.
     pub fn ui_delete_connection(&self, id: &Uuid) -> Result<Connection> {
         let conn = self.store.connection_by_id(id)?;
-        let confirmation = self.confirm_action(&format!("Delete service “{}”", conn.name))?;
+        let confirmation = self.confirm_action(&format!("Delete tool “{}”", conn.name))?;
         let _gate = self.config_gate.lock().unwrap();
         if self.store.connection_by_id(id)?.updated_at != conn.updated_at {
             return Err(CoreError::ApprovalConnectionChanged);
@@ -451,7 +451,7 @@ impl Broker {
         self.audit.append(
             AuditEntry::new(
                 AuditKind::ConnectionDeleted,
-                format!("Service deleted: {}", conn.name),
+                format!("Tool deleted: {}", conn.name),
             )
             .connection(conn.name.clone())
             .confirmation(confirmation),
@@ -573,7 +573,7 @@ impl Broker {
                     AuditEntry::new(
                         AuditKind::Wired,
                         format!(
-                            "First agent {} wired to all {} service{}",
+                            "First agent {} wired to all {} tool{}",
                             agent.name,
                             added.len(),
                             if added.len() == 1 { "" } else { "s" }
@@ -656,10 +656,6 @@ impl Broker {
 
     pub fn ui_set_menu_bar_hides_dock(&self, on: bool) -> Result<()> {
         self.store.set_menu_bar_hides_dock(on)
-    }
-
-    pub fn ui_set_service_walkthrough_visible(&self, on: bool) -> Result<()> {
-        self.store.set_service_walkthrough_visible(on)
     }
 
     pub fn ui_set_agent_walkthrough_visible(&self, on: bool) -> Result<()> {

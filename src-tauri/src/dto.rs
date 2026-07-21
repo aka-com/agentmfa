@@ -234,6 +234,5 @@ impl From<&AuditEntry> for ActivityDto {
 pub struct SettingsDto {
     pub reauth_on_read: bool,
     pub menu_bar_hides_dock: bool,
-    pub show_service_walkthrough: bool,
     pub show_agent_walkthrough: bool,
 }

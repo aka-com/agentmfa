@@ -673,15 +673,6 @@ impl Store {
         self.commit(&mut state, next)
     }
 
-    pub fn set_service_walkthrough_visible(&self, on: bool) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
-        let mut settings = state.settings();
-        settings.show_service_walkthrough = on;
-        let mut next = state.clone();
-        next.settings = Some(settings);
-        self.commit(&mut state, next)
-    }
-
     pub fn set_agent_walkthrough_visible(&self, on: bool) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         let mut settings = state.settings();
@@ -1072,7 +1063,7 @@ mod tests {
                 "API_TOKEN",
                 val("api-token"),
                 api_spec(
-                    "service-api",
+                    "tool-api",
                     "api.example.com",
                     "Authorization: Bearer {{API_TOKEN}}",
                 ),
@@ -1151,13 +1142,13 @@ mod tests {
     #[tokio::test]
     async fn walkthrough_visibility_is_persisted_in_settings() {
         let (store, _, _dir) = store().await;
-        assert!(store.settings().show_service_walkthrough);
+
         assert!(store.settings().show_agent_walkthrough);
 
-        store.set_service_walkthrough_visible(false).unwrap();
+
         store.set_agent_walkthrough_visible(false).unwrap();
 
-        assert!(!store.settings().show_service_walkthrough);
+
         assert!(!store.settings().show_agent_walkthrough);
     }
 

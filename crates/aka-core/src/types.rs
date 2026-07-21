@@ -405,10 +405,6 @@ pub struct Settings {
     /// Dock icon (accessory activation) until the window is reopened.
     #[serde(default)]
     pub menu_bar_hides_dock: bool,
-    /// Whether the first-service walkthrough is visible while no services
-    /// have been configured. Defaults on for existing installations.
-    #[serde(default = "default_walkthrough_visible")]
-    pub show_service_walkthrough: bool,
     /// Whether the agent-pairing walkthrough is visible while no agents are
     /// connected. Defaults on for existing installations.
     #[serde(default = "default_walkthrough_visible")]
@@ -425,7 +421,6 @@ impl Default for Settings {
             reauth_on_read: true,
             legacy_pg_trusted_ca_bundle_path: None,
             menu_bar_hides_dock: false,
-            show_service_walkthrough: true,
             show_agent_walkthrough: true,
         }
     }
@@ -453,7 +448,6 @@ mod tests {
     fn legacy_settings_keep_walkthroughs_visible() {
         let settings: Settings =
             serde_json::from_str(r#"{"reauth_on_read":true,"menu_bar_hides_dock":false}"#).unwrap();
-        assert!(settings.show_service_walkthrough);
         assert!(settings.show_agent_walkthrough);
     }
 

@@ -102,7 +102,7 @@ impl FormError {
             CoreError::ConnectionNameTaken(_) => Self::validation(
                 "connection_name_taken",
                 "name",
-                "That service name is already in use",
+                "That tool name is already in use",
             )
             .with_kind("conflict"),
             CoreError::InvalidSecretName(_) => {
@@ -140,7 +140,7 @@ impl FormError {
                 Self::validation(
                     "wrong_credential_count",
                     field,
-                    format!("{kind} services require exactly one saved credential"),
+                    format!("{kind} tools require exactly one saved credential"),
                 )
             }
             CoreError::SecretNotFound => match context {
@@ -199,19 +199,19 @@ impl FormError {
             CoreError::KindChange => Self::global(
                 "validation",
                 "connection_kind_fixed",
-                "Service type cannot be changed after creation",
+                "Tool type cannot be changed after creation",
                 None,
             ),
             CoreError::ConnectionNotFound => Self::global(
                 "conflict",
                 "connection_not_found",
-                "This service was removed elsewhere",
+                "This tool was removed elsewhere",
                 None,
             ),
             CoreError::ApprovalConnectionChanged => Self::global(
                 "conflict",
                 "connection_changed",
-                "The service changed while you were confirming. Review it and save again.",
+                "The tool changed while you were confirming. Review it and save again.",
                 None,
             ),
             CoreError::Vault(detail) => Self::global(
@@ -325,7 +325,6 @@ pub fn get_settings(state: State<AppState>) -> SettingsDto {
     SettingsDto {
         reauth_on_read: s.reauth_on_read,
         menu_bar_hides_dock: s.menu_bar_hides_dock,
-        show_service_walkthrough: s.show_service_walkthrough,
         show_agent_walkthrough: s.show_agent_walkthrough,
     }
 }
@@ -542,7 +541,7 @@ impl ConnectionInput {
                 return Err(FormError::global(
                     "system",
                     "unknown_connection_type",
-                    "Couldn’t save this service",
+                    "Couldn’t save this tool",
                     Some(format!("unknown connection type {other:?}")),
                 ))
             }
@@ -664,7 +663,7 @@ pub fn edit_connection(
         FormError::global(
             "system",
             "invalid_connection_id",
-            "Couldn’t edit this service",
+            "Couldn’t edit this tool",
             Some(detail),
         )
     })?;
@@ -778,14 +777,6 @@ pub fn set_menu_bar_hides_dock(state: State<AppState>, on: bool) -> CmdResult<()
 }
 
 #[tauri::command]
-pub fn set_service_walkthrough_visible(state: State<AppState>, on: bool) -> CmdResult<()> {
-    state
-        .broker
-        .ui_set_service_walkthrough_visible(on)
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
 pub fn set_agent_walkthrough_visible(state: State<AppState>, on: bool) -> CmdResult<()> {
     state
         .broker
@@ -823,7 +814,6 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         close_session,
         set_reauth_on_read,
         set_menu_bar_hides_dock,
-        set_service_walkthrough_visible,
         set_agent_walkthrough_visible,
         crate::windows::ui_set_mode,
         crate::windows::ui_hide_main,
@@ -944,7 +934,7 @@ mod tests {
                 "kind": "conflict",
                 "code": "connection_name_taken",
                 "field": "name",
-                "message": "That service name is already in use"
+                "message": "That tool name is already in use"
             })
         );
     }

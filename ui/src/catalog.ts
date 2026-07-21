@@ -1,10 +1,12 @@
 // The tool catalog: the static registry behind the "Add tools" screen.
 //
 // Connections are stored by protocol (api/pg/ws/ssh); the catalog presents
-// them as branded tools grouped into sections. Each entry either maps to a
+// them as branded tools grouped into sections. Each entry maps to a
 // connection type the broker can serve today (`via: 'connection'`, with an
-// optional prefill for the add sheet) or names an integration that arrives
-// later through the MCP layer (`via: 'mcp'`, shown but not yet addable).
+// optional prefill for the add sheet), fronts a built-in store
+// (`via: 'builtin'` — today the Keychain-backed saved credentials), or
+// names an integration arriving later through the MCP layer
+// (`via: 'mcp'`, shown dimmed and not yet addable).
 
 import type { ConnectionSummary, ConnectionType } from './types';
 
@@ -24,7 +26,7 @@ export interface CatalogEntry {
   chip: string;
   description: string;
   section: CatalogSection;
-  via: 'connection' | 'mcp';
+  via: 'connection' | 'builtin' | 'mcp';
   connType?: ConnectionType;
   /** api entries only: claim api connections whose host contains this. */
   hostHint?: string;
@@ -105,6 +107,14 @@ export const CATALOG: CatalogEntry[] = [
     section: 'Infrastructure',
     via: 'connection',
     connType: 'ws',
+  },
+  {
+    id: 'credentials',
+    name: 'Saved credentials',
+    chip: 'KEY',
+    description: 'API keys, passwords, and private keys in your Keychain',
+    section: 'Secrets',
+    via: 'builtin',
   },
   {
     id: 'onepassword',

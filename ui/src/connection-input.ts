@@ -15,11 +15,11 @@ export function quickSetupPlaceholder(type: ConnectionType): string {
 }
 
 export function firstTaskPrompt(name: string, type: ConnectionType): string {
-  const service = `AKA service ${name}`;
-  if (type === 'pg') return `Using my ${service}, run SELECT current_database().`;
-  if (type === 'ssh') return `Using my ${service}, run uname -a on the remote server.`;
-  if (type === 'api') return `Using my ${service}, make a GET request to / and summarize the response.`;
-  return `Using my ${service}, connect to the WebSocket and report the first message.`;
+  const tool = `Multitool tool ${name}`;
+  if (type === 'pg') return `Using my ${tool}, run SELECT current_database().`;
+  if (type === 'ssh') return `Using my ${tool}, run uname -a on the remote server.`;
+  if (type === 'api') return `Using my ${tool}, make a GET request to / and summarize the response.`;
+  return `Using my ${tool}, connect to the WebSocket and report the first message.`;
 }
 
 export interface HostKeyCandidate {
@@ -227,7 +227,7 @@ export function parseConnectionImport(value: unknown): ConnectionImport {
 
   let parsed: URL;
   try { parsed = new URL(text); }
-  catch { throw new Error('Could not recognize that service. Use a complete URL, Postgres DSN, or ssh command.'); }
+  catch { throw new Error('Could not recognize that tool. Use a complete URL, Postgres DSN, or ssh command.'); }
   const scheme = parsed.protocol.slice(0, -1).toLowerCase();
   if (scheme === 'http' || scheme === 'https') {
     if (parsed.username || parsed.password) throw new Error('API URLs with embedded credentials are not supported');
@@ -262,7 +262,7 @@ export function parseConnectionImport(value: unknown): ConnectionImport {
     if (rawSslmode !== sslmode) warnings.push(`Unsupported sslmode ${rawSslmode}; using verify-full.`);
     const unsupported = [...parsed.searchParams.keys()].filter((key) => !['sslmode', 'sslrootcert'].includes(key));
     if (unsupported.length) warnings.push(`Review unsupported DSN options: ${[...new Set(unsupported)].join(', ')}.`);
-    if (credential) warnings.push('A password was filled in below. It will be saved if you add this service with “New secret…” selected.');
+    if (credential) warnings.push('A password was filled in below. It will be saved if you add this tool with “New secret…” selected.');
     return {
       type: 'pg', name: suggestedName(parsed.hostname, 'postgres'), credential, warnings,
       fields: {
@@ -286,7 +286,7 @@ export function parseConnectionImport(value: unknown): ConnectionImport {
       fields: { host, port: parsed.port ? Number(parsed.port) : 22, user, hostKeyFingerprint: '' },
     };
   }
-  throw new Error(`Service scheme ${scheme || '(missing)'} is not supported`);
+  throw new Error(`Tool scheme ${scheme || '(missing)'} is not supported`);
 }
 
 export function suggestedSecretName(connectionName: string, type: ConnectionType): string {

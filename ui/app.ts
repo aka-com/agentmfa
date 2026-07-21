@@ -1,4 +1,4 @@
-// AKA Desktop frontend. One file drives all Tauri windows (main, tray
+// Multitool frontend. One file drives all Tauri windows (main, tray
 // and dropdown), chosen from location.hash.
 //
 // Every mutation and read goes through the Rust core via Tauri
@@ -16,12 +16,6 @@ import {
   suggestedSecretName,
 } from '/src/connection-input';
 import { formErrorKind, formErrorMessage, inlineFormError } from '/src/form-errors';
-import {
-  GUIDE_DISMISS_SETTINGS, GUIDE_STEPS, guideAdvancesOnSave, guideCanFinish,
-  guideCompletionStage, guideRetargetsReady, guideSettingForStep, guideTabForStep,
-  guideTaskCopiedAfterSave, guideTaskStage, guideTaskTarget,
-} from '/src/guide';
-import type { GuideStep } from '/src/guide';
 import type { HostKeyCandidate } from '/src/connection-input';
 import type {
   ActivityEntry,
@@ -41,7 +35,7 @@ const EDIT_SECRET_MASK = '••••••••••••';
 const ACTIVITY_RENDER_LIMIT = 200;
 
 // The left-nav tabs, in order — also the cycle order for Ctrl-Tab.
-const TABS = ['connections', 'agents', 'secrets', 'activity'] as const;
+const TABS = ['connections', 'agents', 'activity'] as const;
 type Tab = typeof TABS[number];
 
 
@@ -114,19 +108,15 @@ interface AppState {
   confirm: ConfirmState | null;
   toolSearch: string;
   toolOpen: string | null;
+  connImportSource: string;
+  connImportError: string | null;
   menuOpen: boolean;
-  walkthroughMenuOpen: boolean;
   agentMenuOpen: string | null;
   connMenuOpen: string | null;
   copied: string | null;
   readyCopied: boolean;
   setupInstructionsOpen: boolean;
   showFullInstructions: boolean;
-  quickSetupType: ConnectionType;
-  quickSetupSource: string;
-  quickSetupError: string | null;
-  guideStep: GuideStep;
-  guideTaskCopied: boolean;
   connectionReady: ConnectionReadyState | null;
   connectionTaskCopied: boolean;
   connTests: Record<string, ConnectionTestState>;
@@ -151,7 +141,6 @@ const state: AppState = {
   settings: {
     reauth_on_read: true,
     menu_bar_hides_dock: false,
-    show_service_walkthrough: true,
     show_agent_walkthrough: true,
   },
   reveal: {},            // secretId -> prefix string (transient)
@@ -160,26 +149,22 @@ const state: AppState = {
   draft: {},
   sheetErrors: {},       // field key -> inline validation message
   sheetBaseline: null,   // draft signature at sheet open (dirty-close detection)
-  confirmDiscard: false, // "Discard this service?" confirm over the conn sheet
+  confirmDiscard: false, // "Discard this tool?" confirm over the conn sheet
   formMenuOpen: null,    // id of the open custom-select listbox in the sheet
-  connAdvancedOpen: false, // "Advanced" disclosure in the service sheet
+  connAdvancedOpen: false, // "Advanced" disclosure in the tool sheet
   connType: 'api',
   confirm: null,         // {kind, id/name}
   toolSearch: '',        // Add-tools catalog search query
   toolOpen: null,        // catalog entry id whose connections are expanded
+  connImportSource: '',  // paste-to-prefill field in the add sheet
+  connImportError: null,
   menuOpen: false,       // desktop-mode settings popover (gear) open
-  walkthroughMenuOpen: false,
   agentMenuOpen: null,   // agent id whose ⋯ options menu is open (Agents tab)
-  connMenuOpen: null,    // connection id whose ⋯ options menu is open (Services tab)
+  connMenuOpen: null,    // connection id whose ⋯ options menu is open (Tools tab)
   copied: null,          // secretId whose value was just copied (transient "Copied" flash)
   readyCopied: false,    // transient feedback on the setup-instructions status button
   setupInstructionsOpen: false,
   showFullInstructions: false, // short setup vs full /instructions body
-  quickSetupType: 'pg',
-  quickSetupSource: '',
-  quickSetupError: null,
-  guideStep: 'add',      // current guided-setup step (Services panel / Agents hero)
-  guideTaskCopied: false, // the first task was actually copied (gates Finish)
   connectionReady: null,
   connectionTaskCopied: false,
   connTests: {},         // connectionId -> in-flight/last test result (transient)
@@ -278,130 +263,9 @@ function render(capture = true): void {
   }
 }
 
-const QUICK_SETUP_TYPES: Array<[ConnectionType, string]> = [
-  ['pg', 'Postgres'],
-  ['ssh', 'SSH'],
-  ['api', 'HTTP API'],
-  ['ws', 'WebSocket'],
-];
-
-// Centered breadcrumbs over the guided-setup surfaces. Every crumb is
-// clickable regardless of progress — the workflow suggests an order, it
-// never enforces one.
-function guideCrumbsHTML(active: GuideStep): string {
-  const crumbs = GUIDE_STEPS.map(([step, label]) =>
-    `<button class="guide-crumb ${step === active ? 'on' : ''}" data-act="guide-step" data-step="${step}"
-      ${step === active ? 'aria-current="step"' : ''}>${label}</button>`)
-    .join('<span class="guide-crumb-sep" aria-hidden="true">›</span>');
-  return `<nav class="guide-crumbs" aria-label="Setup steps">${crumbs}</nav>`;
-}
-
-function guideAddStepHTML(): string {
-  const type = state.quickSetupType;
-  const types = QUICK_SETUP_TYPES.map(([value, label]) =>
-    `<button class="quick-type ${type === value ? 'on' : ''}" aria-pressed="${type === value}" data-act="quick-setup-type" data-type="${value}">${label}</button>`).join('');
-  return `<div class="onboarding-copy"><b>Add a service for your agent</b></div>
-    <div class="quick-type-row">
-      <div class="quick-types" aria-label="Service type">${types}</div>
-    </div>
-    <div class="quick-import-row">
-      <input id="quick-setup-source" aria-label="Service to import" placeholder="${escAttr(quickSetupPlaceholder(type))}" value="${escAttr(state.quickSetupSource)}">
-      <button class="btn primary sm" data-act="quick-setup-review">Continue</button>
-    </div>
-    ${state.quickSetupError ? `<div class="field-error quick-setup-error">${esc(state.quickSetupError)}</div>` : ''}`;
-}
-
-function guideTaskStepHTML(): string {
-  const stage = guideTaskStage(state.connections.length, state.agents.length);
-  if (stage === 'need-service') {
-    return `<div class="onboarding-copy"><b>Try it end to end</b>
-        <span>Add a service first — then this step hands your agent its first task.</span></div>
-      <div class="guide-nav-row"><button class="linklike" data-act="guide-step" data-step="add">Go to Add service</button></div>`;
-  }
-  if (stage === 'need-agent') {
-    return `<div class="onboarding-copy"><b>Try it end to end</b>
-        <span>No agent is connected yet — connect one first, so it has somewhere to ask from.</span></div>
-      <div class="guide-nav-row"><button class="linklike" data-act="guide-step" data-step="connect">Go to Connect agent</button></div>`;
-  }
-  const conn = guideTaskTarget(state.connectionReady, state.connections)!;
-  return `<div class="onboarding-copy"><b>Try it end to end</b>
-      <span>Ask your agent:</span></div>
-    <div class="guide-task-row"><code>${esc(firstTaskPrompt(conn.name, conn.type))}</code>
-      <button class="btn primary sm" data-act="guide-copy-task" data-name="${escAttr(conn.name)}" data-type="${conn.type}">${state.connectionTaskCopied ? `${ICONS.check} Copied` : 'Copy task'}</button></div>
-    ${guideCanFinish(state.agents.length, state.guideTaskCopied)
-      ? '<div class="guide-nav-row"><button class="linklike" data-act="guide-step" data-step="done">Finish setup →</button></div>'
-      : ''}`;
-}
-
-// The success state lives in the same panel as the breadcrumbs and steps —
-// no separate dialog: text above, buttons centered beneath.
-function guideDoneStepHTML(): string {
-  const stage = guideCompletionStage(
-    state.connections.length,
-    state.agents.length,
-    state.guideTaskCopied,
-  );
-  if (stage === 'need-service') {
-    return `<div class="guide-done">
-      <b>Almost there</b>
-      <p>Add a service before finishing setup.</p>
-      <div class="guide-done-actions">
-        <button class="btn primary" data-act="guide-step" data-step="add">Go to Add service</button>
-        <button class="btn" data-act="guide-dismiss">Dismiss walkthrough</button>
-      </div>
-    </div>`;
-  }
-  if (stage === 'need-agent') {
-    return `<div class="guide-done">
-      <b>Almost there</b>
-      <p>Your services are saved, but no agent is connected yet — nothing can use them until one is. Head back to Connect agent to finish.</p>
-      <div class="guide-done-actions">
-        <button class="btn primary" data-act="guide-step" data-step="connect">Go to Connect agent</button>
-        <button class="btn" data-act="guide-dismiss">Dismiss walkthrough</button>
-      </div>
-    </div>`;
-  }
-  if (stage === 'need-task') {
-    return `<div class="guide-done">
-      <b>Almost there</b>
-      <p>Copy the first task for your agent before finishing setup.</p>
-      <div class="guide-done-actions">
-        <button class="btn primary" data-act="guide-step" data-step="task">Go to First task</button>
-        <button class="btn" data-act="guide-dismiss">Dismiss walkthrough</button>
-      </div>
-    </div>`;
-  }
-  return `<div class="guide-done">
-    <b>Setup complete</b>
-    <p>Your agent can now use the services you wire it to — manage wirings from the Agents tab. Re-run this walkthrough any time from the walkthrough menu.</p>
-    <div class="guide-done-actions">
-      <button class="btn" data-act="guide-step" data-step="connect">Back to the beginning</button>
-      <button class="btn primary" data-act="guide-dismiss">Dismiss walkthrough</button>
-    </div>
-  </div>`;
-}
-
-function firstConnectionSetupHTML(): string {
-  // 'connect' renders on the Agents hero; on Services fall back to Add.
-  const step: GuideStep = state.guideStep === 'connect' ? 'add' : state.guideStep;
-  const body = step === 'task' ? guideTaskStepHTML()
-    : step === 'done' ? guideDoneStepHTML()
-    : guideAddStepHTML();
-  return `<div class="agent-onboarding service-onboarding walkthrough-card">
-    <div class="guide-head">${guideCrumbsHTML(step)}
-      <button class="icon-btn walkthrough-close" title="Hide this walkthrough" aria-label="Hide guided setup walkthrough" data-act="hide-service-walkthrough">${ICONS.x}</button>
-    </div>
-    ${body}
-  </div>`;
-}
-
 function globalSectionsHTML() {
   let out = '';
   let hasOnboarding = false;
-  if (state.tab === 'connections' && state.settings.show_service_walkthrough) {
-    out += firstConnectionSetupHTML();
-    hasOnboarding = true;
-  }
   if (state.tab === 'agents' && state.settings.show_agent_walkthrough) {
     hasOnboarding = true;
     const instructionBody = state.showFullInstructions
@@ -433,7 +297,7 @@ function globalSectionsHTML() {
             </div>`
           : `<pre class="setup-instructions"><code>${esc(instructionBody)}</code></pre>`
         : ''}
-      <div class="guide-nav-row"><button class="linklike manual-setup-link" data-act="guide-step" data-step="add">I’ll add services by hand instead</button></div></div>`;
+      </div>`;
   }
   if (state.sessions.length) {
     out += '<div class="live-head">Active sessions</div>' + state.sessions.map((s) => {
@@ -456,17 +320,10 @@ function globalSectionsHTML() {
   return out ? `<div class="dd-global ${hasOnboarding ? 'onboarding-global' : ''}">${out}</div>` : '';
 }
 
-function secretsHTML() {
-  if (!state.secrets.length) {
-    const detail = mode === 'dropdown' ? '' : `
-      <p>Store API keys, connection strings, and other credentials and secrets here.</p>
-      <p class="empty-tip">Tip: adding a service can save its credential in one step.</p>
-      <button class="btn primary" data-act="open-add-secret">＋ Add secret</button>`;
-    return `<div class="empty"><div class="empty-ico">🔐</div><h3>No secrets</h3>${detail}</div>`;
-  }
+function secretsTableHTML() {
   const rows = state.secrets.map((s) => {
     if (state.confirm && state.confirm.kind === 'del-secret-inuse' && state.confirm.id === s.id) {
-      return `<tr class="confirm-row"><td colspan="3"><div class="confirm-inline"><span>Currently used by ${esc(s.used_by_names.join(', '))}. Delete the service first.</span>
+      return `<tr class="confirm-row"><td colspan="3"><div class="confirm-inline"><span>Currently used by ${esc(s.used_by_names.join(', '))}. Delete the tool first.</span>
           <button class="btn sm" data-act="confirm-cancel">OK</button></div></td></tr>`;
     }
     if (state.confirm && state.confirm.kind === 'del-secret' && state.confirm.id === s.id) {
@@ -489,7 +346,7 @@ function secretsHTML() {
       ? `<span class="copied-badge">${ICONS.check}<span>Copied</span></span>`
       : `<button class="ghost-copy" title="Copy value" data-act="copy-secret" data-id="${s.id}">${ICONS.copy}<span>Copy</span></button>`;
     const valText = revealed ? esc(revealed) : '••••••••';
-    const sub = `Used by ${s.used_by} service${s.used_by === 1 ? '' : 's'}`;
+    const sub = `Used by ${s.used_by} tool${s.used_by === 1 ? '' : 's'}`;
     return `<tr>
       <td><div><div class="s-name">${esc(s.name)}</div><div class="s-sub secret-usage">${esc(sub)}</div></div></td>
       <td class="val"><span class="val-wrap"><span class="val-slot ${copied ? 'is-copied' : ''}"><code>${valText}</code><span class="val-overlay">${overlay}</span></span></span> ${eyeBtn}</td>
@@ -508,12 +365,12 @@ function secretsHTML() {
 const agentWiringFor = (a: AgentSummary, c: ConnectionSummary): WiringSummary | undefined =>
   (c.wired_agents || []).find((wiring) => wiring.agent_id === a.id);
 
-function agentServiceRowHTML(a: AgentSummary, c: ConnectionSummary): string {
+function agentToolRowHTML(a: AgentSummary, c: ConnectionSummary): string {
   const t = TYPES[c.type];
   const wired = !!agentWiringFor(a, c);
   const live = state.sessions.some((s) => s.agent === a.name && s.connection === c.name);
   const pill = wired
-    ? '<span class="acc-pill granted">Wired · can use this service</span>'
+    ? '<span class="acc-pill granted">Wired · can use this tool</span>'
     : '<span class="acc-pill">Not wired</span>';
   const action = wired
     ? `<button class="btn ghost sm" aria-label="Unwire ${escAttr(a.name)} from ${escAttr(c.name)}" data-act="unwire" data-id="${a.id}" data-conn="${c.id}">Unwire</button>`
@@ -527,10 +384,19 @@ function agentServiceRowHTML(a: AgentSummary, c: ConnectionSummary): string {
 
 function agentBlockHTML(a: AgentSummary): string {
   const menuOpen = state.agentMenuOpen === a.id;
-  const sub = `last used ${relTime(a.last_used)}`;
-  const rows = state.connections.length
-    ? state.connections.map((c) => agentServiceRowHTML(a, c)).join('')
-    : `<div class="acc-none">No services yet.${mode === 'dropdown' ? '' : ` Add one to give ${esc(a.name)} somewhere to connect.`}</div>`;
+  // Wired tools first — with many tools the interesting rows would
+  // otherwise be scattered through the list.
+  const ordered = [...state.connections].sort((x, y) => {
+    const wired = Number(!!agentWiringFor(a, y)) - Number(!!agentWiringFor(a, x));
+    return wired || x.name.localeCompare(y.name);
+  });
+  const wiredCount = ordered.filter((c) => agentWiringFor(a, c)).length;
+  const sub = state.connections.length
+    ? `Connected to ${wiredCount} of ${state.connections.length} tool${state.connections.length === 1 ? '' : 's'} · last used ${relTime(a.last_used)}`
+    : `last used ${relTime(a.last_used)}`;
+  const rows = ordered.length
+    ? ordered.map((c) => agentToolRowHTML(a, c)).join('')
+    : `<div class="acc-none">No tools yet.${mode === 'dropdown' ? '' : ` Add one to give ${esc(a.name)} somewhere to connect.`}</div>`;
   return `<div class="agent-block">
     <div class="agent-card">
       <span class="agent-avatar" role="img" aria-label="Agent">${ICONS.bot}</span>
@@ -578,7 +444,7 @@ function connTileHTML(c: ConnectionSummary): string {
     return `<div class="tile confirm-tile">
       <span class="badge ${t.cls}">${t.label}</span>
       <div class="tile-tx"><b title="${escAttr(c.name)}">${esc(c.name)}</b>
-        <span class="tile-confirm">Delete this service?${(c.wired_agents || []).length ? ' Wired agents will lose access.' : ''}</span>
+        <span class="tile-confirm">Delete this tool?${(c.wired_agents || []).length ? ' Wired agents will lose access.' : ''}</span>
         <span class="tile-confirm-actions"><button class="btn sm" data-act="confirm-cancel">Cancel</button>
           <button class="btn sm danger" data-act="del-conn-confirm" data-id="${c.id}">Delete</button></span></div></div>`;
   }
@@ -589,7 +455,7 @@ function connTileHTML(c: ConnectionSummary): string {
     <div class="tile-tx"><b title="${escAttr(c.name)}">${esc(c.name)}${liveCount(c) ? ' <span class="cc-live">● live</span>' : ''}</b>
       <code title="${escAttr(c.target)}">${esc(c.target)}</code>${connTestResultHTML(c)}</div>
     <div class="tile-menu-wrap">
-      <button class="icon-btn tile-menu-btn ${menuOpen ? 'on' : ''}" title="Service options"
+      <button class="icon-btn tile-menu-btn ${menuOpen ? 'on' : ''}" title="Tool options"
         aria-label="Options for ${escAttr(c.name)}" aria-haspopup="menu"
         aria-expanded="${menuOpen}" data-act="toggle-conn-menu" data-id="${c.id}">${ICONS.ellipsis}</button>
       ${menuOpen ? `<div class="tile-menu" role="menu" aria-label="Options for ${escAttr(c.name)}">
@@ -600,23 +466,67 @@ function connTileHTML(c: ConnectionSummary): string {
     </div></div>`;
 }
 
-// One catalog row: icon chip, name, one-line description, and either an
-// Add button, a "Soon" chip (MCP-backed, not addable yet), or a count
-// badge that expands the row into its configured connections.
+// One flat row inside an expanded catalog entry: name, target, and the
+// same ⋯ menu the tool tiles carried. Quieter than a card grid because the
+// parent row already establishes the tool's identity.
+function catalogConnRowHTML(c: ConnectionSummary): string {
+  if (state.confirm && state.confirm.kind === 'del-conn' && state.confirm.id === c.id) {
+    return `<div class="cat-conn confirm-conn">
+      <div class="cat-conn-tx"><b>${esc(c.name)}</b>
+        <span>Delete this tool?${(c.wired_agents || []).length ? ' Wired agents will lose access.' : ''}</span></div>
+      <button class="btn sm" data-act="confirm-cancel">Cancel</button>
+      <button class="btn sm danger" data-act="del-conn-confirm" data-id="${c.id}">Delete</button></div>`;
+  }
+  const test = state.connTests[c.id];
+  const menuOpen = state.connMenuOpen === c.id;
+  return `<div class="cat-conn">
+    <div class="cat-conn-tx"><b>${esc(c.name)}${liveCount(c) ? ' <span class="cc-live">● live</span>' : ''}</b>
+      <code title="${escAttr(c.target)}">${esc(c.target)}</code>${connTestResultHTML(c)}</div>
+    <div class="tile-menu-wrap">
+      <button class="icon-btn tile-menu-btn ${menuOpen ? 'on' : ''}" title="Tool options"
+        aria-label="Options for ${escAttr(c.name)}" aria-haspopup="menu"
+        aria-expanded="${menuOpen}" data-act="toggle-conn-menu" data-id="${c.id}">${ICONS.ellipsis}</button>
+      ${menuOpen ? `<div class="tile-menu" role="menu" aria-label="Options for ${escAttr(c.name)}">
+        <button class="menu-item" role="menuitem" data-act="test-conn" data-id="${c.id}" ${test && test.running ? 'disabled' : ''}>${ICONS.flaskConical} ${test && test.running ? 'Testing…' : 'Test connection'}</button>
+        <button class="menu-item" role="menuitem" data-act="edit-conn" data-id="${c.id}">${ICONS.pencil} Edit…</button>
+        <button class="menu-item danger" role="menuitem" data-act="del-conn-ask" data-id="${c.id}">${ICONS.trash} Delete…</button>
+      </div>` : ''}
+    </div></div>`;
+}
+
+// The built-in credentials store, expanded inline: the same secrets table
+// the standalone tab used to own.
+function credentialsExpansionHTML(): string {
+  const body = state.secrets.length
+    ? secretsTableHTML()
+    : '<div class="muted-note">No saved credentials yet.</div>';
+  return `<div class="cat-conns">${body}
+    <button class="btn ghost sm cat-add-another" data-act="open-add-secret">＋ Add credential</button></div>`;
+}
+
+// One catalog row: icon chip, name, one-line description, and a trailing
+// action — Add for addable tools, a dimmed "Soon" chip for MCP-backed ones,
+// or a count badge that expands the row into what is configured.
 function catalogRowHTML(entry: CatalogEntry): string {
-  const conns = connectionsForEntry(entry, state.connections);
-  const open = state.toolOpen === entry.id && conns.length > 0;
-  const action = conns.length
+  const builtin = entry.via === 'builtin';
+  const count = builtin ? state.secrets.length : connectionsForEntry(entry, state.connections).length;
+  const open = state.toolOpen === entry.id && (builtin || count > 0);
+  const label = builtin
+    ? `${count} saved credential${count === 1 ? '' : 's'}`
+    : `${count} configured connection${count === 1 ? '' : 's'}`;
+  const action = count || builtin
     ? `<button class="cat-count ${open ? 'on' : ''}" data-act="catalog-toggle" data-id="${entry.id}"
-        aria-expanded="${open}" title="${conns.length} configured connection${conns.length === 1 ? '' : 's'}">${ICONS.plug} ${conns.length}</button>`
+        aria-expanded="${open}" title="${escAttr(label)}">${builtin ? ICONS.fileKey : ICONS.plug} ${count}<span class="cat-chev">${ICONS.chevronDown}</span></button>`
     : entry.via === 'connection'
     ? `<button class="btn cat-add" data-act="catalog-add" data-id="${entry.id}">Add</button>`
     : `<span class="cat-soon" title="Arrives with the MCP layer">Soon</span>`;
-  const expansion = open ? `<div class="cat-conns">
-      <div class="conn-tiles">${conns.map(connTileHTML).join('')}</div>
+  const expansion = !open ? ''
+    : builtin ? credentialsExpansionHTML()
+    : `<div class="cat-conns">
+      <div class="cat-conn-list">${connectionsForEntry(entry, state.connections).map(catalogConnRowHTML).join('')}</div>
       <button class="btn ghost sm cat-add-another" data-act="catalog-add" data-id="${entry.id}">＋ Add another ${esc(entry.name)}</button>
-    </div>` : '';
-  return `<div class="cat-row-wrap ${open ? 'open' : ''}">
+    </div>`;
+  return `<div class="cat-row-wrap ${open ? 'open' : ''} ${entry.via === 'mcp' ? 'is-soon' : ''}">
     <div class="cat-row">
       <span class="cat-ico" aria-hidden="true">${esc(entry.chip)}</span>
       <div class="cat-tx"><b>${esc(entry.name)}</b><span>${esc(entry.description)}</span></div>
@@ -627,15 +537,12 @@ function catalogRowHTML(entry: CatalogEntry): string {
 function connectionsHTML() {
   const ready = state.connectionReady;
   const readyPrompt = ready ? firstTaskPrompt(ready.name, ready.type) : '';
-  // The guided panel's First-task step carries the same prompt; don't
-  // show the nudge twice on one screen.
-  const guideShowsTask = state.settings.show_service_walkthrough && state.guideStep === 'task';
-  const readyCard = ready && state.agents.length && !guideShowsTask ? `<div class="connection-ready">
+  const readyCard = ready && state.agents.length ? `<div class="connection-ready">
     <div class="connection-ready-copy"><b>${esc(ready.name)} is ready</b>
       <span>Ask your agent:</span><code>${esc(readyPrompt)}</code></div>
     <div class="connection-ready-actions">
       <button class="btn sm" data-act="copy-first-task">${state.connectionTaskCopied ? `${ICONS.check} Copied` : 'Copy task'}</button>
-      <button class="icon-btn" title="Dismiss" aria-label="Dismiss service ready message" data-act="dismiss-connection-ready">${ICONS.circleX}</button>
+      <button class="icon-btn" title="Dismiss" aria-label="Dismiss tool ready message" data-act="dismiss-connection-ready">${ICONS.circleX}</button>
     </div></div>` : '';
   const entries = filterCatalog(state.toolSearch);
   const sections = CATALOG_SECTIONS.map((section) => {
@@ -693,8 +600,7 @@ async function receiveActivity(entry: ActivityEntry | null | undefined): Promise
 }
 
 function tabContentHTML() {
-  return state.tab === 'secrets' ? secretsHTML()
-    : state.tab === 'connections' ? connectionsHTML()
+  return state.tab === 'connections' ? connectionsHTML()
     : state.tab === 'agents' ? agentsHTML()
     : activityHTML();
 }
@@ -707,22 +613,6 @@ function brokerReadyHTML() {
     <span class="ready-copy-label" aria-live="polite">${copied ? `${ICONS.check} Copied` : 'Ready'}</span></button>`;
 }
 
-function walkthroughMenuHTML(): string {
-  const option = (action: string, label: string, checked: boolean): string =>
-    `<button class="walkthrough-option" role="menuitemcheckbox" aria-checked="${checked}" data-act="${action}">
-      <span class="walkthrough-check">${checked ? ICONS.check : ''}</span><span>${label}</span></button>`;
-  return `<div class="walkthrough-menu-wrap">
-    <button class="icon-btn walkthrough-menu-icon ${state.walkthroughMenuOpen ? 'on' : ''}"
-      title="Choose walkthroughs" aria-label="Choose walkthroughs" aria-haspopup="menu"
-      aria-expanded="${state.walkthroughMenuOpen}" data-act="toggle-walkthrough-menu">${ICONS.circleQuestion}</button>
-    ${state.walkthroughMenuOpen ? `<div class="walkthrough-menu" role="menu" aria-label="Walkthroughs">
-      <div class="walkthrough-menu-title">Walkthroughs</div>
-      ${option('toggle-service-walkthrough', 'Guided setup on Services', state.settings.show_service_walkthrough)}
-      ${option('toggle-agent-walkthrough', 'Let your agent set this up', state.settings.show_agent_walkthrough)}
-    </div>` : ''}
-  </div>`;
-}
-
 function renderMainWindow() {
   const navItem = (tab: Tab): string =>
     `<button class="nav-item ${state.tab === tab ? 'on' : ''}" data-act="tab" data-tab="${tab}">${tabLabel(tab)}</button>`;
@@ -730,11 +620,9 @@ function renderMainWindow() {
   const activityNav = navItem('activity');
   // One view-specific action, always in the header row next to the title.
   const actionBtn = state.tab === 'connections'
-    ? `<div class="dw-head-actions">${walkthroughMenuHTML()}<button class="btn" data-act="open-add-conn">＋ Add tool</button></div>`
+    ? `<button class="btn" data-act="open-add-conn">＋ Add tool</button>`
     : state.tab === 'agents'
-    ? `<div class="dw-head-actions">${walkthroughMenuHTML()}<button class="btn" data-act="copy-agent-setup">Copy setup instructions</button></div>`
-    : state.tab === 'secrets'
-    ? `<button class="btn" data-act="open-add-secret">＋ Add secret</button>`
+    ? `<button class="btn" data-act="copy-agent-setup">Copy setup instructions</button>`
     : `<button class="btn" data-act="clear-activity-ask" ${state.activity.length ? '' : 'disabled'}>Clear activity</button>`;
   const menu = state.menuOpen
     ? `<div class="settings-menu">
@@ -742,11 +630,11 @@ function renderMainWindow() {
         <button class="menu-item" data-act="open-settings">${ICONS.gear} Settings</button>
       </div>` : '';
   root().innerHTML = `<div class="surface">
-    <div class="dw-titlebar" data-tauri-drag-region><span class="dw-title">AKA Desktop</span></div>
+    <div class="dw-titlebar" data-tauri-drag-region><span class="dw-title">Multitool</span></div>
     <div class="dw-body">
       <div class="dw-side">
         <div class="dw-brand"><div class="dd-appicon">🔐</div>
-          <div><div class="dd-title">AKA Desktop</div>${brokerReadyHTML()}</div></div>
+          <div><div class="dd-title">Multitool</div>${brokerReadyHTML()}</div></div>
         <div class="dw-nav">${nav}</div>
         <div class="dw-secondary-nav">${activityNav}</div>
         <div class="dw-settings">${menu}
@@ -764,15 +652,12 @@ function renderMainWindow() {
 function renderDropdown() {
   const tabs = TABS.map((tb) =>
     `<button class="seg-btn ${state.tab === tb ? 'on' : ''}" data-act="tab" data-tab="${tb}">${tabLabel(tb)}</button>`).join('');
-  const footer = state.tab === 'secrets'
-    ? '<div class="dd-footer"><button class="btn block" data-act="open-add-secret">＋ Add secret</button></div>'
-    : state.tab === 'connections'
+  const footer = state.tab === 'connections'
     ? '<div class="dd-footer"><button class="btn block" data-act="open-add-conn">＋ Add tool</button></div>' : '';
   root().innerHTML = `<div class="surface dropdown-surface">
     <div class="dd-head"><div class="dd-appicon">🔐</div>
-      <div class="dd-identity"><div class="dd-title">AKA Desktop</div>${brokerReadyHTML()}</div>
+      <div class="dd-identity"><div class="dd-title">Multitool</div>${brokerReadyHTML()}</div>
       <button class="icon-btn" title="Open as a window" aria-label="Open as a window" data-act="mode-window">${ICONS.expand}</button>
-      ${walkthroughMenuHTML()}
       <button class="icon-btn" title="Settings" aria-label="Settings" data-act="open-settings">${ICONS.gear}</button></div>
     <div class="seg">${tabs}</div>
     ${globalSectionsHTML()}
@@ -861,7 +746,7 @@ function credentialNameIsTaken(name: string): boolean {
   return Boolean(candidate) && state.secrets.some((secret) => secret.name === candidate);
 }
 
-function serviceNameIsTaken(name: string): boolean {
+function toolNameIsTaken(name: string): boolean {
   const candidate = name.trim();
   return Boolean(candidate) && state.connections.some((connection) => connection.name === candidate);
 }
@@ -883,7 +768,7 @@ function credentialChooserHTML(
     // touching secret values (revealing those is a separate explicit call).
     const usageDetail = (secret: SecretSummary): string => !secret.used_by ? ''
       : secret.used_by === 1 && secret.used_by_names.length ? `used by ${secret.used_by_names[0]}`
-      : `used by ${secret.used_by} services`;
+      : `used by ${secret.used_by} tools`;
     // No default selection: a wrong prefilled secret (a password where a
     // private key belongs, or vice versa) is worse than an explicit choice.
     const selected = source === 'existing'
@@ -970,7 +855,7 @@ async function connectionDraftFromImport(
 }
 
 function connectionTypeLabel(type: ConnectionType): string {
-  return QUICK_SETUP_TYPES.find(([value]) => value === type)?.[1] || 'service';
+  return TYPES[type]?.label || 'tool';
 }
 
 // Whether the draft carries a non-default value in one of the fields hidden
@@ -995,13 +880,21 @@ function connSheet(editing: boolean): string {
   };
   const importWarnings = !editing && d.importWarnings && d.importWarnings.length
     ? `<div class="pair-identity-warning import-warning"><b>Review imported details</b><ul>${d.importWarnings.map((warning) => `<li>${esc(warning)}</li>`).join('')}</ul></div>` : '';
+  // Paste-to-prefill: a DSN, URL, or `ssh` command fills the form below
+  // instead of making the user retype what they already have.
+  const importRow = editing ? '' : `<div class="sheet-import">
+      <label for="conn-import">Paste a connection string <span class="label-detail">(optional)</span></label>
+      <div class="sheet-import-row">
+        <input id="conn-import" placeholder="${escAttr(quickSetupPlaceholder(t))}" value="${escAttr(state.connImportSource)}">
+        <button class="btn sm" data-act="conn-import">Prefill</button></div>
+      ${state.connImportError ? `<div class="field-error">${esc(state.connImportError)}</div>` : ''}</div>`;
   let sshHostKeyField = '';
   let pgTlsFields = '';
-  let fields = importWarnings;
-  const nameTaken = !editing && serviceNameIsTaken(d.name ?? '');
+  let fields = importRow + importWarnings;
+  const nameTaken = !editing && toolNameIsTaken(d.name ?? '');
   const nameWarning = editing ? ''
-    : `<div id="service-name-warning" class="field-warning" role="status" aria-live="polite"${nameTaken ? '' : ' hidden'}>Name used by an existing service</div>`;
-  fields += `<div class="f-row"><label for="f-cname">Name</label><input id="f-cname" class="${fieldCls('name')} ${nameTaken ? 'name-conflict-warning' : ''}"${editing ? '' : ' aria-describedby="service-name-warning"'} placeholder="e.g. github" value="${escAttr(d.name ?? '')}">${fieldErr('name')}${nameWarning}</div>
+    : `<div id="tool-name-warning" class="field-warning" role="status" aria-live="polite"${nameTaken ? '' : ' hidden'}>Name used by an existing tool</div>`;
+  fields += `<div class="f-row"><label for="f-cname">Name</label><input id="f-cname" class="${fieldCls('name')} ${nameTaken ? 'name-conflict-warning' : ''}"${editing ? '' : ' aria-describedby="tool-name-warning"'} placeholder="e.g. github" value="${escAttr(d.name ?? '')}">${fieldErr('name')}${nameWarning}</div>
     <div class="f-row"><label>Type${editing ? ': fixed after creation' : ''}</label>
     <div class="seg in-form">${typeBtn('pg', 'Postgres')}${typeBtn('ssh', 'SSH')}${typeBtn('api', 'HTTP API')}${typeBtn('ws', 'WebSocket')}</div></div>`;
   if (t === 'api') {
@@ -1090,14 +983,14 @@ function connSheet(editing: boolean): string {
   if (editing && conn && (conn.wired_agents || []).length) {
     fields += `<div class="rule-note">Changing the destination unwires affected agents.</div>`;
   }
-  const title = editing ? 'Edit service'
-    : d.setupSource === 'import' ? `Review ${connectionTypeLabel(t)} service`
-    : d.setupSource === 'manual' ? `Add ${connectionTypeLabel(t)} service`
-    : 'Add service';
+  const title = editing ? 'Edit tool'
+    : d.setupSource === 'import' ? `Review ${connectionTypeLabel(t)} tool`
+    : d.setupSource === 'manual' ? `Add ${connectionTypeLabel(t)} tool`
+    : 'Add tool';
   const discardConfirm = state.confirmDiscard ? `
     <div class="sheet-backdrop over-sheet" data-act="discard-keep"></div>
     <div class="sheet wide confirm-sheet discard-confirm" role="dialog" aria-modal="true" aria-labelledby="discard-conn-title">
-      <h3 id="discard-conn-title">${editing ? 'Discard changes?' : 'Discard this service?'}</h3>
+      <h3 id="discard-conn-title">${editing ? 'Discard changes?' : 'Discard this tool?'}</h3>
       <p>You have unsaved changes in this form. Closing it discards them.</p>
       <div class="sheet-actions">
         <button class="btn" data-act="discard-keep">Keep editing</button>
@@ -1106,7 +999,7 @@ function connSheet(editing: boolean): string {
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
     <div class="sheet wide"><h3>${title}</h3>${fields}
     <div class="sheet-actions"><button class="btn" data-act="sheet-cancel">Cancel</button>
-      <button class="btn primary" data-act="save-conn">${editing ? 'Save' : 'Add service'}</button></div></div>${discardConfirm}`;
+      <button class="btn primary" data-act="save-conn">${editing ? 'Save' : 'Add tool'}</button></div></div>${discardConfirm}`;
 }
 
 function settingsSheet() {
@@ -1117,9 +1010,12 @@ function settingsSheet() {
   const dockRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Hide Dock icon in the menu bar</div>
       <div class="st-sub">When minimized to the menu bar, hide the Dock icon until the window is reopened.</div></div>
       <button class="switch ${s.menu_bar_hides_dock ? 'on' : ''}" data-act="toggle-menubar-dock" role="checkbox" aria-checked="${s.menu_bar_hides_dock ? 'true' : 'false'}"></button></div>`;
+  const walkthroughRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Show the agent setup walkthrough</div>
+      <div class="st-sub">The “Let your agent set this up” card on the Agents tab.</div></div>
+      <button class="switch ${s.show_agent_walkthrough ? 'on' : ''}" data-act="toggle-agent-walkthrough" role="checkbox" aria-checked="${s.show_agent_walkthrough ? 'true' : 'false'}"></button></div>`;
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
     <div class="sheet wide"><h3>Settings</h3>
-    ${reauthRow}${dockRow}
+    ${reauthRow}${dockRow}${walkthroughRow}
     <div class="sheet-actions"><button class="btn primary" data-act="sheet-cancel">Done</button></div></div>`;
 }
 
@@ -1349,7 +1245,7 @@ async function saveConn(): Promise<void> {
   const name = (d.name || '').trim();
   const t = state.connType;
   const adding = sheet.kind === 'add-conn';
-  const serviceNameTaken = adding && serviceNameIsTaken(name);
+  const toolNameTaken = adding && toolNameIsTaken(name);
   const authMode = d.authMode || 'bearer';
   const errs: Record<string, string> = {};
   if (!name) errs.name = 'Name is required';
@@ -1410,10 +1306,10 @@ async function saveConn(): Promise<void> {
   } else if (!adding && t === 'api' && !injectionTemplate) {
     errs.template = 'Injection template is required';
   }
-  if (Object.keys(errs).length || serviceNameTaken || newSecretNameTaken) {
+  if (Object.keys(errs).length || toolNameTaken || newSecretNameTaken) {
     state.sheetErrors = errs;
     render();
-    if (serviceNameTaken) focusField('f-cname');
+    if (toolNameTaken) focusField('f-cname');
     else if (newSecretNameTaken) focusField('c-new-secret-name');
     return;
   }
@@ -1455,27 +1351,15 @@ async function saveConn(): Promise<void> {
   try {
     if (adding) await invoke('add_connection', { input });
     else await invoke('edit_connection', { id: sheet.id ?? '', input });
-    toast(adding ? '🔌 Service saved' : '✏️ Service updated');
+    toast(adding ? '🔌 Tool saved' : '✏️ Tool updated');
     if (adding) {
       // The first-task prompt names the service just saved — the very first
       // one, and every guided save after it — never an older neighbor.
       const hadConnections = state.connections.length > 0;
-      const retargetsReady = guideRetargetsReady(hadConnections, d.setupSource);
-      state.guideTaskCopied = guideTaskCopiedAfterSave(
-        hadConnections,
-        d.setupSource,
-        state.guideTaskCopied,
-      );
-      if (retargetsReady) {
+      // The first tool added gets the "ready — ask your agent" nudge.
+      if (!hadConnections) {
         state.connectionReady = { name, type: t };
         state.connectionTaskCopied = false;
-      }
-      state.quickSetupSource = '';
-      state.quickSetupError = null;
-      // A save that started in the guided panel moves the walkthrough
-      // forward; a plain ＋ Add service does not touch it.
-      if (guideAdvancesOnSave(state.settings.show_service_walkthrough, d.setupSource)) {
-        state.guideStep = 'task';
       }
     }
     closeSheet();
@@ -1545,10 +1429,6 @@ document.addEventListener('click', async (e) => {
     if (!btn) { render(); return; }
     // fall through: the clicked action runs and its render reflects the close
   }
-  if (state.walkthroughMenuOpen && !target?.closest('.walkthrough-menu-wrap')) {
-    state.walkthroughMenuOpen = false;
-    if (!btn) { render(); return; }
-  }
   if (state.agentMenuOpen && !target?.closest('.agent-menu-wrap')) {
     state.agentMenuOpen = null;
     if (!btn) { render(); return; }
@@ -1573,7 +1453,6 @@ document.addEventListener('click', async (e) => {
       const tab = btn.dataset.tab;
       if (tab && TABS.includes(tab as Tab)) state.tab = tab as Tab;
       state.confirm = null;
-      state.walkthroughMenuOpen = false;
       state.agentMenuOpen = null;
       state.connMenuOpen = null;
       render();
@@ -1582,11 +1461,6 @@ document.addEventListener('click', async (e) => {
     case 'mode-tray': state.menuOpen = false; run(() => invoke('ui_set_mode', { mode: 'tray' })); break;
     case 'mode-window': run(() => invoke('ui_set_mode', { mode: 'window' })); break;
     case 'toggle-settings-menu': state.menuOpen = !state.menuOpen; render(); break;
-    case 'toggle-walkthrough-menu':
-      state.menuOpen = false;
-      state.walkthroughMenuOpen = !state.walkthroughMenuOpen;
-      render();
-      break;
     case 'toggle-agent-menu':
       state.agentMenuOpen = state.agentMenuOpen === id ? null : id;
       render();
@@ -1595,14 +1469,6 @@ document.addEventListener('click', async (e) => {
       state.connMenuOpen = state.connMenuOpen === id ? null : id;
       render();
       break;
-    case 'toggle-service-walkthrough': {
-      const on = !state.settings.show_service_walkthrough;
-      if (await run(() => invoke('set_service_walkthrough_visible', { on }))) {
-        state.settings.show_service_walkthrough = on;
-        render();
-      }
-      break;
-    }
     case 'toggle-agent-walkthrough': {
       const on = !state.settings.show_agent_walkthrough;
       if (await run(() => invoke('set_agent_walkthrough_visible', { on }))) {
@@ -1612,12 +1478,6 @@ document.addEventListener('click', async (e) => {
       }
       break;
     }
-    case 'hide-service-walkthrough':
-      if (await run(() => invoke('set_service_walkthrough_visible', { on: false }))) {
-        state.settings.show_service_walkthrough = false;
-        render();
-      }
-      break;
     case 'hide-agent-walkthrough':
       if (await run(() => invoke('set_agent_walkthrough_visible', { on: false }))) {
         state.settings.show_agent_walkthrough = false;
@@ -1625,64 +1485,6 @@ document.addEventListener('click', async (e) => {
         render();
       }
       break;
-    // Guided-setup breadcrumb navigation. The Connect step is the Agents
-    // hero; the rest live in the Services panel — a crumb click may switch
-    // tabs, and re-shows a hidden walkthrough (the click asked for it).
-    case 'guide-step': {
-      const step = btn.dataset.step as GuideStep | undefined;
-      if (!step || !GUIDE_STEPS.some(([value]) => value === step)) break;
-      state.guideStep = step;
-      state.tab = guideTabForStep(step);
-      const setting = guideSettingForStep(step);
-      if (!state.settings[setting]) {
-        const command = setting === 'show_agent_walkthrough'
-          ? 'set_agent_walkthrough_visible' as const
-          : 'set_service_walkthrough_visible' as const;
-        if (await run(() => invoke(command, { on: true }))) {
-          state.settings[setting] = true;
-        }
-      }
-      render();
-      if (step === 'add') focusField('quick-setup-source');
-      break;
-    }
-    case 'guide-copy-task': {
-      const taskType = btn.dataset.type as ConnectionType | undefined;
-      if (!name || !taskType || !TYPES[taskType]) break;
-      try {
-        await navigator.clipboard.writeText(firstTaskPrompt(name, taskType));
-        state.guideTaskCopied = true; // durable: gates Finish setup
-        state.connectionTaskCopied = true; // transient: the Copied flash
-        render();
-        setTimeout(() => { state.connectionTaskCopied = false; render(); }, 1400);
-      } catch {
-        toast('⚠ Could not copy the task');
-      }
-      break;
-    }
-    case 'guide-dismiss': {
-      // Dismissing the walkthrough dismisses the whole workflow: the
-      // Services panel and the Agents hero both retire, or Back-to-the-
-      // beginning would resurrect a supposedly dismissed walkthrough.
-      let allOff = true;
-      for (const setting of GUIDE_DISMISS_SETTINGS) {
-        const command = setting === 'show_agent_walkthrough'
-          ? 'set_agent_walkthrough_visible' as const
-          : 'set_service_walkthrough_visible' as const;
-        if (await run(() => invoke(command, { on: false }))) {
-          state.settings[setting] = false;
-        } else {
-          allOff = false;
-        }
-      }
-      if (allOff) {
-        state.guideStep = 'add';
-        state.guideTaskCopied = false;
-        state.setupInstructionsOpen = false;
-      }
-      render();
-      break;
-    }
     case 'open-settings': state.menuOpen = false; state.sheet = { kind: 'settings' }; render(); break;
     case 'copy-agent-setup':
       if (state.agentMenuOpen) { state.agentMenuOpen = null; render(); }
@@ -1776,34 +1578,23 @@ document.addEventListener('click', async (e) => {
       render(); focusField('f-name'); break;
     case 'save-secret': await saveSecret(); break;
 
-    case 'quick-setup-type': {
-      const type = btn.dataset.type as ConnectionType | undefined;
-      if (type && QUICK_SETUP_TYPES.some(([value]) => value === type)) {
-        state.quickSetupType = type;
-        state.quickSetupError = null;
-        render();
-        focusField('quick-setup-source');
-      }
-      break;
-    }
-    case 'quick-setup-review': {
+    case 'conn-import': {
+      const source = (document.getElementById('conn-import') as HTMLInputElement | null)?.value
+        ?? state.connImportSource;
+      if (!source.trim()) break;
       try {
-        const imported = await connectionDraftFromImport(state.quickSetupSource);
-        if (!await holdDropdownFormOpen()) break;
-        state.quickSetupType = imported.type;
-        state.quickSetupError = null;
-        state.sheet = { kind: 'add-conn' };
+        const imported = await connectionDraftFromImport(source, state.draft);
         state.connType = imported.type;
         state.draft = imported.draft;
+        state.connImportError = null;
         state.sheetErrors = {};
-        state.sheetBaseline = null;
         state.connAdvancedOpen = draftUsesAdvancedFields(state.draft, state.connType);
         render();
         focusImportedConnectionDraft();
       } catch (error) {
-        state.quickSetupError = errorMessage(error);
+        state.connImportError = errorMessage(error);
         render();
-        focusField('quick-setup-source');
+        focusField('conn-import');
       }
       break;
     }
@@ -1829,6 +1620,7 @@ document.addEventListener('click', async (e) => {
       if (!await holdDropdownFormOpen()) break;
       state.sheet = { kind: 'add-conn' }; state.connType = 'api'; state.draft = {};
       state.sheetErrors = {}; state.sheetBaseline = null; state.connAdvancedOpen = false;
+      state.connImportSource = ''; state.connImportError = null;
       render(); focusField('f-cname'); break;
     case 'catalog-toggle':
       state.toolOpen = state.toolOpen === id ? null : id;
@@ -1845,6 +1637,7 @@ document.addEventListener('click', async (e) => {
       if (entry.connType === 'pg') state.draft.port = '5432';
       if (entry.connType === 'ssh') state.draft.port = '22';
       state.sheetErrors = {}; state.sheetBaseline = null; state.connAdvancedOpen = false;
+      state.connImportSource = ''; state.connImportError = null;
       render(); focusField('f-cname'); break;
     }
     case 'edit-conn': {
@@ -1935,7 +1728,7 @@ document.addEventListener('click', async (e) => {
       if (await run(() => invoke('delete_connection', { id }))) {
         state.confirm = null;
         delete state.connTests[id];
-        toast('🗑 Service removed');
+        toast('🗑 Tool removed');
         await refresh('all');
       }
       break;
@@ -2005,11 +1798,6 @@ document.addEventListener('click', async (e) => {
 document.addEventListener('keydown', (e) => {
   // Ctrl-Tab / Ctrl-Shift-Tab cycle the left-nav tabs when the main window is
   // open (a modal sheet keeps focus).
-  if (e.key === 'Enter' && e.target instanceof HTMLInputElement && e.target.id === 'quick-setup-source') {
-    e.preventDefault();
-    document.querySelector<HTMLElement>('[data-act="quick-setup-review"]')?.click();
-    return;
-  }
   if (e.key === 'Tab' && e.ctrlKey && !state.sheet) {
     e.preventDefault();
     const i = TABS.indexOf(state.tab);
@@ -2020,7 +1808,6 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (e.key === 'Escape') {
-    if (state.walkthroughMenuOpen) { state.walkthroughMenuOpen = false; render(); return; }
     if (state.agentMenuOpen) { state.agentMenuOpen = null; render(); return; }
     if (state.connMenuOpen) { state.connMenuOpen = null; render(); return; }
     if (state.menuOpen) { state.menuOpen = false; render(); return; }
@@ -2107,11 +1894,11 @@ function updateCredentialNameWarning(): void {
   hint.hidden = !nameTaken;
 }
 
-function updateServiceNameWarning(): void {
+function updateToolNameWarning(): void {
   const input = document.getElementById('f-cname') as HTMLInputElement | null;
-  const hint = document.getElementById('service-name-warning');
+  const hint = document.getElementById('tool-name-warning');
   if (!input || !hint) return;
-  const nameTaken = serviceNameIsTaken(input.value);
+  const nameTaken = toolNameIsTaken(input.value);
   input.classList.toggle('name-conflict-warning', nameTaken);
   hint.hidden = !nameTaken;
 }
@@ -2123,9 +1910,9 @@ document.addEventListener('input', (e) => {
   const key = target
     ? ERR_KEY_BY_INPUT[target.id as keyof typeof ERR_KEY_BY_INPUT]
     : undefined;
-  if (target?.id === 'quick-setup-source') {
-    state.quickSetupSource = target.value;
-    state.quickSetupError = null;
+  if (target?.id === 'conn-import') {
+    state.connImportSource = target.value;
+    state.connImportError = null;
   }
   if (target?.id === 'tool-search') {
     state.toolSearch = target.value;
@@ -2136,7 +1923,7 @@ document.addEventListener('input', (e) => {
   if (target?.id === 'f-cname') {
     updateCredentialNamePlaceholder(target.value);
     updateCredentialNameWarning();
-    updateServiceNameWarning();
+    updateToolNameWarning();
   }
   if (target?.id === 'c-new-secret-name') updateCredentialNameWarning();
   if (key && state.sheetErrors[key]) {
@@ -2195,7 +1982,7 @@ async function boot() {
     render();
     const connected = state.agents.find((agent) =>
       !before.has(agent.name) || before.get(agent.name) !== agent.paired_at);
-    if (connected) toast(`🔗 ${connected.name} is connected — wire it to your services from the Agents tab`);
+    if (connected) toast(`🔗 ${connected.name} is connected — wire it to your tools from the Agents tab`);
   });
   await listen('aka://wirings-changed', () => refreshAgentsView());
   // A core-side connection change (a trust-on-first-use host-key pin) has no
@@ -2222,7 +2009,6 @@ async function boot() {
     state.sheetBaseline = null;
     state.confirmDiscard = false;
     state.confirm = null;
-    state.walkthroughMenuOpen = false;
     state.agentMenuOpen = null;
     state.connMenuOpen = null;
     render();

@@ -73,10 +73,10 @@ const MOCK_ACTIVITY_META = {
   unwired: { icon: 'unplug', tone: 'neutral' },
   tokenRevoked: { icon: 'unplug', tone: 'danger' },
 };
-const MOCK_AGENT_SETUP = 'Connect to the local AKA broker. Read its current instructions, then list what connections are currently available:\n\ncurl -fsS --unix-socket ~/.aka/broker.sock http://localhost/instructions';
-const MOCK_BROKER_INSTRUCTIONS = `# AKA: broker instructions
+const MOCK_AGENT_SETUP = 'Connect to the local Multitool broker. Read its current instructions, then list what connections are currently available:\n\ncurl -fsS --unix-socket ~/.aka/broker.sock http://localhost/instructions';
+const MOCK_BROKER_INSTRUCTIONS = `# Multitool: broker instructions
 
-AKA holds this developer's secrets and brokers their use.
+Multitool holds this developer's secrets and brokers their use.
 Transport: HTTP over the Unix domain socket \`~/.aka/broker.sock\`.
 
 ## 1. Authenticate
@@ -186,7 +186,6 @@ const db: MockDatabase = {
   settings: {
     reauth_on_read: true,
     menu_bar_hides_dock: false,
-    show_service_walkthrough: true,
     show_agent_walkthrough: true,
   },
 };
@@ -375,7 +374,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         throw formError('validation', 'invalid_connection_field', 'hostKeyFingerprint', 'Enter an OpenSSH SHA-256 or SHA-512 fingerprint');
       }
       if (db.connections.some((c) => c.name === i.name)) {
-        throw formError('conflict', 'connection_name_taken', 'name', 'That service name is already in use');
+        throw formError('conflict', 'connection_name_taken', 'name', 'That tool name is already in use');
       }
       if (i.new_secret_name && (i.new_secret_value || (i.ssh_import_id && i.identity_file))) {
         if (db.secrets.some((s) => s.name === i.new_secret_name)) {
@@ -395,7 +394,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         destination: i.destination, host: i.host, scheme: i.scheme, port: i.port, template: i.template, dbname: i.dbname, user: i.user,
         host_key_fingerprint: i.host_key_fingerprint, sslmode: i.sslmode,
         trusted_ca_bundle_path: i.trusted_ca_bundle_path, url: i.url });
-      audit('connectionAdded', `Service added: ${i.name}`); return;
+      audit('connectionAdded', `Tool added: ${i.name}`); return;
     }
     case 'edit_connection': {
       const c = db.connections.find((x) => x.id === args.id); if (!c) throw new Error('no such connection');
@@ -405,7 +404,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         throw formError('validation', 'invalid_connection_field', 'hostKeyFingerprint', 'Enter an OpenSSH SHA-256 or SHA-512 fingerprint');
       }
       if (db.connections.some((other) => other.id !== c.id && other.name === i.name)) {
-        throw formError('conflict', 'connection_name_taken', 'name', 'That service name is already in use');
+        throw formError('conflict', 'connection_name_taken', 'name', 'That tool name is already in use');
       }
       Object.assign(c, { name: i.name, host: i.host, scheme: i.scheme, port: i.port,
         destination: i.destination,
@@ -416,13 +415,13 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         c.secret_names = [db.secrets.find((s) => s.id === i.secret_id)?.name]
           .filter((name): name is string => Boolean(name));
       }
-      audit('connectionUpdated', `Service updated: ${i.name}`); return;
+      audit('connectionUpdated', `Tool updated: ${i.name}`); return;
     }
     case 'delete_connection': {
       const c = db.connections.find((x) => x.id === args.id); if (!c) throw new Error('no such connection');
       db.connections = db.connections.filter((x) => x.id !== args.id);
       db.wirings = db.wirings.filter((w) => w.connection_id !== args.id);
-      audit('connectionDeleted', `Service deleted: ${c.name}`); return;
+      audit('connectionDeleted', `Tool deleted: ${c.name}`); return;
     }
     case 'test_connection': {
       const c = db.connections.find((x) => x.id === args.id); if (!c) throw new Error('no such connection');
@@ -470,9 +469,6 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
     case 'set_reauth_on_read': db.settings.reauth_on_read = args.on; return;
     case 'set_menu_bar_hides_dock':
       db.settings.menu_bar_hides_dock = args.on;
-      return;
-    case 'set_service_walkthrough_visible':
-      db.settings.show_service_walkthrough = args.on;
       return;
     case 'set_agent_walkthrough_visible':
       db.settings.show_agent_walkthrough = args.on;
