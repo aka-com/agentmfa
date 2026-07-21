@@ -138,5 +138,4 @@ mod tests {
         assert!(wait <= Duration::from_secs(60));
         assert!(l.check("b").is_ok());
     }
-
 }

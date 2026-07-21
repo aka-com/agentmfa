@@ -249,7 +249,10 @@ async fn run_once(
 }
 
 /// Drain stdout for the life of the process, reporting the ready line once.
-async fn pump_stdout(stdout: tokio::process::ChildStdout, ready: tokio::sync::oneshot::Sender<u16>) {
+async fn pump_stdout(
+    stdout: tokio::process::ChildStdout,
+    ready: tokio::sync::oneshot::Sender<u16>,
+) {
     let mut lines = BufReader::new(stdout).lines();
     let mut ready = Some(ready);
     while let Ok(Some(line)) = lines.next_line().await {

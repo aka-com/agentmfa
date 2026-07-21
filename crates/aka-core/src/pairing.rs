@@ -222,7 +222,6 @@ impl PairingRegistry {
             .find(|agent| &agent.id == client_id)
             .cloned()
     }
-
 }
 
 /// Agent names are self-asserted labels; keep them printable and bounded so

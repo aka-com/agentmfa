@@ -166,7 +166,11 @@ impl Drop for WaiterGuard {
 }
 
 impl Executions {
-    pub fn new(retention: Duration, retention_max_entries: usize, retention_max_bytes: usize) -> Self {
+    pub fn new(
+        retention: Duration,
+        retention_max_entries: usize,
+        retention_max_bytes: usize,
+    ) -> Self {
         let shared = Arc::new(Shared {
             retention,
             retention_max_entries,

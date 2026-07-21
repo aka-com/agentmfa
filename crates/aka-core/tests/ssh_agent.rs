@@ -549,7 +549,10 @@ async fn tofu_pin_holds_for_later_binds_and_refuses_other_keys() {
     let token = h.pair().await;
     let (auth_sock, _) = h.open_ssh(&token).await;
 
-    assert_eq!(spawn_bind(&auth_sock, &host_key).await.unwrap().0, SSH_AGENT_SUCCESS);
+    assert_eq!(
+        spawn_bind(&auth_sock, &host_key).await.unwrap().0,
+        SSH_AGENT_SUCCESS
+    );
 
     // A second connection binds the pinned key without re-pinning.
     let mut again = UnixStream::connect(&auth_sock).await.unwrap();
@@ -603,7 +606,10 @@ async fn tofu_pin_reaches_agent_sockets_opened_before_it() {
     let (first_sock, _) = h.open_ssh(&token).await;
     let (second_sock, _) = h.open_ssh(&token).await;
 
-    assert_eq!(spawn_bind(&first_sock, &host_key).await.unwrap().0, SSH_AGENT_SUCCESS);
+    assert_eq!(
+        spawn_bind(&first_sock, &host_key).await.unwrap().0,
+        SSH_AGENT_SUCCESS
+    );
 
     // The second socket re-reads the store instead of re-pinning.
     let mut stream = UnixStream::connect(&second_sock).await.unwrap();

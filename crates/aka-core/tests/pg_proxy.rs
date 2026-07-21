@@ -39,10 +39,7 @@ impl BrokerEvents for TestEvents {
             .fetch_add(1, Ordering::SeqCst);
         true
     }
-    fn confirm_action(
-        &self,
-        _description: &str,
-    ) -> Option<aka_core::types::ConfirmationMethod> {
+    fn confirm_action(&self, _description: &str) -> Option<aka_core::types::ConfirmationMethod> {
         Some(aka_core::types::ConfirmationMethod::Waived)
     }
 }

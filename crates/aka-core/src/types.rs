@@ -482,7 +482,7 @@ mod tests {
             scheme: "https".into(),
             port: None,
             template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
-        
+
             mcp_path: None,
         };
         assert_eq!(api.target(), "https://api.github.com");
@@ -558,7 +558,7 @@ mod tests {
             scheme: "https".into(),
             port: None,
             template: "Authorization: Bearer {{A}}".into(),
-        
+
             mcp_path: None,
         };
         let api_b = ConnectionConfig::Api {
@@ -566,7 +566,7 @@ mod tests {
             scheme: "https".into(),
             port: Some(443),
             template: "Authorization: Bearer {{B}}".into(),
-        
+
             mcp_path: None,
         };
         assert!(api_a.has_equivalent_target(&api_b));

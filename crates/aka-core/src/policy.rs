@@ -311,7 +311,11 @@ mod tests {
         let existing = Uuid::new_v4();
         w.wire(client, "claude-code", existing).unwrap();
         let added = w
-            .wire_all(client, "claude-code", &[existing, Uuid::new_v4(), Uuid::new_v4()])
+            .wire_all(
+                client,
+                "claude-code",
+                &[existing, Uuid::new_v4(), Uuid::new_v4()],
+            )
             .unwrap();
         assert_eq!(added.len(), 2);
         assert_eq!(w.wirings().len(), 3);

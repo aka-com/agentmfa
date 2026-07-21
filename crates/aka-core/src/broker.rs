@@ -20,7 +20,9 @@ use crate::policy::Wirings;
 use crate::ratelimit::{KeyedLimiter, WindowLimiter};
 use crate::sessions::{DataPlane, SessionInfo};
 use crate::store::{ConnectionSpec, Store};
-use crate::types::{Connection, ConnectionKind, PairedAgent, SecretMeta, SecretValue, Settings, Wiring};
+use crate::types::{
+    Connection, ConnectionKind, PairedAgent, SecretMeta, SecretValue, Settings, Wiring,
+};
 use crate::Result;
 
 const COPY_AUTHORIZATION_TTL: Duration = Duration::from_secs(5 * 60);
@@ -512,7 +514,12 @@ impl Broker {
     /// Wire or unwire an agent from the app. Unwiring does not chase down
     /// live transports — tickets are short-lived, and the next open is
     /// refused.
-    pub fn ui_set_wiring(&self, client_id: &Uuid, connection_id: &Uuid, wired: bool) -> Result<bool> {
+    pub fn ui_set_wiring(
+        &self,
+        client_id: &Uuid,
+        connection_id: &Uuid,
+        wired: bool,
+    ) -> Result<bool> {
         let _gate = self.config_gate.lock().unwrap();
         let Some(agent) = self.pairing.get_by_id(client_id) else {
             return Ok(false);
@@ -661,7 +668,6 @@ impl Broker {
     pub fn ui_set_menu_bar_hides_dock(&self, on: bool) -> Result<()> {
         self.store.set_menu_bar_hides_dock(on)
     }
-
 }
 
 /// A broker from before the advisory-lock protocol can still own the socket

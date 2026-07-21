@@ -681,7 +681,6 @@ impl Store {
         next.settings = Some(settings);
         self.commit(&mut state, next)
     }
-
 }
 
 fn migrate_legacy_pg_ca_bundle(state: &mut IndexState) -> bool {
@@ -1005,7 +1004,7 @@ mod tests {
                 scheme: "https".into(),
                 port: None,
                 template: template.into(),
-            
+
                 mcp_path: None,
             },
             secrets: vec![],

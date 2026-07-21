@@ -416,7 +416,7 @@ fn conn_config(args: &ConnAdd) -> Result<ConnectionConfig, String> {
                 scheme: args.scheme.clone().unwrap_or_else(|| "https".into()),
                 port: args.port,
                 template: require("template", &args.template)?,
-            
+
                 mcp_path: None,
             })
         }
