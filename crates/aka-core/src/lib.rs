@@ -19,6 +19,7 @@ pub mod daemon;
 pub mod error;
 pub mod events;
 pub mod executions;
+pub mod health;
 pub mod integrity;
 pub mod mcp;
 pub mod mcp_auth;

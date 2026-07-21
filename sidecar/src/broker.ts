@@ -24,6 +24,8 @@ export interface BrokerConnection {
   wired: boolean;
   /** Set when this upstream speaks MCP at that path, e.g. `/mcp`. */
   mcp_path?: string | null;
+  /** Curated upstream MCP tool subset for this agent; absent means all. */
+  allowed_tools?: string[] | null;
 }
 
 /** A non-2xx from the broker, carried through with its status intact. */

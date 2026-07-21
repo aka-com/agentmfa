@@ -341,6 +341,80 @@ pub async fn check_connection(
     check_endpoint(client.clone(), endpoint, credential, options).await
 }
 
+/// One upstream tool, as the per-wiring tool picker lists it.
+#[derive(Debug, Clone, Serialize)]
+pub struct McpToolInfo {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Ask an MCP connection's upstream for its tool list (names +
+/// descriptions), for the per-wiring tool picker. Same handshake and
+/// credential path as the status check, minus whoami and resources.
+pub async fn list_tools(
+    store: &Store,
+    client: &reqwest::Client,
+    connection: &Connection,
+) -> Result<Vec<McpToolInfo>, String> {
+    let endpoint = mcp_endpoint(connection)?;
+    let ConnectionConfig::Api { template, .. } = &connection.config else {
+        return Err("not an API connection".into());
+    };
+    let rendered = render_injection(store, template)
+        .await
+        .map_err(|detail| format!("could not render credential: {detail}"))?;
+    let mut session = McpSession::new(
+        client.clone(),
+        endpoint,
+        Credential::from_rendered(rendered),
+    );
+    session
+        .request(
+            "initialize",
+            json!({
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": { "name": "aka-multitool", "version": env!("CARGO_PKG_VERSION") },
+            }),
+        )
+        .await?;
+    session.protocol_sent = true;
+    let _ = session.notify("notifications/initialized").await;
+
+    let mut tools: Vec<McpToolInfo> = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..MAX_TOOL_PAGES {
+        let params = match &cursor {
+            Some(cursor) => json!({ "cursor": cursor }),
+            None => json!({}),
+        };
+        let page = session.request("tools/list", params).await?;
+        if let Some(list) = page.get("tools").and_then(Value::as_array) {
+            for tool in list {
+                let Some(name) = tool.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                tools.push(McpToolInfo {
+                    name: name.to_string(),
+                    description: tool
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                });
+            }
+        }
+        cursor = page
+            .get("nextCursor")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    Ok(tools)
+}
+
 /// Post-OAuth verification: same handshake, with the just-issued bearer
 /// token supplied directly (it is not in the vault yet, or was just
 /// replaced, and reading it back could demand a native re-auth prompt).

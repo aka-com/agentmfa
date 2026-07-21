@@ -566,6 +566,12 @@ function catalogConnRowHTML(c: ConnectionSummary): string {
     ? `<span class="cat-meta-warn">TLS ${esc(c.sslmode)}</span>` : '';
   const hostKey = c.type === 'ssh' && !c.host_key_fingerprint
     ? '<span class="cat-meta-warn">Host key not pinned yet</span>' : '';
+  // Passive health: brokered agent calls and background token renewals
+  // record a rejected credential without anyone pressing Test. Only the
+  // actionable state is surfaced; the tooltip carries the check's detail.
+  const needsReconnect = c.last_status === 'needs_reconnect'
+    ? `<span class="cat-meta-warn" title="${escAttr(c.last_detail || '')}">Needs reconnect</span>`
+    : '';
   return `<div class="cat-conn">
     <div class="cat-conn-tx">
       <div class="cat-conn-head"><b>${esc(c.name)}</b>${live ? ` <span class="cc-live">● ${live} live</span>` : ''}</div>
@@ -574,7 +580,7 @@ function catalogConnRowHTML(c: ConnectionSummary): string {
         <span>${esc(connectionPurpose(c))}</span>
         <span>${esc(connectionCredential(c))}</span>
         <span class="${wiring.wired ? '' : 'cat-meta-idle'}">${esc(wiring.text)}</span>
-        ${account}${tls}${hostKey}
+        ${account}${tls}${hostKey}${needsReconnect}
       </div>${connTestResultHTML(c)}${mcpStatusHTML(c)}</div>
     ${statusBtn}<div class="tile-menu-wrap">
       <button class="icon-btn tile-menu-btn ${menuOpen ? 'on' : ''}" title="Tool options"

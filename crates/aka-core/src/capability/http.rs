@@ -269,6 +269,10 @@ pub struct HttpExecution {
     pub path: String,
     pub headers: HeaderMap,
     pub body: Arc<SpooledBody>,
+    /// When present, the outcome updates the connection's last-known health:
+    /// an upstream 401/403 flips it to needs-reconnect, a served response
+    /// upgrades it to ok.
+    pub health: Option<Arc<crate::health::HealthRegistry>>,
 }
 
 /// Pinned upstream authority from an API connection config.
@@ -311,6 +315,7 @@ impl HttpExecution {
             .and_then(|s| s.as_u64())
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("broker:{}", outcome.status));
+        self.record_health(&outcome);
         self.audit.append(
             AuditEntry::new(
                 AuditKind::HttpExecuted,
@@ -326,7 +331,37 @@ impl HttpExecution {
         outcome
     }
 
+    /// Health bookkeeping from one outcome: a relayed upstream 401/403 means
+    /// the destination rejected the credential; any other relayed response
+    /// proves the connection works; broker-side errors are not conclusive.
+    fn record_health(&self, outcome: &ExecOutcome) {
+        let Some(health) = &self.health else { return };
+        let id = self.connection.id;
+        match outcome.body.get("status").and_then(|s| s.as_u64()) {
+            Some(status @ (401 | 403)) => health.record(
+                &id,
+                crate::types::HealthStatus::NeedsReconnect,
+                format!("The destination answered but rejected the credential (HTTP {status})"),
+            ),
+            Some(_) => health.record_ok_if_changed(&id, "A brokered call reached the destination"),
+            None => {}
+        }
+    }
+
     async fn run_inner(&self) -> ExecOutcome {
+        // An OAuth-minted token at expiry is renewed before it rides the
+        // upstream leg, so agent calls never present a token the broker
+        // already knew was stale. Best-effort: on failure the current token
+        // goes out as-is and the upstream's verdict lands in health.
+        if self.connection.oauth.is_some() {
+            let ctx = crate::mcp_refresh::RefreshContext {
+                store: self.store.as_ref(),
+                http: &self.client,
+                audit: self.audit.as_ref(),
+                health: self.health.as_deref(),
+            };
+            crate::mcp_refresh::ensure_fresh(&ctx, &self.connection).await;
+        }
         // Render the credential as late as possible; values are zeroized on
         // drop.
         let ConnectionConfig::Api { template, .. } = &self.connection.config else {

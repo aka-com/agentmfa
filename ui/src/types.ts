@@ -13,6 +13,8 @@ export interface SecretSummary {
 export interface WiringSummary {
   agent_id: string;
   agent: string;
+  /** Curated upstream MCP tool subset for this agent; absent means all. */
+  allowed_tools?: string[] | null;
 }
 
 export interface ConnectionSummary {
@@ -41,6 +43,14 @@ export interface ConnectionSummary {
   sslmode: string | null;
   url: string | null;
   trusted_ca_bundle_path: string | null;
+  /**
+   * Last-known health, learned passively (brokered calls) and from tests
+   * and status checks: 'ok' | 'failed' | 'needs_reconnect'. All absent
+   * while untested.
+   */
+  last_status?: 'ok' | 'failed' | 'needs_reconnect' | null;
+  last_detail?: string | null;
+  last_checked_at?: string | null;
 }
 
 export interface AgentSummary {
@@ -221,6 +231,12 @@ export interface McpCheckOptions {
   expected_tools?: string[];
 }
 
+/** One upstream tool, as the per-wiring tool picker lists it. */
+export interface McpToolInfo {
+  name: string;
+  description?: string;
+}
+
 interface CommandSpec<Args, Result> {
   args: Args;
   result: Result;
@@ -255,6 +271,11 @@ export interface CommandMap {
   get_mcp_auth: CommandSpec<{ id: string }, McpAuthState | null>;
   cancel_mcp_auth: CommandSpec<{ id: string }, boolean>;
   mcp_status: CommandSpec<{ id: string; options?: McpCheckOptions | null }, McpStatusReport>;
+  set_wiring_tools: CommandSpec<
+    { agentId: string; connectionId: string; tools?: string[] | null },
+    boolean
+  >;
+  list_mcp_tools: CommandSpec<{ id: string }, McpToolInfo[]>;
   open_url: CommandSpec<{ url: string }, void>;
   set_wiring: CommandSpec<{
     agentId: string;

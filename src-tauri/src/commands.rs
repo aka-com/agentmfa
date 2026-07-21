@@ -809,6 +809,39 @@ pub fn set_wiring(
         .map_err(|e| e.to_string())
 }
 
+/// Curate which upstream MCP tools a wiring may call. `null` restores the
+/// default (all tools). Enforced broker-side on every `tools/call`; the
+/// sidecar's tool listing mirrors it.
+#[tauri::command]
+pub fn set_wiring_tools(
+    state: State<AppState>,
+    agent_id: String,
+    connection_id: String,
+    tools: Option<Vec<String>>,
+) -> CmdResult<bool> {
+    let agent_id = parse_id(&agent_id)?;
+    let connection_id = parse_id(&connection_id)?;
+    state
+        .broker
+        .ui_set_wiring_tools(&agent_id, &connection_id, tools)
+        .map_err(|e| e.to_string())
+}
+
+/// List an MCP connection's upstream tools (names + descriptions), for the
+/// per-wiring tool picker. Read-only against the upstream.
+#[tauri::command]
+pub async fn list_mcp_tools(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<Vec<aka_core::mcp::McpToolInfo>> {
+    let id = parse_id(&id)?;
+    state
+        .broker
+        .ui_list_mcp_tools(&id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /* ----------------------------- paired agents ----------------------------- */
 
 #[tauri::command]
@@ -894,6 +927,8 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         mcp_status,
         open_url,
         set_wiring,
+        set_wiring_tools,
+        list_mcp_tools,
         confirm_agent_disconnect,
         revoke_agent,
         close_session,

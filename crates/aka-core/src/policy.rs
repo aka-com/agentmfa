@@ -69,6 +69,7 @@ impl Wirings {
                             client_id: rule.client_id,
                             agent: rule.agent,
                             connection_id: rule.connection_id,
+                            allowed_tools: None,
                             created_at: Utc::now(),
                         });
                     }
@@ -101,6 +102,41 @@ impl Wirings {
 
     pub fn wirings(&self) -> Vec<Wiring> {
         self.wirings.lock().unwrap().clone()
+    }
+
+    /// The wiring for one agent↔connection pair, when it exists.
+    pub fn wiring_for(&self, client_id: &Uuid, connection_id: &Uuid) -> Option<Wiring> {
+        self.wirings
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|w| &w.client_id == client_id && &w.connection_id == connection_id)
+            .cloned()
+    }
+
+    /// Set (or clear, with `None`) the wiring's allowed upstream MCP tools.
+    /// Returns whether a wiring existed and was updated.
+    pub fn set_allowed_tools(
+        &self,
+        client_id: &Uuid,
+        connection_id: &Uuid,
+        tools: Option<Vec<String>>,
+    ) -> Result<bool> {
+        let mut wirings = self.wirings.lock().unwrap();
+        let mut next = wirings.clone();
+        let Some(wiring) = next
+            .iter_mut()
+            .find(|w| &w.client_id == client_id && &w.connection_id == connection_id)
+        else {
+            return Ok(false);
+        };
+        if wiring.allowed_tools == tools {
+            return Ok(false);
+        }
+        wiring.allowed_tools = tools;
+        self.persist(&next)?;
+        *wirings = next;
+        Ok(true)
     }
 
     pub fn wirings_for_client(&self, client_id: &Uuid) -> Vec<Wiring> {
@@ -138,6 +174,7 @@ impl Wirings {
             client_id,
             agent: agent.to_string(),
             connection_id,
+            allowed_tools: None,
             created_at: Utc::now(),
         };
         let mut next = wirings.clone();
@@ -170,6 +207,7 @@ impl Wirings {
                 client_id,
                 agent: agent.to_string(),
                 connection_id: *connection_id,
+                allowed_tools: None,
                 created_at: Utc::now(),
             };
             next.push(wiring.clone());

@@ -294,6 +294,39 @@ impl ConnectionConfig {
     }
 }
 
+/// Persisted per-connection health, updated by tests and brokered calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthStatus {
+    /// Last check reached the destination and the credential was accepted.
+    Ok,
+    /// Last check failed to reach the destination or errored.
+    Failed,
+    /// The destination answered but rejected the credential (HTTP 401/403,
+    /// auth failure): the fix is reconnecting/replacing the credential, not
+    /// retrying.
+    NeedsReconnect,
+}
+
+impl HealthStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            HealthStatus::Ok => "ok",
+            HealthStatus::Failed => "failed",
+            HealthStatus::NeedsReconnect => "needs_reconnect",
+        }
+    }
+}
+
+/// One connection's last-known health: the verdict, the check's one-line
+/// summary, and when it was learned. Display state only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectionHealth {
+    pub status: HealthStatus,
+    pub detail: String,
+    pub checked_at: DateTime<Utc>,
+}
+
 /// The index-side half of an OAuth-connected MCP connection: which vault
 /// item holds the refresh grant, and when the access token expires. The
 /// secret material (refresh token, client secret) lives in the vault item;
@@ -374,6 +407,11 @@ pub struct Wiring {
     pub agent: String,
     /// The connection's stable id, never its renamable name.
     pub connection_id: Uuid,
+    /// Curated subset of the upstream MCP tools this wiring may call;
+    /// `None` means every tool. Enforced broker-side on `tools/call` and
+    /// mirrored by the sidecar's tool listing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_tools: Option<Vec<String>>,
     pub created_at: DateTime<Utc>,
 }
 

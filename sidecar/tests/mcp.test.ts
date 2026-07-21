@@ -388,6 +388,28 @@ test("an MCP upstream's own tools are re-exposed, credential-side untouched", as
   }
 });
 
+test('a curated wiring lists only its allowed subset of upstream tools', async () => {
+  // The broker advertises `allowed_tools` on the connection when the user
+  // curated a subset; the sidecar's listing mirrors it (the broker enforces
+  // it on tools/call regardless).
+  const notion = CONNECTIONS.find((c) => c.name === 'notion')! as {
+    allowed_tools?: string[] | null;
+  };
+  notion.allowed_tools = ['search'];
+  const app = await harness();
+  try {
+    const client = await app.connect('token-mcp');
+    const { tools } = await client.listTools();
+    assert.deepEqual(tools.map((tool) => tool.name).sort(), [
+      'multitool_notion_search',
+      'multitool_status',
+    ]);
+  } finally {
+    delete notion.allowed_tools;
+    await app.close();
+  }
+});
+
 test('a stateful upstream sees the full handshake and no leaked sessions', async () => {
   // The fake upstream refuses anything without its session id, before
   // `notifications/initialized`, or missing the negotiated protocol-version

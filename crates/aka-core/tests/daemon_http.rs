@@ -193,6 +193,10 @@ async fn upstream() -> Upstream {
                     vec![0u8, 159, 146, 150, 255],
                 )
             }),
+        )
+        .route(
+            "/unauthorized",
+            get(|| async { (axum::http::StatusCode::UNAUTHORIZED, "nope") }),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -1345,4 +1349,141 @@ async fn repairing_supersedes_the_previous_token() {
     )
     .await;
     assert_eq!(status, 200);
+}
+
+#[tokio::test]
+async fn a_brokered_401_flips_connection_health_to_needs_reconnect() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let up = upstream().await;
+    api_connection(&h, "github", up.port);
+    let conn_id = h.broker.store.connection_by_name("github").unwrap().id;
+    let token = h.pair("claude-code").await;
+    let auth = format!("Bearer {token}");
+
+    // Nothing checked yet.
+    assert!(h.broker.health.get(&conn_id).is_none());
+
+    // A brokered call the upstream rejects (401) is a credential problem.
+    let (status, _) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(json!({ "connection": "github", "method": "GET", "path": "/unauthorized" })),
+    )
+    .await;
+    assert_eq!(status, 200, "the broker relays the upstream response");
+    let health = h.broker.health.get(&conn_id).expect("health recorded");
+    assert_eq!(health.status, aka_core::types::HealthStatus::NeedsReconnect);
+
+    // A subsequent successful call upgrades it back to ok.
+    let (status, _) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(json!({ "connection": "github", "method": "GET", "path": "/user/repos" })),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        h.broker.health.get(&conn_id).unwrap().status,
+        aka_core::types::HealthStatus::Ok
+    );
+}
+
+#[tokio::test]
+async fn a_curated_wiring_refuses_tools_outside_its_subset() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let up = upstream().await;
+    // An MCP connection: an API connection with an mcp_path, pointed at the
+    // upstream's /echo so tools/call round-trips.
+    h.broker
+        .store
+        .add_secret("MCP_TOKEN", Zeroizing::new("tok".into()))
+        .unwrap();
+    h.broker
+        .store
+        .add_connection(ConnectionSpec {
+            name: "docs".into(),
+            config: ConnectionConfig::Api {
+                host: "127.0.0.1".into(),
+                scheme: "http".into(),
+                port: Some(up.port),
+                template: "Authorization: Bearer {{MCP_TOKEN}}".into(),
+                mcp_path: Some("/echo".into()),
+            },
+            secrets: vec![],
+        })
+        .unwrap();
+    let conn = h.broker.store.connection_by_name("docs").unwrap();
+    let token = h.pair("claude-code").await;
+    let auth = format!("Bearer {token}");
+    let agent_id = h.broker.paired_agents()[0].id;
+
+    // Allow only "search"; "delete" is not in the subset.
+    h.broker
+        .ui_set_wiring_tools(&agent_id, &conn.id, Some(vec!["search".into()]))
+        .unwrap();
+
+    let call = |name: &str| {
+        json!({
+            "connection": "docs",
+            "method": "POST",
+            "path": "/echo",
+            "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                      "params": { "name": name, "arguments": {} } }
+        })
+    };
+
+    let (status, body) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(call("delete")),
+    )
+    .await;
+    assert_eq!(status, 403, "a tool outside the subset is refused: {body}");
+    assert_eq!(body["reason"], "denied_by_policy");
+
+    let (status, _) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(call("search")),
+    )
+    .await;
+    assert_eq!(status, 200, "an allowed tool passes through");
+
+    // A non-tools/call body on the MCP path is untouched by the filter.
+    let (status, _) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(json!({
+            "connection": "docs",
+            "method": "POST",
+            "path": "/echo",
+            "body": { "jsonrpc": "2.0", "id": 2, "method": "tools/list" }
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "listing is not a tools/call and passes");
+
+    // Clearing the subset (None) allows everything again.
+    h.broker
+        .ui_set_wiring_tools(&agent_id, &conn.id, None)
+        .unwrap();
+    let (status, _) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(call("delete")),
+    )
+    .await;
+    assert_eq!(status, 200, "no subset means every tool is callable");
 }

@@ -95,6 +95,10 @@ impl Paths {
     pub fn audit_file(&self) -> PathBuf {
         self.data_dir.join("audit.jsonl")
     }
+    /// Last-known connection health. Advisory display state, not sealed.
+    pub fn health_file(&self) -> PathBuf {
+        self.data_dir.join("health.json")
+    }
     /// Dev-only fallback vault (non-macOS builds); see `vault::FileVault`.
     pub fn dev_vault_file(&self) -> PathBuf {
         self.data_dir.join("dev-vault.json")

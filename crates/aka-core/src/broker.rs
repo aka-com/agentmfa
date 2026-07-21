@@ -53,6 +53,8 @@ pub struct Broker {
     pub executions: Executions,
     pub audit: Arc<AuditLog>,
     pub events: Arc<dyn BrokerEvents>,
+    /// Last-known per-connection health (tests + brokered-call outcomes).
+    pub health: Arc<crate::health::HealthRegistry>,
     /// Tickets + live WS/PG sessions.
     pub data_plane: DataPlane,
     /// The WS bridge's ephemeral loopback port, set when the daemon starts;
@@ -126,6 +128,10 @@ impl Broker {
             audit.clone(),
             events.clone(),
         );
+        let health = Arc::new(crate::health::HealthRegistry::open(
+            paths.health_file(),
+            events.clone(),
+        ));
         let broker = Arc::new(Self {
             data_plane,
             mcp_auth: crate::mcp_auth::McpAuthSessions::default(),
@@ -151,6 +157,7 @@ impl Broker {
             executions,
             audit,
             events,
+            health,
             http_client,
             _instance_lock: instance_lock,
         });
@@ -403,6 +410,9 @@ impl Broker {
             if dropped > 0 {
                 self.events.wirings_changed();
             }
+            // A health result for the old destination says nothing about
+            // the new one.
+            self.health.forget(id);
         }
         let mut entry = AuditEntry::new(
             AuditKind::ConnectionUpdated,
@@ -453,6 +463,7 @@ impl Broker {
             return Err(CoreError::ApprovalConnectionChanged);
         }
         let conn = self.store.delete_connection(id)?;
+        self.health.forget(id);
         let dropped = self.wirings.remove_for_connection(id)?;
         if dropped > 0 {
             self.events.wirings_changed();
@@ -474,7 +485,21 @@ impl Broker {
     /// summary comes back.
     pub async fn ui_test_connection(&self, id: &Uuid) -> Result<ConnectionTestReport> {
         const TEST_TIMEOUT: Duration = Duration::from_secs(15);
-        let connection = self.store.connection_by_id(id)?;
+        let mut connection = self.store.connection_by_id(id)?;
+        // An OAuth token at expiry is renewed before the test, so the test
+        // grades the connection, not a token the broker knew was stale.
+        if crate::mcp_refresh::wants_refresh(&connection)
+            && crate::mcp_refresh::refresh_connection_token(
+                &self.refresh_context(),
+                id,
+                crate::mcp_refresh::RefreshMode::IfStale,
+            )
+            .await
+            .is_ok()
+        {
+            connection = self.store.connection_by_id(id)?;
+        }
+        let connection = connection;
         let test = async {
             match connection.config.kind() {
                 ConnectionKind::Api => {
@@ -509,6 +534,18 @@ impl Broker {
             Ok(detail) => (true, detail),
             Err(detail) => (false, detail),
         };
+        // The test result is the connection's new last-known health. A
+        // credential rejection reads as "reconnect", not "retry".
+        let status = if ok {
+            crate::types::HealthStatus::Ok
+        } else if detail.contains("rejected the credential")
+            || detail.contains("password authentication failed")
+        {
+            crate::types::HealthStatus::NeedsReconnect
+        } else {
+            crate::types::HealthStatus::Failed
+        };
+        self.health.record(id, status, detail.clone());
         Ok(ConnectionTestReport { ok, detail })
     }
 
@@ -530,9 +567,13 @@ impl Broker {
         // "credential rejected".
         let mut refreshed = false;
         if crate::mcp_refresh::wants_refresh(&connection)
-            && crate::mcp_refresh::refresh_connection_token(self, &connection)
-                .await
-                .is_ok()
+            && crate::mcp_refresh::refresh_connection_token(
+                &self.refresh_context(),
+                id,
+                crate::mcp_refresh::RefreshMode::IfStale,
+            )
+            .await
+            .is_ok()
         {
             connection = self.store.connection_by_id(id)?;
             refreshed = true;
@@ -552,9 +593,13 @@ impl Broker {
         if !report.ok
             && report.credential_rejected
             && !refreshed
-            && crate::mcp_refresh::refresh_connection_token(self, &connection)
-                .await
-                .is_ok()
+            && crate::mcp_refresh::refresh_connection_token(
+                &self.refresh_context(),
+                id,
+                crate::mcp_refresh::RefreshMode::Force,
+            )
+            .await
+            .is_ok()
         {
             connection = self.store.connection_by_id(id)?;
             report = match tokio::time::timeout(
@@ -572,6 +617,15 @@ impl Broker {
                 .set_connection_account(id, report.account.clone())?;
             self.events.connections_changed();
         }
+        // The check's verdict is the connection's new last-known health.
+        let status = if report.ok {
+            crate::types::HealthStatus::Ok
+        } else if report.credential_rejected {
+            crate::types::HealthStatus::NeedsReconnect
+        } else {
+            crate::types::HealthStatus::Failed
+        };
+        self.health.record(id, status, report.detail.clone());
         Ok(report)
     }
 
@@ -625,6 +679,67 @@ impl Broker {
             }
             Ok(removed.is_some())
         }
+    }
+
+    /// Curate which upstream MCP tools a wiring may call. `None` restores
+    /// the default (all tools); `Some` is enforced by the broker on every
+    /// `tools/call` and mirrored by the sidecar's tool listing.
+    pub fn ui_set_wiring_tools(
+        &self,
+        client_id: &Uuid,
+        connection_id: &Uuid,
+        tools: Option<Vec<String>>,
+    ) -> Result<bool> {
+        let _gate = self.config_gate.lock().unwrap();
+        let Some(agent) = self.pairing.get_by_id(client_id) else {
+            return Ok(false);
+        };
+        let connection = self.store.connection_by_id(connection_id)?;
+        let detail = match &tools {
+            None => "all tools".to_string(),
+            Some(list) => format!(
+                "{} tool{} allowed",
+                list.len(),
+                if list.len() == 1 { "" } else { "s" }
+            ),
+        };
+        let changed = self
+            .wirings
+            .set_allowed_tools(client_id, connection_id, tools)?;
+        if changed {
+            self.audit.append(
+                AuditEntry::new(
+                    AuditKind::Wired,
+                    format!(
+                        "Tool selection for {} → {}: {detail}",
+                        agent.name, connection.name
+                    ),
+                )
+                .agent(agent.name.clone())
+                .connection(connection.name.clone()),
+            );
+            self.events.wirings_changed();
+        }
+        Ok(changed)
+    }
+
+    /// Ask an MCP connection's upstream server for its tool list (the
+    /// per-wiring tool picker). Read-only against the upstream; the
+    /// credential rides only the upstream leg, as everywhere.
+    pub async fn ui_list_mcp_tools(&self, id: &Uuid) -> Result<Vec<crate::mcp::McpToolInfo>> {
+        let connection = self.store.connection_by_id(id)?;
+        if crate::mcp_refresh::wants_refresh(&connection) {
+            let _ = crate::mcp_refresh::refresh_connection_token(
+                &self.refresh_context(),
+                id,
+                crate::mcp_refresh::RefreshMode::IfStale,
+            )
+            .await;
+        }
+        let connection = self.store.connection_by_id(id)?;
+        crate::mcp::list_tools(&self.store, &self.http_client, &connection)
+            .await
+            .map_err(CoreError::InvalidConnectionConfig)
     }
 
     /// The very first agent to register is wired to every existing

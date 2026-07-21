@@ -616,6 +616,16 @@ async fn get_connections(State(state): State<AppState>, authed: Authed) -> Respo
             } = &c.config
             {
                 row["mcp_path"] = json!(path);
+                // A curated tool subset for this agent, when the wiring has
+                // one; the broker enforces it on tools/call, this field lets
+                // the sidecar list only what is callable.
+                if let Some(tools) = broker
+                    .wirings
+                    .wiring_for(&authed.agent.id, &c.id)
+                    .and_then(|w| w.allowed_tools)
+                {
+                    row["allowed_tools"] = json!(tools);
+                }
             }
             row
         })
@@ -790,6 +800,49 @@ async fn post_http(
             format!("request body cap is {} bytes", broker.config.request_cap),
         );
     }
+
+    // A curated MCP wiring: `tools/call` for a tool outside the allowed
+    // subset is refused here, at the same trust boundary as the wiring
+    // check itself — the sidecar's filtered listing is a mirror, not the
+    // enforcement.
+    if let ConnectionConfig::Api {
+        mcp_path: Some(mcp_path),
+        ..
+    } = &conn.config
+    {
+        let call_path = call.path.split('?').next().unwrap_or("");
+        let pinned_path = mcp_path.split('?').next().unwrap_or("");
+        if call_path == pinned_path {
+            let allowed = broker
+                .wirings
+                .wiring_for(&agent.id, &conn.id)
+                .and_then(|w| w.allowed_tools);
+            if let (Some(allowed), Some(tool)) = (allowed, mcp_tool_call_name(&body_bytes)) {
+                if !allowed.iter().any(|name| name == &tool) {
+                    broker.audit.append(
+                        AuditEntry::new(
+                            AuditKind::Denied,
+                            format!(
+                                "Refused (tool not enabled): {} → {} · {tool}",
+                                agent.name, conn.name
+                            ),
+                        )
+                        .agent(agent.name.clone())
+                        .connection(conn.name.clone())
+                        .outcome("denied_by_policy"),
+                    );
+                    return err_detail(
+                        StatusCode::FORBIDDEN,
+                        ErrorReason::DeniedByPolicy,
+                        format!(
+                            "the tool {tool:?} is not enabled for {} on {}; the user can enable it in Multitool",
+                            agent.name, conn.name
+                        ),
+                    );
+                }
+            }
+        }
+    }
     let hash = payload_hash(&conn.id, &method, &call.path, &wire_headers, &body_bytes);
     let body = match SpooledBody::from_bytes(body_bytes, broker.config.spool_threshold) {
         Ok(b) => Arc::new(b),
@@ -823,6 +876,7 @@ async fn post_http(
         path: call.path.clone(),
         headers: header_map,
         body: body.clone(),
+        health: Some(broker.health.clone()),
     };
     let executor: crate::executions::Executor = Box::pin(executor.run());
 
@@ -837,6 +891,19 @@ async fn post_http(
         },
     )
     .await
+}
+
+/// The tool a JSON-RPC `tools/call` body names, if that is what it is.
+fn mcp_tool_call_name(body: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    if value.get("method").and_then(|m| m.as_str()) != Some("tools/call") {
+        return None;
+    }
+    value
+        .get("params")
+        .and_then(|p| p.get("name"))
+        .and_then(|n| n.as_str())
+        .map(String::from)
 }
 
 /// Shared capability tail: a wired agent executes immediately (retries

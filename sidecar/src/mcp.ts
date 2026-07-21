@@ -400,6 +400,14 @@ async function registerUpstream(
     return { tools: [], error: `could not reach the MCP server: ${String(error)}` };
   }
 
+  // A curated wiring lists only its allowed subset. This mirrors what the
+  // broker enforces on tools/call; hiding the rest keeps the agent's tool
+  // budget honest and its failures unconfusing.
+  if (connection.allowed_tools) {
+    const allowed = new Set(connection.allowed_tools);
+    tools = tools.filter((tool) => allowed.has(tool.name));
+  }
+
   const registered: string[] = [];
   for (const tool of tools) {
     const toolName = upstreamToolName(connection, tool.name);

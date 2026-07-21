@@ -5,10 +5,16 @@
 //! token endpoint, in a vault item of their own. This module spends that
 //! grant so an expiring access token never becomes user-visible friction:
 //!
-//! - a background sweeper renews tokens shortly before they expire, and
-//! - the status check calls in here to renew an already-expired (or
-//!   upstream-rejected) token and retry, instead of telling the user to
-//!   reconnect.
+//! - a background sweeper renews tokens shortly before they expire,
+//! - every credential *use* (a brokered agent call, a connection test, the
+//!   status check) renews first when the token is at expiry, and
+//! - the status check renews-and-retries once on an upstream 401/403,
+//!   instead of telling the user to reconnect.
+//!
+//! Renewals are serialized per connection: providers may rotate the
+//! refresh token on use, so two concurrent renewals would spend it twice
+//! and kill the grant. Whoever waits re-reads the connection under the
+//! lock and finds the work already done.
 //!
 //! The refresh token leaves the process only toward the grant's own pinned
 //! token endpoint (https, or loopback for tests), mirroring how access
@@ -17,7 +23,7 @@
 //! Reconnect sign-in — while network trouble is retried with backoff.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -25,10 +31,12 @@ use serde_json::Value;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::audit::{AuditEntry, AuditKind};
+use crate::audit::{AuditEntry, AuditKind, AuditLog};
 use crate::broker::Broker;
+use crate::health::HealthRegistry;
 use crate::mcp_auth::{is_loopback_host, parse_token_payload, McpOAuthGrant};
-use crate::types::Connection;
+use crate::store::Store;
+use crate::types::{Connection, HealthStatus};
 
 /// Renew when the access token is within this window of expiry.
 pub(crate) const REFRESH_SKEW: chrono::Duration = chrono::Duration::minutes(5);
@@ -38,6 +46,39 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 const RETRY_BACKOFF: chrono::Duration = chrono::Duration::minutes(5);
 /// One refresh round-trip may take this long.
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// What one renewal needs from its caller. Every credential-using path can
+/// build one (the broker, an HTTP execution) without dragging the whole
+/// broker along.
+pub(crate) struct RefreshContext<'a> {
+    pub store: &'a Store,
+    pub http: &'a reqwest::Client,
+    pub audit: &'a AuditLog,
+    /// When present, a rejected renewal records needs-reconnect health.
+    pub health: Option<&'a HealthRegistry>,
+}
+
+impl Broker {
+    pub(crate) fn refresh_context(&self) -> RefreshContext<'_> {
+        RefreshContext {
+            store: self.store.as_ref(),
+            http: &self.http_client,
+            audit: self.audit.as_ref(),
+            health: Some(self.health.as_ref()),
+        }
+    }
+}
+
+/// Why the caller wants a renewal; decides what counts as already done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RefreshMode {
+    /// Renew only when the token is at/near expiry (sweeper, pre-use).
+    IfStale,
+    /// The upstream just rejected the token: renew even if the stored
+    /// expiry claims it is fine — unless another path replaced the token
+    /// while this caller waited, in which case that renewal is the answer.
+    Force,
+}
 
 /// Why a refresh did not happen. The distinction drives retry policy.
 #[derive(Debug)]
@@ -62,6 +103,14 @@ impl RefreshError {
     }
 }
 
+/// When the connection's bound token secret last changed — the "version"
+/// concurrent renewals compare to avoid spending the refresh token twice.
+fn bound_token_version(ctx: &RefreshContext<'_>, connection_id: &Uuid) -> Option<DateTime<Utc>> {
+    let connection = ctx.store.connection_by_id(connection_id).ok()?;
+    let secret_id = connection.secrets.first()?;
+    Some(ctx.store.secret_by_id(secret_id).ok()?.updated_at)
+}
+
 /// Whether this connection's access token is (about to be) expired,
 /// making a pre-emptive refresh worthwhile.
 pub(crate) fn wants_refresh(connection: &Connection) -> bool {
@@ -72,17 +121,70 @@ pub(crate) fn wants_refresh(connection: &Connection) -> bool {
         .is_some_and(|at| Utc::now() + REFRESH_SKEW >= at)
 }
 
+/// Best-effort pre-use renewal: called before a credential rides the
+/// upstream leg, so agent calls and tests never present a token the broker
+/// already knew was expired. Failures fall through silently — the current
+/// token is rendered as-is and the upstream's verdict (and health
+/// bookkeeping) tells the rest of the story.
+pub(crate) async fn ensure_fresh(ctx: &RefreshContext<'_>, connection: &Connection) {
+    if !wants_refresh(connection) {
+        return;
+    }
+    let _ = refresh_connection_token(ctx, &connection.id, RefreshMode::IfStale).await;
+}
+
+/// One process-wide async lock per connection. The broker instance lock
+/// guarantees a single broker per state dir, so process-wide is
+/// grant-wide.
+fn connection_lock(id: &Uuid) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .entry(*id)
+        .or_default()
+        .clone()
+}
+
 /// Renew a connection's access token with its stored refresh grant: trade
 /// the refresh token at the grant's token endpoint, replace the vault-held
 /// access token, and persist the (possibly rotated) grant and new expiry.
+///
+/// Serialized per connection; the connection is re-read under the lock so
+/// a caller that waited behind a successful renewal sees it and returns
+/// `Ok` without spending the rotated refresh token again.
 pub(crate) async fn refresh_connection_token(
-    broker: &Broker,
-    connection: &Connection,
+    ctx: &RefreshContext<'_>,
+    connection_id: &Uuid,
+    mode: RefreshMode,
 ) -> Result<(), RefreshError> {
-    let outcome = try_refresh(broker, connection).await;
+    // The token version the caller acted on: if it changes while we wait
+    // for the lock, another path already renewed and this 401 is stale.
+    let observed = bound_token_version(ctx, connection_id);
+    let lock = connection_lock(connection_id);
+    let _guard = lock.lock().await;
+    let connection = ctx
+        .store
+        .connection_by_id(connection_id)
+        .map_err(|_| RefreshError::NotRefreshable("the connection no longer exists".into()))?;
+    match mode {
+        RefreshMode::IfStale => {
+            if !wants_refresh(&connection) {
+                return Ok(());
+            }
+        }
+        RefreshMode::Force => {
+            if observed.is_some() && bound_token_version(ctx, connection_id) != observed {
+                return Ok(());
+            }
+        }
+    }
+
+    let outcome = try_refresh(ctx, &connection).await;
     match &outcome {
         Ok(()) => {
-            broker.audit.append(
+            ctx.audit.append(
                 AuditEntry::new(
                     AuditKind::McpTokenRefreshed,
                     format!("MCP access token renewed: {}", connection.name),
@@ -96,7 +198,7 @@ pub(crate) async fn refresh_connection_token(
             // Reconnect path narrates the user-visible consequence.
         }
         Err(error) => {
-            broker.audit.append(
+            ctx.audit.append(
                 AuditEntry::new(
                     AuditKind::McpTokenRefreshFailed,
                     format!("MCP access token renewal failed: {}", connection.name),
@@ -109,13 +211,25 @@ pub(crate) async fn refresh_connection_token(
     if let Err(RefreshError::Rejected(_)) = &outcome {
         // The refresh token is spent; retire it so neither the sweeper nor
         // the status check keeps replaying a grant the provider refused.
-        retire_refresh_token(broker, connection).await;
+        retire_refresh_token(ctx, &connection).await;
+        // Passive signal: the row can say "reconnect" before anyone runs a
+        // check by hand.
+        if let Some(health) = ctx.health {
+            health.record(
+                &connection.id,
+                HealthStatus::NeedsReconnect,
+                "The provider refused the token renewal; reconnect this tool",
+            );
+        }
     }
     outcome
 }
 
-async fn try_refresh(broker: &Broker, connection: &Connection) -> Result<(), RefreshError> {
-    let grant = read_grant(broker, connection).await?;
+async fn try_refresh(
+    ctx: &RefreshContext<'_>,
+    connection: &Connection,
+) -> Result<(), RefreshError> {
+    let grant = read_grant(ctx, connection).await?;
     let Some(refresh_token) = grant.refresh_token.clone() else {
         return Err(RefreshError::NotRefreshable(
             "the provider granted no refresh token".into(),
@@ -135,8 +249,8 @@ async fn try_refresh(broker: &Broker, connection: &Connection) -> Result<(), Ref
     if let Some(secret) = grant.client_secret.as_deref() {
         form.push(("client_secret", secret));
     }
-    let request = broker
-        .http_client
+    let request = ctx
+        .http
         .post(endpoint)
         .timeout(REFRESH_TIMEOUT)
         .header(http::header::ACCEPT, "application/json")
@@ -176,8 +290,7 @@ async fn try_refresh(broker: &Broker, connection: &Connection) -> Result<(), Ref
     }
     let tokens = parse_token_payload(&payload).map_err(RefreshError::Rejected)?;
 
-    broker
-        .store
+    ctx.store
         .replace_secret_value(&secret_id, Zeroizing::new(tokens.access_token.to_string()))
         .map_err(|error| {
             RefreshError::Transient(format!("could not store the renewed token: {error}"))
@@ -196,8 +309,7 @@ async fn try_refresh(broker: &Broker, connection: &Connection) -> Result<(), Ref
         .expires_in
         .and_then(|seconds| i64::try_from(seconds).ok())
         .map(|seconds| Utc::now() + chrono::Duration::seconds(seconds));
-    broker
-        .store
+    ctx.store
         .set_connection_oauth(&connection.id, renewed.to_secret_value(), expires_at)
         .map_err(|error| {
             RefreshError::Transient(format!("could not store the renewed grant: {error}"))
@@ -206,7 +318,7 @@ async fn try_refresh(broker: &Broker, connection: &Connection) -> Result<(), Ref
 }
 
 async fn read_grant(
-    broker: &Broker,
+    ctx: &RefreshContext<'_>,
     connection: &Connection,
 ) -> Result<McpOAuthGrant, RefreshError> {
     if connection.oauth.is_none() {
@@ -214,7 +326,7 @@ async fn read_grant(
             "this connection was not added by sign-in".into(),
         ));
     }
-    let stored = broker
+    let stored = ctx
         .store
         .connection_oauth_grant(&connection.id)
         .await
@@ -236,8 +348,8 @@ fn secure_token_endpoint(raw: &str) -> Result<url::Url, RefreshError> {
     )))
 }
 
-async fn retire_refresh_token(broker: &Broker, connection: &Connection) {
-    let Ok(grant) = read_grant(broker, connection).await else {
+async fn retire_refresh_token(ctx: &RefreshContext<'_>, connection: &Connection) {
+    let Ok(grant) = read_grant(ctx, connection).await else {
         return;
     };
     let expires_at = connection.oauth.as_ref().and_then(|oauth| oauth.expires_at);
@@ -246,8 +358,7 @@ async fn retire_refresh_token(broker: &Broker, connection: &Connection) {
         ..grant
     };
     if let Err(error) =
-        broker
-            .store
+        ctx.store
             .set_connection_oauth(&connection.id, retired.to_secret_value(), expires_at)
     {
         tracing::warn!(
@@ -285,7 +396,13 @@ pub(crate) fn spawn_refresh_sweeper(broker: &Arc<Broker>) {
                 if retry_after.get(&connection.id).is_some_and(|at| now < *at) {
                     continue;
                 }
-                match refresh_connection_token(&broker, &connection).await {
+                match refresh_connection_token(
+                    &broker.refresh_context(),
+                    &connection.id,
+                    RefreshMode::IfStale,
+                )
+                .await
+                {
                     Ok(()) => {
                         retry_after.remove(&connection.id);
                     }

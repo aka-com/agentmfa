@@ -40,6 +40,9 @@ impl SecretDto {
 pub struct WiringChip {
     pub agent_id: String,
     pub agent: String,
+    /// Curated upstream MCP tool subset; absent means all tools.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_tools: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -71,6 +74,11 @@ pub struct ConnectionDto {
     /// The upstream account this connection's credential was last verified
     /// as (an MCP whoami answer). Display metadata, never authorization.
     pub account: Option<String>,
+    /// Last-known health: "ok" | "failed" | "needs_reconnect", with the
+    /// check's summary and timestamp. All absent while untested.
+    pub last_status: Option<String>,
+    pub last_detail: Option<String>,
+    pub last_checked_at: Option<String>,
 }
 
 impl ConnectionDto {
@@ -87,8 +95,10 @@ impl ConnectionDto {
             .map(|w| WiringChip {
                 agent_id: w.client_id.to_string(),
                 agent: w.agent.clone(),
+                allowed_tools: w.allowed_tools.clone(),
             })
             .collect();
+        let health = broker.health.get(&conn.id);
         let mut dto = ConnectionDto {
             id: conn.id.to_string(),
             name: conn.name.clone(),
@@ -109,6 +119,9 @@ impl ConnectionDto {
             url: None,
             mcp_path: None,
             account: conn.account.clone(),
+            last_status: health.as_ref().map(|h| h.status.as_str().to_string()),
+            last_detail: health.as_ref().map(|h| h.detail.clone()),
+            last_checked_at: health.as_ref().map(|h| h.checked_at.to_rfc3339()),
         };
         match &conn.config {
             Api {
