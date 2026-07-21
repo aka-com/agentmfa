@@ -8,8 +8,10 @@
 
 import { invoke, listen, mode } from '/src/bridge';
 import {
-  CATALOG, CATALOG_SECTIONS, catalogNameForType, connectionsForEntry, visibleCatalog,
+  CATALOG, CATALOG_SECTIONS, catalogNameForType, connectionsForEntry, entryForConnection,
+  visibleCatalog,
 } from '/src/catalog';
+import type { ConnectionPreset } from '/src/catalog';
 import {
   START_OPTIONS, startOptionById, startProgress, startTask,
 } from '/src/getting-started';
@@ -116,6 +118,8 @@ interface AppState {
   connType: ConnectionType;
   /** The catalog row that opened the add sheet; names the dialog. */
   connEntryName: string | null;
+  /** The branded row's prefill (docs pointer, credential hint) while adding. */
+  connPreset: ConnectionPreset | null;
   confirm: ConfirmState | null;
   toolSearch: string;
   toolOpen: string | null;
@@ -163,6 +167,7 @@ const state: AppState = {
   connAdvancedOpen: false, // "Advanced" disclosure in the tool sheet
   connType: 'api',
   connEntryName: null,
+  connPreset: null,      // branded-row prefill for the open add sheet
   confirm: null,         // {kind, id/name}
   toolSearch: '',        // Add-tools catalog search query
   toolOpen: null,        // catalog entry id whose connections are expanded
@@ -877,6 +882,7 @@ function credentialChooserHTML(
   type: ConnectionType,
   draft: ConnectionDraft,
   allowNew = true,
+  valueHint?: string,
 ): string {
   const source = allowNew
     ? (draft.secretSource || (draft.importedCredential || draft.sshImportId || !state.secrets.length ? 'new' : 'existing'))
@@ -946,7 +952,8 @@ function credentialChooserHTML(
       <div class="f-row"><label for="c-identity-file">Identity file</label>${customSelectHTML('c-identity-file', identityOptions, draft.identityFile)}${fieldErr('newSecretValue')}
         <div class="rule-note">Saved directly to macOS Keychain</div></div></div>`;
   }
-  const valuePlaceholder = type === 'pg' ? 'Paste the database password'
+  const valuePlaceholder = valueHint ? `Paste your key (${valueHint})`
+    : type === 'pg' ? 'Paste the database password'
     : type === 'ssh' ? 'Paste the private key'
     : 'Paste the token or API key';
   return `<div class="credential-group">${picker}${nameRow}
@@ -1086,7 +1093,12 @@ function connSheet(editing: boolean): string {
       fields += `<div class="f-row"><label for="c-template">Injection template</label><input id="c-template" class="${fieldCls('template')}" placeholder="Authorization: Bearer {{TOKEN_NAME}}" value="${escAttr(d.template ?? '')}">${fieldErr('template')}
         <div class="rule-note">References credentials by name using <code>{{ … }}</code>. Use this for Basic auth or composed credentials.</div></div>`;
     } else {
-      fields += credentialChooserHTML(t, d);
+      fields += credentialChooserHTML(t, d, true, state.connPreset?.credentialHint);
+    }
+    // Branded rows say where the credential comes from — the equivalent of a
+    // provider's "get your API key" page, as plain text (no live links here).
+    if (state.connPreset?.docsUrl) {
+      fields += `<div class="rule-note">Create or find your ${esc(state.connEntryName || 'API')} key at <code>${esc(state.connPreset.docsUrl)}</code></div>`;
     }
   } else {
     fields += credentialChooserHTML(t, d);
@@ -1309,6 +1321,21 @@ function isProtectedFormSheet(sheet: SheetState | null = state.sheet): boolean {
     || sheet?.kind === 'add-conn' || sheet?.kind === 'edit-conn';
 }
 
+// Test a connection broker-side and pin the result to its catalog row.
+// Shared by the row's ⋯ menu and the automatic post-save health check.
+async function runConnectionTest(id: string): Promise<void> {
+  if (!id || state.connTests[id]?.running) return;
+  state.connTests[id] = { running: true };
+  render();
+  try {
+    const report = await invoke('test_connection', { id });
+    state.connTests[id] = { running: false, ok: report.ok, detail: report.detail };
+  } catch (error) {
+    state.connTests[id] = { running: false, ok: false, detail: errorMessage(error) };
+  }
+  render();
+}
+
 async function holdDropdownFormOpen(): Promise<boolean> {
   if (mode !== 'dropdown') return true;
   try {
@@ -1494,6 +1521,19 @@ async function saveConn(): Promise<void> {
     }
     closeSheet();
     await refresh('all');
+    // Answer "did that actually work?" immediately: test the saved tool and
+    // show the result on its row (expanded into view when it was just added).
+    if (adding) {
+      const saved = state.connections.find((c) => c.name === name);
+      if (saved) {
+        const entry = entryForConnection(saved);
+        if (entry) state.toolOpen = entry.id;
+        render();
+        void runConnectionTest(saved.id);
+      }
+    } else {
+      void runConnectionTest(sheet.id ?? '');
+    }
   } catch (e) {
     showFormError(e);
   }
@@ -1507,6 +1547,7 @@ function closeSheet() {
   state.sheetBaseline = null;
   state.confirmDiscard = false;
   state.formMenuOpen = null;
+  state.connPreset = null;
   render();
   if (releaseDropdown) releaseDropdownForm();
 }
@@ -1733,12 +1774,25 @@ document.addEventListener('click', async (e) => {
       // server URL rather than an API root — and the dialog is named after
       // the row the user clicked, not the protocol underneath it.
       state.connEntryName = entry.name;
+      state.connPreset = entry.preset ?? null;
       if (entry.mcp) state.draft.isMcp = true;
+      // A branded row prefills everything but the credential: the documented
+      // API root, the vendor's auth recipe, and a suggested name — all into
+      // ordinary, editable form fields.
+      if (entry.preset) {
+        state.draft.name = entry.preset.name;
+        state.draft.origin = entry.preset.origin;
+        state.draft.authMode = entry.preset.authMode;
+        state.draft.authDetail = entry.preset.authDetail;
+      }
       if (entry.connType === 'pg') state.draft.port = '5432';
       if (entry.connType === 'ssh') state.draft.port = '22';
       state.sheetErrors = {}; state.sheetBaseline = null; state.connAdvancedOpen = false;
       state.connImportSource = ''; state.connImportError = null;
-      render(); focusField('f-cname'); break;
+      render();
+      // With a preset the only thing left to supply is the credential.
+      focusField(!entry.preset ? 'f-cname' : state.secrets.length ? 'c-secret' : 'c-new-secret-value');
+      break;
     }
     case 'edit-conn': {
       const c = state.connections.find((x) => x.id === id);
@@ -1747,6 +1801,7 @@ document.addEventListener('click', async (e) => {
       if (!await holdDropdownFormOpen()) break;
       state.sheet = { kind: 'edit-conn', id }; state.connType = c.type;
       state.connEntryName = null;
+      state.connPreset = null;
       state.sheetErrors = {};
       state.sheetBaseline = null;
       state.draft = { name: c.name, host: c.host, scheme: c.scheme,
@@ -1823,20 +1878,10 @@ document.addEventListener('click', async (e) => {
         await refresh('all');
       }
       break;
-    case 'test-conn': {
-      if (state.connTests[id] && state.connTests[id].running) break;
+    case 'test-conn':
       state.connMenuOpen = null;
-      state.connTests[id] = { running: true };
-      render();
-      try {
-        const report = await invoke('test_connection', { id });
-        state.connTests[id] = { running: false, ok: report.ok, detail: report.detail };
-      } catch (error) {
-        state.connTests[id] = { running: false, ok: false, detail: errorMessage(error) };
-      }
-      render();
+      void runConnectionTest(id);
       break;
-    }
     case 'wire':
       await run(() => invoke('set_wiring', { agentId: id, connectionId: btn.dataset.conn || '', wired: true }));
       await refresh('all');

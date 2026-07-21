@@ -4,11 +4,14 @@ import assert from 'node:assert/strict';
 import {
   CATALOG,
   CATALOG_SECTIONS,
+  catalogNameForType,
   connectionsForEntry,
   entryForConnection,
   filterCatalog,
+  presetHost,
   visibleCatalog,
 } from '../src/catalog';
+import { authTemplate, parseApiOrigin } from '../src/connection-input';
 import type { ConnectionSummary, ConnectionType } from '../src/types';
 
 function conn(type: ConnectionType, host: string | null, name = 'x'): ConnectionSummary {
@@ -54,6 +57,55 @@ test('the built-in credentials store is a Secrets row', () => {
   const credentials = CATALOG.find((entry) => entry.id === 'credentials');
   assert.equal(credentials?.via, 'builtin');
   assert.equal(credentials?.section, 'Secrets');
+});
+
+test('every preset is a valid, addable API prefill', () => {
+  const presets = CATALOG.filter((entry) => entry.preset);
+  assert.ok(presets.length >= 8, 'the branded API catalog exists');
+  for (const entry of presets) {
+    const preset = entry.preset!;
+    // A preset row is a plain API connection — never MCP, always addable.
+    assert.equal(entry.via, 'connection', entry.id);
+    assert.equal(entry.connType, 'api', entry.id);
+    assert.notEqual(entry.mcp, true, entry.id);
+    // The origin must be exactly what the add form accepts (root, no path).
+    assert.doesNotThrow(() => parseApiOrigin(preset.origin), entry.id);
+    assert.ok(presetHost(preset), entry.id);
+    // The auth recipe must compile to an injection template as-is.
+    assert.doesNotThrow(
+      () => authTemplate('api', preset.authMode, 'A_TOKEN', preset.authDetail ?? ''),
+      entry.id,
+    );
+    assert.ok(preset.name, entry.id);
+  }
+});
+
+test('preset hosts are unique so host→row mapping stays deterministic', () => {
+  const hosts = CATALOG.filter((e) => e.preset).map((e) => presetHost(e.preset!));
+  assert.equal(new Set(hosts).size, hosts.length);
+});
+
+test('a connection pinned to a preset host lists under its branded row', () => {
+  assert.equal(entryForConnection(conn('api', 'api.stripe.com'))?.id, 'stripe');
+  assert.equal(entryForConnection(conn('api', 'api.openai.com'))?.id, 'openai');
+  // …while an unrecognized host still lists under Custom API.
+  assert.equal(entryForConnection(conn('api', 'internal.example.com'))?.id, 'http');
+  // An MCP connection at a preset host is still an MCP connection.
+  assert.equal(
+    entryForConnection({ ...conn('api', 'api.stripe.com'), mcp_path: '/mcp' })?.id,
+    'mcp',
+  );
+});
+
+test('preset rows never rename the generic type dialogs', () => {
+  assert.equal(catalogNameForType('api'), 'Custom API');
+});
+
+test('keyword search finds apps by what they do', () => {
+  assert.ok(filterCatalog('payments').some((entry) => entry.id === 'stripe'));
+  assert.ok(filterCatalog('email').some((entry) => entry.id === 'gmail'));
+  assert.ok(filterCatalog('errors').some((entry) => entry.id === 'sentry'));
+  assert.ok(filterCatalog('sql').some((entry) => entry.id === 'postgres'));
 });
 
 test('each protocol maps to exactly one infrastructure row', () => {
