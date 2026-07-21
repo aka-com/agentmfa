@@ -27,6 +27,8 @@ const READY_TIMEOUT: Duration = Duration::from_secs(15);
 /// First restart delay after a failure; doubles up to [`MAX_BACKOFF`].
 const MIN_BACKOFF: Duration = Duration::from_millis(500);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+/// Grace period for the pipe readers to flush after the process exits.
+const SETTLE_TIMEOUT: Duration = Duration::from_secs(2);
 /// A sidecar that stayed up this long is considered healthy, so its next
 /// failure restarts promptly instead of inheriting an old backoff.
 const STABLE_AFTER: Duration = Duration::from_secs(10);
@@ -198,59 +200,73 @@ async fn run_once(
     let stderr = child.stderr.take().expect("stderr was piped");
     let logs = tokio::spawn(forward_logs(stderr));
 
-    let ready = read_ready(stdout, token, tx);
-    tokio::pin!(ready);
+    // The pump owns stdout for the whole life of the process and reports the
+    // handshake over a oneshot. Keeping it separate is what lets the ready
+    // deadline bound *only* the handshake: a healthy sidecar that then sits
+    // quiet for an hour must not be killed for it.
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let pump = tokio::spawn(pump_stdout(stdout, ready_tx));
 
-    // Race the handshake against an early exit so a sidecar that dies on
+    // Race the handshake against an early exit, so a sidecar that dies on
     // startup surfaces as `ExitedEarly` rather than a 15-second timeout.
-    let status = tokio::select! {
-        result = tokio::time::timeout(READY_TIMEOUT, &mut ready) => {
-            match result {
-                Ok(Ok(())) => child.wait().await?,
-                Ok(Err(error)) => {
-                    let _ = child.kill().await;
-                    logs.abort();
-                    return Err(error);
-                }
-                Err(_) => {
-                    let _ = child.kill().await;
-                    logs.abort();
-                    return Err(SidecarError::ReadyTimeout(READY_TIMEOUT));
-                }
+    let port = tokio::select! {
+        ready = tokio::time::timeout(READY_TIMEOUT, ready_rx) => match ready {
+            Ok(Ok(port)) => port,
+            // The sender dropped: stdout reached EOF with no ready line.
+            Ok(Err(_)) => {
+                let _ = child.kill().await;
+                settle(pump, logs).await;
+                return Err(SidecarError::ExitedEarly);
             }
+            Err(_) => {
+                let _ = child.kill().await;
+                settle(pump, logs).await;
+                return Err(SidecarError::ReadyTimeout(READY_TIMEOUT));
+            }
+        },
+        status = child.wait() => {
+            settle(pump, logs).await;
+            return Ok(status?);
         }
-        status = child.wait() => status?,
     };
 
-    logs.abort();
+    tracing::info!(port, "sidecar ready");
+    let _ = tx.send(Some(SidecarEndpoint { port, token }));
+
+    let status = child.wait().await?;
+    settle(pump, logs).await;
     Ok(status)
 }
 
-/// Read stdout until the ready line arrives, then keep draining it.
-async fn read_ready(
-    stdout: tokio::process::ChildStdout,
-    token: String,
-    tx: &watch::Sender<Option<SidecarEndpoint>>,
-) -> Result<(), SidecarError> {
+/// Drain stdout for the life of the process, reporting the ready line once.
+async fn pump_stdout(stdout: tokio::process::ChildStdout, ready: tokio::sync::oneshot::Sender<u16>) {
     let mut lines = BufReader::new(stdout).lines();
+    let mut ready = Some(ready);
     while let Ok(Some(line)) = lines.next_line().await {
-        match serde_json::from_str::<ReadyLine>(&line) {
-            Ok(ready) if ready.event == "ready" => {
-                tracing::info!(port = ready.port, "sidecar ready");
-                let _ = tx.send(Some(SidecarEndpoint {
-                    port: ready.port,
-                    token,
-                }));
-                // Keep draining so the pipe never fills.
-                while let Ok(Some(line)) = lines.next_line().await {
-                    tracing::debug!(target: "sidecar", "{line}");
+        if ready.is_some() {
+            if let Ok(parsed) = serde_json::from_str::<ReadyLine>(&line) {
+                if parsed.event == "ready" {
+                    if let Some(sender) = ready.take() {
+                        let _ = sender.send(parsed.port);
+                    }
+                    continue;
                 }
-                return Ok(());
             }
-            _ => tracing::debug!(target: "sidecar", "{line}"),
         }
+        tracing::debug!(target: "sidecar", "{line}");
     }
-    Err(SidecarError::ExitedEarly)
+}
+
+/// Give the pipe readers a moment to flush what the process wrote on its
+/// way out — a crash message is the most useful line in the whole log, and
+/// aborting the readers the instant the child exits is how you lose it.
+/// Both tasks end on EOF, so a timeout here leaks nothing.
+async fn settle(pump: JoinHandle<()>, logs: JoinHandle<()>) {
+    let both = async {
+        let _ = pump.await;
+        let _ = logs.await;
+    };
+    let _ = tokio::time::timeout(SETTLE_TIMEOUT, both).await;
 }
 
 /// Forward the sidecar's JSON log lines into our own tracing output.
@@ -350,6 +366,27 @@ mod tests {
         tokens.dedup();
         assert!(tokens.len() >= 2, "expected a restart, saw {tokens:?}");
         assert!(tokens.iter().all(|token| token.len() == 64));
+    }
+
+    #[tokio::test]
+    async fn a_healthy_sidecar_outlives_the_ready_window() {
+        // The handshake deadline must bound only the handshake. A sidecar
+        // that is up and quiet must not be killed for it.
+        let (_dir, config) = stub(
+            r#"echo '{"event":"ready","port":45680}'
+               sleep 60"#,
+        );
+        let sidecar = Sidecar::spawn(config);
+        let first = sidecar
+            .wait_ready(Duration::from_secs(5))
+            .await
+            .expect("ready");
+        tokio::time::sleep(READY_TIMEOUT + Duration::from_secs(2)).await;
+        assert_eq!(
+            sidecar.endpoint(),
+            Some(first),
+            "the sidecar was restarted while healthy"
+        );
     }
 
     #[tokio::test]
