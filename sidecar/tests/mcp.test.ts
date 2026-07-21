@@ -19,14 +19,20 @@ const SUPERVISOR_TOKEN = 'a'.repeat(64);
 const AGENTS: Record<string, { client_id: string; agent: string }> = {
   'token-wired': { client_id: 'client-wired', agent: 'claude-code' },
   'token-bare': { client_id: 'client-bare', agent: 'other-agent' },
+  'token-collide': { client_id: 'client-collide', agent: 'collide-agent' },
 };
 const WIRED: Record<string, string[]> = {
   'client-wired': ['prod-db'],
+  'client-collide': ['prod.db', 'prod db'],
   'client-bare': [],
 };
 const CONNECTIONS = [
   { name: 'prod-db', type: 'pg', target: 'db.internal:5432/app', endpoint: '/v1/pg/open' },
   { name: 'deploy-host', type: 'ssh', target: 'deploy@host.internal', endpoint: '/v1/ssh/open' },
+  // These two slug to the same MCP tool name: `multitool_prod_db_open`.
+  // Hyphens survive; dots and spaces do not.
+  { name: 'prod.db', type: 'pg', target: 'db.other:5432/app', endpoint: '/v1/pg/open' },
+  { name: 'prod db', type: 'pg', target: 'db.third:5432/app', endpoint: '/v1/pg/open' },
 ];
 
 /** A stand-in for the broker's control plane, on a Unix socket. */
@@ -156,6 +162,42 @@ test('an agent wired to nothing is told so, not left guessing', async () => {
     ) as { tools: unknown[]; hint?: string };
     assert.deepEqual(status.tools, []);
     assert.match(status.hint ?? '', /wire this agent/i);
+  } finally {
+    await app.close();
+  }
+});
+
+test('a colliding tool name costs one tool, not the whole session', async () => {
+  const app = await harness();
+  try {
+    const client = await app.connect('token-collide');
+    const { tools } = await client.listTools();
+    // The session works, and the second colliding connection is dropped
+    // rather than taking every other tool down with it.
+    assert.deepEqual(tools.map((tool) => tool.name).sort(), [
+      'multitool_prod_db_open',
+      'multitool_status',
+    ]);
+  } finally {
+    await app.close();
+  }
+});
+
+test('status reports tools wired after the session opened', async () => {
+  const app = await harness();
+  try {
+    const client = await app.connect('token-bare');
+    // The user wires something while the agent is already connected.
+    WIRED['client-bare'] = ['deploy-host'];
+    try {
+      const status = payload(
+        await client.callTool({ name: 'multitool_status', arguments: {} }),
+      ) as { pending?: string[]; hint?: string };
+      assert.deepEqual(status.pending, ['deploy-host']);
+      assert.match(status.hint ?? '', /reconnect/i);
+    } finally {
+      WIRED['client-bare'] = [];
+    }
   } finally {
     await app.close();
   }

@@ -202,39 +202,77 @@ export async function createToolServer(
         'there are none.',
       inputSchema: {},
     },
-    async () => ({
-      content: [
-        {
-          type: 'text' as const,
-          text: JSON.stringify(
-            {
-              agent: principal.agent,
-              tools: wired.map((connection) => ({
-                tool: toolNameFor(connection),
-                name: connection.name,
-                type: connection.type,
-                target: connection.target,
-              })),
-              ...(wired.length === 0
-                ? {
-                    hint:
-                      'This agent is not wired to any tools yet. Ask the user to ' +
-                      'open Multitool, find the tool under Tools, and wire this ' +
-                      `agent ("${principal.agent}") to it.`,
-                  }
-                : {}),
-            },
-            null,
-            2,
-          ),
-        },
-      ],
-    }),
+    async () => {
+      // Deliberately re-queried rather than reported from the list captured
+      // at session open: the user may have wired something since, and the
+      // whole point of this tool is to answer "why can't I see it?".
+      const live = (await broker.connections(principal.token)).filter(
+        (candidate) => candidate.wired,
+      );
+      const registered = new Set(wired.map((connection) => connection.name));
+      const pending = live
+        .filter((connection) => !registered.has(connection.name))
+        .map((connection) => connection.name);
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(
+              {
+                agent: principal.agent,
+                tools: live
+                  .filter((connection) => registered.has(connection.name))
+                  .map((connection) => ({
+                    tool: toolNameFor(connection),
+                    name: connection.name,
+                    type: connection.type,
+                    target: connection.target,
+                  })),
+                ...(pending.length
+                  ? {
+                      pending,
+                      hint:
+                        `Wired since this session started: ${pending.join(', ')}. ` +
+                        'Reconnect to Multitool to use them.',
+                    }
+                  : {}),
+                ...(live.length === 0
+                  ? {
+                      hint:
+                        'This agent is not wired to any tools yet. Ask the user to ' +
+                        'open Multitool, find the tool under Tools, and wire this ' +
+                        `agent ("${principal.agent}") to it.`,
+                    }
+                  : {}),
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    },
   );
 
+  // Connection names are freer than MCP tool names, so two of them can slug
+  // to the same thing. Registering a duplicate throws, which would fail the
+  // whole session — one awkwardly named connection must not cost an agent
+  // every other tool it has.
+  const taken = new Set<string>(['multitool_status']);
   for (const connection of wired) {
+    const toolName = toolNameFor(connection);
+    if (taken.has(toolName)) {
+      log('warn', 'skipping a connection whose tool name collides', {
+        connection: connection.name,
+        toolName,
+      });
+      continue;
+    }
+    taken.add(toolName);
+
     server.registerTool(
-      toolNameFor(connection),
+      toolName,
       {
         title: connection.name,
         description: describe(connection),
