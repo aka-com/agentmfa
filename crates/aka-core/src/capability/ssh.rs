@@ -39,14 +39,16 @@ use ssh_key::private::KeypairData;
 use ssh_key::{Algorithm, Fingerprint, HashAlg, PrivateKey, PublicKey, Signature};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::Notify;
 
 use uuid::Uuid;
 
 use crate::audit::{AuditEntry, AuditKind};
 use crate::broker::Broker;
+use crate::endpoints::EndpointListenerHandle;
 use crate::sessions::SessionHandle;
 use crate::store::{PinOutcome, Store};
-use crate::types::{Connection, ConnectionConfig, ConnectionKind};
+use crate::types::{Connection, ConnectionConfig, ConnectionKind, WiringEndpoint};
 
 /* --------------------------- ssh-agent protocol --------------------------- */
 
@@ -596,6 +598,166 @@ async fn handle_conn(state: Arc<AgentState>, mut stream: UnixStream) -> std::io:
     // redemption without `start` would release the reserved budget slot).
     let max_ttl = state.broker.config.session_max_ttl;
     let session = redemption.start(ConnectionKind::Ssh);
+    let idle = state.broker.config.session_idle_timeout;
+    let reason = serve(&state, &mut stream, &session, max_ttl, idle).await;
+    let _ = stream.shutdown().await;
+    session.finish(reason);
+    Ok(())
+}
+
+/* --------------------------- per-wiring endpoint -------------------------- */
+
+/// The filename of a per-wiring SSH endpoint's agent socket, under the
+/// endpoint's private directory. Stable across restarts so the user can point
+/// `~/.ssh/config`'s `IdentityAgent` at it once.
+pub const ENDPOINT_SOCK: &str = "agent.sock";
+
+/// Per-wiring SSH endpoint context: which wiring this persistent socket serves,
+/// re-checked on every connection.
+#[derive(Clone)]
+struct SshEndpointCtx {
+    endpoint_id: Uuid,
+    client_id: Uuid,
+    agent: String,
+    connection_id: Uuid,
+}
+
+/// Bind a persistent per-wiring SSH endpoint: an `SSH_AUTH_SOCK` at a stable
+/// path the user points `~/.ssh/config` at (`IdentityAgent …/agent.sock`). It
+/// signs only for the connection's pinned user and host key, exactly like the
+/// per-open agent, but outlives any single `open`. Unlike a 60 s ticket it is
+/// a *standing* signing oracle reachable by any same-user process that knows
+/// the path — the same same-user posture the wiring model documents, and the
+/// reason issuing one is an explicit, confirmed action. The wiring is
+/// re-checked on every connection.
+pub async fn bind_endpoint(
+    broker: Arc<Broker>,
+    endpoint: &WiringEndpoint,
+) -> std::io::Result<EndpointListenerHandle> {
+    let connection = broker
+        .store
+        .connection_by_id(&endpoint.connection_id)
+        .map_err(|e| std::io::Error::other(format!("ssh endpoint: {e}")))?;
+    let ConnectionConfig::Ssh {
+        user,
+        host_key_fingerprint,
+        ..
+    } = &connection.config
+    else {
+        return Err(std::io::Error::other("not an ssh connection"));
+    };
+    let user = user.clone();
+    let host_key_fingerprint = if host_key_fingerprint.is_empty() {
+        None
+    } else {
+        Some(
+            host_key_fingerprint
+                .parse::<Fingerprint>()
+                .map_err(|e| std::io::Error::other(format!("bad host key fingerprint: {e}")))?,
+        )
+    };
+    // Parse the key up front so a broken key fails issuance, not every later
+    // signature.
+    let signer = Arc::new(
+        SshSigner::load(&broker.store, &connection)
+            .await
+            .map_err(std::io::Error::other)?,
+    );
+
+    let dir = broker.paths.endpoint_dir(&endpoint.id);
+    crate::paths::create_private_dir(&dir)?;
+    let socket_path = dir.join(ENDPOINT_SOCK);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path)?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+
+    let state = Arc::new(AgentState {
+        broker: broker.clone(),
+        // Endpoints never redeem a ticket; the per-connection wiring re-check
+        // gates access instead.
+        ticket: String::new(),
+        user,
+        host_key_fingerprint: tokio::sync::Mutex::new(host_key_fingerprint),
+        bind_gate: tokio::sync::Mutex::new(()),
+        connection_id: connection.id,
+        connection_name: connection.name.clone(),
+        comment: format!("aka:{}", connection.name),
+        signer,
+    });
+    let ctx = SshEndpointCtx {
+        endpoint_id: endpoint.id,
+        client_id: endpoint.client_id,
+        agent: endpoint.agent.clone(),
+        connection_id: endpoint.connection_id,
+    };
+    let shutdown = Arc::new(Notify::new());
+    let sd = shutdown.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = sd.notified() => break,
+                accepted = listener.accept() => match accepted {
+                    Ok((stream, _)) => {
+                        let state = state.clone();
+                        let ctx = ctx.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = handle_endpoint_conn(state, ctx, stream).await {
+                                tracing::debug!("ssh endpoint connection ended: {e}");
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        tracing::debug!("ssh endpoint accept failed: {e}");
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    Ok(EndpointListenerHandle { shutdown, task })
+}
+
+/// One accepted endpoint connection: re-check the wiring, register a live
+/// session, and serve the ssh-agent protocol with the bound signer.
+async fn handle_endpoint_conn(
+    state: Arc<AgentState>,
+    ctx: SshEndpointCtx,
+    mut stream: UnixStream,
+) -> std::io::Result<()> {
+    // Authorization is enforced here, at connect time: an unwired agent is
+    // refused even if a stale listener briefly outlived its teardown.
+    if !state
+        .broker
+        .wirings
+        .is_wired(&ctx.client_id, &ctx.connection_id)
+    {
+        let _ = stream.shutdown().await;
+        return Ok(());
+    }
+    let Ok(connection) = state.broker.store.connection_by_id(&ctx.connection_id) else {
+        let _ = stream.shutdown().await;
+        return Ok(());
+    };
+    if connection.kind() != ConnectionKind::Ssh {
+        let _ = stream.shutdown().await;
+        return Ok(());
+    }
+    let session = match state.broker.data_plane.start_endpoint_session(
+        &ctx.agent,
+        &connection,
+        ctx.endpoint_id,
+        ConnectionKind::Ssh,
+    ) {
+        Ok(session) => session,
+        Err(_) => {
+            let _ = stream.shutdown().await;
+            return Ok(());
+        }
+    };
+    let max_ttl = state.broker.config.session_max_ttl;
     let idle = state.broker.config.session_idle_timeout;
     let reason = serve(&state, &mut stream, &session, max_ttl, idle).await;
     let _ = stream.shutdown().await;

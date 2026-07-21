@@ -252,6 +252,17 @@ impl Harness {
         assert_eq!(body["destination"], "prod");
         (body["auth_sock"].as_str().unwrap().to_string(), body)
     }
+
+    /// Issue an SSH direct endpoint for the first (auto-wired) agent; its
+    /// `dsn` is the stable `SSH_AUTH_SOCK` path.
+    async fn issue_ssh_endpoint(&self) -> aka_core::broker::IssuedEndpointInfo {
+        let client = self.broker.pairing.get("claude-code").unwrap();
+        let conn = self.broker.store.connection_by_name("prod-ssh").unwrap();
+        self.broker
+            .ui_issue_endpoint(&client.id, &conn.id)
+            .await
+            .unwrap()
+    }
 }
 
 /// Connect a fresh agent connection and session-bind `host_key` on it, in a
@@ -634,4 +645,89 @@ fn stale_socket_sweep_cleans_dead_files() {
     aka_core::capability::ssh::sweep_stale_sockets(Path::new(root));
     assert!(!dead.exists(), "dead .sock file should be removed");
     assert!(other.exists(), "non-socket files are left untouched");
+}
+
+/* ----------------------------- direct endpoint ---------------------------- */
+
+#[tokio::test]
+async fn direct_endpoint_serves_the_ssh_agent_protocol() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let host_key = add_ssh_connection(&h.broker, &key, "deploy");
+    h.pair().await;
+    let info = h.issue_ssh_endpoint().await;
+
+    assert_eq!(info.kind, aka_core::types::ConnectionKind::Ssh);
+    assert!(info.dsn.ends_with("agent.sock"), "dsn is the auth-sock path");
+    assert!(info.example.contains("SSH_AUTH_SOCK"));
+    // The ssh-agent protocol has no password, so an SSH endpoint carries no
+    // presented secret: the socket path is the whole capability.
+    assert!(info.secret.is_empty());
+
+    let key_blob = key.public_key().to_bytes().unwrap();
+    let host_blob = host_key.public_key().to_bytes().unwrap();
+    let data = userauth_blob("deploy", "ssh-ed25519", &key_blob, &host_blob);
+
+    // Unbound signing is refused on the stable socket, exactly as per-open.
+    let mut unbound = UnixStream::connect(&info.dsn).await.unwrap();
+    let (kind, _) = sign(&mut unbound, &key_blob, &data, 0).await;
+    assert_eq!(kind, SSH_AGENT_FAILURE, "unbound signing must be refused");
+    drop(unbound);
+
+    // Bind, list the identity, and produce a verifying signature for the
+    // pinned user.
+    let mut s = bound_stream(&info.dsn, &host_key).await;
+    assert_lists_identity(&mut s, &key).await;
+    let (kind, body) = sign(&mut s, &key_blob, &data, 0).await;
+    assert_eq!(kind, SSH_AGENT_SIGN_RESPONSE);
+    verify_signature(key.public_key(), &body, &data);
+
+    // A wrong user is still refused by the scoped signer.
+    let other = userauth_blob("root", "ssh-ed25519", &key_blob, &host_blob);
+    let (kind, _) = sign(&mut s, &key_blob, &other, 0).await;
+    assert_eq!(kind, SSH_AGENT_FAILURE, "wrong user must be refused");
+
+    // Listed as a live session, tagged to the connection.
+    assert_eq!(h.broker.sessions().len(), 1);
+    assert_eq!(h.broker.sessions()[0].connection, "prod-ssh");
+
+    drop(s);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !h.broker.sessions().is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("session should end after client disconnect");
+}
+
+#[tokio::test]
+async fn unwiring_tears_down_the_ssh_endpoint() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let host_key = add_ssh_connection(&h.broker, &key, "deploy");
+    h.pair().await;
+    let info = h.issue_ssh_endpoint().await;
+
+    // Works while wired: a bound stream signs.
+    let mut s = bound_stream(&info.dsn, &host_key).await;
+    assert_lists_identity(&mut s, &key).await;
+
+    // Unwiring stops the listener, closes the live session, and removes the
+    // socket, so a fresh connection no longer reaches it.
+    let client = h.broker.pairing.get("claude-code").unwrap();
+    let conn = h.broker.store.connection_by_name("prod-ssh").unwrap();
+    h.broker.ui_set_wiring(&client.id, &conn.id, false).unwrap();
+    assert!(h.broker.endpoints().is_empty());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !h.broker.sessions().is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("revoke should close the live session");
+    assert!(
+        UnixStream::connect(&info.dsn).await.is_err(),
+        "the socket must be gone after teardown"
+    );
 }

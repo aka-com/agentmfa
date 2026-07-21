@@ -869,9 +869,10 @@ impl Broker {
         connection_id: &Uuid,
     ) -> Result<IssuedEndpointInfo> {
         let connection = self.store.connection_by_id(connection_id)?;
-        // Only Postgres endpoints exist so far; other kinds land in later work.
-        if connection.kind() != ConnectionKind::Pg {
-            return Err(CoreError::EndpointUnsupportedKind(connection.kind().label()));
+        // Direct endpoints exist for Postgres and SSH so far; API/WS land later.
+        match connection.kind() {
+            ConnectionKind::Pg | ConnectionKind::Ssh => {}
+            other => return Err(CoreError::EndpointUnsupportedKind(other.label())),
         }
         if !self.wirings.is_wired(client_id, connection_id) {
             return Err(CoreError::EndpointRequiresWiring);
@@ -910,12 +911,48 @@ impl Broker {
             return Err(CoreError::Io(error));
         }
 
-        let ConnectionConfig::Pg { user, dbname, .. } = &connection.config else {
-            unreachable!("kind checked above")
-        };
         let dir = self.paths.endpoint_dir(&issued.endpoint.id);
-        let dsn = crate::capability::pg::endpoint_dsn(dir.as_path(), user, dbname);
-        let example = format!("PGPASSWORD={} psql \"{dsn}\"", issued.secret);
+        let info = match &connection.config {
+            ConnectionConfig::Pg { user, dbname, .. } => {
+                let dsn = crate::capability::pg::endpoint_dsn(dir.as_path(), user, dbname);
+                let example = format!("PGPASSWORD={} psql \"{dsn}\"", issued.secret);
+                IssuedEndpointInfo {
+                    endpoint_id: issued.endpoint.id,
+                    kind: ConnectionKind::Pg,
+                    dsn,
+                    secret: issued.secret,
+                    example,
+                }
+            }
+            ConnectionConfig::Ssh {
+                user,
+                host,
+                port,
+                destination,
+                ..
+            } => {
+                let sock = dir
+                    .join(crate::capability::ssh::ENDPOINT_SOCK)
+                    .display()
+                    .to_string();
+                let target = match destination {
+                    Some(dest) => format!("ssh {dest}"),
+                    None if *port == 22 => format!("ssh {user}@{host}"),
+                    None => format!("ssh -p {port} {user}@{host}"),
+                };
+                // SSH has no presented secret: the ssh-agent protocol offers no
+                // password, so the socket path is the whole capability. The
+                // minted secret is not surfaced.
+                IssuedEndpointInfo {
+                    endpoint_id: issued.endpoint.id,
+                    kind: ConnectionKind::Ssh,
+                    dsn: sock.clone(),
+                    secret: String::new(),
+                    example: format!("SSH_AUTH_SOCK=\"{sock}\" {target}"),
+                }
+            }
+            _ => unreachable!("kind checked above"),
+        };
         self.audit.append(
             AuditEntry::new(
                 AuditKind::Wired,
@@ -931,13 +968,7 @@ impl Broker {
             .field("kind", connection.kind().as_str()),
         );
         self.events.wirings_changed();
-        Ok(IssuedEndpointInfo {
-            endpoint_id: issued.endpoint.id,
-            kind: connection.kind(),
-            dsn,
-            secret: issued.secret,
-            example,
-        })
+        Ok(info)
     }
 
     /// Revoke one direct endpoint: drop the record, stop its listener, and
@@ -993,6 +1024,9 @@ impl Broker {
     ) -> std::io::Result<()> {
         let handle = match connection.kind() {
             ConnectionKind::Pg => crate::capability::pg::bind_endpoint(self.clone(), endpoint).await?,
+            ConnectionKind::Ssh => {
+                crate::capability::ssh::bind_endpoint(self.clone(), endpoint).await?
+            }
             other => {
                 return Err(std::io::Error::other(format!(
                     "direct endpoints are not supported for {} tools",
