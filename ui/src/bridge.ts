@@ -175,7 +175,6 @@ const db: MockDatabase = {
   settings: {
     reauth_on_read: true,
     menu_bar_hides_dock: false,
-    show_agent_walkthrough: true,
   },
 };
 function mkSecret(name: string, value: string): MockSecret {
@@ -457,9 +456,6 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
     case 'set_reauth_on_read': db.settings.reauth_on_read = args.on; return;
     case 'set_menu_bar_hides_dock':
       db.settings.menu_bar_hides_dock = args.on;
-      return;
-    case 'set_agent_walkthrough_visible':
-      db.settings.show_agent_walkthrough = args.on;
       return;
     case 'ui_set_mode': case 'ui_hide_main': case 'ui_hide_dropdown':
     case 'ui_set_dropdown_form_active': return;

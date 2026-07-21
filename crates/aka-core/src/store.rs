@@ -673,14 +673,6 @@ impl Store {
         self.commit(&mut state, next)
     }
 
-    pub fn set_agent_walkthrough_visible(&self, on: bool) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
-        let mut settings = state.settings();
-        settings.show_agent_walkthrough = on;
-        let mut next = state.clone();
-        next.settings = Some(settings);
-        self.commit(&mut state, next)
-    }
 }
 
 fn migrate_legacy_pg_ca_bundle(state: &mut IndexState) -> bool {
@@ -1137,19 +1129,6 @@ mod tests {
         gate.allow.store(false, Ordering::SeqCst);
         assert_eq!(&*store.secret_value(&meta.id).await.unwrap(), "ghp_secret");
         assert_eq!(gate.calls.load(Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test]
-    async fn walkthrough_visibility_is_persisted_in_settings() {
-        let (store, _, _dir) = store().await;
-
-        assert!(store.settings().show_agent_walkthrough);
-
-
-        store.set_agent_walkthrough_visible(false).unwrap();
-
-
-        assert!(!store.settings().show_agent_walkthrough);
     }
 
     #[tokio::test]

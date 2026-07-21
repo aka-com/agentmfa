@@ -387,8 +387,10 @@ async fn pairing_flow_and_token_auth() {
 
 #[tokio::test]
 async fn pairing_attempts_are_rate_limited() {
-    let mut config = BrokerConfig::default();
-    config.pairing_max_attempts = 2;
+    let config = BrokerConfig {
+        pairing_max_attempts: 2,
+        ..BrokerConfig::default()
+    };
     let h = harness(config).await;
     for name in ["agent-one", "agent-two"] {
         let (status, _) = uds_request(

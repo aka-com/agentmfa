@@ -36,7 +36,9 @@ const EDIT_SECRET_MASK = '••••••••••••';
 const ACTIVITY_RENDER_LIMIT = 200;
 
 // The left-nav tabs, in order — also the cycle order for Ctrl-Tab.
-const TABS = ['connections', 'agents', 'activity'] as const;
+const TABS = ['start', 'connections', 'agents', 'activity'] as const;
+// The tray dropdown is a quick-access panel; onboarding belongs in the window.
+const DROPDOWN_TABS = TABS.filter((tab) => tab !== 'start');
 type Tab = typeof TABS[number];
 
 
@@ -138,7 +140,6 @@ const state: AppState = {
   settings: {
     reauth_on_read: true,
     menu_bar_hides_dock: false,
-    show_agent_walkthrough: true,
   },
   reveal: {},            // secretId -> prefix string (transient)
   // sheet / confirm state
@@ -287,20 +288,7 @@ function render(capture = true): void {
 
 function globalSectionsHTML() {
   let out = '';
-  let hasOnboarding = false;
-  if (state.tab === 'agents' && state.settings.show_agent_walkthrough) {
-    hasOnboarding = true;
-    out += `<div class="agent-onboarding walkthrough-card">
-      <div class="walkthrough-head">
-        <div class="onboarding-copy"><b>Let your agent set this up</b>
-          <span>Paste this into your coding agent. Once it runs, the agent registers itself and appears below, ready to wire up.</span></div>
-        <button class="icon-btn walkthrough-close" title="Hide this walkthrough" aria-label="Hide Let your agent set this up walkthrough" data-act="hide-agent-walkthrough">${ICONS.x}</button>
-      </div>
-      <pre class="setup-instructions"><code>${esc(state.agentSetupInstructions || 'Loading…')}</code></pre>
-      <div class="onboarding-actions">
-        <button class="btn primary sm" data-act="copy-agent-setup">Copy setup instructions</button>
-      </div></div>`;
-  }
+  const hasOnboarding = false;
   // Live sessions answer "what is my agent doing right now?", so they sit
   // with the agents rather than above every screen.
   if (state.tab === 'agents' && state.sessions.length) {
@@ -613,8 +601,24 @@ async function receiveActivity(entry: ActivityEntry | null | undefined): Promise
   while (list.children.length > ACTIVITY_RENDER_LIMIT) list.lastElementChild?.remove();
 }
 
+/** The paste-ready message that registers an agent with this broker. */
+function agentSetupCardHTML(): string {
+  return `<div class="agent-onboarding">
+    <div class="onboarding-copy"><b>Let your agent set this up</b>
+      <span>Paste this into your coding agent. Once it runs, the agent registers itself and appears on the Agents tab, ready to wire up.</span></div>
+    <pre class="setup-instructions"><code>${esc(state.agentSetupInstructions || 'Loading…')}</code></pre>
+    <div class="onboarding-actions">
+      <button class="btn primary sm" data-act="copy-agent-setup">Copy setup instructions</button>
+    </div></div>`;
+}
+
+function startHTML(): string {
+  return `<div class="start">${agentSetupCardHTML()}</div>`;
+}
+
 function tabContentHTML() {
-  return state.tab === 'connections' ? connectionsHTML()
+  return state.tab === 'start' ? startHTML()
+    : state.tab === 'connections' ? connectionsHTML()
     : state.tab === 'agents' ? agentsHTML()
     : activityHTML();
 }
@@ -633,14 +637,14 @@ function renderMainWindow() {
   const nav = TABS.filter((tab) => tab !== 'activity').map(navItem).join('');
   const activityNav = navItem('activity');
   // One view-specific action, always in the header row next to the title.
-  const actionBtn = state.tab === 'connections'
+  const actionBtn = state.tab === 'start'
+    ? ''
+    : state.tab === 'connections'
     ? `<div class="dw-head-actions">
         <input id="tool-search" class="cat-search" type="search" placeholder="Search tools…"
           aria-label="Search tools" value="${escAttr(state.toolSearch)}"></div>`
     : state.tab === 'agents'
-    ? (state.settings.show_agent_walkthrough
-        ? ''
-        : `<button class="btn" data-act="copy-agent-setup">Copy setup instructions</button>`)
+    ? ''
     : `<button class="btn" data-act="clear-activity-ask" ${state.activity.length ? '' : 'disabled'}>Clear activity</button>`;
   const menu = state.menuOpen
     ? `<div class="settings-menu">
@@ -668,7 +672,8 @@ function renderMainWindow() {
 }
 
 function renderDropdown() {
-  const tabs = TABS.map((tb) =>
+  if (state.tab === 'start') state.tab = 'connections';
+  const tabs = DROPDOWN_TABS.map((tb) =>
     `<button class="seg-btn ${state.tab === tb ? 'on' : ''}" data-act="tab" data-tab="${tb}">${tabLabel(tb)}</button>`).join('');
   const footer = '';
   root().innerHTML = `<div class="surface dropdown-surface">
@@ -1017,18 +1022,16 @@ function settingsSheet() {
   const dockRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Hide Dock icon in the menu bar</div>
       <div class="st-sub">When minimized to the menu bar, hide the Dock icon until the window is reopened.</div></div>
       <button class="switch ${s.menu_bar_hides_dock ? 'on' : ''}" data-act="toggle-menubar-dock" role="checkbox" aria-checked="${s.menu_bar_hides_dock ? 'true' : 'false'}"></button></div>`;
-  const walkthroughRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Show the agent setup walkthrough</div>
-      <div class="st-sub">The “Let your agent set this up” card on the Agents tab.</div></div>
-      <button class="switch ${s.show_agent_walkthrough ? 'on' : ''}" data-act="toggle-agent-walkthrough" role="checkbox" aria-checked="${s.show_agent_walkthrough ? 'true' : 'false'}"></button></div>`;
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
     <div class="sheet wide"><h3>Settings</h3>
-    ${reauthRow}${dockRow}${walkthroughRow}
+    ${reauthRow}${dockRow}
     <div class="sheet-actions"><button class="btn primary" data-act="sheet-cancel">Done</button></div></div>`;
 }
 
 /* --------------------------------- helpers ------------------------------- */
 const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
-const tabLabel = (tab: Tab): string => tab === 'connections' ? 'Tools' : cap(tab);
+const tabLabel = (tab: Tab): string =>
+  tab === 'connections' ? 'Tools' : tab === 'start' ? 'Get started' : cap(tab);
 
 // Flash "Copied" in place of the masked value for a moment after a copy.
 let copiedTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1477,20 +1480,6 @@ document.addEventListener('click', async (e) => {
       state.connMenuOpen = state.connMenuOpen === id ? null : id;
       render();
       break;
-    case 'toggle-agent-walkthrough': {
-      const on = !state.settings.show_agent_walkthrough;
-      if (await run(() => invoke('set_agent_walkthrough_visible', { on }))) {
-        state.settings.show_agent_walkthrough = on;
-        render();
-      }
-      break;
-    }
-    case 'hide-agent-walkthrough':
-      if (await run(() => invoke('set_agent_walkthrough_visible', { on: false }))) {
-        state.settings.show_agent_walkthrough = false;
-        render();
-      }
-      break;
     case 'open-settings': state.menuOpen = false; state.sheet = { kind: 'settings' }; render(); break;
     case 'copy-agent-setup':
       if (state.agentMenuOpen) { state.agentMenuOpen = null; render(); }
@@ -1915,6 +1904,15 @@ async function boot() {
   // A webview reload must not leave a stale native lock behind. Forms acquire
   // it again before they are shown.
   if (mode === 'dropdown') await invoke('ui_set_dropdown_form_active', { active: false });
+  // Choose the landing tab before the first paint: nothing configured yet
+  // means the walkthrough is the useful screen.
+  await Promise.all([
+    load('connections', 'list_connections'),
+    load('agents', 'list_agents'),
+  ]);
+  if (mode !== 'dropdown' && !state.connections.length && !state.agents.length) {
+    state.tab = 'start';
+  }
   await refresh('all');
   // The setup card always shows the paste-ready message.
   try { state.agentSetupInstructions = await invoke('get_agent_setup'); render(); }

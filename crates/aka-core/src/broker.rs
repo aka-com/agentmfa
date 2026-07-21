@@ -658,9 +658,6 @@ impl Broker {
         self.store.set_menu_bar_hides_dock(on)
     }
 
-    pub fn ui_set_agent_walkthrough_visible(&self, on: bool) -> Result<()> {
-        self.store.set_agent_walkthrough_visible(on)
-    }
 }
 
 /// A broker from before the advisory-lock protocol can still own the socket

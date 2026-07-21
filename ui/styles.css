@@ -206,6 +206,10 @@
   .live-row .s-sub{ max-width: 250px; }
   .live-row .agent-sub{ font-family: inherit; }
   .agent-onboarding{ margin: 9px 0; padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--card-bg); }
+  /* The Get started tab: a centered column so the walkthrough reads as a
+     document rather than a dashboard. */
+  .start{ max-width: 640px; margin: 0 auto; padding-top: 4px; }
+  .start .agent-onboarding{ margin: 0; }
   .walkthrough-head{ display: flex; align-items: flex-start; gap: 8px; }
   .walkthrough-head .onboarding-copy{ flex: 1; min-width: 0; }
   .walkthrough-close{ flex: 0 0 auto; margin: -4px -5px 0 0; }

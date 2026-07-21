@@ -63,7 +63,6 @@ export interface ActivityEntry {
 export interface Settings {
   reauth_on_read: boolean;
   menu_bar_hides_dock: boolean;
-  show_agent_walkthrough: boolean;
 }
 
 export interface HostKeyCandidate {
@@ -151,7 +150,6 @@ export interface CommandMap {
   close_session: CommandSpec<{ id: number }, boolean>;
   set_reauth_on_read: CommandSpec<{ on: boolean }, void>;
   set_menu_bar_hides_dock: CommandSpec<{ on: boolean }, void>;
-  set_agent_walkthrough_visible: CommandSpec<{ on: boolean }, void>;
   ui_set_mode: CommandSpec<{ mode: string }, void>;
   ui_hide_main: CommandSpec<undefined, void>;
   ui_hide_dropdown: CommandSpec<undefined, void>;

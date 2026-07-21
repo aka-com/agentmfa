@@ -22,7 +22,7 @@ pub const EVT_ACTIVITY_CHANGED: &str = "aka://activity-changed";
 
 fn copy_authorization_reason(duration: Duration) -> String {
     let seconds = duration.as_secs();
-    let window = if seconds % 60 == 0 {
+    let window = if seconds.is_multiple_of(60) {
         let minutes = seconds / 60;
         format!("{minutes} minute{}", if minutes == 1 { "" } else { "s" })
     } else {
