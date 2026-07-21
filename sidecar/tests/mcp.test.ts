@@ -46,22 +46,128 @@ const CONNECTIONS = [
   },
 ];
 
-/** A stand-in for an upstream MCP server, reached through the broker. */
-function upstreamRpc(request: { id: number; method: string; params?: unknown }): unknown {
-  const reply = (result: unknown) => ({ jsonrpc: '2.0', id: request.id, result });
+/**
+ * A stand-in for an upstream MCP server, reached through the broker.
+ *
+ * Deliberately *stateful*, because that is the default posture of a server
+ * built on the official SDKs: `initialize` issues a session id in a response
+ * header, every later request must echo it plus the negotiated
+ * `MCP-Protocol-Version`, requests before `notifications/initialized` are
+ * refused, `tools/list` paginates, and `tools/call` answers as an SSE body
+ * whose first frame is a notification — everything the old
+ * treat-it-as-stateless client got wrong.
+ */
+const upstream = {
+  sessions: new Map<string, { initialized: boolean }>(),
+  counter: 0,
+  deleted: [] as string[],
+};
+
+function resetUpstream(): void {
+  upstream.sessions.clear();
+  upstream.deleted = [];
+}
+
+interface UpstreamReply {
+  status: number;
+  headers?: Record<string, string>;
+  body: string;
+}
+
+function upstreamHttp(call: {
+  method: string;
+  headers?: Record<string, string>;
+  body?: { id?: number; method: string; params?: unknown };
+}): UpstreamReply {
+  const requestHeaders = Object.fromEntries(
+    Object.entries(call.headers ?? {}).map(([name, value]) => [name.toLowerCase(), value]),
+  );
+  const sessionId = requestHeaders['mcp-session-id'];
+
+  if (call.method === 'DELETE') {
+    if (sessionId && upstream.sessions.delete(sessionId)) {
+      upstream.deleted.push(sessionId);
+      return { status: 200, body: '' };
+    }
+    return { status: 404, body: '' };
+  }
+
+  const request = call.body!;
+  const reply = (result: unknown): UpstreamReply => ({
+    status: 200,
+    body: JSON.stringify({ jsonrpc: '2.0', id: request.id, result }),
+  });
+  const failure = (message: string): UpstreamReply => ({
+    status: 200,
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: request.id ?? null,
+      error: { code: -32600, message },
+    }),
+  });
+
   if (request.method === 'initialize') {
-    return reply({ protocolVersion: '2025-06-18', capabilities: {}, serverInfo: { name: 'notion' } });
+    const id = `sess-${++upstream.counter}`;
+    upstream.sessions.set(id, { initialized: false });
+    return {
+      status: 200,
+      // Mixed case on purpose: the client must match header names
+      // case-insensitively, as the broker relays whatever case it saw.
+      headers: { 'Mcp-Session-Id': id },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: request.id,
+        result: { protocolVersion: '2025-06-18', capabilities: {}, serverInfo: { name: 'notion' } },
+      }),
+    };
   }
+
+  const session = sessionId ? upstream.sessions.get(sessionId) : undefined;
+  if (!session) return { status: 404, body: 'missing or unknown Mcp-Session-Id' };
+
+  if (request.method === 'notifications/initialized') {
+    session.initialized = true;
+    return { status: 202, body: '' };
+  }
+  if (!session.initialized) return failure('server not initialized');
+  if (requestHeaders['mcp-protocol-version'] !== '2025-06-18') {
+    return { status: 400, body: 'missing or wrong MCP-Protocol-Version' };
+  }
+
   if (request.method === 'tools/list') {
-    return reply({
-      tools: [{ name: 'search', description: 'Search the workspace' }],
-    });
+    const cursor = (request.params as { cursor?: string } | undefined)?.cursor;
+    if (!cursor) {
+      return reply({
+        tools: [{ name: 'search', description: 'Search the workspace' }],
+        nextCursor: 'page-2',
+      });
+    }
+    return reply({ tools: [{ name: 'create_page', description: 'Create a page' }] });
   }
+
   if (request.method === 'tools/call') {
     const params = request.params as { name: string; arguments: Record<string, unknown> };
-    return reply({ content: [{ type: 'text', text: `${params.name}:${JSON.stringify(params.arguments)}` }] });
+    // A notification frame ahead of the response, so a client that grabs
+    // the first parseable frame instead of matching its request id fails.
+    const notification = JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'notifications/message',
+      params: { level: 'info', data: 'working…' },
+    });
+    const response = JSON.stringify({
+      jsonrpc: '2.0',
+      id: request.id,
+      result: {
+        content: [{ type: 'text', text: `${params.name}:${JSON.stringify(params.arguments)}` }],
+      },
+    });
+    return {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+      body: `event: message\ndata: ${notification}\n\nevent: message\ndata: ${response}\n\n`,
+    };
   }
-  return { jsonrpc: '2.0', id: request.id, error: { code: -32601, message: 'Method not found' } };
+  return failure('Method not found');
 }
 
 /** A stand-in for the broker's control plane, on a Unix socket. */
@@ -113,7 +219,15 @@ function fakeBroker(socketPath: string): Promise<Server> {
           return;
         }
         if (req.url === '/v1/http' && body.path === '/mcp') {
-          send(200, { status: 200, body: upstreamRpc(body.body) });
+          // Relay the upstream's answer the way the real broker does:
+          // `{status, headers, body, body_encoding}`, body as a string.
+          const relayed = upstreamHttp(body);
+          send(200, {
+            status: relayed.status,
+            headers: relayed.headers ?? {},
+            body: relayed.body,
+            body_encoding: 'utf8',
+          });
           return;
         }
         // An MCP upstream that answers, but with an error status — the shape
@@ -138,6 +252,7 @@ interface Harness {
 }
 
 async function harness(): Promise<Harness> {
+  resetUpstream();
   const dir = mkdtempSync(join(tmpdir(), 'aka-mcp-'));
   const socketPath = join(dir, 'broker.sock');
   const broker = await fakeBroker(socketPath);
@@ -253,7 +368,9 @@ test("an MCP upstream's own tools are re-exposed, credential-side untouched", as
   try {
     const client = await app.connect('token-mcp');
     const { tools } = await client.listTools();
+    // Both pages of the upstream's paginated `tools/list` are present.
     assert.deepEqual(tools.map((tool) => tool.name).sort(), [
+      'multitool_notion_create_page',
       'multitool_notion_search',
       'multitool_status',
     ]);
@@ -266,6 +383,23 @@ test("an MCP upstream's own tools are re-exposed, credential-side untouched", as
     assert.deepEqual((result as { content: Array<{ text: string }> }).content, [
       { type: 'text', text: 'search:{"query":"roadmap"}' },
     ]);
+  } finally {
+    await app.close();
+  }
+});
+
+test('a stateful upstream sees the full handshake and no leaked sessions', async () => {
+  // The fake upstream refuses anything without its session id, before
+  // `notifications/initialized`, or missing the negotiated protocol-version
+  // header — so tools appearing at all proves the handshake. What is
+  // asserted here is the cleanup: every session the sidecar opened was
+  // DELETEd rather than left for the server's idle reaper.
+  const app = await harness();
+  try {
+    const client = await app.connect('token-mcp');
+    await client.callTool({ name: 'multitool_notion_search', arguments: { query: 'x' } });
+    assert.ok(upstream.deleted.length >= 2, 'list + call should each close their session');
+    assert.equal(upstream.sessions.size, 0, 'no upstream session may be left open');
   } finally {
     await app.close();
   }
@@ -331,7 +465,7 @@ test('status reports an MCP upstream by its real tool names', async () => {
     ) as { tools: Array<{ tool: string; name: string }> };
     assert.deepEqual(
       status.tools.map((entry) => entry.tool).sort(),
-      ['multitool_notion_search'],
+      ['multitool_notion_create_page', 'multitool_notion_search'],
     );
     assert.ok(status.tools.every((entry) => entry.name === 'notion'));
     // The advertised names are exactly the tools the agent can actually call.
