@@ -92,6 +92,10 @@ impl Paths {
     pub fn agents_file(&self) -> PathBuf {
         self.data_dir.join("agents.json")
     }
+    /// Persisted per-wiring direct endpoints (id, wiring, hashed secret).
+    pub fn endpoints_file(&self) -> PathBuf {
+        self.data_dir.join("endpoints.json")
+    }
     pub fn audit_file(&self) -> PathBuf {
         self.data_dir.join("audit.jsonl")
     }
@@ -129,6 +133,18 @@ impl Paths {
         self.socket_dir.join("ssh")
     }
 
+    /// Per-wiring direct-endpoint sockets live here, one subdirectory per
+    /// endpoint (`endpoints/<endpoint-id>/…`). Filesystem permissions keep
+    /// out other users; the per-wiring secret attributes same-user callers.
+    pub fn endpoints_dir(&self) -> PathBuf {
+        self.socket_dir.join("endpoints")
+    }
+    /// The private directory holding one endpoint's listener socket(s). Named
+    /// by the endpoint id so revocation is a single recursive remove.
+    pub fn endpoint_dir(&self, endpoint_id: &uuid::Uuid) -> PathBuf {
+        self.endpoints_dir().join(endpoint_id.to_string())
+    }
+
     /// `socket_file()` for display: home shortened to `~`.
     pub fn socket_display(&self) -> String {
         display_tilde(&self.socket_file())
@@ -146,6 +162,7 @@ impl Paths {
         create_private_dir(&self.socket_dir)?;
         create_private_dir(&self.tokens_dir())?;
         create_private_dir(&self.ssh_agent_dir())?;
+        create_private_dir(&self.endpoints_dir())?;
         Ok(())
     }
 

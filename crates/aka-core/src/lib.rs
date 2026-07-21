@@ -16,6 +16,7 @@ pub mod broker;
 pub mod capability;
 pub mod config;
 pub mod daemon;
+pub mod endpoints;
 pub mod error;
 pub mod events;
 pub mod executions;

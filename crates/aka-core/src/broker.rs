@@ -21,7 +21,8 @@ use crate::ratelimit::{KeyedLimiter, WindowLimiter};
 use crate::sessions::{DataPlane, SessionInfo};
 use crate::store::{ConnectionSpec, Store};
 use crate::types::{
-    Connection, ConnectionKind, PairedAgent, SecretMeta, SecretValue, Settings, Wiring, WiringMode,
+    Connection, ConnectionKind, PairedAgent, SecretMeta, SecretValue, Settings, Wiring,
+    WiringEndpoint, WiringMode,
 };
 use crate::Result;
 
@@ -40,6 +41,9 @@ pub struct Broker {
     pub paths: Paths,
     pub store: Arc<Store>,
     pub wirings: Arc<Wirings>,
+    /// Per-wiring direct endpoints (stable DSN/URL issuance). Bounds and
+    /// teardown ride alongside the wiring table.
+    pub endpoints: Arc<crate::endpoints::EndpointRegistry>,
     /// Serializes configuration mutations that read-then-write shared state
     /// (connection edits, wiring changes) so concurrent UI actions cannot
     /// interleave.
@@ -115,6 +119,12 @@ impl Broker {
             config.token_ttl,
             integrity.clone(),
         )?);
+        let endpoints = Arc::new(crate::endpoints::EndpointRegistry::open(
+            paths.endpoints_file(),
+            config.max_endpoints,
+            config.max_endpoints_per_client,
+            integrity.clone(),
+        )?);
         let wirings = Arc::new(Wirings::open_with_legacy_rules(
             paths.wirings_file(),
             Some(&paths.rules_file()),
@@ -160,6 +170,7 @@ impl Broker {
             paths,
             store,
             wirings,
+            endpoints,
             config_gate: Mutex::new(()),
             copy_authorization_until: Mutex::new(None),
             copy_authorization_gate: tokio::sync::Mutex::new(()),
@@ -422,7 +433,11 @@ impl Broker {
         let mut dropped = 0;
         if target_changed {
             dropped = self.wirings.remove_for_connection(id)?;
-            if dropped > 0 {
+            // A wiring granted for one destination must not silently cover
+            // another: its direct endpoints die with it.
+            let endpoints = self.endpoints.remove_for_connection(id)?;
+            self.teardown_endpoints(&endpoints);
+            if dropped > 0 || !endpoints.is_empty() {
                 self.events.wirings_changed();
             }
             // A health result for the old destination says nothing about
@@ -480,7 +495,9 @@ impl Broker {
         let conn = self.store.delete_connection(id)?;
         self.health.forget(id);
         let dropped = self.wirings.remove_for_connection(id)?;
-        if dropped > 0 {
+        let endpoints = self.endpoints.remove_for_connection(id)?;
+        self.teardown_endpoints(&endpoints);
+        if dropped > 0 || !endpoints.is_empty() {
             self.events.wirings_changed();
         }
         self.audit.append(
@@ -816,6 +833,28 @@ impl Broker {
         self.wirings.wirings()
     }
 
+    /// Every issued direct endpoint, for the app's wiring rows.
+    pub fn endpoints(&self) -> Vec<WiringEndpoint> {
+        self.endpoints.list()
+    }
+
+    /// Tear down endpoints whose wiring just went away. Removing the persisted
+    /// record already happened; this releases the runtime resources tied to it
+    /// (the per-wiring listener and its socket directory) and closes any live
+    /// sessions it was serving, so a revoked endpoint stops working at once —
+    /// unlike a ticket, its access is standing and cannot be left to expire.
+    fn teardown_endpoints(&self, removed: &[WiringEndpoint]) {
+        for endpoint in removed {
+            self.data_plane.close_endpoint_sessions(&endpoint.id);
+            let dir = self.paths.endpoint_dir(&endpoint.id);
+            if let Err(error) = std::fs::remove_dir_all(&dir) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!("could not remove endpoint dir {}: {error}", dir.display());
+                }
+            }
+        }
+    }
+
     /// Wire or unwire an agent from the app. Unwiring does not chase down
     /// live transports — tickets are short-lived, and the next open is
     /// refused.
@@ -847,6 +886,9 @@ impl Broker {
             Ok(true)
         } else {
             let removed = self.wirings.unwire(client_id, connection_id)?;
+            // The endpoint for this exact wiring dies with it.
+            let endpoint = self.endpoints.remove_for_wiring(client_id, connection_id)?;
+            self.teardown_endpoints(endpoint.as_slice());
             if removed.is_some() {
                 self.audit.append(
                     AuditEntry::new(
@@ -856,6 +898,8 @@ impl Broker {
                     .agent(agent.name.clone())
                     .connection(connection.name.clone()),
                 );
+                self.events.wirings_changed();
+            } else if endpoint.is_some() {
                 self.events.wirings_changed();
             }
             Ok(removed.is_some())
@@ -1059,7 +1103,9 @@ impl Broker {
         let removed = self.pairing.revoke(client_id)?;
         if removed {
             let dropped = self.wirings.remove_for_client(client_id)?;
-            if dropped > 0 {
+            let endpoints = self.endpoints.remove_for_client(client_id)?;
+            self.teardown_endpoints(&endpoints);
+            if dropped > 0 || !endpoints.is_empty() {
                 self.events.wirings_changed();
             }
             let sessions_closed = self.data_plane.close_agent(&name);

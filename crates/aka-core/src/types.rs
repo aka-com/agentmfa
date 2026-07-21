@@ -478,6 +478,36 @@ pub struct Wiring {
     pub created_at: DateTime<Utc>,
 }
 
+/// A stable, per-wiring **direct endpoint**: a listener + secret an agent can
+/// keep in its own config (a DSN/URL) instead of round-tripping the control
+/// plane for a short-lived ticket on every session.
+///
+/// It is an artifact of a *wiring*, not a connection, so it inherits the
+/// wiring's grain: it identifies exactly one `(client_id, connection_id)` and
+/// dies with that wiring. Because it grants standing access, it is issued only
+/// by an explicit user action, carries a per-wiring secret the caller must
+/// present (so the listener can attribute the session and re-check the wiring
+/// on every connection, exactly as the control plane does), and persists that
+/// secret only as a SHA-256 hash — the plaintext is shown once at issue.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WiringEndpoint {
+    pub id: Uuid,
+    /// Stable paired-client principal this endpoint belongs to.
+    pub client_id: Uuid,
+    /// Display-name snapshot for audit and UI copy; never authorization.
+    pub agent: String,
+    /// The connection's stable id, never its renamable name.
+    pub connection_id: Uuid,
+    /// The connection kind at issue time: fixes the listener/DSN shape without
+    /// a store lookup and lets a stale endpoint be recognized if the
+    /// connection was replaced by a different kind.
+    pub kind: ConnectionKind,
+    /// SHA-256 of the per-wiring secret, hex-encoded. The plaintext leaves the
+    /// broker exactly once, in the issue response.
+    pub secret_hash: String,
+    pub created_at: DateTime<Utc>,
+}
+
 /// The surface a human decision came from (audit attribution).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

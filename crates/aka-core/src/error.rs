@@ -69,6 +69,12 @@ pub enum CoreError {
     #[error("a tool's type is fixed after creation")]
     KindChange,
 
+    #[error("no such endpoint")]
+    EndpointNotFound,
+
+    #[error("too many direct endpoints ({0}); revoke one before issuing another")]
+    EndpointLimit(usize),
+
     #[error("Secret read was not authenticated")]
     SecretReadNotAuthenticated,
 

@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tokio::sync::Notify;
+use uuid::Uuid;
 
 use crate::audit::{AuditEntry, AuditKind, AuditLog};
 use crate::events::BrokerEvents;
@@ -71,7 +72,12 @@ pub struct SessionInfo {
 
 struct SessionEntry {
     info: SessionInfo,
-    ticket: String,
+    /// The ticket that opened this session, or `None` for a session served by
+    /// a per-wiring direct endpoint (which has no ticket).
+    ticket: Option<String>,
+    /// The direct endpoint that opened this session, when one did. Lets a
+    /// wiring revocation close exactly the endpoint's live sessions.
+    endpoint_id: Option<Uuid>,
     close: Arc<Notify>,
 }
 
@@ -292,6 +298,27 @@ impl DataPlane {
         count
     }
 
+    /// Close every live session a per-wiring direct endpoint is serving.
+    /// Unlike a ticket (short-lived; the next open is simply refused), an
+    /// endpoint grants standing access, so revoking its wiring must chase down
+    /// established sessions rather than wait them out. Returns how many were
+    /// signalled.
+    pub fn close_endpoint_sessions(&self, endpoint_id: &Uuid) -> usize {
+        let state = self.inner.state.lock().unwrap();
+        let sessions: Vec<_> = state
+            .sessions
+            .values()
+            .filter(|session| session.endpoint_id.as_ref() == Some(endpoint_id))
+            .map(|session| session.close.clone())
+            .collect();
+        let count = sessions.len();
+        drop(state);
+        for close in sessions {
+            close.notify_waiters();
+        }
+        count
+    }
+
     /// Drop long-expired tickets (closing any unclaimed pre-dialed upstream
     /// by dropping it). Freshly-expired tickets are kept for a grace period
     /// so a late redemption gets the informative `410 ticket_expired`
@@ -327,7 +354,8 @@ impl Redemption {
             id,
             SessionEntry {
                 info: info.clone(),
-                ticket: self.ticket.clone(),
+                ticket: Some(self.ticket.clone()),
+                endpoint_id: None,
                 close: close.clone(),
             },
         );
@@ -378,8 +406,10 @@ impl SessionHandle {
         let mut state = self.plane.state.lock().unwrap();
         let entry = state.sessions.remove(&self.id);
         if let Some(entry) = &entry {
-            if let Some(ticket) = state.tickets.get_mut(&entry.ticket) {
-                ticket.active_sessions = ticket.active_sessions.saturating_sub(1);
+            if let Some(ticket_key) = &entry.ticket {
+                if let Some(ticket) = state.tickets.get_mut(ticket_key) {
+                    ticket.active_sessions = ticket.active_sessions.saturating_sub(1);
+                }
             }
         }
         drop(state);
