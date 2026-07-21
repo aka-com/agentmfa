@@ -1,11 +1,9 @@
 //! Rate limiting.
 //!
 //! - Per-token sliding-window buckets on capability calls (60/min default).
-//! - **Global** windows on the unauthenticated endpoints, global rather
-//!   than per-peer because a hostile local process can respawn to present a
-//!   fresh audit token on every attempt, so any per-peer key is trivially
-//!   evaded: pairing at 3 attempts per 5 s with a 30 s cooldown after a
-//!   user denial; discovery at 60/min.
+//! - **Global** windows on the unauthenticated endpoints (pairing at 3
+//!   attempts per 5 s; discovery at 60/min), global because unauthenticated
+//!   callers have no stable key to bucket on.
 //!
 //! Every refusal carries *how long to wait*: `check` returns
 //! `Err(retry_after)` so the daemon can answer with `Retry-After` and a
@@ -105,54 +103,6 @@ impl KeyedLimiter {
     }
 }
 
-/// Why a pairing attempt was refused. The two causes demand different agent
-/// behavior: a full window means "slow down and retry"; the post-denial
-/// cooldown means "the human just said no, ask them before trying again".
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PairingBlock {
-    /// Attempt window exhausted; retry after the given wait.
-    Window(Duration),
-    /// The user denied a pairing recently; armed for the given remainder.
-    DeniedCooldown(Duration),
-}
-
-/// The pairing brake: a global window plus a cooldown armed whenever the
-/// user *denies* a pairing.
-pub struct PairingLimiter {
-    window: WindowLimiter,
-    cooldown: Duration,
-    cooldown_until: Mutex<Option<Instant>>,
-}
-
-impl PairingLimiter {
-    pub fn new(max: u32, window: Duration, cooldown: Duration) -> Self {
-        Self {
-            window: WindowLimiter::new(max, window),
-            cooldown,
-            cooldown_until: Mutex::new(None),
-        }
-    }
-
-    pub fn check(&self) -> Result<(), PairingBlock> {
-        {
-            let mut until = self.cooldown_until.lock().unwrap();
-            if let Some(t) = *until {
-                let now = Instant::now();
-                if now < t {
-                    return Err(PairingBlock::DeniedCooldown(t - now));
-                }
-                *until = None;
-            }
-        }
-        self.window.check().map_err(PairingBlock::Window)
-    }
-
-    /// Arm the post-denial cooldown.
-    pub fn on_user_denied(&self) {
-        *self.cooldown_until.lock().unwrap() = Some(Instant::now() + self.cooldown);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,21 +139,4 @@ mod tests {
         assert!(l.check("b").is_ok());
     }
 
-    #[test]
-    fn pairing_cooldown_blocks_distinctly() {
-        let l = PairingLimiter::new(10, Duration::from_secs(5), Duration::from_secs(60));
-        assert!(l.check().is_ok());
-        l.on_user_denied();
-        match l.check().unwrap_err() {
-            PairingBlock::DeniedCooldown(wait) => assert!(wait <= Duration::from_secs(60)),
-            other => panic!("expected DeniedCooldown, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn pairing_window_blocks_as_window() {
-        let l = PairingLimiter::new(1, Duration::from_secs(5), Duration::from_secs(60));
-        assert!(l.check().is_ok());
-        assert!(matches!(l.check().unwrap_err(), PairingBlock::Window(_)));
-    }
 }

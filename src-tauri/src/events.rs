@@ -98,7 +98,6 @@ impl TauriEvents {
     fn request_summary(&self, request: &ApprovalRequest) -> String {
         let connection = self.connection_name(request);
         match request.kind {
-            ApprovalKind::Pair => format!("{} wants to connect to AKA Desktop", request.agent),
             ApprovalKind::Http if request.http.as_ref().is_some_and(|http| !http.mutating) => {
                 format!("{} wants to fetch data from {connection}", request.agent)
             }
@@ -197,7 +196,6 @@ impl BrokerEvents for TauriEvents {
                         "Let {} make any request through {} without asking again",
                         request.agent, connection
                     ),
-                    ApprovalKind::Pair => format!("Connect {} to AKA Desktop", request.agent),
                     ApprovalKind::Propose => proposal_confirmation(request),
                     ApprovalKind::Pg | ApprovalKind::Ws | ApprovalKind::Ssh => format!(
                         "Let {} open and use {} without asking again",
@@ -225,12 +223,10 @@ impl BrokerEvents for TauriEvents {
                         "Let {} open and use {} for {}",
                         request.agent, connection, duration
                     ),
-                    ApprovalKind::Pair => format!("Connect {} to AKA Desktop", request.agent),
                     ApprovalKind::Propose => proposal_confirmation(request),
                 }
             }
             _ => match request.kind {
-                ApprovalKind::Pair => format!("Connect {} to AKA Desktop", request.agent),
                 ApprovalKind::Propose => proposal_confirmation(request),
                 _ => format!("Allow {}", request.action),
             },

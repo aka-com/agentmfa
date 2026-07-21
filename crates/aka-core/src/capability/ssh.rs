@@ -779,10 +779,6 @@ async fn tofu_session_bind(
         ),
         received_at: chrono::Utc::now(),
         deadline: chrono::Utc::now(),
-        identity: None,
-        pairing_identity: None,
-        replaces_existing_agent: false,
-        inherited: vec![],
         http: None,
         ssh: Some(SshHostKeyView {
             host: state.host.clone(),

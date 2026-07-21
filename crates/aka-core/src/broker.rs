@@ -17,7 +17,7 @@ use crate::grants::{AccessGrantSummary, AccessGrants, GrantRemoval};
 use crate::pairing::PairingRegistry;
 use crate::paths::{BrokerInstanceLock, Paths};
 use crate::policy::{NaivePolicyEngine, PolicyEngine as _};
-use crate::ratelimit::{KeyedLimiter, PairingLimiter, WindowLimiter};
+use crate::ratelimit::{KeyedLimiter, WindowLimiter};
 use crate::sessions::{DataPlane, SessionInfo};
 use crate::store::{ConnectionSpec, Store};
 use crate::types::{
@@ -50,9 +50,6 @@ pub enum UiDecision {
 /// What a decision can carry beyond its shape. All fields default to off.
 #[derive(Default)]
 pub struct DecisionOptions {
-    /// Pairing approvals: remove inherited standing rules before the token
-    /// is minted.
-    pub revoke_inherited_rules: bool,
     /// Connection-proposal approvals: the credential value the user typed
     /// into the prompt. Required to allow a proposal; never logged.
     pub proposal_credential: Option<SecretValue>,
@@ -89,7 +86,7 @@ pub struct Broker {
     pub(crate) http_client: reqwest::Client,
     pub(crate) token_limiter: KeyedLimiter,
     pub(crate) discovery_limiter: WindowLimiter,
-    pub(crate) pairing_limiter: PairingLimiter,
+    pub(crate) pairing_limiter: WindowLimiter,
     /// Acquired before any persistent state is opened and declared last so it
     /// remains held while every state-owning field is dropped.
     _instance_lock: BrokerInstanceLock,
@@ -166,11 +163,7 @@ impl Broker {
                 config.discovery_per_min,
                 std::time::Duration::from_secs(60),
             ),
-            pairing_limiter: PairingLimiter::new(
-                config.pairing_max_attempts,
-                config.pairing_window,
-                config.pairing_deny_cooldown,
-            ),
+            pairing_limiter: WindowLimiter::new(config.pairing_max_attempts, config.pairing_window),
             config,
             paths,
             store,
@@ -215,17 +208,6 @@ impl Broker {
         Ok(conn)
     }
 
-    /// The connections a pairing under `agent` would inherit promptless
-    /// access to, the loud disclosure list.
-    pub fn inherited_for(&self, client_id: &Uuid) -> Vec<ConnectionSummary> {
-        self.policy
-            .rules_for_client(client_id)
-            .into_iter()
-            .filter_map(|rule| self.store.connection_by_id(&rule.connection_id).ok())
-            .map(|conn| self.connection_summary(&conn))
-            .collect()
-    }
-
     /* --------------------------- approvals (UI) --------------------------- */
 
     pub fn approvals_queue(&self) -> Vec<ApprovalRequest> {
@@ -244,32 +226,11 @@ impl Broker {
         decision: UiDecision,
         ctx: &DecisionContext,
     ) -> Result<Option<ApprovalRequest>> {
-        self.decide_with_pairing_options(id, decision, false, ctx)
+        self.decide_with_options(id, decision, DecisionOptions::default(), ctx)
     }
 
-    /// Apply the user's decision, optionally removing inherited standing
-    /// rules before an approved pairing can mint and return its token.
-    pub fn decide_with_pairing_options(
-        &self,
-        id: &Uuid,
-        decision: UiDecision,
-        revoke_inherited_rules: bool,
-        ctx: &DecisionContext,
-    ) -> Result<Option<ApprovalRequest>> {
-        self.decide_with_options(
-            id,
-            decision,
-            DecisionOptions {
-                revoke_inherited_rules,
-                ..DecisionOptions::default()
-            },
-            ctx,
-        )
-    }
-
-    /// Apply the user's decision with everything it can carry: inherited-rule
-    /// revocation for pairing approvals, and the user-typed credential value
-    /// for connection-proposal approvals.
+    /// Apply the user's decision with everything it can carry: the
+    /// user-typed credential value for connection-proposal approvals.
     pub fn decide_with_options(
         &self,
         id: &Uuid,
@@ -289,19 +250,6 @@ impl Broker {
             self.stage_proposal_credential(&request, options.proposal_credential)?;
         }
         let confirmation = self.confirm_decision(&request, decision)?;
-        if options.revoke_inherited_rules
-            && request.kind == ApprovalKind::Pair
-            && matches!(decision, UiDecision::AllowOnce | UiDecision::AlwaysAllow)
-        {
-            if let Some(client_id) = request.client_id {
-                self.remove_rules_for_client_before_pairing(
-                    &client_id,
-                    &request.agent,
-                    Some(ctx),
-                    confirmation,
-                )?;
-            }
-        }
         self.apply_decision(id, decision, ctx, confirmation)
     }
 
@@ -352,7 +300,7 @@ impl Broker {
     }
 
     /// Whether — and how — the decision was confirmed. Deny is always one
-    /// click; *Allow once* on a pairing or mutating request, every access
+    /// click; *Allow once* on a proposal or mutating request, every access
     /// session, and *Always allow…* in every case complete only after the
     /// shell's native confirmation. Fails closed when the shell refuses.
     fn confirm_decision(
@@ -398,23 +346,8 @@ impl Broker {
                     .approvals
                     .deny(id, crate::wire::ErrorReason::DeniedByUser);
                 if let Some(request) = &request {
-                    if request.kind == ApprovalKind::Pair {
-                        // Pairing-prompt spam brake.
-                        self.pairing_limiter.on_user_denied();
-                        self.audit.append(attributed(
-                            AuditEntry::new(
-                                AuditKind::PairDenied,
-                                format!("Connection denied: {}", request.agent),
-                            )
-                            .agent(request.agent.clone())
-                            .outcome("denied_by_user"),
-                        ));
-                    } else {
-                        self.audit.append(attributed(
-                            AuditEntry::new(
-                                AuditKind::Denied,
-                                format!("Denied: {}", request.agent),
-                            )
+                    self.audit.append(attributed(
+                        AuditEntry::new(AuditKind::Denied, format!("Denied: {}", request.agent))
                             .agent(request.agent.clone())
                             .connection(
                                 request
@@ -429,15 +362,14 @@ impl Broker {
                                 "approval_state",
                                 crate::wire::ApprovalState::Denied.as_str(),
                             ),
-                        ));
-                    }
+                    ));
                 }
                 Ok(request)
             }
             UiDecision::AllowOnce => {
                 let request = self.approvals.approve(id, confirmation.is_some(), None);
                 if let Some(request) = &request {
-                    if !matches!(request.kind, ApprovalKind::Pair | ApprovalKind::Propose) {
+                    if request.kind != ApprovalKind::Propose {
                         self.audit.append(attributed(
                             AuditEntry::new(
                                 AuditKind::AllowedOnce,
@@ -468,9 +400,9 @@ impl Broker {
                 let Some(request) = self.approvals.get(id) else {
                     return Ok(None);
                 };
-                if matches!(request.kind, ApprovalKind::Pair | ApprovalKind::Propose) {
-                    // "Always allow" applies to neither pairing nor a
-                    // connection proposal; both are one-shot decisions.
+                if request.kind == ApprovalKind::Propose {
+                    // "Always allow" does not apply to a connection
+                    // proposal; it is a one-shot decision.
                     return self.apply_decision(id, UiDecision::AllowOnce, ctx, confirmation);
                 }
                 if request.ssh.is_some() {
@@ -507,9 +439,9 @@ impl Broker {
                 let Some(request) = self.approvals.get(id) else {
                     return Ok(None);
                 };
-                if matches!(request.kind, ApprovalKind::Pair | ApprovalKind::Propose) {
-                    // Neither pairing nor a proposal starts an access
-                    // session; coerce to the one-shot decision.
+                if request.kind == ApprovalKind::Propose {
+                    // A proposal never starts an access session; coerce to
+                    // the one-shot decision.
                     return self.apply_decision(id, UiDecision::AllowOnce, ctx, confirmation);
                 }
                 if request.ssh.is_some() {
@@ -536,10 +468,9 @@ impl Broker {
                     _ => PermissionScope::Full,
                 };
                 let Some(claim) = self.approvals.claim_session(id, |queued| {
-                    queued.kind != ApprovalKind::Pair
-                        // A queued host-key trust prompt is never absorbed by
-                        // an access session; the user must see the fingerprint.
-                        && queued.ssh.is_none()
+                    // A queued host-key trust prompt is never absorbed by
+                    // an access session; the user must see the fingerprint.
+                    queued.ssh.is_none()
                         && queued.agent_token_hash.as_deref()
                             == Some(current_agent.token_hash.as_str())
                         && queued.connection.as_ref().is_some_and(|queued_connection| {
@@ -1177,35 +1108,24 @@ impl Broker {
         let Some(client) = self.pairing.get(agent) else {
             return Ok(0);
         };
-        self.remove_rules_for_client_before_pairing(&client.id, agent, None, None)
+        self.remove_rules_for_client(&client.id, agent)
     }
 
-    pub(crate) fn remove_rules_for_client_before_pairing(
-        &self,
-        client_id: &Uuid,
-        agent: &str,
-        ctx: Option<&DecisionContext>,
-        confirmation: Option<ConfirmationMethod>,
-    ) -> Result<usize> {
+    pub(crate) fn remove_rules_for_client(&self, client_id: &Uuid, agent: &str) -> Result<usize> {
         let removed = self.policy.remove_rules_for_client(client_id)?;
         if removed > 0 {
-            let mut entry = AuditEntry::new(
-                AuditKind::RuleRemoved,
-                format!("Approval required again: {agent}"),
-            )
-            .agent(agent.to_string())
-            .detail(format!(
-                "{removed} standing rule{} removed before pairing",
-                if removed == 1 { "" } else { "s" }
-            ))
-            .field("rules_removed", removed);
-            if let Some(ctx) = ctx {
-                entry = entry.context(ctx);
-            }
-            if let Some(confirmation) = confirmation {
-                entry = entry.confirmation(confirmation);
-            }
-            self.audit.append(entry);
+            self.audit.append(
+                AuditEntry::new(
+                    AuditKind::RuleRemoved,
+                    format!("Approval required again: {agent}"),
+                )
+                .agent(agent.to_string())
+                .detail(format!(
+                    "{removed} standing rule{} removed",
+                    if removed == 1 { "" } else { "s" }
+                ))
+                .field("rules_removed", removed),
+            );
             self.events.rules_changed();
         }
         Ok(removed)
@@ -1228,7 +1148,7 @@ impl Broker {
         let name = client.name.clone();
         let removed = self.pairing.revoke(client_id)?;
         if removed {
-            self.remove_rules_for_client_before_pairing(&client.id, &name, None, None)?;
+            self.remove_rules_for_client(&client.id, &name)?;
             self.revoke_access_grants_for_agent(&name, "agent revoked");
             let sessions_closed = self.data_plane.close_agent(&name);
             self.audit.append(

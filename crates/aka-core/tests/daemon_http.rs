@@ -115,21 +115,16 @@ impl Harness {
         request
     }
 
+    /// Registration is immediate: no prompt to decide.
     async fn pair(&mut self, name: &str) -> String {
-        let socket = self.socket.clone();
-        let name_owned = name.to_string();
-        let call = tokio::spawn(async move {
-            uds_request(
-                &socket,
-                "POST",
-                "/v1/pair",
-                &[],
-                Some(json!({ "agent_name": name_owned })),
-            )
-            .await
-        });
-        self.decide_next(UiDecision::AllowOnce).await;
-        let (status, body) = call.await.unwrap();
+        let (status, body) = uds_request(
+            &self.socket,
+            "POST",
+            "/v1/pair",
+            &[],
+            Some(json!({ "agent_name": name })),
+        )
+        .await;
         assert_eq!(status, 200, "pair failed: {body}");
         body["token"].as_str().unwrap().to_string()
     }
@@ -485,38 +480,33 @@ async fn pairing_flow_and_token_auth() {
 }
 
 #[tokio::test]
-async fn denied_pairing_returns_403_and_arms_cooldown() {
-    let mut h = harness(BrokerConfig::default()).await;
-    let socket = h.socket.clone();
-    let call = tokio::spawn(async move {
-        uds_request(
-            &socket,
+async fn pairing_attempts_are_rate_limited() {
+    let mut config = BrokerConfig::default();
+    config.pairing_max_attempts = 2;
+    let h = harness(config).await;
+    for name in ["agent-one", "agent-two"] {
+        let (status, _) = uds_request(
+            &h.socket,
             "POST",
             "/v1/pair",
             &[],
-            Some(json!({"agent_name": "evil-tool"})),
+            Some(json!({"agent_name": name})),
         )
-        .await
-    });
-    h.decide_next(UiDecision::Deny).await;
-    let (status, body) = call.await.unwrap();
-    assert_eq!(status, 403);
-    assert_eq!(body["reason"], "denied_by_user");
-    // Cooldown after a user denial: the refusal names its cause (the
-    // human said no, distinct from a full attempt window) and how long to
-    // wait.
+        .await;
+        assert_eq!(status, 200);
+    }
     let (status, body) = uds_request(
         &h.socket,
         "POST",
         "/v1/pair",
         &[],
-        Some(json!({"agent_name": "evil-tool"})),
+        Some(json!({"agent_name": "agent-three"})),
     )
     .await;
     assert_eq!(status, 429);
-    assert_eq!(body["reason"], "pairing_denied_cooldown");
+    assert_eq!(body["reason"], "pairing_rate_limited");
     let wait = body["retry_after_seconds"].as_u64().unwrap();
-    assert!((1..=30).contains(&wait), "unexpected wait {wait}");
+    assert!((1..=5).contains(&wait), "unexpected wait {wait}");
 }
 
 #[tokio::test]
@@ -1450,27 +1440,19 @@ async fn blocking_reauth_prompt_does_not_stall_the_daemon() {
     let daemon = daemon::serve(broker.clone()).await.unwrap();
     let socket = daemon.socket_path.clone();
 
-    // Pair (no secret read, so the gate is not touched).
+    // Pair (registration is immediate; no secret read, so the gate is not
+    // touched).
     let token = {
-        let s = socket.clone();
-        let call = tokio::spawn(async move {
-            uds_request(
-                &s,
-                "POST",
-                "/v1/pair",
-                &[],
-                Some(json!({"agent_name": "claude-code"})),
-            )
-            .await
-        });
-        let prompt = tokio::time::timeout(Duration::from_secs(5), prompts.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        broker
-            .decide(&prompt.id, UiDecision::AllowOnce, &ctx())
-            .unwrap();
-        call.await.unwrap().1["token"].as_str().unwrap().to_string()
+        let (status, body) = uds_request(
+            &socket,
+            "POST",
+            "/v1/pair",
+            &[],
+            Some(json!({"agent_name": "claude-code"})),
+        )
+        .await;
+        assert_eq!(status, 200);
+        body["token"].as_str().unwrap().to_string()
     };
 
     // Fire an HTTP GET; approving it runs the executor, which reads the
@@ -1962,13 +1944,13 @@ async fn binary_bodies_come_back_base64() {
 }
 
 #[tokio::test]
-async fn pairing_inheritance_is_disclosed() {
+async fn repairing_preserves_client_id_and_rules() {
     let mut h = harness(BrokerConfig::default()).await;
     let up = upstream().await;
     api_connection(&h, "github", up.port);
     let conn = h.broker.store.connection_by_name("github").unwrap();
 
-    // The same verified client earned a standing rule before re-pairing.
+    // The client earned a standing rule before re-pairing.
     h.pair("claude-code").await;
     let client = h.broker.pairing.get("claude-code").unwrap();
     use aka_core::policy::PolicyEngine as _;
@@ -1982,58 +1964,29 @@ async fn pairing_inheritance_is_disclosed() {
         )
         .unwrap();
 
-    let socket = h.socket.clone();
-    let call = tokio::spawn(async move {
-        uds_request(
-            &socket,
-            "POST",
-            "/v1/pair",
-            &[],
-            Some(json!({"agent_name": "claude-code"})),
-        )
-        .await
-    });
-    let prompt = tokio::time::timeout(Duration::from_secs(5), h.prompts.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    // The dialog data must disclose exactly what the new process inherits.
-    assert_eq!(prompt.inherited.len(), 1);
-    assert_eq!(prompt.inherited[0].name, "github");
-    assert_eq!(
-        prompt.inherited[0].target,
-        format!("http://127.0.0.1:{}", up.port)
-    );
-    assert!(prompt.identity.is_some());
-    h.broker
-        .decide(&prompt.id, UiDecision::AllowOnce, &ctx())
-        .unwrap();
-    let (status, _) = call.await.unwrap();
-    assert_eq!(status, 200);
+    // Re-pairing preserves the stable client id, so the rule survives.
+    h.pair("claude-code").await;
+    let repaired = h.broker.pairing.get("claude-code").unwrap();
+    assert_eq!(repaired.id, client.id);
+    assert_eq!(h.broker.rules().len(), 1);
 }
 
 #[tokio::test]
 async fn pair_response_is_self_contained() {
-    let mut h = harness(BrokerConfig::default()).await;
-    let socket = h.socket.clone();
-    let call = tokio::spawn(async move {
-        uds_request(
-            &socket,
-            "POST",
-            "/v1/pair",
-            &[],
-            Some(json!({"agent_name": "claude-code"})),
-        )
-        .await
-    });
-    h.decide_next(UiDecision::AllowOnce).await;
-    let (status, body) = call.await.unwrap();
+    let h = harness(BrokerConfig::default()).await;
+    let (status, body) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/pair",
+        &[],
+        Some(json!({"agent_name": "claude-code"})),
+    )
+    .await;
     assert_eq!(status, 200);
     assert!(body["token"].as_str().unwrap().starts_with("aka_"));
-    // The response echoes what was registered and pinned, so the agent can
+    // The response echoes what was registered, so the agent can
     // log its enrollment without a follow-up /v1/whoami.
     assert_eq!(body["agent"], "claude-code");
-    assert!(!body["identity"].as_str().unwrap().is_empty());
     // The storage guidance travels with the credential.
     assert_eq!(body["expires_after_days"], 30);
     assert_eq!(
@@ -2063,7 +2016,6 @@ async fn whoami_probes_a_stored_token() {
     .await;
     assert_eq!(status, 200);
     assert_eq!(body["agent"], "claude-code");
-    assert!(!body["identity"].as_str().unwrap().is_empty());
     assert!(body["expires_at"].as_str().is_some());
     // A garbage token is a plain 401, the signal to fall through to pairing.
     let (status, body) = uds_request(
@@ -2118,83 +2070,38 @@ async fn superseded_token_gets_a_distinct_reason() {
 }
 
 #[tokio::test]
-async fn concurrent_same_name_pairings_coalesce() {
+async fn repairing_supersedes_the_previous_token() {
     let mut h = harness(BrokerConfig::default()).await;
-    // Two instances of the same (identically-signed) agent race to pair.
-    let socket = h.socket.clone();
-    let call1 = tokio::spawn(async move {
-        uds_request(
-            &socket,
-            "POST",
-            "/v1/pair",
-            &[],
-            Some(json!({"agent_name": "claude-code"})),
-        )
-        .await
-    });
-    // Give the first call time to park so the second joins it.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let socket = h.socket.clone();
-    let call2 = tokio::spawn(async move {
-        uds_request(
-            &socket,
-            "POST",
-            "/v1/pair",
-            &[],
-            Some(json!({"agent_name": "claude-code"})),
-        )
-        .await
-    });
-
-    // Exactly one prompt for the pair of calls.
-    let prompt = tokio::time::timeout(Duration::from_secs(5), h.prompts.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(
-        h.prompts.try_recv().is_err(),
-        "the second pairing must join, not re-prompt"
-    );
-    assert_eq!(*h.queue_len.lock().unwrap(), 1);
-
-    h.broker
-        .decide(&prompt.id, UiDecision::AllowOnce, &ctx())
-        .unwrap();
-    let ((s1, b1), (s2, b2)) = (call1.await.unwrap(), call2.await.unwrap());
-    assert_eq!((s1, s2), (200, 200));
-    assert_eq!(
-        b1["token"], b2["token"],
-        "both instances receive the one minted token"
-    );
+    let token1 = h.pair("claude-code").await;
+    let token2 = h.pair("claude-code").await;
+    assert_ne!(token1, token2);
     assert_eq!(h.broker.paired_agents().len(), 1);
 
-    // A pairing arriving after completion is never handed the old token:
-    // it raises its own prompt and mints afresh.
-    let socket = h.socket.clone();
-    let call3 = tokio::spawn(async move {
-        uds_request(
-            &socket,
-            "POST",
-            "/v1/pair",
-            &[],
-            Some(json!({"agent_name": "claude-code"})),
-        )
-        .await
-    });
-    let prompt = tokio::time::timeout(Duration::from_secs(5), h.prompts.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    h.broker
-        .decide(&prompt.id, UiDecision::AllowOnce, &ctx())
-        .unwrap();
-    let (s3, b3) = call3.await.unwrap();
-    assert_eq!(s3, 200);
-    assert_ne!(
-        b3["token"], b1["token"],
-        "a post-completion pairing gets a fresh prompt and token"
-    );
+    // The superseded token names the shared token file so a stale instance
+    // re-reads it instead of pairing again.
+    let auth = format!("Bearer {token1}");
+    let (status, body) = uds_request(
+        &h.socket,
+        "GET",
+        "/v1/whoami",
+        &[("authorization", &auth)],
+        None,
+    )
+    .await;
+    assert_eq!(status, 401);
+    assert_eq!(body["reason"], "token_superseded");
+    assert!(body["store_at"].as_str().unwrap().ends_with("claude-code"));
+
+    let auth = format!("Bearer {token2}");
+    let (status, _) = uds_request(
+        &h.socket,
+        "GET",
+        "/v1/whoami",
+        &[("authorization", &auth)],
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
 }
 
 /* --------------------------- connection proposals ------------------------- */
@@ -2226,7 +2133,6 @@ impl Harness {
                 &request.id,
                 decision,
                 aka_core::broker::DecisionOptions {
-                    revoke_inherited_rules: false,
                     proposal_credential: credential.map(|value| Zeroizing::new(value.to_string())),
                 },
                 &ctx(),
@@ -2357,7 +2263,6 @@ async fn disconnected_agent_cannot_apply_its_parked_proposal() {
         &request.id,
         UiDecision::AllowOnce,
         aka_core::broker::DecisionOptions {
-            revoke_inherited_rules: false,
             proposal_credential: Some(Zeroizing::new("s3cr3t".into())),
         },
         &ctx(),
@@ -2515,7 +2420,6 @@ async fn proposal_rechecks_equivalent_target_after_the_prompt() {
             &request.id,
             UiDecision::AllowOnce,
             aka_core::broker::DecisionOptions {
-                revoke_inherited_rules: false,
                 proposal_credential: Some(Zeroizing::new("s3cr3t".into())),
             },
             &ctx(),

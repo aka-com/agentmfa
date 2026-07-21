@@ -115,7 +115,6 @@ interface AppState {
   confirm: ConfirmState | null;
   alwaysOpen: boolean;
   reqDetailOpen: boolean | null;
-  revokeInheritedRules: boolean;
   approvalRequestId: string | null;
   proposalCredential: string;
   proposalCredentialError: string | null;
@@ -173,7 +172,6 @@ const state: AppState = {
   confirm: null,         // {kind, id/name}
   alwaysOpen: false,
   reqDetailOpen: null,   // approval payload disclosure override
-  revokeInheritedRules: false,
   approvalRequestId: null,
   proposalCredential: '',       // transient; typed into the proposal prompt
   proposalCredentialError: null,
@@ -579,7 +577,7 @@ function agentServiceRowHTML(a: AgentSummary, c: ConnectionSummary): string {
 
 function agentBlockHTML(a: AgentSummary): string {
   const menuOpen = state.agentMenuOpen === a.id;
-  const sub = `${a.program} · last used ${relTime(a.last_used)}`;
+  const sub = `last used ${relTime(a.last_used)}`;
   const rows = state.connections.length
     ? state.connections.map((c) => agentServiceRowHTML(a, c)).join('')
     : `<div class="acc-none">No services yet.${mode === 'dropdown' ? '' : ` Add one to give ${esc(a.name)} somewhere to connect.`}</div>`;
@@ -587,7 +585,7 @@ function agentBlockHTML(a: AgentSummary): string {
     <div class="agent-card">
       <span class="agent-avatar" role="img" aria-label="Agent">${ICONS.bot}</span>
       <div class="agent-id"><div class="c-name">${esc(a.name)}</div>
-        <div class="s-sub agent-sub" title="${escAttr(a.identity)}">${esc(sub)}</div></div>
+        <div class="s-sub agent-sub">${esc(sub)}</div></div>
       <div class="agent-menu-wrap">
         <button class="icon-btn agent-menu-btn ${menuOpen ? 'on' : ''}" title="Agent options"
           aria-label="Options for ${escAttr(a.name)}" aria-haspopup="menu"
@@ -1167,7 +1165,6 @@ function approvalWindowLabel(req: ApprovalRequest): string {
 
 function approvalHeading(req: ApprovalRequest): string {
   const name = req.connection ? req.connection.name : 'AKA Desktop';
-  if (req.kind === 'pair') return `Let ${req.agent} connect to AKA Desktop?`;
   if (req.kind === 'propose') {
     return `${req.agent} wants to add a new service: ${req.proposal?.name ?? ''}`;
   }
@@ -1223,14 +1220,12 @@ function renderApproval() {
   }
   const conn = req.connection;
   const t = conn ? TYPES[conn.type] : null;
-  const isPair = req.kind === 'pair';
   const isHostKey = !!req.ssh;
   const isPropose = req.kind === 'propose';
   if (state.approvalRequestId !== req.id) {
     state.approvalRequestId = req.id;
     state.alwaysOpen = false;
     state.reqDetailOpen = null;
-    state.revokeInheritedRules = isPair && !!(req.inherited && req.inherited.length);
     state.proposalCredential = '';
     state.proposalCredentialError = null;
   }
@@ -1240,34 +1235,6 @@ function renderApproval() {
     : '';
   const connectionRow = conn ? `<div class="ap-row"><span>Service</span><span>${connCell}</span></div>` : '';
   const targetRow = conn ? `<div class="ap-row"><span>Target</span><code>${esc(conn.target)}</code></div>` : '';
-  const pairIdentity = req.pairing_identity || {
-    program: req.identity || 'Unknown program',
-    verification: 'Program identity',
-    technical: req.identity || 'Unavailable',
-    warning: null,
-  };
-  const identityRows = isPair ? `
-      <div class="ap-row"><span>Requested name</span><span><b>${esc(req.agent)}</b> <em class="self-reported">supplied by program</em></span></div>
-      <div class="ap-row"><span>Program</span><b>${esc(pairIdentity.program)}</b></div>
-      <div class="ap-row"><span>Verification</span><span>${esc(pairIdentity.verification)}</span></div>` : '';
-
-  let inherit = '';
-  if (isPair && req.inherited && req.inherited.length) {
-    inherit = `<div class="inherit-warn"><span class="iw-head">This name already has access that does not require approval</span>
-      <ul>${req.inherited.map((c) => `<li><b>${esc(c.name)}</b> — ${c.type === 'api' ? 'Any request' : 'Open and use this service'}</li>`).join('')}</ul>
-      <div class="pair-choice-head">When this program connects:</div>
-      <label class="pair-choice"><input type="radio" name="pair-access" data-act="pair-inheritance" data-revoke="true" ${state.revokeInheritedRules ? 'checked' : ''}>
-        <span><b>Require approval again</b><small>Recommended</small></span></label>
-      <label class="pair-choice"><input type="radio" name="pair-access" data-act="pair-inheritance" data-revoke="false" ${state.revokeInheritedRules ? '' : 'checked'}>
-        <span><b>Keep existing access</b><small>The new program inherits everything listed above</small></span></label></div>`;
-  }
-
-  const replacement = isPair && req.replaces_existing_agent
-    ? `<div class="pair-replace"><b>${esc(req.agent)} is already connected.</b> Connecting again replaces its current sign-in. Other ${esc(req.agent)} processes may need to reload their saved sign-in.</div>` : '';
-  const identityWarning = isPair && pairIdentity.warning
-    ? `<div class="pair-identity-warning">${esc(pairIdentity.warning)}</div>` : '';
-  const identityDetails = isPair
-    ? `<details class="pair-tech"><summary>Technical identity</summary><code>${esc(pairIdentity.technical)}</code></details>` : '';
 
   const detail = requestDetailHTML(req) + sshHostKeyDetailHTML(req);
 
@@ -1290,7 +1257,7 @@ function renderApproval() {
   // no access session (the broker coerces those decisions to a one-time
   // pin anyway).
   let always: { btn: string; box: string } | null = null;
-  if (!isPair && !isHostKey && !isPropose) {
+  if (!isHostKey && !isPropose) {
     const box = state.alwaysOpen
       ? `<div class="always-box"><div class="f-row"><label>Use without asking</label>
         <div class="rule-note">${esc(ongoingAccessExplanation(req))} You can require approval again from the Agents tab.</div></div>
@@ -1299,37 +1266,35 @@ function renderApproval() {
   }
 
   const temporary = temporaryAccessExplanation(req);
-  const sessionNote = !isPair && !isHostKey && !isPropose
+  const sessionNote = !isHostKey && !isPropose
     ? `<div class="ap-access-summary"><b>If you allow for ${esc(temporary.duration)}</b><p>${esc(temporary.text)}</p></div>` : '';
 
   el.innerHTML = `<div class="surface approval">
     <div class="ap-head" data-tauri-drag-region><div class="ap-icon" data-tauri-drag-region>🔐</div>
       <div data-tauri-drag-region><div class="ap-title" data-tauri-drag-region>${esc(approvalHeading(req))}</div></div></div>
     <div class="ap-scroll">
-    ${isPair ? `<div class="pair-explainer"><p>This program will be able to list services you have added, and request to make outbound connections to them.</p><p>Agents can never read saved secrets.</p></div>` : ''}
     ${isPropose ? `<div class="pair-explainer"><p>${esc(req.agent)} proposed this service. Approving saves it; using it will still ask you.</p></div>` : ''}
     <div class="ap-rows">
-      ${isPair ? identityRows
-      : isPropose ? `<div class="ap-row"><span>Agent</span><b>${esc(req.agent)}</b></div>${proposalRows}`
+      ${isPropose ? `<div class="ap-row"><span>Agent</span><b>${esc(req.agent)}</b></div>${proposalRows}`
       : `<div class="ap-row"><span>Agent</span><b>${esc(req.agent)}</b></div>
       ${connectionRow}${targetRow}
       <div class="ap-row"><span>This request</span><code>${esc(req.action)}</code></div>`}
       <div class="ap-row"><span>Approve within</span><span>${esc(approvalWindowLabel(req))}</span></div>
     </div>
-    ${identityWarning}${replacement}${inherit}${identityDetails}${detail}
+    ${detail}
     ${proposalCredential}
     ${sessionNote}
     ${always ? `<div class="ap-ongoing-action">${always.btn}</div>${always.box}` : ''}
     </div>
     <div class="ap-buttons">
-      <button class="btn deny" data-act="decide-deny" data-id="${req.id}">${isPair ? 'Don’t connect' : isPropose ? 'Reject proposal' : 'Deny'}</button>
-      ${isPair || isHostKey || isPropose ? '' : `<button class="btn ghost sm" data-act="decide-once" data-id="${req.id}">This request only</button>`}
+      <button class="btn deny" data-act="decide-deny" data-id="${req.id}">${isPropose ? 'Reject proposal' : 'Deny'}</button>
+      ${isHostKey || isPropose ? '' : `<button class="btn ghost sm" data-act="decide-once" data-id="${req.id}">This request only</button>`}
       <span class="spacer"></span>
       ${isHostKey
         ? `<button class="btn primary" data-act="decide-once" data-id="${req.id}">Trust &amp; allow</button>`
         : isPropose
         ? `<button class="btn primary" data-act="decide-once" data-id="${req.id}">Save service</button>`
-        : `<button class="btn primary" data-act="decide-allow" data-id="${req.id}">${isPair ? 'Connect agent' : `Allow for ${esc(temporary.duration)}`}</button>`}</div>
+        : `<button class="btn primary" data-act="decide-allow" data-id="${req.id}">Allow for ${esc(temporary.duration)}</button>`}</div>
     ${state.queue.length > 1 ? `<div class="aw-queue">${state.queue.length - 1} more request${state.queue.length > 2 ? 's' : ''} waiting</div>` : ''}
   </div>`;
   resizeApprovalToContent();
@@ -2268,11 +2233,10 @@ document.addEventListener('click', async (e) => {
       const shownNow = state.reqDetailOpen === null ? (req.http && req.http.mutating) : state.reqDetailOpen;
       state.reqDetailOpen = !shownNow; render(); break;
     }
-    case 'pair-inheritance': state.revokeInheritedRules = btn.dataset.revoke === 'true'; render(); break;
     case 'always-toggle': state.alwaysOpen = !state.alwaysOpen; render(); break;
 
     case 'decide-deny': await decide(id, 'deny'); break;
-    case 'decide-allow': await decide(id, mode === 'approval' && state.queue[0] && state.queue[0].kind !== 'pair' ? 'allow_session' : 'allow_once'); break;
+    case 'decide-allow': await decide(id, mode === 'approval' ? 'allow_session' : 'allow_once'); break;
     case 'decide-once': await decide(id, 'allow_once'); break;
     case 'always-save': await decide(id, 'always_allow'); break;
     case 'open-approval': run(() => invoke('ui_show_approval')); break;
@@ -2283,8 +2247,6 @@ document.addEventListener('click', async (e) => {
 async function decide(id: string, decision: Decision): Promise<void> {
   try {
     const req = state.queue[0];
-    const revokeInheritedRules =
-      decision === 'allow_once' && req && req.kind === 'pair' && !!state.revokeInheritedRules;
     let credentialValue: string | undefined;
     if (req && req.kind === 'propose' && decision !== 'deny') {
       // The typed value rides only on an approving decision, and never an
@@ -2299,10 +2261,9 @@ async function decide(id: string, decision: Decision): Promise<void> {
       }
       credentialValue = typed;
     }
-    await invoke('decide', { id, decision, revokeInheritedRules, credentialValue });
+    await invoke('decide', { id, decision, credentialValue });
     state.alwaysOpen = false;
     state.reqDetailOpen = null;
-    state.revokeInheritedRules = false;
     state.proposalCredential = '';
     state.proposalCredentialError = null;
   } catch (error) {

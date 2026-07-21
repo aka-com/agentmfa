@@ -808,7 +808,7 @@ pub enum DecisionInput {
 }
 
 /// Apply a decision to a queued approval. Deny is always one click. Allow once
-/// on a pairing or mutating request, every access session, and Always allow in
+/// on a proposal or mutating request, every access session, and Always allow in
 /// every case complete only after the native OS confirmation, which the
 /// **core** demands via `BrokerEvents::confirm_decision` before the decision
 /// takes effect; this command only names the surface for attribution.
@@ -817,7 +817,6 @@ pub fn decide(
     state: State<AppState>,
     id: String,
     decision: DecisionInput,
-    revoke_inherited_rules: Option<bool>,
     credential_value: Option<String>,
 ) -> CmdResult<()> {
     let broker = &state.broker;
@@ -834,7 +833,6 @@ pub fn decide(
             &id,
             ui_decision,
             DecisionOptions {
-                revoke_inherited_rules: revoke_inherited_rules.unwrap_or(false),
                 proposal_credential: credential_value.map(Zeroizing::new),
             },
             &ctx,

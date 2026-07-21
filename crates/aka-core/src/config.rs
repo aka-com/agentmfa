@@ -52,8 +52,6 @@ pub struct BrokerConfig {
     /// Global pairing brake: max attempts per window.
     pub pairing_max_attempts: u32,
     pub pairing_window: Duration,
-    /// Cooldown after a user denies a pairing.
-    pub pairing_deny_cooldown: Duration,
 
     /// Data-plane tickets die this long after issue.
     pub ticket_ttl: Duration,
@@ -89,7 +87,6 @@ impl Default for BrokerConfig {
             discovery_per_min: 60,
             pairing_max_attempts: 3,
             pairing_window: Duration::from_secs(5),
-            pairing_deny_cooldown: Duration::from_secs(30),
             ticket_ttl: Duration::from_secs(60),
             session_max_ttl: Duration::from_secs(60 * 60),
             session_idle_timeout: Duration::from_secs(5 * 60),

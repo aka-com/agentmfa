@@ -1,10 +1,9 @@
 //! Pairing and pair tokens.
 //!
-//! `POST /v1/pair {"agent_name": …}` triggers a user approval and returns a
-//! random 256-bit bearer token, stored hashed. Tokens have a 30-day TTL
-//! refreshed on use, are revocable from the UI, and are pinned to the
-//! peer identity observed at pairing: any later call presenting the token
-//! from a different peer identity is rejected and audited.
+//! `POST /v1/pair {"agent_name": …}` registers the agent immediately (no
+//! approval) and returns a random 256-bit bearer token, stored hashed.
+//! Tokens have a 30-day TTL refreshed on use and are revocable from the UI.
+//! The token identifies the agent; there is no peer identity verification.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -14,7 +13,7 @@ use chrono::Utc;
 use sha2::{Digest, Sha256};
 
 use crate::integrity::StateIntegrity;
-use crate::types::{PairedAgent, PeerIdentity};
+use crate::types::PairedAgent;
 use crate::wire::ErrorReason;
 use crate::Result;
 
@@ -25,8 +24,6 @@ pub enum TokenError {
     Invalid,
     /// Known but past its TTL.
     Expired,
-    /// Known, but presented by a peer whose identity doesn't match the pin.
-    IdentityMismatch,
     /// Replaced by a later pairing under the same name. Distinct from
     /// `Invalid` so a stale instance re-reads the shared token file instead
     /// of re-pairing (which would break the newer instance in turn). Carries
@@ -39,7 +36,6 @@ impl TokenError {
         match self {
             TokenError::Invalid => ErrorReason::InvalidToken,
             TokenError::Expired => ErrorReason::TokenExpired,
-            TokenError::IdentityMismatch => ErrorReason::PeerIdentityMismatch,
             TokenError::Superseded { .. } => ErrorReason::TokenSuperseded,
         }
     }
@@ -80,8 +76,8 @@ fn mint_token() -> String {
 }
 
 impl PairingRegistry {
-    /// `agents.json` carries token hashes *and pinned identities*, so it is
-    /// sealed: a rewrite of a pin must not go unnoticed.
+    /// `agents.json` carries token hashes, so it is sealed: a rewrite must
+    /// not go unnoticed.
     pub fn open(path: PathBuf, ttl: Duration, integrity: Arc<StateIntegrity>) -> Result<Self> {
         let mut agents: Vec<PairedAgent> = match integrity.read_verified(&path)? {
             Some(bytes) => serde_json::from_slice(&bytes)?,
@@ -118,21 +114,19 @@ impl PairingRegistry {
         Ok(())
     }
 
-    /// Complete an approved pairing: mint a token pinned to `identity`.
-    /// Re-pairing the same verified client preserves its stable id while a
-    /// different program using the same display name receives a new id. One
-    /// live token remains per name. The replaced token's hash is remembered
-    /// so its holder gets `token_superseded`, not `invalid_token`.
-    pub fn pair(&self, name: &str, identity: PeerIdentity) -> Result<(String, PairedAgent)> {
+    /// Register (or re-register) an agent: mint a fresh token. Re-pairing an
+    /// existing name preserves its stable id. One live token remains per
+    /// name. The replaced token's hash is remembered so its holder gets
+    /// `token_superseded`, not `invalid_token`.
+    pub fn pair(&self, name: &str) -> Result<(String, PairedAgent)> {
         let token = mint_token();
         let now = Utc::now();
-        let existing_id = agents_for_identity(&self.agents, name, &identity);
+        let existing_id = self.get(name).map(|agent| agent.id);
         let agent = PairedAgent {
             id: existing_id.unwrap_or_else(uuid::Uuid::new_v4),
             name: name.to_string(),
             token_hash: hash_token(&token),
             token_preview: token[..11].to_string(),
-            identity,
             paired_at: now,
             last_used: now,
         };
@@ -157,13 +151,9 @@ impl PairingRegistry {
         Ok((token, agent))
     }
 
-    /// Verify a presented bearer token against the given peer identity.
+    /// Verify a presented bearer token.
     /// Success refreshes `last_used` (the TTL is refreshed on use).
-    pub fn verify(
-        &self,
-        token: &str,
-        peer: &PeerIdentity,
-    ) -> std::result::Result<PairedAgent, TokenError> {
+    pub fn verify(&self, token: &str) -> std::result::Result<PairedAgent, TokenError> {
         let hash = hash_token(token);
         let mut agents = self.agents.lock().unwrap();
         let Some(agent) = agents.iter_mut().find(|a| a.token_hash == hash) else {
@@ -176,9 +166,6 @@ impl PairingRegistry {
         let age = now.signed_duration_since(agent.last_used);
         if age.num_seconds() > self.ttl.as_secs() as i64 {
             return Err(TokenError::Expired);
-        }
-        if &agent.identity != peer {
-            return Err(TokenError::IdentityMismatch);
         }
         // Refresh the sliding TTL, but only rewrite agents.json when the
         // advance is material — a sub-interval refresh stays in memory, so the
@@ -236,27 +223,6 @@ impl PairingRegistry {
             .cloned()
     }
 
-    pub fn get_matching(&self, name: &str, identity: &PeerIdentity) -> Option<PairedAgent> {
-        self.agents
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|agent| agent.name == name && &agent.identity == identity)
-            .cloned()
-    }
-}
-
-fn agents_for_identity(
-    agents: &Mutex<Vec<PairedAgent>>,
-    name: &str,
-    identity: &PeerIdentity,
-) -> Option<uuid::Uuid> {
-    agents
-        .lock()
-        .unwrap()
-        .iter()
-        .find(|agent| agent.name == name && &agent.identity == identity)
-        .map(|agent| agent.id)
 }
 
 /// Agent names are self-asserted labels; keep them printable and bounded so
@@ -283,136 +249,61 @@ mod tests {
         (r, dir)
     }
 
-    fn dev_identity() -> PeerIdentity {
-        PeerIdentity::DevUnverified { uid: 501 }
-    }
-
     #[test]
     fn pair_verify_roundtrip() {
         let (r, _dir) = registry(Duration::from_secs(3600));
-        let (token, agent) = r.pair("claude-code", dev_identity()).unwrap();
+        let (token, agent) = r.pair("claude-code").unwrap();
         assert!(token.starts_with("aka_"));
         assert_eq!(token.len(), 4 + 64);
         assert_eq!(agent.token_preview, &token[..11]);
-        let verified = r.verify(&token, &dev_identity()).unwrap();
+        let verified = r.verify(&token).unwrap();
         assert_eq!(verified.name, "claude-code");
-        assert!(r.verify("aka_bogus", &dev_identity()).is_err());
-    }
-
-    #[test]
-    fn identity_pin_is_enforced() {
-        let (r, _dir) = registry(Duration::from_secs(3600));
-        let (token, _) = r
-            .pair(
-                "claude-code",
-                PeerIdentity::Signed {
-                    signing_id: "com.anthropic.claude-code".into(),
-                    team_id: Some("6XN7K9RPQ2".into()),
-                },
-            )
-            .unwrap();
-        // Same identity passes.
-        assert!(r
-            .verify(
-                &token,
-                &PeerIdentity::Signed {
-                    signing_id: "com.anthropic.claude-code".into(),
-                    team_id: Some("6XN7K9RPQ2".into()),
-                }
-            )
-            .is_ok());
-        // A different peer identity presenting a lifted token is rejected.
-        assert_eq!(
-            r.verify(
-                &token,
-                &PeerIdentity::Signed {
-                    signing_id: "com.evil.tool".into(),
-                    team_id: Some("EVIL000000".into()),
-                }
-            )
-            .unwrap_err(),
-            TokenError::IdentityMismatch
-        );
-        assert_eq!(
-            r.verify(
-                &token,
-                &PeerIdentity::Unsigned {
-                    uid: Some(501),
-                    executable_path: Some("/tmp/unsigned-tool".into()),
-                    file_id: Some("dev:1 ino:2".into()),
-                    executable_sha256: Some("a".repeat(64)),
-                }
-            )
-            .unwrap_err(),
-            TokenError::IdentityMismatch
-        );
+        assert!(r.verify("aka_bogus").is_err());
     }
 
     #[test]
     fn expired_tokens_are_rejected() {
         let (r, _dir) = registry(Duration::from_secs(0));
-        let (token, _) = r.pair("claude-code", dev_identity()).unwrap();
+        let (token, _) = r.pair("claude-code").unwrap();
         std::thread::sleep(Duration::from_millis(1100));
-        assert_eq!(
-            r.verify(&token, &dev_identity()).unwrap_err(),
-            TokenError::Expired
-        );
+        assert_eq!(r.verify(&token).unwrap_err(), TokenError::Expired);
     }
 
     #[test]
     fn revoke_invalidates_immediately() {
         let (r, _dir) = registry(Duration::from_secs(3600));
-        let (token, client) = r.pair("claude-code", dev_identity()).unwrap();
+        let (token, client) = r.pair("claude-code").unwrap();
         assert!(r.revoke(&client.id).unwrap());
-        assert_eq!(
-            r.verify(&token, &dev_identity()).unwrap_err(),
-            TokenError::Invalid
-        );
+        assert_eq!(r.verify(&token).unwrap_err(), TokenError::Invalid);
         assert!(!r.revoke(&client.id).unwrap());
     }
 
     #[test]
     fn repairing_replaces_the_token() {
         let (r, _dir) = registry(Duration::from_secs(3600));
-        let (token1, first) = r.pair("claude-code", dev_identity()).unwrap();
-        let (token2, repaired) = r.pair("claude-code", dev_identity()).unwrap();
+        let (token1, first) = r.pair("claude-code").unwrap();
+        let (token2, repaired) = r.pair("claude-code").unwrap();
         assert_eq!(first.id, repaired.id);
         // The replaced token is reported as superseded — naming whose token
         // file to re-read — not merely invalid, so its holder recovers
         // instead of re-pairing.
         assert_eq!(
-            r.verify(&token1, &dev_identity()).unwrap_err(),
+            r.verify(&token1).unwrap_err(),
             TokenError::Superseded {
                 name: "claude-code".into()
             }
         );
-        assert!(r.verify(&token2, &dev_identity()).is_ok());
+        assert!(r.verify(&token2).is_ok());
         assert_eq!(r.list().len(), 1);
         // A different name's pairing does not disturb the tombstone.
-        let (token3, _) = r.pair("codex", dev_identity()).unwrap();
+        let (token3, _) = r.pair("codex").unwrap();
         assert_eq!(
-            r.verify(&token1, &dev_identity()).unwrap_err(),
+            r.verify(&token1).unwrap_err(),
             TokenError::Superseded {
                 name: "claude-code".into()
             }
         );
-        assert!(r.verify(&token3, &dev_identity()).is_ok());
-    }
-
-    #[test]
-    fn same_name_different_identity_gets_a_new_client_id() {
-        let (r, _dir) = registry(Duration::from_secs(3600));
-        let (_, first) = r.pair("claude-code", dev_identity()).unwrap();
-        let (_, replacement) = r
-            .pair(
-                "claude-code",
-                PeerIdentity::Signed {
-                    signing_id: "com.example.other".into(),
-                    team_id: Some("OTHERTEAM".into()),
-                },
-            )
-            .unwrap();
-        assert_ne!(first.id, replacement.id);
+        assert!(r.verify(&token3).is_ok());
     }
 
     #[test]
@@ -452,7 +343,7 @@ mod tests {
     fn verify_coalesces_the_ttl_refresh_write() {
         // ttl 2s → refresh interval ~200ms.
         let (r, dir) = registry(Duration::from_secs(2));
-        let (token, _) = r.pair("claude-code", dev_identity()).unwrap();
+        let (token, _) = r.pair("claude-code").unwrap();
         let path = dir.path().join("agents.json");
         // agents.json is sealed: the agent list is the envelope's
         // `payload`.
@@ -467,7 +358,7 @@ mod tests {
 
         // A refresh well inside the interval stays in memory — the file is
         // left untouched.
-        r.verify(&token, &dev_identity()).unwrap();
+        r.verify(&token).unwrap();
         assert_eq!(
             persisted_last_used(&path),
             at_pair,
@@ -476,7 +367,7 @@ mod tests {
 
         // Past the interval (but inside the TTL), the refresh is persisted.
         std::thread::sleep(Duration::from_millis(350));
-        r.verify(&token, &dev_identity()).unwrap();
+        r.verify(&token).unwrap();
         assert!(
             persisted_last_used(&path) > at_pair,
             "a refresh past the interval must be written"
@@ -486,7 +377,7 @@ mod tests {
     #[test]
     fn tokens_are_stored_hashed() {
         let (r, dir) = registry(Duration::from_secs(3600));
-        let (token, _) = r.pair("claude-code", dev_identity()).unwrap();
+        let (token, _) = r.pair("claude-code").unwrap();
         let on_disk = std::fs::read_to_string(dir.path().join("agents.json")).unwrap();
         assert!(!on_disk.contains(&token));
         assert!(on_disk.contains(&hash_token(&token)));
@@ -505,21 +396,21 @@ mod tests {
     fn failed_agent_writes_do_not_change_active_tokens() {
         let (r, dir) = registry(Duration::from_secs(3600));
         let path = dir.path().join("agents.json");
-        let (token, original) = r.pair("claude-code", dev_identity()).unwrap();
+        let (token, original) = r.pair("claude-code").unwrap();
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
 
-        assert!(r.pair("codex", dev_identity()).is_err());
+        assert!(r.pair("codex").is_err());
         assert!(r.get("codex").is_none());
 
-        assert!(r.pair("claude-code", dev_identity()).is_err());
+        assert!(r.pair("claude-code").is_err());
         assert_eq!(
             r.get("claude-code").unwrap().token_hash,
             original.token_hash
         );
-        assert!(r.verify(&token, &dev_identity()).is_ok());
+        assert!(r.verify(&token).is_ok());
 
         assert!(r.revoke(&original.id).is_err());
-        assert!(r.verify(&token, &dev_identity()).is_ok());
+        assert!(r.verify(&token).is_ok());
     }
 }

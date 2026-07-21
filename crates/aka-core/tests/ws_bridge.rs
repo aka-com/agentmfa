@@ -204,25 +204,14 @@ async fn uds_request(
 
 impl Harness {
     async fn pair(&mut self) -> String {
-        let socket = self.daemon.socket_path.clone();
-        let call = tokio::spawn(async move {
-            uds_request(
-                &socket,
-                "POST",
-                "/v1/pair",
-                &[],
-                Some(json!({"agent_name": "claude-code"})),
-            )
-            .await
-        });
-        let prompt = tokio::time::timeout(Duration::from_secs(5), self.prompts.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        self.broker
-            .decide(&prompt.id, UiDecision::AllowOnce, &ctx())
-            .unwrap();
-        let (status, body) = call.await.unwrap();
+        let (status, body) = uds_request(
+            &self.daemon.socket_path,
+            "POST",
+            "/v1/pair",
+            &[],
+            Some(json!({"agent_name": "claude-code"})),
+        )
+        .await;
         assert_eq!(status, 200);
         body["token"].as_str().unwrap().to_string()
     }

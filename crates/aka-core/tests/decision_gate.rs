@@ -21,7 +21,7 @@ use aka_core::sessions::{RedeemError, TicketPayload};
 use aka_core::store::ConnectionSpec;
 use aka_core::types::{
     ConfirmationMethod, Connection, ConnectionConfig, ConnectionKind, DecisionContext,
-    DecisionSurface, PeerIdentity,
+    DecisionSurface,
 };
 use aka_core::vault::MemoryVault;
 use chrono::Utc;
@@ -133,10 +133,6 @@ fn http_request(conn: &Connection, mutating: bool) -> ApprovalRequest {
         notification: String::new(),
         received_at: now,
         deadline: now,
-        identity: None,
-        pairing_identity: None,
-        replaces_existing_agent: false,
-        inherited: vec![],
         http: Some(HttpPayloadView {
             method: method.into(),
             path: "/x".into(),
@@ -146,32 +142,6 @@ fn http_request(conn: &Connection, mutating: bool) -> ApprovalRequest {
             body_truncated: false,
             mutating,
         }),
-        ssh: None,
-        proposal: None,
-        proposal_credential: None,
-    }
-}
-
-fn pair_request(agent: &str, inherited: Vec<ConnectionSummary>) -> ApprovalRequest {
-    let now = Utc::now();
-    ApprovalRequest {
-        id: Uuid::new_v4(),
-        agent: agent.into(),
-        client_id: Some(Uuid::new_v4()),
-        agent_token_hash: None,
-        kind: ApprovalKind::Pair,
-        connection: None,
-        action: format!("Pair new agent \"{agent}\" with AKA"),
-        notification: String::new(),
-        received_at: now,
-        deadline: now,
-        identity: Some(PeerIdentity::DevUnverified { uid: 501 }.display()),
-        pairing_identity: Some(aka_core::approvals::PairingIdentitySummary::from_identity(
-            &PeerIdentity::DevUnverified { uid: 501 },
-        )),
-        replaces_existing_agent: false,
-        inherited,
-        http: None,
         ssh: None,
         proposal: None,
         proposal_credential: None,
@@ -276,10 +246,7 @@ async fn pairing_revocation_is_immediate_without_confirmation() {
         confirms: AtomicUsize::new(0),
     });
     let (broker, _dir) = broker_with(events.clone()).await;
-    let (_, client) = broker
-        .pairing
-        .pair("claude-code", PeerIdentity::DevUnverified { uid: 501 })
-        .unwrap();
+    let (_, client) = broker.pairing.pair("claude-code").unwrap();
     let conn = add_github(&broker);
     let ticket = broker
         .data_plane
@@ -505,10 +472,7 @@ async fn durable_decisions_refuse_a_same_target_connection_revision_change() {
     };
     assert_eq!(always_waiter.wait().await.unwrap().status, 403);
 
-    let (_, paired) = broker
-        .pairing
-        .pair("claude-code", PeerIdentity::DevUnverified { uid: 501 })
-        .unwrap();
+    let (_, paired) = broker.pairing.pair("claude-code").unwrap();
     let mut request = http_request(&conn, false);
     request.agent_token_hash = Some(paired.token_hash);
     let session_id = request.id;
@@ -893,18 +857,18 @@ async fn service_tests_are_not_added_to_the_activity_log() {
 }
 
 #[tokio::test]
-async fn inherited_rules_are_removed_before_pairing_executes() {
+async fn revoking_an_agent_removes_its_rules() {
     let events = Arc::new(GateEvents {
         allow: true,
         confirms: AtomicUsize::new(0),
     });
     let (broker, _dir) = broker_with(events.clone()).await;
     let conn = add_github(&broker);
-    let client_id = Uuid::new_v4();
+    let (_, client) = broker.pairing.pair("claude-code").unwrap();
     broker
         .policy
         .record_rule(
-            client_id,
+            client.id,
             "claude-code",
             conn.id,
             aka_core::types::PermissionScope::Full,
@@ -912,42 +876,12 @@ async fn inherited_rules_are_removed_before_pairing_executes() {
         .unwrap();
     assert_eq!(broker.rules().len(), 1);
 
-    let mut request = pair_request("claude-code", broker.inherited_for(&client_id));
-    request.client_id = Some(client_id);
-    let id = request.id;
-    let broker_for_executor = broker.clone();
-    let parked = park_with_executor(
-        &broker,
-        request,
-        Box::pin(async move {
-            ExecOutcome {
-                status: 200,
-                body: serde_json::json!({
-                    "rules_at_execution": broker_for_executor.rules().len(),
-                }),
-            }
-        }),
-    );
-
-    broker
-        .decide_with_pairing_options(&id, UiDecision::AllowOnce, true, &ctx())
-        .unwrap()
-        .expect("pending");
-
-    let Parked::Wait(handle) = parked else {
-        panic!()
-    };
-    let outcome = handle.wait().await.unwrap();
-    assert_eq!(outcome.status, 200);
-    assert_eq!(outcome.body["rules_at_execution"], 0);
+    assert!(broker.ui_revoke_agent(&client.id).unwrap());
     assert_eq!(broker.rules().len(), 0);
-    assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
 
     let recent = broker.audit.recent(10);
-    let removed = recent
+    recent
         .iter()
         .find(|entry| entry.kind == aka_core::audit::AuditKind::RuleRemoved)
         .expect("rule removal audit entry");
-    assert_eq!(removed.confirmation, Some(ConfirmationMethod::Waived));
-    assert_eq!(removed.surface, Some(DecisionSurface::Harness));
 }

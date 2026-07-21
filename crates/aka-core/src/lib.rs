@@ -6,9 +6,9 @@
 //! socket; WS/PG data planes on ephemeral loopback TCP).
 //!
 //! The crate is deliberately portable: everything builds and tests on any
-//! Unix. macOS-only integrations (Keychain vault, code-signing peer checks)
-//! are `cfg`-gated with documented dev fallbacks, so the security-relevant
-//! logic is exercised by tests everywhere.
+//! Unix. macOS-only integrations (the Keychain vault) are `cfg`-gated with
+//! documented dev fallbacks, so the security-relevant logic is exercised by
+//! tests everywhere.
 
 pub mod approvals;
 pub mod audit;
@@ -23,7 +23,6 @@ pub mod grants;
 pub mod integrity;
 pub mod pairing;
 pub mod paths;
-pub mod peer;
 pub mod policy;
 pub mod ratelimit;
 pub mod sessions;

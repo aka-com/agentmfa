@@ -8,7 +8,7 @@ use aka_core::approvals::ApprovalRequest;
 use aka_core::audit::AuditEntry;
 use aka_core::broker::Broker;
 use aka_core::sessions::SessionInfo;
-use aka_core::types::{Connection, PairedAgent, PeerIdentity, Rule, SecretMeta};
+use aka_core::types::{Connection, PairedAgent, Rule, SecretMeta};
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -175,9 +175,6 @@ impl ConnectionDto {
 pub struct AgentDto {
     pub id: String,
     pub name: String,
-    pub program: String,
-    pub verification: &'static str,
-    pub identity: String,
     pub paired_at: String,
     pub last_used: String,
     pub permission_count: usize,
@@ -185,29 +182,9 @@ pub struct AgentDto {
 
 impl AgentDto {
     pub fn from(agent: &PairedAgent, rules: &[Rule], broker: &Broker) -> Self {
-        let (program, verification) = match &agent.identity {
-            PeerIdentity::Signed { signing_id, .. } => (signing_id.clone(), "Signed application"),
-            PeerIdentity::Unsigned {
-                executable_path, ..
-            } => (
-                executable_path
-                    .as_deref()
-                    .and_then(|path| std::path::Path::new(path).file_name())
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("Unsigned local program")
-                    .to_string(),
-                "Local executable",
-            ),
-            PeerIdentity::DevUnverified { .. } => {
-                ("Development process".into(), "Development identity")
-            }
-        };
         Self {
             id: agent.id.to_string(),
             name: agent.name.clone(),
-            program,
-            verification,
-            identity: agent.identity.display(),
             paired_at: agent.paired_at.to_rfc3339(),
             last_used: agent.last_used.to_rfc3339(),
             permission_count: rules
@@ -297,13 +274,10 @@ pub struct TemporaryAccessDto {
 impl ApprovalDto {
     pub fn new(request: ApprovalRequest, access_duration_seconds: u64) -> Self {
         let high_consequence = request.is_high_consequence();
-        // Pairing and host-key trust prompts have no access-session shape;
+        // Proposals and host-key trust prompts have no access-session shape;
         // the broker coerces any such decision to allow-once regardless.
-        let temporary_access = if matches!(
-            request.kind,
-            aka_core::approvals::ApprovalKind::Pair
-                | aka_core::approvals::ApprovalKind::Propose
-        ) || request.ssh.is_some()
+        let temporary_access = if request.kind == aka_core::approvals::ApprovalKind::Propose
+            || request.ssh.is_some()
         {
             None
         } else {

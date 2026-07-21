@@ -47,7 +47,7 @@ pub fn manifest(config: &BrokerConfig, paths: &Paths) -> serde_json::Value {
             "ssh_open": "/v1/ssh/open",
             "instructions": "/instructions",
         },
-        "pairing": "Reuse a stored token if GET /v1/whoami accepts it; otherwise POST /v1/pair with {\"agent_name\": \"<your-name>\"}, the user approves, and the returned token is your Bearer token.",
+        "pairing": "Reuse a stored token if GET /v1/whoami accepts it; otherwise POST /v1/pair with {\"agent_name\": \"<your-name>\"} — registration is immediate and the returned token is your Bearer token.",
     })
 }
 
@@ -83,15 +83,15 @@ Example: `curl --unix-socket {socket} http://localhost/v1/connections`
 
 ## 1. Authenticate: reuse a stored token; pair only when you must
 
-Pairing interrupts the human; reusing a stored token does not. Check for
-one first:
+Re-pairing invalidates the name's previous token, so reuse a stored token
+when one exists:
 
 1. Read `{tokens}/<your-name>`. If it exists, probe it:
 
        curl --unix-socket {socket} \
             -H "Authorization: Bearer <token>" http://localhost/v1/whoami
        → 200 {{"client_id": "<uuid>", "agent": "<your-name>",
-               "identity": "…", "expires_at": "…"}}
+               "expires_at": "…"}}
 
    `200` means the token works: skip pairing. Any `401` means it does
    not: fall through to pairing.
@@ -103,27 +103,22 @@ one first:
             -d '{{"agent_name": "<your-name>"}}'
        → 200 {{"token": "aka_…", "client_id": "<uuid>",
                "agent": "<your-name>",
-               "identity": "<the peer identity the token is pinned to>",
                "expires_after_days": {token_days},
                "store_at": "{tokens}/<your-name>"}}
 
-   The human approves the pairing in the AKA Desktop window; the call blocks
-   until they decide. Store the token at `store_at` with mode 0600 (the
+   Registration is immediate — no human approval. You appear in the AKA
+   Desktop window as a connected agent, and the user wires you up to the
+   tools you may use. Store the token at `store_at` with mode 0600 (the
    directory already exists), or in your own credential store, and send it
    on every subsequent call as `Authorization: Bearer <token>`.
 
-The token is pinned to your process's peer identity: normally its
-code-signing identity, or a best-effort local executable fingerprint when
-the process is unsigned/ad-hoc. A copy lifted from disk is not generally
-usable from a different pinned identity. Tokens last {token_days} days,
-refreshed on use.
+Tokens last {token_days} days, refreshed on use.
 
 **Several instances under one name share the stored token.** Pairing
 again replaces the name's previous token; a call failing with
 `401 {{"reason": "token_superseded"}}` means another instance re-paired:
 re-read the token file and retry rather than pairing again (which would
-break that instance in turn). Concurrent pairings from identically-signed
-processes are merged into one prompt and receive the same token. Re-pairing or
+break that instance in turn). Re-pairing or
 user-initiated disconnect also invalidates outstanding data-plane capabilities
 and closes live WebSocket, Postgres, and SSH connections for that agent name.
 
@@ -345,13 +340,10 @@ without talking to your user.
 - `401 {{"reason": "invalid_token", "detail": "..."}}`: the token that
   reached the broker was not recognized. It may have been revoked or rewritten
   by a local application; re-pair.
-- `401 {{"reason": "token_expired"}}`: re-pair (the human will see a pairing
-  prompt).
+- `401 {{"reason": "token_expired"}}`: re-pair.
 - `401 {{"reason": "token_superseded"}}`: another instance under your name
   re-paired; re-read the token at the response's `store_at`, do not pair
   again.
-- `401 {{"reason": "peer_identity_mismatch"}}`: the token is pinned to a
-  different peer identity than yours; re-pair.
 - `404 {{"reason": "unknown_connection"}}`: no such connection; the detail
   lists the configured names.
 - `409 {{"reason": "request_id_mismatch"}}`: you reused a request_id with a
@@ -359,13 +351,9 @@ without talking to your user.
 - `409 {{"reason": "outcome_not_replayable"}}`: the earlier execution
   completed but its retained response is unavailable; do not repeat it
   automatically under a fresh ID. Reconcile the result or ask your user.
-- `409 {{"reason": "pairing_already_pending"}}`: a pairing prompt for this
-  name from another process is on screen; retry after it resolves.
 - `429 {{"reason": "rate_limited" | "pairing_rate_limited"}}`: over budget;
   wait `retry_after_seconds` (also in the `Retry-After` header), then
   retry.
-- `429 {{"reason": "pairing_denied_cooldown"}}`: the human denied a pairing
-  moments ago; do not retry automatically, ask your user first.
 - `502 {{"reason": "ssh_agent_open_failed"}}`: the key could not be loaded
   (missing, encrypted, or an unsupported type); the `detail` says which.
 - `503 {{"reason": "ticket_session_limit" | "broker_session_limit"}}`: your
@@ -423,7 +411,7 @@ mod tests {
         let m = manifest(&BrokerConfig::default(), &paths());
         assert_eq!(PROTOCOL_VERSION, 0);
         assert_eq!(m["protocol_version"], 0);
-        assert_eq!(m["auth_schemes"], serde_json::json!(["bearer_pinned"]));
+        assert_eq!(m["auth_schemes"], serde_json::json!(["bearer"]));
         assert_eq!(m["approval_modes"], serde_json::json!(["blocking"]));
         assert_eq!(m["transport"], "http-over-unix-socket");
         assert_eq!(m["approval_timeout_seconds"], 900);
@@ -474,8 +462,6 @@ mod tests {
             "request_id_mismatch",
             "outcome_not_replayable",
             "idempotency_capacity",
-            "pairing_already_pending",
-            "pairing_denied_cooldown",
             "retry_after_seconds",
             "invalid_json",
             "will_prompt",

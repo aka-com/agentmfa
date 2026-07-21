@@ -2,11 +2,11 @@
 //!
 //! - `GET /.well-known/agent-broker.json`, `GET /instructions`,
 //!   unauthenticated discovery, globally rate limited;
-//! - `POST /v1/pair`, unauthenticated, globally rate limited, gated by a
-//!   held-open user approval;
+//! - `POST /v1/pair`, unauthenticated, globally rate limited, registered
+//!   immediately (no approval);
 //! - `GET /v1/connections`, `GET /v1/whoami`, `POST /v1/http` (+ the WS/PG
-//!   opens added by later phases), bearer-token authenticated,
-//!   identity-pinned, per-token rate limited.
+//!   opens added by later phases), bearer-token authenticated, per-token
+//!   rate limited.
 
 pub mod wellknown;
 
@@ -16,7 +16,6 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::extract::connect_info::{ConnectInfo, Connected};
 use axum::extract::{DefaultBodyLimit, FromRequestParts, State};
 use axum::http::request::Parts;
 use axum::http::StatusCode;
@@ -41,11 +40,8 @@ use crate::capability::SpooledBody;
 use crate::error::CoreError;
 use crate::pairing::{validate_agent_name, TokenError};
 use crate::policy::PolicyEngine as _;
-use crate::ratelimit::PairingBlock;
 use crate::store::ConnectionSpec;
-use crate::types::{
-    ConnectionConfig, ConnectionKind, Decision, PairedAgent, PeerIdentity, PermissionScope,
-};
+use crate::types::{ConnectionConfig, ConnectionKind, Decision, PairedAgent, PermissionScope};
 use crate::wire::{ErrorReason, MissingTokenCause, REQUEST_ID_MAX_BYTES};
 
 /* ------------------------------ plumbing --------------------------------- */
@@ -53,20 +49,6 @@ use crate::wire::{ErrorReason, MissingTokenCause, REQUEST_ID_MAX_BYTES};
 #[derive(Clone)]
 pub struct AppState {
     pub broker: Arc<Broker>,
-}
-
-/// Per-connection peer info, resolved race-free at accept time.
-#[derive(Clone, Debug)]
-pub struct PeerInfo {
-    pub identity: PeerIdentity,
-}
-
-impl Connected<axum::serve::IncomingStream<'_, UnixListener>> for PeerInfo {
-    fn connect_info(stream: axum::serve::IncomingStream<'_, UnixListener>) -> Self {
-        Self {
-            identity: crate::peer::resolve_peer(stream.io()),
-        }
-    }
 }
 
 fn err(status: StatusCode, reason: ErrorReason) -> Response {
@@ -209,7 +191,7 @@ fn err_unknown_connection(broker: &Arc<Broker>) -> Response {
     )
 }
 
-/// Bearer-token + identity-pin authentication.
+/// Bearer-token authentication.
 pub struct Authed {
     pub agent: PairedAgent,
 }
@@ -221,32 +203,10 @@ impl FromRequestParts<AppState> for Authed {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let peer = parts
-            .extensions
-            .get::<ConnectInfo<PeerInfo>>()
-            .map(|ci| ci.0.identity.clone())
-            .unwrap_or(PeerIdentity::Unsigned {
-                uid: None,
-                executable_path: None,
-                file_id: None,
-                executable_sha256: None,
-            });
         let token = bearer_token(&parts.headers).map_err(err_missing_token)?;
-        match state.broker.pairing.verify(token, &peer) {
+        match state.broker.pairing.verify(token) {
             Ok(agent) => Ok(Authed { agent }),
             Err(e) => {
-                if e == TokenError::IdentityMismatch {
-                    state.broker.audit.append(
-                        AuditEntry::new(
-                            AuditKind::PeerIdentityMismatch,
-                            format!(
-                                "Rejected call: pin mismatch, valid token presented by {}",
-                                peer.display()
-                            ),
-                        )
-                        .outcome("peer_identity_mismatch"),
-                    );
-                }
                 if let TokenError::Superseded { name } = &e {
                     // The two-instances case: without this hint each 401
                     // triggers a re-pair that breaks the *other* instance,
@@ -503,12 +463,7 @@ pub async fn serve(broker: Arc<Broker>) -> crate::Result<DaemonHandle> {
 
     let app = router(broker);
     let task = tokio::spawn(async move {
-        if let Err(e) = axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<PeerInfo>(),
-        )
-        .await
-        {
+        if let Err(e) = axum::serve(listener, app).await {
             tracing::error!("daemon exited: {e}");
         }
     });
@@ -557,23 +512,10 @@ struct PairBody {
     agent_name: String,
 }
 
-async fn post_pair(
-    State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<PeerInfo>,
-    ApiJson(body): ApiJson<PairBody>,
-) -> Response {
+async fn post_pair(State(state): State<AppState>, ApiJson(body): ApiJson<PairBody>) -> Response {
     let broker = &state.broker;
-    // The brake's two causes read differently to an agent: a full window
-    // means "slow down"; the post-denial cooldown means "the human just
-    // said no, ask them before trying again".
-    match broker.pairing_limiter.check() {
-        Ok(()) => {}
-        Err(PairingBlock::Window(wait)) => {
-            return err_rate_limited(ErrorReason::PairingRateLimited, wait)
-        }
-        Err(PairingBlock::DeniedCooldown(wait)) => {
-            return err_rate_limited(ErrorReason::PairingDeniedCooldown, wait)
-        }
+    if let Err(wait) = broker.pairing_limiter.check() {
+        return err_rate_limited(ErrorReason::PairingRateLimited, wait);
     }
     let name = body.agent_name.trim().to_string();
     if !validate_agent_name(&name) {
@@ -584,148 +526,51 @@ async fn post_pair(
         );
     }
 
-    let identity = peer.identity.clone();
-    // Only the same verified client can retain its existing permissions.
-    // A different program requesting the same display name starts clean.
-    let existing = broker.pairing.get(&name);
-    let matching_client = broker.pairing.get_matching(&name, &identity);
-    let inherited = matching_client
-        .as_ref()
-        .map(|client| broker.inherited_for(&client.id))
-        .unwrap_or_default();
-    let replaces_existing_agent = existing.is_some();
-    let replaced_client_id = existing.as_ref().map(|client| client.id);
-
-    broker.audit.append(
-        AuditEntry::new(
-            AuditKind::PairRequested,
-            format!("Connection request from {name}"),
-        )
-        .agent(name.clone())
-        .detail(identity.display())
-        .field("identity", identity.display()),
-    );
-
-    let request = ApprovalRequest {
-        id: Uuid::new_v4(),
-        agent: name.clone(),
-        client_id: matching_client.as_ref().map(|client| client.id),
-        agent_token_hash: None,
-        kind: ApprovalKind::Pair,
-        connection: None,
-        action: format!("Connect {name} to AKA"),
-        notification: format!("{name} requests to pair with AKA"),
-        received_at: chrono::Utc::now(),
-        deadline: chrono::Utc::now(),
-        identity: Some(identity.display()),
-        pairing_identity: Some(crate::approvals::PairingIdentitySummary::from_identity(
-            &identity,
-        )),
-        replaces_existing_agent,
-        inherited,
-        http: None,
-        ssh: None,
-        proposal: None,
-        proposal_credential: None,
-    };
-
-    // Concurrent pairings under one name coalesce: identically-signed
-    // processes (the two-terminals case) join the one held-open prompt and
-    // receive the same minted token, which they share via the token file.
-    // The key's `\0` cannot appear in a validated agent name, so it can
-    // never collide with a capability call's `(agent, request_id)` key.
-    let coalesce_key = Some((format!("pair\u{0}{name}"), String::new()));
-    let payload_hash = Some({
-        use sha2::{Digest as _, Sha256};
-        let digest = Sha256::digest(identity.display().as_bytes());
-        digest
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>()
-    });
-
-    let executor = {
-        let broker = broker.clone();
-        let name = name.clone();
-        Box::pin(async move {
-            match broker.pairing.pair(&name, identity) {
-                Ok((token, agent)) => {
-                    if replaced_client_id.is_some_and(|id| id != agent.id) {
-                        let _ = broker.remove_rules_for_client_before_pairing(
-                            &replaced_client_id.unwrap(),
-                            &name,
-                            None,
-                            None,
-                        );
-                    }
-                    broker.revoke_access_grants_for_agent(&name, "agent re-paired");
-                    let sessions_closed = broker.data_plane.close_agent(&name);
-                    broker.audit.append(
-                        AuditEntry::new(AuditKind::Paired, format!("Agent connected: {name}"))
-                            .agent(name.clone())
-                            .outcome("paired")
-                            .field("prior_sessions_closed", sessions_closed),
-                    );
-                    broker.events.agents_changed();
-                    ExecOutcome {
-                        status: 200,
-                        body: json!({
-                            "token": token,
-                            "client_id": agent.id,
-                            // Echo what was registered and pinned, so the
-                            // agent can log its own enrollment without a
-                            // follow-up /v1/whoami.
-                            "agent": agent.name,
-                            "identity": agent.identity.display(),
-                            "expires_after_days": broker.config.token_ttl.as_secs() / 86400,
-                            // The storage guidance travels with the
-                            // credential, not just in prose.
-                            "store_at": format!("{}/{name}", broker.paths.tokens_display()),
-                        }),
-                    }
-                }
-                Err(e) => ExecOutcome {
-                    status: 500,
-                    body: json!({ "reason": ErrorReason::PairingFailed, "detail": e.to_string() }),
-                },
+    // Registration is immediate: no approval prompt. The new agent simply
+    // appears in the app, unwired — it can list connections but cannot use
+    // any until the user wires it up.
+    let replaces_existing_agent = broker.pairing.get(&name).is_some();
+    match broker.pairing.pair(&name) {
+        Ok((token, agent)) => {
+            if replaces_existing_agent {
+                // A re-pair invalidates the prior token generation; end the
+                // in-memory access it carried.
+                broker.revoke_access_grants_for_agent(&name, "agent re-paired");
+                let sessions_closed = broker.data_plane.close_agent(&name);
+                broker.audit.append(
+                    AuditEntry::new(AuditKind::Paired, format!("Agent reconnected: {name}"))
+                        .agent(name.clone())
+                        .outcome("paired")
+                        .field("prior_sessions_closed", sessions_closed),
+                );
+            } else {
+                broker.audit.append(
+                    AuditEntry::new(AuditKind::Paired, format!("Agent connected: {name}"))
+                        .agent(name.clone())
+                        .outcome("paired"),
+                );
             }
-        })
-    };
-
-    // retain_outcome is off: replaying a minted token to a pairing that
-    // arrives *after* completion would hand out a credential with no
-    // approval; only in-flight pairings may share the prompt.
-    let parked = broker.approvals.park(ParkRequest {
-        request,
-        coalesce_key,
-        payload_hash,
-        retain_outcome: false,
-        executor,
-    });
-    match parked {
-        Ok(Parked::Wait(handle)) => match handle.wait().await {
-            Some(outcome) => outcome_response(outcome),
-            None => err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ErrorReason::BrokerShutdown,
-            ),
-        },
-        Ok(Parked::Replay(outcome)) => outcome_response(outcome),
-        // Same name, different peer identity, while a prompt is pending: a
-        // second racing prompt would be confusing at best, so ask the agent
-        // to come back once the first resolves.
-        Err(ParkError::RequestIdMismatch) => err_detail(
-            StatusCode::CONFLICT,
-            ErrorReason::PairingAlreadyPending,
-            "a pairing for this name from a different peer identity is \
-             awaiting the user; retry after it resolves",
-        ),
-        // Pairing does not retain completed outcomes, so neither condition
-        // is reachable unless that invariant regresses.
-        Err(ParkError::IdempotencyCapacity | ParkError::OutcomeNotReplayable) => err_detail(
+            broker.events.agents_changed();
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "token": token,
+                    "client_id": agent.id,
+                    // Echo what was registered, so the agent can log its own
+                    // enrollment without a follow-up /v1/whoami.
+                    "agent": agent.name,
+                    "expires_after_days": broker.config.token_ttl.as_secs() / 86400,
+                    // The storage guidance travels with the credential, not
+                    // just in prose.
+                    "store_at": format!("{}/{name}", broker.paths.tokens_display()),
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => err_detail(
             StatusCode::INTERNAL_SERVER_ERROR,
             ErrorReason::PairingFailed,
-            "internal pairing idempotency error",
+            e.to_string(),
         ),
     }
 }
@@ -820,7 +665,6 @@ async fn get_whoami(State(state): State<AppState>, authed: Authed) -> Response {
     Json(json!({
         "client_id": authed.agent.id,
         "agent": authed.agent.name,
-        "identity": authed.agent.identity.display(),
         "paired_at": authed.agent.paired_at,
         // The sliding TTL's current horizon; refreshed on every
         // authenticated call.
@@ -1000,10 +844,6 @@ async fn post_http(
         ),
         received_at: chrono::Utc::now(),
         deadline: chrono::Utc::now(),
-        identity: None,
-        pairing_identity: None,
-        replaces_existing_agent: false,
-        inherited: vec![],
         http: Some(HttpPayloadView {
             method: method.to_string(),
             path: call.path.clone(),
@@ -1356,10 +1196,6 @@ async fn post_propose(
         ),
         received_at: chrono::Utc::now(),
         deadline: chrono::Utc::now(),
-        identity: None,
-        pairing_identity: None,
-        replaces_existing_agent: false,
-        inherited: vec![],
         http: None,
         ssh: None,
         proposal: Some(crate::approvals::ProposalView {
@@ -1570,10 +1406,6 @@ async fn post_ws_open(
         ),
         received_at: chrono::Utc::now(),
         deadline: chrono::Utc::now(),
-        identity: None,
-        pairing_identity: None,
-        replaces_existing_agent: false,
-        inherited: vec![],
         http: None,
         ssh: None,
         proposal: None,
@@ -1720,10 +1552,6 @@ async fn post_ssh_open(
         ),
         received_at: chrono::Utc::now(),
         deadline: chrono::Utc::now(),
-        identity: None,
-        pairing_identity: None,
-        replaces_existing_agent: false,
-        inherited: vec![],
         http: None,
         ssh: None,
         proposal: None,
@@ -1855,10 +1683,6 @@ async fn post_pg_open(
         ),
         received_at: chrono::Utc::now(),
         deadline: chrono::Utc::now(),
-        identity: None,
-        pairing_identity: None,
-        replaces_existing_agent: false,
-        inherited: vec![],
         http: None,
         ssh: None,
         proposal: None,

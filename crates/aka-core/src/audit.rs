@@ -87,10 +87,16 @@ pub struct AuditEntry {
 #[serde(rename_all = "snake_case")]
 pub enum AuditKind {
     // Pairing lifecycle
+    /// Retained so activity logs written by older versions still deserialize.
+    /// Registration is immediate now; nothing emits this.
     PairRequested,
     Paired,
+    /// Retained so activity logs written by older versions still deserialize.
+    /// Registration is immediate now; nothing emits this.
     PairDenied,
     TokenRevoked,
+    /// Retained so activity logs written by older versions still deserialize.
+    /// Peer identity verification was removed; nothing emits this.
     PeerIdentityMismatch,
     // Requests + decisions
     Requested,

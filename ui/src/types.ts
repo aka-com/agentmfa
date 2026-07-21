@@ -41,9 +41,6 @@ export interface ConnectionSummary {
 export interface AgentSummary {
   id: string;
   name: string;
-  program: string;
-  verification: string;
-  identity: string;
   paired_at: string;
   last_used: string;
   permission_count: number;
@@ -73,21 +70,8 @@ export interface Settings {
   show_agent_walkthrough: boolean;
 }
 
-export interface PairingIdentity {
-  program: string;
-  verification: string;
-  technical: string;
-  warning: string | null;
-}
-
 export interface ApprovalConnection {
   id: string;
-  name: string;
-  type: ConnectionType;
-  target: string;
-}
-
-export interface InheritedConnection {
   name: string;
   type: ConnectionType;
   target: string;
@@ -120,16 +104,12 @@ export interface SshHostKeyView {
 export interface ApprovalRequest {
   id: string;
   agent: string;
-  kind: 'pair' | 'http' | 'ws' | 'pg' | 'ssh' | 'propose';
+  kind: 'http' | 'ws' | 'pg' | 'ssh' | 'propose';
   connection: ApprovalConnection | null;
   action: string;
   notification: string;
   received_at: string;
   deadline: string;
-  identity: string | null;
-  pairing_identity: PairingIdentity | null;
-  replaces_existing_agent: boolean;
-  inherited: InheritedConnection[];
   http: HttpPayloadView | null;
   ssh: SshHostKeyView | null;
   proposal?: ProposalView | null;
@@ -235,7 +215,6 @@ export interface CommandMap {
   decide: CommandSpec<{
     id: string;
     decision: Decision;
-    revokeInheritedRules?: boolean;
     credentialValue?: string;
   }, void>;
   ui_set_mode: CommandSpec<{ mode: string }, void>;
@@ -285,7 +264,7 @@ declare global {
         ): Promise<Unlisten>;
       };
     };
-    __mockApproval?: (kind?: 'http' | 'post' | 'pair' | 'ssh', ttlMs?: number) => void;
+    __mockApproval?: (kind?: 'http' | 'post' | 'ssh', ttlMs?: number) => void;
     tippy?: {
       delegate(
         target: string,

@@ -635,12 +635,6 @@ fn cmd_serve(root: Option<PathBuf>, auto_yes: bool) {
     };
 
     eprintln!("AKA broker listening on {}", daemon.socket_path.display());
-    if cfg!(not(target_os = "macos")) {
-        eprintln!(
-            "  ⚠ dev build: peer identity is uid-pinned only on this OS \
-             (code-signature pinning is macOS-only)"
-        );
-    }
     eprintln!(
         "  discovery: curl --unix-socket {} http://localhost/instructions",
         daemon.socket_path.display()
@@ -696,11 +690,8 @@ fn cmd_serve(root: Option<PathBuf>, auto_yes: bool) {
         let Some((decision, proposal_credential)) = decided else {
             break;
         };
-        // Auto-approve rebounds the pairing brake fairly; on a real denial
-        // the core arms the cooldown itself.
         let ctx = DecisionContext::local(DecisionSurface::Cli);
         let options = DecisionOptions {
-            revoke_inherited_rules: false,
             proposal_credential,
         };
         if let Err(e) = broker.decide_with_options(&request.id, decision, options, &ctx) {
@@ -754,18 +745,6 @@ fn prompt_decision(
 ) -> (UiDecision, Option<aka_core::types::SecretValue>) {
     eprintln!("── approval required ──────────────────────────────");
     eprintln!("  agent:   {}", req.agent);
-    if req.kind == ApprovalKind::Pair {
-        eprintln!(
-            "  identity: {}",
-            req.identity.as_deref().unwrap_or("unsigned")
-        );
-        if !req.inherited.is_empty() {
-            eprintln!("  ⚠ inherits standing access to:");
-            for c in &req.inherited {
-                eprintln!("      {} ({} · {})", c.name, c.kind.as_str(), c.target);
-            }
-        }
-    }
     if let Some(conn) = &req.connection {
         eprintln!(
             "  connection: {} ({} · {})",
@@ -822,10 +801,9 @@ fn prompt_decision(
             proposal.credential_name
         );
     }
-    // Pairing and host-key trust are yes/no decisions: no session or
+    // Proposals and host-key trust are yes/no decisions: no session or
     // standing-rule shapes (the broker coerces them to allow-once anyway).
-    let binary_prompt =
-        matches!(req.kind, ApprovalKind::Pair | ApprovalKind::Propose) || req.ssh.is_some();
+    let binary_prompt = req.kind == ApprovalKind::Propose || req.ssh.is_some();
     let decision = loop {
         eprint!("  decide [a/o/f/d]: ");
         let _ = std::io::stderr().flush();
@@ -839,9 +817,6 @@ fn prompt_decision(
             "o" | "once" => break UiDecision::AllowOnce,
             "f" | "forever" if !binary_prompt => break UiDecision::AlwaysAllow,
             "d" | "deny" | "" => break UiDecision::Deny,
-            _ if req.kind == ApprovalKind::Pair => {
-                eprintln!("  ? enter a (allow pairing) or d (deny)")
-            }
             _ if req.kind == ApprovalKind::Propose => {
                 eprintln!("  ? enter a (save this service) or d (deny)")
             }

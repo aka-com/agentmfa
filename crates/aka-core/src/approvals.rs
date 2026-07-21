@@ -43,7 +43,7 @@ use uuid::Uuid;
 
 use crate::audit::{AuditEntry, AuditKind, AuditLog};
 use crate::events::BrokerEvents;
-use crate::types::{ConnectionKind, PeerIdentity, SecretValue};
+use crate::types::{ConnectionKind, SecretValue};
 use crate::wire::ErrorReason;
 
 /* ------------------------------ view types ------------------------------- */
@@ -53,8 +53,7 @@ use crate::wire::ErrorReason;
 pub struct ApprovalRequest {
     pub id: Uuid,
     pub agent: String,
-    /// Stable paired-client authorization principal. Pairing requests carry
-    /// the existing matching client's id when reconnecting the same program.
+    /// Stable paired-client authorization principal.
     #[serde(skip)]
     pub client_id: Option<Uuid>,
     /// Pair-token generation that originated a capability request. This is
@@ -63,7 +62,7 @@ pub struct ApprovalRequest {
     #[doc(hidden)]
     pub agent_token_hash: Option<String>,
     pub kind: ApprovalKind,
-    /// None for pairing requests.
+    /// None for connection proposals.
     pub connection: Option<ConnectionSummary>,
     /// Display line: "GET api.github.com/user/repos",
     /// "Connect to Postgres → app@db…".
@@ -73,19 +72,6 @@ pub struct ApprovalRequest {
     pub received_at: DateTime<Utc>,
     /// Auto-deny deadline; the UI renders the countdown.
     pub deadline: DateTime<Utc>,
-    /// Pairing only: the peer's verified identity display string.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub identity: Option<String>,
-    /// Pairing only: plain-language program identity for the human prompt.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pairing_identity: Option<PairingIdentitySummary>,
-    /// Pairing only: this name already has an active pair token that the new
-    /// token will replace.
-    pub replaces_existing_agent: bool,
-    /// Pairing only: connections the name's standing rules would grant the
-    /// connecting process promptless access to, the loud disclosure.
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub inherited: Vec<ConnectionSummary>,
     /// HTTP only: the request-payload view.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub http: Option<HttpPayloadView>,
@@ -108,61 +94,17 @@ pub struct ApprovalRequest {
     pub proposal_credential: Option<Arc<Mutex<Option<SecretValue>>>>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct PairingIdentitySummary {
-    pub program: String,
-    pub verification: &'static str,
-    pub technical: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub warning: Option<&'static str>,
-}
-
-impl PairingIdentitySummary {
-    pub fn from_identity(identity: &PeerIdentity) -> Self {
-        match identity {
-            PeerIdentity::Signed { signing_id, .. } => Self {
-                program: signing_id.clone(),
-                verification: "Signed application",
-                technical: identity.display(),
-                warning: None,
-            },
-            PeerIdentity::Unsigned {
-                executable_path, ..
-            } => Self {
-                program: executable_path
-                    .as_deref()
-                    .and_then(|path| std::path::Path::new(path).file_name())
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("Unsigned local program")
-                    .to_string(),
-                verification: "Local executable",
-                technical: identity.display(),
-                warning: Some(
-                    "This program is not signed. AKA uses local file details, and scripts run by the same program may share this identity.",
-                ),
-            },
-            PeerIdentity::DevUnverified { .. } => Self {
-                program: "Development process".into(),
-                verification: "Development identity",
-                technical: identity.display(),
-                warning: Some("This development build cannot verify the connecting program."),
-            },
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ApprovalKind {
-    Pair,
     Http,
     Ws,
     Pg,
     Ssh,
     /// An agent proposing a new named connection (`POST
     /// /v1/connections/propose`). Approval saves configuration only — like
-    /// pairing and host-key pins, every allow shape is coerced to a single
-    /// one-time decision.
+    /// host-key pins, every allow shape is coerced to a single one-time
+    /// decision.
     Propose,
 }
 
@@ -236,13 +178,13 @@ pub struct SshHostKeyView {
 
 impl ApprovalRequest {
     /// Requests whose exact *Allow once* decision completes only behind the
-    /// native OS confirmation: pairing, mutating HTTP requests, and SSH
+    /// native OS confirmation: proposals, mutating HTTP requests, and SSH
     /// host-key trust prompts.
     /// Starting an access session and saving "Always allow…" are gated for
     /// every request kind; the broker enforces those decisions separately.
     pub fn is_high_consequence(&self) -> bool {
         match self.kind {
-            ApprovalKind::Pair | ApprovalKind::Propose => true,
+            ApprovalKind::Propose => true,
             ApprovalKind::Http => self.http.as_ref().is_some_and(|h| h.mutating),
             ApprovalKind::Ssh => self.ssh.is_some(),
             _ => false,
@@ -685,11 +627,11 @@ impl Approvals {
             inner.queue.retain(|q| q != id);
             (request, queue_snapshot(&inner), executor)
         };
-        // Pairing mints an agent token and never reads a user credential. Do
-        // not let its confirmation authorize secret reads if that invariant
-        // is ever accidentally violated by a future executor.
-        let secret_read_confirmed = decision_confirmed
-            && !matches!(request.kind, ApprovalKind::Pair | ApprovalKind::Propose);
+        // A proposal saves configuration and never reads a user credential.
+        // Do not let its confirmation authorize secret reads if that
+        // invariant is ever accidentally violated by a future executor.
+        let secret_read_confirmed =
+            decision_confirmed && request.kind != ApprovalKind::Propose;
         self.spawn_completion(*id, executor, secret_read_confirmed, authorization);
         self.shared.events.queue_changed(&snapshot);
         Some(request)
@@ -1099,10 +1041,6 @@ mod tests {
             notification: format!("{agent} wants to use GitHub: {action}"),
             received_at: now,
             deadline: now,
-            identity: None,
-            pairing_identity: None,
-            replaces_existing_agent: false,
-            inherited: vec![],
             http: None,
             ssh: None,
             proposal: None,
@@ -1141,27 +1079,6 @@ mod tests {
             panic!("new request unexpectedly replayed")
         };
         assert!(handle.wait().await.is_some());
-    }
-
-    #[test]
-    fn pairing_identity_summary_separates_program_and_verification() {
-        let signed = PairingIdentitySummary::from_identity(&PeerIdentity::Signed {
-            signing_id: "com.example.agent".into(),
-            team_id: Some("TEAM123".into()),
-        });
-        assert_eq!(signed.program, "com.example.agent");
-        assert_eq!(signed.verification, "Signed application");
-        assert!(signed.warning.is_none());
-
-        let unsigned = PairingIdentitySummary::from_identity(&PeerIdentity::Unsigned {
-            uid: Some(501),
-            executable_path: Some("/usr/local/bin/node".into()),
-            file_id: None,
-            executable_sha256: Some("a".repeat(64)),
-        });
-        assert_eq!(unsigned.program, "node");
-        assert_eq!(unsigned.verification, "Local executable");
-        assert!(unsigned.warning.is_some());
     }
 
     #[tokio::test]

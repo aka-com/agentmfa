@@ -47,8 +47,6 @@ signature = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
-libc = "0.2"
-core-foundation = "0.10"
 
 [dev-dependencies]
 tempfile = { workspace = true }

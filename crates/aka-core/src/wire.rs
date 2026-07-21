@@ -68,10 +68,7 @@ pub enum ErrorReason {
     InvalidToken,
     TokenExpired,
     TokenSuperseded,
-    PeerIdentityMismatch,
     InvalidAgentName,
-    PairingAlreadyPending,
-    PairingDeniedCooldown,
     PairingRateLimited,
     PairingFailed,
     // Request validation.
@@ -123,15 +120,12 @@ pub enum ErrorReason {
 
 impl ErrorReason {
     /// Every registered reason, for exhaustiveness checks and docs.
-    pub const ALL: [ErrorReason; 46] = [
+    pub const ALL: [ErrorReason; 43] = [
         ErrorReason::MissingToken,
         ErrorReason::InvalidToken,
         ErrorReason::TokenExpired,
         ErrorReason::TokenSuperseded,
-        ErrorReason::PeerIdentityMismatch,
         ErrorReason::InvalidAgentName,
-        ErrorReason::PairingAlreadyPending,
-        ErrorReason::PairingDeniedCooldown,
         ErrorReason::PairingRateLimited,
         ErrorReason::PairingFailed,
         ErrorReason::UnknownConnection,
@@ -178,10 +172,7 @@ impl ErrorReason {
             ErrorReason::InvalidToken => "invalid_token",
             ErrorReason::TokenExpired => "token_expired",
             ErrorReason::TokenSuperseded => "token_superseded",
-            ErrorReason::PeerIdentityMismatch => "peer_identity_mismatch",
             ErrorReason::InvalidAgentName => "invalid_agent_name",
-            ErrorReason::PairingAlreadyPending => "pairing_already_pending",
-            ErrorReason::PairingDeniedCooldown => "pairing_denied_cooldown",
             ErrorReason::PairingRateLimited => "pairing_rate_limited",
             ErrorReason::PairingFailed => "pairing_failed",
             ErrorReason::UnknownConnection => "unknown_connection",
@@ -242,16 +233,17 @@ impl Serialize for ErrorReason {
 /// sender-constrained tokens) exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthScheme {
-    /// A bearer pair token bound out-of-band to the OS-verified peer
-    /// identity observed at pairing: the only scheme in ABP/0.
-    BearerPinned,
+    /// A plain bearer pair token minted at registration: the only scheme in
+    /// ABP/0. The token identifies the agent; there is no peer identity
+    /// verification.
+    Bearer,
 }
 
 impl AuthScheme {
-    pub const ALL: [AuthScheme; 1] = [AuthScheme::BearerPinned];
+    pub const ALL: [AuthScheme; 1] = [AuthScheme::Bearer];
     pub const fn as_str(self) -> &'static str {
         match self {
-            AuthScheme::BearerPinned => "bearer_pinned",
+            AuthScheme::Bearer => "bearer",
         }
     }
 }
@@ -368,8 +360,8 @@ mod tests {
             "\"denied_by_user\""
         );
         assert_eq!(
-            serde_json::to_string(&AuthScheme::BearerPinned).unwrap(),
-            "\"bearer_pinned\""
+            serde_json::to_string(&AuthScheme::Bearer).unwrap(),
+            "\"bearer\""
         );
         assert_eq!(
             serde_json::to_string(&MissingTokenCause::AuthorizationHeaderAbsent).unwrap(),

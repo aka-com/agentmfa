@@ -193,8 +193,7 @@ const db: MockDatabase = {
   rules: [],
   grants: [],
   agents: [
-    { id: uid(), name: 'claude-code', program: 'com.anthropic.claude-code', verification: 'Signed application',
-      identity: 'com.anthropic.claude-code · Team 6XN7K9RPQ2', paired_at: now(), last_used: now() },
+    { id: uid(), name: 'claude-code', paired_at: now(), last_used: now() },
   ],
   sessions: [],
   activity: [],
@@ -489,32 +488,6 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       return;
     case 'decide': {
       const req = db.queue.find((r) => r.id === args.id);
-      if (req && req.kind === 'pair' && args.revokeInheritedRules) {
-        const client = db.agents.find((agent) => agent.name === req.agent);
-        db.rules = db.rules.filter((r) => !client || r.client_id !== client.id);
-        audit('ruleRemoved', `Approval required again: ${req.agent}`);
-      }
-      if (req && req.kind === 'pair' && args.decision === 'allow_once' && req.pairing_identity) {
-        db.grants = db.grants.filter((g) => g.agent !== req.agent);
-        db.sessions = db.sessions.filter((s) => s.agent !== req.agent);
-        const existing = db.agents.find((agent) => agent.name === req.agent);
-        if (existing) {
-          existing.paired_at = now();
-          existing.last_used = existing.paired_at;
-        } else {
-          db.agents.push({
-            id: uid(),
-            name: req.agent,
-            program: req.pairing_identity.program,
-            verification: req.pairing_identity.verification,
-            identity: req.pairing_identity.technical,
-            paired_at: now(),
-            last_used: now(),
-          });
-        }
-        emit('aka://agents-changed', {});
-        emit('aka://sessions-changed', {});
-      }
       if (req && args.decision === 'allow_session' && req.connection && req.temporary_access) {
         const connection = req.connection;
         const temporaryAccess = req.temporary_access;
@@ -545,7 +518,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
 
 // Expose a way for the dev page to inject a fake approval for visual testing.
 // Kinds: 'http' (GET, collapsed payload), 'post' (mutating, auto-expanded
-// payload with many headers + body — exercises the scroll region), 'pair'.
+// payload with many headers + body — exercises the scroll region), 'ssh'.
 if (!tauri && typeof window !== 'undefined') {
   window.__mockApproval = (kind = 'http', ttlMs = 900000) => {
     if (kind === 'ssh') {
@@ -557,8 +530,7 @@ if (!tauri && typeof window !== 'undefined') {
         action: `Trust SSH host key for ${sshConn.name}`,
         notification: `claude-code reached ${sshConn.name} for the first time: verify the server's host key`,
         received_at: now(), deadline: new Date(Date.now() + ttlMs).toISOString(),
-        identity: null, pairing_identity: null, replaces_existing_agent: false,
-        inherited: [], http: null,
+        http: null,
         ssh: {
           host: sshConn.host || 'prod.example.com', port: sshConn.port || 22,
           observed_fingerprint: 'SHA256:vdZ5N8kNxU7J4W2WYa6qK0sJYv8oXb8s2H7n3jE5q1A',
@@ -569,15 +541,9 @@ if (!tauri && typeof window !== 'undefined') {
       db.queue = [req]; emit('aka://queue-changed', db.queue.slice());
       return;
     }
-    const inherited = kind === 'pair'
-      ? db.rules.filter((r) => r.client_id === db.agents[0]?.id).flatMap((r) => {
-          const c = db.connections.find((conn) => conn.id === r.connection_id);
-          return c ? [{ name: c.name, type: c.type, target: connTarget(c) }] : [];
-        })
-      : [];
     const post = kind === 'post';
     const body = post ? JSON.stringify({ event_type: 'deploy', client_payload: { ref: 'main', sha: 'a1b2c3d', env: 'production', requested_by: 'claude-code' } }, null, 2) : null;
-    const http: ApprovalRequest['http'] = kind === 'pair' ? null : {
+    const http: ApprovalRequest['http'] = {
       method: post ? 'POST' : 'GET',
       path: post ? '/repos/aka/aka/dispatches' : '/user/repos',
       headers: post
@@ -587,21 +553,14 @@ if (!tauri && typeof window !== 'undefined') {
     };
     const firstConnection = db.connections[0]!;
     const req: ApprovalRequest = {
-      id: uid(), agent: 'claude-code', kind: kind === 'pair' ? 'pair' : 'http',
-      connection: kind === 'pair' ? null : { id: firstConnection.id, name: 'github', type: 'api', target: 'api.github.com' },
-      action: kind === 'pair' ? 'Connect claude-code to AKA Desktop'
-        : post ? 'POST api.github.com/repos/aka/aka/dispatches' : 'GET api.github.com/user/repos',
+      id: uid(), agent: 'claude-code', kind: 'http',
+      connection: { id: firstConnection.id, name: 'github', type: 'api', target: 'api.github.com' },
+      action: post ? 'POST api.github.com/repos/aka/aka/dispatches' : 'GET api.github.com/user/repos',
       notification: 'claude-code wants to use github: GET /user/repos',
       received_at: now(), deadline: new Date(Date.now() + ttlMs).toISOString(),
-      identity: kind === 'pair' ? 'com.anthropic.claude-code · Team 6XN7K9RPQ2' : null,
-      pairing_identity: kind === 'pair' ? {
-        program: 'com.anthropic.claude-code', verification: 'Signed application',
-        technical: 'com.anthropic.claude-code · Team 6XN7K9RPQ2', warning: null,
-      } : null,
-      replaces_existing_agent: kind === 'pair',
-      inherited, http,
+      http,
       ssh: null,
-      temporary_access: kind === 'pair' ? null : { scope: post ? 'full' : 'read', duration_seconds: 900 },
+      temporary_access: { scope: post ? 'full' : 'read', duration_seconds: 900 },
     };
     db.queue = [req]; emit('aka://queue-changed', db.queue.slice());
   };
