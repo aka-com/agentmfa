@@ -896,8 +896,8 @@ function catalogRowHTML(entry: CatalogEntry): string {
     ? `${count} saved credential${count === 1 ? '' : 's'}`
     : `${count} configured connection${count === 1 ? '' : 's'}`;
   // A branded token row prompts for a key; an MCP row without a published
-  // endpoint (Gmail, 1Password, the generic row) needs a server URL you
-  // supply. Both read better than a bare "Add" when nothing is configured.
+  // endpoint (Gmail, the generic row) needs a server URL you supply. Both
+  // read better than a bare "Add" when nothing is configured.
   const addLabel = ['mcp', 'http', 'gmail'].includes(entry.id)
     ? 'Configure'
     : entry.preset
@@ -910,15 +910,16 @@ function catalogRowHTML(entry: CatalogEntry): string {
   const quickConnectAction = `<div class="cat-connect-wrap ${actionMenuOpen ? 'open' : ''}">
       <div class="cat-connect-buttons">
         <button class="btn cat-add cat-connect-primary" data-act="catalog-connect-oauth"
-          data-id="${entry.id}">Connect now</button>
+          data-id="${entry.id}">Connect</button>
         <button class="btn cat-add cat-connect-menu-btn" data-act="toggle-catalog-connect-menu"
           data-id="${entry.id}" title="More ways to connect ${escAttr(entry.name)}"
           aria-label="More ways to connect ${escAttr(entry.name)}" aria-haspopup="menu"
           aria-expanded="${actionMenuOpen}">${ICONS.chevronDown}</button>
       </div>
       ${actionMenuOpen ? `<div class="cat-connect-menu" role="menu" aria-label="Connect ${escAttr(entry.name)}">
-        <button class="menu-item" role="menuitem" data-act="catalog-connect-oauth" data-id="${entry.id}">Connect via OAuth</button>
-        <button class="menu-item" role="menuitem" data-act="catalog-connect-manual" data-id="${entry.id}">Connect manually</button>
+        <button class="menu-item" role="menuitem" data-act="catalog-connect-oauth" data-id="${entry.id}">Connect</button>
+        <button class="menu-item" role="menuitem" data-act="catalog-connect-manual" data-id="${entry.id}">Connect custom MCP</button>
+        ${entry.preset ? `<button class="menu-item" role="menuitem" data-act="catalog-connect-api" data-id="${entry.id}">Connect custom API</button>` : ''}
       </div>` : ''}
     </div>`;
   const action = count || builtin
@@ -2146,12 +2147,13 @@ function releaseDropdownForm(): void {
 function initializeCatalogConnectionDraft(
   entry: CatalogEntry,
   mcpAuthMode: 'oauth' | 'bearer' = 'oauth',
+  asApi = false,
 ): void {
   state.connType = entry.connType!;
   state.connEntryName = entry.name;
   state.connPreset = entry.preset ?? null;
   state.draft = { nameIsAutomatic: true };
-  if (entry.mcp) {
+  if (entry.mcp && !asApi) {
     state.draft.isMcp = true;
     state.draft.entryId = entry.id;
     state.draft.authMode = mcpAuthMode;
@@ -2191,10 +2193,11 @@ function initialCatalogConnectionFocusTarget(entry: CatalogEntry): string {
 async function openCatalogConnectionForm(
   entry: CatalogEntry,
   mcpAuthMode: 'oauth' | 'bearer' = 'oauth',
+  asApi = false,
 ): Promise<void> {
   if (!entry.connType || !await holdDropdownFormOpen()) return;
   state.sheet = { kind: 'add-conn' };
-  initializeCatalogConnectionDraft(entry, mcpAuthMode);
+  initializeCatalogConnectionDraft(entry, mcpAuthMode, asApi);
   render();
   focusField(initialCatalogConnectionFocusTarget(entry));
 }
@@ -2804,6 +2807,14 @@ document.addEventListener('click', async (e) => {
       const entry = catalogEntryById(id);
       state.catalogActionMenuOpen = null;
       if (entry) await openCatalogConnectionForm(entry, 'bearer');
+      break;
+    }
+    case 'catalog-connect-api': {
+      // The dual-mode escape hatch: add a branded row as a plain
+      // credentialed API instead of its hosted MCP server.
+      const entry = catalogEntryById(id);
+      state.catalogActionMenuOpen = null;
+      if (entry) await openCatalogConnectionForm(entry, 'bearer', true);
       break;
     }
     case 'catalog-add': {

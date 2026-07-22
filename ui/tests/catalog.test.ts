@@ -62,7 +62,7 @@ test('key-only vendors live in the API registry, not Apps', () => {
 });
 
 test('branded apps are added as MCP servers, not raw API origins', () => {
-  for (const id of ['github', 'gmail', 'notion', 'onepassword',
+  for (const id of ['github', 'gmail', 'notion',
     'airtable', 'linear', 'sentry', 'stripe']) {
     const entry = CATALOG.find((candidate) => candidate.id === id);
     assert.equal(entry?.via, 'connection', id);

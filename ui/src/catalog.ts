@@ -6,7 +6,7 @@
 // a built-in store (`via: 'builtin'` — the Keychain-backed saved
 // credentials).
 //
-// Branded apps (GitHub, Gmail, Notion, 1Password) are `mcp: true`: they are
+// Branded apps (GitHub, Gmail, Notion, …) are `mcp: true`: they are
 // richer than a single credentialed origin, so they are added by pointing
 // at that service's MCP server. Underneath they are still API connections —
 // same pinned host, same credential injected on the upstream leg — with an
@@ -423,17 +423,6 @@ export const CATALOG: CatalogEntry[] = [
     section: 'Secrets',
     via: 'builtin',
     keywords: ['secrets', 'tokens', 'keychain'],
-  },
-  {
-    id: 'onepassword',
-    name: '1Password',
-    icon: 'onepassword',
-    description: 'Vault & credentials — via MCP',
-    section: 'Secrets',
-    via: 'connection',
-    connType: 'api',
-    mcp: true,
-    keywords: ['vault', 'passwords', 'secrets'],
   },
 ];
 
