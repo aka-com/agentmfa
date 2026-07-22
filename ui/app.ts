@@ -2119,7 +2119,14 @@ async function openCatalogConnectionForm(
   state.sheet = { kind: 'add-conn' };
   initializeCatalogConnectionDraft(entry, mcpAuthMode);
   render();
-  focusField(!entry.preset ? 'f-cname' : state.secrets.length ? 'c-secret' : 'c-new-secret-value');
+  const focusTarget = entry.connType === 'api' && (state.draft.name || '').trim()
+    ? 'f-origin'
+    : !entry.preset
+    ? 'f-cname'
+    : state.secrets.length
+    ? 'c-secret'
+    : 'c-new-secret-value';
+  focusField(focusTarget);
 }
 
 function availableConnectionName(base: string): string {
