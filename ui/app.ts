@@ -2980,6 +2980,14 @@ document.addEventListener('click', async (e) => {
         reauth_connection_id: connection.id,
         whoami_tool: template?.whoamiTool ?? null,
         expected_tools: template?.expectedTools ?? [],
+        // An oauthApp template's scope override and authorize params must
+        // ride reauth too, or the retry asks for every advertised scope
+        // and (for Google) comes back without a refresh token. The client
+        // ID itself is recovered broker-side from the stored grant.
+        ...(template?.oauthApp ? {
+          oauth_scope: template.oauthApp.scopes?.join(' ') || null,
+          extra_auth_params: template.oauthApp.extraAuthParams ?? [],
+        } : {}),
       });
       break;
     }

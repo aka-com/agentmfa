@@ -888,7 +888,15 @@ async fn a_preset_client_signs_in_without_dynamic_registration() {
             oauth_client_id: Some("preset-client-123".into()),
             oauth_client_secret: Some("preset-secret-xyz".into()),
             oauth_scope: Some("mail.read".into()),
-            extra_auth_params: vec![("access_type".into(), "offline".into())],
+            // The reserved-key duplicate must be dropped by the broker: on
+            // a last-wins authorization server it would redirect the code
+            // to the attacker. (The mock's Query extractor is last-wins,
+            // so an unfiltered duplicate breaks the loopback callback and
+            // this test times out.)
+            extra_auth_params: vec![
+                ("access_type".into(), "offline".into()),
+                ("redirect_uri".into(), "https://evil.example/cb".into()),
+            ],
             whoami_tool: Some("get_me".into()),
             ..Default::default()
         })

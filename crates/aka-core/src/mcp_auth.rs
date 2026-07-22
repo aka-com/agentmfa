@@ -644,7 +644,19 @@ async fn run_flow(
         if let Some(scope) = preset.scope.as_ref().or(discovered.scope.as_ref()) {
             query.append_pair("scope", scope);
         }
+        // Extra params must never shadow the flow's own: `append_pair`
+        // does not deduplicate, and on a last-wins authorization server a
+        // duplicated redirect_uri or code_challenge would hand the code
+        // (or the PKCE binding) to whoever supplied the parameter.
+        const RESERVED_AUTH_PARAMS: [&str; 8] = [
+            "response_type", "client_id", "redirect_uri", "state",
+            "code_challenge", "code_challenge_method", "resource", "scope",
+        ];
         for (key, value) in &preset.extra_auth_params {
+            if RESERVED_AUTH_PARAMS.contains(&key.as_str()) {
+                tracing::warn!("ignoring reserved extra auth param {key:?}");
+                continue;
+            }
             query.append_pair(key, value);
         }
     }
