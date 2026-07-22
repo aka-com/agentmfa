@@ -586,7 +586,7 @@ async fn post_pair(State(state): State<AppState>, ApiJson(body): ApiJson<PairBod
 
 async fn get_connections(State(state): State<AppState>, authed: Authed) -> Response {
     let broker = &state.broker;
-    if let Err(wait) = broker.token_limiter.check(&authed.client) {
+    if let Err(wait) = broker.token_limiter.check(&authed.client_id.to_string()) {
         return err_rate_limited(ErrorReason::RateLimited, wait);
     }
     // The one authenticated endpoint that bypasses the access check by
@@ -716,8 +716,9 @@ async fn post_http(
     ApiJson(call): ApiJson<HttpCallBody>,
 ) -> Response {
     let broker = &state.broker;
+    let limiter_key = authed.client_id.to_string();
     let client = authed.client;
-    if let Err(wait) = broker.token_limiter.check(&client) {
+    if let Err(wait) = broker.token_limiter.check(&limiter_key) {
         broker.audit.append(
             AuditEntry::new(AuditKind::RateLimited, format!("Rate limited: {client}"))
                 .agent(client.clone()),
@@ -1013,8 +1014,9 @@ async fn post_ws_open(
     ApiJson(body): ApiJson<OpenBody>,
 ) -> Response {
     let broker = &state.broker;
+    let limiter_key = authed.client_id.to_string();
     let client = authed.client;
-    if let Err(wait) = broker.token_limiter.check(&client) {
+    if let Err(wait) = broker.token_limiter.check(&limiter_key) {
         return err_rate_limited(ErrorReason::RateLimited, wait);
     }
     if let Some(response) = request_id_error(body.request_id.as_deref()) {
@@ -1114,8 +1116,9 @@ async fn post_ssh_open(
     ApiJson(body): ApiJson<OpenBody>,
 ) -> Response {
     let broker = &state.broker;
+    let limiter_key = authed.client_id.to_string();
     let client = authed.client;
-    if let Err(wait) = broker.token_limiter.check(&client) {
+    if let Err(wait) = broker.token_limiter.check(&limiter_key) {
         return err_rate_limited(ErrorReason::RateLimited, wait);
     }
     if let Some(response) = request_id_error(body.request_id.as_deref()) {
@@ -1225,8 +1228,9 @@ async fn post_pg_open(
     ApiJson(body): ApiJson<OpenBody>,
 ) -> Response {
     let broker = &state.broker;
+    let limiter_key = authed.client_id.to_string();
     let client = authed.client;
-    if let Err(wait) = broker.token_limiter.check(&client) {
+    if let Err(wait) = broker.token_limiter.check(&limiter_key) {
         return err_rate_limited(ErrorReason::RateLimited, wait);
     }
     if let Some(response) = request_id_error(body.request_id.as_deref()) {

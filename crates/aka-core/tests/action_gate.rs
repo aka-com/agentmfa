@@ -195,6 +195,22 @@ async fn one_confirmation_opens_the_presence_window_for_reads() {
 }
 
 #[tokio::test]
+async fn copy_presence_does_not_authorize_configuration_changes() {
+    let events = Arc::new(GateEvents {
+        allow: true,
+        confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    let conn = add_github(&broker);
+    let secret = broker.store.secret_by_name("GITHUB_API_KEY").unwrap();
+
+    broker.ui_secret_value_for_copy(&secret.id).await.unwrap();
+    broker.ui_delete_connection(&conn.id).unwrap();
+
+    assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn an_expired_presence_window_prompts_again() {
     let events = Arc::new(UnifiedAuthEvents {
         secret_read_confirms: AtomicUsize::new(0),

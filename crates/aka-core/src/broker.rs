@@ -194,7 +194,7 @@ impl Broker {
             ws_bridge_port: std::sync::OnceLock::new(),
             pg_proxy_port: std::sync::OnceLock::new(),
             token_limiter: KeyedLimiter::new(
-                config.per_client_per_min,
+                config.per_identity_per_min,
                 std::time::Duration::from_secs(60),
             ),
             discovery_limiter: WindowLimiter::new(
@@ -249,23 +249,21 @@ impl Broker {
     /// gate. Every action that grants an agent new authority goes through
     /// here (or calls `events.confirm_action` directly off-runtime).
     fn confirm_action(&self, description: &str) -> Result<crate::types::ConfirmationMethod> {
-        let method = self
-            .events
+        self.events
             .confirm_action(description)
-            .ok_or(CoreError::NotConfirmed)?;
-        self.store.note_user_presence();
-        Ok(method)
+            .ok_or(CoreError::NotConfirmed)
     }
 
     /// Confirm a user-plane configuration action (tool and secret CRUD):
     /// rides the presence window when it is fresh, otherwise prompts and
     /// opens it. Never used for granting an agent authority.
     fn confirm_user_action(&self, description: &str) -> Result<crate::types::ConfirmationMethod> {
-        if self.store.user_presence_fresh() {
-            self.store.note_user_presence();
+        if self.store.use_configuration_presence() {
             return Ok(crate::types::ConfirmationMethod::RecentAuthentication);
         }
-        self.confirm_action(description)
+        let method = self.confirm_action(description)?;
+        self.store.note_configuration_presence();
+        Ok(method)
     }
 
     /* ----------------------- secrets (UI commands) ------------------------ */
@@ -369,8 +367,7 @@ impl Broker {
             return self.store.secret_value(id).await;
         }
 
-        if self.store.user_presence_fresh() {
-            self.store.note_user_presence();
+        if self.store.use_secret_read_presence() {
             return crate::authorization::scope(true, self.store.secret_value(id)).await;
         }
 
@@ -384,7 +381,7 @@ impl Broker {
         if !confirmed {
             return Err(CoreError::SecretReadNotAuthenticated);
         }
-        self.store.note_user_presence();
+        self.store.note_secret_read_presence();
         crate::authorization::scope(true, self.store.secret_value(id)).await
     }
 
@@ -925,8 +922,6 @@ impl Broker {
             .await
             .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))?
             .ok_or(CoreError::NotConfirmed)?;
-        self.store.note_user_presence();
-
         // Mint under the gate; re-check access didn't vanish while the
         // sheet was up.
         let issued = {
@@ -1300,7 +1295,7 @@ impl Broker {
         self.store.set_presence_window_secs(secs)?;
         // Re-anchor the just-confirmed window so a shortened length takes
         // effect now instead of at the old deadline.
-        self.store.note_user_presence();
+        self.store.reanchor_presence();
         Ok(())
     }
 

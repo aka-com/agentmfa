@@ -1084,9 +1084,9 @@ async fn mutating_request_id_is_scoped_to_connection() {
 }
 
 #[tokio::test]
-async fn per_token_rate_limit_bites() {
+async fn changing_the_client_label_cannot_bypass_the_identity_rate_limit() {
     let config = BrokerConfig {
-        per_client_per_min: 2,
+        per_identity_per_min: 2,
         ..BrokerConfig::default()
     };
     let mut h = harness(config).await;
@@ -1095,13 +1095,14 @@ async fn per_token_rate_limit_bites() {
     let token = h.pair("claude-code").await;
     let auth = format!("Bearer {token}");
 
-    // Two listings pass, the third 429s.
-    for _ in 0..2 {
+    // Two listings pass under different self-reported labels. The third,
+    // under yet another label, still shares the verified identity's bucket.
+    for label in ["claude-code", "codex"] {
         let (status, _) = uds_request(
             &h.socket,
             "GET",
             "/v1/connections",
-            &[("authorization", &auth)],
+            &[("authorization", &auth), ("x-multitool-client", label)],
             None,
         )
         .await;
@@ -1111,7 +1112,10 @@ async fn per_token_rate_limit_bites() {
         &h.socket,
         "GET",
         "/v1/connections",
-        &[("authorization", &auth)],
+        &[
+            ("authorization", &auth),
+            ("x-multitool-client", "fresh-label"),
+        ],
         None,
     )
     .await;
@@ -1287,7 +1291,7 @@ async fn whoami_is_exempt_from_the_per_token_limit() {
     // tool-call rate and surface as a mystifying rate limit, so whoami is
     // exempt — while capability calls stay limited.
     let config = BrokerConfig {
-        per_client_per_min: 1,
+        per_identity_per_min: 1,
         ..BrokerConfig::default()
     };
     let mut h = harness(config).await;

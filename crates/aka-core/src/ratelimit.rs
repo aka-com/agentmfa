@@ -1,9 +1,9 @@
 //! Rate limiting.
 //!
-//! - Per-client sliding-window buckets on capability calls (60/min
-//!   default), keyed on the self-reported client label — with one shared
-//!   key there is no stronger per-caller grain, and the map is pruned so
-//!   label churn cannot grow it without bound.
+//! - Per-identity sliding-window buckets on capability calls (60/min
+//!   default), keyed on the verified identity UUID rather than the
+//!   self-reported activity label. The bucket map is hard bounded and stale
+//!   entries are pruned before new keys are admitted.
 //! - **Global** windows on the unauthenticated endpoints (pairing at 3
 //!   attempts per 5 s; discovery at 60/min), global because unauthenticated
 //!   callers have no stable key to bucket on.
@@ -61,11 +61,13 @@ impl WindowLimiter {
     }
 }
 
-/// Keyed sliding window: at most `max` hits per `window`, per key
-/// (per client-label bucket).
+const DEFAULT_MAX_KEYS: usize = 1024;
+
+/// Keyed sliding window: at most `max` hits per `window`, per verified key.
 pub struct KeyedLimiter {
     window: Duration,
     max: u32,
+    max_keys: usize,
     map: Mutex<HashMap<String, VecDeque<Instant>>>,
 }
 
@@ -74,30 +76,46 @@ impl KeyedLimiter {
         Self {
             window,
             max,
+            max_keys: DEFAULT_MAX_KEYS,
+            map: Mutex::new(HashMap::new()),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_max_keys(max: u32, window: Duration, max_keys: usize) -> Self {
+        Self {
+            window,
+            max,
+            max_keys,
             map: Mutex::new(HashMap::new()),
         }
     }
 
     /// Record an attempt; over budget returns how long until a slot frees.
     pub fn check(&self, key: &str) -> Result<(), Duration> {
-        let now = Instant::now();
+        self.check_at(key, Instant::now())
+    }
+
+    fn check_at(&self, key: &str, now: Instant) -> Result<(), Duration> {
         let mut map = self.map.lock().unwrap();
-        // Opportunistic cleanup of idle keys so revoked tokens don't leak
-        // buckets forever.
-        if map.len() > 1024 {
-            map.retain(|_, hits| {
-                hits.back()
-                    .is_some_and(|last| now.duration_since(*last) <= self.window)
-            });
+        // Prune all expired entries before considering a new bucket. This is
+        // both lifecycle cleanup and the invariant that makes the key cap a
+        // hard bound rather than a best-effort watermark.
+        map.retain(|_, hits| {
+            while hits
+                .front()
+                .is_some_and(|front| now.duration_since(*front) > self.window)
+            {
+                hits.pop_front();
+            }
+            !hits.is_empty()
+        });
+        if !map.contains_key(key) && map.len() >= self.max_keys {
+            // Refuse admission instead of evicting an active bucket, which
+            // would let key churn reset another caller's rate limit.
+            return Err(self.window);
         }
         let hits = map.entry(key.to_string()).or_default();
-        while let Some(front) = hits.front() {
-            if now.duration_since(*front) > self.window {
-                hits.pop_front();
-            } else {
-                break;
-            }
-        }
         if hits.len() >= self.max as usize {
             return Err(window_retry_after(hits, self.window, now));
         }
@@ -140,5 +158,22 @@ mod tests {
         let wait = l.check("a").unwrap_err();
         assert!(wait <= Duration::from_secs(60));
         assert!(l.check("b").is_ok());
+    }
+
+    #[test]
+    fn keyed_state_is_hard_bounded_and_pruned() {
+        let window = Duration::from_secs(60);
+        let l = KeyedLimiter::with_max_keys(10, window, 2);
+        let t0 = Instant::now();
+        assert!(l.check_at("a", t0).is_ok());
+        assert!(l.check_at("b", t0).is_ok());
+        assert_eq!(l.check_at("c", t0), Err(window));
+        assert_eq!(l.map.lock().unwrap().len(), 2);
+
+        let later = t0 + window + Duration::from_secs(1);
+        assert!(l.check_at("c", later).is_ok());
+        let map = l.map.lock().unwrap();
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key("c"));
     }
 }

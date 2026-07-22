@@ -30,6 +30,44 @@ use crate::types::{
 use crate::vault::{SecretVault, VaultAttrs};
 use crate::Result;
 
+const PRESENCE_ABSOLUTE_MAX: std::time::Duration = std::time::Duration::from_secs(12 * 60 * 60);
+
+#[derive(Debug, Clone, Copy)]
+struct PresenceGrant {
+    idle_until: std::time::Instant,
+    absolute_until: std::time::Instant,
+}
+
+impl PresenceGrant {
+    fn new(now: std::time::Instant, window: std::time::Duration) -> Self {
+        let absolute_until = now + PRESENCE_ABSOLUTE_MAX;
+        Self {
+            idle_until: std::cmp::min(now + window, absolute_until),
+            absolute_until,
+        }
+    }
+
+    fn ride(&mut self, now: std::time::Instant, window: std::time::Duration) -> bool {
+        if now >= self.idle_until || now >= self.absolute_until {
+            return false;
+        }
+        self.idle_until = std::cmp::min(now + window, self.absolute_until);
+        true
+    }
+
+    fn reanchor(&mut self, now: std::time::Instant, window: std::time::Duration) {
+        if now < self.idle_until && now < self.absolute_until {
+            self.idle_until = std::cmp::min(now + window, self.absolute_until);
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct PresenceState {
+    secret_read: Option<PresenceGrant>,
+    configuration: Option<PresenceGrant>,
+}
+
 /// Everything `index.json` holds.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct IndexState {
@@ -73,10 +111,10 @@ pub struct Store {
     events: Arc<dyn BrokerEvents>,
     integrity: Arc<StateIntegrity>,
     state: Mutex<IndexState>,
-    /// When the user last passed (or rode) a native authentication, plus the
-    /// presence window: user-plane gates within it skip their prompts, and
-    /// each pass slides it forward. Never persisted.
-    presence_until: Mutex<Option<std::time::Instant>>,
+    /// Purpose-scoped native-authentication grants. Copy/read approval never
+    /// authorizes configuration changes, and no grant can slide beyond its
+    /// original 12-hour absolute lifetime. Never persisted.
+    presence: Mutex<PresenceState>,
 }
 
 impl Store {
@@ -107,31 +145,83 @@ impl Store {
             events,
             integrity,
             state: Mutex::new(state),
-            presence_until: Mutex::new(None),
+            presence: Mutex::new(PresenceState::default()),
         })
     }
 
     /* ----------------------------- presence ------------------------------- */
 
-    /// Slide the presence window forward: the user just authenticated, or
-    /// rode a still-fresh authentication.
-    pub fn note_user_presence(&self) {
-        let window = std::time::Duration::from_secs(self.settings().presence_window_secs);
-        *self.presence_until.lock().unwrap() = Some(std::time::Instant::now() + window);
+    fn presence_window(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.settings().presence_window_secs)
     }
 
-    /// Whether a recent authentication still covers user-plane gates.
-    pub fn user_presence_fresh(&self) -> bool {
-        matches!(
-            *self.presence_until.lock().unwrap(),
-            Some(deadline) if std::time::Instant::now() < deadline
-        )
+    /// Establish a read/copy-only grant after a native authentication.
+    pub fn note_secret_read_presence(&self) {
+        let now = std::time::Instant::now();
+        let grant = PresenceGrant::new(now, self.presence_window());
+        self.presence.lock().unwrap().secret_read = Some(grant);
     }
 
-    /// Drop the window so the next gated action re-prompts (e.g. after the
+    /// Establish a configuration grant. A native authentication for a
+    /// configuration action also covers reads, which preserves the intended
+    /// save-then-test flow without allowing the reverse escalation.
+    pub fn note_configuration_presence(&self) {
+        let now = std::time::Instant::now();
+        let grant = PresenceGrant::new(now, self.presence_window());
+        let mut presence = self.presence.lock().unwrap();
+        presence.configuration = Some(grant);
+        presence.secret_read = Some(grant);
+    }
+
+    /// Ride a read/copy grant if it is still within both its idle and
+    /// absolute deadlines.
+    pub fn use_secret_read_presence(&self) -> bool {
+        let now = std::time::Instant::now();
+        let window = self.presence_window();
+        self.presence
+            .lock()
+            .unwrap()
+            .secret_read
+            .as_mut()
+            .is_some_and(|grant| grant.ride(now, window))
+    }
+
+    /// Ride a configuration grant. It may extend an existing read grant, but
+    /// cannot create one unless a native configuration authentication did.
+    pub fn use_configuration_presence(&self) -> bool {
+        let now = std::time::Instant::now();
+        let window = self.presence_window();
+        let mut presence = self.presence.lock().unwrap();
+        let fresh = presence
+            .configuration
+            .as_mut()
+            .is_some_and(|grant| grant.ride(now, window));
+        if fresh {
+            if let Some(grant) = presence.secret_read.as_mut() {
+                grant.ride(now, window);
+            }
+        }
+        fresh
+    }
+
+    /// Re-anchor active grants after the configured idle window changes. The
+    /// original absolute deadline is deliberately retained.
+    pub fn reanchor_presence(&self) {
+        let now = std::time::Instant::now();
+        let window = self.presence_window();
+        let mut presence = self.presence.lock().unwrap();
+        if let Some(grant) = presence.secret_read.as_mut() {
+            grant.reanchor(now, window);
+        }
+        if let Some(grant) = presence.configuration.as_mut() {
+            grant.reanchor(now, window);
+        }
+    }
+
+    /// Drop all grants so the next gated action re-prompts (e.g. after the
     /// read-authentication setting changes).
     pub fn clear_user_presence(&self) {
-        *self.presence_until.lock().unwrap() = None;
+        *self.presence.lock().unwrap() = PresenceState::default();
     }
 
     fn persist(&self, state: &IndexState) -> Result<()> {
@@ -414,8 +504,7 @@ impl Store {
             // A fresh presence window covers the read; pre-authorized agent
             // executions never reach this closure, so agent traffic cannot
             // keep the window alive.
-            if self.user_presence_fresh() {
-                self.note_user_presence();
+            if self.use_secret_read_presence() {
                 return Ok(());
             }
             let confirmed = tokio::task::spawn_blocking(move || events.confirm_secret_read(&meta))
@@ -424,7 +513,7 @@ impl Store {
             if !confirmed {
                 return Err(CoreError::SecretReadNotAuthenticated);
             }
-            self.note_user_presence();
+            self.note_secret_read_presence();
             Ok(())
         })
         .await
@@ -1146,6 +1235,35 @@ mod tests {
 
     const SSH_HOST_FP: &str = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     const SSH_HOST_FP_ALT: &str = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE";
+
+    #[test]
+    fn presence_grant_cannot_slide_past_twelve_hours() {
+        let start = std::time::Instant::now();
+        let window = std::time::Duration::from_secs(2 * 60 * 60);
+        let mut grant = PresenceGrant::new(start, window);
+
+        for hour in 1..12 {
+            assert!(grant.ride(
+                start + std::time::Duration::from_secs(hour * 60 * 60),
+                window,
+            ));
+        }
+        assert_eq!(grant.absolute_until, start + PRESENCE_ABSOLUTE_MAX);
+        assert_eq!(grant.idle_until, grant.absolute_until);
+        assert!(!grant.ride(grant.absolute_until, window));
+    }
+
+    #[test]
+    fn reanchoring_never_resets_the_absolute_deadline() {
+        let start = std::time::Instant::now();
+        let mut grant = PresenceGrant::new(start, std::time::Duration::from_secs(60 * 60));
+        let absolute = grant.absolute_until;
+        grant.reanchor(
+            start + std::time::Duration::from_secs(30 * 60),
+            std::time::Duration::from_secs(2 * 60 * 60),
+        );
+        assert_eq!(grant.absolute_until, absolute);
+    }
 
     struct ReadGate {
         allow: AtomicBool,
