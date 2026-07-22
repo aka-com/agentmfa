@@ -1731,6 +1731,19 @@ function connSheet(editing: boolean): string {
       fields += `<div class="rule-note oauth-note">You’ll approve access in your browser. The token is saved
         to your Keychain and injected by the broker — agents never see it. Run this again to connect
         a second account.</div>`;
+      // Vendors without automatic client registration (Google Workspace)
+      // need a one-time OAuth client the user creates with the provider.
+      const oauthApp = mcpAdd && d.entryId
+        ? catalogEntryById(d.entryId)?.mcpTemplate?.oauthApp : undefined;
+      if (oauthApp) {
+        fields += `<div class="rule-note oauth-note">This provider has no automatic client registration:
+            create an OAuth client at <code>${esc(oauthApp.docsUrl || 'the provider')}</code> and paste
+            its ID here. It is used once per sign-in and stored with the connection.</div>
+          <div class="f-row"><label for="c-oauth-client-id">Client ID</label>
+            <input id="c-oauth-client-id" class="${fieldCls('oauthClientId')}" value="${escAttr(d.oauthClientId ?? '')}">${fieldErr('oauthClientId')}</div>
+          <div class="f-row"><label for="c-oauth-client-secret">Client secret <span class="label-detail">(only if your provider issued one)</span></label>
+            <input id="c-oauth-client-secret" type="password" value="${escAttr(d.oauthClientSecret ?? '')}"></div>`;
+      }
     } else if (modeValue === 'header') {
       fields += `<div class="f-row"><label for="c-auth-detail">Header name</label><input id="c-auth-detail" class="${fieldCls('authDetail')}" placeholder="X-API-Key" value="${escAttr(d.authDetail ?? '')}">${fieldErr('authDetail')}</div>`;
     } else if (modeValue === 'query') {
@@ -2313,6 +2326,11 @@ async function saveConn(): Promise<void> {
     try { apiOrigin = parseApiOrigin(d.origin || ''); }
     catch (error) { errs.origin = errorMessage(error); }
   }
+  const mcpOauthApp = usesOauth && d.entryId
+    ? catalogEntryById(d.entryId)?.mcpTemplate?.oauthApp : undefined;
+  if (mcpOauthApp && !(d.oauthClientId || '').trim()) {
+    errs.oauthClientId = 'The OAuth client ID is required';
+  }
   if (byoOauth) {
     if (!(d.oauthClientId || '').trim()) errs.oauthClientId = 'The OAuth client ID is required';
     for (const [key, value] of [
@@ -2376,6 +2394,12 @@ async function saveConn(): Promise<void> {
       mcp_path: mcpPath!,
       whoami_tool: template?.whoamiTool ?? null,
       expected_tools: template?.expectedTools ?? [],
+      ...(mcpOauthApp ? {
+        oauth_client_id: (d.oauthClientId || '').trim(),
+        oauth_client_secret: (d.oauthClientSecret || '').trim() || null,
+        oauth_scope: mcpOauthApp.scopes?.join(' ') || null,
+        extra_auth_params: mcpOauthApp.extraAuthParams ?? [],
+      } : {}),
     });
     return;
   }

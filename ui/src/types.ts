@@ -218,6 +218,13 @@ export interface McpAuthDraft {
   reauth_connection_id?: string | null;
   whoami_tool?: string | null;
   expected_tools?: string[];
+  /** Pre-registered OAuth client, for servers without dynamic registration. */
+  oauth_client_id?: string | null;
+  oauth_client_secret?: string | null;
+  /** Scopes to request instead of everything the resource advertises. */
+  oauth_scope?: string | null;
+  /** Extra authorize-URL params (e.g. Google's access_type=offline). */
+  extra_auth_params?: Array<[string, string]>;
 }
 
 /** One step of the sign-in flow, tagged the way the broker serializes it. */

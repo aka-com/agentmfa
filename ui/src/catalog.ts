@@ -82,6 +82,21 @@ export interface McpTemplate {
   whoamiTool?: string;
   /** Copy shown under the URL field in the add form. */
   urlHint?: string;
+  /**
+   * Set when the vendor's authorization server has no dynamic client
+   * registration: the user creates an OAuth client with the provider once
+   * and pastes its ID (and secret) into the add form. Everything else —
+   * discovery, browser consent, token storage, refresh — stays the
+   * standard flow.
+   */
+  oauthApp?: {
+    /** Where to create the OAuth client (shown as plain text). */
+    docsUrl?: string;
+    /** Scopes to request instead of everything the server advertises. */
+    scopes?: string[];
+    /** Extra authorize-URL params (e.g. Google's access_type=offline). */
+    extraAuthParams?: Array<[string, string]>;
+  };
 }
 
 export interface CatalogEntry {
@@ -164,12 +179,22 @@ export const CATALOG: CatalogEntry[] = [
     connType: 'api',
     mcp: true,
     keywords: ['email', 'mail', 'google', 'inbox'],
-    // Google publishes no hosted Gmail MCP endpoint yet, so there is no URL
-    // to encode — paste the one your provider gave you. Sign-in and status
-    // checks work the same once the URL is known.
+    // Google's hosted Gmail MCP server uses plain OAuth 2.0 — no dynamic
+    // client registration — so connecting takes a one-time OAuth client
+    // ("Desktop app" type, which allows loopback redirects on any port)
+    // created in the user's own Google Cloud console.
     mcpTemplate: {
+      serverUrl: 'https://gmailmcp.googleapis.com/mcp/v1',
       expectedTools: [],
-      urlHint: 'Google doesn’t publish a hosted Gmail MCP endpoint yet — paste the server URL from your Gmail MCP provider.',
+      urlHint: 'Google’s hosted Gmail MCP server. Needs a one-time OAuth client from your Google Cloud console; then sign in with your Google account.',
+      oauthApp: {
+        docsUrl: 'console.cloud.google.com/apis/credentials (create an OAuth client, type “Desktop app”)',
+        scopes: [
+          'https://www.googleapis.com/auth/gmail.readonly',
+          'https://www.googleapis.com/auth/gmail.compose',
+        ],
+        extraAuthParams: [['access_type', 'offline'], ['prompt', 'consent']],
+      },
     },
   },
   {
@@ -459,9 +484,13 @@ export function catalogEntryById(id: string): CatalogEntry | undefined {
     ?? REGISTRY_CATALOG.find((entry) => entry.id === id);
 }
 
-/** A known MCP endpoint can begin server discovery and OAuth immediately. */
+/**
+ * A known MCP endpoint can begin server discovery and OAuth immediately.
+ * A template needing a pre-registered OAuth client can't: the add form
+ * must collect the client ID first.
+ */
 export function canQuickConnectMcp(entry: CatalogEntry): boolean {
-  return Boolean(entry.mcp && entry.mcpTemplate?.serverUrl);
+  return Boolean(entry.mcp && entry.mcpTemplate?.serverUrl && !entry.mcpTemplate.oauthApp);
 }
 
 /** The pinned host of a preset's API root, e.g. 'api.stripe.com'. */

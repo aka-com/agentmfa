@@ -98,11 +98,13 @@ test('templated vendors ship a server URL, expected tools, and a whoami tool', (
   assert.ok(linear?.serverUrl?.startsWith('https://'));
   assert.ok((linear?.expectedTools.length ?? 0) > 0);
   assert.equal(linear?.whoamiTool, undefined);
-  // Gmail has no published endpoint to encode: template without a URL, so
-  // the form still asks for the provider's server URL.
+  // Gmail's endpoint is published, but Google has no dynamic client
+  // registration: the template carries an oauthApp block, so the add form
+  // collects the user's OAuth client before the sign-in starts.
   const gmail = CATALOG.find((entry) => entry.id === 'gmail')?.mcpTemplate;
-  assert.ok(gmail);
-  assert.equal(gmail?.serverUrl, undefined);
+  assert.ok(gmail?.serverUrl?.startsWith('https://'));
+  assert.ok(gmail?.oauthApp);
+  assert.ok((gmail?.oauthApp?.scopes?.length ?? 0) > 0);
 });
 
 test('only MCP rows with a prefilled server URL offer quick OAuth connect', () => {

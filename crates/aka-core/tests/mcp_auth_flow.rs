@@ -300,6 +300,128 @@ async fn spawn_mock_vendor() -> (u16, Arc<Mutex<MockAuthServer>>) {
     (port, state)
 }
 
+/// A Google-style vendor: the MCP endpoint answers `initialize` without
+/// authentication, the authorization server publishes no registration
+/// endpoint, and the token endpoint expects the pre-registered client's
+/// secret alongside PKCE.
+async fn spawn_preset_client_vendor() -> u16 {
+    const CLIENT_ID: &str = "preset-client-123";
+    const CLIENT_SECRET: &str = "preset-secret-xyz";
+    let challenge: Arc<Mutex<Option<String>>> = Arc::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind vendor");
+    let port = listener.local_addr().expect("addr").port();
+    let base = format!("http://127.0.0.1:{port}");
+
+    let mcp = move |body: axum::Json<Value>| async move {
+        if body.0.get("id").is_none() {
+            return axum::http::Response::builder()
+                .status(202)
+                .body(axum::body::Body::empty())
+                .unwrap();
+        }
+        let reply = json!({
+            "jsonrpc": "2.0",
+            "id": body.0["id"],
+            "result": mcp_result(body.0["method"].as_str()),
+        });
+        axum::http::Response::builder()
+            .status(200)
+            .header("content-type", "application/json")
+            .header("mcp-session-id", "mock-session-2")
+            .body(axum::body::Body::from(reply.to_string()))
+            .unwrap()
+    };
+    let resource_meta = {
+        let base = base.clone();
+        move || {
+            let base = base.clone();
+            async move {
+                axum::Json(json!({
+                    "resource": format!("{base}/mcp"),
+                    "authorization_servers": [base],
+                    "scopes_supported": ["mail.everything"],
+                }))
+            }
+        }
+    };
+    let as_meta = {
+        let base = base.clone();
+        move || {
+            let base = base.clone();
+            async move {
+                axum::Json(json!({
+                    "issuer": base,
+                    "authorization_endpoint": format!("{base}/authorize"),
+                    "token_endpoint": format!("{base}/token"),
+                }))
+            }
+        }
+    };
+    let authorize = {
+        let challenge = challenge.clone();
+        move |axum::extract::Query(query): axum::extract::Query<HashMap<String, String>>| {
+            let challenge = challenge.clone();
+            async move {
+                assert_eq!(query.get("client_id").map(String::as_str), Some(CLIENT_ID));
+                // The draft's scope override wins over scopes_supported,
+                // and the extra authorize params ride along.
+                assert_eq!(query.get("scope").map(String::as_str), Some("mail.read"));
+                assert_eq!(
+                    query.get("access_type").map(String::as_str),
+                    Some("offline")
+                );
+                let redirect = query.get("redirect_uri").expect("redirect_uri").clone();
+                let nonce = query.get("state").expect("state").clone();
+                *challenge.lock().unwrap() =
+                    Some(query.get("code_challenge").expect("challenge").clone());
+                axum::response::Redirect::to(&format!("{redirect}?code={AUTH_CODE}&state={nonce}"))
+            }
+        }
+    };
+    let token = {
+        let challenge = challenge.clone();
+        move |axum::extract::Form(form): axum::extract::Form<HashMap<String, String>>| {
+            let challenge = challenge.clone();
+            async move {
+                assert_eq!(form.get("client_id").map(String::as_str), Some(CLIENT_ID));
+                assert_eq!(
+                    form.get("client_secret").map(String::as_str),
+                    Some(CLIENT_SECRET)
+                );
+                let verifier = form.get("code_verifier").expect("code_verifier");
+                let hashed = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(sha2::Sha256::digest(verifier.as_bytes()));
+                assert_eq!(Some(hashed), *challenge.lock().unwrap());
+                axum::Json(json!({
+                    "access_token": ACCESS_TOKEN,
+                    "refresh_token": REFRESH_TOKEN,
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                }))
+            }
+        }
+    };
+
+    let app = axum::Router::new()
+        .route("/mcp", axum::routing::post(mcp))
+        .route(
+            "/.well-known/oauth-protected-resource/mcp",
+            axum::routing::get(resource_meta),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server",
+            axum::routing::get(as_meta),
+        )
+        .route("/authorize", axum::routing::get(authorize))
+        .route("/token", axum::routing::post(token));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    port
+}
+
 async fn test_broker() -> (Arc<Broker>, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let paths = Paths::under(dir.path());
@@ -350,6 +472,7 @@ async fn complete_sign_in(
             reauth_connection_id: None,
             whoami_tool: None,
             expected_tools: vec![],
+            ..Default::default()
         })
         .expect("start auth");
     let session_id = Uuid::parse_str(&started.id).expect("session id");
@@ -390,6 +513,7 @@ async fn auth_can_be_started_from_a_thread_without_a_tokio_context() {
             reauth_connection_id: None,
             whoami_tool: None,
             expected_tools: vec![],
+            ..Default::default()
         })
     })
     .join()
@@ -416,6 +540,7 @@ async fn oauth_sign_in_mints_a_connection_and_the_status_check_acknowledges_it()
             reauth_connection_id: None,
             whoami_tool: Some("get_me".into()),
             expected_tools: vec!["get_me".into(), "definitely_missing".into()],
+            ..Default::default()
         })
         .expect("start auth");
     let session_id = Uuid::parse_str(&started.id).expect("session id");
@@ -523,6 +648,7 @@ async fn oauth_sign_in_mints_a_connection_and_the_status_check_acknowledges_it()
             reauth_connection_id: None,
             whoami_tool: None,
             expected_tools: vec![],
+            ..Default::default()
         })
         .expect("second auth");
     let second_id = Uuid::parse_str(&second.id).expect("session id");
@@ -725,6 +851,7 @@ async fn a_server_that_never_asks_for_auth_fails_with_a_token_hint() {
             reauth_connection_id: None,
             whoami_tool: None,
             expected_tools: vec![],
+            ..Default::default()
         })
         .expect("start auth");
     let session_id = Uuid::parse_str(&started.id).expect("session id");
@@ -747,6 +874,68 @@ async fn a_server_that_never_asks_for_auth_fails_with_a_token_hint() {
 }
 
 #[tokio::test]
+async fn a_preset_client_signs_in_without_dynamic_registration() {
+    let port = spawn_preset_client_vendor().await;
+    let (broker, _dir) = test_broker().await;
+
+    let started = broker
+        .ui_start_mcp_auth(McpAuthDraft {
+            name: "gmail-style".into(),
+            scheme: "http".into(),
+            host: "127.0.0.1".into(),
+            port: Some(port),
+            mcp_path: "/mcp".into(),
+            oauth_client_id: Some("preset-client-123".into()),
+            oauth_client_secret: Some("preset-secret-xyz".into()),
+            oauth_scope: Some("mail.read".into()),
+            extra_auth_params: vec![("access_type".into(), "offline".into())],
+            whoami_tool: Some("get_me".into()),
+            ..Default::default()
+        })
+        .expect("start auth");
+    let session_id = Uuid::parse_str(&started.id).expect("session id");
+
+    // The open probe (2xx initialize) must not end the flow: with a client
+    // in hand it proceeds to discovery and the browser step.
+    let awaiting = wait_for(&broker, &session_id, "the browser step", |state| {
+        matches!(state.phase, McpAuthPhase::AwaitingAuthorization { .. })
+    })
+    .await;
+    let McpAuthPhase::AwaitingAuthorization { authorization_url } = &awaiting.phase else {
+        unreachable!();
+    };
+    reqwest::Client::new()
+        .get(authorization_url)
+        .send()
+        .await
+        .expect("authorize hop");
+    let done = wait_for(&broker, &session_id, "completion", |state| {
+        matches!(state.phase, McpAuthPhase::Succeeded { .. })
+    })
+    .await;
+    let McpAuthPhase::Succeeded { account, .. } = &done.phase else {
+        unreachable!();
+    };
+    assert_eq!(account.as_deref(), Some("Octo Cat (@octocat)"));
+
+    // The stored grant carries the preset client, so silent refresh and
+    // reconnect can reuse it without asking again.
+    let connection = broker
+        .store
+        .connection_by_name("gmail-style")
+        .expect("connection created");
+    let stored = broker
+        .store
+        .connection_oauth_grant(&connection.id)
+        .await
+        .expect("grant stored");
+    let grant = aka_core::mcp_auth::McpOAuthGrant::from_secret_value(&stored).expect("grant parses");
+    assert_eq!(grant.client_id, "preset-client-123");
+    assert_eq!(grant.client_secret.as_deref(), Some("preset-secret-xyz"));
+    assert_eq!(grant.refresh_token.as_deref(), Some(REFRESH_TOKEN));
+}
+
+#[tokio::test]
 async fn a_bad_draft_is_rejected_before_any_browser_opens() {
     let (broker, _dir) = test_broker().await;
     // Plain http to a non-loopback host is refused up front.
@@ -760,6 +949,7 @@ async fn a_bad_draft_is_rejected_before_any_browser_opens() {
             reauth_connection_id: None,
             whoami_tool: None,
             expected_tools: vec![],
+            ..Default::default()
         })
         .unwrap_err();
     assert!(error.to_string().contains("https"), "{error}");

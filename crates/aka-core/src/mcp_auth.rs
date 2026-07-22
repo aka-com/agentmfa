@@ -127,7 +127,7 @@ pub struct McpAuthState {
 }
 
 /// What the UI submits to start a sign-in.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct McpAuthDraft {
     pub name: String,
     pub scheme: String,
@@ -145,6 +145,57 @@ pub struct McpAuthDraft {
     pub whoami_tool: Option<String>,
     #[serde(default)]
     pub expected_tools: Vec<String>,
+    /// Pre-registered OAuth client, for authorization servers without
+    /// dynamic client registration (Google Workspace, Slack). When set,
+    /// the registration step is skipped and these ride the authorize +
+    /// exchange legs; the secret lands in the vault with the grant.
+    #[serde(default)]
+    pub oauth_client_id: Option<String>,
+    #[serde(default)]
+    pub oauth_client_secret: Option<String>,
+    /// Scopes to request instead of everything the resource advertises.
+    #[serde(default)]
+    pub oauth_scope: Option<String>,
+    /// Extra authorize-URL parameters some providers need (e.g. Google's
+    /// `access_type=offline` for a refresh token).
+    #[serde(default)]
+    pub extra_auth_params: Vec<(String, String)>,
+}
+
+/// A caller-supplied OAuth client carried through the flow in place of
+/// dynamic registration.
+#[derive(Default)]
+struct ClientPreset {
+    client_id: Option<String>,
+    client_secret: Option<Zeroizing<String>>,
+    scope: Option<String>,
+    extra_auth_params: Vec<(String, String)>,
+}
+
+impl ClientPreset {
+    fn from_draft(draft: &McpAuthDraft) -> Self {
+        Self {
+            client_id: draft
+                .oauth_client_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string),
+            client_secret: draft
+                .oauth_client_secret
+                .as_deref()
+                .map(str::trim)
+                .filter(|secret| !secret.is_empty())
+                .map(|secret| Zeroizing::new(secret.to_string())),
+            scope: draft
+                .oauth_scope
+                .as_deref()
+                .map(str::trim)
+                .filter(|scope| !scope.is_empty())
+                .map(str::to_string),
+            extra_auth_params: draft.extra_auth_params.clone(),
+        }
+    }
 }
 
 /// Where the token lands when the dance completes.
@@ -263,11 +314,12 @@ impl Broker {
             whoami_tool: draft.whoami_tool.clone(),
             expected_tools: draft.expected_tools.clone(),
         };
+        let preset = ClientPreset::from_draft(&draft);
         // This is also called by a synchronous Tauri command on the app's
         // main thread, where no Tokio reactor is entered. Always put the
         // flow on the broker-owned runtime instead of the caller's context.
         let task = broker.task_runtime().spawn(async move {
-            let outcome = run_flow(&broker, session_id, endpoint, plan, options).await;
+            let outcome = run_flow(&broker, session_id, endpoint, plan, options, preset).await;
             let phase = match outcome {
                 Ok(phase) => phase,
                 Err(failure) => {
@@ -496,6 +548,7 @@ async fn run_flow(
     endpoint: Url,
     plan: CompletionPlan,
     options: McpCheckOptions,
+    preset: ClientPreset,
 ) -> std::result::Result<McpAuthPhase, FlowFailure> {
     // The flow follows cross-origin hops (resource → authorization server),
     // so it uses its own client with bounded redirects rather than the
@@ -506,8 +559,12 @@ async fn run_flow(
         .build()
         .map_err(|e| FlowFailure::plain(format!("http client: {e}")))?;
 
-    /* 1 — probe */
-    let www_authenticate = step("the MCP server", probe(&client, &endpoint)).await?;
+    /* 1 — probe. Some servers with pre-registered clients (Google's
+    Workspace endpoints) answer an unauthenticated initialize with 2xx and
+    gate the actual tools instead; with a client in hand the flow can
+    proceed straight to discovery. */
+    let www_authenticate =
+        step("the MCP server", probe(&client, &endpoint, preset.client_id.is_some())).await?;
 
     /* 2 — discover */
     broadcast(broker, &session_id, McpAuthPhase::Discovering);
@@ -527,11 +584,46 @@ async fn run_flow(
         .map_err(|e| FlowFailure::plain(format!("loopback listener: {e}")))?
         .port();
     let redirect_uri = format!("http://127.0.0.1:{port}/callback");
-    let registration = step(
-        "client registration",
-        register(&client, &discovered, &redirect_uri),
-    )
-    .await?;
+    let registration = if let Some(client_id) = &preset.client_id {
+        Registration {
+            client_id: client_id.clone(),
+            client_secret: preset.client_secret.clone(),
+        }
+    } else {
+        match step(
+            "client registration",
+            register(&client, &discovered, &redirect_uri),
+        )
+        .await
+        {
+            Ok(registration) => registration,
+            Err(failure) => {
+                // No dynamic registration: a reconnect may reuse the
+                // client stored with the original grant, so the user is
+                // not asked for the client ID twice.
+                let stored = match &plan {
+                    CompletionPlan::Reauth { connection_id, .. }
+                        if discovered.registration_endpoint.is_none() =>
+                    {
+                        broker
+                            .store
+                            .connection_oauth_grant(connection_id)
+                            .await
+                            .ok()
+                            .and_then(|value| McpOAuthGrant::from_secret_value(&value).ok())
+                    }
+                    _ => None,
+                };
+                match stored {
+                    Some(grant) => Registration {
+                        client_id: grant.client_id,
+                        client_secret: grant.client_secret.map(Zeroizing::new),
+                    },
+                    None => return Err(failure),
+                }
+            }
+        }
+    };
 
     /* 4 — authorize in the browser */
     let pkce_verifier = random_urlsafe(48);
@@ -549,8 +641,11 @@ async fn run_flow(
             .append_pair("code_challenge", &pkce_challenge)
             .append_pair("code_challenge_method", "S256")
             .append_pair("resource", &discovered.resource);
-        if let Some(scope) = &discovered.scope {
+        if let Some(scope) = preset.scope.as_ref().or(discovered.scope.as_ref()) {
             query.append_pair("scope", scope);
+        }
+        for (key, value) in &preset.extra_auth_params {
+            query.append_pair(key, value);
         }
     }
     broadcast(
@@ -704,6 +799,7 @@ async fn run_flow(
 async fn probe(
     client: &reqwest::Client,
     endpoint: &Url,
+    allow_open: bool,
 ) -> std::result::Result<Option<String>, FlowFailure> {
     let body = json!({
         "jsonrpc": "2.0", "id": 0, "method": "initialize",
@@ -725,6 +821,9 @@ async fn probe(
         })?;
     let status = response.status();
     if status.is_success() {
+        if allow_open {
+            return Ok(None);
+        }
         return Err(FlowFailure::hinted(
             "the server answered without asking for authentication",
             "There is no account to sign in to — add this server with a token instead.",
@@ -901,7 +1000,7 @@ async fn register(
     let Some(registration_endpoint) = &discovered.registration_endpoint else {
         return Err(FlowFailure::hinted(
             "The authorization server does not offer automatic client registration",
-            "Add this server with a token instead, or register a client with the provider.",
+            "Register an OAuth client with the provider and paste its client ID here, or add this server with a token instead.",
         ));
     };
     let mut body = json!({
