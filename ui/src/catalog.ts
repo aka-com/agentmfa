@@ -28,7 +28,8 @@
 import type { ConnectionSummary, ConnectionType } from './types';
 import { REGISTRY_SERVERS } from './registry-data';
 
-export type CatalogSection = 'Apps' | 'Infrastructure' | 'Secrets' | 'MCP registry';
+export type CatalogSection =
+  | 'Apps' | 'Custom Apps' | 'Infrastructure' | 'Secrets' | 'MCP registry';
 
 /**
  * Prefill for a branded API row: everything the add form needs so the user
@@ -322,11 +323,21 @@ export const CATALOG: CatalogEntry[] = [
     name: 'MCP server',
     icon: 'plug',
     description: 'Any MCP server, by URL',
-    section: 'Apps',
+    section: 'Custom Apps',
     via: 'connection',
     connType: 'api',
     mcp: true,
     keywords: ['server', 'tools', 'model context protocol'],
+  },
+  {
+    id: 'http',
+    name: 'Custom API',
+    icon: 'globe',
+    description: 'Any credentialed REST API',
+    section: 'Custom Apps',
+    via: 'connection',
+    connType: 'api',
+    keywords: ['rest', 'http', 'endpoint'],
   },
   {
     id: 'postgres',
@@ -347,16 +358,6 @@ export const CATALOG: CatalogEntry[] = [
     via: 'connection',
     connType: 'ssh',
     keywords: ['server', 'shell', 'remote', 'terminal'],
-  },
-  {
-    id: 'http',
-    name: 'Custom API',
-    icon: 'globe',
-    description: 'Any credentialed REST API',
-    section: 'Infrastructure',
-    via: 'connection',
-    connType: 'api',
-    keywords: ['rest', 'http', 'endpoint'],
   },
   {
     id: 'websocket',
@@ -391,7 +392,7 @@ export const CATALOG: CatalogEntry[] = [
 ];
 
 export const CATALOG_SECTIONS: CatalogSection[] =
-  ['Apps', 'Infrastructure', 'MCP registry', 'Secrets'];
+  ['Infrastructure', 'Apps', 'Custom Apps', 'MCP registry', 'Secrets'];
 
 /**
  * The registry tail: hosted MCP servers from the public index, each an
@@ -421,6 +422,11 @@ export const REGISTRY_CATALOG: CatalogEntry[] = REGISTRY_SERVERS.map((server) =>
 export function catalogEntryById(id: string): CatalogEntry | undefined {
   return CATALOG.find((entry) => entry.id === id)
     ?? REGISTRY_CATALOG.find((entry) => entry.id === id);
+}
+
+/** A known MCP endpoint can begin server discovery and OAuth immediately. */
+export function canQuickConnectMcp(entry: CatalogEntry): boolean {
+  return Boolean(entry.mcp && entry.mcpTemplate?.serverUrl);
 }
 
 /** The pinned host of a preset's API root, e.g. 'api.stripe.com'. */
@@ -484,6 +490,42 @@ export function connectionsForEntry(
   connections: ConnectionSummary[],
 ): ConnectionSummary[] {
   return connections.filter((connection) => entryForConnection(connection)?.id === entry.id);
+}
+
+/** Connected rows first, without disturbing catalog order within either set. */
+export function connectedCatalogFirst(
+  entries: CatalogEntry[],
+  connections: ConnectionSummary[],
+): CatalogEntry[] {
+  return [
+    ...entries.filter((entry) => connectionsForEntry(entry, connections).length > 0),
+    ...entries.filter((entry) => connectionsForEntry(entry, connections).length === 0),
+  ];
+}
+
+export interface CollapsedCatalogGroup {
+  visible: CatalogEntry[];
+  hiddenCount: number;
+}
+
+/**
+ * Keep every connected row visible, then fill to the group's minimum size.
+ * `connectedCatalogFirst` makes both halves stable in catalog order.
+ */
+export function collapsedCatalogGroup(
+  entries: CatalogEntry[],
+  connections: ConnectionSummary[],
+  minimumVisible = 3,
+): CollapsedCatalogGroup {
+  const ordered = connectedCatalogFirst(entries, connections);
+  const connectedCount = ordered.filter(
+    (entry) => connectionsForEntry(entry, connections).length > 0,
+  ).length;
+  const visibleCount = Math.min(ordered.length, Math.max(minimumVisible, connectedCount));
+  return {
+    visible: ordered.slice(0, visibleCount),
+    hiddenCount: ordered.length - visibleCount,
+  };
 }
 
 /**

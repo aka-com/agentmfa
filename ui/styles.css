@@ -177,10 +177,9 @@
   width: 100%; max-width: var(--content-max); margin: 0 auto;
 }
   .dw-head{
-  flex: 0 0 44px;
-  height: 44px;
+  flex: 0 0 auto;
   display: flex; align-items: center; justify-content: space-between;
-  padding: 14px 16px 2px;
+  padding: 12px 16px;
 }
   .dw-head h2{ font-size: 17px; }/* ---- custom title bar (main window) ---------------------------------- */
 /* The window uses titleBarStyle "Overlay": the native macOS traffic lights
@@ -742,11 +741,11 @@
 .cat-row-wrap + .cat-row-wrap { border-top: 1px solid var(--line); }
 .cat-row {
   display: flex; align-items: center; gap: 12px; padding: 12px 14px; min-width: 0;
-  transition: background .12s ease;
 }
 .cat-row.is-toggle { cursor: pointer; }
-.cat-row-wrap:not(.is-soon) .cat-row:hover { background: var(--hover); }
-.cat-row-wrap.open .cat-row { background: var(--hover); }
+.cat-row:not(.is-configured) .cat-ico,
+.cat-row:not(.is-configured) .cat-tx span { opacity: .5; }
+.cat-row:not(.is-configured) .cat-tx b { opacity: .35; }
 /* MCP-backed rows are visibly not-yet-available without needing a hover. */
 .cat-row-wrap.is-soon .cat-row { opacity: .55; }
 .cat-ico {
@@ -762,6 +761,42 @@
   font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap;
 }
 .cat-add { flex: 0 0 auto; border-radius: 999px; padding: 5px 16px; }
+.cat-row:not(.is-configured) .cat-add { opacity: .5; transition: opacity .12s ease; }
+.cat-row:not(.is-configured) .cat-add:hover,
+.cat-row:not(.is-configured) .cat-add:active,
+.cat-row:not(.is-configured) .cat-add:focus-visible { opacity: 1; }
+.cat-connect-wrap { position: relative; flex: 0 0 auto; }
+.cat-connect-buttons { display: flex; }
+.cat-connect-primary {
+  padding-left: 14px; padding-right: 13px; border-radius: 999px 0 0 999px;
+}
+.cat-connect-menu-btn {
+  margin-left: -1px; padding: 5px 8px; border-radius: 0 999px 999px 0;
+}
+.cat-connect-menu-btn svg { width: 13px; height: 13px; transform: translate(-1px, 2px); }
+.cat-row:not(.is-configured) .cat-connect-wrap { opacity: .5; transition: opacity .12s ease; }
+.cat-row:not(.is-configured) .cat-connect-wrap .cat-add { opacity: 1; }
+.cat-row:not(.is-configured) .cat-connect-wrap:hover,
+.cat-row:not(.is-configured) .cat-connect-wrap:focus-within,
+.cat-row:not(.is-configured) .cat-connect-wrap.open { opacity: 1; }
+.cat-connect-menu {
+  position: absolute; right: 0; top: calc(100% + 5px); z-index: 20;
+  min-width: 178px; display: flex; flex-direction: column; gap: 2px; padding: 4px;
+  background: var(--panel); border: 1px solid var(--line-mid); border-radius: 9px;
+  box-shadow: 0 10px 28px rgba(10,15,40,.22);
+}
+.cat-section:has(.cat-row-wrap.menu-open) { position: relative; z-index: 2; }
+.cat-rows:has(.cat-row-wrap.menu-open) { overflow: visible; }
+.cat-more {
+  display: flex; align-items: center; justify-content: center; gap: 5px; width: 100%;
+  padding: 9px 14px; border: 0; border-top: 1px solid var(--line);
+  background: transparent; color: var(--muted); font: inherit; font-size: 12.5px;
+  font-weight: 600; cursor: pointer;
+}
+.cat-more:hover { background: var(--hover); color: var(--ink-3); }
+.cat-more-chev { display: inline-flex; transition: transform .15s ease; }
+.cat-more-chev svg { width: 13px; height: 13px; }
+.cat-more-chev.open { transform: rotate(180deg); }
 .cat-soon {
   flex: 0 0 auto; padding: 4px 12px; border: 1px dashed var(--line);
   border-radius: 999px; color: var(--muted); font-size: 12px; font-weight: 600;
@@ -819,7 +854,12 @@
 .sheet-import-row input { flex: 1; min-width: 0; }
 .sheet-import-row .btn { flex: 0 0 auto; padding: 0 14px; }
 .sheet-import-row .btn[disabled] { opacity: .45; cursor: default; }
-.sheet-import-divider { margin: 3px 0 14px; border: 0; border-top: 1px solid var(--line); }
+.sheet-import-divider {
+  display: flex; align-items: center; gap: 10px; margin: 3px 0 14px;
+  color: var(--muted); font-size: 11.5px;
+}
+.sheet-import-divider::before,
+.sheet-import-divider::after { content: ''; flex: 1; border-top: 1px solid var(--line); }
 
 /* ------------------------------- MCP status ------------------------------- */
 /* Result line for connection tests and MCP status checks, rendered inside

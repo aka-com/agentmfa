@@ -8,9 +8,9 @@
 
 import { invoke, listen, mode } from '/src/bridge';
 import {
-  CATALOG_SECTIONS, catalogEntryById, catalogNameForType, connectionsForEntry, entryForConnection,
-  mcpTemplateForConnection,
-  visibleCatalog,
+  CATALOG_SECTIONS, canQuickConnectMcp, catalogEntryById, catalogNameForType,
+  collapsedCatalogGroup, connectedCatalogFirst, connectionsForEntry, entryForConnection,
+  mcpTemplateForConnection, visibleCatalog,
 } from '/src/catalog';
 import type { ConnectionPreset } from '/src/catalog';
 import {
@@ -146,6 +146,8 @@ interface AppState {
   confirm: ConfirmState | null;
   toolSearch: string;
   toolOpen: string | null;
+  catalogActionMenuOpen: string | null;
+  appsExpanded: boolean;
   startOption: string;
   connImportSource: string;
   connImportError: string | null;
@@ -231,6 +233,8 @@ const state: AppState = {
   confirm: null,         // {kind, id/name}
   toolSearch: '',        // Add-tools catalog search query
   toolOpen: null,        // catalog entry id whose connections are expanded
+  catalogActionMenuOpen: null, // catalog id whose quick-connect chevron menu is open
+  appsExpanded: false,   // whether the Apps section shows beyond its connected/minimum rows
   startOption: 'postgres', // which walkthrough the Get started tab shows
   connImportSource: '',  // paste-to-prefill field in the add sheet
   connImportError: null,
@@ -873,20 +877,42 @@ function catalogRowHTML(entry: CatalogEntry): string {
   const builtin = entry.via === 'builtin';
   const count = builtin ? state.secrets.length : connectionsForEntry(entry, state.connections).length;
   const open = state.toolOpen === entry.id && (builtin || count > 0);
+  const quickConnect = canQuickConnectMcp(entry);
+  const actionMenuOpen = state.catalogActionMenuOpen === entry.id;
   const label = builtin
     ? `${count} saved credential${count === 1 ? '' : 's'}`
     : `${count} configured connection${count === 1 ? '' : 's'}`;
   // A branded token row prompts for a key; an MCP row without a published
   // endpoint (Gmail, 1Password, the generic row) needs a server URL you
   // supply. Both read better than a bare "Add" when nothing is configured.
-  const addLabel = entry.preset
+  const addLabel = ['mcp', 'http', 'gmail'].includes(entry.id)
+    ? 'Configure'
+    : entry.preset
     ? 'Add API key'
     : entry.mcp && !entry.mcpTemplate?.serverUrl
     ? 'Add custom app'
+    : entry.mcp
+    ? 'Connect now'
     : 'Add';
+  const quickConnectAction = `<div class="cat-connect-wrap ${actionMenuOpen ? 'open' : ''}">
+      <div class="cat-connect-buttons">
+        <button class="btn cat-add cat-connect-primary" data-act="catalog-connect-oauth"
+          data-id="${entry.id}">Connect now</button>
+        <button class="btn cat-add cat-connect-menu-btn" data-act="toggle-catalog-connect-menu"
+          data-id="${entry.id}" title="More ways to connect ${escAttr(entry.name)}"
+          aria-label="More ways to connect ${escAttr(entry.name)}" aria-haspopup="menu"
+          aria-expanded="${actionMenuOpen}">${ICONS.chevronDown}</button>
+      </div>
+      ${actionMenuOpen ? `<div class="cat-connect-menu" role="menu" aria-label="Connect ${escAttr(entry.name)}">
+        <button class="menu-item" role="menuitem" data-act="catalog-connect-oauth" data-id="${entry.id}">Connect via OAuth</button>
+        <button class="menu-item" role="menuitem" data-act="catalog-connect-manual" data-id="${entry.id}">Connect manually</button>
+      </div>` : ''}
+    </div>`;
   const action = count || builtin
     ? `<button class="cat-count ${open ? 'on' : ''}" data-act="catalog-toggle" data-id="${entry.id}"
         aria-expanded="${open}" title="${escAttr(label)}">${builtin ? ICONS.fileKey : ICONS.plug} ${count}<span class="cat-chev">${ICONS.chevronDown}</span></button>`
+    : quickConnect
+    ? quickConnectAction
     : entry.via === 'connection'
     ? `<button class="btn cat-add" data-act="catalog-add" data-id="${entry.id}">${addLabel}</button>`
     : `<span class="cat-soon" title="Arrives with the MCP layer">Soon</span>`;
@@ -899,8 +925,8 @@ function catalogRowHTML(entry: CatalogEntry): string {
   const rowToggle = count || builtin
     ? ` data-act="catalog-toggle" data-id="${entry.id}"`
     : '';
-  return `<div class="cat-row-wrap ${open ? 'open' : ''}">
-    <div class="cat-row ${rowToggle ? 'is-toggle' : ''}"${rowToggle}>
+  return `<div class="cat-row-wrap ${open ? 'open' : ''} ${actionMenuOpen ? 'menu-open' : ''}">
+    <div class="cat-row ${rowToggle ? 'is-toggle' : ''} ${count ? 'is-configured' : ''}"${rowToggle}>
       <span class="cat-ico" aria-hidden="true">${ICONS[entry.icon] || ''}</span>
       <div class="cat-tx"><b>${esc(entry.name)}</b><span>${esc(entry.description)}</span></div>
       ${action}
@@ -927,10 +953,22 @@ function connectionsHTML() {
     connections: state.connections,
   });
   const sections = CATALOG_SECTIONS.map((section) => {
-    const rows = entries.filter((entry) => entry.section === section);
-    if (!rows.length) return '';
+    const sectionEntries = entries.filter((entry) => entry.section === section);
+    if (!sectionEntries.length) return '';
+    const ordered = connectedCatalogFirst(sectionEntries, state.connections);
+    const collapsible = section === 'Apps' && !state.toolSearch.trim();
+    const collapsed = collapsible
+      ? collapsedCatalogGroup(sectionEntries, state.connections)
+      : { visible: ordered, hiddenCount: 0 };
+    const rows = collapsible && !state.appsExpanded ? collapsed.visible : ordered;
+    const disclosure = collapsible && collapsed.hiddenCount > 0
+      ? `<button class="cat-more" data-act="toggle-apps-expanded" aria-expanded="${state.appsExpanded}">
+          <span>${state.appsExpanded ? 'Show fewer tools' : `More tools (${collapsed.hiddenCount})`}</span>
+          <span class="cat-more-chev ${state.appsExpanded ? 'open' : ''}" aria-hidden="true">${ICONS.chevronDown}</span>
+        </button>`
+      : '';
     return `<div class="cat-section"><div class="cat-section-h">${section.toUpperCase()}</div>
-      <div class="cat-rows">${rows.map(catalogRowHTML).join('')}</div></div>`;
+      <div class="cat-rows">${rows.map(catalogRowHTML).join('')}${disclosure}</div></div>`;
   }).join('');
   const search = mode === 'dropdown'
     ? `<input id="tool-search" class="cat-search" type="search" placeholder="Search tools…"
@@ -1505,9 +1543,10 @@ function connSheet(editing: boolean): string {
   const conn = editing ? state.connections.find((c) => c.id === sheetId) : null;
   const importWarnings = !editing && d.importWarnings && d.importWarnings.length
     ? `<div class="pair-identity-warning import-warning"><b>Review imported details</b><ul>${d.importWarnings.map((warning) => `<li>${esc(warning)}</li>`).join('')}</ul></div>` : '';
-  // Paste-to-prefill: a DSN, URL, or `ssh` command fills the form below
+  // Paste-to-prefill: a Postgres DSN or `ssh` command fills the form below
   // instead of making the user retype what they already have.
-  const importRow = editing ? '' : `<div class="f-row sheet-import">
+  const canImport = !editing && (t === 'pg' || t === 'ssh');
+  const importRow = !canImport ? '' : `<div class="f-row sheet-import">
       <label for="conn-import">Paste a connection string <span class="label-detail">(optional)</span></label>
       <div class="sheet-import-row">
         <input id="conn-import" class="${state.connImportError ? 'field-invalid' : ''}" type="text"
@@ -1515,8 +1554,8 @@ function connSheet(editing: boolean): string {
           placeholder="${escAttr(quickSetupPlaceholder(t))}" value="${escAttr(state.connImportSource)}">
         <button class="btn" data-act="conn-import" ${state.connImportSource.trim() ? '' : 'disabled'}>Prefill</button></div>
       ${state.connImportError ? `<div class="field-error">${esc(state.connImportError)}</div>` : ''}</div>`;
-  const importDivider = !editing && (t === 'pg' || t === 'ssh')
-    ? '<hr class="sheet-import-divider">'
+  const importDivider = canImport
+    ? '<div class="sheet-import-divider"><span>or</span></div>'
     : '';
   let sshHostKeyField = '';
   let pgTlsFields = '';
@@ -2043,6 +2082,75 @@ function releaseDropdownForm(): void {
     .catch((error) => toast('⚠ Couldn’t release the menu-bar form: ' + errorMessage(error)));
 }
 
+function initializeCatalogConnectionDraft(
+  entry: CatalogEntry,
+  mcpAuthMode: 'oauth' | 'bearer' = 'oauth',
+): void {
+  state.connType = entry.connType!;
+  state.connEntryName = entry.name;
+  state.connPreset = entry.preset ?? null;
+  state.draft = { nameIsAutomatic: true };
+  if (entry.mcp) {
+    state.draft.isMcp = true;
+    state.draft.entryId = entry.id;
+    state.draft.authMode = mcpAuthMode;
+    if (entry.mcpTemplate?.serverUrl) state.draft.origin = entry.mcpTemplate.serverUrl;
+  }
+  if (entry.preset) {
+    state.draft.origin = entry.preset.origin;
+    state.draft.authMode = entry.preset.authMode;
+    state.draft.authDetail = entry.preset.authDetail;
+  }
+  if (entry.connType === 'pg') state.draft.port = '5432';
+  if (entry.connType === 'ssh') state.draft.port = '22';
+  state.draft.name = automaticConnectionName();
+  state.sheetErrors = {};
+  state.sheetBaseline = null;
+  state.connAdvancedOpen = false;
+  state.connImportSource = '';
+  state.connImportError = null;
+}
+
+async function openCatalogConnectionForm(
+  entry: CatalogEntry,
+  mcpAuthMode: 'oauth' | 'bearer' = 'oauth',
+): Promise<void> {
+  if (!entry.connType || !await holdDropdownFormOpen()) return;
+  state.sheet = { kind: 'add-conn' };
+  initializeCatalogConnectionDraft(entry, mcpAuthMode);
+  render();
+  focusField(!entry.preset ? 'f-cname' : state.secrets.length ? 'c-secret' : 'c-new-secret-value');
+}
+
+function availableConnectionName(base: string): string {
+  if (!toolNameIsTaken(base)) return base;
+  let suffix = 2;
+  while (toolNameIsTaken(`${base} ${suffix}`)) suffix += 1;
+  return `${base} ${suffix}`;
+}
+
+async function quickConnectCatalogMcp(entry: CatalogEntry): Promise<void> {
+  const serverUrl = entry.mcpTemplate?.serverUrl;
+  if (!entry.connType || !canQuickConnectMcp(entry) || !serverUrl) return;
+  if (!await holdDropdownFormOpen()) return;
+  initializeCatalogConnectionDraft(entry, 'oauth');
+  state.draft.name = availableConnectionName(state.draft.name || entry.name);
+  try {
+    const server = parseMcpServerUrl(serverUrl);
+    await startMcpAuth({
+      name: state.draft.name,
+      scheme: server.scheme,
+      host: server.host,
+      port: server.port,
+      mcp_path: server.mcpPath,
+      whoami_tool: entry.mcpTemplate?.whoamiTool ?? null,
+      expected_tools: entry.mcpTemplate?.expectedTools ?? [],
+    });
+  } catch (error) {
+    toast('⚠ ' + errorMessage(error));
+  }
+}
+
 async function saveSecret(): Promise<void> {
   captureDrafts();
   const sheet = state.sheet;
@@ -2377,6 +2485,11 @@ document.addEventListener('click', async (e) => {
     if (!btn) { render(); return; }
     // fall through: the clicked action runs and its render reflects the close
   }
+  if (state.catalogActionMenuOpen && !target?.closest('.cat-connect-wrap')) {
+    state.catalogActionMenuOpen = null;
+    if (!btn) { render(); return; }
+    // fall through: the clicked action runs and its render reflects the close
+  }
   if (state.connMenuOpen && !target?.closest('.tile-menu-wrap')) {
     state.connMenuOpen = null;
     if (!btn) { render(); return; }
@@ -2402,6 +2515,7 @@ document.addEventListener('click', async (e) => {
       if (tab && TABS.includes(tab as Tab)) state.tab = tab as Tab;
       state.confirm = null;
       state.agentMenuOpen = null;
+      state.catalogActionMenuOpen = null;
       state.connMenuOpen = null;
       state.wiringMenuOpen = null;
       render();
@@ -2594,42 +2708,31 @@ document.addEventListener('click', async (e) => {
     case 'catalog-toggle':
       state.toolOpen = state.toolOpen === id ? null : id;
       render(); break;
+    case 'toggle-apps-expanded':
+      state.appsExpanded = !state.appsExpanded;
+      render();
+      break;
+    case 'toggle-catalog-connect-menu':
+      state.catalogActionMenuOpen = state.catalogActionMenuOpen === id ? null : id;
+      render();
+      break;
+    case 'catalog-connect-oauth': {
+      const entry = catalogEntryById(id);
+      state.catalogActionMenuOpen = null;
+      render(false);
+      if (entry) await quickConnectCatalogMcp(entry);
+      break;
+    }
+    case 'catalog-connect-manual': {
+      const entry = catalogEntryById(id);
+      state.catalogActionMenuOpen = null;
+      if (entry) await openCatalogConnectionForm(entry, 'bearer');
+      break;
+    }
     case 'catalog-add': {
       const entry = catalogEntryById(id);
       if (!entry || entry.via !== 'connection' || !entry.connType) break;
-      if (!await holdDropdownFormOpen()) break;
-      state.sheet = { kind: 'add-conn' };
-      state.connType = entry.connType;
-      state.draft = { nameIsAutomatic: true };
-      // An MCP row stores an API connection, but the form asks for a
-      // server URL rather than an API root — and the dialog is named after
-      // the row the user clicked, not the protocol underneath it.
-      state.connEntryName = entry.name;
-      state.connPreset = entry.preset ?? null;
-      if (entry.mcp) {
-        state.draft.isMcp = true;
-        state.draft.entryId = entry.id;
-        // Sign-in first; a pasted token stays one select away. The
-        // template's published URL prefills the field but stays editable.
-        state.draft.authMode = 'oauth';
-        if (entry.mcpTemplate?.serverUrl) state.draft.origin = entry.mcpTemplate.serverUrl;
-      }
-      // A branded row prefills everything but the credential: the documented
-      // API root, the vendor's auth recipe, and a suggested name — all into
-      // ordinary, editable form fields.
-      if (entry.preset) {
-        state.draft.origin = entry.preset.origin;
-        state.draft.authMode = entry.preset.authMode;
-        state.draft.authDetail = entry.preset.authDetail;
-      }
-      if (entry.connType === 'pg') state.draft.port = '5432';
-      if (entry.connType === 'ssh') state.draft.port = '22';
-      state.draft.name = automaticConnectionName();
-      state.sheetErrors = {}; state.sheetBaseline = null; state.connAdvancedOpen = false;
-      state.connImportSource = ''; state.connImportError = null;
-      render();
-      // With a preset the only thing left to supply is the credential.
-      focusField(!entry.preset ? 'f-cname' : state.secrets.length ? 'c-secret' : 'c-new-secret-value');
+      await openCatalogConnectionForm(entry);
       break;
     }
     case 'edit-conn': {
@@ -3015,6 +3118,7 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (e.key === 'Escape') {
+    if (state.catalogActionMenuOpen) { state.catalogActionMenuOpen = null; render(); return; }
     if (state.agentMenuOpen) { state.agentMenuOpen = null; render(); return; }
     if (state.connMenuOpen) { state.connMenuOpen = null; render(); return; }
     if (state.menuOpen) { state.menuOpen = false; render(); return; }
@@ -3280,6 +3384,7 @@ async function boot() {
     state.sheetBaseline = null;
     state.confirmDiscard = false;
     state.confirm = null;
+    state.catalogActionMenuOpen = null;
     state.agentMenuOpen = null;
     state.connMenuOpen = null;
     render();

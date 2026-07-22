@@ -5,8 +5,11 @@ import {
   CATALOG,
   CATALOG_SECTIONS,
   REGISTRY_CATALOG,
+  canQuickConnectMcp,
   catalogEntryById,
   catalogNameForType,
+  collapsedCatalogGroup,
+  connectedCatalogFirst,
   connectionsForEntry,
   entryForConnection,
   filterCatalog,
@@ -32,6 +35,17 @@ test('every entry lives in a known section; only connection entries are addable'
     if (entry.via === 'connection') assert.ok(entry.connType, entry.id);
     else assert.equal(entry.connType, undefined, entry.id);
   }
+});
+
+test('infrastructure precedes apps and generic endpoints live under Custom Apps', () => {
+  assert.ok(
+    CATALOG_SECTIONS.indexOf('Infrastructure') < CATALOG_SECTIONS.indexOf('Apps'),
+  );
+  assert.ok(CATALOG_SECTIONS.indexOf('Apps') < CATALOG_SECTIONS.indexOf('Custom Apps'));
+  assert.deepEqual(
+    CATALOG.filter((entry) => entry.section === 'Custom Apps').map((entry) => entry.id),
+    ['mcp', 'http'],
+  );
 });
 
 test('branded apps are added as MCP servers, not raw API origins', () => {
@@ -69,6 +83,16 @@ test('templated vendors ship a server URL, expected tools, and a whoami tool', (
   const gmail = CATALOG.find((entry) => entry.id === 'gmail')?.mcpTemplate;
   assert.ok(gmail);
   assert.equal(gmail?.serverUrl, undefined);
+});
+
+test('only MCP rows with a prefilled server URL offer quick OAuth connect', () => {
+  for (const id of ['github', 'notion']) {
+    assert.equal(canQuickConnectMcp(CATALOG.find((entry) => entry.id === id)!), true, id);
+  }
+  for (const id of ['gmail', 'mcp', 'http']) {
+    assert.equal(canQuickConnectMcp(CATALOG.find((entry) => entry.id === id)!), false, id);
+  }
+  assert.ok(REGISTRY_CATALOG.every(canQuickConnectMcp));
 });
 
 test('MCP connections group under the brand whose endpoint they pin', () => {
@@ -154,7 +178,7 @@ test('keyword search finds apps by what they do', () => {
   assert.ok(filterCatalog('sql').some((entry) => entry.id === 'postgres'));
 });
 
-test('each protocol maps to exactly one infrastructure row', () => {
+test('each protocol maps to exactly one generic catalog row', () => {
   assert.equal(entryForConnection(conn('api', 'api.github.com'))?.id, 'http');
   assert.equal(entryForConnection(conn('api', 'internal.example.com'))?.id, 'http');
   assert.equal(entryForConnection(conn('pg', 'db.internal'))?.id, 'postgres');
@@ -174,6 +198,41 @@ test('every connection is counted by exactly one row', () => {
   assert.equal(counted.length, connections.length);
   const api = CATALOG.find((entry) => entry.id === 'http')!;
   assert.deepEqual(connectionsForEntry(api, connections).map((c) => c.name), ['gh-1', 'internal']);
+});
+
+test('connected tools sort to the top of their group without otherwise reordering it', () => {
+  const apps = CATALOG.filter((entry) => entry.section === 'Apps');
+  const sorted = connectedCatalogFirst(apps, [
+    conn('api', 'api.stripe.com', 'billing'),
+    conn('api', 'api.openai.com', 'ai'),
+  ]);
+  assert.deepEqual(sorted.slice(0, 2).map((entry) => entry.id), ['openai', 'stripe']);
+  assert.deepEqual(
+    sorted.slice(2).map((entry) => entry.id),
+    apps.filter((entry) => !['openai', 'stripe'].includes(entry.id)).map((entry) => entry.id),
+  );
+});
+
+test('collapsed app groups show at least three rows and never hide connected tools', () => {
+  const apps = CATALOG.filter((entry) => entry.section === 'Apps');
+  const oneConnected = collapsedCatalogGroup(apps, [
+    conn('api', 'api.stripe.com', 'billing'),
+  ]);
+  assert.equal(oneConnected.visible.length, 3);
+  assert.equal(oneConnected.visible[0]?.id, 'stripe');
+  assert.equal(oneConnected.hiddenCount, apps.length - 3);
+
+  const fourConnected = collapsedCatalogGroup(apps, [
+    conn('api', 'api.openai.com', 'ai'),
+    conn('api', 'sentry.io', 'errors'),
+    conn('api', 'api.stripe.com', 'billing'),
+    conn('api', 'api.vercel.com', 'deployments'),
+  ]);
+  assert.deepEqual(
+    fourConnected.visible.map((entry) => entry.id),
+    ['openai', 'sentry', 'stripe', 'vercel'],
+  );
+  assert.equal(fourConnected.hiddenCount, apps.length - 4);
 });
 
 test('search filters by name and description, empty query returns all', () => {
