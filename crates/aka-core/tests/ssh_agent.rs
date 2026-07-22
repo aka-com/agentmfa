@@ -757,6 +757,15 @@ async fn disabling_access_refuses_the_ssh_endpoint_and_revoke_tears_it_down() {
     let conn = h.broker.store.connection_by_name("prod-ssh").unwrap();
     h.broker.ui_set_tool_access(&conn.id, false).unwrap();
     assert_eq!(h.broker.endpoints().len(), 1);
+    let mut byte = [0u8; 1];
+    let read = tokio::time::timeout(Duration::from_secs(2), s.read(&mut byte))
+        .await
+        .expect("the established connection should close promptly");
+    assert!(
+        matches!(read, Ok(0) | Err(_)),
+        "a disabled tool must close an established agent connection"
+    );
+    assert!(h.broker.sessions().is_empty());
     let mut refused = UnixStream::connect(&info.dsn)
         .await
         .expect("the socket persists while disabled");

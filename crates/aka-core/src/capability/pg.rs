@@ -486,6 +486,21 @@ async fn handle_endpoint_conn(
             return Ok(());
         }
     };
+    // Close the establishment race with disable/revoke: either teardown sees
+    // the registered session, or this post-registration check sees the new
+    // policy/registry state and retires it before ReadyForQuery is sent.
+    let endpoint_still_valid = state
+        .broker
+        .endpoints
+        .resolve_secret(&presented)
+        .is_some_and(|current| current.id == endpoint_id);
+    if !endpoint_still_valid || !state.broker.access.allows(&connection.id) {
+        session.finish("access_revoked");
+        client
+            .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
+            .await?;
+        return Ok(());
+    }
 
     let registration = state.register_cancel(CancelTarget {
         host,

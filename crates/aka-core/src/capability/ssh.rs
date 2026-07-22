@@ -760,6 +760,19 @@ async fn handle_endpoint_conn(
             return Ok(());
         }
     };
+    // Close the establishment race with disable/revoke: either teardown sees
+    // the registered session, or this post-registration check sees that the
+    // endpoint or access disappeared before the protocol is served.
+    let endpoint_still_valid = state
+        .broker
+        .endpoints
+        .get(&ctx.endpoint_id)
+        .is_some_and(|endpoint| endpoint.connection_id == ctx.connection_id);
+    if !endpoint_still_valid || !state.broker.access.allows(&ctx.connection_id) {
+        session.finish("access_revoked");
+        let _ = stream.shutdown().await;
+        return Ok(());
+    }
     let max_ttl = state.broker.config.session_max_ttl;
     let idle = state.broker.config.session_idle_timeout;
     let reason = serve(&state, &mut stream, &session, max_ttl, idle).await;

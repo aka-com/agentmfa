@@ -1714,6 +1714,47 @@ async fn http_direct_endpoint_preserves_multiple_set_cookie_headers() {
 }
 
 #[tokio::test]
+async fn disabling_access_during_http_upload_prevents_dispatch() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let mut h = harness(BrokerConfig::default()).await;
+    let up = upstream().await;
+    api_connection(&h, "github", up.port);
+    h.pair("claude-code").await;
+    let (info, port) = issue_http_endpoint(&h).await;
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    let request = format!(
+        "POST /dispatch HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nContent-Length: 4\r\nConnection: close\r\n\r\nx",
+        info.secret
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+
+    // Let the handler authenticate, then disable while it is still waiting
+    // for the remainder of the body.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let connection = h.broker.store.connection_by_name("github").unwrap();
+    h.broker.ui_set_tool_access(&connection.id, false).unwrap();
+    let _ = stream.write_all(b"xxx").await;
+
+    let mut response = Vec::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        stream.read_to_end(&mut response),
+    )
+    .await
+    .expect("the refused upload should receive a response")
+    .unwrap();
+    let response = String::from_utf8_lossy(&response);
+    assert!(
+        response.starts_with("HTTP/1.1 403"),
+        "response was {response}"
+    );
+    assert_eq!(up.hits.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn http_direct_endpoint_rejects_missing_or_wrong_secret() {
     let mut h = harness(BrokerConfig::default()).await;
     let up = upstream().await;

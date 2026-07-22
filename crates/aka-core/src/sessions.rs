@@ -320,7 +320,7 @@ impl DataPlane {
         let state = self.inner.state.lock().unwrap();
         match state.sessions.get(&id) {
             Some(entry) => {
-                entry.close.notify_waiters();
+                entry.close.notify_one();
                 true
             }
             None => false,
@@ -346,7 +346,9 @@ impl DataPlane {
         let count = sessions.len();
         drop(state);
         for close in sessions {
-            close.notify_waiters();
+            // One transport waits on each session. `notify_one` retains a
+            // permit if closure races the transport beginning its wait.
+            close.notify_one();
         }
         count
     }
@@ -367,7 +369,9 @@ impl DataPlane {
         let count = sessions.len();
         drop(state);
         for close in sessions {
-            close.notify_waiters();
+            // One transport waits on each session. Preserve a permit if
+            // revocation races the transport beginning its close wait.
+            close.notify_one();
         }
         count
     }
@@ -456,6 +460,10 @@ impl SessionHandle {
     /// Session over (either leg closed, TTL, idle, or user close): tear
     /// down accounting and audit with byte counts.
     pub fn finish(self, reason: &str) {
+        self.finish_inner(reason);
+    }
+
+    fn finish_inner(&self, reason: &str) {
         let mut state = self.plane.state.lock().unwrap();
         let entry = state.sessions.remove(&self.id);
         if let Some(entry) = &entry {
@@ -488,6 +496,14 @@ impl SessionHandle {
             );
             self.plane.events.sessions_changed();
         }
+    }
+}
+
+impl Drop for SessionHandle {
+    fn drop(&mut self) {
+        // Async request/connection tasks can be cancelled by their runtime or
+        // client. Never leave a ghost session consuming the global budget.
+        self.finish_inner("transport_dropped");
     }
 }
 
@@ -559,6 +575,23 @@ mod tests {
         s1.finish("test");
         s2.finish("test");
         assert_eq!(plane.sessions().len(), 0);
+    }
+
+    #[test]
+    fn dropping_a_handle_retires_the_session() {
+        let (plane, _dir) = plane(Duration::from_secs(60), 60, 300);
+        let endpoint_id = Uuid::new_v4();
+        let session = plane
+            .start_endpoint_session(
+                "endpoint",
+                &ssh_connection(),
+                endpoint_id,
+                ConnectionKind::Ssh,
+            )
+            .unwrap();
+        assert_eq!(plane.sessions().len(), 1);
+        drop(session);
+        assert!(plane.sessions().is_empty());
     }
 
     #[test]
@@ -650,5 +683,28 @@ mod tests {
             "rotation invalidates every outstanding ticket"
         );
         session.finish("key_rotated");
+    }
+
+    #[tokio::test]
+    async fn endpoint_close_signal_survives_waiter_registration_race() {
+        let (plane, _dir) = plane(Duration::from_secs(60), 60, 300);
+        let endpoint_id = Uuid::new_v4();
+        let session = plane
+            .start_endpoint_session(
+                "endpoint",
+                &ssh_connection(),
+                endpoint_id,
+                ConnectionKind::Ssh,
+            )
+            .unwrap();
+        let closed = session.close_signal.clone();
+
+        // Close before the transport begins awaiting. `notify_one` retains a
+        // permit, so the late waiter must still wake immediately.
+        assert_eq!(plane.close_endpoint_sessions(&endpoint_id), 1);
+        tokio::time::timeout(Duration::from_secs(1), closed.notified())
+            .await
+            .expect("the close permit must survive a late waiter");
+        session.finish("access_revoked");
     }
 }

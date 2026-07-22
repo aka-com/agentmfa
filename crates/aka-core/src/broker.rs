@@ -1138,14 +1138,22 @@ impl Broker {
 
     /// Enable or disable agent access for a connection from the app.
     /// Disabling does not chase down live ticket transports — tickets are
-    /// short-lived, and the next open is refused — but the connection's
-    /// direct-endpoint listeners re-check on every request and refuse at
-    /// once.
+    /// short-lived, and the next open is refused. Direct endpoints are
+    /// standing authority, so their established sessions are closed at once;
+    /// the issued endpoint itself remains available for later re-enabling.
     pub fn ui_set_tool_access(&self, connection_id: &Uuid, enabled: bool) -> Result<bool> {
         let _gate = self.config_gate.lock().unwrap();
         let connection = self.store.connection_by_id(connection_id)?;
         let changed = self.access.set_enabled(*connection_id, enabled)?;
         if changed {
+            let closed_sessions = if enabled {
+                0
+            } else {
+                self.endpoints
+                    .get_for_connection(connection_id)
+                    .map(|endpoint| self.data_plane.close_endpoint_sessions(&endpoint.id))
+                    .unwrap_or(0)
+            };
             self.audit.append(
                 AuditEntry::new(
                     if enabled {
@@ -1159,7 +1167,8 @@ impl Broker {
                         connection.name
                     ),
                 )
-                .connection(connection.name.clone()),
+                .connection(connection.name.clone())
+                .field("closed_endpoint_sessions", closed_sessions),
             );
             self.events.wirings_changed();
         }

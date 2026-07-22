@@ -939,6 +939,73 @@ async fn proxy_handler(
         }
     };
 
+    // Receiving a request body can take arbitrarily long. Reauthenticate and
+    // re-check access immediately before dispatch so a disable, revoke, or
+    // secret rotation that landed during the upload wins.
+    let Some(endpoint) = broker
+        .endpoints
+        .resolve_secret(presented)
+        .filter(|endpoint| endpoint.id == state.endpoint_id)
+    else {
+        return endpoint_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid_secret",
+            "the endpoint was revoked or its secret was rotated",
+        );
+    };
+    if !broker.access.allows(&endpoint.connection_id) {
+        return endpoint_error(
+            StatusCode::FORBIDDEN,
+            "denied_by_policy",
+            "agent access is disabled for this tool",
+        );
+    }
+    let Ok(connection) = broker.store.connection_by_id(&endpoint.connection_id) else {
+        return endpoint_error(
+            StatusCode::BAD_GATEWAY,
+            "unknown_connection",
+            "the connection has been removed",
+        );
+    };
+    if connection.kind() != ConnectionKind::Api {
+        return endpoint_error(
+            StatusCode::BAD_GATEWAY,
+            "wrong_connection_type",
+            "the connection is no longer an HTTP tool",
+        );
+    }
+
+    // Register the in-flight request against the endpoint. Disable/revoke can
+    // now signal it just like a PG/SSH direct session; the post-registration
+    // check closes the small establishment race with teardown.
+    let session = match broker.data_plane.start_endpoint_session(
+        "endpoint",
+        &connection,
+        endpoint.id,
+        ConnectionKind::Api,
+    ) {
+        Ok(session) => session,
+        Err(_) => {
+            return endpoint_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "broker_session_limit",
+                "the broker's live-session limit has been reached",
+            )
+        }
+    };
+    let endpoint_still_valid = broker
+        .endpoints
+        .resolve_secret(presented)
+        .is_some_and(|current| current.id == endpoint.id);
+    if !endpoint_still_valid || !broker.access.allows(&endpoint.connection_id) {
+        session.finish("access_revoked");
+        return endpoint_error(
+            StatusCode::FORBIDDEN,
+            "denied_by_policy",
+            "the endpoint was revoked or agent access was disabled",
+        );
+    }
+
     // Reuse `/v1/http`'s whole execution core. The wiring is the
     // authorization, so the vault read is pre-authorized (scope confirmed).
     let execution = HttpExecution {
@@ -954,7 +1021,19 @@ async fn proxy_handler(
         body: spooled,
         health: Some(broker.health.clone()),
     };
-    let outcome = crate::authorization::scope(true, execution.run()).await;
+    let close_signal = session.close_signal.clone();
+    let outcome = tokio::select! {
+        _ = close_signal.notified() => {
+            session.finish("access_revoked");
+            return endpoint_error(
+                StatusCode::FORBIDDEN,
+                "denied_by_policy",
+                "the endpoint was revoked or agent access was disabled",
+            );
+        }
+        outcome = crate::authorization::scope(true, execution.run()) => outcome,
+    };
+    session.finish("request_complete");
     translate_outcome(outcome)
 }
 

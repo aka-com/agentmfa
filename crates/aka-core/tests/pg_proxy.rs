@@ -785,15 +785,23 @@ async fn disabling_access_refuses_the_endpoint_until_reenabled() {
     h.pair().await;
     let info = h.issue_endpoint().await;
     // It works while enabled …
-    let (_client, _connection) = tokio_postgres::connect(&h.endpoint_conn_str(&info), NoTls)
+    let (client, connection) = tokio_postgres::connect(&h.endpoint_conn_str(&info), NoTls)
         .await
         .unwrap();
+    let connection = tokio::spawn(connection);
+    assert!(!client.simple_query("SELECT 1").await.unwrap().is_empty());
+    assert_eq!(h.broker.sessions().len(), 1);
 
     // … is refused at the connect-time re-check while disabled (the
     // endpoint itself stays issued) …
     let conn = h.broker.store.connection_by_name("prod-db").unwrap();
     h.broker.ui_set_tool_access(&conn.id, false).unwrap();
     assert_eq!(h.broker.endpoints().len(), 1);
+    let _ = tokio::time::timeout(Duration::from_secs(3), connection)
+        .await
+        .expect("disabling access must close the established session");
+    assert!(h.broker.sessions().is_empty());
+    assert!(client.simple_query("SELECT 1").await.is_err());
     assert!(tokio_postgres::connect(&h.endpoint_conn_str(&info), NoTls)
         .await
         .is_err());
