@@ -51,14 +51,6 @@ export const REGISTRY_SERVERS: RegistryServer[] = [
     keywords: ['tasks', 'projects', 'work management'],
   },
   {
-    id: 'mcp-cloudflare',
-    name: 'Cloudflare',
-    icon: 'plug',
-    description: 'DNS, Workers & zone config — official hosted MCP',
-    serverUrl: 'https://mcp.cloudflare.com/mcp',
-    keywords: ['dns', 'cdn', 'workers', 'zones', 'edge'],
-  },
-  {
     id: 'mcp-figma',
     name: 'Figma',
     icon: 'plug',

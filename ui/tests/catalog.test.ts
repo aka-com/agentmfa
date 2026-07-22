@@ -63,7 +63,7 @@ test('key-only vendors live in the API registry, not Apps', () => {
 
 test('branded apps are added as MCP servers, not raw API origins', () => {
   for (const id of ['github', 'gmail', 'notion',
-    'airtable', 'linear', 'sentry', 'stripe']) {
+    'airtable', 'linear', 'sentry', 'stripe', 'cloudflare']) {
     const entry = CATALOG.find((candidate) => candidate.id === id);
     assert.equal(entry?.via, 'connection', id);
     assert.equal(entry?.mcp, true, id);
@@ -92,12 +92,14 @@ test('templated vendors ship a server URL, expected tools, and a whoami tool', (
     assert.ok(template?.whoamiTool, id);
     assert.ok(template?.expectedTools.includes(template.whoamiTool!), id);
   }
-  // Linear's server exposes identity as a resource, not a tool — its
-  // template carries expectations without a whoami.
-  const linear = CATALOG.find((entry) => entry.id === 'linear')?.mcpTemplate;
-  assert.ok(linear?.serverUrl?.startsWith('https://'));
-  assert.ok((linear?.expectedTools.length ?? 0) > 0);
-  assert.equal(linear?.whoamiTool, undefined);
+  // Linear and Cloudflare publish no whoami-style tool — their templates
+  // carry expectations only.
+  for (const id of ['linear', 'cloudflare']) {
+    const template = CATALOG.find((entry) => entry.id === id)?.mcpTemplate;
+    assert.ok(template?.serverUrl?.startsWith('https://'), id);
+    assert.ok((template?.expectedTools.length ?? 0) > 0, id);
+    assert.equal(template?.whoamiTool, undefined, id);
+  }
   // Gmail's endpoint is published, but Google has no dynamic client
   // registration: the template carries an oauthApp block, so the add form
   // collects the user's OAuth client before the sign-in starts.
@@ -108,7 +110,7 @@ test('templated vendors ship a server URL, expected tools, and a whoami tool', (
 });
 
 test('only MCP rows with a prefilled server URL offer quick OAuth connect', () => {
-  for (const id of ['github', 'notion', 'airtable', 'linear', 'sentry', 'stripe']) {
+  for (const id of ['github', 'notion', 'airtable', 'linear', 'sentry', 'stripe', 'cloudflare']) {
     assert.equal(canQuickConnectMcp(CATALOG.find((entry) => entry.id === id)!), true, id);
   }
   for (const id of ['gmail', 'mcp', 'http']) {

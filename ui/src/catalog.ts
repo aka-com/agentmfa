@@ -390,6 +390,24 @@ export const CATALOG: CatalogEntry[] = [
     },
   },
   {
+    id: 'cloudflare',
+    name: 'Cloudflare',
+    icon: 'cloudflare',
+    description: 'DNS, Workers & zone config',
+    section: 'Apps',
+    via: 'connection',
+    connType: 'api',
+    mcp: true,
+    keywords: ['dns', 'cdn', 'workers', 'zones', 'edge', 'r2'],
+    // Cloudflare's unified server fronts the whole API through two
+    // Code-Mode tools (search + execute); there is no whoami-style tool.
+    mcpTemplate: {
+      serverUrl: 'https://mcp.cloudflare.com/mcp',
+      expectedTools: ['search', 'execute'],
+      urlHint: 'Cloudflare’s hosted MCP server for the full API. Sign in with your Cloudflare account, or paste an API token.',
+    },
+  },
+  {
     id: 'mcp',
     name: 'MCP server',
     icon: 'plug',
