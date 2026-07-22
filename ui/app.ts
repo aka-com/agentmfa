@@ -983,18 +983,21 @@ function connectionsHTML() {
 // semantic Lucide icon, then plain primary text with optional detail.
 function activityRowHTML(a: ActivityEntry): string {
   const icon = ICONS[a.icon] || '';
-  // Attribution and timing as quiet chips: only what the entry actually
-  // carries, never guessed from the prose.
+  // Attribution and timing stay under the message. The tool gets its own
+  // right-side column so it can be scanned independently across rows.
   const chips = [
     a.agent ? `<span class="act-chip" title="Agent">${esc(a.agent)}</span>` : '',
-    a.connection ? `<span class="act-chip" title="Tool">${esc(a.connection)}</span>` : '',
     typeof a.duration_ms === 'number'
       ? `<span class="act-chip act-chip-time" title="Duration">${a.duration_ms} ms</span>` : '',
   ].join('');
+  const tool = a.connection
+    ? `<span class="act-chip act-tool" title="Tool: ${escAttr(a.connection)}">${esc(a.connection)}</span>`
+    : '';
   return `<div class="act-row">
     <span class="act-gutter"><span class="act-time" data-tippy-content="${escAttr(absTime(a.at))}" data-tippy-theme="activity-time">${esc(relTime(a.at))}</span></span>
     <span class="act-ico tone-${escAttr(a.tone || 'neutral')}">${icon}</span>
-    <span class="act-txt">${esc(a.text)}${a.detail ? `<div class="act-detail">${esc(a.detail)}</div>` : ''}${chips ? `<div class="act-chips">${chips}</div>` : ''}</span></div>`;
+    <span class="act-txt">${esc(a.text)}${a.detail ? `<div class="act-detail">${esc(a.detail)}</div>` : ''}${chips ? `<div class="act-chips">${chips}</div>` : ''}</span>
+    ${tool}</div>`;
 }
 
 /** The activity entries the current filters keep. */
