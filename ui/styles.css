@@ -523,25 +523,6 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
     overflow-wrap: anywhere; white-space: pre-wrap; user-select: all;
   }
-  /* ⋮ access-mode menu on a wired Postgres/SSH row, left of Unwire. */
-  .wiring-menu-wrap{ position: relative; flex: 0 0 auto; }
-  .wiring-menu-btn{ opacity: .55; transition: opacity .12s ease; }
-  .acc-row:hover .wiring-menu-btn, .wiring-menu-btn:hover,
-  .wiring-menu-btn:focus-visible, .wiring-menu-btn.on{ opacity: 1; }
-  .wiring-menu-btn.on{ background: var(--hover-2); color: var(--ink-2); }
-  .wiring-menu{
-  position: absolute; right: 0; top: calc(100% + 4px); z-index: 15;
-  width: 208px; display: flex; flex-direction: column; gap: 2px; padding: 4px;
-  background: var(--panel); border: 1px solid var(--line-mid); border-radius: 9px;
-  box-shadow: 0 10px 28px rgba(10,15,40,.22);
-}
-  .wiring-menu-head{
-  padding: 5px 9px 3px; font-size: 10.5px; font-weight: 700; letter-spacing: .04em;
-  text-transform: uppercase; color: var(--muted-2);
-}
-  .wiring-menu .menu-item{ align-items: flex-start; }
-  .wiring-menu .menu-item.disabled{ opacity: .5; cursor: default; }
-  .wiring-menu .menu-item.disabled:hover{ background: transparent; }
   .menu-check{ flex: 0 0 14px; width: 14px; line-height: 0; padding-top: 1px; }
   .menu-check svg{ color: var(--ok-ink); }
   .menu-lbl{ display: flex; flex-direction: column; gap: 1px; min-width: 0; }
@@ -1045,3 +1026,19 @@
 .cat-meta-tools svg{ color: var(--muted-2); }
 .cat-meta-cred{ display: inline-flex; align-items: center; gap: 5px; }
 .cat-meta-cred svg{ color: var(--muted-2); }
+/* Direct-endpoint lifecycle strip: a hairline footer inside the row. Absent:
+   just the issue button. Issued: badge, pasteable address, copy, and the
+   reissue/revoke pair (each behind an inline confirm). */
+.ep-strip{
+  display: flex; align-items: center; gap: 8px; margin-top: 9px; padding-top: 9px;
+  border-top: 1px solid var(--line-soft);
+}
+.ep-strip .ep-addr{
+  flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--ink-2); font-size: 11.5px;
+}
+.ep-strip .ep-addr-hidden{ color: var(--muted); font-family: inherit; }
+.ep-strip .ep-spacer{ flex: 1; }
+.ep-strip .ep-act{ color: var(--muted); }
+.ep-strip .ep-act:hover{ color: var(--ink); }
+.ep-strip .ep-act.rv{ color: var(--danger-ink); }

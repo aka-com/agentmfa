@@ -162,7 +162,6 @@ interface AppState {
   connectOpen: string | null;
   agentMenuOpen: string | null;
   connMenuOpen: string | null;
-  wiringMenuOpen: string | null;
   copied: string | null;
   readyCopied: boolean;
   connectionReady: ConnectionReadyState | null;
@@ -250,7 +249,6 @@ const state: AppState = {
   connectOpen: 'claude-code', // Connect-page guide card that starts expanded
   agentMenuOpen: null,   // 'identity' while the key card's ⋯ menu is open
   connMenuOpen: null,    // connection id whose ⋯ options menu is open (Tools tab)
-  wiringMenuOpen: null,  // connection id whose ⋮ direct-endpoint menu is open
 
   copied: null,          // secretId whose value was just copied (transient "Copied" flash)
   readyCopied: false,    // transient feedback on the setup-instructions status button
@@ -499,23 +497,30 @@ function secretsTableHTML(query = '') {
 // DSN/socket/URL an unmodified tool uses). WebSocket lands later.
 const ENDPOINTABLE: Record<ConnectionType, boolean> = { pg: true, ssh: true, api: true, ws: false };
 
-// The ⋮ menu on an enabled Postgres/SSH/HTTP row: issue / reissue / revoke
-// the connection's direct endpoint.
-function wiringMenuHTML(c: ConnectionSummary): string {
-  const open = state.wiringMenuOpen === c.id;
+// The direct-endpoint lifecycle strip on an enabled Postgres/SSH/HTTP row:
+// a hairline footer that owns issue → live badge → reissue/revoke. The
+// address shown is never the capability itself — SSH's socket path (which is
+// the whole capability) appears only in the one-time issue sheet.
+function endpointStripHTML(c: ConnectionSummary): string {
+  if (!c.agent_access.enabled || !ENDPOINTABLE[c.type]) return '';
   const endpoint = c.agent_access.endpoint ?? null;
-  return `<div class="wiring-menu-wrap">
-    <button class="icon-btn wiring-menu-btn ${open ? 'on' : ''}" title="Direct endpoint"
-      aria-label="Direct endpoint for ${escAttr(c.name)}" aria-haspopup="menu"
-      aria-expanded="${open}" data-act="toggle-wiring-menu" data-conn="${c.id}">${ICONS.ellipsisVertical}</button>
-    ${open ? `<div class="wiring-menu" role="menu" aria-label="Direct endpoint for ${escAttr(c.name)}">
-      <div class="wiring-menu-head">Direct endpoint</div>
-      <button class="menu-item" role="menuitem" data-act="issue-endpoint" data-conn="${c.id}">
-        <span class="menu-lbl">${endpoint ? 'Reissue (new secret)' : 'Issue direct endpoint'}<span class="menu-sub">${
-          endpoint ? 'Rotates the secret; the old one stops working' : 'A pasteable address for an unmodified tool'}</span></span></button>
-      ${endpoint ? `<button class="menu-item danger" role="menuitem" data-act="revoke-endpoint" data-endpoint="${endpoint.endpoint_id}">
-        <span class="menu-lbl">Revoke endpoint<span class="menu-sub">Stops the listener and open sessions</span></span></button>` : ''}
-    </div>` : ''}
+  if (!endpoint) {
+    return `<div class="ep-strip">
+      <button class="btn primary sm" data-act="issue-endpoint" data-conn="${c.id}"
+        title="A pasteable address for an unmodified tool">Issue direct endpoint…</button>
+    </div>`;
+  }
+  const address = endpoint.dsn
+    ? `<code class="ep-addr" title="${escAttr(endpoint.dsn)}">${esc(endpoint.dsn)}</code>
+      <button class="icon-btn" title="Copy address" aria-label="Copy endpoint address for ${escAttr(c.name)}"
+        data-act="copy-endpoint-dsn" data-conn="${c.id}">${state.copied === `ep:${c.id}` ? ICONS.check : ICONS.copy}</button>`
+    : '<span class="ep-addr ep-addr-hidden">Agent socket — shown at issue</span>';
+  return `<div class="ep-strip">
+    <span class="acc-pill ep">Endpoint</span>
+    ${address}
+    <span class="ep-spacer"></span>
+    <button class="btn ghost sm ep-act" data-act="reissue-endpoint-ask" data-conn="${c.id}">Reissue…</button>
+    <button class="btn ghost sm ep-act rv" data-act="revoke-endpoint-ask" data-conn="${c.id}">Revoke…</button>
   </div>`;
 }
 
@@ -783,6 +788,20 @@ function catalogConnRowHTML(c: ConnectionSummary): string {
       <button class="btn sm" data-act="confirm-cancel">Cancel</button>
       <button class="btn sm danger" data-act="del-conn-confirm" data-id="${c.id}">Delete</button></div>`;
   }
+  if (state.confirm && state.confirm.kind === 'reissue-endpoint' && state.confirm.id === c.id) {
+    return `<div class="cat-conn confirm-conn">
+      <div class="cat-conn-tx"><b>${esc(c.name)}</b>
+        <span class="cat-conn-danger">Reissue this endpoint? The current secret stops working immediately.</span></div>
+      <button class="btn sm" data-act="confirm-cancel">Cancel</button>
+      <button class="btn sm primary" data-act="reissue-endpoint-confirm" data-conn="${c.id}">Reissue</button></div>`;
+  }
+  if (state.confirm && state.confirm.kind === 'revoke-endpoint' && state.confirm.id === c.id) {
+    return `<div class="cat-conn confirm-conn">
+      <div class="cat-conn-tx"><b>${esc(c.name)}</b>
+        <span class="cat-conn-danger">Revoke this endpoint? Tools using its address lose access immediately.</span></div>
+      <button class="btn sm" data-act="confirm-cancel">Cancel</button>
+      <button class="btn sm danger" data-act="revoke-endpoint-confirm" data-conn="${c.id}">Revoke</button></div>`;
+  }
   const test = state.connTests[c.id];
   const menuOpen = state.connMenuOpen === c.id;
   const live = liveCount(c);
@@ -800,10 +819,6 @@ function catalogConnRowHTML(c: ConnectionSummary): string {
             ? `${c.agent_access.allowed_tools.length} tool${c.agent_access.allowed_tools.length === 1 ? '' : 's'}`
             : 'All tools'}</span></button>`
     : '';
-  const endpointChip = c.agent_access.endpoint
-    ? '<span class="acc-pill ep" title="A direct endpoint is issued for this tool">Endpoint</span>'
-    : '';
-  const endpointMenu = enabled && ENDPOINTABLE[c.type] ? wiringMenuHTML(c) : '';
   const statusItem = c.mcp_path
     ? `<button class="menu-item" role="menuitem" data-act="mcp-status" data-id="${c.id}"
         ${mcpStatus && mcpStatus.running ? 'disabled' : ''}>${ICONS.refresh} ${
@@ -839,10 +854,10 @@ function catalogConnRowHTML(c: ConnectionSummary): string {
         ${purpose ? `<span>${esc(purpose)}</span>` : ''}
         ${toolsChip}
         <span class="cat-meta-cred">${ICONS.keyRound}<span>${esc(connectionCredential(c))}</span></span>
-        ${endpointChip}${tls}${hostKey}${needsReconnect}
+        ${tls}${hostKey}${needsReconnect}
       </div>
-      ${connTestResultHTML(c)}${mcpStatusHTML(c)}</div>
-    <div class="cat-conn-ctl">${endpointMenu}<div class="tile-menu-wrap">
+      ${connTestResultHTML(c)}${mcpStatusHTML(c)}${endpointStripHTML(c)}</div>
+    <div class="cat-conn-ctl"><div class="tile-menu-wrap">
       <button class="icon-btn tile-menu-btn ${menuOpen ? 'on' : ''}" title="Tool options"
         aria-label="Options for ${escAttr(c.name)}" aria-haspopup="menu"
         aria-expanded="${menuOpen}" data-act="toggle-conn-menu" data-id="${c.id}">${ICONS.ellipsis}</button>
@@ -2703,11 +2718,6 @@ document.addEventListener('click', async (e) => {
     if (!btn) { render(); return; }
     // fall through: the clicked action runs and its render reflects the close
   }
-  if (state.wiringMenuOpen && !target?.closest('.wiring-menu-wrap')) {
-    state.wiringMenuOpen = null;
-    if (!btn) { render(); return; }
-    // fall through: the clicked action runs and its render reflects the close
-  }
   if (state.formMenuOpen && !target?.closest('.cred-select') && !target?.closest('.cred-menu')) {
     state.formMenuOpen = null;
     if (!btn) { render(); return; }
@@ -2725,7 +2735,6 @@ document.addEventListener('click', async (e) => {
       state.agentMenuOpen = null;
       state.catalogActionMenuOpen = null;
       state.connMenuOpen = null;
-      state.wiringMenuOpen = null;
       render();
       resetScroll();
       break;
@@ -2748,15 +2757,10 @@ document.addEventListener('click', async (e) => {
       state.connMenuOpen = state.connMenuOpen === id ? null : id;
       render();
       break;
-    case 'toggle-wiring-menu': {
-      const key = btn.dataset.conn || '';
-      state.wiringMenuOpen = state.wiringMenuOpen === key ? null : key;
-      render();
-      break;
-    }
-    case 'issue-endpoint': {
+    case 'issue-endpoint':
+    case 'reissue-endpoint-confirm': {
       const connectionId = btn.dataset.conn || '';
-      state.wiringMenuOpen = null;
+      state.confirm = null;
       // Not via run(): we need the one-time result to show its secret.
       try {
         const info = await invoke('issue_endpoint', { connectionId });
@@ -2768,14 +2772,36 @@ document.addEventListener('click', async (e) => {
       }
       break;
     }
-    case 'revoke-endpoint': {
-      const endpointId = btn.dataset.endpoint || '';
-      state.wiringMenuOpen = null;
-      if (await run(() => invoke('revoke_endpoint', { endpointId }))) {
+    case 'reissue-endpoint-ask':
+      state.confirm = { kind: 'reissue-endpoint', id: btn.dataset.conn || '' };
+      render();
+      break;
+    case 'revoke-endpoint-ask':
+      state.confirm = { kind: 'revoke-endpoint', id: btn.dataset.conn || '' };
+      render();
+      break;
+    case 'revoke-endpoint-confirm': {
+      const conn = state.connections.find((candidate) => candidate.id === btn.dataset.conn);
+      const endpointId = conn?.agent_access.endpoint?.endpoint_id || '';
+      state.confirm = null;
+      if (endpointId && await run(() => invoke('revoke_endpoint', { endpointId }))) {
         toast('Endpoint revoked');
         await refresh('all');
       } else {
         render();
+      }
+      break;
+    }
+    case 'copy-endpoint-dsn': {
+      const conn = state.connections.find((candidate) => candidate.id === btn.dataset.conn);
+      const dsn = conn?.agent_access.endpoint?.dsn;
+      if (conn && dsn) {
+        try {
+          await navigator.clipboard.writeText(dsn);
+          flashCopied(`ep:${conn.id}`);
+        } catch {
+          toast('⚠ Copy failed — select the text and copy it manually');
+        }
       }
       break;
     }

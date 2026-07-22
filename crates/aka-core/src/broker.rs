@@ -878,8 +878,10 @@ impl Broker {
     /// Issue (or rotate) a direct endpoint for a connection: mint the
     /// endpoint secret, bind its listener, and hand back the pasteable DSN.
     /// The secret leaves the broker exactly once, here. Gated behind the
-    /// native confirmation because it grants standing access; the
-    /// connection's agent access must be enabled.
+    /// configuration gate: a fresh native authentication is reused (the
+    /// presence window), otherwise the OS prompt appears — issuance grants
+    /// standing access, so it is never silent for a user who has not
+    /// authenticated recently. The connection's agent access must be enabled.
     pub async fn ui_issue_endpoint(
         self: &Arc<Self>,
         connection_id: &Uuid,
@@ -897,7 +899,8 @@ impl Broker {
         // Confirm off the async runtime: the native sheet blocks its thread.
         let store = self.store.clone();
         let description = format!("Issue a direct endpoint for {}", connection.name);
-        let confirmation = tokio::task::spawn_blocking(move || store.confirm_action(&description))
+        let confirmation =
+            tokio::task::spawn_blocking(move || store.confirm_configuration_action(&description))
             .await
             .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))??;
         // Mint under the gate; re-check access didn't vanish while the

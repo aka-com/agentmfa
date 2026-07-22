@@ -962,8 +962,9 @@ pub async fn list_mcp_tools(
 }
 
 /// Issue (or rotate) a direct endpoint for a connection. The broker gates
-/// this behind the native confirmation; the returned secret is shown to the
-/// user exactly once and never persisted in a recoverable form.
+/// this behind the configuration gate (a fresh native authentication is
+/// reused, otherwise the OS prompt appears); the returned secret is shown to
+/// the user exactly once and never persisted in a recoverable form.
 #[tauri::command]
 pub async fn issue_endpoint(
     state: State<'_, AppState>,

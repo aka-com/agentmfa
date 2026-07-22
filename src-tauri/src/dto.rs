@@ -62,12 +62,16 @@ pub struct AccessDto {
 }
 
 /// The direct endpoint on a wiring row: enough to address and revoke it, never
-/// the secret.
+/// the secret. `dsn` is the pasteable, non-secret address (the secret rides
+/// separately); it is omitted for SSH, whose socket path is itself the
+/// capability and is shown only in the one-time issue sheet.
 #[derive(Serialize)]
 pub struct EndpointChip {
     pub endpoint_id: String,
     #[serde(rename = "type")]
     pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dsn: Option<String>,
 }
 
 /// The one-time result of issuing a direct endpoint: the pasteable address, a
@@ -151,9 +155,21 @@ impl ConnectionDto {
             endpoint: broker
                 .endpoints
                 .get_for_connection(&conn.id)
-                .map(|e| EndpointChip {
-                    endpoint_id: e.id.to_string(),
-                    kind: e.kind.as_str().to_string(),
+                .map(|e| {
+                    let dsn = match &conn.config {
+                        Pg { user, dbname, .. } => Some(aka_core::capability::pg::endpoint_dsn(
+                            broker.paths.endpoint_dir(&e.id).as_path(),
+                            user,
+                            dbname,
+                        )),
+                        Api { .. } => e.port.map(|port| format!("http://127.0.0.1:{port}")),
+                        _ => None,
+                    };
+                    EndpointChip {
+                        endpoint_id: e.id.to_string(),
+                        kind: e.kind.as_str().to_string(),
+                        dsn,
+                    }
                 }),
         };
         let health = broker.health.get(&conn.id);

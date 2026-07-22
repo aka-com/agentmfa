@@ -21,9 +21,11 @@ export interface AgentAccess {
   /**
    * The direct endpoint issued for this connection, if any. Its presence
    * flips the row's control from "Issue" to "Reissue / Revoke". Never
-   * carries the secret — that leaves the broker once, at issue.
+   * carries the secret — that leaves the broker once, at issue. `dsn` is the
+   * pasteable, non-secret address; absent for SSH, whose socket path is the
+   * whole capability.
    */
-  endpoint?: { endpoint_id: string; type: ConnectionType } | null;
+  endpoint?: { endpoint_id: string; type: ConnectionType; dsn?: string | null } | null;
 }
 
 /**
