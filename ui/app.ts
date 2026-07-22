@@ -1152,11 +1152,7 @@ function startHTML(): string {
     </div>`;
 
   const task = startTask(option, progress);
-  const wireWhat = progress.toolName ? `<b>${esc(progress.toolName)}</b>` : 'the tool';
-  const wireBody = `<p>Tools are enabled for agents when you add them — ${wireWhat} is ready to use.
-      Flip access per tool from its row on the Tools tab: an enabled tool works with no
-      prompt, a disabled one is refused. The Connect tab has ready-made setup for Claude
-      Code, Claude Desktop, Codex, and custom harnesses.</p>
+  const wireBody = `<p>Tools are enabled for all agents when you add them.</p>
     <pre class="setup-instructions"><code>${esc(task)}</code></pre>
     <div class="start-actions">
       <button class="btn primary sm" data-act="copy-text" data-text="${escAttr(task)}">Copy this task</button>
