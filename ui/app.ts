@@ -27,18 +27,17 @@ import { formErrorKind, formErrorMessage, inlineFormError } from '/src/form-erro
 import type { HostKeyCandidate } from '/src/connection-input';
 import type {
   ActivityEntry,
-  AgentSummary,
   CommandArgs,
   CommandName,
   ConnectionInput,
   ConnectionSummary,
   ConnectionType,
   ElicitationRequest,
+  IdentityInfo,
   McpAuthDraft,
   McpAuthState,
   McpStatusReport,
   McpToolInfo,
-  WiringSummary,
   IssuedEndpoint,
   SecretSummary,
   SessionSummary,
@@ -124,7 +123,8 @@ interface AppState {
   localUsername: string;
   secrets: SecretSummary[];
   connections: ConnectionSummary[];
-  agents: AgentSummary[];
+  /** The shared broker identity ("this computer's key"); null until loaded. */
+  identity: IdentityInfo | null;
   sessions: SessionSummary[];
   activity: ActivityEntry[];
   elicitations: ElicitationRequest[];
@@ -175,8 +175,6 @@ interface AppState {
 }
 
 interface WiringToolsState {
-  agentId: string;
-  agentName: string;
   connectionId: string;
   connectionName: string;
   loading: boolean;
@@ -205,7 +203,7 @@ const state: AppState = {
   localUsername: '',
   secrets: [],
   connections: [],
-  agents: [],
+  identity: null,
   sessions: [],
   activity: [],
   elicitations: [],      // paused upstream tool calls awaiting the user (SEP-2322)
@@ -235,9 +233,9 @@ const state: AppState = {
   connImportSource: '',  // paste-to-prefill field in the add sheet
   connImportError: null,
   menuOpen: false,       // desktop-mode settings popover (gear) open
-  agentMenuOpen: null,   // agent id whose ⋯ options menu is open (Agents tab)
+  agentMenuOpen: null,   // 'identity' while the key card's ⋯ menu is open
   connMenuOpen: null,    // connection id whose ⋯ options menu is open (Tools tab)
-  wiringMenuOpen: null,  // "<agentId>:<connId>" whose ⋮ access-mode menu is open
+  wiringMenuOpen: null,  // connection id whose ⋮ direct-endpoint menu is open
 
   copied: null,          // secretId whose value was just copied (transient "Copied" flash)
   readyCopied: false,    // transient feedback on the setup-instructions status button
@@ -284,16 +282,16 @@ const root = (): HTMLElement => {
   return element;
 };
 /* ------------------------------ data loading ----------------------------- */
-type RefreshTarget = 'all' | 'secrets' | 'connections' | 'agents' | 'sessions' |
+type RefreshTarget = 'all' | 'secrets' | 'connections' | 'identity' | 'sessions' |
   'activity' | 'settings' | 'elicitations';
-type LoadKey = 'secrets' | 'connections' | 'agents' | 'sessions' | 'activity' |
+type LoadKey = 'secrets' | 'connections' | 'sessions' | 'activity' |
   'elicitations';
 
 async function refresh(which: RefreshTarget = 'all'): Promise<void> {
   const jobs: Promise<void>[] = [];
   if (which === 'all' || which === 'secrets') jobs.push(load('secrets', 'list_secrets'));
   if (which === 'all' || which === 'connections') jobs.push(load('connections', 'list_connections'));
-  if (which === 'all' || which === 'agents') jobs.push(load('agents', 'list_agents'));
+  if (which === 'all' || which === 'identity') jobs.push(loadIdentity());
   if (which === 'all' || which === 'sessions') jobs.push(load('sessions', 'list_sessions'));
   if (which === 'all' || which === 'elicitations') jobs.push(load('elicitations', 'list_elicitations'));
   if (which === 'all' || which === 'activity') {
@@ -313,7 +311,6 @@ async function load<K extends CommandName>(
     switch (key) {
       case 'secrets': state.secrets = result as SecretSummary[]; break;
       case 'connections': state.connections = result as ConnectionSummary[]; break;
-      case 'agents': state.agents = result as AgentSummary[]; break;
       case 'sessions': state.sessions = result as SessionSummary[]; break;
       case 'activity': state.activity = result as ActivityEntry[]; break;
       case 'elicitations': state.elicitations = result as ElicitationRequest[]; break;
@@ -329,10 +326,14 @@ async function loadLocalUsername(): Promise<void> {
   try { state.localUsername = await invoke('get_local_username'); }
   catch (e) { console.error('get_local_username', e); }
 }
+async function loadIdentity(): Promise<void> {
+  try { state.identity = await invoke('get_identity'); }
+  catch (e) { console.error('get_identity', e); }
+}
 async function refreshAgentsView(): Promise<void> {
   await Promise.all([
     load('connections', 'list_connections'),
-    load('agents', 'list_agents'),
+    loadIdentity(),
   ]);
   render();
 }
@@ -470,34 +471,28 @@ function secretsTableHTML() {
 }
 
 /* ---- agents tab ---- */
-// The screen pivots around the core question — what can this agent reach?
-// One block per registered agent: an identity card on top, then one row per
-// service with a wire/unwire toggle. Wired = the agent uses the service
-// without prompting; unwired = refused.
-const agentWiringFor = (a: AgentSummary, c: ConnectionSummary): WiringSummary | undefined =>
-  (c.wired_agents || []).find((wiring) => wiring.agent_id === a.id);
+// One shared identity covers every local agent, so the screen pivots around
+// the core question — what may agents reach? A key card on top (this
+// computer's key: where it lives, and Rotate), then one row per tool with an
+// enable/disable toggle. Enabled = agents use the tool without prompting;
+// disabled = refused.
 
-// Kinds that can be issued a stable, per-wiring direct endpoint (a pasteable
+// Kinds that can be issued a stable direct endpoint (a pasteable
 // DSN/socket/URL an unmodified tool uses). WebSocket lands later.
 const ENDPOINTABLE: Record<ConnectionType, boolean> = { pg: true, ssh: true, api: true, ws: false };
 
-// The ⋮ menu on a wired Postgres/SSH/HTTP row: issue / reissue / revoke the
-// wiring's direct endpoint.
-function wiringMenuHTML(
-  a: AgentSummary,
-  c: ConnectionSummary,
-  wiring: WiringSummary | undefined,
-): string {
-  const key = `${a.id}:${c.id}`;
-  const open = state.wiringMenuOpen === key;
-  const endpoint = wiring?.endpoint ?? null;
+// The ⋮ menu on an enabled Postgres/SSH/HTTP row: issue / reissue / revoke
+// the connection's direct endpoint.
+function wiringMenuHTML(c: ConnectionSummary): string {
+  const open = state.wiringMenuOpen === c.id;
+  const endpoint = c.agent_access.endpoint ?? null;
   return `<div class="wiring-menu-wrap">
     <button class="icon-btn wiring-menu-btn ${open ? 'on' : ''}" title="Direct endpoint"
-      aria-label="Direct endpoint for ${escAttr(a.name)} on ${escAttr(c.name)}" aria-haspopup="menu"
-      aria-expanded="${open}" data-act="toggle-wiring-menu" data-id="${a.id}" data-conn="${c.id}">${ICONS.ellipsisVertical}</button>
+      aria-label="Direct endpoint for ${escAttr(c.name)}" aria-haspopup="menu"
+      aria-expanded="${open}" data-act="toggle-wiring-menu" data-conn="${c.id}">${ICONS.ellipsisVertical}</button>
     ${open ? `<div class="wiring-menu" role="menu" aria-label="Direct endpoint for ${escAttr(c.name)}">
       <div class="wiring-menu-head">Direct endpoint</div>
-      <button class="menu-item" role="menuitem" data-act="issue-endpoint" data-id="${a.id}" data-conn="${c.id}">
+      <button class="menu-item" role="menuitem" data-act="issue-endpoint" data-conn="${c.id}">
         <span class="menu-lbl">${endpoint ? 'Reissue (new secret)' : 'Issue direct endpoint'}<span class="menu-sub">${
           endpoint ? 'Rotates the secret; the old one stops working' : 'A pasteable address for an unmodified tool'}</span></span></button>
       ${endpoint ? `<button class="menu-item danger" role="menuitem" data-act="revoke-endpoint" data-endpoint="${endpoint.endpoint_id}">
@@ -506,36 +501,35 @@ function wiringMenuHTML(
   </div>`;
 }
 
-function agentToolRowHTML(a: AgentSummary, c: ConnectionSummary): string {
+function agentToolRowHTML(c: ConnectionSummary): string {
   const t = TYPES[c.type];
-  const wiring = agentWiringFor(a, c);
-  const wired = !!wiring;
-  const live = state.sessions.some((s) => s.agent === a.name && s.connection === c.name);
-  const pill = !wired
-    ? '<span class="acc-pill">Not wired</span>'
-    : '<span class="acc-pill granted">Wired</span>';
-  // A wired MCP connection can be narrowed to a curated tool subset; the
+  const enabled = c.agent_access.enabled;
+  const live = state.sessions.some((s) => s.connection === c.name);
+  const pill = !enabled
+    ? '<span class="acc-pill">Off</span>'
+    : '<span class="acc-pill granted">Enabled</span>';
+  // An enabled MCP connection can be narrowed to a curated tool subset; the
   // chip names the current scope and opens the picker.
-  const toolsChip = wired && c.mcp_path
-    ? `<button class="btn ghost sm" data-act="wiring-tools" data-id="${a.id}" data-conn="${c.id}"
-        aria-label="Choose which tools ${escAttr(a.name)} may call on ${escAttr(c.name)}"
-        title="Choose which of this server’s tools ${escAttr(a.name)} may call">${
-          wiring?.allowed_tools
-            ? `${wiring.allowed_tools.length} tool${wiring.allowed_tools.length === 1 ? '' : 's'}`
+  const toolsChip = enabled && c.mcp_path
+    ? `<button class="btn ghost sm" data-act="wiring-tools" data-conn="${c.id}"
+        aria-label="Choose which tools agents may call on ${escAttr(c.name)}"
+        title="Choose which of this server’s tools agents may call">${
+          c.agent_access.allowed_tools
+            ? `${c.agent_access.allowed_tools.length} tool${c.agent_access.allowed_tools.length === 1 ? '' : 's'}`
             : 'All tools'}</button>`
     : '';
-  // A wired Postgres/SSH/HTTP row gets the ⋮ direct-endpoint menu, left of
-  // Unwire.
-  const wiringMenu = wired && ENDPOINTABLE[c.type]
-    ? wiringMenuHTML(a, c, wiring)
+  // An enabled Postgres/SSH/HTTP row gets the ⋮ direct-endpoint menu, left
+  // of the toggle.
+  const wiringMenu = enabled && ENDPOINTABLE[c.type]
+    ? wiringMenuHTML(c)
     : '';
-  // A small chip when a direct endpoint is issued for this wiring.
-  const endpointChip = wiring?.endpoint
-    ? '<span class="acc-pill ep" title="A direct endpoint is issued for this wiring">Endpoint</span>'
+  // A small chip when a direct endpoint is issued for this connection.
+  const endpointChip = c.agent_access.endpoint
+    ? '<span class="acc-pill ep" title="A direct endpoint is issued for this tool">Endpoint</span>'
     : '';
-  const action = wired
-    ? `<button class="btn ghost sm" aria-label="Unwire ${escAttr(a.name)} from ${escAttr(c.name)}" data-act="unwire" data-id="${a.id}" data-conn="${c.id}">Unwire</button>`
-    : `<button class="btn ghost sm" aria-label="Wire ${escAttr(a.name)} to ${escAttr(c.name)}" data-act="wire" data-id="${a.id}" data-conn="${c.id}">Wire up</button>`;
+  const action = enabled
+    ? `<button class="btn ghost sm" aria-label="Disable ${escAttr(c.name)} for agents" data-act="disable-tool" data-conn="${c.id}">Disable</button>`
+    : `<button class="btn ghost sm" aria-label="Enable ${escAttr(c.name)} for agents" data-act="enable-tool" data-conn="${c.id}">Enable</button>`;
   return `<div class="acc-row">
     <span class="badge ${t.cls}">${t.label}</span>
     <div class="acc-svc"><div class="acc-name">${esc(c.name)}${live ? ' <span class="cc-live">● live</span>' : ''}</div>
@@ -543,32 +537,32 @@ function agentToolRowHTML(a: AgentSummary, c: ConnectionSummary): string {
     ${pill}${endpointChip}${toolsChip}${wiringMenu}${action}</div>`;
 }
 
-function agentBlockHTML(a: AgentSummary): string {
-  const menuOpen = state.agentMenuOpen === a.id;
-  // Wired tools first — with many tools the interesting rows would
+function identityBlockHTML(identity: IdentityInfo): string {
+  const menuOpen = state.agentMenuOpen === 'identity';
+  // Enabled tools first — with many tools the interesting rows would
   // otherwise be scattered through the list.
   const ordered = [...state.connections].sort((x, y) => {
-    const wired = Number(!!agentWiringFor(a, y)) - Number(!!agentWiringFor(a, x));
-    return wired || x.name.localeCompare(y.name);
+    const enabled = Number(y.agent_access.enabled) - Number(x.agent_access.enabled);
+    return enabled || x.name.localeCompare(y.name);
   });
-  const wiredCount = ordered.filter((c) => agentWiringFor(a, c)).length;
+  const enabledCount = ordered.filter((c) => c.agent_access.enabled).length;
   const sub = state.connections.length
-    ? `Connected to ${wiredCount} of ${state.connections.length} tool${state.connections.length === 1 ? '' : 's'} · last used ${relTime(a.last_used)}`
-    : `last used ${relTime(a.last_used)}`;
+    ? `Shared by every local agent · ${enabledCount} of ${state.connections.length} tool${state.connections.length === 1 ? '' : 's'} enabled · key at ${identity.token_path}`
+    : `Shared by every local agent · key at ${identity.token_path}`;
   const rows = ordered.length
-    ? ordered.map((c) => agentToolRowHTML(a, c)).join('')
-    : `<div class="acc-none">No tools yet.${mode === 'dropdown' ? '' : ` Add one to give ${esc(a.name)} somewhere to connect.`}</div>`;
+    ? ordered.map((c) => agentToolRowHTML(c)).join('')
+    : `<div class="acc-none">No tools yet.${mode === 'dropdown' ? '' : ' Add one to give your agents somewhere to connect.'}</div>`;
   return `<div class="agent-block">
     <div class="agent-card">
-      <span class="agent-avatar" role="img" aria-label="Agent">${ICONS.bot}</span>
-      <div class="agent-id"><div class="c-name">${esc(a.name)}</div>
+      <span class="agent-avatar" role="img" aria-label="This computer's key">${ICONS.bot}</span>
+      <div class="agent-id"><div class="c-name">This computer’s key</div>
         <div class="s-sub agent-sub">${esc(sub)}</div></div>
       <div class="agent-menu-wrap">
-        <button class="icon-btn agent-menu-btn ${menuOpen ? 'on' : ''}" title="Agent options"
-          aria-label="Options for ${escAttr(a.name)}" aria-haspopup="menu"
-          aria-expanded="${menuOpen}" data-act="toggle-agent-menu" data-id="${a.id}">${ICONS.ellipsis}</button>
-        ${menuOpen ? `<div class="agent-menu" role="menu" aria-label="Options for ${escAttr(a.name)}">
-          <button class="menu-item danger" role="menuitem" data-act="revoke-ask" data-id="${a.id}">${ICONS.unplug} Disconnect ${esc(a.name)}…</button>
+        <button class="icon-btn agent-menu-btn ${menuOpen ? 'on' : ''}" title="Key options"
+          aria-label="Key options" aria-haspopup="menu"
+          aria-expanded="${menuOpen}" data-act="toggle-agent-menu" data-id="identity">${ICONS.ellipsis}</button>
+        ${menuOpen ? `<div class="agent-menu" role="menu" aria-label="Key options">
+          <button class="menu-item danger" role="menuitem" data-act="rotate-key-ask">${ICONS.unplug} Rotate key…</button>
         </div>` : ''}
       </div>
     </div>
@@ -576,22 +570,9 @@ function agentBlockHTML(a: AgentSummary): string {
   </div>`;
 }
 
-// With no agent registered there is nothing to wire. Get started owns the
-// onboarding narrative — how an agent self-registers (POST /v1/pair) and gets
-// wired — so this is a plain empty state that points there rather than a
-// second copy of the walkthrough.
-function agentsEmptyHTML(): string {
-  const pointer = mode === 'dropdown'
-    ? 'Open the window and follow Get started.'
-    : 'Follow Get started to connect your first agent.';
-  return `<div class="empty"><div class="empty-ico">${ICONS.botMessageSquare}</div>
-    <h3>No agents connected</h3>
-    <p>${pointer}</p></div>`;
-}
-
 function agentsHTML(): string {
-  if (!state.agents.length) return agentsEmptyHTML();
-  return state.agents.map(agentBlockHTML).join('');
+  if (!state.identity) return '';
+  return identityBlockHTML(state.identity);
 }
 const liveCount = (c: ConnectionSummary): number =>
   state.sessions.filter((s) => s.connection === c.name).length;
@@ -622,12 +603,11 @@ function connectionCredential(c: ConnectionSummary): string {
   return `Uses ${names.join(' + ')}`;
 }
 
-/** Who may use it — the wiring is the whole authorization model. */
+/** Who may use it — agent access is the whole authorization model. */
 function connectionWiring(c: ConnectionSummary): { text: string; wired: boolean } {
-  const names = (c.wired_agents || []).map((w) => w.agent);
-  return names.length
-    ? { text: `Wired to ${names.join(', ')}`, wired: true }
-    : { text: 'Not wired to any agent', wired: false };
+  return c.agent_access.enabled
+    ? { text: 'Enabled for agents', wired: true }
+    : { text: 'Off for agents', wired: false };
 }
 
 // One row inside an expanded catalog entry. It spans the full card width and
@@ -637,7 +617,7 @@ function catalogConnRowHTML(c: ConnectionSummary): string {
   if (state.confirm && state.confirm.kind === 'del-conn' && state.confirm.id === c.id) {
     return `<div class="cat-conn confirm-conn">
       <div class="cat-conn-tx"><b>${esc(c.name)}</b>
-        <span class="cat-conn-danger">Delete this tool?${(c.wired_agents || []).length ? ' Wired agents will lose access.' : ''}</span></div>
+        <span class="cat-conn-danger">Delete this tool?${c.agent_access.enabled ? ' Agents will lose access.' : ''}</span></div>
       <button class="btn sm" data-act="confirm-cancel">Cancel</button>
       <button class="btn sm danger" data-act="del-conn-confirm" data-id="${c.id}">Delete</button></div>`;
   }
@@ -789,7 +769,7 @@ function isMcpDraft(draft: { isMcp?: boolean; mcpPath?: string | null }): boolea
 function connectionsHTML() {
   const ready = state.connectionReady;
   const readyPrompt = ready ? firstTaskPrompt(ready.name, ready.type) : '';
-  const readyCard = ready && state.agents.length ? `<div class="connection-ready">
+  const readyCard = ready ? `<div class="connection-ready">
     <div class="connection-ready-copy"><b>${esc(ready.name)} is ready</b>
       <span>Ask your agent:</span><code>${esc(readyPrompt)}</code></div>
     <div class="connection-ready-actions">
@@ -902,7 +882,8 @@ async function receiveActivity(entry: ActivityEntry | null | undefined): Promise
 
 function startHTML(): string {
   const option = startOptionById(state.startOption);
-  const progress = startProgress(option, state.connections, state.agents);
+  const agentConnected = state.activity.some((entry) => entry.text.startsWith('Agent connected'));
+  const progress = startProgress(option, state.connections, agentConnected);
 
   const picker = START_OPTIONS.map((candidate) =>
     `<button class="start-pick ${candidate.id === option.id ? 'on' : ''}"
@@ -922,20 +903,20 @@ function startHTML(): string {
           ? `<span class="start-note">${esc(progress.toolName)} is saved.</span>` : ''}
       </div>`;
 
-  const connectBody = `<p>Paste this into your coding agent. It registers itself and shows up on
-      the Agents tab — with no access to anything yet.</p>
+  const connectBody = `<p>Paste this into your coding agent. It reads this computer’s shared
+      key and can use every enabled tool at once.</p>
     <pre class="setup-instructions"><code>${esc(state.agentSetupInstructions || 'Loading…')}</code></pre>
     <div class="start-actions">
       <button class="btn primary sm" data-act="copy-agent-setup">Copy setup instructions</button>
-      ${progress.connected && progress.agentName
-        ? `<span class="start-note">${esc(progress.agentName)} is connected.</span>` : ''}
+      ${progress.connected
+        ? '<span class="start-note">An agent is connected.</span>' : ''}
     </div>`;
 
   const task = startTask(option, progress);
-  const wireWhat = `wire ${progress.agentName ? `<b>${esc(progress.agentName)}</b>` : 'your agent'} `
-    + `to ${progress.toolName ? `<b>${esc(progress.toolName)}</b>` : 'the tool'}`;
-  const wireBody = `<p>On the Agents tab, ${wireWhat}. Wiring is the whole permission model:
-      a wired tool works with no prompt, everything else is refused.</p>
+  const wireWhat = progress.toolName ? `<b>${esc(progress.toolName)}</b>` : 'the tool';
+  const wireBody = `<p>Tools are enabled for agents when you add them — ${wireWhat} is ready to use.
+      Flip access per tool on the Agents tab: an enabled tool works with no prompt,
+      a disabled one is refused.</p>
     <pre class="start-task"><code>${esc(task)}</code></pre>
     <div class="start-actions">
       <button class="btn sm" data-act="copy-text" data-text="${escAttr(task)}">Copy this task</button>
@@ -951,7 +932,7 @@ function startHTML(): string {
     <ol class="start-steps">
       ${step(1, option.connType ? `Add the ${option.label} tool` : `Add an ${option.label}`, progress.added, addBody)}
       ${step(2, 'Connect your agent', progress.connected, connectBody)}
-      ${step(3, 'Wire them together, then ask for something useful', progress.wired, wireBody)}
+      ${step(3, 'Ask for something useful', progress.wired, wireBody)}
     </ol>
   </div>`;
 }
@@ -1122,7 +1103,7 @@ function elicitationSheet(): string {
 function wiringToolsSheet(): string {
   const wt = state.wiringTools;
   if (!wt) return '';
-  const title = `Tools for ${wt.agentName} on ${wt.connectionName}`;
+  const title = `Tools agents may call on ${wt.connectionName}`;
   let body = '';
   if (wt.loading) {
     body = '<div class="cc-test running">Asking the server for its tools…</div>';
@@ -1159,7 +1140,7 @@ function wiringToolsSheet(): string {
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
     <div class="sheet wide" role="dialog" aria-modal="true" aria-labelledby="wt-title">
       <h3 id="wt-title">${esc(title)}</h3>
-      <p class="wt-sub">${esc(wt.agentName)} can call ${esc(count)} on this server. Everything
+      <p class="wt-sub">Agents can call ${esc(count)} on this server. Everything
         unchecked is refused by the broker and hidden from the agent's tool list.</p>
       ${body}
       <div class="sheet-actions">
@@ -1537,8 +1518,8 @@ function connSheet(editing: boolean): string {
         <span class="adv-toggle-icon" aria-hidden="true">${ICONS.chevronDown}</span>Advanced</button>
       ${advOpen ? advancedFields : ''}</div>`;
   }
-  if (editing && conn && (conn.wired_agents || []).length) {
-    fields += `<div class="rule-note">Changing the destination unwires affected agents.</div>`;
+  if (editing && conn) {
+    fields += `<div class="rule-note">Changing the destination revokes direct endpoints and resets the tool selection.</div>`;
   }
   const label = (!editing && state.connEntryName) || catalogNameForType(t);
   const oauthSelected = !editing && t === 'api' && isMcpDraft(d)
@@ -2289,7 +2270,7 @@ document.addEventListener('click', async (e) => {
       render();
       break;
     case 'toggle-wiring-menu': {
-      const key = `${id}:${btn.dataset.conn || ''}`;
+      const key = btn.dataset.conn || '';
       state.wiringMenuOpen = state.wiringMenuOpen === key ? null : key;
       render();
       break;
@@ -2299,7 +2280,7 @@ document.addEventListener('click', async (e) => {
       state.wiringMenuOpen = null;
       // Not via run(): we need the one-time result to show its secret.
       try {
-        const info = await invoke('issue_endpoint', { agentId: id, connectionId });
+        const info = await invoke('issue_endpoint', { connectionId });
         state.sheet = { kind: 'endpoint-issued', endpoint: info };
         await refresh('all');
       } catch (error) {
@@ -2663,18 +2644,15 @@ document.addEventListener('click', async (e) => {
       break;
     }
     case 'wiring-tools': {
-      const agent = state.agents.find((x) => x.id === id);
       const connection = state.connections.find((x) => x.id === btn.dataset.conn);
-      if (!agent || !connection) break;
-      const wiring = (connection.wired_agents || []).find((w) => w.agent_id === agent.id);
+      if (!connection) break;
       state.sheet = { kind: 'wiring-tools' };
       state.wiringTools = {
-        agentId: agent.id,
-        agentName: agent.name,
         connectionId: connection.id,
         connectionName: connection.name,
         loading: true,
-        selected: wiring?.allowed_tools ? [...wiring.allowed_tools] : null,
+        selected: connection.agent_access.allowed_tools
+          ? [...connection.agent_access.allowed_tools] : null,
         saving: false,
       };
       render();
@@ -2710,8 +2688,8 @@ document.addEventListener('click', async (e) => {
       if (!wt || wt.saving) break;
       wt.saving = true;
       render(false);
-      if (await run(() => invoke('set_wiring_tools', {
-        agentId: wt.agentId, connectionId: wt.connectionId, tools: wt.selected,
+      if (await run(() => invoke('set_allowed_tools', {
+        connectionId: wt.connectionId, tools: wt.selected,
       }))) {
         toast(wt.selected === null
           ? '🔧 All tools allowed'
@@ -2755,21 +2733,21 @@ document.addEventListener('click', async (e) => {
       closeSheet();
       await refresh('all');
       break;
-    case 'wire':
-      await run(() => invoke('set_wiring', { agentId: id, connectionId: btn.dataset.conn || '', wired: true }));
+    case 'enable-tool':
+      await run(() => invoke('set_tool_access', { connectionId: btn.dataset.conn || '', enabled: true }));
       await refresh('all');
       break;
-    case 'unwire':
-      await run(() => invoke('set_wiring', { agentId: id, connectionId: btn.dataset.conn || '', wired: false }));
-      toast('🔌 Unwired'); await refresh('all');
+    case 'disable-tool':
+      await run(() => invoke('set_tool_access', { connectionId: btn.dataset.conn || '', enabled: false }));
+      toast('🔌 Disabled for agents'); await refresh('all');
       break;
 
-    case 'revoke-ask': {
+    case 'rotate-key-ask': {
       if (state.agentMenuOpen) { state.agentMenuOpen = null; render(); }
       let confirmed = false;
-      if (!await run(async () => { confirmed = await invoke('confirm_agent_disconnect'); }) || !confirmed) break;
-      if (await run(() => invoke('revoke_agent', { id }))) {
-        toast('🔒 Agent disconnected'); await refresh('all');
+      if (!await run(async () => { confirmed = await invoke('confirm_rotate_key'); }) || !confirmed) break;
+      if (await run(() => invoke('rotate_key'))) {
+        toast('🔑 Key rotated — agents reconnect from the token file'); await refresh('all');
       }
       break;
     }
@@ -3070,9 +3048,9 @@ async function boot() {
   await Promise.all([
     loadLocalUsername(),
     load('connections', 'list_connections'),
-    load('agents', 'list_agents'),
+    loadIdentity(),
   ]);
-  if (mode !== 'dropdown' && !state.connections.length && !state.agents.length) {
+  if (mode !== 'dropdown' && !state.connections.length) {
     state.tab = 'start';
   }
   await refresh('all');
@@ -3103,12 +3081,10 @@ async function boot() {
     // is correct — nothing to close here, the user dismisses it informed.
   });
   await listen('aka://agents-changed', async () => {
-    const before = new Map(state.agents.map((agent) => [agent.name, agent.paired_at]));
-    await load('agents', 'list_agents');
+    // Fires when an agent fetches the shared key (compat pair) or the key
+    // rotates; the Paired audit entry carries the who.
+    await loadIdentity();
     render();
-    const connected = state.agents.find((agent) =>
-      !before.has(agent.name) || before.get(agent.name) !== agent.paired_at);
-    if (connected) toast(`🔗 ${connected.name} is connected — wire it to your tools from the Agents tab`);
   });
   await listen('aka://wirings-changed', () => refreshAgentsView());
   // A core-side connection change (a trust-on-first-use host-key pin) has no

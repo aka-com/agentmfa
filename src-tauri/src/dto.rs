@@ -7,7 +7,7 @@
 use aka_core::audit::AuditEntry;
 use aka_core::broker::Broker;
 use aka_core::sessions::SessionInfo;
-use aka_core::types::{Connection, PairedAgent, SecretMeta, Wiring};
+use aka_core::types::{BrokerIdentity, Connection, SecretMeta};
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -45,17 +45,18 @@ pub struct OAuthDto {
     pub scopes: Vec<String>,
 }
 
-/// One agent wired to a connection, as the UI toggles it.
+/// A connection's agent access, as the UI toggles it. There is one shared
+/// identity, so this is per connection, not per agent.
 #[derive(Serialize)]
-pub struct WiringChip {
-    pub agent_id: String,
-    pub agent: String,
+pub struct AccessDto {
+    /// Whether agents may use the connection (default true).
+    pub enabled: bool,
     /// Curated upstream MCP tool subset; absent means all tools.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_tools: Option<Vec<String>>,
-    /// The direct endpoint issued for this wiring, if any. Its presence flips
-    /// the row's control from "Issue" to "Copy / Revoke"; the secret is never
-    /// carried here (it left the broker once, at issue).
+    /// The direct endpoint issued for this connection, if any. Its presence
+    /// flips the row's control from "Issue" to "Reissue / Revoke"; the secret
+    /// is never carried here (it left the broker once, at issue).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<EndpointChip>,
 }
@@ -105,8 +106,9 @@ pub struct ConnectionDto {
     /// Whether this connection uses a broker-managed OAuth grant. The grant
     /// itself lives in the vault and is never exposed to the webview.
     pub oauth: bool,
-    /// Agents wired to this connection.
-    pub wired_agents: Vec<WiringChip>,
+    /// Agent access for this connection (shared identity — one setting
+    /// covers every agent).
+    pub agent_access: AccessDto,
     // Type-specific config, prefilled into the Edit sheet.
     pub host: Option<String>,
     pub scheme: Option<String>,
@@ -135,29 +137,25 @@ pub struct ConnectionDto {
 }
 
 impl ConnectionDto {
-    pub fn from(conn: &Connection, all_wirings: &[Wiring], broker: &Broker) -> Self {
+    pub fn from(conn: &Connection, broker: &Broker) -> Self {
         use aka_core::types::ConnectionConfig::*;
         let secret_names = conn
             .secrets
             .iter()
             .filter_map(|id| broker.store.secret_by_id(id).ok().map(|s| s.name))
             .collect();
-        let wired_agents: Vec<WiringChip> = all_wirings
-            .iter()
-            .filter(|w| w.connection_id == conn.id)
-            .map(|w| WiringChip {
-                agent_id: w.client_id.to_string(),
-                agent: w.agent.clone(),
-                allowed_tools: w.allowed_tools.clone(),
-                endpoint: broker
-                    .endpoints
-                    .get_for_wiring(&w.client_id, &conn.id)
-                    .map(|e| EndpointChip {
-                        endpoint_id: e.id.to_string(),
-                        kind: e.kind.as_str().to_string(),
-                    }),
-            })
-            .collect();
+        let entry = broker.access.entry(&conn.id);
+        let agent_access = AccessDto {
+            enabled: entry.as_ref().map(|e| e.enabled).unwrap_or(true),
+            allowed_tools: entry.and_then(|e| e.allowed_tools),
+            endpoint: broker
+                .endpoints
+                .get_for_connection(&conn.id)
+                .map(|e| EndpointChip {
+                    endpoint_id: e.id.to_string(),
+                    kind: e.kind.as_str().to_string(),
+                }),
+        };
         let health = broker.health.get(&conn.id);
         let mut dto = ConnectionDto {
             id: conn.id.to_string(),
@@ -166,7 +164,7 @@ impl ConnectionDto {
             target: conn.target(),
             secret_names,
             oauth: conn.oauth.is_some(),
-            wired_agents,
+            agent_access,
             host: None,
             scheme: None,
             port: None,
@@ -251,26 +249,29 @@ impl ConnectionDto {
     }
 }
 
+/// The shared broker identity, for the Connect page's key card. Never the
+/// key itself — only its home and lifecycle metadata.
 #[derive(Serialize)]
-pub struct AgentDto {
-    pub id: String,
-    pub name: String,
-    pub paired_at: String,
+pub struct IdentityDto {
+    pub client_id: String,
+    /// Where the plaintext key lives (`~/.aka/token`), for display and copy
+    /// instructions.
+    pub token_path: String,
+    pub minted_at: String,
     pub last_used: String,
-    pub wiring_count: usize,
+    /// How many legacy per-agent tokens still work as aliases (cleared by
+    /// the first rotation).
+    pub legacy_aliases: usize,
 }
 
-impl AgentDto {
-    pub fn from(agent: &PairedAgent, wirings: &[Wiring]) -> Self {
+impl IdentityDto {
+    pub fn from(identity: &BrokerIdentity, broker: &Broker) -> Self {
         Self {
-            id: agent.id.to_string(),
-            name: agent.name.clone(),
-            paired_at: agent.paired_at.to_rfc3339(),
-            last_used: agent.last_used.to_rfc3339(),
-            wiring_count: wirings
-                .iter()
-                .filter(|wiring| wiring.client_id == agent.id)
-                .count(),
+            client_id: identity.id.to_string(),
+            token_path: broker.paths.token_display(),
+            minted_at: identity.minted_at.to_rfc3339(),
+            last_used: identity.last_used.to_rfc3339(),
+            legacy_aliases: identity.alias_hashes.len(),
         }
     }
 }

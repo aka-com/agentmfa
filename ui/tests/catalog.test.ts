@@ -19,7 +19,7 @@ import type { ConnectionSummary, ConnectionType } from '../src/types';
 
 function conn(type: ConnectionType, host: string | null, name = 'x'): ConnectionSummary {
   return {
-    id: name, name, type, target: host || '', secret_names: [], oauth: false, wired_agents: [],
+    id: name, name, type, target: host || '', secret_names: [], oauth: false, agent_access: { enabled: true },
     host, scheme: null, port: null, template: null, dbname: null, user: null,
     host_key_fingerprint: null, destination: null, sslmode: null, url: null,
     trusted_ca_bundle_path: null,

@@ -9,16 +9,19 @@ export interface SecretSummary {
   updated_at: string;
 }
 
-/** One agent wired to a connection. */
-export interface WiringSummary {
-  agent_id: string;
-  agent: string;
-  /** Curated upstream MCP tool subset for this agent; absent means all. */
+/**
+ * A connection's agent access. There is one shared local identity, so this
+ * is a property of the connection — one setting covers every agent.
+ */
+export interface AgentAccess {
+  /** Whether agents may use the connection (default true). */
+  enabled: boolean;
+  /** Curated upstream MCP tool subset; absent means all tools. */
   allowed_tools?: string[] | null;
   /**
-   * The direct endpoint issued for this wiring, if any. Its presence flips
-   * the row's control from "Issue" to "Copy / Revoke". Never carries the
-   * secret — that leaves the broker once, at issue.
+   * The direct endpoint issued for this connection, if any. Its presence
+   * flips the row's control from "Issue" to "Reissue / Revoke". Never
+   * carries the secret — that leaves the broker once, at issue.
    */
   endpoint?: { endpoint_id: string; type: ConnectionType } | null;
 }
@@ -52,7 +55,7 @@ export interface ConnectionSummary {
   secret_names: string[];
   /** True when the broker injects and refreshes a vault-backed OAuth grant. */
   oauth: boolean;
-  wired_agents: WiringSummary[];
+  agent_access: AgentAccess;
   host: string | null;
   scheme: string | null;
   port: number | null;
@@ -76,12 +79,15 @@ export interface ConnectionSummary {
   last_checked_at?: string | null;
 }
 
-export interface AgentSummary {
-  id: string;
-  name: string;
-  paired_at: string;
+/** The shared broker identity ("this computer's key") — never the key itself. */
+export interface IdentityInfo {
+  client_id: string;
+  /** Where the plaintext key lives (`~/.aka/token`). */
+  token_path: string;
+  minted_at: string;
   last_used: string;
-  wiring_count: number;
+  /** Legacy per-agent tokens still working as aliases (cleared by rotation). */
+  legacy_aliases: number;
 }
 
 export interface SessionSummary {
@@ -282,7 +288,7 @@ export interface CommandMap {
   get_local_username: CommandSpec<undefined, string>;
   list_secrets: CommandSpec<undefined, SecretSummary[]>;
   list_connections: CommandSpec<undefined, ConnectionSummary[]>;
-  list_agents: CommandSpec<undefined, AgentSummary[]>;
+  get_identity: CommandSpec<undefined, IdentityInfo>;
   list_sessions: CommandSpec<undefined, SessionSummary[]>;
   list_activity: CommandSpec<{ limit: number }, ActivityEntry[]>;
   clear_activity: CommandSpec<undefined, void>;
@@ -308,23 +314,16 @@ export interface CommandMap {
   get_mcp_auth: CommandSpec<{ id: string }, McpAuthState | null>;
   cancel_mcp_auth: CommandSpec<{ id: string }, boolean>;
   mcp_status: CommandSpec<{ id: string; options?: McpCheckOptions | null }, McpStatusReport>;
-  set_wiring_tools: CommandSpec<
-    { agentId: string; connectionId: string; tools?: string[] | null },
-    boolean
-  >;
+  set_allowed_tools: CommandSpec<{ connectionId: string; tools?: string[] | null }, boolean>;
   list_mcp_tools: CommandSpec<{ id: string }, McpToolInfo[]>;
   oauth_connect: CommandSpec<{ input: ConnectionInput; clientSecret?: string | null }, void>;
   oauth_reconnect: CommandSpec<{ id: string }, void>;
   open_url: CommandSpec<{ url: string }, void>;
-  set_wiring: CommandSpec<{
-    agentId: string;
-    connectionId: string;
-    wired: boolean;
-  }, boolean>;
-  issue_endpoint: CommandSpec<{ agentId: string; connectionId: string }, IssuedEndpoint>;
+  set_tool_access: CommandSpec<{ connectionId: string; enabled: boolean }, boolean>;
+  issue_endpoint: CommandSpec<{ connectionId: string }, IssuedEndpoint>;
   revoke_endpoint: CommandSpec<{ endpointId: string }, boolean>;
-  confirm_agent_disconnect: CommandSpec<undefined, boolean>;
-  revoke_agent: CommandSpec<{ id: string }, boolean>;
+  confirm_rotate_key: CommandSpec<undefined, boolean>;
+  rotate_key: CommandSpec<undefined, void>;
   close_session: CommandSpec<{ id: number }, boolean>;
   list_elicitations: CommandSpec<undefined, ElicitationRequest[]>;
   respond_elicitation: CommandSpec<{

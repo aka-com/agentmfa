@@ -5,7 +5,7 @@
 // The copy lives here (rather than inline in the renderer) so the prompts and
 // the progress rules are testable on their own.
 
-import type { AgentSummary, ConnectionSummary, ConnectionType } from './types';
+import type { ConnectionSummary, ConnectionType } from './types';
 
 export interface StartOption {
   id: string;
@@ -79,21 +79,21 @@ export function startOptionById(id: string): StartOption {
 export interface StartProgress {
   /** A tool of this kind exists. */
   added: boolean;
-  /** At least one agent has registered. */
+  /** An agent has fetched the shared key (a pair/whoami has been seen). */
   connected: boolean;
-  /** An agent is wired to a tool of this kind. */
+  /** A tool of this kind is enabled for agents. */
   wired: boolean;
   /** The tool the example task should name. */
   toolName: string | null;
-  /** The agent the wiring step should name. */
-  agentName: string | null;
 }
 
-/** Live progress for the chosen option, read straight from broker state. */
+/** Live progress for the chosen option, read straight from broker state.
+ * `agentConnected` is supplied by the caller (there is no agent registry
+ * under the shared identity — the signal is activity, not a roster). */
 export function startProgress(
   option: StartOption,
   connections: ConnectionSummary[],
-  agents: AgentSummary[],
+  agentConnected: boolean,
 ): StartProgress {
   const matching = option.connType
     ? connections.filter(
@@ -102,19 +102,14 @@ export function startProgress(
         && Boolean(connection.mcp_path) === Boolean(option.mcp),
     )
     : [];
-  // Prefer showing a tool that is already usable by an agent.
-  const wiredTool = matching.find((connection) => (connection.wired_agents || []).length > 0);
-  const tool = wiredTool ?? matching[0] ?? null;
-  // Name the agent that actually holds the wiring when one exists — with more
-  // than one registered agent, agents[0] need not be the wired one, and the
-  // wire step would otherwise name an agent that isn't connected to the tool.
-  const wiredAgent = wiredTool ? (wiredTool.wired_agents || [])[0]?.agent : undefined;
+  // Prefer showing a tool that is already usable by agents.
+  const enabledTool = matching.find((connection) => connection.agent_access.enabled);
+  const tool = enabledTool ?? matching[0] ?? null;
   return {
     added: matching.length > 0,
-    connected: agents.length > 0,
-    wired: Boolean(wiredTool),
+    connected: agentConnected,
+    wired: Boolean(enabledTool),
     toolName: tool ? tool.name : null,
-    agentName: wiredAgent ?? (agents.length ? agents[0].name : null),
   };
 }
 

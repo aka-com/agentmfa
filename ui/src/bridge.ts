@@ -6,7 +6,6 @@
 
 import type {
   ActivityEntry,
-  AgentSummary,
   CommandArgs,
   CommandName,
   CommandResult,
@@ -79,7 +78,7 @@ const MOCK_ACTIVITY_META = {
   inputProvided: { icon: 'circleCheck', tone: 'success' },
   inputRefused: { icon: 'circleX', tone: 'danger' },
 };
-const MOCK_AGENT_SETUP = 'Connect to the local Multitool broker. Read its current instructions, then list what connections are currently available:\n\ncurl -fsS --unix-socket ~/.aka/broker.sock http://localhost/instructions';
+const MOCK_AGENT_SETUP = "Connect to the local Multitool broker. Read its current instructions, then list the available connections:\n\ncurl -fsS --unix-socket ~/.aka/broker.sock http://localhost/instructions\n\nAuthenticate with this computer's shared key — read it from ~/.aka/token and send it as `Authorization: Bearer <key>`.";
 function emit<K extends EventName>(event: K, payload: EventMap[K]): void {
   (listeners[event] || []).forEach((callback) => callback({ event, payload }));
 }
@@ -131,21 +130,28 @@ interface MockConnection {
   oauth_spec?: { auth_url: string; token_url: string; client_id: string; scopes: string[] } | null;
 }
 
-interface MockWiring {
-  client_id: string;
-  agent: string;
+/** Per-connection agent access; a missing record means the default
+ * (enabled, all tools). */
+interface MockAccess {
   connection_id: string;
+  enabled: boolean;
   allowed_tools?: string[];
   endpoint?: { endpoint_id: string; type: ConnectionType };
 }
 
-type MockAgent = Omit<AgentSummary, 'wiring_count'>;
+interface MockIdentity {
+  client_id: string;
+  token_path: string;
+  minted_at: string;
+  last_used: string;
+  legacy_aliases: number;
+}
 
 interface MockDatabase {
   secrets: MockSecret[];
   connections: MockConnection[];
-  wirings: MockWiring[];
-  agents: MockAgent[];
+  access: MockAccess[];
+  identity: MockIdentity;
   sessions: SessionSummary[];
   activity: ActivityEntry[];
   elicitations: ElicitationRequest[];
@@ -165,9 +171,8 @@ interface MockArgs {
   limit: number;
   on: boolean;
   secs: number;
-  agentId: string;
   connectionId: string;
-  wired: boolean;
+  enabled: boolean;
   tools?: string[] | null;
   clientSecret?: string | null;
   source: string;
@@ -189,10 +194,14 @@ const db: MockDatabase = {
     mkSecret('NOTION_TOKEN', 'ntn_demo_2f81c4a9b3e7'),
   ],
   connections: [],
-  wirings: [],
-  agents: [
-    { id: uid(), name: 'claude-code', paired_at: now(), last_used: now() },
-  ],
+  access: [],
+  identity: {
+    client_id: uid(),
+    token_path: '~/.aka/token',
+    minted_at: now(),
+    last_used: now(),
+    legacy_aliases: 0,
+  },
   sessions: [],
   activity: [],
   elicitations: [],
@@ -250,12 +259,12 @@ seedFixtures();
 // Illustrative broker state so the standalone dev page exercises every layout
 // affordance: ongoing access, temporary access, an open connection, and activity.
 function seedFixtures() {
-  const wire = (i: number) =>
-    db.wirings.push({ client_id: db.agents[0].id, agent: 'claude-code', connection_id: db.connections[i].id });
-  wire(0); // github
-  wire(1); // notion
-  wire(2); // prod-db
-  wire(5); // prod-ssh
+  // Connections are enabled by default; record the two switched-off ones so
+  // the standalone dev page shows both states.
+  const disable = (i: number) =>
+    db.access.push({ connection_id: db.connections[i].id, enabled: false });
+  disable(3); // market-feed
+  disable(4); // internal-api
   db.sessions.push({
     id: 1,
     type: 'ws',
@@ -312,9 +321,14 @@ function connDto(c: MockConnection): ConnectionSummary {
     id: c.id, name: c.name, type: c.type, target: connTarget(c),
     secret_names: c.secret_names,
     oauth: c.oauth ?? false,
-    wired_agents: db.wirings
-      .filter((w) => w.connection_id === c.id)
-      .map((w) => ({ agent_id: w.client_id, agent: w.agent, allowed_tools: w.allowed_tools ?? null, endpoint: w.endpoint ?? null })),
+    agent_access: (() => {
+      const record = db.access.find((a) => a.connection_id === c.id);
+      return {
+        enabled: record?.enabled ?? true,
+        allowed_tools: record?.allowed_tools ?? null,
+        endpoint: record?.endpoint ?? null,
+      };
+    })(),
     host: c.host || null, scheme: c.scheme || null, port: c.port || null, template: c.template || null,
     mcp_path: c.mcp_path || null, account: c.account || null, oauth_spec: c.oauth_spec || null,
     dbname: c.dbname || null, user: c.user || null, host_key_fingerprint: c.host_key_fingerprint || null,
@@ -473,9 +487,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         return { id: s.id, name: s.name, used_by: names.length, used_by_names: names, created_at: s.created_at, updated_at: s.updated_at };
       });
     case 'list_connections': return db.connections.map(connDto);
-    case 'list_agents':
-      return db.agents.map((a) => ({ ...a,
-        wiring_count: db.wirings.filter((w) => w.client_id === a.id).length }));
+    case 'get_identity': return { ...db.identity };
     case 'list_sessions': return db.sessions.slice();
     case 'list_activity': return db.activity.slice(0, Math.min(args.limit ?? MOCK_ACTIVITY_LIMIT, MOCK_ACTIVITY_LIMIT));
     case 'clear_activity': db.activity = []; emit('aka://activity-changed', {}); return;
@@ -597,7 +609,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
     case 'delete_connection': {
       const c = db.connections.find((x) => x.id === args.id); if (!c) throw new Error('no such connection');
       db.connections = db.connections.filter((x) => x.id !== args.id);
-      db.wirings = db.wirings.filter((w) => w.connection_id !== args.id);
+      db.access = db.access.filter((a) => a.connection_id !== args.id);
       audit('connectionDeleted', `Tool deleted: ${c.name}`); return;
     }
     case 'test_connection': {
@@ -647,21 +659,21 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       return report;
     }
     case 'open_url': return;
-    case 'set_wiring': {
-      const agent = db.agents.find((a) => a.id === args.agentId);
+    case 'set_tool_access': {
       const connection = db.connections.find((c) => c.id === args.connectionId);
-      if (!agent || !connection) return false;
-      const wired = db.wirings.some((w) =>
-        w.client_id === agent.id && w.connection_id === connection.id);
-      if (args.wired && !wired) {
-        db.wirings.push({ client_id: agent.id, agent: agent.name, connection_id: connection.id });
-        audit('wired', `${agent.name} wired to ${connection.name}`,
-          null, { agent: agent.name, connection: connection.name });
-      } else if (!args.wired && wired) {
-        db.wirings = db.wirings.filter((w) =>
-          !(w.client_id === agent.id && w.connection_id === connection.id));
-        audit('unwired', `${agent.name} unwired from ${connection.name}`);
+      if (!connection) return false;
+      let record = db.access.find((a) => a.connection_id === connection.id);
+      const current = record?.enabled ?? true;
+      if (current === args.enabled) return false;
+      if (!record) {
+        record = { connection_id: connection.id, enabled: args.enabled };
+        db.access.push(record);
+      } else {
+        record.enabled = args.enabled;
       }
+      audit(args.enabled ? 'wired' : 'unwired',
+        `Agent access ${args.enabled ? 'enabled' : 'disabled'} for ${connection.name}`,
+        null, { connection: connection.name });
       emit('aka://wirings-changed', {});
       return true;
     }
@@ -701,13 +713,17 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       emit('aka://connections-changed', {});
       return;
     }
-    case 'set_wiring_tools': {
-      const wiring = db.wirings.find((w) =>
-        w.client_id === args.agentId && w.connection_id === args.connectionId);
-      if (!wiring) return false;
+    case 'set_allowed_tools': {
+      const connection = db.connections.find((c) => c.id === args.connectionId);
+      if (!connection) return false;
+      let record = db.access.find((a) => a.connection_id === connection.id);
+      if (!record) {
+        record = { connection_id: connection.id, enabled: true };
+        db.access.push(record);
+      }
       const tools = args.tools;
-      if (tools == null) delete wiring.allowed_tools;
-      else wiring.allowed_tools = [...tools];
+      if (tools == null) delete record.allowed_tools;
+      else record.allowed_tools = [...tools];
       emit('aka://wirings-changed', {});
       emit('aka://connections-changed', {});
       return true;
@@ -724,14 +740,17 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       }));
     }
     case 'issue_endpoint': {
-      const wiring = db.wirings.find((w) =>
-        w.client_id === args.agentId && w.connection_id === args.connectionId);
-      if (!wiring) throw new Error('wire the agent to this tool before issuing a direct endpoint');
       const connection = db.connections.find((c) => c.id === args.connectionId);
       if (!connection) throw new Error('no such tool');
+      let record = db.access.find((a) => a.connection_id === connection.id);
+      if (record && !record.enabled) throw new Error('enable this tool for agents before issuing a direct endpoint');
       const kind = connection.type;
       if (kind === 'ws') throw new Error(`direct endpoints are not available for ${kind} tools`);
-      const endpointId = wiring.endpoint?.endpoint_id ?? `mock-endpoint-${connection.id}-${wiring.client_id}`;
+      if (!record) {
+        record = { connection_id: connection.id, enabled: true };
+        db.access.push(record);
+      }
+      const endpointId = record.endpoint?.endpoint_id ?? `mock-endpoint-${connection.id}`;
       const secret = 'end_' + 'demo0'.repeat(12) + '0000';
       const dir = `~/.aka/endpoints/${endpointId}`;
       let dsn: string;
@@ -749,31 +768,29 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         dsn = 'http://127.0.0.1:52000';
         example = `curl -H "Authorization: Bearer ${secret}" ${dsn}/<path>`;
       }
-      wiring.endpoint = { endpoint_id: endpointId, type: kind };
-      audit('wired', `Direct endpoint issued: ${wiring.agent} → ${connection.name}`);
+      record.endpoint = { endpoint_id: endpointId, type: kind };
+      audit('wired', `Direct endpoint issued: ${connection.name}`);
       emit('aka://wirings-changed', {});
       return { endpoint_id: endpointId, type: kind, dsn, secret: shownSecret, example };
     }
     case 'revoke_endpoint': {
-      const wiring = db.wirings.find((w) => w.endpoint?.endpoint_id === args.endpointId);
-      if (!wiring) return false;
-      const connection = db.connections.find((c) => c.id === wiring.connection_id);
-      delete wiring.endpoint;
-      audit('unwired', `Direct endpoint revoked: ${wiring.agent}${connection ? ` → ${connection.name}` : ''}`);
+      const record = db.access.find((a) => a.endpoint?.endpoint_id === args.endpointId);
+      if (!record) return false;
+      const connection = db.connections.find((c) => c.id === record.connection_id);
+      delete record.endpoint;
+      audit('unwired', `Direct endpoint revoked${connection ? `: ${connection.name}` : ''}`);
       emit('aka://wirings-changed', {});
       return true;
     }
-    case 'confirm_agent_disconnect':
-      return window.confirm('Disconnect agent\n\nDisconnect this agent? Its wirings and active sessions will end.');
-    case 'revoke_agent':
-      { const agent = db.agents.find((a) => a.id === args.id); if (!agent) return false;
-      db.agents = db.agents.filter((a) => a.id !== args.id);
-      db.wirings = db.wirings.filter((w) => w.client_id !== agent.id);
-      db.sessions = db.sessions.filter((s) => s.agent !== agent.name);
-      audit('tokenRevoked', `Agent disconnected: ${agent.name}`); }
+    case 'confirm_rotate_key':
+      return window.confirm("Rotate key\n\nRotate this computer's key? Every live agent session closes now, and anything holding a pasted copy of the old key stops working until updated.");
+    case 'rotate_key':
+      db.identity = { ...db.identity, minted_at: now(), last_used: now(), legacy_aliases: 0 };
+      db.sessions = [];
+      audit('tokenRevoked', 'Key rotated; all agents disconnected');
       emit('aka://agents-changed', {});
       emit('aka://sessions-changed', {});
-      return true;
+      return;
     case 'close_session': db.sessions = db.sessions.filter((s) => s.id !== args.id); emit('aka://sessions-changed', {}); return true;
     case 'list_elicitations': return db.elicitations.slice();
     case 'respond_elicitation': {

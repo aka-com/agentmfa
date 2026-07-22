@@ -286,24 +286,18 @@ pub fn list_secrets(state: State<AppState>) -> Vec<SecretDto> {
 #[tauri::command]
 pub fn list_connections(state: State<AppState>) -> Vec<ConnectionDto> {
     let broker = &state.broker;
-    let wirings = broker.wirings();
     broker
         .store
         .list_connections()
         .iter()
-        .map(|c| ConnectionDto::from(c, &wirings, broker))
+        .map(|c| ConnectionDto::from(c, broker))
         .collect()
 }
 
 #[tauri::command]
-pub fn list_agents(state: State<AppState>) -> Vec<AgentDto> {
+pub fn get_identity(state: State<AppState>) -> IdentityDto {
     let broker = &state.broker;
-    let wirings = broker.wirings();
-    broker
-        .paired_agents()
-        .iter()
-        .map(|a| AgentDto::from(a, &wirings))
-        .collect()
+    IdentityDto::from(&broker.identity_info(), broker)
 }
 
 #[tauri::command]
@@ -346,20 +340,26 @@ pub fn get_settings(state: State<AppState>) -> SettingsDto {
     }
 }
 
-fn agent_setup_instructions(socket: &str) -> String {
+fn agent_setup_instructions(socket: &str, token_path: &str) -> String {
     format!(
-        "Connect to the local Multitool broker. Read its current instructions, then list what connections are currently available and which of them you are wired to:\n\ncurl -fsS --unix-socket {socket} http://localhost/instructions"
+        "Connect to the local Multitool broker. Read its current instructions, then list the available connections:\n\ncurl -fsS --unix-socket {socket} http://localhost/instructions\n\nAuthenticate with this computer's shared key — read it from {token_path} and send it as `Authorization: Bearer <key>`."
     )
 }
 
 #[tauri::command]
 pub fn get_agent_setup(state: State<AppState>) -> String {
-    agent_setup_instructions(&state.broker.paths.socket_display())
+    agent_setup_instructions(
+        &state.broker.paths.socket_display(),
+        &state.broker.paths.token_display(),
+    )
 }
 
 #[tauri::command]
 pub fn copy_agent_setup(app: AppHandle, state: State<AppState>) -> CmdResult<()> {
-    let instructions = agent_setup_instructions(&state.broker.paths.socket_display());
+    let instructions = agent_setup_instructions(
+        &state.broker.paths.socket_display(),
+        &state.broker.paths.token_display(),
+    );
     app.clipboard()
         .write_text(instructions)
         .map_err(|error| error.to_string())
@@ -908,41 +908,37 @@ pub async fn oauth_reconnect(state: State<'_, AppState>, id: String) -> CmdResul
         .map_err(|e| e.to_string())
 }
 
-/* ------------------------------- wirings ---------------------------------- */
+/* ----------------------------- agent access -------------------------------- */
 
-/// Wire or unwire an agent from a connection. Editing the wiring table is
-/// the whole authorization model: wired agents use the connection without
-/// prompting, unwired agents are refused.
+/// Enable or disable agent access for a connection. Editing this table is
+/// the whole authorization model: enabled connections execute without
+/// prompting, disabled ones are refused — for every local agent at once.
 #[tauri::command]
-pub fn set_wiring(
+pub fn set_tool_access(
     state: State<AppState>,
-    agent_id: String,
     connection_id: String,
-    wired: bool,
+    enabled: bool,
 ) -> CmdResult<bool> {
-    let agent_id = parse_id(&agent_id)?;
     let connection_id = parse_id(&connection_id)?;
     state
         .broker
-        .ui_set_wiring(&agent_id, &connection_id, wired)
+        .ui_set_tool_access(&connection_id, enabled)
         .map_err(|e| e.to_string())
 }
 
-/// Curate which upstream MCP tools a wiring may call. `null` restores the
-/// default (all tools). Enforced broker-side on every `tools/call`; the
-/// sidecar's tool listing mirrors it.
+/// Curate which upstream MCP tools agents may call on a connection. `null`
+/// restores the default (all tools). Enforced broker-side on every
+/// `tools/call`; the sidecar's tool listing mirrors it.
 #[tauri::command]
-pub fn set_wiring_tools(
+pub fn set_allowed_tools(
     state: State<AppState>,
-    agent_id: String,
     connection_id: String,
     tools: Option<Vec<String>>,
 ) -> CmdResult<bool> {
-    let agent_id = parse_id(&agent_id)?;
     let connection_id = parse_id(&connection_id)?;
     state
         .broker
-        .ui_set_wiring_tools(&agent_id, &connection_id, tools)
+        .ui_set_allowed_tools(&connection_id, tools)
         .map_err(|e| e.to_string())
 }
 
@@ -961,20 +957,18 @@ pub async fn list_mcp_tools(
         .map_err(|e| e.to_string())
 }
 
-/// Issue (or rotate) a direct endpoint for a wiring. The broker gates this
-/// behind the native confirmation; the returned secret is shown to the user
-/// exactly once and never persisted in a recoverable form.
+/// Issue (or rotate) a direct endpoint for a connection. The broker gates
+/// this behind the native confirmation; the returned secret is shown to the
+/// user exactly once and never persisted in a recoverable form.
 #[tauri::command]
 pub async fn issue_endpoint(
     state: State<'_, AppState>,
-    agent_id: String,
     connection_id: String,
 ) -> CmdResult<IssuedEndpointDto> {
-    let agent_id = parse_id(&agent_id)?;
     let connection_id = parse_id(&connection_id)?;
     state
         .broker
-        .ui_issue_endpoint(&agent_id, &connection_id)
+        .ui_issue_endpoint(&connection_id)
         .await
         .map(IssuedEndpointDto::from)
         .map_err(|e| e.to_string())
@@ -990,24 +984,32 @@ pub fn revoke_endpoint(state: State<AppState>, endpoint_id: String) -> CmdResult
         .map_err(|e| e.to_string())
 }
 
-/* ----------------------------- paired agents ----------------------------- */
+/* ---------------------------- shared identity ----------------------------- */
 
+/// Rotate this computer's key. The broker gates this behind the native
+/// confirmation; every agent disconnects and re-reads the token file.
 #[tauri::command]
-pub fn revoke_agent(state: State<AppState>, id: String) -> CmdResult<bool> {
-    let id = parse_id(&id)?;
-    state.broker.ui_revoke_agent(&id).map_err(|e| e.to_string())
+pub async fn rotate_key(state: State<'_, AppState>) -> CmdResult<()> {
+    let broker = state.broker.clone();
+    // The native confirmation sheet blocks; keep it off the async runtime.
+    tokio::task::spawn_blocking(move || broker.ui_rotate_key())
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn confirm_agent_disconnect(app: AppHandle) -> bool {
+pub async fn confirm_rotate_key(app: AppHandle) -> bool {
     app.dialog()
         .message(
-            "Disconnect this agent? Its wirings and active sessions will end.",
+            "Rotate this computer's key? Every live agent session closes now, and \
+             anything holding a pasted copy of the old key stops working until updated. \
+             Agents that read the key file reconnect on their own.",
         )
-        .title("Disconnect agent")
+        .title("Rotate key")
         .kind(MessageDialogKind::Warning)
         .buttons(MessageDialogButtons::OkCancelCustom(
-            "Disconnect".to_string(),
+            "Rotate key".to_string(),
             "Cancel".to_string(),
         ))
         .blocking_show()
@@ -1060,7 +1062,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         get_local_username,
         list_secrets,
         list_connections,
-        list_agents,
+        get_identity,
         list_sessions,
         list_activity,
         clear_activity,
@@ -1085,13 +1087,13 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         open_url,
         oauth_connect,
         oauth_reconnect,
-        set_wiring,
-        set_wiring_tools,
+        set_tool_access,
+        set_allowed_tools,
         list_mcp_tools,
         issue_endpoint,
         revoke_endpoint,
-        confirm_agent_disconnect,
-        revoke_agent,
+        confirm_rotate_key,
+        rotate_key,
         close_session,
         set_reauth_on_read,
         set_show_websockets,
@@ -1240,15 +1242,14 @@ mod tests {
     }
 
     #[test]
-    fn agent_setup_instructions_include_the_runtime_socket() {
-        let instructions = agent_setup_instructions("/tmp/aka-test.sock");
+    fn agent_setup_instructions_include_the_runtime_paths() {
+        let instructions = agent_setup_instructions("/tmp/aka-test.sock", "~/.aka/token");
         assert!(instructions.contains("curl -fsS"));
         assert!(instructions.contains("--unix-socket /tmp/aka-test.sock"));
-        assert!(instructions.contains(
-            "Read its current instructions, then list what connections are currently available"
-        ));
+        assert!(instructions.contains("Read its current instructions"));
+        assert!(instructions.contains("~/.aka/token"));
+        assert!(instructions.contains("Authorization: Bearer"));
         assert!(!instructions.contains("\\\n"));
-        assert!(instructions.ends_with("http://localhost/instructions"));
         assert!(!instructions.contains("--max-time"));
         assert!(!instructions.contains("Reuse an existing token before pairing"));
     }
