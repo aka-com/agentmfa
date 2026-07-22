@@ -1127,7 +1127,7 @@ function startHTML(): string {
 
   const step = (n: number, title: string, done: boolean, body: string): string =>
     `<li class="start-step ${done ? 'done' : ''}">
-      <span class="start-num" aria-hidden="true">${done ? ICONS.check : n}</span>
+      <span class="start-num" aria-hidden="true">${n}</span>
       <div class="start-body"><b>${esc(title)}</b>${body}</div></li>`;
 
   const addAction = catalogEntry && canQuickConnectMcp(catalogEntry)
@@ -1141,8 +1141,8 @@ function startHTML(): string {
           ${progress.added ? 'disabled' : ''}>${esc(addLabel)}</button>
       </div>`;
 
-  const connectBody = `<p>Paste this into your coding agent. It reads this computer’s shared
-      key and can use every enabled tool at once.</p>
+  const connectBody = `<p>Paste this into your agent. It reads this computer’s shared
+      key and can use every enabled tool.</p>
     <pre class="setup-instructions"><code>${esc(state.agentSetupInstructions || 'Loading…')}</code></pre>
     <div class="start-actions">
       <button class="btn primary sm" data-act="copy-agent-setup">Copy setup instructions</button>
@@ -1156,9 +1156,9 @@ function startHTML(): string {
       Flip access per tool from its row on the Tools tab: an enabled tool works with no
       prompt, a disabled one is refused. The Connect tab has ready-made setup for Claude
       Code, Claude Desktop, Codex, and custom harnesses.</p>
-    <pre class="start-task"><code>${esc(task)}</code></pre>
+    <pre class="setup-instructions"><code>${esc(task)}</code></pre>
     <div class="start-actions">
-      <button class="btn sm" data-act="copy-text" data-text="${escAttr(task)}">Copy this task</button>
+      <button class="btn primary sm" data-act="copy-text" data-text="${escAttr(task)}">Copy this task</button>
       <button class="btn ghost sm" data-act="tab" data-tab="agents">Open Agents</button>
     </div>`;
 
