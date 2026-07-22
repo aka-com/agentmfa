@@ -23,8 +23,21 @@ const CURATED_HOSTS = new Set(['api.githubcopilot.com', 'mcp.notion.com']);
 
 // Brand marks bundled in ui/src/brand-icons.ts, by lowercased brand name.
 const KNOWN_ICONS = new Set([
-  'airtable', 'anthropic', 'github', 'gmail', 'notion', 'linear',
-  'onepassword', 'openai', 'postgres', 'sentry', 'slack', 'stripe', 'vercel',
+  'airtable', 'anthropic', 'asana', 'atlassian', 'figma', 'github', 'gmail',
+  'hubspot', 'huggingface', 'intercom', 'neon', 'notion', 'linear',
+  'onepassword', 'openai', 'paypal', 'postgres', 'sentry', 'slack', 'square',
+  'stripe', 'vercel',
+]);
+
+// Registry display names do not always match the bundled icon key, and a
+// few products are better served by a distinct Lucide metaphor than `plug`.
+const ICON_BY_SLUG = new Map([
+  ['canva', 'palette'],
+  ['context7', 'library'],
+  ['deepwiki', 'bookOpen'],
+  ['globalping', 'radioTower'],
+  ['hugging-face', 'huggingface'],
+  ['semgrep', 'scanSearch'],
 ]);
 
 const args = process.argv.slice(2);
@@ -102,11 +115,12 @@ for (const server of servers) {
   if (status === 'deleted' || status === 'deprecated') continue;
   const name = displayName(server);
   if (!name) continue;
+  const nameSlug = slug(name);
   seen.add(host);
   rows.push({
-    id: `mcp-${slug(name)}`,
+    id: `mcp-${nameSlug}`,
     name,
-    icon: KNOWN_ICONS.has(slug(name)) ? slug(name) : 'plug',
+    icon: ICON_BY_SLUG.get(nameSlug) ?? (KNOWN_ICONS.has(nameSlug) ? nameSlug : 'plug'),
     description: (server.description ?? server.server?.description ?? '').slice(0, 100)
       || 'Hosted MCP server',
     serverUrl: url.toString(),

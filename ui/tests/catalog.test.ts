@@ -19,6 +19,7 @@ import {
 } from '../src/catalog';
 import { authTemplate, parseApiOrigin } from '../src/connection-input';
 import type { ConnectionSummary, ConnectionType } from '../src/types';
+import { ICONS } from '../src/util';
 
 function conn(type: ConnectionType, host: string | null, name = 'x'): ConnectionSummary {
   return {
@@ -308,6 +309,8 @@ test('the registry tail shows by default and is searchable', () => {
     assert.equal(entry.connType, 'api', entry.id);
     assert.equal(entry.mcp, true, entry.id);
     assert.equal(entry.section, 'MCP registry', entry.id);
+    assert.notEqual(entry.icon, 'plug', entry.id);
+    assert.ok(ICONS[entry.icon], `${entry.id}: ${entry.icon}`);
     assert.ok(CATALOG_SECTIONS.includes(entry.section), entry.id);
     const url = new URL(entry.mcpTemplate!.serverUrl!);
     assert.equal(url.protocol, 'https:', entry.id);

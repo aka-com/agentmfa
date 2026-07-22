@@ -37,7 +37,7 @@ export const REGISTRY_SERVERS: RegistryServer[] = [
   {
     id: 'mcp-atlassian',
     name: 'Atlassian',
-    icon: 'plug',
+    icon: 'atlassian',
     description: 'Jira, Confluence & Compass — official hosted MCP',
     serverUrl: 'https://mcp.atlassian.com/v1/mcp',
     keywords: ['jira', 'confluence', 'tickets', 'wiki', 'issues'],
@@ -45,7 +45,7 @@ export const REGISTRY_SERVERS: RegistryServer[] = [
   {
     id: 'mcp-asana',
     name: 'Asana',
-    icon: 'plug',
+    icon: 'asana',
     description: 'Tasks, projects & goals — official hosted MCP',
     serverUrl: 'https://mcp.asana.com/v2/mcp',
     keywords: ['tasks', 'projects', 'work management'],
@@ -53,7 +53,7 @@ export const REGISTRY_SERVERS: RegistryServer[] = [
   {
     id: 'mcp-figma',
     name: 'Figma',
-    icon: 'plug',
+    icon: 'figma',
     description: 'Design files & components — official hosted MCP',
     serverUrl: 'https://mcp.figma.com/mcp',
     keywords: ['design', 'ui', 'prototypes', 'components'],
@@ -61,7 +61,7 @@ export const REGISTRY_SERVERS: RegistryServer[] = [
   {
     id: 'mcp-hubspot',
     name: 'HubSpot',
-    icon: 'plug',
+    icon: 'hubspot',
     description: 'CRM contacts, deals & tickets — official hosted MCP',
     serverUrl: 'https://mcp.hubspot.com/',
     keywords: ['crm', 'contacts', 'deals', 'marketing'],
@@ -69,7 +69,7 @@ export const REGISTRY_SERVERS: RegistryServer[] = [
   {
     id: 'mcp-square',
     name: 'Square',
-    icon: 'plug',
+    icon: 'square',
     description: 'Payments, orders & inventory — official hosted MCP',
     serverUrl: 'https://mcp.squareup.com/mcp',
     keywords: ['payments', 'pos', 'orders', 'inventory'],
@@ -77,7 +77,7 @@ export const REGISTRY_SERVERS: RegistryServer[] = [
   {
     id: 'mcp-canva',
     name: 'Canva',
-    icon: 'plug',
+    icon: 'palette',
     description: 'Designs, assets & exports — official hosted MCP',
     serverUrl: 'https://mcp.canva.com/mcp',
     keywords: ['design', 'graphics', 'templates', 'assets'],
@@ -85,7 +85,7 @@ export const REGISTRY_SERVERS: RegistryServer[] = [
   {
     id: 'mcp-paypal',
     name: 'PayPal',
-    icon: 'plug',
+    icon: 'paypal',
     description: 'Payments & invoicing — official hosted MCP',
     serverUrl: 'https://mcp.paypal.com/mcp',
     keywords: ['payments', 'invoices', 'checkout'],
@@ -93,7 +93,7 @@ export const REGISTRY_SERVERS: RegistryServer[] = [
   {
     id: 'mcp-intercom',
     name: 'Intercom',
-    icon: 'plug',
+    icon: 'intercom',
     description: 'Customer conversations & tickets — official hosted MCP',
     serverUrl: 'https://mcp.intercom.com/mcp',
     keywords: ['support', 'chat', 'customers', 'helpdesk'],
@@ -101,7 +101,7 @@ export const REGISTRY_SERVERS: RegistryServer[] = [
   {
     id: 'mcp-neon',
     name: 'Neon',
-    icon: 'plug',
+    icon: 'neon',
     description: 'Serverless Postgres — official hosted MCP',
     serverUrl: 'https://mcp.neon.tech/mcp',
     keywords: ['database', 'postgres', 'sql', 'branching'],
@@ -109,7 +109,7 @@ export const REGISTRY_SERVERS: RegistryServer[] = [
   {
     id: 'mcp-huggingface',
     name: 'Hugging Face',
-    icon: 'plug',
+    icon: 'huggingface',
     description: 'Models, datasets & Spaces — official hosted MCP',
     serverUrl: 'https://huggingface.co/mcp',
     keywords: ['ml', 'models', 'datasets', 'ai', 'spaces'],
@@ -117,7 +117,7 @@ export const REGISTRY_SERVERS: RegistryServer[] = [
   {
     id: 'mcp-deepwiki',
     name: 'DeepWiki',
-    icon: 'plug',
+    icon: 'bookOpen',
     description: 'Ask questions about public GitHub repositories',
     serverUrl: 'https://mcp.deepwiki.com/mcp',
     keywords: ['docs', 'code', 'repos', 'research'],
@@ -125,7 +125,7 @@ export const REGISTRY_SERVERS: RegistryServer[] = [
   {
     id: 'mcp-context7',
     name: 'Context7',
-    icon: 'plug',
+    icon: 'library',
     description: 'Up-to-date library documentation for prompts',
     serverUrl: 'https://mcp.context7.com/mcp',
     keywords: ['docs', 'libraries', 'code', 'reference'],
@@ -133,7 +133,7 @@ export const REGISTRY_SERVERS: RegistryServer[] = [
   {
     id: 'mcp-semgrep',
     name: 'Semgrep',
-    icon: 'plug',
+    icon: 'scanSearch',
     description: 'Static analysis & security scanning — official hosted MCP',
     serverUrl: 'https://mcp.semgrep.ai/mcp',
     keywords: ['security', 'lint', 'sast', 'scanning'],
@@ -141,7 +141,7 @@ export const REGISTRY_SERVERS: RegistryServer[] = [
   {
     id: 'mcp-globalping',
     name: 'Globalping',
-    icon: 'plug',
+    icon: 'radioTower',
     description: 'Network measurements from probes worldwide',
     serverUrl: 'https://mcp.globalping.dev/mcp',
     keywords: ['network', 'ping', 'latency', 'traceroute', 'dns'],

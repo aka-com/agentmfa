@@ -813,7 +813,9 @@
 .cat-count.on .cat-chev { transform: rotate(180deg); }
 /* Expanded rows are full-bleed: they span the whole card and align with the
    parent row's text, so a tool reads as one object rather than a card-in-card. */
-.cat-conns { background: var(--wash); border-top: 1px solid var(--line); }
+.cat-conns {
+  display: flow-root; background: var(--wash); border-top: 1px solid var(--line);
+}
 /* The hairline under the last connection separates it from "Add another". */
 .cat-conn-list { display: flex; flex-direction: column; border-bottom: 1px solid var(--line-soft); }
 .cat-conn {
