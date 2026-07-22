@@ -190,11 +190,7 @@ impl Harness {
         .await;
         assert_eq!(status, 200);
         let client = self.broker.pairing.get("claude-code").unwrap();
-        let conn = self
-            .broker
-            .store
-            .connection_by_name("market-feed")
-            .unwrap();
+        let conn = self.broker.store.connection_by_name("market-feed").unwrap();
         tokio::time::timeout(Duration::from_secs(1), async {
             while !self.broker.wirings.is_wired(&client.id, &conn.id) {
                 tokio::task::yield_now().await;

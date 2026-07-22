@@ -693,7 +693,10 @@ async fn direct_endpoint_serves_an_unmodified_client() {
     assert!(info.dsn.contains("host="));
     assert!(info.dsn.contains(".aka/endpoints") || info.dsn.contains("/endpoints/"));
     assert!(info.secret.starts_with("end_"));
-    assert!(!info.dsn.contains(&info.secret), "secret must not be in the DSN");
+    assert!(
+        !info.dsn.contains(&info.secret),
+        "secret must not be in the DSN"
+    );
 
     let (client, connection) = tokio_postgres::connect(&h.endpoint_conn_str(&info), NoTls)
         .await
@@ -706,9 +709,7 @@ async fn direct_endpoint_serves_an_unmodified_client() {
     // endpoint secret.
     let startups = fake.state.startups.lock().unwrap().clone();
     assert_eq!(startups.len(), 1);
-    assert!(startups[0]
-        .iter()
-        .any(|(k, v)| k == "user" && v == "app"));
+    assert!(startups[0].iter().any(|(k, v)| k == "user" && v == "app"));
     assert_eq!(
         fake.state.passwords.lock().unwrap().clone(),
         vec![REAL_PG_PASSWORD.to_string()]

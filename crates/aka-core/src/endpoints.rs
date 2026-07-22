@@ -251,10 +251,7 @@ impl EndpointRegistry {
             .next())
     }
 
-    fn remove_where(
-        &self,
-        pred: impl Fn(&WiringEndpoint) -> bool,
-    ) -> Result<Vec<WiringEndpoint>> {
+    fn remove_where(&self, pred: impl Fn(&WiringEndpoint) -> bool) -> Result<Vec<WiringEndpoint>> {
         let mut endpoints = self.endpoints.lock().unwrap();
         let (removed, kept): (Vec<_>, Vec<_>) = endpoints.iter().cloned().partition(|e| pred(e));
         if removed.is_empty() {
@@ -318,7 +315,9 @@ mod tests {
         let (r, dir) = registry();
         let client = Uuid::new_v4();
         let conn = Uuid::new_v4();
-        let issued = r.issue(client, "claude-code", conn, ConnectionKind::Pg).unwrap();
+        let issued = r
+            .issue(client, "claude-code", conn, ConnectionKind::Pg)
+            .unwrap();
         assert!(issued.secret.starts_with("end_"));
         assert_eq!(issued.secret.len(), 4 + 64);
         assert_eq!(issued.endpoint.secret_hash, hash_secret(&issued.secret));
@@ -334,7 +333,9 @@ mod tests {
         let (r, _dir) = registry();
         let client = Uuid::new_v4();
         let conn = Uuid::new_v4();
-        let issued = r.issue(client, "claude-code", conn, ConnectionKind::Pg).unwrap();
+        let issued = r
+            .issue(client, "claude-code", conn, ConnectionKind::Pg)
+            .unwrap();
         let resolved = r.resolve_secret(&issued.secret).expect("known secret");
         assert_eq!(resolved.id, issued.endpoint.id);
         assert_eq!(resolved.client_id, client);
@@ -347,8 +348,12 @@ mod tests {
         let (r, _dir) = registry();
         let client = Uuid::new_v4();
         let conn = Uuid::new_v4();
-        let first = r.issue(client, "claude-code", conn, ConnectionKind::Pg).unwrap();
-        let second = r.issue(client, "claude-code", conn, ConnectionKind::Pg).unwrap();
+        let first = r
+            .issue(client, "claude-code", conn, ConnectionKind::Pg)
+            .unwrap();
+        let second = r
+            .issue(client, "claude-code", conn, ConnectionKind::Pg)
+            .unwrap();
         // Same endpoint id (stable listener path) …
         assert_eq!(first.endpoint.id, second.endpoint.id);
         assert_ne!(first.secret, second.secret);
@@ -376,7 +381,9 @@ mod tests {
             Err(CoreError::EndpointLimit(2))
         ));
         // Re-issuing an existing wiring rotates and never trips the bound.
-        assert!(r.issue(a, "a", r.list()[0].connection_id, ConnectionKind::Pg).is_ok());
+        assert!(r
+            .issue(a, "a", r.list()[0].connection_id, ConnectionKind::Pg)
+            .is_ok());
     }
 
     #[test]
@@ -385,9 +392,12 @@ mod tests {
         let claude = Uuid::new_v4();
         let codex = Uuid::new_v4();
         let shared_conn = Uuid::new_v4();
-        r.issue(claude, "claude", shared_conn, ConnectionKind::Pg).unwrap();
-        r.issue(codex, "codex", shared_conn, ConnectionKind::Pg).unwrap();
-        r.issue(claude, "claude", Uuid::new_v4(), ConnectionKind::Ssh).unwrap();
+        r.issue(claude, "claude", shared_conn, ConnectionKind::Pg)
+            .unwrap();
+        r.issue(codex, "codex", shared_conn, ConnectionKind::Pg)
+            .unwrap();
+        r.issue(claude, "claude", Uuid::new_v4(), ConnectionKind::Ssh)
+            .unwrap();
 
         let removed = r.remove_for_connection(&shared_conn).unwrap();
         assert_eq!(removed.len(), 2);

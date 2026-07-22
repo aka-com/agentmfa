@@ -130,10 +130,7 @@ impl Harness {
         )
         .await;
         assert_eq!(status, 200, "pair failed: {body}");
-        if is_first_agent
-            && self.expect_first_agent_auto_wire
-            && !connection_ids.is_empty()
-        {
+        if is_first_agent && self.expect_first_agent_auto_wire && !connection_ids.is_empty() {
             let client = self.broker.pairing.get(name).unwrap();
             tokio::time::timeout(Duration::from_secs(1), async {
                 while connection_ids
@@ -1858,7 +1855,8 @@ async fn http_endpoint_survives_rebind_and_revoke_frees_the_port() {
     // Rebinding (as a restart does) reuses the persisted port; the same base
     // URL keeps working.
     h.broker.rebind_endpoints().await;
-    let (status, _) = loopback_request(port, "POST", "/dispatch", &[("authorization", &auth)], None).await;
+    let (status, _) =
+        loopback_request(port, "POST", "/dispatch", &[("authorization", &auth)], None).await;
     assert_eq!(status, 204);
     assert_eq!(up.hits.load(Ordering::SeqCst), 1);
 

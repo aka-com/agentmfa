@@ -706,7 +706,10 @@ async fn direct_endpoint_serves_the_ssh_agent_protocol() {
     let info = h.issue_ssh_endpoint().await;
 
     assert_eq!(info.kind, aka_core::types::ConnectionKind::Ssh);
-    assert!(info.dsn.ends_with("agent.sock"), "dsn is the auth-sock path");
+    assert!(
+        info.dsn.ends_with("agent.sock"),
+        "dsn is the auth-sock path"
+    );
     assert!(info.example.contains("SSH_AUTH_SOCK"));
     // The ssh-agent protocol has no password, so an SSH endpoint carries no
     // presented secret: the socket path is the whole capability.

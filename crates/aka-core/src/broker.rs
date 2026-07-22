@@ -913,7 +913,10 @@ impl Broker {
 
         // Bind the listener outside the gate (it awaits). A bind failure rolls
         // the record back so we never advertise a dead endpoint.
-        if let Err(error) = self.bind_endpoint_listener(&issued.endpoint, &connection).await {
+        if let Err(error) = self
+            .bind_endpoint_listener(&issued.endpoint, &connection)
+            .await
+        {
             let _ = self.endpoints.revoke(&issued.endpoint.id);
             return Err(CoreError::Io(error));
         }
@@ -964,9 +967,7 @@ impl Broker {
                     .endpoints
                     .get(&issued.endpoint.id)
                     .and_then(|e| e.port)
-                    .ok_or_else(|| {
-                        CoreError::Vault("http endpoint bound no port".to_string())
-                    })?;
+                    .ok_or_else(|| CoreError::Vault("http endpoint bound no port".to_string()))?;
                 let base = format!("http://127.0.0.1:{port}");
                 IssuedEndpointInfo {
                     endpoint_id: issued.endpoint.id,
@@ -1054,7 +1055,9 @@ impl Broker {
         connection: &Connection,
     ) -> std::io::Result<()> {
         let handle = match connection.kind() {
-            ConnectionKind::Pg => crate::capability::pg::bind_endpoint(self.clone(), endpoint).await?,
+            ConnectionKind::Pg => {
+                crate::capability::pg::bind_endpoint(self.clone(), endpoint).await?
+            }
             ConnectionKind::Ssh => {
                 crate::capability::ssh::bind_endpoint(self.clone(), endpoint).await?
             }

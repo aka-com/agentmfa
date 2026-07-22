@@ -378,7 +378,11 @@ async fn handle_endpoint_conn(
     let (tag, payload) = read_message(&mut client).await?;
     if tag != b'p' {
         client
-            .write_all(&error_response("FATAL", "08P01", "expected PasswordMessage"))
+            .write_all(&error_response(
+                "FATAL",
+                "08P01",
+                "expected PasswordMessage",
+            ))
             .await?;
         return Ok(());
     }
@@ -444,7 +448,12 @@ async fn handle_endpoint_conn(
     // authorization, so the secret read is pre-authorized (scope confirmed).
     let upstream = match crate::authorization::scope(
         true,
-        dial_upstream(&state.broker.store, &state.broker.events, &connection, &params),
+        dial_upstream(
+            &state.broker.store,
+            &state.broker.events,
+            &connection,
+            &params,
+        ),
     )
     .await
     {
@@ -1554,5 +1563,4 @@ mod tests {
         let text = parse_error_response(&msg[5..]);
         assert_eq!(text, "28P01: AKA: unknown_ticket");
     }
-
 }

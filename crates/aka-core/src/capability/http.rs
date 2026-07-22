@@ -792,8 +792,8 @@ pub async fn bind_endpoint(
     let shutdown = Arc::new(tokio::sync::Notify::new());
     let sd = shutdown.clone();
     let task = tokio::spawn(async move {
-        let served = axum::serve(listener, app)
-            .with_graceful_shutdown(async move { sd.notified().await });
+        let served =
+            axum::serve(listener, app).with_graceful_shutdown(async move { sd.notified().await });
         if let Err(e) = served.await {
             tracing::error!("http endpoint serve ended: {e}");
         }
@@ -809,7 +809,11 @@ fn endpoint_error(
     detail: &str,
 ) -> axum::response::Response {
     use axum::response::IntoResponse as _;
-    (status, axum::Json(json!({ "reason": reason, "detail": detail }))).into_response()
+    (
+        status,
+        axum::Json(json!({ "reason": reason, "detail": detail })),
+    )
+        .into_response()
 }
 
 async fn proxy_handler(
