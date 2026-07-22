@@ -892,10 +892,11 @@ function catalogRowHTML(entry: CatalogEntry): string {
   const label = builtin
     ? `${count} saved credential${count === 1 ? '' : 's'}`
     : `${count} configured connection${count === 1 ? '' : 's'}`;
-  // A branded token row prompts for a key; an MCP row without a published
-  // endpoint (Gmail, the generic row) needs a server URL you supply. Both
-  // read better than a bare "Add" when nothing is configured.
-  const addLabel = ['mcp', 'http', 'gmail'].includes(entry.id)
+  // Call out rows that need provider-side setup; generic MCP and HTTP rows
+  // still use Configure because the user supplies their endpoint.
+  const addLabel = entry.requiresSetup
+    ? 'Requires setup'
+    : ['mcp', 'http'].includes(entry.id)
     ? 'Configure'
     : entry.preset
     ? 'Add API key'

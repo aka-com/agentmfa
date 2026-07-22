@@ -48,9 +48,17 @@ test('infrastructure precedes apps and generic endpoints live under Custom Apps'
   );
 });
 
-test('featured apps keep their curated display order', () => {
+test('setup-required apps lead the disconnected app rows', () => {
   const apps = CATALOG.filter((entry) => entry.section === 'Apps').map((entry) => entry.id);
-  assert.ok(apps.indexOf('slack') < apps.indexOf('gmail'));
+  const displayed = connectedCatalogFirst(
+    CATALOG.filter((entry) => entry.section === 'Apps'),
+    [],
+  );
+  assert.deepEqual(displayed.slice(0, 2).map((entry) => entry.id), ['slack', 'gmail']);
+  assert.deepEqual(
+    CATALOG.filter((entry) => entry.requiresSetup).map((entry) => entry.id),
+    ['slack', 'gmail'],
+  );
   assert.ok(apps.indexOf('airtable') < apps.indexOf('linear'));
 });
 
@@ -220,17 +228,14 @@ test('every connection is counted by exactly one row', () => {
   assert.deepEqual(connectionsForEntry(api, connections).map((c) => c.name), ['gh-1', 'internal']);
 });
 
-test('connected tools sort to the top of their group without otherwise reordering it', () => {
+test('connected tools sort above setup-required tools', () => {
   const apps = CATALOG.filter((entry) => entry.section === 'Apps');
   const sorted = connectedCatalogFirst(apps, [
     conn('api', 'api.stripe.com', 'billing'),
     conn('api', 'sentry.io', 'errors'),
   ]);
   assert.deepEqual(sorted.slice(0, 2).map((entry) => entry.id), ['sentry', 'stripe']);
-  assert.deepEqual(
-    sorted.slice(2).map((entry) => entry.id),
-    apps.filter((entry) => !['sentry', 'stripe'].includes(entry.id)).map((entry) => entry.id),
-  );
+  assert.deepEqual(sorted.slice(2, 4).map((entry) => entry.id), ['slack', 'gmail']);
 });
 
 test('collapsed app groups show at least three rows and never hide connected tools', () => {

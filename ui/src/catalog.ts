@@ -117,6 +117,8 @@ export interface CatalogEntry {
   mcpTemplate?: McpTemplate;
   /** BYO-app OAuth prefill for a plain REST row; see OAuthPreset. */
   oauthPreset?: OAuthPreset;
+  /** Requires provider-side configuration before it can be connected. */
+  requiresSetup?: boolean;
   /** Extra search terms ("payments", "email") the row answers to. */
   keywords?: string[];
   /** From the generated MCP-registry tail, not the curated catalog. */
@@ -148,6 +150,7 @@ export const CATALOG: CatalogEntry[] = [
     section: 'Apps',
     via: 'connection',
     connType: 'api',
+    requiresSetup: true,
     keywords: ['chat', 'messages', 'channels', 'team'],
     preset: {
       origin: 'https://slack.com',
@@ -172,6 +175,7 @@ export const CATALOG: CatalogEntry[] = [
     via: 'connection',
     connType: 'api',
     mcp: true,
+    requiresSetup: true,
     keywords: ['email', 'mail', 'google', 'inbox'],
     // Google's hosted Gmail MCP server uses plain OAuth 2.0 — no dynamic
     // client registration — so connecting takes a one-time OAuth client
@@ -544,14 +548,18 @@ export function connectionsForEntry(
   return connections.filter((connection) => entryForConnection(connection)?.id === entry.id);
 }
 
-/** Connected rows first, without disturbing catalog order within either set. */
+/** Connected rows first, then setup-required rows, preserving catalog order within each set. */
 export function connectedCatalogFirst(
   entries: CatalogEntry[],
   connections: ConnectionSummary[],
 ): CatalogEntry[] {
+  const disconnected = entries.filter(
+    (entry) => connectionsForEntry(entry, connections).length === 0,
+  );
   return [
     ...entries.filter((entry) => connectionsForEntry(entry, connections).length > 0),
-    ...entries.filter((entry) => connectionsForEntry(entry, connections).length === 0),
+    ...disconnected.filter((entry) => entry.requiresSetup),
+    ...disconnected.filter((entry) => !entry.requiresSetup),
   ];
 }
 
