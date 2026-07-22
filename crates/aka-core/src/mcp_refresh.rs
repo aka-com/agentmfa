@@ -297,14 +297,13 @@ async fn try_refresh(
         })?;
     // Providers may rotate the refresh token; keep the old one when they
     // answer without one.
-    let renewed = McpOAuthGrant {
-        refresh_token: tokens
+    let renewed = grant.with_refresh_token(
+        tokens
             .refresh_token
             .as_ref()
             .map(|token| token.to_string())
             .or(Some(refresh_token)),
-        ..grant
-    };
+    );
     let expires_at = tokens
         .expires_in
         .and_then(|seconds| i64::try_from(seconds).ok())
@@ -353,10 +352,7 @@ async fn retire_refresh_token(ctx: &RefreshContext<'_>, connection: &Connection)
         return;
     };
     let expires_at = connection.oauth.as_ref().and_then(|oauth| oauth.expires_at);
-    let retired = McpOAuthGrant {
-        refresh_token: None,
-        ..grant
-    };
+    let retired = grant.with_refresh_token(None);
     if let Err(error) =
         ctx.store
             .set_connection_oauth(&connection.id, retired.to_secret_value(), expires_at)

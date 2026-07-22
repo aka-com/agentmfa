@@ -615,9 +615,11 @@ async fn run_flow(
                     _ => None,
                 };
                 match stored {
+                    // Clone rather than move: the grant scrubs its secret
+                    // material on drop, so its fields can't be moved out.
                     Some(grant) => Registration {
-                        client_id: grant.client_id,
-                        client_secret: grant.client_secret.map(Zeroizing::new),
+                        client_id: grant.client_id.clone(),
+                        client_secret: grant.client_secret.clone().map(Zeroizing::new),
                     },
                     None => return Err(failure),
                 }
@@ -1209,9 +1211,31 @@ pub struct McpOAuthGrant {
     pub resource: String,
 }
 
+/// The refresh and client-secret material is scrubbed when a grant is
+/// dropped, so it does not linger in freed heap — matching the
+/// `Zeroizing` handling the token flow uses everywhere else. (`zeroize` v1
+/// implements `Zeroize` for `String`/`Option<String>` without the derive
+/// feature, so this needs no manual field bookkeeping beyond the two
+/// secrets.)
+impl Drop for McpOAuthGrant {
+    fn drop(&mut self) {
+        use zeroize::Zeroize as _;
+        self.refresh_token.zeroize();
+        self.client_secret.zeroize();
+    }
+}
+
 impl McpOAuthGrant {
     pub fn to_secret_value(&self) -> Zeroizing<String> {
         Zeroizing::new(serde_json::to_string(self).expect("grant serializes"))
+    }
+
+    /// Return this grant with its refresh token replaced. Takes `self` by
+    /// value so no field is moved out of a `Drop` type (struct-update
+    /// syntax can't be used here for that reason).
+    pub fn with_refresh_token(mut self, refresh_token: Option<String>) -> Self {
+        self.refresh_token = refresh_token;
+        self
     }
 
     pub fn from_secret_value(value: &str) -> std::result::Result<Self, String> {

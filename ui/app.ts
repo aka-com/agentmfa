@@ -2844,7 +2844,13 @@ document.addEventListener('click', async (e) => {
     case 'catalog-add': {
       const entry = catalogEntryById(id);
       if (!entry || entry.via !== 'connection' || !entry.connType) break;
-      await openCatalogConnectionForm(entry);
+      // "Add another" on a dual-mode row should match what is already
+      // there: if every existing connection under it is a plain API
+      // (no MCP path), open the API form rather than jumping to MCP.
+      const existing = connectionsForEntry(entry, state.connections);
+      const asApi = Boolean(entry.mcp && entry.preset && existing.length > 0
+        && existing.every((connection) => !connection.mcp_path));
+      await openCatalogConnectionForm(entry, asApi ? 'bearer' : 'oauth', asApi);
       break;
     }
     case 'edit-conn': {
