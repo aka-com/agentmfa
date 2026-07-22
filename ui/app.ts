@@ -14,8 +14,10 @@ import {
 } from '/src/catalog';
 import type { ConnectionPreset } from '/src/catalog';
 import {
-  START_OPTIONS, START_PROMISE, firstTaskPrompt, startOptionById, startProgress, startTask,
+  CONNECT_MODE_LABELS, START_OPTIONS, START_PROMISE, connectModesFor, firstTaskPrompt,
+  resolveConnectMode, startOptionById, startProgress, startTask,
 } from '/src/getting-started';
+import type { ConnectModeId, StartOption, StartProgress } from '/src/getting-started';
 import type { CatalogEntry } from '/src/catalog';
 import { ICONS, TYPES, esc, escAttr, toast, relTime, absTime } from '/src/util';
 import {
@@ -150,6 +152,8 @@ interface AppState {
   catalogActionMenuOpen: string | null;
   appsExpanded: boolean;
   startOption: string;
+  /** Which connect mode step 2 of the walkthrough shows. */
+  connectMode: string;
   connImportSource: string;
   connImportError: string | null;
   menuOpen: boolean;
@@ -238,6 +242,7 @@ const state: AppState = {
   catalogActionMenuOpen: null, // catalog id whose quick-connect chevron menu is open
   appsExpanded: false,   // whether the Apps section shows beyond its connected/minimum rows
   startOption: 'postgres', // which walkthrough the Get started tab shows
+  connectMode: 'direct', // step 2's connect-mode chip (falls back per option)
   connImportSource: '',  // paste-to-prefill field in the add sheet
   connImportError: null,
   menuOpen: false,       // desktop-mode settings popover (gear) open
@@ -550,6 +555,16 @@ interface ConnectGuide {
   note?: string;
 }
 
+// One snippet per MCP client, shared by the Connect-page guides and the Get
+// started walkthrough so the two can never disagree.
+const MCP_SETUP_SNIPPETS = {
+  'claude-code': 'claude mcp add multitool -- aka mcp --client claude-code',
+  'claude-desktop':
+    '{\n  "mcpServers": {\n    "multitool": { "command": "aka", "args": ["mcp", "--client", "claude-desktop"] }\n  }\n}',
+  codex: '[mcp_servers.multitool]\ncommand = "aka"\nargs = ["mcp", "--client", "codex"]',
+  'codex-desktop': '[mcp_servers.multitool]\ncommand = "aka"\nargs = ["mcp", "--client", "codex-desktop"]',
+} as const;
+
 function connectGuides(identity: IdentityInfo): ConnectGuide[] {
   const socket = identity.socket_path;
   const token = identity.token_path;
@@ -564,7 +579,7 @@ function connectGuides(identity: IdentityInfo): ConnectGuide[] {
         {
           title: 'Add Multitool as an MCP server',
           detail: 'Run once, anywhere. No key to paste — aka mcp finds the broker and key itself.',
-          snippet: 'claude mcp add multitool -- aka mcp --client claude-code',
+          snippet: MCP_SETUP_SNIPPETS['claude-code'],
         },
         {
           title: 'Check it took',
@@ -583,7 +598,7 @@ function connectGuides(identity: IdentityInfo): ConnectGuide[] {
         {
           title: 'Add Multitool to Claude Desktop’s config',
           detail: 'Merge this into ~/Library/Application Support/Claude/claude_desktop_config.json — or copy the whole file if you don’t have one yet.',
-          snippet: '{\n  "mcpServers": {\n    "multitool": { "command": "aka", "args": ["mcp", "--client", "claude-desktop"] }\n  }\n}',
+          snippet: MCP_SETUP_SNIPPETS['claude-desktop'],
         },
         {
           title: 'Restart Claude Desktop',
@@ -602,7 +617,7 @@ function connectGuides(identity: IdentityInfo): ConnectGuide[] {
         {
           title: 'Register the MCP server',
           detail: 'Add to ~/.codex/config.toml:',
-          snippet: '[mcp_servers.multitool]\ncommand = "aka"\nargs = ["mcp", "--client", "codex"]',
+          snippet: MCP_SETUP_SNIPPETS.codex,
         },
         {
           title: 'Verify from a Codex session',
@@ -1110,6 +1125,100 @@ async function receiveActivity(entry: ActivityEntry | null | undefined): Promise
   while (list.children.length > ACTIVITY_RENDER_LIMIT) list.lastElementChild?.remove();
 }
 
+// Client labels the walkthrough can attribute directly (the --client flag on
+// aka mcp). Anything else in the Activity log is a self-named harness.
+const BRANDED_CLIENT_MODES = new Set<string>(['claude-code', 'claude-desktop', 'codex', 'codex-desktop']);
+
+/** The right-aligned status on a step-2 pane. One vocabulary for every mode:
+ * "Connected · <when>" once the broker has seen a call, "Waiting for first
+ * call" before that, and "No endpoint yet" for a direct pane pre-issue. */
+function startModeStatusHTML(mode: ConnectModeId, conn: ConnectionSummary | null): string {
+  const idle = (text: string) =>
+    `<span class="start-status idle"><span class="start-status-dot"></span>${text}</span>`;
+  let seenAt: string | undefined;
+  if (mode === 'direct') {
+    if (!conn?.agent_access.endpoint) return idle('No endpoint yet');
+    seenAt = state.activity.find(
+      (entry) => entry.agent === 'endpoint' && entry.connection === conn.name)?.at;
+  } else if (BRANDED_CLIENT_MODES.has(mode)) {
+    seenAt = recentClients().find((client) => client.name === mode)?.at;
+  } else {
+    // CLI harnesses and HTTP MCP clients name themselves; any unbranded label counts.
+    seenAt = recentClients().find((client) => !BRANDED_CLIENT_MODES.has(client.name))?.at;
+  }
+  return seenAt
+    ? `<span class="start-status"><span class="start-status-dot"></span>Connected · ${esc(relTime(seenAt))}</span>`
+    : idle('Waiting for first call');
+}
+
+/** Step 2's pane for one connect mode: a one-line lead, the snippet, and an
+ * actions row with the status pinned right. */
+function startConnectPaneHTML(mode: ConnectModeId, option: StartOption, progress: StartProgress): string {
+  const conn = progress.toolName
+    ? state.connections.find((candidate) => candidate.name === progress.toolName) ?? null
+    : null;
+  const status = startModeStatusHTML(mode, conn);
+  const snip = (text: string) => `<pre class="setup-instructions"><code>${esc(text)}</code></pre>`;
+  const copyBtn = (text: string, label: string) =>
+    `<button class="btn primary sm" data-act="copy-text" data-text="${escAttr(text)}">${label}</button>`;
+  const actions = (inner: string) => `<div class="start-actions">${inner}${status}</div>`;
+
+  switch (mode) {
+    case 'direct': {
+      if (!conn) {
+        return `<p>Direct endpoints are issued per tool — add the ${esc(option.label)} tool above first.</p>
+          ${actions('<button class="btn primary sm" disabled>Issue direct endpoint</button>')}`;
+      }
+      const endpoint = conn.agent_access.endpoint ?? null;
+      const lead = endpoint
+        ? `A direct endpoint is issued for “${esc(conn.name)}”. Its address${conn.type === 'pg' ? ' and secret were' : ' was'}
+            shown at issue — reissue to get a new one.`
+        : conn.type === 'pg'
+        ? `Issue a local DSN for “${esc(conn.name)}” that any unmodified Postgres client can use —
+            psql, drivers, ORMs. The address and its secret are shown once, at issue.`
+        : `Issue a signing-agent socket for “${esc(conn.name)}”. Plain ssh, git, and rsync work
+            unmodified; the private key never leaves this machine.`;
+      const label = !endpoint ? 'Issue direct endpoint'
+        : conn.type === 'pg' ? 'Reissue (new secret)' : 'Reissue';
+      return `<p>${lead}</p>
+        ${actions(`<button class="btn primary sm" data-act="issue-endpoint" data-conn="${conn.id}">${label}</button>`)}`;
+    }
+    case 'claude-code':
+      return `<p>Run this once in a terminal. Claude Code finds the broker and key itself.</p>
+        ${snip(MCP_SETUP_SNIPPETS['claude-code'])}
+        ${actions(copyBtn(MCP_SETUP_SNIPPETS['claude-code'], 'Copy command'))}`;
+    case 'claude-desktop':
+      return `<p>Merge this into ~/Library/Application Support/Claude/claude_desktop_config.json,
+          then restart Claude Desktop.</p>
+        ${snip(MCP_SETUP_SNIPPETS['claude-desktop'])}
+        ${actions(copyBtn(MCP_SETUP_SNIPPETS['claude-desktop'], 'Copy config'))}`;
+    case 'codex':
+      return `<p>Add this to ~/.codex/config.toml.</p>
+        ${snip(MCP_SETUP_SNIPPETS.codex)}
+        ${actions(copyBtn(MCP_SETUP_SNIPPETS.codex, 'Copy config'))}`;
+    case 'codex-desktop':
+      return `<p>Add this to ~/.codex/config.toml — Codex Desktop shares its config with the Codex CLI.</p>
+        ${snip(MCP_SETUP_SNIPPETS['codex-desktop'])}
+        ${actions(copyBtn(MCP_SETUP_SNIPPETS['codex-desktop'], 'Copy config'))}`;
+    case 'mcp': {
+      const socket = state.identity?.socket_path ?? '~/.aka/broker.sock';
+      const token = state.identity?.token_path ?? '~/.aka/token';
+      const snippet = `# the MCP URL's port moves with restarts — read mcp_url from the manifest\n`
+        + `curl -fsS --unix-socket ${socket} http://localhost/.well-known/agent-broker.json\n\n`
+        + `# connect your MCP client to mcp_url with this header\n`
+        + `Authorization: Bearer $(cat ${token})`;
+      return `<p>For MCP clients that speak HTTP: connect to the broker's mcp_url with this
+          computer's key as the bearer token.</p>
+        ${snip(snippet)}${actions(copyBtn(snippet, 'Copy setup instructions'))}`;
+    }
+    case 'cli':
+      return `<p>Paste this into any agent. It reads this computer's shared key and gets
+          full API docs from the broker.</p>
+        <pre class="setup-instructions"><code>${esc(state.agentSetupInstructions || 'Loading…')}</code></pre>
+        ${actions('<button class="btn primary sm" data-act="copy-agent-setup">Copy setup instructions</button>')}`;
+  }
+}
+
 function startHTML(): string {
   const option = startOptionById(state.startOption);
   const catalogEntry = option.catalogId ? catalogEntryById(option.catalogId) : undefined;
@@ -1142,14 +1251,14 @@ function startHTML(): string {
           ${progress.added ? 'disabled' : ''}>${esc(addLabel)}</button>
       </div>`;
 
-  const connectBody = `<p>Paste this into your agent. It reads this computer’s shared
-      key and can use every enabled tool.</p>
-    <pre class="setup-instructions"><code>${esc(state.agentSetupInstructions || 'Loading…')}</code></pre>
-    <div class="start-actions">
-      <button class="btn primary sm" data-act="copy-agent-setup">Copy setup instructions</button>
-      ${progress.connected
-        ? '<span class="start-note">An agent is connected.</span>' : ''}
-    </div>`;
+  const connectMode = resolveConnectMode(state.connectMode, option);
+  const modePicker = connectModesFor(option).map((candidate) =>
+    `<button class="start-pick has-label ${candidate === connectMode ? 'on' : ''}"
+      aria-pressed="${candidate === connectMode}" data-act="start-mode" data-id="${candidate}">
+      <span class="start-pick-label">${esc(CONNECT_MODE_LABELS[candidate])}</span></button>`).join('');
+  const connectBody = `
+    <div class="start-picker" role="group" aria-label="How your agent connects">${modePicker}</div>
+    ${startConnectPaneHTML(connectMode, option, progress)}`;
 
   const task = startTask(option, progress);
   const wireBody = `<p>Tools are enabled for all agents when you add them.</p>
@@ -2789,6 +2898,12 @@ document.addEventListener('click', async (e) => {
     case 'start-option':
       if (id && START_OPTIONS.some((option) => option.id === id)) {
         state.startOption = id;
+        render();
+      }
+      break;
+    case 'start-mode':
+      if (id) {
+        state.connectMode = id;
         render();
       }
       break;

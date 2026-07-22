@@ -319,7 +319,15 @@
   .start-body p{ margin-top: 4px; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
   .start-body > b:first-child + p{ margin-top: 3px; }
   .start-actions{ display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 9px; }
-  .start-note{ color: var(--ok-ink); font-size: 12px; font-weight: 600; }
+  /* Per-mode connection status, pinned to the right edge of the actions row
+   * so it stays put while switching modes. */
+  .start-status{
+    display: inline-flex; align-items: center; gap: 6px; margin-left: auto;
+    color: var(--ok-ink); font-size: 12px; font-weight: 600; text-align: right;
+  }
+  .start-status-dot{ width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .start-status.idle{ color: var(--muted); }
+  .start-status.idle .start-status-dot{ opacity: .5; }
   .start .setup-instructions{ margin-top: 9px; }
   /* The paste-ready setup message shown in the agent card. */
   .setup-instructions{

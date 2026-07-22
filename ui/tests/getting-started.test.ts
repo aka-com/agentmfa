@@ -2,9 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  CONNECT_MODE_LABELS,
   START_OPTIONS,
   START_PROMISE,
+  connectModesFor,
   firstTaskPrompt,
+  resolveConnectMode,
   startOptionById,
   startProgress,
   startTask,
@@ -125,6 +128,32 @@ test('the MCP option is not satisfied by a plain API connection', () => {
     ...conn('api', 'custom'), host: 'mcp.internal.example.com', mcp_path: '/mcp',
   };
   assert.equal(startProgress(mcp, [server], false).added, true);
+});
+
+test('Direct is offered first, and only for kinds with a direct endpoint', () => {
+  for (const id of ['postgres', 'ssh']) {
+    const modes = connectModesFor(startOptionById(id));
+    assert.equal(modes[0], 'direct', id);
+  }
+  for (const id of ['notion', 'github', 'mcp']) {
+    const modes = connectModesFor(startOptionById(id));
+    assert.equal(modes.includes('direct'), false, id);
+    assert.equal(modes[0], 'claude-code', id);
+  }
+  // Every offered mode has a picker label.
+  for (const mode of connectModesFor(startOptionById('postgres'))) {
+    assert.ok(CONNECT_MODE_LABELS[mode], mode);
+  }
+});
+
+test('the picked mode survives while offered and falls back when not', () => {
+  const postgres = startOptionById('postgres');
+  const notion = startOptionById('notion');
+  assert.equal(resolveConnectMode('direct', postgres), 'direct');
+  assert.equal(resolveConnectMode('codex-desktop', notion), 'codex-desktop');
+  // Direct is not offered for an API tool; the pane falls back to the first mode.
+  assert.equal(resolveConnectMode('direct', notion), 'claude-code');
+  assert.equal(resolveConnectMode('nonsense', postgres), 'direct');
 });
 
 test('a branded option is satisfied only by its own connection', () => {

@@ -132,6 +132,39 @@ export function startOptionById(id: string): StartOption {
   return START_OPTIONS.find((option) => option.id === id) ?? START_OPTIONS[0];
 }
 
+/**
+ * How the agent reaches the broker in step 2. `direct` is the per-tool
+ * endpoint (a Postgres DSN or SSH agent socket) and is only offered for
+ * kinds that have one; every other mode rides the shared key.
+ */
+export type ConnectModeId =
+  | 'direct' | 'claude-code' | 'claude-desktop' | 'codex' | 'codex-desktop' | 'mcp' | 'cli';
+
+export const CONNECT_MODE_LABELS: Record<ConnectModeId, string> = {
+  direct: 'Direct',
+  'claude-code': 'Claude Code',
+  'claude-desktop': 'Claude Desktop',
+  codex: 'Codex',
+  'codex-desktop': 'Codex Desktop',
+  mcp: 'MCP client',
+  cli: 'CLI',
+};
+
+const SHARED_KEY_MODES: ConnectModeId[] =
+  ['claude-code', 'claude-desktop', 'codex', 'codex-desktop', 'mcp', 'cli'];
+
+/** The connect modes step 2 offers for the picked tool, in display order. */
+export function connectModesFor(option: StartOption): ConnectModeId[] {
+  const hasDirect = option.connType === 'pg' || option.connType === 'ssh';
+  return hasDirect ? ['direct', ...SHARED_KEY_MODES] : [...SHARED_KEY_MODES];
+}
+
+/** The mode step 2 shows: the picked one when offered, otherwise the first. */
+export function resolveConnectMode(picked: string, option: StartOption): ConnectModeId {
+  const modes = connectModesFor(option);
+  return modes.includes(picked as ConnectModeId) ? (picked as ConnectModeId) : modes[0];
+}
+
 export interface StartProgress {
   /** A tool of this kind exists. */
   added: boolean;
