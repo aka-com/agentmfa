@@ -428,32 +428,6 @@ pub struct PairedAgent {
     pub last_used: DateTime<Utc>,
 }
 
-/// How much a wiring may do, per connection type. Attenuation keeps the
-/// vocabulary deliberately tiny: two modes, no expiry, no policy language.
-/// `read-write` is the default (a wiring is full access, matching the
-/// pre-attenuation behavior); `read-only` narrows what the agent may do and,
-/// where the upstream can enforce it (Postgres), the broker makes it so.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum WiringMode {
-    #[default]
-    ReadWrite,
-    ReadOnly,
-}
-
-impl WiringMode {
-    pub fn is_read_only(&self) -> bool {
-        matches!(self, WiringMode::ReadOnly)
-    }
-    /// Wire/UI/audit spelling; matches libpq-style `read-only`/`read-write`.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            WiringMode::ReadWrite => "read-write",
-            WiringMode::ReadOnly => "read-only",
-        }
-    }
-}
-
 /// A persistent agent → connection wiring. A wired agent may use the
 /// connection without prompting; an unwired agent is refused.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -470,11 +444,6 @@ pub struct Wiring {
     /// mirrored by the sidecar's tool listing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_tools: Option<Vec<String>>,
-    /// Attenuation: `read-write` (default) or `read-only`. Absent in wirings
-    /// written by pre-attenuation versions, which load as `read-write` — a
-    /// wiring was full access, so the default preserves that behavior.
-    #[serde(default)]
-    pub mode: WiringMode,
     pub created_at: DateTime<Utc>,
 }
 

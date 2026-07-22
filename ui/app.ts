@@ -39,7 +39,6 @@ import type {
   McpStatusReport,
   McpToolInfo,
   WiringSummary,
-  WiringMode,
   IssuedEndpoint,
   SecretSummary,
   SessionSummary,
@@ -478,56 +477,31 @@ function secretsTableHTML() {
 const agentWiringFor = (a: AgentSummary, c: ConnectionSummary): WiringSummary | undefined =>
   (c.wired_agents || []).find((wiring) => wiring.agent_id === a.id);
 
-// Attenuation applies only where the broker can enforce it. Postgres opens the
-// upstream read-only; SSH cannot yet (the broker only signs the login), so its
-// read-only option is shown disabled with a note rather than hidden.
-const ATTENUABLE: Record<ConnectionType, boolean> = { pg: true, ssh: true, api: false, ws: false };
 // Kinds that can be issued a stable, per-wiring direct endpoint (a pasteable
 // DSN/socket/URL an unmodified tool uses). WebSocket lands later.
 const ENDPOINTABLE: Record<ConnectionType, boolean> = { pg: true, ssh: true, api: true, ws: false };
 
+// The ⋮ menu on a wired Postgres/SSH/HTTP row: issue / reissue / revoke the
+// wiring's direct endpoint.
 function wiringMenuHTML(
   a: AgentSummary,
   c: ConnectionSummary,
-  mode: WiringMode,
   wiring: WiringSummary | undefined,
 ): string {
   const key = `${a.id}:${c.id}`;
   const open = state.wiringMenuOpen === key;
-  const sshOnly = c.type === 'ssh';
-  const modeItem = (m: WiringMode, label: string, sub: string): string => {
-    const on = mode === m;
-    // SSH read-only isn't enforceable yet: show it, but inert.
-    if (m === 'read-only' && sshOnly) {
-      return `<div class="menu-item disabled" role="menuitemradio" aria-checked="false" aria-disabled="true">
-        <span class="menu-check">${on ? ICONS.check : ''}</span>
-        <span class="menu-lbl">${label}<span class="menu-sub">Not enforceable for SSH yet</span></span></div>`;
-    }
-    return `<button class="menu-item ${on ? 'on' : ''}" role="menuitemradio" aria-checked="${on}"
-      data-act="set-wiring-mode" data-id="${a.id}" data-conn="${c.id}" data-mode="${m}">
-      <span class="menu-check">${on ? ICONS.check : ''}</span>
-      <span class="menu-lbl">${label}<span class="menu-sub">${sub}</span></span></button>`;
-  };
-  const accessSection = ATTENUABLE[c.type]
-    ? `<div class="wiring-menu-head">Access</div>
-       ${modeItem('read-write', 'Read-write', 'Full access')}
-       ${modeItem('read-only', 'Read-only', 'Writes are refused by the database')}`
-    : '';
   const endpoint = wiring?.endpoint ?? null;
-  const endpointSection = ENDPOINTABLE[c.type]
-    ? `<div class="wiring-menu-head">Direct endpoint</div>
-       <button class="menu-item" role="menuitem" data-act="issue-endpoint" data-id="${a.id}" data-conn="${c.id}">
-         <span class="menu-lbl">${endpoint ? 'Reissue (new secret)' : 'Issue direct endpoint'}<span class="menu-sub">${
-           endpoint ? 'Rotates the secret; the old one stops working' : 'A pasteable address for an unmodified tool'}</span></span></button>
-       ${endpoint ? `<button class="menu-item danger" role="menuitem" data-act="revoke-endpoint" data-endpoint="${endpoint.endpoint_id}">
-         <span class="menu-lbl">Revoke endpoint<span class="menu-sub">Stops the listener and open sessions</span></span></button>` : ''}`
-    : '';
   return `<div class="wiring-menu-wrap">
-    <button class="icon-btn wiring-menu-btn ${open ? 'on' : ''}" title="Access &amp; endpoint"
-      aria-label="Access and endpoint for ${escAttr(a.name)} on ${escAttr(c.name)}" aria-haspopup="menu"
+    <button class="icon-btn wiring-menu-btn ${open ? 'on' : ''}" title="Direct endpoint"
+      aria-label="Direct endpoint for ${escAttr(a.name)} on ${escAttr(c.name)}" aria-haspopup="menu"
       aria-expanded="${open}" data-act="toggle-wiring-menu" data-id="${a.id}" data-conn="${c.id}">${ICONS.ellipsisVertical}</button>
-    ${open ? `<div class="wiring-menu" role="menu" aria-label="Access and endpoint for ${escAttr(c.name)}">
-      ${accessSection}${endpointSection}
+    ${open ? `<div class="wiring-menu" role="menu" aria-label="Direct endpoint for ${escAttr(c.name)}">
+      <div class="wiring-menu-head">Direct endpoint</div>
+      <button class="menu-item" role="menuitem" data-act="issue-endpoint" data-id="${a.id}" data-conn="${c.id}">
+        <span class="menu-lbl">${endpoint ? 'Reissue (new secret)' : 'Issue direct endpoint'}<span class="menu-sub">${
+          endpoint ? 'Rotates the secret; the old one stops working' : 'A pasteable address for an unmodified tool'}</span></span></button>
+      ${endpoint ? `<button class="menu-item danger" role="menuitem" data-act="revoke-endpoint" data-endpoint="${endpoint.endpoint_id}">
+        <span class="menu-lbl">Revoke endpoint<span class="menu-sub">Stops the listener and open sessions</span></span></button>` : ''}
     </div>` : ''}
   </div>`;
 }
@@ -536,14 +510,10 @@ function agentToolRowHTML(a: AgentSummary, c: ConnectionSummary): string {
   const t = TYPES[c.type];
   const wiring = agentWiringFor(a, c);
   const wired = !!wiring;
-  const mode: WiringMode = wiring?.mode ?? 'read-write';
-  const readOnly = wired && mode === 'read-only';
   const live = state.sessions.some((s) => s.agent === a.name && s.connection === c.name);
   const pill = !wired
     ? '<span class="acc-pill">Not wired</span>'
-    : readOnly
-      ? '<span class="acc-pill ro" title="Writes are refused by the database">Read-only</span>'
-      : '<span class="acc-pill granted">Wired</span>';
+    : '<span class="acc-pill granted">Wired</span>';
   // A wired MCP connection can be narrowed to a curated tool subset; the
   // chip names the current scope and opens the picker.
   const toolsChip = wired && c.mcp_path
@@ -554,10 +524,10 @@ function agentToolRowHTML(a: AgentSummary, c: ConnectionSummary): string {
             ? `${wiring.allowed_tools.length} tool${wiring.allowed_tools.length === 1 ? '' : 's'}`
             : 'All tools'}</button>`
     : '';
-  // A wired Postgres/SSH/HTTP row gets the ⋮ menu (access mode + direct
-  // endpoint), left of Unwire.
-  const wiringMenu = wired && (ATTENUABLE[c.type] || ENDPOINTABLE[c.type])
-    ? wiringMenuHTML(a, c, mode, wiring)
+  // A wired Postgres/SSH/HTTP row gets the ⋮ direct-endpoint menu, left of
+  // Unwire.
+  const wiringMenu = wired && ENDPOINTABLE[c.type]
+    ? wiringMenuHTML(a, c, wiring)
     : '';
   // A small chip when a direct endpoint is issued for this wiring.
   const endpointChip = wiring?.endpoint
@@ -2314,18 +2284,6 @@ document.addEventListener('click', async (e) => {
       const key = `${id}:${btn.dataset.conn || ''}`;
       state.wiringMenuOpen = state.wiringMenuOpen === key ? null : key;
       render();
-      break;
-    }
-    case 'set-wiring-mode': {
-      const connectionId = btn.dataset.conn || '';
-      const mode = (btn.dataset.mode || 'read-write') as WiringMode;
-      state.wiringMenuOpen = null;
-      if (await run(() => invoke('set_wiring_mode', { agentId: id, connectionId, mode }))) {
-        toast(mode === 'read-only' ? '🔒 Read-only' : '🔓 Read-write');
-        await refresh('all');
-      } else {
-        render();
-      }
       break;
     }
     case 'issue-endpoint': {

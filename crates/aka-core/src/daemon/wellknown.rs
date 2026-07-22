@@ -135,11 +135,6 @@ executes immediately, an unwired call is refused with
 in the Multitool app — if you need a connection you are not wired to, ask
 your user rather than retrying.
 
-A Postgres connection you are wired to also carries a `mode`: `read-only`
-means the broker opens the database session read-only, so writes are
-refused by the engine (and disabling read-only ends the session);
-`read-write` is full access. The mode is set by the user in the app.
-
 ## 3. Retries and timeouts
 
 Calls execute immediately; there is no approval wait. Set your HTTP client
@@ -230,12 +225,7 @@ in `ps`-visible argv and shell history:
 
 The broker's local proxy speaks real Postgres on the loopback leg and
 opens the upstream Postgres leg itself; you never see the real password or
-host. When your wiring's `mode` is `read-only` (see `GET /v1/connections`),
-the upstream session is opened with `default_transaction_read_only=on`:
-reads work, writes come back as Postgres's read-only error, and trying to
-turn read-only off (`SET`/`RESET`, `BEGIN … READ WRITE`, `RESET ALL`) ends
-the session — ask your user to grant read-write if you need it.
-Ticket lifetime and reconnect semantics are the same as WebSocket.
+host. Ticket lifetime and reconnect semantics are the same as WebSocket.
 `sslmode=disable` applies only to the loopback leg; the upstream
 leg uses the connection's configured TLS. The default upstream
 `sslmode=verify-full` validates the certificate chain and hostname. A

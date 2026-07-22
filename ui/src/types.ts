@@ -9,17 +9,12 @@ export interface SecretSummary {
   updated_at: string;
 }
 
-/** Attenuation of a wiring. `read-write` is full access (the default). */
-export type WiringMode = 'read-only' | 'read-write';
-
 /** One agent wired to a connection. */
 export interface WiringSummary {
   agent_id: string;
   agent: string;
   /** Curated upstream MCP tool subset for this agent; absent means all. */
   allowed_tools?: string[] | null;
-  /** Attenuation; only Postgres enforces `read-only` today. */
-  mode: WiringMode;
   /**
    * The direct endpoint issued for this wiring, if any. Its presence flips
    * the row's control from "Issue" to "Copy / Revoke". Never carries the
@@ -325,11 +320,6 @@ export interface CommandMap {
     agentId: string;
     connectionId: string;
     wired: boolean;
-  }, boolean>;
-  set_wiring_mode: CommandSpec<{
-    agentId: string;
-    connectionId: string;
-    mode: WiringMode;
   }, boolean>;
   issue_endpoint: CommandSpec<{ agentId: string; connectionId: string }, IssuedEndpoint>;
   revoke_endpoint: CommandSpec<{ endpointId: string }, boolean>;

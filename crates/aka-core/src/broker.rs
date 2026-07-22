@@ -23,7 +23,7 @@ use crate::sessions::{DataPlane, SessionInfo};
 use crate::store::{ConnectionSpec, Store};
 use crate::types::{
     Connection, ConnectionConfig, ConnectionKind, PairedAgent, SecretMeta, SecretValue, Settings,
-    Wiring, WiringEndpoint, WiringMode,
+    Wiring, WiringEndpoint,
 };
 use crate::Result;
 
@@ -1216,45 +1216,6 @@ impl Broker {
         crate::mcp::list_tools(&self.store, &self.http_client, &connection)
             .await
             .map_err(CoreError::InvalidConnectionConfig)
-    }
-
-    /// Set a wiring's attenuation mode from the app. `read-only` narrows what
-    /// the agent may do; for Postgres the broker enforces it structurally on
-    /// the next open (upstream opened `default_transaction_read_only=on`).
-    /// Returns whether a wiring existed to change.
-    pub fn ui_set_wiring_mode(
-        &self,
-        client_id: &Uuid,
-        connection_id: &Uuid,
-        mode: WiringMode,
-    ) -> Result<bool> {
-        let _gate = self.config_gate.lock().unwrap();
-        let Some(agent) = self.pairing.get_by_id(client_id) else {
-            return Ok(false);
-        };
-        let connection = self.store.connection_by_id(connection_id)?;
-        let changed = self.wirings.mode(client_id, connection_id) != Some(mode);
-        if self.wirings.set_mode(client_id, connection_id, mode)?.is_none() {
-            return Ok(false);
-        }
-        if changed {
-            self.audit.append(
-                AuditEntry::new(
-                    AuditKind::Wired,
-                    format!(
-                        "{} → {} set to {}",
-                        agent.name,
-                        connection.name,
-                        mode.as_str()
-                    ),
-                )
-                .agent(agent.name.clone())
-                .connection(connection.name.clone())
-                .field("mode", mode.as_str()),
-            );
-            self.events.wirings_changed();
-        }
-        Ok(true)
     }
 
     /// Schedule the first agent's optional wire-to-everything grant without

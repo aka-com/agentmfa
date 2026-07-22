@@ -498,8 +498,6 @@
 }
   .acc-pill.granted{ background: var(--ok-wash); border: 1px solid var(--ok-border); color: var(--ok-ink); }
   .acc-pill.rule{ background: var(--amber-wash); border: 1px solid var(--amber-border); color: var(--amber-ink); }
-  /* Read-only attenuation: a restricted-but-fine state, dressed in amber. */
-  .acc-pill.ro{ background: var(--amber-wash); border: 1px solid var(--amber-border); color: var(--amber-ink); }
   /* A direct endpoint has been issued for this wiring. */
   .acc-pill.ep{ background: var(--ok-wash); border: 1px solid var(--ok-border); color: var(--ok-ink); }
   .acc-row .btn{ flex: 0 0 auto; }

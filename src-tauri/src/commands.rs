@@ -13,7 +13,7 @@
 use aka_core::broker::Broker;
 use aka_core::error::{ConnectionField, CoreError};
 use aka_core::store::ConnectionSpec;
-use aka_core::types::{ConnectionConfig, PgSslMode, WiringMode};
+use aka_core::types::{ConnectionConfig, PgSslMode};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter as _, State};
 use tauri_plugin_clipboard_manager::ClipboardExt as _;
@@ -961,35 +961,6 @@ pub async fn list_mcp_tools(
         .map_err(|e| e.to_string())
 }
 
-fn parse_wiring_mode(mode: &str) -> CmdResult<WiringMode> {
-    match mode {
-        "read-write" => Ok(WiringMode::ReadWrite),
-        "read-only" => Ok(WiringMode::ReadOnly),
-        other => Err(format!(
-            "invalid wiring mode {other:?}: expected read-only or read-write"
-        )),
-    }
-}
-
-/// Set an existing wiring's attenuation. `read-only` narrows what the agent
-/// may do; for Postgres the broker enforces it on the next open. Returns
-/// whether a wiring existed to change.
-#[tauri::command]
-pub fn set_wiring_mode(
-    state: State<AppState>,
-    agent_id: String,
-    connection_id: String,
-    mode: String,
-) -> CmdResult<bool> {
-    let agent_id = parse_id(&agent_id)?;
-    let connection_id = parse_id(&connection_id)?;
-    let mode = parse_wiring_mode(&mode)?;
-    state
-        .broker
-        .ui_set_wiring_mode(&agent_id, &connection_id, mode)
-        .map_err(|e| e.to_string())
-}
-
 /// Issue (or rotate) a direct endpoint for a wiring. The broker gates this
 /// behind the native confirmation; the returned secret is shown to the user
 /// exactly once and never persisted in a recoverable form.
@@ -1117,7 +1088,6 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         set_wiring,
         set_wiring_tools,
         list_mcp_tools,
-        set_wiring_mode,
         issue_endpoint,
         revoke_endpoint,
         confirm_agent_disconnect,

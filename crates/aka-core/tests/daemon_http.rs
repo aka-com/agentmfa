@@ -13,7 +13,7 @@ use aka_core::events::BrokerEvents;
 use aka_core::paths::Paths;
 use aka_core::store::ConnectionSpec;
 use aka_core::types::{
-    ConfirmationMethod, ConnectionConfig, ConnectionKind, PgSslMode, SecretMeta, WiringMode,
+    ConfirmationMethod, ConnectionConfig, ConnectionKind, PgSslMode, SecretMeta,
 };
 use aka_core::vault::MemoryVault;
 use aka_core::wire::REQUEST_ID_MAX_BYTES;
@@ -667,44 +667,19 @@ async fn connections_listing_shows_targets_only() {
     )
     .await;
     assert_eq!(status, 200);
-    // The auto-wired first agent sees its Postgres attenuation (`mode`) so it
-    // knows up front whether writes will be refused; only Postgres advertises
-    // it (only Postgres enforces it).
     assert_eq!(
         list,
         json!([
             {"name": "github", "type": "api", "target": format!("http://127.0.0.1:{}", up.port),
              "endpoint": "/v1/http", "wired": true},
             {"name": "prod-db", "type": "pg", "target": "app@db.internal.aka.com:5432/app_production",
-             "endpoint": "/v1/pg/open", "wired": true, "mode": "read-write"},
+             "endpoint": "/v1/pg/open", "wired": true},
         ])
     );
     // No secret names, ids, or templates anywhere in the response.
     let raw = list.to_string();
     assert!(!raw.contains("GITHUB_API_KEY"));
     assert!(!raw.contains("Bearer {{"));
-
-    // Attenuating the wiring is reflected in the next listing.
-    let agent = h.broker.paired_agents().into_iter().next().unwrap();
-    let prod_db = h.broker.store.connection_by_name("prod-db").unwrap();
-    h.broker
-        .ui_set_wiring_mode(&agent.id, &prod_db.id, WiringMode::ReadOnly)
-        .unwrap();
-    let (_status, list) = uds_request(
-        &h.socket,
-        "GET",
-        "/v1/connections",
-        &[("authorization", &auth)],
-        None,
-    )
-    .await;
-    let pg_row = list
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["name"] == "prod-db")
-        .unwrap();
-    assert_eq!(pg_row["mode"], "read-only");
 
     // A later agent starts unwired: it sees the catalog but `wired` is
     // false everywhere.

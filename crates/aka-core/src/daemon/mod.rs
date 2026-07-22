@@ -613,14 +613,6 @@ async fn get_connections(State(state): State<AppState>, authed: Authed) -> Respo
                 // agents up in the app.
                 "wired": broker.wirings.is_wired(&authed.agent.id, &c.id),
             });
-            // Attenuation on a Postgres connection this agent is wired to, so
-            // it knows up front that a read-only wiring will refuse writes.
-            // Only Postgres enforces it, so only Postgres advertises it.
-            if c.kind() == ConnectionKind::Pg {
-                if let Some(mode) = broker.wirings.mode(&authed.agent.id, &c.id) {
-                    row["mode"] = json!(mode.as_str());
-                }
-            }
             // Present only when this upstream speaks MCP, so the payload
             // stays exactly as it was for every other connection.
             if let ConnectionConfig::Api {
@@ -1279,15 +1271,6 @@ async fn post_pg_open(
             .collect::<String>()
     });
 
-    // The wiring's attenuation, resolved now so the ticket carries it: a
-    // read-only wiring makes the proxy open the upstream read-only. An unwired
-    // agent has no mode; `run_wired` refuses it below either way.
-    let read_only = broker
-        .wirings
-        .mode(&agent.id, &conn.id)
-        .map(|m| m.is_read_only())
-        .unwrap_or(false);
-
     // Executor: issue the ticket and hand back the password-less DSN.
     // Unlike WS, nothing is dialed here, the proxy dials upstream at
     // redemption time. The ticket is deliberately NOT embedded in the DSN
@@ -1298,11 +1281,10 @@ async fn post_pg_open(
         let conn = conn.clone();
         let agent_name = agent.name.clone();
         Box::pin(async move {
-            let ticket = broker.data_plane.issue(
-                &agent_name,
-                &conn,
-                crate::sessions::TicketPayload::Pg { read_only },
-            );
+            let ticket =
+                broker
+                    .data_plane
+                    .issue(&agent_name, &conn, crate::sessions::TicketPayload::Pg);
             let dsn = format!("postgres://ticket@127.0.0.1:{proxy_port}/{dbname}?sslmode=disable");
             ExecOutcome {
                 status: 200,

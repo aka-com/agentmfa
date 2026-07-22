@@ -53,8 +53,6 @@ pub struct WiringChip {
     /// Curated upstream MCP tool subset; absent means all tools.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_tools: Option<Vec<String>>,
-    /// Attenuation of this wiring: `read-write` (default) or `read-only`.
-    pub mode: String,
     /// The direct endpoint issued for this wiring, if any. Its presence flips
     /// the row's control from "Issue" to "Copy / Revoke"; the secret is never
     /// carried here (it left the broker once, at issue).
@@ -151,7 +149,6 @@ impl ConnectionDto {
                 agent_id: w.client_id.to_string(),
                 agent: w.agent.clone(),
                 allowed_tools: w.allowed_tools.clone(),
-                mode: w.mode.as_str().to_string(),
                 endpoint: broker
                     .endpoints
                     .get_for_wiring(&w.client_id, &conn.id)

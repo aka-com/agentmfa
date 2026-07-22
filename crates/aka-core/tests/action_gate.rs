@@ -115,7 +115,7 @@ async fn agent_revocation_is_immediate_without_confirmation() {
     let conn = add_github(&broker);
     let ticket = broker
         .data_plane
-        .issue("claude-code", &conn, TicketPayload::Pg { read_only: false });
+        .issue("claude-code", &conn, TicketPayload::Pg);
     let session = broker
         .data_plane
         .redeem(&ticket)
