@@ -158,9 +158,10 @@ impl Broker {
         // rather than inheriting the new enabled-by-default.
         let known_connections: Vec<Uuid> =
             store.list_connections().into_iter().map(|c| c.id).collect();
-        let access = Arc::new(AccessTable::open_with_legacy_wirings(
+        let access = Arc::new(AccessTable::open_with_legacy_policy(
             paths.access_file(),
             Some(&paths.wirings_file()),
+            Some(&paths.rules_file()),
             &known_connections,
             integrity,
         )?);

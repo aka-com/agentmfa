@@ -45,6 +45,26 @@ impl AccessTable {
         known_connections: &[Uuid],
         integrity: Arc<StateIntegrity>,
     ) -> Result<Self> {
+        Self::open_with_legacy_policy(
+            path,
+            legacy_wirings_path,
+            None,
+            known_connections,
+            integrity,
+        )
+    }
+
+    /// Open `access.json`, preferring the immediately preceding
+    /// `wirings.json` representation but also accepting the older
+    /// `rules.json` representation. Supporting both prevents a direct
+    /// upgrade from losing its deny-by-default posture.
+    pub fn open_with_legacy_policy(
+        path: PathBuf,
+        legacy_wirings_path: Option<&std::path::Path>,
+        legacy_rules_path: Option<&std::path::Path>,
+        known_connections: &[Uuid],
+        integrity: Arc<StateIntegrity>,
+    ) -> Result<Self> {
         let mut entries: Option<Vec<ToolAccess>> = integrity
             .read_verified(&path)?
             .map(|bytes| serde_json::from_slice(&bytes))
@@ -96,6 +116,32 @@ impl AccessTable {
                             updated_at: Utc::now(),
                         });
                     }
+                    integrity.write(&path, &serde_json::to_vec_pretty(&migrated)?)?;
+                    entries = Some(migrated);
+                }
+            }
+        }
+        if entries.is_none() {
+            if let Some(rules_path) = legacy_rules_path {
+                if let Some(bytes) = integrity.read_verified(rules_path)? {
+                    #[derive(serde::Deserialize)]
+                    struct LegacyRule {
+                        #[serde(default)]
+                        client_id: Uuid,
+                        connection_id: Uuid,
+                    }
+                    let rules: Vec<LegacyRule> = serde_json::from_slice(&bytes)?;
+                    let migrated: Vec<ToolAccess> = known_connections
+                        .iter()
+                        .map(|connection_id| ToolAccess {
+                            connection_id: *connection_id,
+                            enabled: rules.iter().any(|rule| {
+                                !rule.client_id.is_nil() && &rule.connection_id == connection_id
+                            }),
+                            allowed_tools: None,
+                            updated_at: Utc::now(),
+                        })
+                        .collect();
                     integrity.write(&path, &serde_json::to_vec_pretty(&migrated)?)?;
                     entries = Some(migrated);
                 }
@@ -369,5 +415,58 @@ mod tests {
         let reopened = AccessTable::open(access_path, integrity).unwrap();
         assert!(!reopened.allows(&unwired));
         assert!(reopened.allows(&wired_all));
+    }
+
+    #[test]
+    fn legacy_rules_collapse_preserving_deny_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let access_path = dir.path().join("access.json");
+        let rules_path = dir.path().join("rules.json");
+        let integrity = integrity();
+        let granted = Uuid::new_v4();
+        let not_granted = Uuid::new_v4();
+        let legacy = serde_json::json!([{
+            "id": Uuid::new_v4(),
+            "client_id": Uuid::new_v4(),
+            "agent": "claude-code",
+            "connection_id": granted,
+            "scope": {"kind": "standing"},
+            "created_at": Utc::now(),
+        }]);
+        integrity
+            .write(&rules_path, &serde_json::to_vec_pretty(&legacy).unwrap())
+            .unwrap();
+
+        let table = AccessTable::open_with_legacy_policy(
+            access_path.clone(),
+            None,
+            Some(&rules_path),
+            &[granted, not_granted],
+            integrity.clone(),
+        )
+        .unwrap();
+        assert!(table.allows(&granted));
+        assert!(!table.allows(&not_granted));
+
+        let reopened = AccessTable::open(access_path, integrity).unwrap();
+        assert!(reopened.allows(&granted));
+        assert!(!reopened.allows(&not_granted));
+    }
+
+    #[test]
+    fn malformed_legacy_rules_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let rules_path = dir.path().join("rules.json");
+        let integrity = integrity();
+        integrity.write(&rules_path, b"{}").unwrap();
+
+        assert!(AccessTable::open_with_legacy_policy(
+            dir.path().join("access.json"),
+            None,
+            Some(&rules_path),
+            &[Uuid::new_v4()],
+            integrity,
+        )
+        .is_err());
     }
 }

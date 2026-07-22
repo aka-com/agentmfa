@@ -96,6 +96,7 @@ fn mint_token() -> String {
 #[derive(serde::Deserialize)]
 struct LegacyAgent {
     token_hash: String,
+    last_used: chrono::DateTime<Utc>,
 }
 
 impl IdentityStore {
@@ -134,6 +135,7 @@ impl IdentityStore {
                     id: uuid::Uuid::nil(),
                     token_hash: String::new(),
                     alias_hashes: Vec::new(),
+                    alias_last_used: std::collections::HashMap::new(),
                     minted_at: Utc::now(),
                     last_used: Utc::now(),
                 },
@@ -164,14 +166,17 @@ impl IdentityStore {
                             store.token_file.display()
                         );
                         let mut aliases = identity.alias_hashes.clone();
+                        let mut alias_last_used = identity.alias_last_used.clone();
                         if !identity.token_hash.is_empty() {
                             aliases.push(identity.token_hash.clone());
+                            alias_last_used.insert(identity.token_hash.clone(), identity.last_used);
                         }
                         let token = mint_token();
                         let next = BrokerIdentity {
                             id: identity.id,
                             token_hash: hash_token(&token),
                             alias_hashes: aliases,
+                            alias_last_used,
                             minted_at: Utc::now(),
                             last_used: Utc::now(),
                         };
@@ -185,16 +190,32 @@ impl IdentityStore {
             None => {
                 // First open. Absorb the per-agent era's token hashes as
                 // aliases (grace period until the first rotation).
-                let alias_hashes = legacy_agents_path
-                    .and_then(|p| store.integrity.read_verified(p).ok().flatten())
-                    .and_then(|bytes| serde_json::from_slice::<Vec<LegacyAgent>>(&bytes).ok())
-                    .map(|agents| agents.into_iter().map(|a| a.token_hash).collect())
-                    .unwrap_or_default();
+                let legacy_agents = match legacy_agents_path {
+                    Some(path) => store
+                        .integrity
+                        .read_verified(path)?
+                        .map(|bytes| serde_json::from_slice::<Vec<LegacyAgent>>(&bytes))
+                        .transpose()?
+                        .unwrap_or_default(),
+                    None => Vec::new(),
+                };
+                let now = Utc::now();
+                let mut alias_hashes = Vec::new();
+                let mut alias_last_used = std::collections::HashMap::new();
+                for agent in legacy_agents {
+                    let age = now.signed_duration_since(agent.last_used);
+                    if age.num_seconds() > ttl.as_secs() as i64 {
+                        continue;
+                    }
+                    alias_last_used.insert(agent.token_hash.clone(), agent.last_used);
+                    alias_hashes.push(agent.token_hash);
+                }
                 let token = mint_token();
                 let identity = BrokerIdentity {
                     id: uuid::Uuid::new_v4(),
                     token_hash: hash_token(&token),
                     alias_hashes,
+                    alias_last_used,
                     minted_at: Utc::now(),
                     last_used: Utc::now(),
                 };
@@ -240,17 +261,20 @@ impl IdentityStore {
     pub fn verify(&self, token: &str) -> std::result::Result<VerifiedToken, TokenError> {
         let hash = hash_token(token);
         let mut state = self.state.lock().unwrap();
-        let via_alias = if state.identity.token_hash == hash {
-            false
+        let (via_alias, last_used) = if state.identity.token_hash == hash {
+            (false, state.identity.last_used)
         } else if state.identity.alias_hashes.contains(&hash) {
-            true
+            let Some(last_used) = state.identity.alias_last_used.get(&hash).copied() else {
+                return Err(TokenError::Expired);
+            };
+            (true, last_used)
         } else if state.rotated_out.as_deref() == Some(hash.as_str()) {
             return Err(TokenError::Superseded);
         } else {
             return Err(TokenError::Invalid);
         };
         let now = Utc::now();
-        let age = now.signed_duration_since(state.identity.last_used);
+        let age = now.signed_duration_since(last_used);
         if age.num_seconds() > self.ttl.as_secs() as i64 {
             return Err(TokenError::Expired);
         }
@@ -261,7 +285,11 @@ impl IdentityStore {
         if age < self.refresh_interval {
             return Ok(verified);
         }
-        state.identity.last_used = now;
+        if via_alias {
+            state.identity.alias_last_used.insert(hash, now);
+        } else {
+            state.identity.last_used = now;
+        }
         // last_used is best-effort persisted; failure to write must not fail
         // the call.
         if let Err(e) = self.persist(&state.identity) {
@@ -292,6 +320,7 @@ impl IdentityStore {
             id: state.identity.id,
             token_hash: hash_token(&token),
             alias_hashes: Vec::new(),
+            alias_last_used: std::collections::HashMap::new(),
             minted_at: Utc::now(),
             last_used: Utc::now(),
         };
@@ -471,6 +500,142 @@ mod tests {
         // Rotation ends the grace period.
         s.rotate().unwrap();
         assert_eq!(s.verify(legacy_token).unwrap_err(), TokenError::Invalid);
+    }
+
+    #[test]
+    fn shared_key_activity_does_not_revive_an_expired_legacy_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let integrity = integrity();
+        let legacy_token = "aka_legacy_token";
+        let legacy = serde_json::json!([{
+            "id": uuid::Uuid::new_v4(),
+            "name": "claude-code",
+            "token_hash": hash_token(legacy_token),
+            "token_preview": "aka_legacy_",
+            "paired_at": Utc::now(),
+            "last_used": Utc::now(),
+        }]);
+        let agents_path = dir.path().join("agents.json");
+        integrity
+            .write(&agents_path, &serde_json::to_vec_pretty(&legacy).unwrap())
+            .unwrap();
+
+        let s = IdentityStore::open(
+            dir.path().join("identity.json"),
+            dir.path().join("token"),
+            Some(&agents_path),
+            Duration::ZERO,
+            integrity,
+        )
+        .unwrap();
+        assert!(s.verify(legacy_token).is_ok());
+        std::thread::sleep(Duration::from_millis(1100));
+        s.touch();
+        assert!(s.verify(&s.token()).is_ok());
+        assert_eq!(s.verify(legacy_token).unwrap_err(), TokenError::Expired);
+    }
+
+    #[test]
+    fn expired_legacy_aliases_are_not_imported() {
+        let dir = tempfile::tempdir().unwrap();
+        let integrity = integrity();
+        let legacy_token = "aka_expired_legacy_token";
+        let legacy = serde_json::json!([{
+            "id": uuid::Uuid::new_v4(),
+            "name": "old-agent",
+            "token_hash": hash_token(legacy_token),
+            "token_preview": "aka_expired_",
+            "paired_at": Utc::now() - chrono::Duration::hours(2),
+            "last_used": Utc::now() - chrono::Duration::hours(2),
+        }]);
+        let agents_path = dir.path().join("agents.json");
+        integrity
+            .write(&agents_path, &serde_json::to_vec_pretty(&legacy).unwrap())
+            .unwrap();
+
+        let s = IdentityStore::open(
+            dir.path().join("identity.json"),
+            dir.path().join("token"),
+            Some(&agents_path),
+            Duration::from_secs(3600),
+            integrity,
+        )
+        .unwrap();
+        assert_eq!(s.verify(legacy_token).unwrap_err(), TokenError::Invalid);
+        assert!(s.info().alias_hashes.is_empty());
+    }
+
+    #[test]
+    fn aliases_missing_an_independent_clock_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let integrity = integrity();
+        let primary = "aka_primary_token";
+        let legacy = "aka_alias_without_a_clock";
+        let identity = serde_json::json!({
+            "id": uuid::Uuid::new_v4(),
+            "token_hash": hash_token(primary),
+            "alias_hashes": [hash_token(legacy)],
+            "minted_at": Utc::now(),
+            "last_used": Utc::now(),
+        });
+        integrity
+            .write(
+                &dir.path().join("identity.json"),
+                &serde_json::to_vec(&identity).unwrap(),
+            )
+            .unwrap();
+        std::fs::write(dir.path().join("token"), primary).unwrap();
+
+        let s = IdentityStore::open(
+            dir.path().join("identity.json"),
+            dir.path().join("token"),
+            None,
+            Duration::from_secs(3600),
+            integrity,
+        )
+        .unwrap();
+        assert!(s.verify(primary).is_ok());
+        assert_eq!(s.verify(legacy).unwrap_err(), TokenError::Expired);
+    }
+
+    #[test]
+    fn malformed_legacy_agents_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let integrity = integrity();
+        let agents_path = dir.path().join("agents.json");
+        integrity.write(&agents_path, b"{}").unwrap();
+
+        assert!(IdentityStore::open(
+            dir.path().join("identity.json"),
+            dir.path().join("token"),
+            Some(&agents_path),
+            Duration::from_secs(3600),
+            integrity,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn tampered_legacy_agents_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let integrity = integrity();
+        let agents_path = dir.path().join("agents.json");
+        integrity.write(&agents_path, b"[]").unwrap();
+        let sealed = std::fs::read_to_string(&agents_path).unwrap();
+        std::fs::write(
+            &agents_path,
+            sealed.replace("\"payload\":[]", "\"payload\":[ ]"),
+        )
+        .unwrap();
+
+        assert!(IdentityStore::open(
+            dir.path().join("identity.json"),
+            dir.path().join("token"),
+            Some(&agents_path),
+            Duration::from_secs(3600),
+            integrity,
+        )
+        .is_err());
     }
 
     #[test]

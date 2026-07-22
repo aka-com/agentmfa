@@ -92,7 +92,8 @@ impl Paths {
     pub fn wirings_file(&self) -> PathBuf {
         self.data_dir.join("wirings.json")
     }
-    /// Legacy standing-rules file (pre-wirings); no longer read.
+    /// Legacy standing-rules file (pre-wirings); read once when neither the
+    /// access table nor the intermediate wirings table exists.
     pub fn rules_file(&self) -> PathBuf {
         self.data_dir.join("rules.json")
     }

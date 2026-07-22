@@ -427,6 +427,11 @@ pub struct BrokerIdentity {
     /// until the first rotation clears them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alias_hashes: Vec<String>,
+    /// Independent sliding-expiry clocks for migration aliases. An alias
+    /// without an entry is never accepted: older buggy identity records that
+    /// discarded the legacy clock must fail closed rather than revive it.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub alias_last_used: std::collections::HashMap<String, DateTime<Utc>>,
     pub minted_at: DateTime<Utc>,
     /// Refreshed on use; the key expires 30 days after this (re-minted at
     /// the next broker start, or refreshed by a compat `/v1/pair`).
