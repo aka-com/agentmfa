@@ -217,7 +217,6 @@ export interface McpAuthDraft {
   /** Re-authenticate an existing connection instead of creating one. */
   reauth_connection_id?: string | null;
   whoami_tool?: string | null;
-  expected_tools?: string[];
   /** Pre-registered OAuth client, for servers without dynamic registration. */
   oauth_client_id?: string | null;
   oauth_client_secret?: string | null;
@@ -272,14 +271,12 @@ export interface McpStatusReport {
   protocol_version?: string;
   account?: string;
   tools: string[];
-  missing_tools: string[];
   resources_supported: boolean;
   resources: McpResourceInfo[];
 }
 
 export interface McpCheckOptions {
   whoami_tool?: string | null;
-  expected_tools?: string[];
 }
 
 /** One upstream tool, as the per-wiring tool picker lists it. */

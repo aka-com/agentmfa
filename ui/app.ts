@@ -853,9 +853,6 @@ function mcpStatusHTML(c: ConnectionSummary): string {
   if (!report) return '';
   const head = `<div class="cc-test ${report.ok ? 'ok' : 'err'}">${report.ok ? ICONS.circleCheck : ICONS.circleX}<span>${esc(report.detail)}</span></div>`;
   if (!report.ok) return head;
-  const missing = report.missing_tools.length
-    ? `<div class="mcp-missing">${ICONS.circleQuestion}<span>Expected tools not advertised: ${esc(report.missing_tools.join(', '))}</span></div>`
-    : '';
   let resources = '';
   if (report.resources_supported) {
     const shown = report.resources.slice(0, 8);
@@ -866,7 +863,7 @@ function mcpStatusHTML(c: ConnectionSummary): string {
     resources = `<div class="mcp-res-head">Resources (${report.resources.length})</div>
       ${rows || '<div class="mcp-res-more">None listed by the server.</div>'}${more}`;
   }
-  return `${head}${missing}${resources}`;
+  return `${head}${resources}`;
 }
 
 // The built-in credentials store, expanded inline: the same secrets table
@@ -2233,7 +2230,6 @@ async function quickConnectCatalogMcp(entry: CatalogEntry): Promise<void> {
       port: server.port,
       mcp_path: server.mcpPath,
       whoami_tool: entry.mcpTemplate?.whoamiTool ?? null,
-      expected_tools: entry.mcpTemplate?.expectedTools ?? [],
     });
   } catch (error) {
     toast('⚠ ' + errorMessage(error));
@@ -2389,7 +2385,6 @@ async function saveConn(): Promise<void> {
       port: apiOrigin!.port,
       mcp_path: mcpPath!,
       whoami_tool: template?.whoamiTool ?? null,
-      expected_tools: template?.expectedTools ?? [],
       ...(mcpOauthApp ? {
         oauth_client_id: (d.oauthClientId || '').trim(),
         oauth_client_secret: (d.oauthClientSecret || '').trim() || null,
@@ -2955,7 +2950,6 @@ document.addEventListener('click', async (e) => {
           id,
           options: {
             whoami_tool: template?.whoamiTool ?? null,
-            expected_tools: template?.expectedTools ?? [],
           },
         });
         state.mcpStatus[id] = { running: false, report };
@@ -2981,7 +2975,6 @@ document.addEventListener('click', async (e) => {
         mcp_path: connection.mcp_path,
         reauth_connection_id: connection.id,
         whoami_tool: template?.whoamiTool ?? null,
-        expected_tools: template?.expectedTools ?? [],
         // An oauthApp template's scope override and authorize params must
         // ride reauth too, or the retry asks for every advertised scope
         // and (for Google) comes back without a refresh token. The client

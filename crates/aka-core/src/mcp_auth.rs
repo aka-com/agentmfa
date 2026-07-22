@@ -140,11 +140,10 @@ pub struct McpAuthDraft {
     /// bound token. The other destination fields are ignored.
     #[serde(default)]
     pub reauth_connection_id: Option<String>,
-    /// Template expectations carried into the post-auth verification.
+    /// The whoami tool carried into the post-auth verification, to
+    /// acknowledge which account the new token belongs to.
     #[serde(default)]
     pub whoami_tool: Option<String>,
-    #[serde(default)]
-    pub expected_tools: Vec<String>,
     /// Pre-registered OAuth client, for authorization servers without
     /// dynamic client registration (Google Workspace, Slack). When set,
     /// the registration step is skipped and these ride the authorize +
@@ -312,7 +311,6 @@ impl Broker {
         let broker = self.clone();
         let options = McpCheckOptions {
             whoami_tool: draft.whoami_tool.clone(),
-            expected_tools: draft.expected_tools.clone(),
         };
         let preset = ClientPreset::from_draft(&draft);
         // This is also called by a synchronous Tauri command on the app's

@@ -870,11 +870,6 @@
 .cc-test.running { opacity: .8; }
 .cat-meta-account { color: var(--ok-ink); font-weight: 600; }
 .mcp-status-btn { flex: 0 0 auto; }
-.mcp-missing {
-  display: flex; align-items: flex-start; gap: 5px; margin-top: 3px;
-  color: var(--amber-strong); font-size: 11.5px;
-}
-.mcp-missing svg { flex: 0 0 auto; margin-top: 1px; }
 /* Resources the server advertises, listed under the connection the same
    way credentials and wirings are. */
 .mcp-res-head {

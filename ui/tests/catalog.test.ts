@@ -84,20 +84,16 @@ test('an unbranded MCP connection lists under the generic MCP row', () => {
   assert.equal(plain?.id, 'http');
 });
 
-test('templated vendors ship a server URL, expected tools, and a whoami tool', () => {
+test('templated vendors ship a server URL and a whoami tool', () => {
   for (const id of ['github', 'notion', 'airtable', 'sentry', 'stripe']) {
     const template = CATALOG.find((entry) => entry.id === id)?.mcpTemplate;
     assert.ok(template?.serverUrl?.startsWith('https://'), id);
-    assert.ok((template?.expectedTools.length ?? 0) > 0, id);
     assert.ok(template?.whoamiTool, id);
-    assert.ok(template?.expectedTools.includes(template.whoamiTool!), id);
   }
-  // Linear and Cloudflare publish no whoami-style tool — their templates
-  // carry expectations only.
+  // Linear and Cloudflare publish no whoami-style tool.
   for (const id of ['linear', 'cloudflare']) {
     const template = CATALOG.find((entry) => entry.id === id)?.mcpTemplate;
     assert.ok(template?.serverUrl?.startsWith('https://'), id);
-    assert.ok((template?.expectedTools.length ?? 0) > 0, id);
     assert.equal(template?.whoamiTool, undefined, id);
   }
   // Gmail's endpoint is published, but Google has no dynamic client

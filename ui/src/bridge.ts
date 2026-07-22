@@ -165,7 +165,7 @@ interface MockArgs {
   value: string;
   input2?: never;
   url?: string;
-  options?: { whoami_tool?: string | null; expected_tools?: string[] } | null;
+  options?: { whoami_tool?: string | null } | null;
   newName?: string | null;
   newValue?: string | null;
   input: ConnectionInput & Partial<McpAuthDraft>;
@@ -448,7 +448,6 @@ function mockStatusReport(c: MockConnection): McpStatusReport {
       server: 'Notion MCP 1.4.0', protocol_version: '2025-06-18', account,
       tools: ['notion-search', 'notion-fetch', 'notion-create-pages',
         'notion-update-page', 'notion-get-self', 'notion-create-comment'],
-      missing_tools: [],
       resources_supported: true,
       resources: [
         { uri: 'notion://workspaces/demo', name: 'Demo workspace' },
@@ -464,7 +463,6 @@ function mockStatusReport(c: MockConnection): McpStatusReport {
       server: 'github-mcp-server 0.9.1', protocol_version: '2025-06-18', account,
       tools: ['get_me', 'search_repositories', 'get_file_contents',
         'list_issues', 'create_issue', 'create_pull_request'],
-      missing_tools: [],
       resources_supported: true,
       resources: [
         { uri: 'repo://aka-com/multitool/contents', name: 'aka-com/multitool' },
@@ -475,8 +473,7 @@ function mockStatusReport(c: MockConnection): McpStatusReport {
     ok: true,
     detail: 'The server answered with 3 tools',
     server: 'mock-mcp 0.1.0', protocol_version: '2025-06-18',
-    account, tools: ['echo', 'search', 'fetch'], missing_tools: [],
-    resources_supported: false, resources: [],
+    account, tools: ['echo', 'search', 'fetch'],    resources_supported: false, resources: [],
   };
 }
 
@@ -649,8 +646,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       await new Promise((resolve) => setTimeout(resolve, 700));
       if (!c.mcp_path) {
         return {
-          ok: false, detail: 'this connection has no MCP path', tools: [], missing_tools: [],
-          resources_supported: false, resources: [],
+          ok: false, detail: 'this connection has no MCP path', tools: [],          resources_supported: false, resources: [],
         };
       }
       const report = mockStatusReport(c);

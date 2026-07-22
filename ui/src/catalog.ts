@@ -13,11 +13,11 @@
 // MCP path set, which is what lets the sidecar re-expose their tools.
 //
 // Vendors with an *official, documented* hosted MCP server carry an
-// `mcpTemplate`: the server URL is prefilled (still editable), the tools we
-// expect the server to advertise are checked by the status button, and the
-// whoami tool acknowledges which account a credential belongs to. A vendor
-// without a published endpoint (Gmail today) keeps the template minus the
-// URL — the user pastes the one their provider gave them.
+// `mcpTemplate`: the server URL is prefilled (still editable), and the
+// whoami tool (when the server has one) acknowledges which account a
+// credential belongs to. A vendor whose authorization server has no
+// dynamic client registration (Gmail) adds an `oauthApp` block so the
+// form collects a one-time OAuth client before sign-in.
 //
 // Branded API rows (Stripe, OpenAI, …) carry a `preset` instead: the
 // vendor's *documented public API root* and auth recipe, prefilled into the
@@ -72,13 +72,11 @@ export interface OAuthPreset {
  * A branded MCP server the catalog knows how to reach and talk to.
  *
  * `serverUrl` is the vendor's published endpoint, prefilled into the add
- * form but always editable. `expectedTools` is advisory: the status check
- * reports (never blocks on) tools the server stopped advertising.
- * `whoamiTool` names the tool that identifies the connected account.
+ * form but always editable. `whoamiTool` names the tool that identifies
+ * the connected account, so the status check can acknowledge it.
  */
 export interface McpTemplate {
   serverUrl?: string;
-  expectedTools: string[];
   whoamiTool?: string;
   /** Copy shown under the URL field in the add form. */
   urlHint?: string;
@@ -115,7 +113,7 @@ export interface CatalogEntry {
   mcp?: boolean;
   /** Prefill for a branded API row; see ConnectionPreset. */
   preset?: ConnectionPreset;
-  /** Branded MCP details (endpoint, expected tools, whoami). */
+  /** Branded MCP details (endpoint, whoami, OAuth-app prefill). */
   mcpTemplate?: McpTemplate;
   /** BYO-app OAuth prefill for a plain REST row; see OAuthPreset. */
   oauthPreset?: OAuthPreset;
@@ -138,10 +136,6 @@ export const CATALOG: CatalogEntry[] = [
     keywords: ['git', 'repos', 'issues', 'pull requests', 'code'],
     mcpTemplate: {
       serverUrl: 'https://api.githubcopilot.com/mcp/',
-      expectedTools: [
-        'get_me', 'search_repositories', 'get_file_contents',
-        'list_issues', 'create_issue', 'create_pull_request',
-      ],
       whoamiTool: 'get_me',
       urlHint: 'GitHub’s hosted MCP server. Sign in with your GitHub account, or paste a personal access token.',
     },
@@ -185,7 +179,6 @@ export const CATALOG: CatalogEntry[] = [
     // created in the user's own Google Cloud console.
     mcpTemplate: {
       serverUrl: 'https://gmailmcp.googleapis.com/mcp/v1',
-      expectedTools: [],
       urlHint: 'Google’s hosted Gmail MCP server. Needs a one-time OAuth client from your Google Cloud console; then sign in with your Google account.',
       oauthApp: {
         docsUrl: 'console.cloud.google.com/apis/credentials (create an OAuth client, type “Desktop app”)',
@@ -209,10 +202,6 @@ export const CATALOG: CatalogEntry[] = [
     keywords: ['docs', 'wiki', 'notes', 'pages'],
     mcpTemplate: {
       serverUrl: 'https://mcp.notion.com/mcp',
-      expectedTools: [
-        'notion-search', 'notion-fetch', 'notion-create-pages',
-        'notion-update-page', 'notion-get-self',
-      ],
       whoamiTool: 'notion-get-self',
       urlHint: 'Notion’s hosted MCP server. Sign in with your Notion account to pick the workspace.',
     },
@@ -229,10 +218,6 @@ export const CATALOG: CatalogEntry[] = [
     keywords: ['spreadsheet', 'tables', 'records', 'bases'],
     mcpTemplate: {
       serverUrl: 'https://mcp.airtable.com/mcp',
-      expectedTools: [
-        'whoami', 'list_bases', 'get_base_schema', 'list_records',
-        'get_record', 'create_records', 'update_records',
-      ],
       whoamiTool: 'whoami',
       urlHint: 'Airtable’s hosted MCP server. Sign in with your Airtable account, or paste a personal access token.',
     },
@@ -293,10 +278,6 @@ export const CATALOG: CatalogEntry[] = [
     // linear://viewer), so the template carries expectations only.
     mcpTemplate: {
       serverUrl: 'https://mcp.linear.app/mcp',
-      expectedTools: [
-        'list_issues', 'get_issue', 'create_issue', 'list_projects',
-        'list_teams', 'create_comment',
-      ],
       urlHint: 'Linear’s hosted MCP server. Sign in with your Linear account, or paste an API key.',
     },
     preset: {
@@ -326,10 +307,6 @@ export const CATALOG: CatalogEntry[] = [
     keywords: ['errors', 'crashes', 'monitoring', 'issues'],
     mcpTemplate: {
       serverUrl: 'https://mcp.sentry.dev/mcp',
-      expectedTools: [
-        'whoami', 'find_organizations', 'find_projects', 'list_issues',
-        'get_issue_details', 'search_issues',
-      ],
       whoamiTool: 'whoami',
       urlHint: 'Sentry’s hosted MCP server. Sign in with your Sentry account, or paste an auth token.',
     },
@@ -353,11 +330,6 @@ export const CATALOG: CatalogEntry[] = [
     keywords: ['payments', 'billing', 'charges', 'invoices'],
     mcpTemplate: {
       serverUrl: 'https://mcp.stripe.com/',
-      expectedTools: [
-        'get_stripe_account_info', 'search_stripe_resources',
-        'fetch_stripe_resources', 'search_stripe_documentation',
-        'get_balance_summary',
-      ],
       whoamiTool: 'get_stripe_account_info',
       urlHint: 'Stripe’s hosted MCP server. Sign in with your Stripe account, or paste a restricted API key.',
     },
@@ -403,7 +375,6 @@ export const CATALOG: CatalogEntry[] = [
     // Code-Mode tools (search + execute); there is no whoami-style tool.
     mcpTemplate: {
       serverUrl: 'https://mcp.cloudflare.com/mcp',
-      expectedTools: ['search', 'execute'],
       urlHint: 'Cloudflare’s hosted MCP server for the full API. Sign in with your Cloudflare account, or paste an API token.',
     },
   },
@@ -491,7 +462,6 @@ export const REGISTRY_CATALOG: CatalogEntry[] = REGISTRY_SERVERS.map((server) =>
   keywords: [...server.keywords, 'mcp', 'registry'],
   mcpTemplate: {
     serverUrl: server.serverUrl,
-    expectedTools: [],
     urlHint: 'The vendor’s published MCP endpoint, from the public MCP registry. Sign in, or paste a token.',
   },
 }));

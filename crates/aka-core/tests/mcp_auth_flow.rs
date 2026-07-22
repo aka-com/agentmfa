@@ -471,7 +471,6 @@ async fn complete_sign_in(
             mcp_path: "/mcp".into(),
             reauth_connection_id: None,
             whoami_tool: None,
-            expected_tools: vec![],
             ..Default::default()
         })
         .expect("start auth");
@@ -512,7 +511,6 @@ async fn auth_can_be_started_from_a_thread_without_a_tokio_context() {
             mcp_path: "/mcp".into(),
             reauth_connection_id: None,
             whoami_tool: None,
-            expected_tools: vec![],
             ..Default::default()
         })
     })
@@ -539,7 +537,6 @@ async fn oauth_sign_in_mints_a_connection_and_the_status_check_acknowledges_it()
             mcp_path: "/mcp".into(),
             reauth_connection_id: None,
             whoami_tool: Some("get_me".into()),
-            expected_tools: vec!["get_me".into(), "definitely_missing".into()],
             ..Default::default()
         })
         .expect("start auth");
@@ -621,7 +618,6 @@ async fn oauth_sign_in_mints_a_connection_and_the_status_check_acknowledges_it()
             &connection.id,
             McpCheckOptions {
                 whoami_tool: Some("get_me".into()),
-                expected_tools: vec!["get_me".into(), "definitely_missing".into()],
             },
         )
         .await
@@ -630,7 +626,6 @@ async fn oauth_sign_in_mints_a_connection_and_the_status_check_acknowledges_it()
     assert_eq!(report.server.as_deref(), Some("mock-mcp 1.0.0"));
     assert_eq!(report.account.as_deref(), Some("Octo Cat (@octocat)"));
     assert_eq!(report.tools, vec!["get_me", "search"]);
-    assert_eq!(report.missing_tools, vec!["definitely_missing"]);
     assert!(report.resources_supported);
     assert_eq!(report.resources.len(), 1);
     assert_eq!(report.resources[0].uri, "mock://repos/one");
@@ -647,7 +642,6 @@ async fn oauth_sign_in_mints_a_connection_and_the_status_check_acknowledges_it()
             mcp_path: "/mcp".into(),
             reauth_connection_id: None,
             whoami_tool: None,
-            expected_tools: vec![],
             ..Default::default()
         })
         .expect("second auth");
@@ -850,7 +844,6 @@ async fn a_server_that_never_asks_for_auth_fails_with_a_token_hint() {
             mcp_path: "/mcp".into(),
             reauth_connection_id: None,
             whoami_tool: None,
-            expected_tools: vec![],
             ..Default::default()
         })
         .expect("start auth");
@@ -956,7 +949,6 @@ async fn a_bad_draft_is_rejected_before_any_browser_opens() {
             mcp_path: "/mcp".into(),
             reauth_connection_id: None,
             whoami_tool: None,
-            expected_tools: vec![],
             ..Default::default()
         })
         .unwrap_err();

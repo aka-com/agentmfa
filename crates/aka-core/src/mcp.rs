@@ -63,8 +63,6 @@ pub struct McpStatusReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
     pub tools: Vec<String>,
-    /// Template-expected tools the server did not advertise.
-    pub missing_tools: Vec<String>,
     /// Whether the server advertises the resources capability at all.
     pub resources_supported: bool,
     pub resources: Vec<McpResourceInfo>,
@@ -85,7 +83,6 @@ impl McpStatusReport {
             protocol_version: None,
             account: None,
             tools: Vec::new(),
-            missing_tools: Vec::new(),
             resources_supported: false,
             resources: Vec::new(),
         }
@@ -103,9 +100,6 @@ impl McpStatusReport {
 pub struct McpCheckOptions {
     /// Tool that identifies the connected account (e.g. GitHub's `get_me`).
     pub whoami_tool: Option<String>,
-    /// Tools the catalog template expects this server to advertise.
-    #[serde(default)]
-    pub expected_tools: Vec<String>,
 }
 
 /// The credential attached to every upstream request.
@@ -500,13 +494,6 @@ async fn check_endpoint(
             break;
         }
     }
-    let missing_tools: Vec<String> = options
-        .expected_tools
-        .iter()
-        .filter(|expected| !tools.iter().any(|tool| tool == *expected))
-        .cloned()
-        .collect();
-
     let mut account = None;
     if let Some(whoami) = &options.whoami_tool {
         if tools.iter().any(|tool| tool == whoami) {
@@ -584,10 +571,7 @@ async fn check_endpoint(
             if resources.len() == 1 { "" } else { "s" }
         ));
     }
-    let mut detail = summary.join(" ");
-    if !missing_tools.is_empty() {
-        detail.push_str(&format!("; missing expected: {}", missing_tools.join(", ")));
-    }
+    let detail = summary.join(" ");
 
     McpStatusReport {
         ok: true,
@@ -597,7 +581,6 @@ async fn check_endpoint(
         protocol_version,
         account,
         tools,
-        missing_tools,
         resources_supported,
         resources,
     }
