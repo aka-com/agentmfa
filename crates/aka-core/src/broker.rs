@@ -250,6 +250,8 @@ impl Broker {
     /// window. Fails closed when the shell refuses or does not implement the
     /// gate. Every action that grants an agent new authority goes through
     /// here; async callers run this same serialized store gate off-runtime.
+    /// A successful prompt opens the user-plane presence window (see
+    /// `Store::confirm_action`), so a following read or config change rides it.
     fn confirm_action(&self, description: &str) -> Result<crate::types::ConfirmationMethod> {
         self.store.confirm_action(description)
     }

@@ -30,6 +30,25 @@ struct UnifiedAuthEvents {
     secret_read_confirms: AtomicUsize,
 }
 
+/// Counts both gate kinds, so a test can tell an action-gate prompt from a
+/// secret-read prompt and observe which one a later action rides.
+struct CountingEvents {
+    action_confirms: AtomicUsize,
+    secret_read_confirms: AtomicUsize,
+}
+
+impl BrokerEvents for CountingEvents {
+    fn confirm_secret_read(&self, _secret: &aka_core::types::SecretMeta) -> bool {
+        self.secret_read_confirms.fetch_add(1, Ordering::SeqCst);
+        true
+    }
+
+    fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
+        self.action_confirms.fetch_add(1, Ordering::SeqCst);
+        Some(ConfirmationMethod::Waived)
+    }
+}
+
 struct SerializedEvents {
     active: AtomicUsize,
     max_active: AtomicUsize,
@@ -220,6 +239,44 @@ async fn one_confirmation_opens_the_presence_window_for_reads() {
         "first"
     );
     assert_eq!(events.secret_read_confirms.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn an_action_gate_prompt_opens_the_user_plane_presence_window() {
+    // A full-authority native auth (here, key rotation) is the strongest
+    // prompt there is; opening the presence window afterward keeps the "one OS
+    // authentication keeps Multitool unlocked" model, so an immediately
+    // following read or configuration change rides it instead of surprising
+    // the user with a second prompt.
+    let events = Arc::new(CountingEvents {
+        action_confirms: AtomicUsize::new(0),
+        secret_read_confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    let conn = add_github(&broker);
+    let secret = broker.store.secret_by_name("GITHUB_API_KEY").unwrap();
+
+    broker.ui_rotate_key().unwrap();
+    assert_eq!(events.action_confirms.load(Ordering::SeqCst), 1);
+
+    // A following user-plane read rides the window the action gate opened…
+    broker.ui_reveal_secret_prefix(&secret.id).await.unwrap();
+    assert_eq!(events.secret_read_confirms.load(Ordering::SeqCst), 0);
+
+    // …and so does a following configuration change, recorded honestly as a
+    // ridden authentication.
+    broker.ui_delete_connection(&conn.id).unwrap();
+    assert_eq!(events.action_confirms.load(Ordering::SeqCst), 1);
+    let deleted = broker
+        .audit
+        .recent(5)
+        .into_iter()
+        .find(|e| e.text.starts_with("Tool deleted"))
+        .unwrap();
+    assert_eq!(
+        deleted.confirmation,
+        Some(ConfirmationMethod::RecentAuthentication)
+    );
 }
 
 #[tokio::test]

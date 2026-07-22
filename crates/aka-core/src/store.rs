@@ -163,9 +163,12 @@ impl Store {
         std::time::Duration::from_secs(self.settings().presence_window_secs)
     }
 
-    /// Establish a configuration grant. A native authentication for a
-    /// configuration action also covers reads, which preserves the intended
-    /// save-then-test flow without allowing the reverse escalation.
+    /// Establish a configuration grant, which also covers reads. Used after a
+    /// native authentication for a configuration action (preserving the
+    /// save-then-test flow) and after a full-authority action-gate prompt
+    /// (agent grants, key rotation) — the strongest prompts open the full
+    /// user-plane window. A copy/read authentication never lands here, so it
+    /// cannot escalate into configuration authority.
     fn note_configuration_presence(&self) {
         let now = std::time::Instant::now();
         let grant = PresenceGrant::new(now, self.presence_window());
@@ -215,12 +218,21 @@ impl Store {
     }
 
     /// Always invoke the native action gate, serialized with every other
-    /// presence check and prompt.
+    /// presence check and prompt. The action gate never *rides* the presence
+    /// window — a full-authority action (agent grants, key rotation) always
+    /// re-prompts — but a successful authentication here *opens* it, so an
+    /// immediately following user-plane read or configuration change is not a
+    /// surprise re-prompt. This keeps the documented "one OS authentication
+    /// keeps Multitool unlocked" model: the strongest prompt there is also
+    /// covers the weaker user-plane actions that follow it.
     pub fn confirm_action(&self, description: &str) -> Result<crate::types::ConfirmationMethod> {
         let _confirmation = self.presence.confirmation.lock().unwrap();
-        self.events
+        let method = self
+            .events
             .confirm_action(description)
-            .ok_or(CoreError::NotConfirmed)
+            .ok_or(CoreError::NotConfirmed)?;
+        self.note_configuration_presence();
+        Ok(method)
     }
 
     /// Check and ride the configuration grant, or establish purpose-scoped
