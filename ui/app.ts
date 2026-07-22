@@ -521,11 +521,11 @@ function endpointStripHTML(c: ConnectionSummary): string {
         data-act="copy-endpoint-dsn" data-conn="${c.id}">${state.copied === `ep:${c.id}` ? ICONS.check : ICONS.copy}</button>`
     : '<span class="ep-addr ep-addr-hidden">Agent socket — shown at issue</span>';
   return `<div class="ep-strip">
-    <span class="acc-pill ep">Endpoint</span>
+    <span class="ep-ico" title="Direct endpoint">${ICONS.plugSm}</span>
     ${address}
     <span class="ep-spacer"></span>
-    <button class="btn ghost sm ep-act" data-act="reissue-endpoint-ask" data-conn="${c.id}">Reissue…</button>
-    <button class="btn ghost sm ep-act rv" data-act="revoke-endpoint-ask" data-conn="${c.id}">Revoke…</button>
+    <button class="btn outline sm ep-act" data-act="reissue-endpoint-ask" data-conn="${c.id}">Reissue…</button>
+    <button class="btn outline sm ep-act rv" data-act="revoke-endpoint-ask" data-conn="${c.id}">Revoke…</button>
   </div>`;
 }
 
@@ -836,14 +836,15 @@ function catalogConnRowHTML(c: ConnectionSummary): string {
     : '';
   // Only call out TLS when it is weaker than the default.
   const tls = c.type === 'pg' && c.sslmode && c.sslmode !== 'verify-full'
-    ? `<span class="cat-meta-warn">TLS ${esc(c.sslmode)}</span>` : '';
+    ? `<span class="cat-meta-warn">${ICONS.triangleAlert}<span>${
+        c.sslmode === 'disable' ? 'TLS disabled' : `TLS ${esc(c.sslmode)}`}</span></span>` : '';
   const hostKey = c.type === 'ssh' && !c.host_key_fingerprint
-    ? '<span class="cat-meta-warn">Host key not pinned yet</span>' : '';
+    ? `<span class="cat-meta-warn">${ICONS.triangleAlert}<span>Host key not pinned yet</span></span>` : '';
   // Passive health: brokered agent calls and background token renewals
   // record a rejected credential without anyone pressing Test. The badge
   // carries the fix: sign in again for MCP connections, re-test otherwise.
   const needsReconnect = c.last_status === 'needs_reconnect'
-    ? `<span class="cat-meta-warn" title="${escAttr(c.last_detail || '')}">Needs reconnect</span>
+    ? `<span class="cat-meta-warn" title="${escAttr(c.last_detail || '')}">${ICONS.triangleAlert}<span>Needs reconnect</span></span>
        ${c.mcp_path
          ? `<button class="btn ghost sm cat-meta-fix" data-act="reconnect-mcp" data-id="${c.id}">Reconnect…</button>`
          : c.oauth_spec
@@ -915,7 +916,7 @@ function credentialsExpansionHTML(): string {
     ? secretsTableHTML(query)
     : `<div class="muted-note">${state.secrets.length ? 'No saved credentials match your search.' : 'No saved credentials yet.'}</div>`;
   return `<div class="cat-conns">${body}
-    <button class="btn ghost sm cat-add-another cat-add-secret" data-act="open-add-secret">＋ Add credential</button></div>`;
+    <button class="btn outline sm cat-add-another cat-add-secret" data-act="open-add-secret">＋ Add credential</button></div>`;
 }
 
 // One catalog row: icon chip, name, one-line description, and a trailing
@@ -971,7 +972,7 @@ function catalogRowHTML(entry: CatalogEntry): string {
     : builtin ? credentialsExpansionHTML()
     : `<div class="cat-conns">
       <div class="cat-conn-list">${connectionsForEntry(entry, state.connections).map(catalogConnRowHTML).join('')}</div>
-      <button class="btn ghost sm cat-add-another" data-act="catalog-add" data-id="${entry.id}">＋ Add another ${esc(entry.name)} connection</button>
+      <button class="btn outline sm cat-add-another" data-act="catalog-add" data-id="${entry.id}">＋ Add another ${esc(entry.name)} connection</button>
     </div>`;
   const rowToggle = count || builtin
     ? ` data-act="catalog-toggle" data-id="${entry.id}"`

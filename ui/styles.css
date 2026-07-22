@@ -413,6 +413,10 @@
   .btn.danger:hover{ background: #e0281e; }.btn.ghost{ border-color: transparent; background: transparent; box-shadow: none; color: var(--accent-text); }
   .btn.ghost:hover{ background: var(--accent-wash); }
   .btn.sm{ padding: 3px 9px; font-size: 12.5px; }
+  /* Outline: a visible button without a fill — quieter than default, more
+     button-like than ghost. Row-level actions (reissue/revoke/add another). */
+  .btn.outline{ background: transparent; box-shadow: none; }
+  .btn.outline:hover{ background: var(--btn-hover); }
   .btn.block{ width: 100%; }
   .dd-footer{ flex: 0 0 auto; padding: 10px 14px 12px; border-top: 1px solid var(--line-soft); }
   .dropdown-surface .empty{ padding: 28px 22px; }
@@ -507,8 +511,6 @@
 }
   .acc-pill.granted{ background: var(--ok-wash); border: 1px solid var(--ok-border); color: var(--ok-ink); }
   .acc-pill.rule{ background: var(--amber-wash); border: 1px solid var(--amber-border); color: var(--amber-ink); }
-  /* A direct endpoint has been issued for this wiring. */
-  .acc-pill.ep{ background: var(--ok-wash); border: 1px solid var(--ok-border); color: var(--ok-ink); }
   .acc-row .btn{ flex: 0 0 auto; }
 
   /* Issued-endpoint sheet: pasteable address / secret / example, each with a
@@ -829,18 +831,20 @@
 .cat-conn-tx { flex: 1; min-width: 0; }
 .cat-conn-head { display: flex; align-items: center; gap: 6px; }
 .cat-conn-tx b { font-size: 13px; font-weight: 600; }
+/* Targets are identifiers to read, not code to edit: same family as the row. */
 .cat-conn-tx code {
   display: block; margin-top: 1px; overflow: hidden; color: var(--muted-2);
-  font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap;
+  font-family: inherit; font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap;
 }
+/* One flat run of icon-led facts: a single gap, one size, one weight. */
 .cat-conn-meta {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 4px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin-top: 4px;
   color: var(--muted); font-size: 11.5px;
 }
-/* Dot separators between facts, without markup for them. */
-.cat-conn-meta > span + span::before { content: '·'; margin-right: 8px; opacity: .6; }
 .cat-meta-idle { color: var(--amber-ink); }
-.cat-meta-warn { color: var(--amber-strong); font-weight: 600; }
+/* Warnings differ by color and icon only — never weight. */
+.cat-meta-warn { display: inline-flex; align-items: center; gap: 5px; color: var(--amber-strong); }
+.cat-meta-warn svg { flex: 0 0 auto; color: var(--amber-strong); }
 .cat-conn-danger { display: block; margin-top: 2px; color: var(--danger-ink); font-size: 11.5px; }
 .cat-conns .sec-table { margin: 0; }
 /* Align the credential table with the connection rows' text spine. */
@@ -1030,29 +1034,30 @@
 }
 .switch.on{ background: var(--ok-solid); }
 .switch.on::after{ left: 16px; }
-/* Tool-scope picker and credential, rendered as icon-led meta facts. */
+/* Tool-scope picker and credential, rendered as icon-led meta facts. The
+   picker rests indistinguishable from its neighbors; hover reveals the link. */
 .cat-meta-tools{
   display: inline-flex; align-items: center; gap: 5px; padding: 0; border: none;
-  background: transparent; color: var(--ink); font: inherit; font-size: 11.5px;
-  font-weight: 500; cursor: pointer;
+  background: transparent; color: var(--muted); font: inherit; font-size: 11.5px;
+  cursor: pointer;
 }
-.cat-meta-tools:hover{ text-decoration: underline; }
+.cat-meta-tools:hover{ color: var(--ink); text-decoration: underline; }
 .cat-meta-tools svg{ color: var(--muted-2); }
 .cat-meta-cred{ display: inline-flex; align-items: center; gap: 5px; }
 .cat-meta-cred svg{ color: var(--muted-2); }
 /* Direct-endpoint lifecycle strip: a hairline footer inside the row. Absent:
-   just the issue button. Issued: badge, pasteable address, copy, and the
-   reissue/revoke pair (each behind an inline confirm). */
+   just the issue button. Issued: plug icon, pasteable address, copy, and the
+   reissue/revoke pair (each behind an inline confirm). The plug matches the
+   copy button's spec — 14px stroke icon in the muted icon color. */
 .ep-strip{
   display: flex; align-items: center; gap: 8px; margin-top: 9px; padding-top: 9px;
   border-top: 1px solid var(--line-soft);
 }
+.ep-strip .ep-ico{ flex: 0 0 auto; line-height: 0; color: var(--muted-2); }
 .ep-strip .ep-addr{
   flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
-  white-space: nowrap; color: var(--ink-2); font-size: 11.5px;
+  white-space: nowrap; color: var(--ink-2); font-family: inherit; font-size: 11.5px;
 }
-.ep-strip .ep-addr-hidden{ color: var(--muted); font-family: inherit; }
+.ep-strip .ep-addr-hidden{ color: var(--muted); }
 .ep-strip .ep-spacer{ flex: 1; }
-.ep-strip .ep-act{ color: var(--muted); }
-.ep-strip .ep-act:hover{ color: var(--ink); }
-.ep-strip .ep-act.rv{ color: var(--danger-ink); }
+.ep-strip .ep-act.rv{ color: var(--danger-ink); border-color: var(--danger-border); }
