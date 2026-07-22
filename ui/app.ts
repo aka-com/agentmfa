@@ -148,7 +148,8 @@ interface AppState {
   confirm: ConfirmState | null;
   toolSearch: string;
   secretSearch: string;
-  toolOpen: string | null;
+  /** Catalog entry ids whose connections are expanded. */
+  toolsOpen: string[];
   catalogActionMenuOpen: string | null;
   appsExpanded: boolean;
   startOption: string;
@@ -238,7 +239,7 @@ const state: AppState = {
   confirm: null,         // {kind, id/name}
   toolSearch: '',        // Add-tools catalog search query
   secretSearch: '',      // Secrets catalog search query
-  toolOpen: null,        // catalog entry id whose connections are expanded
+  toolsOpen: [],         // catalog entry ids whose connections are expanded
   catalogActionMenuOpen: null, // catalog id whose quick-connect chevron menu is open
   appsExpanded: false,   // whether the Apps section shows beyond its connected/minimum rows
   startOption: 'postgres', // which walkthrough the Get started tab shows
@@ -903,7 +904,7 @@ function credentialsExpansionHTML(): string {
 function catalogRowHTML(entry: CatalogEntry): string {
   const builtin = entry.via === 'builtin';
   const count = builtin ? state.secrets.length : connectionsForEntry(entry, state.connections).length;
-  const open = state.toolOpen === entry.id && (builtin || count > 0);
+  const open = state.toolsOpen.includes(entry.id) && (builtin || count > 0);
   const quickConnect = canQuickConnectMcp(entry);
   const actionMenuOpen = state.catalogActionMenuOpen === entry.id;
   const label = builtin
@@ -2590,7 +2591,7 @@ async function saveConn(): Promise<void> {
       const saved = state.connections.find((c) => c.name === name);
       if (saved) {
         const entry = entryForConnection(saved);
-        if (entry) state.toolOpen = entry.id;
+        if (entry && !state.toolsOpen.includes(entry.id)) state.toolsOpen.push(entry.id);
         render();
         void runConnectionTest(saved.id);
       }
@@ -2919,7 +2920,9 @@ document.addEventListener('click', async (e) => {
       break;
     }
     case 'catalog-toggle':
-      state.toolOpen = state.toolOpen === id ? null : id;
+      state.toolsOpen = state.toolsOpen.includes(id)
+        ? state.toolsOpen.filter((openId) => openId !== id)
+        : [...state.toolsOpen, id];
       render(); break;
     case 'toggle-apps-expanded':
       state.appsExpanded = !state.appsExpanded;
@@ -3476,13 +3479,13 @@ document.addEventListener('input', (e) => {
   }
   if (target?.id === 'tool-search') {
     state.toolSearch = target.value;
-    state.toolOpen = null;
+    state.toolsOpen = [];
     render();
     return;
   }
   if (target?.id === 'secret-search') {
     state.secretSearch = target.value;
-    state.toolOpen = null;
+    state.toolsOpen = [];
     render();
     return;
   }
@@ -3599,7 +3602,7 @@ async function boot() {
     const { agent, service } = ev.payload;
     state.tab = 'connections';
     state.toolSearch = service;
-    state.toolOpen = null;
+    state.toolsOpen = [];
     toast(`🤖 ${agent} asked to connect “${service}”`);
     render();
   });
