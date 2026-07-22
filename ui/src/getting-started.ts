@@ -5,36 +5,36 @@
 // The copy lives here (rather than inline in the renderer) so the prompts and
 // the progress rules are testable on their own.
 
+import { catalogEntryById, connectionsForEntry } from './catalog';
 import type { ConnectionSummary, ConnectionType } from './types';
 
 export interface StartOption {
   id: string;
   /** Label on the small picker row. */
   label: string;
-  /** Connection type this sets up; null while only MCP can provide it. */
+  /** Key into the shared icon set. */
+  icon: string;
+  /** Custom MCP keeps its label visible; branded choices use their logo. */
+  showPickerLabel?: boolean;
+  /** Connection type this sets up. */
   connType: ConnectionType | null;
   /** Catalog row the Add button opens. */
   catalogId: string | null;
-  /**
-   * This option is satisfied only by an MCP connection. Both this and the
-   * Custom API option store `api` connections, so type alone cannot tell
-   * them apart — without this, adding a plain API would tick the MCP
-   * option's first step.
-   */
+  /** This option is backed by an MCP connection. */
   mcp?: boolean;
-  /** Why this is worth wiring up, in one line. */
-  promise: string;
   /** The first ask — chosen to be immediately useful, not a hello-world. */
   task: (toolName: string) => string;
 }
+
+export const START_PROMISE = "Give your agent a whole app's tools — GitHub, Notion, anything with MCP.";
 
 export const START_OPTIONS: StartOption[] = [
   {
     id: 'postgres',
     label: 'Postgres',
+    icon: 'postgres',
     connType: 'pg',
     catalogId: 'postgres',
-    promise: 'Let your agent read your database without ever holding the password.',
     task: (name) =>
       `Using my Multitool tool "${name}", list the 10 largest tables with their row ` +
       `counts, and flag any foreign key that has no index.`,
@@ -42,30 +42,86 @@ export const START_OPTIONS: StartOption[] = [
   {
     id: 'ssh',
     label: 'SSH',
+    icon: 'terminal',
     connType: 'ssh',
     catalogId: 'ssh',
-    promise: 'Let your agent work on a server while the private key stays in the broker.',
     task: (name) =>
       `Using my Multitool tool "${name}", report disk and memory usage, then show the ` +
       `last 20 lines of any log that contains errors.`,
   },
   {
-    id: 'api',
-    label: 'Custom API',
+    id: 'notion',
+    label: 'Notion',
+    icon: 'notion',
     connType: 'api',
-    catalogId: 'http',
-    promise: 'Let your agent call an API with a key it never gets to read.',
+    catalogId: 'notion',
+    mcp: true,
     task: (name) =>
-      `Using my Multitool tool "${name}", call a read-only endpoint and summarize the ` +
-      `response as a short schema I can keep.`,
+      `Using my Multitool tool "${name}", summarize the pages I changed this week and ` +
+      `list any open action items.`,
+  },
+  {
+    id: 'github',
+    label: 'GitHub',
+    icon: 'github',
+    connType: 'api',
+    catalogId: 'github',
+    mcp: true,
+    task: (name) =>
+      `Using my Multitool tool "${name}", summarize the pull requests and issues that ` +
+      `changed this week.`,
+  },
+  {
+    id: 'slack',
+    label: 'Slack',
+    icon: 'slack',
+    connType: 'api',
+    catalogId: 'slack',
+    task: (name) =>
+      `Using my Multitool tool "${name}", summarize the important conversations from ` +
+      `this week and list the decisions that were made.`,
+  },
+  {
+    id: 'stripe',
+    label: 'Stripe',
+    icon: 'stripe',
+    connType: 'api',
+    catalogId: 'mcp-stripe',
+    mcp: true,
+    task: (name) =>
+      `Using my Multitool tool "${name}", summarize payment activity from the last seven ` +
+      `days and flag anything that needs attention.`,
+  },
+  {
+    id: 'sentry',
+    label: 'Sentry',
+    icon: 'sentry',
+    connType: 'api',
+    catalogId: 'mcp-sentry',
+    mcp: true,
+    task: (name) =>
+      `Using my Multitool tool "${name}", summarize the highest-impact unresolved issues ` +
+      `from this week.`,
+  },
+  {
+    id: 'vercel',
+    label: 'Vercel',
+    icon: 'vercel',
+    connType: 'api',
+    catalogId: 'mcp-vercel',
+    mcp: true,
+    task: (name) =>
+      `Using my Multitool tool "${name}", summarize this week’s deployments and explain ` +
+      `any failures.`,
   },
   {
     id: 'mcp',
-    label: 'MCP server',
+    label: 'Custom MCP',
+    icon: 'plug',
+    showPickerLabel: true,
     connType: 'api',
     catalogId: 'mcp',
     mcp: true,
-    promise: "Give your agent a whole app's tools — GitHub, Notion, anything with an MCP server.",
     task: (name) =>
       `Using my Multitool tool "${name}", list the tools it exposes, then use them to ` +
       `summarize what changed this week.`,
@@ -95,13 +151,8 @@ export function startProgress(
   connections: ConnectionSummary[],
   agentConnected: boolean,
 ): StartProgress {
-  const matching = option.connType
-    ? connections.filter(
-      (connection) =>
-        connection.type === option.connType
-        && Boolean(connection.mcp_path) === Boolean(option.mcp),
-    )
-    : [];
+  const entry = option.catalogId ? catalogEntryById(option.catalogId) : undefined;
+  const matching = entry ? connectionsForEntry(entry, connections) : [];
   // Prefer showing a tool that is already usable by agents.
   const enabledTool = matching.find((connection) => connection.agent_access.enabled);
   const tool = enabledTool ?? matching[0] ?? null;
@@ -126,10 +177,10 @@ export function startTask(option: StartOption, progress: StartProgress): string 
  */
 export function firstTaskPrompt(name: string, type: ConnectionType): string {
   const option = START_OPTIONS.find(
-    (candidate) => candidate.connType === type && !candidate.mcp,
+    (candidate) => ['postgres', 'ssh'].includes(candidate.id) && candidate.connType === type,
   );
   if (option) return option.task(name);
-  // No walkthrough option enumerates this type (only WebSockets today), so
-  // fall back to a generic read-only ask rather than borrow another type's copy.
+  // Branded APIs and protocols without a walkthrough use a generic read-only
+  // ask rather than borrowing one particular provider's copy.
   return `Using my Multitool tool "${name}", make one read-only request and summarize what comes back.`;
 }

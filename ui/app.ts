@@ -14,7 +14,7 @@ import {
 } from '/src/catalog';
 import type { ConnectionPreset } from '/src/catalog';
 import {
-  START_OPTIONS, firstTaskPrompt, startOptionById, startProgress, startTask,
+  START_OPTIONS, START_PROMISE, firstTaskPrompt, startOptionById, startProgress, startTask,
 } from '/src/getting-started';
 import type { CatalogEntry } from '/src/catalog';
 import { ICONS, TYPES, esc, escAttr, toast, relTime, absTime } from '/src/util';
@@ -48,7 +48,7 @@ const EDIT_SECRET_MASK = '••••••••••••';
 const ACTIVITY_RENDER_LIMIT = 200;
 
 // The left-nav tabs, in order — also the cycle order for Ctrl-Tab.
-const TABS = ['start', 'connections', 'agents', 'activity'] as const;
+const TABS = ['start', 'connections', 'secrets', 'agents', 'activity'] as const;
 // The tray dropdown is a quick-access panel; onboarding belongs in the window.
 const DROPDOWN_TABS = TABS.filter((tab) => tab !== 'start');
 type Tab = typeof TABS[number];
@@ -145,6 +145,7 @@ interface AppState {
   connPreset: ConnectionPreset | null;
   confirm: ConfirmState | null;
   toolSearch: string;
+  secretSearch: string;
   toolOpen: string | null;
   catalogActionMenuOpen: string | null;
   appsExpanded: boolean;
@@ -232,6 +233,7 @@ const state: AppState = {
   connPreset: null,      // branded-row prefill for the open add sheet
   confirm: null,         // {kind, id/name}
   toolSearch: '',        // Add-tools catalog search query
+  secretSearch: '',      // Secrets catalog search query
   toolOpen: null,        // catalog entry id whose connections are expanded
   catalogActionMenuOpen: null, // catalog id whose quick-connect chevron menu is open
   appsExpanded: false,   // whether the Apps section shows beyond its connected/minimum rows
@@ -440,8 +442,11 @@ function globalSectionsHTML() {
   return out ? `<div class="dd-global ${hasOnboarding ? 'onboarding-global' : ''}">${out}</div>` : '';
 }
 
-function secretsTableHTML() {
-  const rows = state.secrets.map((s) => {
+function secretsTableHTML(query = '') {
+  const needle = query.trim().toLowerCase();
+  const rows = state.secrets.filter((secret) => !needle
+    || secret.name.toLowerCase().includes(needle)
+    || secret.used_by_names.some((name) => name.toLowerCase().includes(needle))).map((s) => {
     if (state.confirm && state.confirm.kind === 'del-secret-inuse' && state.confirm.id === s.id) {
       return `<tr class="confirm-row"><td colspan="3"><div class="confirm-inline"><span>Currently used by ${esc(s.used_by_names.join(', '))}. Delete the tool first.</span>
           <button class="btn sm" data-act="confirm-cancel">OK</button></div></td></tr>`;
@@ -552,8 +557,10 @@ interface ConnectGuide {
   id: string;
   name: string;
   sub: string;
-  /** Two-letter mark on the card row. */
+  /** Text fallback on the card row. */
   mark: string;
+  /** Brand mark used instead of the text fallback. */
+  icon?: string;
   steps: ConnectStep[];
   /** A closing one-liner under the steps. */
   note?: string;
@@ -568,6 +575,7 @@ function connectGuides(identity: IdentityInfo): ConnectGuide[] {
       name: 'Claude Code',
       sub: 'Terminal · connects over MCP',
       mark: 'CC',
+      icon: 'anthropic',
       steps: [
         {
           title: 'Add Multitool as an MCP server',
@@ -586,6 +594,7 @@ function connectGuides(identity: IdentityInfo): ConnectGuide[] {
       name: 'Claude Desktop',
       sub: 'App · connects over MCP',
       mark: 'CD',
+      icon: 'anthropic',
       steps: [
         {
           title: 'Add Multitool to Claude Desktop’s config',
@@ -604,6 +613,7 @@ function connectGuides(identity: IdentityInfo): ConnectGuide[] {
       name: 'Codex',
       sub: 'Terminal · connects over MCP',
       mark: 'CX',
+      icon: 'openai',
       steps: [
         {
           title: 'Register the MCP server',
@@ -671,8 +681,7 @@ function connectKeyCardHTML(identity: IdentityInfo): string {
       </div>
     </div>
     <div class="connect-keynote">One shared key for everything that runs as you on this computer.
-      Agents read it themselves — you’ll rarely need to copy it. Rotating it disconnects every
-      agent at once; access per tool lives on the Tools tab.</div>
+      Rotating it disconnects every agent at once.</div>
   </div>`;
 }
 
@@ -700,7 +709,7 @@ function connectCardHTML(guide: ConnectGuide): string {
     : '';
   return `<div class="agent-block connect-card ${open ? 'open' : ''}">
     <button class="connect-row" data-act="connect-toggle" data-id="${guide.id}" aria-expanded="${open}">
-      <span class="connect-mark ${guide.id}">${esc(guide.mark)}</span>
+      <span class="connect-mark ${guide.id}" aria-hidden="true">${guide.icon ? ICONS[guide.icon] || esc(guide.mark) : esc(guide.mark)}</span>
       <span class="connect-tx"><b>${esc(guide.name)}</b><span>${esc(guide.sub)}</span></span>
       ${seenChip}
       <span class="cat-chev ${open ? 'open' : ''}">${ICONS.chevronDown}</span>
@@ -863,9 +872,13 @@ function mcpStatusHTML(c: ConnectionSummary): string {
 // The built-in credentials store, expanded inline: the same secrets table
 // the standalone tab used to own.
 function credentialsExpansionHTML(): string {
-  const body = state.secrets.length
-    ? secretsTableHTML()
-    : '<div class="muted-note">No saved credentials yet.</div>';
+  const query = state.tab === 'secrets' ? state.secretSearch : '';
+  const matching = state.secrets.filter((secret) => !query.trim()
+    || secret.name.toLowerCase().includes(query.trim().toLowerCase())
+    || secret.used_by_names.some((name) => name.toLowerCase().includes(query.trim().toLowerCase())));
+  const body = matching.length
+    ? secretsTableHTML(query)
+    : `<div class="muted-note">${state.secrets.length ? 'No saved credentials match your search.' : 'No saved credentials yet.'}</div>`;
   return `<div class="cat-conns">${body}
     <button class="btn ghost sm cat-add-another" data-act="open-add-secret">＋ Add credential</button></div>`;
 }
@@ -952,7 +965,7 @@ function connectionsHTML() {
     showWebsockets: state.settings.show_websockets,
     connections: state.connections,
   });
-  const sections = CATALOG_SECTIONS.map((section) => {
+  const sections = CATALOG_SECTIONS.filter((section) => section !== 'Secrets').map((section) => {
     const sectionEntries = entries.filter((entry) => entry.section === section);
     if (!sectionEntries.length) return '';
     const ordered = connectedCatalogFirst(sectionEntries, state.connections);
@@ -976,6 +989,35 @@ function connectionsHTML() {
     : '';
   return readyCard + `<div class="catalog">${search}
     ${sections || '<div class="muted-note">No tools match your search.</div>'}
+  </div>`;
+}
+
+function secretsHTML(): string {
+  const allEntries = visibleCatalog('', {
+    showWebsockets: state.settings.show_websockets,
+    connections: state.connections,
+  }).filter((entry) => entry.section === 'Secrets');
+  const needle = state.secretSearch.trim().toLowerCase();
+  const entries = allEntries.filter((entry) => {
+    const entryMatch = !needle
+      || entry.name.toLowerCase().includes(needle)
+      || entry.description.toLowerCase().includes(needle)
+      || (entry.keywords || []).some((keyword) => keyword.toLowerCase().includes(needle));
+    const savedSecretMatch = entry.id === 'credentials' && state.secrets.some((secret) =>
+      secret.name.toLowerCase().includes(needle)
+      || secret.used_by_names.some((name) => name.toLowerCase().includes(needle)));
+    return entryMatch || savedSecretMatch;
+  });
+  const rows = connectedCatalogFirst(entries, state.connections);
+  const search = mode === 'dropdown'
+    ? `<input id="secret-search" class="cat-search" type="search" placeholder="Search secrets…"
+        aria-label="Search secrets" value="${escAttr(state.secretSearch)}">`
+    : '';
+  const section = rows.length
+    ? `<div class="cat-section"><div class="cat-section-h">SECRETS</div>
+        <div class="cat-rows">${rows.map(catalogRowHTML).join('')}</div></div>`
+    : '<div class="muted-note">No secrets match your search.</div>';
+  return `<div class="catalog">${search}${section}
   </div>`;
 }
 
@@ -1069,25 +1111,34 @@ async function receiveActivity(entry: ActivityEntry | null | undefined): Promise
 
 function startHTML(): string {
   const option = startOptionById(state.startOption);
+  const catalogEntry = option.catalogId ? catalogEntryById(option.catalogId) : undefined;
   const agentConnected = state.activity.some((entry) => entry.text.startsWith('Agent connected'));
   const progress = startProgress(option, state.connections, agentConnected);
 
-  const picker = START_OPTIONS.map((candidate) =>
-    `<button class="start-pick ${candidate.id === option.id ? 'on' : ''}"
+  const picker = START_OPTIONS.map((candidate) => {
+    const visibleLabel = candidate.showPickerLabel
+      ? `<span class="start-pick-label">${esc(candidate.label)}</span>` : '';
+    return `<button class="start-pick ${candidate.showPickerLabel ? 'has-label' : ''} ${candidate.id === option.id ? 'on' : ''}"
       aria-pressed="${candidate.id === option.id}"
-      data-act="start-option" data-id="${candidate.id}">${esc(candidate.label)}</button>`).join('');
+      aria-label="${escAttr(candidate.label)}" title="${escAttr(candidate.label)}"
+      data-act="start-option" data-id="${candidate.id}">
+      <span class="start-pick-icon" aria-hidden="true">${ICONS[candidate.icon] || ''}</span>${visibleLabel}</button>`;
+  }).join('');
 
   const step = (n: number, title: string, done: boolean, body: string): string =>
     `<li class="start-step ${done ? 'done' : ''}">
       <span class="start-num" aria-hidden="true">${done ? ICONS.check : n}</span>
       <div class="start-body"><b>${esc(title)}</b>${body}</div></li>`;
 
+  const addAction = catalogEntry && canQuickConnectMcp(catalogEntry)
+    ? 'catalog-connect-oauth' : 'catalog-add';
+  const addLabel = progress.added ? `${option.label} Connected` : `Add ${option.label}`;
   const addBody = `<p>Save the destination and its credential. The credential goes to your Keychain;
         agents can use it but never read it.</p>
+      <div class="start-picker" role="group" aria-label="What to connect">${picker}</div>
       <div class="start-actions">
-        <button class="btn primary sm" data-act="catalog-add" data-id="${option.catalogId}">Add ${esc(option.label)}</button>
-        ${progress.added && progress.toolName
-          ? `<span class="start-note">${esc(progress.toolName)} is saved.</span>` : ''}
+        <button class="btn primary sm" data-act="${addAction}" data-id="${option.catalogId}"
+          ${progress.added ? 'disabled' : ''}>${esc(addLabel)}</button>
       </div>`;
 
   const connectBody = `<p>Paste this into your coding agent. It reads this computer’s shared
@@ -1114,8 +1165,7 @@ function startHTML(): string {
   return `<div class="start">
     <div class="start-hero">
       <h3>Connect your agent to everything</h3>
-      <div class="start-picker" role="group" aria-label="What to set up first">${picker}</div>
-      <p class="start-promise">${esc(option.promise)}</p>
+      <p class="start-promise">${esc(START_PROMISE)}</p>
     </div>
     <ol class="start-steps">
       ${step(1, option.connType ? `Add the ${option.label} tool` : `Add an ${option.label}`, progress.added, addBody)}
@@ -1128,6 +1178,7 @@ function startHTML(): string {
 function tabContentHTML() {
   return state.tab === 'start' ? startHTML()
     : state.tab === 'connections' ? connectionsHTML()
+    : state.tab === 'secrets' ? secretsHTML()
     : state.tab === 'agents' ? agentsHTML()
     : activityHTML();
 }
@@ -1146,15 +1197,22 @@ function renderMainWindow() {
   const nav = TABS.filter((tab) => tab !== 'activity').map(navItem).join('');
   const activityNav = navItem('activity');
   // One view-specific action, always in the header row next to the title.
-  const actionBtn = state.tab === 'start'
-    ? ''
-    : state.tab === 'connections'
+  const actionBtn = state.tab === 'connections'
     ? `<div class="dw-head-actions">
         <input id="tool-search" class="cat-search" type="search" placeholder="Search tools…"
           aria-label="Search tools" value="${escAttr(state.toolSearch)}"></div>`
-    : state.tab === 'agents'
-    ? ''
-    : `<button class="btn" data-act="clear-activity-ask" ${state.activity.length ? '' : 'disabled'}>Clear activity</button>`;
+    : state.tab === 'secrets'
+    ? `<div class="dw-head-actions">
+        <input id="secret-search" class="cat-search" type="search" placeholder="Search secrets…"
+          aria-label="Search secrets" value="${escAttr(state.secretSearch)}"></div>`
+    : state.tab === 'activity'
+    ? `<button class="btn" data-act="clear-activity-ask" ${state.activity.length ? '' : 'disabled'}>Clear activity</button>`
+    : '';
+  const pageTitle = state.tab === 'connections' ? 'Manage tools'
+    : state.tab === 'secrets' ? 'Manage secrets'
+    : tabLabel(state.tab);
+  const pageHead = state.tab === 'start' ? ''
+    : `<div class="dw-head"><h2>${pageTitle}</h2>${actionBtn}</div>`;
   const menu = state.menuOpen
     ? `<div class="settings-menu">
         <button class="menu-item" data-act="mode-tray">${ICONS.menubar} Minimize to menu bar</button>
@@ -1173,7 +1231,7 @@ function renderMainWindow() {
         </div>
       </div>
       <div class="dw-main">
-        <div class="dw-head"><h2>${state.tab === 'connections' ? 'Add tools' : tabLabel(state.tab)}</h2>${actionBtn}</div>
+        ${pageHead}
         ${globalSectionsHTML()}
         <div class="content">${tabContentHTML()}</div>
       </div>
@@ -1841,15 +1899,15 @@ function settingsSheet() {
       data-id="${secs}" role="radio" aria-checked="${s.presence_window_secs === secs}">${label}</button>`;
   const presenceRow = s.reauth_on_read
     ? `<div class="set-row"><div class="set-txt"><div class="st-title">Stay unlocked after confirming</div>
-      <div class="st-sub">One confirmation covers your own actions for this long. Giving an agent new access always asks again.</div></div>
+      <div class="st-sub">Confirming access allows actions for this long. An agent requesting new access will always ask again.</div></div>
       <div class="seg in-form" role="radiogroup" aria-label="Stay unlocked for">
-      ${windowBtn(15 * 60, '15 min')}${windowBtn(60 * 60, '1 hour')}${windowBtn(2 * 60 * 60, '2 hours')}</div></div>`
+      ${windowBtn(15 * 60, '15 min')}${windowBtn(60 * 60, '1 hr')}${windowBtn(2 * 60 * 60, '2 hrs')}</div></div>`
     : '';
   const dockRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Hide Dock icon in the menu bar</div>
-      <div class="st-sub">When minimized to the menu bar, hide the Dock icon until the window is reopened.</div></div>
+      <div class="st-sub">When minimized to the menu bar, hide the Dock icon.</div></div>
       <button class="switch ${s.menu_bar_hides_dock ? 'on' : ''}" data-act="toggle-menubar-dock" role="checkbox" aria-checked="${s.menu_bar_hides_dock ? 'true' : 'false'}"></button></div>`;
   const websocketRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Show WebSockets</div>
-      <div class="st-sub">Adds Custom WebSocket to the tool catalog. Tools you already have stay visible either way.</div></div>
+      <div class="st-sub">Adds Custom WebSocket to the tool catalog.</div></div>
       <button class="switch ${s.show_websockets ? 'on' : ''}" data-act="toggle-websockets" role="checkbox" aria-checked="${s.show_websockets ? 'true' : 'false'}"></button></div>`;
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
     <div class="sheet wide"><h3>Settings</h3>
@@ -3253,6 +3311,12 @@ document.addEventListener('input', (e) => {
   }
   if (target?.id === 'tool-search') {
     state.toolSearch = target.value;
+    state.toolOpen = null;
+    render();
+    return;
+  }
+  if (target?.id === 'secret-search') {
+    state.secretSearch = target.value;
     state.toolOpen = null;
     render();
     return;

@@ -3,12 +3,13 @@ import assert from 'node:assert/strict';
 
 import {
   START_OPTIONS,
+  START_PROMISE,
   firstTaskPrompt,
   startOptionById,
   startProgress,
   startTask,
 } from '../src/getting-started';
-import { CATALOG } from '../src/catalog';
+import { catalogEntryById } from '../src/catalog';
 import type { ConnectionSummary, ConnectionType } from '../src/types';
 
 function conn(
@@ -31,7 +32,7 @@ test('every option that can be added points at a real catalog row', () => {
       assert.equal(option.catalogId, null, option.id);
       continue;
     }
-    const entry = CATALOG.find((candidate) => candidate.id === option.catalogId);
+    const entry = option.catalogId ? catalogEntryById(option.catalogId) : undefined;
     assert.ok(entry, `${option.id} names a catalog row`);
     assert.equal(entry?.connType, option.connType, option.id);
     assert.equal(entry?.via, 'connection', option.id);
@@ -41,6 +42,20 @@ test('every option that can be added points at a real catalog row', () => {
 test('an unknown option id falls back to the first option', () => {
   assert.equal(startOptionById('nope').id, START_OPTIONS[0].id);
   assert.equal(startOptionById('ssh').id, 'ssh');
+});
+
+test('the picker omits Custom API and keeps labeled Custom MCP last', () => {
+  assert.equal(START_OPTIONS.some((option) => option.id === 'api'), false);
+  assert.deepEqual(
+    START_OPTIONS.slice(-2).map((option) => option.id),
+    ['vercel', 'mcp'],
+  );
+  assert.equal(START_OPTIONS.at(-1)?.label, 'Custom MCP');
+  assert.equal(START_OPTIONS.filter((option) => option.showPickerLabel).length, 1);
+  assert.equal(
+    START_PROMISE,
+    "Give your agent a whole app's tools — GitHub, Notion, anything with MCP.",
+  );
 });
 
 test('progress tracks add, connect, and enable independently', () => {
@@ -81,7 +96,7 @@ test('the example names an enabled tool when there is one', () => {
 test('the ready nudge and the walkthrough resolve to the same first task', () => {
   // Both surfaces route through firstTaskPrompt / the option task, so a given
   // connection type can never show two different first asks.
-  for (const type of ['pg', 'ssh', 'api'] as const) {
+  for (const type of ['pg', 'ssh'] as const) {
     const option = START_OPTIONS.find((o) => o.connType === type && !o.mcp);
     assert.ok(option, `an option exists for ${type}`);
     assert.equal(firstTaskPrompt('prod', type), option!.task('prod'));
@@ -106,13 +121,20 @@ test('the MCP option is not satisfied by a plain API connection', () => {
   const plainApi = conn('api', 'billing-api');
   assert.equal(startProgress(mcp, [plainApi], false).added, false);
 
-  const server = { ...conn('api', 'notion'), mcp_path: '/mcp' };
+  const server = {
+    ...conn('api', 'custom'), host: 'mcp.internal.example.com', mcp_path: '/mcp',
+  };
   assert.equal(startProgress(mcp, [server], false).added, true);
 });
 
-test('the Custom API option is not satisfied by an MCP server', () => {
-  const api = startOptionById('api');
-  const server = { ...conn('api', 'notion'), mcp_path: '/mcp' };
-  assert.equal(startProgress(api, [server], false).added, false);
-  assert.equal(startProgress(api, [conn('api', 'billing-api')], false).added, true);
+test('a branded option is satisfied only by its own connection', () => {
+  const notion = startOptionById('notion');
+  const notionServer = {
+    ...conn('api', 'Notion'), host: 'mcp.notion.com', mcp_path: '/mcp',
+  };
+  const githubServer = {
+    ...conn('api', 'GitHub'), host: 'api.githubcopilot.com', mcp_path: '/mcp',
+  };
+  assert.equal(startProgress(notion, [githubServer], false).added, false);
+  assert.equal(startProgress(notion, [notionServer], false).added, true);
 });
