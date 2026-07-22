@@ -27,30 +27,6 @@ export interface RegistryServer {
 
 export const REGISTRY_SERVERS: RegistryServer[] = [
   {
-    id: 'mcp-linear',
-    name: 'Linear',
-    icon: 'linear',
-    description: 'Issues, projects & cycles — official hosted MCP',
-    serverUrl: 'https://mcp.linear.app/mcp',
-    keywords: ['issues', 'tickets', 'projects', 'sprint'],
-  },
-  {
-    id: 'mcp-sentry',
-    name: 'Sentry',
-    icon: 'sentry',
-    description: 'Errors, issues & releases — official hosted MCP',
-    serverUrl: 'https://mcp.sentry.dev/mcp',
-    keywords: ['errors', 'crashes', 'monitoring', 'issues'],
-  },
-  {
-    id: 'mcp-stripe',
-    name: 'Stripe',
-    icon: 'stripe',
-    description: 'Payments, customers & invoices — official hosted MCP',
-    serverUrl: 'https://mcp.stripe.com/',
-    keywords: ['payments', 'billing', 'charges', 'invoices'],
-  },
-  {
     id: 'mcp-vercel',
     name: 'Vercel',
     icon: 'vercel',

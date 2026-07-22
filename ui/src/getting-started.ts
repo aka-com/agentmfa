@@ -86,7 +86,7 @@ export const START_OPTIONS: StartOption[] = [
     label: 'Stripe',
     icon: 'stripe',
     connType: 'api',
-    catalogId: 'mcp-stripe',
+    catalogId: 'stripe',
     mcp: true,
     task: (name) =>
       `Using my Multitool tool "${name}", summarize payment activity from the last seven ` +
@@ -97,7 +97,7 @@ export const START_OPTIONS: StartOption[] = [
     label: 'Sentry',
     icon: 'sentry',
     connType: 'api',
-    catalogId: 'mcp-sentry',
+    catalogId: 'sentry',
     mcp: true,
     task: (name) =>
       `Using my Multitool tool "${name}", summarize the highest-impact unresolved issues ` +

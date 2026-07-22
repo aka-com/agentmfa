@@ -51,11 +51,19 @@ test('infrastructure precedes apps and generic endpoints live under Custom Apps'
 test('featured apps keep their curated display order', () => {
   const apps = CATALOG.filter((entry) => entry.section === 'Apps').map((entry) => entry.id);
   assert.ok(apps.indexOf('slack') < apps.indexOf('gmail'));
-  assert.ok(apps.indexOf('openai') < apps.indexOf('linear'));
+  assert.ok(apps.indexOf('airtable') < apps.indexOf('linear'));
+});
+
+test('key-only vendors live in the API registry, not Apps', () => {
+  assert.deepEqual(
+    CATALOG.filter((entry) => entry.section === 'API registry').map((entry) => entry.id),
+    ['anthropic', 'openai', 'vercel'],
+  );
 });
 
 test('branded apps are added as MCP servers, not raw API origins', () => {
-  for (const id of ['github', 'gmail', 'notion', 'onepassword']) {
+  for (const id of ['github', 'gmail', 'notion', 'onepassword',
+    'airtable', 'linear', 'sentry', 'stripe']) {
     const entry = CATALOG.find((candidate) => candidate.id === id);
     assert.equal(entry?.via, 'connection', id);
     assert.equal(entry?.mcp, true, id);
@@ -77,13 +85,19 @@ test('an unbranded MCP connection lists under the generic MCP row', () => {
 });
 
 test('templated vendors ship a server URL, expected tools, and a whoami tool', () => {
-  for (const id of ['github', 'notion']) {
+  for (const id of ['github', 'notion', 'airtable', 'sentry', 'stripe']) {
     const template = CATALOG.find((entry) => entry.id === id)?.mcpTemplate;
     assert.ok(template?.serverUrl?.startsWith('https://'), id);
     assert.ok((template?.expectedTools.length ?? 0) > 0, id);
     assert.ok(template?.whoamiTool, id);
     assert.ok(template?.expectedTools.includes(template.whoamiTool!), id);
   }
+  // Linear's server exposes identity as a resource, not a tool — its
+  // template carries expectations without a whoami.
+  const linear = CATALOG.find((entry) => entry.id === 'linear')?.mcpTemplate;
+  assert.ok(linear?.serverUrl?.startsWith('https://'));
+  assert.ok((linear?.expectedTools.length ?? 0) > 0);
+  assert.equal(linear?.whoamiTool, undefined);
   // Gmail has no published endpoint to encode: template without a URL, so
   // the form still asks for the provider's server URL.
   const gmail = CATALOG.find((entry) => entry.id === 'gmail')?.mcpTemplate;
@@ -92,7 +106,7 @@ test('templated vendors ship a server URL, expected tools, and a whoami tool', (
 });
 
 test('only MCP rows with a prefilled server URL offer quick OAuth connect', () => {
-  for (const id of ['github', 'notion']) {
+  for (const id of ['github', 'notion', 'airtable', 'linear', 'sentry', 'stripe']) {
     assert.equal(canQuickConnectMcp(CATALOG.find((entry) => entry.id === id)!), true, id);
   }
   for (const id of ['gmail', 'mcp', 'http']) {
@@ -140,10 +154,10 @@ test('every preset is a valid, addable API prefill', () => {
   assert.ok(presets.length >= 8, 'the branded API catalog exists');
   for (const entry of presets) {
     const preset = entry.preset!;
-    // A preset row is a plain API connection — never MCP, always addable.
+    // A preset row is addable as a plain API connection (dual-mode rows
+    // also carry an MCP template — the preset covers the key path).
     assert.equal(entry.via, 'connection', entry.id);
     assert.equal(entry.connType, 'api', entry.id);
-    assert.notEqual(entry.mcp, true, entry.id);
     // The origin must be exactly what the add form accepts (root, no path).
     assert.doesNotThrow(() => parseApiOrigin(preset.origin), entry.id);
     assert.ok(presetHost(preset), entry.id);
@@ -210,12 +224,12 @@ test('connected tools sort to the top of their group without otherwise reorderin
   const apps = CATALOG.filter((entry) => entry.section === 'Apps');
   const sorted = connectedCatalogFirst(apps, [
     conn('api', 'api.stripe.com', 'billing'),
-    conn('api', 'api.openai.com', 'ai'),
+    conn('api', 'sentry.io', 'errors'),
   ]);
-  assert.deepEqual(sorted.slice(0, 2).map((entry) => entry.id), ['openai', 'stripe']);
+  assert.deepEqual(sorted.slice(0, 2).map((entry) => entry.id), ['sentry', 'stripe']);
   assert.deepEqual(
     sorted.slice(2).map((entry) => entry.id),
-    apps.filter((entry) => !['openai', 'stripe'].includes(entry.id)).map((entry) => entry.id),
+    apps.filter((entry) => !['sentry', 'stripe'].includes(entry.id)).map((entry) => entry.id),
   );
 });
 
@@ -229,14 +243,14 @@ test('collapsed app groups show at least three rows and never hide connected too
   assert.equal(oneConnected.hiddenCount, apps.length - 3);
 
   const fourConnected = collapsedCatalogGroup(apps, [
-    conn('api', 'api.openai.com', 'ai'),
+    conn('api', 'api.airtable.com', 'crm'),
     conn('api', 'sentry.io', 'errors'),
     conn('api', 'api.stripe.com', 'billing'),
-    conn('api', 'api.vercel.com', 'deployments'),
+    conn('api', 'api.linear.app', 'tickets'),
   ]);
   assert.deepEqual(
     fourConnected.visible.map((entry) => entry.id),
-    ['openai', 'sentry', 'stripe', 'vercel'],
+    ['airtable', 'linear', 'sentry', 'stripe'],
   );
   assert.equal(fourConnected.hiddenCount, apps.length - 4);
 });
@@ -274,9 +288,11 @@ test('search still respects the WebSocket setting', () => {
   assert.equal(hidden.length, 0);
 });
 
-test('the registry tail is searchable, not default-view padding', () => {
-  const none = visibleCatalog('', { showWebsockets: true, connections: [] });
-  assert.ok(none.every((entry) => !entry.registry), 'empty query hides the registry tail');
+test('the registry tail shows by default and is searchable', () => {
+  const all = visibleCatalog('', { showWebsockets: true, connections: [] });
+  for (const entry of REGISTRY_CATALOG) {
+    assert.ok(all.some((row) => row.id === entry.id), entry.id);
+  }
 
   const hits = visibleCatalog('paypal', { showWebsockets: true, connections: [] });
   assert.ok(hits.some((entry) => entry.id === 'mcp-paypal'));
@@ -298,16 +314,22 @@ test('the registry tail is searchable, not default-view padding', () => {
 });
 
 test('a configured registry server stays visible and groups under its row', () => {
-  const linear = conn('api', 'mcp.linear.app', 'linear-work');
-  (linear as { mcp_path?: string }).mcp_path = '/mcp';
+  const paypal = conn('api', 'mcp.paypal.com', 'paypal-main');
+  (paypal as { mcp_path?: string }).mcp_path = '/mcp';
 
   // Host-matching is deterministic: the connection lists under the
   // registry row, not the generic MCP row…
-  assert.equal(entryForConnection(linear)?.id, 'mcp-linear');
+  assert.equal(entryForConnection(paypal)?.id, 'mcp-paypal');
   // …and the row surfaces even with no search query, so a configured tool
   // never becomes unreachable.
-  const rows = visibleCatalog('', { showWebsockets: true, connections: [linear] });
-  assert.ok(rows.some((entry) => entry.id === 'mcp-linear'));
-  const row = REGISTRY_CATALOG.find((entry) => entry.id === 'mcp-linear')!;
-  assert.deepEqual(connectionsForEntry(row, [linear]).map((c) => c.name), ['linear-work']);
+  const rows = visibleCatalog('', { showWebsockets: true, connections: [paypal] });
+  assert.ok(rows.some((entry) => entry.id === 'mcp-paypal'));
+  const row = REGISTRY_CATALOG.find((entry) => entry.id === 'mcp-paypal')!;
+  assert.deepEqual(connectionsForEntry(row, [paypal]).map((c) => c.name), ['paypal-main']);
+
+  // A promoted brand's endpoint groups under the curated row now that the
+  // tail dupe is gone.
+  const linear = conn('api', 'mcp.linear.app', 'linear-work');
+  (linear as { mcp_path?: string }).mcp_path = '/mcp';
+  assert.equal(entryForConnection(linear)?.id, 'linear');
 });

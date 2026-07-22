@@ -2157,7 +2157,9 @@ function initializeCatalogConnectionDraft(
     state.draft.authMode = mcpAuthMode;
     if (entry.mcpTemplate?.serverUrl) state.draft.origin = entry.mcpTemplate.serverUrl;
   }
-  if (entry.preset) {
+  // On a dual-mode row (MCP template + API preset) the MCP draft wins;
+  // the preset applies only when adding the row as a plain API.
+  if (entry.preset && !state.draft.isMcp) {
     state.draft.origin = entry.preset.origin;
     state.draft.authMode = entry.preset.authMode;
     state.draft.authDetail = entry.preset.authDetail;

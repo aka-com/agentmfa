@@ -29,7 +29,8 @@ import type { ConnectionSummary, ConnectionType } from './types';
 import { REGISTRY_SERVERS } from './registry-data';
 
 export type CatalogSection =
-  | 'Apps' | 'Custom Apps' | 'Infrastructure' | 'Secrets' | 'MCP registry';
+  | 'Apps' | 'Custom Apps' | 'Infrastructure' | 'Secrets'
+  | 'API registry' | 'MCP registry';
 
 /**
  * Prefill for a branded API row: everything the add form needs so the user
@@ -199,7 +200,17 @@ export const CATALOG: CatalogEntry[] = [
     section: 'Apps',
     via: 'connection',
     connType: 'api',
+    mcp: true,
     keywords: ['spreadsheet', 'tables', 'records', 'bases'],
+    mcpTemplate: {
+      serverUrl: 'https://mcp.airtable.com/mcp',
+      expectedTools: [
+        'whoami', 'list_bases', 'get_base_schema', 'list_records',
+        'get_record', 'create_records', 'update_records',
+      ],
+      whoamiTool: 'whoami',
+      urlHint: 'Airtable’s hosted MCP server. Sign in with your Airtable account, or paste a personal access token.',
+    },
     preset: {
       origin: 'https://api.airtable.com',
       authMode: 'bearer',
@@ -213,7 +224,7 @@ export const CATALOG: CatalogEntry[] = [
     name: 'Anthropic',
     icon: 'anthropic',
     description: 'Claude models & messages',
-    section: 'Apps',
+    section: 'API registry',
     via: 'connection',
     connType: 'api',
     keywords: ['claude', 'llm', 'ai', 'models'],
@@ -231,7 +242,7 @@ export const CATALOG: CatalogEntry[] = [
     name: 'OpenAI',
     icon: 'openai',
     description: 'GPT models & responses',
-    section: 'Apps',
+    section: 'API registry',
     via: 'connection',
     connType: 'api',
     keywords: ['gpt', 'llm', 'ai', 'models'],
@@ -251,7 +262,18 @@ export const CATALOG: CatalogEntry[] = [
     section: 'Apps',
     via: 'connection',
     connType: 'api',
+    mcp: true,
     keywords: ['issues', 'tickets', 'projects', 'sprint'],
+    // Linear's server has no whoami-style tool (identity is a resource,
+    // linear://viewer), so the template carries expectations only.
+    mcpTemplate: {
+      serverUrl: 'https://mcp.linear.app/mcp',
+      expectedTools: [
+        'list_issues', 'get_issue', 'create_issue', 'list_projects',
+        'list_teams', 'create_comment',
+      ],
+      urlHint: 'Linear’s hosted MCP server. Sign in with your Linear account, or paste an API key.',
+    },
     preset: {
       origin: 'https://api.linear.app',
       authMode: 'header',
@@ -275,7 +297,17 @@ export const CATALOG: CatalogEntry[] = [
     section: 'Apps',
     via: 'connection',
     connType: 'api',
+    mcp: true,
     keywords: ['errors', 'crashes', 'monitoring', 'issues'],
+    mcpTemplate: {
+      serverUrl: 'https://mcp.sentry.dev/mcp',
+      expectedTools: [
+        'whoami', 'find_organizations', 'find_projects', 'list_issues',
+        'get_issue_details', 'search_issues',
+      ],
+      whoamiTool: 'whoami',
+      urlHint: 'Sentry’s hosted MCP server. Sign in with your Sentry account, or paste an auth token.',
+    },
     preset: {
       origin: 'https://sentry.io',
       authMode: 'bearer',
@@ -292,7 +324,18 @@ export const CATALOG: CatalogEntry[] = [
     section: 'Apps',
     via: 'connection',
     connType: 'api',
+    mcp: true,
     keywords: ['payments', 'billing', 'charges', 'invoices'],
+    mcpTemplate: {
+      serverUrl: 'https://mcp.stripe.com/',
+      expectedTools: [
+        'get_stripe_account_info', 'search_stripe_resources',
+        'fetch_stripe_resources', 'search_stripe_documentation',
+        'get_balance_summary',
+      ],
+      whoamiTool: 'get_stripe_account_info',
+      urlHint: 'Stripe’s hosted MCP server. Sign in with your Stripe account, or paste a restricted API key.',
+    },
     preset: {
       origin: 'https://api.stripe.com',
       authMode: 'bearer',
@@ -305,8 +348,11 @@ export const CATALOG: CatalogEntry[] = [
     id: 'vercel',
     name: 'Vercel',
     icon: 'vercel',
+    // Vercel's hosted MCP (mcp.vercel.com) only accepts Vercel-approved
+    // clients, so the API key stays the reliable path; the MCP row lives in
+    // the registry tail for anyone allowlisted.
     description: 'Deployments, projects & domains',
-    section: 'Apps',
+    section: 'API registry',
     via: 'connection',
     connType: 'api',
     keywords: ['deploy', 'hosting', 'domains', 'frontend'],
@@ -392,13 +438,13 @@ export const CATALOG: CatalogEntry[] = [
 ];
 
 export const CATALOG_SECTIONS: CatalogSection[] =
-  ['Infrastructure', 'Apps', 'Custom Apps', 'MCP registry', 'Secrets'];
+  ['Infrastructure', 'Apps', 'Custom Apps', 'API registry', 'MCP registry', 'Secrets'];
 
 /**
  * The registry tail: hosted MCP servers from the public index, each an
- * ordinary addable MCP row (OAuth-first, endpoint prefilled but editable).
- * They surface on search — and whenever one is configured — rather than
- * padding the default catalog view.
+ * ordinary addable MCP row (OAuth-first, endpoint prefilled but editable),
+ * shown by default in its own section after the curated rows. Some brands
+ * appear twice — a curated REST preset row and a hosted-MCP registry row.
  */
 export const REGISTRY_CATALOG: CatalogEntry[] = REGISTRY_SERVERS.map((server) => ({
   id: server.id,
@@ -565,12 +611,9 @@ export function visibleCatalog(query: string, visibility: CatalogVisibility): Ca
     if (entry.id !== 'websocket' || visibility.showWebsockets) return true;
     return connectionsForEntry(entry, visibility.connections).length > 0;
   });
-  // The registry tail stays out of the default view — search brings it in,
-  // and a row with something configured under it must never be invisible.
-  const registry = REGISTRY_CATALOG.filter((entry) =>
-    needle
-      ? matchesQuery(entry, needle)
-      : connectionsForEntry(entry, visibility.connections).length > 0);
+  const registry = needle
+    ? REGISTRY_CATALOG.filter((entry) => matchesQuery(entry, needle))
+    : REGISTRY_CATALOG;
   return [...curated, ...registry];
 }
 
