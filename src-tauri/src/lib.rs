@@ -297,7 +297,7 @@ pub fn run() {
             // Closing the main window hides it and keeps the broker running
             // rather than quitting; reopen from the Dock or the tray.
             if let Some(win) = app.get_webview_window(windows::MAIN) {
-                windows::move_traffic_lights_down(&win, 3.0)?;
+                windows::move_traffic_lights_down(&win, 6.0)?;
                 let handle = handle.clone();
                 win.on_window_event(move |event| {
                     if let WindowEvent::CloseRequested { api, .. } = event {

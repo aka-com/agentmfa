@@ -381,10 +381,9 @@
   @keyframes copied-pop{ from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }
   .icon-btn{ border: none; background: transparent; cursor: pointer; color: var(--muted-2); padding: 4px; border-radius: 5px; line-height: 0; }
   .icon-btn:hover{ background: var(--hover-2); color: var(--ink-2); }
-  .sec-table .icon-btn{ transform: translateY(1px); }
   /* The copy button is centered over the masked value, whose slot sits ~3.5px
    below the row's icons; lift it so it lines up with the eye/edit/delete icons. */
-.sec-table .ghost-copy{ transform: translateY(-2.5px); }
+.sec-table .ghost-copy{ transform: translateY(-3.5px); }
   .dropdown-surface .sec-table .ghost-copy{ transform: none; }
   .rowdel{ text-align: right; white-space: nowrap; }
   .confirm-row td{ height: 48px; padding: 0 6px; background: var(--danger-wash); border-radius: 0; font-size: 13px; }
@@ -714,7 +713,7 @@
   }
 }
   /* The header's trailing controls: search sits beside the primary action. */
-.dw-head-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.dw-head-actions { display: flex; align-items: center; gap: 16px; flex: 0 0 auto; }
 .dw-head-actions .cat-search { width: 210px; }
 .show-all {
   display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;
@@ -800,9 +799,9 @@
   border-radius: 999px; color: var(--muted); font-size: 12px; font-weight: 600;
 }
 .cat-limited {
-  flex: 0 0 auto; padding: 4px 10px; border: 1px solid var(--amber-border);
-  border-radius: 999px; background: var(--amber-wash); color: var(--amber-ink);
-  font-size: 11.5px; font-weight: 600; white-space: nowrap;
+  flex: 0 0 auto; padding: 4px 10px; border: 1px solid var(--line);
+  border-radius: 999px; background: var(--wash); color: var(--muted);
+  font-size: 11.5px; font-weight: 600; white-space: nowrap; opacity: .8;
 }
 .cat-count {
   display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto;
@@ -853,7 +852,10 @@
 .cat-conns > .muted-note { padding: 10px 14px; }
 /* Add-actions read as part of the list, not as calls to action: ink, not accent. */
 .cat-conns .cat-add-another { margin: 8px 14px 10px 64px; color: var(--ink); }
-.cat-conns .cat-add-secret { display: block; margin: 8px auto 10px; }
+/* "Add credential" is a full-bleed activatable row like "More tools"; the
+   table's last-row hairline is the divider above it, so the row itself draws
+   no border of its own. */
+.cat-conns .cat-add-secret { border-top: 0; }
 .dropdown-surface .catalog { gap: 12px; }
 .dropdown-surface .cat-search { width: 100%; }
 

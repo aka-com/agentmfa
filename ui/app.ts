@@ -150,11 +150,12 @@ interface AppState {
   secretSearch: string;
   /** Catalog entry ids whose connections are expanded. */
   toolsOpen: string[];
-  /** "Show all": lock every configured row on the page fully expanded. */
+  /** "Show all" checkbox state: checking it expands every configured row. */
   showAllTools: boolean;
   showAllSecrets: boolean;
   catalogActionMenuOpen: string | null;
-  appsExpanded: boolean;
+  /** Collapsible catalog sections currently showing all of their rows. */
+  sectionsExpanded: string[];
   startOption: string;
   /** Which connect mode step 2 of the walkthrough shows. */
   connectMode: string;
@@ -242,10 +243,10 @@ const state: AppState = {
   toolSearch: '',        // Add-tools catalog search query
   secretSearch: '',      // Secrets catalog search query
   toolsOpen: [],         // catalog entry ids whose connections are expanded
-  showAllTools: false,   // lock every configured tool row fully expanded
-  showAllSecrets: false, // lock every configured secret row fully expanded
+  showAllTools: false,   // checkbox state; checking expands every tool row
+  showAllSecrets: false, // checkbox state; checking expands every secret row
   catalogActionMenuOpen: null, // catalog id whose quick-connect chevron menu is open
-  appsExpanded: false,   // whether the Apps section shows beyond its connected/minimum rows
+  sectionsExpanded: [],  // sections showing beyond their connected/minimum rows
   startOption: 'postgres', // which walkthrough the Get started tab shows
   connectMode: 'direct', // step 2's connect-mode chip (falls back per option)
   connImportSource: '',  // paste-to-prefill field in the add sheet
@@ -593,7 +594,7 @@ function connectGuides(identity: IdentityInfo): ConnectGuide[] {
           snippet: MCP_SETUP_SNIPPETS['claude-code'],
         },
         {
-          title: 'Check it took',
+          title: 'Check for valid tools',
           detail: 'In any Claude Code session, ask it to run multitool_status — it should report your enabled tools.',
         },
       ],
@@ -652,7 +653,6 @@ function connectGuides(identity: IdentityInfo): ConnectGuide[] {
           detail: 'The MCP host’s loopback URL is advertised as mcp_url in /.well-known/agent-broker.json (its port moves with restarts), authenticated with the same key — or just launch aka mcp as a stdio bridge.',
         },
       ],
-      note: 'X-Multitool-Client is optional — it names your harness in the Activity log. Attribution only, never authorization.',
     },
   ];
 }
@@ -916,7 +916,7 @@ function credentialsExpansionHTML(): string {
     ? secretsTableHTML(query)
     : `<div class="muted-note">${state.secrets.length ? 'No saved credentials match your search.' : 'No saved credentials yet.'}</div>`;
   return `<div class="cat-conns">${body}
-    <button class="btn outline sm cat-add-another cat-add-secret" data-act="open-add-secret">＋ Add credential</button></div>`;
+    <button class="cat-more cat-add-secret" data-act="open-add-secret">＋ Add credential</button></div>`;
 }
 
 // One catalog row: icon chip, name, one-line description, and a trailing
@@ -926,7 +926,7 @@ function catalogRowHTML(entry: CatalogEntry): string {
   const builtin = entry.via === 'builtin';
   const count = builtin ? state.secrets.length : connectionsForEntry(entry, state.connections).length;
   const showAll = state.tab === 'secrets' ? state.showAllSecrets : state.showAllTools;
-  const open = (builtin || count > 0) && (showAll || state.toolsOpen.includes(entry.id));
+  const open = (builtin || count > 0) && state.toolsOpen.includes(entry.id);
   const quickConnect = canQuickConnectMcp(entry);
   const actionMenuOpen = state.catalogActionMenuOpen === entry.id;
   const label = builtin
@@ -974,7 +974,10 @@ function catalogRowHTML(entry: CatalogEntry): string {
       <div class="cat-conn-list">${connectionsForEntry(entry, state.connections).map(catalogConnRowHTML).join('')}</div>
       <button class="btn outline sm cat-add-another" data-act="catalog-add" data-id="${entry.id}">＋ Add another ${esc(entry.name)} connection</button>
     </div>`;
-  const rowToggle = count || builtin
+  // While "Show all" is checked the row body is inert (no pointer cursor, no
+  // toggle); only the trailing count button collapses, and doing so unchecks
+  // "Show all" without touching the other rows.
+  const rowToggle = (count || builtin) && !showAll
     ? ` data-act="catalog-toggle" data-id="${entry.id}"`
     : '';
   return `<div class="cat-row-wrap ${open ? 'open' : ''} ${actionMenuOpen ? 'menu-open' : ''}">
@@ -990,6 +993,11 @@ function catalogRowHTML(entry: CatalogEntry): string {
 function isMcpDraft(draft: { isMcp?: boolean; mcpPath?: string | null }): boolean {
   return Boolean(draft.isMcp || draft.mcpPath);
 }
+
+// Sections that collapse to their connected/minimum rows behind a "More
+// tools" disclosure. The API registry holds few rows today but is expected
+// to grow, so it collapses the same way as the larger sections.
+const COLLAPSIBLE_SECTIONS: string[] = ['Apps', 'API registry', 'MCP registry'];
 
 function connectionsHTML() {
   const ready = state.connectionReady;
@@ -1009,15 +1017,17 @@ function connectionsHTML() {
     const sectionEntries = entries.filter((entry) => entry.section === section);
     if (!sectionEntries.length) return '';
     const ordered = connectedCatalogFirst(sectionEntries, state.connections);
-    const collapsible = section === 'Apps' && !state.toolSearch.trim();
+    const collapsible = COLLAPSIBLE_SECTIONS.includes(section) && !state.toolSearch.trim();
+    const expanded = state.sectionsExpanded.includes(section);
     const collapsed = collapsible
       ? collapsedCatalogGroup(sectionEntries, state.connections)
       : { visible: ordered, hiddenCount: 0 };
-    const rows = collapsible && !state.appsExpanded ? collapsed.visible : ordered;
+    const rows = collapsible && !expanded ? collapsed.visible : ordered;
     const disclosure = collapsible && collapsed.hiddenCount > 0
-      ? `<button class="cat-more" data-act="toggle-apps-expanded" aria-expanded="${state.appsExpanded}">
-          <span>${state.appsExpanded ? 'Show fewer tools' : `More tools (${collapsed.hiddenCount})`}</span>
-          <span class="cat-more-chev ${state.appsExpanded ? 'open' : ''}" aria-hidden="true">${ICONS.chevronDown}</span>
+      ? `<button class="cat-more" data-act="toggle-section-expanded" data-id="${escAttr(section)}"
+          aria-expanded="${expanded}">
+          <span>${expanded ? 'Show fewer tools' : `More tools (${collapsed.hiddenCount})`}</span>
+          <span class="cat-more-chev ${expanded ? 'open' : ''}" aria-hidden="true">${ICONS.chevronDown}</span>
         </button>`
       : '';
     return `<div class="cat-section"><div class="cat-section-h">${section.toUpperCase()}</div>
@@ -1321,8 +1331,22 @@ function brokerReadyHTML() {
     <span class="ready-copy-label" aria-live="polite">${copied ? `${ICONS.check} Copied` : 'Ready'}</span></button>`;
 }
 
-// "Show all" locks every configured row on the page fully expanded; there is
-// nothing to expand (so nothing to lock) when no connections exist yet.
+// Every row on the current tab that can expand — mirrors the render-time
+// "open" precondition in catalogRowHTML (builtin rows and configured rows).
+function expandableCatalogIds(): string[] {
+  const entries = visibleCatalog(state.tab === 'secrets' ? '' : state.toolSearch, {
+    showWebsockets: state.settings.show_websockets,
+    connections: state.connections,
+  }).filter((entry) => (state.tab === 'secrets')
+    === (entry.section === 'Secrets'));
+  return entries
+    .filter((entry) => entry.via === 'builtin'
+      || connectionsForEntry(entry, state.connections).length > 0)
+    .map((entry) => entry.id);
+}
+
+// "Show all" expands every configured row on the page; there is nothing to
+// expand when no connections exist yet.
 function showAllToggleHTML(checked: boolean, enabled: boolean): string {
   // The <label> carries the action so a click anywhere on it flips state; the
   // checkbox is presentational (state is the single source of truth) so the
@@ -2990,19 +3014,36 @@ document.addEventListener('click', async (e) => {
       break;
     }
     case 'catalog-toggle':
-      state.toolsOpen = state.toolsOpen.includes(id)
-        ? state.toolsOpen.filter((openId) => openId !== id)
-        : [...state.toolsOpen, id];
+      if (state.toolsOpen.includes(id)) {
+        state.toolsOpen = state.toolsOpen.filter((openId) => openId !== id);
+        // Any row collapsing means "every row is shown" no longer holds; the
+        // rows that stay open keep their own entries in toolsOpen.
+        if (state.tab === 'secrets') state.showAllSecrets = false;
+        else state.showAllTools = false;
+      } else {
+        state.toolsOpen = [...state.toolsOpen, id];
+      }
       render(); break;
-    case 'toggle-apps-expanded':
-      state.appsExpanded = !state.appsExpanded;
+    case 'toggle-section-expanded':
+      state.sectionsExpanded = state.sectionsExpanded.includes(id)
+        ? state.sectionsExpanded.filter((section) => section !== id)
+        : [...state.sectionsExpanded, id];
       render();
       break;
-    case 'toggle-show-all':
-      if (state.tab === 'secrets') state.showAllSecrets = !state.showAllSecrets;
-      else state.showAllTools = !state.showAllTools;
+    case 'toggle-show-all': {
+      // "Show all" is a transition, not a render-time override: checking it
+      // opens every expandable row through the same per-row state the count
+      // buttons use, so one row can collapse later without hiding the rest.
+      const wasOn = state.tab === 'secrets' ? state.showAllSecrets : state.showAllTools;
+      const ids = expandableCatalogIds();
+      state.toolsOpen = wasOn
+        ? state.toolsOpen.filter((openId) => !ids.includes(openId))
+        : [...new Set([...state.toolsOpen, ...ids])];
+      if (state.tab === 'secrets') state.showAllSecrets = !wasOn;
+      else state.showAllTools = !wasOn;
       render();
       break;
+    }
     case 'toggle-catalog-connect-menu':
       state.catalogActionMenuOpen = state.catalogActionMenuOpen === id ? null : id;
       render();
@@ -3554,13 +3595,15 @@ document.addEventListener('input', (e) => {
   }
   if (target?.id === 'tool-search') {
     state.toolSearch = target.value;
-    state.toolsOpen = [];
+    // Results render collapsed unless "Show all" is on, in which case the
+    // rows matching the new query open (the checkbox keeps its promise).
+    state.toolsOpen = state.showAllTools ? expandableCatalogIds() : [];
     render();
     return;
   }
   if (target?.id === 'secret-search') {
     state.secretSearch = target.value;
-    state.toolsOpen = [];
+    state.toolsOpen = state.showAllSecrets ? expandableCatalogIds() : [];
     render();
     return;
   }
