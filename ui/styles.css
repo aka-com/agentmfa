@@ -592,6 +592,7 @@
   background: var(--accent-wash-2); color: var(--accent-ink);
 }
   .cred-badge.plus{ background: var(--seg-bg); color: var(--muted); }
+  .cred-badge.none{ background: var(--seg-bg); color: var(--muted); }
   .cred-name{ font-size: 13.5px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .cred-placeholder{ color: var(--muted); font-weight: 400; }
   .cred-menu{
@@ -713,6 +714,14 @@
   /* The header's trailing controls: search sits beside the primary action. */
 .dw-head-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
 .dw-head-actions .cat-search { width: 210px; }
+.show-all {
+  display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;
+  color: var(--muted); font-size: 12.5px; font-weight: 600;
+  white-space: nowrap; cursor: pointer; user-select: none;
+}
+.show-all input { margin: 0; cursor: pointer; accent-color: var(--accent); }
+.show-all.disabled { opacity: .45; cursor: default; }
+.show-all.disabled input { cursor: default; }
 
 /* ------------------------------ Add-tools catalog ------------------------ */
 /* The default page: a searchable, sectioned registry of tools. Rows show an
@@ -787,6 +796,11 @@
 .cat-soon {
   flex: 0 0 auto; padding: 4px 12px; border: 1px dashed var(--line);
   border-radius: 999px; color: var(--muted); font-size: 12px; font-weight: 600;
+}
+.cat-limited {
+  flex: 0 0 auto; padding: 4px 10px; border: 1px solid var(--amber-border);
+  border-radius: 999px; background: var(--amber-wash); color: var(--amber-ink);
+  font-size: 11.5px; font-weight: 600; white-space: nowrap;
 }
 .cat-count {
   display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto;

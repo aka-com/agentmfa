@@ -1157,6 +1157,11 @@ fn validate_config_and_bind_secrets(
                     });
                 }
             }
+            // An empty template is a credential-less connection (e.g. a public
+            // MCP server): nothing is injected, so it binds no secrets.
+            if template.trim().is_empty() {
+                return Ok(Vec::new());
+            }
             let parsed = Template::parse(template)?;
             let refs = parsed.refs();
             if refs.is_empty() {
@@ -1663,6 +1668,34 @@ mod tests {
                 .add_connection(api_spec("x", "x.example.com", "Bearer {{NOPE}}"))
                 .unwrap_err(),
             CoreError::UnknownTemplateRef(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn api_connection_may_have_no_credential() {
+        let (store, _, _dir) = store().await;
+        // An empty template is a credential-less connection (e.g. a public MCP
+        // server): it saves and binds no secrets.
+        let conn = store
+            .add_connection(api_spec("public-mcp", "mcp.example.com", ""))
+            .unwrap();
+        assert!(conn.secrets.is_empty());
+
+        // Whitespace-only is treated the same way.
+        let blank = store
+            .add_connection(api_spec("blank-tmpl", "blank.example.com", "  "))
+            .unwrap();
+        assert!(blank.secrets.is_empty());
+
+        // A non-empty template with no credential reference is still rejected.
+        assert!(matches!(
+            store
+                .add_connection(api_spec("x", "x.example.com", "Authorization: Bearer static"))
+                .unwrap_err(),
+            CoreError::InvalidConnectionField {
+                field: ConnectionField::Template,
+                ..
+            }
         ));
     }
 

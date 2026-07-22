@@ -226,6 +226,8 @@ fn endpoint_forward_headers(
 
 /// The rendered credential, applied fresh to every hop.
 pub(crate) enum RenderedInjection {
+    /// A credential-less connection: nothing is injected onto the request.
+    None,
     Header(HeaderName, HeaderValue),
     /// Raw query-string fragment (already percent-encoded by the template's
     /// `url(…)` transform), e.g. `token=abc%20def`.
@@ -244,6 +246,7 @@ impl Redactions {
             needles: Vec::new(),
         };
         match injection {
+            RenderedInjection::None => {}
             RenderedInjection::Header(name, value) => {
                 if let Ok(value) = value.to_str() {
                     redactions.add(value);
@@ -504,6 +507,7 @@ impl HttpExecution {
                 .timeout(self.config.upstream_timeout)
                 .headers(self.headers.clone());
             match &injection {
+                RenderedInjection::None => {}
                 RenderedInjection::Header(name, value) => {
                     request = request.header(name.clone(), value.clone());
                 }
@@ -630,6 +634,7 @@ pub async fn test_upstream(
         return Err("cannot set port".into());
     }
     let request = match &injection {
+        RenderedInjection::None => client.request(Method::GET, url.clone()),
         RenderedInjection::Header(name, value) => client
             .request(Method::GET, url.clone())
             .header(name.clone(), value.clone()),
@@ -685,6 +690,11 @@ pub(crate) async fn render_injection(
     store: &Store,
     template_src: &str,
 ) -> Result<RenderedInjection, String> {
+    // An empty template is a credential-less connection: nothing to render,
+    // nothing to inject.
+    if template_src.trim().is_empty() {
+        return Ok(RenderedInjection::None);
+    }
     let template = Template::parse(template_src).map_err(|e| e.to_string())?;
     let rendered = store
         .render_template(&template)
@@ -1438,6 +1448,16 @@ mod tests {
         assert_eq!(
             redactions.apply_to_string("token ghp_test_secret_value reflected"),
             "token [REDACTED] reflected"
+        );
+    }
+
+    #[test]
+    fn credential_less_injection_redacts_nothing() {
+        let redactions = Redactions::from_injection(&RenderedInjection::None);
+        // Nothing was injected, so nothing is scrubbed from the response.
+        assert_eq!(
+            redactions.apply_to_string("plain upstream body"),
+            "plain upstream body"
         );
     }
 

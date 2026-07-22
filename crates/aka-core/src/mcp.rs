@@ -102,8 +102,10 @@ pub struct McpCheckOptions {
     pub whoami_tool: Option<String>,
 }
 
-/// The credential attached to every upstream request.
+/// The credential attached to every upstream request. `None` is a
+/// credential-less connection (a public MCP server): nothing is injected.
 enum Credential {
+    None,
     Header(HeaderName, HeaderValue),
     Query(Zeroizing<String>),
 }
@@ -111,6 +113,7 @@ enum Credential {
 impl Credential {
     fn from_rendered(rendered: RenderedInjection) -> Self {
         match rendered {
+            RenderedInjection::None => Credential::None,
             RenderedInjection::Header(name, value) => Credential::Header(name, value),
             RenderedInjection::Query(fragment) => Credential::Query(fragment),
         }

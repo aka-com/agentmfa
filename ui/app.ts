@@ -150,6 +150,9 @@ interface AppState {
   secretSearch: string;
   /** Catalog entry ids whose connections are expanded. */
   toolsOpen: string[];
+  /** "Show all": lock every configured row on the page fully expanded. */
+  showAllTools: boolean;
+  showAllSecrets: boolean;
   catalogActionMenuOpen: string | null;
   appsExpanded: boolean;
   startOption: string;
@@ -239,6 +242,8 @@ const state: AppState = {
   toolSearch: '',        // Add-tools catalog search query
   secretSearch: '',      // Secrets catalog search query
   toolsOpen: [],         // catalog entry ids whose connections are expanded
+  showAllTools: false,   // lock every configured tool row fully expanded
+  showAllSecrets: false, // lock every configured secret row fully expanded
   catalogActionMenuOpen: null, // catalog id whose quick-connect chevron menu is open
   appsExpanded: false,   // whether the Apps section shows beyond its connected/minimum rows
   startOption: 'postgres', // which walkthrough the Get started tab shows
@@ -919,7 +924,8 @@ function credentialsExpansionHTML(): string {
 function catalogRowHTML(entry: CatalogEntry): string {
   const builtin = entry.via === 'builtin';
   const count = builtin ? state.secrets.length : connectionsForEntry(entry, state.connections).length;
-  const open = state.toolsOpen.includes(entry.id) && (builtin || count > 0);
+  const showAll = state.tab === 'secrets' ? state.showAllSecrets : state.showAllTools;
+  const open = (builtin || count > 0) && (showAll || state.toolsOpen.includes(entry.id));
   const quickConnect = canQuickConnectMcp(entry);
   const actionMenuOpen = state.catalogActionMenuOpen === entry.id;
   const label = builtin
@@ -932,7 +938,7 @@ function catalogRowHTML(entry: CatalogEntry): string {
     : ['mcp', 'http'].includes(entry.id)
     ? 'Configure'
     : entry.preset
-    ? 'Add API key'
+    ? 'Configure API key'
     : entry.mcp && !entry.mcpTemplate?.serverUrl
     ? 'Add custom app'
     : entry.mcp
@@ -974,6 +980,7 @@ function catalogRowHTML(entry: CatalogEntry): string {
     <div class="cat-row ${rowToggle ? 'is-toggle' : ''} ${count ? 'is-configured' : ''}"${rowToggle}>
       <span class="cat-ico" aria-hidden="true">${ICONS[entry.icon] || ''}</span>
       <div class="cat-tx"><b>${esc(entry.name)}</b><span>${esc(entry.description)}</span></div>
+      ${entry.limitedSupport ? `<span class="cat-limited" title="This vendor only admits pre-approved OAuth clients, so connecting may be refused.">Limited support</span>` : ''}
       ${action}
     </div>${expansion}</div>`;
 }
@@ -1313,6 +1320,18 @@ function brokerReadyHTML() {
     <span class="ready-copy-label" aria-live="polite">${copied ? `${ICONS.check} Copied` : 'Ready'}</span></button>`;
 }
 
+// "Show all" locks every configured row on the page fully expanded; there is
+// nothing to expand (so nothing to lock) when no connections exist yet.
+function showAllToggleHTML(checked: boolean, enabled: boolean): string {
+  // The <label> carries the action so a click anywhere on it flips state; the
+  // checkbox is presentational (state is the single source of truth) so the
+  // native toggle is suppressed to avoid drifting out of sync on re-render.
+  return `<label class="show-all ${enabled ? '' : 'disabled'}" ${enabled ? 'data-act="toggle-show-all"' : ''}
+    title="Keep every configured row expanded">
+    <input type="checkbox" tabindex="-1" ${checked ? 'checked' : ''} ${enabled ? '' : 'disabled'}>
+    <span>Show all</span></label>`;
+}
+
 function renderMainWindow() {
   const navItem = (tab: Tab): string =>
     `<button class="nav-item ${state.tab === tab ? 'on' : ''}" data-act="tab" data-tab="${tab}">${tabLabel(tab)}</button>`;
@@ -1321,10 +1340,12 @@ function renderMainWindow() {
   // One view-specific action, always in the header row next to the title.
   const actionBtn = state.tab === 'connections'
     ? `<div class="dw-head-actions">
+        ${showAllToggleHTML(state.showAllTools, state.connections.length > 0)}
         <input id="tool-search" class="cat-search" type="search" placeholder="Search tools…"
           aria-label="Search tools" value="${escAttr(state.toolSearch)}"></div>`
     : state.tab === 'secrets'
     ? `<div class="dw-head-actions">
+        ${showAllToggleHTML(state.showAllSecrets, state.secrets.length > 0 || state.connections.length > 0)}
         <input id="secret-search" class="cat-search" type="search" placeholder="Search secrets…"
           aria-label="Search secrets" value="${escAttr(state.secretSearch)}"></div>`
     : state.tab === 'activity'
@@ -1581,6 +1602,26 @@ function addSecretSheet(editing: boolean): string {
 const NEW_CREDENTIAL_OPTION = '__new__';
 const NO_CREDENTIAL_OPTION = '__none__';
 
+/** Types that may be connected without any stored credential. MCP servers
+ *  are stored as `api` connections, so this covers them too. */
+function secretAllowsNone(type: ConnectionType): boolean {
+  return type === 'pg' || type === 'ssh' || type === 'api';
+}
+
+/** The credential source to assume when the draft has not chosen one yet.
+ *  Defaults to "none" wherever None is offered; an imported credential still
+ *  forces "new". Kept in one place so the chooser and validation agree. */
+function defaultSecretSource(
+  type: ConnectionType,
+  draft: ConnectionDraft,
+  allowNew: boolean,
+): 'existing' | 'new' | 'none' {
+  if (draft.secretSource) return draft.secretSource;
+  if (draft.importedCredential || draft.sshImportId) return 'new';
+  if (secretAllowsNone(type)) return 'none';
+  return allowNew && !state.secrets.length ? 'new' : 'existing';
+}
+
 function credentialNameIsTaken(name: string): boolean {
   const candidate = name.trim();
   return Boolean(candidate) && state.secrets.some((secret) => secret.name === candidate);
@@ -1605,10 +1646,8 @@ function credentialChooserHTML(
   allowNew = true,
   valueHint?: string,
 ): string {
-  const allowNone = type === 'pg' || type === 'ssh';
-  const source = allowNew
-    ? (draft.secretSource || (draft.importedCredential || draft.sshImportId || !state.secrets.length ? 'new' : 'existing'))
-    : (draft.secretSource || 'existing');
+  const allowNone = secretAllowsNone(type);
+  const source = defaultSecretSource(type, draft, allowNew);
   const secretLabel = type === 'pg' ? 'Database password'
     : type === 'ssh' ? 'SSH private key'
     : 'Token or API key';
@@ -1621,12 +1660,13 @@ function credentialChooserHTML(
       : null;
     const keyBadge = `<span class="cred-badge" aria-hidden="true">${ICONS.keyRound}</span>`;
     const plusBadge = `<span class="cred-badge plus" aria-hidden="true">${ICONS.plus}</span>`;
+    const noneBadge = `<span class="cred-badge none" aria-hidden="true">${ICONS.circleSlash}</span>`;
     const triggerContent = selected
       ? `${keyBadge}<span class="cred-name">${esc(selected.name)}</span>`
       : source === 'new'
       ? `${plusBadge}<span class="cred-name">New secret…</span>`
       : source === 'none'
-      ? `<span class="cred-name">None</span>`
+      ? `${noneBadge}<span class="cred-name">None</span>`
       : `<span class="cred-name cred-placeholder">Choose a secret…</span>`;
     const options = state.secrets.map((secret) => {
       const picked = selected !== null && selected.id === secret.id;
@@ -1644,7 +1684,7 @@ function credentialChooserHTML(
     const noneOption = allowNone
       ? `${allowNew || !state.secrets.length ? '' : '<div class="cred-menu-divider"></div>'}
         <button type="button" class="cred-opt" role="option" data-act="credential-pick"
-          data-id="${NO_CREDENTIAL_OPTION}" aria-selected="${source === 'none'}">
+          data-id="${NO_CREDENTIAL_OPTION}" aria-selected="${source === 'none'}">${noneBadge}
           <span class="cred-opt-col"><span class="cred-name">None</span></span>
           ${source === 'none' ? `<span class="cred-opt-check">${ICONS.check}</span>` : ''}</button>`
       : '';
@@ -1850,8 +1890,7 @@ function connSheet(editing: boolean): string {
           </div></details></div>`;
     } else if (modeValue === 'oauth') {
       fields += `<div class="rule-note oauth-note">You’ll approve access in your browser. The token is saved
-        to your Keychain and injected by the broker — agents never see it. Run this again to connect
-        a second account.</div>`;
+        to your Keychain and injected into the connection. You can connect multiple accounts.</div>`;
       // Vendors without automatic client registration (Google Workspace)
       // need a one-time OAuth client the user creates with the provider.
       const oauthApp = mcpAdd && d.entryId
@@ -1971,9 +2010,10 @@ function mcpAuthSheet(): string {
     actions = `<button class="btn primary" data-act="mcp-auth-done">Done</button>`;
   } else if (auth.phase === 'failed') {
     body = `<div class="auth-failed">${ICONS.circleX}
-      <div><b>${esc(auth.message)}</b>
+      <div><b>${esc(cap(auth.message))}</b>
       ${auth.hint ? `<div class="auth-sub">${esc(auth.hint)}</div>` : ''}</div></div>`;
-    actions = `${state.mcpAuthDraft && !state.mcpAuthDraft.reauth_connection_id
+    actions = `<button class="btn" data-act="mcp-open-browser" data-url="${escAttr(auth.target)}">Open in browser</button>
+      ${state.mcpAuthDraft && !state.mcpAuthDraft.reauth_connection_id
         ? '<button class="btn" data-act="mcp-auth-token">Use a token instead</button>'
         : '<button class="btn" data-act="sheet-cancel">Close</button>'}
       ${state.mcpAuthDraft ? '<button class="btn primary" data-act="mcp-auth-retry">Try again</button>' : ''}`;
@@ -2465,9 +2505,9 @@ async function saveConn(): Promise<void> {
   const needsCredentialChoice = !usesOauth && !byoOauth && (
     (adding && !((t === 'api' || t === 'ws') && authMode === 'advanced')) ||
     (!adding && t !== 'api'));
-  const secretSource = d.secretSource || (adding
-    ? (d.importedCredential || d.sshImportId || !state.secrets.length ? 'new' : 'existing')
-    : 'existing');
+  const secretSource = adding
+    ? defaultSecretSource(t, d, true)
+    : (d.secretSource || 'existing');
   let selectedSecret: SecretSummary | null = null;
   let newSecretName: string | null = null;
   let newSecretNameTaken = false;
@@ -2486,7 +2526,7 @@ async function saveConn(): Promise<void> {
   }
   const templateSecretName = selectedSecret ? selectedSecret.name : newSecretName;
   let injectionTemplate = (d.template || '').trim();
-  if (usesRecipe) {
+  if (usesRecipe && secretSource !== 'none') {
     try { injectionTemplate = authTemplate(t, authMode, templateSecretName || '', (d.authDetail || '').trim()); }
     catch (error) { errs.authDetail = errorMessage(error); }
   } else if ((t === 'api' || (adding && t === 'ws')) && authMode === 'advanced' && !injectionTemplate) {
@@ -2695,6 +2735,9 @@ document.addEventListener('click', async (e) => {
   const target = e.target instanceof Element ? e.target : null;
   const btn = target?.closest<HTMLElement>('[data-act]') ?? null;
   if (btn?.dataset.act === 'open-external-url') e.preventDefault();
+  // The checkbox is presentational; stop the browser toggling it so the
+  // rendered state stays authoritative.
+  if (btn?.dataset.act === 'toggle-show-all') e.preventDefault();
   // Dismiss the desktop settings popover on any click outside it (its own
   // toggle handles itself; menu-item clicks close it in their handlers).
   if (state.menuOpen && !target?.closest('.settings-menu') &&
@@ -2952,6 +2995,11 @@ document.addEventListener('click', async (e) => {
       render(); break;
     case 'toggle-apps-expanded':
       state.appsExpanded = !state.appsExpanded;
+      render();
+      break;
+    case 'toggle-show-all':
+      if (state.tab === 'secrets') state.showAllSecrets = !state.showAllSecrets;
+      else state.showAllTools = !state.showAllTools;
       render();
       break;
     case 'toggle-catalog-connect-menu':

@@ -764,6 +764,9 @@ async fn post_http(
         match injection_form(template) {
             Some(InjectionForm::Header { name }) => Some(name),
             Some(InjectionForm::Query) => None,
+            // An empty template is a credential-less connection: nothing is
+            // injected, so there is no reserved credential header.
+            None if template.trim().is_empty() => None,
             None => {
                 return err_detail(
                     StatusCode::INTERNAL_SERVER_ERROR,
