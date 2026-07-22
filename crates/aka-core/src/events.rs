@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use crate::types::{ConfirmationMethod, PgSslMode, SecretMeta};
+use crate::types::{ConfirmationMethod, SecretMeta};
 
 pub trait BrokerEvents: Send + Sync {
     /// Live WS/PG session set changed.
@@ -69,20 +69,6 @@ pub trait BrokerEvents: Send + Sync {
     /// fails closed.
     fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
         None
-    }
-
-    /// A Postgres `verify-ca`/`verify-full` TLS handshake could not verify
-    /// the upstream certificate. Returning true explicitly allows this one
-    /// connection attempt to continue with encryption but without certificate
-    /// verification. The default is fail-closed for tests and headless use.
-    fn confirm_unverified_pg_tls(
-        &self,
-        _host: &str,
-        _port: u16,
-        _sslmode: PgSslMode,
-        _error: &str,
-    ) -> bool {
-        false
     }
 }
 

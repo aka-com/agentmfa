@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use aka_core::audit::AuditEntry;
 use aka_core::events::BrokerEvents;
-use aka_core::types::{ConfirmationMethod, PgSslMode, SecretMeta};
+use aka_core::types::{ConfirmationMethod, SecretMeta};
 use tauri::{AppHandle, Emitter};
 
 use crate::dto::ActivityDto;
@@ -106,34 +106,6 @@ impl BrokerEvents for TauriEvents {
             .arg(url)
             .spawn()
             .is_ok()
-    }
-
-    fn confirm_unverified_pg_tls(
-        &self,
-        host: &str,
-        port: u16,
-        sslmode: PgSslMode,
-        error: &str,
-    ) -> bool {
-        let mode = match sslmode {
-            PgSslMode::Disable => "disable",
-            PgSslMode::Prefer => "prefer",
-            PgSslMode::Require => "require",
-            PgSslMode::VerifyCa => "verify-ca",
-            PgSslMode::VerifyFull => "verify-full",
-        };
-        let reason = format!(
-            "The Postgres TLS certificate for {host}:{port} could not be verified with sslmode={mode}.\n\n{error}\n\nContinue without certificate verification for this connection attempt?"
-        );
-        #[cfg(target_os = "macos")]
-        {
-            crate::auth::confirm(&reason).is_ok()
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = reason;
-            false
-        }
     }
 }
 

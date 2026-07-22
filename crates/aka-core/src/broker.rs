@@ -625,8 +625,7 @@ impl Broker {
                     .await
                 }
                 ConnectionKind::Pg => {
-                    crate::capability::pg::test_upstream(&self.store, &self.events, &connection)
-                        .await
+                    crate::capability::pg::test_upstream(&self.store, &connection).await
                 }
                 ConnectionKind::Ws => {
                     crate::capability::ws::test_upstream(&self.store, &connection).await

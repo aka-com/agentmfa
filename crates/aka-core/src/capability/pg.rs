@@ -42,7 +42,6 @@ use tokio::sync::Notify;
 
 use crate::broker::Broker;
 use crate::endpoints::EndpointListenerHandle;
-use crate::events::BrokerEvents;
 use crate::sessions::{RedeemError, SessionHandle};
 use crate::store::Store;
 use crate::types::{Connection, ConnectionConfig, ConnectionKind, DirectEndpoint, PgSslMode};
@@ -444,12 +443,7 @@ async fn handle_endpoint_conn(
     // authorization, so the secret read is pre-authorized (scope confirmed).
     let upstream = match crate::authorization::scope(
         true,
-        dial_upstream(
-            &state.broker.store,
-            &state.broker.events,
-            &connection,
-            &params,
-        ),
+        dial_upstream(&state.broker.store, &connection, &params),
     )
     .await
     {
@@ -663,12 +657,7 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
     // reserved budget slot.
     let upstream = match crate::authorization::scope_existing(
         redemption.secret_read_authorization.clone(),
-        dial_upstream(
-            &state.broker.store,
-            &state.broker.events,
-            &redemption.connection,
-            &params,
-        ),
+        dial_upstream(&state.broker.store, &redemption.connection, &params),
     )
     .await
     {
@@ -730,7 +719,6 @@ async fn handle_cancel(state: &Arc<ProxyState>, pid: i32, key: i32) {
             target.port,
             target.sslmode,
             target.trusted_ca_bundle_path.as_deref(),
-            Some(&state.broker.events),
         )
         .await?;
         let mut msg = Vec::with_capacity(16);
@@ -1058,16 +1046,17 @@ fn is_cert_verification_error(detail: &str) -> bool {
 /// TCP connect + TLS per the connection's `sslmode`: `Disable` →
 /// plaintext; `Prefer` → SSLRequest, wrap on 'S', continue plaintext on 'N';
 /// `Require`/`verify-ca`/`verify-full` → SSLRequest, 'S' or fail. The verify
-/// modes use trusted roots, and may continue once without verification only
-/// when the observer explicitly confirms the certificate failure. Returns the
-/// stream plus the SHA-256 digest of the server certificate DER (the
-/// `tls-server-end-point` channel-binding input) when TLS was negotiated.
+/// modes use trusted roots and fail closed on a certificate that cannot be
+/// verified: skipping verification is a persisted, per-connection decision
+/// made in the app's edit sheet (behind the capability-change gate), never a
+/// per-dial prompt. Returns the stream plus the SHA-256 digest of the server
+/// certificate DER (the `tls-server-end-point` channel-binding input) when
+/// TLS was negotiated.
 async fn tls_connect(
     host: &str,
     port: u16,
     sslmode: PgSslMode,
     ca_bundle_path: Option<&str>,
-    events: Option<&Arc<dyn BrokerEvents>>,
 ) -> Result<(PgStream, Option<Vec<u8>>), String> {
     if sslmode == PgSslMode::Disable {
         let tcp = TcpStream::connect((host, port))
@@ -1084,34 +1073,12 @@ async fn tls_connect(
                 if matches!(sslmode, PgSslMode::VerifyCa | PgSslMode::VerifyFull)
                     && is_cert_verification_error(&e) =>
             {
-                // The re-auth prompt is a blocking native dialog; run it on
-                // the blocking pool so it never ties up a runtime worker
-                // while the user decides.
-                let approved = match events {
-                    Some(events) => {
-                        let events = events.clone();
-                        let host = host.to_string();
-                        let err = e.clone();
-                        tokio::task::spawn_blocking(move || {
-                            events.confirm_unverified_pg_tls(&host, port, sslmode, &err)
-                        })
-                        .await
-                        .unwrap_or(false)
-                    }
-                    None => false,
-                };
-                if !approved {
-                    return Err(format!("tls certificate verification failed: {e}"));
-                }
-                let (tcp, answer) = connect_and_probe_tls(host, port).await?;
-                match answer {
-                    b'S' => wrap_tls(host, tcp, PgSslMode::Require, None).await,
-                    b'N' => Err(format!(
-                        "upstream declined TLS after {} certificate fallback",
-                        sslmode_name(sslmode)
-                    )),
-                    other => Err(format!("unexpected SSLRequest reply 0x{other:02x}")),
-                }
+                Err(format!(
+                    "tls certificate verification failed: {e}. Edit the tool to \
+                     trust the server's CA (Advanced → Trusted CA bundle) or \
+                     lower its TLS mode to \"require\" to connect without \
+                     certificate verification"
+                ))
             }
             Err(e) => Err(e),
         },
@@ -1142,7 +1109,6 @@ struct UpstreamSession {
 /// client_encoding, options, search_path, …) are forwarded for fidelity.
 async fn dial_upstream(
     store: &Arc<Store>,
-    events: &Arc<dyn BrokerEvents>,
     connection: &Connection,
     client_params: &[(String, String)],
 ) -> Result<UpstreamSession, String> {
@@ -1166,14 +1132,8 @@ async fn dial_upstream(
         ),
         None => None,
     };
-    let (stream, cert_digest) = tls_connect(
-        host,
-        *port,
-        *sslmode,
-        trusted_ca_bundle_path.as_deref(),
-        Some(events),
-    )
-    .await?;
+    let (stream, cert_digest) =
+        tls_connect(host, *port, *sslmode, trusted_ca_bundle_path.as_deref()).await?;
     let mut stream = BufReader::new(stream);
 
     // StartupMessage with the CONFIGURED user + dbname; forward the client's
@@ -1316,15 +1276,11 @@ async fn dial_upstream(
 
 /// UI-initiated connectivity/credential test: dial and authenticate exactly
 /// as a brokered session would, then send Terminate without issuing a query.
-pub async fn test_upstream(
-    store: &Arc<Store>,
-    events: &Arc<dyn BrokerEvents>,
-    connection: &Connection,
-) -> Result<String, String> {
+pub async fn test_upstream(store: &Arc<Store>, connection: &Connection) -> Result<String, String> {
     let ConnectionConfig::Pg { dbname, user, .. } = &connection.config else {
         return Err("not a postgres connection".into());
     };
-    let mut upstream = dial_upstream(store, events, connection, &[]).await?;
+    let mut upstream = dial_upstream(store, connection, &[]).await?;
     let _ = upstream.stream.write_all(&frame(b'X', &[])).await;
     let _ = upstream.stream.shutdown().await;
     Ok(format!("Signed in to {dbname} as {user}"))
