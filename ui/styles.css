@@ -230,7 +230,10 @@
   .seg-btn.on{ background: var(--seg-on-bg); color: var(--seg-on-ink); box-shadow: 0 1px 3px rgba(0,0,0,.15); font-weight: 600; }
   .seg.in-form{ margin: 0; }
   /* ---- content ---------------------------------------------------------- */
-.content{ flex: 1; overflow-y: auto; overflow-x: hidden; padding: 0 14px 12px; }
+.content{
+  flex: 1; overflow-y: auto; overflow-x: hidden; padding: 0 14px 12px;
+  scrollbar-gutter: stable;
+}
   .dd-content{ position: relative; min-height: 0; }
   .dw-main .content{ padding: 0 16px 14px; }
   .content::-webkit-scrollbar, .dd-global::-webkit-scrollbar{ width: 8px; }
@@ -764,10 +767,6 @@
   font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap;
 }
 .cat-add { flex: 0 0 auto; border-radius: 999px; padding: 5px 16px; }
-.cat-row:not(.is-configured) .cat-add { opacity: .5; transition: opacity .12s ease; }
-.cat-row:not(.is-configured) .cat-add:hover,
-.cat-row:not(.is-configured) .cat-add:active,
-.cat-row:not(.is-configured) .cat-add:focus-visible { opacity: 1; }
 .cat-connect-wrap { position: relative; flex: 0 0 auto; }
 .cat-connect-buttons { display: flex; }
 .cat-connect-primary {
@@ -777,11 +776,6 @@
   margin-left: -1px; padding: 5px 8px; border-radius: 0 999px 999px 0;
 }
 .cat-connect-menu-btn svg { width: 13px; height: 13px; transform: translate(-1px, 2px); }
-.cat-row:not(.is-configured) .cat-connect-wrap { opacity: .5; transition: opacity .12s ease; }
-.cat-row:not(.is-configured) .cat-connect-wrap .cat-add { opacity: 1; }
-.cat-row:not(.is-configured) .cat-connect-wrap:hover,
-.cat-row:not(.is-configured) .cat-connect-wrap:focus-within,
-.cat-row:not(.is-configured) .cat-connect-wrap.open { opacity: 1; }
 .cat-connect-menu {
   position: absolute; right: 0; top: calc(100% + 5px); z-index: 20;
   min-width: 178px; display: flex; flex-direction: column; gap: 2px; padding: 4px;

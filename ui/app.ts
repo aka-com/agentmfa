@@ -2172,6 +2172,20 @@ function initializeCatalogConnectionDraft(
   state.connImportError = null;
 }
 
+function credentialFocusTarget(draft: ConnectionDraft = state.draft): string {
+  const source = draft.secretSource
+    || (draft.importedCredential || draft.sshImportId || !state.secrets.length ? 'new' : 'existing');
+  return source === 'new' ? 'c-new-secret-value' : 'c-secret';
+}
+
+function initialCatalogConnectionFocusTarget(entry: CatalogEntry): string {
+  const prefilledApiRoot = entry.connType === 'api' && Boolean(state.draft.origin?.trim());
+  if (prefilledApiRoot && state.draft.authMode !== 'oauth') return credentialFocusTarget();
+  if (entry.connType === 'api' && (state.draft.name || '').trim()) return 'f-origin';
+  if (!entry.preset) return 'f-cname';
+  return credentialFocusTarget();
+}
+
 async function openCatalogConnectionForm(
   entry: CatalogEntry,
   mcpAuthMode: 'oauth' | 'bearer' = 'oauth',
@@ -2180,14 +2194,7 @@ async function openCatalogConnectionForm(
   state.sheet = { kind: 'add-conn' };
   initializeCatalogConnectionDraft(entry, mcpAuthMode);
   render();
-  const focusTarget = entry.connType === 'api' && (state.draft.name || '').trim()
-    ? 'f-origin'
-    : !entry.preset
-    ? 'f-cname'
-    : state.secrets.length
-    ? 'c-secret'
-    : 'c-new-secret-value';
-  focusField(focusTarget);
+  focusField(initialCatalogConnectionFocusTarget(entry));
 }
 
 function availableConnectionName(base: string): string {
@@ -3054,7 +3061,7 @@ document.addEventListener('click', async (e) => {
       state.sheetErrors = {};
       state.sheetBaseline = null;
       render();
-      focusField('f-origin');
+      focusField(state.draft.origin?.trim() ? credentialFocusTarget() : 'f-origin');
       break;
     case 'mcp-auth-done':
       toast('🔌 Connected');
