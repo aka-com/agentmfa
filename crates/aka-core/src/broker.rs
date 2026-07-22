@@ -1,7 +1,7 @@
-//! The broker facade: one struct owning the store, wiring table, pairing
-//! registry, execution machinery and audit log. The daemon (agent-facing)
-//! and the shell (UI-facing Tauri commands, tests, dev harness) both drive
-//! it.
+//! The broker facade: one struct owning the store, the shared identity,
+//! the per-connection access table, execution machinery and audit log. The
+//! daemon (agent-facing) and the shell (UI-facing Tauri commands, tests,
+//! dev harness) both drive it.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -67,7 +67,7 @@ pub struct Broker {
     /// re-established from `endpoints` at daemon start, stopped on teardown.
     endpoint_listeners: Mutex<HashMap<Uuid, crate::endpoints::EndpointListenerHandle>>,
     /// Serializes configuration mutations that read-then-write shared state
-    /// (connection edits, wiring changes) so concurrent UI actions cannot
+    /// (connection edits, access changes) so concurrent UI actions cannot
     /// interleave.
     pub(crate) config_gate: Mutex<()>,
     /// Serializes clipboard-copy authorization checks so simultaneous clicks
@@ -133,7 +133,7 @@ impl Broker {
             audit.subscribe(move |entry| events.audit_appended(entry));
         }
         // One integrity key seals every state file: index.json,
-        // wirings.json, and agents.json refuse to load if tampered with.
+        // access.json, and identity.json refuse to load if tampered with.
         let integrity = Arc::new(crate::integrity::StateIntegrity::open(&*vault).await?);
         let store = Arc::new(Store::open_with_events(
             paths.clone(),
@@ -193,7 +193,7 @@ impl Broker {
             ws_bridge_port: std::sync::OnceLock::new(),
             pg_proxy_port: std::sync::OnceLock::new(),
             token_limiter: KeyedLimiter::new(
-                config.per_token_per_min,
+                config.per_client_per_min,
                 std::time::Duration::from_secs(60),
             ),
             discovery_limiter: WindowLimiter::new(

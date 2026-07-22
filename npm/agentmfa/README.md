@@ -73,8 +73,8 @@ approval step.
 
 - **macOS** is the fully supported product platform: secrets live in the
   Keychain and approvals confirm via LocalAuthentication (Touch ID). ABP/0
-  agents authenticate with bearer pair tokens; those tokens are not bound to
-  a process or code-signing identity.
+  agents authenticate with the machine's shared broker key; the key is not
+  bound to a process or code-signing identity.
 - **Linux** support is developer-grade: secrets are kept in a `0600` JSON
   file vault that is **not encrypted at rest**. `aka serve` prints a warning
   to this effect. It is intended for development, integration testing, and

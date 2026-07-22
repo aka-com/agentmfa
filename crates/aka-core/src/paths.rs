@@ -1,13 +1,14 @@
 //! Filesystem layout.
 //!
-//! - Non-secret state (`index.json`, `rules.json`, `agents.json`,
+//! - Non-secret state (`index.json`, `access.json`, `identity.json`,
 //!   `audit.jsonl`) lives under the per-user data directory,
 //!   `~/Library/Application Support/aka` on macOS.
 //! - The control-plane rendezvous point is `~/.aka/broker.sock`
 //!   (short and space-free: it never needs shell quoting and stays well
-//!   clear of the 104-byte `sun_path` limit). A persistent `broker.lock`
+//!   clear of the 104-byte `sun_path` limit), and the shared key's
+//!   plaintext home is `~/.aka/token`. A persistent `broker.lock`
 //!   serializes startup and stale-socket repair. `~/.aka` is created
-//!   `0700`; the lock and socket are `0600`.
+//!   `0700`; the lock, socket, and token are `0600`.
 
 use std::fs;
 use std::io;
@@ -16,10 +17,11 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct Paths {
-    /// Non-secret app state: index.json, rules.json, agents.json, audit.jsonl.
+    /// Non-secret app state: index.json, access.json, identity.json,
+    /// audit.jsonl.
     pub data_dir: PathBuf,
-    /// `~/.aka`, the socket directory (also the advisory token home
-    /// that `/instructions` names for agents).
+    /// `~/.aka`, the socket directory (also home to the shared key's
+    /// token file that `/instructions` names for agents).
     pub socket_dir: PathBuf,
 }
 
@@ -103,7 +105,8 @@ impl Paths {
     pub fn agents_file(&self) -> PathBuf {
         self.data_dir.join("agents.json")
     }
-    /// Persisted per-wiring direct endpoints (id, wiring, hashed secret).
+    /// Persisted per-connection direct endpoints (id, connection, hashed
+    /// secret).
     pub fn endpoints_file(&self) -> PathBuf {
         self.data_dir.join("endpoints.json")
     }
@@ -138,21 +141,16 @@ impl Paths {
     pub fn token_file(&self) -> PathBuf {
         self.socket_dir.join("token")
     }
-    /// The per-agent era's advisory token home. Kept only so existing
-    /// setups aren't surprised by its disappearance; nothing writes here
-    /// any more.
-    pub fn tokens_dir(&self) -> PathBuf {
-        self.socket_dir.join("tokens")
-    }
+
     /// Per-open SSH agent sockets live here, one `agent-<suffix>.sock` per
     /// approved `/v1/ssh/open`.
     pub fn ssh_agent_dir(&self) -> PathBuf {
         self.socket_dir.join("ssh")
     }
 
-    /// Per-wiring direct-endpoint sockets live here, one subdirectory per
-    /// endpoint (`endpoints/<endpoint-id>/…`). Filesystem permissions keep
-    /// out other users; the per-wiring secret attributes same-user callers.
+    /// Direct-endpoint sockets live here, one subdirectory per endpoint
+    /// (`endpoints/<endpoint-id>/…`). Filesystem permissions keep out other
+    /// users; the endpoint secret attributes same-user callers.
     pub fn endpoints_dir(&self) -> PathBuf {
         self.socket_dir.join("endpoints")
     }
@@ -171,13 +169,12 @@ impl Paths {
         display_tilde(&self.token_file())
     }
 
-    /// Create the directories with owner-only permissions, including the
-    /// advisory token home, so agents following the instructions never have
-    /// to mkdir (and get the permissions right) themselves.
+    /// Create the directories with owner-only permissions, so agents
+    /// following the instructions never have to mkdir (and get the
+    /// permissions right) themselves.
     pub fn ensure(&self) -> io::Result<()> {
         create_private_dir(&self.data_dir)?;
         create_private_dir(&self.socket_dir)?;
-        create_private_dir(&self.tokens_dir())?;
         create_private_dir(&self.ssh_agent_dir())?;
         create_private_dir(&self.endpoints_dir())?;
         Ok(())
@@ -277,7 +274,7 @@ mod tests {
         fs::write(paths.rules_file(), b"rules").unwrap();
         fs::write(paths.agents_file(), b"agents").unwrap();
         fs::write(paths.audit_file(), b"audit").unwrap();
-        fs::write(paths.tokens_dir().join("agent"), b"token").unwrap();
+        fs::write(paths.token_file(), b"token").unwrap();
 
         let archive = paths.archive_data_dir().unwrap();
 
@@ -286,10 +283,7 @@ mod tests {
         assert_eq!(fs::read(archive.join("rules.json")).unwrap(), b"rules");
         assert_eq!(fs::read(archive.join("agents.json")).unwrap(), b"agents");
         assert_eq!(fs::read(archive.join("audit.jsonl")).unwrap(), b"audit");
-        assert_eq!(
-            fs::read(paths.tokens_dir().join("agent")).unwrap(),
-            b"token"
-        );
+        assert_eq!(fs::read(paths.token_file()).unwrap(), b"token");
     }
 
     #[test]

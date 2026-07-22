@@ -38,8 +38,12 @@ pub struct BrokerConfig {
     /// Pair token TTL, refreshed on use.
     pub token_ttl: Duration,
 
-    /// Per-token rate limit on capability calls: requests per minute.
-    pub per_token_per_min: u32,
+    /// Per-client rate limit on capability calls: requests per minute,
+    /// bucketed on the self-reported client label (one shared key serves
+    /// every agent, so the label is the only per-caller grain left; it is
+    /// spoofable, which per-agent tokens effectively were too — any local
+    /// process could always pair itself a fresh one).
+    pub per_client_per_min: u32,
     /// Global discovery limit (unauthenticated endpoints).
     pub discovery_per_min: u32,
     /// Global pairing brake: max attempts per window.
@@ -77,7 +81,7 @@ impl Default for BrokerConfig {
             spool_threshold: 2 * 1024 * 1024,
             max_redirects: 10,
             token_ttl: Duration::from_secs(30 * 24 * 60 * 60),
-            per_token_per_min: 60,
+            per_client_per_min: 60,
             discovery_per_min: 60,
             pairing_max_attempts: 3,
             pairing_window: Duration::from_secs(5),

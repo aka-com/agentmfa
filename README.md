@@ -17,42 +17,63 @@ The tool supports most common workflows:
   the first connection)
 - **WebSocket**: the agent gets a short-lived `ws://127.0.0.1:…` bridge
   URL usable by any stock WS client
-- **MCP**: the agent's wired connections appear as MCP tools, and any
+- **MCP**: the enabled connections appear as MCP tools, and any
   remote (HTTP) MCP server can itself be added as a connection and
   re-exposed — served by a bundled Node sidecar built on
   [executor](https://executor.sh)
 
-## Tools and wiring
+## Tools, the shared key, and agent access
 
 Tools (connections) are added in the app, globally — they belong to
-Multitool, not to any particular agent. Agents register themselves with
-one `POST /v1/pair` call (no approval step) and appear in the app; you
-then **wire** an agent to the tools it may use. A wired call executes
-immediately with no prompt; an unwired call is refused. When the very first
-agent registers, the app offers to wire it to everything that exists at that
-moment — confirmed with a native OS-authentication sheet, since it grants
-standing access to every tool — so a fresh setup can work end-to-end. Decline
-and the agent stays unwired like any other; only that first auto-wiring is
-gated, never the pairing itself.
+Multitool, not to any particular agent. Every local agent authenticates
+with **one shared key** ("this computer's key"), minted by the broker and
+kept in plaintext at `~/.aka/token` (mode 0600) where agents read it
+themselves; the broker stores only its hash. This is deliberate: on a
+single-user machine the real boundary is the OS user plus the 0600
+socket — per-agent tokens were self-issued and never distinguished
+same-user processes — so the key is defense against *accidental* secret
+use and the audit handle, not inter-agent isolation. `POST /v1/pair`
+remains as a compat shim that hands the same key back; agents may also
+send `X-Multitool-Client: <name>` to label themselves in the activity
+log (attribution only, never authorization).
 
-Wirings bind to a stable client ID and to the connection's pinned
-destination: deleting a connection or changing its target drops its
-wirings, and disconnecting an agent drops that agent's wirings.
+Authorization is per **tool**: a connection is enabled for agents when it
+is added (adding it was the deliberate act) and can be switched off from
+its row on the Tools tab. An enabled call executes immediately with no
+prompt; a disabled call is refused with `403 denied_by_policy` — for
+every agent at once. Access binds to the connection's pinned destination:
+retargeting a tool resets its MCP tool selection and revokes its direct
+endpoints (a disabled tool stays disabled). Rotating the key from the
+Connect page disconnects everything at once; agents that read the token
+file recover on their own.
 
 Locally, we use the `keyring` crate's apple-native backend, which
 targets the login keychain. Reading a secret from the app (reveal or
 copy) can require native reauthentication (Touch ID); agent executions
-are authorized by their wiring instead.
+are authorized by per-tool agent access instead.
 
 ## MCP Support
 
 Agents reach Multitool over MCP through a supervised Node sidecar that
 embeds the [executor](https://executor.sh) engine; see `EXECUTOR.md` for
 the design and the phase plan. The sidecar serves streamable HTTP on
-loopback and authorizes nothing itself: each request carries the agent's
-own broker bearer token, and the broker re-checks the wiring on every
+loopback and authorizes nothing itself: each request carries the shared
+broker key, and the broker re-checks per-tool agent access on every
 call. Secrets stay in the broker — MCP traffic rides the existing broker
 planes, so the sidecar never sees a credential.
+
+The easiest way to connect an MCP client is the stdio bridge:
+
+```sh
+aka mcp --client claude-code   # stdio ⇄ streamable-HTTP, self-configuring
+```
+
+It reads the shared key from `~/.aka/token` and finds the MCP host
+through the discovery manifest (the sidecar's loopback port is dynamic
+and advertised as `mcp_url` in `/.well-known/agent-broker.json`), so
+Claude Code, Claude Desktop, and Codex configs are two static words:
+`command: aka, args: [mcp]`. The app's Connect tab has copy-paste setup
+for each.
 
 ```sh
 npm run sidecar:build    # bundle sidecar/ to dist/sidecar/main.mjs
@@ -60,12 +81,12 @@ npm run sidecar:vendor   # fetch the pinned Node the .app ships (macOS)
 npm run test:sidecar     # the sidecar's own tests
 ```
 
-Once an agent is paired and wired, its connections appear over MCP: an API
-connection becomes `multitool_<name>_request`, and Postgres/SSH/WebSocket
-connections become `multitool_<name>_open`, which hand back the same
-password-less DSN, agent socket, or bridge URL the CLI path returns.
-Unwired connections are never registered. `multitool_status` is always
-present and reports who the agent is and what it may use.
+Enabled connections appear over MCP: an API connection becomes
+`multitool_<name>_request`, and Postgres/SSH/WebSocket connections become
+`multitool_<name>_open`, which hand back the same password-less DSN,
+agent socket, or bridge URL the CLI path returns. Disabled connections
+are never registered. `multitool_status` is always present and reports
+the caller's label and what it may use.
 
 **Remote MCP servers are connections too.** An API connection may carry an
 `mcp_path` (e.g. `/mcp`); when it does, that upstream speaks MCP and the
@@ -111,7 +132,7 @@ npm run frontend:dev   # vite dev server with hot reload
 
 Then open:
 
-- <http://127.0.0.1:1420/> — the main window (Tools catalog, Agents,
+- <http://127.0.0.1:1420/> — the main window (Tools catalog, Connect,
   Secrets, Activity)
 - <http://127.0.0.1:1420/#dropdown> — the compact menu-bar dropdown
 

@@ -1067,7 +1067,7 @@ async fn mutating_request_id_is_scoped_to_connection() {
 #[tokio::test]
 async fn per_token_rate_limit_bites() {
     let config = BrokerConfig {
-        per_token_per_min: 2,
+        per_client_per_min: 2,
         ..BrokerConfig::default()
     };
     let mut h = harness(config).await;
@@ -1268,7 +1268,7 @@ async fn whoami_is_exempt_from_the_per_token_limit() {
     // tool-call rate and surface as a mystifying rate limit, so whoami is
     // exempt — while capability calls stay limited.
     let config = BrokerConfig {
-        per_token_per_min: 1,
+        per_client_per_min: 1,
         ..BrokerConfig::default()
     };
     let mut h = harness(config).await;

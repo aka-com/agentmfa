@@ -43,18 +43,19 @@ executing `/v1/http` for real needs a real value and a reachable host.
 
 ```sh
 curl -s --unix-socket $SOCK http://localhost/.well-known/agent-broker.json
-curl -s --unix-socket $SOCK -X POST http://localhost/v1/pair \
-     -H "Content-Type: application/json" -d '{"agent_name": "claude-code"}'
+TOKEN=$(cat "$DIR/root/sock/token")     # the shared key, written at startup
 curl -s --unix-socket $SOCK -H "Authorization: Bearer $TOKEN" http://localhost/v1/whoami
 curl -s --unix-socket $SOCK -H "Authorization: Bearer $TOKEN" http://localhost/v1/connections
 ```
 
 Gotchas:
-- Pairing registers instantly (no approval). The **first** agent to pair
-  on a fresh root is auto-wired to every seeded connection; later agents
-  start unwired and their capability calls 403 `denied_by_policy` (there
-  is no wire-protocol way to change wirings — pair the agent you're
-  testing first, or exercise the refusal path with a second agent).
+- One shared key covers every agent; `POST /v1/pair` is a compat shim
+  that returns the same key. Send `X-Multitool-Client: <name>` to label
+  calls in the audit trail.
+- Connections are **enabled for agents by default**; there is no
+  wire-protocol way to change access (it is app/UI state under
+  `data/access.json`), so exercise the refusal path by flipping a
+  connection off via `Broker::ui_set_tool_access` in a Rust test instead.
 - Pairing is globally rate limited (3 per 5 s): `sleep 5` between bursts
   or unrelated probes will 429.
 - `pkill -f "aka serve"` to clean up.

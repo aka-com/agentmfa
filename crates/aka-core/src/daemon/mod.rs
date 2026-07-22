@@ -5,8 +5,8 @@
 //! - `POST /v1/pair`, unauthenticated, globally rate limited, registered
 //!   immediately (no approval);
 //! - `GET /v1/connections`, `GET /v1/whoami`, `POST /v1/http` (+ the WS/PG
-//!   opens added by later phases), bearer-token authenticated, per-token
-//!   rate limited.
+//!   opens added by later phases), authenticated with the shared broker
+//!   key, rate limited per client label.
 
 pub mod wellknown;
 
@@ -643,7 +643,7 @@ async fn get_connections(State(state): State<AppState>, authed: Authed) -> Respo
 /// not audited on success (failures are audited by the extractor like any
 /// other call).
 ///
-/// Deliberately exempt from the per-token capability limiter. The MCP sidecar
+/// Deliberately exempt from the per-client capability limiter. The MCP sidecar
 /// resolves the agent's token here on *every* request it serves (no caching,
 /// so a revoked token stops working at once), so charging whoami against the
 /// 60/min budget would halve an agent's real tool-call rate and surface as a

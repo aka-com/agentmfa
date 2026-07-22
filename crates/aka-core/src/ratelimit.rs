@@ -1,6 +1,9 @@
 //! Rate limiting.
 //!
-//! - Per-token sliding-window buckets on capability calls (60/min default).
+//! - Per-client sliding-window buckets on capability calls (60/min
+//!   default), keyed on the self-reported client label — with one shared
+//!   key there is no stronger per-caller grain, and the map is pruned so
+//!   label churn cannot grow it without bound.
 //! - **Global** windows on the unauthenticated endpoints (pairing at 3
 //!   attempts per 5 s; discovery at 60/min), global because unauthenticated
 //!   callers have no stable key to bucket on.
@@ -59,7 +62,7 @@ impl WindowLimiter {
 }
 
 /// Keyed sliding window: at most `max` hits per `window`, per key
-/// (per pair-token bucket).
+/// (per client-label bucket).
 pub struct KeyedLimiter {
     window: Duration,
     max: u32,

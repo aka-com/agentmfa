@@ -68,9 +68,9 @@ enum Command {
         #[arg(long)]
         root: Option<PathBuf>,
     },
-    /// Run the broker headless (no desktop UI). Agents register instantly;
-    /// wire them to connections from the desktop app, or rely on the
-    /// first-agent bootstrap.
+    /// Run the broker headless (no desktop UI). Every local agent shares
+    /// one key (~/.aka/token under the root); tools are enabled for agents
+    /// by default and toggled from the desktop app.
     Serve {
         /// Use an isolated root dir (data + socket under it) instead of the
         /// default per-user locations. Handy for testing.
@@ -634,7 +634,7 @@ fn cmd_serve(root: Option<PathBuf>) {
         "  skill file: `aka skill --write` in a repo (or --write --user) \
          teaches agents this broker"
     );
-    eprintln!("  agents register instantly; wire them to connections in the app");
+    eprintln!("  agents authenticate with the shared key at the root's token file");
     eprintln!("  Ctrl-C to quit.\n");
 
     // Block until Ctrl-C, then drop the daemon handle so it removes only
