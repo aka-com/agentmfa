@@ -377,31 +377,77 @@ impl Broker {
 
     /* --------------------- connections (UI commands) ---------------------- */
 
-    /// A connection binds a secret to a destination, so creating one is not
-    /// completable without the native confirmation the core demands.
+    /// Whether the spec binds or references a secret the vault already
+    /// holds. Attaching a stored credential to a new destination extends
+    /// that credential's reach, which is the escalation the native gate
+    /// exists for. A credential typed into the form alongside the tool is
+    /// self-authorizing: the form is the intent. `exclude` names a secret
+    /// being created atomically with the tool, so its own template ref does
+    /// not count as reuse.
+    fn spec_reuses_stored_secret(&self, spec: &ConnectionSpec, exclude: Option<&str>) -> bool {
+        if !spec.secrets.is_empty() {
+            return true;
+        }
+        let template = match &spec.config {
+            crate::types::ConnectionConfig::Api { template, .. } => Some(template.as_str()),
+            crate::types::ConnectionConfig::Ws { template, .. } => template.as_deref(),
+            _ => None,
+        };
+        let Some(template) = template else {
+            return false;
+        };
+        let Ok(parsed) = crate::template::Template::parse(template) else {
+            // Unparseable templates are rejected later by validation; treat
+            // the ambiguity as reuse so the gate fails safe.
+            return true;
+        };
+        let stored: std::collections::HashSet<String> = self
+            .store
+            .list_secrets()
+            .into_iter()
+            .map(|meta| meta.name)
+            .collect();
+        parsed
+            .refs()
+            .iter()
+            .any(|name| Some(name.as_str()) != exclude && stored.contains(name))
+    }
+
+    /// A connection pins a destination and may bind a secret to it. The
+    /// native confirmation fires only when the spec attaches an
+    /// already-stored secret; credential-less tools and tools whose secret
+    /// arrives with the form add without a prompt.
     pub fn ui_add_connection(&self, spec: ConnectionSpec) -> Result<Connection> {
         // Reject invalid or already-stale input before asking the user to
         // authenticate. `add_connection` repeats the state-dependent checks
         // after confirmation in case the index changed while the sheet was up.
         self.store.preflight_add_connection(&spec)?;
-        let confirmation = self.confirm_user_action(&format!("Add tool “{}”", spec.name))?;
+        let confirmation = if self.spec_reuses_stored_secret(&spec, None) {
+            Some(self.confirm_user_action(&format!("Add tool “{}”", spec.name))?)
+        } else {
+            None
+        };
         let conn = self.store.add_connection(spec)?;
-        self.audit.append(
-            AuditEntry::new(
-                AuditKind::ConnectionAdded,
-                format!("Tool added: {}", conn.name),
-            )
-            .connection(conn.name.clone())
-            .detail(format!("{} → {}", conn.kind().label(), conn.target()))
-            .field("kind", conn.kind().as_str())
-            .field("target", conn.target())
-            .confirmation(confirmation),
-        );
+        let mut entry = AuditEntry::new(
+            AuditKind::ConnectionAdded,
+            format!("Tool added: {}", conn.name),
+        )
+        .connection(conn.name.clone())
+        .detail(format!("{} → {}", conn.kind().label(), conn.target()))
+        .field("kind", conn.kind().as_str())
+        .field("target", conn.target());
+        if let Some(confirmation) = confirmation {
+            entry = entry.confirmation(confirmation);
+        }
+        self.audit.append(entry);
         Ok(conn)
     }
 
     /// One connection-first setup action: save a new credential and bind it
-    /// without exposing an intermediate, partially configured state.
+    /// without exposing an intermediate, partially configured state. The
+    /// credential arrives with the form (or was just minted by an OAuth
+    /// sign-in the user drove), so no native confirmation fires unless the
+    /// spec additionally references some other stored secret.
     pub fn ui_add_connection_with_secret(
         &self,
         secret_name: &str,
@@ -410,7 +456,11 @@ impl Broker {
     ) -> Result<Connection> {
         self.store
             .preflight_add_connection_with_secret(secret_name, &spec)?;
-        let confirmation = self.confirm_user_action(&format!("Add tool “{}”", spec.name))?;
+        let confirmation = if self.spec_reuses_stored_secret(&spec, Some(secret_name)) {
+            Some(self.confirm_user_action(&format!("Add tool “{}”", spec.name))?)
+        } else {
+            None
+        };
         let (secret, conn) = self
             .store
             .add_connection_with_secret(secret_name, value, spec)?;
@@ -418,17 +468,18 @@ impl Broker {
             AuditKind::SecretAdded,
             format!("Secret added: {}", secret.name),
         ));
-        self.audit.append(
-            AuditEntry::new(
-                AuditKind::ConnectionAdded,
-                format!("Tool added: {}", conn.name),
-            )
-            .connection(conn.name.clone())
-            .detail(format!("{} → {}", conn.kind().label(), conn.target()))
-            .field("kind", conn.kind().as_str())
-            .field("target", conn.target())
-            .confirmation(confirmation),
-        );
+        let mut entry = AuditEntry::new(
+            AuditKind::ConnectionAdded,
+            format!("Tool added: {}", conn.name),
+        )
+        .connection(conn.name.clone())
+        .detail(format!("{} → {}", conn.kind().label(), conn.target()))
+        .field("kind", conn.kind().as_str())
+        .field("target", conn.target());
+        if let Some(confirmation) = confirmation {
+            entry = entry.confirmation(confirmation);
+        }
+        self.audit.append(entry);
         Ok(conn)
     }
 
@@ -514,10 +565,11 @@ impl Broker {
         Ok(conn)
     }
 
-    /// Delete a connection; wirings die with it.
+    /// Delete a connection; wirings die with it. Deletion only narrows
+    /// access (its listed secrets stay in the Keychain), so the in-app
+    /// confirmation is the gate — no native prompt.
     pub fn ui_delete_connection(&self, id: &Uuid) -> Result<Connection> {
         let conn = self.store.connection_by_id(id)?;
-        let confirmation = self.confirm_user_action(&format!("Delete tool “{}”", conn.name))?;
         let _gate = self.config_gate.lock().unwrap();
         if self.store.connection_by_id(id)?.updated_at != conn.updated_at {
             return Err(CoreError::ApprovalConnectionChanged);
@@ -535,8 +587,7 @@ impl Broker {
                 AuditKind::ConnectionDeleted,
                 format!("Tool deleted: {}", conn.name),
             )
-            .connection(conn.name.clone())
-            .confirmation(confirmation),
+            .connection(conn.name.clone()),
         );
         Ok(conn)
     }
@@ -585,11 +636,11 @@ impl Broker {
                 }
             }
         };
-        // One authorization scope per test: a template referencing several
-        // secrets confirms once, not once per secret — and within the
-        // presence window (which the save preceding an automatic post-save
-        // test refreshed) not at all.
-        let test = crate::authorization::scope(false, test);
+        // Testing rides the same pre-authorization as the agent plane: any
+        // enabled agent can already open this connection with no prompt, so
+        // the user's own Test button reading the secret it is about to send
+        // to the pinned destination must not re-authenticate either.
+        let test = crate::authorization::scope(true, test);
         let outcome = match tokio::time::timeout(TEST_TIMEOUT, test).await {
             Ok(result) => result,
             Err(_) => Err(format!(
@@ -770,9 +821,14 @@ impl Broker {
             connection = self.store.connection_by_id(id)?;
             refreshed = true;
         }
+        // Same pre-authorization as tests: the check reads the connection's
+        // own credential to talk to its own pinned upstream.
         let mut report = match tokio::time::timeout(
             CHECK_TIMEOUT,
-            crate::mcp::check_connection(&self.store, &self.http_client, &connection, &options),
+            crate::authorization::scope(
+                true,
+                crate::mcp::check_connection(&self.store, &self.http_client, &connection, &options),
+            ),
         )
         .await
         {
@@ -901,8 +957,8 @@ impl Broker {
         let description = format!("Issue a direct endpoint for {}", connection.name);
         let confirmation =
             tokio::task::spawn_blocking(move || store.confirm_configuration_action(&description))
-            .await
-            .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))??;
+                .await
+                .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))??;
         // Mint under the gate; re-check access didn't vanish while the
         // sheet was up. Rotating a live endpoint changes only its persisted
         // secret: the listener resolves the registry on every request, so
@@ -1245,9 +1301,14 @@ impl Broker {
             .await;
         }
         let connection = self.store.connection_by_id(id)?;
-        crate::mcp::list_tools(&self.store, &self.http_client, &connection)
-            .await
-            .map_err(CoreError::InvalidConnectionConfig)
+        // Same pre-authorization as tests: this reads the connection's own
+        // credential to talk to its own pinned upstream.
+        crate::authorization::scope(
+            true,
+            crate::mcp::list_tools(&self.store, &self.http_client, &connection),
+        )
+        .await
+        .map_err(CoreError::InvalidConnectionConfig)
     }
 
     /* ------------------------- shared identity (UI) ------------------------ */

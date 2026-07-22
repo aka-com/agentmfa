@@ -48,9 +48,10 @@ Connect page disconnects everything at once; agents that read the token
 file recover on their own.
 
 Locally, we use the `keyring` crate's apple-native backend, which
-targets the login keychain. Reading a secret from the app (reveal or
-copy) can require native reauthentication (Touch ID); agent executions
-are authorized by per-tool agent access instead.
+targets the login keychain. Copying a secret's full value from the app
+can require native reauthentication (Touch ID); revealing its short
+prefix never does. Agent executions, connection tests, and MCP status
+checks are authorized by per-tool agent access instead.
 
 ## MCP Support
 

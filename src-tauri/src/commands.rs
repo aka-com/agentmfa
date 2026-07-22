@@ -2,13 +2,13 @@
 //!
 //! - there is **no** command that returns a stored secret value; reveal
 //!   returns only the short prefix, copy writes core-side to the clipboard;
-//! - confirmation-gated commands (creating a connection, changing a
-//!   connection's capability, or deleting a secret) are gated by the
-//!   **core itself**: the broker demands the native OS confirmation through
-//!   the `BrokerEvents` hooks (implemented over [`crate::auth::confirm`] in
-//!   this shell) before any effect happens — this command layer cannot
-//!   apply a gated action without passing through it, so the webview cannot
-//!   forge or skip the gate.
+//! - confirmation-gated commands (attaching an already-stored secret to a
+//!   new destination, changing a connection's capability, or deleting a
+//!   secret) are gated by the **core itself**: the broker demands the
+//!   native OS confirmation through the `BrokerEvents` hooks (implemented
+//!   over [`crate::auth::confirm`] in this shell) before any effect
+//!   happens — this command layer cannot apply a gated action without
+//!   passing through it, so the webview cannot forge or skip the gate.
 
 use aka_core::broker::Broker;
 use aka_core::error::{ConnectionField, CoreError};
@@ -605,8 +605,10 @@ impl ConnectionInput {
     }
 }
 
-/// Creating a connection optionally binds a secret to a destination; the core
-/// demands native OS confirmation before it takes effect.
+/// Creating a connection optionally binds a secret to a destination. The
+/// core gates the add behind native OS confirmation only when it attaches
+/// an already-stored secret; a credential typed into the form (or none at
+/// all) adds without a prompt.
 #[tauri::command]
 pub fn add_connection(state: State<AppState>, mut input: ConnectionInput) -> FormResult<()> {
     let kind = input.kind.clone();

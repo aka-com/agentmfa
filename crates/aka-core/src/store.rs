@@ -489,9 +489,12 @@ impl Store {
     }
 
     /// Core-side Keychain read returning only the short prefix
-    /// (`min(6, ⌊len/2⌋)` chars).
+    /// (`min(6, ⌊len/2⌋)` chars). The prefix is deliberately
+    /// low-sensitivity — the full value never leaves the core — so
+    /// revealing it rides without a native re-auth; full-value copy keeps
+    /// its own gate.
     pub async fn reveal_secret_prefix(&self, id: &Uuid) -> Result<String> {
-        let value = self.secret_value(id).await?;
+        let value = crate::authorization::scope(true, self.secret_value(id)).await?;
         Ok(reveal_prefix(&value))
     }
 
@@ -1690,7 +1693,11 @@ mod tests {
         // A non-empty template with no credential reference is still rejected.
         assert!(matches!(
             store
-                .add_connection(api_spec("x", "x.example.com", "Authorization: Bearer static"))
+                .add_connection(api_spec(
+                    "x",
+                    "x.example.com",
+                    "Authorization: Bearer static"
+                ))
                 .unwrap_err(),
             CoreError::InvalidConnectionField {
                 field: ConnectionField::Template,

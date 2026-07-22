@@ -144,11 +144,27 @@ async fn unimplemented_shell_fails_closed_on_config_actions() {
     let (broker, _dir) = broker_with(Arc::new(UnimplementedShell)).await;
     let conn = add_github(&broker);
 
+    // Attaching an already-stored secret to a new destination is the gated
+    // escalation, and the unimplemented default fails closed.
     assert!(matches!(
-        broker.ui_delete_connection(&conn.id),
+        broker.ui_add_connection(ConnectionSpec {
+            name: "github-second".into(),
+            config: ConnectionConfig::Api {
+                host: "api.example.com".into(),
+                scheme: "https".into(),
+                port: None,
+                template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
+                mcp_path: None,
+                oauth: None,
+            },
+            secrets: vec![],
+        }),
         Err(CoreError::NotConfirmed)
     ));
-    assert!(broker.store.connection_by_id(&conn.id).is_ok());
+
+    // Deleting a tool only narrows access: no gate, even on this shell.
+    broker.ui_delete_connection(&conn.id).unwrap();
+    assert!(broker.store.connection_by_id(&conn.id).is_err());
 }
 
 #[tokio::test]
@@ -263,15 +279,16 @@ async fn an_action_gate_prompt_opens_the_user_plane_presence_window() {
     broker.ui_reveal_secret_prefix(&secret.id).await.unwrap();
     assert_eq!(events.secret_read_confirms.load(Ordering::SeqCst), 0);
 
-    // …and so does a following configuration change, recorded honestly as a
-    // ridden authentication.
+    // …and so does a following gated configuration change (deleting the
+    // now-unused secret), recorded honestly as a ridden authentication.
     broker.ui_delete_connection(&conn.id).unwrap();
+    broker.ui_delete_secret(&secret.id).unwrap();
     assert_eq!(events.action_confirms.load(Ordering::SeqCst), 1);
     let deleted = broker
         .audit
         .recent(5)
         .into_iter()
-        .find(|e| e.text.starts_with("Tool deleted"))
+        .find(|e| e.text.starts_with("Secret deleted"))
         .unwrap();
     assert_eq!(
         deleted.confirmation,
@@ -290,7 +307,25 @@ async fn copy_presence_does_not_authorize_configuration_changes() {
     let secret = broker.store.secret_by_name("GITHUB_API_KEY").unwrap();
 
     broker.ui_secret_value_for_copy(&secret.id).await.unwrap();
-    broker.ui_delete_connection(&conn.id).unwrap();
+    // A gated capability change (retargeting the tool) must still prompt on
+    // its own: copy presence covers reads, not configuration authority.
+    broker
+        .ui_update_connection(
+            &conn.id,
+            ConnectionSpec {
+                name: conn.name.clone(),
+                config: ConnectionConfig::Api {
+                    host: "api.enterprise.github.com".into(),
+                    scheme: "https".into(),
+                    port: None,
+                    template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
+                    mcp_path: None,
+                    oauth: None,
+                },
+                secrets: vec![],
+            },
+        )
+        .unwrap();
 
     assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
 }
@@ -323,7 +358,25 @@ async fn presence_prompts_are_globally_serialized_across_purposes() {
 
     let config_broker = broker.clone();
     let configure = tokio::task::spawn_blocking(move || {
-        config_broker.ui_delete_connection(&conn.id).unwrap();
+        // A gated capability change: retarget the tool while the copy
+        // prompt is still up.
+        config_broker
+            .ui_update_connection(
+                &conn.id,
+                ConnectionSpec {
+                    name: conn.name.clone(),
+                    config: ConnectionConfig::Api {
+                        host: "api.enterprise.github.com".into(),
+                        scheme: "https".into(),
+                        port: None,
+                        template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
+                        mcp_path: None,
+                        oauth: None,
+                    },
+                    secrets: vec![],
+                },
+            )
+            .unwrap();
     });
     copy.await.unwrap();
     configure.await.unwrap();
@@ -346,12 +399,12 @@ async fn an_expired_presence_window_prompts_again() {
         .add_secret("TOKEN", Zeroizing::new("abcdefghijkl".into()))
         .unwrap();
 
-    broker.ui_reveal_secret_prefix(&secret.id).await.unwrap();
-    broker.ui_reveal_secret_prefix(&secret.id).await.unwrap();
+    broker.ui_secret_value_for_copy(&secret.id).await.unwrap();
+    broker.ui_secret_value_for_copy(&secret.id).await.unwrap();
     assert_eq!(
         events.secret_read_confirms.load(Ordering::SeqCst),
         2,
-        "each read outside the window authenticates"
+        "each full-value copy outside the window authenticates"
     );
 }
 
@@ -380,15 +433,15 @@ async fn post_save_test_rides_the_add_confirmation() {
         )
         .unwrap();
 
-    // The confirmed add opened the presence window: the automatic post-save
-    // test (and any further test within the window) reads without prompting.
+    // Tests ride the agent-plane pre-authorization: the automatic post-save
+    // test (and any later manual test) reads without prompting.
     let _ = broker.ui_test_connection(&conn.id).await.unwrap();
     let _ = broker.ui_test_connection(&conn.id).await.unwrap();
     assert_eq!(events.secret_read_confirms.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
-async fn a_manual_test_confirms_once_across_all_template_refs() {
+async fn a_manual_test_never_prompts() {
     let events = Arc::new(UnifiedAuthEvents {
         secret_read_confirms: AtomicUsize::new(0),
     });
@@ -401,8 +454,6 @@ async fn a_manual_test_confirms_once_across_all_template_refs() {
         .store
         .add_secret("B_KEY", Zeroizing::new("b".into()))
         .unwrap();
-    // Store-level add: no confirmed change on record, so the test must
-    // confirm — but exactly once, not once per referenced secret.
     let conn = broker
         .store
         .add_connection(ConnectionSpec {
@@ -419,8 +470,11 @@ async fn a_manual_test_confirms_once_across_all_template_refs() {
         })
         .unwrap();
 
+    // Testing rides the same pre-authorization as the agent plane: any
+    // enabled agent could open this connection promptlessly, so the user's
+    // own Test button never re-authenticates either.
     let _ = broker.ui_test_connection(&conn.id).await.unwrap();
-    assert_eq!(events.secret_read_confirms.load(Ordering::SeqCst), 1);
+    assert_eq!(events.secret_read_confirms.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -437,17 +491,19 @@ async fn config_actions_confirm_and_record_the_method() {
         "store-level setup is not gated"
     );
 
+    // Deleting a tool only narrows access: no gate, and the audit entry
+    // honestly carries no confirmation method.
     broker.ui_delete_connection(&conn.id).unwrap();
-    assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
+    assert_eq!(events.confirms.load(Ordering::SeqCst), 0);
     let recent = broker.audit.recent(5);
     let deleted = recent
         .iter()
         .find(|e| e.text.starts_with("Tool deleted"))
         .unwrap();
-    assert_eq!(deleted.confirmation, Some(ConfirmationMethod::Waived));
+    assert_eq!(deleted.confirmation, None);
 
-    // The follow-up delete rides the presence window the first one opened,
-    // and the audit trail records that method honestly.
+    // Deleting the now-unused secret destroys Keychain material: gated,
+    // and the method is recorded.
     let secret = broker.store.secret_by_name("GITHUB_API_KEY").unwrap();
     broker.ui_delete_secret(&secret.id).unwrap();
     assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
@@ -458,7 +514,7 @@ async fn config_actions_confirm_and_record_the_method() {
         .unwrap();
     assert_eq!(
         deleted_secret.confirmation,
-        Some(ConfirmationMethod::RecentAuthentication)
+        Some(ConfirmationMethod::Waived)
     );
 }
 
@@ -471,8 +527,24 @@ async fn the_presence_window_never_covers_weakening_the_gates() {
     let (broker, _dir) = broker_with(events.clone()).await;
     let conn = add_github(&broker);
 
-    // Open the window with a user-plane action…
-    broker.ui_delete_connection(&conn.id).unwrap();
+    // Open the window with a gated user-plane action (a capability change)…
+    broker
+        .ui_update_connection(
+            &conn.id,
+            ConnectionSpec {
+                name: conn.name.clone(),
+                config: ConnectionConfig::Api {
+                    host: "api.enterprise.github.com".into(),
+                    scheme: "https".into(),
+                    port: None,
+                    template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
+                    mcp_path: None,
+                    oauth: None,
+                },
+                secrets: vec![],
+            },
+        )
+        .unwrap();
     assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
 
     // …which does not extend to disabling the read gate: that prompts on
@@ -620,8 +692,23 @@ async fn connection_add_preflight_rejects_failures_before_confirmation() {
         .unwrap();
     assert_eq!(
         events.confirms.load(Ordering::SeqCst),
+        0,
+        "a new-in-form credential is self-authorizing: no prompt"
+    );
+
+    // Attaching the already-stored secret to a new destination is the
+    // escalation that still authenticates.
+    broker
+        .ui_add_connection(api_spec(
+            "github-reuse",
+            "api.other.example.com",
+            "Authorization: Bearer {{GITHUB_API_KEY}}",
+        ))
+        .unwrap();
+    assert_eq!(
+        events.confirms.load(Ordering::SeqCst),
         1,
-        "a valid add still authenticates exactly once"
+        "reusing a stored credential authenticates exactly once"
     );
 }
 
@@ -803,7 +890,9 @@ async fn prefix_reveals_are_not_added_to_the_activity_log() {
         broker.ui_reveal_secret_prefix(&secret.id).await.unwrap(),
         "abcdef…"
     );
-    assert_eq!(events.secret_read_confirms.load(Ordering::SeqCst), 1);
+    // The prefix is deliberately low-sensitivity: revealing it never
+    // re-authenticates (the full-value copy keeps its gate).
+    assert_eq!(events.secret_read_confirms.load(Ordering::SeqCst), 0);
     assert!(broker
         .audit
         .recent(10)
