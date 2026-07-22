@@ -533,7 +533,11 @@ impl ConnectionInput {
                     .mcp_path
                     .map(|path| path.trim().to_string())
                     .filter(|path| !path.is_empty()),
-                oauth: match (self.oauth_auth_url, self.oauth_token_url, self.oauth_client_id) {
+                oauth: match (
+                    self.oauth_auth_url,
+                    self.oauth_token_url,
+                    self.oauth_client_id,
+                ) {
                     (Some(auth_url), Some(token_url), Some(client_id)) => {
                         Some(aka_core::types::OAuthSpec {
                             auth_url: auth_url.trim().to_string(),
@@ -1156,6 +1160,11 @@ mod tests {
             scheme: Some("https".into()),
             port: None,
             template: Some("Authorization: Bearer {{TOKEN}}".into()),
+            oauth_auth_url: None,
+            oauth_token_url: None,
+            oauth_client_id: None,
+            oauth_scopes: None,
+            oauth_extra_params: None,
             dbname: None,
             user: None,
             host_key_fingerprint: None,
@@ -1206,6 +1215,11 @@ mod tests {
             scheme: Some("http".into()),
             port: Some(8080),
             template: Some("Authorization: Bearer {{TOKEN}}".into()),
+            oauth_auth_url: None,
+            oauth_token_url: None,
+            oauth_client_id: None,
+            oauth_scopes: None,
+            oauth_extra_params: None,
             dbname: None,
             user: None,
             host_key_fingerprint: None,
@@ -1236,6 +1250,11 @@ mod tests {
             scheme: None,
             port: None,
             template: Some("X-Stream-Key: {{STREAM_TOKEN}}".into()),
+            oauth_auth_url: None,
+            oauth_token_url: None,
+            oauth_client_id: None,
+            oauth_scopes: None,
+            oauth_extra_params: None,
             dbname: None,
             user: None,
             host_key_fingerprint: None,
