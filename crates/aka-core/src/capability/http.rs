@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use http::{HeaderMap, HeaderName, HeaderValue, Method};
+use http_body_util::BodyExt as _;
 use percent_encoding::percent_decode_str;
 use serde_json::json;
 use url::Url;
@@ -20,7 +21,7 @@ use zeroize::Zeroizing;
 
 use crate::audit::{AuditEntry, AuditKind, AuditLog};
 use crate::broker::Broker;
-use crate::capability::SpooledBody;
+use crate::capability::{BodySpool, SpoolError, SpooledBody};
 use crate::config::BrokerConfig;
 use crate::endpoints::EndpointListenerHandle;
 use crate::executions::ExecOutcome;
@@ -763,6 +764,7 @@ pub fn payload_hash(
 struct HttpEndpointState {
     broker: Arc<Broker>,
     endpoint_id: Uuid,
+    uploads: Arc<tokio::sync::Semaphore>,
 }
 
 /// Bind a per-wiring HTTP reverse proxy on a loopback TCP port. An unmodified
@@ -791,6 +793,9 @@ pub async fn bind_endpoint(
     let port = listener.local_addr()?.port();
 
     let state = Arc::new(HttpEndpointState {
+        uploads: Arc::new(tokio::sync::Semaphore::new(
+            broker.config.endpoint_uploads_per_listener,
+        )),
         broker,
         endpoint_id: endpoint.id,
     });
@@ -822,6 +827,48 @@ fn endpoint_error(
         axum::Json(json!({ "reason": reason, "detail": detail })),
     )
         .into_response()
+}
+
+enum EndpointUploadError {
+    TooLarge,
+    TimedOut,
+    InvalidBody(String),
+    Spool(std::io::Error),
+}
+
+async fn spool_endpoint_body(
+    mut body: axum::body::Body,
+    cap: usize,
+    spool_threshold: usize,
+    total_timeout: std::time::Duration,
+    idle_timeout: std::time::Duration,
+) -> Result<SpooledBody, EndpointUploadError> {
+    let absolute_deadline = tokio::time::Instant::now() + total_timeout;
+    let mut spool = BodySpool::new(spool_threshold, cap);
+    loop {
+        let next = tokio::select! {
+            _ = tokio::time::sleep_until(absolute_deadline) => {
+                return Err(EndpointUploadError::TimedOut);
+            }
+            next = tokio::time::timeout(idle_timeout, body.frame()) => {
+                next.map_err(|_| EndpointUploadError::TimedOut)?
+            }
+        };
+        let Some(frame) = next else {
+            break;
+        };
+        let frame = frame.map_err(|error| EndpointUploadError::InvalidBody(error.to_string()))?;
+        if let Ok(data) = frame.into_data() {
+            spool.push(&data).map_err(|error| match error {
+                SpoolError::TooLarge => EndpointUploadError::TooLarge,
+                SpoolError::Io(error) => EndpointUploadError::Spool(error),
+            })?;
+        }
+    }
+    spool.finish().map_err(|error| match error {
+        SpoolError::TooLarge => EndpointUploadError::TooLarge,
+        SpoolError::Io(error) => EndpointUploadError::Spool(error),
+    })
 }
 
 async fn proxy_handler(
@@ -918,66 +965,32 @@ async fn proxy_handler(
         headers.insert(name.clone(), value.clone());
     }
 
-    let bytes = match axum::body::to_bytes(body, broker.config.request_cap).await {
-        Ok(b) => b,
+    // Admit the upload before reading even its first body frame. A malicious
+    // holder of a valid endpoint secret can therefore occupy only the fixed
+    // per-listener and broker-wide budgets.
+    let _global_upload = match broker.endpoint_uploads.clone().try_acquire_owned() {
+        Ok(permit) => permit,
         Err(_) => {
             return endpoint_error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "request_too_large",
-                "the request body exceeds the configured cap",
+                StatusCode::SERVICE_UNAVAILABLE,
+                "endpoint_busy",
+                "the broker's direct-endpoint upload limit has been reached",
             )
         }
     };
-    let spooled = match SpooledBody::from_bytes(bytes.to_vec(), broker.config.spool_threshold) {
-        Ok(b) => Arc::new(b),
-        Err(e) => {
+    let _listener_upload = match state.uploads.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
             return endpoint_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "spool_failed",
-                &e.to_string(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "endpoint_busy",
+                "this direct endpoint's upload limit has been reached",
             )
         }
     };
 
-    // Receiving a request body can take arbitrarily long. Reauthenticate and
-    // re-check access immediately before dispatch so a disable, revoke, or
-    // secret rotation that landed during the upload wins.
-    let Some(endpoint) = broker
-        .endpoints
-        .resolve_secret(presented)
-        .filter(|endpoint| endpoint.id == state.endpoint_id)
-    else {
-        return endpoint_error(
-            StatusCode::UNAUTHORIZED,
-            "invalid_secret",
-            "the endpoint was revoked or its secret was rotated",
-        );
-    };
-    if !broker.access.allows(&endpoint.connection_id) {
-        return endpoint_error(
-            StatusCode::FORBIDDEN,
-            "denied_by_policy",
-            "agent access is disabled for this tool",
-        );
-    }
-    let Ok(connection) = broker.store.connection_by_id(&endpoint.connection_id) else {
-        return endpoint_error(
-            StatusCode::BAD_GATEWAY,
-            "unknown_connection",
-            "the connection has been removed",
-        );
-    };
-    if connection.kind() != ConnectionKind::Api {
-        return endpoint_error(
-            StatusCode::BAD_GATEWAY,
-            "wrong_connection_type",
-            "the connection is no longer an HTTP tool",
-        );
-    }
-
-    // Register the in-flight request against the endpoint. Disable/revoke can
-    // now signal it just like a PG/SSH direct session; the post-registration
-    // check closes the small establishment race with teardown.
+    // Register before receiving the body so endpoint revocation can interrupt
+    // an upload rather than waiting for its deadline.
     let session = match broker.data_plane.start_endpoint_session(
         "endpoint",
         &connection,
@@ -1006,6 +1019,111 @@ async fn proxy_handler(
         );
     }
 
+    let close_signal = session.close_signal.clone();
+    let upload = tokio::select! {
+        _ = close_signal.notified() => {
+            session.finish("access_revoked");
+            return endpoint_error(
+                StatusCode::FORBIDDEN,
+                "denied_by_policy",
+                "the endpoint was revoked or agent access was disabled",
+            );
+        }
+        upload = spool_endpoint_body(
+            body,
+            broker.config.request_cap,
+            broker.config.spool_threshold,
+            broker.config.endpoint_upload_timeout,
+            broker.config.endpoint_upload_idle_timeout,
+        ) => upload,
+    };
+    let spooled = match upload {
+        Ok(body) => Arc::new(body),
+        Err(EndpointUploadError::TooLarge) => {
+            session.finish("request_too_large");
+            return endpoint_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "request_too_large",
+                "the request body exceeds the configured cap",
+            );
+        }
+        Err(EndpointUploadError::TimedOut) => {
+            session.finish("upload_timeout");
+            return endpoint_error(
+                StatusCode::REQUEST_TIMEOUT,
+                "upload_timeout",
+                "the request body upload exceeded its time limit",
+            );
+        }
+        Err(EndpointUploadError::InvalidBody(detail)) => {
+            session.finish("invalid_request_body");
+            return endpoint_error(StatusCode::BAD_REQUEST, "invalid_body", &detail);
+        }
+        Err(EndpointUploadError::Spool(error)) => {
+            session.finish("spool_failed");
+            return endpoint_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "spool_failed",
+                &error.to_string(),
+            );
+        }
+    };
+
+    // Receiving a request body can take arbitrarily long. Reauthenticate and
+    // re-check access immediately before dispatch so a disable, revoke, or
+    // secret rotation that landed during the upload wins.
+    let Some(endpoint) = broker
+        .endpoints
+        .resolve_secret(presented)
+        .filter(|endpoint| endpoint.id == state.endpoint_id)
+    else {
+        session.finish("access_revoked");
+        return endpoint_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid_secret",
+            "the endpoint was revoked or its secret was rotated",
+        );
+    };
+    if !broker.access.allows(&endpoint.connection_id) {
+        session.finish("access_revoked");
+        return endpoint_error(
+            StatusCode::FORBIDDEN,
+            "denied_by_policy",
+            "agent access is disabled for this tool",
+        );
+    }
+    let Ok(connection) = broker.store.connection_by_id(&endpoint.connection_id) else {
+        session.finish("connection_removed");
+        return endpoint_error(
+            StatusCode::BAD_GATEWAY,
+            "unknown_connection",
+            "the connection has been removed",
+        );
+    };
+    if connection.kind() != ConnectionKind::Api {
+        session.finish("connection_changed");
+        return endpoint_error(
+            StatusCode::BAD_GATEWAY,
+            "wrong_connection_type",
+            "the connection is no longer an HTTP tool",
+        );
+    }
+
+    // The session was registered before upload. Re-check once more after
+    // resolving current connection state to close races with rotation.
+    let endpoint_still_valid = broker
+        .endpoints
+        .resolve_secret(presented)
+        .is_some_and(|current| current.id == endpoint.id);
+    if !endpoint_still_valid || !broker.access.allows(&endpoint.connection_id) {
+        session.finish("access_revoked");
+        return endpoint_error(
+            StatusCode::FORBIDDEN,
+            "denied_by_policy",
+            "the endpoint was revoked or agent access was disabled",
+        );
+    }
+
     // Reuse `/v1/http`'s whole execution core. The wiring is the
     // authorization, so the vault read is pre-authorized (scope confirmed).
     let execution = HttpExecution {
@@ -1021,7 +1139,6 @@ async fn proxy_handler(
         body: spooled,
         health: Some(broker.health.clone()),
     };
-    let close_signal = session.close_signal.clone();
     let outcome = tokio::select! {
         _ = close_signal.notified() => {
             session.finish("access_revoked");
@@ -1111,6 +1228,20 @@ fn translate_outcome(outcome: ExecOutcome) -> axum::response::Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn endpoint_upload_stream_enforces_cap_while_spooling() {
+        let body = axum::body::Body::from(vec![7_u8; 9]);
+        let result = spool_endpoint_body(
+            body,
+            8,
+            2,
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+        )
+        .await;
+        assert!(matches!(result, Err(EndpointUploadError::TooLarge)));
+    }
 
     #[test]
     fn paths_validated() {

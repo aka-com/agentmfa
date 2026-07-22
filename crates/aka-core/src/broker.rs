@@ -99,6 +99,9 @@ pub struct Broker {
     /// surfaced only in open responses' DSNs.
     pub(crate) pg_proxy_port: std::sync::OnceLock<u16>,
     pub(crate) http_client: reqwest::Client,
+    /// Admission backstop acquired before direct HTTP request bodies are
+    /// read. Each listener has a narrower semaphore as well.
+    pub(crate) endpoint_uploads: Arc<tokio::sync::Semaphore>,
     /// Live and recently finished MCP sign-in sessions (`mcp_auth` module).
     pub mcp_auth: crate::mcp_auth::McpAuthSessions,
     /// Recent agent connect-requests, so a retrying agent cannot spam the
@@ -186,6 +189,8 @@ impl Broker {
             paths.health_file(),
             events.clone(),
         ));
+        let endpoint_uploads =
+            Arc::new(tokio::sync::Semaphore::new(config.endpoint_global_uploads));
         let broker = Arc::new(Self {
             data_plane,
             mcp_auth: crate::mcp_auth::McpAuthSessions::default(),
@@ -208,6 +213,7 @@ impl Broker {
             access,
             endpoints,
             endpoint_listeners: Mutex::new(HashMap::new()),
+            endpoint_uploads,
             config_gate: Mutex::new(()),
             copy_authorization_gate: tokio::sync::Mutex::new(()),
             identity,
@@ -923,23 +929,39 @@ impl Broker {
             .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))?
             .ok_or(CoreError::NotConfirmed)?;
         // Mint under the gate; re-check access didn't vanish while the
-        // sheet was up.
-        let issued = {
+        // sheet was up. Rotating a live endpoint changes only its persisted
+        // secret: the listener resolves the registry on every request, so
+        // rebinding would collide with our own occupied port and destroy a
+        // healthy endpoint.
+        let (issued, listener_already_live) = {
             let _gate = self.config_gate.lock().unwrap();
             if !self.access.allows(connection_id) {
                 return Err(CoreError::EndpointRequiresWiring);
             }
-            self.endpoints.issue(*connection_id, connection.kind())?
+            let existing = self.endpoints.get_for_connection(connection_id);
+            let listener_already_live = existing.as_ref().is_some_and(|endpoint| {
+                self.endpoint_listeners
+                    .lock()
+                    .unwrap()
+                    .contains_key(&endpoint.id)
+            });
+            (
+                self.endpoints.issue(*connection_id, connection.kind())?,
+                listener_already_live,
+            )
         };
 
-        // Bind the listener outside the gate (it awaits). A bind failure rolls
-        // the record back so we never advertise a dead endpoint.
-        if let Err(error) = self
-            .bind_endpoint_listener(&issued.endpoint, &connection)
-            .await
-        {
-            let _ = self.endpoints.revoke(&issued.endpoint.id);
-            return Err(CoreError::Io(error));
+        if !listener_already_live {
+            // Bind the listener outside the gate (it awaits). A bind failure
+            // revokes the record so a port conflict can never leave a valid
+            // credential pointing at another process.
+            if let Err(error) = self
+                .bind_endpoint_listener(&issued.endpoint, &connection)
+                .await
+            {
+                let _ = self.endpoints.revoke(&issued.endpoint.id);
+                return Err(CoreError::Io(error));
+            }
         }
 
         let dir = self.paths.endpoint_dir(&issued.endpoint.id);
@@ -1050,10 +1072,41 @@ impl Broker {
     /// stale and dropped rather than rebound.
     pub async fn rebind_endpoints(self: &Arc<Self>) {
         for endpoint in self.endpoints.list() {
+            if self
+                .endpoint_listeners
+                .lock()
+                .unwrap()
+                .contains_key(&endpoint.id)
+            {
+                continue;
+            }
             match self.store.connection_by_id(&endpoint.connection_id) {
                 Ok(connection) if connection.kind() == endpoint.kind => {
                     if let Err(error) = self.bind_endpoint_listener(&endpoint, &connection).await {
-                        tracing::warn!("could not rebind endpoint {}: {error}", endpoint.id);
+                        // A persisted port owned by another process is not a
+                        // harmless degraded state: clients would send their
+                        // still-valid endpoint secret to that listener. Make
+                        // the credential invalid before continuing startup.
+                        tracing::error!(
+                            "revoking endpoint {} after listener rebind failed: {error}",
+                            endpoint.id
+                        );
+                        if let Ok(Some(removed)) = self.endpoints.revoke(&endpoint.id) {
+                            self.teardown_endpoints(std::slice::from_ref(&removed));
+                            self.audit.append(
+                                AuditEntry::new(
+                                    AuditKind::Unwired,
+                                    format!(
+                                        "Direct endpoint revoked after bind conflict: {}",
+                                        connection.name
+                                    ),
+                                )
+                                .connection(connection.name.clone())
+                                .outcome("listener_bind_failed")
+                                .field("endpoint_id", endpoint.id.to_string()),
+                            );
+                            self.events.wirings_changed();
+                        }
                     }
                 }
                 _ => {

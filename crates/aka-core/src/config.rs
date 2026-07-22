@@ -32,6 +32,14 @@ pub struct BrokerConfig {
     /// Request bodies past this are spooled to a temp file rather than held
     /// in memory while parked.
     pub spool_threshold: usize,
+    /// Concurrent direct-endpoint uploads across the broker.
+    pub endpoint_global_uploads: usize,
+    /// Concurrent uploads admitted by one direct HTTP endpoint.
+    pub endpoint_uploads_per_listener: usize,
+    /// Absolute deadline for receiving a direct-endpoint request body.
+    pub endpoint_upload_timeout: Duration,
+    /// Maximum gap between chunks while receiving a direct-endpoint body.
+    pub endpoint_upload_idle_timeout: Duration,
     /// Redirect loop bound.
     pub max_redirects: usize,
 
@@ -77,6 +85,10 @@ impl Default for BrokerConfig {
             response_cap: 10 * 1024 * 1024,
             request_cap: 150 * 1024 * 1024,
             spool_threshold: 2 * 1024 * 1024,
+            endpoint_global_uploads: 16,
+            endpoint_uploads_per_listener: 4,
+            endpoint_upload_timeout: Duration::from_secs(60),
+            endpoint_upload_idle_timeout: Duration::from_secs(15),
             max_redirects: 10,
             token_ttl: Duration::from_secs(30 * 24 * 60 * 60),
             per_identity_per_min: 60,

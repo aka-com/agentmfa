@@ -22,6 +22,77 @@ pub enum SpooledBody {
     },
 }
 
+#[derive(Debug)]
+pub enum SpoolError {
+    TooLarge,
+    Io(std::io::Error),
+}
+
+impl From<std::io::Error> for SpoolError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+/// Incremental request-body spool. It retains at most `spool_threshold`
+/// bytes in memory, switches to an unlinked file once crossed, and enforces
+/// the wire-size cap before accepting each chunk.
+pub struct BodySpool {
+    inline: Vec<u8>,
+    file: Option<std::fs::File>,
+    len: usize,
+    spool_threshold: usize,
+    cap: usize,
+}
+
+impl BodySpool {
+    pub fn new(spool_threshold: usize, cap: usize) -> Self {
+        Self {
+            inline: Vec::with_capacity(spool_threshold.min(cap)),
+            file: None,
+            len: 0,
+            spool_threshold,
+            cap,
+        }
+    }
+
+    pub fn push(&mut self, chunk: &[u8]) -> Result<(), SpoolError> {
+        let next_len = self
+            .len
+            .checked_add(chunk.len())
+            .filter(|len| *len <= self.cap)
+            .ok_or(SpoolError::TooLarge)?;
+        if let Some(file) = self.file.as_mut() {
+            file.write_all(chunk)?;
+        } else if next_len <= self.spool_threshold {
+            self.inline.extend_from_slice(chunk);
+        } else {
+            let mut file = tempfile::tempfile()?;
+            file.write_all(&self.inline)?;
+            file.write_all(chunk)?;
+            self.inline.clear();
+            self.file = Some(file);
+        }
+        self.len = next_len;
+        Ok(())
+    }
+
+    pub fn finish(self) -> Result<SpooledBody, SpoolError> {
+        let Some(mut file) = self.file else {
+            return if self.inline.is_empty() {
+                Ok(SpooledBody::Empty)
+            } else {
+                Ok(SpooledBody::Inline(self.inline))
+            };
+        };
+        file.flush()?;
+        Ok(SpooledBody::Spooled {
+            file: Mutex::new(file),
+            len: self.len as u64,
+        })
+    }
+}
+
 impl SpooledBody {
     pub fn from_bytes(bytes: Vec<u8>, spool_threshold: usize) -> std::io::Result<Self> {
         if bytes.is_empty() {
@@ -104,5 +175,16 @@ mod tests {
         assert!(truncated);
         let (_, truncated) = body.preview(1024).unwrap();
         assert!(!truncated);
+    }
+
+    #[test]
+    fn incremental_spool_switches_to_disk_and_enforces_cap() {
+        let mut writer = BodySpool::new(4, 8);
+        writer.push(b"123").unwrap();
+        writer.push(b"456").unwrap();
+        assert!(matches!(writer.push(b"789"), Err(SpoolError::TooLarge)));
+        let body = writer.finish().unwrap();
+        assert!(matches!(body, SpooledBody::Spooled { .. }));
+        assert_eq!(body.bytes().unwrap(), b"123456");
     }
 }
