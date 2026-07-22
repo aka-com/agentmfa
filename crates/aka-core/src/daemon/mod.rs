@@ -35,8 +35,8 @@ use crate::capability::http::{
 use crate::capability::SpooledBody;
 use crate::error::CoreError;
 use crate::executions::{ExecError, ExecOutcome, ExecRequest, Execution};
-use crate::pairing::{validate_agent_name, TokenError};
-use crate::types::{ConnectionConfig, ConnectionKind, PairedAgent};
+use crate::identity::{validate_agent_name, TokenError};
+use crate::types::{ConnectionConfig, ConnectionKind};
 use crate::wire::{ErrorReason, MissingTokenCause, REQUEST_ID_MAX_BYTES};
 
 /* ------------------------------ plumbing --------------------------------- */
@@ -186,9 +186,23 @@ fn err_unknown_connection(broker: &Arc<Broker>) -> Response {
     )
 }
 
-/// Bearer-token authentication.
+/// The header a client may set to label itself in the activity log and the
+/// sessions band. Self-reported and cosmetic — never authorization.
+pub const CLIENT_LABEL_HEADER: &str = "x-multitool-client";
+
+/// The label used when a client does not name itself.
+pub const DEFAULT_CLIENT_LABEL: &str = "agent";
+
+/// Bearer-token authentication against the shared broker key.
 pub struct Authed {
-    pub agent: PairedAgent,
+    /// Self-reported client label (`X-Multitool-Client`), for attribution
+    /// only.
+    pub client: String,
+    /// The identity's stable principal id.
+    pub client_id: uuid::Uuid,
+    /// The presented token was a legacy per-agent alias still riding the
+    /// migration grace period.
+    pub via_alias: bool,
 }
 
 impl FromRequestParts<AppState> for Authed {
@@ -199,23 +213,34 @@ impl FromRequestParts<AppState> for Authed {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         let token = bearer_token(&parts.headers).map_err(err_missing_token)?;
-        match state.broker.pairing.verify(token) {
-            Ok(agent) => Ok(Authed { agent }),
+        match state.broker.identity.verify(token) {
+            Ok(verified) => {
+                let client = parts
+                    .headers
+                    .get(CLIENT_LABEL_HEADER)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::trim)
+                    .filter(|v| validate_agent_name(v))
+                    .unwrap_or(DEFAULT_CLIENT_LABEL)
+                    .to_string();
+                Ok(Authed {
+                    client,
+                    client_id: verified.client_id,
+                    via_alias: verified.via_alias,
+                })
+            }
             Err(e) => {
-                if let TokenError::Superseded { name } = &e {
-                    // The two-instances case: without this hint each 401
-                    // triggers a re-pair that breaks the *other* instance,
-                    // and the human fields an endless stream of prompts.
-                    // `store_at` names the exact file so recovery is
-                    // mechanical, not prose-guided.
+                if e == TokenError::Superseded {
+                    // The key was rotated. Without this hint each 401 reads
+                    // as a dead token; `store_at` names the exact file so
+                    // recovery is mechanical, not prose-guided.
                     return Err((
                         StatusCode::UNAUTHORIZED,
                         Json(json!({
                             "reason": e.reason(),
-                            "detail": "a later pairing under this name replaced the token; \
-                                       re-read the shared token file instead of pairing again",
-                            "store_at":
-                                format!("{}/{name}", state.broker.paths.tokens_display()),
+                            "detail": "the broker key was rotated; \
+                                       re-read the token file instead of treating this as fatal",
+                            "store_at": state.broker.paths.token_display(),
                         })),
                     )
                         .into_response());
@@ -224,7 +249,8 @@ impl FromRequestParts<AppState> for Authed {
                     return Err(err_detail(
                         StatusCode::UNAUTHORIZED,
                         ErrorReason::InvalidToken,
-                        "A bearer token reached the broker but was not recognized. It may have been revoked or rewritten by a local application.",
+                        "A bearer token reached the broker but was not recognized. \
+                         Re-read the broker's token file, or POST /v1/pair to fetch the shared key.",
                     ));
                 }
                 Err(err(StatusCode::UNAUTHORIZED, e.reason()))
@@ -524,77 +550,53 @@ async fn post_pair(State(state): State<AppState>, ApiJson(body): ApiJson<PairBod
         );
     }
 
-    // Registration is immediate: pairing is never gated. The new agent simply
-    // appears in the app, unwired — it can list connections but cannot use
-    // any until the user wires it up. The one exception is the very first
-    // agent: the app offers to wire it to every existing connection so a fresh
-    // install works end-to-end without a trip through the app. That standing
-    // grant is confirmed with the user (below); declining leaves it unwired.
-    let is_first_agent = broker.pairing.list().is_empty();
-    let replaces_existing_agent = broker.pairing.get(&name).is_some();
-    match broker.pairing.pair(&name) {
-        Ok((token, agent)) => {
-            if replaces_existing_agent {
-                // A re-pair invalidates the prior token generation; close
-                // the transports it carried.
-                let sessions_closed = broker.data_plane.close_agent(&name);
-                broker.audit.append(
-                    AuditEntry::new(AuditKind::Paired, format!("Agent reconnected: {name}"))
-                        .agent(name.clone())
-                        .outcome("paired")
-                        .field("prior_sessions_closed", sessions_closed),
-                );
-            } else {
-                broker.audit.append(
-                    AuditEntry::new(AuditKind::Paired, format!("Agent connected: {name}"))
-                        .agent(name.clone())
-                        .outcome("paired"),
-                );
-            }
-            broker.events.agents_changed();
-            if is_first_agent {
-                broker.schedule_first_agent_wirings(agent.clone());
-            }
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "token": token,
-                    "client_id": agent.id,
-                    // Echo what was registered, so the agent can log its own
-                    // enrollment without a follow-up /v1/whoami.
-                    "agent": agent.name,
-                    "expires_after_days": broker.config.token_ttl.as_secs() / 86400,
-                    // The storage guidance travels with the credential, not
-                    // just in prose.
-                    "store_at": format!("{}/{name}", broker.paths.tokens_display()),
-                })),
-            )
-                .into_response()
-        }
-        Err(e) => err_detail(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ErrorReason::PairingFailed,
-            e.to_string(),
-        ),
-    }
+    // Compat shim from the per-agent era: there is one shared key for every
+    // local agent, and "pairing" hands it back. Unauthenticated on a 0600
+    // socket, which is exactly the pre-collapse trust model made honest —
+    // per-agent pairing was never gated either, so any local process could
+    // always mint itself a token. The name is recorded as an activity label
+    // only; agents that can read the token file directly never need this.
+    broker.identity.touch();
+    broker.audit.append(
+        AuditEntry::new(AuditKind::Paired, format!("Agent connected: {name}"))
+            .agent(name.clone())
+            .outcome("paired"),
+    );
+    broker.events.agents_changed();
+    (
+        StatusCode::OK,
+        Json(json!({
+            "token": broker.identity.token(),
+            "client_id": broker.identity.client_id(),
+            // Echo what was registered, so the agent can log its own
+            // enrollment without a follow-up /v1/whoami.
+            "agent": name,
+            "expires_after_days": broker.config.token_ttl.as_secs() / 86400,
+            // The storage guidance travels with the credential, not just in
+            // prose: the shared key already lives at this path, so agents
+            // that can read files skip pairing entirely.
+            "store_at": broker.paths.token_display(),
+        })),
+    )
+        .into_response()
 }
 
 /* ------------------------- connection listing ----------------------------- */
 
 async fn get_connections(State(state): State<AppState>, authed: Authed) -> Response {
     let broker = &state.broker;
-    if let Err(wait) = broker.token_limiter.check(&authed.agent.token_hash) {
+    if let Err(wait) = broker.token_limiter.check(&authed.client) {
         return err_rate_limited(ErrorReason::RateLimited, wait);
     }
-    // The one authenticated endpoint that bypasses the wiring check by
-    // design, an agent must see what exists (and what it is wired to).
+    // The one authenticated endpoint that bypasses the access check by
+    // design, an agent must see what exists (and what is enabled).
     // Audited.
     broker.audit.append(
         AuditEntry::new(
             AuditKind::Listed,
-            format!("{} listed connections", authed.agent.name),
+            format!("{} listed connections", authed.client),
         )
-        .agent(authed.agent.name.clone()),
+        .agent(authed.client.clone()),
     );
     let list: Vec<serde_json::Value> = broker
         .store
@@ -608,10 +610,10 @@ async fn get_connections(State(state): State<AppState>, authed: Authed) -> Respo
                 // Where a call naming this connection goes; the
                 // type→endpoint mapping shouldn't live only in prose.
                 "endpoint": endpoint_for(c.kind()),
-                // Whether this agent may use the connection. Unwired
-                // connections are visible but refused; the user wires
-                // agents up in the app.
-                "wired": broker.wirings.is_wired(&authed.agent.id, &c.id),
+                // Whether agents may use the connection. Disabled
+                // connections are visible but refused; the user flips
+                // access in the app.
+                "wired": broker.access.allows(&c.id),
             });
             // Present only when this upstream speaks MCP, so the payload
             // stays exactly as it was for every other connection.
@@ -621,14 +623,10 @@ async fn get_connections(State(state): State<AppState>, authed: Authed) -> Respo
             } = &c.config
             {
                 row["mcp_path"] = json!(path);
-                // A curated tool subset for this agent, when the wiring has
-                // one; the broker enforces it on tools/call, this field lets
-                // the sidecar list only what is callable.
-                if let Some(tools) = broker
-                    .wirings
-                    .wiring_for(&authed.agent.id, &c.id)
-                    .and_then(|w| w.allowed_tools)
-                {
+                // The curated tool subset, when one is set; the broker
+                // enforces it on tools/call, this field lets the sidecar
+                // list only what is callable.
+                if let Some(tools) = broker.access.allowed_tools(&c.id) {
                     row["allowed_tools"] = json!(tools);
                 }
             }
@@ -653,18 +651,26 @@ async fn get_connections(State(state): State<AppState>, authed: Authed) -> Respo
 /// a capability call would, so it needs no throttle of its own.
 async fn get_whoami(State(state): State<AppState>, authed: Authed) -> Response {
     let broker = &state.broker;
-    let expires_at = authed.agent.last_used
+    let identity = broker.identity.info();
+    let expires_at = identity.last_used
         + chrono::Duration::from_std(broker.config.token_ttl)
             .unwrap_or_else(|_| chrono::Duration::days(30));
-    Json(json!({
-        "client_id": authed.agent.id,
-        "agent": authed.agent.name,
-        "paired_at": authed.agent.paired_at,
+    let mut body = json!({
+        "client_id": authed.client_id,
+        "agent": authed.client,
+        "paired_at": identity.minted_at,
         // The sliding TTL's current horizon; refreshed on every
         // authenticated call.
         "expires_at": expires_at,
-    }))
-    .into_response()
+    });
+    if authed.via_alias {
+        // A legacy per-agent token riding the migration grace period: it
+        // works, and it dies at the first rotation. Steer its holder to the
+        // shared key file while everything is still green.
+        body["token_deprecated"] = json!(true);
+        body["store_at"] = json!(broker.paths.token_display());
+    }
+    Json(body).into_response()
 }
 
 /* ------------------------------ HTTP call --------------------------------- */
@@ -709,14 +715,11 @@ async fn post_http(
     ApiJson(call): ApiJson<HttpCallBody>,
 ) -> Response {
     let broker = &state.broker;
-    let agent = authed.agent;
-    if let Err(wait) = broker.token_limiter.check(&agent.token_hash) {
+    let client = authed.client;
+    if let Err(wait) = broker.token_limiter.check(&client) {
         broker.audit.append(
-            AuditEntry::new(
-                AuditKind::RateLimited,
-                format!("Rate limited: {}", agent.name),
-            )
-            .agent(agent.name.clone()),
+            AuditEntry::new(AuditKind::RateLimited, format!("Rate limited: {client}"))
+                .agent(client.clone()),
         );
         return err_rate_limited(ErrorReason::RateLimited, wait);
     }
@@ -818,21 +821,18 @@ async fn post_http(
         let call_path = call.path.split('?').next().unwrap_or("");
         let pinned_path = mcp_path.split('?').next().unwrap_or("");
         if call_path == pinned_path {
-            let allowed = broker
-                .wirings
-                .wiring_for(&agent.id, &conn.id)
-                .and_then(|w| w.allowed_tools);
+            let allowed = broker.access.allowed_tools(&conn.id);
             if let (Some(allowed), Some(tool)) = (allowed, mcp_tool_call_name(&body_bytes)) {
                 if !allowed.iter().any(|name| name == &tool) {
                     broker.audit.append(
                         AuditEntry::new(
                             AuditKind::Denied,
                             format!(
-                                "Refused (tool not enabled): {} → {} · {tool}",
-                                agent.name, conn.name
+                                "Refused (tool not enabled): {client} → {} · {tool}",
+                                conn.name
                             ),
                         )
-                        .agent(agent.name.clone())
+                        .agent(client.clone())
                         .connection(conn.name.clone())
                         .outcome("denied_by_policy"),
                     );
@@ -840,8 +840,8 @@ async fn post_http(
                         StatusCode::FORBIDDEN,
                         ErrorReason::DeniedByPolicy,
                         format!(
-                            "the tool {tool:?} is not enabled for {} on {}; the user can enable it in Multitool",
-                            agent.name, conn.name
+                            "the tool {tool:?} is not enabled on {}; the user can enable it in Multitool",
+                            conn.name
                         ),
                     );
                 }
@@ -862,10 +862,10 @@ async fn post_http(
 
     let mutating = is_mutating(&method);
 
-    // Coalescing is keyed on (agent, request_id) for mutating calls only;
-    // GET/HEAD are never coalesced, a request_id there is ignored.
+    // Coalescing is keyed on (client label, request_id) for mutating calls
+    // only; GET/HEAD are never coalesced, a request_id there is ignored.
     let coalesce_key = match (&call.request_id, mutating) {
-        (Some(rid), true) => Some((agent.name.clone(), rid.clone())),
+        (Some(rid), true) => Some((client.clone(), rid.clone())),
         _ => None,
     };
     let payload_hash = coalesce_key.as_ref().map(|_| hash);
@@ -875,7 +875,7 @@ async fn post_http(
         audit: broker.audit.clone(),
         client: broker.http_client.clone(),
         config: broker.config.clone(),
-        agent: agent.name.clone(),
+        agent: client.clone(),
         connection: conn.clone(),
         method,
         path: call.path.clone(),
@@ -885,9 +885,9 @@ async fn post_http(
     };
     let executor: crate::executions::Executor = Box::pin(executor.run());
 
-    run_wired(
+    run_allowed(
         broker,
-        &agent,
+        &client,
         &conn,
         ExecRequest {
             coalesce_key,
@@ -914,7 +914,7 @@ async fn post_connect_request(
             "a `service` string is required",
         );
     };
-    match broker.agent_connect_request(&authed.agent, service) {
+    match broker.agent_connect_request(&authed.client, service) {
         Ok(fresh) => (
             StatusCode::ACCEPTED,
             Json(serde_json::json!({
@@ -945,21 +945,22 @@ fn mcp_tool_call_name(body: &[u8]) -> Option<String> {
         .map(String::from)
 }
 
-/// Shared capability tail: a wired agent executes immediately (retries
-/// still coalesce under their idempotency key); an unwired one is refused.
-async fn run_wired(
+/// Shared capability tail: an enabled connection executes immediately
+/// (retries still coalesce under their idempotency key); a disabled one is
+/// refused.
+async fn run_allowed(
     broker: &Arc<Broker>,
-    agent: &PairedAgent,
+    client: &str,
     conn: &crate::types::Connection,
     exec: ExecRequest,
 ) -> Response {
-    if !broker.wirings.is_wired(&agent.id, &conn.id) {
+    if !broker.access.allows(&conn.id) {
         broker.audit.append(
             AuditEntry::new(
                 AuditKind::Denied,
-                format!("Refused (not wired): {} → {}", agent.name, conn.name),
+                format!("Refused (agents disabled): {client} → {}", conn.name),
             )
-            .agent(agent.name.clone())
+            .agent(client.to_string())
             .connection(conn.name.clone())
             .outcome("denied_by_policy"),
         );
@@ -967,8 +968,8 @@ async fn run_wired(
             StatusCode::FORBIDDEN,
             ErrorReason::DeniedByPolicy,
             format!(
-                "{} is not wired to {}; the user can wire it up in Multitool",
-                agent.name, conn.name
+                "{} is not enabled for agents; the user can enable it in Multitool",
+                conn.name
             ),
         );
     }
@@ -1011,8 +1012,8 @@ async fn post_ws_open(
     ApiJson(body): ApiJson<OpenBody>,
 ) -> Response {
     let broker = &state.broker;
-    let agent = authed.agent;
-    if let Err(wait) = broker.token_limiter.check(&agent.token_hash) {
+    let client = authed.client;
+    if let Err(wait) = broker.token_limiter.check(&client) {
         return err_rate_limited(ErrorReason::RateLimited, wait);
     }
     if let Some(response) = request_id_error(body.request_id.as_deref()) {
@@ -1045,7 +1046,7 @@ async fn post_ws_open(
     let coalesce_key = body
         .request_id
         .as_ref()
-        .map(|rid| (agent.name.clone(), rid.clone()));
+        .map(|rid| (client.clone(), rid.clone()));
     let payload_hash = coalesce_key.as_ref().map(|_| {
         use sha2::{Digest as _, Sha256};
         let digest = Sha256::digest(format!("ws/open\0{}", conn.name).as_bytes());
@@ -1061,12 +1062,12 @@ async fn post_ws_open(
     let executor: crate::executions::Executor = {
         let broker = broker.clone();
         let conn = conn.clone();
-        let agent_name = agent.name.clone();
+        let client_label = client.clone();
         Box::pin(async move {
             match crate::capability::ws::dial_upstream(&broker.store, &conn).await {
                 Ok(upstream) => {
                     let ticket = broker.data_plane.issue(
-                        &agent_name,
+                        &client_label,
                         &conn,
                         crate::sessions::TicketPayload::Ws {
                             pending_upstream: Some(upstream),
@@ -1091,9 +1092,9 @@ async fn post_ws_open(
         })
     };
 
-    run_wired(
+    run_allowed(
         broker,
-        &agent,
+        &client,
         &conn,
         ExecRequest {
             coalesce_key,
@@ -1112,8 +1113,8 @@ async fn post_ssh_open(
     ApiJson(body): ApiJson<OpenBody>,
 ) -> Response {
     let broker = &state.broker;
-    let agent = authed.agent;
-    if let Err(wait) = broker.token_limiter.check(&agent.token_hash) {
+    let client = authed.client;
+    if let Err(wait) = broker.token_limiter.check(&client) {
         return err_rate_limited(ErrorReason::RateLimited, wait);
     }
     if let Some(response) = request_id_error(body.request_id.as_deref()) {
@@ -1161,7 +1162,7 @@ async fn post_ssh_open(
     let coalesce_key = body
         .request_id
         .as_ref()
-        .map(|rid| (agent.name.clone(), rid.clone()));
+        .map(|rid| (client.clone(), rid.clone()));
     let payload_hash = coalesce_key.as_ref().map(|_| {
         use sha2::{Digest as _, Sha256};
         let digest = Sha256::digest(format!("ssh/open\0{}", conn.name).as_bytes());
@@ -1173,13 +1174,13 @@ async fn post_ssh_open(
 
     // Executor: read + parse the key, bind the per-open agent socket, issue
     // the ticket, hand back the SSH_AUTH_SOCK path. The socket path is
-    // the capability, so it is minted only for a wired agent.
+    // the capability, so it is minted only when access is enabled.
     let executor: crate::executions::Executor = {
         let broker = broker.clone();
         let conn = conn.clone();
-        let agent_name = agent.name.clone();
+        let client_label = client.clone();
         Box::pin(async move {
-            match crate::capability::ssh::open_agent(broker.clone(), agent_name, conn).await {
+            match crate::capability::ssh::open_agent(broker.clone(), client_label, conn).await {
                 Ok(auth_sock) => ExecOutcome {
                     status: 200,
                     body: json!({
@@ -1202,9 +1203,9 @@ async fn post_ssh_open(
         })
     };
 
-    run_wired(
+    run_allowed(
         broker,
-        &agent,
+        &client,
         &conn,
         ExecRequest {
             coalesce_key,
@@ -1223,8 +1224,8 @@ async fn post_pg_open(
     ApiJson(body): ApiJson<OpenBody>,
 ) -> Response {
     let broker = &state.broker;
-    let agent = authed.agent;
-    if let Err(wait) = broker.token_limiter.check(&agent.token_hash) {
+    let client = authed.client;
+    if let Err(wait) = broker.token_limiter.check(&client) {
         return err_rate_limited(ErrorReason::RateLimited, wait);
     }
     if let Some(response) = request_id_error(body.request_id.as_deref()) {
@@ -1261,7 +1262,7 @@ async fn post_pg_open(
     let coalesce_key = body
         .request_id
         .as_ref()
-        .map(|rid| (agent.name.clone(), rid.clone()));
+        .map(|rid| (client.clone(), rid.clone()));
     let payload_hash = coalesce_key.as_ref().map(|_| {
         use sha2::{Digest as _, Sha256};
         let digest = Sha256::digest(format!("pg/open\0{}", conn.name).as_bytes());
@@ -1279,12 +1280,12 @@ async fn post_pg_open(
     let executor: crate::executions::Executor = {
         let broker = broker.clone();
         let conn = conn.clone();
-        let agent_name = agent.name.clone();
+        let client_label = client.clone();
         Box::pin(async move {
             let ticket =
                 broker
                     .data_plane
-                    .issue(&agent_name, &conn, crate::sessions::TicketPayload::Pg);
+                    .issue(&client_label, &conn, crate::sessions::TicketPayload::Pg);
             let dsn = format!("postgres://ticket@127.0.0.1:{proxy_port}/{dbname}?sslmode=disable");
             ExecOutcome {
                 status: 200,
@@ -1302,9 +1303,9 @@ async fn post_pg_open(
         })
     };
 
-    run_wired(
+    run_allowed(
         broker,
-        &agent,
+        &client,
         &conn,
         ExecRequest {
             coalesce_key,

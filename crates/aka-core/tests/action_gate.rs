@@ -105,13 +105,13 @@ async fn unimplemented_shell_fails_closed_on_config_actions() {
 }
 
 #[tokio::test]
-async fn agent_revocation_is_immediate_without_confirmation() {
+async fn key_rotation_is_confirmed_and_closes_live_sessions() {
     let events = Arc::new(GateEvents {
-        allow: false,
+        allow: true,
         confirms: AtomicUsize::new(0),
     });
     let (broker, _dir) = broker_with(events.clone()).await;
-    let (_, client) = broker.pairing.pair("claude-code").unwrap();
+    let old_token = broker.identity.token();
     let conn = add_github(&broker);
     let ticket = broker
         .data_plane
@@ -124,24 +124,40 @@ async fn agent_revocation_is_immediate_without_confirmation() {
     let close = session.close_signal.clone();
     let notified = close.notified();
 
-    assert!(broker.ui_revoke_agent(&client.id).unwrap());
+    // Rotation touches the credential, so it always re-prompts.
+    broker.ui_rotate_key().unwrap();
+    assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
     tokio::time::timeout(std::time::Duration::from_secs(1), notified)
         .await
-        .expect("disconnect should close live data-plane sessions");
+        .expect("rotation should close live data-plane sessions");
     assert!(matches!(
         broker.data_plane.redeem(&ticket),
         Err(RedeemError::Expired)
     ));
-    session.finish("agent_disconnected");
-    assert!(broker.paired_agents().is_empty());
-    assert_eq!(events.confirms.load(Ordering::SeqCst), 0);
+    session.finish("key_rotated");
+    assert_ne!(broker.identity.token(), old_token);
     let revoked = broker
         .audit
         .recent(10)
         .into_iter()
         .find(|entry| entry.kind == aka_core::audit::AuditKind::TokenRevoked)
-        .expect("revocation should be audited");
-    assert_eq!(revoked.confirmation, None);
+        .expect("rotation should be audited");
+    assert!(revoked.confirmation.is_some());
+}
+
+#[tokio::test]
+async fn key_rotation_fails_closed_without_confirmation() {
+    let events = Arc::new(GateEvents {
+        allow: false,
+        confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    let before = broker.identity.token();
+    assert!(matches!(
+        broker.ui_rotate_key(),
+        Err(CoreError::NotConfirmed)
+    ));
+    assert_eq!(broker.identity.token(), before);
 }
 
 #[tokio::test]
@@ -689,52 +705,54 @@ async fn service_tests_are_not_added_to_the_activity_log() {
         .all(|entry| entry.kind != aka_core::audit::AuditKind::ConnectionTested));
 }
 
-/* ------------------------------- wirings ---------------------------------- */
+/* ----------------------------- agent access -------------------------------- */
 
 #[tokio::test]
-async fn revoking_an_agent_removes_its_wirings() {
+async fn access_survives_key_rotation() {
     let events = Arc::new(GateEvents {
         allow: true,
         confirms: AtomicUsize::new(0),
     });
     let (broker, _dir) = broker_with(events.clone()).await;
     let conn = add_github(&broker);
-    let (_, client) = broker.pairing.pair("claude-code").unwrap();
-    assert!(broker.ui_set_wiring(&client.id, &conn.id, true).unwrap());
-    assert_eq!(broker.wirings().len(), 1);
+    assert!(broker.ui_set_tool_access(&conn.id, false).unwrap());
+    assert!(!broker.access.allows(&conn.id));
 
-    assert!(broker.ui_revoke_agent(&client.id).unwrap());
-    assert_eq!(broker.wirings().len(), 0);
+    // Rotation replaces the credential, not the policy.
+    broker.ui_rotate_key().unwrap();
+    assert!(!broker.access.allows(&conn.id));
+    assert_eq!(broker.tool_access().len(), 1);
 }
 
 #[tokio::test]
-async fn wirings_die_with_a_deleted_connection() {
+async fn access_records_die_with_a_deleted_connection() {
     let events = Arc::new(GateEvents {
         allow: true,
         confirms: AtomicUsize::new(0),
     });
     let (broker, _dir) = broker_with(events.clone()).await;
     let conn = add_github(&broker);
-    let (_, client) = broker.pairing.pair("claude-code").unwrap();
-    assert!(broker.ui_set_wiring(&client.id, &conn.id, true).unwrap());
+    assert!(broker.ui_set_tool_access(&conn.id, false).unwrap());
 
     broker.ui_delete_connection(&conn.id).unwrap();
-    assert_eq!(broker.wirings().len(), 0);
-    assert!(!broker.wirings.is_wired(&client.id, &conn.id));
+    assert_eq!(broker.tool_access().len(), 0);
 }
 
 #[tokio::test]
-async fn target_changes_drop_the_connection_wirings() {
+async fn target_changes_keep_the_flag_but_reset_the_tool_subset() {
     let events = Arc::new(GateEvents {
         allow: true,
         confirms: AtomicUsize::new(0),
     });
     let (broker, _dir) = broker_with(events.clone()).await;
     let conn = add_github(&broker);
-    let (_, client) = broker.pairing.pair("claude-code").unwrap();
-    assert!(broker.ui_set_wiring(&client.id, &conn.id, true).unwrap());
+    // A disabled tool with a curated subset (the subset names the *old*
+    // upstream's tools).
+    assert!(broker.ui_set_tool_access(&conn.id, false).unwrap());
+    assert!(broker
+        .ui_set_allowed_tools(&conn.id, Some(vec!["search".into()]))
+        .unwrap());
 
-    // A wiring granted for one destination must not silently cover another.
     broker
         .ui_update_connection(
             &conn.id,
@@ -753,44 +771,47 @@ async fn target_changes_drop_the_connection_wirings() {
             },
         )
         .unwrap();
-    assert!(!broker.wirings.is_wired(&client.id, &conn.id));
+    // A disabled tool must not silently re-enable on retarget…
+    assert!(!broker.access.allows(&conn.id));
+    // …but the curated subset named the old upstream's tools and is reset.
+    assert_eq!(broker.access.allowed_tools(&conn.id), None);
 
-    // A rename alone keeps the wiring: same destination, same authority.
+    // A rename alone keeps everything: same destination, same authority.
+    assert!(broker.ui_set_tool_access(&conn.id, true).unwrap());
+    assert!(broker
+        .ui_set_allowed_tools(&conn.id, Some(vec!["search".into()]))
+        .unwrap());
+    let current = broker.store.connection_by_id(&conn.id).unwrap();
     let renamed = broker
-        .ui_set_wiring(&client.id, &conn.id, true)
-        .and_then(|_| {
-            let current = broker.store.connection_by_id(&conn.id)?;
-            broker.ui_update_connection(
-                &conn.id,
-                ConnectionSpec {
-                    name: "github-renamed".into(),
-                    config: current.config.clone(),
-                    secrets: current.secrets.clone(),
-                },
-            )
-        })
+        .ui_update_connection(
+            &conn.id,
+            ConnectionSpec {
+                name: "github-renamed".into(),
+                config: current.config.clone(),
+                secrets: current.secrets.clone(),
+            },
+        )
         .unwrap();
     assert_eq!(renamed.name, "github-renamed");
-    assert!(broker.wirings.is_wired(&client.id, &conn.id));
+    assert!(broker.access.allows(&conn.id));
+    assert_eq!(
+        broker.access.allowed_tools(&conn.id),
+        Some(vec!["search".into()])
+    );
 }
 
 #[tokio::test]
-async fn wiring_an_unknown_agent_or_connection_is_refused() {
+async fn access_for_an_unknown_connection_is_refused() {
     let events = Arc::new(GateEvents {
         allow: true,
         confirms: AtomicUsize::new(0),
     });
     let (broker, _dir) = broker_with(events.clone()).await;
-    let conn = add_github(&broker);
-    let (_, client) = broker.pairing.pair("claude-code").unwrap();
+    add_github(&broker);
 
-    // Unknown agent: report false rather than persisting a dangling wiring.
-    assert!(!broker
-        .ui_set_wiring(&uuid::Uuid::new_v4(), &conn.id, true)
-        .unwrap());
     // Unknown connection: an error, nothing persisted.
     assert!(broker
-        .ui_set_wiring(&client.id, &uuid::Uuid::new_v4(), true)
+        .ui_set_tool_access(&uuid::Uuid::new_v4(), false)
         .is_err());
-    assert_eq!(broker.wirings().len(), 0);
+    assert_eq!(broker.tool_access().len(), 0);
 }

@@ -82,13 +82,24 @@ impl Paths {
     pub fn index_file(&self) -> PathBuf {
         self.data_dir.join("index.json")
     }
+    /// Per-connection agent access (the authorization table).
+    pub fn access_file(&self) -> PathBuf {
+        self.data_dir.join("access.json")
+    }
+    /// Legacy per-agent wirings; read once to collapse into access.
     pub fn wirings_file(&self) -> PathBuf {
         self.data_dir.join("wirings.json")
     }
-    /// Legacy standing-rules file; read once to migrate into wirings.
+    /// Legacy standing-rules file (pre-wirings); no longer read.
     pub fn rules_file(&self) -> PathBuf {
         self.data_dir.join("rules.json")
     }
+    /// The shared identity record (key hash + migration aliases).
+    pub fn identity_file(&self) -> PathBuf {
+        self.data_dir.join("identity.json")
+    }
+    /// Legacy per-agent registry; read once to absorb its token hashes as
+    /// aliases of the shared key.
     pub fn agents_file(&self) -> PathBuf {
         self.data_dir.join("agents.json")
     }
@@ -122,8 +133,14 @@ impl Paths {
     pub fn try_acquire_broker_lock(&self) -> io::Result<Option<BrokerInstanceLock>> {
         BrokerInstanceLock::try_acquire(&self.broker_lock_file())
     }
-    /// The advisory token home `/instructions` tells agents to persist
-    /// pair tokens in (one file per agent name, mode 0600).
+    /// The shared broker key's plaintext home (`~/.aka/token`, 0600) —
+    /// the one file every local agent reads.
+    pub fn token_file(&self) -> PathBuf {
+        self.socket_dir.join("token")
+    }
+    /// The per-agent era's advisory token home. Kept only so existing
+    /// setups aren't surprised by its disappearance; nothing writes here
+    /// any more.
     pub fn tokens_dir(&self) -> PathBuf {
         self.socket_dir.join("tokens")
     }
@@ -149,9 +166,9 @@ impl Paths {
     pub fn socket_display(&self) -> String {
         display_tilde(&self.socket_file())
     }
-    /// `tokens_dir()` for display: home shortened to `~`.
-    pub fn tokens_display(&self) -> String {
-        display_tilde(&self.tokens_dir())
+    /// `token_file()` for display: home shortened to `~`.
+    pub fn token_display(&self) -> String {
+        display_tilde(&self.token_file())
     }
 
     /// Create the directories with owner-only permissions, including the

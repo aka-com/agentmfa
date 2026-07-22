@@ -327,17 +327,12 @@ impl DataPlane {
         }
     }
 
-    /// Invalidate every unredeemed capability and close every live transport
-    /// issued to an agent, regardless of whether it came from one-time,
-    /// temporary, or saved access. Disconnecting or re-pairing an agent must
-    /// not leave an older token generation's data-plane capabilities usable.
-    pub fn close_agent(&self, agent: &str) -> usize {
+    /// Invalidate every unredeemed capability and close every live transport,
+    /// regardless of which agent opened it. Rotating the shared key must not
+    /// leave the old generation's data-plane capabilities usable.
+    pub fn close_all(&self) -> usize {
         let mut state = self.inner.state.lock().unwrap();
-        for ticket in state
-            .tickets
-            .values_mut()
-            .filter(|ticket| ticket.agent == agent)
-        {
+        for ticket in state.tickets.values_mut() {
             ticket.invalidated = true;
             if let TicketPayload::Ws { pending_upstream } = &mut ticket.payload {
                 *pending_upstream = None;
@@ -346,7 +341,6 @@ impl DataPlane {
         let sessions: Vec<_> = state
             .sessions
             .values()
-            .filter(|session| session.info.agent == agent)
             .map(|session| session.close.clone())
             .collect();
         let count = sessions.len();
@@ -638,23 +632,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_disconnect_blocks_all_tickets_and_signals_live_sessions() {
+    async fn key_rotation_blocks_all_tickets_and_signals_live_sessions() {
         let (plane, _dir) = plane(Duration::from_secs(60), 60, 300);
         let ticket = plane.issue("codex", &ws_connection(), TicketPayload::Pg);
         let other_ticket = plane.issue("claude", &ws_connection(), TicketPayload::Pg);
         let session = plane.redeem(&ticket).unwrap().start(ConnectionKind::Pg);
         let closed = session.close_signal.clone();
         let notified = closed.notified();
-        assert_eq!(plane.close_agent("codex"), 1);
+        assert_eq!(plane.close_all(), 1);
         tokio::time::timeout(Duration::from_secs(1), notified)
             .await
-            .expect("live session should receive agent disconnect");
+            .expect("live session should receive the close signal");
         assert_eq!(expect_err(plane.redeem(&ticket)), RedeemError::Expired);
-        let other_session = plane
-            .redeem(&other_ticket)
-            .expect("another agent's ticket should stay active")
-            .start(ConnectionKind::Pg);
-        session.finish("agent_disconnected");
-        other_session.finish("test_complete");
+        assert_eq!(
+            expect_err(plane.redeem(&other_ticket)),
+            RedeemError::Expired,
+            "rotation invalidates every outstanding ticket"
+        );
+        session.finish("key_rotated");
     }
 }

@@ -163,20 +163,11 @@ impl Harness {
         )
         .await;
         assert_eq!(status, 200);
-        let client = self.broker.pairing.get("claude-code").unwrap();
-        let conn = self.broker.store.connection_by_name("prod-db").unwrap();
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !self.broker.wirings.is_wired(&client.id, &conn.id) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("first-agent wiring was not applied asynchronously");
         body["token"].as_str().unwrap().to_string()
     }
 
-    /// POST /v1/pg/open (the first paired agent is auto-wired); returns
-    /// (dsn, ticket).
+    /// POST /v1/pg/open (connections are enabled for agents by default);
+    /// returns (dsn, ticket).
     async fn open_pg(&mut self, token: &str) -> (String, String) {
         let auth = format!("Bearer {token}");
         let (status, body) = uds_request(
@@ -202,14 +193,10 @@ impl Harness {
         )
     }
 
-    /// Issue a direct endpoint for the first (auto-wired) agent on `prod-db`.
+    /// Issue a direct endpoint on `prod-db`.
     async fn issue_endpoint(&self) -> aka_core::broker::IssuedEndpointInfo {
-        let client = self.broker.pairing.get("claude-code").unwrap();
         let conn = self.broker.store.connection_by_name("prod-db").unwrap();
-        self.broker
-            .ui_issue_endpoint(&client.id, &conn.id)
-            .await
-            .unwrap()
+        self.broker.ui_issue_endpoint(&conn.id).await.unwrap()
     }
 
     /// A `tokio-postgres` conn string reaching an endpoint's Unix socket. The
@@ -791,25 +778,31 @@ async fn revoking_an_endpoint_closes_sessions_and_refuses_new_ones() {
 }
 
 #[tokio::test]
-async fn unwiring_tears_down_the_endpoint() {
+async fn disabling_access_refuses_the_endpoint_until_reenabled() {
     let mut h = harness(BrokerConfig::default()).await;
     let fake = fake_pg(FakeAuth::Cleartext).await;
     add_pg_connection(&h.broker, fake.port);
     h.pair().await;
     let info = h.issue_endpoint().await;
-    // It works while wired …
+    // It works while enabled …
     let (_client, _connection) = tokio_postgres::connect(&h.endpoint_conn_str(&info), NoTls)
         .await
         .unwrap();
 
-    // … and is gone the moment the wiring is removed.
-    let client = h.broker.pairing.get("claude-code").unwrap();
+    // … is refused at the connect-time re-check while disabled (the
+    // endpoint itself stays issued) …
     let conn = h.broker.store.connection_by_name("prod-db").unwrap();
-    h.broker.ui_set_wiring(&client.id, &conn.id, false).unwrap();
-    assert!(h.broker.endpoints().is_empty());
+    h.broker.ui_set_tool_access(&conn.id, false).unwrap();
+    assert_eq!(h.broker.endpoints().len(), 1);
     assert!(tokio_postgres::connect(&h.endpoint_conn_str(&info), NoTls)
         .await
         .is_err());
+
+    // … and serves again once re-enabled, with the same pasted DSN.
+    h.broker.ui_set_tool_access(&conn.id, true).unwrap();
+    assert!(tokio_postgres::connect(&h.endpoint_conn_str(&info), NoTls)
+        .await
+        .is_ok());
 }
 
 #[tokio::test]

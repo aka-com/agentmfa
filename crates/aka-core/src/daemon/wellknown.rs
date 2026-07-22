@@ -19,9 +19,9 @@ pub fn manifest(config: &BrokerConfig, paths: &Paths) -> serde_json::Value {
         "protocol_version": PROTOCOL_VERSION,
         "transport": "http-over-unix-socket",
         "socket": paths.socket_display(),
-        // The advisory token home; the pair response repeats the exact
-        // per-agent path in `store_at`.
-        "tokens_dir": paths.tokens_display(),
+        // The shared key's plaintext home; the pair response repeats it in
+        // `store_at`.
+        "token_file": paths.token_display(),
         "capabilities": ["http", "websocket", "postgres", "ssh"],
         // Capability flags: how a client may authenticate. Closed
         // vocabulary (wire.rs); new schemes appear here before any client
@@ -43,7 +43,7 @@ pub fn manifest(config: &BrokerConfig, paths: &Paths) -> serde_json::Value {
             "ssh_open": "/v1/ssh/open",
             "instructions": "/instructions",
         },
-        "pairing": "Reuse a stored token if GET /v1/whoami accepts it; otherwise POST /v1/pair with {\"agent_name\": \"<your-name>\"} — registration is immediate and the returned token is your Bearer token.",
+        "pairing": "One shared key covers every local agent: read it from the token_file and send it as your Bearer token. If you cannot read files, POST /v1/pair with {\"agent_name\": \"<your-name>\"} returns the same key. Optionally send X-Multitool-Client: <your-name> to label your activity.",
     })
 }
 
@@ -60,42 +60,42 @@ AKA holds this developer's secrets in the macOS Keychain and brokers
 their use. Broker-produced fields do not expose vault-held values or secret
 names; you ask the broker to *use a named connection* (make an HTTP request
 through `github`, connect to `prod-db`) and the broker injects the credential
-on the upstream leg. Authorization is a **wiring**: the user wires agents to
-connections in the Multitool app. A wired call executes immediately, with no
-prompt; an unwired call is refused with `403 denied_by_policy` — ask your
-user to wire you up in the app. Relayed HTTP responses are scrubbed for
-recognized credential material, but arbitrary transformed upstream output
-cannot be guaranteed secret-free.
+on the upstream leg. Authorization is per **tool**: the user enables or
+disables each connection for agents in the Multitool app. An enabled call
+executes immediately, with no prompt; a disabled call is refused with
+`403 denied_by_policy` — ask your user to enable the tool in the app.
+Relayed HTTP responses are scrubbed for recognized credential material, but
+arbitrary transformed upstream output cannot be guaranteed secret-free.
 
 Protocol: Agent Broker Protocol version {protocol_version} (the manifest's
 `protocol_version`; PROTOCOL.md is the spec).
 Transport: HTTP over the Unix domain socket `{socket}`.
 Example: `curl --unix-socket {socket} http://localhost/v1/connections`
 
-## 1. Authenticate: reuse a stored token; pair only when you must
+## 1. Authenticate: one shared key for this machine
 
-Re-pairing invalidates the name's previous token, so reuse a stored token
-when one exists:
+Every local agent uses the same bearer key — there are no per-agent
+identities. It lives in plaintext at `{token_file}` (mode 0600).
 
-1. Read `{tokens}/<your-name>`. If it exists, probe it:
+1. Read `{token_file}` and send it on every call:
 
        curl --unix-socket {socket} \
             -H "Authorization: Bearer <token>" http://localhost/v1/whoami
        → 200 {{"client_id": "<uuid>", "agent": "<your-name>",
                "expires_at": "…"}}
 
-   Follow the response-specific recovery action; do not treat every `401`
-   as permission to re-pair:
+   Follow the response-specific recovery action:
 
    | `/v1/whoami` result | Action |
    | --- | --- |
-   | `200` | Reuse the stored token and skip pairing. |
-   | `401 token_superseded` | Re-read the token from the response's `store_at` path and retry. Do **not** pair. |
-   | `401 token_expired` | Pair again, then replace the stored token. |
-   | `401 invalid_token` | Pair again, then replace the stored token. |
-   | Any other `401` | Correct the Authorization header or bearer credential first; do not pair automatically. |
+   | `200` | The key works; carry on. |
+   | `401 token_superseded` | The key was rotated: re-read `{token_file}` (the response's `store_at`) and retry. Do **not** treat this as fatal. |
+   | `401 token_expired` | POST /v1/pair once, then retry with the returned key. |
+   | `401 invalid_token` | Re-read `{token_file}`; if it still fails, POST /v1/pair. |
+   | Any other `401` | Correct the Authorization header or bearer credential first. |
 
-2. Pair:
+2. If you cannot read files (a sandbox, a remote client), pair — it hands
+   the same shared key back:
 
        curl --unix-socket {socket} -X POST http://localhost/v1/pair \
             -H "Content-Type: application/json" \
@@ -103,23 +103,18 @@ when one exists:
        → 200 {{"token": "aka_…", "client_id": "<uuid>",
                "agent": "<your-name>",
                "expires_after_days": {token_days},
-               "store_at": "{tokens}/<your-name>"}}
+               "store_at": "{token_file}"}}
 
-   Registration is immediate — no human approval. You appear in the AKA
-   Desktop window as a connected agent, and the user wires you up to the
-   tools you may use. Store the token at `store_at` with mode 0600 (the
-   directory already exists), or in your own credential store, and send it
-   on every subsequent call as `Authorization: Bearer <token>`.
+The key lasts {token_days} days, refreshed on use; the broker rewrites
+`{token_file}` whenever it re-mints, so re-reading the file is always the
+first recovery step. Rotating the key (user-initiated) invalidates
+outstanding data-plane capabilities and closes live WebSocket, Postgres,
+and SSH connections for every agent at once.
 
-Tokens last {token_days} days, refreshed on use.
-
-**Several instances under one name share the stored token.** Pairing
-again replaces the name's previous token; a call failing with
-`401 {{"reason": "token_superseded"}}` means another instance re-paired:
-re-read the token file and retry rather than pairing again (which would
-break that instance in turn). Re-pairing or
-user-initiated disconnect also invalidates outstanding data-plane capabilities
-and closes live WebSocket, Postgres, and SSH connections for that agent name.
+**Label yourself.** Optionally send `X-Multitool-Client: <your-name>`
+(1-64 chars of `[A-Za-z0-9._-]`) on every call. It names you in the user's
+activity log and live-sessions view — attribution only, never
+authorization.
 
 ## 2. Discover what you may ask for
 
@@ -129,10 +124,10 @@ and closes live WebSocket, Postgres, and SSH connections for that agent name.
 
 Connections name a destination. Secret names and values are never
 exposed. `endpoint` is where a call naming this connection goes (POST
-it). `wired` says whether *you* may use the connection: a wired call
-executes immediately, an unwired call is refused with
-`403 {{"reason": "denied_by_policy"}}`. Wiring is changed only by the user
-in the Multitool app — if you need a connection you are not wired to, ask
+it). `wired` says whether agents may use the connection: an enabled call
+executes immediately, a disabled call is refused with
+`403 {{"reason": "denied_by_policy"}}`. Access is changed only by the user
+in the Multitool app — if you need a connection that is disabled, ask
 your user rather than retrying.
 
 ## 3. Retries and timeouts
@@ -283,12 +278,11 @@ host-key-mismatched signing requests.
   bearer credential. The detail describes what arrived without assuming the
   agent itself omitted or rewrote the data.
 - `401 {{"reason": "invalid_token", "detail": "..."}}`: the token that
-  reached the broker was not recognized. It may have been revoked or rewritten
-  by a local application; re-pair.
-- `401 {{"reason": "token_expired"}}`: re-pair.
-- `401 {{"reason": "token_superseded"}}`: another instance under your name
-  re-paired; re-read the token at the response's `store_at`, do not pair
-  again.
+  reached the broker was not recognized. Re-read the token file; if it
+  still fails, pair.
+- `401 {{"reason": "token_expired"}}`: pair once, then retry.
+- `401 {{"reason": "token_superseded"}}`: the key was rotated; re-read the
+  token at the response's `store_at` and retry.
 - `404 {{"reason": "unknown_connection"}}`: no such connection; the detail
   lists the configured names.
 - `409 {{"reason": "request_id_mismatch"}}`: you reused a request_id with a
@@ -309,7 +303,7 @@ host-key-mismatched signing requests.
 "#,
         protocol_version = PROTOCOL_VERSION,
         socket = paths.socket_display(),
-        tokens = paths.tokens_display(),
+        token_file = paths.token_display(),
         client_timeout = client_timeout,
         ticket = ticket,
         token_days = token_days,
@@ -367,7 +361,7 @@ mod tests {
         assert_eq!(m["endpoints"]["whoami"], "/v1/whoami");
         assert_eq!(m["endpoints"]["ssh_open"], "/v1/ssh/open");
         assert_eq!(m["socket"], "~/.aka/broker.sock");
-        assert_eq!(m["tokens_dir"], "~/.aka/tokens");
+        assert_eq!(m["token_file"], "~/.aka/token");
         assert_eq!(
             m["capabilities"],
             serde_json::json!(["http", "websocket", "postgres", "ssh"])
@@ -391,7 +385,8 @@ mod tests {
         let text = instructions(&BrokerConfig::default(), &paths());
         for needle in [
             "curl --unix-socket ~/.aka/broker.sock",
-            "~/.aka/tokens",
+            "~/.aka/token",
+            "X-Multitool-Client",
             "/v1/whoami",
             "store_at",
             "token_superseded",
@@ -417,13 +412,12 @@ mod tests {
         ] {
             assert!(text.contains(needle), "instructions missing {needle:?}");
         }
-        assert!(text.contains(
-            "`401 token_superseded` | Re-read the token from the response's `store_at` path"
-        ));
-        assert!(text.contains("Do **not** pair"));
+        assert!(text.contains("one shared key") || text.contains("One shared key"));
+        assert!(text.contains("The key was rotated: re-read"));
+        assert!(text.contains("Do **not** treat this as fatal"));
         assert!(!text.contains("Any `401` means"));
         // Config-derived numbers are rendered, not hard-coded prose.
-        assert!(text.contains("Tokens last\n30 days") || text.contains("30 days"));
+        assert!(text.contains("30 days"));
     }
 
     #[test]

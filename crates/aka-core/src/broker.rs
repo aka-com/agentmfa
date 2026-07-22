@@ -15,15 +15,15 @@ use crate::config::BrokerConfig;
 use crate::error::CoreError;
 use crate::events::BrokerEvents;
 use crate::executions::Executions;
-use crate::pairing::PairingRegistry;
+use crate::identity::IdentityStore;
 use crate::paths::{BrokerInstanceLock, Paths};
-use crate::policy::Wirings;
+use crate::policy::AccessTable;
 use crate::ratelimit::{KeyedLimiter, WindowLimiter};
 use crate::sessions::{DataPlane, SessionInfo};
 use crate::store::{ConnectionSpec, Store};
 use crate::types::{
-    Connection, ConnectionConfig, ConnectionKind, PairedAgent, SecretMeta, SecretValue, Settings,
-    Wiring, WiringEndpoint,
+    BrokerIdentity, Connection, ConnectionConfig, ConnectionKind, DirectEndpoint, SecretMeta,
+    SecretValue, Settings, ToolAccess,
 };
 use crate::Result;
 
@@ -58,11 +58,12 @@ pub struct Broker {
     pub config: BrokerConfig,
     pub paths: Paths,
     pub store: Arc<Store>,
-    pub wirings: Arc<Wirings>,
-    /// Per-wiring direct endpoints (stable DSN/URL issuance). Bounds and
-    /// teardown ride alongside the wiring table.
+    /// Per-connection agent access: the whole authorization model.
+    pub access: Arc<AccessTable>,
+    /// Per-connection direct endpoints (stable DSN/URL issuance). Bounds and
+    /// teardown ride alongside the access table.
     pub endpoints: Arc<crate::endpoints::EndpointRegistry>,
-    /// Live per-wiring endpoint listeners, keyed on endpoint id. Runtime only:
+    /// Live endpoint listeners, keyed on endpoint id. Runtime only:
     /// re-established from `endpoints` at daemon start, stopped on teardown.
     endpoint_listeners: Mutex<HashMap<Uuid, crate::endpoints::EndpointListenerHandle>>,
     /// Serializes configuration mutations that read-then-write shared state
@@ -72,7 +73,8 @@ pub struct Broker {
     /// Serializes clipboard-copy authorization checks so simultaneous clicks
     /// cannot open duplicate native prompts.
     copy_authorization_gate: tokio::sync::Mutex<()>,
-    pub pairing: Arc<PairingRegistry>,
+    /// The shared local identity ("this computer's key").
+    pub identity: Arc<IdentityStore>,
     pub executions: Executions,
     /// Runtime that owns broker background work. UI entry points can be
     /// called from threads without an entered Tokio context (notably
@@ -95,8 +97,9 @@ pub struct Broker {
     /// Live and recently finished MCP sign-in sessions (`mcp_auth` module).
     pub mcp_auth: crate::mcp_auth::McpAuthSessions,
     /// Recent agent connect-requests, so a retrying agent cannot spam the
-    /// activity log or the shell's attention. Never leaves memory.
-    connect_request_debounce: Mutex<std::collections::HashMap<(Uuid, String), Instant>>,
+    /// activity log or the shell's attention. Keyed on the self-reported
+    /// client label. Never leaves memory.
+    connect_request_debounce: Mutex<std::collections::HashMap<(String, String), Instant>>,
     pub(crate) token_limiter: KeyedLimiter,
     pub(crate) discovery_limiter: WindowLimiter,
     pub(crate) pairing_limiter: WindowLimiter,
@@ -133,20 +136,27 @@ impl Broker {
             events.clone(),
             integrity.clone(),
         )?);
-        let pairing = Arc::new(PairingRegistry::open(
-            paths.agents_file(),
+        let identity = Arc::new(IdentityStore::open(
+            paths.identity_file(),
+            paths.token_file(),
+            Some(&paths.agents_file()),
             config.token_ttl,
             integrity.clone(),
         )?);
         let endpoints = Arc::new(crate::endpoints::EndpointRegistry::open(
             paths.endpoints_file(),
             config.max_endpoints,
-            config.max_endpoints_per_client,
             integrity.clone(),
         )?);
-        let wirings = Arc::new(Wirings::open_with_legacy_rules(
-            paths.wirings_file(),
-            Some(&paths.rules_file()),
+        // The per-agent wirings collapse needs the connection list so
+        // never-wired connections migrate as disabled (the old default)
+        // rather than inheriting the new enabled-by-default.
+        let known_connections: Vec<Uuid> =
+            store.list_connections().into_iter().map(|c| c.id).collect();
+        let access = Arc::new(AccessTable::open_with_legacy_wirings(
+            paths.access_file(),
+            Some(&paths.wirings_file()),
+            &known_connections,
             integrity,
         )?);
         let executions = Executions::new(
@@ -188,12 +198,12 @@ impl Broker {
             config,
             paths,
             store,
-            wirings,
+            access,
             endpoints,
             endpoint_listeners: Mutex::new(HashMap::new()),
             config_gate: Mutex::new(()),
             copy_authorization_gate: tokio::sync::Mutex::new(()),
-            pairing,
+            identity,
             executions,
             task_runtime,
             audit,
@@ -453,12 +463,16 @@ impl Broker {
         };
         let mut dropped = 0;
         if target_changed {
-            dropped = self.wirings.remove_for_connection(id)?;
-            // A wiring granted for one destination must not silently cover
-            // another: its direct endpoints die with it.
+            // The enabled/disabled flag names the *tool* and survives a
+            // retarget (a disabled tool must not silently re-enable), but a
+            // curated MCP tool subset names the old upstream's tools and its
+            // direct endpoints grant standing access to the old destination:
+            // both die with the retarget.
+            let tools_cleared = self.access.set_allowed_tools(*id, None)?;
+            dropped = usize::from(tools_cleared);
             let endpoints = self.endpoints.remove_for_connection(id)?;
             self.teardown_endpoints(&endpoints);
-            if dropped > 0 || !endpoints.is_empty() {
+            if tools_cleared || !endpoints.is_empty() {
                 self.events.wirings_changed();
             }
             // A health result for the old destination says nothing about
@@ -481,10 +495,7 @@ impl Broker {
             "{}{}",
             conn.target(),
             if dropped > 0 {
-                format!(
-                    " · {dropped} wiring{} removed (target changed)",
-                    if dropped == 1 { "" } else { "s" }
-                )
+                " · tool selection reset (target changed)".to_string()
             } else {
                 String::new()
             }
@@ -492,7 +503,7 @@ impl Broker {
         .field("target", conn.target())
         .field("target_changed", target_changed)
         .field("capability_changed", capability_changed)
-        .field("wirings_removed", dropped);
+        .field("tool_selection_reset", dropped > 0);
         if let Some(confirmation) = confirmation {
             entry = entry.confirmation(confirmation);
         }
@@ -515,10 +526,10 @@ impl Broker {
         }
         let conn = self.store.delete_connection(id)?;
         self.health.forget(id);
-        let dropped = self.wirings.remove_for_connection(id)?;
+        let dropped = self.access.remove_for_connection(id)?;
         let endpoints = self.endpoints.remove_for_connection(id)?;
         self.teardown_endpoints(&endpoints);
-        if dropped > 0 || !endpoints.is_empty() {
+        if dropped || !endpoints.is_empty() {
             self.events.wirings_changed();
         }
         self.audit.append(
@@ -817,9 +828,9 @@ impl Broker {
     /// An agent asked for a service that is not configured (the sidecar's
     /// `multitool_connect` tool). This records the ask and pokes the shell
     /// so the user can add the tool — nothing is created or granted here,
-    /// and the same agent asking for the same service within a minute is
-    /// coalesced. Returns whether this call surfaced a fresh request.
-    pub fn agent_connect_request(&self, agent: &PairedAgent, service: &str) -> Result<bool> {
+    /// and the same client label asking for the same service within a minute
+    /// is coalesced. Returns whether this call surfaced a fresh request.
+    pub fn agent_connect_request(&self, client: &str, service: &str) -> Result<bool> {
         const DEBOUNCE: Duration = Duration::from_secs(60);
         let service = service.trim();
         if service.is_empty()
@@ -834,7 +845,7 @@ impl Broker {
             let mut recent = self.connect_request_debounce.lock().unwrap();
             let now = Instant::now();
             recent.retain(|_, at| now.duration_since(*at) < DEBOUNCE);
-            let key = (agent.id, service.to_ascii_lowercase());
+            let key = (client.to_string(), service.to_ascii_lowercase());
             if recent.contains_key(&key) {
                 return Ok(false);
             }
@@ -843,35 +854,36 @@ impl Broker {
         self.audit.append(
             AuditEntry::new(
                 AuditKind::ConnectRequested,
-                format!("{} asked to connect: {service}", agent.name),
+                format!("{client} asked to connect: {service}"),
             )
-            .agent(agent.name.clone())
-            .detail("A request only — add and wire the tool in Multitool to grant it")
+            .agent(client.to_string())
+            .detail("A request only — add the tool in Multitool to grant it")
             .field("service", service),
         );
-        self.events.connect_requested(&agent.name, service);
+        self.events.connect_requested(client, service);
         Ok(true)
     }
 
-    /* ---------------------------- wirings (UI) ----------------------------- */
+    /* ------------------------- agent access (UI) --------------------------- */
 
-    pub fn wirings(&self) -> Vec<Wiring> {
-        self.wirings.wirings()
+    /// Every recorded access entry, for the app's tool rows. Connections
+    /// with no entry are in the default state (enabled, all tools).
+    pub fn tool_access(&self) -> Vec<ToolAccess> {
+        self.access.entries()
     }
 
-    /// Every issued direct endpoint, for the app's wiring rows.
-    pub fn endpoints(&self) -> Vec<WiringEndpoint> {
+    /// Every issued direct endpoint, for the app's tool rows.
+    pub fn endpoints(&self) -> Vec<DirectEndpoint> {
         self.endpoints.list()
     }
 
-    /// Issue (or rotate) a direct endpoint for a wiring: mint the per-wiring
-    /// secret, bind its listener, and hand back the pasteable DSN. The secret
-    /// leaves the broker exactly once, here. Gated behind the native
-    /// confirmation because it grants standing access; the wiring must already
-    /// exist.
+    /// Issue (or rotate) a direct endpoint for a connection: mint the
+    /// endpoint secret, bind its listener, and hand back the pasteable DSN.
+    /// The secret leaves the broker exactly once, here. Gated behind the
+    /// native confirmation because it grants standing access; the
+    /// connection's agent access must be enabled.
     pub async fn ui_issue_endpoint(
         self: &Arc<Self>,
-        client_id: &Uuid,
         connection_id: &Uuid,
     ) -> Result<IssuedEndpointInfo> {
         let connection = self.store.connection_by_id(connection_id)?;
@@ -880,35 +892,27 @@ impl Broker {
             ConnectionKind::Pg | ConnectionKind::Ssh | ConnectionKind::Api => {}
             other => return Err(CoreError::EndpointUnsupportedKind(other.label())),
         }
-        if !self.wirings.is_wired(client_id, connection_id) {
+        if !self.access.allows(connection_id) {
             return Err(CoreError::EndpointRequiresWiring);
         }
-        let agent = self
-            .pairing
-            .get_by_id(client_id)
-            .ok_or(CoreError::EndpointRequiresWiring)?;
 
         // Confirm off the async runtime: the native sheet blocks its thread.
         let events = self.events.clone();
-        let description = format!(
-            "Issue a direct endpoint for “{}” → {}",
-            agent.name, connection.name
-        );
+        let description = format!("Issue a direct endpoint for {}", connection.name);
         let confirmation = tokio::task::spawn_blocking(move || events.confirm_action(&description))
             .await
             .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))?
             .ok_or(CoreError::NotConfirmed)?;
         self.store.note_user_presence();
 
-        // Mint under the gate; re-check the wiring didn't vanish while the
+        // Mint under the gate; re-check access didn't vanish while the
         // sheet was up.
         let issued = {
             let _gate = self.config_gate.lock().unwrap();
-            if !self.wirings.is_wired(client_id, connection_id) {
+            if !self.access.allows(connection_id) {
                 return Err(CoreError::EndpointRequiresWiring);
             }
-            self.endpoints
-                .issue(*client_id, &agent.name, *connection_id, connection.kind())?
+            self.endpoints.issue(*connection_id, connection.kind())?
         };
 
         // Bind the listener outside the gate (it awaits). A bind failure rolls
@@ -988,12 +992,8 @@ impl Broker {
         self.audit.append(
             AuditEntry::new(
                 AuditKind::Wired,
-                format!(
-                    "Direct endpoint issued: {} → {}",
-                    agent.name, connection.name
-                ),
+                format!("Direct endpoint issued: {}", connection.name),
             )
-            .agent(agent.name.clone())
             .connection(connection.name.clone())
             .confirmation(confirmation)
             .field("endpoint_id", issued.endpoint.id.to_string())
@@ -1011,12 +1011,17 @@ impl Broker {
             return Ok(false);
         };
         self.teardown_endpoints(std::slice::from_ref(&endpoint));
+        let connection = self
+            .store
+            .connection_by_id(&endpoint.connection_id)
+            .map(|c| c.name)
+            .unwrap_or_else(|_| "removed tool".to_string());
         self.audit.append(
             AuditEntry::new(
                 AuditKind::Unwired,
-                format!("Direct endpoint revoked: {}", endpoint.agent),
+                format!("Direct endpoint revoked: {connection}"),
             )
-            .agent(endpoint.agent.clone())
+            .connection(connection.clone())
             .field("endpoint_id", endpoint.id.to_string()),
         );
         self.events.wirings_changed();
@@ -1051,7 +1056,7 @@ impl Broker {
     /// stopping any prior listener for the same endpoint id.
     async fn bind_endpoint_listener(
         self: &Arc<Self>,
-        endpoint: &WiringEndpoint,
+        endpoint: &DirectEndpoint,
         connection: &Connection,
     ) -> std::io::Result<()> {
         let handle = match connection.kind() {
@@ -1089,12 +1094,12 @@ impl Broker {
         Ok(())
     }
 
-    /// Tear down endpoints whose wiring just went away. Removing the persisted
+    /// Tear down endpoints that just went away. Removing the persisted
     /// record already happened; this releases the runtime resources tied to it
-    /// (the per-wiring listener and its socket directory) and closes any live
+    /// (the listener and its socket directory) and closes any live
     /// sessions it was serving, so a revoked endpoint stops working at once —
     /// unlike a ticket, its access is standing and cannot be left to expire.
-    fn teardown_endpoints(&self, removed: &[WiringEndpoint]) {
+    fn teardown_endpoints(&self, removed: &[DirectEndpoint]) {
         for endpoint in removed {
             if let Some(handle) = self.endpoint_listeners.lock().unwrap().remove(&endpoint.id) {
                 handle.stop();
@@ -1109,70 +1114,46 @@ impl Broker {
         }
     }
 
-    /// Wire or unwire an agent from the app. Unwiring does not chase down
-    /// live transports — tickets are short-lived, and the next open is
-    /// refused.
-    pub fn ui_set_wiring(
-        &self,
-        client_id: &Uuid,
-        connection_id: &Uuid,
-        wired: bool,
-    ) -> Result<bool> {
+    /// Enable or disable agent access for a connection from the app.
+    /// Disabling does not chase down live ticket transports — tickets are
+    /// short-lived, and the next open is refused — but the connection's
+    /// direct-endpoint listeners re-check on every request and refuse at
+    /// once.
+    pub fn ui_set_tool_access(&self, connection_id: &Uuid, enabled: bool) -> Result<bool> {
         let _gate = self.config_gate.lock().unwrap();
-        let Some(agent) = self.pairing.get_by_id(client_id) else {
-            return Ok(false);
-        };
         let connection = self.store.connection_by_id(connection_id)?;
-        if wired {
-            let existing = self.wirings.is_wired(client_id, connection_id);
-            self.wirings.wire(*client_id, &agent.name, *connection_id)?;
-            if !existing {
-                self.audit.append(
-                    AuditEntry::new(
-                        AuditKind::Wired,
-                        format!("{} wired to {}", agent.name, connection.name),
-                    )
-                    .agent(agent.name.clone())
-                    .connection(connection.name.clone()),
-                );
-                self.events.wirings_changed();
-            }
-            Ok(true)
-        } else {
-            let removed = self.wirings.unwire(client_id, connection_id)?;
-            // The endpoint for this exact wiring dies with it.
-            let endpoint = self.endpoints.remove_for_wiring(client_id, connection_id)?;
-            self.teardown_endpoints(endpoint.as_slice());
-            if removed.is_some() {
-                self.audit.append(
-                    AuditEntry::new(
-                        AuditKind::Unwired,
-                        format!("{} unwired from {}", agent.name, connection.name),
-                    )
-                    .agent(agent.name.clone())
-                    .connection(connection.name.clone()),
-                );
-                self.events.wirings_changed();
-            } else if endpoint.is_some() {
-                self.events.wirings_changed();
-            }
-            Ok(removed.is_some())
+        let changed = self.access.set_enabled(*connection_id, enabled)?;
+        if changed {
+            self.audit.append(
+                AuditEntry::new(
+                    if enabled {
+                        AuditKind::Wired
+                    } else {
+                        AuditKind::Unwired
+                    },
+                    format!(
+                        "Agent access {} for {}",
+                        if enabled { "enabled" } else { "disabled" },
+                        connection.name
+                    ),
+                )
+                .connection(connection.name.clone()),
+            );
+            self.events.wirings_changed();
         }
+        Ok(changed)
     }
 
-    /// Curate which upstream MCP tools a wiring may call. `None` restores
-    /// the default (all tools); `Some` is enforced by the broker on every
-    /// `tools/call` and mirrored by the sidecar's tool listing.
-    pub fn ui_set_wiring_tools(
+    /// Curate which upstream MCP tools agents may call on a connection.
+    /// `None` restores the default (all tools); `Some` is enforced by the
+    /// broker on every `tools/call` and mirrored by the sidecar's tool
+    /// listing.
+    pub fn ui_set_allowed_tools(
         &self,
-        client_id: &Uuid,
         connection_id: &Uuid,
         tools: Option<Vec<String>>,
     ) -> Result<bool> {
         let _gate = self.config_gate.lock().unwrap();
-        let Some(agent) = self.pairing.get_by_id(client_id) else {
-            return Ok(false);
-        };
         let connection = self.store.connection_by_id(connection_id)?;
         let detail = match &tools {
             None => "all tools".to_string(),
@@ -1182,19 +1163,13 @@ impl Broker {
                 if list.len() == 1 { "" } else { "s" }
             ),
         };
-        let changed = self
-            .wirings
-            .set_allowed_tools(client_id, connection_id, tools)?;
+        let changed = self.access.set_allowed_tools(*connection_id, tools)?;
         if changed {
             self.audit.append(
                 AuditEntry::new(
                     AuditKind::Wired,
-                    format!(
-                        "Tool selection for {} → {}: {detail}",
-                        agent.name, connection.name
-                    ),
+                    format!("Tool selection for {}: {detail}", connection.name),
                 )
-                .agent(agent.name.clone())
                 .connection(connection.name.clone()),
             );
             self.events.wirings_changed();
@@ -1221,140 +1196,36 @@ impl Broker {
             .map_err(CoreError::InvalidConnectionConfig)
     }
 
-    /// Schedule the first agent's optional wire-to-everything grant without
-    /// holding open the pairing response. The native confirmation is a
-    /// separate UI step and may remain open indefinitely.
-    pub(crate) fn schedule_first_agent_wirings(self: &Arc<Self>, agent: PairedAgent) {
-        let broker = self.clone();
-        self.task_runtime.spawn(async move {
-            broker.bootstrap_first_agent_wirings(&agent).await;
-        });
+    /* ------------------------- shared identity (UI) ------------------------ */
+
+    /// The persisted identity record (hash, timestamps, migration aliases —
+    /// never the plaintext key).
+    pub fn identity_info(&self) -> BrokerIdentity {
+        self.identity.info()
     }
 
-    /// Offer the very first agent a wire-to-everything grant so a fresh
-    /// install can work end-to-end without a wiring trip through the app.
-    /// Because that grant is *standing* access to every existing tool, it is
-    /// gated behind the shell's native confirmation. Declining (or a shell
-    /// with no confirmation gate) leaves the agent unwired, exactly like any
-    /// later agent.
-    pub(crate) async fn bootstrap_first_agent_wirings(&self, agent: &PairedAgent) {
-        let connection_count = {
-            let _gate = self.config_gate.lock().unwrap();
-            self.store.list_connections().len()
-        };
-        if connection_count == 0 {
-            return;
-        }
-
-        // Confirm off the async runtime: the native sheet blocks its thread
-        // until the user answers, while pairing has already returned.
-        let events = self.events.clone();
-        let agent_name = agent.name.clone();
-        let confirmation = tokio::task::spawn_blocking(move || {
-            events.confirm_action(&format!(
-                "Wire new agent “{agent_name}” to all {connection_count} tool{}",
-                if connection_count == 1 { "" } else { "s" }
-            ))
-        })
-        .await
-        .ok()
-        .flatten();
-        let Some(confirmation) = confirmation else {
-            tracing::info!(
-                "first-agent auto-wire declined for {}; agent left unwired",
-                agent.name
-            );
-            return;
-        };
-
-        // Pairing and confirmation are deliberately decoupled. The user may
-        // disconnect the agent while the sheet is open; never recreate an
-        // orphaned wiring after that revocation.
-        if self.pairing.get_by_id(&agent.id).is_none() {
-            tracing::info!(
-                "first-agent auto-wire skipped for {}; agent was disconnected",
-                agent.name
-            );
-            return;
-        }
-        self.store.note_user_presence();
-
+    /// Rotate this computer's key: mint a fresh one, rewrite the token
+    /// file, clear the migration aliases, and close every outstanding
+    /// data-plane capability. This is the "disconnect everything" action —
+    /// agents that read the token file reconnect on their own; anything
+    /// holding a pasted copy stops working. Gated behind the native
+    /// confirmation because it is destructive and touches the credential.
+    pub fn ui_rotate_key(&self) -> Result<()> {
+        let confirmation =
+            self.confirm_action("Rotate this computer's key and disconnect all agents")?;
         let _gate = self.config_gate.lock().unwrap();
-        // Re-snapshot under the gate: connections may have changed while the
-        // confirmation sheet was up.
-        let connection_ids: Vec<Uuid> = self
-            .store
-            .list_connections()
-            .into_iter()
-            .map(|c| c.id)
-            .collect();
-        if connection_ids.is_empty() {
-            return;
-        }
-        match self
-            .wirings
-            .wire_all(agent.id, &agent.name, &connection_ids)
-        {
-            Ok(added) if !added.is_empty() => {
-                self.audit.append(
-                    AuditEntry::new(
-                        AuditKind::Wired,
-                        format!(
-                            "First agent {} wired to all {} tool{}",
-                            agent.name,
-                            added.len(),
-                            if added.len() == 1 { "" } else { "s" }
-                        ),
-                    )
-                    .agent(agent.name.clone())
-                    .confirmation(confirmation)
-                    .field("wirings_added", added.len()),
-                );
-                self.events.wirings_changed();
-            }
-            Ok(_) => {}
-            Err(error) => {
-                tracing::warn!("could not bootstrap first-agent wirings: {error}");
-            }
-        }
-    }
-
-    /* ------------------------- registered agents (UI) ---------------------- */
-
-    pub fn paired_agents(&self) -> Vec<PairedAgent> {
-        self.pairing.list()
-    }
-
-    /// Disconnect invalidates the token, the agent's wirings, and every
-    /// issued data-plane capability immediately.
-    pub fn ui_revoke_agent(&self, client_id: &Uuid) -> Result<bool> {
-        let _gate = self.config_gate.lock().unwrap();
-        let client = self.pairing.get_by_id(client_id);
-        let Some(client) = client else {
-            return Ok(false);
-        };
-        let name = client.name.clone();
-        let removed = self.pairing.revoke(client_id)?;
-        if removed {
-            let dropped = self.wirings.remove_for_client(client_id)?;
-            let endpoints = self.endpoints.remove_for_client(client_id)?;
-            self.teardown_endpoints(&endpoints);
-            if dropped > 0 || !endpoints.is_empty() {
-                self.events.wirings_changed();
-            }
-            let sessions_closed = self.data_plane.close_agent(&name);
-            self.audit.append(
-                AuditEntry::new(
-                    AuditKind::TokenRevoked,
-                    format!("Agent disconnected: {name}"),
-                )
-                .agent(name)
-                .field("sessions_closed", sessions_closed)
-                .field("wirings_removed", dropped),
-            );
-            self.events.agents_changed();
-        }
-        Ok(removed)
+        self.identity.rotate()?;
+        let sessions_closed = self.data_plane.close_all();
+        self.audit.append(
+            AuditEntry::new(
+                AuditKind::TokenRevoked,
+                "Key rotated; all agents disconnected".to_string(),
+            )
+            .confirmation(confirmation)
+            .field("sessions_closed", sessions_closed),
+        );
+        self.events.agents_changed();
+        Ok(())
     }
 
     /* --------------------------- live sessions ---------------------------- */

@@ -409,69 +409,72 @@ impl Connection {
     }
 }
 
-/// A registered agent record. Persisted in `agents.json`;
-/// the pair token itself is stored only as a SHA-256 hash.
+/// The single local broker identity — "this computer's key". Every local
+/// agent presents the same bearer token; the 0600 socket already excludes
+/// other OS users, so the key is defense against *accidental* socket use and
+/// the audit handle, not inter-agent isolation (same-user processes were
+/// never securely distinguishable). Persisted in `identity.json`, sealed;
+/// the key itself is stored only as a SHA-256 hash — the plaintext lives in
+/// the broker's token file (`~/.aka/token`, 0600), where agents read it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PairedAgent {
-    /// Stable authorization principal. Display names and bearer tokens may
-    /// change, but wirings always bind to this id.
-    #[serde(default)]
+pub struct BrokerIdentity {
+    /// Stable principal id (what pairing used to call the client id).
     pub id: Uuid,
-    /// Self-asserted at registration; a label, not an authenticated identity.
-    pub name: String,
-    /// SHA-256 of the 256-bit bearer token, hex-encoded.
+    /// SHA-256 of the 256-bit shared key, hex-encoded.
     pub token_hash: String,
-    /// First characters of the token for the UI's masked preview.
-    pub token_preview: String,
-    pub paired_at: DateTime<Utc>,
-    /// Refreshed on use; tokens expire 30 days after this.
+    /// Legacy per-agent token hashes accepted as aliases of the shared key,
+    /// so agents paired before the single-identity collapse keep working
+    /// until the first rotation clears them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alias_hashes: Vec<String>,
+    pub minted_at: DateTime<Utc>,
+    /// Refreshed on use; the key expires 30 days after this (re-minted at
+    /// the next broker start, or refreshed by a compat `/v1/pair`).
     pub last_used: DateTime<Utc>,
 }
 
-/// A persistent agent → connection wiring. A wired agent may use the
-/// connection without prompting; an unwired agent is refused.
+/// Per-connection agent access — the whole authorization model. A connection
+/// with no entry is **enabled** (adding a tool in the app is already a
+/// deliberate user action); an entry records the non-default states: agents
+/// switched off, or an MCP tool subset curated. Applies to every local agent
+/// at once — there is one shared identity.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Wiring {
-    pub id: Uuid,
-    /// Stable paired-client principal.
-    pub client_id: Uuid,
-    /// Display-name snapshot for audit and UI copy; never authorization.
-    pub agent: String,
+pub struct ToolAccess {
     /// The connection's stable id, never its renamable name.
     pub connection_id: Uuid,
-    /// Curated subset of the upstream MCP tools this wiring may call;
-    /// `None` means every tool. Enforced broker-side on `tools/call` and
-    /// mirrored by the sidecar's tool listing.
+    /// Whether agents may use the connection. A disabled call is refused
+    /// with `403 denied_by_policy`.
+    pub enabled: bool,
+    /// Curated subset of the upstream MCP tools agents may call; `None`
+    /// means every tool. Enforced broker-side on `tools/call` and mirrored
+    /// by the sidecar's tool listing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_tools: Option<Vec<String>>,
-    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
-/// A stable, per-wiring **direct endpoint**: a listener + secret an agent can
-/// keep in its own config (a DSN/URL) instead of round-tripping the control
-/// plane for a short-lived ticket on every session.
+/// A stable, per-connection **direct endpoint**: a listener + secret an agent
+/// can keep in its own config (a DSN/URL) instead of round-tripping the
+/// control plane for a short-lived ticket on every session.
 ///
-/// It is an artifact of a *wiring*, not a connection, so it inherits the
-/// wiring's grain: it identifies exactly one `(client_id, connection_id)` and
-/// dies with that wiring. Because it grants standing access, it is issued only
-/// by an explicit user action, carries a per-wiring secret the caller must
-/// present (so the listener can attribute the session and re-check the wiring
-/// on every connection, exactly as the control plane does), and persists that
-/// secret only as a SHA-256 hash — the plaintext is shown once at issue.
+/// Because it grants standing access, it is issued only by an explicit user
+/// action and carries its own secret the caller must present. The secret is
+/// deliberately **not** the shared broker key: an endpoint listens on a
+/// loopback port or socket that outlives any one setup, and its secret can be
+/// pasted into one tool's config and revoked alone without rotating the key
+/// every agent shares. It is persisted only as a SHA-256 hash — the plaintext
+/// is shown once at issue. The listener re-checks the connection's agent
+/// access on every request/connection, exactly as the control plane does.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WiringEndpoint {
+pub struct DirectEndpoint {
     pub id: Uuid,
-    /// Stable paired-client principal this endpoint belongs to.
-    pub client_id: Uuid,
-    /// Display-name snapshot for audit and UI copy; never authorization.
-    pub agent: String,
     /// The connection's stable id, never its renamable name.
     pub connection_id: Uuid,
     /// The connection kind at issue time: fixes the listener/DSN shape without
     /// a store lookup and lets a stale endpoint be recognized if the
     /// connection was replaced by a different kind.
     pub kind: ConnectionKind,
-    /// SHA-256 of the per-wiring secret, hex-encoded. The plaintext leaves the
+    /// SHA-256 of the endpoint secret, hex-encoded. The plaintext leaves the
     /// broker exactly once, in the issue response.
     pub secret_hash: String,
     /// The loopback port an HTTP reverse-proxy endpoint is pinned to, so a
@@ -772,19 +775,16 @@ mod tests {
     }
 
     #[test]
-    fn paired_agent_ignores_legacy_identity_records() {
-        let now = chrono::Utc::now().to_rfc3339();
-        let agent: PairedAgent = serde_json::from_str(&format!(
-            r#"{{
-              "name": "claude-code",
-              "token_hash": "hash",
-              "token_preview": "aka_legacy",
-              "identity": {{"kind": "dev_unverified", "uid": 501}},
-              "paired_at": "{now}",
-              "last_used": "{now}"
-            }}"#
-        ))
+    fn tool_access_defaults_cover_older_records() {
+        let entry: ToolAccess = serde_json::from_str(
+            r#"{
+              "connection_id": "00000000-0000-0000-0000-000000000001",
+              "enabled": false,
+              "updated_at": "2026-01-01T00:00:00Z"
+            }"#,
+        )
         .unwrap();
-        assert_eq!(agent.name, "claude-code");
+        assert!(!entry.enabled);
+        assert_eq!(entry.allowed_tools, None);
     }
 }

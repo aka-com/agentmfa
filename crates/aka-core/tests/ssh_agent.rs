@@ -252,20 +252,11 @@ impl Harness {
         )
         .await;
         assert_eq!(status, 200);
-        let client = self.broker.pairing.get("claude-code").unwrap();
-        let conn = self.broker.store.connection_by_name("prod-ssh").unwrap();
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !self.broker.wirings.is_wired(&client.id, &conn.id) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("first-agent wiring was not applied asynchronously");
         body["token"].as_str().unwrap().to_string()
     }
 
-    /// POST /v1/ssh/open (the first paired agent is auto-wired); returns
-    /// the auth_sock path and the full open-response body (its
+    /// POST /v1/ssh/open (connections are enabled for agents by default);
+    /// returns the auth_sock path and the full open-response body (its
     /// `host_key_fingerprint` is null while the connection is unpinned).
     async fn open_ssh(&mut self, token: &str) -> (String, Value) {
         let auth = format!("Bearer {token}");
@@ -284,15 +275,11 @@ impl Harness {
         (body["auth_sock"].as_str().unwrap().to_string(), body)
     }
 
-    /// Issue an SSH direct endpoint for the first (auto-wired) agent; its
-    /// `dsn` is the stable `SSH_AUTH_SOCK` path.
+    /// Issue an SSH direct endpoint; its `dsn` is the stable
+    /// `SSH_AUTH_SOCK` path.
     async fn issue_ssh_endpoint(&self) -> aka_core::broker::IssuedEndpointInfo {
-        let client = self.broker.pairing.get("claude-code").unwrap();
         let conn = self.broker.store.connection_by_name("prod-ssh").unwrap();
-        self.broker
-            .ui_issue_endpoint(&client.id, &conn.id)
-            .await
-            .unwrap()
+        self.broker.ui_issue_endpoint(&conn.id).await.unwrap()
     }
 }
 
@@ -753,22 +740,43 @@ async fn direct_endpoint_serves_the_ssh_agent_protocol() {
 }
 
 #[tokio::test]
-async fn unwiring_tears_down_the_ssh_endpoint() {
+async fn disabling_access_refuses_the_ssh_endpoint_and_revoke_tears_it_down() {
     let mut h = harness(BrokerConfig::default()).await;
     let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
     let host_key = add_ssh_connection(&h.broker, &key, "deploy");
     h.pair().await;
     let info = h.issue_ssh_endpoint().await;
 
-    // Works while wired: a bound stream signs.
+    // Works while enabled: a bound stream signs.
     let mut s = bound_stream(&info.dsn, &host_key).await;
     assert_lists_identity(&mut s, &key).await;
 
-    // Unwiring stops the listener, closes the live session, and removes the
-    // socket, so a fresh connection no longer reaches it.
-    let client = h.broker.pairing.get("claude-code").unwrap();
+    // Disabling agent access keeps the endpoint issued but refuses fresh
+    // connections at the access re-check (the listener shuts them down
+    // before serving the agent protocol).
     let conn = h.broker.store.connection_by_name("prod-ssh").unwrap();
-    h.broker.ui_set_wiring(&client.id, &conn.id, false).unwrap();
+    h.broker.ui_set_tool_access(&conn.id, false).unwrap();
+    assert_eq!(h.broker.endpoints().len(), 1);
+    let mut refused = UnixStream::connect(&info.dsn)
+        .await
+        .expect("the socket persists while disabled");
+    let mut byte = [0u8; 1];
+    use tokio::io::AsyncReadExt as _;
+    let read = tokio::time::timeout(Duration::from_secs(2), refused.read(&mut byte))
+        .await
+        .expect("the refused connection should close promptly");
+    assert!(
+        matches!(read, Ok(0) | Err(_)),
+        "a disabled tool must not serve the agent protocol"
+    );
+
+    // Re-enabling restores service without re-issuing.
+    h.broker.ui_set_tool_access(&conn.id, true).unwrap();
+    let mut s = bound_stream(&info.dsn, &host_key).await;
+    assert_lists_identity(&mut s, &key).await;
+
+    // Revoking the endpoint stops the listener and removes the socket.
+    h.broker.ui_revoke_endpoint(&info.endpoint_id).unwrap();
     assert!(h.broker.endpoints().is_empty());
     tokio::time::timeout(Duration::from_secs(5), async {
         while !h.broker.sessions().is_empty() {

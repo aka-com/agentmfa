@@ -45,7 +45,7 @@ use crate::endpoints::EndpointListenerHandle;
 use crate::events::BrokerEvents;
 use crate::sessions::{RedeemError, SessionHandle};
 use crate::store::Store;
-use crate::types::{Connection, ConnectionConfig, ConnectionKind, PgSslMode, WiringEndpoint};
+use crate::types::{Connection, ConnectionConfig, ConnectionKind, DirectEndpoint, PgSslMode};
 
 /* ---------------------------- wire constants ------------------------------ */
 
@@ -302,14 +302,14 @@ pub fn endpoint_dsn(dir: &std::path::Path, user: &str, dbname: &str) -> String {
     )
 }
 
-/// Bind a per-wiring Postgres endpoint: a private Unix-domain listener at
+/// Bind a direct Postgres endpoint: a private Unix-domain listener at
 /// `<endpoint-dir>/.s.PGSQL.5432` that an unmodified `psql`/driver reaches
-/// with `host=<endpoint-dir>`. Attribution is the per-wiring secret presented
+/// with `host=<endpoint-dir>`. Attribution is the endpoint secret presented
 /// as the password; filesystem permissions keep other users out. Returns the
 /// running listener handle for the broker to hold and later stop.
 pub async fn bind_endpoint(
     broker: Arc<Broker>,
-    endpoint: &WiringEndpoint,
+    endpoint: &DirectEndpoint,
 ) -> io::Result<EndpointListenerHandle> {
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -406,13 +406,9 @@ async fn handle_endpoint_conn(
         return Ok(());
     };
 
-    // Re-check the wiring at connect time: an unwired agent must be refused
+    // Re-check access at connect time: a disabled tool must be refused
     // even if a stale listener briefly outlived its teardown.
-    if !state
-        .broker
-        .wirings
-        .is_wired(&endpoint.client_id, &endpoint.connection_id)
-    {
+    if !state.broker.access.allows(&endpoint.connection_id) {
         client
             .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
             .await?;
@@ -473,7 +469,7 @@ async fn handle_endpoint_conn(
     // Reserve the live-session slot (global backstop) before committing the
     // downstream handshake, so exhaustion is a clean pre-ReadyForQuery error.
     let session = match state.broker.data_plane.start_endpoint_session(
-        &endpoint.agent,
+        "endpoint",
         &connection,
         endpoint_id,
         ConnectionKind::Pg,

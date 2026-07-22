@@ -1,0 +1,524 @@
+//! The shared broker identity and its key.
+//!
+//! One 256-bit bearer key covers every local agent — "this computer's key".
+//! The plaintext lives in the broker's token file (`~/.aka/token`, 0600)
+//! where agents read it themselves; `identity.json` (sealed) stores only the
+//! SHA-256 hash. `POST /v1/pair` remains as a compat shim that hands the
+//! same key back and records the caller's name as an activity label.
+//!
+//! Rotation replaces per-agent revocation: a rotated key answers
+//! `401 token_superseded` naming the token file, the same recovery path
+//! agents already follow. Token hashes from the per-agent era are carried as
+//! aliases until the first rotation so running agents don't break mid-session.
+
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use chrono::Utc;
+use sha2::{Digest, Sha256};
+
+use crate::integrity::StateIntegrity;
+use crate::types::BrokerIdentity;
+use crate::wire::ErrorReason;
+use crate::Result;
+
+/// Why a presented token was rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TokenError {
+    /// Unknown.
+    Invalid,
+    /// Known but past its TTL.
+    Expired,
+    /// The key was rotated. Distinct from `Invalid` so the holder re-reads
+    /// the token file instead of giving up (or looping through `/v1/pair`).
+    Superseded,
+}
+
+impl TokenError {
+    pub fn reason(&self) -> ErrorReason {
+        match self {
+            TokenError::Invalid => ErrorReason::InvalidToken,
+            TokenError::Expired => ErrorReason::TokenExpired,
+            TokenError::Superseded => ErrorReason::TokenSuperseded,
+        }
+    }
+}
+
+/// A successful verification. `via_alias` marks a legacy per-agent token
+/// still riding the migration grace period, so `/v1/whoami` can steer its
+/// holder to the shared token file.
+#[derive(Debug, Clone)]
+pub struct VerifiedToken {
+    pub client_id: uuid::Uuid,
+    pub via_alias: bool,
+}
+
+struct State {
+    identity: BrokerIdentity,
+    /// The plaintext key. Held in memory so `/v1/pair` and the UI can hand
+    /// it out; on disk it exists only in the 0600 token file.
+    token: String,
+    /// The previous primary hash after a rotation, kept as an in-memory
+    /// hint so a stale holder gets `token_superseded`, not `invalid_token`.
+    rotated_out: Option<String>,
+}
+
+pub struct IdentityStore {
+    path: PathBuf,
+    token_file: PathBuf,
+    ttl: Duration,
+    /// Minimum `last_used` advance before a refresh is written to disk;
+    /// refreshes are coalesced so the hot path costs no write.
+    refresh_interval: chrono::Duration,
+    integrity: Arc<StateIntegrity>,
+    state: Mutex<State>,
+}
+
+fn hash_token(token: &str) -> String {
+    let digest = Sha256::digest(token.as_bytes());
+    hex(&digest)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// 256-bit random bearer key: `aka_` + 64 hex chars.
+fn mint_token() -> String {
+    let mut buf = [0u8; 32];
+    getrandom::fill(&mut buf).expect("os rng");
+    format!("aka_{}", hex(&buf))
+}
+
+/// The shape of the per-agent-era `agents.json`, read once to carry its
+/// token hashes across as aliases.
+#[derive(serde::Deserialize)]
+struct LegacyAgent {
+    token_hash: String,
+}
+
+impl IdentityStore {
+    /// Open (or establish) the identity. `identity.json` is sealed: a
+    /// rewrite must not go unnoticed. On first open after the per-agent era,
+    /// hashes from a legacy `agents.json` become aliases of the fresh key.
+    ///
+    /// The plaintext is reconciled with the token file: a matching file
+    /// yields the known key; a missing or foreign file forces a re-mint
+    /// (demoting the old hash to an alias so in-flight holders keep working)
+    /// because the broker itself only stores the hash.
+    pub fn open(
+        path: PathBuf,
+        token_file: PathBuf,
+        legacy_agents_path: Option<&std::path::Path>,
+        ttl: Duration,
+        integrity: Arc<StateIntegrity>,
+    ) -> Result<Self> {
+        let refresh = std::cmp::min(ttl / 10, Duration::from_secs(3600));
+        let refresh_interval =
+            chrono::Duration::from_std(refresh).unwrap_or_else(|_| chrono::Duration::seconds(3600));
+
+        let existing: Option<BrokerIdentity> = integrity
+            .read_verified(&path)?
+            .map(|bytes| serde_json::from_slice(&bytes))
+            .transpose()?;
+
+        let store = Self {
+            path,
+            token_file,
+            ttl,
+            refresh_interval,
+            integrity,
+            state: Mutex::new(State {
+                identity: BrokerIdentity {
+                    id: uuid::Uuid::nil(),
+                    token_hash: String::new(),
+                    alias_hashes: Vec::new(),
+                    minted_at: Utc::now(),
+                    last_used: Utc::now(),
+                },
+                token: String::new(),
+                rotated_out: None,
+            }),
+        };
+
+        match existing {
+            Some(identity) => {
+                let on_disk = std::fs::read_to_string(&store.token_file)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                match on_disk {
+                    Some(token) if hash_token(&token) == identity.token_hash => {
+                        let mut state = store.state.lock().unwrap();
+                        state.identity = identity;
+                        state.token = token;
+                    }
+                    _ => {
+                        // The plaintext is unrecoverable (file lost, replaced,
+                        // or foreign): re-mint. The old hash rides along as an
+                        // alias so agents holding the old key keep working
+                        // until the user rotates deliberately.
+                        tracing::warn!(
+                            "token file {} missing or stale; minting a fresh key",
+                            store.token_file.display()
+                        );
+                        let mut aliases = identity.alias_hashes.clone();
+                        if !identity.token_hash.is_empty() {
+                            aliases.push(identity.token_hash.clone());
+                        }
+                        let token = mint_token();
+                        let next = BrokerIdentity {
+                            id: identity.id,
+                            token_hash: hash_token(&token),
+                            alias_hashes: aliases,
+                            minted_at: Utc::now(),
+                            last_used: Utc::now(),
+                        };
+                        store.persist_and_write_file(&next, &token)?;
+                        let mut state = store.state.lock().unwrap();
+                        state.identity = next;
+                        state.token = token;
+                    }
+                }
+            }
+            None => {
+                // First open. Absorb the per-agent era's token hashes as
+                // aliases (grace period until the first rotation).
+                let alias_hashes = legacy_agents_path
+                    .and_then(|p| store.integrity.read_verified(p).ok().flatten())
+                    .and_then(|bytes| serde_json::from_slice::<Vec<LegacyAgent>>(&bytes).ok())
+                    .map(|agents| agents.into_iter().map(|a| a.token_hash).collect())
+                    .unwrap_or_default();
+                let token = mint_token();
+                let identity = BrokerIdentity {
+                    id: uuid::Uuid::new_v4(),
+                    token_hash: hash_token(&token),
+                    alias_hashes,
+                    minted_at: Utc::now(),
+                    last_used: Utc::now(),
+                };
+                store.persist_and_write_file(&identity, &token)?;
+                let mut state = store.state.lock().unwrap();
+                state.identity = identity;
+                state.token = token;
+            }
+        }
+        Ok(store)
+    }
+
+    fn persist(&self, identity: &BrokerIdentity) -> Result<()> {
+        self.integrity
+            .write(&self.path, &serde_json::to_vec_pretty(identity)?)?;
+        Ok(())
+    }
+
+    fn persist_and_write_file(&self, identity: &BrokerIdentity, token: &str) -> Result<()> {
+        self.persist(identity)?;
+        crate::paths::write_private_atomic(&self.token_file, token.as_bytes())?;
+        Ok(())
+    }
+
+    /// The stable principal id (what pairing used to call the client id).
+    pub fn client_id(&self) -> uuid::Uuid {
+        self.state.lock().unwrap().identity.id
+    }
+
+    /// The plaintext key, for `/v1/pair` and the UI's copy affordance.
+    pub fn token(&self) -> String {
+        self.state.lock().unwrap().token.clone()
+    }
+
+    /// A snapshot of the persisted record (hash, timestamps, aliases).
+    pub fn info(&self) -> BrokerIdentity {
+        self.state.lock().unwrap().identity.clone()
+    }
+
+    /// Verify a presented bearer token against the key (or a legacy alias).
+    /// Success refreshes the sliding TTL, coalesced to at most one disk
+    /// write per interval.
+    pub fn verify(&self, token: &str) -> std::result::Result<VerifiedToken, TokenError> {
+        let hash = hash_token(token);
+        let mut state = self.state.lock().unwrap();
+        let via_alias = if state.identity.token_hash == hash {
+            false
+        } else if state.identity.alias_hashes.contains(&hash) {
+            true
+        } else if state.rotated_out.as_deref() == Some(hash.as_str()) {
+            return Err(TokenError::Superseded);
+        } else {
+            return Err(TokenError::Invalid);
+        };
+        let now = Utc::now();
+        let age = now.signed_duration_since(state.identity.last_used);
+        if age.num_seconds() > self.ttl.as_secs() as i64 {
+            return Err(TokenError::Expired);
+        }
+        let verified = VerifiedToken {
+            client_id: state.identity.id,
+            via_alias,
+        };
+        if age < self.refresh_interval {
+            return Ok(verified);
+        }
+        state.identity.last_used = now;
+        // last_used is best-effort persisted; failure to write must not fail
+        // the call.
+        if let Err(e) = self.persist(&state.identity) {
+            tracing::warn!("could not persist key refresh: {e}");
+        }
+        Ok(verified)
+    }
+
+    /// A compat `/v1/pair` counts as use: refresh the sliding TTL so an
+    /// expired key recovers through the documented pair path instead of
+    /// dead-ending (pair would otherwise return a key that still 401s).
+    pub fn touch(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.identity.last_used = Utc::now();
+        if let Err(e) = self.persist(&state.identity) {
+            tracing::warn!("could not persist key refresh: {e}");
+        }
+    }
+
+    /// Rotate the key: mint a fresh one, clear the migration aliases, and
+    /// rewrite the token file. The old key answers `token_superseded` so
+    /// holders re-read the file. The caller is responsible for closing live
+    /// sessions — rotation is the "disconnect everything" action.
+    pub fn rotate(&self) -> Result<String> {
+        let mut state = self.state.lock().unwrap();
+        let token = mint_token();
+        let next = BrokerIdentity {
+            id: state.identity.id,
+            token_hash: hash_token(&token),
+            alias_hashes: Vec::new(),
+            minted_at: Utc::now(),
+            last_used: Utc::now(),
+        };
+        self.persist_and_write_file(&next, &token)?;
+        state.rotated_out = Some(state.identity.token_hash.clone());
+        state.identity = next;
+        state.token = token.clone();
+        Ok(token)
+    }
+}
+
+/// Client labels are self-asserted; keep them printable and bounded so they
+/// render safely in dialogs and logs. (Also the compat pair's name rule.)
+pub fn validate_agent_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn integrity() -> Arc<StateIntegrity> {
+        Arc::new(
+            futures::executor::block_on(StateIntegrity::open(&crate::vault::MemoryVault::new()))
+                .unwrap(),
+        )
+    }
+
+    fn store(ttl: Duration) -> (IdentityStore, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let s = IdentityStore::open(
+            dir.path().join("identity.json"),
+            dir.path().join("token"),
+            None,
+            ttl,
+            integrity(),
+        )
+        .unwrap();
+        (s, dir)
+    }
+
+    #[test]
+    fn open_mints_and_writes_the_token_file() {
+        let (s, dir) = store(Duration::from_secs(3600));
+        let token = s.token();
+        assert!(token.starts_with("aka_"));
+        assert_eq!(token.len(), 4 + 64);
+        let on_disk = std::fs::read_to_string(dir.path().join("token")).unwrap();
+        assert_eq!(on_disk, token);
+        // 0600 on the plaintext.
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(dir.path().join("token"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+        // The sealed record holds only the hash.
+        let sealed = std::fs::read_to_string(dir.path().join("identity.json")).unwrap();
+        assert!(!sealed.contains(&token));
+        assert!(sealed.contains(&hash_token(&token)));
+    }
+
+    #[test]
+    fn verify_accepts_the_key_and_rejects_others() {
+        let (s, _dir) = store(Duration::from_secs(3600));
+        let token = s.token();
+        let verified = s.verify(&token).unwrap();
+        assert!(!verified.via_alias);
+        assert_eq!(verified.client_id, s.client_id());
+        assert_eq!(s.verify("aka_bogus").unwrap_err(), TokenError::Invalid);
+    }
+
+    #[test]
+    fn reopen_reuses_the_token_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let integrity = integrity();
+        let token = {
+            let s = IdentityStore::open(
+                dir.path().join("identity.json"),
+                dir.path().join("token"),
+                None,
+                Duration::from_secs(3600),
+                integrity.clone(),
+            )
+            .unwrap();
+            s.token()
+        };
+        let s = IdentityStore::open(
+            dir.path().join("identity.json"),
+            dir.path().join("token"),
+            None,
+            Duration::from_secs(3600),
+            integrity,
+        )
+        .unwrap();
+        assert_eq!(s.token(), token, "a matching file keeps the same key");
+        assert!(s.verify(&token).is_ok());
+    }
+
+    #[test]
+    fn lost_token_file_reminting_keeps_the_old_key_as_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let integrity = integrity();
+        let old = {
+            let s = IdentityStore::open(
+                dir.path().join("identity.json"),
+                dir.path().join("token"),
+                None,
+                Duration::from_secs(3600),
+                integrity.clone(),
+            )
+            .unwrap();
+            s.token()
+        };
+        std::fs::remove_file(dir.path().join("token")).unwrap();
+        let s = IdentityStore::open(
+            dir.path().join("identity.json"),
+            dir.path().join("token"),
+            None,
+            Duration::from_secs(3600),
+            integrity,
+        )
+        .unwrap();
+        assert_ne!(s.token(), old);
+        let verified = s.verify(&old).expect("old key stays valid as an alias");
+        assert!(verified.via_alias);
+        assert!(!s.verify(&s.token()).unwrap().via_alias);
+    }
+
+    #[test]
+    fn rotation_supersedes_and_clears_aliases() {
+        let (s, dir) = store(Duration::from_secs(3600));
+        let old = s.token();
+        let new = s.rotate().unwrap();
+        assert_ne!(old, new);
+        assert_eq!(s.verify(&old).unwrap_err(), TokenError::Superseded);
+        assert!(s.verify(&new).is_ok());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("token")).unwrap(),
+            new
+        );
+        assert!(s.info().alias_hashes.is_empty());
+    }
+
+    #[test]
+    fn legacy_agent_hashes_become_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        let integrity = integrity();
+        let legacy_token = "aka_legacy_token";
+        let legacy = serde_json::json!([{
+            "id": uuid::Uuid::new_v4(),
+            "name": "claude-code",
+            "token_hash": hash_token(legacy_token),
+            "token_preview": "aka_legacy_",
+            "paired_at": Utc::now(),
+            "last_used": Utc::now(),
+        }]);
+        let agents_path = dir.path().join("agents.json");
+        integrity
+            .write(&agents_path, &serde_json::to_vec_pretty(&legacy).unwrap())
+            .unwrap();
+
+        let s = IdentityStore::open(
+            dir.path().join("identity.json"),
+            dir.path().join("token"),
+            Some(&agents_path),
+            Duration::from_secs(3600),
+            integrity,
+        )
+        .unwrap();
+        let verified = s.verify(legacy_token).expect("legacy token is an alias");
+        assert!(verified.via_alias);
+        // Rotation ends the grace period.
+        s.rotate().unwrap();
+        assert_eq!(s.verify(legacy_token).unwrap_err(), TokenError::Invalid);
+    }
+
+    #[test]
+    fn expired_key_recovers_via_touch() {
+        let (s, _dir) = store(Duration::from_secs(0));
+        let token = s.token();
+        std::thread::sleep(Duration::from_millis(1100));
+        assert_eq!(s.verify(&token).unwrap_err(), TokenError::Expired);
+        s.touch();
+        assert!(s.verify(&token).is_ok());
+    }
+
+    #[test]
+    fn verify_coalesces_the_ttl_refresh_write() {
+        // ttl 2s → refresh interval ~200ms.
+        let (s, dir) = store(Duration::from_secs(2));
+        let token = s.token();
+        let path = dir.path().join("identity.json");
+        let persisted_last_used = |p: &std::path::Path| {
+            let sealed: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap();
+            let identity: BrokerIdentity =
+                serde_json::from_value(sealed["payload"].clone()).unwrap();
+            identity.last_used
+        };
+        let at_mint = persisted_last_used(&path);
+
+        s.verify(&token).unwrap();
+        assert_eq!(
+            persisted_last_used(&path),
+            at_mint,
+            "a sub-interval refresh must not rewrite identity.json"
+        );
+
+        std::thread::sleep(Duration::from_millis(350));
+        s.verify(&token).unwrap();
+        assert!(
+            persisted_last_used(&path) > at_mint,
+            "a refresh past the interval must be written"
+        );
+    }
+
+    #[test]
+    fn agent_names_validated() {
+        assert!(validate_agent_name("claude-code"));
+        assert!(validate_agent_name("codex_2.1"));
+        assert!(!validate_agent_name(""));
+        assert!(!validate_agent_name("has space"));
+        assert!(!validate_agent_name("emoji🙂"));
+    }
+}

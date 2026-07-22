@@ -26,7 +26,7 @@ use crate::endpoints::EndpointListenerHandle;
 use crate::executions::ExecOutcome;
 use crate::store::Store;
 use crate::template::Template;
-use crate::types::{Connection, ConnectionConfig, ConnectionKind, WiringEndpoint};
+use crate::types::{Connection, ConnectionConfig, ConnectionKind, DirectEndpoint};
 use crate::wire::ErrorReason;
 
 /// Machine-readable validation failure (wire: `400 {"reason": …}`).
@@ -776,7 +776,7 @@ struct HttpEndpointState {
 /// (persisted so a pasted base URL survives a restart).
 pub async fn bind_endpoint(
     broker: Arc<Broker>,
-    endpoint: &WiringEndpoint,
+    endpoint: &DirectEndpoint,
 ) -> std::io::Result<(EndpointListenerHandle, u16)> {
     let requested_port = endpoint.port.unwrap_or(0);
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", requested_port)).await?;
@@ -855,14 +855,11 @@ async fn proxy_handler(
     };
 
     // Authorization is enforced here, on every request, at connect time.
-    if !broker
-        .wirings
-        .is_wired(&endpoint.client_id, &endpoint.connection_id)
-    {
+    if !broker.access.allows(&endpoint.connection_id) {
         return endpoint_error(
             StatusCode::FORBIDDEN,
             "denied_by_policy",
-            "this agent is no longer wired to the tool",
+            "agent access is disabled for this tool",
         );
     }
     let Ok(connection) = broker.store.connection_by_id(&endpoint.connection_id) else {
@@ -941,7 +938,7 @@ async fn proxy_handler(
         audit: broker.audit.clone(),
         client: broker.http_client.clone(),
         config: broker.config.clone(),
-        agent: endpoint.agent.clone(),
+        agent: "endpoint".to_string(),
         connection,
         method,
         path,

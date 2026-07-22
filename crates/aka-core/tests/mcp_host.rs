@@ -285,42 +285,20 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
         })
         .expect("mcp connection");
 
-    // The first agent is auto-wired to everything by design; the second
-    // starts with nothing. That asymmetry is exactly what we want to test.
+    // Every agent shares one key; access is a property of the connection.
     let first = pair(&daemon.socket_path, "claude-code").await;
-    let claude = broker
-        .pairing
-        .get("claude-code")
-        .expect("paired first agent");
-    let all_connections = broker.store.list_connections();
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while all_connections
-            .iter()
-            .any(|connection| !broker.wirings.is_wired(&claude.id, &connection.id))
-        {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("first-agent wiring was not applied asynchronously");
-    let second = pair(&daemon.socket_path, "other-agent").await;
 
-    // Narrow the first agent down to one connection so "wired" and
-    // "exists" cannot be confused for each other.
+    // Disable one connection so "enabled" and "exists" cannot be confused
+    // for each other.
     let deploy = broker
         .store
         .list_connections()
         .into_iter()
         .find(|c| c.name == "deploy-host")
         .expect("deploy-host");
-    let agents = broker.paired_agents();
-    let claude = agents
-        .iter()
-        .find(|a| a.name == "claude-code")
-        .expect("claude-code");
     broker
-        .ui_set_wiring(&claude.id, &deploy.id, false)
-        .expect("unwire");
+        .ui_set_tool_access(&deploy.id, false)
+        .expect("disable");
 
     let sidecar = Sidecar::spawn(SidecarConfig {
         node: PathBuf::from("node"),
@@ -346,7 +324,7 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
             "multitool_prod-db_request",
             "multitool_status"
         ],
-        "an MCP upstream contributes its own tools; unwired ones contribute none"
+        "an MCP upstream contributes its own tools; disabled ones contribute none"
     );
 
     // The real thing: a call that reaches the upstream server, with the
@@ -412,9 +390,15 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
         "status must not advertise a phantom request tool for an MCP upstream: {status}"
     );
 
-    // A second agent, wired to nothing, gets the status + connect-request
-    // tools and nothing else.
-    let mut bare = McpClient::new(&endpoint, &second);
+    // With every connection disabled, a session gets the status +
+    // connect-request tools and nothing else — access is per tool, shared
+    // by every client of the one key.
+    for connection in broker.store.list_connections() {
+        broker
+            .ui_set_tool_access(&connection.id, false)
+            .expect("disable");
+    }
+    let mut bare = McpClient::new(&endpoint, &first);
     assert_eq!(bare.initialize().await, 200);
     assert_eq!(
         bare.list_tools().await,
@@ -424,7 +408,7 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
     assert_eq!(
         status["tools"],
         json!([]),
-        "a fresh agent starts with no wirings"
+        "every tool disabled ⇒ nothing to report"
     );
 
     // An unpaired token cannot open a session at all.

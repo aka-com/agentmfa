@@ -58,11 +58,9 @@ pub struct BrokerConfig {
     /// Global concurrent session backstop.
     pub global_sessions: usize,
 
-    /// Global cap on issued per-wiring direct endpoints (each owns a
+    /// Global cap on issued per-connection direct endpoints (each owns a
     /// persistent listener + socket, so the count is bounded).
     pub max_endpoints: usize,
-    /// Per-agent cap on issued direct endpoints.
-    pub max_endpoints_per_client: usize,
 }
 
 impl Default for BrokerConfig {
@@ -89,7 +87,6 @@ impl Default for BrokerConfig {
             per_ticket_sessions: 60,
             global_sessions: 300,
             max_endpoints: 64,
-            max_endpoints_per_client: 16,
         }
     }
 }

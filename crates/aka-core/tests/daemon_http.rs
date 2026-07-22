@@ -2,9 +2,8 @@
 //! real upstream HTTP server, and a scripted "user" deciding approvals.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use aka_core::broker::Broker;
 use aka_core::config::BrokerConfig;
@@ -37,7 +36,7 @@ impl BrokerEvents for TestEvents {
 }
 
 /// A shell whose user declines every native confirmation. Used to exercise
-/// the first-agent bootstrap prompt's cancel path.
+/// the key-rotation confirmation's cancel path.
 struct DecliningEvents;
 
 impl BrokerEvents for DecliningEvents {
@@ -49,49 +48,18 @@ impl BrokerEvents for DecliningEvents {
     }
 }
 
-/// Holds the first-agent wiring sheet open so the test can prove pairing
-/// returns independently of the user's eventual decision.
-#[derive(Default)]
-struct BlockingEvents {
-    entered: AtomicBool,
-    release: AtomicBool,
-}
-
-impl BrokerEvents for BlockingEvents {
-    fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
-        true
-    }
-
-    fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
-        self.entered.store(true, Ordering::SeqCst);
-        while !self.release.load(Ordering::SeqCst) {
-            std::thread::park_timeout(Duration::from_millis(5));
-        }
-        Some(ConfirmationMethod::Waived)
-    }
-}
-
 struct Harness {
     broker: Arc<Broker>,
     _daemon: daemon::DaemonHandle,
     socket: std::path::PathBuf,
     _dir: tempfile::TempDir,
-    expect_first_agent_auto_wire: bool,
 }
 
 async fn harness(config: BrokerConfig) -> Harness {
-    harness_inner(config, Arc::new(TestEvents), true).await
+    harness_with_events(config, Arc::new(TestEvents)).await
 }
 
-async fn harness_with_events(config: BrokerConfig, events: Arc<dyn BrokerEvents>) -> Harness {
-    harness_inner(config, events, false).await
-}
-
-async fn harness_inner(
-    mut config: BrokerConfig,
-    events: Arc<dyn BrokerEvents>,
-    expect_first_agent_auto_wire: bool,
-) -> Harness {
+async fn harness_with_events(mut config: BrokerConfig, events: Arc<dyn BrokerEvents>) -> Harness {
     config.version = "test".into();
     let dir = tempfile::tempdir().unwrap();
     let paths = Paths::under(dir.path());
@@ -105,22 +73,13 @@ async fn harness_inner(
         _daemon: handle,
         socket,
         _dir: dir,
-        expect_first_agent_auto_wire,
     }
 }
 
 impl Harness {
-    /// Registration is immediate: no prompt to decide. The first agent to
-    /// pair is auto-wired to every existing connection.
+    /// The compat pair: registration is immediate and every name receives
+    /// the same shared key.
     async fn pair(&mut self, name: &str) -> String {
-        let is_first_agent = self.broker.pairing.list().is_empty();
-        let connection_ids: Vec<_> = self
-            .broker
-            .store
-            .list_connections()
-            .into_iter()
-            .map(|connection| connection.id)
-            .collect();
         let (status, body) = uds_request(
             &self.socket,
             "POST",
@@ -130,19 +89,6 @@ impl Harness {
         )
         .await;
         assert_eq!(status, 200, "pair failed: {body}");
-        if is_first_agent && self.expect_first_agent_auto_wire && !connection_ids.is_empty() {
-            let client = self.broker.pairing.get(name).unwrap();
-            tokio::time::timeout(Duration::from_secs(1), async {
-                while connection_ids
-                    .iter()
-                    .any(|id| !self.broker.wirings.is_wired(&client.id, id))
-                {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .expect("first-agent wiring was not applied asynchronously");
-        }
         body["token"].as_str().unwrap().to_string()
     }
 }
@@ -404,10 +350,11 @@ async fn pairing_flow_and_token_auth() {
     let token = h.pair("claude-code").await;
     assert!(token.starts_with("aka_"));
 
-    // The paired agent shows up for the UI band.
-    let agents = h.broker.paired_agents();
-    assert_eq!(agents.len(), 1);
-    assert_eq!(agents[0].name, "claude-code");
+    // Every name receives the same shared key: pairing is a fetch, not an
+    // enrollment.
+    let again = h.pair("codex").await;
+    assert_eq!(again, token);
+    assert_eq!(h.broker.identity.token(), token);
 
     // Token works; garbage doesn't.
     let auth = format!("Bearer {token}");
@@ -446,10 +393,9 @@ async fn pairing_flow_and_token_auth() {
         .unwrap()
         .contains("reached the broker"));
 
-    // Revocation invalidates immediately.
-    let client = h.broker.pairing.get("claude-code").unwrap();
-    assert!(h.broker.ui_revoke_agent(&client.id).unwrap());
-    let (status, _) = uds_request(
+    // Rotation invalidates the old key immediately, with the recovery hint.
+    h.broker.ui_rotate_key().unwrap();
+    let (status, body) = uds_request(
         &h.socket,
         "GET",
         "/v1/connections",
@@ -458,6 +404,31 @@ async fn pairing_flow_and_token_auth() {
     )
     .await;
     assert_eq!(status, 401);
+    assert_eq!(body["reason"], "token_superseded");
+    assert_eq!(
+        body["store_at"].as_str().unwrap(),
+        h.broker.paths.token_display()
+    );
+    // The rewritten token file authenticates.
+    let fresh = h.broker.identity.token();
+    let fresh_auth = format!("Bearer {fresh}");
+    let (status, _) = uds_request(
+        &h.socket,
+        "GET",
+        "/v1/connections",
+        &[("authorization", &fresh_auth)],
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+}
+
+#[tokio::test]
+async fn rotation_requires_the_native_confirmation() {
+    let h = harness_with_events(BrokerConfig::default(), Arc::new(DecliningEvents)).await;
+    let before = h.broker.identity.token();
+    assert!(h.broker.ui_rotate_key().is_err(), "declined ⇒ no rotation");
+    assert_eq!(h.broker.identity.token(), before);
 }
 
 #[tokio::test]
@@ -678,21 +649,22 @@ async fn connections_listing_shows_targets_only() {
     assert!(!raw.contains("GITHUB_API_KEY"));
     assert!(!raw.contains("Bearer {{"));
 
-    // A later agent starts unwired: it sees the catalog but `wired` is
-    // false everywhere.
-    let second = h.pair("codex").await;
-    let second_auth = format!("Bearer {second}");
+    // Disabling a tool flips its `wired` flag for every agent at once —
+    // access is per connection, not per caller.
+    let pg = h.broker.store.connection_by_name("prod-db").unwrap();
+    h.broker.ui_set_tool_access(&pg.id, false).unwrap();
     let (status, list) = uds_request(
         &h.socket,
         "GET",
         "/v1/connections",
-        &[("authorization", &second_auth)],
+        &[("authorization", &auth)],
         None,
     )
     .await;
     assert_eq!(status, 200);
     for entry in list.as_array().unwrap() {
-        assert_eq!(entry["wired"], false, "later agents start unwired");
+        let expected = entry["name"] != "prod-db";
+        assert_eq!(entry["wired"], json!(expected), "entry: {entry}");
     }
 }
 
@@ -1157,144 +1129,17 @@ async fn binary_bodies_come_back_base64() {
 }
 
 #[tokio::test]
-async fn repairing_preserves_client_id_and_wirings() {
+async fn connections_are_enabled_by_default_and_disable_refuses() {
     let mut h = harness(BrokerConfig::default()).await;
     let up = upstream().await;
     api_connection(&h, "github", up.port);
     let conn = h.broker.store.connection_by_name("github").unwrap();
-
-    // The first agent is auto-wired at pairing time.
-    h.pair("claude-code").await;
-    let client = h.broker.pairing.get("claude-code").unwrap();
-    assert!(h.broker.wirings.is_wired(&client.id, &conn.id));
-
-    // Re-pairing preserves the stable client id, so the wiring survives.
-    h.pair("claude-code").await;
-    let repaired = h.broker.pairing.get("claude-code").unwrap();
-    assert_eq!(repaired.id, client.id);
-    assert!(h.broker.wirings.is_wired(&repaired.id, &conn.id));
-    assert_eq!(h.broker.wirings().len(), 1);
-}
-
-#[tokio::test]
-async fn first_agent_bootstrap_prompts_and_cancel_leaves_it_unwired() {
-    // A shell whose user cancels the "wire to everything" prompt: the first
-    // agent still pairs (the token comes back) but is wired to nothing, so it
-    // is refused exactly like any later agent until wired in the app.
-    let mut h = harness_with_events(BrokerConfig::default(), Arc::new(DecliningEvents)).await;
-    let up = upstream().await;
-    api_connection(&h, "github", up.port);
-    let conn = h.broker.store.connection_by_name("github").unwrap();
-
     let token = h.pair("claude-code").await;
-    let client = h.broker.pairing.get("claude-code").unwrap();
-    assert!(
-        !h.broker.wirings.is_wired(&client.id, &conn.id),
-        "a cancelled bootstrap must not wire the first agent"
-    );
-    assert_eq!(h.broker.wirings().len(), 0);
-
-    let auth = format!("Bearer {token}");
-    let call = json!({"connection": "github", "method": "GET", "path": "/echo"});
-    let (status, body) = uds_request(
-        &h.socket,
-        "POST",
-        "/v1/http",
-        &[("authorization", &auth)],
-        Some(call),
-    )
-    .await;
-    assert_eq!(status, 403, "unwired first agent must be refused: {body}");
-    assert_eq!(body["reason"], "denied_by_policy");
-}
-
-#[tokio::test]
-async fn pairing_returns_while_first_agent_wiring_confirmation_is_open() {
-    let events = Arc::new(BlockingEvents::default());
-    let h = harness_with_events(BrokerConfig::default(), events.clone()).await;
-    let up = upstream().await;
-    api_connection(&h, "github", up.port);
-    let conn = h.broker.store.connection_by_name("github").unwrap();
-    let socket = h.socket.clone();
-
-    let pair = tokio::spawn(async move {
-        uds_request(
-            &socket,
-            "POST",
-            "/v1/pair",
-            &[],
-            Some(json!({"agent_name": "claude-code"})),
-        )
-        .await
-    });
-
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while !events.entered.load(Ordering::SeqCst) {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("first-agent wiring confirmation never opened");
-
-    // The confirmation is still blocked, but pairing must already be able to
-    // return the token. Release the sheet only after observing the response.
-    let response = tokio::time::timeout(Duration::from_secs(1), pair).await;
-    events.release.store(true, Ordering::SeqCst);
-    let (status, body) = response
-        .expect("pairing waited for the wiring confirmation")
-        .expect("pair request task failed");
-    assert_eq!(status, 200, "pair failed: {body}");
-    assert!(body["token"].as_str().unwrap().starts_with("aka_"));
-
-    tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            let client = h.broker.pairing.get("claude-code").unwrap();
-            if h.broker.wirings.is_wired(&client.id, &conn.id) {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("approved first-agent wiring was not applied asynchronously");
-}
-
-#[tokio::test]
-async fn unwired_agent_is_refused_until_wired() {
-    let mut h = harness(BrokerConfig::default()).await;
-    let up = upstream().await;
-    api_connection(&h, "github", up.port);
-    let conn = h.broker.store.connection_by_name("github").unwrap();
-    // The first agent takes the auto-wire bootstrap; the second starts
-    // unwired.
-    h.pair("claude-code").await;
-    let token = h.pair("codex").await;
     let auth = format!("Bearer {token}");
 
+    // A fresh connection works with no grant step: adding the tool in the
+    // app was the deliberate act.
     let call = json!({"connection": "github", "method": "GET", "path": "/echo"});
-    let (status, body) = uds_request(
-        &h.socket,
-        "POST",
-        "/v1/http",
-        &[("authorization", &auth)],
-        Some(call.clone()),
-    )
-    .await;
-    assert_eq!(status, 403);
-    assert_eq!(body["reason"], "denied_by_policy");
-    assert!(
-        body["detail"].as_str().unwrap().contains("not wired"),
-        "refusal should explain the wiring model: {body}"
-    );
-    assert_eq!(
-        up.hits.load(Ordering::SeqCst),
-        0,
-        "nothing reached upstream"
-    );
-
-    // Wiring the agent in the app flips the same call to allowed…
-    let codex = h.broker.pairing.get("codex").unwrap();
-    assert!(h.broker.ui_set_wiring(&codex.id, &conn.id, true).unwrap());
     let (status, _) = uds_request(
         &h.socket,
         "POST",
@@ -1305,9 +1150,26 @@ async fn unwired_agent_is_refused_until_wired() {
     .await;
     assert_eq!(status, 200);
 
-    // …and unwiring refuses it again.
-    assert!(h.broker.ui_set_wiring(&codex.id, &conn.id, false).unwrap());
+    // Disabling the tool refuses every agent…
+    assert!(h.broker.ui_set_tool_access(&conn.id, false).unwrap());
     let (status, body) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(call.clone()),
+    )
+    .await;
+    assert_eq!(status, 403);
+    assert_eq!(body["reason"], "denied_by_policy");
+    assert!(
+        body["detail"].as_str().unwrap().contains("not enabled"),
+        "refusal should explain the access model: {body}"
+    );
+
+    // …and re-enabling flips the same call back to allowed.
+    assert!(h.broker.ui_set_tool_access(&conn.id, true).unwrap());
+    let (status, _) = uds_request(
         &h.socket,
         "POST",
         "/v1/http",
@@ -1315,8 +1177,7 @@ async fn unwired_agent_is_refused_until_wired() {
         Some(call),
     )
     .await;
-    assert_eq!(status, 403);
-    assert_eq!(body["reason"], "denied_by_policy");
+    assert_eq!(status, 200);
 }
 
 #[tokio::test]
@@ -1335,18 +1196,23 @@ async fn pair_response_is_self_contained() {
     // The response echoes what was registered, so the agent can
     // log its enrollment without a follow-up /v1/whoami.
     assert_eq!(body["agent"], "claude-code");
-    // The storage guidance travels with the credential.
+    // The storage guidance travels with the credential: the shared key
+    // already lives in the token file.
     assert_eq!(body["expires_after_days"], 30);
     assert_eq!(
         body["store_at"].as_str().unwrap(),
-        format!("{}/claude-code", h.broker.paths.tokens_display())
+        h.broker.paths.token_display()
     );
-    // The advisory directory exists (ensure() created it owner-only), so
-    // agents never need mkdir-and-chmod logic of their own.
+    // The token file exists, owner-only, and holds the very key pairing
+    // returned — file readers and pairers get the same credential.
     use std::os::unix::fs::PermissionsExt;
-    let meta = std::fs::metadata(h.broker.paths.tokens_dir()).unwrap();
-    assert!(meta.is_dir());
-    assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+    let token_file = h.broker.paths.token_file();
+    let meta = std::fs::metadata(&token_file).unwrap();
+    assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    assert_eq!(
+        std::fs::read_to_string(&token_file).unwrap(),
+        body["token"].as_str().unwrap()
+    );
 }
 
 #[tokio::test]
@@ -1354,6 +1220,23 @@ async fn whoami_probes_a_stored_token() {
     let mut h = harness(BrokerConfig::default()).await;
     let token = h.pair("claude-code").await;
     let auth = format!("Bearer {token}");
+    // The label is per-request (self-reported header), not per-token: one
+    // shared key serves every client.
+    let (status, body) = uds_request(
+        &h.socket,
+        "GET",
+        "/v1/whoami",
+        &[
+            ("authorization", &auth),
+            ("x-multitool-client", "claude-code"),
+        ],
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["agent"], "claude-code");
+    assert!(body["expires_at"].as_str().is_some());
+    // Unlabeled calls fall back to the generic label.
     let (status, body) = uds_request(
         &h.socket,
         "GET",
@@ -1363,8 +1246,7 @@ async fn whoami_probes_a_stored_token() {
     )
     .await;
     assert_eq!(status, 200);
-    assert_eq!(body["agent"], "claude-code");
-    assert!(body["expires_at"].as_str().is_some());
+    assert_eq!(body["agent"], "agent");
     // A garbage token is a plain 401, the signal to fall through to pairing.
     let (status, body) = uds_request(
         &h.socket,
@@ -1432,14 +1314,13 @@ async fn whoami_is_exempt_from_the_per_token_limit() {
 }
 
 #[tokio::test]
-async fn superseded_token_gets_a_distinct_reason() {
+async fn rotated_key_gets_a_distinct_reason() {
     let mut h = harness(BrokerConfig::default()).await;
     let token1 = h.pair("claude-code").await;
-    // A second instance re-pairs under the same name.
-    let token2 = h.pair("claude-code").await;
-    // The first instance's next call is told what happened and what to do,
-    // not just "invalid_token" (whose remedy, re-pairing, would break the
-    // second instance in turn).
+    // The user rotates the key in the app.
+    h.broker.ui_rotate_key().unwrap();
+    // The old key's next call is told what happened and what to do, not
+    // just "invalid_token": re-read the token file the broker rewrote.
     let auth1 = format!("Bearer {token1}");
     let (status, body) = uds_request(
         &h.socket,
@@ -1456,49 +1337,17 @@ async fn superseded_token_gets_a_distinct_reason() {
     // mechanical.
     assert_eq!(
         body["store_at"].as_str().unwrap(),
-        format!("{}/claude-code", h.broker.paths.tokens_display())
+        h.broker.paths.token_display()
     );
+    // The rewritten file holds the working key.
+    let token2 = std::fs::read_to_string(h.broker.paths.token_file()).unwrap();
+    assert_ne!(token1, token2);
     let auth2 = format!("Bearer {token2}");
     let (status, _) = uds_request(
         &h.socket,
         "GET",
         "/v1/whoami",
         &[("authorization", &auth2)],
-        None,
-    )
-    .await;
-    assert_eq!(status, 200);
-}
-
-#[tokio::test]
-async fn repairing_supersedes_the_previous_token() {
-    let mut h = harness(BrokerConfig::default()).await;
-    let token1 = h.pair("claude-code").await;
-    let token2 = h.pair("claude-code").await;
-    assert_ne!(token1, token2);
-    assert_eq!(h.broker.paired_agents().len(), 1);
-
-    // The superseded token names the shared token file so a stale instance
-    // re-reads it instead of pairing again.
-    let auth = format!("Bearer {token1}");
-    let (status, body) = uds_request(
-        &h.socket,
-        "GET",
-        "/v1/whoami",
-        &[("authorization", &auth)],
-        None,
-    )
-    .await;
-    assert_eq!(status, 401);
-    assert_eq!(body["reason"], "token_superseded");
-    assert!(body["store_at"].as_str().unwrap().ends_with("claude-code"));
-
-    let auth = format!("Bearer {token2}");
-    let (status, _) = uds_request(
-        &h.socket,
-        "GET",
-        "/v1/whoami",
-        &[("authorization", &auth)],
         None,
     )
     .await;
@@ -1574,11 +1423,10 @@ async fn a_curated_wiring_refuses_tools_outside_its_subset() {
     let conn = h.broker.store.connection_by_name("docs").unwrap();
     let token = h.pair("claude-code").await;
     let auth = format!("Bearer {token}");
-    let agent_id = h.broker.paired_agents()[0].id;
 
     // Allow only "search"; "delete" is not in the subset.
     h.broker
-        .ui_set_wiring_tools(&agent_id, &conn.id, Some(vec!["search".into()]))
+        .ui_set_allowed_tools(&conn.id, Some(vec!["search".into()]))
         .unwrap();
 
     let call = |name: &str| {
@@ -1629,9 +1477,7 @@ async fn a_curated_wiring_refuses_tools_outside_its_subset() {
     assert_eq!(status, 200, "listing is not a tools/call and passes");
 
     // Clearing the subset (None) allows everything again.
-    h.broker
-        .ui_set_wiring_tools(&agent_id, &conn.id, None)
-        .unwrap();
+    h.broker.ui_set_allowed_tools(&conn.id, None).unwrap();
     let (status, _) = uds_request(
         &h.socket,
         "POST",
@@ -1653,7 +1499,10 @@ async fn agent_connect_requests_are_audited_and_debounced() {
         &h.socket,
         "POST",
         "/v1/connect-requests",
-        &[("authorization", &auth)],
+        &[
+            ("authorization", &auth),
+            ("x-multitool-client", "claude-code"),
+        ],
         Some(json!({ "service": "linear" })),
     )
     .await;
@@ -1674,7 +1523,10 @@ async fn agent_connect_requests_are_audited_and_debounced() {
         &h.socket,
         "POST",
         "/v1/connect-requests",
-        &[("authorization", &auth)],
+        &[
+            ("authorization", &auth),
+            ("x-multitool-client", "claude-code"),
+        ],
         Some(json!({ "service": "linear" })),
     )
     .await;
@@ -1686,7 +1538,10 @@ async fn agent_connect_requests_are_audited_and_debounced() {
         &h.socket,
         "POST",
         "/v1/connect-requests",
-        &[("authorization", &auth)],
+        &[
+            ("authorization", &auth),
+            ("x-multitool-client", "claude-code"),
+        ],
         Some(json!({ "service": "" })),
     )
     .await;
@@ -1705,7 +1560,10 @@ async fn brokered_calls_audit_attribution_duration_and_outcome() {
         &h.socket,
         "POST",
         "/v1/http",
-        &[("authorization", &auth)],
+        &[
+            ("authorization", &auth),
+            ("x-multitool-client", "claude-code"),
+        ],
         Some(json!({ "connection": "github", "method": "GET", "path": "/user/repos" })),
     )
     .await;
@@ -1763,16 +1621,10 @@ async fn loopback_request(
     (status, value)
 }
 
-/// Issue an HTTP endpoint for the (auto-wired) first agent on `github`;
-/// returns (info, port).
+/// Issue an HTTP direct endpoint on `github`; returns (info, port).
 async fn issue_http_endpoint(h: &Harness) -> (aka_core::broker::IssuedEndpointInfo, u16) {
-    let client = h.broker.pairing.get("claude-code").unwrap();
     let conn = h.broker.store.connection_by_name("github").unwrap();
-    let info = h
-        .broker
-        .ui_issue_endpoint(&client.id, &conn.id)
-        .await
-        .unwrap();
+    let info = h.broker.ui_issue_endpoint(&conn.id).await.unwrap();
     let port: u16 = info.dsn.rsplit(':').next().unwrap().parse().unwrap();
     (info, port)
 }
