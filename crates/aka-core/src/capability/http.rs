@@ -656,9 +656,16 @@ async fn relay_response(
 ) -> ExecOutcome {
     let status = response.status().as_u16();
     let mut headers = serde_json::Map::new();
+    // Preserve Set-Cookie separately for the raw direct-endpoint response:
+    // unlike ordinary HTTP fields it cannot be combined with commas. Keep
+    // the existing flattened `headers` object for control-plane compatibility.
+    let mut set_cookie_headers = Vec::new();
     for (name, value) in response.headers() {
         let value_lossy = String::from_utf8_lossy(value.as_bytes());
         let value_str = redactions.apply_to_string(value_lossy.as_ref());
+        if name == http::header::SET_COOKIE {
+            set_cookie_headers.push(value_str.clone());
+        }
         match headers.get_mut(name.as_str()) {
             Some(serde_json::Value::String(existing)) => {
                 *existing = format!("{existing}, {value_str}");
@@ -709,6 +716,7 @@ async fn relay_response(
         body: json!({
             "status": status,
             "headers": headers,
+            "set_cookie_headers": set_cookie_headers,
             "body": body_value,
             "body_encoding": encoding,
         }),
@@ -995,7 +1003,7 @@ fn translate_outcome(outcome: ExecOutcome) -> axum::response::Response {
             // Framing/length headers are recomputed for the client leg.
             if matches!(
                 name.to_ascii_lowercase().as_str(),
-                "content-length" | "transfer-encoding" | "connection"
+                "content-length" | "transfer-encoding" | "connection" | "set-cookie"
             ) {
                 continue;
             }
@@ -1003,6 +1011,13 @@ fn translate_outcome(outcome: ExecOutcome) -> axum::response::Response {
                 if let Ok(hv) = HeaderValue::from_str(vs) {
                     response = response.header(hn, hv);
                 }
+            }
+        }
+    }
+    if let Some(cookies) = env.get("set_cookie_headers").and_then(|h| h.as_array()) {
+        for cookie in cookies.iter().filter_map(|cookie| cookie.as_str()) {
+            if let Ok(value) = HeaderValue::from_str(cookie) {
+                response = response.header(http::header::SET_COOKIE, value);
             }
         }
     }
@@ -1156,6 +1171,37 @@ mod tests {
         assert_eq!(
             redactions.apply_to_bytes(b"\x00ghp_test_secret_value\xff"),
             b"\x00[REDACTED]\xff"
+        );
+    }
+
+    #[test]
+    fn direct_response_preserves_each_set_cookie_field() {
+        let response = translate_outcome(ExecOutcome {
+            status: 200,
+            body: json!({
+                "status": 200,
+                "headers": {
+                    "content-type": "text/plain",
+                    "set-cookie": "session=one, csrf=two",
+                },
+                "set_cookie_headers": [
+                    "session=one; Path=/; HttpOnly",
+                    "csrf=two; Path=/; Secure",
+                ],
+                "body": "ok",
+                "body_encoding": "utf8",
+            }),
+        });
+
+        let cookies: Vec<&str> = response
+            .headers()
+            .get_all(http::header::SET_COOKIE)
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect();
+        assert_eq!(
+            cookies,
+            vec!["session=one; Path=/; HttpOnly", "csrf=two; Path=/; Secure"]
         );
     }
 

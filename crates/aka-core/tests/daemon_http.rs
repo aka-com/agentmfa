@@ -209,6 +209,25 @@ async fn upstream() -> Upstream {
             }),
         )
         .route(
+            "/cookies",
+            get(|| async {
+                let mut response = axum::response::Response::new(axum::body::Body::empty());
+                response.headers_mut().append(
+                    axum::http::header::SET_COOKIE,
+                    axum::http::HeaderValue::from_static(
+                        "session=one; Path=/; HttpOnly; SameSite=Lax",
+                    ),
+                );
+                response.headers_mut().append(
+                    axum::http::header::SET_COOKIE,
+                    axum::http::HeaderValue::from_static(
+                        "csrf=two; Path=/; Secure; SameSite=Strict",
+                    ),
+                );
+                response
+            }),
+        )
+        .route(
             "/unauthorized",
             get(|| async { (axum::http::StatusCode::UNAUTHORIZED, "nope") }),
         );
@@ -1587,14 +1606,14 @@ async fn brokered_calls_audit_attribution_duration_and_outcome() {
 /* -------------------------- HTTP direct endpoint -------------------------- */
 
 /// Minimal HTTP/1.1 client over a loopback TCP port (the reverse-proxy
-/// endpoint). Returns (status, parsed-json-or-string body).
+/// endpoint). Returns (status, response headers, parsed-json-or-string body).
 async fn loopback_request(
     port: u16,
     method: &str,
     path: &str,
     headers: &[(&str, &str)],
     body: Option<&str>,
-) -> (u16, Value) {
+) -> (u16, axum::http::HeaderMap, Value) {
     let stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
         .await
         .unwrap();
@@ -1611,14 +1630,15 @@ async fn loopback_request(
     let request = builder.body(body.unwrap_or("").to_string()).unwrap();
     let response = sender.send_request(request).await.unwrap();
     let status = response.status().as_u16();
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let (parts, body) = response.into_parts();
+    let bytes = body.collect().await.unwrap().to_bytes();
     let value = if bytes.is_empty() {
         Value::Null
     } else {
         serde_json::from_slice(&bytes)
             .unwrap_or(Value::String(String::from_utf8_lossy(&bytes).into_owned()))
     };
-    (status, value)
+    (status, parts.headers, value)
 }
 
 /// Issue an HTTP direct endpoint on `github`; returns (info, port).
@@ -1644,7 +1664,7 @@ async fn http_direct_endpoint_proxies_with_injected_credential() {
     assert!(!info.dsn.contains(&info.secret));
 
     let auth = format!("Bearer {}", info.secret);
-    let (status, body) = loopback_request(
+    let (status, _, body) = loopback_request(
         port,
         "GET",
         "/echo",
@@ -1668,6 +1688,32 @@ async fn http_direct_endpoint_proxies_with_injected_credential() {
 }
 
 #[tokio::test]
+async fn http_direct_endpoint_preserves_multiple_set_cookie_headers() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let up = upstream().await;
+    api_connection(&h, "github", up.port);
+    h.pair("claude-code").await;
+    let (info, port) = issue_http_endpoint(&h).await;
+    let auth = format!("Bearer {}", info.secret);
+
+    let (status, headers, _) =
+        loopback_request(port, "GET", "/cookies", &[("authorization", &auth)], None).await;
+    assert_eq!(status, 200);
+    let cookies: Vec<&str> = headers
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .map(|value| value.to_str().unwrap())
+        .collect();
+    assert_eq!(
+        cookies,
+        vec![
+            "session=one; Path=/; HttpOnly; SameSite=Lax",
+            "csrf=two; Path=/; Secure; SameSite=Strict",
+        ]
+    );
+}
+
+#[tokio::test]
 async fn http_direct_endpoint_rejects_missing_or_wrong_secret() {
     let mut h = harness(BrokerConfig::default()).await;
     let up = upstream().await;
@@ -1676,12 +1722,12 @@ async fn http_direct_endpoint_rejects_missing_or_wrong_secret() {
     let (_info, port) = issue_http_endpoint(&h).await;
 
     // No secret.
-    let (status, body) = loopback_request(port, "GET", "/echo", &[], None).await;
+    let (status, _, body) = loopback_request(port, "GET", "/echo", &[], None).await;
     assert_eq!(status, 401);
     assert_eq!(body["reason"], "missing_secret");
 
     // Wrong secret.
-    let (status, body) = loopback_request(
+    let (status, _, body) = loopback_request(
         port,
         "GET",
         "/echo",
@@ -1707,7 +1753,7 @@ async fn http_endpoint_survives_rebind_and_revoke_frees_the_port() {
     // Rebinding (as a restart does) reuses the persisted port; the same base
     // URL keeps working.
     h.broker.rebind_endpoints().await;
-    let (status, _) =
+    let (status, _, _) =
         loopback_request(port, "POST", "/dispatch", &[("authorization", &auth)], None).await;
     assert_eq!(status, 204);
     assert_eq!(up.hits.load(Ordering::SeqCst), 1);
