@@ -10,8 +10,12 @@ use crate::config::BrokerConfig;
 use crate::paths::Paths;
 use crate::wire::{AuthScheme, PROTOCOL_VERSION, REQUEST_ID_MAX_BYTES};
 
-pub fn manifest(config: &BrokerConfig, paths: &Paths) -> serde_json::Value {
-    json!({
+pub fn manifest(
+    config: &BrokerConfig,
+    paths: &Paths,
+    mcp_url: Option<String>,
+) -> serde_json::Value {
+    let mut m = json!({
         "name": "aka",
         "version": config.version,
         // The Agent Broker Protocol revision (PROTOCOL.md / wire.rs); the
@@ -44,7 +48,15 @@ pub fn manifest(config: &BrokerConfig, paths: &Paths) -> serde_json::Value {
             "instructions": "/instructions",
         },
         "pairing": "One shared key covers every local agent: read it from the token_file and send it as your Bearer token. If you cannot read files, POST /v1/pair with {\"agent_name\": \"<your-name>\"} returns the same key. Optionally send X-Multitool-Client: <your-name> to label your activity.",
-    })
+    });
+    // Where the MCP host is listening right now, when one is running: the
+    // loopback streamable-HTTP endpoint `aka mcp` (and any HTTP-native MCP
+    // client) bridges to, authenticated with the same shared key. The port
+    // is dynamic, so bridges discover it here instead of pinning it.
+    if let Some(url) = mcp_url {
+        m["mcp_url"] = json!(url);
+    }
+    m
 }
 
 /// The `/instructions` markdown. The pair-or-reuse walkthrough, one worked
@@ -345,7 +357,7 @@ mod tests {
 
     #[test]
     fn manifest_advertises_the_contract() {
-        let m = manifest(&BrokerConfig::default(), &paths());
+        let m = manifest(&BrokerConfig::default(), &paths(), None);
         assert_eq!(PROTOCOL_VERSION, 0);
         assert_eq!(m["protocol_version"], 0);
         assert_eq!(m["auth_schemes"], serde_json::json!(["bearer"]));
@@ -374,10 +386,22 @@ mod tests {
         // the production socket.
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::under(dir.path());
-        let m = manifest(&BrokerConfig::default(), &paths);
+        let m = manifest(&BrokerConfig::default(), &paths, None);
         assert_eq!(m["socket"], paths.socket_file().display().to_string());
         let text = instructions(&BrokerConfig::default(), &paths);
         assert!(text.contains(&paths.socket_file().display().to_string()));
+    }
+
+    #[test]
+    fn manifest_advertises_the_mcp_endpoint_only_while_one_runs() {
+        let absent = manifest(&BrokerConfig::default(), &paths(), None);
+        assert!(absent.get("mcp_url").is_none());
+        let present = manifest(
+            &BrokerConfig::default(),
+            &paths(),
+            Some("http://127.0.0.1:42117/mcp".into()),
+        );
+        assert_eq!(present["mcp_url"], "http://127.0.0.1:42117/mcp");
     }
 
     #[test]

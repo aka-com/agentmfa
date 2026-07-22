@@ -13,6 +13,17 @@ export interface BrokerIdentity {
   agent: string;
 }
 
+/**
+ * What broker calls authenticate as: the shared key, plus the caller's
+ * self-reported label, forwarded so the user's activity log names the real
+ * client instead of the generic fallback. The label is cosmetic — the
+ * broker treats it as attribution, never authorization.
+ */
+export interface AgentAuth {
+  token: string;
+  label?: string;
+}
+
 export interface BrokerConnection {
   name: string;
   /** `http` | `pg` | `ssh` | `ws` — the broker's own type names. */
@@ -53,7 +64,7 @@ export class BrokerClient {
   private call(
     method: string,
     path: string,
-    token: string,
+    auth: AgentAuth,
     body?: unknown,
   ): Promise<RawResponse> {
     const payload = body === undefined ? null : Buffer.from(JSON.stringify(body));
@@ -64,8 +75,9 @@ export class BrokerClient {
           path,
           method,
           headers: {
-            authorization: `Bearer ${token}`,
+            authorization: `Bearer ${auth.token}`,
             accept: 'application/json',
+            ...(auth.label ? { 'x-multitool-client': auth.label } : {}),
             ...(payload ? { 'content-type': 'application/json', 'content-length': payload.length } : {}),
           },
         },
@@ -86,8 +98,8 @@ export class BrokerClient {
     });
   }
 
-  private async json<T>(method: string, path: string, token: string, body?: unknown): Promise<T> {
-    const response = await this.call(method, path, token, body);
+  private async json<T>(method: string, path: string, auth: AgentAuth, body?: unknown): Promise<T> {
+    const response = await this.call(method, path, auth, body);
     let parsed: unknown = null;
     try {
       parsed = response.body ? JSON.parse(response.body) : null;
@@ -110,19 +122,19 @@ export class BrokerClient {
     return parsed as T;
   }
 
-  /** Resolve a bearer token to the agent behind it, or throw. */
-  async whoami(token: string): Promise<BrokerIdentity> {
+  /** Resolve a bearer token (plus its self-reported label), or throw. */
+  async whoami(auth: AgentAuth): Promise<BrokerIdentity> {
     const body = await this.json<{ client_id: string; agent: string }>(
       'GET',
       '/v1/whoami',
-      token,
+      auth,
     );
     return { clientId: body.client_id, agent: body.agent };
   }
 
-  /** Every connection the broker knows, each flagged for this agent. */
-  async connections(token: string): Promise<BrokerConnection[]> {
-    return this.json<BrokerConnection[]>('GET', '/v1/connections', token);
+  /** Every connection the broker knows, each flagged for agent access. */
+  async connections(auth: AgentAuth): Promise<BrokerConnection[]> {
+    return this.json<BrokerConnection[]>('GET', '/v1/connections', auth);
   }
 
   /**
@@ -130,13 +142,13 @@ export class BrokerClient {
    * that is not configured. Advisory: nothing is granted by this call.
    */
   async requestConnect(
-    token: string,
+    auth: AgentAuth,
     service: string,
   ): Promise<{ status: string; detail?: string }> {
     return this.json<{ status: string; detail?: string }>(
       'POST',
       '/v1/connect-requests',
-      token,
+      auth,
       { service },
     );
   }
@@ -147,7 +159,7 @@ export class BrokerClient {
    * The wiring check happens on the far side of this call, which is the
    * point: the sidecar cannot skip it, and a bug here cannot widen access.
    */
-  async invoke(path: string, token: string, body: unknown): Promise<unknown> {
-    return this.json<unknown>('POST', path, token, body);
+  async invoke(path: string, auth: AgentAuth, body: unknown): Promise<unknown> {
+    return this.json<unknown>('POST', path, auth, body);
   }
 }

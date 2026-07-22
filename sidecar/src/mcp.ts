@@ -77,6 +77,8 @@ export function hostIsLoopback(host: string | undefined, localPort: number): boo
 export interface Principal extends BrokerIdentity {
   /** The token itself, reused for the broker calls made on its behalf. */
   token: string;
+  /** Self-reported client label, forwarded to the broker for attribution. */
+  label?: string;
 }
 
 /**
@@ -88,11 +90,11 @@ export interface Principal extends BrokerIdentity {
 export class BrokerAuthProvider {
   constructor(private readonly broker: BrokerClient) {}
 
-  async authenticate(token: string | null): Promise<Principal | null> {
+  async authenticate(token: string | null, label?: string): Promise<Principal | null> {
     if (!token) return null;
     try {
-      const identity = await this.broker.whoami(token);
-      return { ...identity, token };
+      const identity = await this.broker.whoami({ token, label });
+      return { ...identity, token, label };
     } catch (error) {
       if (error instanceof BrokerError && (error.status === 401 || error.status === 403)) {
         return null;
@@ -220,7 +222,7 @@ export async function createToolServer(
 
   let connections: BrokerConnection[] = [];
   try {
-    connections = await broker.connections(principal.token);
+    connections = await broker.connections(principal);
   } catch (error) {
     // A broker that cannot be listed yields a session with no tools rather
     // than a failed connection: the agent gets a usable, empty surface.
@@ -254,7 +256,7 @@ export async function createToolServer(
       // Deliberately re-queried rather than reported from the list captured
       // at session open: the user may have wired something since, and the
       // whole point of this tool is to answer "why can't I see it?".
-      const live = (await broker.connections(principal.token)).filter(
+      const live = (await broker.connections(principal)).filter(
         (candidate) => candidate.wired,
       );
       const liveNames = new Set(live.map((connection) => connection.name));
@@ -391,7 +393,7 @@ export async function createToolServer(
         inputSchema: schemaFor(connection),
       },
       async (args: Record<string, unknown>) =>
-        invoke(broker, principal.token, connection, args ?? {}),
+        invoke(broker, principal, connection, args ?? {}),
     );
     registrations.push({ connection, tools: [toolName] });
   }
@@ -433,7 +435,7 @@ function registerMetaTools(
     },
     async ({ service }: { service: string }) => {
       try {
-        const outcome = await broker.requestConnect(principal.token, service);
+        const outcome = await broker.requestConnect(principal, service);
         return {
           content: [{
             type: 'text' as const,
@@ -540,7 +542,7 @@ function registerMetaTools(
       }
       try {
         const result = await callUpstreamTool(
-          broker, principal.token, entry.connection, entry.tool.name, args ?? {},
+          broker, principal, entry.connection, entry.tool.name, args ?? {},
         );
         return result as { content: Array<{ type: 'text'; text: string }> };
       } catch (error) {
@@ -592,7 +594,7 @@ async function registerUpstream(
 ): Promise<UpstreamRegistration> {
   let tools: Awaited<ReturnType<typeof listUpstreamTools>> = [];
   try {
-    tools = await listUpstreamTools(broker, principal.token, connection);
+    tools = await listUpstreamTools(broker, principal, connection);
   } catch (error) {
     log('warn', 'could not list tools from an MCP upstream', {
       connection: connection.name,
@@ -651,7 +653,7 @@ async function registerUpstream(
         try {
           const result = await callUpstreamTool(
             broker,
-            principal.token,
+            principal,
             connection,
             tool.name,
             args ?? {},

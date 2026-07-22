@@ -16,9 +16,12 @@ name = "aka"
 version = "0.0.1"
 dependencies = [
  "aka-core",
+ "axum",
  "clap",
  "dirs",
  "libc",
+ "reqwest",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing-subscriber",

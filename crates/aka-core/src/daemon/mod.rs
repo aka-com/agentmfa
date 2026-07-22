@@ -511,6 +511,7 @@ async fn get_manifest(State(state): State<AppState>) -> Response {
     Json(wellknown::manifest(
         &state.broker.config,
         &state.broker.paths,
+        state.broker.sidecar_mcp_url(),
     ))
     .into_response()
 }

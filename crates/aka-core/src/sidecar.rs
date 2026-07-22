@@ -110,6 +110,15 @@ impl SidecarWatch {
             .await
             .map_err(|_| SidecarError::ReadyTimeout(timeout))
     }
+
+    /// Run `report` with the current endpoint now and again after every
+    /// change (restarts move the port), until the supervisor goes away.
+    pub async fn follow(mut self, mut report: impl FnMut(Option<SidecarEndpoint>)) {
+        report(self.0.borrow_and_update().clone());
+        while self.0.changed().await.is_ok() {
+            report(self.0.borrow_and_update().clone());
+        }
+    }
 }
 
 /// A supervised sidecar. Dropping this kills the process and stops

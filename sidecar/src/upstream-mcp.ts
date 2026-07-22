@@ -22,7 +22,7 @@
 
 import { deriveMcpNamespace, joinToolPath } from '@executor-js/plugin-mcp/core';
 
-import type { BrokerClient, BrokerConnection } from './broker';
+import type { AgentAuth, BrokerClient, BrokerConnection } from './broker';
 import { log } from './log';
 
 /** One tool as the upstream MCP server describes it. */
@@ -111,12 +111,12 @@ class UpstreamClient {
 
   constructor(
     private readonly broker: BrokerClient,
-    private readonly token: string,
+    private readonly auth: AgentAuth,
     private readonly connection: BrokerConnection,
   ) {}
 
   private async send(method: 'POST' | 'DELETE', payload?: unknown): Promise<UpstreamResponse> {
-    return (await this.broker.invoke('/v1/http', this.token, {
+    return (await this.broker.invoke('/v1/http', this.auth, {
       connection: this.connection.name,
       method,
       path: this.connection.mcp_path,
@@ -220,10 +220,10 @@ class UpstreamClient {
  */
 export async function listUpstreamTools(
   broker: BrokerClient,
-  token: string,
+  auth: AgentAuth,
   connection: BrokerConnection,
 ): Promise<UpstreamTool[]> {
-  const client = new UpstreamClient(broker, token, connection);
+  const client = new UpstreamClient(broker, auth, connection);
   await client.initialize();
   try {
     const tools: UpstreamTool[] = [];
@@ -250,12 +250,12 @@ export async function listUpstreamTools(
 /** Call one of the upstream's tools. */
 export async function callUpstreamTool(
   broker: BrokerClient,
-  token: string,
+  auth: AgentAuth,
   connection: BrokerConnection,
   tool: string,
   args: Record<string, unknown>,
 ): Promise<unknown> {
-  const client = new UpstreamClient(broker, token, connection);
+  const client = new UpstreamClient(broker, auth, connection);
   await client.initialize();
   try {
     return await client.request('tools/call', { name: tool, arguments: args });

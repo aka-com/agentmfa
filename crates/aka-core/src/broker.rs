@@ -87,6 +87,11 @@ pub struct Broker {
     pub health: Arc<crate::health::HealthRegistry>,
     /// Tickets + live WS/PG sessions.
     pub data_plane: DataPlane,
+    /// The sidecar's loopback MCP port, reported by the shell that
+    /// supervises it (restarts move it; `None` while it is not running).
+    /// Advertised in the discovery manifest so `aka mcp` and other bridges
+    /// can find the MCP endpoint without a config file.
+    sidecar_mcp_port: Mutex<Option<u16>>,
     /// The WS bridge's ephemeral loopback port, set when the daemon starts;
     /// surfaced only in open responses.
     pub(crate) ws_bridge_port: std::sync::OnceLock<u16>,
@@ -184,6 +189,7 @@ impl Broker {
             data_plane,
             mcp_auth: crate::mcp_auth::McpAuthSessions::default(),
             connect_request_debounce: Mutex::new(std::collections::HashMap::new()),
+            sidecar_mcp_port: Mutex::new(None),
             ws_bridge_port: std::sync::OnceLock::new(),
             pg_proxy_port: std::sync::OnceLock::new(),
             token_limiter: KeyedLimiter::new(
@@ -220,6 +226,21 @@ impl Broker {
 
     pub(crate) fn task_runtime(&self) -> tokio::runtime::Handle {
         self.task_runtime.clone()
+    }
+
+    /// Report where the sidecar's MCP endpoint is listening (`None` when it
+    /// stopped). Called by the shell supervising the sidecar; the discovery
+    /// manifest advertises it.
+    pub fn set_sidecar_mcp_port(&self, port: Option<u16>) {
+        *self.sidecar_mcp_port.lock().unwrap() = port;
+    }
+
+    /// The sidecar's MCP URL, when one is running.
+    pub fn sidecar_mcp_url(&self) -> Option<String> {
+        self.sidecar_mcp_port
+            .lock()
+            .unwrap()
+            .map(|port| format!("http://127.0.0.1:{port}/mcp"))
     }
 
     /// Demand the shell's native confirmation, regardless of the presence

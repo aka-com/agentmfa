@@ -29,6 +29,8 @@ use aka_core::vault::{platform_vault, platform_vault_for_root, SecretVault};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use zeroize::Zeroizing;
 
+mod mcp_bridge;
+
 #[derive(Parser)]
 #[command(name = "aka", version, about = "AKA broker CLI")]
 struct Cli {
@@ -74,6 +76,18 @@ enum Command {
         /// default per-user locations. Handy for testing.
         #[arg(long)]
         root: Option<PathBuf>,
+    },
+    /// Bridge stdio MCP to the local Multitool broker's MCP host. Point any
+    /// MCP client at `aka mcp` — it reads this computer's shared key and
+    /// discovers the MCP endpoint itself, so configs stay static.
+    Mcp {
+        /// Bridge to a broker rooted here instead of the default layout.
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Label this client in the user's activity log (e.g. claude-code).
+        /// Attribution only, never authorization.
+        #[arg(long)]
+        client: Option<String>,
     },
     /// Manage secrets from the terminal (dev/headless use; the desktop app
     /// is the primary interface).
@@ -191,6 +205,7 @@ fn main() {
             );
         }
         Command::Serve { root } => cmd_serve(root),
+        Command::Mcp { root, client } => cmd_mcp(root, client),
         Command::Secret {
             command:
                 SecretCommand::Add {
@@ -559,6 +574,17 @@ impl BrokerEvents for CliEvents {
 
     fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
         Some(ConfirmationMethod::Terminal)
+    }
+}
+
+fn cmd_mcp(root: Option<PathBuf>, client: Option<String>) {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let paths = store_paths(root.as_deref());
+    if let Err(message) = runtime.block_on(mcp_bridge::run(paths, client)) {
+        die(message);
     }
 }
 

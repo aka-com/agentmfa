@@ -18,7 +18,7 @@
 
 import { z } from 'zod';
 
-import type { BrokerClient, BrokerConnection } from './broker';
+import type { AgentAuth, BrokerClient, BrokerConnection } from './broker';
 
 /** MCP tool names allow `[a-zA-Z0-9_-]`; connection names are freer. */
 export function toolNameFor(connection: BrokerConnection): string {
@@ -143,13 +143,13 @@ export function toolError(message: string): ToolResult {
  */
 export async function invoke(
   broker: BrokerClient,
-  token: string,
+  auth: AgentAuth,
   connection: BrokerConnection,
   args: Record<string, unknown>,
 ): Promise<ToolResult> {
   const { path, body } = callFor(connection, args);
   try {
-    return text(await broker.invoke(path, token, body));
+    return text(await broker.invoke(path, auth, body));
   } catch (error) {
     const failure = error as { status?: number; reason?: string; message?: string };
     if (failure.status === 403) {

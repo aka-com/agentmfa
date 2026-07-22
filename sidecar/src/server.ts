@@ -137,8 +137,14 @@ async function handleMcp(
   }
 
   // Every request, including one carrying a live session id: a token
-  // revoked in the app must stop working on the very next call.
-  const principal = await auth.authenticate(bearer(req));
+  // revoked in the app must stop working on the very next call. The
+  // self-reported label rides along so the user's activity log names the
+  // real client; it is attribution only, never authorization.
+  const rawLabel = req.headers['x-multitool-client'];
+  const label = typeof rawLabel === 'string' && /^[A-Za-z0-9._-]{1,64}$/.test(rawLabel.trim())
+    ? rawLabel.trim()
+    : undefined;
+  const principal = await auth.authenticate(bearer(req), label);
   if (!principal) {
     res.setHeader('www-authenticate', 'Bearer');
     rpcError(res, 401, -32001, 'Unauthorized: pair this agent with Multitool first');

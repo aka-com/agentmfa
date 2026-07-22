@@ -276,6 +276,16 @@ pub fn run() {
             let sidecar = runtime.block_on(async {
                 sidecar::start(&handle, daemon.socket_path.clone())
             });
+            // Keep the broker told where the MCP endpoint is listening
+            // (restarts move the port), so the discovery manifest can
+            // advertise it to `aka mcp` and other bridges.
+            if let Some(sidecar) = &sidecar {
+                let watch = sidecar.watch();
+                let broker = broker.clone();
+                runtime.spawn(watch.follow(move |endpoint| {
+                    broker.set_sidecar_mcp_port(endpoint.map(|e| e.port));
+                }));
+            }
 
             windows::setup_app_menu(&handle)?;
             windows::setup_dropdown_panel(&handle)?;
