@@ -757,15 +757,20 @@ async fn post_http(
     if let Err(e) = validate_path(&call.path) {
         return err_detail(StatusCode::BAD_REQUEST, e.reason(), e.detail());
     }
-    let credential_header = match injection_form(template) {
-        Some(InjectionForm::Header { name }) => Some(name),
-        Some(InjectionForm::Query) => None,
-        None => {
-            return err_detail(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ErrorReason::BadConnectionConfig,
-                "connection template is neither a header line nor a query form",
-            )
+    let credential_header = if matches!(&conn.config, ConnectionConfig::Api { oauth: Some(_), .. })
+    {
+        Some("authorization".to_string())
+    } else {
+        match injection_form(template) {
+            Some(InjectionForm::Header { name }) => Some(name),
+            Some(InjectionForm::Query) => None,
+            None => {
+                return err_detail(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    ErrorReason::BadConnectionConfig,
+                    "connection template is neither a header line nor a query form",
+                )
+            }
         }
     };
     let wire_headers: Vec<(String, String)> = call.headers.clone().into_iter().collect();

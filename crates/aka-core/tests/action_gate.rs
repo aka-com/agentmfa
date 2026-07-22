@@ -30,6 +30,34 @@ struct UnifiedAuthEvents {
     secret_read_confirms: AtomicUsize,
 }
 
+struct SerializedEvents {
+    active: AtomicUsize,
+    max_active: AtomicUsize,
+    calls: AtomicUsize,
+}
+
+impl SerializedEvents {
+    fn prompt(&self) {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active.fetch_max(active, Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(75));
+        self.active.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl BrokerEvents for SerializedEvents {
+    fn confirm_secret_read(&self, _secret: &aka_core::types::SecretMeta) -> bool {
+        self.prompt();
+        true
+    }
+
+    fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
+        self.prompt();
+        Some(ConfirmationMethod::Waived)
+    }
+}
+
 impl BrokerEvents for UnifiedAuthEvents {
     fn confirm_secret_read(&self, _secret: &aka_core::types::SecretMeta) -> bool {
         self.secret_read_confirms.fetch_add(1, Ordering::SeqCst);
@@ -208,6 +236,43 @@ async fn copy_presence_does_not_authorize_configuration_changes() {
     broker.ui_delete_connection(&conn.id).unwrap();
 
     assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn presence_prompts_are_globally_serialized_across_purposes() {
+    let events = Arc::new(SerializedEvents {
+        active: AtomicUsize::new(0),
+        max_active: AtomicUsize::new(0),
+        calls: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    let conn = add_github(&broker);
+    let secret = broker.store.secret_by_name("GITHUB_API_KEY").unwrap();
+
+    let copy_broker = broker.clone();
+    let copy = tokio::spawn(async move {
+        copy_broker
+            .ui_secret_value_for_copy(&secret.id)
+            .await
+            .unwrap();
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while events.active.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("copy prompt should start");
+
+    let config_broker = broker.clone();
+    let configure = tokio::task::spawn_blocking(move || {
+        config_broker.ui_delete_connection(&conn.id).unwrap();
+    });
+    copy.await.unwrap();
+    configure.await.unwrap();
+
+    assert_eq!(events.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(events.max_active.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

@@ -70,9 +70,6 @@ pub struct Broker {
     /// (connection edits, access changes) so concurrent UI actions cannot
     /// interleave.
     pub(crate) config_gate: Mutex<()>,
-    /// Serializes clipboard-copy authorization checks so simultaneous clicks
-    /// cannot open duplicate native prompts.
-    copy_authorization_gate: tokio::sync::Mutex<()>,
     /// The shared local identity ("this computer's key").
     pub identity: Arc<IdentityStore>,
     pub executions: Executions,
@@ -215,7 +212,6 @@ impl Broker {
             endpoint_listeners: Mutex::new(HashMap::new()),
             endpoint_uploads,
             config_gate: Mutex::new(()),
-            copy_authorization_gate: tokio::sync::Mutex::new(()),
             identity,
             executions,
             task_runtime,
@@ -253,23 +249,16 @@ impl Broker {
     /// Demand the shell's native confirmation, regardless of the presence
     /// window. Fails closed when the shell refuses or does not implement the
     /// gate. Every action that grants an agent new authority goes through
-    /// here (or calls `events.confirm_action` directly off-runtime).
+    /// here; async callers run this same serialized store gate off-runtime.
     fn confirm_action(&self, description: &str) -> Result<crate::types::ConfirmationMethod> {
-        self.events
-            .confirm_action(description)
-            .ok_or(CoreError::NotConfirmed)
+        self.store.confirm_action(description)
     }
 
     /// Confirm a user-plane configuration action (tool and secret CRUD):
     /// rides the presence window when it is fresh, otherwise prompts and
     /// opens it. Never used for granting an agent authority.
     fn confirm_user_action(&self, description: &str) -> Result<crate::types::ConfirmationMethod> {
-        if self.store.use_configuration_presence() {
-            return Ok(crate::types::ConfirmationMethod::RecentAuthentication);
-        }
-        let method = self.confirm_action(description)?;
-        self.store.note_configuration_presence();
-        Ok(method)
+        self.store.confirm_configuration_action(description)
     }
 
     /* ----------------------- secrets (UI commands) ------------------------ */
@@ -365,29 +354,11 @@ impl Broker {
     /// OS authentication opens (or a fresh one extends) the presence window;
     /// agent executions keep their own authorization scopes.
     pub async fn ui_secret_value_for_copy(&self, id: &Uuid) -> Result<SecretValue> {
-        // Serialize copy authorization checks so simultaneous clicks cannot
-        // open duplicate native prompts or race to establish the window.
-        let _gate = self.copy_authorization_gate.lock().await;
-
         if !self.store.settings().reauth_on_read {
             return self.store.secret_value(id).await;
         }
-
-        if self.store.use_secret_read_presence() {
-            return crate::authorization::scope(true, self.store.secret_value(id)).await;
-        }
-
         let meta = self.store.secret_by_id(id)?;
-        let window = Duration::from_secs(self.store.settings().presence_window_secs);
-        let events = self.events.clone();
-        let confirmed =
-            tokio::task::spawn_blocking(move || events.confirm_secret_copy(&meta, window))
-                .await
-                .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))?;
-        if !confirmed {
-            return Err(CoreError::SecretReadNotAuthenticated);
-        }
-        self.store.note_secret_read_presence();
+        self.store.confirm_secret_copy(meta).await?;
         crate::authorization::scope(true, self.store.secret_value(id)).await
     }
 
@@ -922,12 +893,11 @@ impl Broker {
         }
 
         // Confirm off the async runtime: the native sheet blocks its thread.
-        let events = self.events.clone();
+        let store = self.store.clone();
         let description = format!("Issue a direct endpoint for {}", connection.name);
-        let confirmation = tokio::task::spawn_blocking(move || events.confirm_action(&description))
+        let confirmation = tokio::task::spawn_blocking(move || store.confirm_action(&description))
             .await
-            .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))?
-            .ok_or(CoreError::NotConfirmed)?;
+            .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))??;
         // Mint under the gate; re-check access didn't vanish while the
         // sheet was up. Rotating a live endpoint changes only its persisted
         // secret: the listener resolves the registry on every request, so

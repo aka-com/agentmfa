@@ -68,6 +68,14 @@ struct PresenceState {
     configuration: Option<PresenceGrant>,
 }
 
+#[derive(Debug, Default)]
+struct PresenceCoordinator {
+    state: Mutex<PresenceState>,
+    /// One process-wide lane for the freshness re-check and any native
+    /// prompt it triggers. The check must happen after acquiring this lock.
+    confirmation: Mutex<()>,
+}
+
 /// Everything `index.json` holds.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct IndexState {
@@ -114,7 +122,7 @@ pub struct Store {
     /// Purpose-scoped native-authentication grants. Copy/read approval never
     /// authorizes configuration changes, and no grant can slide beyond its
     /// original 12-hour absolute lifetime. Never persisted.
-    presence: Mutex<PresenceState>,
+    presence: Arc<PresenceCoordinator>,
 }
 
 impl Store {
@@ -145,7 +153,7 @@ impl Store {
             events,
             integrity,
             state: Mutex::new(state),
-            presence: Mutex::new(PresenceState::default()),
+            presence: Arc::new(PresenceCoordinator::default()),
         })
     }
 
@@ -155,43 +163,23 @@ impl Store {
         std::time::Duration::from_secs(self.settings().presence_window_secs)
     }
 
-    /// Establish a read/copy-only grant after a native authentication.
-    pub fn note_secret_read_presence(&self) {
-        let now = std::time::Instant::now();
-        let grant = PresenceGrant::new(now, self.presence_window());
-        self.presence.lock().unwrap().secret_read = Some(grant);
-    }
-
     /// Establish a configuration grant. A native authentication for a
     /// configuration action also covers reads, which preserves the intended
     /// save-then-test flow without allowing the reverse escalation.
-    pub fn note_configuration_presence(&self) {
+    fn note_configuration_presence(&self) {
         let now = std::time::Instant::now();
         let grant = PresenceGrant::new(now, self.presence_window());
-        let mut presence = self.presence.lock().unwrap();
+        let mut presence = self.presence.state.lock().unwrap();
         presence.configuration = Some(grant);
         presence.secret_read = Some(grant);
     }
 
-    /// Ride a read/copy grant if it is still within both its idle and
-    /// absolute deadlines.
-    pub fn use_secret_read_presence(&self) -> bool {
-        let now = std::time::Instant::now();
-        let window = self.presence_window();
-        self.presence
-            .lock()
-            .unwrap()
-            .secret_read
-            .as_mut()
-            .is_some_and(|grant| grant.ride(now, window))
-    }
-
     /// Ride a configuration grant. It may extend an existing read grant, but
     /// cannot create one unless a native configuration authentication did.
-    pub fn use_configuration_presence(&self) -> bool {
+    fn use_configuration_presence(&self) -> bool {
         let now = std::time::Instant::now();
         let window = self.presence_window();
-        let mut presence = self.presence.lock().unwrap();
+        let mut presence = self.presence.state.lock().unwrap();
         let fresh = presence
             .configuration
             .as_mut()
@@ -207,9 +195,10 @@ impl Store {
     /// Re-anchor active grants after the configured idle window changes. The
     /// original absolute deadline is deliberately retained.
     pub fn reanchor_presence(&self) {
+        let _confirmation = self.presence.confirmation.lock().unwrap();
         let now = std::time::Instant::now();
         let window = self.presence_window();
-        let mut presence = self.presence.lock().unwrap();
+        let mut presence = self.presence.state.lock().unwrap();
         if let Some(grant) = presence.secret_read.as_mut() {
             grant.reanchor(now, window);
         }
@@ -221,7 +210,66 @@ impl Store {
     /// Drop all grants so the next gated action re-prompts (e.g. after the
     /// read-authentication setting changes).
     pub fn clear_user_presence(&self) {
-        *self.presence.lock().unwrap() = PresenceState::default();
+        let _confirmation = self.presence.confirmation.lock().unwrap();
+        *self.presence.state.lock().unwrap() = PresenceState::default();
+    }
+
+    /// Always invoke the native action gate, serialized with every other
+    /// presence check and prompt.
+    pub fn confirm_action(&self, description: &str) -> Result<crate::types::ConfirmationMethod> {
+        let _confirmation = self.presence.confirmation.lock().unwrap();
+        self.events
+            .confirm_action(description)
+            .ok_or(CoreError::NotConfirmed)
+    }
+
+    /// Check and ride the configuration grant, or establish purpose-scoped
+    /// grants after one serialized native prompt.
+    pub fn confirm_configuration_action(
+        &self,
+        description: &str,
+    ) -> Result<crate::types::ConfirmationMethod> {
+        let _confirmation = self.presence.confirmation.lock().unwrap();
+        if self.use_configuration_presence() {
+            return Ok(crate::types::ConfirmationMethod::RecentAuthentication);
+        }
+        let method = self
+            .events
+            .confirm_action(description)
+            .ok_or(CoreError::NotConfirmed)?;
+        self.note_configuration_presence();
+        Ok(method)
+    }
+
+    /// Check and ride the read grant, or establish it after the clipboard's
+    /// native authentication. The blocking prompt and check share the same
+    /// global lane as config and ordinary read prompts.
+    pub async fn confirm_secret_copy(&self, meta: SecretMeta) -> Result<()> {
+        let presence = self.presence.clone();
+        let events = self.events.clone();
+        let window = self.presence_window();
+        tokio::task::spawn_blocking(move || {
+            let _confirmation = presence.confirmation.lock().unwrap();
+            let now = std::time::Instant::now();
+            if presence
+                .state
+                .lock()
+                .unwrap()
+                .secret_read
+                .as_mut()
+                .is_some_and(|grant| grant.ride(now, window))
+            {
+                return Ok(());
+            }
+            if !events.confirm_secret_copy(&meta, window) {
+                return Err(CoreError::SecretReadNotAuthenticated);
+            }
+            presence.state.lock().unwrap().secret_read =
+                Some(PresenceGrant::new(std::time::Instant::now(), window));
+            Ok(())
+        })
+        .await
+        .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))?
     }
 
     fn persist(&self, state: &IndexState) -> Result<()> {
@@ -499,22 +547,35 @@ impl Store {
         if !reauth {
             return Ok(());
         }
+        let presence = self.presence.clone();
         let events = self.events.clone();
+        let window = self.presence_window();
         crate::authorization::confirm_once(|| async move {
-            // A fresh presence window covers the read; pre-authorized agent
-            // executions never reach this closure, so agent traffic cannot
-            // keep the window alive.
-            if self.use_secret_read_presence() {
-                return Ok(());
-            }
-            let confirmed = tokio::task::spawn_blocking(move || events.confirm_secret_read(&meta))
-                .await
-                .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))?;
-            if !confirmed {
-                return Err(CoreError::SecretReadNotAuthenticated);
-            }
-            self.note_secret_read_presence();
-            Ok(())
+            tokio::task::spawn_blocking(move || {
+                let _confirmation = presence.confirmation.lock().unwrap();
+                // Re-check only after joining the global lane: another prompt
+                // may have established a suitable grant while this read was
+                // waiting. Pre-authorized agent executions never reach here.
+                let now = std::time::Instant::now();
+                if presence
+                    .state
+                    .lock()
+                    .unwrap()
+                    .secret_read
+                    .as_mut()
+                    .is_some_and(|grant| grant.ride(now, window))
+                {
+                    return Ok(());
+                }
+                if !events.confirm_secret_read(&meta) {
+                    return Err(CoreError::SecretReadNotAuthenticated);
+                }
+                presence.state.lock().unwrap().secret_read =
+                    Some(PresenceGrant::new(std::time::Instant::now(), window));
+                Ok(())
+            })
+            .await
+            .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))?
         })
         .await
     }

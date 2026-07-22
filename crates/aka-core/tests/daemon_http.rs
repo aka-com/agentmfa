@@ -1792,6 +1792,46 @@ async fn http_direct_endpoint_rejects_missing_or_wrong_secret() {
 }
 
 #[tokio::test]
+async fn http_direct_endpoint_rejects_client_supplied_custom_credential_header() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let up = upstream().await;
+    h.broker
+        .store
+        .add_secret("API_KEY", Zeroizing::new("real-key".into()))
+        .unwrap();
+    h.broker
+        .store
+        .add_connection(ConnectionSpec {
+            name: "github".into(),
+            config: ConnectionConfig::Api {
+                host: "127.0.0.1".into(),
+                scheme: "http".into(),
+                port: Some(up.port),
+                template: "X-Api-Key: {{API_KEY}}".into(),
+                mcp_path: None,
+                oauth: None,
+            },
+            secrets: vec![],
+        })
+        .unwrap();
+    h.pair("claude-code").await;
+    let (info, port) = issue_http_endpoint(&h).await;
+    let auth = format!("Bearer {}", info.secret);
+
+    let (status, _, body) = loopback_request(
+        port,
+        "GET",
+        "/echo",
+        &[("authorization", &auth), ("x-api-key", "attacker-value")],
+        None,
+    )
+    .await;
+    assert_eq!(status, 400, "response: {body}");
+    assert_eq!(body["reason"], "reserved_header");
+    assert_eq!(up.hits.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn reissuing_http_endpoint_rotates_secret_without_rebinding_its_port() {
     let mut h = harness(BrokerConfig::default()).await;
     let up = upstream().await;

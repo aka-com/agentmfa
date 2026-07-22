@@ -163,6 +163,67 @@ pub fn injection_form(template_src: &str) -> Option<InjectionForm> {
         })
 }
 
+fn connection_credential_header(connection: &Connection) -> Option<String> {
+    let ConnectionConfig::Api {
+        template, oauth, ..
+    } = &connection.config
+    else {
+        return None;
+    };
+    if oauth.is_some() {
+        return Some("authorization".to_string());
+    }
+    match injection_form(template) {
+        Some(InjectionForm::Header { name }) => Some(name),
+        Some(InjectionForm::Query) | None => None,
+    }
+}
+
+/// Sanitize the raw direct-endpoint client leg before the configured
+/// credential is injected. In addition to ordinary hop-by-hop headers, strip
+/// fields nominated by `Connection`; reject any attempt to supply a custom
+/// credential header instead of silently allowing it to shadow the broker.
+fn endpoint_forward_headers(
+    source: &HeaderMap,
+    credential_header: Option<&str>,
+) -> Result<HeaderMap, HttpValidationError> {
+    let mut connection_nominated = Vec::new();
+    for value in source.get_all(http::header::CONNECTION) {
+        let value = value
+            .to_str()
+            .map_err(|_| HttpValidationError::InvalidHeader("connection".to_string()))?;
+        for token in value
+            .split(',')
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+        {
+            let name = HeaderName::from_bytes(token.as_bytes())
+                .map_err(|_| HttpValidationError::InvalidHeader(token.to_string()))?;
+            connection_nominated.push(name);
+        }
+    }
+
+    let mut forwarded = HeaderMap::new();
+    for (name, value) in source.iter() {
+        let lower = name.as_str();
+        if credential_header.is_some_and(|credential| {
+            !credential.eq_ignore_ascii_case("authorization")
+                && credential.eq_ignore_ascii_case(lower)
+        }) {
+            return Err(HttpValidationError::ReservedHeader(lower.to_string()));
+        }
+        if lower == "authorization"
+            || lower == "accept-encoding"
+            || DENYLIST.contains(&lower)
+            || connection_nominated.iter().any(|n| n == name)
+        {
+            continue;
+        }
+        forwarded.append(name.clone(), value.clone());
+    }
+    Ok(forwarded)
+}
+
 /// The rendered credential, applied fresh to every hop.
 pub(crate) enum RenderedInjection {
     Header(HeaderName, HeaderValue),
@@ -946,24 +1007,23 @@ async fn proxy_handler(
         );
     }
 
-    // Forward the client's headers minus the endpoint auth, the proxy's own
-    // Host, and framing/encoding headers the upstream leg recomputes. The real
-    // credential is injected on the upstream leg by the shared core.
-    let mut headers = HeaderMap::new();
-    for (name, value) in parts.headers.iter() {
-        if matches!(
-            name.as_str(),
-            "authorization"
-                | "host"
-                | "content-length"
-                | "connection"
-                | "transfer-encoding"
-                | "accept-encoding"
-        ) {
-            continue;
+    // The endpoint Authorization value authenticates only this listener. The
+    // configured upstream credential header is broker-controlled as well,
+    // including custom header templates such as X-Api-Key.
+    let credential_header = connection_credential_header(&connection);
+    let headers = match endpoint_forward_headers(&parts.headers, credential_header.as_deref()) {
+        Ok(headers) => headers,
+        Err(error) => {
+            let reason = match &error {
+                HttpValidationError::ReservedHeader(_) => "reserved_header",
+                HttpValidationError::InvalidHeader(_) => "invalid_header",
+                HttpValidationError::InvalidMethod | HttpValidationError::InvalidPath => {
+                    "invalid_header"
+                }
+            };
+            return endpoint_error(StatusCode::BAD_REQUEST, reason, &error.detail());
         }
-        headers.insert(name.clone(), value.clone());
-    }
+    };
 
     // Admit the upload before reading even its first body frame. A malicious
     // holder of a valid endpoint secret can therefore occupy only the fixed
@@ -1321,6 +1381,33 @@ mod tests {
             validate_headers(&[("X-Ok".to_string(), "bad\r\nvalue".into())], None).unwrap_err(),
             HttpValidationError::InvalidHeader(_)
         ));
+    }
+
+    #[test]
+    fn direct_headers_cannot_shadow_custom_credentials() {
+        let mut source = HeaderMap::new();
+        source.insert("authorization", HeaderValue::from_static("Bearer endpoint"));
+        source.insert("x-api-key", HeaderValue::from_static("attacker"));
+        assert!(matches!(
+            endpoint_forward_headers(&source, Some("X-Api-Key")).unwrap_err(),
+            HttpValidationError::ReservedHeader(_)
+        ));
+    }
+
+    #[test]
+    fn direct_headers_strip_connection_nominated_fields() {
+        let mut source = HeaderMap::new();
+        source.insert("authorization", HeaderValue::from_static("Bearer endpoint"));
+        source.insert(
+            "connection",
+            HeaderValue::from_static("x-remove, keep-alive"),
+        );
+        source.insert("x-remove", HeaderValue::from_static("private"));
+        source.insert("x-keep", HeaderValue::from_static("public"));
+        let forwarded = endpoint_forward_headers(&source, Some("Authorization")).unwrap();
+        assert!(!forwarded.contains_key("authorization"));
+        assert!(!forwarded.contains_key("x-remove"));
+        assert_eq!(forwarded["x-keep"], "public");
     }
 
     #[test]
