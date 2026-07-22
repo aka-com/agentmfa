@@ -37,6 +37,7 @@
   --amber-wash: rgba(255, 190, 50, .16);
   --amber-border: rgba(200, 140, 20, .3);
   --ok-ink: #1a8f3c;
+  --ok-solid: #34c759;                  /* filled switch track, status dot */
   --ok-wash: rgba(52, 199, 89, .09);
   --ok-border: rgba(52, 199, 89, .28);
   --brand-claude-bg: rgba(217, 119, 87, .14);
@@ -677,6 +678,7 @@
     --amber-wash: rgba(255,190,50,.13);
     --amber-border: rgba(255,190,80,.32);
     --ok-ink: #4cd07d;
+    --ok-solid: #30d158;
     --ok-wash: rgba(76,208,125,.10);
     --ok-border: rgba(76,208,125,.30);
     --brand-claude-bg: rgba(217,119,87,.18);
@@ -812,7 +814,8 @@
 /* Expanded rows are full-bleed: they span the whole card and align with the
    parent row's text, so a tool reads as one object rather than a card-in-card. */
 .cat-conns { background: var(--wash); border-top: 1px solid var(--line); }
-.cat-conn-list { display: flex; flex-direction: column; }
+/* The hairline under the last connection separates it from "Add another". */
+.cat-conn-list { display: flex; flex-direction: column; border-bottom: 1px solid var(--line-soft); }
 .cat-conn {
   display: flex; align-items: flex-start; gap: 10px;
   padding: 10px 14px 10px 64px; min-width: 0;
@@ -838,9 +841,10 @@
 /* Align the credential table with the connection rows' text spine. */
 .cat-conns .sec-table td:first-child { padding-left: 64px; }
 .cat-conns .sec-table td:last-child { padding-right: 14px; }
-.cat-conns .sec-table tr:last-child td { border-bottom: 0; }
 .cat-conns > .muted-note { padding: 10px 14px; }
-.cat-conns .cat-add-another { margin: 8px 14px 10px 64px; }
+/* Add-actions read as part of the list, not as calls to action: ink, not accent. */
+.cat-conns .cat-add-another { margin: 8px 14px 10px 64px; color: var(--ink); }
+.cat-conns .cat-add-secret { display: block; margin: 8px auto 10px; }
 .dropdown-surface .catalog { gap: 12px; }
 .dropdown-surface .cat-search { width: 100%; }
 
@@ -868,8 +872,6 @@
 .cc-test.ok { color: var(--ok-ink); }
 .cc-test.err { color: var(--danger-ink); }
 .cc-test.running { opacity: .8; }
-.cat-meta-account { color: var(--ok-ink); font-weight: 600; }
-.mcp-status-btn { flex: 0 0 auto; }
 /* Resources the server advertises, listed under the connection the same
    way credentials and wirings are. */
 .mcp-res-head {
@@ -1003,7 +1005,33 @@
 .connect-recent-row code{ font-size: 12.5px; font-weight: 600; }
 .connect-recent-row .grow{ flex: 1; }
 
-/* Access controls on a Tools-tab connection row: the whole permission model
-   in one line — pill, endpoint chip, tool picker, ⋮ menu, toggle. */
-.cat-conn-access{ display: flex; align-items: center; gap: 8px; margin-top: 8px;
-  flex-wrap: wrap; }
+/* The connection row's right-edge controls: ⋮ endpoint menu, ⋯ options,
+   and the agents on/off switch pinned rightmost. */
+.cat-conn-ctl{ display: flex; align-items: center; gap: 6px; flex: 0 0 auto; margin-top: 1px; }
+/* Connection state at a glance: green = agents on, grey = off, amber = needs attention. */
+.conn-dot{ flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: var(--ok-solid); }
+.conn-dot.off{ background: var(--faint); }
+.conn-dot.warn{ background: var(--amber-strong); }
+/* The enable/disable switch — the row's master control. */
+.switch{
+  position: relative; flex: 0 0 auto; width: 34px; height: 20px; padding: 0;
+  border: none; border-radius: 999px; background: var(--hover-2); cursor: pointer;
+  transition: background .15s ease;
+}
+.switch::after{
+  content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px;
+  border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.3);
+  transition: left .15s ease;
+}
+.switch.on{ background: var(--ok-solid); }
+.switch.on::after{ left: 16px; }
+/* Tool-scope picker and credential, rendered as icon-led meta facts. */
+.cat-meta-tools{
+  display: inline-flex; align-items: center; gap: 5px; padding: 0; border: none;
+  background: transparent; color: var(--ink); font: inherit; font-size: 11.5px;
+  font-weight: 500; cursor: pointer;
+}
+.cat-meta-tools:hover{ text-decoration: underline; }
+.cat-meta-tools svg{ color: var(--muted-2); }
+.cat-meta-cred{ display: inline-flex; align-items: center; gap: 5px; }
+.cat-meta-cred svg{ color: var(--muted-2); }

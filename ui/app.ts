@@ -513,30 +513,14 @@ function wiringMenuHTML(c: ConnectionSummary): string {
   </div>`;
 }
 
-/** The row of interactive access controls a connection carries on its
- * Tools-tab row: state pill, endpoint chip, MCP tool picker, the ⋮
- * direct-endpoint menu, and the enable/disable toggle. */
-function accessControlsHTML(c: ConnectionSummary): string {
+/** The agents on/off switch a connection row carries — the row's primary
+ * control, pinned to its right edge. */
+function connToggleHTML(c: ConnectionSummary): string {
   const enabled = c.agent_access.enabled;
-  const pill = enabled
-    ? '<span class="acc-pill granted">Agents: on</span>'
-    : '<span class="acc-pill">Agents: off</span>';
-  const endpointChip = c.agent_access.endpoint
-    ? '<span class="acc-pill ep" title="A direct endpoint is issued for this tool">Endpoint</span>'
-    : '';
-  const toolsChip = enabled && c.mcp_path
-    ? `<button class="btn ghost sm" data-act="wiring-tools" data-conn="${c.id}"
-        aria-label="Choose which tools agents may call on ${escAttr(c.name)}"
-        title="Choose which of this server’s tools agents may call">${
-          c.agent_access.allowed_tools
-            ? `${c.agent_access.allowed_tools.length} tool${c.agent_access.allowed_tools.length === 1 ? '' : 's'}`
-            : 'All tools'}</button>`
-    : '';
-  const endpointMenu = enabled && ENDPOINTABLE[c.type] ? wiringMenuHTML(c) : '';
-  const action = enabled
-    ? `<button class="btn ghost sm" aria-label="Disable ${escAttr(c.name)} for agents" data-act="disable-tool" data-conn="${c.id}">Disable</button>`
-    : `<button class="btn ghost sm" aria-label="Enable ${escAttr(c.name)} for agents" data-act="enable-tool" data-conn="${c.id}">Enable</button>`;
-  return `${pill}${endpointChip}${toolsChip}${endpointMenu}${action}`;
+  return `<button class="switch ${enabled ? 'on' : ''}" role="switch" aria-checked="${enabled}"
+    title="${enabled ? 'Agents may use this tool' : 'Agents may not use this tool'}"
+    aria-label="${enabled ? 'Disable' : 'Enable'} ${escAttr(c.name)} for agents"
+    data-act="${enabled ? 'disable-tool' : 'enable-tool'}" data-conn="${c.id}"></button>`;
 }
 
 /* ---- Connect page ---- */
@@ -754,7 +738,9 @@ const connTestResultHTML = (c: ConnectionSummary): string => {
 // What a connection actually lets an agent do, in plain words — the
 // expansion has to answer "what is this for?" without opening the editor.
 function connectionPurpose(c: ConnectionSummary): string | null {
-  if (c.type === 'api' && c.mcp_path) return 'Exposes this MCP server’s tools to wired agents';
+  // MCP rows skip the sentence: the parent catalog row's description
+  // already says what the server does, and the meta facts carry the rest.
+  if (c.type === 'api' && c.mcp_path) return null;
   if (c.type === 'pg') return null;
   if (c.type === 'ssh') return `Shell, git, and file transfer as ${c.user || 'the pinned user'}`;
   if (c.type === 'ws') return 'Streams WebSocket messages';
@@ -770,8 +756,9 @@ function connectionCredential(c: ConnectionSummary): string {
 }
 
 // One row inside an expanded catalog entry. It spans the full card width and
-// carries enough to identify the connection without opening it: name, where
-// it points, what it does, which credential it injects, and who is wired.
+// carries enough to identify the connection without opening it: who is signed
+// in (accounts differ between connections; the server rarely does), where it
+// points, which tools agents get, and which credential the broker injects.
 function catalogConnRowHTML(c: ConnectionSummary): string {
   if (state.confirm && state.confirm.kind === 'del-conn' && state.confirm.id === c.id) {
     return `<div class="cat-conn confirm-conn">
@@ -783,14 +770,28 @@ function catalogConnRowHTML(c: ConnectionSummary): string {
   const test = state.connTests[c.id];
   const menuOpen = state.connMenuOpen === c.id;
   const live = liveCount(c);
+  const enabled = c.agent_access.enabled;
   const mcpStatus = c.mcp_path ? state.mcpStatus[c.id] : undefined;
-  const account = c.mcp_path && c.account
-    ? `<span class="cat-meta-account" title="Verified by the status check">${esc(`Connected as ${c.account}`)}</span>`
+  // Account-first title: the signed-in identity is what tells two
+  // connections to the same server apart. The row name stays on hover.
+  const title = c.mcp_path && c.account ? c.account : c.name;
+  const dot = !enabled ? ' off' : c.last_status === 'needs_reconnect' ? ' warn' : '';
+  const toolsChip = enabled && c.mcp_path
+    ? `<button class="cat-meta-tools" data-act="wiring-tools" data-conn="${c.id}"
+        aria-label="Choose which tools agents may call on ${escAttr(c.name)}"
+        title="Choose which of this server’s tools agents may call">${ICONS.layoutGrid}<span>${
+          c.agent_access.allowed_tools
+            ? `${c.agent_access.allowed_tools.length} tool${c.agent_access.allowed_tools.length === 1 ? '' : 's'}`
+            : 'All tools'}</span></button>`
     : '';
-  const statusBtn = c.mcp_path
-    ? `<button class="icon-btn mcp-status-btn" title="Check server & account"
-        aria-label="Check status of ${escAttr(c.name)}" data-act="mcp-status" data-id="${c.id}"
-        ${mcpStatus && mcpStatus.running ? 'disabled' : ''}>${ICONS.refresh}</button>`
+  const endpointChip = c.agent_access.endpoint
+    ? '<span class="acc-pill ep" title="A direct endpoint is issued for this tool">Endpoint</span>'
+    : '';
+  const endpointMenu = enabled && ENDPOINTABLE[c.type] ? wiringMenuHTML(c) : '';
+  const statusItem = c.mcp_path
+    ? `<button class="menu-item" role="menuitem" data-act="mcp-status" data-id="${c.id}"
+        ${mcpStatus && mcpStatus.running ? 'disabled' : ''}>${ICONS.refresh} ${
+          mcpStatus && mcpStatus.running ? 'Checking…' : 'Check server & account'}</button>`
     : '';
   const reconnectItem = c.mcp_path
     ? `<button class="menu-item" role="menuitem" data-act="reconnect-mcp" data-id="${c.id}">${ICONS.logIn} Reconnect (sign in again)…</button>`
@@ -816,26 +817,27 @@ function catalogConnRowHTML(c: ConnectionSummary): string {
   const purpose = connectionPurpose(c);
   return `<div class="cat-conn">
     <div class="cat-conn-tx">
-      <div class="cat-conn-head"><b>${esc(c.name)}</b>${live ? ` <span class="cc-live">● ${live} live</span>` : ''}</div>
+      <div class="cat-conn-head"><b title="${escAttr(c.name)}">${esc(title)}</b><span class="conn-dot${dot}"></span>${live ? ` <span class="cc-live">● ${live} live</span>` : ''}</div>
       <code title="${escAttr(c.target)}">${esc(c.target)}</code>
       <div class="cat-conn-meta">
         ${purpose ? `<span>${esc(purpose)}</span>` : ''}
-        <span>${esc(connectionCredential(c))}</span>
-        ${account}${tls}${hostKey}${needsReconnect}
+        ${toolsChip}
+        <span class="cat-meta-cred">${ICONS.keyRound}<span>${esc(connectionCredential(c))}</span></span>
+        ${endpointChip}${tls}${hostKey}${needsReconnect}
       </div>
-      <div class="cat-conn-access">${accessControlsHTML(c)}</div>
       ${connTestResultHTML(c)}${mcpStatusHTML(c)}</div>
-    ${statusBtn}<div class="tile-menu-wrap">
+    <div class="cat-conn-ctl">${endpointMenu}<div class="tile-menu-wrap">
       <button class="icon-btn tile-menu-btn ${menuOpen ? 'on' : ''}" title="Tool options"
         aria-label="Options for ${escAttr(c.name)}" aria-haspopup="menu"
         aria-expanded="${menuOpen}" data-act="toggle-conn-menu" data-id="${c.id}">${ICONS.ellipsis}</button>
       ${menuOpen ? `<div class="tile-menu" role="menu" aria-label="Options for ${escAttr(c.name)}">
+        ${statusItem}
         <button class="menu-item" role="menuitem" data-act="test-conn" data-id="${c.id}" ${test && test.running ? 'disabled' : ''}>${ICONS.flaskConical} ${test && test.running ? 'Testing…' : 'Test connection'}</button>
         ${reconnectItem}
         <button class="menu-item" role="menuitem" data-act="edit-conn" data-id="${c.id}">${ICONS.pencil} Edit…</button>
         <button class="menu-item danger" role="menuitem" data-act="del-conn-ask" data-id="${c.id}">${ICONS.trash} Delete…</button>
       </div>` : ''}
-    </div></div>`;
+    </div>${connToggleHTML(c)}</div></div>`;
 }
 
 // The status check's result, rendered under the MCP connection it belongs
@@ -877,7 +879,7 @@ function credentialsExpansionHTML(): string {
     ? secretsTableHTML(query)
     : `<div class="muted-note">${state.secrets.length ? 'No saved credentials match your search.' : 'No saved credentials yet.'}</div>`;
   return `<div class="cat-conns">${body}
-    <button class="btn ghost sm cat-add-another" data-act="open-add-secret">＋ Add credential</button></div>`;
+    <button class="btn ghost sm cat-add-another cat-add-secret" data-act="open-add-secret">＋ Add credential</button></div>`;
 }
 
 // One catalog row: icon chip, name, one-line description, and a trailing
@@ -932,7 +934,7 @@ function catalogRowHTML(entry: CatalogEntry): string {
     : builtin ? credentialsExpansionHTML()
     : `<div class="cat-conns">
       <div class="cat-conn-list">${connectionsForEntry(entry, state.connections).map(catalogConnRowHTML).join('')}</div>
-      <button class="btn ghost sm cat-add-another" data-act="catalog-add" data-id="${entry.id}">＋ Add another ${esc(entry.name)}</button>
+      <button class="btn ghost sm cat-add-another" data-act="catalog-add" data-id="${entry.id}">＋ Add another ${esc(entry.name)} connection</button>
     </div>`;
   const rowToggle = count || builtin
     ? ` data-act="catalog-toggle" data-id="${entry.id}"`
