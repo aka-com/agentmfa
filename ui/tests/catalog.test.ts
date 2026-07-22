@@ -48,6 +48,12 @@ test('infrastructure precedes apps and generic endpoints live under Custom Apps'
   );
 });
 
+test('featured apps keep their curated display order', () => {
+  const apps = CATALOG.filter((entry) => entry.section === 'Apps').map((entry) => entry.id);
+  assert.ok(apps.indexOf('slack') < apps.indexOf('gmail'));
+  assert.ok(apps.indexOf('openai') < apps.indexOf('linear'));
+});
+
 test('branded apps are added as MCP servers, not raw API origins', () => {
   for (const id of ['github', 'gmail', 'notion', 'onepassword']) {
     const entry = CATALOG.find((candidate) => candidate.id === id);
