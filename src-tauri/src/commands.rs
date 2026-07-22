@@ -998,6 +998,22 @@ pub async fn rotate_key(state: State<'_, AppState>) -> CmdResult<()> {
         .map_err(|e| e.to_string())
 }
 
+/// Copy the shared key to the clipboard. The key never enters the webview:
+/// the clipboard write happens here, like a secret copy. Most setups never
+/// need it — agents read the token file themselves.
+#[tauri::command]
+pub fn copy_key(app: AppHandle, state: State<AppState>) -> CmdResult<()> {
+    let token = state.broker.identity.token();
+    app.clipboard()
+        .write_text(token)
+        .map_err(|error| error.to_string())?;
+    state.broker.audit.append(aka_core::audit::AuditEntry::new(
+        aka_core::audit::AuditKind::SecretCopied,
+        "Shared key copied".to_string(),
+    ));
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn confirm_rotate_key(app: AppHandle) -> bool {
     app.dialog()
@@ -1094,6 +1110,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         revoke_endpoint,
         confirm_rotate_key,
         rotate_key,
+        copy_key,
         close_session,
         set_reauth_on_read,
         set_show_websockets,

@@ -150,6 +150,8 @@ interface AppState {
   connImportSource: string;
   connImportError: string | null;
   menuOpen: boolean;
+  /** Which Connect-page guide card is expanded. */
+  connectOpen: string | null;
   agentMenuOpen: string | null;
   connMenuOpen: string | null;
   wiringMenuOpen: string | null;
@@ -233,6 +235,7 @@ const state: AppState = {
   connImportSource: '',  // paste-to-prefill field in the add sheet
   connImportError: null,
   menuOpen: false,       // desktop-mode settings popover (gear) open
+  connectOpen: 'claude-code', // Connect-page guide card that starts expanded
   agentMenuOpen: null,   // 'identity' while the key card's ⋯ menu is open
   connMenuOpen: null,    // connection id whose ⋯ options menu is open (Tools tab)
   wiringMenuOpen: null,  // connection id whose ⋮ direct-endpoint menu is open
@@ -501,15 +504,17 @@ function wiringMenuHTML(c: ConnectionSummary): string {
   </div>`;
 }
 
-function agentToolRowHTML(c: ConnectionSummary): string {
-  const t = TYPES[c.type];
+/** The row of interactive access controls a connection carries on its
+ * Tools-tab row: state pill, endpoint chip, MCP tool picker, the ⋮
+ * direct-endpoint menu, and the enable/disable toggle. */
+function accessControlsHTML(c: ConnectionSummary): string {
   const enabled = c.agent_access.enabled;
-  const live = state.sessions.some((s) => s.connection === c.name);
-  const pill = !enabled
-    ? '<span class="acc-pill">Off</span>'
-    : '<span class="acc-pill granted">Enabled</span>';
-  // An enabled MCP connection can be narrowed to a curated tool subset; the
-  // chip names the current scope and opens the picker.
+  const pill = enabled
+    ? '<span class="acc-pill granted">Agents: on</span>'
+    : '<span class="acc-pill">Agents: off</span>';
+  const endpointChip = c.agent_access.endpoint
+    ? '<span class="acc-pill ep" title="A direct endpoint is issued for this tool">Endpoint</span>'
+    : '';
   const toolsChip = enabled && c.mcp_path
     ? `<button class="btn ghost sm" data-act="wiring-tools" data-conn="${c.id}"
         aria-label="Choose which tools agents may call on ${escAttr(c.name)}"
@@ -518,45 +523,140 @@ function agentToolRowHTML(c: ConnectionSummary): string {
             ? `${c.agent_access.allowed_tools.length} tool${c.agent_access.allowed_tools.length === 1 ? '' : 's'}`
             : 'All tools'}</button>`
     : '';
-  // An enabled Postgres/SSH/HTTP row gets the ⋮ direct-endpoint menu, left
-  // of the toggle.
-  const wiringMenu = enabled && ENDPOINTABLE[c.type]
-    ? wiringMenuHTML(c)
-    : '';
-  // A small chip when a direct endpoint is issued for this connection.
-  const endpointChip = c.agent_access.endpoint
-    ? '<span class="acc-pill ep" title="A direct endpoint is issued for this tool">Endpoint</span>'
-    : '';
+  const endpointMenu = enabled && ENDPOINTABLE[c.type] ? wiringMenuHTML(c) : '';
   const action = enabled
     ? `<button class="btn ghost sm" aria-label="Disable ${escAttr(c.name)} for agents" data-act="disable-tool" data-conn="${c.id}">Disable</button>`
     : `<button class="btn ghost sm" aria-label="Enable ${escAttr(c.name)} for agents" data-act="enable-tool" data-conn="${c.id}">Enable</button>`;
-  return `<div class="acc-row">
-    <span class="badge ${t.cls}">${t.label}</span>
-    <div class="acc-svc"><div class="acc-name">${esc(c.name)}${live ? ' <span class="cc-live">● live</span>' : ''}</div>
-      <div class="acc-target" title="${escAttr(c.target)}">${esc(c.target)}</div></div>
-    ${pill}${endpointChip}${toolsChip}${wiringMenu}${action}</div>`;
+  return `${pill}${endpointChip}${toolsChip}${endpointMenu}${action}`;
 }
 
-function identityBlockHTML(identity: IdentityInfo): string {
+/* ---- Connect page ---- */
+// The page's job is no longer to manage identities the broker stores —
+// there is exactly one, this computer's key — but to get the user's own
+// agents talking to Multitool: a key card, one guide card per agent family
+// with copyable setup snippets, and a cosmetic recently-seen list built
+// from activity labels. Per-tool access lives on the Tools tab.
+
+interface ConnectStep {
+  title: string;
+  detail: string;
+  /** A copyable snippet, rendered monospace with a Copy button. */
+  snippet?: string;
+}
+
+interface ConnectGuide {
+  id: string;
+  name: string;
+  sub: string;
+  /** Two-letter mark on the card row. */
+  mark: string;
+  steps: ConnectStep[];
+  /** A closing one-liner under the steps. */
+  note?: string;
+}
+
+function connectGuides(identity: IdentityInfo): ConnectGuide[] {
+  const socket = identity.socket_path;
+  const token = identity.token_path;
+  return [
+    {
+      id: 'claude-code',
+      name: 'Claude Code',
+      sub: 'Terminal · connects over MCP',
+      mark: 'CC',
+      steps: [
+        {
+          title: 'Add Multitool as an MCP server',
+          detail: 'Run once, anywhere. No key to paste — aka mcp finds the broker and key itself.',
+          snippet: 'claude mcp add multitool -- aka mcp --client claude-code',
+        },
+        {
+          title: 'Check it took',
+          detail: 'In any Claude Code session, ask it to run multitool_status — it should report your enabled tools.',
+        },
+      ],
+      note: 'Working over the raw API instead? Use the plain-HTTP setup under “Command line & custom harnesses”.',
+    },
+    {
+      id: 'claude-desktop',
+      name: 'Claude Desktop',
+      sub: 'App · connects over MCP',
+      mark: 'CD',
+      steps: [
+        {
+          title: 'Add Multitool to Claude Desktop’s config',
+          detail: 'Merge this into ~/Library/Application Support/Claude/claude_desktop_config.json — or copy the whole file if you don’t have one yet.',
+          snippet: '{\n  "mcpServers": {\n    "multitool": { "command": "aka", "args": ["mcp", "--client", "claude-desktop"] }\n  }\n}',
+        },
+        {
+          title: 'Restart Claude Desktop',
+          detail: 'Multitool appears under the tools icon. Ask Claude to run multitool_status to confirm.',
+        },
+      ],
+      note: 'Claude Desktop launches aka mcp itself; the key never appears in the config file.',
+    },
+    {
+      id: 'codex',
+      name: 'Codex',
+      sub: 'Terminal · connects over MCP',
+      mark: 'CX',
+      steps: [
+        {
+          title: 'Register the MCP server',
+          detail: 'Add to ~/.codex/config.toml:',
+          snippet: '[mcp_servers.multitool]\ncommand = "aka"\nargs = ["mcp", "--client", "codex"]',
+        },
+        {
+          title: 'Verify from a Codex session',
+          detail: 'Ask Codex to call multitool_status. Your enabled tools show up as multitool_* tools.',
+        },
+      ],
+    },
+    {
+      id: 'cli',
+      name: 'Command line & custom harnesses',
+      sub: 'curl, scripts, your own agent loop — HTTP over the local socket',
+      mark: '>_',
+      steps: [
+        {
+          title: 'Point your harness at the broker',
+          detail: `The socket and key live in ${socket.replace(/\/broker\.sock$/, '')}. Everything is plain HTTP with a bearer header.`,
+          snippet: `# discover what's available (and full API docs)\ncurl -fsS --unix-socket ${socket} http://localhost/instructions\n\n# authenticated calls: one shared key for this machine\nexport MULTITOOL_TOKEN="$(cat ${token})"\ncurl -fsS --unix-socket ${socket} \\\n  -H "Authorization: Bearer $MULTITOOL_TOKEN" \\\n  -H "X-Multitool-Client: my-harness" \\\n  http://localhost/v1/connections`,
+        },
+        {
+          title: 'Or speak MCP without stdio',
+          detail: 'The MCP host’s loopback URL is advertised as mcp_url in /.well-known/agent-broker.json (its port moves with restarts), authenticated with the same key — or just launch aka mcp as a stdio bridge.',
+        },
+      ],
+      note: 'X-Multitool-Client is optional — it names your harness in the Activity log. Attribution only, never authorization.',
+    },
+  ];
+}
+
+/** Activity labels seen recently, newest first: the cosmetic replacement
+ * for the old agent roster. */
+function recentClients(): Array<{ name: string; at: string }> {
+  const latest = new Map<string, string>();
+  for (const entry of state.activity) {
+    if (!entry.agent || entry.agent === 'endpoint') continue;
+    if (!latest.has(entry.agent)) latest.set(entry.agent, entry.at);
+  }
+  return [...latest.entries()]
+    .map(([name, at]) => ({ name, at }))
+    .slice(0, 6);
+}
+
+function connectKeyCardHTML(identity: IdentityInfo): string {
   const menuOpen = state.agentMenuOpen === 'identity';
-  // Enabled tools first — with many tools the interesting rows would
-  // otherwise be scattered through the list.
-  const ordered = [...state.connections].sort((x, y) => {
-    const enabled = Number(y.agent_access.enabled) - Number(x.agent_access.enabled);
-    return enabled || x.name.localeCompare(y.name);
-  });
-  const enabledCount = ordered.filter((c) => c.agent_access.enabled).length;
-  const sub = state.connections.length
-    ? `Shared by every local agent · ${enabledCount} of ${state.connections.length} tool${state.connections.length === 1 ? '' : 's'} enabled · key at ${identity.token_path}`
-    : `Shared by every local agent · key at ${identity.token_path}`;
-  const rows = ordered.length
-    ? ordered.map((c) => agentToolRowHTML(c)).join('')
-    : `<div class="acc-none">No tools yet.${mode === 'dropdown' ? '' : ' Add one to give your agents somewhere to connect.'}</div>`;
+  const copied = state.copied === 'shared-key';
   return `<div class="agent-block">
     <div class="agent-card">
-      <span class="agent-avatar" role="img" aria-label="This computer's key">${ICONS.bot}</span>
+      <span class="agent-avatar" role="img" aria-label="This computer's key">${ICONS.fileKey}</span>
       <div class="agent-id"><div class="c-name">This computer’s key</div>
-        <div class="s-sub agent-sub">${esc(sub)}</div></div>
+        <div class="s-sub agent-sub">${esc(identity.token_path)}${identity.legacy_aliases
+          ? ` · ${identity.legacy_aliases} legacy token${identity.legacy_aliases === 1 ? '' : 's'} still accepted`
+          : ''}</div></div>
+      <button class="btn sm" data-act="copy-key">${copied ? `${ICONS.check} Copied` : 'Copy key'}</button>
       <div class="agent-menu-wrap">
         <button class="icon-btn agent-menu-btn ${menuOpen ? 'on' : ''}" title="Key options"
           aria-label="Key options" aria-haspopup="menu"
@@ -566,13 +666,66 @@ function identityBlockHTML(identity: IdentityInfo): string {
         </div>` : ''}
       </div>
     </div>
-    <div class="acc-rows">${rows}</div>
+    <div class="connect-keynote">One shared key for everything that runs as you on this computer.
+      Agents read it themselves — you’ll rarely need to copy it. Rotating it disconnects every
+      agent at once; access per tool lives on the Tools tab.</div>
   </div>`;
 }
 
+function connectStepHTML(step: ConnectStep, n: number): string {
+  const snippet = step.snippet
+    ? `<div class="connect-snip"><pre><code>${esc(step.snippet)}</code></pre>
+        <button class="btn sm connect-copy" data-act="copy-text" data-text="${escAttr(step.snippet)}">Copy</button></div>`
+    : '';
+  return `<div class="connect-step">
+    <span class="connect-step-n" aria-hidden="true">${n}</span>
+    <div class="connect-step-bd"><b>${esc(step.title)}</b>
+      <div class="connect-step-d">${esc(step.detail)}</div>${snippet}</div>
+  </div>`;
+}
+
+function connectCardHTML(guide: ConnectGuide): string {
+  const open = state.connectOpen === guide.id;
+  const seen = recentClients().find((client) => client.name === guide.id);
+  const seenChip = seen
+    ? `<span class="connect-seen" title="An agent using this label reached the broker">● seen ${relTime(seen.at)}</span>`
+    : '';
+  const steps = open
+    ? `<div class="connect-steps">${guide.steps.map((step, i) => connectStepHTML(step, i + 1)).join('')}
+        ${guide.note ? `<div class="connect-note">${esc(guide.note)}</div>` : ''}</div>`
+    : '';
+  return `<div class="agent-block connect-card ${open ? 'open' : ''}">
+    <button class="connect-row" data-act="connect-toggle" data-id="${guide.id}" aria-expanded="${open}">
+      <span class="connect-mark ${guide.id}">${esc(guide.mark)}</span>
+      <span class="connect-tx"><b>${esc(guide.name)}</b><span>${esc(guide.sub)}</span></span>
+      ${seenChip}
+      <span class="cat-chev ${open ? 'open' : ''}">${ICONS.chevronDown}</span>
+    </button>
+    ${steps}
+  </div>`;
+}
+
+function recentClientsHTML(): string {
+  const clients = recentClients();
+  if (!clients.length) return '';
+  const rows = clients.map((client) => `<div class="connect-recent-row">
+      <code>${esc(client.name)}</code><span class="grow"></span>
+      <span class="s-sub">${relTime(client.at)}</span>
+    </div>`).join('');
+  return `<div class="connect-sec-lbl">Recently seen</div>
+    <div class="agent-block"><div class="connect-recent">${rows}</div>
+    <div class="connect-keynote">Names are labels agents report about themselves for the
+      activity log — they aren’t identities, and access doesn’t depend on them.</div></div>`;
+}
+
 function agentsHTML(): string {
-  if (!state.identity) return '';
-  return identityBlockHTML(state.identity);
+  const identity = state.identity;
+  if (!identity) return '';
+  const guides = connectGuides(identity).map(connectCardHTML).join('');
+  return `${connectKeyCardHTML(identity)}
+    <div class="connect-sec-lbl">Connect an agent</div>
+    ${guides}
+    ${recentClientsHTML()}`;
 }
 const liveCount = (c: ConnectionSummary): number =>
   state.sessions.filter((s) => s.connection === c.name).length;
@@ -603,13 +756,6 @@ function connectionCredential(c: ConnectionSummary): string {
   return `Uses ${names.join(' + ')}`;
 }
 
-/** Who may use it — agent access is the whole authorization model. */
-function connectionWiring(c: ConnectionSummary): { text: string; wired: boolean } {
-  return c.agent_access.enabled
-    ? { text: 'Enabled for agents', wired: true }
-    : { text: 'Off for agents', wired: false };
-}
-
 // One row inside an expanded catalog entry. It spans the full card width and
 // carries enough to identify the connection without opening it: name, where
 // it points, what it does, which credential it injects, and who is wired.
@@ -624,7 +770,6 @@ function catalogConnRowHTML(c: ConnectionSummary): string {
   const test = state.connTests[c.id];
   const menuOpen = state.connMenuOpen === c.id;
   const live = liveCount(c);
-  const wiring = connectionWiring(c);
   const mcpStatus = c.mcp_path ? state.mcpStatus[c.id] : undefined;
   const account = c.mcp_path && c.account
     ? `<span class="cat-meta-account" title="Verified by the status check">${esc(`Connected as ${c.account}`)}</span>`
@@ -663,9 +808,10 @@ function catalogConnRowHTML(c: ConnectionSummary): string {
       <div class="cat-conn-meta">
         ${purpose ? `<span>${esc(purpose)}</span>` : ''}
         <span>${esc(connectionCredential(c))}</span>
-        <span class="${wiring.wired ? '' : 'cat-meta-idle'}">${esc(wiring.text)}</span>
         ${account}${tls}${hostKey}${needsReconnect}
-      </div>${connTestResultHTML(c)}${mcpStatusHTML(c)}</div>
+      </div>
+      <div class="cat-conn-access">${accessControlsHTML(c)}</div>
+      ${connTestResultHTML(c)}${mcpStatusHTML(c)}</div>
     ${statusBtn}<div class="tile-menu-wrap">
       <button class="icon-btn tile-menu-btn ${menuOpen ? 'on' : ''}" title="Tool options"
         aria-label="Options for ${escAttr(c.name)}" aria-haspopup="menu"
@@ -915,8 +1061,9 @@ function startHTML(): string {
   const task = startTask(option, progress);
   const wireWhat = progress.toolName ? `<b>${esc(progress.toolName)}</b>` : 'the tool';
   const wireBody = `<p>Tools are enabled for agents when you add them — ${wireWhat} is ready to use.
-      Flip access per tool on the Agents tab: an enabled tool works with no prompt,
-      a disabled one is refused.</p>
+      Flip access per tool from its row on the Tools tab: an enabled tool works with no
+      prompt, a disabled one is refused. The Connect tab has ready-made setup for Claude
+      Code, Claude Desktop, Codex, and custom harnesses.</p>
     <pre class="start-task"><code>${esc(task)}</code></pre>
     <div class="start-actions">
       <button class="btn sm" data-act="copy-text" data-text="${escAttr(task)}">Copy this task</button>
@@ -1671,7 +1818,10 @@ function settingsSheet() {
 /* --------------------------------- helpers ------------------------------- */
 const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
 const tabLabel = (tab: Tab): string =>
-  tab === 'connections' ? 'Tools' : tab === 'start' ? 'Get started' : cap(tab);
+  tab === 'connections' ? 'Tools'
+  : tab === 'start' ? 'Get started'
+  : tab === 'agents' ? 'Connect'
+  : cap(tab);
 
 // Flash "Copied" in place of the masked value for a moment after a copy.
 let copiedTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2261,6 +2411,13 @@ document.addEventListener('click', async (e) => {
     case 'mode-tray': state.menuOpen = false; run(() => invoke('ui_set_mode', { mode: 'tray' })); break;
     case 'mode-window': run(() => invoke('ui_set_mode', { mode: 'window' })); break;
     case 'toggle-settings-menu': state.menuOpen = !state.menuOpen; render(); break;
+    case 'connect-toggle':
+      state.connectOpen = state.connectOpen === id ? null : id;
+      render();
+      break;
+    case 'copy-key':
+      if (await run(() => invoke('copy_key'))) flashCopied('shared-key');
+      break;
     case 'toggle-agent-menu':
       state.agentMenuOpen = state.agentMenuOpen === id ? null : id;
       render();

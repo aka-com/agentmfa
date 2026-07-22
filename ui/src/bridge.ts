@@ -142,6 +142,7 @@ interface MockAccess {
 interface MockIdentity {
   client_id: string;
   token_path: string;
+  socket_path: string;
   minted_at: string;
   last_used: string;
   legacy_aliases: number;
@@ -198,6 +199,7 @@ const db: MockDatabase = {
   identity: {
     client_id: uid(),
     token_path: '~/.aka/token',
+    socket_path: '~/.aka/broker.sock',
     minted_at: now(),
     last_used: now(),
     legacy_aliases: 0,
@@ -275,20 +277,20 @@ function seedFixtures() {
   });
   // Spread across a day so the relative/absolute timestamp split is visible.
   const t = (minutes: number) => new Date(Date.now() - minutes * 60000).toISOString();
-  const fixtures: Array<[keyof typeof MOCK_ACTIVITY_META, string, string | null, number]> = [
-    ['denied', 'Denied: claude-code', 'POST api.github.com/repos/aka/aka/dispatches', 2],
-    ['secretCopied', 'Secret copied: GITHUB_API_KEY', null, 6],
-    ['sessionClosed', 'WebSocket session closed', 'market-feed', 14],
-    ['sessionOpened', 'WebSocket session opened', 'market-feed', 35],
-    ['autoAllowed', 'Used without asking: claude-code → github', null, 90],
-    ['requested', 'claude-code requested github', 'GET api.github.com/user/repos', 180],
-    ['sessionClosed', 'Postgres session closed', 'Ticket window elapsed', 400],
-    ['sessionOpened', 'Postgres session opened', 'prod-db → app_production', 402],
-    ['allowedOnce', 'Allowed this request: claude-code', 'Connect to Postgres → app@db.internal.aka.com:5432/app_production', 1500],
-    ['paired', 'Agent connected: claude-code', null, 3000],
+  const fixtures: Array<[keyof typeof MOCK_ACTIVITY_META, string, string | null, number, string | null]> = [
+    ['denied', 'Denied: claude-code', 'POST api.github.com/repos/aka/aka/dispatches', 2, 'claude-code'],
+    ['secretCopied', 'Secret copied: GITHUB_API_KEY', null, 6, null],
+    ['sessionClosed', 'WebSocket session closed', 'market-feed', 14, 'claude-code'],
+    ['sessionOpened', 'WebSocket session opened', 'market-feed', 35, 'claude-code'],
+    ['autoAllowed', 'Used without asking: claude-code → github', null, 90, 'claude-code'],
+    ['requested', 'codex requested github', 'GET api.github.com/user/repos', 180, 'codex'],
+    ['sessionClosed', 'Postgres session closed', 'Ticket window elapsed', 400, 'deploy-script'],
+    ['sessionOpened', 'Postgres session opened', 'prod-db → app_production', 402, 'deploy-script'],
+    ['allowedOnce', 'Allowed this request: claude-code', 'Connect to Postgres → app@db.internal.aka.com:5432/app_production', 1500, 'claude-code'],
+    ['paired', 'Agent connected: claude-code', null, 3000, 'claude-code'],
   ];
-  fixtures.forEach(([kind, text, detail, minutes]) =>
-    db.activity.push({ ...MOCK_ACTIVITY_META[kind], text, detail, at: t(minutes) }));
+  fixtures.forEach(([kind, text, detail, minutes, agent]) =>
+    db.activity.push({ ...MOCK_ACTIVITY_META[kind], text, detail, agent, at: t(minutes) }));
   // DESIGN MOCK (SEP-2322, see ELICITATION.md): a tool call paused on user
   // input. The broker does not produce these yet; this fixture exists so the
   // trusted-UI answering flow is designable and reviewable standalone.
@@ -782,6 +784,9 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       emit('aka://wirings-changed', {});
       return true;
     }
+    case 'copy_key':
+      audit('secretCopied', 'Shared key copied');
+      return;
     case 'confirm_rotate_key':
       return window.confirm("Rotate key\n\nRotate this computer's key? Every live agent session closes now, and anything holding a pasted copy of the old key stops working until updated.");
     case 'rotate_key':

@@ -257,6 +257,8 @@ pub struct IdentityDto {
     /// Where the plaintext key lives (`~/.aka/token`), for display and copy
     /// instructions.
     pub token_path: String,
+    /// The broker socket, for the Connect page's setup snippets.
+    pub socket_path: String,
     pub minted_at: String,
     pub last_used: String,
     /// How many legacy per-agent tokens still work as aliases (cleared by
@@ -269,6 +271,7 @@ impl IdentityDto {
         Self {
             client_id: identity.id.to_string(),
             token_path: broker.paths.token_display(),
+            socket_path: broker.paths.socket_display(),
             minted_at: identity.minted_at.to_rfc3339(),
             last_used: identity.last_used.to_rfc3339(),
             legacy_aliases: identity.alias_hashes.len(),

@@ -84,6 +84,8 @@ export interface IdentityInfo {
   client_id: string;
   /** Where the plaintext key lives (`~/.aka/token`). */
   token_path: string;
+  /** The broker socket, for the Connect page's setup snippets. */
+  socket_path: string;
   minted_at: string;
   last_used: string;
   /** Legacy per-agent tokens still working as aliases (cleared by rotation). */
@@ -324,6 +326,7 @@ export interface CommandMap {
   revoke_endpoint: CommandSpec<{ endpointId: string }, boolean>;
   confirm_rotate_key: CommandSpec<undefined, boolean>;
   rotate_key: CommandSpec<undefined, void>;
+  copy_key: CommandSpec<undefined, void>;
   close_session: CommandSpec<{ id: number }, boolean>;
   list_elicitations: CommandSpec<undefined, ElicitationRequest[]>;
   respond_elicitation: CommandSpec<{

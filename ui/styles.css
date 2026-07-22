@@ -917,3 +917,56 @@
   border-radius: 999px; padding: 0 7px; line-height: 16px;
 }
 .act-chip-time { font-variant-numeric: tabular-nums; }
+
+/* ------------------------------ Connect page ----------------------------- */
+/* The Agents tab reborn: a key card, one guide card per agent family with
+   copyable setup snippets, and the cosmetic recently-seen list. Cards reuse
+   .agent-block; everything below is the guide anatomy. */
+.connect-keynote{ font-size: 12.5px; color: var(--muted); border-top: 1px solid var(--line);
+  padding: 10px 16px 11px; line-height: 1.55; }
+.connect-sec-lbl{ font-size: 11px; letter-spacing: .11em; text-transform: uppercase;
+  font-weight: 700; color: var(--muted); margin: 18px 2px 8px; }
+.connect-card{ margin-bottom: 10px; }
+.connect-row{ display: flex; align-items: center; gap: 12px; width: 100%;
+  padding: 12px 16px; background: none; border: none; text-align: left;
+  color: var(--ink); cursor: pointer; border-radius: 11px; }
+.connect-row:hover{ background: var(--hover); }
+.connect-card.open .connect-row{ border-radius: 11px 11px 0 0; }
+.connect-mark{ width: 30px; height: 30px; border-radius: 8px; display: flex;
+  align-items: center; justify-content: center; font-weight: 700; font-size: 13px;
+  flex: 0 0 auto; background: var(--b-agent-bg); color: var(--b-agent-ink); }
+.connect-mark.claude-code, .connect-mark.claude-desktop{
+  background: var(--b-ws-bg); color: var(--b-ws-ink); }
+.connect-mark.cli{ background: var(--b-ssh-bg); color: var(--b-ssh-ink); }
+.connect-tx{ display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
+.connect-tx b{ font-size: 13.5px; font-weight: 650; }
+.connect-tx span{ font-size: 12px; color: var(--muted); }
+.connect-seen{ display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px;
+  font-weight: 600; color: var(--ok-ink); background: var(--ok-wash);
+  border: 1px solid var(--ok-border); border-radius: 999px; padding: 2.5px 9px;
+  white-space: nowrap; }
+.connect-steps{ border-top: 1px solid var(--line); padding: 4px 16px 14px 20px; }
+.connect-step{ display: flex; gap: 12px; margin-top: 12px; }
+.connect-step-n{ width: 20px; height: 20px; border-radius: 50%; background: var(--chip-bg);
+  color: var(--ink-3); font-size: 11px; font-weight: 700; display: flex;
+  align-items: center; justify-content: center; flex: 0 0 auto; margin-top: 1px; }
+.connect-step-bd{ flex: 1; min-width: 0; }
+.connect-step-bd b{ font-size: 13px; font-weight: 600; }
+.connect-step-d{ font-size: 12.5px; color: var(--muted); margin-top: 1px; line-height: 1.5; }
+.connect-snip{ position: relative; margin-top: 8px; background: var(--wash-2);
+  border: 1px solid var(--line); border-radius: 7px; padding: 9px 12px; overflow-x: auto; }
+.connect-snip pre{ margin: 0; }
+.connect-snip code{ font-size: 12px; line-height: 1.6; white-space: pre; color: var(--ink-2); }
+.connect-copy{ position: absolute; top: 6px; right: 6px; }
+.connect-note{ font-size: 12px; color: var(--muted); margin-top: 12px; }
+.connect-recent{ display: flex; flex-direction: column; }
+.connect-recent-row{ display: flex; align-items: center; gap: 10px; padding: 10px 16px;
+  border-bottom: 1px solid var(--line); font-size: 13px; }
+.connect-recent-row:last-child{ border-bottom: none; }
+.connect-recent-row code{ font-size: 12.5px; font-weight: 600; }
+.connect-recent-row .grow{ flex: 1; }
+
+/* Access controls on a Tools-tab connection row: the whole permission model
+   in one line — pill, endpoint chip, tool picker, ⋮ menu, toggle. */
+.cat-conn-access{ display: flex; align-items: center; gap: 8px; margin-top: 8px;
+  flex-wrap: wrap; }
