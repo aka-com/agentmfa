@@ -750,11 +750,19 @@ function catalogRowHTML(entry: CatalogEntry): string {
   const label = builtin
     ? `${count} saved credential${count === 1 ? '' : 's'}`
     : `${count} configured connection${count === 1 ? '' : 's'}`;
+  // A branded token row prompts for a key; an MCP row without a published
+  // endpoint (Gmail, 1Password, the generic row) needs a server URL you
+  // supply. Both read better than a bare "Add" when nothing is configured.
+  const addLabel = entry.preset
+    ? 'Add API key'
+    : entry.mcp && !entry.mcpTemplate?.serverUrl
+    ? 'Add custom app'
+    : 'Add';
   const action = count || builtin
     ? `<button class="cat-count ${open ? 'on' : ''}" data-act="catalog-toggle" data-id="${entry.id}"
         aria-expanded="${open}" title="${escAttr(label)}">${builtin ? ICONS.fileKey : ICONS.plug} ${count}<span class="cat-chev">${ICONS.chevronDown}</span></button>`
     : entry.via === 'connection'
-    ? `<button class="btn cat-add" data-act="catalog-add" data-id="${entry.id}">Add</button>`
+    ? `<button class="btn cat-add" data-act="catalog-add" data-id="${entry.id}">${addLabel}</button>`
     : `<span class="cat-soon" title="Arrives with the MCP layer">Soon</span>`;
   const expansion = !open ? ''
     : builtin ? credentialsExpansionHTML()
