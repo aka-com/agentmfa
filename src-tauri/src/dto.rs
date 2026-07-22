@@ -274,7 +274,7 @@ impl IdentityDto {
             socket_path: broker.paths.socket_display(),
             minted_at: identity.minted_at.to_rfc3339(),
             last_used: identity.last_used.to_rfc3339(),
-            legacy_aliases: identity.alias_hashes.len(),
+            legacy_aliases: broker.identity.active_alias_count(),
         }
     }
 }

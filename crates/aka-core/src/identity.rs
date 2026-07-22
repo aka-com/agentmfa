@@ -255,6 +255,29 @@ impl IdentityStore {
         self.state.lock().unwrap().identity.clone()
     }
 
+    /// Legacy aliases that would authenticate right now. The Connect page
+    /// must not describe hashes with a missing independent clock, or aliases
+    /// past that clock's TTL, as still accepted.
+    pub fn active_alias_count(&self) -> usize {
+        let state = self.state.lock().unwrap();
+        let now = Utc::now();
+        state
+            .identity
+            .alias_hashes
+            .iter()
+            .filter(|hash| {
+                state
+                    .identity
+                    .alias_last_used
+                    .get(*hash)
+                    .is_some_and(|last_used| {
+                        now.signed_duration_since(*last_used).num_seconds()
+                            <= self.ttl.as_secs() as i64
+                    })
+            })
+            .count()
+    }
+
     /// Verify a presented bearer token against the key (or a legacy alias).
     /// Success refreshes the sliding TTL, coalesced to at most one disk
     /// write per interval.
@@ -529,10 +552,12 @@ mod tests {
         )
         .unwrap();
         assert!(s.verify(legacy_token).is_ok());
+        assert_eq!(s.active_alias_count(), 1);
         std::thread::sleep(Duration::from_millis(1100));
         s.touch();
         assert!(s.verify(&s.token()).is_ok());
         assert_eq!(s.verify(legacy_token).unwrap_err(), TokenError::Expired);
+        assert_eq!(s.active_alias_count(), 0);
     }
 
     #[test]
@@ -596,6 +621,7 @@ mod tests {
         .unwrap();
         assert!(s.verify(primary).is_ok());
         assert_eq!(s.verify(legacy).unwrap_err(), TokenError::Expired);
+        assert_eq!(s.active_alias_count(), 0);
     }
 
     #[test]
