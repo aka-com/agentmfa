@@ -3398,8 +3398,8 @@ document.addEventListener('click', async (e) => {
 
     case 'rotate-key-ask': {
       if (state.agentMenuOpen) { state.agentMenuOpen = null; render(); }
-      // No in-app confirm: the broker gates rotation behind the native
-      // (Touch ID / system) confirmation.
+      // The OS authentication sheet is both the warning and the gate: its
+      // reason text carries the consequences, so nothing precedes it.
       if (await run(() => invoke('rotate_key'))) {
         toast('🔑 Key rotated — agents reconnect from the token file'); await refresh('all');
       }

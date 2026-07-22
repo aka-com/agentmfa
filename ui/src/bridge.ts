@@ -784,8 +784,9 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       audit('secretCopied', 'Shared key copied');
       return;
     case 'rotate_key':
-      // Stand-in for the broker's native (Touch ID / system) confirmation gate.
-      if (!window.confirm("Rotate this computer's key and disconnect all agents?")) return;
+      // Stands in for the native sheet (whose reason text is the warning).
+      if (!window.confirm("Rotate this computer's key?\n\nEvery live agent session closes now; agents reconnect on their own from the key file.")) throw 'declined';
+      // falls through to apply
       db.identity = { ...db.identity, minted_at: now(), last_used: now(), legacy_aliases: 0 };
       db.sessions = [];
       audit('tokenRevoked', 'Key rotated; all agents disconnected');

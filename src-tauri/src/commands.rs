@@ -3,12 +3,13 @@
 //! - there is **no** command that returns a stored secret value; reveal
 //!   returns only the short prefix, copy writes core-side to the clipboard;
 //! - confirmation-gated commands (attaching an already-stored secret to a
-//!   new destination, changing a connection's capability, or deleting a
-//!   secret) are gated by the **core itself**: the broker demands the
-//!   native OS confirmation through the `BrokerEvents` hooks (implemented
-//!   over [`crate::auth::confirm`] in this shell) before any effect
-//!   happens — this command layer cannot apply a gated action without
-//!   passing through it, so the webview cannot forge or skip the gate.
+//!   new destination, changing a connection's capability, issuing a first
+//!   direct endpoint, rotating the key) are gated by the **core itself**:
+//!   the broker demands the native OS confirmation through the
+//!   `BrokerEvents` hooks (implemented over [`crate::auth::confirm`] in
+//!   this shell) before any effect happens — this command layer cannot
+//!   apply a gated action without passing through it, so the webview cannot
+//!   forge or skip the gate.
 
 use aka_core::broker::Broker;
 use aka_core::error::{ConnectionField, CoreError};
@@ -426,7 +427,7 @@ pub fn edit_secret(
 #[tauri::command]
 pub fn delete_secret(state: State<AppState>, id: String) -> CmdResult<()> {
     let id = parse_id(&id)?;
-    // The core refuses in-use deletion and demands the OS confirmation.
+    // The core refuses in-use deletion; the UI's inline confirm is the gate.
     state
         .broker
         .ui_delete_secret(&id)

@@ -119,9 +119,12 @@ pub struct Store {
     events: Arc<dyn BrokerEvents>,
     integrity: Arc<StateIntegrity>,
     state: Mutex<IndexState>,
-    /// Purpose-scoped native-authentication grants. Copy/read approval never
-    /// authorizes configuration changes, and no grant can slide beyond its
-    /// original 12-hour absolute lifetime. Never persisted.
+    /// Native-authentication grants. Any *native* prompt the user passes —
+    /// configuration, full-authority, or the clipboard copy sheet — opens the
+    /// whole user-plane window ("one OS authentication keeps Multitool
+    /// unlocked"); only riding an existing read grant stays read-scoped. No
+    /// grant can slide beyond its original 12-hour absolute lifetime. Never
+    /// persisted.
     presence: Arc<PresenceCoordinator>,
 }
 
@@ -163,12 +166,13 @@ impl Store {
         std::time::Duration::from_secs(self.settings().presence_window_secs)
     }
 
-    /// Establish a configuration grant, which also covers reads. Used after a
-    /// native authentication for a configuration action (preserving the
-    /// save-then-test flow) and after a full-authority action-gate prompt
-    /// (agent grants, key rotation) — the strongest prompts open the full
-    /// user-plane window. A copy/read authentication never lands here, so it
-    /// cannot escalate into configuration authority.
+    /// Establish a configuration grant, which also covers reads. Used after
+    /// any successful *native* authentication — a configuration action
+    /// (preserving the save-then-test flow), a full-authority action-gate
+    /// prompt (agent grants, key rotation), or the clipboard copy sheet. The
+    /// prompts all present the same OS authentication, so one passed sheet
+    /// opens the same window regardless of which gate collected it; riding
+    /// an existing read grant establishes nothing new.
     fn note_configuration_presence(&self) {
         let now = std::time::Instant::now();
         let grant = PresenceGrant::new(now, self.presence_window());
@@ -253,9 +257,13 @@ impl Store {
         Ok(method)
     }
 
-    /// Check and ride the read grant, or establish it after the clipboard's
-    /// native authentication. The blocking prompt and check share the same
-    /// global lane as config and ordinary read prompts.
+    /// Check and ride the read grant, or establish grants after the
+    /// clipboard's native authentication. The blocking prompt and check share
+    /// the same global lane as config and ordinary read prompts. A *passed
+    /// sheet* opens the full user-plane window (read + configuration): it is
+    /// the same OS authentication a configuration prompt would collect, so
+    /// acting near the copy (edit, reissue, delete) must not re-prompt
+    /// back-to-back. Riding an existing read grant grants nothing new.
     pub async fn confirm_secret_copy(&self, meta: SecretMeta) -> Result<()> {
         let presence = self.presence.clone();
         let events = self.events.clone();
@@ -276,8 +284,10 @@ impl Store {
             if !events.confirm_secret_copy(&meta, window) {
                 return Err(CoreError::SecretReadNotAuthenticated);
             }
-            presence.state.lock().unwrap().secret_read =
-                Some(PresenceGrant::new(std::time::Instant::now(), window));
+            let grant = PresenceGrant::new(std::time::Instant::now(), window);
+            let mut state = presence.state.lock().unwrap();
+            state.secret_read = Some(grant);
+            state.configuration = Some(grant);
             Ok(())
         })
         .await

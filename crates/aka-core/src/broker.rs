@@ -326,23 +326,21 @@ impl Broker {
     }
 
     pub fn ui_delete_secret(&self, id: &Uuid) -> Result<SecretMeta> {
-        let meta = self.store.secret_by_id(id)?;
-        // Refuse in-use deletion *before* the confirmation, so the user is
-        // never asked to authenticate an action that cannot proceed.
+        // Refuse in-use deletion first, so the user is never asked to
+        // confirm an action that cannot proceed.
         let users = self.store.connections_using(id);
         if !users.is_empty() {
             return Err(CoreError::SecretInUse(users));
         }
-        let confirmation =
-            self.confirm_user_action(&format!("Delete secret “{}” from the Keychain", meta.name))?;
+        // The in-app confirm is the gate: an unused secret grants nothing,
+        // so deleting it is destructive to the user's own material only.
         let meta = self.store.delete_secret(id)?;
         self.audit.append(
             AuditEntry::new(
                 AuditKind::SecretDeleted,
                 format!("Secret deleted: {}", meta.name),
             )
-            .detail("Removed from Keychain")
-            .confirmation(confirmation),
+            .detail("Removed from Keychain"),
         );
         Ok(meta)
     }
@@ -709,8 +707,10 @@ impl Broker {
         };
         self.store
             .preflight_add_connection_with_secret(secret_name, &spec)?;
-        let confirmation =
-            self.confirm_user_action(&format!("Connect “{}” with your browser", spec.name))?;
+        // No native gate: the token set is minted fresh by the sign-in the
+        // user is about to drive in the browser — the same new-credential
+        // rule as every other add. The provider's consent page is the
+        // deliberate act.
         let pending = crate::oauth::begin(&oauth_spec)
             .await
             .map_err(CoreError::OAuth)?;
@@ -740,8 +740,7 @@ impl Broker {
             .detail(format!("{} → {}", conn.kind().label(), conn.target()))
             .field("kind", conn.kind().as_str())
             .field("target", conn.target())
-            .field("oauth", true)
-            .confirmation(confirmation),
+            .field("oauth", true),
         );
         self.events.connections_changed();
         Ok(conn)
@@ -763,8 +762,9 @@ impl Broker {
         let secret_id = *conn.secrets.first().ok_or_else(|| {
             CoreError::InvalidConnectionConfig("the OAuth connection has no token secret".into())
         })?;
-        let confirmation =
-            self.confirm_user_action(&format!("Reconnect “{}” with your browser", conn.name))?;
+        // No native gate, matching connect: the browser consent page is the
+        // deliberate act, and the replaced token targets the same pinned
+        // destination.
         // Carry the client secret across (BYO apps that require one at the
         // token endpoint); the old tokens are replaced wholesale.
         let previous = self
@@ -801,8 +801,7 @@ impl Broker {
                 format!("Tool reconnected via OAuth: {}", conn.name),
             )
             .connection(conn.name.clone())
-            .field("oauth", true)
-            .confirmation(confirmation),
+            .field("oauth", true),
         );
         self.events.connections_changed();
         Ok(conn)
@@ -968,13 +967,24 @@ impl Broker {
             return Err(CoreError::EndpointRequiresWiring);
         }
 
-        // Confirm off the async runtime: the native sheet blocks its thread.
-        let store = self.store.clone();
-        let description = format!("Issue a direct endpoint for {}", connection.name);
-        let confirmation =
-            tokio::task::spawn_blocking(move || store.confirm_configuration_action(&description))
+        // First issuance mints standing access, so it takes the native gate.
+        // A *reissue* only rotates the secret of an endpoint the user already
+        // authorized — the in-app confirm is its gate (revoking, which only
+        // narrows, is likewise in-app only).
+        let confirmation = if self.endpoints.get_for_connection(connection_id).is_none() {
+            // Confirm off the async runtime: the native sheet blocks its thread.
+            let store = self.store.clone();
+            let description = format!("Issue a direct endpoint for {}", connection.name);
+            Some(
+                tokio::task::spawn_blocking(move || {
+                    store.confirm_configuration_action(&description)
+                })
                 .await
-                .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))??;
+                .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))??,
+            )
+        } else {
+            None
+        };
         // Mint under the gate; re-check access didn't vanish while the
         // sheet was up. Rotating a live endpoint changes only its persisted
         // secret: the listener resolves the registry on every request, so
@@ -1075,16 +1085,17 @@ impl Broker {
             }
             ConnectionConfig::Ws { .. } => unreachable!("kind checked above"),
         };
-        self.audit.append(
-            AuditEntry::new(
-                AuditKind::Wired,
-                format!("Direct endpoint issued: {}", connection.name),
-            )
-            .connection(connection.name.clone())
-            .confirmation(confirmation)
-            .field("endpoint_id", issued.endpoint.id.to_string())
-            .field("kind", connection.kind().as_str()),
-        );
+        let mut entry = AuditEntry::new(
+            AuditKind::Wired,
+            format!("Direct endpoint issued: {}", connection.name),
+        )
+        .connection(connection.name.clone())
+        .field("endpoint_id", issued.endpoint.id.to_string())
+        .field("kind", connection.kind().as_str());
+        if let Some(confirmation) = confirmation {
+            entry = entry.confirmation(confirmation);
+        }
+        self.audit.append(entry);
         self.events.wirings_changed();
         Ok(info)
     }
@@ -1339,11 +1350,14 @@ impl Broker {
     /// file, clear the migration aliases, and close every outstanding
     /// data-plane capability. This is the "disconnect everything" action —
     /// agents that read the token file reconnect on their own; anything
-    /// holding a pasted copy stops working. Gated behind the native
-    /// confirmation because it is destructive and touches the credential.
+    /// holding a pasted copy stops working. The single native sheet is both
+    /// the warning and the gate: its reason text carries the consequences,
+    /// so no separate dialog precedes it.
     pub fn ui_rotate_key(&self) -> Result<()> {
-        let confirmation =
-            self.confirm_action("Rotate this computer's key and disconnect all agents")?;
+        let confirmation = self.confirm_action(
+            "rotate this computer's key — every live agent session closes now, \
+             and agents reconnect on their own from the key file",
+        )?;
         let _gate = self.config_gate.lock().unwrap();
         self.identity.rotate()?;
         let sessions_closed = self.data_plane.close_all();
