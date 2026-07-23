@@ -8,6 +8,7 @@
 //!   opens added by later phases), authenticated with the shared broker
 //!   key, rate limited per client label.
 
+pub mod manage;
 pub mod wellknown;
 
 use std::collections::HashMap;
@@ -41,16 +42,47 @@ use crate::wire::{ErrorReason, MissingTokenCause, REQUEST_ID_MAX_BYTES};
 
 /* ------------------------------ plumbing --------------------------------- */
 
+/// Which listener a request arrived on. TCP requests see remote-flavored
+/// discovery documents and are refused `/v1/pair` (an unauthenticated
+/// key-dispenser is only acceptable behind 0600 filesystem permissions).
+#[derive(Clone, Debug)]
+pub enum Transport {
+    Uds,
+    Tcp {
+        /// The URL remote clients reach this broker at (the operator's TLS
+        /// proxy or tunnel), advertised in TCP-served discovery documents.
+        public_url: Option<Arc<str>>,
+    },
+}
+
+impl Transport {
+    fn is_tcp(&self) -> bool {
+        matches!(self, Transport::Tcp { .. })
+    }
+
+    fn public_url(&self) -> Option<&str> {
+        match self {
+            Transport::Uds => None,
+            Transport::Tcp { public_url } => public_url.as_deref(),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub broker: Arc<Broker>,
+    /// The manage-plane backend the `/v1/manage` routes drive — the same
+    /// implementation an in-process shell uses, so the two cannot drift.
+    pub manage: Arc<crate::manage::LocalBackend>,
+    /// The listener this router serves.
+    pub transport: Transport,
 }
 
 fn err(status: StatusCode, reason: ErrorReason) -> Response {
     (status, Json(json!({ "reason": reason }))).into_response()
 }
 
-fn err_missing_token(cause: MissingTokenCause) -> Response {
+pub(crate) fn err_missing_token(cause: MissingTokenCause) -> Response {
     (
         StatusCode::UNAUTHORIZED,
         Json(json!({
@@ -62,7 +94,7 @@ fn err_missing_token(cause: MissingTokenCause) -> Response {
         .into_response()
 }
 
-fn bearer_token(headers: &axum::http::HeaderMap) -> Result<&str, MissingTokenCause> {
+pub(crate) fn bearer_token(headers: &axum::http::HeaderMap) -> Result<&str, MissingTokenCause> {
     let authorization = headers
         .get(axum::http::header::AUTHORIZATION)
         .ok_or(MissingTokenCause::AuthorizationHeaderAbsent)?;
@@ -104,7 +136,7 @@ mod auth_header_tests {
 /// 415/400/422 responses — a shape break exactly when a fumbling agent
 /// needs the `{"reason", "detail"}` envelope most. Fold them all into
 /// `400 {"reason": "invalid_json"}` with axum's diagnosis as the detail.
-struct ApiJson<T>(T);
+pub(crate) struct ApiJson<T>(pub(crate) T);
 
 impl<T, S> axum::extract::FromRequest<S> for ApiJson<T>
 where
@@ -265,6 +297,8 @@ impl FromRequestParts<AppState> for Authed {
 /// dropping the handle stops all of them.
 pub struct DaemonHandle {
     pub socket_path: PathBuf,
+    /// The bound TCP control-plane address, when `--listen` asked for one.
+    pub tcp_addr: Option<std::net::SocketAddr>,
     /// The WS bridge's ephemeral loopback port (tests need it; agents only
     /// ever see it inside open responses).
     pub ws_bridge_port: u16,
@@ -272,6 +306,7 @@ pub struct DaemonHandle {
     /// ever see it inside open responses' DSNs).
     pub pg_proxy_port: u16,
     task: tokio::task::JoinHandle<()>,
+    tcp_task: Option<tokio::task::JoinHandle<()>>,
     bridge_task: tokio::task::JoinHandle<()>,
     proxy_task: tokio::task::JoinHandle<()>,
     // Declared last so serving tasks are aborted/dropped before the
@@ -282,9 +317,24 @@ pub struct DaemonHandle {
 impl Drop for DaemonHandle {
     fn drop(&mut self) {
         self.task.abort();
+        if let Some(task) = &self.tcp_task {
+            task.abort();
+        }
         self.bridge_task.abort();
         self.proxy_task.abort();
     }
+}
+
+/// How to serve beyond the Unix socket.
+#[derive(Clone, Debug, Default)]
+pub struct ServeOptions {
+    /// Serve the control plane on this TCP address as well (for remote
+    /// agents and the remote desktop shell, behind the operator's TLS
+    /// proxy or tunnel). `/v1/pair` is refused on it.
+    pub listen: Option<std::net::SocketAddr>,
+    /// The URL remote clients reach the TCP listener at; advertised in
+    /// TCP-served discovery documents.
+    pub public_url: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -418,8 +468,13 @@ async fn remove_stale_socket(
 }
 
 pub fn router(broker: Arc<Broker>) -> Router {
+    router_for(broker, Transport::Uds)
+}
+
+pub fn router_for(broker: Arc<Broker>, transport: Transport) -> Router {
     let body_cap = broker.config.request_cap;
     Router::new()
+        .nest("/v1/manage", manage::router())
         .route("/.well-known/agent-broker.json", get(get_manifest))
         .route("/instructions", get(get_instructions))
         .route("/v1/pair", post(post_pair))
@@ -430,10 +485,19 @@ pub fn router(broker: Arc<Broker>) -> Router {
         .route("/v1/ws/open", post(post_ws_open))
         .route("/v1/pg/open", post(post_pg_open))
         .route("/v1/ssh/open", post(post_ssh_open))
+        // The sidecar's MCP endpoint, reverse-proxied so one address (and
+        // one operator proxy rule) covers the whole broker. The sidecar
+        // authorizes every request against the broker itself, so this
+        // proxy adds reach, not authority.
+        .route("/mcp", axum::routing::any(proxy_mcp))
         // JSON string bodies inflate the wire size (escaping, base64): give
         // the transport head-room; the decoded body cap is enforced exactly.
         .layer(DefaultBodyLimit::max(body_cap + body_cap / 2 + 1024 * 1024))
-        .with_state(AppState { broker })
+        .with_state(AppState {
+            manage: Arc::new(crate::manage::LocalBackend::new(broker.clone())),
+            broker,
+            transport,
+        })
 }
 
 /// Bind the control-plane socket and serve. [`Broker::new`] acquired the OS
@@ -442,6 +506,14 @@ pub fn router(broker: Arc<Broker>) -> Router {
 /// when it is still the observed inode and rejects a connection with the
 /// expected stale-socket error.
 pub async fn serve(broker: Arc<Broker>) -> crate::Result<DaemonHandle> {
+    serve_with(broker, ServeOptions::default()).await
+}
+
+/// [`serve`] plus the optional TCP listener.
+pub async fn serve_with(
+    broker: Arc<Broker>,
+    options: ServeOptions,
+) -> crate::Result<DaemonHandle> {
     let paths = broker.paths.clone();
     paths.ensure()?;
     let socket_path = paths.socket_file();
@@ -485,6 +557,38 @@ pub async fn serve(broker: Arc<Broker>) -> crate::Result<DaemonHandle> {
     // run, so a stable DSN survives a broker restart with no agent lifecycle.
     broker.rebind_endpoints().await;
 
+    // The optional TCP listener serves the same router, marked so pairing
+    // is refused and discovery renders for network clients. Bound before
+    // the UDS serving task so a bad address fails startup as a diagnosis,
+    // not a background log line.
+    let (tcp_addr, tcp_task) = match &options.listen {
+        Some(addr) => {
+            let tcp_listener = tokio::net::TcpListener::bind(addr).await?;
+            let bound = tcp_listener.local_addr()?;
+            if !bound.ip().is_loopback() {
+                tracing::warn!(
+                    %bound,
+                    "control plane bound to a non-loopback address; every \
+                     network client with the key can use enabled tools — \
+                     front this with TLS (proxy or tunnel)"
+                );
+            }
+            let tcp_app = router_for(
+                broker.clone(),
+                Transport::Tcp {
+                    public_url: options.public_url.clone().map(Arc::from),
+                },
+            );
+            let task = tokio::spawn(async move {
+                if let Err(e) = axum::serve(tcp_listener, tcp_app).await {
+                    tracing::error!("tcp control plane exited: {e}");
+                }
+            });
+            (Some(bound), Some(task))
+        }
+        None => (None, None),
+    };
+
     let app = router(broker);
     let task = tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
@@ -493,9 +597,11 @@ pub async fn serve(broker: Arc<Broker>) -> crate::Result<DaemonHandle> {
     });
     Ok(DaemonHandle {
         socket_path,
+        tcp_addr,
         ws_bridge_port,
         pg_proxy_port,
         task,
+        tcp_task,
         bridge_task,
         proxy_task,
         _socket_guard: socket_guard,
@@ -507,6 +613,14 @@ pub async fn serve(broker: Arc<Broker>) -> crate::Result<DaemonHandle> {
 async fn get_manifest(State(state): State<AppState>) -> Response {
     if let Err(wait) = state.broker.discovery_limiter.check() {
         return err_rate_limited(ErrorReason::RateLimited, wait);
+    }
+    if state.transport.is_tcp() {
+        return Json(wellknown::manifest_remote(
+            &state.broker.config,
+            state.transport.public_url(),
+            state.broker.sidecar_mcp_url().is_some(),
+        ))
+        .into_response();
     }
     Json(wellknown::manifest(
         &state.broker.config,
@@ -520,12 +634,22 @@ async fn get_instructions(State(state): State<AppState>) -> Response {
     if let Err(wait) = state.broker.discovery_limiter.check() {
         return err_rate_limited(ErrorReason::RateLimited, wait);
     }
+    let mut body = String::new();
+    if state.transport.is_tcp() {
+        body.push_str(&wellknown::remote_instructions_banner(
+            state.transport.public_url(),
+        ));
+    }
+    body.push_str(&wellknown::instructions(
+        &state.broker.config,
+        &state.broker.paths,
+    ));
     (
         [(
             axum::http::header::CONTENT_TYPE,
             "text/markdown; charset=utf-8",
         )],
-        wellknown::instructions(&state.broker.config, &state.broker.paths),
+        body,
     )
         .into_response()
 }
@@ -538,6 +662,17 @@ struct PairBody {
 }
 
 async fn post_pair(State(state): State<AppState>, ApiJson(body): ApiJson<PairBody>) -> Response {
+    // Pairing is an unauthenticated key-dispenser, acceptable only behind
+    // the 0600 socket's filesystem gate. A network listener must never
+    // hand the key to whoever connects.
+    if state.transport.is_tcp() {
+        return err_detail(
+            StatusCode::NOT_FOUND,
+            ErrorReason::NotServedRemotely,
+            "pairing is not served remotely; obtain this broker's shared key \
+             from its operator",
+        );
+    }
     let broker = &state.broker;
     if let Err(wait) = broker.pairing_limiter.check() {
         return err_rate_limited(ErrorReason::PairingRateLimited, wait);
@@ -1001,6 +1136,85 @@ async fn run_allowed(
         Err(ExecError::IdempotencyCapacity) => err(
             StatusCode::SERVICE_UNAVAILABLE,
             ErrorReason::IdempotencyCapacity,
+        ),
+    }
+}
+
+/* ------------------------------ MCP proxy --------------------------------- */
+
+/// Header fields owned by the transport on each leg; never forwarded.
+fn hop_by_hop(name: &str) -> bool {
+    matches!(
+        name,
+        "host"
+            | "connection"
+            | "content-length"
+            | "transfer-encoding"
+            | "keep-alive"
+            | "upgrade"
+            | "proxy-authorization"
+            | "proxy-connection"
+            | "te"
+            | "trailer"
+    )
+}
+
+/// Reverse-proxy `/mcp` to the sidecar's loopback MCP endpoint, so one
+/// address (and one operator proxy rule) covers the whole broker for
+/// remote agents. The sidecar authorizes every request against the broker
+/// itself (the bearer rides through untouched), so this adds reach, not
+/// authority. Streaming both ways: MCP's streamable-HTTP GET leg is a
+/// long-lived event stream.
+async fn proxy_mcp(State(state): State<AppState>, request: axum::extract::Request) -> Response {
+    let Some(target) = state.broker.sidecar_mcp_url() else {
+        return err_detail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorReason::McpUnavailable,
+            "the broker's MCP host is not running",
+        );
+    };
+    let (parts, body) = request.into_parts();
+    let mut url = target;
+    if let Some(query) = parts.uri.query() {
+        url.push('?');
+        url.push_str(query);
+    }
+    let mut headers = axum::http::HeaderMap::new();
+    for (name, value) in parts.headers.iter() {
+        if hop_by_hop(name.as_str()) {
+            continue;
+        }
+        headers.insert(name.clone(), value.clone());
+    }
+    let stream = http_body_util::BodyDataStream::new(body);
+    let upstream = state
+        .broker
+        .http_client
+        .request(parts.method.clone(), url)
+        .headers(headers)
+        .body(reqwest::Body::wrap_stream(stream))
+        .send()
+        .await;
+    match upstream {
+        Ok(upstream) => {
+            let status = upstream.status();
+            let mut builder = Response::builder().status(status);
+            for (name, value) in upstream.headers() {
+                if hop_by_hop(name.as_str()) {
+                    continue;
+                }
+                builder = builder.header(name, value);
+            }
+            builder
+                .body(axum::body::Body::from_stream(upstream.bytes_stream()))
+                .unwrap_or_else(|_| {
+                    err(StatusCode::BAD_GATEWAY, ErrorReason::UpstreamError)
+                })
+        }
+        Err(error) => err_detail(
+            StatusCode::BAD_GATEWAY,
+            ErrorReason::UpstreamConnectFailed,
+            error.to_string(),
         ),
     }
 }

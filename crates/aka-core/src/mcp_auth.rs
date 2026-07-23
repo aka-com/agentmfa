@@ -66,7 +66,7 @@ const MAX_FINISHED_SESSIONS: usize = 16;
 
 /// Everything the UI needs to render one step of the flow. Serialized to
 /// the webview verbatim — no token material may ever appear here.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 pub enum McpAuthPhase {
     /// Asking the server whether (and how) it wants authentication.
@@ -86,19 +86,19 @@ pub enum McpAuthPhase {
     Succeeded {
         connection_id: String,
         connection_name: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         account: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         expires_in: Option<u64>,
         /// Set when the token was stored but post-auth verification could
         /// not confirm the server (the connection still exists).
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         warning: Option<String>,
     },
     Failed {
         message: String,
         /// What to try instead, when there is a sensible fallback.
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         hint: Option<String>,
     },
     Cancelled,
@@ -113,7 +113,7 @@ impl McpAuthPhase {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpAuthState {
     /// Auth-session id (not a connection id).
     pub id: String,
@@ -127,7 +127,7 @@ pub struct McpAuthState {
 }
 
 /// What the UI submits to start a sign-in.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct McpAuthDraft {
     pub name: String,
     pub scheme: String,

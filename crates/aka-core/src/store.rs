@@ -103,8 +103,9 @@ pub enum PinOutcome {
     AlreadyPinned(ssh_key::Fingerprint),
 }
 
-/// Input for creating or updating a connection.
-#[derive(Debug, Clone)]
+/// Input for creating or updating a connection. Serializable: it rides the
+/// manage API when a remote shell submits an add or edit.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConnectionSpec {
     pub name: String,
     pub config: ConnectionConfig,

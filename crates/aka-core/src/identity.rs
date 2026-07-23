@@ -91,6 +91,18 @@ fn mint_token() -> String {
     format!("aka_{}", hex(&buf))
 }
 
+/// The management token's distinguishing prefix. Distinct from the agent
+/// key's `aka_` so the two can never be confused, pasted into the wrong
+/// field silently, or accepted by the wrong plane.
+pub const MANAGE_TOKEN_PREFIX: &str = "akamgr_";
+
+/// 256-bit random management token: `akamgr_` + 64 hex chars.
+fn mint_manage_token() -> String {
+    let mut buf = [0u8; 32];
+    getrandom::fill(&mut buf).expect("os rng");
+    format!("{MANAGE_TOKEN_PREFIX}{}", hex(&buf))
+}
+
 /// The shape of the per-agent-era `agents.json`, read once to carry its
 /// token hashes across as aliases.
 #[derive(serde::Deserialize)]
@@ -138,6 +150,7 @@ impl IdentityStore {
                     alias_last_used: std::collections::HashMap::new(),
                     minted_at: Utc::now(),
                     last_used: Utc::now(),
+                    manage_token_hash: None,
                 },
                 token: String::new(),
                 rotated_out: None,
@@ -179,6 +192,9 @@ impl IdentityStore {
                             alias_last_used,
                             minted_at: Utc::now(),
                             last_used: Utc::now(),
+                            // The manage token is independent of the agent
+                            // key; losing the token file must not revoke it.
+                            manage_token_hash: identity.manage_token_hash.clone(),
                         };
                         store.persist_and_write_file(&next, &token)?;
                         let mut state = store.state.lock().unwrap();
@@ -218,6 +234,7 @@ impl IdentityStore {
                     alias_last_used,
                     minted_at: Utc::now(),
                     last_used: Utc::now(),
+                    manage_token_hash: None,
                 };
                 store.persist_and_write_file(&identity, &token)?;
                 let mut state = store.state.lock().unwrap();
@@ -332,6 +349,49 @@ impl IdentityStore {
         }
     }
 
+    /// Whether a management token has been issued (the manage API is closed
+    /// until one exists).
+    pub fn manage_token_issued(&self) -> bool {
+        self.state.lock().unwrap().identity.manage_token_hash.is_some()
+    }
+
+    /// Issue (or rotate) the management token, returning its plaintext —
+    /// shown exactly once; only the hash is persisted.
+    pub fn issue_manage_token(&self) -> Result<String> {
+        let mut state = self.state.lock().unwrap();
+        let token = mint_manage_token();
+        state.identity.manage_token_hash = Some(hash_token(&token));
+        self.persist(&state.identity)?;
+        Ok(token)
+    }
+
+    /// Revoke the management token (close the manage API). Returns whether
+    /// one existed.
+    pub fn revoke_manage_token(&self) -> Result<bool> {
+        let mut state = self.state.lock().unwrap();
+        let had = state.identity.manage_token_hash.take().is_some();
+        if had {
+            self.persist(&state.identity)?;
+        }
+        Ok(had)
+    }
+
+    /// Verify a presented management token. Deliberately long-lived (no
+    /// sliding TTL): re-issue to rotate, revoke to close the plane. The
+    /// agent key never verifies here, nor the manage token on the agent
+    /// plane — separate hashes, separate prefixes.
+    pub fn verify_manage(&self, token: &str) -> std::result::Result<(), TokenError> {
+        if !token.starts_with(MANAGE_TOKEN_PREFIX) {
+            return Err(TokenError::Invalid);
+        }
+        let hash = hash_token(token);
+        let state = self.state.lock().unwrap();
+        match &state.identity.manage_token_hash {
+            Some(stored) if *stored == hash => Ok(()),
+            _ => Err(TokenError::Invalid),
+        }
+    }
+
     /// Rotate the key: mint a fresh one, clear the migration aliases, and
     /// rewrite the token file. The old key answers `token_superseded` so
     /// holders re-read the file. The caller is responsible for closing live
@@ -346,6 +406,9 @@ impl IdentityStore {
             alias_last_used: std::collections::HashMap::new(),
             minted_at: Utc::now(),
             last_used: Utc::now(),
+            // Rotating the agent key deliberately leaves the management
+            // token alone: they authorize different planes.
+            manage_token_hash: state.identity.manage_token_hash.clone(),
         };
         self.persist_and_write_file(&next, &token)?;
         state.rotated_out = Some(state.identity.token_hash.clone());
@@ -702,6 +765,37 @@ mod tests {
             persisted_last_used(&path) > at_mint,
             "a refresh past the interval must be written"
         );
+    }
+
+    #[test]
+    fn manage_token_is_a_separate_credential() {
+        let (s, _dir) = store(Duration::from_secs(3600));
+        // Closed until issued; the agent key never opens the manage plane.
+        assert!(!s.manage_token_issued());
+        assert_eq!(s.verify_manage(&s.token()).unwrap_err(), TokenError::Invalid);
+
+        let manage = s.issue_manage_token().unwrap();
+        assert!(manage.starts_with("akamgr_"));
+        assert_eq!(manage.len(), 7 + 64);
+        assert!(s.manage_token_issued());
+        s.verify_manage(&manage).unwrap();
+        // The manage token never authenticates the agent plane.
+        assert_eq!(s.verify(&manage).unwrap_err(), TokenError::Invalid);
+        // The sealed record never holds the plaintext.
+        let sealed = std::fs::read_to_string(_dir.path().join("identity.json")).unwrap();
+        assert!(!sealed.contains(&manage));
+
+        // Rotating the agent key leaves the manage token working.
+        s.rotate().unwrap();
+        s.verify_manage(&manage).unwrap();
+
+        // Re-issuing supersedes; revoking closes the plane.
+        let second = s.issue_manage_token().unwrap();
+        assert_eq!(s.verify_manage(&manage).unwrap_err(), TokenError::Invalid);
+        s.verify_manage(&second).unwrap();
+        assert!(s.revoke_manage_token().unwrap());
+        assert_eq!(s.verify_manage(&second).unwrap_err(), TokenError::Invalid);
+        assert!(!s.revoke_manage_token().unwrap());
     }
 
     #[test]

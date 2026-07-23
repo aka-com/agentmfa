@@ -344,6 +344,9 @@ pub enum ManageEvent {
     /// `McpAuthState` serialization, passed through opaquely.
     McpAuthChanged { state: serde_json::Value },
     ConnectRequested { agent: String, service: String },
+    /// The event stream dropped notifications (a slow consumer): refetch
+    /// everything instead of trusting incremental updates.
+    Resync,
 }
 
 #[cfg(test)]

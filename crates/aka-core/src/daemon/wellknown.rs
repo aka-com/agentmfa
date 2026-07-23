@@ -59,6 +59,68 @@ pub fn manifest(
     m
 }
 
+/// The manifest a TCP (network) client sees: the same contract minus every
+/// same-machine assumption. No socket or token-file paths, no pair endpoint
+/// (the operator hands out the key), and MCP reached through the daemon's
+/// own `/mcp` proxy rather than a loopback port the client cannot route to.
+pub fn manifest_remote(
+    config: &BrokerConfig,
+    public_url: Option<&str>,
+    mcp_available: bool,
+) -> serde_json::Value {
+    let mut m = json!({
+        "name": "aka",
+        "version": config.version,
+        "protocol_version": PROTOCOL_VERSION,
+        // What this listener itself speaks. TLS is the operator's proxy or
+        // tunnel in front of it; the advertised base_url reflects that.
+        "transport": "http",
+        "capabilities": ["http", "websocket", "postgres", "ssh"],
+        "auth_schemes": AuthScheme::ALL,
+        "recommended_client_timeout_seconds": config.recommended_client_timeout.as_secs(),
+        "token_ttl_days": config.token_ttl.as_secs() / 86400,
+        "ticket_ttl_seconds": config.ticket_ttl.as_secs(),
+        "request_id_max_bytes": REQUEST_ID_MAX_BYTES,
+        "endpoints": {
+            "whoami": "/v1/whoami",
+            "connections": "/v1/connections",
+            "http": "/v1/http",
+            "ws_open": "/v1/ws/open",
+            "pg_open": "/v1/pg/open",
+            "ssh_open": "/v1/ssh/open",
+            "instructions": "/instructions",
+        },
+        "pairing": "Not served remotely: every client of this broker uses its one shared key, obtained from the broker's operator (on the broker host it lives in the token file). Send it as your Bearer token, and optionally X-Multitool-Client: <your-name> to label your activity.",
+    });
+    if let Some(base) = public_url {
+        m["base_url"] = json!(base);
+    }
+    if mcp_available {
+        m["mcp_path"] = json!("/mcp");
+        if let Some(base) = public_url {
+            m["mcp_url"] = json!(format!("{}/mcp", base.trim_end_matches('/')));
+        }
+    }
+    m
+}
+
+/// The banner prepended to `/instructions` when served over TCP: the
+/// document below is written for same-machine use, and a network client
+/// needs its transport and auth guidance overridden up front.
+pub fn remote_instructions_banner(public_url: Option<&str>) -> String {
+    let base = public_url.unwrap_or("<this broker's URL>");
+    format!(
+        "> **You are reaching this broker over the network.** Use `{base}` as the\n\
+         > HTTP base URL for every endpoint below and ignore the Unix-socket\n\
+         > `curl --unix-socket …` forms and token-file paths — they exist on the\n\
+         > broker's host machine, not yours. Authenticate with the shared key your\n\
+         > operator gave you (`Authorization: Bearer <key>`). `POST /v1/pair` is\n\
+         > not served remotely. WebSocket, Postgres, and SSH opens currently hand\n\
+         > back broker-host-local addresses and are usable only by agents on that\n\
+         > machine; HTTP calls and MCP (`{base}/mcp`) work from anywhere.\n\n"
+    )
+}
+
 /// The `/instructions` markdown. The pair-or-reuse walkthrough, one worked
 /// example per capability, token-storage guidance, and error semantics.
 pub fn instructions(config: &BrokerConfig, paths: &Paths) -> String {

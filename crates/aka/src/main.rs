@@ -70,12 +70,26 @@ enum Command {
     },
     /// Run the broker headless (no desktop UI). Every local agent shares
     /// one key (~/.aka/token under the root); tools are enabled for agents
-    /// by default and toggled from the desktop app.
+    /// by default and managed remotely via the manage API (`aka manage
+    /// token`) or locally from the desktop app.
     Serve {
         /// Use an isolated root dir (data + socket under it) instead of the
         /// default per-user locations. Handy for testing.
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Also serve the control plane on this TCP address (e.g.
+        /// 127.0.0.1:4780) for remote agents and the remote desktop app.
+        /// Put your TLS proxy or tunnel in front of it; /v1/pair is not
+        /// served on it.
+        #[arg(long)]
+        listen: Option<std::net::SocketAddr>,
+        /// The URL remote clients reach this broker at (your proxy or
+        /// tunnel address); advertised in discovery served over TCP.
+        #[arg(long)]
+        public_url: Option<String>,
+        /// Do not start the MCP sidecar even when its script is found.
+        #[arg(long)]
+        no_sidecar: bool,
     },
     /// Bridge stdio MCP to the local Multitool broker's MCP host. Point any
     /// MCP client at `aka mcp` — it reads this computer's shared key and
@@ -95,6 +109,12 @@ enum Command {
         #[command(subcommand)]
         command: SecretCommand,
     },
+    /// The broker's management plane (the desktop app's remote-management
+    /// API).
+    Manage {
+        #[command(subcommand)]
+        command: ManageCommand,
+    },
     /// Manage connections from the terminal (dev/headless use).
     Conn {
         #[command(subcommand)]
@@ -112,6 +132,21 @@ enum SecretCommand {
         /// Read the value from this environment variable instead of stdin.
         #[arg(long, value_name = "VAR")]
         value_env: Option<String>,
+        /// Operate on a broker rooted here instead of the default layout.
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ManageCommand {
+    /// Issue (or rotate) this broker's management token and print it once.
+    /// Enter it in the desktop app to manage this broker remotely. Offline:
+    /// run on the broker host while the broker is stopped.
+    Token {
+        /// Revoke the management token instead (closes the manage API).
+        #[arg(long)]
+        revoke: bool,
         /// Operate on a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
@@ -204,7 +239,12 @@ fn main() {
                 wellknown::instructions(&BrokerConfig::default(), &doc_paths(root))
             );
         }
-        Command::Serve { root } => cmd_serve(root),
+        Command::Serve {
+            root,
+            listen,
+            public_url,
+            no_sidecar,
+        } => cmd_serve(root, listen, public_url, no_sidecar),
         Command::Mcp { root, client } => cmd_mcp(root, client),
         Command::Secret {
             command:
@@ -218,6 +258,9 @@ fn main() {
             ConnCommand::Add(args) => cmd_conn_add(args),
             ConnCommand::List { root } => cmd_conn_list(root),
         },
+        Command::Manage {
+            command: ManageCommand::Token { revoke, root },
+        } => cmd_manage_token(revoke, root),
     }
 }
 
@@ -559,21 +602,79 @@ fn cmd_skill(write: bool, path: Option<PathBuf>, user: bool, root: Option<PathBu
     eprintln!("wrote {}", path.display());
 }
 
-/// Headless events: the terminal session that launched `serve` stands in
-/// for the app's native confirmation gates.
+/// Headless events: under `serve` no user is at the machine, and gated
+/// configuration actions can only arrive through the manage API — so
+/// possession of the management token is what authorizes them, and the
+/// audit trail records exactly that.
 struct CliEvents;
 
 impl BrokerEvents for CliEvents {
     fn confirm_secret_read(&self, secret: &SecretMeta) -> bool {
         eprintln!(
-            "  secret read re-auth requested for {} (headless CLI allows this dev path)",
+            "  secret read authorized for {} (headless broker; the manage \
+             token is the gate)",
             secret.name
         );
         true
     }
 
     fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
-        Some(ConfirmationMethod::Terminal)
+        Some(ConfirmationMethod::ManagementToken)
+    }
+}
+
+/// Issue, rotate, or revoke the management token. Offline like `secret add`:
+/// a live broker holds identity state in memory and would overwrite the
+/// edit, so it must be stopped first.
+fn cmd_manage_token(revoke: bool, root: Option<PathBuf>) {
+    let paths = store_paths(root.as_deref());
+    let _lock = match acquire_offline_store_lock(&paths) {
+        Ok(lock) => lock,
+        Err(CoreError::BrokerAlreadyRunning(_)) => die(format!(
+            "a broker is running on {} — stop it first (its in-memory \
+             identity would overwrite this change)",
+            paths.socket_file().display()
+        )),
+        Err(error) => die(format!("could not acquire the broker state lease: {error}")),
+    };
+    let vault = match open_vault(&paths, root.as_deref()) {
+        Ok(vault) => vault,
+        Err(e) => die(format!("could not open the secret vault: {e}")),
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let integrity = match runtime.block_on(aka_core::integrity::StateIntegrity::open(&*vault)) {
+        Ok(integrity) => Arc::new(integrity),
+        Err(e) => die(format!("could not open the state integrity key: {e}")),
+    };
+    let identity = match aka_core::identity::IdentityStore::open(
+        paths.identity_file(),
+        paths.token_file(),
+        Some(&paths.agents_file()),
+        BrokerConfig::default().token_ttl,
+        integrity,
+    ) {
+        Ok(identity) => identity,
+        Err(e) => die(format!("could not open the broker identity: {e}")),
+    };
+    if revoke {
+        match identity.revoke_manage_token() {
+            Ok(true) => eprintln!("management token revoked; the manage API is closed"),
+            Ok(false) => eprintln!("no management token was issued"),
+            Err(e) => die(e),
+        }
+        return;
+    }
+    match identity.issue_manage_token() {
+        Ok(token) => {
+            eprintln!("management token (shown once — only its hash is stored):\n");
+            println!("{token}");
+            eprintln!("\nEnter it in the Multitool app to manage this broker remotely.");
+            eprintln!("Re-run this command to rotate it, or --revoke to close the manage API.");
+        }
+        Err(e) => die(e),
     }
 }
 
@@ -588,7 +689,49 @@ fn cmd_mcp(root: Option<PathBuf>, client: Option<String>) {
     }
 }
 
-fn cmd_serve(root: Option<PathBuf>) {
+/// Where the MCP sidecar's pieces are, when a checkout or install carries
+/// them. `AKA_SIDECAR_SCRIPT`/`AKA_SIDECAR_NODE` override; otherwise the
+/// bundled `dist/sidecar/main.mjs` of the working directory is used and
+/// `node` resolves through PATH at spawn time.
+fn resolve_sidecar(broker_socket: PathBuf) -> Option<aka_core::sidecar::SidecarConfig> {
+    let script = match std::env::var_os("AKA_SIDECAR_SCRIPT") {
+        Some(script) => {
+            let script = PathBuf::from(script);
+            if !script.exists() {
+                // Warn once here instead of letting the supervisor loop on
+                // spawn failures with backoff noise.
+                eprintln!(
+                    "  MCP host not started: AKA_SIDECAR_SCRIPT={} does not exist",
+                    script.display()
+                );
+                return None;
+            }
+            script
+        }
+        None => {
+            let bundled = PathBuf::from("dist/sidecar/main.mjs");
+            if !bundled.exists() {
+                return None;
+            }
+            bundled
+        }
+    };
+    let node = std::env::var_os("AKA_SIDECAR_NODE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("node"));
+    Some(aka_core::sidecar::SidecarConfig {
+        node,
+        script,
+        broker_socket,
+    })
+}
+
+fn cmd_serve(
+    root: Option<PathBuf>,
+    listen: Option<std::net::SocketAddr>,
+    public_url: Option<String>,
+    no_sidecar: bool,
+) {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -620,12 +763,53 @@ fn cmd_serve(root: Option<PathBuf>) {
             Ok(broker) => broker,
             Err(e) => fail("could not start the broker", &e),
         };
-    let daemon = match runtime.block_on(daemon::serve(broker.clone())) {
+    let options = daemon::ServeOptions {
+        listen,
+        public_url: public_url.clone(),
+    };
+    let daemon = match runtime.block_on(daemon::serve_with(broker.clone(), options)) {
         Ok(daemon) => daemon,
         Err(e) => fail("could not serve the control plane", &e),
     };
 
+    // Supervise the MCP sidecar when its script is available, and keep the
+    // discovery manifest told where its endpoint is (restarts move the
+    // port). Without a script the broker still serves everything but MCP.
+    let sidecar = if no_sidecar {
+        None
+    } else {
+        match resolve_sidecar(daemon.socket_path.clone()) {
+            Some(config) => {
+                let sidecar = runtime.block_on(async {
+                    aka_core::sidecar::Sidecar::spawn(config)
+                });
+                let watch = sidecar.watch();
+                let broker_for_watch = broker.clone();
+                runtime.spawn(watch.follow(move |endpoint| {
+                    broker_for_watch.set_sidecar_mcp_port(endpoint.map(|e| e.port));
+                }));
+                Some(sidecar)
+            }
+            None => {
+                eprintln!(
+                    "  MCP host not started: no sidecar script found (set \
+                     AKA_SIDECAR_SCRIPT or run from a checkout with \
+                     dist/sidecar/main.mjs built)"
+                );
+                None
+            }
+        }
+    };
+
     eprintln!("AKA broker listening on {}", daemon.socket_path.display());
+    if let Some(addr) = daemon.tcp_addr {
+        eprintln!("  TCP control plane on {addr} (put TLS in front; /v1/pair is not served there)");
+        match &public_url {
+            Some(url) => eprintln!("  advertised to remote clients as {url}"),
+            None => eprintln!("  no --public-url set: TCP discovery omits absolute URLs"),
+        }
+        eprintln!("  remote management: enter this broker's `aka manage token` in the app");
+    }
     eprintln!(
         "  discovery: curl --unix-socket {} http://localhost/instructions",
         daemon.socket_path.display()
@@ -642,6 +826,7 @@ fn cmd_serve(root: Option<PathBuf>) {
     runtime.block_on(async {
         let _ = tokio::signal::ctrl_c().await;
     });
+    drop(sidecar);
     drop(daemon);
 }
 

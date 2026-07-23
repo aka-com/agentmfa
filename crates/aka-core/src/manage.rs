@@ -275,6 +275,158 @@ pub fn agent_setup_instructions(socket: &str, token_path: &str) -> String {
     )
 }
 
+/* ----------------------------- event fanout ------------------------------- */
+
+/// Wraps a shell's `BrokerEvents` observer so every state-change
+/// notification also lands on the broker's manage-event broadcast (the SSE
+/// stream remote shells subscribe to). Confirmation gates and the browser
+/// hook delegate untouched — fanout observes, it never authorizes.
+pub struct FanoutEvents {
+    inner: Arc<dyn crate::events::BrokerEvents>,
+    tx: tokio::sync::broadcast::Sender<aka_api::ManageEvent>,
+}
+
+impl FanoutEvents {
+    pub fn new(
+        inner: Arc<dyn crate::events::BrokerEvents>,
+        tx: tokio::sync::broadcast::Sender<aka_api::ManageEvent>,
+    ) -> Self {
+        Self { inner, tx }
+    }
+}
+
+impl crate::events::BrokerEvents for FanoutEvents {
+    fn sessions_changed(&self) {
+        self.inner.sessions_changed();
+        let _ = self.tx.send(aka_api::ManageEvent::SessionsChanged);
+    }
+
+    fn agents_changed(&self) {
+        self.inner.agents_changed();
+        let _ = self.tx.send(aka_api::ManageEvent::AgentsChanged);
+    }
+
+    fn wirings_changed(&self) {
+        self.inner.wirings_changed();
+        let _ = self.tx.send(aka_api::ManageEvent::WiringsChanged);
+    }
+
+    fn connections_changed(&self) {
+        self.inner.connections_changed();
+        let _ = self.tx.send(aka_api::ManageEvent::ConnectionsChanged);
+    }
+
+    fn audit_appended(&self, entry: &AuditEntry) {
+        self.inner.audit_appended(entry);
+        let _ = self.tx.send(aka_api::ManageEvent::ActivityAppended {
+            entry: activity_dto(entry),
+        });
+    }
+
+    fn mcp_auth_changed(&self, state: &crate::mcp_auth::McpAuthState) {
+        self.inner.mcp_auth_changed(state);
+        if let Ok(value) = serde_json::to_value(state) {
+            let _ = self
+                .tx
+                .send(aka_api::ManageEvent::McpAuthChanged { state: value });
+        }
+    }
+
+    fn connect_requested(&self, agent: &str, service: &str) {
+        self.inner.connect_requested(agent, service);
+        let _ = self.tx.send(aka_api::ManageEvent::ConnectRequested {
+            agent: agent.to_string(),
+            service: service.to_string(),
+        });
+    }
+
+    fn confirm_secret_read(&self, secret: &SecretMeta) -> bool {
+        self.inner.confirm_secret_read(secret)
+    }
+
+    fn confirm_secret_copy(&self, secret: &SecretMeta, duration: std::time::Duration) -> bool {
+        self.inner.confirm_secret_copy(secret, duration)
+    }
+
+    fn open_external_url(&self, url: &str) -> bool {
+        self.inner.open_external_url(url)
+    }
+
+    fn confirm_action(&self, description: &str) -> Option<crate::types::ConfirmationMethod> {
+        self.inner.confirm_action(description)
+    }
+}
+
+/* ---------------------------- request bodies ------------------------------ */
+
+/// `POST /v1/manage/secrets`. The value crosses as plaintext inside the
+/// (Unix-socket or tunneled) manage transport, exactly like the app's own
+/// IPC; it is wrapped zeroizing immediately after parse.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct SecretAddBody {
+    pub name: String,
+    pub value: String,
+}
+
+/// `PATCH /v1/manage/secrets/{id}`.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct SecretEditBody {
+    #[serde(default)]
+    pub new_name: Option<String>,
+    #[serde(default)]
+    pub new_value: Option<String>,
+}
+
+/// `POST /v1/manage/connections`: the spec plus, for connection-first
+/// setup, the new credential stored atomically with it.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct ConnectionAddBody {
+    pub spec: ConnectionSpec,
+    #[serde(default)]
+    pub new_secret: Option<SecretAddBody>,
+}
+
+/// `PUT /v1/manage/connections/{id}`.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct ConnectionUpdateBody {
+    pub spec: ConnectionSpec,
+}
+
+/// `POST /v1/manage/connections/test-draft`.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct DraftTestBody {
+    pub spec: ConnectionSpec,
+    #[serde(default)]
+    pub typed_secret: Option<String>,
+}
+
+/// `POST /v1/manage/connections/{id}/access`.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct AccessBody {
+    pub enabled: bool,
+}
+
+/// `POST /v1/manage/connections/{id}/allowed-tools`. `tools: null` restores
+/// the default (all tools).
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct AllowedToolsBody {
+    #[serde(default)]
+    pub tools: Option<Vec<String>>,
+}
+
+/// `PATCH /v1/manage/settings`: partial update, absent fields unchanged.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct SettingsPatchBody {
+    #[serde(default)]
+    pub reauth_on_read: Option<bool>,
+    #[serde(default)]
+    pub show_websockets: Option<bool>,
+    #[serde(default)]
+    pub menu_bar_hides_dock: Option<bool>,
+    #[serde(default)]
+    pub presence_window_secs: Option<u64>,
+}
+
 /* -------------------------------- backend --------------------------------- */
 
 /// Which broker the shell is managing. The webview uses this to label the

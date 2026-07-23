@@ -34,7 +34,7 @@ const MAX_RESOURCE_PAGES: usize = 3;
 const MAX_LISTED_RESOURCES: usize = 100;
 
 /// One resource the server advertises, trimmed to display metadata.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpResourceInfo {
     pub uri: String,
     pub name: String,
@@ -43,7 +43,7 @@ pub struct McpResourceInfo {
 }
 
 /// What the UI's status button renders. Never credential material.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpStatusReport {
     pub ok: bool,
     /// One-line human summary (success or the failure reason).
@@ -96,7 +96,7 @@ impl McpStatusReport {
 
 /// Template-supplied expectations for a status check. Both optional: a
 /// generic MCP server checks reachability and lists what it finds.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct McpCheckOptions {
     /// Tool that identifies the connected account (e.g. GitHub's `get_me`).
     pub whoami_tool: Option<String>,
@@ -339,7 +339,7 @@ pub async fn check_connection(
 }
 
 /// One upstream tool, as the per-wiring tool picker lists it.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpToolInfo {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]

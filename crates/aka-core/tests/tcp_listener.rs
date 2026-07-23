@@ -1,0 +1,231 @@
+//! TCP control-plane tests: the same daemon serving a network listener the
+//! way a hosted broker does — remote-flavored discovery, no pairing, agent
+//! and manage planes authenticated, and `/mcp` reverse-proxied to the
+//! sidecar's loopback endpoint.
+
+use std::sync::Arc;
+
+use aka_core::broker::Broker;
+use aka_core::config::BrokerConfig;
+use aka_core::daemon::{self, ServeOptions};
+use aka_core::events::BrokerEvents;
+use aka_core::paths::Paths;
+use aka_core::types::{ConfirmationMethod, SecretMeta};
+use aka_core::vault::MemoryVault;
+use serde_json::{json, Value};
+
+struct TestEvents;
+
+impl BrokerEvents for TestEvents {
+    fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
+        true
+    }
+    fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
+        Some(ConfirmationMethod::ManagementToken)
+    }
+}
+
+struct Harness {
+    broker: Arc<Broker>,
+    _daemon: daemon::DaemonHandle,
+    base: String,
+    manage_token: String,
+    _dir: tempfile::TempDir,
+}
+
+async fn harness(public_url: Option<&str>) -> Harness {
+    let config = BrokerConfig {
+        version: "test".into(),
+        ..BrokerConfig::default()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::under(dir.path());
+    let broker = Broker::new(
+        paths,
+        Arc::new(MemoryVault::new()),
+        config,
+        Arc::new(TestEvents),
+    )
+    .await
+    .unwrap();
+    let manage_token = broker.identity.issue_manage_token().unwrap();
+    let handle = daemon::serve_with(
+        broker.clone(),
+        ServeOptions {
+            listen: Some("127.0.0.1:0".parse().unwrap()),
+            public_url: public_url.map(String::from),
+        },
+    )
+    .await
+    .unwrap();
+    let base = format!("http://{}", handle.tcp_addr.unwrap());
+    Harness {
+        broker,
+        _daemon: handle,
+        base,
+        manage_token,
+        _dir: dir,
+    }
+}
+
+async fn get_json(url: &str, bearer: Option<&str>) -> (u16, Value) {
+    let client = reqwest::Client::new();
+    let mut request = client.get(url);
+    if let Some(token) = bearer {
+        request = request.header("authorization", format!("Bearer {token}"));
+    }
+    let response = request.send().await.unwrap();
+    let status = response.status().as_u16();
+    let text = response.text().await.unwrap();
+    let value = serde_json::from_str(&text).unwrap_or(Value::String(text));
+    (status, value)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tcp_discovery_is_remote_flavored_and_pair_is_refused() {
+    let h = harness(Some("https://broker.example.dev")).await;
+
+    let (status, manifest) =
+        get_json(&format!("{}/.well-known/agent-broker.json", h.base), None).await;
+    assert_eq!(status, 200, "{manifest}");
+    assert_eq!(manifest["transport"], "http");
+    assert_eq!(manifest["base_url"], "https://broker.example.dev");
+    assert!(manifest.get("socket").is_none(), "no host-local paths");
+    assert!(manifest.get("token_file").is_none());
+    assert!(manifest["endpoints"].get("pair").is_none());
+    assert!(
+        manifest.get("mcp_url").is_none(),
+        "no MCP host is running yet"
+    );
+
+    // Pairing is refused on TCP with a distinct reason.
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{}/v1/pair", h.base))
+        .json(&json!({ "agent_name": "remote" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 404);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["reason"], "not_served_remotely");
+
+    // The instructions carry the network banner up front.
+    let text = client
+        .get(format!("{}/instructions", h.base))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(text.starts_with("> **You are reaching this broker over the network.**"));
+    assert!(text.contains("https://broker.example.dev"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn both_planes_authenticate_over_tcp() {
+    let h = harness(None).await;
+
+    // Agent plane: the shared key works over TCP.
+    let agent_key = h.broker.identity.token();
+    let (status, body) = get_json(&format!("{}/v1/whoami", h.base), Some(&agent_key)).await;
+    assert_eq!(status, 200, "{body}");
+
+    // Manage plane: the manage token works over TCP; the agent key does not.
+    let (status, body) =
+        get_json(&format!("{}/v1/manage/whoami", h.base), Some(&h.manage_token)).await;
+    assert_eq!(status, 200, "{body}");
+    let (status, _) = get_json(&format!("{}/v1/manage/whoami", h.base), Some(&agent_key)).await;
+    assert_eq!(status, 401);
+
+    // Unauthenticated agent-plane calls still 401 over TCP.
+    let (status, _) = get_json(&format!("{}/v1/connections", h.base), None).await;
+    assert_eq!(status, 401);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_is_reverse_proxied_to_the_sidecar() {
+    let h = harness(Some("https://broker.example.dev")).await;
+
+    // Without a sidecar, /mcp answers 503 with a distinct reason.
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{}/mcp", h.base))
+        .json(&json!({ "jsonrpc": "2.0" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 503);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["reason"], "mcp_unavailable");
+
+    // Stand in a stub "sidecar" that echoes what it received.
+    let stub = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = stub.local_addr().unwrap().port();
+    let app = axum::Router::new().route(
+        "/mcp",
+        axum::routing::any(|request: axum::extract::Request| async move {
+            let (parts, body) = request.into_parts();
+            let bytes = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
+            axum::Json(json!({
+                "method": parts.method.as_str(),
+                "authorization": parts
+                    .headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok()),
+                "body": String::from_utf8_lossy(&bytes),
+            }))
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(stub, app).await.unwrap();
+    });
+    h.broker.set_sidecar_mcp_port(Some(port));
+
+    // The manifest now advertises the proxied endpoint.
+    let (_, manifest) =
+        get_json(&format!("{}/.well-known/agent-broker.json", h.base), None).await;
+    assert_eq!(manifest["mcp_path"], "/mcp");
+    assert_eq!(manifest["mcp_url"], "https://broker.example.dev/mcp");
+
+    // Requests ride through with method, bearer, and body intact.
+    let response = client
+        .post(format!("{}/mcp", h.base))
+        .header("authorization", "Bearer aka_agent_key")
+        .body(r#"{"jsonrpc":"2.0","method":"tools/list"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["method"], "POST");
+    assert_eq!(body["authorization"], "Bearer aka_agent_key");
+    assert_eq!(body["body"], r#"{"jsonrpc":"2.0","method":"tools/list"}"#);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn uds_discovery_is_unchanged_by_the_tcp_listener() {
+    let h = harness(Some("https://broker.example.dev")).await;
+    // The Unix socket keeps serving the local manifest with local paths and
+    // the pair endpoint — TCP flavor must not leak across listeners.
+    let socket = h._daemon.socket_path.clone();
+    let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    let io = hyper_util::rt::TokioIo::new(stream);
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await.unwrap();
+    tokio::spawn(conn);
+    let request = hyper::Request::builder()
+        .method("GET")
+        .uri("/.well-known/agent-broker.json")
+        .header("host", "localhost")
+        .body(String::new())
+        .unwrap();
+    let response = sender.send_request(request).await.unwrap();
+    assert_eq!(response.status(), 200);
+    use http_body_util::BodyExt as _;
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let manifest: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(manifest["transport"], "http-over-unix-socket");
+    assert!(manifest.get("socket").is_some());
+    assert_eq!(manifest["endpoints"]["pair"], "/v1/pair");
+}

@@ -436,6 +436,12 @@ pub struct BrokerIdentity {
     /// Refreshed on use; the key expires 30 days after this (re-minted at
     /// the next broker start, or refreshed by a compat `/v1/pair`).
     pub last_used: DateTime<Utc>,
+    /// SHA-256 of the management token (`akamgr_…`), hex-encoded. `None`
+    /// until one is issued: the manage API is closed by default. Never
+    /// interchangeable with the agent key — manage routes accept only this
+    /// hash, agent routes only the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manage_token_hash: Option<String>,
 }
 
 /// Per-connection agent access — the whole authorization model. A connection
@@ -522,6 +528,9 @@ pub enum ConfirmationMethod {
     Waived,
     /// A recent OS authentication was still fresh (the presence window).
     RecentAuthentication,
+    /// Possession of the management token authorized the action (a hosted
+    /// broker managed over its manage API — no user is at the machine).
+    ManagementToken,
 }
 
 /// Attribution carried with every decision: who decided, from where. The

@@ -102,6 +102,11 @@ pub enum ErrorReason {
     ResponseTooLarge,
     CredentialRenderFailed,
     SshAgentOpenFailed,
+    /// The endpoint exists on another transport but is not served on the
+    /// one the request arrived on (pairing over TCP).
+    NotServedRemotely,
+    /// The MCP host is not running (no sidecar to proxy to).
+    McpUnavailable,
     // Broker-side faults.
     BadConnectionConfig,
     BodyUnavailable,
@@ -113,7 +118,7 @@ pub enum ErrorReason {
 
 impl ErrorReason {
     /// Every registered reason, for exhaustiveness checks and docs.
-    pub const ALL: [ErrorReason; 37] = [
+    pub const ALL: [ErrorReason; 39] = [
         ErrorReason::MissingToken,
         ErrorReason::InvalidToken,
         ErrorReason::TokenExpired,
@@ -145,6 +150,8 @@ impl ErrorReason {
         ErrorReason::ResponseTooLarge,
         ErrorReason::CredentialRenderFailed,
         ErrorReason::SshAgentOpenFailed,
+        ErrorReason::NotServedRemotely,
+        ErrorReason::McpUnavailable,
         ErrorReason::BadConnectionConfig,
         ErrorReason::BodyUnavailable,
         ErrorReason::SpoolFailed,
@@ -186,6 +193,8 @@ impl ErrorReason {
             ErrorReason::ResponseTooLarge => "response_too_large",
             ErrorReason::CredentialRenderFailed => "credential_render_failed",
             ErrorReason::SshAgentOpenFailed => "ssh_agent_open_failed",
+            ErrorReason::NotServedRemotely => "not_served_remotely",
+            ErrorReason::McpUnavailable => "mcp_unavailable",
             ErrorReason::BadConnectionConfig => "bad_connection_config",
             ErrorReason::BodyUnavailable => "body_unavailable",
             ErrorReason::SpoolFailed => "spool_failed",
