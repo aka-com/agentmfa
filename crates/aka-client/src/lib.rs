@@ -63,9 +63,8 @@ impl std::fmt::Debug for RemoteConfig {
 }
 
 impl RemoteConfig {
-    /// Parse and normalize the user-entered URL (scheme required, trailing
-    /// slash trimmed).
-    pub fn new(url: &str, token: &str) -> Result<Self, String> {
+    /// Parse and validate a user-entered broker URL (scheme required).
+    fn parse_base(url: &str) -> Result<url::Url, String> {
         let trimmed = url.trim().trim_end_matches('/');
         if trimmed.is_empty() {
             return Err("enter the broker's URL".into());
@@ -77,6 +76,25 @@ impl RemoteConfig {
             "http" | "https" => {}
             other => return Err(format!("unsupported scheme {other:?}: use http or https")),
         }
+        Ok(base)
+    }
+
+    /// A user-entered URL's canonical form — exactly what [`Self::base_url`]
+    /// returns after [`Self::new`] (the parser lowercases the host and drops
+    /// default ports). Anything keyed by broker URL (the saved-token store)
+    /// must look up with this, never the raw input, or textual variants of
+    /// one broker stop matching their stored entry.
+    pub fn normalize_url(url: &str) -> Result<String, String> {
+        Ok(Self::parse_base(url)?
+            .as_str()
+            .trim_end_matches('/')
+            .to_string())
+    }
+
+    /// Parse and normalize the user-entered URL (scheme required, trailing
+    /// slash trimmed).
+    pub fn new(url: &str, token: &str) -> Result<Self, String> {
+        let base = Self::parse_base(url)?;
         let token = token.trim();
         if token.is_empty() {
             return Err("enter the broker's management token".into());
@@ -671,5 +689,29 @@ mod tests {
         assert!(RemoteConfig::new("http://127.0.0.1:4780", "")
             .unwrap_err()
             .contains("management token"));
+    }
+
+    #[test]
+    fn normalize_url_collapses_textual_variants_of_one_broker() {
+        // The token store keys on this: every way a user might re-type the
+        // same broker must land on the same string base_url() produces.
+        for variant in [
+            "https://broker.example.dev",
+            "https://broker.example.dev/",
+            " https://Broker.Example.dev ",
+            "https://broker.example.dev:443",
+        ] {
+            assert_eq!(
+                RemoteConfig::normalize_url(variant).unwrap(),
+                "https://broker.example.dev",
+                "{variant}"
+            );
+        }
+        assert_eq!(
+            RemoteConfig::normalize_url("http://127.0.0.1:4780").unwrap(),
+            "http://127.0.0.1:4780"
+        );
+        assert!(RemoteConfig::normalize_url("").is_err());
+        assert!(RemoteConfig::normalize_url("broker.example.dev").is_err());
     }
 }

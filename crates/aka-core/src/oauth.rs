@@ -334,10 +334,13 @@ async fn wait_for_redirect_on(
             let _ = respond(&mut stream, "400 Bad Request", "Missing code or state.").await;
             return Err("the provider sent no authorization code".into());
         };
+        // This page is written before the state nonce is checked (locally in
+        // wait_for_code_on, or broker-side in the relayed flow), so it must
+        // not claim the connection succeeded — only hand the user back.
         let _ = respond(
             &mut stream,
             "200 OK",
-            "Connected. You can close this window and return to Multitool.",
+            "You can close this window and return to Multitool.",
         )
         .await;
         return Ok((code, state));

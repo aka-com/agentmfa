@@ -235,6 +235,12 @@ impl BrokerState {
         url: String,
         token: Option<String>,
     ) -> Result<BrokerProfileInfo, String> {
+        // Normalize before the saved-token lookup: tokens are stored under
+        // the canonical URL (what base_url() returns), so a re-typed variant
+        // of the same broker — different case, an explicit default port, a
+        // trailing slash — must collapse to the same key or the saved token
+        // is missed and the user is asked to paste it again.
+        let url = RemoteConfig::normalize_url(&url)?;
         let saved = self.tokens.load(&url);
         let token = match token.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
             Some(token) => token.to_string(),
@@ -301,11 +307,29 @@ impl BrokerState {
         self: &Arc<Self>,
         app: &AppHandle,
     ) -> Result<BrokerProfileInfo, String> {
-        let url = self
-            .profile()
+        let profile = self.profile();
+        let url = profile
             .url
             .ok_or_else(|| "no remote broker is configured".to_string())?;
-        self.connect_remote(app, url, None).await
+        // Show the attempt: clear the previous failure so the pane flips to
+        // "Connecting…" while the probe runs, instead of pinning stale
+        // error text with no sign the click did anything.
+        if !profile.connected {
+            self.update_link(app, false, None);
+        }
+        match self.connect_remote(app, url, None).await {
+            Ok(profile) => Ok(profile),
+            Err(message) => {
+                // A failed connect emits no profile change on its own;
+                // surface what this attempt hit so the pane stays honest.
+                // A superseded attempt lost to a newer transition that owns
+                // the profile now — leave that state alone.
+                if message != TRANSITION_SUPERSEDED {
+                    self.update_link(app, false, Some(message.clone()));
+                }
+                Err(message)
+            }
+        }
     }
 
     /// Called once at startup when the saved mode is remote: try the saved

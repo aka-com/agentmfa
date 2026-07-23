@@ -2252,9 +2252,15 @@ function settingsSheet() {
       <div class="seg in-form" role="radiogroup" aria-label="Stay unlocked for">
       ${windowBtn(15 * 60, '15 min')}${windowBtn(60 * 60, '1 hr')}${windowBtn(2 * 60 * 60, '2 hrs')}</div></div>`
     : '';
-  const dockRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Hide Dock icon in the menu bar</div>
+  // Window chrome is a this-machine concern: in remote mode the toggle
+  // would patch the *remote* broker's setting, which this app's chrome
+  // deliberately never reads (windows.rs) — and could silently reconfigure
+  // a desktop app running on the broker host. Local mode only.
+  const dockRow = state.broker.mode === 'local'
+    ? `<div class="set-row"><div class="set-txt"><div class="st-title">Hide Dock icon in the menu bar</div>
       <div class="st-sub">When minimized to the menu bar, hide the Dock icon.</div></div>
-      <button class="switch ${s.menu_bar_hides_dock ? 'on' : ''}" data-act="toggle-menubar-dock" role="checkbox" aria-checked="${s.menu_bar_hides_dock ? 'true' : 'false'}"></button></div>`;
+      <button class="switch ${s.menu_bar_hides_dock ? 'on' : ''}" data-act="toggle-menubar-dock" role="checkbox" aria-checked="${s.menu_bar_hides_dock ? 'true' : 'false'}"></button></div>`
+    : '';
   const websocketRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Show WebSockets</div>
       <div class="st-sub">Adds Custom WebSocket to the tool catalog.</div></div>
       <button class="switch ${s.show_websockets ? 'on' : ''}" data-act="toggle-websockets" role="checkbox" aria-checked="${s.show_websockets ? 'true' : 'false'}"></button></div>`;
@@ -2385,8 +2391,14 @@ function captureDrafts(): void {
     const el = document.getElementById(id) as HTMLInputElement | HTMLSelectElement | null;
     return el?.value;
   };
-  if (g('rb-url') !== undefined) state.remoteSetup.url = g('rb-url') ?? '';
-  if (g('rb-token') !== undefined) state.remoteSetup.token = g('rb-token') ?? '';
+  // Capture the remote-broker form only while state still shows it: after a
+  // successful connect resets the form, the old inputs are in the DOM until
+  // the next paint, and capturing then would copy the deliberately cleared
+  // token back into JS state.
+  if (brokerTakeover(state.broker, state.remoteSetup.open) === 'setup') {
+    if (g('rb-url') !== undefined) state.remoteSetup.url = g('rb-url') ?? '';
+    if (g('rb-token') !== undefined) state.remoteSetup.token = g('rb-token') ?? '';
+  }
   if (state.sheet && (state.sheet.kind === 'add-secret' || state.sheet.kind === 'edit-secret')) {
     if (g('f-name') !== undefined) state.draft.name = g('f-name');
     if (g('f-value') !== undefined) state.draft.value = g('f-value');
