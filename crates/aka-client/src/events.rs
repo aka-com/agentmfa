@@ -25,6 +25,13 @@ pub enum LinkState {
 const MIN_BACKOFF: Duration = Duration::from_millis(500);
 const MAX_BACKOFF: Duration = Duration::from_secs(15);
 
+/// How long the stream may go silent before the link is declared dead. The
+/// broker sends an SSE keep-alive comment every 15 seconds, so a healthy
+/// link never approaches this; without it a connection dropped without a
+/// FIN (sleep/wake, network change, an idle proxy) would keep the shell
+/// showing "connected" forever while receiving nothing.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Subscribe forever (until the task is aborted): connect, stream events,
 /// reconnect with backoff. `on_event` receives every parsed event;
 /// `on_state` every link-state *transition*.
@@ -103,9 +110,11 @@ async fn open_stream(
     last_event_id: Option<&str>,
 ) -> Result<impl futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>>, String> {
     // A dedicated client without the request timeout: the event stream is
-    // deliberately long-lived (keep-alives ride it).
+    // deliberately long-lived (keep-alives ride it). The per-read timeout
+    // is the dead-link detector — see [`IDLE_TIMEOUT`].
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
+        .read_timeout(IDLE_TIMEOUT)
         .build()
         .map_err(|error| error.to_string())?;
     let mut request = client

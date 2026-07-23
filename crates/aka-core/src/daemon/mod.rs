@@ -666,6 +666,7 @@ async fn get_instructions(State(state): State<AppState>) -> Response {
     if state.transport.is_tcp() {
         body.push_str(&wellknown::remote_instructions_banner(
             state.transport.public_url(),
+            state.broker.data_plane_advertised().as_deref(),
         ));
     }
     body.push_str(&wellknown::instructions(

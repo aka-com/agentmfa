@@ -107,17 +107,32 @@ pub fn manifest_remote(
 /// The banner prepended to `/instructions` when served over TCP: the
 /// document below is written for same-machine use, and a network client
 /// needs its transport and auth guidance overridden up front.
-pub fn remote_instructions_banner(public_url: Option<&str>) -> String {
+/// `data_plane_host` is the advertised WS/PG host when the operator serves
+/// the data planes beyond loopback (`--advertise-host`); `None` means the
+/// opens hand back broker-host-local addresses.
+pub fn remote_instructions_banner(
+    public_url: Option<&str>,
+    data_plane_host: Option<&str>,
+) -> String {
     let base = public_url.unwrap_or("<this broker's URL>");
+    let data_planes = match data_plane_host {
+        Some(host) => format!(
+            "> not served remotely. WebSocket and Postgres opens hand back\n\
+             > addresses on `{host}`, reachable if you can route to it; SSH opens\n\
+             > name a Unix socket that exists only on the broker's machine"
+        ),
+        None => "> not served remotely. WebSocket, Postgres, and SSH opens currently hand\n\
+                 > back broker-host-local addresses and are usable only by agents on that\n\
+                 > machine"
+            .to_string(),
+    };
     format!(
         "> **You are reaching this broker over the network.** Use `{base}` as the\n\
          > HTTP base URL for every endpoint below and ignore the Unix-socket\n\
          > `curl --unix-socket …` forms and token-file paths — they exist on the\n\
          > broker's host machine, not yours. Authenticate with the shared key your\n\
          > operator gave you (`Authorization: Bearer <key>`). `POST /v1/pair` is\n\
-         > not served remotely. WebSocket, Postgres, and SSH opens currently hand\n\
-         > back broker-host-local addresses and are usable only by agents on that\n\
-         > machine; HTTP calls and MCP (`{base}/mcp`) work from anywhere.\n\n"
+         {data_planes}; HTTP calls and MCP (`{base}/mcp`) work from anywhere.\n\n"
     )
 }
 
@@ -440,6 +455,22 @@ mod tests {
             m["capabilities"],
             serde_json::json!(["http", "websocket", "postgres", "ssh"])
         );
+    }
+
+    #[test]
+    fn remote_banner_reflects_the_data_plane_configuration() {
+        // Default: WS/PG/SSH opens are host-local and the banner says so.
+        let text = remote_instructions_banner(Some("https://b.example.dev"), None);
+        assert!(text.contains("broker-host-local addresses"));
+        assert!(!text.contains("broker.lan"));
+
+        // With an advertised host, WS/PG are reachable and only SSH stays
+        // host-local.
+        let text =
+            remote_instructions_banner(Some("https://b.example.dev"), Some("broker.lan"));
+        assert!(text.contains("`broker.lan`"), "{text}");
+        assert!(!text.contains("broker-host-local addresses"));
+        assert!(text.contains("SSH opens"), "{text}");
     }
 
     #[test]

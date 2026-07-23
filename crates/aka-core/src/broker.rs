@@ -343,6 +343,16 @@ impl Broker {
             .unwrap_or_else(|| "127.0.0.1".to_string())
     }
 
+    /// The advertised data-plane host when it points beyond this machine —
+    /// `None` while WS/PG opens hand back loopback addresses.
+    pub fn data_plane_advertised(&self) -> Option<String> {
+        let host = self.advertise_host();
+        match host.trim_start_matches('[').trim_end_matches(']') {
+            "127.0.0.1" | "localhost" | "::1" => None,
+            _ => Some(host),
+        }
+    }
+
     /// The manage-plane event bus (SSE subscription + reconnect replay).
     pub fn manage_bus(&self) -> &Arc<crate::manage::ManageBus> {
         &self.manage_bus
