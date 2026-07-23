@@ -516,10 +516,17 @@ function endpointStripHTML(c: ConnectionSummary): string {
         title="A pasteable address for an unmodified tool">Issue direct endpoint…</button>
     </div>`;
   }
+  // The address itself is the copy affordance — clicking it copies, with the
+  // same dim-and-overlay effect as copying a secret value.
+  const copied = state.copied === `ep:${c.id}`;
   const address = endpoint.dsn
-    ? `<code class="ep-addr" title="${escAttr(endpoint.dsn)}">${esc(endpoint.dsn)}</code>
-      <button class="icon-btn" title="Copy address" aria-label="Copy endpoint address for ${escAttr(c.name)}"
-        data-act="copy-endpoint-dsn" data-conn="${c.id}">${state.copied === `ep:${c.id}` ? ICONS.check : ICONS.copy}</button>`
+    ? `<button class="ep-addr-wrap ${copied ? 'is-copied' : ''}" title="${escAttr(endpoint.dsn)} — click to copy"
+        aria-label="Copy endpoint address for ${escAttr(c.name)}" data-act="copy-endpoint-dsn" data-conn="${c.id}">
+        <code class="ep-addr">${esc(endpoint.dsn)}</code>
+        <span class="val-overlay">${copied
+          ? `<span class="copied-badge">${ICONS.check}<span>Copied</span></span>`
+          : `<span class="ghost-copy">${ICONS.copy}<span>Copy</span></span>`}</span>
+      </button>`
     : '<span class="ep-addr ep-addr-hidden">Agent socket — shown at issue</span>';
   return `<div class="ep-strip">
     <span class="ep-ico" title="Direct endpoint">${ICONS.plugSm}</span>
@@ -793,20 +800,6 @@ function catalogConnRowHTML(c: ConnectionSummary): string {
       <button class="btn sm" data-act="confirm-cancel">Cancel</button>
       <button class="btn sm danger" data-act="del-conn-confirm" data-id="${c.id}">Delete</button></div>`;
   }
-  if (state.confirm && state.confirm.kind === 'reissue-endpoint' && state.confirm.id === c.id) {
-    return `<div class="cat-conn confirm-conn">
-      <div class="cat-conn-tx"><b>${esc(c.name)}</b>
-        <span class="cat-conn-danger">Reissue this endpoint? The current secret stops working immediately.</span></div>
-      <button class="btn sm" data-act="confirm-cancel">Cancel</button>
-      <button class="btn sm primary" data-act="reissue-endpoint-confirm" data-conn="${c.id}">Reissue</button></div>`;
-  }
-  if (state.confirm && state.confirm.kind === 'revoke-endpoint' && state.confirm.id === c.id) {
-    return `<div class="cat-conn confirm-conn">
-      <div class="cat-conn-tx"><b>${esc(c.name)}</b>
-        <span class="cat-conn-danger">Revoke this endpoint? Tools using its address lose access immediately.</span></div>
-      <button class="btn sm" data-act="confirm-cancel">Cancel</button>
-      <button class="btn sm danger" data-act="revoke-endpoint-confirm" data-conn="${c.id}">Revoke</button></div>`;
-  }
   const test = state.connTests[c.id];
   const menuOpen = state.connMenuOpen === c.id;
   const live = liveCount(c);
@@ -828,11 +821,6 @@ function catalogConnRowHTML(c: ConnectionSummary): string {
     ? `<button class="menu-item" role="menuitem" data-act="mcp-status" data-id="${c.id}"
         ${mcpStatus && mcpStatus.running ? 'disabled' : ''}>${ICONS.refresh} ${
           mcpStatus && mcpStatus.running ? 'Checking…' : 'Check server & account'}</button>`
-    : '';
-  const reconnectItem = c.mcp_path
-    ? `<button class="menu-item" role="menuitem" data-act="reconnect-mcp" data-id="${c.id}">${ICONS.logIn} Reconnect (sign in again)…</button>`
-    : c.oauth_spec
-    ? `<button class="menu-item" role="menuitem" data-act="oauth-reconnect" data-id="${c.id}">${ICONS.logIn} Reconnect (sign in again)…</button>`
     : '';
   // Only call out TLS when it is weaker than the default.
   const tls = c.type === 'pg' && c.sslmode && c.sslmode !== 'verify-full'
@@ -870,7 +858,6 @@ function catalogConnRowHTML(c: ConnectionSummary): string {
       ${menuOpen ? `<div class="tile-menu" role="menu" aria-label="Options for ${escAttr(c.name)}">
         ${statusItem}
         <button class="menu-item" role="menuitem" data-act="test-conn" data-id="${c.id}" ${test && test.running ? 'disabled' : ''}>${ICONS.flaskConical} ${test && test.running ? 'Testing…' : 'Test connection'}</button>
-        ${reconnectItem}
         <button class="menu-item" role="menuitem" data-act="edit-conn" data-id="${c.id}">${ICONS.pencil} Edit…</button>
         <button class="menu-item danger" role="menuitem" data-act="del-conn-ask" data-id="${c.id}">${ICONS.trash} Delete…</button>
       </div>` : ''}
@@ -962,7 +949,7 @@ function catalogRowHTML(entry: CatalogEntry): string {
     </div>`;
   const action = count || builtin
     ? `<button class="cat-count ${open ? 'on' : ''}" data-act="catalog-toggle" data-id="${entry.id}"
-        aria-expanded="${open}" title="${escAttr(label)}">${builtin ? ICONS.fileKey : ICONS.plug} ${count}<span class="cat-chev">${ICONS.chevronDown}</span></button>`
+        aria-expanded="${open}" title="${escAttr(label)}">${builtin ? `${ICONS.fileKey} ${count}` : 'Connected'}<span class="cat-chev">${ICONS.chevronDown}</span></button>`
     : quickConnect
     ? quickConnectAction
     : entry.via === 'connection'
@@ -1403,7 +1390,7 @@ function renderMainWindow() {
         ${globalSectionsHTML()}
         <div class="content">${tabContentHTML()}</div>
       </div>
-    </div></div>${sheetsHTML()}`;
+    </div></div>${sheetsHTML()}${endpointConfirmHTML()}`;
 }
 
 function renderDropdown() {
@@ -1419,7 +1406,7 @@ function renderDropdown() {
     <div class="seg">${tabs}</div>
     ${globalSectionsHTML()}
     <div class="content dd-content">${tabContentHTML()}</div>
-    ${footer}</div>${sheetsHTML()}`;
+    ${footer}</div>${sheetsHTML()}${endpointConfirmHTML()}`;
 }
 
 /* --------------------------------- sheets -------------------------------- */
@@ -1446,6 +1433,28 @@ function endpointIssuedSheet(): string {
       ${field('Example', info.example, 'example')}
       <div class="sheet-actions"><button class="btn" data-act="sheet-cancel">Done</button></div>
     </div>`;
+}
+
+// Reissue/revoke endpoint asks: a centered confirm dialog with the same
+// chrome as the other confirm sheets, instead of an inline row swap.
+function endpointConfirmHTML(): string {
+  const confirm = state.confirm;
+  if (!confirm || (confirm.kind !== 'reissue-endpoint' && confirm.kind !== 'revoke-endpoint')) return '';
+  const conn = state.connections.find((candidate) => candidate.id === confirm.id);
+  const name = conn ? conn.name : 'this tool';
+  const reissue = confirm.kind === 'reissue-endpoint';
+  return `<div class="sheet-backdrop" data-act="confirm-cancel"></div>
+    <div class="sheet wide confirm-sheet" role="dialog" aria-modal="true" aria-labelledby="ep-confirm-title">
+      <h3 id="ep-confirm-title">${reissue ? 'Reissue this endpoint?' : 'Revoke this endpoint?'}</h3>
+      <p>${reissue
+        ? `${esc(name)} gets a new secret; the current one stops working immediately.`
+        : `Tools using ${esc(name)}’s direct address lose access immediately.`}</p>
+      <div class="sheet-actions">
+        <button class="btn" data-act="confirm-cancel">Cancel</button>
+        ${reissue
+          ? `<button class="btn primary" data-act="reissue-endpoint-confirm" data-conn="${escAttr(String(confirm.id ?? ''))}">Reissue</button>`
+          : `<button class="btn danger" data-act="revoke-endpoint-confirm" data-conn="${escAttr(String(confirm.id ?? ''))}">Revoke</button>`}
+      </div></div>`;
 }
 
 function sheetsHTML() {
@@ -1795,7 +1804,7 @@ function connSheet(editing: boolean): string {
   // instead of making the user retype what they already have.
   const canImport = !editing && (t === 'pg' || t === 'ssh');
   const importRow = !canImport ? '' : `<div class="f-row sheet-import">
-      <label for="conn-import">Paste a connection string <span class="label-detail">(optional)</span></label>
+      <label for="conn-import">Connection string</label>
       <div class="sheet-import-row">
         <input id="conn-import" class="${state.connImportError ? 'field-invalid' : ''}" type="text"
           spellcheck="false" autocapitalize="off" autocorrect="off"
@@ -1819,11 +1828,10 @@ function connSheet(editing: boolean): string {
         ? `${apiOriginFromParts(d.scheme ?? undefined, d.host, d.port ?? null)}${d.mcpPath ?? ''}`
         : '');
     const entry = d.entryId ? catalogEntryById(d.entryId) : undefined;
-    const hint = entry?.mcpTemplate?.urlHint
-      ?? 'The URL your provider gave you. Its tools appear to wired agents automatically; the credential below is injected on the way out and never reaches the agent.';
+    const hint = entry?.mcpTemplate?.urlHint;
     fields += `<div class="f-row"><label for="f-origin">MCP server URL</label>
       <input id="f-origin" class="${fieldCls('origin')}" placeholder="https://mcp.example.com/mcp" value="${escAttr(url)}">${fieldErr('origin')}
-      <div class="rule-note">${esc(hint)}</div></div>`;
+      ${hint ? `<div class="rule-note">${esc(hint)}</div>` : ''}</div>`;
   } else if (t === 'api') {
     const origin = d.origin ?? apiOriginFromParts(d.scheme ?? undefined, d.host ?? undefined, d.port ?? null);
     fields += `<div class="f-row"><label for="f-origin">API root</label><input id="f-origin" class="${fieldCls('origin')}" placeholder="https://api.github.com" value="${escAttr(origin)}">${fieldErr('origin')}</div>`;
@@ -1963,6 +1971,10 @@ function connSheet(editing: boolean): string {
       <button type="button" class="adv-toggle" aria-expanded="${advOpen}" data-act="toggle-conn-advanced">
         <span class="adv-toggle-icon" aria-hidden="true">${ICONS.chevronDown}</span>Advanced</button>
       ${advOpen ? advancedFields : ''}</div>`;
+  }
+  if (editing && conn && (conn.mcp_path || conn.oauth_spec)) {
+    fields += `<div class="f-row"><button class="btn" data-act="${conn.mcp_path ? 'reconnect-mcp' : 'oauth-reconnect'}"
+      data-id="${conn.id}">Reconnect (sign in again)</button></div>`;
   }
   if (editing && conn) {
     fields += `<div class="rule-note">Changing the destination revokes direct endpoints and resets the tool selection.</div>`;

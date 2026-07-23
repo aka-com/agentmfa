@@ -1058,18 +1058,29 @@
 .cat-meta-cred{ display: inline-flex; align-items: center; gap: 5px; }
 .cat-meta-cred svg{ color: var(--muted-2); }
 /* Direct-endpoint lifecycle strip: a hairline footer inside the row. Absent:
-   just the issue button. Issued: plug icon, pasteable address, copy, and the
-   reissue/revoke pair (each behind an inline confirm). The plug matches the
-   copy button's spec — 14px stroke icon in the muted icon color. */
+   just the issue button. Issued: plug icon, the pasteable address (click to
+   copy — the secret-value dim-and-overlay effect), and the reissue/revoke
+   pair (each behind a confirm dialog). The plug matches the copy button's
+   spec — 14px stroke icon in the muted icon color. */
 .ep-strip{
   display: flex; align-items: center; gap: 8px; margin-top: 9px; padding-top: 9px;
   border-top: 1px solid var(--line-soft);
 }
 .ep-strip .ep-ico{ flex: 0 0 auto; line-height: 0; color: var(--muted-2); }
-.ep-strip .ep-addr{
-  flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
-  white-space: nowrap; color: var(--ink-2); font-family: inherit; font-size: 11.5px;
+.ep-strip .ep-addr-wrap{
+  position: relative; flex: 0 1 auto; min-width: 0; display: inline-flex;
+  align-items: center; border: none; background: transparent; padding: 0;
+  cursor: pointer; text-align: left;
 }
+.ep-strip .ep-addr{
+  min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--ink-2); font-family: inherit; font-size: 12px;
+}
+.ep-strip .ep-addr-wrap .ep-addr{ transition: opacity .14s ease; }
+.ep-strip .ep-addr-wrap:hover .ep-addr,
+.ep-strip .ep-addr-wrap.is-copied .ep-addr{ opacity: .22; }
+.ep-strip .ep-addr-wrap:hover .ghost-copy,
+.ep-strip .ep-addr-wrap:focus-visible .ghost-copy{ opacity: 1; }
 .ep-strip .ep-addr-hidden{ color: var(--muted); }
 .ep-strip .ep-spacer{ flex: 1; }
 .ep-strip .ep-act.rv{ color: var(--danger-ink); border-color: var(--danger-border); }
