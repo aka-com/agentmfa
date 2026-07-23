@@ -158,6 +158,11 @@ enum ManageCommand {
         /// Revoke the management token instead (closes the manage API).
         #[arg(long)]
         revoke: bool,
+        /// Expire the token this many days after issue (bounds a leaked
+        /// token's blast radius). Omit for a token that never expires; the
+        /// desktop app re-prompts for a fresh one when it does.
+        #[arg(long, conflicts_with = "revoke")]
+        ttl_days: Option<u64>,
         /// Operate on a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
@@ -279,8 +284,13 @@ fn main() {
             ConnCommand::List { root } => cmd_conn_list(root),
         },
         Command::Manage {
-            command: ManageCommand::Token { revoke, root },
-        } => cmd_manage_token(revoke, root),
+            command:
+                ManageCommand::Token {
+                    revoke,
+                    ttl_days,
+                    root,
+                },
+        } => cmd_manage_token(revoke, ttl_days, root),
     }
 }
 
@@ -646,7 +656,7 @@ impl BrokerEvents for CliEvents {
 /// Issue, rotate, or revoke the management token. Offline like `secret add`:
 /// a live broker holds identity state in memory and would overwrite the
 /// edit, so it must be stopped first.
-fn cmd_manage_token(revoke: bool, root: Option<PathBuf>) {
+fn cmd_manage_token(revoke: bool, ttl_days: Option<u64>, root: Option<PathBuf>) {
     let paths = store_paths(root.as_deref());
     let _lock = match acquire_offline_store_lock(&paths) {
         Ok(lock) => lock,
@@ -687,12 +697,21 @@ fn cmd_manage_token(revoke: bool, root: Option<PathBuf>) {
         }
         return;
     }
-    match identity.issue_manage_token() {
+    let ttl = ttl_days.map(|days| std::time::Duration::from_secs(days * 86400));
+    match identity.issue_manage_token_with_ttl(ttl) {
         Ok(token) => {
             eprintln!("management token (shown once — only its hash is stored):\n");
             println!("{token}");
             eprintln!("\nEnter it in the Multitool app to manage this broker remotely.");
-            eprintln!("Re-run this command to rotate it, or --revoke to close the manage API.");
+            match ttl_days {
+                Some(days) => eprintln!(
+                    "Expires in {days} day{}; re-run to rotate, or --revoke to close the manage API.",
+                    if days == 1 { "" } else { "s" }
+                ),
+                None => eprintln!(
+                    "Never expires; re-run this command to rotate it, or --revoke to close the manage API."
+                ),
+            }
         }
         Err(e) => die(e),
     }

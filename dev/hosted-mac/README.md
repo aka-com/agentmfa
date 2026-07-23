@@ -16,6 +16,11 @@ Install the CLI (`npm install -g agentmfa`) or use a checkout. Then:
 # desktop app.
 aka manage token
 
+# Optionally bound a leaked token's blast radius with an expiry; the app
+# re-prompts for a fresh one when it lapses. Re-run to rotate, --revoke
+# to close the manage API.
+aka manage token --ttl-days 90
+
 # Optionally seed tools/secrets offline (or do it all from the app later):
 aka secret add GITHUB_API_KEY
 aka conn add github --kind api --host api.github.com \

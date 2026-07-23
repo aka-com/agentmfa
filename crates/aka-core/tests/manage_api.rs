@@ -164,6 +164,33 @@ async fn manage_routes_require_the_management_token() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_expired_manage_token_is_rejected_over_http() {
+    let h = harness().await;
+    // Issue a token that is already past its horizon; the live one the
+    // harness holds keeps working, so this covers only the expiry path.
+    let expired = h
+        .broker
+        .identity
+        .issue_manage_token_with_ttl(Some(std::time::Duration::ZERO))
+        .unwrap();
+    let (status, body) = uds_request(
+        &h.socket,
+        "GET",
+        "/v1/manage/whoami",
+        &[("authorization", &format!("Bearer {expired}"))],
+        None,
+    )
+    .await;
+    assert_eq!(status, 401, "{body}");
+    assert_eq!(body["reason"], "invalid_manage_token");
+    // The detail steers the operator to re-issue rather than re-check.
+    assert!(
+        body["detail"].as_str().unwrap().contains("expired"),
+        "{body}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn secrets_and_connections_round_trip_over_the_manage_api() {
     let h = harness().await;
 

@@ -46,15 +46,23 @@ impl FromRequestParts<AppState> for ManageAuthed {
         let token = bearer_token(&parts.headers).map_err(err_missing_token)?;
         match state.broker.identity.verify_manage(token) {
             Ok(()) => Ok(ManageAuthed),
-            Err(_) => Err((
-                StatusCode::UNAUTHORIZED,
-                Json(json!({
-                    "reason": "invalid_manage_token",
-                    "detail": "manage routes require this broker's management token \
-                               (issue one on the broker host with `aka manage token`)",
-                })),
-            )
-                .into_response()),
+            Err(error) => {
+                // Both map to InvalidManageToken client-side (re-enter the
+                // token), but the detail names the cause so a curl user
+                // knows whether to re-issue or check what they pasted.
+                let detail = if error == crate::identity::TokenError::Expired {
+                    "the management token has expired; issue a fresh one on the \
+                     broker host with `aka manage token`"
+                } else {
+                    "manage routes require this broker's management token \
+                     (issue one on the broker host with `aka manage token`)"
+                };
+                Err((
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({ "reason": "invalid_manage_token", "detail": detail })),
+                )
+                    .into_response())
+            }
         }
     }
 }

@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
 use crate::integrity::StateIntegrity;
@@ -151,6 +151,7 @@ impl IdentityStore {
                     minted_at: Utc::now(),
                     last_used: Utc::now(),
                     manage_token_hash: None,
+                    manage_token_expires_at: None,
                 },
                 token: String::new(),
                 rotated_out: None,
@@ -195,6 +196,7 @@ impl IdentityStore {
                             // The manage token is independent of the agent
                             // key; losing the token file must not revoke it.
                             manage_token_hash: identity.manage_token_hash.clone(),
+                            manage_token_expires_at: identity.manage_token_expires_at,
                         };
                         store.persist_and_write_file(&next, &token)?;
                         let mut state = store.state.lock().unwrap();
@@ -235,6 +237,7 @@ impl IdentityStore {
                     minted_at: Utc::now(),
                     last_used: Utc::now(),
                     manage_token_hash: None,
+                    manage_token_expires_at: None,
                 };
                 store.persist_and_write_file(&identity, &token)?;
                 let mut state = store.state.lock().unwrap();
@@ -355,14 +358,30 @@ impl IdentityStore {
         self.state.lock().unwrap().identity.manage_token_hash.is_some()
     }
 
-    /// Issue (or rotate) the management token, returning its plaintext —
-    /// shown exactly once; only the hash is persisted.
+    /// Issue (or rotate) the management token with no expiry, returning its
+    /// plaintext — shown exactly once; only the hash is persisted.
     pub fn issue_manage_token(&self) -> Result<String> {
+        self.issue_manage_token_with_ttl(None)
+    }
+
+    /// Issue (or rotate) the management token. `ttl: Some` bakes a fixed
+    /// expiry into the record (bounding a leaked token's blast radius);
+    /// `None` never expires. A fresh issue always resets the clock.
+    pub fn issue_manage_token_with_ttl(&self, ttl: Option<Duration>) -> Result<String> {
         let mut state = self.state.lock().unwrap();
         let token = mint_manage_token();
         state.identity.manage_token_hash = Some(hash_token(&token));
+        state.identity.manage_token_expires_at = ttl.map(|ttl| {
+            Utc::now()
+                + chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::days(3650))
+        });
         self.persist(&state.identity)?;
         Ok(token)
+    }
+
+    /// When the management token expires, if it does.
+    pub fn manage_token_expires_at(&self) -> Option<DateTime<Utc>> {
+        self.state.lock().unwrap().identity.manage_token_expires_at
     }
 
     /// Revoke the management token (close the manage API). Returns whether
@@ -370,16 +389,19 @@ impl IdentityStore {
     pub fn revoke_manage_token(&self) -> Result<bool> {
         let mut state = self.state.lock().unwrap();
         let had = state.identity.manage_token_hash.take().is_some();
+        state.identity.manage_token_expires_at = None;
         if had {
             self.persist(&state.identity)?;
         }
         Ok(had)
     }
 
-    /// Verify a presented management token. Deliberately long-lived (no
-    /// sliding TTL): re-issue to rotate, revoke to close the plane. The
-    /// agent key never verifies here, nor the manage token on the agent
-    /// plane — separate hashes, separate prefixes.
+    /// Verify a presented management token. Long-lived unless issued with a
+    /// TTL: re-issue to rotate, revoke to close the plane. The agent key
+    /// never verifies here, nor the manage token on the agent plane —
+    /// separate hashes, separate prefixes. An expired token answers
+    /// `Expired`, distinct from `Invalid`, so the client can tell "re-issue
+    /// this" apart from "wrong token".
     pub fn verify_manage(&self, token: &str) -> std::result::Result<(), TokenError> {
         if !token.starts_with(MANAGE_TOKEN_PREFIX) {
             return Err(TokenError::Invalid);
@@ -387,7 +409,14 @@ impl IdentityStore {
         let hash = hash_token(token);
         let state = self.state.lock().unwrap();
         match &state.identity.manage_token_hash {
-            Some(stored) if *stored == hash => Ok(()),
+            Some(stored) if *stored == hash => {
+                if let Some(expires_at) = state.identity.manage_token_expires_at {
+                    if Utc::now() >= expires_at {
+                        return Err(TokenError::Expired);
+                    }
+                }
+                Ok(())
+            }
             _ => Err(TokenError::Invalid),
         }
     }
@@ -409,6 +438,7 @@ impl IdentityStore {
             // Rotating the agent key deliberately leaves the management
             // token alone: they authorize different planes.
             manage_token_hash: state.identity.manage_token_hash.clone(),
+            manage_token_expires_at: state.identity.manage_token_expires_at,
         };
         self.persist_and_write_file(&next, &token)?;
         state.rotated_out = Some(state.identity.token_hash.clone());
@@ -796,6 +826,63 @@ mod tests {
         assert!(s.revoke_manage_token().unwrap());
         assert_eq!(s.verify_manage(&second).unwrap_err(), TokenError::Invalid);
         assert!(!s.revoke_manage_token().unwrap());
+    }
+
+    #[test]
+    fn a_manage_token_ttl_expires_and_reissue_resets_it() {
+        let (s, _dir) = store(Duration::from_secs(3600));
+        // No TTL by default: never expires.
+        let forever = s.issue_manage_token().unwrap();
+        assert!(s.manage_token_expires_at().is_none());
+        s.verify_manage(&forever).unwrap();
+
+        // An immediate expiry rejects with Expired (distinct from Invalid),
+        // and the recorded horizon is surfaced.
+        let expired = s.issue_manage_token_with_ttl(Some(Duration::ZERO)).unwrap();
+        assert!(s.manage_token_expires_at().is_some());
+        assert_eq!(s.verify_manage(&expired).unwrap_err(), TokenError::Expired);
+        // The old (no-TTL) token is superseded regardless.
+        assert_eq!(s.verify_manage(&forever).unwrap_err(), TokenError::Invalid);
+
+        // Re-issuing without a TTL clears the expiry.
+        let fresh = s.issue_manage_token().unwrap();
+        assert!(s.manage_token_expires_at().is_none());
+        s.verify_manage(&fresh).unwrap();
+
+        // A live TTL still verifies.
+        let live = s
+            .issue_manage_token_with_ttl(Some(Duration::from_secs(3600)))
+            .unwrap();
+        s.verify_manage(&live).unwrap();
+        assert!(s.manage_token_expires_at().unwrap() > Utc::now());
+    }
+
+    #[test]
+    fn a_ttl_manage_token_survives_reopen_with_its_horizon() {
+        let dir = tempfile::tempdir().unwrap();
+        let integrity = integrity();
+        let token = {
+            let s = IdentityStore::open(
+                dir.path().join("identity.json"),
+                dir.path().join("token"),
+                None,
+                Duration::from_secs(3600),
+                integrity.clone(),
+            )
+            .unwrap();
+            s.issue_manage_token_with_ttl(Some(Duration::from_secs(3600)))
+                .unwrap()
+        };
+        let s = IdentityStore::open(
+            dir.path().join("identity.json"),
+            dir.path().join("token"),
+            None,
+            Duration::from_secs(3600),
+            integrity,
+        )
+        .unwrap();
+        s.verify_manage(&token).expect("live TTL token survives reopen");
+        assert!(s.manage_token_expires_at().unwrap() > Utc::now());
     }
 
     #[test]

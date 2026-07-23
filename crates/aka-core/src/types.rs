@@ -442,6 +442,12 @@ pub struct BrokerIdentity {
     /// hash, agent routes only the key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manage_token_hash: Option<String>,
+    /// When the management token stops being accepted. `None` means it
+    /// never expires (the default; re-issue or revoke to change it) — a
+    /// value bounds the blast radius of a leaked token for hardened
+    /// deployments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manage_token_expires_at: Option<DateTime<Utc>>,
 }
 
 /// Per-connection agent access — the whole authorization model. A connection
