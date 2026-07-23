@@ -1038,13 +1038,14 @@
   </div>
           </div>
           <figure>
-            <svg class="fan" viewBox="0 0 480 250" role="img" aria-label="Diagram: agents fan into Multitool, which fans out to tools">
+            <svg class="fan" viewBox="0 0 480 304" role="img" aria-label="Diagram: agents fan into Multitool, which fans out to tools and connects down to the Vault and 1Password secret vaults">
               <g class="wire">
-                <path d="M122 25 C158 25 158 125 195 125"/><path d="M285 125 C322 125 322 25 358 25"/>
-                <path d="M122 75 C158 75 158 125 195 125"/><path d="M285 125 C322 125 322 75 358 75"/>
-                <path d="M122 125 L195 125"/><path d="M285 125 L358 125"/>
-                <path d="M122 175 C158 175 158 125 195 125"/><path d="M285 125 C322 125 322 175 358 175"/>
-                <path d="M122 225 C158 225 158 125 195 125"/><path d="M285 125 C322 125 322 225 358 225"/>
+                <path d="M122 25 C158 25 158 118 195 118"/><path d="M285 118 C322 118 322 25 358 25"/>
+                <path d="M122 75 C158 75 158 118 195 118"/><path d="M285 118 C322 118 322 75 358 75"/>
+                <path d="M122 125 C158 125 158 118 195 118"/><path d="M285 118 C322 118 322 125 358 125"/>
+                <path d="M122 175 C158 175 158 118 195 118"/><path d="M285 118 C322 118 322 175 358 175"/>
+                <path d="M122 225 C158 225 158 118 195 118"/><path d="M285 118 C322 118 322 225 358 225"/>
+                <path d="M222 162 C222 190 208 196 208 240"/><path d="M258 162 C258 190 272 196 272 240"/>
               </g>
 
               <text class="lbl" text-anchor="end" x="76" y="28.5">Claude</text>
@@ -1063,9 +1064,9 @@
               <rect class="box" x="86" y="207" width="36" height="36" rx="4"/>
               <svg class="node-ic" x="96" y="217" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/></svg>
 
-              <rect class="box hub" x="195" y="81" width="90" height="88" rx="5"/>
-              <svg class="hub-ic" x="225" y="95" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2"/><rect x="14" y="2" width="8" height="8" rx="1"/></svg>
-              <text class="hub-lbl" text-anchor="middle" x="240" y="151">Multitool</text>
+              <rect class="box hub" x="195" y="74" width="90" height="88" rx="5"/>
+              <svg class="hub-ic" x="225" y="88" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2"/><rect x="14" y="2" width="8" height="8" rx="1"/></svg>
+              <text class="hub-lbl" text-anchor="middle" x="240" y="144">Multitool</text>
 
               <rect class="box" x="358" y="7" width="36" height="36" rx="4"/>
               <svg class="node-ic" x="368" y="17" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg>
@@ -1082,6 +1083,13 @@
               <rect class="box" x="358" y="207" width="36" height="36" rx="4"/>
               <svg class="node-ic" x="368" y="217" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22v-5"/><path d="M15 8V2"/><path d="M17 8a1 1 0 0 1 1 1v4a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1z"/><path d="M9 8V2"/></svg>
               <text class="lbl" x="404" y="228.5">MCP</text>
+
+              <rect class="box" x="190" y="240" width="36" height="36" rx="4"/>
+              <svg class="node-ic" x="200" y="250" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="7.5" cy="7.5" r=".5" fill="currentColor"/><path d="m7.9 7.9 2.7 2.7"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/><path d="m13.4 10.6 2.7-2.7"/><circle cx="7.5" cy="16.5" r=".5" fill="currentColor"/><path d="m7.9 16.1 2.7-2.7"/><circle cx="16.5" cy="16.5" r=".5" fill="currentColor"/><path d="m13.4 13.4 2.7 2.7"/><circle cx="12" cy="12" r="2"/></svg>
+              <text class="lbl" text-anchor="middle" x="208" y="294">Vault</text>
+              <rect class="box" x="254" y="240" width="36" height="36" rx="4"/>
+              <svg class="node-ic" x="264" y="250" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path fill-rule="evenodd" d="M12 1C5.925 1 1 5.925 1 12s4.925 11 11 11 11-4.925 11-11S18.075 1 12 1Zm0 2a9 9 0 1 1 0 18 9 9 0 0 1 0-18Zm-1.8 2.4a1 1 0 0 0-1 1v5.13a.6.6 0 0 0 .224.468l1.09.872-1.09.872a.6.6 0 0 0-.224.468v3.39a1 1 0 0 0 1 1h3.6a1 1 0 0 0 1-1v-5.13a.6.6 0 0 0-.224-.468l-1.09-.872 1.09-.872a.6.6 0 0 0 .224-.468V6.4a1 1 0 0 0-1-1Z"/></svg>
+              <text class="lbl" text-anchor="middle" x="272" y="294">1Password</text>
             </svg>
           </figure>
         </div>
