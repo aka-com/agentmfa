@@ -292,11 +292,23 @@ pub const PG_ENDPOINT_PORT: u16 = 5432;
 /// The pasteable connection string for a Postgres endpoint bound under `dir`.
 /// libpq derives the socket path from `host` + `port` as
 /// `<host>/.s.PGSQL.<port>`, so pointing `host` at the endpoint directory
-/// reaches the per-wiring listener with an unmodified client. The secret
-/// travels out-of-band as `PGPASSWORD` (never argv), exactly like the ticket.
-pub fn endpoint_dsn(dir: &std::path::Path, user: &str, dbname: &str) -> String {
+/// reaches the per-wiring listener with an unmodified client. When the
+/// plaintext secret is at hand (issue time only — the registry stores just
+/// its hash), it rides in the DSN's password slot so the string works
+/// standalone; without it, the caller supplies `PGPASSWORD` out-of-band.
+/// The `end_` + hex secret alphabet needs no percent-encoding.
+pub fn endpoint_dsn(
+    dir: &std::path::Path,
+    user: &str,
+    dbname: &str,
+    secret: Option<&str>,
+) -> String {
+    let auth = match secret {
+        Some(secret) => format!("{user}:{secret}"),
+        None => user.to_string(),
+    };
     format!(
-        "postgresql://{user}@/{dbname}?host={}&port={PG_ENDPOINT_PORT}&sslmode=disable",
+        "postgresql://{auth}@/{dbname}?host={}&port={PG_ENDPOINT_PORT}&sslmode=disable",
         dir.display()
     )
 }

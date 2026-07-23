@@ -676,13 +676,14 @@ async fn direct_endpoint_serves_an_unmodified_client() {
     h.pair().await;
     let info = h.issue_endpoint().await;
 
-    // The DSN is a stable, pasteable socket path; the secret is out-of-band.
+    // The DSN is a stable, pasteable socket path that works standalone: the
+    // secret rides in its password slot.
     assert!(info.dsn.contains("host="));
     assert!(info.dsn.contains(".aka/endpoints") || info.dsn.contains("/endpoints/"));
     assert!(info.secret.starts_with("end_"));
     assert!(
-        !info.dsn.contains(&info.secret),
-        "secret must not be in the DSN"
+        info.dsn.contains(&format!(":{}@", info.secret)),
+        "secret must ride in the DSN's password slot"
     );
 
     let (client, connection) = tokio_postgres::connect(&h.endpoint_conn_str(&info), NoTls)

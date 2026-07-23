@@ -157,10 +157,13 @@ impl ConnectionDto {
                 .get_for_connection(&conn.id)
                 .map(|e| {
                     let dsn = match &conn.config {
+                        // Password-less: only the secret's hash survives issue
+                        // time, so the chip shows the DSN without it.
                         Pg { user, dbname, .. } => Some(aka_core::capability::pg::endpoint_dsn(
                             broker.paths.endpoint_dir(&e.id).as_path(),
                             user,
                             dbname,
+                            None,
                         )),
                         Api { .. } => e.port.map(|port| format!("http://127.0.0.1:{port}")),
                         _ => None,

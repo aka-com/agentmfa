@@ -48,9 +48,9 @@ pub struct IssuedEndpointInfo {
     pub kind: ConnectionKind,
     /// Pasteable connection string (a Postgres DSN today).
     pub dsn: String,
-    /// The one-time secret to supply out-of-band (`PGPASSWORD`).
+    /// The one-time secret, also embedded in the DSN's password slot.
     pub secret: String,
-    /// Ready-to-adapt invocation, e.g. `PGPASSWORD=… psql "…"`.
+    /// Ready-to-adapt invocation, e.g. `psql "…"`.
     pub example: String,
 }
 
@@ -1024,8 +1024,13 @@ impl Broker {
         let dir = self.paths.endpoint_dir(&issued.endpoint.id);
         let info = match &connection.config {
             ConnectionConfig::Pg { user, dbname, .. } => {
-                let dsn = crate::capability::pg::endpoint_dsn(dir.as_path(), user, dbname);
-                let example = format!("PGPASSWORD={} psql \"{dsn}\"", issued.secret);
+                let dsn = crate::capability::pg::endpoint_dsn(
+                    dir.as_path(),
+                    user,
+                    dbname,
+                    Some(&issued.secret),
+                );
+                let example = format!("psql \"{dsn}\"");
                 IssuedEndpointInfo {
                     endpoint_id: issued.endpoint.id,
                     kind: ConnectionKind::Pg,
