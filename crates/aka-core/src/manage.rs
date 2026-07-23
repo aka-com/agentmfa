@@ -109,7 +109,9 @@ pub fn connection_dto(broker: &Broker, conn: &Connection) -> ConnectionDto {
                     dbname,
                     (!e.secret.is_empty()).then_some(e.secret.as_str()),
                 )),
-                Api { .. } => e.port.map(|port| format!("http://127.0.0.1:{port}")),
+                Api { .. } => e
+                    .port
+                    .map(|port| format!("http://{}:{port}", broker.advertise_host())),
                 _ => None,
             };
             EndpointChip {

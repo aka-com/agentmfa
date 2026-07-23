@@ -87,6 +87,17 @@ enum Command {
         /// tunnel address); advertised in discovery served over TCP.
         #[arg(long)]
         public_url: Option<String>,
+        /// Bind the WS/PG data planes and API direct endpoints to this
+        /// address (e.g. 0.0.0.0 or a LAN IP) for remote agents, instead of
+        /// loopback. These legs are plaintext — keep them on a trusted
+        /// network behind your TLS/tunnel.
+        #[arg(long)]
+        data_plane_listen: Option<std::net::IpAddr>,
+        /// The host to put in returned DSNs / ws:// URLs — what a remote
+        /// agent dials (defaults to 127.0.0.1). Usually your broker host's
+        /// LAN name or the tunnel address.
+        #[arg(long)]
+        advertise_host: Option<String>,
         /// Do not start the MCP sidecar even when its script is found.
         #[arg(long)]
         no_sidecar: bool,
@@ -243,8 +254,17 @@ fn main() {
             root,
             listen,
             public_url,
+            data_plane_listen,
+            advertise_host,
             no_sidecar,
-        } => cmd_serve(root, listen, public_url, no_sidecar),
+        } => cmd_serve(ServeArgs {
+            root,
+            listen,
+            public_url,
+            data_plane_listen,
+            advertise_host,
+            no_sidecar,
+        }),
         Command::Mcp { root, client } => cmd_mcp(root, client),
         Command::Secret {
             command:
@@ -726,12 +746,25 @@ fn resolve_sidecar(broker_socket: PathBuf) -> Option<aka_core::sidecar::SidecarC
     })
 }
 
-fn cmd_serve(
+/// Everything `aka serve` accepts, bundled so the call site stays legible.
+struct ServeArgs {
     root: Option<PathBuf>,
     listen: Option<std::net::SocketAddr>,
     public_url: Option<String>,
+    data_plane_listen: Option<std::net::IpAddr>,
+    advertise_host: Option<String>,
     no_sidecar: bool,
-) {
+}
+
+fn cmd_serve(args: ServeArgs) {
+    let ServeArgs {
+        root,
+        listen,
+        public_url,
+        data_plane_listen,
+        advertise_host,
+        no_sidecar,
+    } = args;
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -766,6 +799,8 @@ fn cmd_serve(
     let options = daemon::ServeOptions {
         listen,
         public_url: public_url.clone(),
+        data_plane_listen,
+        advertise_host: advertise_host.clone(),
     };
     let daemon = match runtime.block_on(daemon::serve_with(broker.clone(), options)) {
         Ok(daemon) => daemon,
@@ -804,6 +839,9 @@ fn cmd_serve(
     eprintln!("AKA broker listening on {}", daemon.socket_path.display());
     if let Some(addr) = daemon.tcp_addr {
         eprintln!("  TCP control plane on {addr} (put TLS in front; /v1/pair is not served there)");
+        if let Some(host) = &advertise_host {
+            eprintln!("  data planes advertised to agents as {host} (WS/PG legs are plaintext)");
+        }
         match &public_url {
             Some(url) => eprintln!("  advertised to remote clients as {url}"),
             None => eprintln!("  no --public-url set: TCP discovery omits absolute URLs"),

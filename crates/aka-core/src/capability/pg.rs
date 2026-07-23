@@ -255,7 +255,7 @@ impl Drop for CancelRegistration {
 /// Start the PG proxy listener on an OS-assigned ephemeral loopback port.
 /// Returns the bound port and the accept-loop task handle.
 pub async fn start_proxy(broker: Arc<Broker>) -> io::Result<(u16, tokio::task::JoinHandle<()>)> {
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+    let listener = tokio::net::TcpListener::bind((broker.data_plane_bind(), 0)).await?;
     let port = listener.local_addr()?.port();
     let state = Arc::new(ProxyState {
         broker,

@@ -335,6 +335,14 @@ pub struct ServeOptions {
     /// The URL remote clients reach the TCP listener at; advertised in
     /// TCP-served discovery documents.
     pub public_url: Option<String>,
+    /// Bind the WS/PG data-plane proxies and API direct endpoints to this
+    /// address instead of loopback (for remote agents on the LAN). The
+    /// credential legs on these are plaintext, so a non-loopback value must
+    /// sit behind a trusted network.
+    pub data_plane_listen: Option<std::net::IpAddr>,
+    /// The host put into returned data-plane URLs/DSNs — what a remote
+    /// agent dials. Defaults to loopback.
+    pub advertise_host: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -514,6 +522,17 @@ pub async fn serve_with(
     broker: Arc<Broker>,
     options: ServeOptions,
 ) -> crate::Result<DaemonHandle> {
+    broker.set_data_plane_address(options.data_plane_listen, options.advertise_host.clone());
+    if let Some(bind) = options.data_plane_listen {
+        if !bind.is_loopback() {
+            tracing::warn!(
+                %bind,
+                "data planes bound to a non-loopback address; the WS/PG \
+                 credential legs are plaintext — keep this on a trusted \
+                 network behind TLS/tunnel"
+            );
+        }
+    }
     let paths = broker.paths.clone();
     paths.ensure()?;
     let socket_path = paths.socket_file();
@@ -1303,7 +1322,10 @@ async fn post_ws_open(
                         status: 200,
                         body: json!({
                             "ws_url":
-                                format!("ws://127.0.0.1:{bridge_port}/v1/ws/bridge/{ticket}"),
+                                format!(
+                                    "ws://{}:{bridge_port}/v1/ws/bridge/{ticket}",
+                                    broker.advertise_host()
+                                ),
                             // The redemption deadline, machine-actionable
                             // instead of prose-only.
                             "expires_in_seconds": broker.config.ticket_ttl.as_secs(),
@@ -1514,7 +1536,10 @@ async fn post_pg_open(
                 broker
                     .data_plane
                     .issue(&client_label, &conn, crate::sessions::TicketPayload::Pg);
-            let dsn = format!("postgres://ticket@127.0.0.1:{proxy_port}/{dbname}?sslmode=disable");
+            let dsn = format!(
+                "postgres://ticket@{}:{proxy_port}/{dbname}?sslmode=disable",
+                broker.advertise_host()
+            );
             ExecOutcome {
                 status: 200,
                 body: json!({

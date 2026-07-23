@@ -31,7 +31,7 @@ import {
 } from '/src/connection-input';
 import { formErrorKind, formErrorMessage, inlineFormError } from '/src/form-errors';
 import {
-  LOCAL_BROKER, brokerLabel, brokerTakeover, brokerTone, remoteFeatureNote,
+  LOCAL_BROKER, brokerLabel, brokerTakeover, brokerTone, remoteEndpointCaution,
 } from '/src/broker';
 import type { HostKeyCandidate } from '/src/connection-input';
 import type {
@@ -559,7 +559,6 @@ function endpointStripHTML(c: ConnectionSummary): string {
   if (!endpoint) {
     return `<div class="ep-strip">
       <button class="btn primary sm" data-act="issue-endpoint" data-conn="${c.id}"
-        ${remoteFeatureNote(state.broker, 'endpoints') ? `disabled data-tippy-content="${escAttr(remoteFeatureNote(state.broker, 'endpoints') ?? '')}"` : ''}
         title="A pasteable address for an unmodified tool">Issue direct endpoint…</button>
     </div>`;
   }
@@ -1489,6 +1488,9 @@ function endpointIssuedSheet(): string {
       ${field(addressLabel, info.dsn, 'dsn')}
       ${secretField}
       ${field('Example', info.example, 'example')}
+      ${remoteEndpointCaution(state.broker, info.type)
+        ? `<div class="rule-note ep-remote-note">${esc(remoteEndpointCaution(state.broker, info.type) ?? '')}</div>`
+        : ''}
       <div class="sheet-actions"><button class="btn" data-act="sheet-cancel">Done</button></div>
     </div>`;
 }
@@ -3064,8 +3066,6 @@ document.addEventListener('click', async (e) => {
     }
     case 'issue-endpoint':
     case 'reissue-endpoint-confirm': {
-      const remoteNote = remoteFeatureNote(state.broker, 'endpoints');
-      if (remoteNote) { toast(remoteNote); break; }
       const connectionId = btn.dataset.conn || '';
       state.confirm = null;
       // Not via run(): we need the one-time result to show its secret.

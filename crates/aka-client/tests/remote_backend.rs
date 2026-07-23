@@ -51,6 +51,7 @@ async fn harness() -> Harness {
         ServeOptions {
             listen: Some("127.0.0.1:0".parse().unwrap()),
             public_url: None,
+            ..Default::default()
         },
     )
     .await

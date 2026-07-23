@@ -860,7 +860,8 @@ pub async fn bind_endpoint(
     endpoint: &DirectEndpoint,
 ) -> std::io::Result<(EndpointListenerHandle, u16)> {
     let requested_port = endpoint.port.unwrap_or(0);
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", requested_port)).await?;
+    let listener =
+        tokio::net::TcpListener::bind((broker.data_plane_bind(), requested_port)).await?;
     let port = listener.local_addr()?.port();
 
     let state = Arc::new(HttpEndpointState {

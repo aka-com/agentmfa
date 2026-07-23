@@ -123,7 +123,7 @@ struct BridgeState {
 pub async fn start_bridge(
     broker: Arc<Broker>,
 ) -> std::io::Result<(u16, tokio::task::JoinHandle<()>)> {
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+    let listener = tokio::net::TcpListener::bind((broker.data_plane_bind(), 0)).await?;
     let port = listener.local_addr()?.port();
     let app = axum::Router::new()
         .route("/v1/ws/bridge/{ticket}", get(bridge_handler))

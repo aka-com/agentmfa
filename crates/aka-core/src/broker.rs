@@ -122,6 +122,13 @@ pub struct Broker {
     /// The URL remote clients reach this broker at (`serve --public-url`),
     /// when one is configured. Drives remote-flavored agent-setup text.
     public_url: Mutex<Option<String>>,
+    /// The address the WS/PG data-plane proxies and API direct endpoints
+    /// bind to (`serve --data-plane-listen`); loopback by default. A
+    /// non-loopback value exposes plaintext credential legs to the network.
+    data_plane_bind: std::sync::OnceLock<std::net::IpAddr>,
+    /// The host put into returned data-plane URLs/DSNs (`serve
+    /// --advertise-host`); loopback by default. What a remote agent dials.
+    advertise_host: std::sync::OnceLock<String>,
     /// The sidecar's loopback MCP port, reported by the shell that
     /// supervises it (restarts move it; `None` while it is not running).
     /// Advertised in the discovery manifest so `aka mcp` and other bridges
@@ -243,6 +250,8 @@ impl Broker {
             manage_oauth: Mutex::new(HashMap::new()),
             connect_request_debounce: Mutex::new(std::collections::HashMap::new()),
             public_url: Mutex::new(None),
+            data_plane_bind: std::sync::OnceLock::new(),
+            advertise_host: std::sync::OnceLock::new(),
             sidecar_mcp_port: Mutex::new(None),
             ws_bridge_port: std::sync::OnceLock::new(),
             pg_proxy_port: std::sync::OnceLock::new(),
@@ -298,6 +307,39 @@ impl Broker {
     /// The configured public URL, when serving one.
     pub fn public_url(&self) -> Option<String> {
         self.public_url.lock().unwrap().clone()
+    }
+
+    /// Configure the data-plane bind address and advertised host (once, at
+    /// serve). Absent values keep the loopback defaults.
+    pub fn set_data_plane_address(
+        &self,
+        bind: Option<std::net::IpAddr>,
+        advertise_host: Option<String>,
+    ) {
+        if let Some(bind) = bind {
+            let _ = self.data_plane_bind.set(bind);
+        }
+        if let Some(host) = advertise_host {
+            let _ = self.advertise_host.set(host);
+        }
+    }
+
+    /// The address WS/PG proxies and API endpoints bind to (loopback by
+    /// default).
+    pub fn data_plane_bind(&self) -> std::net::IpAddr {
+        *self
+            .data_plane_bind
+            .get()
+            .unwrap_or(&std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+    }
+
+    /// The host put into returned data-plane URLs/DSNs (loopback by
+    /// default).
+    pub fn advertise_host(&self) -> String {
+        self.advertise_host
+            .get()
+            .cloned()
+            .unwrap_or_else(|| "127.0.0.1".to_string())
     }
 
     /// Subscribe to manage-plane change notifications (the SSE feed).
@@ -1405,7 +1447,7 @@ impl Broker {
                     .get(&issued.endpoint.id)
                     .and_then(|e| e.port)
                     .ok_or_else(|| CoreError::Vault("http endpoint bound no port".to_string()))?;
-                let base = format!("http://127.0.0.1:{port}");
+                let base = format!("http://{}:{port}", self.advertise_host());
                 IssuedEndpointInfo {
                     endpoint_id: issued.endpoint.id,
                     kind: ConnectionKind::Api,

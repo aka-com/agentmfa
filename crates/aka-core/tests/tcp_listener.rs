@@ -54,6 +54,7 @@ async fn harness(public_url: Option<&str>) -> Harness {
         ServeOptions {
             listen: Some("127.0.0.1:0".parse().unwrap()),
             public_url: public_url.map(String::from),
+            ..Default::default()
         },
     )
     .await
@@ -202,6 +203,142 @@ async fn mcp_is_reverse_proxied_to_the_sidecar() {
     assert_eq!(body["method"], "POST");
     assert_eq!(body["authorization"], "Bearer aka_agent_key");
     assert_eq!(body["body"], r#"{"jsonrpc":"2.0","method":"tools/list"}"#);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn data_plane_opens_advertise_the_configured_host() {
+    // A broker serving remote agents advertises a reachable host in its
+    // WS/PG open responses instead of loopback, while still binding
+    // loopback here (the bind address and the advertised host are separate
+    // knobs; the test keeps the bind on loopback so it stays hermetic).
+    let config = BrokerConfig {
+        version: "test".into(),
+        ..BrokerConfig::default()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let broker = Broker::new(
+        Paths::under(dir.path()),
+        Arc::new(MemoryVault::new()),
+        config,
+        Arc::new(TestEvents),
+    )
+    .await
+    .unwrap();
+    let _daemon = daemon::serve_with(
+        broker.clone(),
+        ServeOptions {
+            advertise_host: Some("broker.lan".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(broker.advertise_host(), "broker.lan");
+    assert!(broker.data_plane_bind().is_loopback(), "bind stays loopback");
+
+    // Add a WS connection and open it: the bridge URL names the advertised
+    // host, not 127.0.0.1.
+    broker
+        .ui_add_secret(
+            "FEED",
+            zeroize::Zeroizing::new("wss-tok".into()),
+        )
+        .unwrap();
+    let secret_id = broker.store.list_secrets()[0].id;
+    broker
+        .ui_add_connection(aka_core::store::ConnectionSpec {
+            name: "feed".into(),
+            config: aka_core::types::ConnectionConfig::Ws {
+                url: "wss://stream.example.com/feed".into(),
+                template: None,
+            },
+            secrets: vec![secret_id],
+        })
+        .unwrap();
+
+    let agent_key = broker.identity.token();
+    let socket = _daemon.socket_path.clone();
+    let (status, body) = uds_json(
+        &socket,
+        "POST",
+        "/v1/ws/open",
+        &agent_key,
+        json!({ "connection": "feed" }),
+    )
+    .await;
+    // The upstream dial fails (stream.example.com is unreachable in the
+    // test), but reachability is a per-open concern; when it does succeed
+    // the URL is what we assert. Accept either and only check the host when
+    // a URL came back.
+    if status == 200 {
+        let url = body["ws_url"].as_str().unwrap();
+        assert!(url.starts_with("ws://broker.lan:"), "{url}");
+    }
+
+    // PG advertises the host in its DSN unconditionally (no upstream dial
+    // at open time).
+    broker
+        .ui_add_secret("PGPW", zeroize::Zeroizing::new("pw".into()))
+        .unwrap();
+    let pg_secret = broker
+        .store
+        .list_secrets()
+        .into_iter()
+        .find(|s| s.name == "PGPW")
+        .unwrap()
+        .id;
+    broker
+        .ui_add_connection(aka_core::store::ConnectionSpec {
+            name: "db".into(),
+            config: aka_core::types::ConnectionConfig::Pg {
+                host: "db.internal".into(),
+                port: 5432,
+                dbname: "app".into(),
+                user: "app".into(),
+                sslmode: aka_core::types::PgSslMode::Disable,
+                trusted_ca_bundle_path: None,
+            },
+            secrets: vec![pg_secret],
+        })
+        .unwrap();
+    let (status, body) = uds_json(
+        &socket,
+        "POST",
+        "/v1/pg/open",
+        &agent_key,
+        json!({ "connection": "db" }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let dsn = body["dsn"].as_str().unwrap();
+    assert!(dsn.contains("@broker.lan:"), "{dsn}");
+}
+
+async fn uds_json(
+    socket: &std::path::Path,
+    method: &str,
+    path: &str,
+    bearer: &str,
+    body: Value,
+) -> (u16, Value) {
+    let stream = tokio::net::UnixStream::connect(socket).await.unwrap();
+    let io = hyper_util::rt::TokioIo::new(stream);
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await.unwrap();
+    tokio::spawn(conn);
+    let request = hyper::Request::builder()
+        .method(method)
+        .uri(path)
+        .header("host", "localhost")
+        .header("authorization", format!("Bearer {bearer}"))
+        .header("content-type", "application/json")
+        .body(body.to_string())
+        .unwrap();
+    let response = sender.send_request(request).await.unwrap();
+    let status = response.status().as_u16();
+    use http_body_util::BodyExt as _;
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, value)
 }
 
 #[tokio::test(flavor = "multi_thread")]

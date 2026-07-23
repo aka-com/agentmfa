@@ -6,7 +6,7 @@ import {
   brokerLabel,
   brokerTakeover,
   brokerTone,
-  remoteFeatureNote,
+  remoteEndpointCaution,
 } from '../src/broker';
 import type { BrokerProfile } from '../src/types';
 
@@ -57,7 +57,13 @@ test('the takeover pane renders exactly when the remote link is unusable', () =>
   );
 });
 
-test('remote-only feature notes gate direct endpoints', () => {
-  assert.equal(remoteFeatureNote(LOCAL_BROKER, 'endpoints'), null);
-  assert.match(remoteFeatureNote(remote(), 'endpoints') ?? '', /Direct endpoints/);
+test('remote endpoint cautions describe reachability per type', () => {
+  // Local mode: no caution.
+  assert.equal(remoteEndpointCaution(LOCAL_BROKER, 'api'), null);
+  assert.equal(remoteEndpointCaution(LOCAL_BROKER, 'pg'), null);
+  // Remote: the HTTP endpoint is reachable (advertised host); PG/SSH are
+  // broker-host-local sockets.
+  assert.match(remoteEndpointCaution(remote(), 'api') ?? '', /advertised host/);
+  assert.match(remoteEndpointCaution(remote(), 'pg') ?? '', /broker host/);
+  assert.match(remoteEndpointCaution(remote(), 'ssh') ?? '', /broker host/);
 });

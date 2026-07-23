@@ -67,11 +67,31 @@ hosted broker exactly like a local one; the switcher's dot shows the live
 link. Switch back to **This Mac** anytime — the token stays saved (in
 your login Keychain) per broker URL.
 
-Not yet available against a remote broker (coming phases): browser OAuth
-sign-ins (paste tokens instead) and direct endpoints; WebSocket/Postgres/
-SSH data-plane opens still hand out broker-host-local addresses, so
-agents using those must run on the broker Mac. HTTP tools and MCP work
-from anywhere.
+Browser OAuth sign-ins (BYO-app and MCP) are relayed — the consent page
+opens in *your* browser, the token stays on the broker. Direct endpoints
+issue remotely too.
+
+For agents on other machines to use the **WebSocket/Postgres** data
+planes, serve them on a reachable address:
+
+```sh
+aka serve --listen 127.0.0.1:4780 --public-url https://broker.example.dev \
+    --data-plane-listen 0.0.0.0 --advertise-host broker.lan
+```
+
+`--data-plane-listen` binds the WS/PG proxies (and the HTTP direct
+endpoint) to that address; `--advertise-host` is the host put in the
+`ws://…`/`postgres://…` addresses agents receive. **These legs are
+plaintext** (the loopback contract), so keep them on a trusted LAN or
+tunnel — never the open internet.
+
+**SSH is the remaining same-machine plane.** `/v1/ssh/open` and the SSH
+direct endpoint hand back a Unix-socket path for `SSH_AUTH_SOCK`, which
+only exists on the broker Mac. An agent needing SSH must run on the
+broker host (or forward the agent socket over its own SSH connection);
+a networked SSH-agent bridge is future work. Postgres/SSH *direct
+endpoints* are likewise broker-host sockets; only the HTTP endpoint's
+address is reachable off-box.
 
 ## 4. Agents on other machines
 
