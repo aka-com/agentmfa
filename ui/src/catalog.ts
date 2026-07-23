@@ -128,6 +128,8 @@ export interface CatalogEntry {
    * be refused for us. Shown as a "Limited support" badge on the row.
    */
   limitedSupport?: boolean;
+  /** Announced but not yet available: rendered grayed out with no action. */
+  disabled?: boolean;
 }
 
 export const CATALOG: CatalogEntry[] = [
@@ -446,6 +448,16 @@ export const CATALOG: CatalogEntry[] = [
     section: 'Secrets',
     via: 'builtin',
     keywords: ['secrets', 'tokens', 'keychain'],
+  },
+  {
+    id: 'onepassword-vault',
+    name: '1Password Vault',
+    icon: 'onepassword',
+    description: 'Bring secrets from your 1Password vaults',
+    section: 'Secrets',
+    via: 'builtin',
+    disabled: true,
+    keywords: ['1password', 'vault', 'op'],
   },
 ];
 

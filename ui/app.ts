@@ -182,9 +182,6 @@ interface AppState {
   secretSearch: string;
   /** Catalog entry ids whose connections are expanded. */
   toolsOpen: string[];
-  /** "Show all" checkbox state: checking it expands every configured row. */
-  showAllTools: boolean;
-  showAllSecrets: boolean;
   catalogActionMenuOpen: string | null;
   /** Collapsible catalog sections currently showing all of their rows. */
   sectionsExpanded: string[];
@@ -200,9 +197,8 @@ interface AppState {
   connectOpen: string | null;
   agentMenuOpen: string | null;
   connMenuOpen: string | null;
-  epMenuOpen: string | null;
-  /** Connection ids whose health-chip issue list is expanded. */
-  connIssuesOpen: string[];
+  /** Tools tab: the catalog "add" view is open (the flat list otherwise). */
+  addToolOpen: boolean;
   copied: string | null;
   readyCopied: boolean;
   connectionReady: ConnectionReadyState | null;
@@ -288,8 +284,6 @@ const state: AppState = {
   toolSearch: '',        // Add-tools catalog search query
   secretSearch: '',      // Secrets catalog search query
   toolsOpen: [],         // catalog entry ids whose connections are expanded
-  showAllTools: true,    // checkbox state; checking expands every tool row (on by default)
-  showAllSecrets: true,  // checkbox state; checking expands every secret row (on by default)
   catalogActionMenuOpen: null, // catalog id whose quick-connect chevron menu is open
   sectionsExpanded: [],  // sections showing beyond their connected/minimum rows
   startOption: 'postgres', // which walkthrough the Get started tab shows
@@ -301,8 +295,7 @@ const state: AppState = {
   connectOpen: 'claude-code', // connection-guide card that starts expanded
   agentMenuOpen: null,   // 'identity' while the key card's ⋯ menu is open
   connMenuOpen: null,    // connection id whose ⋯ options menu is open (Tools tab)
-  epMenuOpen: null,      // connection id whose endpoint ⋮ menu is open
-  connIssuesOpen: [],    // connection ids with the health chip's issue list expanded
+  addToolOpen: false,    // Tools tab: catalog add-view open (flat list otherwise)
 
   copied: null,          // secretId whose value was just copied (transient "Copied" flash)
   readyCopied: false,    // transient feedback on the setup-instructions status button
@@ -368,7 +361,6 @@ async function refresh(which: RefreshTarget = 'all'): Promise<void> {
   }
   if (which === 'all' || which === 'settings') jobs.push(loadSettings());
   await Promise.all(jobs);
-  syncShowAllExpansion();
   render();
 }
 async function load<K extends CommandName>(
@@ -567,7 +559,9 @@ function briefEndpointAddress(dsn: string): string {
       : url.password ? '…@' : '';
     return `${url.protocol}//${auth}${url.host}${url.pathname === '/' ? '' : url.pathname}`;
   } catch {
-    return dsn;
+    // Unparseable DSNs must never fall through with a credential in them:
+    // drop everything between the username and the `@` before showing it.
+    return dsn.replace(/\/\/([^/@:]*)(:[^@]*)?@/, '//$1@');
   }
 }
 
@@ -596,20 +590,11 @@ function endpointStripHTML(c: ConnectionSummary): string {
           : `<span class="ghost-copy">${ICONS.copy}<span>Copy</span></span>`}</span>
       </button>`
     : '<span class="ep-addr ep-addr-hidden">Agent socket — shown at issue</span>';
-  const menuOpen = state.epMenuOpen === c.id;
+  // The strip is plug + address + copy, nothing more: reissue/revoke live
+  // in the row's one options menu.
   return `<div class="ep-strip">
     <span class="ep-ico" title="Direct endpoint">${ICONS.plugSm}</span>
     ${address}
-    <span class="ep-spacer"></span>
-    <div class="tile-menu-wrap ep-menu-wrap">
-      <button class="icon-btn ep-menu-btn ${menuOpen ? 'on' : ''}" title="Endpoint options"
-        aria-label="Endpoint options for ${escAttr(c.name)}" aria-haspopup="menu"
-        aria-expanded="${menuOpen}" data-act="toggle-ep-menu" data-conn="${c.id}">${ICONS.ellipsis}</button>
-      ${menuOpen ? `<div class="tile-menu" role="menu" aria-label="Endpoint options for ${escAttr(c.name)}">
-        <button class="menu-item" role="menuitem" data-act="reissue-endpoint-ask" data-conn="${c.id}">${ICONS.refresh} Reissue endpoint…</button>
-        <button class="menu-item danger" role="menuitem" data-act="revoke-endpoint-ask" data-conn="${c.id}">${ICONS.x} Revoke endpoint…</button>
-      </div>` : ''}
-    </div>
   </div>`;
 }
 
@@ -749,26 +734,32 @@ const connTestResultHTML = (c: ConnectionSummary): string => {
   const test = state.connTests[c.id];
   if (!test) return '';
   if (test.running) return '<div class="cc-test running">Testing…</div>';
-  if (test.detail === undefined) return '';
-  return `<div class="cc-test ${test.ok ? 'ok' : 'err'}">${test.ok ? ICONS.circleCheck : ICONS.circleX}<span>${esc(test.detail)}</span></div>`;
+  // Failures are health, not feedback: they render through the row's
+  // issue list (connectionIssues), never as a line under a green verdict.
+  if (test.detail === undefined || !test.ok) return '';
+  return `<div class="cc-test ok">${ICONS.circleCheck}<span>${esc(test.detail)}</span></div>`;
 };
 
 
-// What a connection actually lets an agent do, in plain words — the
-// expansion has to answer "what is this for?" without opening the editor.
-function connectionPurpose(c: ConnectionSummary): string | null {
-  // MCP rows skip the sentence: the parent catalog row's description
-  // already says what the server does, and the meta facts carry the rest.
-  if (c.type === 'api' && c.mcp_path) return null;
-  if (c.type === 'pg') return null;
-  if (c.type === 'ssh') return `Shell, git, and file transfer as ${c.user || 'the pinned user'}`;
-  if (c.type === 'ws') return 'Streams WebSocket messages';
-  return 'Makes HTTP requests to this origin';
+/** The coarse kind a connection belongs to. Drives the muted per-kind
+ * icon tint so a mixed list sorts itself visually without being
+ * grouped. */
+type ConnKind = 'mcp' | 'db' | 'ssh' | 'ws' | 'api';
+
+function connectionKind(c: ConnectionSummary): ConnKind {
+  if (c.type === 'pg') return 'db';
+  if (c.type === 'ssh') return 'ssh';
+  if (c.type === 'ws') return 'ws';
+  return c.mcp_path ? 'mcp' : 'api';
 }
+
+
 
 /** The credential the broker injects; never its value. */
 function connectionCredential(c: ConnectionSummary): string | null {
-  if (c.oauth || c.oauth_spec) return 'Connected via OAuth';
+  // Inside the connected block, connectedness is the precondition — the
+  // chip names the mechanism, it doesn't re-announce the state.
+  if (c.oauth || c.oauth_spec) return 'OAuth';
   const names = c.secret_names || [];
   if (!names.length) return null;
   return names.join(' + ');
@@ -778,42 +769,15 @@ function connectionCredential(c: ConnectionSummary): string | null {
 // carries enough to identify the connection without opening it: who is signed
 // in (accounts differ between connections; the server rarely does), where it
 // points, which tools agents get, and which credential the broker injects.
-function catalogConnRowHTML(c: ConnectionSummary): string {
-  if (state.confirm && state.confirm.kind === 'del-conn' && state.confirm.id === c.id) {
-    return `<div class="cat-conn confirm-conn">
-      <div class="cat-conn-tx"><b>${esc(c.name)}</b>
-        <span class="cat-conn-danger">Delete this tool?${c.agent_access.enabled ? ' Agents will lose access.' : ''}</span></div>
-      <button class="btn sm" data-act="confirm-cancel">Cancel</button>
-      <button class="btn sm danger" data-act="del-conn-confirm" data-id="${c.id}">Delete</button></div>`;
-  }
-  const test = state.connTests[c.id];
-  const menuOpen = state.connMenuOpen === c.id;
-  const live = liveCount(c);
-  const enabled = c.agent_access.enabled;
-  const mcpStatus = c.mcp_path ? state.mcpStatus[c.id] : undefined;
-  // Account-first title: the signed-in identity is what tells two
-  // connections to the same server apart. The row name stays on hover.
-  const title = c.mcp_path && c.account ? c.account : c.name;
-  const toolsChip = enabled && c.mcp_path
-    ? `<button class="cat-meta-tools" data-act="wiring-tools" data-conn="${c.id}"
-        aria-label="Choose which tools agents may call on ${escAttr(c.name)}"
-        title="Choose which of this server’s tools agents may call">${ICONS.filter}<span>${
-          c.agent_access.allowed_tools
-            ? `${c.agent_access.allowed_tools.length} tool${c.agent_access.allowed_tools.length === 1 ? '' : 's'}`
-            : 'All tools'}</span></button>`
-    : '';
-  const connectionCheckItem = c.mcp_path
-    ? `<button class="menu-item" role="menuitem" data-act="mcp-status" data-id="${c.id}"
-        ${mcpStatus && mcpStatus.running ? 'disabled' : ''}>${ICONS.refresh} ${
-          mcpStatus && mcpStatus.running ? 'Checking…' : 'Check server & account'}</button>`
-    : `<button class="menu-item" role="menuitem" data-act="test-conn" data-id="${c.id}"
-        ${test && test.running ? 'disabled' : ''}>${ICONS.flaskConical} ${
-          test && test.running ? 'Testing…' : 'Test connection'}</button>`;
-  // Everything wrong with the row, folded into one health chip. TLS
-  // weaker than the default, an unpinned host key, and a passively
-  // recorded rejected credential (brokered calls and background token
-  // renewals set needs_reconnect without anyone pressing Test) each become
-  // one line in the chip's expansion, with the fix action beside it.
+/** Everything wrong with a connection, folded into the one list the
+ * health indicator owns. TLS weaker than the default, an unpinned host
+ * key, a passively recorded rejected credential (brokered calls and
+ * background token renewals set needs_reconnect without anyone pressing
+ * Test), and the most recent failed test or MCP check each become one
+ * line in the expansion, with the fix action beside it. One verdict per
+ * row: a failed check moves the indicator, it never sits beside a green
+ * one. */
+function connectionIssues(c: ConnectionSummary): Array<{ text: string; fix?: string }> {
   const issues: Array<{ text: string; fix?: string }> = [];
   if (c.type === 'pg' && c.sslmode && c.sslmode !== 'verify-full' && !isLoopbackHost(c.host)) {
     issues.push({
@@ -836,45 +800,93 @@ function catalogConnRowHTML(c: ConnectionSummary): string {
         : `<button class="btn ghost sm cat-meta-fix" data-act="test-conn" data-id="${c.id}">Test again</button>`,
     });
   }
-  const issuesOpen = state.connIssuesOpen.includes(c.id);
-  const health = !enabled
-    ? '<span class="cc-health off">Off</span>'
-    : issues.length
-    ? `<button class="cc-health attn" data-act="toggle-conn-issues" data-id="${c.id}"
-        aria-expanded="${issuesOpen}"
-        aria-label="${issues.length} warning${issues.length === 1 ? '' : 's'}: ${escAttr(issues.map((issue) => issue.text).join(' '))}"
-        title="${escAttr(issues.map((issue) => issue.text).join(' '))}">
-        ${ICONS.triangleAlert}<span>${issues.length}</span>
-        <span class="cat-chev ${issuesOpen ? 'open' : ''}">${ICONS.chevronDown}</span></button>`
-    : '<span class="cc-health ok">Ready</span>';
-  const issuesBlock = enabled && issuesOpen && issues.length
+  const test = state.connTests[c.id];
+  if (test && !test.running && test.detail !== undefined && !test.ok
+      && test.detail !== c.last_detail) {
+    issues.push({
+      text: test.detail,
+      fix: `<button class="btn ghost sm cat-meta-fix" data-act="test-conn" data-id="${c.id}">Test again</button>`,
+    });
+  }
+  const mcpStatus = c.mcp_path ? state.mcpStatus[c.id] : undefined;
+  if (mcpStatus && !mcpStatus.running) {
+    const detail = mcpStatus.error
+      ?? (mcpStatus.report && !mcpStatus.report.ok ? mcpStatus.report.detail : null);
+    if (detail && detail !== c.last_detail) {
+      issues.push({
+        text: detail,
+        fix: `<button class="btn ghost sm cat-meta-fix" data-act="mcp-status" data-id="${c.id}">Check again</button>`,
+      });
+    }
+  }
+  return issues;
+}
+
+/** Account-first display title: the signed-in identity is what tells two
+ * connections to the same server apart. A parenthetical that just
+ * restates the target ("Postgres (dev@localhost:5433)") drops away — the
+ * target is printed beside it anyway. The full name stays on hover. */
+function connectionTitle(c: ConnectionSummary): string {
+  const paren = /^(.*\S)\s*\((.+)\)$/.exec(c.name);
+  return c.mcp_path && c.account
+    ? c.account
+    : paren && c.target.includes(paren[2])
+    ? paren[1]
+    : c.name;
+}
+
+/** The per-server tool filter chip an enabled MCP connection carries. */
+function connectionToolsChipHTML(c: ConnectionSummary): string {
+  if (!c.agent_access.enabled || !c.mcp_path) return '';
+  return `<button class="cat-meta-tools" data-act="wiring-tools" data-conn="${c.id}"
+      aria-label="Choose which tools agents may call on ${escAttr(c.name)}"
+      title="Choose which of this server’s tools agents may call">${ICONS.filter}<span>${
+        c.agent_access.allowed_tools
+          ? `${c.agent_access.allowed_tools.length} tool${c.agent_access.allowed_tools.length === 1 ? '' : 's'}`
+          : 'All tools'}</span></button>`;
+}
+
+// The always-visible strip under a connected row: just the direct
+// endpoint and the row's one options menu. Everything identifying lives
+// on the row above; issues and test results render as lines beneath.
+function connPanelHTML(c: ConnectionSummary): string {
+  const test = state.connTests[c.id];
+  const menuOpen = state.connMenuOpen === c.id;
+  const enabled = c.agent_access.enabled;
+  const mcpStatus = c.mcp_path ? state.mcpStatus[c.id] : undefined;
+  const running = c.mcp_path
+    ? Boolean(mcpStatus && mcpStatus.running)
+    : Boolean(test && test.running);
+  // One name and one icon for the one action, whatever the protocol —
+  // MCP rows still run the server & account check underneath.
+  const connectionCheckItem = `<button class="menu-item" role="menuitem"
+      data-act="${c.mcp_path ? 'mcp-status' : 'test-conn'}" data-id="${c.id}"
+      ${running ? 'disabled' : ''}>${ICONS.flaskConical} ${running ? 'Testing…' : 'Test connection'}</button>`;
+  const endpointItems = enabled && c.agent_access.endpoint
+    ? `<button class="menu-item" role="menuitem" data-act="reissue-endpoint-ask" data-conn="${c.id}">${ICONS.refresh} Reissue endpoint…</button>
+        <button class="menu-item danger" role="menuitem" data-act="revoke-endpoint-ask" data-conn="${c.id}">${ICONS.x} Revoke endpoint…</button>`
+    : '';
+  const issues = connectionIssues(c);
+  const issuesBlock = enabled && issues.length
     ? `<div class="cc-issues">${issues.map((issue) =>
         `<div class="cc-issue"><span>${esc(issue.text)}</span>${issue.fix ?? ''}</div>`).join('')}</div>`
     : '';
-  const purpose = connectionPurpose(c);
-  const credential = connectionCredential(c);
-  return `<div class="cat-conn">
-    <div class="cat-conn-tx">
-      <div class="cat-conn-head"><b title="${escAttr(c.name)}">${esc(title)}</b>${live ? ` <span class="cc-live">● ${live} live</span>` : ''}${health}</div>
-      <div class="cat-conn-sub">
-        <code title="${escAttr(c.target)}">${esc(c.target)}</code>
-        <div class="cat-conn-meta">
-          ${purpose ? `<span>${esc(purpose)}</span>` : ''}
-          ${toolsChip}
-          ${credential ? `<span class="cat-meta-cred">${ICONS.keyRound}<span>${esc(credential)}</span></span>` : ''}
-        </div>
+  return `<div class="conn-panel">
+    <div class="conn-panel-main">
+      ${endpointStripHTML(c)}
+      <span class="grow"></span>
+      <div class="tile-menu-wrap">
+        <button class="icon-btn tile-menu-btn ${menuOpen ? 'on' : ''}" title="Tool options"
+          aria-label="Options for ${escAttr(c.name)}" aria-haspopup="menu"
+          aria-expanded="${menuOpen}" data-act="toggle-conn-menu" data-id="${c.id}">${ICONS.ellipsis}</button>
+        ${menuOpen ? `<div class="tile-menu" role="menu" aria-label="Options for ${escAttr(c.name)}">
+          ${connectionCheckItem}
+          ${endpointItems}
+        </div>` : ''}
       </div>
-      ${issuesBlock}${connTestResultHTML(c)}${mcpStatusHTML(c)}${endpointStripHTML(c)}</div>
-    <div class="cat-conn-ctl"><div class="tile-menu-wrap">
-      <button class="icon-btn tile-menu-btn ${menuOpen ? 'on' : ''}" title="Tool options"
-        aria-label="Options for ${escAttr(c.name)}" aria-haspopup="menu"
-        aria-expanded="${menuOpen}" data-act="toggle-conn-menu" data-id="${c.id}">${ICONS.ellipsis}</button>
-      ${menuOpen ? `<div class="tile-menu" role="menu" aria-label="Options for ${escAttr(c.name)}">
-        ${connectionCheckItem}
-        <button class="menu-item" role="menuitem" data-act="edit-conn" data-id="${c.id}">${ICONS.pencil} Edit…</button>
-        <button class="menu-item danger" role="menuitem" data-act="del-conn-ask" data-id="${c.id}">${ICONS.trash} Delete…</button>
-      </div>` : ''}
-    </div>${connToggleHTML(c)}</div></div>`;
+    </div>
+    ${issuesBlock}${connTestResultHTML(c)}${mcpStatusHTML(c)}
+  </div>`;
 }
 
 // The status check's result, rendered under the MCP connection it belongs
@@ -885,13 +897,12 @@ function mcpStatusHTML(c: ConnectionSummary): string {
   const status = state.mcpStatus[c.id];
   if (!status) return '';
   if (status.running) return '<div class="cc-test running">Checking the server…</div>';
-  if (status.error) {
-    return `<div class="cc-test err">${ICONS.circleX}<span>${esc(status.error)}</span></div>`;
-  }
+  // Errors and failed reports surface through the row's issue list
+  // (connectionIssues); only a healthy report renders here.
+  if (status.error) return '';
   const report = status.report;
-  if (!report) return '';
-  const head = `<div class="cc-test ${report.ok ? 'ok' : 'err'}">${report.ok ? ICONS.circleCheck : ICONS.circleX}<span>${esc(report.detail)}</span></div>`;
-  if (!report.ok) return head;
+  if (!report || !report.ok) return '';
+  const head = `<div class="cc-test ok">${ICONS.circleCheck}<span>${esc(report.detail)}</span></div>`;
   let resources = '';
   if (report.resources_supported) {
     const shown = report.resources.slice(0, 8);
@@ -922,11 +933,26 @@ function credentialsExpansionHTML(): string {
 // One catalog row: icon chip, name, one-line description, and a trailing
 // action — Add for addable tools, a dimmed "Soon" chip for MCP-backed ones,
 // or a count badge that expands the row into what is configured.
-function catalogRowHTML(entry: CatalogEntry): string {
+// `forceAdd` renders a connected generic row as still-addable: its
+// connections already live in the flat list above, so the catalog offers
+// only the add action instead of a second representation of them.
+function catalogRowHTML(entry: CatalogEntry, forceAdd = false): string {
+  // A grayed-out placeholder: visible, not yet addable.
+  if (entry.disabled) {
+    return `<div class="cat-row-wrap is-soon">
+      <div class="cat-row">
+        <span class="cat-ico" aria-hidden="true">${ICONS[entry.icon] || ''}</span>
+        <div class="cat-tx"><b>${esc(entry.name)}</b><span>${esc(entry.description)}</span></div>
+        <span class="cat-soon" title="Not available yet">Soon</span>
+      </div></div>`;
+  }
   const builtin = entry.via === 'builtin';
-  const count = builtin ? state.secrets.length : connectionsForEntry(entry, state.connections).length;
-  const showAll = state.tab === 'secrets' ? state.showAllSecrets : state.showAllTools;
-  const open = (builtin || count > 0) && state.toolsOpen.includes(entry.id);
+  const count = builtin
+    ? state.secrets.length
+    : forceAdd ? 0 : connectionsForEntry(entry, state.connections).length;
+  // The credentials store renders fully expanded, always — its table is
+  // the content of the Secrets tab, not a disclosure.
+  const open = builtin || (count > 0 && state.toolsOpen.includes(entry.id));
   const quickConnect = canQuickConnectMcp(entry);
   const actionMenuOpen = state.catalogActionMenuOpen === entry.id;
   const label = builtin
@@ -970,7 +996,8 @@ function catalogRowHTML(entry: CatalogEntry): string {
   const connectedAction = `<div class="cat-connect-wrap ${actionMenuOpen ? 'open' : ''}">
       <div class="cat-connect-buttons">
         <button class="cat-count cat-connect-primary ${open ? 'on' : ''}" data-act="catalog-toggle"
-          data-id="${entry.id}" aria-expanded="${open}" title="${escAttr(label)}">${count} connected</button>
+          data-id="${entry.id}" aria-expanded="${open}" aria-label="${escAttr(label)}"
+          title="${escAttr(label)}">${count}</button>
         <button class="cat-count cat-connect-menu-btn" data-act="toggle-catalog-connect-menu"
           data-id="${entry.id}" title="Add another ${escAttr(entry.name)} connection"
           aria-label="Add another ${escAttr(entry.name)} connection" aria-haspopup="menu"
@@ -979,8 +1006,7 @@ function catalogRowHTML(entry: CatalogEntry): string {
       ${actionMenuOpen ? `<div class="cat-connect-menu" role="menu" aria-label="Add another ${escAttr(entry.name)} connection">${connectedMenuItems}</div>` : ''}
     </div>`;
   const action = builtin
-    ? `<button class="cat-count ${open ? 'on' : ''}" data-act="catalog-toggle" data-id="${entry.id}"
-        aria-expanded="${open}" title="${escAttr(label)}">${ICONS.fileKey} ${count}<span class="cat-chev">${ICONS.chevronDown}</span></button>`
+    ? `<span class="cat-count is-static" title="${escAttr(label)}">${ICONS.fileKey} ${count}</span>`
     : count
     ? connectedAction
     : quickConnect
@@ -988,15 +1014,10 @@ function catalogRowHTML(entry: CatalogEntry): string {
     : entry.via === 'connection'
     ? `<button class="btn cat-add" data-act="catalog-add" data-id="${entry.id}">${addLabel}</button>`
     : `<span class="cat-soon" title="Arrives with the MCP layer">Soon</span>`;
-  const expansion = !open ? ''
-    : builtin ? credentialsExpansionHTML()
-    : `<div class="cat-conns">
-      <div class="cat-conn-list">${connectionsForEntry(entry, state.connections).map(catalogConnRowHTML).join('')}</div>
-    </div>`;
-  // While "Show all" is checked the row body is inert (no pointer cursor, no
-  // toggle); only the trailing count button collapses, and doing so unchecks
-  // "Show all" without touching the other rows.
-  const rowToggle = (count || builtin) && !showAll
+  // Only the credentials store expands here: connected tools live in the
+  // flat list above the catalog, never inside catalog rows.
+  const expansion = open && builtin ? credentialsExpansionHTML() : '';
+  const rowToggle = count && !builtin
     ? ` data-act="catalog-toggle" data-id="${entry.id}"`
     : '';
   return `<div class="cat-row-wrap ${open ? 'open' : ''} ${actionMenuOpen ? 'menu-open' : ''}">
@@ -1007,6 +1028,77 @@ function catalogRowHTML(entry: CatalogEntry): string {
       ${action}
     </div>${expansion}</div>`;
 }
+
+/* ---- flat tools list (steady state) ----------------------------------- */
+// The Tools tab's steady state answers one question: what can agents
+// reach right now, and is it healthy? One row per connection; the whole
+// catalog waits behind "+ Add tool". Anything wrong is one banner above
+// the list — never red text inside it.
+
+/** Flat rows are named after the tool, not the signed-in account — the
+ * account is a detail fact. (connectionTitle keeps account-first naming
+ * for sibling rows inside the add view's groups, where it's what tells
+ * two connections to the same server apart.) */
+function connectionRowName(c: ConnectionSummary): string {
+  const paren = /^(.*\S)\s*\((.+)\)$/.exec(c.name);
+  return paren && c.target.includes(paren[2]) ? paren[1] : c.name;
+}
+
+/** The row's second line: destination, then the credential the broker
+ * injects (never its value). */
+function connectionSublineHTML(c: ConnectionSummary): string {
+  const credential = connectionCredential(c);
+  const filter = connectionToolsChipHTML(c);
+  const key = credential
+    ? `<span class="flat-cred" tabindex="0" data-tippy-content="Using ${escAttr(
+        credential === 'OAuth' ? 'OAuth sign-in' : credential)}">${ICONS.keyRound}</span>`
+    : '';
+  return `<span class="flat-dest" title="${escAttr(c.target)}">${esc(c.target)}</span>${
+    filter ? ` · ${filter}` : ''}${key ? ` · ${key}` : ''}`;
+}
+
+/** The flat row's health glyph. Not a control: the row itself opens the
+ * detail, which is where issues are read and fixed. */
+function flatHealthHTML(c: ConnectionSummary): string {
+  if (!c.agent_access.enabled) {
+    return '<span class="cc-dot off" role="img" title="Off" aria-label="Off — agents may not use this tool"></span>';
+  }
+  const issues = connectionIssues(c);
+  if (!issues.length) return '<span class="cc-dot ok" role="img" title="Ready" aria-label="Ready"></span>';
+  return `<span class="cc-health attn" title="${escAttr(issues.map((issue) => issue.text).join(' '))}">
+      <span class="cc-dot warn"></span><span>${issues.length} issue${issues.length === 1 ? '' : 's'}</span></span>`;
+}
+
+function attentionBannerHTML(): string {
+  const attn = state.connections.filter(
+    (c) => c.agent_access.enabled && connectionIssues(c).length,
+  );
+  if (!attn.length) return '';
+  const first = attn[0];
+  const firstIssue = connectionIssues(first)[0];
+  const more = attn.length > 1 ? ` · +${attn.length - 1} more` : '';
+  return `<div class="attn-banner">${ICONS.triangleAlert}
+    <span><b>${attn.length === 1 ? '1 tool needs' : `${attn.length} tools need`} attention</b>
+      — ${esc(connectionTitle(first))}: ${esc(firstIssue.text)}${more}</span></div>`;
+}
+
+function flatConnRowHTML(c: ConnectionSummary): string {
+  const kind = connectionKind(c);
+  const live = liveCount(c);
+  const entry = entryForConnection(c);
+  return `<div class="flat-conn-wrap">
+    <div class="flat-conn-row">
+      <span class="cat-ico kind-${kind}" aria-hidden="true">${entry ? ICONS[entry.icon] || '' : ''}</span>
+      <div class="flat-tx"><b title="${escAttr(c.name)}">${esc(connectionRowName(c))}</b>
+        <span>${connectionSublineHTML(c)}</span></div>
+      ${live ? `<span class="cc-live">● ${live} live</span>` : ''}
+      <div class="cat-conn-status">${flatHealthHTML(c)}</div>
+      ${connToggleHTML(c)}
+      <button class="icon-btn conn-edit-btn" title="Edit ${escAttr(connectionRowName(c))}"
+        aria-label="Edit ${escAttr(c.name)}" data-act="edit-conn" data-id="${c.id}">${ICONS.squarePen}</button>
+    </div>${connPanelHTML(c)}</div>`;
+}
+
 
 /** Whether a draft is being edited as an MCP server rather than a raw API. */
 function isMcpDraft(draft: { isMcp?: boolean; mcpPath?: string | null }): boolean {
@@ -1028,21 +1120,51 @@ function connectionsHTML() {
       <button class="btn sm" data-act="copy-first-task">${state.connectionTaskCopied ? `${ICONS.check} Copied` : 'Copy task'}</button>
       <button class="icon-btn" title="Dismiss" aria-label="Dismiss tool ready message" data-act="dismiss-connection-ready">${ICONS.circleX}</button>
     </div></div>` : '';
+  // One view, no navigation: the connected tools stay at the top as flat
+  // rows, and an "Add a tool" row at the bottom of the list expands the
+  // catalog of everything not yet connected, in place, beneath it.
   const entries = visibleCatalog(state.toolSearch, {
     showWebsockets: state.settings.show_websockets,
     connections: state.connections,
   });
-  // Anything already configured surfaces in one place at the top; the
-  // catalog sections below then only offer what could still be added.
   const isConnected = (entry: CatalogEntry): boolean =>
     connectionsForEntry(entry, state.connections).length > 0;
-  const connected = entries.filter((entry) => entry.section !== 'Secrets' && isConnected(entry));
-  const connectedSection = connected.length
-    ? `<div class="cat-section"><div class="cat-rows">${connected.map(catalogRowHTML).join('')}</div></div>`
+  const needle = state.toolSearch.trim().toLowerCase();
+  const matching = state.connections.filter((c) => !needle
+    || c.name.toLowerCase().includes(needle)
+    || c.target.toLowerCase().includes(needle)
+    || (c.account || '').toLowerCase().includes(needle));
+  const connectedList = state.connections.length
+    ? `<div class="cat-section"><div class="cat-section-h">TOOLS</div>
+      <div class="cat-rows">${matching.length
+        ? matching.map(flatConnRowHTML).join('')
+        : '<div class="muted-note">No tools match your search.</div>'}</div></div>`
     : '';
-  const sections = CATALOG_SECTIONS.filter((section) => section !== 'Secrets').map((section) => {
+  // With nothing connected, adding is the only thing to do — the catalog
+  // starts open.
+  const addOpen = state.addToolOpen || !state.connections.length;
+  const addRow = `<div class="cat-section"><div class="cat-rows">
+      <div class="cat-row is-toggle add-tools-row" role="button" tabindex="0"
+        data-act="toggle-add-tools" aria-expanded="${addOpen}"
+        aria-label="${addOpen ? 'Hide' : 'Show'} tools that can be added">
+        <span class="cat-ico" aria-hidden="true">${ICONS.plus}</span>
+        <div class="cat-tx"><b>Add a tool</b></div>
+        <span class="cat-chev group-chev ${addOpen ? 'open' : ''}" aria-hidden="true">${ICONS.chevronDown}</span>
+      </div></div></div>`;
+  // Generic rows are tool types, not accounts: they stay addable even
+  // while connected, or there would be no way to add a second database.
+  const alwaysAddable = (entry: CatalogEntry): boolean =>
+    entry.section === 'Infrastructure' || ['http', 'mcp'].includes(entry.id);
+  // Infrastructure leads; every other section (Secrets aside) follows as
+  // its own group, offering what isn't connected yet plus the generics.
+  const ADD_SECTIONS = [
+    'Infrastructure',
+    ...CATALOG_SECTIONS.filter((section) => section !== 'Infrastructure' && section !== 'Secrets'),
+  ];
+  const sections = !addOpen ? '' : ADD_SECTIONS.map((section) => {
     const sectionEntries = entries.filter(
-      (entry) => entry.section === section && !isConnected(entry),
+      (entry) => entry.section === section
+        && (!isConnected(entry) || alwaysAddable(entry)),
     );
     if (!sectionEntries.length) return '';
     const ordered = connectedCatalogFirst(sectionEntries, state.connections);
@@ -1059,15 +1181,15 @@ function connectionsHTML() {
           <span class="cat-more-chev ${expanded ? 'open' : ''}" aria-hidden="true">${ICONS.chevronDown}</span>
         </button>`
       : '';
-    return `<div class="cat-section"><div class="cat-section-h">${section.toUpperCase()}</div>
-      <div class="cat-rows">${rows.map(catalogRowHTML).join('')}${disclosure}</div></div>`;
+    return `<div class="cat-section add-section"><div class="cat-section-h">${section.toUpperCase()}</div>
+      <div class="cat-rows">${rows.map((entry) => catalogRowHTML(entry, isConnected(entry))).join('')}${disclosure}</div></div>`;
   }).join('');
   const search = mode === 'dropdown'
     ? `<input id="tool-search" class="cat-search" type="search" placeholder="Search tools…"
         aria-label="Search tools" value="${escAttr(state.toolSearch)}">`
     : '';
-  return readyCard + `<div class="catalog">${search}
-    ${connectedSection}${sections || (connectedSection ? '' : '<div class="muted-note">No tools match your search.</div>')}
+  return readyCard + `<div class="catalog">${search}${attentionBannerHTML()}
+    ${connectedList}${addRow}${addOpen && !sections ? '<div class="muted-note">No tools match your search.</div>' : sections}
   </div>`;
 }
 
@@ -1094,7 +1216,7 @@ function secretsHTML(): string {
     : '';
   const section = rows.length
     ? `<div class="cat-section"><div class="cat-section-h">SECRETS</div>
-        <div class="cat-rows">${rows.map(catalogRowHTML).join('')}</div></div>`
+        <div class="cat-rows">${rows.map((entry) => catalogRowHTML(entry)).join('')}</div></div>`
     : '<div class="muted-note">No secrets match your search.</div>';
   return `<div class="catalog">${search}${section}
   </div>`;
@@ -1360,42 +1482,6 @@ function brokerReadyHTML() {
     <span class="ready-copy-label" aria-live="polite">${copied ? `${ICONS.check} Copied` : label}</span></button>`;
 }
 
-// Every row on the current tab that can expand — mirrors the render-time
-// "open" precondition in catalogRowHTML (builtin rows and configured rows).
-function expandableCatalogIds(): string[] {
-  const entries = visibleCatalog(state.tab === 'secrets' ? '' : state.toolSearch, {
-    showWebsockets: state.settings.show_websockets,
-    connections: state.connections,
-  }).filter((entry) => (state.tab === 'secrets')
-    === (entry.section === 'Secrets'));
-  return entries
-    .filter((entry) => entry.via === 'builtin'
-      || connectionsForEntry(entry, state.connections).length > 0)
-    .map((entry) => entry.id);
-}
-
-// "Show all" starts checked, but expansion lives in per-row state
-// (toolsOpen), so rows that appear after the checkbox was last toggled —
-// data finishing loading, a new connection, a tab switch — must fold in
-// for the checked box to keep its promise.
-function syncShowAllExpansion(): void {
-  const on = state.tab === 'secrets' ? state.showAllSecrets : state.showAllTools;
-  if (!on) return;
-  state.toolsOpen = [...new Set([...state.toolsOpen, ...expandableCatalogIds()])];
-}
-
-// "Show all" expands every configured row on the page; there is nothing to
-// expand when no connections exist yet.
-function showAllToggleHTML(checked: boolean, enabled: boolean): string {
-  // The <label> carries the action so a click anywhere on it flips state; the
-  // checkbox is presentational (state is the single source of truth) so the
-  // native toggle is suppressed to avoid drifting out of sync on re-render.
-  return `<label class="show-all ${enabled ? '' : 'disabled'}" ${enabled ? 'data-act="toggle-show-all"' : ''}
-    title="Keep every configured row expanded">
-    <input type="checkbox" tabindex="-1" ${checked ? 'checked' : ''} ${enabled ? '' : 'disabled'}>
-    <span>Show all</span></label>`;
-}
-
 /* --------------------------- broker switcher ------------------------------ */
 
 /** The header's custom local/remote dropdown (right-justified). */
@@ -1487,12 +1573,10 @@ function renderMainWindow() {
   // One view-specific action, always in the header row next to the title.
   const actionBtn = state.tab === 'connections'
     ? `<div class="dw-head-actions">
-        ${showAllToggleHTML(state.showAllTools, state.connections.length > 0)}
         <input id="tool-search" class="cat-search" type="search" placeholder="Search tools…"
           aria-label="Search tools" value="${escAttr(state.toolSearch)}"></div>`
     : state.tab === 'secrets'
     ? `<div class="dw-head-actions">
-        ${showAllToggleHTML(state.showAllSecrets, state.secrets.length > 0 || state.connections.length > 0)}
         <input id="secret-search" class="cat-search" type="search" placeholder="Search secrets…"
           aria-label="Search secrets" value="${escAttr(state.secretSearch)}"></div>`
     : state.tab === 'activity'
@@ -1528,7 +1612,7 @@ function renderMainWindow() {
         ${globalSectionsHTML()}
         <div class="content">${tabContentHTML()}</div>`}
       </div>
-    </div></div>${takeover ? '' : sheetsHTML() + endpointConfirmHTML()}`;
+    </div></div>${takeover ? '' : sheetsHTML() + endpointConfirmHTML() + deleteConnConfirmHTML()}`;
 }
 
 function renderDropdown() {
@@ -1553,7 +1637,7 @@ function renderDropdown() {
     <div class="seg">${tabs}</div>
     ${globalSectionsHTML()}
     <div class="content dd-content">${tabContentHTML()}</div>
-    ${footer}</div>${sheetsHTML()}${endpointConfirmHTML()}`;
+    ${footer}</div>${sheetsHTML()}${endpointConfirmHTML()}${deleteConnConfirmHTML()}`;
 }
 
 /* --------------------------------- sheets -------------------------------- */
@@ -1606,6 +1690,24 @@ function endpointConfirmHTML(): string {
         ${reissue
           ? `<button class="btn primary" data-act="reissue-endpoint-confirm" data-conn="${escAttr(String(confirm.id ?? ''))}">Reissue</button>`
           : `<button class="btn danger" data-act="revoke-endpoint-confirm" data-conn="${escAttr(String(confirm.id ?? ''))}">Revoke</button>`}
+      </div></div>`;
+}
+
+// Deleting a tool asks in the same centered dialog as the other
+// destructive confirms, instead of an inline row swap.
+function deleteConnConfirmHTML(): string {
+  const confirm = state.confirm;
+  if (!confirm || confirm.kind !== 'del-conn') return '';
+  const conn = state.connections.find((candidate) => candidate.id === confirm.id);
+  const name = conn ? conn.name : 'this tool';
+  const enabled = Boolean(conn && conn.agent_access.enabled);
+  return `<div class="sheet-backdrop" data-act="confirm-cancel"></div>
+    <div class="sheet wide confirm-sheet" role="dialog" aria-modal="true" aria-labelledby="del-conn-title">
+      <h3 id="del-conn-title">Delete ${esc(name)}?</h3>
+      <p>The connection and its settings are removed.${enabled ? ' Agents lose access immediately.' : ''}</p>
+      <div class="sheet-actions">
+        <button class="btn" data-act="confirm-cancel">Cancel</button>
+        <button class="btn danger" data-act="del-conn-confirm" data-id="${escAttr(String(confirm.id ?? ''))}">Delete</button>
       </div></div>`;
 }
 
@@ -2140,10 +2242,6 @@ function connSheet(editing: boolean): string {
         <span class="adv-toggle-icon" aria-hidden="true">${ICONS.chevronDown}</span>Advanced</button>
       ${advOpen ? advancedFields : ''}</div>`;
   }
-  if (editing && conn && (conn.mcp_path || conn.oauth_spec)) {
-    fields += `<div class="f-row"><button class="btn" data-act="${conn.mcp_path ? 'reconnect-mcp' : 'oauth-reconnect'}"
-      data-id="${conn.id}">Reconnect (sign in again)</button></div>`;
-  }
   const label = (!editing && state.connEntryName) || catalogNameForType(t);
   const oauthSelected = !editing && t === 'api' && isMcpDraft(d)
     && (d.authMode || 'oauth') === 'oauth';
@@ -2174,7 +2272,21 @@ function connSheet(editing: boolean): string {
       </div></div>`;
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
     <div class="sheet wide"><h3>${title}</h3>${fields}${draftTestHTML}
-    <div class="sheet-actions"><button class="btn" data-act="sheet-cancel">Cancel</button>
+    <div class="sheet-actions">${editing && conn
+      ? `<button class="btn danger conn-delete-btn" data-act="del-conn-from-edit" data-id="${conn.id}">Delete…</button>${
+          conn.mcp_path || conn.oauth_spec
+          ? `<div class="tile-menu-wrap sheet-conn-menu">
+              <button class="icon-btn tile-menu-btn ${state.connMenuOpen === `sheet:${conn.id}` ? 'on' : ''}"
+                title="More options" aria-label="More options for ${escAttr(conn.name)}" aria-haspopup="menu"
+                aria-expanded="${state.connMenuOpen === `sheet:${conn.id}`}"
+                data-act="toggle-conn-menu" data-id="sheet:${conn.id}">${ICONS.ellipsis}</button>
+              ${state.connMenuOpen === `sheet:${conn.id}` ? `<div class="tile-menu" role="menu" aria-label="More options for ${escAttr(conn.name)}">
+                <button class="menu-item" role="menuitem" data-act="${conn.mcp_path ? 'reconnect-mcp' : 'oauth-reconnect'}"
+                  data-id="${conn.id}">${ICONS.refresh} Reconnect (sign in again)</button>
+              </div>` : ''}
+            </div>`
+          : ''}`
+      : ''}<button class="btn" data-act="sheet-cancel">Cancel</button>
       <button class="btn primary" data-act="save-conn" ${dt?.running ? 'disabled' : ''}>${editing ? 'Save' : oauthSelected ? 'Sign in & connect' : `Add ${label}`}</button></div></div>${discardConfirm}`;
 }
 
@@ -2889,6 +3001,8 @@ async function saveConn(): Promise<void> {
       // The first tool added gets the "ready — ask your agent" nudge.
       if (!hadConnections) {
         state.connectionReady = { name, type: t };
+        // A finished add lands back on the flat list, where the new tool is.
+        state.addToolOpen = false;
         state.connectionTaskCopied = false;
       }
     }
@@ -3006,7 +3120,6 @@ document.addEventListener('click', async (e) => {
   if (btn?.dataset.act === 'open-external-url') e.preventDefault();
   // The checkbox is presentational; stop the browser toggling it so the
   // rendered state stays authoritative.
-  if (btn?.dataset.act === 'toggle-show-all') e.preventDefault();
   // Dismiss the desktop settings popover on any click outside it (its own
   // toggle handles itself; menu-item clicks close it in their handlers).
   if (state.menuOpen && !target?.closest('.settings-menu') &&
@@ -3035,11 +3148,6 @@ document.addEventListener('click', async (e) => {
     if (!btn) { render(); return; }
     // fall through: the clicked action runs and its render reflects the close
   }
-  if (state.epMenuOpen && !target?.closest('.ep-menu-wrap')) {
-    state.epMenuOpen = null;
-    if (!btn) { render(); return; }
-    // fall through: the clicked action runs and its render reflects the close
-  }
   if (state.formMenuOpen && !target?.closest('.cred-select') && !target?.closest('.cred-menu')) {
     state.formMenuOpen = null;
     if (!btn) { render(); return; }
@@ -3057,8 +3165,6 @@ document.addEventListener('click', async (e) => {
       state.agentMenuOpen = null;
       state.catalogActionMenuOpen = null;
       state.connMenuOpen = null;
-      state.epMenuOpen = null;
-      syncShowAllExpansion();
       render();
       resetScroll();
       break;
@@ -3164,12 +3270,6 @@ document.addEventListener('click', async (e) => {
       state.connMenuOpen = state.connMenuOpen === id ? null : id;
       render();
       break;
-    case 'toggle-ep-menu': {
-      const connectionId = btn.dataset.conn || '';
-      state.epMenuOpen = state.epMenuOpen === connectionId ? null : connectionId;
-      render();
-      break;
-    }
     case 'issue-endpoint':
     case 'reissue-endpoint-confirm': {
       const connectionId = btn.dataset.conn || '';
@@ -3186,12 +3286,12 @@ document.addEventListener('click', async (e) => {
       break;
     }
     case 'reissue-endpoint-ask':
-      state.epMenuOpen = null;
+      state.connMenuOpen = null;
       state.confirm = { kind: 'reissue-endpoint', id: btn.dataset.conn || '' };
       render();
       break;
     case 'revoke-endpoint-ask':
-      state.epMenuOpen = null;
+      state.connMenuOpen = null;
       state.confirm = { kind: 'revoke-endpoint', id: btn.dataset.conn || '' };
       render();
       break;
@@ -3380,18 +3480,12 @@ document.addEventListener('click', async (e) => {
     case 'catalog-toggle':
       if (state.toolsOpen.includes(id)) {
         state.toolsOpen = state.toolsOpen.filter((openId) => openId !== id);
-        // Any row collapsing means "every row is shown" no longer holds; the
-        // rows that stay open keep their own entries in toolsOpen.
-        if (state.tab === 'secrets') state.showAllSecrets = false;
-        else state.showAllTools = false;
       } else {
         state.toolsOpen = [...state.toolsOpen, id];
       }
       render(); break;
-    case 'toggle-conn-issues':
-      state.connIssuesOpen = state.connIssuesOpen.includes(id)
-        ? state.connIssuesOpen.filter((openId) => openId !== id)
-        : [...state.connIssuesOpen, id];
+    case 'toggle-add-tools':
+      state.addToolOpen = !state.addToolOpen;
       render();
       break;
     case 'toggle-section-expanded':
@@ -3400,20 +3494,6 @@ document.addEventListener('click', async (e) => {
         : [...state.sectionsExpanded, id];
       render();
       break;
-    case 'toggle-show-all': {
-      // "Show all" is a transition, not a render-time override: checking it
-      // opens every expandable row through the same per-row state the count
-      // buttons use, so one row can collapse later without hiding the rest.
-      const wasOn = state.tab === 'secrets' ? state.showAllSecrets : state.showAllTools;
-      const ids = expandableCatalogIds();
-      state.toolsOpen = wasOn
-        ? state.toolsOpen.filter((openId) => !ids.includes(openId))
-        : [...new Set([...state.toolsOpen, ...ids])];
-      if (state.tab === 'secrets') state.showAllSecrets = !wasOn;
-      else state.showAllTools = !wasOn;
-      render();
-      break;
-    }
     case 'toggle-catalog-connect-menu':
       state.catalogActionMenuOpen = state.catalogActionMenuOpen === id ? null : id;
       render();
@@ -3545,6 +3625,11 @@ document.addEventListener('click', async (e) => {
       break;
     case 'save-conn': await saveConn(); break;
     case 'del-conn-ask': state.connMenuOpen = null; state.confirm = { kind: 'del-conn', id }; render(); break;
+    case 'del-conn-from-edit':
+      closeSheet();
+      state.confirm = { kind: 'del-conn', id };
+      render();
+      break;
     case 'del-conn-confirm':
       if (await run(() => invoke('delete_connection', { id }))) {
         state.confirm = null;
@@ -3850,7 +3935,6 @@ document.addEventListener('keydown', (e) => {
     const n = TABS.length;
     state.tab = TABS[(i + (e.shiftKey ? -1 : 1) + n) % n];
     state.menuOpen = false;
-    syncShowAllExpansion();
     render();
     resetScroll();
     return;
@@ -3859,7 +3943,6 @@ document.addEventListener('keydown', (e) => {
     if (state.catalogActionMenuOpen) { state.catalogActionMenuOpen = null; render(); return; }
     if (state.agentMenuOpen) { state.agentMenuOpen = null; render(); return; }
     if (state.connMenuOpen) { state.connMenuOpen = null; render(); return; }
-    if (state.epMenuOpen) { state.epMenuOpen = null; render(); return; }
     if (state.menuOpen) { state.menuOpen = false; render(); return; }
     if (state.formMenuOpen) {
       const menuId = state.formMenuOpen;
@@ -3994,15 +4077,13 @@ document.addEventListener('input', (e) => {
   }
   if (target?.id === 'tool-search') {
     state.toolSearch = target.value;
-    // Results render collapsed unless "Show all" is on, in which case the
-    // rows matching the new query open (the checkbox keeps its promise).
-    state.toolsOpen = state.showAllTools ? expandableCatalogIds() : [];
+    state.toolsOpen = [];
     render();
     return;
   }
   if (target?.id === 'secret-search') {
     state.secretSearch = target.value;
-    state.toolsOpen = state.showAllSecrets ? expandableCatalogIds() : [];
+    state.toolsOpen = [];
     render();
     return;
   }
@@ -4167,7 +4248,7 @@ async function boot() {
     const { agent, service } = ev.payload;
     state.tab = 'connections';
     state.toolSearch = service;
-    state.toolsOpen = state.showAllTools ? expandableCatalogIds() : [];
+    state.toolsOpen = [];
     toast(`🤖 ${agent} asked to connect “${service}”`);
     render();
   });
@@ -4194,7 +4275,6 @@ async function boot() {
     state.catalogActionMenuOpen = null;
     state.agentMenuOpen = null;
     state.connMenuOpen = null;
-    state.epMenuOpen = null;
     render();
   });
 }

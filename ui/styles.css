@@ -45,6 +45,15 @@
   --brand-openai-bg: rgba(16, 163, 127, .12);
   --brand-openai-ink: #087a60;
 
+  /* per-kind tints: muted washes that let a mixed tool list sort itself
+     visually (MCP app / database / SSH / plain API) without grouping it */
+  --kind-mcp-ink: #6d4fd0;
+  --kind-mcp-wash: rgba(124, 92, 255, .10);
+  --kind-ssh-ink: #0f8a7a;
+  --kind-ssh-wash: rgba(20, 160, 140, .12);
+  --kind-api-ink: #b05c14;
+  --kind-api-wash: rgba(240, 140, 60, .12);
+
   /* surfaces */
   --surface: rgba(246, 246, 249, 0.98);
   --panel: #fbfbfd;                     /* sheets, popovers */
@@ -551,11 +560,11 @@
   .connection-ready-actions{ display: flex; align-items: center; gap: 3px; flex: 0 0 auto; }
 .tile-menu-wrap{ position: relative; flex: 0 0 auto; }
   /* Tool and endpoint menus use the same strong horizontal-ellipsis trigger. */
-.tile-menu-btn, .ep-menu-btn{
+.tile-menu-btn{
   width: 24px; height: 24px; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;
 }
-.tile-menu-btn.on, .ep-menu-btn.on{ background: var(--hover-2); color: var(--ink-2); }
+.tile-menu-btn.on{ background: var(--hover-2); color: var(--ink-2); }
   .tile-menu{
   position: absolute; right: 0; top: calc(100% + 4px); z-index: 14;
   min-width: 185px; display: flex; flex-direction: column; gap: 2px; padding: 4px;
@@ -777,6 +786,12 @@
     --brand-claude-ink: #ef9a7d;
     --brand-openai-bg: rgba(82,207,172,.16);
     --brand-openai-ink: #72d9bb;
+    --kind-mcp-ink: #c9b8fd;
+    --kind-mcp-wash: rgba(167,139,250,.14);
+    --kind-ssh-ink: #6fe0cd;
+    --kind-ssh-wash: rgba(45,212,191,.13);
+    --kind-api-ink: #f8b184;
+    --kind-api-wash: rgba(240,136,62,.14);
 
     --surface: rgba(30,30,36,.98);
     --panel: #26262c;
@@ -816,14 +831,8 @@
   /* The header's trailing controls: search sits beside the primary action. */
 .dw-head-actions { display: flex; align-items: center; gap: 16px; flex: 0 0 auto; }
 .dw-head-actions .cat-search { width: 210px; }
-.show-all {
-  display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;
-  color: var(--muted); font-size: 12.5px; font-weight: 600;
-  white-space: nowrap; cursor: pointer; user-select: none;
-}
-.show-all input { margin: 0; cursor: pointer; accent-color: var(--accent); }
-.show-all.disabled { opacity: .45; cursor: default; }
-.show-all.disabled input { cursor: default; }
+.cat-count.is-static { cursor: default; }
+.cat-count.is-static:hover { opacity: 1; }
 
 /* ------------------------------ Add-tools catalog ------------------------ */
 /* The default page: a searchable, sectioned registry of tools. Rows show an
@@ -883,10 +892,12 @@
   background: var(--panel); border: 1px solid var(--line-mid); border-radius: 9px;
   box-shadow: 0 10px 28px rgba(10,15,40,.22);
 }
+/* Any open menu inside a card — catalog rows and flat connection rows
+   alike — lifts the card's clipping so the dropdown can escape it. */
 .cat-section:has(.cat-row-wrap.menu-open),
-.cat-section:has(.cat-row-wrap .tile-menu) { position: relative; z-index: 2; }
+.cat-section:has(.tile-menu) { position: relative; z-index: 2; }
 .cat-rows:has(.cat-row-wrap.menu-open),
-.cat-rows:has(.cat-row-wrap .tile-menu) { overflow: visible; }
+.cat-rows:has(.tile-menu) { overflow: visible; }
 .cat-more {
   display: flex; align-items: center; justify-content: center; gap: 5px; width: 100%;
   padding: 9px 14px; border: 0; border-top: 1px solid var(--line);
@@ -957,22 +968,82 @@
 }
 .cat-meta-idle { color: var(--amber-ink); }
 .cat-conn-danger { display: block; margin-top: 2px; color: var(--danger-ink); font-size: 11.5px; }
-/* One health chip per row: Ready / warning count / Off. It rides the right
-   edge of the head line; the warning variant is a button that expands the
-   row's issue list. */
+/* The status rail: kind tag + one health verdict per row, right-aligned
+   into a fixed column so the eye runs down the pane instead of re-scanning
+   each row. Color is spent only where it means something: a green dot for
+   healthy, amber for needs-attention (a button that expands the issue
+   list), a muted dot when agents are switched off. */
+.cat-conn-status {
+  display: flex; align-items: center; gap: 8px;
+  flex: 0 0 auto; margin-top: 2px; min-height: 18px;
+}
+.cc-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; }
+.cc-dot.ok { background: var(--ok-solid); }
+.cc-dot.warn { background: var(--amber-strong); }
+.cc-dot.off { background: var(--muted-2); opacity: .55; }
+.cat-ico.kind-mcp { color: var(--kind-mcp-ink); background: var(--kind-mcp-wash); }
+.cat-ico.kind-db { color: var(--accent-ink); background: var(--accent-wash); }
+.cat-ico.kind-ssh { color: var(--kind-ssh-ink); background: var(--kind-ssh-wash); }
+.cat-ico.kind-api { color: var(--kind-api-ink); background: var(--kind-api-wash); }
 .cc-health {
-  display: inline-flex; align-items: center; gap: 4px;
-  margin-left: auto; padding: 1.5px 9px 2.5px; flex: 0 0 auto;
-  transform: translateY(3px);
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 1.5px 9px 2.5px; flex: 0 0 auto;
   border: 1px solid transparent; border-radius: 999px;
   font-size: 11px; font-weight: 600; white-space: nowrap;
 }
-.cc-health.ok { color: var(--ok-ink); background: var(--ok-wash); border-color: var(--ok-border); }
 .cc-health.attn {
   color: var(--amber-ink); background: var(--amber-wash);
   border-color: var(--amber-border); cursor: pointer;
 }
-.cc-health.off { color: var(--muted); background: var(--chip-bg); }
+
+/* ---- flat tools list (steady state) ----------------------------------- */
+/* One row per connection; the catalog waits behind "+ Add tool", and
+   anything wrong is the banner above the list. */
+.flat-tools-head { display: flex; align-items: center; justify-content: space-between; }
+.attn-banner {
+  display: flex; align-items: center; gap: 10px; padding: 9px 12px;
+  border: 1px solid var(--amber-border); border-radius: 10px;
+  background: var(--amber-wash); color: var(--amber-ink); font-size: 12.5px;
+}
+.attn-banner > svg { width: 14px; height: 14px; flex: 0 0 auto; color: var(--amber-strong); }
+.attn-banner > span { flex: 1 1 auto; min-width: 0; }
+.attn-banner b { font-weight: 650; }
+.flat-conn-wrap + .flat-conn-wrap { border-top: 1px solid var(--line); }
+/* The one add path: a row at the bottom of the tools list that expands
+   the catalog of not-yet-connected tools in place beneath it. Quiet by
+   design: default gray icon chip, a single vertically centered line. */
+.add-tools-row { align-items: center; }
+.add-tools-row .cat-tx b { line-height: 1; }
+.group-chev { display: inline-flex; flex: 0 0 auto; margin-left: auto; color: var(--muted-2); transition: transform .15s ease; }
+.group-chev svg { width: 15px; height: 15px; }
+.group-chev.open { transform: rotate(180deg); }
+.flat-conn-row { display: flex; align-items: center; gap: 12px; padding: 11px 14px 7px; min-width: 0; }
+.flat-conn-row .cat-meta-tools { flex: 0 0 auto; }
+.flat-tx { flex: 1; min-width: 0; }
+.flat-tx b { display: block; font-size: 13.5px; font-weight: 600; }
+.flat-tx > span {
+  display: block; margin-top: 1px; overflow: hidden; color: var(--muted-2);
+  font-size: 12px; text-overflow: ellipsis; white-space: nowrap;
+}
+.flat-cred { display: inline-flex; align-items: center; gap: 3px; }
+.flat-cred svg { width: 11px; height: 11px; }
+.flat-conn-row .cat-conn-status { margin-top: 0; }
+/* The always-visible strip under each connected row: endpoint + menu. */
+.conn-panel { display: flex; flex-direction: column; gap: 5px; padding: 0 8px 9px 64px; }
+.conn-panel-main { display: flex; align-items: center; gap: 8px; min-height: 26px; }
+.conn-panel-main .ep-strip { margin-top: 0; min-width: 0; }
+.conn-panel .cc-issues { margin-right: 6px; }
+.conn-edit-btn { flex: 0 0 auto; transform: translateY(1px); }
+/* Catalog groups in the add view: room above each heading so the label
+   reads as the start of its group, not the tail of the previous card. */
+.add-section { margin-top: 10px; }
+.add-section .cat-section-h { margin-bottom: 10px; }
+.flat-cred { cursor: default; }
+.flat-tx .cat-meta-tools { vertical-align: -2px; }
+.sheet-actions .conn-delete-btn { margin-right: 0; }
+/* Delete + its ⋯ sit left; the menu drops upward, clear of the sheet edge. */
+.sheet-actions .sheet-conn-menu { margin-right: auto; }
+.sheet-conn-menu .tile-menu { top: auto; bottom: calc(100% + 5px); right: auto; left: 0; }
 .cc-health svg { width: 11px; height: 11px; flex: 0 0 auto; }
 .cc-health .cat-chev { opacity: .7; }
 .cc-health[aria-expanded="true"] .cat-chev { transform: rotate(180deg); }
@@ -1225,4 +1296,3 @@
 .ep-strip .ep-addr-wrap:hover .ghost-copy,
 .ep-strip .ep-addr-wrap:focus-visible .ghost-copy{ opacity: 1; }
 .ep-strip .ep-addr-hidden{ color: var(--muted); }
-.ep-strip .ep-spacer{ flex: 1; }
