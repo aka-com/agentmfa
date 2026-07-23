@@ -795,7 +795,7 @@ function connectionCredential(c: ConnectionSummary): string {
   if (c.oauth || c.oauth_spec) return 'OAuth sign-in (token auto-refreshes)';
   const names = c.secret_names || [];
   if (!names.length) return 'No credential bound';
-  return `Uses ${names.join(' + ')}`;
+  return names.join(' + ');
 }
 
 // One row inside an expanded catalog entry. It spans the full card width and
@@ -853,12 +853,14 @@ function catalogConnRowHTML(c: ConnectionSummary): string {
   return `<div class="cat-conn">
     <div class="cat-conn-tx">
       <div class="cat-conn-head"><b title="${escAttr(c.name)}">${esc(title)}</b><span class="conn-dot${dot}"></span>${live ? ` <span class="cc-live">● ${live} live</span>` : ''}</div>
-      <code title="${escAttr(c.target)}">${esc(c.target)}</code>
-      <div class="cat-conn-meta">
-        ${purpose ? `<span>${esc(purpose)}</span>` : ''}
-        ${toolsChip}
-        <span class="cat-meta-cred">${ICONS.keyRound}<span>${esc(connectionCredential(c))}</span></span>
-        ${tls}${hostKey}${needsReconnect}
+      <div class="cat-conn-sub">
+        <code title="${escAttr(c.target)}">${esc(c.target)}</code>
+        <div class="cat-conn-meta">
+          ${purpose ? `<span>${esc(purpose)}</span>` : ''}
+          ${toolsChip}
+          <span class="cat-meta-cred">${ICONS.keyRound}<span>${esc(connectionCredential(c))}</span></span>
+          ${tls}${hostKey}${needsReconnect}
+        </div>
       </div>
       ${connTestResultHTML(c)}${mcpStatusHTML(c)}${endpointStripHTML(c)}</div>
     <div class="cat-conn-ctl"><div class="tile-menu-wrap">

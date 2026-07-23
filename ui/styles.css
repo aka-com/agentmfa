@@ -847,10 +847,14 @@
   display: block; margin-top: 1px; overflow: hidden; color: var(--muted-2);
   font-family: inherit; font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap;
 }
+/* The target line: url first, then the flat run of icon-led facts riding
+   its right. The url yields (ellipsizes) before the facts do. */
+.cat-conn-sub { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.cat-conn-sub code { flex: 0 1 auto; }
 /* One flat run of icon-led facts: a single gap, one size, one weight. */
 .cat-conn-meta {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin-top: 4px;
-  color: var(--muted); font-size: 11.5px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px;
+  flex: 1 1 auto; min-width: 0; color: var(--muted); font-size: 11.5px;
 }
 .cat-meta-idle { color: var(--amber-ink); }
 /* Warnings differ by color and icon only — never weight. */
