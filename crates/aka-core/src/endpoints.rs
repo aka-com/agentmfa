@@ -37,13 +37,12 @@ use crate::integrity::StateIntegrity;
 use crate::types::{ConnectionKind, DirectEndpoint};
 use crate::{CoreError, Result};
 
-/// A minted endpoint plus the one-time plaintext secret. The secret is never
-/// stored and never returned again; losing it means re-issuing (which rotates
-/// it).
+/// A minted endpoint plus its plaintext secret. The secret is retained on
+/// the record, so a lost paste is recovered by copying the address again;
+/// reissuing rotates it.
 pub struct IssuedEndpoint {
     pub endpoint: DirectEndpoint,
-    /// `end_` + 64 hex. Shown to the user once, embedded in the pasteable
-    /// DSN/URL by the caller.
+    /// `end_` + 64 hex, embedded in the pasteable DSN/URL by the caller.
     pub secret: String,
 }
 
@@ -119,6 +118,7 @@ impl EndpointRegistry {
 
         if let Some(existing) = next.iter_mut().find(|e| e.connection_id == connection_id) {
             existing.secret_hash = secret_hash;
+            existing.secret = secret.clone();
             existing.kind = kind;
             let endpoint = existing.clone();
             self.persist(&next)?;
@@ -135,6 +135,7 @@ impl EndpointRegistry {
             connection_id,
             kind,
             secret_hash,
+            secret: secret.clone(),
             port: None,
             created_at: Utc::now(),
         };
@@ -268,7 +269,7 @@ mod tests {
     }
 
     #[test]
-    fn issue_mints_a_prefixed_secret_stored_only_hashed() {
+    fn issue_mints_a_prefixed_secret_retained_on_the_record() {
         let (r, dir) = registry();
         let conn = Uuid::new_v4();
         let issued = r.issue(conn, ConnectionKind::Pg).unwrap();
@@ -276,9 +277,11 @@ mod tests {
         assert_eq!(issued.secret.len(), 4 + 64);
         assert_eq!(issued.endpoint.secret_hash, hash_secret(&issued.secret));
 
-        // The plaintext never touches disk; only its hash does.
+        // The plaintext is retained (deliberately — the copyable DSN carries
+        // it), alongside the hash the auth path matches against.
+        assert_eq!(issued.endpoint.secret, issued.secret);
         let on_disk = std::fs::read_to_string(dir.path().join("endpoints.json")).unwrap();
-        assert!(!on_disk.contains(&issued.secret));
+        assert!(on_disk.contains(&issued.secret));
         assert!(on_disk.contains(&issued.endpoint.secret_hash));
     }
 

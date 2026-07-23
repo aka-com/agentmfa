@@ -69,7 +69,7 @@ interface SheetState {
   kind: 'add-secret' | 'edit-secret' | 'add-conn' | 'edit-conn' | 'settings' | 'clear-activity'
     | 'elicitation' | 'mcp-auth' | 'wiring-tools' | 'endpoint-issued';
   id?: string;
-  /** The one-time issue result, for the 'endpoint-issued' sheet. */
+  /** The issue result, for the 'endpoint-issued' sheet. */
   endpoint?: IssuedEndpoint;
 }
 
@@ -1126,10 +1126,26 @@ function startConnectPaneHTML(mode: ConnectModeId, option: StartOption, progress
     `<button class="btn primary sm" data-act="copy-text" data-text="${escAttr(text)}">${label}</button>`;
   const actions = (inner: string) => `<div class="start-actions">${inner}${status}</div>`;
 
-  if (mode === 'direct') {
-    if (!conn) {
-      return `<p>Direct endpoints are issued per tool — add the ${esc(option.label)} tool above first.</p>
-        ${actions('<button class="btn primary sm" disabled>Issue direct endpoint</button>')}`;
+  switch (mode) {
+    case 'direct': {
+      if (!conn) {
+        return `<p>Direct endpoints are issued per tool — add the ${esc(option.label)} tool above first.</p>
+          ${actions('<button class="btn primary sm" disabled>Issue direct endpoint</button>')}`;
+      }
+      const endpoint = conn.agent_access.endpoint ?? null;
+      const lead = endpoint
+        ? `A direct endpoint is issued for “${esc(conn.name)}”. ${conn.type === 'pg'
+            ? 'Copy its address (secret included) from the tool’s row anytime — reissue to rotate the secret.'
+            : 'Its socket path was shown at issue — reissue to get a new one.'}`
+        : conn.type === 'pg'
+        ? `Issue a local DSN for “${esc(conn.name)}” that any unmodified Postgres client can use —
+            psql, drivers, ORMs.`
+        : `Issue a signing-agent socket for “${esc(conn.name)}”. Plain ssh, git, and rsync work
+            unmodified; the private key never leaves this machine.`;
+      const label = !endpoint ? 'Issue direct endpoint'
+        : conn.type === 'pg' ? 'Reissue (new secret)' : 'Reissue';
+      return `<p>${lead}</p>
+        ${actions(`<button class="btn primary sm" data-act="issue-endpoint" data-conn="${conn.id}">${label}</button>`)}`;
     }
     const endpoint = conn.agent_access.endpoint ?? null;
     const lead = endpoint
@@ -1341,9 +1357,11 @@ function renderDropdown() {
 }
 
 /* --------------------------------- sheets -------------------------------- */
-// Shown once, right after issuing a direct endpoint: the pasteable address,
-// a ready-to-run example, and the secret (never recoverable later). Copy
-// buttons write to the clipboard; the text is also selectable as a fallback.
+// Shown right after issuing a direct endpoint: the pasteable address (with
+// the secret riding in it), a ready-to-run example, and the secret itself.
+// The secret is retained on the endpoint, so the row's chip keeps carrying
+// it — losing this sheet loses nothing. Copy buttons write to the
+// clipboard; the text is also selectable as a fallback.
 function endpointIssuedSheet(): string {
   const info = state.sheet?.endpoint;
   if (!info) return '';
@@ -1353,12 +1371,12 @@ function endpointIssuedSheet(): string {
       <div class="ep-row"><code class="ep-code">${esc(value)}</code>
       <button class="btn ghost sm" data-act="copy-endpoint" data-field="${fieldKey}" aria-label="Copy ${label}">Copy</button></div></div>`;
   const secretField = info.secret
-    ? field('Secret', info.secret, 'secret', 'shown once')
+    ? field('Secret', info.secret, 'secret')
     : '<div class="ep-note">SSH endpoints present no secret — the socket path is the whole capability.</div>';
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
     <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="ep-title">
       <h3 id="ep-title">Direct endpoint issued</h3>
-      <p class="sheet-sub">Paste this into your tool's config.${info.secret ? ' The secret is shown only now — copy it somewhere safe.' : ''}</p>
+      <p class="sheet-sub">Paste this into your tool's config. You can copy it again anytime from the tool's row.</p>
       ${field(addressLabel, info.dsn, 'dsn')}
       ${secretField}
       ${field('Example', info.example, 'example')}

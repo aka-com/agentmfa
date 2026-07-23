@@ -467,9 +467,12 @@ pub struct ToolAccess {
 /// deliberately **not** the shared broker key: an endpoint listens on a
 /// loopback port or socket that outlives any one setup, and its secret can be
 /// pasted into one tool's config and revoked alone without rotating the key
-/// every agent shares. It is persisted only as a SHA-256 hash — the plaintext
-/// is shown once at issue. The listener re-checks the connection's agent
-/// access on every request/connection, exactly as the control plane does.
+/// every agent shares. The plaintext is retained so the pasteable address can
+/// carry it whenever it is copied; nothing in the app runs foreign code that
+/// could read it back out, so recoverability costs nothing here (revoke or
+/// reissue still invalidates it instantly). The listener re-checks the
+/// connection's agent access on every request/connection, exactly as the
+/// control plane does.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DirectEndpoint {
     pub id: Uuid,
@@ -479,9 +482,14 @@ pub struct DirectEndpoint {
     /// a store lookup and lets a stale endpoint be recognized if the
     /// connection was replaced by a different kind.
     pub kind: ConnectionKind,
-    /// SHA-256 of the endpoint secret, hex-encoded. The plaintext leaves the
-    /// broker exactly once, in the issue response.
+    /// SHA-256 of the endpoint secret, hex-encoded; what presented secrets
+    /// are matched against.
     pub secret_hash: String,
+    /// The plaintext endpoint secret, retained so the issued DSN stays
+    /// copyable with the credential in place. Empty on records persisted
+    /// before retention existed — reissuing populates it.
+    #[serde(default)]
+    pub secret: String,
     /// The loopback port an HTTP reverse-proxy endpoint is pinned to, so a
     /// pasted `http://…:<port>/…` base URL survives a broker restart. `None`
     /// for PG/SSH endpoints, whose stable socket path derives from the id.

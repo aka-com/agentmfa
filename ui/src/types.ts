@@ -29,9 +29,10 @@ export interface AgentAccess {
 }
 
 /**
- * The one-time result of issuing a direct endpoint: the pasteable address, a
- * ready-to-run example, and the secret shown exactly once (empty for SSH,
- * whose socket path is the whole capability).
+ * The result of issuing a direct endpoint: the pasteable address, a
+ * ready-to-run example, and the secret (empty for SSH, whose socket path is
+ * the whole capability). The secret is retained on the endpoint, so the
+ * row's chip DSN keeps carrying it after this sheet closes.
  */
 export interface IssuedEndpoint {
   endpoint_id: string;

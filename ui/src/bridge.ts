@@ -136,7 +136,7 @@ interface MockAccess {
   connection_id: string;
   enabled: boolean;
   allowed_tools?: string[];
-  endpoint?: { endpoint_id: string; type: ConnectionType };
+  endpoint?: { endpoint_id: string; type: ConnectionType; dsn?: string | null };
 }
 
 interface MockIdentity {
@@ -789,7 +789,9 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         dsn = 'http://127.0.0.1:52000';
         example = `curl -H "Authorization: Bearer ${secret}" ${dsn}/<path>`;
       }
-      record.endpoint = { endpoint_id: endpointId, type: kind };
+      // The retained secret rides in the chip's DSN (null for SSH, whose
+      // socket path is the whole capability).
+      record.endpoint = { endpoint_id: endpointId, type: kind, dsn: kind === 'ssh' ? null : dsn };
       audit('wired', `Direct endpoint issued: ${connection.name}`);
       emit('aka://wirings-changed', {});
       return { endpoint_id: endpointId, type: kind, dsn, secret: shownSecret, example };

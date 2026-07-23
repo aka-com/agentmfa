@@ -55,16 +55,15 @@ pub struct AccessDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_tools: Option<Vec<String>>,
     /// The direct endpoint issued for this connection, if any. Its presence
-    /// flips the row's control from "Issue" to "Reissue / Revoke"; the secret
-    /// is never carried here (it left the broker once, at issue).
+    /// flips the row's control from "Issue" to "Reissue / Revoke".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<EndpointChip>,
 }
 
-/// The direct endpoint on a wiring row: enough to address and revoke it, never
-/// the secret. `dsn` is the pasteable, non-secret address (the secret rides
-/// separately); it is omitted for SSH, whose socket path is itself the
-/// capability and is shown only in the one-time issue sheet.
+/// The direct endpoint on a wiring row. `dsn` is the pasteable address with
+/// the retained endpoint secret in its password slot, so copying the chip is
+/// enough to connect; it is omitted for SSH, whose socket path is itself the
+/// capability and is shown only in the issue sheet.
 #[derive(Serialize)]
 pub struct EndpointChip {
     pub endpoint_id: String,
@@ -74,8 +73,9 @@ pub struct EndpointChip {
     pub dsn: Option<String>,
 }
 
-/// The one-time result of issuing a direct endpoint: the pasteable address, a
-/// ready-to-run example, and the secret shown exactly once.
+/// The result of issuing a direct endpoint: the pasteable address, a
+/// ready-to-run example, and the secret (also retained on the record, so
+/// the row's chip stays copyable with the credential in place).
 #[derive(Serialize)]
 pub struct IssuedEndpointDto {
     pub endpoint_id: String,
@@ -157,13 +157,14 @@ impl ConnectionDto {
                 .get_for_connection(&conn.id)
                 .map(|e| {
                     let dsn = match &conn.config {
-                        // Password-less: only the secret's hash survives issue
-                        // time, so the chip shows the DSN without it.
+                        // The retained secret rides in the password slot; a
+                        // pre-retention record (empty secret) falls back to
+                        // the password-less form until reissued.
                         Pg { user, dbname, .. } => Some(aka_core::capability::pg::endpoint_dsn(
                             broker.paths.endpoint_dir(&e.id).as_path(),
                             user,
                             dbname,
-                            None,
+                            (!e.secret.is_empty()).then_some(e.secret.as_str()),
                         )),
                         Api { .. } => e.port.map(|port| format!("http://127.0.0.1:{port}")),
                         _ => None,

@@ -40,15 +40,15 @@ pub struct ConnectionTestReport {
 }
 
 /// The result of issuing a direct endpoint: the pasteable connection string
-/// and the one-time secret. The secret is returned exactly once; it is not
-/// recoverable afterward (re-issuing rotates it).
+/// and its secret. The secret is retained on the endpoint record, so later
+/// copies of the address carry it too; re-issuing rotates it.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct IssuedEndpointInfo {
     pub endpoint_id: Uuid,
     pub kind: ConnectionKind,
     /// Pasteable connection string (a Postgres DSN today).
     pub dsn: String,
-    /// The one-time secret, also embedded in the DSN's password slot.
+    /// The endpoint secret, also embedded in the DSN's password slot.
     pub secret: String,
     /// Ready-to-adapt invocation, e.g. `psql "…"`.
     pub example: String,
@@ -1006,7 +1006,8 @@ impl Broker {
 
     /// Issue (or rotate) a direct endpoint for a connection: mint the
     /// endpoint secret, bind its listener, and hand back the pasteable DSN.
-    /// The secret leaves the broker exactly once, here. Gated behind the
+    /// The secret is retained on the record so later copies of the address
+    /// carry it too. Gated behind the
     /// configuration gate: a fresh native authentication is reused (the
     /// presence window), otherwise the OS prompt appears — issuance grants
     /// standing access, so it is never silent for a user who has not
