@@ -232,14 +232,24 @@
   .seg.in-form{ margin: 0; }
   /* ---- content ---------------------------------------------------------- */
 .content{
-  flex: 1; overflow-y: auto; overflow-x: hidden; padding: 0 14px 12px;
-  scrollbar-gutter: stable;
+  /* Always lay out the scrollbar track (overflow-y: scroll, not auto) so the
+     panel reserves its 8px up front. Switching Get started options, toggling
+     "Show all", or opening a menu with many items flips the panel between
+     fitting and overflowing; holding the track keeps the content from shifting
+     sideways when the scrollbar appears or disappears. overflow: scroll reserves
+     the space in every WebKit build we ship on, where scrollbar-gutter is honored
+     inconsistently next to a custom ::-webkit-scrollbar. The track itself stays
+     transparent, so an idle panel shows reserved space, not an empty bar. */
+  flex: 1; overflow-y: scroll; overflow-x: hidden; padding: 0 14px 12px;
 }
   .dd-content{ position: relative; min-height: 0; }
   .dw-main .content{ padding: 0 16px 14px; }
   .content::-webkit-scrollbar, .dd-global::-webkit-scrollbar{ width: 8px; }
   .content::-webkit-scrollbar-thumb, .dd-global::-webkit-scrollbar-thumb{ background: var(--scroll-thumb); border-radius: 4px; }/* ---- global band ------------------------------------------------------ */
-.dd-global{ padding: 0 14px; margin-bottom: 8px; max-height: 172px; overflow-y: auto; border-bottom: 1px solid var(--line); }
+/* Reserve the scrollbar track here too (see .content): the Active sessions and
+   "Waiting on you" bands fill past their max-height with many items, and holding
+   the 8px keeps the band from jumping sideways when its scrollbar appears. */
+.dd-global{ padding: 0 14px; margin-bottom: 8px; max-height: 172px; overflow-y: scroll; border-bottom: 1px solid var(--line); }
   .dd-global.onboarding-global{ max-height: none; overflow: visible; border-bottom: 0; }
   .dw-main .dd-global{ margin: 0 16px 8px; padding: 0; }
   .live-head{ font-size: 12.5px; font-weight: 600; color: var(--muted); padding: 9px 2px 4px; }
