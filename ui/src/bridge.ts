@@ -834,7 +834,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       let shownSecret = secret;
       if (kind === 'pg') {
         dsn = `postgresql://${connection.user ?? 'app'}:${secret}@/${connection.dbname ?? 'app'}?host=${dir}&port=5432&sslmode=disable`;
-        example = `psql "${dsn}"`;
+        example = `DATABASE_URL="${dsn}"`;
       } else if (kind === 'ssh') {
         dsn = `${dir}/agent.sock`;
         const dest = connection.destination ?? `${connection.user ?? 'deploy'}@${connection.host ?? 'host'}`;

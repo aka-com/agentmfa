@@ -50,7 +50,9 @@ pub struct IssuedEndpointInfo {
     pub dsn: String,
     /// The endpoint secret, also embedded in the DSN's password slot.
     pub secret: String,
-    /// Ready-to-adapt invocation, e.g. `psql "…"`.
+    /// Ready-to-adapt usage line. For Postgres this is `.env`-shaped
+    /// (`DATABASE_URL="…"`) rather than a shell command, so the embedded
+    /// secret is not steered toward argv/shell history.
     pub example: String,
 }
 
@@ -1401,7 +1403,10 @@ impl Broker {
                     dbname,
                     Some(&issued.secret),
                 );
-                let example = format!("psql \"{dsn}\"");
+                // .env-shaped on purpose: the expected home for a brokered
+                // DSN is a config file, not a shell command — argv would
+                // leave the embedded secret in history and `ps` output.
+                let example = format!("DATABASE_URL=\"{dsn}\"");
                 IssuedEndpointInfo {
                     endpoint_id: issued.endpoint.id,
                     kind: ConnectionKind::Pg,
