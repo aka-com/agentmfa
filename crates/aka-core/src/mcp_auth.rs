@@ -561,8 +561,11 @@ async fn run_flow(
     Workspace endpoints) answer an unauthenticated initialize with 2xx and
     gate the actual tools instead; with a client in hand the flow can
     proceed straight to discovery. */
-    let www_authenticate =
-        step("the MCP server", probe(&client, &endpoint, preset.client_id.is_some())).await?;
+    let www_authenticate = step(
+        "the MCP server",
+        probe(&client, &endpoint, preset.client_id.is_some()),
+    )
+    .await?;
 
     /* 2 — discover */
     broadcast(broker, &session_id, McpAuthPhase::Discovering);
@@ -649,8 +652,14 @@ async fn run_flow(
         // duplicated redirect_uri or code_challenge would hand the code
         // (or the PKCE binding) to whoever supplied the parameter.
         const RESERVED_AUTH_PARAMS: [&str; 8] = [
-            "response_type", "client_id", "redirect_uri", "state",
-            "code_challenge", "code_challenge_method", "resource", "scope",
+            "response_type",
+            "client_id",
+            "redirect_uri",
+            "state",
+            "code_challenge",
+            "code_challenge_method",
+            "resource",
+            "scope",
         ];
         for (key, value) in &preset.extra_auth_params {
             if RESERVED_AUTH_PARAMS.contains(&key.as_str()) {

@@ -422,7 +422,9 @@ fn set_activation_policy(app: &AppHandle, regular: bool) {
 #[cfg(not(target_os = "macos"))]
 fn set_activation_policy(_app: &AppHandle, _regular: bool) {}
 
-/// Reopen the main window (Dock-icon reactivation via `RunEvent::Reopen`).
+/// Reopen the main window (Dock-icon reactivation via `RunEvent::Reopen`,
+/// which only macOS emits).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn ui_open_main(app: AppHandle) {
     open_main(&app);
 }

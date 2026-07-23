@@ -377,52 +377,70 @@ impl Broker {
 
     /* --------------------- connections (UI commands) ---------------------- */
 
-    /// Whether the spec binds or references a secret the vault already
-    /// holds. Attaching a stored credential to a new destination extends
-    /// that credential's reach, which is the escalation the native gate
-    /// exists for. A credential typed into the form alongside the tool is
-    /// self-authorizing: the form is the intent. `exclude` names a secret
-    /// being created atomically with the tool, so its own template ref does
-    /// not count as reuse.
-    fn spec_reuses_stored_secret(&self, spec: &ConnectionSpec, exclude: Option<&str>) -> bool {
-        if !spec.secrets.is_empty() {
-            return true;
-        }
+    /// Whether the spec attaches a stored secret to a destination that
+    /// secret does not already cover. Attaching a stored credential to a
+    /// *new* destination extends that credential's reach, which is the
+    /// escalation the native gate exists for; reusing it at a destination
+    /// an existing tool already binds it to extends nothing, so it adds
+    /// without a prompt. A credential typed into the form alongside the
+    /// tool is self-authorizing: the form is the intent. `exclude` names a
+    /// secret being created atomically with the tool, so its own template
+    /// ref does not count as reuse.
+    fn spec_extends_stored_secret_reach(
+        &self,
+        spec: &ConnectionSpec,
+        exclude: Option<&str>,
+    ) -> bool {
+        let secrets = self.store.list_secrets();
+        // The stored secrets the spec attaches: explicit bindings plus
+        // template refs that name a secret the vault already holds.
+        let mut attached: Vec<Uuid> = spec.secrets.clone();
         let template = match &spec.config {
             crate::types::ConnectionConfig::Api { template, .. } => Some(template.as_str()),
             crate::types::ConnectionConfig::Ws { template, .. } => template.as_deref(),
             _ => None,
         };
-        let Some(template) = template else {
+        if let Some(template) = template {
+            let Ok(parsed) = crate::template::Template::parse(template) else {
+                // Unparseable templates are rejected later by validation;
+                // treat the ambiguity as an escalation so the gate fails safe.
+                return true;
+            };
+            for name in parsed.refs() {
+                if Some(name.as_str()) == exclude {
+                    continue;
+                }
+                if let Some(meta) = secrets.iter().find(|meta| meta.name == name) {
+                    attached.push(meta.id);
+                }
+            }
+        }
+        if attached.is_empty() {
             return false;
-        };
-        let Ok(parsed) = crate::template::Template::parse(template) else {
-            // Unparseable templates are rejected later by validation; treat
-            // the ambiguity as reuse so the gate fails safe.
-            return true;
-        };
-        let stored: std::collections::HashSet<String> = self
-            .store
-            .list_secrets()
-            .into_iter()
-            .map(|meta| meta.name)
-            .collect();
-        parsed
-            .refs()
-            .iter()
-            .any(|name| Some(name.as_str()) != exclude && stored.contains(name))
+        }
+        // A secret already covers the spec's destination when some existing
+        // tool binds it to an equivalent target (API connections derive
+        // their secret list from template refs, so `secrets` is the full
+        // binding set for every kind).
+        let connections = self.store.list_connections();
+        attached.iter().any(|secret_id| {
+            !connections.iter().any(|conn| {
+                conn.secrets.contains(secret_id) && conn.config.has_equivalent_target(&spec.config)
+            })
+        })
     }
 
     /// A connection pins a destination and may bind a secret to it. The
     /// native confirmation fires only when the spec attaches an
-    /// already-stored secret; credential-less tools and tools whose secret
-    /// arrives with the form add without a prompt.
+    /// already-stored secret to a destination it does not already cover;
+    /// credential-less tools, tools whose secret arrives with the form, and
+    /// same-destination reuse add without a prompt.
     pub fn ui_add_connection(&self, spec: ConnectionSpec) -> Result<Connection> {
         // Reject invalid or already-stale input before asking the user to
         // authenticate. `add_connection` repeats the state-dependent checks
         // after confirmation in case the index changed while the sheet was up.
         self.store.preflight_add_connection(&spec)?;
-        let confirmation = if self.spec_reuses_stored_secret(&spec, None) {
+        let confirmation = if self.spec_extends_stored_secret_reach(&spec, None) {
             Some(self.confirm_user_action(&format!("Add tool “{}”", spec.name))?)
         } else {
             None
@@ -447,7 +465,7 @@ impl Broker {
     /// without exposing an intermediate, partially configured state. The
     /// credential arrives with the form (or was just minted by an OAuth
     /// sign-in the user drove), so no native confirmation fires unless the
-    /// spec additionally references some other stored secret.
+    /// spec additionally extends some other stored secret's reach.
     pub fn ui_add_connection_with_secret(
         &self,
         secret_name: &str,
@@ -456,7 +474,7 @@ impl Broker {
     ) -> Result<Connection> {
         self.store
             .preflight_add_connection_with_secret(secret_name, &spec)?;
-        let confirmation = if self.spec_reuses_stored_secret(&spec, Some(secret_name)) {
+        let confirmation = if self.spec_extends_stored_secret_reach(&spec, Some(secret_name)) {
             Some(self.confirm_user_action(&format!("Add tool “{}”", spec.name))?)
         } else {
             None
@@ -485,9 +503,9 @@ impl Broker {
 
     /// Update a connection. Name-only edits are metadata and do not require
     /// native authentication; changes to configuration, secret bindings, or
-    /// authentication do. When the pinned target changes, its wirings are
-    /// dropped: a wiring granted for one destination must not silently cover
-    /// another.
+    /// authentication do. When the pinned target changes, its direct
+    /// endpoints are revoked: a pasted address granted for one destination
+    /// must not silently cover another.
     pub fn ui_update_connection(&self, id: &Uuid, spec: ConnectionSpec) -> Result<Connection> {
         let old = self.store.connection_by_id(id)?;
         let explicit_secrets_changed =
@@ -510,18 +528,17 @@ impl Broker {
         } else {
             (self.store.rename_connection(id, spec.name)?, false)
         };
-        let mut dropped = 0;
+        let mut endpoints_revoked = false;
         if target_changed {
-            // The enabled/disabled flag names the *tool* and survives a
-            // retarget (a disabled tool must not silently re-enable), but a
-            // curated MCP tool subset names the old upstream's tools and its
-            // direct endpoints grant standing access to the old destination:
-            // both die with the retarget.
-            let tools_cleared = self.access.set_allowed_tools(*id, None)?;
-            dropped = usize::from(tools_cleared);
+            // Direct endpoints grant standing access to the old destination —
+            // an already-pasted DSN must not silently point at the new one —
+            // so they die with the retarget. The enabled/disabled flag and
+            // any curated MCP tool subset name the *tool* and survive: stale
+            // tool names simply stop matching, which only narrows access.
             let endpoints = self.endpoints.remove_for_connection(id)?;
             self.teardown_endpoints(&endpoints);
-            if tools_cleared || !endpoints.is_empty() {
+            endpoints_revoked = !endpoints.is_empty();
+            if endpoints_revoked {
                 self.events.wirings_changed();
             }
             // A health result for the old destination says nothing about
@@ -543,8 +560,8 @@ impl Broker {
         .detail(format!(
             "{}{}",
             conn.target(),
-            if dropped > 0 {
-                " · tool selection reset (target changed)".to_string()
+            if endpoints_revoked {
+                " · direct endpoints revoked (target changed)".to_string()
             } else {
                 String::new()
             }
@@ -552,7 +569,7 @@ impl Broker {
         .field("target", conn.target())
         .field("target_changed", target_changed)
         .field("capability_changed", capability_changed)
-        .field("tool_selection_reset", dropped > 0);
+        .field("endpoints_revoked", endpoints_revoked);
         if let Some(confirmation) = confirmation {
             entry = entry.confirmation(confirmation);
         }

@@ -930,7 +930,8 @@ async fn a_preset_client_signs_in_without_dynamic_registration() {
         .connection_oauth_grant(&connection.id)
         .await
         .expect("grant stored");
-    let grant = aka_core::mcp_auth::McpOAuthGrant::from_secret_value(&stored).expect("grant parses");
+    let grant =
+        aka_core::mcp_auth::McpOAuthGrant::from_secret_value(&stored).expect("grant parses");
     assert_eq!(grant.client_id, "preset-client-123");
     assert_eq!(grant.client_secret.as_deref(), Some("preset-secret-xyz"));
     assert_eq!(grant.refresh_token.as_deref(), Some(REFRESH_TOKEN));

@@ -693,7 +693,7 @@ pub fn add_connection(state: State<AppState>, mut input: ConnectionInput) -> For
 }
 
 /// Security-relevant connection edits are core-gated; metadata-only
-/// edits are not. A target change drops the connection's standing rules.
+/// edits are not. A target change revokes the connection's direct endpoints.
 #[tauri::command]
 pub fn edit_connection(
     state: State<AppState>,

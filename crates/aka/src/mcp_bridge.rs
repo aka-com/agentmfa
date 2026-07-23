@@ -62,7 +62,10 @@ async fn unix_http(
         .ok_or_else(|| std::io::Error::other("malformed HTTP status line"))?;
     // Bodies here are Content-Length JSON; a chunked body would carry size
     // markers, so refuse it loudly rather than pass garbage along.
-    if head.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+    if head
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked")
+    {
         return Err(std::io::Error::other("unexpected chunked response"));
     }
     Ok((status, payload.to_string()))
@@ -88,10 +91,7 @@ async fn shared_key(paths: &Paths, label: Option<&str>) -> Result<String, String
             return Ok(token);
         }
     }
-    let body = format!(
-        r#"{{"agent_name": "{}"}}"#,
-        label.unwrap_or("mcp-bridge")
-    );
+    let body = format!(r#"{{"agent_name": "{}"}}"#, label.unwrap_or("mcp-bridge"));
     let (status, payload) = unix_http(&paths.socket_file(), "POST", "/v1/pair", Some(&body))
         .await
         .map_err(|e| format!("could not reach the broker to fetch the shared key: {e}"))?;
@@ -167,7 +167,8 @@ impl SseParser {
                     self.data.clear();
                 }
             } else if let Some(value) = line.strip_prefix("data:") {
-                self.data.push(value.strip_prefix(' ').unwrap_or(value).to_string());
+                self.data
+                    .push(value.strip_prefix(' ').unwrap_or(value).to_string());
             }
         }
         events
@@ -418,7 +419,10 @@ mod tests {
             let message: serde_json::Value = serde_json::from_str(&body).unwrap();
             match message["method"].as_str().unwrap() {
                 "initialize" => (
-                    [("mcp-session-id", "sess-1"), ("content-type", "application/json")],
+                    [
+                        ("mcp-session-id", "sess-1"),
+                        ("content-type", "application/json"),
+                    ],
                     r#"{"jsonrpc":"2.0","id":1,"result":{}}"#,
                 )
                     .into_response(),
@@ -508,7 +512,9 @@ mod tests {
             session: None,
         };
         assert!(matches!(
-            bridge.post(r#"{"jsonrpc":"2.0","id":1,"method":"x"}"#).await,
+            bridge
+                .post(r#"{"jsonrpc":"2.0","id":1,"method":"x"}"#)
+                .await,
             Ok(Relay::StaleToken)
         ));
     }

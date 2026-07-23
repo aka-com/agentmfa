@@ -700,8 +700,8 @@ impl Store {
 
     /// Update a connection. The kind is fixed after creation. Returns the
     /// updated connection and whether its pinned target changed, the caller
-    /// must drop the connection's standing rules when it did (a rule granted
-    /// for one destination must not silently cover another).
+    /// must revoke the connection's direct endpoints when it did (a pasted
+    /// address granted for one destination must not silently cover another).
     pub fn update_connection(&self, id: &Uuid, spec: ConnectionSpec) -> Result<(Connection, bool)> {
         validate_connection_name(&spec.name)?;
         let mut state = self.state.lock().unwrap();

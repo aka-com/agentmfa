@@ -262,9 +262,8 @@ mod tests {
 
     fn registry_bounded(max_total: usize) -> (EndpointRegistry, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let r =
-            EndpointRegistry::open(dir.path().join("endpoints.json"), max_total, integrity())
-                .unwrap();
+        let r = EndpointRegistry::open(dir.path().join("endpoints.json"), max_total, integrity())
+            .unwrap();
         (r, dir)
     }
 

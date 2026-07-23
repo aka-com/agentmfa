@@ -31,7 +31,10 @@ use commands::AppState;
 
 enum IntegrityRecoveryDecision {
     Quit,
+    // Only the macOS recovery dialog can choose to archive.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     ArchiveConfirmed,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     ArchiveUnconfirmed,
 }
 

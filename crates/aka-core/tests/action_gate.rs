@@ -713,6 +713,54 @@ async fn connection_add_preflight_rejects_failures_before_confirmation() {
 }
 
 #[tokio::test]
+async fn same_destination_reuse_adds_without_confirmation() {
+    let events = Arc::new(GateEvents {
+        allow: true,
+        confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    let existing = add_github(&broker);
+    let api_spec = |name: &str, host: &str| ConnectionSpec {
+        name: name.into(),
+        config: ConnectionConfig::Api {
+            host: host.into(),
+            scheme: "https".into(),
+            port: None,
+            template: "Authorization: token {{GITHUB_API_KEY}}".into(),
+
+            mcp_path: None,
+            oauth: None,
+        },
+        secrets: vec![],
+    };
+
+    // Reusing the stored secret at the destination an existing tool
+    // already binds it to extends nothing: no prompt.
+    let ConnectionConfig::Api { host, .. } = &existing.config else {
+        panic!("expected API connection")
+    };
+    broker
+        .ui_add_connection(api_spec("github-second", host))
+        .unwrap();
+    assert_eq!(
+        events.confirms.load(Ordering::SeqCst),
+        0,
+        "same-destination reuse is not an escalation"
+    );
+
+    // A destination the secret does not cover is the escalation that
+    // authenticates.
+    broker
+        .ui_add_connection(api_spec("github-elsewhere", "api.other.example.com"))
+        .unwrap();
+    assert_eq!(
+        events.confirms.load(Ordering::SeqCst),
+        1,
+        "a new destination still authenticates"
+    );
+}
+
+#[tokio::test]
 async fn connection_renames_skip_confirmation_but_capability_changes_do_not() {
     let events = Arc::new(GateEvents {
         allow: true,
@@ -966,15 +1014,14 @@ async fn access_records_die_with_a_deleted_connection() {
 }
 
 #[tokio::test]
-async fn target_changes_keep_the_flag_but_reset_the_tool_subset() {
+async fn target_changes_keep_the_flag_and_the_tool_subset() {
     let events = Arc::new(GateEvents {
         allow: true,
         confirms: AtomicUsize::new(0),
     });
     let (broker, _dir) = broker_with(events.clone()).await;
     let conn = add_github(&broker);
-    // A disabled tool with a curated subset (the subset names the *old*
-    // upstream's tools).
+    // A disabled tool with a curated subset.
     assert!(broker.ui_set_tool_access(&conn.id, false).unwrap());
     assert!(broker
         .ui_set_allowed_tools(&conn.id, Some(vec!["search".into()]))
@@ -1000,14 +1047,16 @@ async fn target_changes_keep_the_flag_but_reset_the_tool_subset() {
         .unwrap();
     // A disabled tool must not silently re-enable on retarget…
     assert!(!broker.access.allows(&conn.id));
-    // …but the curated subset named the old upstream's tools and is reset.
-    assert_eq!(broker.access.allowed_tools(&conn.id), None);
+    // …and the curated subset survives: stale tool names simply stop
+    // matching the new upstream, which only narrows access — a reset to
+    // "All tools" would widen it.
+    assert_eq!(
+        broker.access.allowed_tools(&conn.id),
+        Some(vec!["search".into()])
+    );
 
     // A rename alone keeps everything: same destination, same authority.
     assert!(broker.ui_set_tool_access(&conn.id, true).unwrap());
-    assert!(broker
-        .ui_set_allowed_tools(&conn.id, Some(vec!["search".into()]))
-        .unwrap());
     let current = broker.store.connection_by_id(&conn.id).unwrap();
     let renamed = broker
         .ui_update_connection(

@@ -1997,9 +1997,6 @@ function connSheet(editing: boolean): string {
     fields += `<div class="f-row"><button class="btn" data-act="${conn.mcp_path ? 'reconnect-mcp' : 'oauth-reconnect'}"
       data-id="${conn.id}">Reconnect (sign in again)</button></div>`;
   }
-  if (editing && conn) {
-    fields += `<div class="rule-note">Changing the destination revokes direct endpoints and resets the tool selection.</div>`;
-  }
   const label = (!editing && state.connEntryName) || catalogNameForType(t);
   const oauthSelected = !editing && t === 'api' && isMcpDraft(d)
     && (d.authMode || 'oauth') === 'oauth';
