@@ -5,6 +5,7 @@ import {
   apiOriginFromParts,
   authTemplate,
   defaultConnectionName,
+  isLoopbackHost,
   parseConnectionImport,
   parseApiOrigin,
   quickSetupPlaceholder,
@@ -16,6 +17,18 @@ import {
 test('provides a quick-setup placeholder for every connection type', () => {
   assert.equal(quickSetupPlaceholder('pg'), 'postgresql://app@db.example.com/production');
   assert.equal(quickSetupPlaceholder('ssh'), 'ssh deploy@prod.example.com');
+});
+
+test('recognizes loopback hosts without treating lookalike remote hosts as local', () => {
+  for (const host of [
+    'localhost', 'LOCALHOST.', 'postgres.localhost', '127.0.0.1', '127.20.30.40',
+    '::1', '[::1]', '0:0:0:0:0:0:0:1',
+  ]) {
+    assert.equal(isLoopbackHost(host), true, host);
+  }
+  for (const host of ['localhost.example.com', '127.0.0.999', '128.0.0.1', '::2', 'db.example.com']) {
+    assert.equal(isLoopbackHost(host), false, host);
+  }
 });
 
 test('builds display names for services and infrastructure endpoints', () => {

@@ -14,6 +14,22 @@ export function quickSetupPlaceholder(type: ConnectionType): string {
   return QUICK_SETUP_PLACEHOLDERS[type];
 }
 
+/** Whether a host names this machine's loopback interface. */
+export function isLoopbackHost(host: string | null | undefined): boolean {
+  let normalized = (host || '').trim().toLowerCase();
+  if (normalized.endsWith('.')) normalized = normalized.slice(0, -1);
+  if (normalized.startsWith('[') && normalized.endsWith(']')) {
+    normalized = normalized.slice(1, -1);
+  }
+  if (normalized === 'localhost' || normalized.endsWith('.localhost')) return true;
+  if (normalized === '::1' || normalized === '0:0:0:0:0:0:0:1') return true;
+
+  const octets = normalized.split('.');
+  return octets.length === 4
+    && octets[0] === '127'
+    && octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255);
+}
+
 export function defaultConnectionName(
   type: ConnectionType,
   label: string,

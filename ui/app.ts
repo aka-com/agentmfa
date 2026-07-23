@@ -26,7 +26,7 @@ import type { CatalogEntry } from '/src/catalog';
 import { ICONS, TYPES, esc, escAttr, toast, relTime, absTime } from '/src/util';
 import {
   apiOriginFromParts, authTemplate, defaultConnectionName, parseApiOrigin, parseConnectionImport,
-  parseMcpServerUrl,
+  isLoopbackHost, parseMcpServerUrl,
   quickSetupPlaceholder, shouldResolveSshImport, sshImportFromPreview, suggestedSecretName,
 } from '/src/connection-input';
 import { formErrorKind, formErrorMessage, inlineFormError } from '/src/form-errors';
@@ -531,9 +531,8 @@ function secretsTableHTML(query = '') {
       ? `<span class="copied-badge">${ICONS.check}<span>Copied</span></span>`
       : `<button class="ghost-copy" title="Copy value" data-act="copy-secret" data-id="${s.id}">${ICONS.copy}<span>Copy</span></button>`;
     const valText = revealed ? esc(revealed) : '••••••••';
-    const sub = `Used by ${s.used_by} tool${s.used_by === 1 ? '' : 's'}`;
     return `<tr>
-      <td><div><div class="s-name">${esc(s.name)}</div><div class="s-sub secret-usage">${esc(sub)}</div></div></td>
+      <td><div class="s-name">${esc(s.name)}</div></td>
       <td class="val"><span class="val-wrap"><span class="val-slot ${copied ? 'is-copied' : ''}"><code>${valText}</code><span class="val-overlay">${overlay}</span></span></span> ${eyeBtn}</td>
       <td class="rowdel">
         <button class="icon-btn" title="Edit secret" aria-label="Edit secret ${escAttr(s.name)}" data-act="edit-secret" data-id="${s.id}">${ICONS.pencil}</button>
@@ -604,7 +603,7 @@ function endpointStripHTML(c: ConnectionSummary): string {
     <div class="tile-menu-wrap ep-menu-wrap">
       <button class="icon-btn ep-menu-btn ${menuOpen ? 'on' : ''}" title="Endpoint options"
         aria-label="Endpoint options for ${escAttr(c.name)}" aria-haspopup="menu"
-        aria-expanded="${menuOpen}" data-act="toggle-ep-menu" data-conn="${c.id}">${ICONS.ellipsisVertical}</button>
+        aria-expanded="${menuOpen}" data-act="toggle-ep-menu" data-conn="${c.id}">${ICONS.ellipsis}</button>
       ${menuOpen ? `<div class="tile-menu" role="menu" aria-label="Endpoint options for ${escAttr(c.name)}">
         <button class="menu-item" role="menuitem" data-act="reissue-endpoint-ask" data-conn="${c.id}">${ICONS.refresh} Reissue endpoint…</button>
         <button class="menu-item danger" role="menuitem" data-act="revoke-endpoint-ask" data-conn="${c.id}">${ICONS.x} Revoke endpoint…</button>
@@ -767,10 +766,10 @@ function connectionPurpose(c: ConnectionSummary): string | null {
 }
 
 /** The credential the broker injects; never its value. */
-function connectionCredential(c: ConnectionSummary): string {
-  if (c.oauth || c.oauth_spec) return 'OAuth sign-in (token auto-refreshes)';
+function connectionCredential(c: ConnectionSummary): string | null {
+  if (c.oauth || c.oauth_spec) return 'Connected via OAuth';
   const names = c.secret_names || [];
-  if (!names.length) return 'No credential bound';
+  if (!names.length) return null;
   return names.join(' + ');
 }
 
@@ -797,23 +796,25 @@ function catalogConnRowHTML(c: ConnectionSummary): string {
   const toolsChip = enabled && c.mcp_path
     ? `<button class="cat-meta-tools" data-act="wiring-tools" data-conn="${c.id}"
         aria-label="Choose which tools agents may call on ${escAttr(c.name)}"
-        title="Choose which of this server’s tools agents may call">${ICONS.layoutGrid}<span>${
+        title="Choose which of this server’s tools agents may call">${ICONS.filter}<span>${
           c.agent_access.allowed_tools
             ? `${c.agent_access.allowed_tools.length} tool${c.agent_access.allowed_tools.length === 1 ? '' : 's'}`
             : 'All tools'}</span></button>`
     : '';
-  const statusItem = c.mcp_path
+  const connectionCheckItem = c.mcp_path
     ? `<button class="menu-item" role="menuitem" data-act="mcp-status" data-id="${c.id}"
         ${mcpStatus && mcpStatus.running ? 'disabled' : ''}>${ICONS.refresh} ${
           mcpStatus && mcpStatus.running ? 'Checking…' : 'Check server & account'}</button>`
-    : '';
+    : `<button class="menu-item" role="menuitem" data-act="test-conn" data-id="${c.id}"
+        ${test && test.running ? 'disabled' : ''}>${ICONS.flaskConical} ${
+          test && test.running ? 'Testing…' : 'Test connection'}</button>`;
   // Everything wrong with the row, folded into one health chip. TLS
   // weaker than the default, an unpinned host key, and a passively
   // recorded rejected credential (brokered calls and background token
   // renewals set needs_reconnect without anyone pressing Test) each become
   // one line in the chip's expansion, with the fix action beside it.
   const issues: Array<{ text: string; fix?: string }> = [];
-  if (c.type === 'pg' && c.sslmode && c.sslmode !== 'verify-full') {
+  if (c.type === 'pg' && c.sslmode && c.sslmode !== 'verify-full' && !isLoopbackHost(c.host)) {
     issues.push({
       text: c.sslmode === 'disable'
         ? 'TLS is disabled for this connection.'
@@ -839,8 +840,10 @@ function catalogConnRowHTML(c: ConnectionSummary): string {
     ? '<span class="cc-health off">Off</span>'
     : issues.length
     ? `<button class="cc-health attn" data-act="toggle-conn-issues" data-id="${c.id}"
-        aria-expanded="${issuesOpen}" title="${escAttr(issues.map((issue) => issue.text).join(' '))}">
-        ${ICONS.triangleAlert}<span>Attention · ${issues.length}</span>
+        aria-expanded="${issuesOpen}"
+        aria-label="${issues.length} warning${issues.length === 1 ? '' : 's'}: ${escAttr(issues.map((issue) => issue.text).join(' '))}"
+        title="${escAttr(issues.map((issue) => issue.text).join(' '))}">
+        ${ICONS.triangleAlert}<span>${issues.length}</span>
         <span class="cat-chev ${issuesOpen ? 'open' : ''}">${ICONS.chevronDown}</span></button>`
     : '<span class="cc-health ok">Ready</span>';
   const issuesBlock = enabled && issuesOpen && issues.length
@@ -848,6 +851,7 @@ function catalogConnRowHTML(c: ConnectionSummary): string {
         `<div class="cc-issue"><span>${esc(issue.text)}</span>${issue.fix ?? ''}</div>`).join('')}</div>`
     : '';
   const purpose = connectionPurpose(c);
+  const credential = connectionCredential(c);
   return `<div class="cat-conn">
     <div class="cat-conn-tx">
       <div class="cat-conn-head"><b title="${escAttr(c.name)}">${esc(title)}</b>${live ? ` <span class="cc-live">● ${live} live</span>` : ''}${health}</div>
@@ -856,7 +860,7 @@ function catalogConnRowHTML(c: ConnectionSummary): string {
         <div class="cat-conn-meta">
           ${purpose ? `<span>${esc(purpose)}</span>` : ''}
           ${toolsChip}
-          <span class="cat-meta-cred">${ICONS.keyRound}<span>${esc(connectionCredential(c))}</span></span>
+          ${credential ? `<span class="cat-meta-cred">${ICONS.keyRound}<span>${esc(credential)}</span></span>` : ''}
         </div>
       </div>
       ${issuesBlock}${connTestResultHTML(c)}${mcpStatusHTML(c)}${endpointStripHTML(c)}</div>
@@ -865,8 +869,7 @@ function catalogConnRowHTML(c: ConnectionSummary): string {
         aria-label="Options for ${escAttr(c.name)}" aria-haspopup="menu"
         aria-expanded="${menuOpen}" data-act="toggle-conn-menu" data-id="${c.id}">${ICONS.ellipsis}</button>
       ${menuOpen ? `<div class="tile-menu" role="menu" aria-label="Options for ${escAttr(c.name)}">
-        ${statusItem}
-        <button class="menu-item" role="menuitem" data-act="test-conn" data-id="${c.id}" ${test && test.running ? 'disabled' : ''}>${ICONS.flaskConical} ${test && test.running ? 'Testing…' : 'Test connection'}</button>
+        ${connectionCheckItem}
         <button class="menu-item" role="menuitem" data-act="edit-conn" data-id="${c.id}">${ICONS.pencil} Edit…</button>
         <button class="menu-item danger" role="menuitem" data-act="del-conn-ask" data-id="${c.id}">${ICONS.trash} Delete…</button>
       </div>` : ''}
@@ -911,7 +914,7 @@ function credentialsExpansionHTML(): string {
   const body = matching.length
     ? secretsTableHTML(query)
     : `<div class="muted-note">${state.secrets.length ? 'No saved credentials match your search.' : 'No saved credentials yet.'}</div>`;
-  return `<div class="cat-conns">${body}
+  return `<div class="cat-conns credentials-expansion">${body}
     <button class="cat-more cat-add-secret" data-act="open-add-secret">＋ Add credential</button></div>`;
 }
 
@@ -935,7 +938,7 @@ function catalogRowHTML(entry: CatalogEntry): string {
     : ['mcp', 'http'].includes(entry.id)
     ? 'Configure'
     : entry.preset
-    ? 'Configure API key'
+    ? 'Configure'
     : entry.mcp && !entry.mcpTemplate?.serverUrl
     ? 'Add custom app'
     : entry.mcp
@@ -999,7 +1002,7 @@ function catalogRowHTML(entry: CatalogEntry): string {
     <div class="cat-row ${rowToggle ? 'is-toggle' : ''} ${count ? 'is-configured' : ''}"${rowToggle}>
       <span class="cat-ico" aria-hidden="true">${ICONS[entry.icon] || ''}</span>
       <div class="cat-tx"><b>${esc(entry.name)}</b><span>${esc(entry.description)}</span></div>
-      ${entry.limitedSupport ? `<span class="cat-limited" tabindex="0" data-tippy-content="${escAttr(entry.name)} only accepts OAuth sign-ins from clients it has pre-approved, and Multitool isn't on that list yet, so connecting may be refused.">Limited support</span>` : ''}
+      ${entry.limitedSupport ? `<span class="cat-limited" tabindex="0" data-tippy-content="${escAttr(entry.name)} only accepts OAuth sign-ins from pre-approved clients. Contact your representative at the company for support.">Limited support</span>` : ''}
       ${action}
     </div>${expansion}</div>`;
 }
@@ -1940,14 +1943,6 @@ const PG_SSL_OPTIONS: Array<[string, string]> = [
   ['prefer', 'Prefer (TLS optional)'],
   ['disable', 'Disable'],
 ];
-
-/** Loopback never benefits from TLS to itself; a stock local Postgres does
- * not even offer it, so the verify-full default would fail every dial. */
-function isLoopbackHost(host: string | null | undefined): boolean {
-  const h = (host || '').trim().toLowerCase();
-  return h === 'localhost' || h === '::1' || h === '[::1]'
-    || h === '127.0.0.1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
-}
 
 /** Keep sslmode tracking a loopback host until the user picks one: default →
  * disable when the host goes loopback, and back when it stops being one.

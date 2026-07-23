@@ -431,7 +431,6 @@
   .sec-table td{ padding: 8px 6px; border-bottom: 1px solid var(--line-soft); vertical-align: middle; }
   .s-name{ font-weight: 600; font-size: 13px; font-family: ui-monospace, Menlo, Consolas, monospace; }
   .s-sub{ font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; color: var(--muted); margin-top: 2px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .secret-usage{ font-family: inherit; font-size: 12px; }
   .c-name{ font-weight: 600; font-size: 14.5px; }
   .badge{ display: inline-block; padding: 2px 8px; border-radius: 9px; font-size: 12px; font-weight: 600; white-space: nowrap; }
   .b-api{ background: var(--b-api-bg); color: var(--b-api-ink); }
@@ -535,12 +534,12 @@
 }
   .connection-ready-actions{ display: flex; align-items: center; gap: 3px; flex: 0 0 auto; }
 .tile-menu-wrap{ position: relative; flex: 0 0 auto; }
-  /* Present but quiet by default: these rows have no other route to
-     test/edit/delete, so the menu must be discoverable without a hover. */
-  .tile-menu-btn{ opacity: .5; transition: opacity .12s ease; }
-  .cat-conn:hover .tile-menu-btn, .tile-menu-btn:hover,
-  .tile-menu-btn:focus-visible, .tile-menu-btn.on{ opacity: 1; }
-  .tile-menu-btn.on{ background: var(--hover-2); color: var(--ink-2); }
+  /* Tool and endpoint menus use the same strong horizontal-ellipsis trigger. */
+.tile-menu-btn, .ep-menu-btn{
+  width: 24px; height: 24px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.tile-menu-btn.on, .ep-menu-btn.on{ background: var(--hover-2); color: var(--ink-2); }
   .tile-menu{
   position: absolute; right: 0; top: calc(100% + 4px); z-index: 14;
   min-width: 185px; display: flex; flex-direction: column; gap: 2px; padding: 4px;
@@ -868,8 +867,10 @@
   background: var(--panel); border: 1px solid var(--line-mid); border-radius: 9px;
   box-shadow: 0 10px 28px rgba(10,15,40,.22);
 }
-.cat-section:has(.cat-row-wrap.menu-open) { position: relative; z-index: 2; }
-.cat-rows:has(.cat-row-wrap.menu-open) { overflow: visible; }
+.cat-section:has(.cat-row-wrap.menu-open),
+.cat-section:has(.cat-row-wrap .tile-menu) { position: relative; z-index: 2; }
+.cat-rows:has(.cat-row-wrap.menu-open),
+.cat-rows:has(.cat-row-wrap .tile-menu) { overflow: visible; }
 .cat-more {
   display: flex; align-items: center; justify-content: center; gap: 5px; width: 100%;
   padding: 9px 14px; border: 0; border-top: 1px solid var(--line);
@@ -940,8 +941,8 @@
 }
 .cat-meta-idle { color: var(--amber-ink); }
 .cat-conn-danger { display: block; margin-top: 2px; color: var(--danger-ink); font-size: 11.5px; }
-/* One health chip per row: Ready / Attention · N / Off. It rides the right
-   edge of the head line; the attention variant is a button that expands the
+/* One health chip per row: Ready / warning count / Off. It rides the right
+   edge of the head line; the warning variant is a button that expands the
    row's issue list. */
 .cc-health {
   display: inline-flex; align-items: center; gap: 4px;
@@ -971,6 +972,9 @@
 }
 .cc-issue > span { flex: 1 1 auto; min-width: 0; }
 .cat-conns .sec-table { margin: 0; }
+/* Credential rows share the darker card surface of their "Saved
+   credentials" parent row. */
+.credentials-expansion { background: transparent; }
 /* Align the credential table with the connection rows' text spine. */
 .cat-conns .sec-table td:first-child { padding-left: 64px; }
 .cat-conns .sec-table td:last-child { padding-right: 14px; }
@@ -979,6 +983,7 @@
    table's last-row hairline is the divider above it, so the row itself draws
    no border of its own. */
 .cat-conns .cat-add-secret { border-top: 0; }
+.credentials-expansion .cat-add-secret:hover { background: var(--hover-2); }
 .dropdown-surface .catalog { gap: 12px; }
 .dropdown-surface .cat-search { width: 100%; }
 
@@ -1204,10 +1209,3 @@
 .ep-strip .ep-addr-wrap:focus-visible .ghost-copy{ opacity: 1; }
 .ep-strip .ep-addr-hidden{ color: var(--muted); }
 .ep-strip .ep-spacer{ flex: 1; }
-/* One ⋮ menu owns reissue/revoke; the trigger is a fixed square so the
-   glyph centers exactly. */
-.ep-menu-btn{
-  width: 24px; height: 24px; padding: 0;
-  display: inline-flex; align-items: center; justify-content: center;
-}
-.ep-menu-btn.on{ background: var(--hover-2); color: var(--ink-2); }
