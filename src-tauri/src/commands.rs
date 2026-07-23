@@ -10,9 +10,16 @@
 //!   this shell) before any effect happens — this command layer cannot
 //!   apply a gated action without passing through it, so the webview cannot
 //!   forge or skip the gate.
+//!
+//! Every command reaches the broker through the [`ManagementBackend`]
+//! seam: in local mode that is the in-process broker, in remote mode an
+//! HTTP client against a hosted broker's manage API. The webview cannot
+//! tell the difference.
 
-use aka_core::broker::Broker;
-use aka_core::error::{ConnectionField, CoreError};
+use std::sync::Arc;
+
+use aka_api::{IssuedEndpointDto, ManageError};
+use aka_core::manage::{BackendProfile, ManagementBackend};
 use aka_core::store::ConnectionSpec;
 use aka_core::types::{ConnectionConfig, PgSslMode};
 use serde::{Deserialize, Serialize};
@@ -21,11 +28,10 @@ use tauri_plugin_clipboard_manager::ClipboardExt as _;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::dto::*;
-
-pub struct AppState {
-    pub broker: std::sync::Arc<Broker>,
-    pub ssh_imports: std::sync::Mutex<crate::ssh_import::ImportCache>,
+/// The in-process broker stack backing local mode. Dropping it stops the
+/// sidecar, the daemon listeners, and finally the runtime, in that order.
+pub struct LocalRuntime {
+    pub broker: Arc<aka_core::broker::Broker>,
     // Keeps the Node sidecar supervised; dropping it kills the process and
     // stops restarting it. `None` when no sidecar script is installed.
     // Declared before the runtime it spawned its supervisor on.
@@ -36,6 +42,14 @@ pub struct AppState {
     // Keeps the broker's tokio runtime (daemon + executions) alive for the
     // life of the app. Dropped last (after `_daemon`).
     pub _runtime: tokio::runtime::Runtime,
+}
+
+pub struct AppState {
+    /// The management seam every command goes through.
+    pub backend: Arc<dyn ManagementBackend>,
+    pub ssh_imports: std::sync::Mutex<crate::ssh_import::ImportCache>,
+    /// Present in local mode only; remote mode runs no broker in-process.
+    pub _local: Option<LocalRuntime>,
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -52,6 +66,13 @@ pub fn get_local_username() -> String {
         .find(|name| !name.trim().is_empty())
         .map(|name| name.trim().to_string())
         .unwrap_or_default()
+}
+
+/// Which broker this app is managing (local vs remote), for the header
+/// switcher.
+#[tauri::command]
+pub fn get_backend_profile(state: State<AppState>) -> BackendProfile {
+    state.backend.profile()
 }
 
 #[derive(Debug, Serialize)]
@@ -101,9 +122,10 @@ impl FormError {
         }
     }
 
-    fn from_core(error: CoreError, context: FormContext<'_>) -> Self {
+    fn from_manage(error: ManageError, context: FormContext<'_>) -> Self {
+        use aka_api::ConnectionField;
         match error {
-            CoreError::SecretNameTaken(_) => {
+            ManageError::SecretNameTaken { .. } => {
                 let field = match context {
                     FormContext::Secret => "name",
                     FormContext::Connection { .. } => "newSecretName",
@@ -115,13 +137,13 @@ impl FormError {
                 )
                 .with_kind("conflict")
             }
-            CoreError::ConnectionNameTaken(_) => Self::validation(
+            ManageError::ConnectionNameTaken { .. } => Self::validation(
                 "connection_name_taken",
                 "name",
                 "That tool name is already in use",
             )
             .with_kind("conflict"),
-            CoreError::InvalidSecretName(_) => {
+            ManageError::InvalidSecretName { .. } => {
                 let field = match context {
                     FormContext::Secret => "name",
                     FormContext::Connection { .. } => "newSecretName",
@@ -132,22 +154,22 @@ impl FormError {
                     "Use letters, numbers, and underscores; start with a letter or underscore",
                 )
             }
-            CoreError::InvalidConnectionName(_) => Self::validation(
+            ManageError::InvalidConnectionName { .. } => Self::validation(
                 "invalid_connection_name",
                 "name",
                 "Use 1–64 letters, numbers, spaces, or endpoint punctuation; start with a letter or number and don’t end with a space",
             ),
-            CoreError::Template(error) => Self::validation(
+            ManageError::Template { message } => Self::validation(
                 "invalid_template",
                 "template",
-                format!("Invalid template: {error}"),
+                format!("Invalid template: {message}"),
             ),
-            CoreError::UnknownTemplateRef(name) => Self::validation(
+            ManageError::UnknownTemplateRef { name } => Self::validation(
                 "unknown_template_credential",
                 "template",
                 format!("{name} is not a saved credential"),
             ),
-            CoreError::WrongSecretCount { kind } => {
+            ManageError::WrongSecretCount { kind } => {
                 let field = if kind == "websocket" {
                     "template"
                 } else {
@@ -159,7 +181,7 @@ impl FormError {
                     format!("{kind} tools require exactly one saved credential"),
                 )
             }
-            CoreError::SecretNotFound => match context {
+            ManageError::SecretNotFound => match context {
                 FormContext::Secret => Self::global(
                     "conflict",
                     "secret_not_found",
@@ -172,7 +194,7 @@ impl FormError {
                     "This credential no longer exists; choose another",
                 ),
             },
-            CoreError::InvalidConnectionField { field, message } => {
+            ManageError::InvalidConnectionField { field, message } => {
                 let connection_kind = match context {
                     FormContext::Connection { kind, .. } => kind,
                     FormContext::Secret => "",
@@ -192,7 +214,7 @@ impl FormError {
                 };
                 Self::validation("invalid_connection_field", field, message)
             }
-            CoreError::InvalidConnectionConfig(message) => {
+            ManageError::InvalidConnectionConfig { message } => {
                 let field = match context {
                     FormContext::Connection {
                         kind: "api",
@@ -209,38 +231,44 @@ impl FormError {
                     None => Self::global("validation", "invalid_connection", message, None),
                 }
             }
-            CoreError::NotConfirmed => {
+            ManageError::NotConfirmed => {
                 Self::global("cancelled", "not_confirmed", "Nothing was saved", None)
             }
-            CoreError::KindChange => Self::global(
+            ManageError::KindChange => Self::global(
                 "validation",
                 "connection_kind_fixed",
                 "Tool type cannot be changed after creation",
                 None,
             ),
-            CoreError::ConnectionNotFound => Self::global(
+            ManageError::ConnectionNotFound => Self::global(
                 "conflict",
                 "connection_not_found",
                 "This tool was removed elsewhere",
                 None,
             ),
-            CoreError::ApprovalConnectionChanged => Self::global(
+            ManageError::ApprovalConnectionChanged => Self::global(
                 "conflict",
                 "connection_changed",
                 "The tool changed while you were confirming. Review it and save again.",
                 None,
             ),
-            CoreError::Vault(detail) => Self::global(
+            ManageError::Vault { message } => Self::global(
                 "system",
                 "keychain_unavailable",
                 "Couldn’t save to macOS Keychain",
-                Some(detail),
+                Some(message),
             ),
-            CoreError::Io(error) => Self::global(
+            ManageError::RemoteUnsupported { feature } => Self::global(
                 "system",
-                "state_write_failed",
-                "Couldn’t save your changes",
-                Some(error.to_string()),
+                "remote_unsupported",
+                format!("{feature} isn’t available for a remote broker yet"),
+                None,
+            ),
+            ManageError::Unreachable { message } => Self::global(
+                "system",
+                "broker_unreachable",
+                "Couldn’t reach the remote broker",
+                Some(message),
             ),
             other => {
                 let detail = other.to_string();
@@ -273,93 +301,68 @@ fn parse_id(id: &str) -> CmdResult<Uuid> {
 /* ------------------------------- reads ----------------------------------- */
 
 #[tauri::command]
-pub fn list_secrets(state: State<AppState>) -> Vec<SecretDto> {
-    let broker = &state.broker;
-    broker
-        .store
-        .list_secrets()
-        .iter()
-        .map(|m| SecretDto::from(m, broker))
-        .collect()
+pub async fn list_secrets(state: State<'_, AppState>) -> CmdResult<Vec<aka_api::SecretDto>> {
+    state.backend.list_secrets().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn list_connections(state: State<AppState>) -> Vec<ConnectionDto> {
-    let broker = &state.broker;
-    broker
-        .store
-        .list_connections()
-        .iter()
-        .map(|c| ConnectionDto::from(c, broker))
-        .collect()
-}
-
-#[tauri::command]
-pub fn get_identity(state: State<AppState>) -> IdentityDto {
-    let broker = &state.broker;
-    IdentityDto::from(&broker.identity_info(), broker)
-}
-
-#[tauri::command]
-pub fn list_sessions(state: State<AppState>) -> Vec<SessionDto> {
+pub async fn list_connections(
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<aka_api::ConnectionDto>> {
     state
-        .broker
-        .sessions()
-        .iter()
-        .map(SessionDto::from)
-        .collect()
+        .backend
+        .list_connections()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn list_activity(state: State<AppState>, limit: Option<usize>) -> Vec<ActivityDto> {
+pub async fn get_identity(state: State<'_, AppState>) -> CmdResult<aka_api::IdentityDto> {
+    state.backend.identity().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_sessions(state: State<'_, AppState>) -> CmdResult<Vec<aka_api::SessionDto>> {
+    state.backend.sessions().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_activity(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> CmdResult<Vec<aka_api::ActivityDto>> {
     let limit = activity_view_limit(limit);
     state
-        .broker
-        .audit
-        .recent(limit)
-        .iter()
-        .map(ActivityDto::from)
-        .collect()
+        .backend
+        .activity(limit)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn clear_activity(app: AppHandle, state: State<AppState>) -> CmdResult<()> {
-    state.broker.audit.clear().map_err(|e| e.to_string())?;
+pub async fn clear_activity(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+    state
+        .backend
+        .clear_activity()
+        .await
+        .map_err(|e| e.to_string())?;
     let _ = app.emit(crate::events::EVT_ACTIVITY_CHANGED, ());
     Ok(())
 }
 
 #[tauri::command]
-pub fn get_settings(state: State<AppState>) -> SettingsDto {
-    let s = state.broker.settings();
-    SettingsDto {
-        reauth_on_read: s.reauth_on_read,
-        show_websockets: s.show_websockets,
-        menu_bar_hides_dock: s.menu_bar_hides_dock,
-        presence_window_secs: s.presence_window_secs,
-    }
-}
-
-fn agent_setup_instructions(socket: &str, token_path: &str) -> String {
-    format!(
-        "Connect to the local Multitool broker. Read its current instructions, then list the available connections:\n\ncurl -fsS --unix-socket {socket} http://localhost/instructions\n\nAuthenticate with this computer's shared key — read it from {token_path} and send it as `Authorization: Bearer <key>`."
-    )
+pub async fn get_settings(state: State<'_, AppState>) -> CmdResult<aka_api::SettingsDto> {
+    state.backend.settings().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn get_agent_setup(state: State<AppState>) -> String {
-    agent_setup_instructions(
-        &state.broker.paths.socket_display(),
-        &state.broker.paths.token_display(),
-    )
+pub async fn get_agent_setup(state: State<'_, AppState>) -> CmdResult<String> {
+    state.backend.agent_setup().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn copy_agent_setup(app: AppHandle, state: State<AppState>) -> CmdResult<()> {
-    let instructions = agent_setup_instructions(
-        &state.broker.paths.socket_display(),
-        &state.broker.paths.token_display(),
-    );
+pub async fn copy_agent_setup(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+    let instructions = state.backend.agent_setup().await.map_err(|e| e.to_string())?;
     app.clipboard()
         .write_text(instructions)
         .map_err(|error| error.to_string())
@@ -393,17 +396,17 @@ pub async fn check_known_hosts(
 /* ------------------------------ secrets ---------------------------------- */
 
 #[tauri::command]
-pub fn add_secret(state: State<AppState>, name: String, value: String) -> FormResult<()> {
+pub async fn add_secret(state: State<'_, AppState>, name: String, value: String) -> FormResult<()> {
     state
-        .broker
-        .ui_add_secret(&name, Zeroizing::new(value))
-        .map(|_| ())
-        .map_err(|error| FormError::from_core(error, FormContext::Secret))
+        .backend
+        .add_secret(name, Zeroizing::new(value))
+        .await
+        .map_err(|error| FormError::from_manage(error, FormContext::Secret))
 }
 
 #[tauri::command]
-pub fn edit_secret(
-    state: State<AppState>,
+pub async fn edit_secret(
+    state: State<'_, AppState>,
     id: String,
     new_name: Option<String>,
     new_value: Option<String>,
@@ -418,20 +421,20 @@ pub fn edit_secret(
     })?;
     let value = new_value.filter(|v| !v.is_empty()).map(Zeroizing::new);
     state
-        .broker
-        .ui_edit_secret(&id, new_name.as_deref(), value)
-        .map(|_| ())
-        .map_err(|error| FormError::from_core(error, FormContext::Secret))
+        .backend
+        .edit_secret(id, new_name, value)
+        .await
+        .map_err(|error| FormError::from_manage(error, FormContext::Secret))
 }
 
 #[tauri::command]
-pub fn delete_secret(state: State<AppState>, id: String) -> CmdResult<()> {
+pub async fn delete_secret(state: State<'_, AppState>, id: String) -> CmdResult<()> {
     let id = parse_id(&id)?;
     // The core refuses in-use deletion; the UI's inline confirm is the gate.
     state
-        .broker
-        .ui_delete_secret(&id)
-        .map(|_| ())
+        .backend
+        .delete_secret(id)
+        .await
         .map_err(|e| e.to_string())
 }
 
@@ -440,8 +443,8 @@ pub fn delete_secret(state: State<AppState>, id: String) -> CmdResult<()> {
 pub async fn reveal_secret_prefix(state: State<'_, AppState>, id: String) -> CmdResult<String> {
     let id = parse_id(&id)?;
     state
-        .broker
-        .ui_reveal_secret_prefix(&id)
+        .backend
+        .reveal_secret_prefix(id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -453,14 +456,15 @@ pub async fn reveal_secret_prefix(state: State<'_, AppState>, id: String) -> Cmd
 pub async fn copy_secret(state: State<'_, AppState>, id: String) -> CmdResult<()> {
     let id = parse_id(&id)?;
     let value = state
-        .broker
-        .ui_secret_value_for_copy(&id)
+        .backend
+        .secret_value_for_copy(id)
         .await
         .map_err(|e| e.to_string())?;
     crate::clipboard::copy_with_hygiene(value)?;
     state
-        .broker
-        .ui_note_secret_copied(&id)
+        .backend
+        .note_secret_copied(id)
+        .await
         .map_err(|e| e.to_string())
 }
 
@@ -610,7 +614,10 @@ impl ConnectionInput {
 /// an already-stored secret; a credential typed into the form (or none at
 /// all) adds without a prompt.
 #[tauri::command]
-pub fn add_connection(state: State<AppState>, mut input: ConnectionInput) -> FormResult<()> {
+pub async fn add_connection(
+    state: State<'_, AppState>,
+    mut input: ConnectionInput,
+) -> FormResult<()> {
     let kind = input.kind.clone();
     let new_secret_name = input.new_secret_name.take();
     // Wrap the user-entered value before any fallible parsing below so every
@@ -665,11 +672,13 @@ pub fn add_connection(state: State<AppState>, mut input: ConnectionInput) -> For
     let includes_new_secret =
         new_secret_name.is_some() || new_secret_value.is_some() || imported_value.is_some();
     let result = match (new_secret_name, new_secret_value.or(imported_value)) {
-        (Some(name), Some(value)) if !name.is_empty() && !value.is_empty() => state
-            .broker
-            .ui_add_connection_with_secret(&name, value, spec)
-            .map(|_| ()),
-        (None, None) => state.broker.ui_add_connection(spec).map(|_| ()),
+        (Some(name), Some(value)) if !name.is_empty() && !value.is_empty() => {
+            state
+                .backend
+                .add_connection_with_secret(name, value, spec)
+                .await
+        }
+        (None, None) => state.backend.add_connection(spec).await,
         _ => {
             return Err(FormError::validation(
                 "incomplete_new_credential",
@@ -679,7 +688,7 @@ pub fn add_connection(state: State<AppState>, mut input: ConnectionInput) -> For
         }
     };
     result.map_err(|error| {
-        FormError::from_core(
+        FormError::from_manage(
             error,
             FormContext::Connection {
                 kind: &kind,
@@ -696,8 +705,8 @@ pub fn add_connection(state: State<AppState>, mut input: ConnectionInput) -> For
 /// Security-relevant connection edits are core-gated; metadata-only
 /// edits are not. A target change revokes the connection's direct endpoints.
 #[tauri::command]
-pub fn edit_connection(
-    state: State<AppState>,
+pub async fn edit_connection(
+    state: State<'_, AppState>,
     id: String,
     input: ConnectionInput,
 ) -> FormResult<()> {
@@ -712,11 +721,11 @@ pub fn edit_connection(
     })?;
     let spec = input.into_spec()?;
     state
-        .broker
-        .ui_update_connection(&id, spec)
-        .map(|_| ())
+        .backend
+        .update_connection(id, spec)
+        .await
         .map_err(|error| {
-            FormError::from_core(
+            FormError::from_manage(
                 error,
                 FormContext::Connection {
                     kind: &kind,
@@ -727,12 +736,12 @@ pub fn edit_connection(
 }
 
 #[tauri::command]
-pub fn delete_connection(state: State<AppState>, id: String) -> CmdResult<()> {
+pub async fn delete_connection(state: State<'_, AppState>, id: String) -> CmdResult<()> {
     let id = parse_id(&id)?;
     state
-        .broker
-        .ui_delete_connection(&id)
-        .map(|_| ())
+        .backend
+        .delete_connection(id)
+        .await
         .map_err(|e| e.to_string())
 }
 
@@ -745,8 +754,8 @@ pub async fn test_connection(
 ) -> CmdResult<aka_core::broker::ConnectionTestReport> {
     let id = parse_id(&id)?;
     state
-        .broker
-        .ui_test_connection(&id)
+        .backend
+        .test_connection(id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -769,11 +778,11 @@ pub async fn test_connection_draft(
     let _ = input.identity_file.take();
     let spec = input.into_spec()?;
     state
-        .broker
-        .ui_test_connection_draft(spec, typed_secret)
+        .backend
+        .test_connection_draft(spec, typed_secret)
         .await
         .map_err(|error| {
-            FormError::from_core(
+            FormError::from_manage(
                 error,
                 FormContext::Connection {
                     kind: &kind,
@@ -789,12 +798,12 @@ pub async fn test_connection_draft(
 /// never enters the webview: progress is observed through
 /// `aka://mcp-auth-changed` events and `get_mcp_auth`.
 #[tauri::command]
-pub fn start_mcp_auth(
-    state: State<AppState>,
+pub async fn start_mcp_auth(
+    state: State<'_, AppState>,
     input: aka_core::mcp_auth::McpAuthDraft,
 ) -> FormResult<aka_core::mcp_auth::McpAuthState> {
-    state.broker.ui_start_mcp_auth(input).map_err(|error| {
-        FormError::from_core(
+    state.backend.start_mcp_auth(input).await.map_err(|error| {
+        FormError::from_manage(
             error,
             FormContext::Connection {
                 kind: "api",
@@ -805,18 +814,26 @@ pub fn start_mcp_auth(
 }
 
 #[tauri::command]
-pub fn get_mcp_auth(
-    state: State<AppState>,
+pub async fn get_mcp_auth(
+    state: State<'_, AppState>,
     id: String,
 ) -> CmdResult<Option<aka_core::mcp_auth::McpAuthState>> {
     let id = parse_id(&id)?;
-    Ok(state.broker.ui_mcp_auth_state(&id))
+    state
+        .backend
+        .get_mcp_auth(id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn cancel_mcp_auth(state: State<AppState>, id: String) -> CmdResult<bool> {
+pub async fn cancel_mcp_auth(state: State<'_, AppState>, id: String) -> CmdResult<bool> {
     let id = parse_id(&id)?;
-    Ok(state.broker.ui_cancel_mcp_auth(&id))
+    state
+        .backend
+        .cancel_mcp_auth(id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Broker-side MCP status check: reachability, acknowledged account,
@@ -830,8 +847,8 @@ pub async fn mcp_status(
 ) -> CmdResult<aka_core::mcp::McpStatusReport> {
     let id = parse_id(&id)?;
     state
-        .broker
-        .ui_mcp_check(&id, options.unwrap_or_default())
+        .backend
+        .mcp_status(id, options.unwrap_or_default())
         .await
         .map_err(|e| e.to_string())
 }
@@ -869,7 +886,7 @@ pub async fn oauth_connect(
     client_secret: Option<String>,
 ) -> FormResult<()> {
     let name = input.name.clone();
-    let secret_name = suggested_oauth_secret_name(&state, &name);
+    let secret_name = suggested_oauth_secret_name(&state, &name).await;
     let mut input = input;
     // The token secret does not exist yet; the template is synthesized to
     // reference it (binding + display), while the upstream leg injects a
@@ -878,9 +895,9 @@ pub async fn oauth_connect(
     let kind = input.kind.clone();
     let spec = input.into_spec()?;
     state
-        .broker
-        .ui_oauth_connect(
-            &secret_name,
+        .backend
+        .oauth_connect(
+            secret_name,
             client_secret
                 .filter(|value| !value.trim().is_empty())
                 .map(Zeroizing::new),
@@ -888,7 +905,7 @@ pub async fn oauth_connect(
         )
         .await
         .map_err(|error| {
-            FormError::from_core(
+            FormError::from_manage(
                 error,
                 FormContext::Connection {
                     kind: &kind,
@@ -900,7 +917,7 @@ pub async fn oauth_connect(
 }
 
 /// `github` → `GITHUB_OAUTH_TOKEN`, suffixed if taken.
-fn suggested_oauth_secret_name(state: &State<AppState>, connection_name: &str) -> String {
+async fn suggested_oauth_secret_name(state: &State<'_, AppState>, connection_name: &str) -> String {
     let mut base: String = connection_name
         .to_uppercase()
         .chars()
@@ -914,9 +931,10 @@ fn suggested_oauth_secret_name(state: &State<AppState>, connection_name: &str) -
         base.to_string()
     };
     let taken: std::collections::HashSet<String> = state
-        .broker
-        .store
+        .backend
         .list_secrets()
+        .await
+        .unwrap_or_default()
         .into_iter()
         .map(|meta| meta.name)
         .collect();
@@ -939,10 +957,9 @@ fn suggested_oauth_secret_name(state: &State<AppState>, connection_name: &str) -
 pub async fn oauth_reconnect(state: State<'_, AppState>, id: String) -> CmdResult<()> {
     let id = parse_id(&id)?;
     state
-        .broker
-        .ui_oauth_reconnect(&id)
+        .backend
+        .oauth_reconnect(id)
         .await
-        .map(|_| ())
         .map_err(|e| e.to_string())
 }
 
@@ -952,15 +969,16 @@ pub async fn oauth_reconnect(state: State<'_, AppState>, id: String) -> CmdResul
 /// the whole authorization model: enabled connections execute without
 /// prompting, disabled ones are refused — for every local agent at once.
 #[tauri::command]
-pub fn set_tool_access(
-    state: State<AppState>,
+pub async fn set_tool_access(
+    state: State<'_, AppState>,
     connection_id: String,
     enabled: bool,
 ) -> CmdResult<bool> {
     let connection_id = parse_id(&connection_id)?;
     state
-        .broker
-        .ui_set_tool_access(&connection_id, enabled)
+        .backend
+        .set_tool_access(connection_id, enabled)
+        .await
         .map_err(|e| e.to_string())
 }
 
@@ -968,15 +986,16 @@ pub fn set_tool_access(
 /// restores the default (all tools). Enforced broker-side on every
 /// `tools/call`; the sidecar's tool listing mirrors it.
 #[tauri::command]
-pub fn set_allowed_tools(
-    state: State<AppState>,
+pub async fn set_allowed_tools(
+    state: State<'_, AppState>,
     connection_id: String,
     tools: Option<Vec<String>>,
 ) -> CmdResult<bool> {
     let connection_id = parse_id(&connection_id)?;
     state
-        .broker
-        .ui_set_allowed_tools(&connection_id, tools)
+        .backend
+        .set_allowed_tools(connection_id, tools)
+        .await
         .map_err(|e| e.to_string())
 }
 
@@ -989,16 +1008,16 @@ pub async fn list_mcp_tools(
 ) -> CmdResult<Vec<aka_core::mcp::McpToolInfo>> {
     let id = parse_id(&id)?;
     state
-        .broker
-        .ui_list_mcp_tools(&id)
+        .backend
+        .list_mcp_tools(id)
         .await
         .map_err(|e| e.to_string())
 }
 
 /// Issue (or rotate) a direct endpoint for a connection. The broker gates
 /// this behind the configuration gate (a fresh native authentication is
-/// reused, otherwise the OS prompt appears); the returned secret is retained
-/// on the endpoint record, so the row's copyable DSN keeps carrying it.
+/// reused, otherwise the OS prompt appears); the returned secret is shown to
+/// the user exactly once and never persisted in a recoverable form.
 #[tauri::command]
 pub async fn issue_endpoint(
     state: State<'_, AppState>,
@@ -1006,20 +1025,20 @@ pub async fn issue_endpoint(
 ) -> CmdResult<IssuedEndpointDto> {
     let connection_id = parse_id(&connection_id)?;
     state
-        .broker
-        .ui_issue_endpoint(&connection_id)
+        .backend
+        .issue_endpoint(connection_id)
         .await
-        .map(IssuedEndpointDto::from)
         .map_err(|e| e.to_string())
 }
 
 /// Revoke a direct endpoint: stop its listener and close its live sessions.
 #[tauri::command]
-pub fn revoke_endpoint(state: State<AppState>, endpoint_id: String) -> CmdResult<bool> {
+pub async fn revoke_endpoint(state: State<'_, AppState>, endpoint_id: String) -> CmdResult<bool> {
     let endpoint_id = parse_id(&endpoint_id)?;
     state
-        .broker
-        .ui_revoke_endpoint(&endpoint_id)
+        .backend
+        .revoke_endpoint(endpoint_id)
+        .await
         .map_err(|e| e.to_string())
 }
 
@@ -1029,68 +1048,67 @@ pub fn revoke_endpoint(state: State<AppState>, endpoint_id: String) -> CmdResult
 /// confirmation; every agent disconnects and re-reads the token file.
 #[tauri::command]
 pub async fn rotate_key(state: State<'_, AppState>) -> CmdResult<()> {
-    let broker = state.broker.clone();
-    // The native confirmation sheet blocks; keep it off the async runtime.
-    tokio::task::spawn_blocking(move || broker.ui_rotate_key())
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())
+    // The backend keeps the blocking native sheet off the async runtime.
+    state.backend.rotate_key().await.map_err(|e| e.to_string())
 }
 
 /// Copy the shared key to the clipboard. The key never enters the webview:
 /// the clipboard write happens here, like a secret copy. Most setups never
 /// need it — agents read the token file themselves.
 #[tauri::command]
-pub fn copy_key(app: AppHandle, state: State<AppState>) -> CmdResult<()> {
-    let token = state.broker.identity.token();
+pub async fn copy_key(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+    let token = state.backend.agent_key().await.map_err(|e| e.to_string())?;
     app.clipboard()
         .write_text(token)
-        .map_err(|error| error.to_string())?;
-    state.broker.audit.append(aka_core::audit::AuditEntry::new(
-        aka_core::audit::AuditKind::SecretCopied,
-        "Shared key copied".to_string(),
-    ));
-    Ok(())
+        .map_err(|error| error.to_string())
 }
 
 /* ------------------------------ sessions --------------------------------- */
 
 #[tauri::command]
-pub fn close_session(state: State<AppState>, id: u64) -> CmdResult<bool> {
-    state.broker.ui_close_session(id).map_err(|e| e.to_string())
+pub async fn close_session(state: State<'_, AppState>, id: u64) -> CmdResult<bool> {
+    state
+        .backend
+        .close_session(id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /* ------------------------------ settings --------------------------------- */
 
 #[tauri::command]
-pub fn set_reauth_on_read(state: State<AppState>, on: bool) -> CmdResult<()> {
+pub async fn set_reauth_on_read(state: State<'_, AppState>, on: bool) -> CmdResult<()> {
     state
-        .broker
-        .ui_change_reauth_on_read(on)
+        .backend
+        .set_reauth_on_read(on)
+        .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn set_show_websockets(state: State<AppState>, on: bool) -> CmdResult<()> {
+pub async fn set_show_websockets(state: State<'_, AppState>, on: bool) -> CmdResult<()> {
     state
-        .broker
-        .ui_set_show_websockets(on)
+        .backend
+        .set_show_websockets(on)
+        .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn set_menu_bar_hides_dock(state: State<AppState>, on: bool) -> CmdResult<()> {
+pub async fn set_menu_bar_hides_dock(state: State<'_, AppState>, on: bool) -> CmdResult<()> {
     state
-        .broker
-        .ui_set_menu_bar_hides_dock(on)
+        .backend
+        .set_menu_bar_hides_dock(on)
+        .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn set_presence_window(state: State<AppState>, secs: u64) -> CmdResult<()> {
+pub async fn set_presence_window(state: State<'_, AppState>, secs: u64) -> CmdResult<()> {
     state
-        .broker
-        .ui_set_presence_window(secs)
+        .backend
+        .set_presence_window(secs)
+        .await
         .map_err(|e| e.to_string())
 }
 
@@ -1098,6 +1116,7 @@ pub fn set_presence_window(state: State<AppState>, secs: u64) -> CmdResult<()> {
 pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
         get_local_username,
+        get_backend_profile,
         list_secrets,
         list_connections,
         get_identity,
@@ -1210,7 +1229,7 @@ mod tests {
         ));
 
         // A blank field is absent, not an empty path: an empty string would
-        // post JSON-RPC to the upstream's root.
+        // make the sidecar post JSON-RPC to the upstream's root.
         for blank in ["", "   "] {
             let input = ConnectionInput {
                 mcp_path: Some(blank.into()),
@@ -1297,7 +1316,8 @@ mod tests {
 
     #[test]
     fn agent_setup_instructions_include_the_runtime_paths() {
-        let instructions = agent_setup_instructions("/tmp/aka-test.sock", "~/.aka/token");
+        let instructions =
+            aka_core::manage::agent_setup_instructions("/tmp/aka-test.sock", "~/.aka/token");
         assert!(instructions.contains("curl -fsS"));
         assert!(instructions.contains("--unix-socket /tmp/aka-test.sock"));
         assert!(instructions.contains("Read its current instructions"));
@@ -1310,8 +1330,10 @@ mod tests {
 
     #[test]
     fn form_errors_serialize_conflicts_with_the_relevant_field() {
-        let error = FormError::from_core(
-            CoreError::ConnectionNameTaken("github".into()),
+        let error = FormError::from_manage(
+            ManageError::ConnectionNameTaken {
+                name: "github".into(),
+            },
             FormContext::Connection {
                 kind: "api",
                 includes_new_secret: false,
@@ -1329,10 +1351,10 @@ mod tests {
     }
 
     #[test]
-    fn form_errors_map_core_connection_fields_without_parsing_messages() {
-        let error = FormError::from_core(
-            CoreError::InvalidConnectionField {
-                field: ConnectionField::HostKeyFingerprint,
+    fn form_errors_map_manage_connection_fields_without_parsing_messages() {
+        let error = FormError::from_manage(
+            ManageError::InvalidConnectionField {
+                field: aka_api::ConnectionField::HostKeyFingerprint,
                 message: "Enter an OpenSSH SHA-256 or SHA-512 fingerprint".into(),
             },
             FormContext::Connection {
@@ -1347,5 +1369,27 @@ mod tests {
             error.message,
             "Enter an OpenSSH SHA-256 or SHA-512 fingerprint"
         );
+    }
+
+    #[test]
+    fn remote_errors_map_to_actionable_form_errors() {
+        let error = FormError::from_manage(
+            ManageError::RemoteUnsupported {
+                feature: "OAuth sign-in".into(),
+            },
+            FormContext::Connection {
+                kind: "api",
+                includes_new_secret: true,
+            },
+        );
+        assert_eq!(error.code, "remote_unsupported");
+        let error = FormError::from_manage(
+            ManageError::Unreachable {
+                message: "connection refused".into(),
+            },
+            FormContext::Secret,
+        );
+        assert_eq!(error.code, "broker_unreachable");
+        assert_eq!(error.detail.as_deref(), Some("connection refused"));
     }
 }

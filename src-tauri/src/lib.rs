@@ -10,7 +10,6 @@
 mod auth;
 mod clipboard;
 mod commands;
-mod dto;
 mod events;
 mod sidecar;
 mod ssh_import;
@@ -22,12 +21,13 @@ use aka_core::broker::Broker;
 use aka_core::config::BrokerConfig;
 use aka_core::daemon;
 use aka_core::error::CoreError;
+use aka_core::manage::{LocalBackend, ManagementBackend};
 use aka_core::paths::Paths;
 use aka_core::vault::platform_vault;
 use tauri::{Manager, WindowEvent};
 use tauri_plugin_dialog::{DialogExt as _, MessageDialogKind};
 
-use commands::AppState;
+use commands::{AppState, LocalRuntime};
 
 enum IntegrityRecoveryDecision {
     Quit,
@@ -323,12 +323,16 @@ pub fn run() {
                 });
             }
 
+            let backend: Arc<dyn ManagementBackend> = Arc::new(LocalBackend::new(broker.clone()));
             app.manage(AppState {
-                broker,
+                backend,
                 ssh_imports: Default::default(),
-                _sidecar: sidecar,
-                _daemon: daemon,
-                _runtime: runtime,
+                _local: Some(LocalRuntime {
+                    broker,
+                    _sidecar: sidecar,
+                    _daemon: daemon,
+                    _runtime: runtime,
+                }),
             });
             Ok(())
         })

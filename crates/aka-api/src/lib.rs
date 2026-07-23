@@ -1,0 +1,442 @@
+//! Management-plane wire types.
+//!
+//! Every shape that crosses the management boundary lives here: the DTOs the
+//! webview renders, the structured error a management call can fail with, and
+//! the change events the broker pushes. The desktop shell consumes these
+//! in-process (local mode) or over HTTP (remote mode) — one set of shapes, so
+//! the two modes cannot drift.
+//!
+//! Serialization is the compatibility contract with the webview: field names
+//! and `rename` attributes must not change without updating `ui/src/types.ts`
+//! and the dev mock together.
+
+use serde::{Deserialize, Serialize};
+
+/// A connection field whose authoritative validation failed. Keeping this
+/// structured lets desktop clients attach the error to the relevant input
+/// without parsing human-readable error strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionField {
+    Host,
+    Scheme,
+    Port,
+    Database,
+    User,
+    Url,
+    Template,
+    HostKeyFingerprint,
+}
+
+/// A management call's failure, as it crosses the backend boundary.
+///
+/// This mirrors the `CoreError` cases a `ui_*` entry point can produce, with
+/// owned data so it survives serialization. The desktop shell maps it onto
+/// form fields; `Display` keeps the human-readable line the core would have
+/// printed, so plain string surfaces read identically in both modes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum ManageError {
+    SecretNameTaken { name: String },
+    ConnectionNameTaken { name: String },
+    ConnectionTargetTaken { name: String },
+    SecretNotFound,
+    ConnectionNotFound,
+    ApprovalConnectionChanged,
+    SecretInUse { connections: Vec<String> },
+    InvalidSecretName { name: String },
+    InvalidConnectionName { name: String },
+    Template { message: String },
+    UnknownTemplateRef { name: String },
+    WrongSecretCount { kind: String },
+    InvalidConnectionConfig { message: String },
+    InvalidSetting { message: String },
+    InvalidConnectionField { field: ConnectionField, message: String },
+    KindChange,
+    EndpointNotFound,
+    EndpointLimit { max: usize },
+    EndpointRequiresWiring,
+    EndpointUnsupportedKind { kind: String },
+    SecretReadNotAuthenticated,
+    NotConfirmed,
+    OAuth { message: String },
+    Vault { message: String },
+    /// The management feature exists but this backend cannot perform it —
+    /// e.g. OAuth sign-in against a remote broker before the relay ships.
+    RemoteUnsupported { feature: String },
+    /// The remote broker could not be reached (or answered outside the
+    /// protocol). Local backends never produce this.
+    Unreachable { message: String },
+    /// Everything without a field mapping (I/O, corrupt state, internals).
+    Internal { message: String },
+}
+
+impl std::fmt::Display for ManageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SecretNameTaken { name } => {
+                write!(f, "secret name {name:?} is already in use")
+            }
+            Self::ConnectionNameTaken { name } => {
+                write!(f, "tool name {name:?} is already in use")
+            }
+            Self::ConnectionTargetTaken { name } => {
+                write!(f, "an equivalent target is already saved as tool {name:?}")
+            }
+            Self::SecretNotFound => write!(f, "no such secret"),
+            Self::ConnectionNotFound => write!(f, "no such tool"),
+            Self::ApprovalConnectionChanged => write!(
+                f,
+                "the tool changed while you were confirming; review it and save again"
+            ),
+            Self::SecretInUse { connections } => {
+                write!(f, "secret is in use by tool(s): {}", connections.join(", "))
+            }
+            Self::InvalidSecretName { name } => write!(
+                f,
+                "invalid name {name:?}: names are 1-64 chars of [A-Za-z0-9_] not starting with a digit"
+            ),
+            Self::InvalidConnectionName { name } => write!(
+                f,
+                "invalid tool name {name:?}: use 1-64 ASCII letters, numbers, spaces, or safe endpoint punctuation; start with a letter or number and do not end with a space"
+            ),
+            Self::Template { message } => write!(f, "invalid template: {message}"),
+            Self::UnknownTemplateRef { name } => {
+                write!(f, "template references unknown secret {name:?}")
+            }
+            Self::WrongSecretCount { kind } => {
+                write!(f, "{kind} tools bind exactly one secret")
+            }
+            Self::InvalidConnectionConfig { message } => {
+                write!(f, "invalid tool config: {message}")
+            }
+            Self::InvalidSetting { message } => write!(f, "invalid setting: {message}"),
+            Self::InvalidConnectionField { field, message } => {
+                write!(f, "invalid tool field {field:?}: {message}")
+            }
+            Self::KindChange => write!(f, "a tool's type is fixed after creation"),
+            Self::EndpointNotFound => write!(f, "no such endpoint"),
+            Self::EndpointLimit { max } => write!(
+                f,
+                "too many direct endpoints ({max}); revoke one before issuing another"
+            ),
+            Self::EndpointRequiresWiring => write!(
+                f,
+                "enable this tool for agents before issuing a direct endpoint"
+            ),
+            Self::EndpointUnsupportedKind { kind } => {
+                write!(f, "direct endpoints are not available for {kind} tools")
+            }
+            Self::SecretReadNotAuthenticated => write!(f, "Secret read was not authenticated"),
+            Self::NotConfirmed => write!(
+                f,
+                "the native confirmation did not complete; nothing was applied"
+            ),
+            Self::OAuth { message } => write!(f, "OAuth: {message}"),
+            Self::Vault { message } => write!(f, "keychain: {message}"),
+            Self::RemoteUnsupported { feature } => write!(
+                f,
+                "{feature} is not available while managing a remote broker"
+            ),
+            Self::Unreachable { message } => {
+                write!(f, "the remote broker could not be reached: {message}")
+            }
+            Self::Internal { message } => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for ManageError {}
+
+/* --------------------------------- DTOs ---------------------------------- */
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretDto {
+    pub id: String,
+    pub name: String,
+    /// How many services reference it (the "Used by N services" line).
+    pub used_by: usize,
+    pub used_by_names: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Non-secret OAuth coordinates, so the UI can label the connection and
+/// offer Reconnect. Never token material.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OAuthDto {
+    pub auth_url: String,
+    pub token_url: String,
+    pub client_id: String,
+    pub scopes: Vec<String>,
+}
+
+/// A connection's agent access, as the UI toggles it. There is one shared
+/// identity, so this is per connection, not per agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccessDto {
+    /// Whether agents may use the connection (default true).
+    pub enabled: bool,
+    /// Curated upstream MCP tool subset; absent means all tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_tools: Option<Vec<String>>,
+    /// The direct endpoint issued for this connection, if any. Its presence
+    /// flips the row's control from "Issue" to "Reissue / Revoke".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<EndpointChip>,
+}
+
+/// The direct endpoint on a wiring row. `dsn` is the pasteable address with
+/// the retained endpoint secret in its password slot, so copying the chip is
+/// enough to connect; it is omitted for SSH, whose socket path is itself the
+/// capability and is shown only in the issue sheet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EndpointChip {
+    pub endpoint_id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dsn: Option<String>,
+}
+
+/// The result of issuing a direct endpoint: the pasteable address, a
+/// ready-to-run example, and the secret (also retained on the record, so
+/// the row's chip stays copyable with the credential in place).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssuedEndpointDto {
+    pub endpoint_id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub dsn: String,
+    pub secret: String,
+    pub example: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionDto {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub target: String,
+    /// Referenced secret names (the 🔑 chips).
+    pub secret_names: Vec<String>,
+    /// Whether this connection uses a broker-managed OAuth grant. The grant
+    /// itself lives in the vault and is never exposed to the webview.
+    pub oauth: bool,
+    /// Agent access for this connection (shared identity — one setting
+    /// covers every agent).
+    pub agent_access: AccessDto,
+    // Type-specific config, prefilled into the Edit sheet.
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub scheme: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub template: Option<String>,
+    #[serde(default)]
+    pub dbname: Option<String>,
+    #[serde(default)]
+    pub user: Option<String>,
+    #[serde(default)]
+    pub host_key_fingerprint: Option<String>,
+    #[serde(default)]
+    pub destination: Option<String>,
+    #[serde(default)]
+    pub sslmode: Option<String>,
+    #[serde(default)]
+    pub trusted_ca_bundle_path: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Set when an API upstream speaks MCP at that path; the sidecar
+    /// re-exposes its tools under this connection's name.
+    #[serde(default)]
+    pub mcp_path: Option<String>,
+    /// The upstream account this connection's credential was last verified
+    /// as (an MCP whoami answer). Display metadata, never authorization.
+    #[serde(default)]
+    pub account: Option<String>,
+    /// Set when the credential is a BYO-app OAuth token set.
+    #[serde(default)]
+    pub oauth_spec: Option<OAuthDto>,
+    /// Last-known health: "ok" | "failed" | "needs_reconnect", with the
+    /// check's summary and timestamp. All absent while untested.
+    #[serde(default)]
+    pub last_status: Option<String>,
+    #[serde(default)]
+    pub last_detail: Option<String>,
+    #[serde(default)]
+    pub last_checked_at: Option<String>,
+}
+
+/// The shared broker identity, for the Connect page's key card. Never the
+/// key itself — only its home and lifecycle metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdentityDto {
+    pub client_id: String,
+    /// Where the plaintext key lives (`~/.aka/token`), for display and copy
+    /// instructions.
+    pub token_path: String,
+    /// The broker socket, for the Connect page's setup snippets.
+    pub socket_path: String,
+    pub minted_at: String,
+    pub last_used: String,
+    /// How many legacy per-agent tokens still work as aliases (cleared by
+    /// the first rotation).
+    pub legacy_aliases: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionDto {
+    pub id: u64,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub agent: String,
+    pub connection: String,
+    pub detail: String,
+    pub opened_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityDto {
+    pub icon: String,
+    pub tone: String,
+    pub text: String,
+    pub detail: Option<String>,
+    /// Structured attribution for filtering: which agent acted and which
+    /// connection was touched (both optional per entry).
+    pub agent: Option<String>,
+    pub connection: Option<String>,
+    /// How long a brokered call or session took, when measured.
+    pub duration_ms: Option<u64>,
+    /// RFC 3339 timestamp; the UI renders it relative (<24h) or absolute and
+    /// shows the full value in a hover tooltip.
+    pub at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsDto {
+    pub reauth_on_read: bool,
+    pub show_websockets: bool,
+    pub menu_bar_hides_dock: bool,
+    pub presence_window_secs: u64,
+}
+
+/* -------------------------------- events ---------------------------------- */
+
+/// A state-change notification from the broker's management plane. Local
+/// mode receives these through `BrokerEvents` directly; remote mode receives
+/// exactly these shapes over the manage event stream, so both re-emit the
+/// same webview events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum ManageEvent {
+    SessionsChanged,
+    AgentsChanged,
+    WiringsChanged,
+    ConnectionsChanged,
+    ActivityAppended { entry: ActivityDto },
+    /// The activity log was cleared (as opposed to appended to).
+    ActivityCleared,
+    /// An MCP sign-in flow progressed; the payload is the core's
+    /// `McpAuthState` serialization, passed through opaquely.
+    McpAuthChanged { state: serde_json::Value },
+    ConnectRequested { agent: String, service: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manage_error_display_matches_the_core_wording() {
+        assert_eq!(
+            ManageError::SecretNameTaken { name: "KEY".into() }.to_string(),
+            "secret name \"KEY\" is already in use"
+        );
+        assert_eq!(
+            ManageError::WrongSecretCount {
+                kind: "websocket".into()
+            }
+            .to_string(),
+            "websocket tools bind exactly one secret"
+        );
+    }
+
+    #[test]
+    fn manage_error_round_trips_through_json() {
+        let error = ManageError::InvalidConnectionField {
+            field: ConnectionField::HostKeyFingerprint,
+            message: "Enter an OpenSSH SHA-256 or SHA-512 fingerprint".into(),
+        };
+        let json = serde_json::to_string(&error).unwrap();
+        assert!(json.contains("\"code\":\"invalid_connection_field\""));
+        let back: ManageError = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, error);
+    }
+
+    #[test]
+    fn connection_dto_serializes_kind_as_type() {
+        let dto = ConnectionDto {
+            id: "id".into(),
+            name: "github".into(),
+            kind: "api".into(),
+            target: "https://api.github.com".into(),
+            secret_names: vec![],
+            oauth: false,
+            agent_access: AccessDto {
+                enabled: true,
+                allowed_tools: None,
+                endpoint: None,
+            },
+            host: None,
+            scheme: None,
+            port: None,
+            template: None,
+            dbname: None,
+            user: None,
+            host_key_fingerprint: None,
+            destination: None,
+            sslmode: None,
+            trusted_ca_bundle_path: None,
+            url: None,
+            mcp_path: None,
+            account: None,
+            oauth_spec: None,
+            last_status: None,
+            last_detail: None,
+            last_checked_at: None,
+        };
+        let value = serde_json::to_value(&dto).unwrap();
+        assert_eq!(value["type"], "api");
+        // Optional config fields serialize as null (the webview relies on
+        // their presence), while agent_access omits its absent options.
+        assert!(value.as_object().unwrap().contains_key("host"));
+        assert!(value["host"].is_null());
+        assert!(!value["agent_access"]
+            .as_object()
+            .unwrap()
+            .contains_key("allowed_tools"));
+    }
+
+    #[test]
+    fn manage_events_tag_themselves() {
+        let event = ManageEvent::ActivityAppended {
+            entry: ActivityDto {
+                icon: "plug".into(),
+                tone: "neutral".into(),
+                text: "Connection added".into(),
+                detail: None,
+                agent: None,
+                connection: None,
+                duration_ms: None,
+                at: "2026-01-01T00:00:00Z".into(),
+            },
+        };
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["event"], "activity_appended");
+        assert_eq!(value["entry"]["icon"], "plug");
+    }
+}

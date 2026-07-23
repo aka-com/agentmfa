@@ -1,19 +1,9 @@
 use thiserror::Error;
 
-/// A connection field whose authoritative validation failed. Keeping this
-/// structured lets desktop clients attach the error to the relevant input
-/// without parsing human-readable error strings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConnectionField {
-    Host,
-    Scheme,
-    Port,
-    Database,
-    User,
-    Url,
-    Template,
-    HostKeyFingerprint,
-}
+/// A connection field whose authoritative validation failed. Defined in
+/// `aka-api` (it crosses the management wire); re-exported here so core
+/// callers keep their `crate::error::ConnectionField` path.
+pub use aka_api::ConnectionField;
 
 /// Core-level errors. Daemon handlers map these onto wire responses with
 /// machine-readable `{"reason": …}` bodies.

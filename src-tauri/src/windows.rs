@@ -402,10 +402,16 @@ fn retreat_to_menu_bar(app: &AppHandle) {
 }
 
 /// Read the "hide Dock icon in the menu bar" preference. Defaults to `false`
-/// (keep the Dock icon) if the broker state is not yet managed.
+/// (keep the Dock icon) if the broker state is not yet managed, and for a
+/// remote broker: window chrome is a this-machine concern, and this sync
+/// window-event path cannot await a network round trip.
 fn menu_bar_hides_dock(app: &AppHandle) -> bool {
     app.try_state::<crate::commands::AppState>()
-        .map(|s| s.broker.settings().menu_bar_hides_dock)
+        .and_then(|s| {
+            s._local
+                .as_ref()
+                .map(|local| local.broker.settings().menu_bar_hides_dock)
+        })
         .unwrap_or(false)
 }
 

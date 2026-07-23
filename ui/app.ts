@@ -1147,19 +1147,6 @@ function startConnectPaneHTML(mode: ConnectModeId, option: StartOption, progress
       return `<p>${lead}</p>
         ${actions(`<button class="btn primary sm" data-act="issue-endpoint" data-conn="${conn.id}">${label}</button>`)}`;
     }
-    const endpoint = conn.agent_access.endpoint ?? null;
-    const lead = endpoint
-      ? `A direct endpoint is issued for “${esc(conn.name)}”. Its address${conn.type === 'pg' ? ' and secret were' : ' was'}
-          shown at issue — reissue to get a new one.`
-      : conn.type === 'pg'
-      ? `Issue a local DSN for “${esc(conn.name)}” that any unmodified Postgres client can use —
-          psql, drivers, ORMs. The address and its secret are shown once, at issue.`
-      : `Issue a signing-agent socket for “${esc(conn.name)}”. Plain ssh, git, and rsync work
-          unmodified; the private key never leaves this machine.`;
-    const label = !endpoint ? 'Issue direct endpoint'
-      : conn.type === 'pg' ? 'Reissue (new secret)' : 'Reissue';
-    return `<p>${lead}</p>
-      ${actions(`<button class="btn primary sm" data-act="issue-endpoint" data-conn="${conn.id}">${label}</button>`)}`;
   }
 
   // Every other mode renders straight from its shared client definition.

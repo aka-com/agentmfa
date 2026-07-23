@@ -29,9 +29,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "aka-api"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "aka-core"
 version = "0.0.1"
 dependencies = [
+ "aka-api",
  "async-trait",
  "axum",
  "base64",

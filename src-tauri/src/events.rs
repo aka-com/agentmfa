@@ -8,10 +8,9 @@ use std::time::Duration;
 
 use aka_core::audit::AuditEntry;
 use aka_core::events::BrokerEvents;
+use aka_core::manage::activity_dto;
 use aka_core::types::{ConfirmationMethod, SecretMeta};
 use tauri::{AppHandle, Emitter};
-
-use crate::dto::ActivityDto;
 
 pub const EVT_SESSIONS: &str = "aka://sessions-changed";
 pub const EVT_AGENTS: &str = "aka://agents-changed";
@@ -61,7 +60,7 @@ impl BrokerEvents for TauriEvents {
     }
 
     fn audit_appended(&self, entry: &AuditEntry) {
-        let _ = self.app.emit(EVT_ACTIVITY, ActivityDto::from(entry));
+        let _ = self.app.emit(EVT_ACTIVITY, activity_dto(entry));
     }
 
     fn mcp_auth_changed(&self, state: &aka_core::mcp_auth::McpAuthState) {
