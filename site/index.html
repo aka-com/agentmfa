@@ -5,6 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="description" content="Multitool — secure execution for AI agents. A local connection broker that keeps keys encrypted and injects credentials on the upstream leg only.">
 <meta name="theme-color" content="#171512">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Multitool">
+<meta property="og:title" content="Multitool — Secure execution for AI agents">
+<meta property="og:description" content="A local connection broker for AI agents. Databases, servers, MCPs, and APIs through one vault — unmodified tools like curl, psql, and git work without an agent ever holding a raw secret.">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Multitool — Secure execution for AI agents">
+<meta name="twitter:description" content="A local connection broker for AI agents. Keys stay in one encrypted vault; agents get brokered handles, logged and revocable in one place.">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23fabb41%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M10%2022V7a1%201%200%200%200-1-1H4a2%202%200%200%200-2%202v12a2%202%200%200%200%202%202h12a2%202%200%200%200%202-2v-5a1%201%200%200%200-1-1H2%22%2F%3E%3Crect%20x%3D%2214%22%20y%3D%222%22%20width%3D%228%22%20height%3D%228%22%20rx%3D%221%22%2F%3E%3C%2Fsvg%3E">
 <title>Multitool — Secure execution for AI agents</title>
 <style>
@@ -94,6 +101,13 @@
     text-transform: uppercase;
     letter-spacing: 0.12em;
   }
+  .nav-byline {
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--muted-fg);
+  }
 
   /* ---------- buttons ---------- */
   .btn {
@@ -140,6 +154,12 @@
     background: var(--bg);
   }
   @media (min-width: 1024px) { .hero { grid-template-columns: 1.05fr 0.95fr; } }
+
+  /* Grid/flex items min-size to 0 so wide content (the terminal pre, the
+     path commands) scrolls inside its own box instead of stretching the
+     track past the viewport on narrow screens. */
+  .hero > *, .split > *, .deploy > *, .paths > * { min-width: 0; }
+  .term { min-width: 0; }
 
   .hero::after {
     content: "";
@@ -413,12 +433,12 @@
   .deploy-panel {
     display: flex;
     flex-direction: column;
-    padding: 1.5rem;
+    padding: 1.25rem 1.5rem 1.75rem;
     border-top: 1px solid var(--border);
   }
   .deploy-panel:first-child { border-top: 0; }
   @media (min-width: 640px) {
-    .deploy-panel { padding: 2rem; border-top: 0; }
+    .deploy-panel { padding: 1.75rem 2rem 2.25rem; border-top: 0; }
     .deploy-panel + .deploy-panel { border-left: 1px solid var(--border); }
   }
   .deploy-panel h3 {
@@ -647,10 +667,10 @@
   /* run-it-your-way paths */
   .paths { display: grid; }
   @media (min-width: 640px) { .paths { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
-  .path { padding: 1.5rem; border-top: 1px solid var(--border); display: flex; flex-direction: column; align-items: flex-start; gap: 0.375rem; }
+  .path { padding: calc(1.5rem - 2px) 1.5rem 1.5rem; border-top: 1px solid var(--border); display: flex; flex-direction: column; align-items: flex-start; gap: 0.375rem; }
   .path:first-child { border-top: 0; }
   @media (min-width: 640px) {
-    .path { padding: 2rem; border-top: 0; }
+    .path { padding: calc(2rem - 2px) 2rem 2rem; border-top: 0; }
     .path + .path { border-left: 1px solid var(--border); }
   }
   .path svg { width: 1rem; height: 1rem; color: var(--muted-fg); margin-bottom: 0.375rem; }
@@ -671,7 +691,6 @@
   }
   .path .btn { margin-top: 0.625rem; }
   .paths { border-top: 1px solid var(--border); }
-  .btn.mono { font-family: var(--font-mono); font-size: 0.8125rem; }
 
   /* faq, locked open */
   .faq-item { border-top: 1px solid var(--border); padding: 1.25rem 1.5rem; }
@@ -716,6 +735,87 @@
     cursor: not-allowed;
     pointer-events: none;
   }
+
+  /* hero pixel field */
+  .pixel-asym-bg {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    overflow: hidden;
+  }
+  .pixel-asym-bg canvas { width: 100%; height: 100%; display: block; }
+
+  /* diagram glow: layered dim gradients + film grain */
+  .hero-glow-bg {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    overflow: hidden;
+  }
+  .hero-glow-bg .glow {
+    position: absolute;
+    inset: -25%;
+    background:
+      radial-gradient(
+        115% 95% at 12% 108%,
+        oklch(83% 0.15 80 / 0.13) 0%,
+        oklch(80% 0.13 80 / 0.055) 32%,
+        transparent 62%
+      ),
+      radial-gradient(
+        90% 80% at 92% -8%,
+        oklch(75% 0.012 60 / 0.09) 0%,
+        oklch(70% 0.01 60 / 0.035) 38%,
+        transparent 66%
+      ),
+      radial-gradient(
+        55% 45% at 78% 96%,
+        oklch(83% 0.14 80 / 0.05) 0%,
+        transparent 60%
+      );
+  }
+  .hero-glow-bg .sweep {
+    position: absolute;
+    inset: -30%;
+    background: conic-gradient(
+      from 215deg at 30% 85%,
+      transparent 0deg,
+      oklch(85% 0.1 82 / 0.045) 55deg,
+      transparent 120deg,
+      oklch(72% 0.008 65 / 0.03) 235deg,
+      transparent 320deg
+    );
+    filter: blur(48px);
+  }
+  .hero-glow-bg .grain {
+    position: absolute;
+    inset: 0;
+    opacity: 0.28;
+    mix-blend-mode: overlay;
+  }
+  .hero-glow-bg .grain svg {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .hero-glow-bg .glow {
+      animation: hero-glow-drift 26s ease-in-out infinite alternate;
+    }
+    .hero-glow-bg .sweep {
+      animation: hero-sweep-drift 38s ease-in-out infinite alternate;
+    }
+    @keyframes hero-glow-drift {
+      from { transform: translate3d(0, 0, 0) scale(1); }
+      to   { transform: translate3d(2.5%, -2%, 0) scale(1.06); }
+    }
+    @keyframes hero-sweep-drift {
+      from { transform: rotate(0deg) scale(1); }
+      to   { transform: rotate(6deg) scale(1.05); }
+    }
+  }
 </style>
 </head>
 <body>
@@ -730,17 +830,11 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2"/><rect x="14" y="2" width="8" height="8" rx="1"/></svg>
           <span class="word">multitool</span>
         </span>
+        <span class="nav-byline">By AKA Labs</span>
       </nav>
 
       <div class="hero has-bg">
       <div class="hbg on" data-bg="pixel-asym">
-<style>
-    .pixel-asym-bg{
-      position:absolute; inset:0; z-index:0;
-      pointer-events:none; overflow:hidden;
-    }
-    .pixel-asym-bg canvas{ width:100%; height:100%; display:block; }
-  </style>
   <div class="pixel-asym-bg" aria-hidden="true"><canvas></canvas></div>
   <script>
   (function(){
@@ -822,13 +916,22 @@
     draw();
 
     if (matchMedia("(prefers-reduced-motion: no-preference)").matches){
-      var last = 0;
-      (function loop(t){
+      var last = 0, visible = true;
+      var loop = function(t){
+        if (!visible) return;
         requestAnimationFrame(loop);
         if (t - last < 90) return;
         last = t;
         draw(t);
-      })(0);
+      };
+      requestAnimationFrame(loop);
+      if (typeof IntersectionObserver !== "undefined"){
+        new IntersectionObserver(function(entries){
+          var was = visible;
+          visible = entries[0].isIntersecting;
+          if (visible && !was) requestAnimationFrame(loop);
+        }).observe(host);
+      }
     }
 
     if (typeof ResizeObserver !== "undefined"){
@@ -903,84 +1006,6 @@
         </div>
         <div class="split-right">
           <div class="graph-glow" aria-hidden="true">
-<style>
-    /* Abstract gradient background: layered dim glows + film grain.
-       Drop .hero-glow-bg as the first child of a position:relative,
-       overflow:hidden panel; keep panel content at z-index: 1. */
-    .hero-glow-bg {
-      position: absolute;
-      inset: 0;
-      z-index: 0;
-      pointer-events: none;
-      overflow: hidden;
-    }
-    .hero-glow-bg .glow {
-      position: absolute;
-      inset: -25%;
-      background:
-        /* primary: large dim gold glow rising from bottom-left */
-        radial-gradient(
-          115% 95% at 12% 108%,
-          oklch(83% 0.15 80 / 0.13) 0%,
-          oklch(80% 0.13 80 / 0.055) 32%,
-          transparent 62%
-        ),
-        /* secondary: cooler warm-gray glow, upper-right */
-        radial-gradient(
-          90% 80% at 92% -8%,
-          oklch(75% 0.012 60 / 0.09) 0%,
-          oklch(70% 0.01 60 / 0.035) 38%,
-          transparent 66%
-        ),
-        /* faint gold ember low on the right for depth */
-        radial-gradient(
-          55% 45% at 78% 96%,
-          oklch(83% 0.14 80 / 0.05) 0%,
-          transparent 60%
-        );
-    }
-    .hero-glow-bg .sweep {
-      position: absolute;
-      inset: -30%;
-      background: conic-gradient(
-        from 215deg at 30% 85%,
-        transparent 0deg,
-        oklch(85% 0.1 82 / 0.045) 55deg,
-        transparent 120deg,
-        oklch(72% 0.008 65 / 0.03) 235deg,
-        transparent 320deg
-      );
-      filter: blur(48px);
-    }
-    .hero-glow-bg .grain {
-      position: absolute;
-      inset: 0;
-      opacity: 0.28;
-      mix-blend-mode: overlay;
-    }
-    .hero-glow-bg .grain svg {
-      width: 100%;
-      height: 100%;
-      display: block;
-    }
-    @media (prefers-reduced-motion: no-preference) {
-      .hero-glow-bg .glow {
-        animation: hero-glow-drift 26s ease-in-out infinite alternate;
-      }
-      .hero-glow-bg .sweep {
-        animation: hero-sweep-drift 38s ease-in-out infinite alternate;
-      }
-      @keyframes hero-glow-drift {
-        from { transform: translate3d(0, 0, 0) scale(1); }
-        to   { transform: translate3d(2.5%, -2%, 0) scale(1.06); }
-      }
-      @keyframes hero-sweep-drift {
-        from { transform: rotate(0deg) scale(1); }
-        to   { transform: rotate(6deg) scale(1.05); }
-      }
-    }
-  </style>
-
   <div class="hero-glow-bg" aria-hidden="true">
     <div class="glow"></div>
     <div class="sweep"></div>
@@ -1054,7 +1079,7 @@
       <div class="deploy">
         <div class="deploy-panel">
           <h3>Local Multitool</h3>
-          <p>The menu bar app runs the broker on your Mac. Keys live encrypted in your Keychain, agents talk to a local socket, and nothing leaves the machine.</p>
+          <p>Native macOS app without any remote dependencies. Keys encrypted in your Keychain, agents talk to a local socket, and nothing leaves the machine.</p>
           <div class="mock" aria-hidden="true">
             <div class="menubar">
               <span class="mb-tray"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2"/><rect x="14" y="2" width="8" height="8" rx="1"/></svg></span>
@@ -1105,13 +1130,13 @@
         <div class="path">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2"/><rect x="14" y="2" width="8" height="8" rx="1"/></svg>
           <h3>Desktop</h3>
-          <p>The macOS menu bar app. Keys live in your Keychain; the broker runs on a local socket.</p>
+          <p>Native macOS app for getting started quickly. Move your keys out of .env files today.</p>
           <button class="btn outline" type="button">Download for macOS</button>
         </div>
         <div class="path">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19h8"/><path d="m4 17 6-6-6-6"/></svg>
           <h3>CLI</h3>
-          <p>Headless install for servers and CI. The same broker, no window required.</p>
+          <p>Run your remote agents, servers, and CI with Multitool credentials.</p>
           <button class="btn outline mono" type="button" disabled>npm install -g agentmfa</button>
         </div>
         <div class="path">
@@ -1126,7 +1151,7 @@
 
     <section class="panel">
       <div class="panel-head">
-        <h2>Your questions answered.</h2>
+        <h2>Frequently asked questions</h2>
       </div>
       <div class="faqs">
         <div class="faq-item">
@@ -1135,7 +1160,7 @@
         </div>
         <div class="faq-item">
           <h3>What does an agent actually see?</h3>
-          <p>Agents can access one shared key for the machine, plus direct handles for individual connections: a password-less Postgres DSN, an <span class="m">SSH_AUTH_SOCK</span>, a local HTTP endpoint per pinned API, and MCP tools for everything enabled.</p>
+          <p>Agents can access one shared key for the machine, plus direct handles for individual connections: a password-less Postgres DSN, an <span class="m">SSH_AUTH_SOCK</span>, a local HTTP endpoint per pinned API, plus a unified MCP tool.</p>
         </div>
         <div class="faq-item">
           <h3>Which agents work with it?</h3>
@@ -1143,7 +1168,7 @@
         </div>
         <div class="faq-item">
           <h3>What happens when I switch a tool off?</h3>
-          <p>Every agent loses it at once, and calls are refused with a <span class="m">403</span> error. You can also reset all tools by rotating the shared key from the app, which disconnects everything in one step.</p>
+          <p>Every agent loses access to it at once, and calls are refused with a <span class="m">403</span> error. You can also reset all tools by rotating the shared key from the app, which disconnects everything in one step.</p>
         </div>
       </div>
     </section>
@@ -1163,7 +1188,7 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2"/><rect x="14" y="2" width="8" height="8" rx="1"/></svg>
           <span class="word" style="color: var(--fg);">multitool</span>
         </span>
-        <span>© 2026 AKA</span>
+        <span>© 2026 AKA LABS</span>
       </footer>
     </div>
 
