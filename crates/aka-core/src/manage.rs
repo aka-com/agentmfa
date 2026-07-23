@@ -921,6 +921,14 @@ impl ManagementBackend for LocalBackend {
     }
 
     async fn agent_key(&self) -> ManageResult<String> {
+        // Audited at release, like a secret copy: the trait's only caller
+        // is the shell's clipboard affordance, and once the plaintext
+        // leaves the broker the copy has happened for audit purposes. A
+        // remote shell reaches this same path through the manage route.
+        self.broker.audit.append(AuditEntry::new(
+            crate::audit::AuditKind::SecretCopied,
+            "Shared key copied".to_string(),
+        ));
         Ok(self.broker.identity.token())
     }
 

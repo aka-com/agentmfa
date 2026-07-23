@@ -76,7 +76,19 @@ pub struct BrokerState {
     profile: Mutex<BrokerProfileInfo>,
     data_dir: PathBuf,
     tokens: TokenStore,
+    /// Transition attempts, monotonically numbered. A transition captures
+    /// the counter when it begins and refuses to commit if another attempt
+    /// began while it awaited (probe/startup): the user's latest choice
+    /// wins, and a slow earlier attempt can never override it. Commits run
+    /// holding this lock, so they are also mutually exclusive.
+    transition_epoch: Mutex<u64>,
 }
+
+/// The error a transition reports when it lost to a newer one. Compared by
+/// [`BrokerState::start_saved_remote`] to keep a lost startup attempt from
+/// stomping the link state the winning transition established.
+const TRANSITION_SUPERSEDED: &str =
+    "the broker choice changed while connecting; nothing was applied";
 
 /// The event the webview listens to for switcher/link state.
 pub const EVT_BROKER: &str = "aka://broker-changed";
@@ -123,6 +135,7 @@ impl BrokerState {
             profile: Mutex::new(BrokerProfileInfo::local()),
             tokens: TokenStore::new(data_dir.clone()),
             data_dir,
+            transition_epoch: Mutex::new(0),
         }
     }
 
@@ -157,7 +170,23 @@ impl BrokerState {
             }),
             tokens,
             data_dir,
+            transition_epoch: Mutex::new(0),
         }
+    }
+
+    /// Begin a transition attempt: bump the counter, invalidating any
+    /// attempt still in flight.
+    fn begin_transition(&self) -> u64 {
+        let mut epoch = self.transition_epoch.lock().unwrap();
+        *epoch += 1;
+        *epoch
+    }
+
+    /// Take the commit lock — `None` when a newer attempt began, in which
+    /// case the caller must apply nothing. No awaiting while held.
+    fn transition_guard(&self, epoch: u64) -> Option<std::sync::MutexGuard<'_, u64>> {
+        let guard = self.transition_epoch.lock().unwrap();
+        (*guard == epoch).then_some(guard)
     }
 
     /// The active backend (cloned out so no lock is held across awaits).
@@ -220,34 +249,50 @@ impl BrokerState {
             RemoteBackend::new(config)
                 .with_opener(Arc::new(crate::events::open_consent_url)),
         );
+        let epoch = self.begin_transition();
         backend
             .whoami()
             .await
             .map_err(|error| error.to_string())?;
 
-        // The probe succeeded: persist, swap, and (re)arm the link.
-        if let Err(error) = self.tokens.save(&url, &token) {
-            tracing::warn!(%error, "could not store the management token");
-        }
-        save_config(
-            &self.data_dir,
-            &ShellConfig {
-                mode: Some("remote".into()),
-                remote_url: Some(url.clone()),
-            },
-        );
-        self.teardown_remote();
-        self.teardown_local().await;
-        *self.backend.write().unwrap() = backend.clone();
-        self.arm_sse(app, backend);
-        let profile = BrokerProfileInfo {
-            mode: "remote".into(),
-            url: Some(url),
-            connected: true,
-            error: None,
-            has_saved_token: true,
+        // The probe succeeded: persist, swap, and (re)arm the link — unless
+        // another transition began while the probe was in flight (the user
+        // switched to this Mac, retried, or connected elsewhere); the later
+        // choice wins and this attempt applies nothing.
+        let (profile, stale_local) = {
+            let Some(_commit) = self.transition_guard(epoch) else {
+                return Err(TRANSITION_SUPERSEDED.into());
+            };
+            if let Err(error) = self.tokens.save(&url, &token) {
+                tracing::warn!(%error, "could not store the management token");
+            }
+            save_config(
+                &self.data_dir,
+                &ShellConfig {
+                    mode: Some("remote".into()),
+                    remote_url: Some(url.clone()),
+                },
+            );
+            self.teardown_remote();
+            let stale_local = self.local.lock().unwrap().take();
+            *self.backend.write().unwrap() = backend.clone();
+            self.arm_sse(app, backend);
+            let profile = BrokerProfileInfo {
+                mode: "remote".into(),
+                url: Some(url),
+                connected: true,
+                error: None,
+                has_saved_token: true,
+            };
+            self.set_profile(app, profile.clone());
+            (profile, stale_local)
         };
-        self.set_profile(app, profile.clone());
+        // The displaced local stack (if any) is dropped after the commit,
+        // off the async runtime: dropping a tokio runtime from async
+        // context panics.
+        if let Some(runtime) = stale_local {
+            let _ = tauri::async_runtime::spawn_blocking(move || drop(runtime)).await;
+        }
         Ok(profile)
     }
 
@@ -271,6 +316,10 @@ impl BrokerState {
             let Some(url) = self.profile().url else { return };
             match self.connect_remote(&app, url, None).await {
                 Ok(_) => {}
+                // A superseded attempt lost to a user-initiated transition
+                // that already set the profile; reporting it as a link
+                // failure would stomp the winner's state.
+                Err(message) if message == TRANSITION_SUPERSEDED => {}
                 Err(message) => self.update_link(&app, false, Some(message)),
             }
         });
@@ -284,6 +333,7 @@ impl BrokerState {
         if self.profile().mode == "local" && self.local.lock().unwrap().is_some() {
             return Ok(self.profile());
         }
+        let epoch = self.begin_transition();
         // Start the local stack first: if it cannot start (another broker
         // holds the instance lock, say), the remote link must stay armed so
         // the user still has a working mode to stand on.
@@ -294,36 +344,52 @@ impl BrokerState {
         .await
         .map_err(|error| format!("local broker start stopped: {error}"))?
         .map_err(|error| error.to_string())?;
-        self.teardown_remote();
-        let backend: Arc<dyn ManagementBackend> =
-            Arc::new(aka_core::manage::LocalBackend::new(runtime.broker.clone()));
-        *self.local.lock().unwrap() = Some(runtime);
-        *self.backend.write().unwrap() = backend;
-        save_config(
-            &self.data_dir,
-            &ShellConfig {
-                mode: Some("local".into()),
-                remote_url: self.profile().url,
-            },
-        );
-        let profile = BrokerProfileInfo::local();
-        self.set_profile(app, profile.clone());
-        Ok(profile)
+        // Commit under the transition lock; `runtime` stays in the slot
+        // when the commit is refused so it can be dropped off-thread below
+        // (the guard must not be held across an await).
+        let mut runtime = Some(runtime);
+        let committed = {
+            match self.transition_guard(epoch) {
+                Some(_commit) => {
+                    self.teardown_remote();
+                    let started = runtime.take().expect("freshly started runtime");
+                    let backend: Arc<dyn ManagementBackend> = Arc::new(
+                        aka_core::manage::LocalBackend::new(started.broker.clone()),
+                    );
+                    *self.local.lock().unwrap() = Some(started);
+                    *self.backend.write().unwrap() = backend;
+                    save_config(
+                        &self.data_dir,
+                        &ShellConfig {
+                            mode: Some("local".into()),
+                            remote_url: self.profile().url,
+                        },
+                    );
+                    let profile = BrokerProfileInfo::local();
+                    self.set_profile(app, profile.clone());
+                    Some(profile)
+                }
+                None => None,
+            }
+        };
+        match committed {
+            Some(profile) => Ok(profile),
+            None => {
+                // A newer transition began while the stack was starting;
+                // drop the fresh runtime off the async thread (dropping a
+                // tokio runtime in async context panics) and apply nothing.
+                if let Some(started) = runtime.take() {
+                    let _ =
+                        tauri::async_runtime::spawn_blocking(move || drop(started)).await;
+                }
+                Err(TRANSITION_SUPERSEDED.into())
+            }
+        }
     }
 
     /// Stop the remote link (keeps the saved token and URL).
     fn teardown_remote(&self) {
         *self.remote.lock().unwrap() = None;
-    }
-
-    /// Stop the local stack, off the async runtime: dropping a tokio
-    /// runtime from async context panics, and the drop must complete
-    /// before a new broker can take the instance lock.
-    async fn teardown_local(&self) {
-        let runtime = self.local.lock().unwrap().take();
-        if let Some(runtime) = runtime {
-            let _ = tauri::async_runtime::spawn_blocking(move || drop(runtime)).await;
-        }
     }
 
     /// Start the remote event stream, re-emitting manage events as the

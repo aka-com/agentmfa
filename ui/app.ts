@@ -3992,7 +3992,11 @@ async function boot() {
   }, 60000);
   // Live updates from the core.
   await listen('aka://broker-changed', async (ev) => {
-    const wasConnected = state.broker.connected && state.broker.mode === ev.payload.mode;
+    // "Same broker" means mode AND url: a switch from connected remote A to
+    // connected remote B must refetch, not keep A's data labeled as B.
+    const wasConnected = state.broker.connected
+      && state.broker.mode === ev.payload.mode
+      && state.broker.url === ev.payload.url;
     state.broker = ev.payload;
     // A link that just came (back) up: refetch everything rather than
     // trusting whatever was on screen for the previous broker.
@@ -4002,6 +4006,27 @@ async function boot() {
     }
     render();
   });
+  // The boot fetches above ran before that listener existed, and events are
+  // not queued for later listeners: a saved-remote probe finishing inside
+  // that window (either way) was silently dropped, which would pin the
+  // "Connecting…" takeover forever. Re-fetch the profile now that changes
+  // are observed — unless an event already delivered a fresher one.
+  {
+    const bootProfile = state.broker;
+    try {
+      const profile = await invoke('get_broker_profile');
+      if (state.broker === bootProfile) {
+        const cameUp = profile.connected
+          && !(bootProfile.connected && bootProfile.mode === profile.mode && bootProfile.url === profile.url);
+        state.broker = profile;
+        if (cameUp) {
+          await refresh('all');
+          try { state.agentSetupInstructions = await invoke('get_agent_setup'); } catch { /* pane shows loading */ }
+        }
+        render();
+      }
+    } catch (e) { console.error(e); }
+  }
   await listen('aka://sessions-changed', () => refresh('sessions'));
   await listen('aka://elicitations-changed', async () => {
     await refresh('elicitations');
