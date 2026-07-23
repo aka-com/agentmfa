@@ -330,7 +330,6 @@ export interface CommandMap {
   set_tool_access: CommandSpec<{ connectionId: string; enabled: boolean }, boolean>;
   issue_endpoint: CommandSpec<{ connectionId: string }, IssuedEndpoint>;
   revoke_endpoint: CommandSpec<{ endpointId: string }, boolean>;
-  confirm_rotate_key: CommandSpec<undefined, boolean>;
   rotate_key: CommandSpec<undefined, void>;
   copy_key: CommandSpec<undefined, void>;
   close_session: CommandSpec<{ id: number }, boolean>;

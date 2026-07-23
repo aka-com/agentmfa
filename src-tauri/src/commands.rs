@@ -17,7 +17,6 @@ use aka_core::types::{ConnectionConfig, PgSslMode};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter as _, State};
 use tauri_plugin_clipboard_manager::ClipboardExt as _;
-use tauri_plugin_dialog::{DialogExt as _, MessageDialogButtons, MessageDialogKind};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -1021,23 +1020,6 @@ pub fn copy_key(app: AppHandle, state: State<AppState>) -> CmdResult<()> {
     Ok(())
 }
 
-#[tauri::command]
-pub async fn confirm_rotate_key(app: AppHandle) -> bool {
-    app.dialog()
-        .message(
-            "Rotate this computer's key? Every live agent session closes now, and \
-             anything holding a pasted copy of the old key stops working until updated. \
-             Agents that read the key file reconnect on their own.",
-        )
-        .title("Rotate key")
-        .kind(MessageDialogKind::Warning)
-        .buttons(MessageDialogButtons::OkCancelCustom(
-            "Rotate key".to_string(),
-            "Cancel".to_string(),
-        ))
-        .blocking_show()
-}
-
 /* ------------------------------ sessions --------------------------------- */
 
 #[tauri::command]
@@ -1115,7 +1097,6 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         list_mcp_tools,
         issue_endpoint,
         revoke_endpoint,
-        confirm_rotate_key,
         rotate_key,
         copy_key,
         close_session,

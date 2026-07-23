@@ -3356,8 +3356,8 @@ document.addEventListener('click', async (e) => {
 
     case 'rotate-key-ask': {
       if (state.agentMenuOpen) { state.agentMenuOpen = null; render(); }
-      let confirmed = false;
-      if (!await run(async () => { confirmed = await invoke('confirm_rotate_key'); }) || !confirmed) break;
+      // No in-app confirm: the broker gates rotation behind the native
+      // (Touch ID / system) confirmation.
       if (await run(() => invoke('rotate_key'))) {
         toast('🔑 Key rotated — agents reconnect from the token file'); await refresh('all');
       }
