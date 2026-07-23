@@ -433,9 +433,6 @@
   }
   .start-pick.has-label{ padding-inline: 10px; }
   .start-pick-icon{ display: inline-flex; align-items: center; justify-content: center; line-height: 0; }
-  /* How the tool connects (MCP/API), shown after its name in the picker. */
-  .start-pick-kind{ color: var(--muted); font-size: 10.5px; font-weight: 700; letter-spacing: .04em; }
-  .start-pick.on .start-pick-kind{ color: inherit; }
   .start-pick-icon svg{ width: 16px; height: 16px; }
   .start-pick:hover{ background: var(--btn-hover); }
   .start-pick.on{ border-color: var(--accent); background: var(--accent-wash); color: var(--accent-ink); }

@@ -117,9 +117,9 @@ export function startOptionById(id: string): StartOption {
 }
 
 /**
- * Suffix shown after the tool's name in the step-1 picker: MCP-backed tools
- * say MCP, plain API integrations say API, databases and SSH say nothing.
- * Skipped when the name already carries it (Custom MCP).
+ * The kind suffix folded into the tool's name (the Add button, aria labels):
+ * MCP-backed tools say MCP, plain API integrations say API, databases and SSH
+ * say nothing. Skipped when the name already carries it (Custom MCP).
  */
 export function startKindLabel(option: StartOption): string {
   const kind = option.mcp ? 'MCP' : option.connType === 'api' ? 'API' : '';

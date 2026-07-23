@@ -1534,13 +1534,12 @@ function startWalkthroughHTML(): string {
     const visibleLabel = candidate.showPickerLabel
       ? `<span class="start-pick-label">${esc(candidate.label)}</span>` : '';
     const kind = startKindLabel(candidate);
-    const kindBadge = kind ? `<span class="start-pick-kind">${kind}</span>` : '';
     const fullLabel = kind ? `${candidate.label} ${kind}` : candidate.label;
     return `<button class="start-pick ${candidate.showPickerLabel ? 'has-label' : ''} ${candidate.id === option.id ? 'on' : ''}"
       aria-pressed="${candidate.id === option.id}"
       aria-label="${escAttr(fullLabel)}" title="${escAttr(fullLabel)}"
       data-act="start-option" data-id="${candidate.id}">
-      <span class="start-pick-icon" aria-hidden="true">${ICONS[candidate.icon] || ''}</span>${visibleLabel}${kindBadge}</button>`;
+      <span class="start-pick-icon" aria-hidden="true">${ICONS[candidate.icon] || ''}</span>${visibleLabel}</button>`;
   }).join('');
 
   const step = (n: number, title: string, done: boolean, body: string): string =>
@@ -1550,7 +1549,9 @@ function startWalkthroughHTML(): string {
 
   const addAction = catalogEntry && canQuickConnectMcp(catalogEntry)
     ? 'catalog-connect-oauth' : 'catalog-add';
-  const addLabel = progress.added ? `${option.label} Connected` : `Add ${option.label}`;
+  const optionKind = startKindLabel(option);
+  const optionName = optionKind ? `${option.label} ${optionKind}` : option.label;
+  const addLabel = progress.added ? `${optionName} Connected` : `Add ${optionName}`;
   const addBody = `<p>Save the destination and its credential. The credential goes to your Keychain;
         agents can use it but never read it.</p>
       <div class="start-picker" role="group" aria-label="What to connect">${picker}</div>
