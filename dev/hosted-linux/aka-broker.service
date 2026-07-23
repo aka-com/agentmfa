@@ -1,0 +1,36 @@
+# systemd unit for a hosted AKA broker on Linux (non-container).
+# Install to /etc/systemd/system/aka-broker.service, edit the paths/URL and
+# the vault key source, then:
+#   systemctl daemon-reload && systemctl enable --now aka-broker
+[Unit]
+Description=AKA secrets broker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aka
+Group=aka
+# State (encrypted vault, socket, token, audit log) lives here.
+Environment=HOME=/var/lib/aka
+Environment=AKA_SIDECAR_SCRIPT=/usr/local/share/aka/sidecar/main.mjs
+# The vault master key. Point this at a root-owned 0400 file that systemd
+# reads (EnvironmentFile), or inject AKA_VAULT_KEY from your secret manager.
+# NEVER put the key literal in this unit file.
+EnvironmentFile=/etc/aka/vault.env
+ExecStart=/usr/local/bin/aka serve \
+    --root /var/lib/aka \
+    --listen 127.0.0.1:4780 \
+    --public-url https://broker.example.dev
+Restart=on-failure
+RestartSec=2
+
+# Hardening: the broker needs only its state dir.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/aka
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

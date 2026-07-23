@@ -127,9 +127,17 @@ aka serve --listen 127.0.0.1:4780 --public-url https://broker.example.dev
 or `AKA_SIDECAR_SCRIPT`), and the daemon reverse-proxies `/mcp`, so
 remote agents reach MCP at `<public-url>/mcp` with the shared agent key.
 `/v1/pair` is never served over TCP. TLS is the operator's proxy or
-tunnel; see `dev/hosted-mac/` for the runbook and a LaunchAgent. Browser
-OAuth sign-ins and direct endpoints are not yet available remotely, and
-WS/PG/SSH opens still hand out broker-host-local addresses.
+tunnel. Browser OAuth sign-ins (BYO-app and MCP) are relayed to your
+machine, and direct endpoints issue remotely. WS/PG data-plane opens can
+advertise a reachable host via `--data-plane-listen`/`--advertise-host`
+(plaintext legs — trusted network only); SSH stays same-machine.
+`aka manage token --ttl-days N` bounds a leaked token, and the manage
+event stream resumes on reconnect (`Last-Event-ID`) instead of refetching.
+
+The broker runs on **macOS** (Keychain vault) or **Linux** (an
+XChaCha20-Poly1305 encrypted vault under a host-provided master key,
+`AKA_VAULT_KEY`). Runbooks plus a Dockerfile, systemd unit, and
+LaunchAgent live under `dev/hosted-mac/` and `dev/hosted-linux/`.
 
 ## Developing
 
