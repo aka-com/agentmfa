@@ -1114,7 +1114,10 @@
 .add-section .cat-more:hover,
 .add-section .cat-more:focus-visible { opacity: 1; }
 .sheet-actions .conn-delete-btn { margin-right: 0; }
-/* Delete + its ⋯ sit left; the menu drops upward, clear of the sheet edge. */
+/* On the connection edit sheet, Delete (and any Reconnect / ⋯ beside it) sits
+   left while Cancel + Save stay right. Pushing Cancel handles every branch. */
+.sheet-actions:has(.conn-delete-btn) [data-act="sheet-cancel"] { margin-left: auto; }
+/* The ⋯ menu drops upward, clear of the sheet edge. */
 .sheet-actions .sheet-conn-menu { margin-right: auto; }
 .sheet-conn-menu .tile-menu { top: auto; bottom: calc(100% + 5px); right: auto; left: 0; }
 /* The row's issue list: plain warning text with its fix pinned right. */
