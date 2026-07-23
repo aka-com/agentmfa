@@ -1,0 +1,1173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Multitool — secure execution for AI agents. A local connection broker that keeps keys encrypted and injects credentials on the upstream leg only.">
+<meta name="theme-color" content="#171512">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23fabb41%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M10%2022V7a1%201%200%200%200-1-1H4a2%202%200%200%200-2%202v12a2%202%200%200%200%202%202h12a2%202%200%200%200%202-2v-5a1%201%200%200%200-1-1H2%22%2F%3E%3Crect%20x%3D%2214%22%20y%3D%222%22%20width%3D%228%22%20height%3D%228%22%20rx%3D%221%22%2F%3E%3C%2Fsvg%3E">
+<title>Multitool — Secure execution for AI agents</title>
+<style>
+  :root {
+    --bg: oklch(16.5% 0.006 75);
+    --fg: oklch(96% 0.004 80);
+    --card: oklch(19.5% 0.006 75);
+    --muted: oklch(23.5% 0.006 75);
+    --muted-fg: oklch(66% 0.005 75);
+    --border: oklch(30% 0.006 75);
+    --joint: oklch(48% 0.006 75);
+    --grid-line: oklch(30% 0.006 75);
+    --primary: oklch(83% 0.15 80);
+    --primary-fg: oklch(18% 0.006 75);
+    --font-sans: "Geist", "Inter", system-ui, "Segoe UI", Helvetica, Arial, sans-serif;
+    --font-mono: "Geist Mono", ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    font-size: 16px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  main {
+    position: relative;
+    min-height: 100svh;
+    overflow: hidden;
+  }
+
+  .bg-grid {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    opacity: 0.5;
+    background-image:
+      linear-gradient(to right, color-mix(in oklch, var(--grid-line) 60%, transparent) 1px, transparent 1px),
+      linear-gradient(to bottom, color-mix(in oklch, var(--grid-line) 60%, transparent) 1px, transparent 1px);
+    background-size: 56px 56px;
+  }
+
+  .shell {
+    position: relative;
+    max-width: 72rem;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    padding: 1.5rem 1rem;
+  }
+  @media (min-width: 640px) { .shell { padding: 1.5rem 1.5rem; } }
+
+  .mono { font-family: var(--font-mono); }
+
+  /* ---------- nav ---------- */
+  nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border: 1px solid var(--border);
+    background: color-mix(in oklab, var(--bg) 70%, transparent);
+    padding: 0.75rem 1rem;
+    backdrop-filter: blur(8px);
+  }
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    user-select: none;
+  }
+  .brand svg {
+    width: 1rem;
+    height: 1rem;
+    color: var(--primary);
+    flex-shrink: 0;
+  }
+  .brand .word {
+    font-family: var(--font-mono);
+    font-weight: 600;
+    font-size: 0.875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+  }
+
+  /* ---------- buttons ---------- */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.375rem;
+    height: 2.25rem;
+    padding: 0 0.75rem;
+    border: 1px solid transparent;
+    border-radius: 0.5rem;
+    font-family: var(--font-sans);
+    font-size: 0.875rem;
+    font-weight: 500;
+    white-space: nowrap;
+    color: var(--fg);
+    background: transparent;
+    cursor: pointer;
+    transition: background-color 0.15s, color 0.15s;
+    user-select: none;
+  }
+  .btn:active { transform: translateY(1px); }
+  .btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+  .btn svg { width: 1rem; height: 1rem; }
+  .btn.primary {
+    background: var(--fg);
+    color: var(--bg);
+  }
+  .btn.primary:hover { background: color-mix(in oklab, var(--fg) 82%, transparent); }
+  .btn.outline {
+    border-color: var(--border);
+    background: color-mix(in oklab, var(--muted) 30%, transparent);
+  }
+  .btn.outline:hover { background: color-mix(in oklab, var(--muted) 60%, transparent); }
+  .btn.ghost { height: 2rem; padding: 0 0.625rem; }
+  .btn.ghost:hover { background: var(--muted); }
+
+  /* ---------- hero ---------- */
+  .hero {
+    position: relative;
+    display: grid;
+    border: 1px solid var(--border);
+    border-top: 0;
+    background: var(--bg);
+  }
+  @media (min-width: 1024px) { .hero { grid-template-columns: 1.05fr 0.95fr; } }
+
+  .hero::after {
+    content: "";
+    position: absolute;
+    inset: -4.5px;
+    z-index: 10;
+    pointer-events: none;
+    background-image:
+      linear-gradient(var(--joint), var(--joint)), linear-gradient(var(--joint), var(--joint)),
+      linear-gradient(var(--joint), var(--joint)), linear-gradient(var(--joint), var(--joint)),
+      linear-gradient(var(--joint), var(--joint)), linear-gradient(var(--joint), var(--joint)),
+      linear-gradient(var(--joint), var(--joint)), linear-gradient(var(--joint), var(--joint));
+    background-repeat: no-repeat;
+    background-size: 9px 1px, 1px 9px, 9px 1px, 1px 9px, 9px 1px, 1px 9px, 9px 1px, 1px 9px;
+    background-position:
+      left 0 top 4px, left 4px top 0,
+      right 0 top 4px, right 4px top 0,
+      left 0 bottom 4px, left 4px bottom 0,
+      right 0 bottom 4px, right 4px bottom 0;
+  }
+
+  .hero-copy {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 1.25rem;
+    padding: 2rem;
+    border-bottom: 1px solid var(--border);
+  }
+  @media (min-width: 640px) { .hero-copy { padding: 2.5rem; } }
+  @media (min-width: 1024px) { .hero-copy { border-bottom: 0; border-right: 1px solid var(--border); } }
+  @media (max-width: 1023.98px) {
+    nav { justify-content: center; }
+    .hero-copy { align-items: center; text-align: center; }
+    .hero-actions { justify-content: center; }
+  }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: fit-content;
+    height: 1.375rem;
+    padding: 0.125rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 0.25rem;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--muted-fg);
+    white-space: nowrap;
+  }
+  .dot {
+    position: relative;
+    display: inline-flex;
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 9999px;
+    background: oklch(78% 0.17 150);
+    flex-shrink: 0;
+  }
+  .dot::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 9999px;
+    background: oklch(78% 0.17 150);
+    opacity: 0.75;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .dot::after { animation: ping 1.2s cubic-bezier(0, 0, 0.2, 1) infinite; }
+    @keyframes ping { 75%, 100% { transform: scale(2.2); opacity: 0; } }
+  }
+
+  h1 {
+    font-size: 2.25rem;
+    font-weight: 600;
+    line-height: 1.04;
+    letter-spacing: -0.025em;
+    text-wrap: balance;
+  }
+  @media (min-width: 640px) { h1 { font-size: 3rem; } }
+
+  .hero-lead {
+    max-width: 28rem;
+    font-size: 1rem;
+    line-height: 1.65;
+    color: var(--muted-fg);
+  }
+  .hero-lead .m { font-family: var(--font-mono); font-size: 0.9em; color: var(--fg); }
+
+  .hero-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.75rem;
+    padding-top: 0.25rem;
+  }
+
+  .hero-demo {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1.5rem;
+    background: var(--card);
+  }
+  @media (min-width: 640px) { .hero-demo { padding: 2rem; } }
+
+  .term {
+    width: 100%;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 0.25rem;
+    background: var(--card);
+    box-shadow: 0 25px 50px -12px rgb(0 0 0 / 0.5);
+  }
+  .term-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+    background: color-mix(in oklab, var(--bg) 60%, transparent);
+  }
+  .term-bar .light {
+    width: 0.625rem;
+    height: 0.625rem;
+    border-radius: 9999px;
+    background: color-mix(in oklab, var(--muted-fg) 40%, transparent);
+  }
+  .term-bar .term-title {
+    margin-left: 0.5rem;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--muted-fg);
+  }
+  .term pre {
+    overflow-x: auto;
+    padding: 1rem;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    line-height: 1.65;
+  }
+  .term .p { color: var(--primary); }
+  .term .c { color: var(--muted-fg); }
+
+  /* ---------- sections ---------- */
+  section.panel {
+    border: 1px solid var(--border);
+    background: var(--bg);
+  }
+  .panel-head {
+    padding: 2rem 1.5rem;
+    border-bottom: 1px solid var(--border);
+  }
+  @media (min-width: 640px) { .panel-head { padding: 2rem 2.5rem; } }
+  .panel-head h2 {
+    max-width: 48rem;
+    font-size: 1.5rem;
+    font-weight: 600;
+    line-height: 1.15;
+    letter-spacing: -0.025em;
+    text-wrap: balance;
+  }
+  @media (min-width: 640px) { .panel-head h2 { font-size: 1.875rem; } }
+  .panel-head p {
+    max-width: 30rem;
+    margin-top: 0.75rem;
+    font-size: 0.875rem;
+    line-height: 1.65;
+    color: var(--muted-fg);
+  }
+  @media (min-width: 640px) { .panel-head p { font-size: 1rem; } }
+
+  /* problem section */
+  .split { display: grid; }
+  @media (min-width: 1024px) { .split { grid-template-columns: 1fr 1fr; } }
+  .split-left {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding: 1.5rem;
+    border-bottom: 1px solid var(--border);
+  }
+  @media (min-width: 640px) { .split-left { padding: 2.5rem; } }
+  @media (min-width: 1024px) { .split-left { border-bottom: 0; border-right: 1px solid var(--border); } }
+  .risk-list { list-style: none; }
+  .risk-list li {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    padding: 0.75rem 0;
+    border-top: 1px solid color-mix(in oklab, var(--border) 60%, transparent);
+    font-size: 0.875rem;
+  }
+  .risk-list li:first-child { border-top: 0; padding-top: 0; }
+  .risk-list li:last-child { padding-bottom: 0; }
+  .risk-list .mark {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-self: center;
+  }
+  .risk-list .mark svg { width: 0.875rem; height: 0.875rem; }
+  .risk-list .mark.x { color: var(--muted-fg); }
+  .risk-list .mark.ok { color: oklch(78% 0.17 150); }
+  .risk-list .struck {
+    color: var(--muted-fg);
+    text-decoration: line-through;
+    text-decoration-color: color-mix(in oklab, var(--muted-fg) 70%, transparent);
+  }
+  .risk-list .kept { color: var(--fg); }
+
+  .split-right {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 1.75rem;
+    padding: 1.5rem;
+  }
+  @media (min-width: 640px) { .split-right { padding: 2.5rem; } }
+  figure figcaption {
+    margin-bottom: 0.75rem;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    color: var(--muted-fg);
+  }
+  figure .note {
+    margin-top: 0.75rem;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--muted-fg);
+  }
+  .fan {
+    display: block;
+    width: 100%;
+    max-width: 30rem;
+    height: auto;
+    margin: 0 auto;
+  }
+  .fan .wire path {
+    fill: none;
+    stroke: var(--border);
+    stroke-width: 1;
+  }
+  .fan .box {
+    fill: var(--card);
+    stroke: var(--border);
+  }
+  .fan .box.hub {
+    stroke: color-mix(in oklab, var(--primary) 55%, var(--border));
+  }
+  .fan .lbl {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    fill: var(--muted-fg);
+  }
+  .fan .hub-lbl {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    fill: var(--primary);
+  }
+  .fan .node-ic { color: var(--muted-fg); }
+  .fan .hub-ic { color: var(--primary); }
+
+
+  /* deployment panels */
+  .deploy { display: grid; }
+  @media (min-width: 640px) { .deploy { grid-template-columns: 1fr 1fr; } }
+  .deploy-panel {
+    display: flex;
+    flex-direction: column;
+    padding: 1.5rem;
+    border-top: 1px solid var(--border);
+  }
+  .deploy-panel:first-child { border-top: 0; }
+  @media (min-width: 640px) {
+    .deploy-panel { padding: 2rem; border-top: 0; }
+    .deploy-panel + .deploy-panel { border-left: 1px solid var(--border); }
+  }
+  .deploy-panel h3 {
+    font-size: 1rem;
+    font-weight: 500;
+    letter-spacing: -0.015em;
+  }
+  .deploy-panel > p {
+    max-width: 26rem;
+    margin-top: 0.375rem;
+    font-size: 0.875rem;
+    line-height: 1.65;
+    color: var(--muted-fg);
+  }
+
+  /* UI outline mocks */
+  .mock {
+    width: 100%;
+    max-width: 17.5rem;
+    margin: auto auto 0;
+    padding-top: 1.5rem;
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    color: var(--muted-fg);
+    user-select: none;
+  }
+  .mock .ok-dot {
+    width: 0.375rem;
+    height: 0.375rem;
+    border-radius: 9999px;
+    background: oklch(78% 0.17 150);
+    flex-shrink: 0;
+  }
+  .mock .sk {
+    height: 0.375rem;
+    border-radius: 9999px;
+    background: var(--muted);
+  }
+  .mock svg { flex-shrink: 0; }
+
+  .menubar {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.25rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 0.375rem;
+    background: color-mix(in oklab, var(--bg) 60%, transparent);
+  }
+  .mb-tray {
+    display: inline-flex;
+    padding: 0.15rem 0.3rem;
+    border-radius: 0.25rem;
+    background: var(--muted);
+    color: var(--fg);
+  }
+  .tray-card {
+    width: 15.5rem;
+    max-width: 100%;
+    margin: 0.375rem 0 0 auto;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 0.375rem;
+    background: var(--card);
+    box-shadow: 0 14px 28px -14px rgb(0 0 0 / 0.6);
+  }
+  .tc-head {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0.5rem 0.625rem;
+    border-bottom: 1px solid var(--border);
+    color: var(--fg);
+  }
+  .tc-head .appicon { color: var(--primary); display: inline-flex; }
+  .tc-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    margin-left: auto;
+    color: var(--muted-fg);
+  }
+  .tc-tabs {
+    display: flex;
+    gap: 0.25rem;
+    padding: 0.375rem 0.625rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .tc-tab { padding: 0.125rem 0.375rem; border-radius: 0.25rem; }
+  .tc-tab.on { background: var(--muted); color: var(--fg); }
+  .tc-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.45rem 0.625rem;
+    border-top: 1px solid color-mix(in oklab, var(--border) 60%, transparent);
+  }
+  .tc-row:first-of-type { border-top: 0; }
+  .sk-ico {
+    width: 0.75rem;
+    height: 0.75rem;
+    border-radius: 0.1875rem;
+    background: var(--muted);
+    flex-shrink: 0;
+  }
+  .sk-pill {
+    width: 1.125rem;
+    height: 0.625rem;
+    margin-left: auto;
+    border-radius: 9999px;
+    background: color-mix(in oklab, var(--primary) 65%, transparent);
+    flex-shrink: 0;
+  }
+  .sk-pill.off { background: var(--muted); }
+
+  .win {
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 0.375rem;
+    background: var(--card);
+    box-shadow: 0 14px 28px -14px rgb(0 0 0 / 0.6);
+  }
+  .win-head {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.375rem 0.625rem;
+    border-bottom: 1px solid var(--border);
+    background: color-mix(in oklab, var(--bg) 60%, transparent);
+  }
+  .win-light {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 9999px;
+    background: color-mix(in oklab, var(--muted-fg) 35%, transparent);
+  }
+  .broker-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    margin-left: auto;
+    padding: 0.2rem 0.45rem;
+    border: 1px solid var(--border);
+    border-radius: 0.25rem;
+    background: color-mix(in oklab, var(--muted) 40%, transparent);
+    color: var(--fg);
+  }
+  .broker-btn .caret { color: var(--muted-fg); display: inline-flex; }
+  .win-body {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    height: 8.75rem;
+    padding: 0.625rem;
+  }
+  .broker-menu {
+    position: absolute;
+    top: 0.25rem;
+    right: 0.625rem;
+    width: 12rem;
+    padding: 0.25rem;
+    border: 1px solid var(--border);
+    border-radius: 0.375rem;
+    background: var(--card);
+    box-shadow: 0 14px 28px -14px rgb(0 0 0 / 0.6);
+  }
+  .wm-item {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0.3rem 0.45rem;
+    border-radius: 0.25rem;
+  }
+  .wm-item.on { background: var(--muted); color: var(--fg); }
+  .wm-check { width: 0.6rem; color: var(--muted-fg); }
+
+  /* ---------- CTA + footer ---------- */
+  .cta {
+    border: 1px solid var(--border);
+    background: var(--card);
+    padding: 3.5rem 1.5rem;
+    text-align: center;
+  }
+  @media (min-width: 640px) { .cta { padding: 3.5rem 2.5rem; } }
+  .cta h2 {
+    font-size: 1.875rem;
+    font-weight: 600;
+    line-height: 1.15;
+    letter-spacing: -0.025em;
+    text-wrap: balance;
+  }
+  @media (min-width: 640px) { .cta h2 { font-size: 2.25rem; } }
+  .cta p {
+    max-width: 28rem;
+    margin: 0.75rem auto 0;
+    font-size: 0.875rem;
+    color: var(--muted-fg);
+  }
+  .cta-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+    margin-top: 1.75rem;
+  }
+
+  footer {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    border: 1px solid var(--border);
+    border-top: 0;
+    background: var(--card);
+    padding: 0.75rem 1rem;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--muted-fg);
+  }
+
+
+  /* run-it-your-way paths */
+  .paths { display: grid; }
+  @media (min-width: 640px) { .paths { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+  .path { padding: 1.5rem; border-top: 1px solid var(--border); display: flex; flex-direction: column; align-items: flex-start; gap: 0.375rem; }
+  .path:first-child { border-top: 0; }
+  @media (min-width: 640px) {
+    .path { padding: 2rem; border-top: 0; }
+    .path + .path { border-left: 1px solid var(--border); }
+  }
+  .path svg { width: 1rem; height: 1rem; color: var(--muted-fg); margin-bottom: 0.375rem; }
+  .path h3 { font-size: 0.9375rem; font-weight: 500; letter-spacing: -0.015em; }
+  .path p { font-size: 0.875rem; line-height: 1.65; color: var(--muted-fg); }
+  .path .path-cmd {
+    margin-top: 0.625rem;
+    padding: 0.375rem 0.625rem;
+    border: 1px solid var(--border);
+    border-radius: 0.25rem;
+    background: var(--card);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--fg);
+    white-space: nowrap;
+    overflow-x: auto;
+    max-width: 100%;
+  }
+  .path .btn { margin-top: 0.625rem; }
+  .paths { border-top: 1px solid var(--border); }
+  .btn.mono { font-family: var(--font-mono); font-size: 0.8125rem; }
+
+  /* faq, locked open */
+  .faq-item { border-top: 1px solid var(--border); padding: 1.25rem 1.5rem; }
+  .faq-item:first-child { border-top: 0; }
+  @media (min-width: 640px) { .faq-item { padding: 1.375rem 2.5rem; } }
+  .faq-item h3 {
+    font-size: 0.9375rem;
+    font-weight: 500;
+    letter-spacing: -0.015em;
+    line-height: 1.4;
+  }
+  .faq-item p {
+    max-width: 46rem;
+    margin-top: 0.5rem;
+    font-size: 0.875rem;
+    line-height: 1.65;
+    color: var(--muted-fg);
+  }
+  .faq-item p .m { font-family: var(--font-mono); font-size: 0.9em; color: var(--fg); }
+
+  /* hero background */
+  .hbg {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    pointer-events: none;
+    visibility: hidden;
+  }
+  .hbg.on { visibility: visible; }
+  .hero-copy, .hero-demo { position: relative; z-index: 1; }
+  .split-right { position: relative; }
+  .graph-glow {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    pointer-events: none;
+  }
+  .split-right figure { position: relative; z-index: 1; }
+  .hero.has-bg .hero-demo { background: color-mix(in oklab, var(--card) 75%, transparent); }
+  .btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+
+<main>
+  <div class="bg-grid"></div>
+  <div class="shell">
+
+    <div>
+      <nav>
+        <span class="brand">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2"/><rect x="14" y="2" width="8" height="8" rx="1"/></svg>
+          <span class="word">multitool</span>
+        </span>
+      </nav>
+
+      <div class="hero has-bg">
+      <div class="hbg on" data-bg="pixel-asym">
+<style>
+    .pixel-asym-bg{
+      position:absolute; inset:0; z-index:0;
+      pointer-events:none; overflow:hidden;
+    }
+    .pixel-asym-bg canvas{ width:100%; height:100%; display:block; }
+  </style>
+  <div class="pixel-asym-bg" aria-hidden="true"><canvas></canvas></div>
+  <script>
+  (function(){
+    "use strict";
+    var host = document.currentScript.previousElementSibling;
+    var canvas = host.querySelector("canvas");
+    var ctx = canvas.getContext("2d");
+
+    function rng(seed){
+      return function(){
+        seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+        var t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+        t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+        return ((t ^ t >>> 14) >>> 0) / 4294967296;
+      };
+    }
+
+    var BAYER = [0,8,2,10, 12,4,14,6, 3,11,1,9, 15,7,13,5];
+
+    var CELL = 14;
+    var PX   = 6;
+    var GRAY = "oklch(66% 0.005 75";
+    var GOLD = "oklch(83% 0.15 80";
+
+    var pixels = [], W = 0, H = 0, dpr = 1;
+
+    function build(){
+      var rect = host.getBoundingClientRect();
+      W = Math.max(1, Math.round(rect.width));
+      H = Math.max(1, Math.round(rect.height));
+      dpr = Math.min(window.devicePixelRatio || 1, 2);
+      canvas.width = W * dpr; canvas.height = H * dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      var rand = rng(20260723);
+      pixels.length = 0;
+
+      var cols = Math.ceil(W / CELL), rows = Math.ceil(H / CELL);
+      for (var j = 0; j < rows; j++){
+        for (var i = 0; i < cols; i++){
+          var r1 = rand(), r2 = rand(), r3 = rand();
+          var cx = i * CELL + CELL / 2, cy = j * CELL + CELL / 2;
+          var rx = cx / W;                        /* 0 left → 1 right */
+          var vy = Math.abs(cy / H * 2 - 1);      /* 0 middle → 1 top/bottom */
+          /* asymmetric: sweep in from the right edge, corners boosted,
+             nothing left of ~45% where the headline sits */
+          var e = Math.pow(Math.max(0, rx - 0.42) / 0.58, 2.0) * 0.85
+                + Math.pow(Math.max(0, rx - 0.55) / 0.45, 2.2) * Math.pow(vy, 1.6) * 0.55;
+          e = Math.min(1, e);
+          var density = Math.pow(e, 1.6) * 0.9;
+          var threshold = (BAYER[(j % 4) * 4 + (i % 4)] + 0.5) / 16;
+          if (density * (0.55 + 0.9 * r1) <= threshold) continue;
+
+          var gold = r2 < 0.30;
+          pixels.push({
+            x: Math.round(cx - PX / 2 + (r3 - 0.5) * 3),
+            y: Math.round(cy - PX / 2 + (r1 - 0.5) * 3),
+            s: r3 < 0.14 ? PX + 3 : (r2 > 0.86 ? PX - 3 : PX),
+            a: (gold ? 0.032 + 0.105 * e : 0.026 + 0.068 * e) * (0.6 + 0.8 * r3),
+            c: gold ? GOLD : GRAY,
+            ph: r2 * Math.PI * 2
+          });
+        }
+      }
+    }
+
+    function draw(t){
+      ctx.clearRect(0, 0, W, H);
+      for (var k = 0; k < pixels.length; k++){
+        var p = pixels[k], a = p.a;
+        if (t !== undefined && p.c === GOLD)
+          a *= 0.72 + 0.28 * Math.sin(t / 4200 + p.ph);
+        ctx.fillStyle = p.c + " / " + a.toFixed(3) + ")";
+        ctx.fillRect(p.x, p.y, p.s, p.s);
+      }
+    }
+
+    build();
+    draw();
+
+    if (matchMedia("(prefers-reduced-motion: no-preference)").matches){
+      var last = 0;
+      (function loop(t){
+        requestAnimationFrame(loop);
+        if (t - last < 90) return;
+        last = t;
+        draw(t);
+      })(0);
+    }
+
+    if (typeof ResizeObserver !== "undefined"){
+      var pend;
+      new ResizeObserver(function(){
+        clearTimeout(pend);
+        pend = setTimeout(function(){ build(); draw(); }, 120);
+      }).observe(host);
+    }
+  })();
+  </script>
+      </div>
+        <div class="hero-copy">
+          <span class="badge"><span class="dot"></span> Broker online</span>
+          <h1>Secure execution for AI agents</h1>
+          <p class="hero-lead">Multitool lets your agents connect to databases, servers, MCPs, and APIs with credentials in a local vault. Unmodified tools like <span class="m">curl</span>, <span class="m">psql</span>, and <span class="m">git</span> work without an agent ever holding a raw secret.</p>
+          <div class="hero-actions">
+            <button class="btn primary" type="button">Download Multitool
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+            </button>
+            <button class="btn outline" type="button">Read the docs</button>
+          </div>
+        </div>
+        <div class="hero-demo">
+          <div class="term">
+            <div class="term-bar">
+              <span class="light"></span><span class="light"></span><span class="light"></span>
+              <span class="term-title">multitool</span>
+            </div>
+            <pre><code><span class="p">agent:~$</span> export SSH_AUTH_SOCK="$(aka ssh production)"
+<span class="p">agent:~$</span> git push production main
+
+<span class="c">// stock tools, brokered credentials</span>
+<span class="p">agent:~$</span> psql "$(aka dsn analytics)"
+<span class="c">analytics=&gt;</span> select count(*) from signups;
+
+<span class="p">▪ ok</span><span class="c"> · 2 tools brokered · 0 secrets exposed · audited</span></code></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Connect any agent to any tool.</h2>
+        <p>Multitool sits between your agents and everything they reach, so they get the access they need, securely.</p>
+      </div>
+      <div class="split">
+        <div class="split-left">
+          <ul class="risk-list">
+            <li class="risk">
+              <span class="mark x"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></span>
+              <span class="struck">Live API tokens pasted into every agent's env file.</span>
+            </li>
+            <li class="risk">
+              <span class="mark x"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></span>
+              <span class="struck">One prompt injection away from reading every secret at once.</span>
+            </li>
+            <li class="risk">
+              <span class="mark x"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></span>
+              <span class="struck">Rotating a key means hunting through every config that copied it.</span>
+            </li>
+            <li class="risk">
+              <span class="mark x"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></span>
+              <span class="struck">No record of which agent used what credential, or when.</span>
+            </li>
+            <li class="risk">
+              <span class="mark ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span>
+              <span class="kept">Secrets sealed in one vault, every call logged in one place.</span>
+            </li>
+          </ul>
+        </div>
+        <div class="split-right">
+          <div class="graph-glow" aria-hidden="true">
+<style>
+    /* Abstract gradient background: layered dim glows + film grain.
+       Drop .hero-glow-bg as the first child of a position:relative,
+       overflow:hidden panel; keep panel content at z-index: 1. */
+    .hero-glow-bg {
+      position: absolute;
+      inset: 0;
+      z-index: 0;
+      pointer-events: none;
+      overflow: hidden;
+    }
+    .hero-glow-bg .glow {
+      position: absolute;
+      inset: -25%;
+      background:
+        /* primary: large dim gold glow rising from bottom-left */
+        radial-gradient(
+          115% 95% at 12% 108%,
+          oklch(83% 0.15 80 / 0.13) 0%,
+          oklch(80% 0.13 80 / 0.055) 32%,
+          transparent 62%
+        ),
+        /* secondary: cooler warm-gray glow, upper-right */
+        radial-gradient(
+          90% 80% at 92% -8%,
+          oklch(75% 0.012 60 / 0.09) 0%,
+          oklch(70% 0.01 60 / 0.035) 38%,
+          transparent 66%
+        ),
+        /* faint gold ember low on the right for depth */
+        radial-gradient(
+          55% 45% at 78% 96%,
+          oklch(83% 0.14 80 / 0.05) 0%,
+          transparent 60%
+        );
+    }
+    .hero-glow-bg .sweep {
+      position: absolute;
+      inset: -30%;
+      background: conic-gradient(
+        from 215deg at 30% 85%,
+        transparent 0deg,
+        oklch(85% 0.1 82 / 0.045) 55deg,
+        transparent 120deg,
+        oklch(72% 0.008 65 / 0.03) 235deg,
+        transparent 320deg
+      );
+      filter: blur(48px);
+    }
+    .hero-glow-bg .grain {
+      position: absolute;
+      inset: 0;
+      opacity: 0.28;
+      mix-blend-mode: overlay;
+    }
+    .hero-glow-bg .grain svg {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    @media (prefers-reduced-motion: no-preference) {
+      .hero-glow-bg .glow {
+        animation: hero-glow-drift 26s ease-in-out infinite alternate;
+      }
+      .hero-glow-bg .sweep {
+        animation: hero-sweep-drift 38s ease-in-out infinite alternate;
+      }
+      @keyframes hero-glow-drift {
+        from { transform: translate3d(0, 0, 0) scale(1); }
+        to   { transform: translate3d(2.5%, -2%, 0) scale(1.06); }
+      }
+      @keyframes hero-sweep-drift {
+        from { transform: rotate(0deg) scale(1); }
+        to   { transform: rotate(6deg) scale(1.05); }
+      }
+    }
+  </style>
+
+  <div class="hero-glow-bg" aria-hidden="true">
+    <div class="glow"></div>
+    <div class="sweep"></div>
+    <div class="grain">
+      <svg xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="none">
+        <filter id="hero-grain-f">
+          <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch"/>
+          <feColorMatrix type="matrix" values="0 0 0 0 0.5  0 0 0 0 0.5  0 0 0 0 0.5  0 0 0 0.5 0"/>
+        </filter>
+        <rect width="100%" height="100%" filter="url(#hero-grain-f)"/>
+      </svg>
+    </div>
+  </div>
+          </div>
+          <figure>
+            <svg class="fan" viewBox="0 0 480 250" role="img" aria-label="Diagram: agents fan into Multitool, which fans out to tools">
+              <g class="wire">
+                <path d="M122 25 C158 25 158 125 195 125"/><path d="M285 125 C322 125 322 25 358 25"/>
+                <path d="M122 75 C158 75 158 125 195 125"/><path d="M285 125 C322 125 322 75 358 75"/>
+                <path d="M122 125 L195 125"/><path d="M285 125 L358 125"/>
+                <path d="M122 175 C158 175 158 125 195 125"/><path d="M285 125 C322 125 322 175 358 175"/>
+                <path d="M122 225 C158 225 158 125 195 125"/><path d="M285 125 C322 125 322 225 358 225"/>
+              </g>
+
+              <text class="lbl" text-anchor="end" x="76" y="28.5">Claude</text>
+              <rect class="box" x="86" y="7" width="36" height="36" rx="4"/>
+              <svg class="node-ic" x="96" y="17" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="m4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z"/></svg>
+              <text class="lbl" text-anchor="end" x="76" y="78.5">Codex</text>
+              <rect class="box" x="86" y="57" width="36" height="36" rx="4"/>
+              <svg class="node-ic" x="96" y="67" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/></svg>
+              <text class="lbl" text-anchor="end" x="76" y="128.5">Copilot</text>
+              <rect class="box" x="86" y="107" width="36" height="36" rx="4"/>
+              <svg class="node-ic" x="96" y="117" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M23.922 16.997C23.061 18.492 18.063 22.02 12 22.02 5.937 22.02.939 18.492.078 16.997A.641.641 0 0 1 0 16.741v-2.869a.883.883 0 0 1 .053-.22c.372-.935 1.347-2.292 2.605-2.656.167-.429.414-1.055.644-1.517a10.098 10.098 0 0 1-.052-1.086c0-1.331.282-2.499 1.132-3.368.397-.406.89-.717 1.474-.952C7.255 2.937 9.248 1.98 11.978 1.98c2.731 0 4.767.957 6.166 2.093.584.235 1.077.546 1.474.952.85.869 1.132 2.037 1.132 3.368 0 .368-.014.733-.052 1.086.23.462.477 1.088.644 1.517 1.258.364 2.233 1.721 2.605 2.656a.841.841 0 0 1 .053.22v2.869a.641.641 0 0 1-.078.256Zm-11.75-5.992h-.344a4.359 4.359 0 0 1-.355.508c-.77.947-1.918 1.492-3.508 1.492-1.725 0-2.989-.359-3.782-1.259a2.137 2.137 0 0 1-.085-.104L4 11.746v6.585c1.435.779 4.514 2.179 8 2.179 3.486 0 6.565-1.4 8-2.179v-6.585l-.098-.104s-.033.045-.085.104c-.793.9-2.057 1.259-3.782 1.259-1.59 0-2.738-.545-3.508-1.492a4.359 4.359 0 0 1-.355-.508Zm2.328 3.25c.549 0 1 .451 1 1v2c0 .549-.451 1-1 1-.549 0-1-.451-1-1v-2c0-.549.451-1 1-1Zm-5 0c.549 0 1 .451 1 1v2c0 .549-.451 1-1 1-.549 0-1-.451-1-1v-2c0-.549.451-1 1-1Zm3.313-6.185c.136 1.057.403 1.913.878 2.497.442.544 1.134.938 2.344.938 1.573 0 2.292-.337 2.657-.751.384-.435.558-1.15.558-2.361 0-1.14-.243-1.847-.705-2.319-.477-.488-1.319-.862-2.824-1.025-1.487-.161-2.192.138-2.533.529-.269.307-.437.808-.438 1.578v.021c0 .265.021.562.063.893Zm-1.626 0c.042-.331.063-.628.063-.894v-.02c-.001-.77-.169-1.271-.438-1.578-.341-.391-1.046-.69-2.533-.529-1.505.163-2.347.537-2.824 1.025-.462.472-.705 1.179-.705 2.319 0 1.211.175 1.926.558 2.361.365.414 1.084.751 2.657.751 1.21 0 1.902-.394 2.344-.938.475-.584.742-1.44.878-2.497Z"/></svg>
+              <text class="lbl" text-anchor="end" x="76" y="178.5">Cursor</text>
+              <rect class="box" x="86" y="157" width="36" height="36" rx="4"/>
+              <svg class="node-ic" x="96" y="167" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M11.503.131 1.891 5.678a.84.84 0 0 0-.42.726v11.188c0 .3.162.575.42.724l9.609 5.55a1 1 0 0 0 .998 0l9.61-5.55a.84.84 0 0 0 .42-.724V6.404a.84.84 0 0 0-.42-.726L12.497.131a1.01 1.01 0 0 0-.996 0M2.657 6.338h18.55c.263 0 .43.287.297.515L12.23 22.918c-.062.107-.229.064-.229-.06V12.335a.59.59 0 0 0-.295-.51l-9.11-5.257c-.109-.063-.064-.23.061-.23"/></svg>
+              <text class="lbl" text-anchor="end" x="76" y="228.5">CI runner</text>
+              <rect class="box" x="86" y="207" width="36" height="36" rx="4"/>
+              <svg class="node-ic" x="96" y="217" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/></svg>
+
+              <rect class="box hub" x="195" y="81" width="90" height="88" rx="5"/>
+              <svg class="hub-ic" x="225" y="95" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2"/><rect x="14" y="2" width="8" height="8" rx="1"/></svg>
+              <text class="hub-lbl" text-anchor="middle" x="240" y="151">Multitool</text>
+
+              <rect class="box" x="358" y="7" width="36" height="36" rx="4"/>
+              <svg class="node-ic" x="368" y="17" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg>
+              <text class="lbl" x="404" y="28.5">API</text>
+              <rect class="box" x="358" y="57" width="36" height="36" rx="4"/>
+              <svg class="node-ic" x="368" y="67" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M23.5594 14.7228a.5269.5269 0 0 0-.0563-.1191c-.139-.2632-.4768-.3418-1.0074-.2321-1.6533.3411-2.2935.1312-2.5256-.0191 1.342-2.0482 2.445-4.522 3.0411-6.8297.2714-1.0507.7982-3.5237.1222-4.7316a1.5641 1.5641 0 0 0-.1509-.235C21.6931.9086 19.8007.0248 17.5099.0005c-1.4947-.0158-2.7705.3461-3.1161.4794a9.449 9.449 0 0 0-.5159-.0816 8.044 8.044 0 0 0-1.3114-.1278c-1.1822-.0184-2.2038.2642-3.0498.8406-.8573-.3211-4.7888-1.645-7.2219.0788C.9359 2.1526.3086 3.8733.4302 6.3043c.0409.818.5069 3.334 1.2423 5.7436.4598 1.5065.9387 2.7019 1.4334 3.582.553.9942 1.1259 1.5933 1.7143 1.7895.4474.1491 1.1327.1441 1.8581-.7279.8012-.9635 1.5903-1.8258 1.9446-2.2069.4351.2355.9064.3625 1.39.3772a.0569.0569 0 0 0 .0004.0041 11.0312 11.0312 0 0 0-.2472.3054c-.3389.4302-.4094.5197-1.5002.7443-.3102.064-1.1344.2339-1.1464.8115-.0025.1224.0329.2309.0919.3268.2269.4231.9216.6097 1.015.6331 1.3345.3335 2.5044.092 3.3714-.6787-.017 2.231.0775 4.4174.3454 5.0874.2212.5529.7618 1.9045 2.4692 1.9043.2505 0 .5263-.0291.8296-.0941 1.7819-.3821 2.5557-1.1696 2.855-2.9059.1503-.8707.4016-2.8753.5388-4.1012.0169-.0703.0357-.1207.057-.1362.0007-.0005.0697-.0471.4272.0307a.3673.3673 0 0 0 .0443.0068l.2539.0223.0149.001c.8468.0384 1.9114-.1426 2.5312-.4308.6438-.2988 1.8057-1.0323 1.5951-1.6698zM2.371 11.8765c-.7435-2.4358-1.1779-4.8851-1.2123-5.5719-.1086-2.1714.4171-3.6829 1.5623-4.4927 1.8367-1.2986 4.8398-.5408 6.108-.13-.0032.0032-.0066.0061-.0098.0094-2.0238 2.044-1.9758 5.536-1.9708 5.7495-.0002.0823.0066.1989.0162.3593.0348.5873.0996 1.6804-.0735 2.9184-.1609 1.1504.1937 2.2764.9728 3.0892.0806.0841.1648.1631.2518.2374-.3468.3714-1.1004 1.1926-1.9025 2.1576-.5677.6825-.9597.5517-1.0886.5087-.3919-.1307-.813-.5871-1.2381-1.3223-.4796-.839-.9635-2.0317-1.4155-3.5126zm6.0072 5.0871c-.1711-.0428-.3271-.1132-.4322-.1772.0889-.0394.2374-.0902.4833-.1409 1.2833-.2641 1.4815-.4506 1.9143-1.0002.0992-.126.2116-.2687.3673-.4426a.3549.3549 0 0 0 .0737-.1298c.1708-.1513.2724-.1099.4369-.0417.156.0646.3078.26.3695.4752.0291.1016.0619.2945-.0452.4444-.9043 1.2658-2.2216 1.2494-3.1676 1.0128zm2.094-3.988-.0525.141c-.133.3566-.2567.6881-.3334 1.003-.6674-.0021-1.3168-.2872-1.8105-.8024-.6279-.6551-.9131-1.5664-.7825-2.5004.1828-1.3079.1153-2.4468.079-3.0586-.005-.0857-.0095-.1607-.0122-.2199.2957-.2621 1.6659-.9962 2.6429-.7724.4459.1022.7176.4057.8305.928.5846 2.7038.0774 3.8307-.3302 4.7363-.084.1866-.1633.3629-.2311.5454zm7.3637 4.5725c-.0169.1768-.0358.376-.0618.5959l-.146.4383a.3547.3547 0 0 0-.0182.1077c-.0059.4747-.054.6489-.115.8693-.0634.2292-.1353.4891-.1794 1.0575-.11 1.4143-.8782 2.2267-2.4172 2.5565-1.5155.3251-1.7843-.4968-2.0212-1.2217a6.5824 6.5824 0 0 0-.0769-.2266c-.2154-.5858-.1911-1.4119-.1574-2.5551.0165-.5612-.0249-1.9013-.3302-2.6462.0044-.2932.0106-.5909.019-.8918a.3529.3529 0 0 0-.0153-.1126 1.4927 1.4927 0 0 0-.0439-.208c-.1226-.4283-.4213-.7866-.7797-.9351-.1424-.059-.4038-.1672-.7178-.0869.067-.276.1831-.5875.309-.9249l.0529-.142c.0595-.16.134-.3257.213-.5012.4265-.9476 1.0106-2.2453.3766-5.1772-.2374-1.0981-1.0304-1.6343-2.2324-1.5098-.7207.0746-1.3799.3654-1.7088.5321a5.6716 5.6716 0 0 0-.1958.1041c.0918-1.1064.4386-3.1741 1.7357-4.4823a4.0306 4.0306 0 0 1 .3033-.276.3532.3532 0 0 0 .1447-.0644c.7524-.5706 1.6945-.8506 2.802-.8325.4091.0067.8017.0339 1.1742.081 1.939.3544 3.2439 1.4468 4.0359 2.3827.8143.9623 1.2552 1.9315 1.4312 2.4543-1.3232-.1346-2.2234.1268-2.6797.779-.9926 1.4189.543 4.1729 1.2811 5.4964.1353.2426.2522.4522.2889.5413.2403.5825.5515.9713.7787 1.2552.0696.087.1372.1714.1885.245-.4008.1155-1.1208.3825-1.0552 1.717-.0123.1563-.0423.4469-.0834.8148-.0461.2077-.0702.4603-.0994.7662zm.8905-1.6211c-.0405-.8316.2691-.9185.5967-1.0105a2.8566 2.8566 0 0 0 .135-.0406 1.202 1.202 0 0 0 .1342.103c.5703.3765 1.5823.4213 3.0068.1344-.2016.1769-.5189.3994-.9533.6011-.4098.1903-1.0957.333-1.7473.3636-.7197.0336-1.0859-.0807-1.1721-.151zm.5695-9.2712c-.0059.3508-.0542.6692-.1054 1.0017-.055.3576-.112.7274-.1264 1.1762-.0142.4368.0404.8909.0932 1.3301.1066.887.216 1.8003-.2075 2.7014a3.5272 3.5272 0 0 1-.1876-.3856c-.0527-.1276-.1669-.3326-.3251-.6162-.6156-1.1041-2.0574-3.6896-1.3193-4.7446.3795-.5427 1.3408-.5661 2.1781-.463zm.2284 7.0137a12.3762 12.3762 0 0 0-.0853-.1074l-.0355-.0444c.7262-1.1995.5842-2.3862.4578-3.4385-.0519-.4318-.1009-.8396-.0885-1.2226.0129-.4061.0666-.7543.1185-1.0911.0639-.415.1288-.8443.1109-1.3505.0134-.0531.0188-.1158.0118-.1902-.0457-.4855-.5999-1.938-1.7294-3.253-.6076-.7073-1.4896-1.4972-2.6889-2.0395.5251-.1066 1.2328-.2035 2.0244-.1859 2.0515.0456 3.6746.8135 4.8242 2.2824a.908.908 0 0 1 .0667.1002c.7231 1.3556-.2762 6.2751-2.9867 10.5405zm-8.8166-6.1162c-.025.1794-.3089.4225-.6211.4225a.5821.5821 0 0 1-.0809-.0056c-.1873-.026-.3765-.144-.5059-.3156-.0458-.0605-.1203-.178-.1055-.2844.0055-.0401.0261-.0985.0925-.1488.1182-.0894.3518-.1226.6096-.0867.3163.0441.6426.1938.6113.4186zm7.9305-.4114c.0111.0792-.049.201-.1531.3102-.0683.0717-.212.1961-.4079.2232a.5456.5456 0 0 1-.075.0052c-.2935 0-.5414-.2344-.5607-.3717-.024-.1765.2641-.3106.5611-.352.297-.0414.6111.0088.6356.1851z"/></svg>
+              <text class="lbl" x="404" y="78.5">Postgres</text>
+              <rect class="box" x="358" y="107" width="36" height="36" rx="4"/>
+              <svg class="node-ic" x="368" y="117" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19h8"/><path d="m4 17 6-6-6-6"/></svg>
+              <text class="lbl" x="404" y="128.5">SSH</text>
+              <rect class="box" x="358" y="157" width="36" height="36" rx="4"/>
+              <svg class="node-ic" x="368" y="167" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.9 16.1C1 12.2 1 5.8 4.9 1.9"/><path d="M7.8 4.7a6.14 6.14 0 0 0-.8 7.5"/><circle cx="12" cy="9" r="2"/><path d="M16.2 4.8c2 2 2.26 5.11.8 7.47"/><path d="M19.1 1.9a9.96 9.96 0 0 1 0 14.1"/><path d="M9.5 18h5"/><path d="m8 22 4-11 4 11"/></svg>
+              <text class="lbl" x="404" y="178.5">WebSocket</text>
+              <rect class="box" x="358" y="207" width="36" height="36" rx="4"/>
+              <svg class="node-ic" x="368" y="217" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22v-5"/><path d="M15 8V2"/><path d="M17 8a1 1 0 0 1 1 1v4a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1z"/><path d="M9 8V2"/></svg>
+              <text class="lbl" x="404" y="228.5">MCP</text>
+            </svg>
+          </figure>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Use it locally, or in the cloud.</h2>
+        <p>Run on your machine, or use a hosted instance in the cloud. Your tools, keys, and activity log go wherever you choose.</p>
+      </div>
+      <div class="deploy">
+        <div class="deploy-panel">
+          <h3>Local Multitool</h3>
+          <p>The menu bar app runs the broker on your Mac. Keys live encrypted in your Keychain, agents talk to a local socket, and nothing leaves the machine.</p>
+          <div class="mock" aria-hidden="true">
+            <div class="menubar">
+              <span class="mb-tray"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2"/><rect x="14" y="2" width="8" height="8" rx="1"/></svg></span>
+            </div>
+            <div class="tray-card">
+              <div class="tc-head">
+                <span class="appicon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2"/><rect x="14" y="2" width="8" height="8" rx="1"/></svg></span>
+                <span class="tc-status"><span class="ok-dot"></span>Ready</span>
+              </div>
+              <div class="tc-tabs">
+                <span class="tc-tab on">Tools</span>
+                <span class="tc-tab">Secrets</span>
+                <span class="tc-tab">Activity Log</span>
+              </div>
+              <div class="tc-row"><span class="sk-ico"></span><span class="sk" style="width: 52%;"></span><span class="sk-pill"></span></div>
+              <div class="tc-row"><span class="sk-ico"></span><span class="sk" style="width: 40%;"></span><span class="sk-pill"></span></div>
+              <div class="tc-row"><span class="sk-ico"></span><span class="sk" style="width: 46%;"></span><span class="sk-pill off"></span></div>
+            </div>
+          </div>
+        </div>
+        <div class="deploy-panel">
+          <h3>Hosted Multitool</h3>
+          <p>Connect the desktop app to a hosted Multitool instance in the cloud, so your tools and activity log remain accessible from anywhere.</p>
+          <div class="mock" aria-hidden="true">
+            <div class="win">
+              <div class="win-head">
+                <span class="win-light"></span>
+                <span class="win-light"></span>
+                <span class="win-light"></span>
+                <span class="broker-btn"><span class="ok-dot"></span>127.0.0.1<span class="caret"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg></span></span>
+              </div>
+              <div class="win-body">
+                <span class="sk" style="width: 60%;"></span>
+                <span class="sk" style="width: 44%;"></span>
+                <span class="sk" style="width: 52%;"></span>
+                <span class="sk" style="width: 38%;"></span>
+                <span class="sk" style="width: 48%;"></span>
+                <div class="broker-menu">
+                  <div class="wm-item on"><span class="wm-check">✓</span>Local</div>
+                  <div class="wm-item"><span class="wm-check"></span>Connect hosted instance…</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="paths">
+        <div class="path">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2"/><rect x="14" y="2" width="8" height="8" rx="1"/></svg>
+          <h3>Desktop</h3>
+          <p>The macOS menu bar app. Keys live in your Keychain; the broker runs on a local socket.</p>
+          <button class="btn outline" type="button">Download for macOS</button>
+        </div>
+        <div class="path">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19h8"/><path d="m4 17 6-6-6-6"/></svg>
+          <h3>CLI</h3>
+          <p>Headless install for servers and CI. The same broker, no window required.</p>
+          <button class="btn outline mono" type="button" disabled>npm install -g agentmfa</button>
+        </div>
+        <div class="path">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg>
+          <h3>Hosted</h3>
+          <p>A cloud instance for your team. Connect the desktop app with a management token.</p>
+          <button class="btn outline" type="button" disabled>Coming soon</button>
+        </div>
+      </div>
+    </section>
+
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Your questions answered.</h2>
+      </div>
+      <div class="faqs">
+        <div class="faq-item">
+          <h3>Where do my keys live?</h3>
+          <p>Keys are stored in an encrypted vault on the machine running the broker. For the desktop app, this is the macOS Keychain. Keys are injected into requests on the upstream leg only and never enter an agent's context.</p>
+        </div>
+        <div class="faq-item">
+          <h3>What does an agent actually see?</h3>
+          <p>Agents can access one shared key for the machine, plus direct handles for individual connections: a password-less Postgres DSN, an <span class="m">SSH_AUTH_SOCK</span>, a local HTTP endpoint per pinned API, and MCP tools for everything enabled.</p>
+        </div>
+        <div class="faq-item">
+          <h3>Which agents work with it?</h3>
+          <p>Anything that speaks MCP or plain HTTP: Claude, Codex, Cursor, Copilot, or your own harness with <span class="m">curl</span>. Unmodified tools like <span class="m">psql</span>, <span class="m">git</span>, and <span class="m">rsync</span> work through the broker too.</p>
+        </div>
+        <div class="faq-item">
+          <h3>What happens when I switch a tool off?</h3>
+          <p>Every agent loses it at once, and calls are refused with a <span class="m">403</span> error. You can also reset all tools by rotating the shared key from the app, which disconnects everything in one step.</p>
+        </div>
+      </div>
+    </section>
+
+    <div>
+      <section class="cta">
+        <h2>Secure execution for AI agents</h2>
+        <div class="cta-actions">
+          <button class="btn primary" type="button">Download Multitool
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+          </button>
+          <button class="btn outline" type="button">Read the docs</button>
+        </div>
+      </section>
+      <footer>
+        <span class="brand">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2"/><rect x="14" y="2" width="8" height="8" rx="1"/></svg>
+          <span class="word" style="color: var(--fg);">multitool</span>
+        </span>
+        <span>© 2026 AKA</span>
+      </footer>
+    </div>
+
+  </div>
+</main>
+</body>
+</html>
