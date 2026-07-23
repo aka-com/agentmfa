@@ -553,7 +553,7 @@ const ENDPOINTABLE: Record<ConnectionType, boolean> = { pg: true, ssh: true, api
 
 // Below this width the Tools tab's detail panel is a slide-over rather
 // than a second column. Must match the styles.css breakpoint.
-const NARROW_LAYOUT = '(max-width: 920px)';
+const NARROW_LAYOUT = '(max-width: 720px)';
 
 /**
  * The on-screen form of an issued endpoint address: scheme, a masked
@@ -763,18 +763,6 @@ function connectionKind(c: ConnectionSummary): ConnKind {
   return c.mcp_path ? 'mcp' : 'api';
 }
 
-
-
-/** The credential the broker injects; never its value. */
-function connectionCredential(c: ConnectionSummary): string | null {
-  // Inside the connected block, connectedness is the precondition — the
-  // chip names the mechanism, it doesn't re-announce the state.
-  if (c.oauth || c.oauth_spec) return 'OAuth';
-  const names = c.secret_names || [];
-  if (!names.length) return null;
-  return names.join(' + ');
-}
-
 // One row inside an expanded catalog entry. It spans the full card width and
 // carries enough to identify the connection without opening it: who is signed
 // in (accounts differ between connections; the server rarely does), where it
@@ -868,10 +856,9 @@ function connectionToolsChipHTML(c: ConnectionSummary): string {
 }
 
 // The Tools tab's detail panel: everything about connecting to the
-// selected tool that the compact rows no longer carry — the direct
-// endpoint, what brokering means for it, issues with their fixes, and the
-// row's one options menu. Beside the list when the window is wide;
-// a slide-over when it isn't.
+// selected tool that the compact rows no longer carry — its connection
+// endpoints, issues with their fixes, and the row's one options menu.
+// Beside the list when the window is wide; a slide-over when it isn't.
 function connDetailHTML(c: ConnectionSummary): string {
   const test = state.connTests[c.id];
   const menuOpen = state.connMenuOpen === c.id;
@@ -897,23 +884,28 @@ function connDetailHTML(c: ConnectionSummary): string {
     : '';
   // What pointing a client at the endpoint means, said once, per protocol.
   const endpointHelp = c.type === 'pg'
-    ? 'Point any Postgres client at this address. The broker injects the password on the upstream leg — it never reaches the agent.'
+    ? 'Point any Postgres client at this address.'
     : c.type === 'ssh'
-    ? 'Agents get an SSH agent socket; the broker signs only for this connection’s pinned user and server host key.'
-    : 'Point any HTTP client at this address. The broker adds the credential upstream — it never reaches the agent.';
+    ? 'Agents get an SSH agent socket.'
+    : 'Point any HTTP client at this address.';
   const endpointSection = enabled && ENDPOINTABLE[c.type]
-    ? `<div class="cd-sec"><div class="cd-sec-lbl">Direct endpoint
-          <span class="cd-chip" title="The broker sits between agent and upstream and injects the credential">Brokered</span></div>
+    ? `<div class="cd-sec"><div class="cd-sec-lbl">Direct endpoint</div>
         ${endpointStripHTML(c)}
         <div class="cd-help">${endpointHelp}</div></div>`
     : '';
-  // MCP tools reach agents through the broker's MCP surface, not an
-  // address to paste — the panel says so and hosts the tool picker.
+  const mcpEndpoint = c.mcp_path
+    ? apiOriginFromParts(c.scheme ?? undefined, c.host ?? undefined, c.port) + c.mcp_path
+    : '';
+  // MCP tools reach agents through the broker's MCP surface. The panel
+  // hosts the tool picker and names the pinned upstream server explicitly.
   const mcpSection = enabled && c.mcp_path
-    ? `<div class="cd-sec"><div class="cd-sec-lbl">Tools
-          <span class="cd-chip cd-chip-mcp" title="Served to agents over Multitool’s MCP server">Via MCP</span></div>
+    ? `<div class="cd-sec"><div class="cd-sec-lbl">Tools</div>
         <div class="cd-mcp-row">${connectionToolsChipHTML(c)}</div>
-        <div class="cd-help">Agents call this app’s tools through Multitool’s MCP server; the sign-in stays in the broker.</div></div>`
+        <div class="cd-help">Call this app’s tools through Multitool’s MCP server.</div>
+        <div class="cd-connection-endpoint">
+          <span>Connection endpoint</span>
+          <code title="${escAttr(mcpEndpoint)}">${esc(mcpEndpoint)}</code>
+        </div></div>`
     : '';
   const offNote = enabled ? ''
     : '<div class="cd-help cd-off-note">Switched off — agents may not use this tool, and its endpoints are refused.</div>';
@@ -1062,17 +1054,10 @@ function connectionRowName(c: ConnectionSummary): string {
   return stripTargetParen(c.name, c.target);
 }
 
-/** The row's second line: destination, then the credential the broker
- * injects (never its value). */
+/** The master row's second line carries only the destination. Tool filtering
+ * and credential details live in the detail pane. */
 function connectionSublineHTML(c: ConnectionSummary): string {
-  const credential = connectionCredential(c);
-  const filter = connectionToolsChipHTML(c);
-  const key = credential
-    ? `<span class="flat-cred" tabindex="0" data-tippy-content="Using ${escAttr(
-        credential === 'OAuth' ? 'OAuth sign-in' : credential)}">${ICONS.keyRound}</span>`
-    : '';
-  return `<span class="flat-dest" title="${escAttr(c.target)}">${esc(c.target)}</span>${
-    filter ? ` · ${filter}` : ''}${key ? ` · ${key}` : ''}`;
+  return `<span class="flat-dest" title="${escAttr(c.target)}">${esc(c.target)}</span>`;
 }
 
 /** The flat row's health glyph. Not a control: the row itself opens the

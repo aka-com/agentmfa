@@ -166,12 +166,15 @@
   .dd-identity{ flex: 1; min-width: 0; }
   /* ---- main window layout ---------------------------------------------- */
 .dw-body{ flex: 1; display: flex; min-height: 0; }
-  .dw-side{
+.dw-side{
   flex: 0 0 176px; display: flex; flex-direction: column;
   padding: 14px 10px 10px;
   border-right: 1px solid var(--line);
   background: var(--wash);
   -webkit-user-select: none; user-select: none;
+}
+@media (max-width: 800px) {
+  .dw-side { flex-basis: 136px; }
 }
   .dw-brand{ display: flex; align-items: center; gap: 9px; padding: 2px 4px 14px; }
   .dw-brand .dd-title{ font-size: 14.5px; }
@@ -994,8 +997,6 @@
   display: block; margin-top: 1px; overflow: hidden; color: var(--muted-2);
   font-size: 12px; text-overflow: ellipsis; white-space: nowrap;
 }
-.flat-cred { display: inline-flex; align-items: center; gap: 3px; vertical-align: -2px; }
-.flat-cred svg { width: 11px; height: 11px; }
 .flat-conn-row .cat-conn-status { margin-top: 0; }
 /* The row's open-details affordance; the selected row carries the accent. */
 .flat-conn-chev { flex: 0 0 auto; color: var(--muted-2); }
@@ -1025,29 +1026,33 @@
   font-size: 12px; text-overflow: ellipsis; white-space: nowrap;
 }
 .cd-close { display: none; }
-.cd-sec { margin-top: 16px; }
+.cd-sec {
+  margin-top: 16px; padding-top: 16px;
+  border-top: 1px solid var(--line-soft);
+}
 .cd-sec-lbl {
   display: flex; align-items: center; gap: 7px; margin-bottom: 7px;
   color: var(--muted); font-size: 11px; font-weight: 700;
   letter-spacing: .07em; text-transform: uppercase;
 }
-.cd-chip {
-  padding: 1.5px 7px; border-radius: 5px;
-  background: var(--accent-wash); color: var(--accent-ink);
-  font-size: 10px; font-weight: 700; letter-spacing: .04em;
-}
-.cd-chip-mcp { background: var(--kind-mcp-wash); color: var(--kind-mcp-ink); }
 .cd-help { margin-top: 7px; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .cd-off-note { margin-top: 12px; }
 .cd-mcp-row { display: flex; }
+.cd-connection-endpoint {
+  display: flex; flex-direction: column; gap: 3px; margin-top: 10px; min-width: 0;
+}
+.cd-connection-endpoint > span {
+  color: var(--faint); font-size: 11px;
+}
+.cd-connection-endpoint code {
+  overflow: hidden; color: var(--ink-2); font-family: inherit; font-size: 12px;
+  text-overflow: ellipsis; white-space: nowrap;
+}
 .conn-detail-pane .ep-strip { margin-top: 0; }
 .conn-detail-pane .cc-issues { margin-top: 12px; max-width: none; }
-/* The pane scrolls, which would clip the ⋯ menu — lift the clipping while
-   a menu is open, the same trade the cards make (.cat-rows above). */
-.conn-detail-pane:has(.tile-menu) { overflow: visible; }
 .conn-detail-backdrop { display: none; }
 
-@media (max-width: 920px) {
+@media (max-width: 720px) {
   /* The slide-over sits above the page but below every modal layer —
      sheets (z 8/9) opened from the panel (issue endpoint, the tool
      picker, confirms) must cover it. */
@@ -1088,8 +1093,6 @@
 .add-section .cat-rows > .cat-row-wrap.menu-open,
 .add-section .cat-more:hover,
 .add-section .cat-more:focus-visible { opacity: 1; }
-.flat-cred { cursor: default; }
-.flat-tx .cat-meta-tools { vertical-align: -2px; }
 .sheet-actions .conn-delete-btn { margin-right: 0; }
 /* Delete + its ⋯ sit left; the menu drops upward, clear of the sheet edge. */
 .sheet-actions .sheet-conn-menu { margin-right: auto; }
