@@ -271,16 +271,25 @@ async fn wait_for_code_on(
     listener: &tokio::net::TcpListener,
     expected_state: &str,
 ) -> Result<String, String> {
-    let (code, state) = wait_for_redirect_on(listener).await?;
-    if state != expected_state {
-        return Err("authorization state mismatch; try connecting again".into());
-    }
+    let (code, _state) = wait_for_redirect_verified(listener, Some(expected_state)).await?;
     Ok(code)
 }
 
-/// The redirect-catching core: hands back `(code, state)`.
+/// The unverified catcher for relays: the party that minted the state nonce
+/// (the broker) checks it, so the browser's page here can only say the
+/// redirect was received, not that the sign-in succeeded.
 async fn wait_for_redirect_on(
     listener: &tokio::net::TcpListener,
+) -> Result<(String, String), String> {
+    wait_for_redirect_verified(listener, None).await
+}
+
+/// The redirect-catching core: hands back `(code, state)`. With an
+/// `expected_state`, a mismatched nonce answers the browser with a 400
+/// rather than the success page — the sign-in did fail.
+async fn wait_for_redirect_verified(
+    listener: &tokio::net::TcpListener,
+    expected_state: Option<&str>,
 ) -> Result<(String, String), String> {
     loop {
         let (mut stream, peer) = listener
@@ -334,9 +343,13 @@ async fn wait_for_redirect_on(
             let _ = respond(&mut stream, "400 Bad Request", "Missing code or state.").await;
             return Err("the provider sent no authorization code".into());
         };
-        // This page is written before the state nonce is checked (locally in
-        // wait_for_code_on, or broker-side in the relayed flow), so it must
-        // not claim the connection succeeded — only hand the user back.
+        if expected_state.is_some_and(|expected| state != expected) {
+            let _ = respond(&mut stream, "400 Bad Request", "State mismatch.").await;
+            return Err("authorization state mismatch; try connecting again".into());
+        }
+        // A local flow verified the nonce above; a relayed flow verifies it
+        // broker-side only after this page is written, so it must not claim
+        // the connection succeeded — only hand the user back.
         let _ = respond(
             &mut stream,
             "200 OK",

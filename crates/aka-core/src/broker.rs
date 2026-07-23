@@ -335,12 +335,19 @@ impl Broker {
     }
 
     /// The host put into returned data-plane URLs/DSNs (loopback by
-    /// default).
+    /// default). A bare IPv6 literal is bracketed so `scheme://host:port`
+    /// forms stay parseable.
     pub fn advertise_host(&self) -> String {
-        self.advertise_host
+        let host = self
+            .advertise_host
             .get()
             .cloned()
-            .unwrap_or_else(|| "127.0.0.1".to_string())
+            .unwrap_or_else(|| "127.0.0.1".to_string());
+        if host.contains(':') && !host.starts_with('[') {
+            format!("[{host}]")
+        } else {
+            host
+        }
     }
 
     /// The advertised data-plane host when it points beyond this machine —
@@ -885,7 +892,8 @@ impl Broker {
         } = spec.config.clone()
         else {
             return Err(CoreError::InvalidConnectionConfig(
-                "OAuth connect requires a plain api config with an oauth section                  (MCP servers use the sign-in flow instead)"
+                "OAuth connect requires a plain api config with an oauth section \
+                 (MCP servers use the sign-in flow instead)"
                     .into(),
             ));
         };
@@ -1057,7 +1065,8 @@ impl Broker {
                         AuditKind::ConnectionUpdated,
                         format!("Tool reconnected via OAuth: {}", conn.name),
                     )
-                    .connection(conn.name.clone()),
+                    .connection(conn.name.clone())
+                    .field("oauth", true),
                 );
                 self.events.connections_changed();
             }
@@ -1083,7 +1092,8 @@ impl Broker {
         } = spec.config.clone()
         else {
             return Err(CoreError::InvalidConnectionConfig(
-                "OAuth connect requires a plain api config with an oauth section                  (MCP servers use the sign-in flow instead)"
+                "OAuth connect requires a plain api config with an oauth section \
+                 (MCP servers use the sign-in flow instead)"
                     .into(),
             ));
         };

@@ -69,14 +69,26 @@ impl TokenStore {
 
     #[cfg(not(target_os = "macos"))]
     pub fn save(&self, url: &str, token: &str) -> Result<(), String> {
+        use std::io::Write as _;
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
         tracing::warn!(
             "storing the management token in a plain file (no keychain on \
              this platform); dev fallback only"
         );
         std::fs::create_dir_all(&self.dir).map_err(|error| error.to_string())?;
         let path = self.path_for(url);
-        std::fs::write(&path, token).map_err(|error| error.to_string())?;
-        use std::os::unix::fs::PermissionsExt as _;
+        // Created 0600 from the first byte — never world-readable, not even
+        // between a write and a chmod.
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|error| error.to_string())?;
+        file.write_all(token.as_bytes())
+            .map_err(|error| error.to_string())?;
+        // `mode` only applies at creation; tighten a pre-existing file too.
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
             .map_err(|error| error.to_string())
     }

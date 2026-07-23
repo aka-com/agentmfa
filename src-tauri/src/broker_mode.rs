@@ -355,6 +355,11 @@ impl BrokerState {
         app: &AppHandle,
     ) -> Result<BrokerProfileInfo, String> {
         if self.profile().mode == "local" && self.local.lock().unwrap().is_some() {
+            // Already local — but re-picking "This Mac" is still the user's
+            // latest choice: bump the epoch so a remote connect still in
+            // flight (its probe not yet back) cannot commit afterwards and
+            // flip the app remote against that choice.
+            let _ = self.begin_transition();
             return Ok(self.profile());
         }
         let epoch = self.begin_transition();

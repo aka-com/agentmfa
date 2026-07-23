@@ -198,7 +198,18 @@ async fn events(
             backlog.extend(events);
         }
         ManageReplay::UpToDate => {}
-        ManageReplay::Resync => resync_first = true,
+        ManageReplay::Resync => {
+            resync_first = true;
+            // The client's position is meaningless here (fresh, foreign
+            // epoch, or aged out), so it must not become the live-dedupe
+            // baseline: a foreign id whose seq is *above* this process's
+            // head would otherwise swallow every live event after the
+            // resync — and the resync frame would teach the client that
+            // same poisoned position back. Baseline on this process's own
+            // head instead; anything at or below it is covered by the
+            // refetch the resync triggers.
+            delivered_head = bus.head_seq();
+        }
     }
 
     struct StreamState {
@@ -631,15 +642,10 @@ async fn activity(
 }
 
 async fn clear_activity(State(state): State<AppState>, _authed: ManageAuthed) -> Response {
-    let result = state.manage.clear_activity().await;
-    if result.is_ok() {
-        // No BrokerEvents counterpart exists for a clear; tell SSE
-        // subscribers directly so remote activity views refresh.
-        state
-            .broker
-            .publish_manage_event(ManageEvent::ActivityCleared);
-    }
-    respond(result)
+    // `LocalBackend::clear_activity` publishes the ActivityCleared manage
+    // event itself, so route-driven and in-process clears both reach SSE
+    // subscribers.
+    respond(state.manage.clear_activity().await)
 }
 
 /* ------------------------------- settings ---------------------------------- */

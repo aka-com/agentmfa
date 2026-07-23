@@ -461,6 +461,46 @@ async fn a_reconnect_resumes_from_last_event_id_instead_of_resyncing() {
     assert!(foreign.contains("\"event\":\"resync\""), "foreign id resyncs: {foreign}");
 }
 
+/// A client resuming from a *foreign* position whose seq is far above this
+/// process's own head (a long-lived previous broker, then a restart) must
+/// be resynced onto this process's numbering — not have every subsequent
+/// live event swallowed by a stale dedupe baseline.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_high_foreign_resume_position_does_not_swallow_live_events() {
+    let h = harness().await;
+
+    // Give the stream a real (small) head first.
+    let (status, _) = h
+        .manage("POST", "/v1/manage/secrets", Some(json!({ "name": "BEFORE", "value": "v" })))
+        .await;
+    assert_eq!(status, 200);
+
+    let sse = {
+        let socket = h.socket.clone();
+        let token = h.manage_token.clone();
+        let reader = tokio::spawn(async move {
+            read_sse_until(&socket, &token, Some("deadbeef:5000"), |s| s.contains("AFTER")).await
+        });
+        // Let the subscriber attach, then publish a live change.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let (status, _) = h
+            .manage("POST", "/v1/manage/secrets", Some(json!({ "name": "AFTER", "value": "v" })))
+            .await;
+        assert_eq!(status, 200);
+        reader.await.unwrap()
+    };
+    assert!(sse.contains("\"event\":\"resync\""), "foreign id resyncs: {sse}");
+    assert!(
+        sse.contains("AFTER"),
+        "live events after the resync must still be delivered: {sse}"
+    );
+    // The resync's baseline id is this process's numbering, not the
+    // client's poisoned position (which would wedge every later resume).
+    let id = last_id(&sse).expect("frames carry ids");
+    let seq: u64 = id.split_once(':').expect("epoch:seq").1.parse().unwrap();
+    assert!(seq < 5000, "ids restart from this process's own seq: {id}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_event_stream_reports_manage_changes() {
     let h = harness().await;

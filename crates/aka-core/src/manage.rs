@@ -355,22 +355,30 @@ impl ManageBus {
     }
 
     /// Number and publish an event: append to the ring (evicting the oldest
-    /// past the cap) and broadcast to live subscribers.
+    /// past the cap) and broadcast to live subscribers. Numbering, the ring
+    /// append, and the broadcast all happen under the ring lock so the ring
+    /// and the live stream both see seqs in order — two concurrent emits
+    /// must not interleave, or `replay_since`'s head/oldest reasoning (and a
+    /// client's monotonic last-id tracking) would miss events.
     pub fn emit(&self, event: aka_api::ManageEvent) {
+        let mut ring = self.ring.lock().unwrap();
         let seq = self
             .seq
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1;
         let item = SeqEvent { seq, event };
-        {
-            let mut ring = self.ring.lock().unwrap();
-            ring.push_back(item.clone());
-            while ring.len() > MANAGE_RING_CAP {
-                ring.pop_front();
-            }
+        ring.push_back(item.clone());
+        while ring.len() > MANAGE_RING_CAP {
+            ring.pop_front();
         }
         // A send error only means no live subscribers; the ring still has it.
         let _ = self.tx.send(item);
+    }
+
+    /// The newest published seq (0 when nothing was emitted yet): the
+    /// resume baseline handed to a client that is being resynced.
+    pub fn head_seq(&self) -> u64 {
+        self.ring.lock().unwrap().back().map(|e| e.seq).unwrap_or(0)
     }
 
     /// Subscribe to live events. Subscribe *before* snapshotting the ring so
@@ -955,7 +963,13 @@ impl ManagementBackend for LocalBackend {
     }
 
     async fn clear_activity(&self) -> ManageResult<()> {
-        Ok(self.broker.audit.clear()?)
+        self.broker.audit.clear()?;
+        // A clear has no `BrokerEvents` counterpart; publish the manage
+        // event here so every caller — the manage route and an in-process
+        // shell alike — refreshes SSE subscribers' activity views.
+        self.broker
+            .publish_manage_event(aka_api::ManageEvent::ActivityCleared);
+        Ok(())
     }
 
     async fn settings(&self) -> ManageResult<SettingsDto> {
