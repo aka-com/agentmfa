@@ -855,6 +855,30 @@ function connectionToolsChipHTML(c: ConnectionSummary): string {
           : 'All tools'}</span></button>`;
 }
 
+// The one endpoint every app's tools are actually reached through:
+// Multitool's own unified MCP server, not the upstream a connection
+// proxies. Agents point a single MCP client here and get every enabled
+// tool. The broker serves it on the same origin as its HTTP API — a remote
+// broker under its own URL, a local one on the loopback origin it hands out
+// for direct endpoints (the sidecar shares one port for the API and the MCP
+// host). Empty only until that origin is known (a fresh local broker with
+// no endpoint issued yet), never the upstream server's address.
+function unifiedMcpUrl(): string {
+  const trimSlash = (u: string) => u.replace(/\/+$/, '');
+  if (state.broker.mode === 'remote' && state.broker.url) {
+    return `${trimSlash(state.broker.url)}/mcp`;
+  }
+  for (const conn of state.connections) {
+    const dsn = conn.agent_access.endpoint?.dsn;
+    if (!dsn) continue;
+    try {
+      const { origin } = new URL(dsn);
+      if (origin.startsWith('http')) return `${origin}/mcp`;
+    } catch { /* not a URL-shaped endpoint (an SSH socket path) — keep looking */ }
+  }
+  return '';
+}
+
 // The Tools tab's detail panel: everything about connecting to the
 // selected tool that the compact rows no longer carry — its connection
 // endpoints, issues with their fixes, and the row's one options menu.
@@ -882,33 +906,47 @@ function connDetailHTML(c: ConnectionSummary): string {
     ? `<div class="cc-issues">${issues.map((issue) =>
         `<div class="cc-issue"><span>${esc(issue.text)}</span>${issue.fix ?? ''}</div>`).join('')}</div>`
     : '';
-  // What pointing a client at the endpoint means, said once, per protocol.
-  const endpointHelp = c.type === 'pg'
-    ? 'Point any Postgres client at this address.'
-    : c.type === 'ssh'
-    ? 'Agents get an SSH agent socket.'
-    : 'Point any HTTP client at this address.';
+  // What pointing a client at the endpoint means, said once, per kind.
+  // Keyed on the user-facing kind, not the internal transport: a tool that
+  // rides one protocol under the hood (MCP is served over HTTP) advertises
+  // what it actually is, never the transport it happens to travel on.
+  const endpointHelp = ((): string => {
+    switch (connectionKind(c)) {
+      case 'db': return 'Point any Postgres client at this address.';
+      case 'ssh': return 'Agents get an SSH agent socket.';
+      case 'mcp': return 'Point any MCP client at this address.';
+      default: return 'Point any HTTP client at this address.';
+    }
+  })();
   const endpointSection = enabled && ENDPOINTABLE[c.type]
     ? `<div class="cd-sec"><div class="cd-sec-lbl">Direct endpoint</div>
         ${endpointStripHTML(c)}
         <div class="cd-help">${endpointHelp}</div></div>`
     : '';
-  const mcpEndpoint = c.mcp_path
-    ? apiOriginFromParts(c.scheme ?? undefined, c.host ?? undefined, c.port) + c.mcp_path
-    : '';
-  // MCP tools reach agents through the broker's MCP surface. The panel
-  // hosts the tool picker and names the pinned upstream server explicitly.
+  const mcpEndpoint = unifiedMcpUrl();
+  // MCP tools reach agents through the broker's MCP surface. The subhead
+  // carries the tool-filter chip on its right; the connection endpoint names
+  // our unified MCP server (never the upstream), with the one-line
+  // explanation sitting under the address it explains.
   const mcpSection = enabled && c.mcp_path
-    ? `<div class="cd-sec"><div class="cd-sec-lbl">Tools</div>
-        <div class="cd-mcp-row">${connectionToolsChipHTML(c)}</div>
-        <div class="cd-help">Call this app’s tools through Multitool’s MCP server.</div>
-        <div class="cd-connection-endpoint">
+    ? `<div class="cd-sec"><div class="cd-sec-lbl">Tools<span class="cd-sec-lbl-aside">${connectionToolsChipHTML(c)}</span></div>
+        ${mcpEndpoint ? `<div class="cd-connection-endpoint">
           <span>Connection endpoint</span>
           <code title="${escAttr(mcpEndpoint)}">${esc(mcpEndpoint)}</code>
-        </div></div>`
+        </div>` : ''}
+        <div class="cd-help">Call this app’s tools through Multitool’s MCP server.</div></div>`
     : '';
-  const offNote = enabled ? ''
-    : '<div class="cd-help cd-off-note">Switched off — agents may not use this tool, and its endpoints are refused.</div>';
+  // How a disabled tool turns agents away, in the terms of the surface they
+  // actually hit: the brokered MCP/HTTP path answers a 403; a Postgres or SSH
+  // client on the direct endpoint has its connection refused, with no HTTP
+  // status to quote.
+  const offNote = enabled ? '' : `<div class="cd-help cd-off-note">${
+    connectionKind(c) === 'db'
+      ? 'This tool is disabled. New connections to its endpoint are refused.'
+      : connectionKind(c) === 'ssh'
+      ? 'This tool is disabled. Its SSH agent socket stops signing for agents.'
+      : 'This tool is disabled. Requests from agents will be rejected with a 403 error.'
+  }</div>`;
   return `<div class="cd-head">
       <span class="cat-ico kind-${connectionKind(c)}" aria-hidden="true">${entry ? ICONS[entry.icon] || '' : ''}</span>
       <div class="cd-title"><b title="${escAttr(c.name)}">${esc(connectionRowName(c))}</b>
@@ -984,7 +1022,7 @@ function catalogRowHTML(entry: CatalogEntry): string {
     return `<div class="cat-row-wrap is-soon">
       <div class="cat-row">
         <span class="cat-ico" aria-hidden="true">${ICONS[entry.icon] || ''}</span>
-        <div class="cat-tx"><b>${esc(entry.name)}</b><span>${esc(entry.description)}</span></div>
+        <div class="cat-tx"><b>${esc(entry.name)}</b></div>
         <span class="cat-soon" title="Not available yet">Soon</span>
       </div></div>`;
   }
@@ -1036,7 +1074,7 @@ function catalogRowHTML(entry: CatalogEntry): string {
   return `<div class="cat-row-wrap ${builtin ? 'open' : ''} ${actionMenuOpen ? 'menu-open' : ''}">
     <div class="cat-row">
       <span class="cat-ico" aria-hidden="true">${ICONS[entry.icon] || ''}</span>
-      <div class="cat-tx"><b>${esc(entry.name)}</b><span>${esc(entry.description)}</span></div>
+      <div class="cat-tx"><b>${esc(entry.name)}</b></div>
       ${entry.limitedSupport ? `<span class="cat-limited" tabindex="0" data-tippy-content="${escAttr(entry.name)} only accepts OAuth sign-ins from pre-approved clients. Use the API connector, or contact your representative at the company for support.">Limited support</span>` : ''}
       ${action}
     </div>${expansion}</div>`;
