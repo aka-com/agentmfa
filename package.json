@@ -17,9 +17,10 @@
     "release": "bash scripts/release.sh",
     "npm:sync": "node scripts/npm/sync-versions.mjs",
     "npm:check": "node scripts/npm/sync-versions.mjs --check",
+    "test:npm-launcher": "node --test scripts/npm/launcher.test.mjs",
     "npm:dist": "bash scripts/npm-dist.sh --all --pack",
     "npm:publish": "bash scripts/npm-publish.sh",
-    "test": "npm run npm:check && npm run typecheck && npm run sidecar:build && cargo test --workspace && cargo test --manifest-path src-tauri/Cargo.toml && npm run test:ui && npm run test:sidecar",
+    "test": "npm run npm:check && npm run test:npm-launcher && npm run typecheck && npm run sidecar:build && cargo test --workspace && cargo test --manifest-path src-tauri/Cargo.toml && npm run test:ui && npm run test:sidecar",
     "lint": "cargo clippy --workspace --all-targets && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets",
     "test:sidecar": "tsx --test sidecar/tests/*.test.ts"
   },

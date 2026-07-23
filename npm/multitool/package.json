@@ -1,0 +1,48 @@
+{
+  "name": "@aka-labs/multitool",
+  "version": "0.1.0",
+  "description": "Multitool credential broker for coding agents, without exposing credentials.",
+  "keywords": [
+    "multitool",
+    "aka",
+    "credentials",
+    "secrets",
+    "broker",
+    "mcp",
+    "ai-agents",
+    "claude-code",
+    "security",
+    "ssh",
+    "postgres",
+    "websocket",
+    "proxy"
+  ],
+  "homepage": "https://github.com/aka-com/multitool",
+  "bin": {
+    "multitool": "bin/multitool.js",
+    "aka": "bin/multitool.js"
+  },
+  "files": [
+    "bin/multitool.js",
+    "sidecar/main.mjs"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "prepublishOnly": "node ../../scripts/npm/verify-package.mjs"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "optionalDependencies": {
+    "@aka-labs/multitool-darwin-arm64": "0.1.0",
+    "@aka-labs/multitool-darwin-x64": "0.1.0",
+    "@aka-labs/multitool-linux-arm64": "0.1.0",
+    "@aka-labs/multitool-linux-x64": "0.1.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -1,14 +1,14 @@
-# agentmfa
+# Multitool
 
-AgentMFA is a credential broker for AI coding agents. Agents make API
+Multitool is a credential broker for AI coding agents. Agents make API
 calls, open database connections, and reach SSH servers using
 unmodified tools like `curl`, `psql`, and `git`.
 
 The broker keeps the raw credentials in a local secret store and
 injects them into requests only after human approval.
 
-This package installs the broker's command line, `aka` (also linked as
-`agentmfa`): the headless broker, the store seeding commands, and the
+This package installs the broker's command line as both `multitool` and
+`aka`: the headless broker, the store seeding commands, and the
 skill-file generator that teaches agents how to use the broker.
 
 - **HTTP**: the agent supplies method/path/headers/body to a pinned host
@@ -20,12 +20,14 @@ skill-file generator that teaches agents how to use the broker.
 ## Install
 
 ```sh
-npm install -g agentmfa
+npm install -g @aka-labs/multitool
 ```
 
-This installs a prebuilt binary via a platform-specific optional
-dependency — there is no postinstall script and no install-time network
-access beyond npm itself.
+This requires Node 22 or newer. It installs a prebuilt binary via a
+platform-specific optional dependency plus a self-contained JavaScript MCP
+host. The MCP host reuses the Node executable that launches `aka`; npm does not
+install a second runtime. There is no postinstall script and no install-time
+network access beyond npm itself.
 
 Supported platforms: macOS (Apple silicon and Intel) and Linux
 (x64 and arm64, glibc). The broker rendezvous is a Unix domain socket, so

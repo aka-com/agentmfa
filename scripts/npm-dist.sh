@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Build the `aka` CLI in release mode and stage it into the npm distribution
-# under npm/ (the main `agentmfa` launcher package plus per-platform binary
+# under npm/ (the main `multitool` launcher package plus per-platform binary
 # packages). One invocation stages one target, or all supported targets when
 # the required Rust targets and cross-linkers are available.
 #
@@ -13,8 +13,8 @@ set -euo pipefail
 #                                        package(s) and the main package into
 #                                        dist/npm/
 #
-# Publish order matters: every agentmfa-<os>-<arch> package must be published
-# before the main agentmfa package of the same version (npm/README.md has the
+# Publish order matters: every @aka-labs/multitool-<os>-<arch> package must be
+# published before the main @aka-labs/multitool package of the same version (npm/README.md has the
 # full runbook).
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
@@ -24,7 +24,7 @@ cd "$repo_root"
 # Keep build caches inside the repository so release builds work in clean or
 # sandboxed environments whose home-directory caches are read-only. npm sets
 # npm_config_cache before invoking scripts, so use our own override variable.
-export npm_config_cache="${AGENTMFA_NPM_CACHE:-$repo_root/target/npm-cache}"
+export npm_config_cache="${MULTITOOL_NPM_CACHE:-$repo_root/target/npm-cache}"
 export ZIG_GLOBAL_CACHE_DIR="${ZIG_GLOBAL_CACHE_DIR:-$repo_root/target/zig-cache}"
 
 set_if_unset() {
@@ -114,6 +114,14 @@ fi
 
 node scripts/npm/sync-versions.mjs --check
 
+# The npm launcher reuses its own Node 22 runtime, but it still needs the
+# self-contained MCP host script. Build and stage that one-file bundle beside
+# the launcher so `aka serve` can host MCP from any working directory.
+npm run sidecar:build
+install -d "npm/multitool/sidecar"
+install -m 0644 "dist/sidecar/main.mjs" "npm/multitool/sidecar/main.mjs"
+echo "staged dist/sidecar/main.mjs -> npm/multitool/sidecar/main.mjs"
+
 host="$(rustc -vV | sed -n 's/^host: //p')"
 if [[ "$all" -eq 1 ]]; then
   targets=(
@@ -131,10 +139,10 @@ fi
 
 for target in "${targets[@]}"; do
   case "$target" in
-    aarch64-apple-darwin)      platform_pkg="agentmfa-darwin-arm64" ;;
-    x86_64-apple-darwin)       platform_pkg="agentmfa-darwin-x64" ;;
-    aarch64-unknown-linux-gnu) platform_pkg="agentmfa-linux-arm64" ;;
-    x86_64-unknown-linux-gnu)  platform_pkg="agentmfa-linux-x64" ;;
+    aarch64-apple-darwin)      platform_pkg="multitool-darwin-arm64" ;;
+    x86_64-apple-darwin)       platform_pkg="multitool-darwin-x64" ;;
+    aarch64-unknown-linux-gnu) platform_pkg="multitool-linux-arm64" ;;
+    x86_64-unknown-linux-gnu)  platform_pkg="multitool-linux-x64" ;;
     *)
       echo "no npm platform package maps to Rust target '$target'." >&2
       echo "supported: aarch64-apple-darwin x86_64-apple-darwin" >&2
@@ -167,6 +175,7 @@ for target in "${targets[@]}"; do
 done
 
 if [[ "$pack" -eq 1 ]]; then
-  (cd npm/agentmfa && npm pack --pack-destination "$repo_root/dist/npm")
+  node scripts/npm/verify-package.mjs "npm/multitool"
+  (cd npm/multitool && npm pack --pack-destination "$repo_root/dist/npm")
   echo "tarballs written to dist/npm/"
 fi

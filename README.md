@@ -1,4 +1,4 @@
-# AKA Multitool
+# Multitool
 
 Multitool lets agents make API calls, open database connections,
 access SSH servers, and interface with MCP servers. In many

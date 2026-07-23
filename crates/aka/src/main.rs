@@ -32,7 +32,7 @@ use zeroize::Zeroizing;
 mod mcp_bridge;
 
 #[derive(Parser)]
-#[command(name = "aka", version, about = "AKA broker CLI")]
+#[command(name = "aka", version, about = "Multitool broker CLI")]
 struct Cli {
     #[command(subcommand)]
     command: Command,

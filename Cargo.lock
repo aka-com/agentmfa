@@ -23,7 +23,7 @@ dependencies = [
 
 [[package]]
 name = "aka"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "aka-core",
  "axum",
@@ -40,7 +40,7 @@ dependencies = [
 
 [[package]]
 name = "aka-api"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -48,7 +48,7 @@ dependencies = [
 
 [[package]]
 name = "aka-client"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "aka-api",
  "aka-core",
@@ -71,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "aka-core"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "aka-api",
  "async-trait",
@@ -117,7 +117,7 @@ dependencies = [
 
 [[package]]
 name = "aka-sandbox"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "axum",
  "serde_json",

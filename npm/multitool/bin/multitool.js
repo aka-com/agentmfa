@@ -1,30 +1,31 @@
 #!/usr/bin/env node
 "use strict";
 
-// Launcher for the `agentmfa` npm package. The real CLI is the prebuilt Rust
+// Launcher for the `@aka-labs/multitool` npm package. The real CLI is the prebuilt Rust
 // `aka` binary shipped in the platform-specific package that npm selected via
-// optionalDependencies (agentmfa-<os>-<arch>); this script only resolves it
+// optionalDependencies (@aka-labs/multitool-<os>-<arch>); this script only resolves it
 // and hands over argv. There is deliberately no postinstall step and no
 // network access here: a credential broker's install should be inert.
 
 const { spawnSync } = require("child_process");
+const path = require("path");
 
 const PLATFORM_PACKAGES = {
-  "darwin arm64": "agentmfa-darwin-arm64",
-  "darwin x64": "agentmfa-darwin-x64",
-  "linux arm64": "agentmfa-linux-arm64",
-  "linux x64": "agentmfa-linux-x64",
+  "darwin arm64": "@aka-labs/multitool-darwin-arm64",
+  "darwin x64": "@aka-labs/multitool-darwin-x64",
+  "linux arm64": "@aka-labs/multitool-linux-arm64",
+  "linux x64": "@aka-labs/multitool-linux-x64",
 };
 
 function fail(message) {
-  console.error(`agentmfa: ${message}`);
+  console.error(`multitool: ${message}`);
   process.exit(1);
 }
 
 function resolveBinary() {
-  // Escape hatch for development and unusual layouts: point AGENTMFA_BIN at
+  // Escape hatch for development and unusual layouts: point MULTITOOL_BIN at
   // any `aka` binary (e.g. target/release/aka) and the launcher uses it.
-  if (process.env.AGENTMFA_BIN) return process.env.AGENTMFA_BIN;
+  if (process.env.MULTITOOL_BIN) return process.env.MULTITOOL_BIN;
 
   const key = `${process.platform} ${process.arch}`;
   const pkg = PLATFORM_PACKAGES[key];
@@ -42,7 +43,7 @@ function resolveBinary() {
   } catch {
     fail(
       `the ${pkg} package holding the binary for ${key} is not installed.\n` +
-        "It is an optionalDependency of agentmfa: reinstall without " +
+        "It is an optionalDependency of @aka-labs/multitool: reinstall without " +
         "--no-optional/--omit=optional, and make sure your package manager " +
         "installs platform-specific optional dependencies."
     );
@@ -55,15 +56,34 @@ function resolveBinary() {
   const got = require(`${pkg}/package.json`).version;
   if (want !== got) {
     fail(
-      `version mismatch: agentmfa@${want} resolved ${pkg}@${got}; ` +
-        "reinstall agentmfa to repair the pairing."
+      `version mismatch: @aka-labs/multitool@${want} resolved ${pkg}@${got}; ` +
+        "reinstall @aka-labs/multitool to repair the pairing."
     );
   }
   return binPath;
 }
 
+// The npm package carries the self-contained JavaScript MCP host, while the
+// Node process already running this launcher supplies its runtime. Point the
+// Rust supervisor at both exact paths so `aka serve` works from any cwd and
+// does not accidentally select a different `node` from PATH. Explicit
+// overrides remain useful for development and diagnostics.
+const childEnv = { ...process.env };
+if (!childEnv.AKA_SIDECAR_NODE) {
+  childEnv.AKA_SIDECAR_NODE = process.execPath;
+}
+if (!childEnv.AKA_SIDECAR_SCRIPT) {
+  childEnv.AKA_SIDECAR_SCRIPT = path.join(
+    __dirname,
+    "..",
+    "sidecar",
+    "main.mjs"
+  );
+}
+
 const result = spawnSync(resolveBinary(), process.argv.slice(2), {
   stdio: "inherit",
+  env: childEnv,
 });
 if (result.error) {
   fail(result.error.message);

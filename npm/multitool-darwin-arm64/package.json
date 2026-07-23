@@ -1,0 +1,24 @@
+{
+  "name": "@aka-labs/multitool-darwin-arm64",
+  "version": "0.1.0",
+  "description": "Multitool CLI binary for macOS (Apple silicon). Install @aka-labs/multitool instead of installing this directly.",
+  "homepage": "https://github.com/aka-com/multitool",
+  "files": [
+    "bin/aka"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "prepublishOnly": "node ../../scripts/npm/verify-package.mjs"
+  },
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}
