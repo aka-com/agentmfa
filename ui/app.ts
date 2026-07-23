@@ -50,10 +50,15 @@ const EDIT_SECRET_MASK = '••••••••••••';
 const ACTIVITY_RENDER_LIMIT = 200;
 
 // The left-nav tabs, in order — also the cycle order for Ctrl-Tab.
-const TABS = ['start', 'connections', 'secrets', 'agents', 'activity'] as const;
+const TABS = ['start', 'connections', 'secrets', 'activity'] as const;
 // The tray dropdown is a quick-access panel; onboarding belongs in the window.
 const DROPDOWN_TABS = TABS.filter((tab) => tab !== 'start');
 type Tab = typeof TABS[number];
+
+// The two Get started views: the intro walkthrough and the per-client
+// connection guides (formerly the Connect tab).
+const START_VIEWS = ['walkthrough', 'guides'] as const;
+type StartView = typeof START_VIEWS[number];
 
 
 interface SheetState {
@@ -157,12 +162,14 @@ interface AppState {
   /** Collapsible catalog sections currently showing all of their rows. */
   sectionsExpanded: string[];
   startOption: string;
+  /** Which view the Get started tab shows: the walkthrough or the guides. */
+  startView: StartView;
   /** Which connect mode step 2 of the walkthrough shows. */
   connectMode: string;
   connImportSource: string;
   connImportError: string | null;
   menuOpen: boolean;
-  /** Which Connect-page guide card is expanded. */
+  /** Which connection-guide card is expanded. */
   connectOpen: string | null;
   agentMenuOpen: string | null;
   connMenuOpen: string | null;
@@ -248,11 +255,12 @@ const state: AppState = {
   catalogActionMenuOpen: null, // catalog id whose quick-connect chevron menu is open
   sectionsExpanded: [],  // sections showing beyond their connected/minimum rows
   startOption: 'postgres', // which walkthrough the Get started tab shows
+  startView: 'walkthrough' as StartView, // walkthrough vs connection guides (kept across tab switches)
   connectMode: 'direct', // step 2's connect-mode chip (falls back per option)
   connImportSource: '',  // paste-to-prefill field in the add sheet
   connImportError: null,
   menuOpen: false,       // desktop-mode settings popover (gear) open
-  connectOpen: 'claude-code', // Connect-page guide card that starts expanded
+  connectOpen: 'claude-code', // connection-guide card that starts expanded
   agentMenuOpen: null,   // 'identity' while the key card's ⋯ menu is open
   connMenuOpen: null,    // connection id whose ⋯ options menu is open (Tools tab)
 
@@ -430,8 +438,8 @@ function globalSectionsHTML() {
       + state.elicitations.map(elicitationNoteHTML).join('');
   }
   // Live sessions answer "what is my agent doing right now?", so they sit
-  // with the agents rather than above every screen.
-  if (state.tab === 'agents' && state.sessions.length) {
+  // with the connection guides rather than above every screen.
+  if (state.tab === 'start' && state.startView === 'guides' && state.sessions.length) {
     out += '<div class="live-head">Active sessions</div>' + state.sessions.map((s) => {
       const t = TYPES[s.type];
       // who holds the session matters as much as what it's connected to
@@ -492,7 +500,7 @@ function secretsTableHTML(query = '') {
   return `<table class="sec-table"><tbody>${rows}</tbody></table>`;
 }
 
-/* ---- agents tab ---- */
+/* ---- connection guides (Get started > guides view) ---- */
 // One shared identity covers every local agent, so the screen pivots around
 // the core question — what may agents reach? A key card on top (this
 // computer's key: where it lives, and Rotate), then one row per tool with an
@@ -549,8 +557,8 @@ function connToggleHTML(c: ConnectionSummary): string {
     data-act="${enabled ? 'disable-tool' : 'enable-tool'}" data-conn="${c.id}"></button>`;
 }
 
-/* ---- Connect page ---- */
-// The page's job is no longer to manage identities the broker stores —
+/* ---- connection guides ---- */
+// The guides' job is no longer to manage identities the broker stores —
 // there is exactly one, this computer's key — but to get the user's own
 // agents talking to Multitool: a key card, one guide card per agent family
 // with copyable setup snippets, and a cosmetic recently-seen list built
@@ -750,7 +758,7 @@ function recentClientsHTML(): string {
       activity log — they aren’t identities, and access doesn’t depend on them.</div></div>`;
 }
 
-function agentsHTML(): string {
+function connectGuidesHTML(): string {
   const identity = state.identity;
   if (!identity) return '';
   const guides = connectGuides(identity).map(connectCardHTML).join('');
@@ -1242,7 +1250,23 @@ function startConnectPaneHTML(mode: ConnectModeId, option: StartOption, progress
   }
 }
 
+// The centered walkthrough/guides switch at the top of the Get started tab.
+function startViewToggleHTML(): string {
+  const btn = (view: StartView, label: string) =>
+    `<button class="seg-btn ${state.startView === view ? 'on' : ''}"
+      aria-pressed="${state.startView === view}" data-act="start-view" data-id="${view}">${label}</button>`;
+  return `<div class="start-view-toggle"><div class="seg" role="group" aria-label="Get started view">
+    ${btn('walkthrough', 'Walkthrough')}${btn('guides', 'Connection guides')}</div></div>`;
+}
+
 function startHTML(): string {
+  const body = state.startView === 'guides'
+    ? connectGuidesHTML()
+    : startWalkthroughHTML();
+  return `<div class="start">${startViewToggleHTML()}${body}</div>`;
+}
+
+function startWalkthroughHTML(): string {
   const option = startOptionById(state.startOption);
   const catalogEntry = option.catalogId ? catalogEntryById(option.catalogId) : undefined;
   const agentConnected = state.activity.some((entry) => entry.text.startsWith('Agent connected'));
@@ -1288,11 +1312,10 @@ function startHTML(): string {
     <pre class="setup-instructions"><code>${esc(task)}</code></pre>
     <div class="start-actions">
       <button class="btn primary sm" data-act="copy-text" data-text="${escAttr(task)}">Copy this task</button>
-      <button class="btn ghost sm" data-act="tab" data-tab="agents">Open Agents</button>
+      <button class="btn ghost sm" data-act="open-connect-guides">Open connection guides</button>
     </div>`;
 
-  return `<div class="start">
-    <div class="start-hero">
+  return `<div class="start-hero">
       <h3>Connect your agent to everything</h3>
       <p class="start-promise">${esc(START_PROMISE)}</p>
     </div>
@@ -1300,15 +1323,13 @@ function startHTML(): string {
       ${step(1, option.connType ? `Add the ${option.label} tool` : `Add an ${option.label}`, progress.added, addBody)}
       ${step(2, 'Connect your agent', progress.connected, connectBody)}
       ${step(3, 'Ask for something useful', progress.wired, wireBody)}
-    </ol>
-  </div>`;
+    </ol>`;
 }
 
 function tabContentHTML() {
   return state.tab === 'start' ? startHTML()
     : state.tab === 'connections' ? connectionsHTML()
     : state.tab === 'secrets' ? secretsHTML()
-    : state.tab === 'agents' ? agentsHTML()
     : activityHTML();
 }
 
@@ -1349,8 +1370,7 @@ function showAllToggleHTML(checked: boolean, enabled: boolean): string {
 function renderMainWindow() {
   const navItem = (tab: Tab): string =>
     `<button class="nav-item ${state.tab === tab ? 'on' : ''}" data-act="tab" data-tab="${tab}">${tabLabel(tab)}</button>`;
-  const nav = TABS.filter((tab) => tab !== 'activity').map(navItem).join('');
-  const activityNav = navItem('activity');
+  const nav = TABS.map(navItem).join('');
   // One view-specific action, always in the header row next to the title.
   const actionBtn = state.tab === 'connections'
     ? `<div class="dw-head-actions">
@@ -1382,7 +1402,6 @@ function renderMainWindow() {
         <div class="dw-brand"><div class="dd-appicon">${ICONS.blocks}</div>
           <div><div class="dd-title">Multitool</div>${brokerReadyHTML()}</div></div>
         <div class="dw-nav">${nav}</div>
-        <div class="dw-secondary-nav">${activityNav}</div>
         <div class="dw-settings">${menu}
           <button class="nav-item gear-btn ${state.menuOpen ? 'on' : ''}" data-act="toggle-settings-menu" title="Settings" aria-label="Settings">${ICONS.gear}</button>
         </div>
@@ -2134,7 +2153,7 @@ const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
 const tabLabel = (tab: Tab): string =>
   tab === 'connections' ? 'Tools'
   : tab === 'start' ? 'Get started'
-  : tab === 'agents' ? 'Connect'
+  : tab === 'activity' ? 'Activity Log'
   : cap(tab);
 
 // Flash "Copied" in place of the masked value for a moment after a copy.
@@ -3015,6 +3034,18 @@ document.addEventListener('click', async (e) => {
         state.connectMode = id;
         render();
       }
+      break;
+    case 'start-view':
+      if (START_VIEWS.includes(id as StartView)) {
+        state.startView = id as StartView;
+        render();
+      }
+      break;
+    case 'open-connect-guides':
+      state.tab = 'start';
+      state.startView = 'guides';
+      render();
+      resetScroll();
       break;
     case 'copy-text': {
       const text = btn.dataset.text ?? '';

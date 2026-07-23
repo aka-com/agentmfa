@@ -167,8 +167,6 @@
   .dw-brand{ display: flex; align-items: center; gap: 9px; padding: 2px 4px 14px; }
   .dw-brand .dd-title{ font-size: 14.5px; }
   .dw-nav{ display: flex; flex-direction: column; gap: 2px; flex: 1; }
-  .dw-secondary-nav{ margin-bottom: 8px; }
-  .dw-secondary-nav .nav-item{ width: 100%; }
   .nav-item{
   display: flex; align-items: center; gap: 7px;
   border: none; background: transparent; cursor: pointer;
@@ -300,6 +298,10 @@
   /* The Get started tab: a centered column so the walkthrough reads as a
      document rather than a dashboard. */
   .start{ max-width: 620px; margin: 0 auto; padding: 20px 0 24px; }
+  /* Centered walkthrough/guides switch above the hero. */
+  .start-view-toggle{ display: flex; justify-content: center; margin-bottom: 18px; }
+  .start-view-toggle .seg{ display: inline-flex; margin: 0; }
+  .start-view-toggle .seg-btn{ flex: none; padding: 5px 16px; }
   .start-hero{ text-align: center; }
   .start-hero h3{ font-size: 19px; }
   .start-hero > p{ margin-top: 5px; color: var(--muted); font-size: 13px; }
