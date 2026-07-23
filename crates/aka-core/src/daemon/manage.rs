@@ -29,8 +29,8 @@ use zeroize::Zeroizing;
 use super::{bearer_token, err_missing_token, ApiJson, AppState};
 use crate::manage::{
     AccessBody, AllowedToolsBody, ConnectionAddBody, ConnectionUpdateBody, DraftTestBody,
-    ManagementBackend, OAuthCompleteBody, OAuthReconnectBody, OAuthStartBody, SecretAddBody,
-    SecretEditBody, SettingsPatchBody,
+    ManagementBackend, McpAuthDeliverBody, McpAuthStartBody, OAuthCompleteBody,
+    OAuthReconnectBody, OAuthStartBody, SecretAddBody, SecretEditBody, SettingsPatchBody,
 };
 
 /// Bearer authentication against the management token.
@@ -130,6 +130,12 @@ pub fn router() -> Router<AppState> {
         .route("/connections/{id}/mcp-status", post(mcp_status))
         .route("/connections/{id}/endpoint", post(issue_endpoint))
         .route("/endpoints/{id}", delete(revoke_endpoint))
+        .route("/mcp-auth", post(mcp_auth_start))
+        .route(
+            "/mcp-auth/{id}",
+            get(mcp_auth_state).delete(mcp_auth_cancel),
+        )
+        .route("/mcp-auth/{id}/deliver", post(mcp_auth_deliver))
         .route("/oauth/start", post(oauth_start))
         .route("/oauth/reconnect/{id}", post(oauth_reconnect_start))
         .route("/oauth/complete/{id}", post(oauth_complete))
@@ -378,6 +384,51 @@ async fn revoke_endpoint(
             .await
             .map(|revoked| json!({ "revoked": revoked })),
     )
+}
+
+/* -------------------------- relayed MCP sign-in --------------------------- */
+
+/// Begin a relayed MCP sign-in. Progress rides the SSE feed as
+/// `mcp_auth_changed`; the shell opens the authorize URL itself and
+/// delivers the code its catcher receives.
+async fn mcp_auth_start(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+    ApiJson(body): ApiJson<McpAuthStartBody>,
+) -> Response {
+    let result = state
+        .broker
+        .ui_start_mcp_auth_external(body.draft, &body.redirect_uri);
+    respond(result.map_err(ManageError::from))
+}
+
+async fn mcp_auth_state(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+    Path(id): Path<Uuid>,
+) -> Response {
+    ok(state.broker.ui_mcp_auth_state(&id))
+}
+
+async fn mcp_auth_cancel(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+    Path(id): Path<Uuid>,
+) -> Response {
+    ok(json!({ "cancelled": state.broker.ui_cancel_mcp_auth(&id) }))
+}
+
+async fn mcp_auth_deliver(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+    Path(id): Path<Uuid>,
+    ApiJson(body): ApiJson<McpAuthDeliverBody>,
+) -> Response {
+    ok(json!({
+        "delivered": state
+            .broker
+            .ui_mcp_auth_deliver_code(&id, body.code, body.state)
+    }))
 }
 
 /* ------------------------- relayed OAuth (BYO app) ------------------------ */

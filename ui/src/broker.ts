@@ -53,16 +53,15 @@ export function brokerTakeover(
 
 /**
  * Why a feature is unavailable against a remote broker, or null when it
- * works. BYO-app OAuth is relayed (the consent page opens in this
- * machine's browser); MCP sign-in and direct endpoints still need their
- * remote flows.
+ * works. OAuth sign-ins (BYO-app and MCP) are relayed — the consent page
+ * opens in this machine's browser; direct endpoints still hand out
+ * broker-host-local addresses and wait on their remote flow.
  */
 export function remoteFeatureNote(
   profile: BrokerProfile,
-  feature: 'mcp-auth' | 'endpoints',
+  feature: 'endpoints',
 ): string | null {
   if (profile.mode !== 'remote') return null;
-  return feature === 'mcp-auth'
-    ? 'MCP sign-in isn’t available for a remote broker yet — paste a token instead'
-    : 'Direct endpoints aren’t available for a remote broker yet';
+  void feature;
+  return 'Direct endpoints aren’t available for a remote broker yet';
 }

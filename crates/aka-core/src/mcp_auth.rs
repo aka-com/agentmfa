@@ -214,6 +214,9 @@ enum CompletionPlan {
 struct SessionSlot {
     state: McpAuthState,
     task: Option<tokio::task::JoinHandle<()>>,
+    /// External-redirect sessions: fulfilled by the remote shell's code
+    /// delivery; the flow task is waiting on the paired receiver.
+    code_tx: Option<tokio::sync::oneshot::Sender<(String, String)>>,
 }
 
 /// Live and recently finished auth sessions, owned by the broker.
@@ -236,13 +239,34 @@ impl McpAuthSessions {
                 slots.remove(&id);
             }
         }
-        slots.insert(id, SessionSlot { state, task: None });
+        slots.insert(
+            id,
+            SessionSlot {
+                state,
+                task: None,
+                code_tx: None,
+            },
+        );
     }
 
     fn attach_task(&self, id: &Uuid, task: tokio::task::JoinHandle<()>) {
         if let Some(slot) = self.slots.lock().unwrap().get_mut(id) {
             slot.task = Some(task);
         }
+    }
+
+    fn attach_code_tx(&self, id: &Uuid, tx: tokio::sync::oneshot::Sender<(String, String)>) {
+        if let Some(slot) = self.slots.lock().unwrap().get_mut(id) {
+            slot.code_tx = Some(tx);
+        }
+    }
+
+    fn take_code_tx(&self, id: &Uuid) -> Option<tokio::sync::oneshot::Sender<(String, String)>> {
+        self.slots
+            .lock()
+            .unwrap()
+            .get_mut(id)
+            .and_then(|slot| slot.code_tx.take())
     }
 
     pub fn get(&self, id: &Uuid) -> Option<McpAuthState> {
@@ -286,6 +310,17 @@ impl McpAuthSessions {
     }
 }
 
+/// Where the sign-in's browser redirect lands: a listener the flow binds
+/// on this host (local shells), or the remote shell's own loopback catcher
+/// with the code delivered back over the manage API.
+enum RedirectMode {
+    Loopback,
+    External {
+        redirect_uri: String,
+        code_rx: tokio::sync::oneshot::Receiver<(String, String)>,
+    },
+}
+
 /* ------------------------------ broker API -------------------------------- */
 
 impl Broker {
@@ -294,6 +329,55 @@ impl Broker {
     /// [`crate::events::BrokerEvents::mcp_auth_changed`] and
     /// [`Broker::ui_mcp_auth_state`].
     pub fn ui_start_mcp_auth(self: &Arc<Self>, draft: McpAuthDraft) -> Result<McpAuthState> {
+        self.start_mcp_auth_with(draft, RedirectMode::Loopback)
+    }
+
+    /// Begin a sign-in whose browser redirect lands on the remote shell's
+    /// loopback catcher; the code comes back via
+    /// [`Broker::ui_mcp_auth_deliver_code`]. Loopback redirect targets only.
+    pub fn ui_start_mcp_auth_external(
+        self: &Arc<Self>,
+        draft: McpAuthDraft,
+        redirect_uri: &str,
+    ) -> Result<McpAuthState> {
+        let parsed = url::Url::parse(redirect_uri)
+            .map_err(|_| CoreError::OAuth("the redirect URI is not a valid URL".into()))?;
+        let loopback = matches!(
+            parsed.host_str(),
+            Some("127.0.0.1") | Some("localhost") | Some("[::1]")
+        );
+        if parsed.scheme() != "http" || !loopback || parsed.path() != "/callback" {
+            return Err(CoreError::OAuth(
+                "the redirect URI must be a loopback http://127.0.0.1:<port>/callback".into(),
+            ));
+        }
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let state = self.start_mcp_auth_with(
+            draft,
+            RedirectMode::External {
+                redirect_uri: redirect_uri.to_string(),
+                code_rx: rx,
+            },
+        )?;
+        let session_id = Uuid::parse_str(&state.id).expect("session id is a uuid");
+        self.mcp_auth.attach_code_tx(&session_id, tx);
+        Ok(state)
+    }
+
+    /// Deliver the authorization code a remote shell's catcher received.
+    /// Returns false when the session is unknown or not waiting.
+    pub fn ui_mcp_auth_deliver_code(&self, id: &Uuid, code: String, state: String) -> bool {
+        match self.mcp_auth.take_code_tx(id) {
+            Some(tx) => tx.send((code, state)).is_ok(),
+            None => false,
+        }
+    }
+
+    fn start_mcp_auth_with(
+        self: &Arc<Self>,
+        draft: McpAuthDraft,
+        mode: RedirectMode,
+    ) -> Result<McpAuthState> {
         let (name, config, plan) = self.plan_auth(&draft)?;
         let endpoint = endpoint_for(&config)?;
 
@@ -317,7 +401,8 @@ impl Broker {
         // main thread, where no Tokio reactor is entered. Always put the
         // flow on the broker-owned runtime instead of the caller's context.
         let task = broker.task_runtime().spawn(async move {
-            let outcome = run_flow(&broker, session_id, endpoint, plan, options, preset).await;
+            let outcome =
+                run_flow(&broker, session_id, endpoint, plan, options, preset, mode).await;
             let phase = match outcome {
                 Ok(phase) => phase,
                 Err(failure) => {
@@ -547,6 +632,7 @@ async fn run_flow(
     plan: CompletionPlan,
     options: McpCheckOptions,
     preset: ClientPreset,
+    mode: RedirectMode,
 ) -> std::result::Result<McpAuthPhase, FlowFailure> {
     // The flow follows cross-origin hops (resource → authorization server),
     // so it uses its own client with bounded redirects rather than the
@@ -575,16 +661,33 @@ async fn run_flow(
     )
     .await?;
 
-    /* 3 — register (loopback first: registration pins the redirect URI) */
+    /* 3 — register (redirect first: registration pins the redirect URI).
+    Local shells get a listener bound here; a remote shell supplied its own
+    catcher's URI and will deliver the code over the manage API. */
     broadcast(broker, &session_id, McpAuthPhase::Registering);
-    let listener = TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .map_err(|e| FlowFailure::plain(format!("could not open a loopback listener: {e}")))?;
-    let port = listener
-        .local_addr()
-        .map_err(|e| FlowFailure::plain(format!("loopback listener: {e}")))?
-        .port();
-    let redirect_uri = format!("http://127.0.0.1:{port}/callback");
+    enum CodeSource {
+        Listener(TcpListener),
+        Delivery(tokio::sync::oneshot::Receiver<(String, String)>),
+    }
+    let (redirect_uri, code_source) = match mode {
+        RedirectMode::Loopback => {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).await.map_err(|e| {
+                FlowFailure::plain(format!("could not open a loopback listener: {e}"))
+            })?;
+            let port = listener
+                .local_addr()
+                .map_err(|e| FlowFailure::plain(format!("loopback listener: {e}")))?
+                .port();
+            (
+                format!("http://127.0.0.1:{port}/callback"),
+                CodeSource::Listener(listener),
+            )
+        }
+        RedirectMode::External {
+            redirect_uri,
+            code_rx,
+        } => (redirect_uri, CodeSource::Delivery(code_rx)),
+    };
     let registration = if let Some(client_id) = &preset.client_id {
         Registration {
             client_id: client_id.clone(),
@@ -676,12 +779,26 @@ async fn run_flow(
             authorization_url: authorize.to_string(),
         },
     );
-    let code = match tokio::time::timeout(
-        BROWSER_TIMEOUT,
-        wait_for_callback(listener, &state_nonce),
-    )
-    .await
-    {
+    let wait_for_code = async {
+        match code_source {
+            CodeSource::Listener(listener) => wait_for_callback(listener, &state_nonce).await,
+            CodeSource::Delivery(code_rx) => {
+                let (code, state) = code_rx.await.map_err(|_| {
+                    FlowFailure::plain("the sign-in was cancelled before the browser returned")
+                })?;
+                // The remote shell's catcher forwards whatever state came
+                // back; the nonce is verified here, where it was minted.
+                if state != state_nonce {
+                    return Err(FlowFailure::hinted(
+                        "authorization state mismatch",
+                        "Run the sign-in again.",
+                    ));
+                }
+                Ok(code)
+            }
+        }
+    };
+    let code = match tokio::time::timeout(BROWSER_TIMEOUT, wait_for_code).await {
         Ok(result) => result?,
         Err(_) => {
             return Err(FlowFailure::hinted(

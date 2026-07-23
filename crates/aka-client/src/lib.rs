@@ -7,11 +7,11 @@
 //! listener); this client just refuses to pretend — it sends the
 //! management token as a bearer on whatever URL it was given.
 //!
-//! BYO-app OAuth flows are relayed: this client binds the loopback
-//! catcher on the *user's* machine, the broker keeps the PKCE verifier,
-//! and only the authorization code crosses back — tokens never touch this
-//! machine. MCP sign-in is not yet relayable and answers
-//! `RemoteUnsupported` until its relay ships.
+//! OAuth flows (BYO-app and MCP sign-in) are relayed: this client binds
+//! the loopback catcher on the *user's* machine, the broker keeps the
+//! PKCE verifier, and only the authorization code crosses back — tokens
+//! never touch this machine. Sign-in progress arrives over the SSE feed
+//! exactly as it does locally.
 
 pub mod credentials;
 pub mod events;
@@ -23,8 +23,9 @@ use aka_api::{
 use aka_core::broker::ConnectionTestReport;
 use aka_core::manage::{
     AccessBody, AllowedToolsBody, BackendProfile, ConnectionAddBody, ConnectionUpdateBody,
-    DraftTestBody, ManageResult, ManagementBackend, OAuthCompleteBody, OAuthReconnectBody,
-    OAuthStartBody, SecretAddBody, SecretEditBody, SettingsPatchBody,
+    DraftTestBody, ManageResult, ManagementBackend, McpAuthDeliverBody, McpAuthStartBody,
+    OAuthCompleteBody, OAuthReconnectBody, OAuthStartBody, SecretAddBody, SecretEditBody,
+    SettingsPatchBody,
 };
 use aka_core::store::ConnectionSpec;
 use aka_core::types::SecretValue;
@@ -40,6 +41,9 @@ const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(150)
 /// How long establishing the TCP/TLS leg may take: this is what turns an
 /// unreachable broker into a prompt, actionable error.
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// How long the relayed MCP sign-in's catcher waits for the browser
+/// (mirrors the broker's own browser deadline).
+const MCP_SIGNIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// A validated broker base URL + management token.
 #[derive(Clone)]
@@ -284,12 +288,6 @@ struct InstructionsBody {
     instructions: String,
 }
 
-fn remote_unsupported(feature: &str) -> ManageError {
-    ManageError::RemoteUnsupported {
-        feature: feature.into(),
-    }
-}
-
 #[async_trait]
 impl ManagementBackend for RemoteBackend {
     fn profile(&self) -> BackendProfile {
@@ -419,22 +417,63 @@ impl ManagementBackend for RemoteBackend {
         .await
     }
 
+    /// Relayed MCP sign-in: the catcher binds here; the broker runs
+    /// discovery/registration/exchange and streams phases over SSE. The UI
+    /// opens the authorize URL itself (as it does locally), and a spawned
+    /// task delivers the code the catcher receives.
     async fn start_mcp_auth(
         &self,
-        _draft: aka_core::mcp_auth::McpAuthDraft,
+        draft: aka_core::mcp_auth::McpAuthDraft,
     ) -> ManageResult<aka_core::mcp_auth::McpAuthState> {
-        Err(remote_unsupported("MCP sign-in"))
+        let catcher = aka_core::oauth::LoopbackCatcher::bind()
+            .await
+            .map_err(|message| ManageError::OAuth { message })?;
+        let state: aka_core::mcp_auth::McpAuthState = self
+            .post(
+                "/v1/manage/mcp-auth",
+                &McpAuthStartBody {
+                    draft,
+                    redirect_uri: catcher.redirect_uri(),
+                },
+            )
+            .await?;
+        // The delivery leg outlives this call: the browser dance takes as
+        // long as the user does. The broker verifies the state nonce.
+        let session = state.id.clone();
+        let http = self.http.clone();
+        let deliver_url = self.url(&format!("/v1/manage/mcp-auth/{session}/deliver"));
+        let bearer = format!("Bearer {}", self.config.token());
+        tokio::spawn(async move {
+            let redirect =
+                tokio::time::timeout(MCP_SIGNIN_TIMEOUT, catcher.wait_for_redirect()).await;
+            let Ok(Ok((code, state))) = redirect else {
+                return;
+            };
+            let _ = http
+                .post(deliver_url)
+                .header(reqwest::header::AUTHORIZATION, bearer)
+                .json(&McpAuthDeliverBody { code, state })
+                .send()
+                .await;
+        });
+        Ok(state)
     }
 
     async fn get_mcp_auth(
         &self,
-        _id: Uuid,
+        id: Uuid,
     ) -> ManageResult<Option<aka_core::mcp_auth::McpAuthState>> {
-        Ok(None)
+        self.get(&format!("/v1/manage/mcp-auth/{id}")).await
     }
 
-    async fn cancel_mcp_auth(&self, _id: Uuid) -> ManageResult<bool> {
-        Ok(false)
+    async fn cancel_mcp_auth(&self, id: Uuid) -> ManageResult<bool> {
+        #[derive(serde::Deserialize)]
+        struct CancelledBody {
+            cancelled: bool,
+        }
+        self.delete::<CancelledBody>(&format!("/v1/manage/mcp-auth/{id}"))
+            .await
+            .map(|body| body.cancelled)
     }
 
     async fn mcp_status(

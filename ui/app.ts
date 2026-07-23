@@ -1963,17 +1963,13 @@ function connSheet(editing: boolean): string {
     }
   } else if (t === 'api' || t === 'ws') {
     const mcpAdd = t === 'api' && isMcpDraft(d);
-    // MCP sign-in is not relayable to a remote broker yet; BYO-app OAuth
-    // is (the consent page opens in this machine's browser).
-    const mcpSignInAvailable = !remoteFeatureNote(state.broker, 'mcp-auth');
     const oauthPreset = !mcpAdd && t === 'api' && d.entryId
       ? catalogEntryById(d.entryId)?.oauthPreset : undefined;
-    const modeValue = d.authMode || (mcpAdd && mcpSignInAvailable ? 'oauth' : 'bearer');
+    const modeValue = d.authMode || (mcpAdd ? 'oauth' : 'bearer');
     const recipes: Array<[string, string]> = [
       // MCP servers advertise their own sign-in flow; the browser dance is
       // the default and a pasted token stays one select away.
-      ...(mcpAdd && mcpSignInAvailable
-        ? [['oauth', 'Sign in with your account (OAuth)'] as [string, string]] : []),
+      ...(mcpAdd ? [['oauth', 'Sign in with your account (OAuth)'] as [string, string]] : []),
       ['bearer', 'Bearer token'], ['header', 'Custom header'],
       ...(t === 'api' ? [['query', 'Query parameter'] as [string, string]] : []),
       // Plain REST rows with documented OAuth endpoints offer a browser
@@ -2059,10 +2055,8 @@ function connSheet(editing: boolean): string {
       ${advOpen ? advancedFields : ''}</div>`;
   }
   if (editing && conn && (conn.mcp_path || conn.oauth_spec)) {
-    // BYO-app OAuth reconnect relays; MCP re-sign-in does not yet.
-    const remoteNote = conn.mcp_path ? remoteFeatureNote(state.broker, 'mcp-auth') : null;
     fields += `<div class="f-row"><button class="btn" data-act="${conn.mcp_path ? 'reconnect-mcp' : 'oauth-reconnect'}"
-      data-id="${conn.id}" ${remoteNote ? `disabled title="${escAttr(remoteNote)}"` : ''}>Reconnect (sign in again)</button></div>`;
+      data-id="${conn.id}">Reconnect (sign in again)</button></div>`;
   }
   const label = (!editing && state.connEntryName) || catalogNameForType(t);
   const oauthSelected = !editing && t === 'api' && isMcpDraft(d)
@@ -3315,12 +3309,6 @@ document.addEventListener('click', async (e) => {
     case 'catalog-connect-oauth': {
       const entry = catalogEntryById(id);
       state.catalogActionMenuOpen = null;
-      // MCP sign-in can't relay to a remote broker yet: open the same
-      // row's manual (token) form instead of a flow that would dead-end.
-      if (entry && remoteFeatureNote(state.broker, 'mcp-auth')) {
-        await openCatalogConnectionForm(entry, 'bearer');
-        break;
-      }
       render(false);
       if (entry) await quickConnectCatalogMcp(entry);
       break;

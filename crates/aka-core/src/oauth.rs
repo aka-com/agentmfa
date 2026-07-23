@@ -227,6 +227,13 @@ impl LoopbackCatcher {
     pub async fn wait_for_code(&self, expected_state: &str) -> Result<String, String> {
         wait_for_code_on(&self.listener, expected_state).await
     }
+
+    /// Await any redirect and hand back `(code, state)` unverified — for
+    /// relays where the party that minted the state nonce (the broker)
+    /// verifies it, not this catcher.
+    pub async fn wait_for_redirect(&self) -> Result<(String, String), String> {
+        wait_for_redirect_on(&self.listener).await
+    }
 }
 
 /// Await the browser redirect and exchange the code for tokens.
@@ -264,6 +271,17 @@ async fn wait_for_code_on(
     listener: &tokio::net::TcpListener,
     expected_state: &str,
 ) -> Result<String, String> {
+    let (code, state) = wait_for_redirect_on(listener).await?;
+    if state != expected_state {
+        return Err("authorization state mismatch; try connecting again".into());
+    }
+    Ok(code)
+}
+
+/// The redirect-catching core: hands back `(code, state)`.
+async fn wait_for_redirect_on(
+    listener: &tokio::net::TcpListener,
+) -> Result<(String, String), String> {
     loop {
         let (mut stream, peer) = listener
             .accept()
@@ -312,12 +330,8 @@ async fn wait_for_code_on(
             .await;
             return Err(format!("the provider reported: {error}"));
         }
-        if state.as_deref() != Some(expected_state) {
-            let _ = respond(&mut stream, "400 Bad Request", "State mismatch.").await;
-            return Err("authorization state mismatch; try connecting again".into());
-        }
-        let Some(code) = code else {
-            let _ = respond(&mut stream, "400 Bad Request", "Missing code.").await;
+        let (Some(code), Some(state)) = (code, state) else {
+            let _ = respond(&mut stream, "400 Bad Request", "Missing code or state.").await;
             return Err("the provider sent no authorization code".into());
         };
         let _ = respond(
@@ -326,7 +340,7 @@ async fn wait_for_code_on(
             "Connected. You can close this window and return to Multitool.",
         )
         .await;
-        return Ok(code);
+        return Ok((code, state));
     }
 }
 

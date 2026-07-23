@@ -452,6 +452,21 @@ pub struct OAuthCompleteBody {
     pub state: String,
 }
 
+/// `POST /v1/manage/mcp-auth`: begin a relayed MCP sign-in. The redirect
+/// URI is the shell's own loopback catcher.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct McpAuthStartBody {
+    pub draft: crate::mcp_auth::McpAuthDraft,
+    pub redirect_uri: String,
+}
+
+/// `POST /v1/manage/mcp-auth/{id}/deliver`: the browser came back.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct McpAuthDeliverBody {
+    pub code: String,
+    pub state: String,
+}
+
 /// `PATCH /v1/manage/settings`: partial update, absent fields unchanged.
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct SettingsPatchBody {

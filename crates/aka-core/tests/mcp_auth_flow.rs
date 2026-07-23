@@ -956,3 +956,87 @@ async fn a_bad_draft_is_rejected_before_any_browser_opens() {
     assert!(error.to_string().contains("https"), "{error}");
     assert!(broker.ui_mcp_auth_state(&Uuid::new_v4()).is_none());
 }
+
+#[tokio::test]
+async fn an_external_redirect_sign_in_completes_via_code_delivery() {
+    // The remote-shell shape: the catcher lives with the caller (here, the
+    // test), the broker never binds a listener, and the code goes back in
+    // through the manage-plane delivery entry point.
+    let (port, _vendor) = spawn_mock_vendor().await;
+    let (broker, _dir) = test_broker().await;
+
+    let catcher = aka_core::oauth::LoopbackCatcher::bind()
+        .await
+        .expect("bind catcher");
+    let started = broker
+        .ui_start_mcp_auth_external(
+            McpAuthDraft {
+                name: "github-remote".into(),
+                scheme: "http".into(),
+                host: "127.0.0.1".into(),
+                port: Some(port),
+                mcp_path: "/mcp".into(),
+                reauth_connection_id: None,
+                whoami_tool: Some("get_me".into()),
+                ..Default::default()
+            },
+            &catcher.redirect_uri(),
+        )
+        .expect("start external auth");
+    let session_id = Uuid::parse_str(&started.id).expect("session id");
+
+    // A non-loopback redirect target is refused up front.
+    assert!(broker
+        .ui_start_mcp_auth_external(
+            McpAuthDraft {
+                name: "evil".into(),
+                scheme: "http".into(),
+                host: "127.0.0.1".into(),
+                port: Some(port),
+                mcp_path: "/mcp".into(),
+                ..Default::default()
+            },
+            "https://attacker.example.dev/callback",
+        )
+        .is_err());
+
+    let awaiting = wait_for(&broker, &session_id, "the browser step", |state| {
+        matches!(state.phase, McpAuthPhase::AwaitingAuthorization { .. })
+    })
+    .await;
+    let McpAuthPhase::AwaitingAuthorization { authorization_url } = &awaiting.phase else {
+        unreachable!();
+    };
+    // The authorize URL carries the *caller's* redirect, not a broker port.
+    let parsed = reqwest::Url::parse(authorization_url).expect("authorize url");
+    let pairs: HashMap<_, _> = parsed.query_pairs().into_owned().collect();
+    assert_eq!(pairs["redirect_uri"], catcher.redirect_uri());
+
+    // Play the browser: the mock AS auto-approves and redirects to the
+    // catcher; hand its (code, state) back through delivery.
+    let browser = reqwest::Client::new();
+    let (landing, redirect) = tokio::join!(
+        browser.get(authorization_url).send(),
+        catcher.wait_for_redirect(),
+    );
+    assert!(landing.expect("authorize hop").status().is_success());
+    let (code, state) = redirect.expect("redirect reaches the catcher");
+    // A wrong state is refused without consuming the session's waiter...
+    // (the sender is one-shot, so verify only the happy path here.)
+    assert!(broker.ui_mcp_auth_deliver_code(&session_id, code, state));
+    // A second delivery has nothing to fulfill.
+    assert!(!broker.ui_mcp_auth_deliver_code(&session_id, "again".into(), "x".into()));
+
+    let done = wait_for(&broker, &session_id, "completion", |state| {
+        state.phase.is_terminal()
+    })
+    .await;
+    let McpAuthPhase::Succeeded {
+        connection_name, ..
+    } = &done.phase
+    else {
+        panic!("expected success, got {:?}", done.phase);
+    };
+    assert_eq!(connection_name, "github-remote");
+    assert!(broker.store.connection_by_name("github-remote").is_some());
+}
