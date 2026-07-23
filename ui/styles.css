@@ -928,46 +928,11 @@
 /* The chevron is the expand affordance; it points down when closed and
    flips when the row is open. */
 .cat-chev { display: inline-flex; transition: transform .15s ease; opacity: .8; }
-.cat-count.on .cat-chev { transform: rotate(180deg); }
-/* Connected rows split the pill: the count half toggles the row open, the
-   chevron half opens the add-another menu. A panel-colored hairline is the
-   seam between the two filled halves. */
-.cat-count.cat-connect-primary { padding: 5px 10px 5px 13px; border-radius: 999px 0 0 999px; }
-.cat-count.cat-connect-menu-btn {
-  margin-left: 0; padding: 5px 9px 5px 7px; border-radius: 0 999px 999px 0;
-  border-left: 1px solid var(--panel);
-}
-.cat-count.cat-connect-menu-btn svg { transform: none; }
 /* Expanded rows are full-bleed: they span the whole card and align with the
    parent row's text, so a tool reads as one object rather than a card-in-card. */
 .cat-conns {
   display: flow-root; background: var(--wash); border-top: 1px solid var(--line);
 }
-.cat-conn-list { display: flex; flex-direction: column; }
-.cat-conn {
-  display: flex; align-items: flex-start; gap: 10px;
-  padding: 10px 14px 10px 64px; min-width: 0;
-}
-.cat-conn + .cat-conn { border-top: 1px solid var(--line-soft); }
-.cat-conn-tx { flex: 1; min-width: 0; }
-.cat-conn-head { display: flex; align-items: center; gap: 6px; }
-.cat-conn-tx b { font-size: 13px; font-weight: 600; }
-/* Targets are identifiers to read, not code to edit: same family as the row. */
-.cat-conn-tx code {
-  display: block; margin-top: 1px; overflow: hidden; color: var(--muted-2);
-  font-family: inherit; font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap;
-}
-/* The target line: url first, then the flat run of icon-led facts riding
-   its right. The url yields (ellipsizes) before the facts do. */
-.cat-conn-sub { display: flex; align-items: center; gap: 12px; min-width: 0; }
-.cat-conn-sub code { flex: 0 1 auto; }
-/* One flat run of icon-led facts: a single gap, one size, one weight. */
-.cat-conn-meta {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px;
-  flex: 1 1 auto; min-width: 0; color: var(--muted); font-size: 11.5px;
-}
-.cat-meta-idle { color: var(--amber-ink); }
-.cat-conn-danger { display: block; margin-top: 2px; color: var(--danger-ink); font-size: 11.5px; }
 /* The status rail: kind tag + one health verdict per row, right-aligned
    into a fixed column so the eye runs down the pane instead of re-scanning
    each row. Color is spent only where it means something: a green dot for
@@ -999,16 +964,25 @@
 /* ---- flat tools list (steady state) ----------------------------------- */
 /* One row per connection; the catalog waits behind "+ Add tool", and
    anything wrong is the banner above the list. */
-.flat-tools-head { display: flex; align-items: center; justify-content: space-between; }
+/* The banner is a button: clicking it jumps to the first row that needs
+   attention, so it resets button chrome and keeps the body text left. */
 .attn-banner {
-  display: flex; align-items: center; gap: 10px; padding: 9px 12px;
+  display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 12px;
   border: 1px solid var(--amber-border); border-radius: 10px;
-  background: var(--amber-wash); color: var(--amber-ink); font-size: 12.5px;
+  background: var(--amber-wash); color: var(--amber-ink);
+  font: inherit; font-size: 12.5px; text-align: left; cursor: pointer;
 }
+.attn-banner:hover { border-color: var(--amber-strong); }
 .attn-banner > svg { width: 14px; height: 14px; flex: 0 0 auto; color: var(--amber-strong); }
 .attn-banner > span { flex: 1 1 auto; min-width: 0; }
 .attn-banner b { font-weight: 650; }
 .flat-conn-wrap + .flat-conn-wrap { border-top: 1px solid var(--line); }
+/* The banner's landing flash: a brief amber wash over the row it names. */
+.flat-conn-wrap.flash { animation: row-flash 1.6s ease-out; }
+@keyframes row-flash {
+  0%, 35% { background: var(--amber-wash); }
+  100% { background: transparent; }
+}
 /* The one add path: a row at the bottom of the tools list that expands
    the catalog of not-yet-connected tools in place beneath it. Quiet by
    design: default gray icon chip, a single vertically centered line. */
@@ -1044,10 +1018,7 @@
 /* Delete + its ⋯ sit left; the menu drops upward, clear of the sheet edge. */
 .sheet-actions .sheet-conn-menu { margin-right: auto; }
 .sheet-conn-menu .tile-menu { top: auto; bottom: calc(100% + 5px); right: auto; left: 0; }
-.cc-health svg { width: 11px; height: 11px; flex: 0 0 auto; }
-.cc-health .cat-chev { opacity: .7; }
-.cc-health[aria-expanded="true"] .cat-chev { transform: rotate(180deg); }
-/* The chip's expansion: one line per issue, its fix action beside it. */
+/* The row's issue list: one line per issue, its fix action beside it. */
 .cc-issues {
   display: flex; flex-direction: column; gap: 6px;
   margin-top: 8px; padding: 7px 10px; max-width: 520px;
@@ -1232,9 +1203,6 @@
 .connect-recent-row code{ font-size: 12.5px; font-weight: 600; }
 .connect-recent-row .grow{ flex: 1; }
 
-/* The connection row's right-edge controls: ⋮ endpoint menu, ⋯ options,
-   and the agents on/off switch pinned rightmost. */
-.cat-conn-ctl{ display: flex; align-items: center; gap: 6px; flex: 0 0 auto; margin-top: 1px; }
 /* Connection state at a glance: green = agents on, grey = off, amber = needs attention. */
 /* The enable/disable switch — the row's master control. */
 .switch{
@@ -1249,8 +1217,8 @@
 }
 .switch.on{ background: var(--ok-solid); }
 .switch.on::after{ left: 16px; }
-/* Tool-scope picker and credential, rendered as icon-led meta facts. The
-   picker rests indistinguishable from its neighbors; hover reveals the link. */
+/* Tool-scope picker, rendered as an icon-led meta fact. It rests
+   indistinguishable from its neighbors; hover reveals the link. */
 .cat-meta-tools{
   display: inline-flex; align-items: center; gap: 5px; padding: 0; border: none;
   background: transparent; color: var(--muted); font: inherit; font-size: 11.5px;
@@ -1258,8 +1226,6 @@
 }
 .cat-meta-tools:hover{ color: var(--ink); text-decoration: underline; }
 .cat-meta-tools svg{ color: var(--muted-2); }
-.cat-meta-cred{ display: inline-flex; align-items: center; gap: 5px; }
-.cat-meta-cred svg{ color: var(--muted-2); }
 /* Draft-test verdict in the add sheet: between the fields (below the
    Advanced toggle) and the action row. Same voice as the row-level .cc-test,
    sized for the sheet. */
