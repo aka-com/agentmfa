@@ -323,7 +323,7 @@ const state: AppState = {
 // Re-rendering replaces #root wholesale, which would drop the scroll
 // position of the scrolling panes — expanding a catalog row would jump you
 // back to the top. Snapshot and restore them around every render.
-const SCROLLERS = ['.content', '.dd-global'];
+const SCROLLERS = ['.content', '.dd-global', '.conn-detail-pane'];
 function captureScroll(): Array<[string, number]> {
   return SCROLLERS.flatMap((sel): Array<[string, number]> => {
     const el = document.querySelector(sel);
@@ -1734,7 +1734,7 @@ function endpointIssuedSheet(): string {
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
     <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="ep-title">
       <h3 id="ep-title">Direct endpoint issued</h3>
-      <p class="sheet-sub">Paste this into your tool's config. You can copy it again anytime from the tool's row.</p>
+      <p class="sheet-sub">Paste this into your tool's config. You can copy it again anytime from the tool's details.</p>
       ${field(addressLabel, info.dsn, 'dsn')}
       ${secretField}
       ${field('Example', info.example, 'example')}
@@ -3265,6 +3265,9 @@ document.addEventListener('click', async (e) => {
       state.agentMenuOpen = null;
       state.catalogActionMenuOpen = null;
       state.connMenuOpen = null;
+      // The slide-over is a transient view; coming back to Tools starts
+      // at the list, not with the panel already over it.
+      state.connDetailOpen = false;
       render();
       resetScroll();
       break;
@@ -4064,6 +4067,7 @@ document.addEventListener('keydown', (e) => {
     const n = TABS.length;
     state.tab = TABS[(i + (e.shiftKey ? -1 : 1) + n) % n];
     state.menuOpen = false;
+    state.connDetailOpen = false;
     render();
     resetScroll();
     return;

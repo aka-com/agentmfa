@@ -1042,12 +1042,18 @@
 .cd-mcp-row { display: flex; }
 .conn-detail-pane .ep-strip { margin-top: 0; }
 .conn-detail-pane .cc-issues { margin-top: 12px; max-width: none; }
+/* The pane scrolls, which would clip the ⋯ menu — lift the clipping while
+   a menu is open, the same trade the cards make (.cat-rows above). */
+.conn-detail-pane:has(.tile-menu) { overflow: visible; }
 .conn-detail-backdrop { display: none; }
 
 @media (max-width: 920px) {
+  /* The slide-over sits above the page but below every modal layer —
+     sheets (z 8/9) opened from the panel (issue endpoint, the tool
+     picker, confirms) must cover it. */
   .conn-detail-pane {
     display: none;
-    position: fixed; top: 0; right: 0; bottom: 0; z-index: 70;
+    position: fixed; top: 0; right: 0; bottom: 0; z-index: 7;
     width: min(400px, 92vw); max-height: none;
     border: none; border-left: 1px solid var(--line); border-radius: 0;
     background: var(--panel);
@@ -1056,7 +1062,7 @@
   }
   .catalog.detail-open .conn-detail-pane { display: block; animation: cd-slide .2s ease; }
   .catalog.detail-open .conn-detail-backdrop {
-    display: block; position: fixed; inset: 0; z-index: 65;
+    display: block; position: fixed; inset: 0; z-index: 6;
     border: 0; padding: 0; background: rgba(15,17,30,.38); cursor: default;
   }
   .cd-close { display: flex; }
