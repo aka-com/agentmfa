@@ -2,9 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  CLAUDE_DESKTOP_CONFIG_PATH,
+  CONNECT_CLIENTS,
   CONNECT_MODE_LABELS,
   START_OPTIONS,
   START_PROMISE,
+  clientMatchesLabel,
+  connectClientById,
   connectModesFor,
   firstTaskPrompt,
   resolveConnectMode,
@@ -12,6 +16,7 @@ import {
   startProgress,
   startTask,
 } from '../src/getting-started';
+import type { ConnectClientEnv } from '../src/getting-started';
 import { catalogEntryById } from '../src/catalog';
 import type { ConnectionSummary, ConnectionType } from '../src/types';
 
@@ -150,10 +155,74 @@ test('the picked mode survives while offered and falls back when not', () => {
   const postgres = startOptionById('postgres');
   const notion = startOptionById('notion');
   assert.equal(resolveConnectMode('direct', postgres), 'direct');
-  assert.equal(resolveConnectMode('codex-desktop', notion), 'codex-desktop');
+  assert.equal(resolveConnectMode('codex', notion), 'codex');
+  // Codex Desktop merged into Codex; a stale pick falls back like any unknown.
+  assert.equal(resolveConnectMode('codex-desktop', notion), 'claude-code');
   // Direct is not offered for an API tool; the pane falls back to the first mode.
   assert.equal(resolveConnectMode('direct', notion), 'claude-code');
   assert.equal(resolveConnectMode('nonsense', postgres), 'direct');
+});
+
+const ENV: ConnectClientEnv = {
+  socket: '/tmp/aka/broker.sock',
+  token: '/tmp/aka/token',
+  platform: 'macos',
+};
+
+test('every shared-key mode renders from a client definition; direct has none', () => {
+  for (const mode of connectModesFor(startOptionById('postgres'))) {
+    if (mode === 'direct') {
+      assert.equal(connectClientById(mode), undefined);
+      continue;
+    }
+    const client = connectClientById(mode);
+    assert.ok(client, mode);
+    assert.ok(client!.lead(ENV).length, mode);
+    assert.ok(client!.snippet(ENV).length, mode);
+    assert.ok(client!.steps(ENV).length, mode);
+  }
+  // The two escape hatches keep their spelled-out labels.
+  assert.equal(CONNECT_MODE_LABELS.mcp, 'Other MCP client');
+  assert.equal(CONNECT_MODE_LABELS.cli, 'Anything else (HTTP API)');
+});
+
+test('activity labels attribute to the right client', () => {
+  const codex = connectClientById('codex')!;
+  const claudeCode = connectClientById('claude-code')!;
+  const mcp = connectClientById('mcp')!;
+  // Codex Desktop's old label still counts as Codex after the merge.
+  assert.ok(clientMatchesLabel(codex, 'codex'));
+  assert.ok(clientMatchesLabel(codex, 'codex-desktop'));
+  assert.equal(clientMatchesLabel(codex, 'my-harness'), false);
+  // A branded label never lights up another client — branded or self-named.
+  assert.equal(clientMatchesLabel(claudeCode, 'codex'), false);
+  assert.equal(clientMatchesLabel(mcp, 'claude-code'), false);
+  // Self-named harnesses count only for the self-named clients.
+  assert.ok(clientMatchesLabel(mcp, 'my-harness'));
+});
+
+test('the Claude Desktop lead names the config path for each platform', () => {
+  const claudeDesktop = connectClientById('claude-desktop')!;
+  for (const platform of ['macos', 'windows', 'linux'] as const) {
+    const path = CLAUDE_DESKTOP_CONFIG_PATH[platform];
+    assert.ok(path.length, platform);
+    const env = { ...ENV, platform };
+    assert.ok(claudeDesktop.lead(env).includes(path), platform);
+    assert.ok(claudeDesktop.steps(env)[0].detail.includes(path), platform);
+  }
+});
+
+test('snippets interpolate the broker socket and token paths', () => {
+  for (const id of ['mcp', 'cli'] as const) {
+    const snippet = connectClientById(id)!.snippet(ENV);
+    assert.ok(snippet.includes(ENV.socket), id);
+    assert.ok(snippet.includes(ENV.token), id);
+  }
+  // Guide steps and the walkthrough pane share the same snippet source.
+  for (const client of CONNECT_CLIENTS) {
+    const stepSnippets = client.steps(ENV).map((step) => step.snippet).filter(Boolean);
+    if (stepSnippets.length) assert.equal(stepSnippets[0], client.snippet(ENV), client.id);
+  }
 });
 
 test('a branded option is satisfied only by its own connection', () => {
