@@ -731,6 +731,23 @@ impl Store {
         if existing.kind() != spec.config.kind() {
             return Err(CoreError::KindChange);
         }
+        if existing.oauth.is_some()
+            && matches!(
+                &existing.config,
+                ConnectionConfig::Api {
+                    mcp_path: Some(_),
+                    ..
+                }
+            )
+            && existing.config != spec.config
+        {
+            return Err(CoreError::InvalidConnectionConfig(
+                "OAuth-managed MCP tools can only be renamed; reconnect the tool \
+                 to change its authentication, or add another MCP server to use a \
+                 different destination"
+                    .into(),
+            ));
+        }
         let old_target = existing.target();
         let old_config = existing.config.clone();
         let secrets = validate_config_and_bind_secrets(&state, &spec)?;
@@ -2003,6 +2020,65 @@ mod tests {
 
         store.delete_connection(&conn.id).unwrap();
         assert_eq!(vault.len(), vault_before);
+    }
+
+    #[tokio::test]
+    async fn oauth_managed_mcp_connections_are_rename_only() {
+        let (store, _, _dir) = store().await;
+        store.add_secret("NOTION_MCP_TOKEN", val("at-1")).unwrap();
+        store.add_secret("OTHER_TOKEN", val("other")).unwrap();
+        let mut spec = api_spec(
+            "Notion",
+            "mcp.notion.com",
+            "Authorization: Bearer {{NOTION_MCP_TOKEN}}",
+        );
+        let ConnectionConfig::Api { mcp_path, .. } = &mut spec.config else {
+            unreachable!()
+        };
+        *mcp_path = Some("/mcp".into());
+        let conn = store.add_connection(spec).unwrap();
+        store
+            .set_connection_oauth(
+                &conn.id,
+                val(r#"{"refresh_token":"rt-1"}"#),
+                Some(Utc::now() + chrono::Duration::hours(1)),
+            )
+            .unwrap();
+
+        let (renamed, target_changed) = store
+            .update_connection(
+                &conn.id,
+                ConnectionSpec {
+                    name: "Notion work".into(),
+                    config: conn.config.clone(),
+                    secrets: vec![],
+                },
+            )
+            .unwrap();
+        assert_eq!(renamed.name, "Notion work");
+        assert!(!target_changed);
+
+        let mut changed_config = renamed.config.clone();
+        let ConnectionConfig::Api { template, .. } = &mut changed_config else {
+            unreachable!()
+        };
+        *template = "Authorization: Bearer {{OTHER_TOKEN}}".into();
+        let error = store
+            .update_connection(
+                &conn.id,
+                ConnectionSpec {
+                    name: renamed.name.clone(),
+                    config: changed_config,
+                    secrets: vec![],
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(error, CoreError::InvalidConnectionConfig(_)));
+
+        let unchanged = store.connection_by_id(&conn.id).unwrap();
+        assert_eq!(unchanged.config, conn.config);
+        assert!(unchanged.oauth.is_some());
+        assert_eq!(unchanged.secrets, conn.secrets);
     }
 
     #[tokio::test]

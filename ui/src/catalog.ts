@@ -547,6 +547,25 @@ export function entryForConnection(connection: ConnectionSummary): CatalogEntry 
 }
 
 /**
+ * Product-facing identity and edit policy for a stored connection.
+ *
+ * OAuth-managed remote MCP servers are API connections internally, but the
+ * edit sheet should keep their catalog identity and hide the mutable
+ * credential-template implementation detail.
+ */
+export function connectionEditPresentation(connection: ConnectionSummary): {
+  label: string;
+  managedMcpOAuth: boolean;
+} {
+  return {
+    label: entryForConnection(connection)?.name ?? catalogNameForType(connection.type),
+    managedMcpOAuth: connection.type === 'api'
+      && Boolean(connection.mcp_path)
+      && connection.oauth,
+  };
+}
+
+/**
  * The branded template covering a connection, when its pinned host matches
  * a template's published endpoint. Feeds the status check's expectations
  * (whoami tool, expected tools) and the reconnect flow.

@@ -100,6 +100,20 @@ branded shortcuts for adding one (you supply the server URL your provider
 gave you — no endpoints are hard-coded), and a generic **MCP server** row
 adds any other by URL.
 
+When an MCP server is connected with OAuth, the provider issues an access
+token after browser approval and Multitool stores it directly in the vault
+under an internal generated credential name. The broker refreshes that token
+when the provider permits it and injects it only on requests to the pinned MCP
+server. The ordinary edit sheet therefore treats the server and authentication
+as managed: rename the tool there, use **Reconnect** to authorize another
+account, or add a separate MCP server for a different destination.
+
+Manually authenticated APIs and MCP servers may instead use a custom
+authentication template such as `Authorization: Bearer {{GITHUB_TOKEN}}`.
+`{{GITHUB_TOKEN}}` is a reference to a saved credential, not executable
+template code; the broker resolves it only when making the pinned upstream
+request.
+
 The app starts the sidecar when `dist/sidecar/main.mjs` exists and runs
 without it otherwise, so a checkout that skips `sidecar:build` still
 works. `AKA_SIDECAR_NODE` and `AKA_SIDECAR_SCRIPT` override what gets

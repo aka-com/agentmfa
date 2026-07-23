@@ -9,8 +9,8 @@
 import { invoke, listen, mode } from '/src/bridge';
 import {
   CATALOG_SECTIONS, canQuickConnectMcp, catalogEntryById, catalogNameForType,
-  collapsedCatalogGroup, connectedCatalogFirst, connectionsForEntry, entryForConnection,
-  mcpTemplateForConnection, visibleCatalog,
+  collapsedCatalogGroup, connectedCatalogFirst, connectionEditPresentation,
+  connectionsForEntry, entryForConnection, mcpTemplateForConnection, visibleCatalog,
 } from '/src/catalog';
 import type { ConnectionPreset } from '/src/catalog';
 import {
@@ -2076,6 +2076,8 @@ function connSheet(editing: boolean): string {
   const t = state.connType;
   const sheetId = state.sheet?.id;
   const conn = editing ? state.connections.find((c) => c.id === sheetId) : null;
+  const editPresentation = conn ? connectionEditPresentation(conn) : null;
+  const managedMcpOAuth = Boolean(editPresentation?.managedMcpOAuth);
   const importWarnings = !editing && d.importWarnings && d.importWarnings.length
     ? `<div class="pair-identity-warning import-warning"><b>Review imported details</b><ul>${d.importWarnings.map((warning) => `<li>${esc(warning)}</li>`).join('')}</ul></div>` : '';
   // Paste-to-prefill: a Postgres DSN or `ssh` command fills the form below
@@ -2108,8 +2110,11 @@ function connSheet(editing: boolean): string {
     const entry = d.entryId ? catalogEntryById(d.entryId) : undefined;
     const hint = entry?.mcpTemplate?.urlHint;
     fields += `<div class="f-row"><label for="f-origin">MCP server URL</label>
-      <input id="f-origin" class="${fieldCls('origin')}" placeholder="https://mcp.example.com/mcp" value="${escAttr(url)}">${fieldErr('origin')}
-      ${hint ? `<div class="rule-note">${esc(hint)}</div>` : ''}</div>`;
+      <input id="f-origin" class="${fieldCls('origin')}" placeholder="https://mcp.example.com/mcp"
+        value="${escAttr(url)}"${managedMcpOAuth ? ' readonly aria-readonly="true"' : ''}>${fieldErr('origin')}
+      ${managedMcpOAuth
+        ? '<div class="rule-note">This OAuth connection is pinned to its MCP server. Add another MCP server to use a different URL.</div>'
+        : hint ? `<div class="rule-note">${esc(hint)}</div>` : ''}</div>`;
   } else if (t === 'api') {
     const origin = d.origin ?? apiOriginFromParts(d.scheme ?? undefined, d.host ?? undefined, d.port ?? null);
     fields += `<div class="f-row"><label for="f-origin">API root</label><input id="f-origin" class="${fieldCls('origin')}" placeholder="https://api.github.com" value="${escAttr(origin)}">${fieldErr('origin')}</div>`;
@@ -2137,17 +2142,36 @@ function connSheet(editing: boolean): string {
   } else {
     fields += `<div class="f-row"><label for="f-url">URL</label><input id="f-url" class="${fieldCls('url')}" placeholder="wss://stream.example.com/feed" value="${escAttr(d.url ?? '')}">${fieldErr('url')}</div>`;
   }
-  // Authentication is recipe-driven for new connections. Existing custom
-  // templates remain directly editable so the UI round-trips every config.
-  if (editing && t === 'api') {
-    fields += `<div class="f-row"><label for="c-template">Injection template</label>
-      <input id="c-template" class="${fieldCls('template')}" value="${escAttr(d.template ?? '')}">${fieldErr('template')}
-      <div class="rule-note">Bearer token + template; references saved credentials by name.</div></div>`;
+  // OAuth-managed MCP authentication belongs to the sign-in flow. Keep its
+  // generated secret name and injection template out of the ordinary editor:
+  // reconnect is the only supported way to replace that grant.
+  if (managedMcpOAuth) {
+    fields += `<div class="f-row"><label>Authentication</label>
+      <input value="OAuth (managed by Multitool)" readonly aria-readonly="true">
+      <div class="rule-note">${conn?.account
+        ? `Connected account: ${esc(conn.account)}. `
+        : ''}Tokens are stored securely, refreshed automatically, and sent only to this MCP server.</div></div>`;
+  // Existing manual API authentication still round-trips every config, but
+  // the implementation template belongs behind an explicit advanced
+  // disclosure rather than defining the connection's product identity.
+  } else if (editing && t === 'api') {
+    const credentialNames = conn?.secret_names.join(', ') || '';
+    fields += `<div class="f-row"><label>Authentication</label>
+      <input value="${credentialNames ? 'Saved credential' : 'No credential'}" readonly aria-readonly="true">
+      ${credentialNames
+        ? `<div class="rule-note">Uses ${esc(credentialNames)}. Advanced authentication can change the saved credential reference.</div>`
+        : ''}</div>
+      <details class="set-collapse" ${state.sheetErrors.template ? 'open' : ''}>
+        <summary>Custom authentication</summary>
+        <div class="set-panel"><div class="f-row"><label for="c-template">Credential template</label>
+          <input id="c-template" class="${fieldCls('template')}" value="${escAttr(d.template ?? '')}">${fieldErr('template')}
+          <div class="rule-note">References saved credentials by name using <code>{{ … }}</code>.</div>
+        </div></div></details>`;
   } else if (editing) {
     if (t !== 'ws' || !d.template) fields += credentialChooserHTML(t, d, false);
     if (t === 'ws' && d.template) {
       fields += `<details class="set-collapse" ${d.template ? 'open' : ''}><summary>Custom authentication header</summary>
-        <div class="set-panel"><div class="f-row"><label for="c-template">Injection template</label>
+        <div class="set-panel"><div class="f-row"><label for="c-template">Credential template</label>
         <input id="c-template" class="${fieldCls('template')}" placeholder="Authorization: Bearer {{TOKEN_NAME}}" value="${escAttr(d.template ?? '')}">${fieldErr('template')}</div></div></details>`;
     }
   } else if (t === 'api' || t === 'ws') {
@@ -2214,7 +2238,7 @@ function connSheet(editing: boolean): string {
       fields += `<div class="f-row"><label for="c-auth-detail">Query parameter</label><input id="c-auth-detail" class="${fieldCls('authDetail')}" placeholder="api_key" value="${escAttr(d.authDetail ?? '')}">${fieldErr('authDetail')}</div>`;
     }
     if (modeValue === 'advanced') {
-      fields += `<div class="f-row"><label for="c-template">Injection template</label><input id="c-template" class="${fieldCls('template')}" placeholder="Authorization: Bearer {{TOKEN_NAME}}" value="${escAttr(d.template ?? '')}">${fieldErr('template')}
+      fields += `<div class="f-row"><label for="c-template">Credential template</label><input id="c-template" class="${fieldCls('template')}" placeholder="Authorization: Bearer {{TOKEN_NAME}}" value="${escAttr(d.template ?? '')}">${fieldErr('template')}
         <div class="rule-note">References credentials by name using <code>{{ … }}</code>. Use this for Basic auth or composed credentials.</div></div>`;
     } else if (modeValue !== 'oauth') {
       fields += credentialChooserHTML(t, d, true, state.connPreset?.credentialHint);
@@ -2243,7 +2267,9 @@ function connSheet(editing: boolean): string {
         <span class="adv-toggle-icon" aria-hidden="true">${ICONS.chevronDown}</span>Advanced</button>
       ${advOpen ? advancedFields : ''}</div>`;
   }
-  const label = (!editing && state.connEntryName) || catalogNameForType(t);
+  const label = editing
+    ? editPresentation?.label ?? catalogNameForType(t)
+    : state.connEntryName || catalogNameForType(t);
   const oauthSelected = !editing && t === 'api' && isMcpDraft(d)
     && (d.authMode || 'oauth') === 'oauth';
   const title = `${editing ? 'Edit' : oauthSelected ? 'Connect' : 'Add'} ${label}`;
@@ -2275,7 +2301,9 @@ function connSheet(editing: boolean): string {
     <div class="sheet wide"><h3>${title}</h3>${fields}${draftTestHTML}
     <div class="sheet-actions">${editing && conn
       ? `<button class="btn danger conn-delete-btn" data-act="del-conn-from-edit" data-id="${conn.id}">Delete…</button>${
-          conn.mcp_path || conn.oauth_spec
+          managedMcpOAuth
+          ? `<button class="btn" data-act="reconnect-mcp" data-id="${conn.id}">Reconnect…</button>`
+          : conn.mcp_path || conn.oauth_spec
           ? `<div class="tile-menu-wrap sheet-conn-menu">
               <button class="icon-btn tile-menu-btn ${state.connMenuOpen === `sheet:${conn.id}` ? 'on' : ''}"
                 title="More options" aria-label="More options for ${escAttr(conn.name)}" aria-haspopup="menu"
@@ -2876,9 +2904,9 @@ async function saveConn(): Promise<void> {
     try { injectionTemplate = authTemplate(t, authMode, templateSecretName || '', (d.authDetail || '').trim()); }
     catch (error) { errs.authDetail = errorMessage(error); }
   } else if ((t === 'api' || (adding && t === 'ws')) && authMode === 'advanced' && !injectionTemplate) {
-    errs.template = 'Injection template is required';
+    errs.template = 'Credential template is required';
   } else if (!adding && t === 'api' && !injectionTemplate) {
-    errs.template = 'Injection template is required';
+    errs.template = 'Credential template is required';
   }
   if (Object.keys(errs).length || toolNameTaken || newSecretNameTaken) {
     state.sheetErrors = errs;
@@ -3538,10 +3566,11 @@ document.addEventListener('click', async (e) => {
     case 'edit-conn': {
       const c = state.connections.find((x) => x.id === id);
       if (!c) break;
+      const entry = entryForConnection(c);
       state.connMenuOpen = null;
       if (!await holdDropdownFormOpen()) break;
       state.sheet = { kind: 'edit-conn', id }; state.connType = c.type;
-      state.connEntryName = null;
+      state.connEntryName = entry?.name ?? null;
       state.connPreset = null;
       state.sheetErrors = {};
       state.sheetBaseline = null;
@@ -3554,6 +3583,7 @@ document.addEventListener('click', async (e) => {
             + (c.mcp_path ?? '')
           : null,
         isMcp: Boolean(c.mcp_path),
+        entryId: entry?.id,
         mcpPath: c.mcp_path ?? null,
         port: c.port ? String(c.port) : (c.type === 'ssh' ? '22' : '5432'),
         dbname: c.dbname, user: c.user, url: c.url, template: c.template,

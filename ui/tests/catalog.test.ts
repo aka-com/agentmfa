@@ -10,6 +10,7 @@ import {
   catalogNameForType,
   collapsedCatalogGroup,
   connectedCatalogFirst,
+  connectionEditPresentation,
   connectionsForEntry,
   entryForConnection,
   filterCatalog,
@@ -199,6 +200,27 @@ test('a connection pinned to a preset host lists under its branded row', () => {
 
 test('preset rows never rename the generic type dialogs', () => {
   assert.equal(catalogNameForType('api'), 'Custom API');
+});
+
+test('connection edits preserve MCP branding and identify managed OAuth authentication', () => {
+  const notion = {
+    ...conn('api', 'mcp.notion.com', 'Notion'),
+    mcp_path: '/mcp',
+    oauth: true,
+  };
+  assert.deepEqual(connectionEditPresentation(notion), {
+    label: 'Notion',
+    managedMcpOAuth: true,
+  });
+
+  const custom = {
+    ...conn('api', 'mcp.internal.example.com', 'Internal'),
+    mcp_path: '/mcp',
+  };
+  assert.deepEqual(connectionEditPresentation(custom), {
+    label: 'MCP server',
+    managedMcpOAuth: false,
+  });
 });
 
 test('keyword search finds apps by what they do', () => {

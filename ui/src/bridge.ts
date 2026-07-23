@@ -193,7 +193,7 @@ const db: MockDatabase = {
     mkSecret('SERVICE_USER', 'svc-agent-ci'),
     mkSecret('SERVICE_PASSWORD', 'basic-pw-demo-8841'),
     mkSecret('DEPLOY_SSH_KEY', '-----BEGIN OPENSSH PRIVATE KEY-----demo'),
-    mkSecret('NOTION_TOKEN', 'ntn_demo_2f81c4a9b3e7'),
+    mkSecret('NOTION_MCP_TOKEN', 'ntn_demo_2f81c4a9b3e7'),
   ],
   connections: [],
   access: [],
@@ -233,7 +233,14 @@ function seedConnections() {
     mkConn('github', 'api', ['GITHUB_API_KEY'], { host: 'api.github.com', scheme: 'https', template: 'Authorization: Bearer {{GITHUB_API_KEY}}' }),
     // An MCP server, so the catalog's MCP row has something under it in
     // frontend-only mode.
-    mkConn('notion', 'api', ['NOTION_TOKEN'], { host: 'mcp.notion.com', scheme: 'https', template: 'Authorization: Bearer {{NOTION_TOKEN}}', mcp_path: '/mcp', account: 'Raymond (raymond@aka.com)' }),
+    mkConn('notion', 'api', ['NOTION_MCP_TOKEN'], {
+      host: 'mcp.notion.com',
+      scheme: 'https',
+      template: 'Authorization: Bearer {{NOTION_MCP_TOKEN}}',
+      mcp_path: '/mcp',
+      account: 'Raymond (raymond@aka.com)',
+      oauth: true,
+    }),
     mkConn('prod-db', 'pg', ['DATABASE_PASSWORD'], { host: 'db.internal.aka.com', port: 5432, dbname: 'app_production', user: 'app', sslmode: 'verify-full', trusted_ca_bundle_path: null }),
     mkConn('market-feed', 'ws', ['STREAM_TOKEN'], { url: 'wss://stream.example.com/feed' }),
     mkConn('internal-api', 'api', ['SERVICE_USER', 'SERVICE_PASSWORD'], { host: 'internal.aka.com', scheme: 'https', template: 'Authorization: Basic {{base64(SERVICE_USER ":" SERVICE_PASSWORD)}}' }),
