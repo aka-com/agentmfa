@@ -33,6 +33,10 @@
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
+  @media (prefers-reduced-motion: no-preference) {
+    html { scroll-behavior: smooth; }
+  }
+
   html, body {
     background: var(--bg);
     color: var(--fg);
@@ -71,6 +75,18 @@
   @media (min-width: 640px) { .shell { padding: 1.5rem 1.5rem; } }
 
   .mono { font-family: var(--font-mono); }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
 
   /* ---------- nav ---------- */
   nav {
@@ -125,6 +141,7 @@
     white-space: nowrap;
     color: var(--fg);
     background: transparent;
+    text-decoration: none;
     cursor: pointer;
     transition: background-color 0.15s, color 0.15s;
     user-select: none;
@@ -949,10 +966,10 @@
           <h1>Secure execution for AI agents</h1>
           <p class="hero-lead">Multitool lets your agents connect to databases, servers, MCPs, and APIs with credentials in a local vault. Unmodified tools like <span class="m">curl</span>, <span class="m">psql</span>, and <span class="m">git</span> work without an agent ever holding a raw secret.</p>
           <div class="hero-actions">
-            <button class="btn primary" type="button">Download Multitool
+            <a class="btn primary" href="#get-multitool">Download Multitool
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
-            </button>
-            <button class="btn outline" type="button">Read the docs</button>
+            </a>
+            <a class="btn outline" href="#faq">Read the FAQ</a>
           </div>
         </div>
         <div class="hero-demo">
@@ -981,26 +998,26 @@
       </div>
       <div class="split">
         <div class="split-left">
-          <ul class="risk-list">
+          <ul class="risk-list" role="list">
             <li class="risk">
               <span class="mark x"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></span>
-              <span class="struck">Live API tokens pasted into every agent's env file.</span>
+              <span class="struck"><span class="sr-only">Without Multitool: </span>Live API tokens pasted into every agent's env file.</span>
             </li>
             <li class="risk">
               <span class="mark x"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></span>
-              <span class="struck">One prompt injection away from reading every secret at once.</span>
+              <span class="struck"><span class="sr-only">Without Multitool: </span>One prompt injection away from reading every secret at once.</span>
             </li>
             <li class="risk">
               <span class="mark x"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></span>
-              <span class="struck">Rotating a key means hunting through every config that copied it.</span>
+              <span class="struck"><span class="sr-only">Without Multitool: </span>Rotating a key means hunting through every config that copied it.</span>
             </li>
             <li class="risk">
               <span class="mark x"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></span>
-              <span class="struck">No record of which agent used what credential, or when.</span>
+              <span class="struck"><span class="sr-only">Without Multitool: </span>No record of which agent used what credential, or when.</span>
             </li>
             <li class="risk">
               <span class="mark ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span>
-              <span class="kept">Secrets sealed in one vault, every call logged in one place.</span>
+              <span class="kept"><span class="sr-only">With Multitool: </span>Secrets sealed in one vault, every call logged in one place.</span>
             </li>
           </ul>
         </div>
@@ -1071,7 +1088,7 @@
       </div>
     </section>
 
-    <section class="panel">
+    <section class="panel" id="get-multitool">
       <div class="panel-head">
         <h2>Use it locally, or in the cloud.</h2>
         <p>Run on your machine, or use a hosted instance in the cloud. Your tools, keys, and activity log go wherever you choose.</p>
@@ -1137,7 +1154,8 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19h8"/><path d="m4 17 6-6-6-6"/></svg>
           <h3>CLI</h3>
           <p>Run your remote agents, servers, and CI with Multitool credentials.</p>
-          <button class="btn outline mono" type="button" disabled>npm install -g agentmfa</button>
+          <button class="btn outline" type="button" disabled>npm install -g agentmfa</button>
+          <!-- <code class="path-cmd">npm install -g agentmfa</code> -->
         </div>
         <div class="path">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg>
@@ -1149,7 +1167,7 @@
     </section>
 
 
-    <section class="panel">
+    <section class="panel" id="faq">
       <div class="panel-head">
         <h2>Frequently asked questions</h2>
       </div>
@@ -1175,12 +1193,12 @@
 
     <div>
       <section class="cta">
-        <h2>Secure execution for AI agents</h2>
+        <h2>Connect every agent, every secret, every tool.</h2>
         <div class="cta-actions">
-          <button class="btn primary" type="button">Download Multitool
+          <a class="btn primary" href="#get-multitool">Download Multitool
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
-          </button>
-          <button class="btn outline" type="button">Read the docs</button>
+          </a>
+          <a class="btn outline" href="#faq">Read the FAQ</a>
         </div>
       </section>
       <footer>
