@@ -5,7 +5,9 @@ calls, open database connections, and reach SSH servers using
 unmodified tools like `curl`, `psql`, and `git`.
 
 The broker keeps the raw credentials in a local secret store and
-injects them into requests only after human approval.
+injects them on the upstream leg only, so agents never hold them.
+Access is authorized per tool: an enabled connection executes
+immediately, a disabled one is refused for every agent at once.
 
 This package installs the broker's command line as both `multitool` and
 `aka`: the headless broker, the store seeding commands, and the
@@ -35,8 +37,8 @@ Windows is not supported.
 
 ## Quick start
 
-Run a broker headless with terminal approvals (the desktop app is the
-primary interface; the CLI is its dev/headless counterpart):
+Run a broker headless (the desktop app is the primary interface; the
+CLI is its dev/headless counterpart):
 
 ```sh
 aka serve
@@ -67,14 +69,13 @@ curl --unix-socket ~/.aka/broker.sock http://localhost/instructions
 
 Every command accepts `--root <dir>` to run against an isolated directory
 (data and socket under it) instead of the per-user defaults — handy for
-demos, tests, and CI. `aka serve --yes` auto-approves everything and exists
-for CI and local demos only; the entire point of the broker is the human
-approval step.
+demos, tests, and CI.
 
 ## Platform notes
 
 - **macOS** is the fully supported product platform: secrets live in the
-  Keychain and approvals confirm via LocalAuthentication (Touch ID). ABP/0
+  Keychain, and copying a secret's full value from the desktop app can
+  require native reauthentication (Touch ID). ABP/0
   agents authenticate with the machine's shared broker key; the key is not
   bound to a process or code-signing identity.
 - **Linux** support is developer-grade: secrets are kept in a `0600` JSON

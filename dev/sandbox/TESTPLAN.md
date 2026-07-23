@@ -115,7 +115,7 @@ make these requests through `sandbox-http`.
 | `GET /redirect/cross-origin` | the raw `302` with a `location` on port `18081`, not followed; a `418` means the credential sink was reached and is a failure |
 | `GET /binary` | `200` with `body_encoding: "base64"` (5 bytes) |
 | `GET /large/12582912` | `502` broker error, reason `response_too_large` (“upstream body exceeds the 10485760 byte cap”) |
-| `POST /echo` with a JSON body | the same body back; also exercises the full-access approval path for a mutating request |
+| `POST /echo` with a JSON body | the same body back; a mutating request runs under the same per-tool access as a GET |
 
 ### Wrong credential
 
@@ -176,11 +176,11 @@ After the end-to-end requests:
 - Every operation appears under **Activity** with the correct agent and
   service names.
 - Secret values never appear in activity entries or responses.
-- A GET can receive read-scoped permission; POST and session opens
-  require full-access approval.
-- Removing a permission makes the next request prompt again.
-- Editing a service destination invalidates prior permission (the next
-  request prompts again).
+- Disabling a tool's agent access makes the next request fail with
+  `403 denied_by_policy`; re-enabling it restores execution with no
+  prompt.
+- Editing a service destination revokes its direct endpoints and resets
+  its MCP tool selection (a disabled tool stays disabled).
 
 ## 7. Shutdown and reset
 
@@ -203,7 +203,7 @@ After a reset the SSH fingerprint changes, so update or recreate
 
 On any platform (including Linux, where the desktop app does not
 build), the whole broker runs headless and the same layer-2 checks
-apply. Seed the store, start an auto-approving broker, and drive it over
+apply. Seed the store, start a headless broker, and drive it over
 the Unix socket:
 
 ```sh
@@ -226,7 +226,7 @@ $B conn add sandbox-postgres --kind pg --host 127.0.0.1 --port 15432 \
 $B conn add sandbox-ssh --kind ssh --host 127.0.0.1 --port 12222 --user sandbox \
   --secret SANDBOX_SSH_KEY --root $ROOT
 
-$B serve --root $ROOT --yes &          # auto-approves every request
+$B serve --root $ROOT &                # headless: per-tool access, no prompts
 ```
 
 Pair and call exactly as an agent would:
@@ -244,5 +244,4 @@ curl -s --unix-socket $SOCK -X POST http://localhost/v1/http \
 `/v1/ws/open`, `/v1/pg/open`, and `/v1/ssh/open` return the same
 payloads described in §5. The audit trail for §6 is
 `<root>/data/audit.jsonl`. Note the Linux vault is a plaintext dev
-fallback, and the `--yes` broker approves everything — both are for
-disposable test roots only.
+fallback intended for disposable test roots only.
