@@ -38,21 +38,22 @@ test('every entry lives in a known section; only connection entries are addable'
   }
 });
 
-test('infrastructure precedes featured and generic endpoints live under Custom Apps', () => {
+test('infrastructure precedes MCP Apps and generic endpoints live under Custom Apps', () => {
   assert.ok(
-    CATALOG_SECTIONS.indexOf('Infrastructure') < CATALOG_SECTIONS.indexOf('Featured'),
+    CATALOG_SECTIONS.indexOf('Infrastructure') < CATALOG_SECTIONS.indexOf('MCP Apps'),
   );
-  assert.ok(CATALOG_SECTIONS.indexOf('Featured') < CATALOG_SECTIONS.indexOf('Custom Apps'));
+  assert.ok(CATALOG_SECTIONS.indexOf('MCP Apps') < CATALOG_SECTIONS.indexOf('Custom Apps'));
+  assert.ok(CATALOG_SECTIONS.indexOf('API Apps') < CATALOG_SECTIONS.indexOf('Custom Apps'));
   assert.deepEqual(
     CATALOG.filter((entry) => entry.section === 'Custom Apps').map((entry) => entry.id),
     ['mcp', 'http'],
   );
 });
 
-test('setup-required apps lead the disconnected featured rows', () => {
-  const apps = CATALOG.filter((entry) => entry.section === 'Featured').map((entry) => entry.id);
+test('setup-required apps lead the disconnected MCP app rows', () => {
+  const apps = CATALOG.filter((entry) => entry.section === 'MCP Apps').map((entry) => entry.id);
   const displayed = connectedCatalogFirst(
-    CATALOG.filter((entry) => entry.section === 'Featured'),
+    CATALOG.filter((entry) => entry.section === 'MCP Apps'),
     [],
   );
   assert.deepEqual(displayed.slice(0, 2).map((entry) => entry.id), ['slack', 'gmail']);
@@ -63,9 +64,9 @@ test('setup-required apps lead the disconnected featured rows', () => {
   assert.ok(apps.indexOf('airtable') < apps.indexOf('linear'));
 });
 
-test('key-only vendors live in the API registry, not Featured', () => {
+test('key-only vendors live in API Apps, not MCP Apps', () => {
   assert.deepEqual(
-    CATALOG.filter((entry) => entry.section === 'API registry').map((entry) => entry.id),
+    CATALOG.filter((entry) => entry.section === 'API Apps').map((entry) => entry.id),
     ['anthropic', 'openai', 'vercel'],
   );
 });
@@ -230,7 +231,7 @@ test('every connection is counted by exactly one row', () => {
 });
 
 test('connected tools sort above setup-required tools', () => {
-  const apps = CATALOG.filter((entry) => entry.section === 'Featured');
+  const apps = CATALOG.filter((entry) => entry.section === 'MCP Apps');
   const sorted = connectedCatalogFirst(apps, [
     conn('api', 'api.stripe.com', 'billing'),
     conn('api', 'sentry.io', 'errors'),
@@ -240,7 +241,7 @@ test('connected tools sort above setup-required tools', () => {
 });
 
 test('collapsed app groups show at least three rows and never hide connected tools', () => {
-  const apps = CATALOG.filter((entry) => entry.section === 'Featured');
+  const apps = CATALOG.filter((entry) => entry.section === 'MCP Apps');
   const oneConnected = collapsedCatalogGroup(apps, [
     conn('api', 'api.stripe.com', 'billing'),
   ]);
@@ -294,11 +295,16 @@ test('search still respects the WebSocket setting', () => {
   assert.equal(hidden.length, 0);
 });
 
-test('the registry tail shows by default and is searchable', () => {
+test('the registry tail follows the curated MCP app rows and is searchable', () => {
   const all = visibleCatalog('', { showWebsockets: true, connections: [] });
   for (const entry of REGISTRY_CATALOG) {
     assert.ok(all.some((row) => row.id === entry.id), entry.id);
   }
+  const mcpApps = all.filter((entry) => entry.section === 'MCP Apps').map((entry) => entry.id);
+  const lastCuratedMcpApp = CATALOG.filter((entry) => entry.section === 'MCP Apps').at(-1)!.id;
+  assert.ok(mcpApps.indexOf(lastCuratedMcpApp) < mcpApps.indexOf('mcp-vercel'));
+  assert.equal(mcpApps.indexOf('mcp-figma'), mcpApps.indexOf('mcp-vercel') + 1);
+  assert.equal(mcpApps.indexOf('mcp-atlassian'), mcpApps.indexOf('mcp-figma') + 1);
 
   const hits = visibleCatalog('paypal', { showWebsockets: true, connections: [] });
   assert.ok(hits.some((entry) => entry.id === 'mcp-paypal'));
@@ -308,7 +314,7 @@ test('the registry tail shows by default and is searchable', () => {
     assert.equal(entry.via, 'connection', entry.id);
     assert.equal(entry.connType, 'api', entry.id);
     assert.equal(entry.mcp, true, entry.id);
-    assert.equal(entry.section, 'MCP registry', entry.id);
+    assert.equal(entry.section, 'MCP Apps', entry.id);
     assert.notEqual(entry.icon, 'plug', entry.id);
     assert.ok(ICONS[entry.icon], `${entry.id}: ${entry.icon}`);
     assert.ok(CATALOG_SECTIONS.includes(entry.section), entry.id);

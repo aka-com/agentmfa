@@ -208,18 +208,18 @@
 
   /* ---- broker switcher (titlebar, right) ------------------------------- */
   .broker-switch-wrap{
-  position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+  position: absolute; right: 10px; top: 50%; z-index: 7; transform: translateY(-50%);
 }
   .broker-btn{
   display: inline-flex; align-items: center; gap: 6px;
   height: 24px; padding: 0 8px;
   font-size: 12px; font-weight: 500; color: var(--ink-2);
-  background: transparent; border: 1px solid transparent; border-radius: 6px;
+  background: transparent; border: 1px solid var(--line); border-radius: 8px;
   cursor: default;
 }
   .broker-btn:hover, .broker-btn.on{ background: var(--hover); border-color: var(--line); }
   .broker-label{ max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .broker-caret{ font-size: 9px; color: var(--muted-2); }
+  .broker-caret{ display: inline-flex; color: var(--muted-2); }
   .broker-dot{
   width: 7px; height: 7px; border-radius: 50%; display: inline-block;
   background: var(--muted-2);
@@ -250,6 +250,7 @@
 }
   .broker-pane h2{ margin: 0; font-size: 16px; }
   .broker-pane .bp-lead{ margin: 0; font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+  .broker-pane[role="form"] h2 + .bp-lead{ margin-top: -4px; }
   .broker-pane .bp-lead code, .broker-pane > p code{ font-size: 11.5px; }
   .broker-pane .bp-detail{
   margin: 0; font-size: 12px; color: var(--danger-text);
@@ -259,10 +260,13 @@
   .broker-pane .bp-icon{ width: 30px; height: 30px; color: var(--muted-2); }
   .broker-pane .bp-icon svg{ width: 30px; height: 30px; }
   .broker-pane .bp-icon-error{ color: var(--danger); }
+  .broker-pane .f-row{ margin-bottom: 5px; }
   .broker-pane .f-row label{ font-size: 12px; }
   .broker-pane .inline-error{
   font-size: 12px; color: var(--danger-ink); word-break: break-word;
 }
+  .broker-pane .adv-collapse{ margin: -7px 0 6px; }
+  .broker-pane .bp-setup-code{ margin-top: 8px; }
   .broker-pane .bp-actions{ display: flex; gap: 8px; margin-top: 6px; }
   .broker-pane .app-loading-spinner{ align-self: flex-start; }
 
@@ -315,7 +319,7 @@
   flex: 1; overflow-y: scroll; overflow-x: hidden; padding: 0 14px 12px;
 }
   .dd-content{ position: relative; min-height: 0; }
-  .dw-main .content{ padding: 0 16px 14px; }
+  .dw-main .content{ padding: 0 16px 28px; }
   .content::-webkit-scrollbar, .dd-global::-webkit-scrollbar{ width: 8px; }
   .content::-webkit-scrollbar-thumb, .dd-global::-webkit-scrollbar-thumb{ background: var(--scroll-thumb); border-radius: 4px; }/* ---- global band ------------------------------------------------------ */
 /* Reserve the scrollbar track here too (see .content): the Active sessions and
@@ -834,9 +838,6 @@
   display: flex; align-items: center; gap: 12px; padding: 12px 14px; min-width: 0;
 }
 .cat-row.is-toggle { cursor: pointer; }
-.cat-row:not(.is-configured) .cat-ico,
-.cat-row:not(.is-configured) .cat-tx span { opacity: .5; }
-.cat-row:not(.is-configured) .cat-tx b { opacity: .35; }
 /* MCP-backed rows are visibly not-yet-available without needing a hover. */
 .cat-row-wrap.is-soon .cat-row { opacity: .55; }
 .cat-ico {
@@ -946,7 +947,8 @@
    row's issue list. */
 .cc-health {
   display: inline-flex; align-items: center; gap: 4px;
-  margin-left: auto; padding: 1.5px 9px; flex: 0 0 auto;
+  margin-left: auto; padding: 1.5px 9px 2.5px; flex: 0 0 auto;
+  transform: translateY(3px);
   border: 1px solid transparent; border-radius: 999px;
   font-size: 11px; font-weight: 600; white-space: nowrap;
 }

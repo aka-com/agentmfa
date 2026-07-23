@@ -29,8 +29,8 @@ import type { ConnectionSummary, ConnectionType } from './types';
 import { REGISTRY_SERVERS } from './registry-data';
 
 export type CatalogSection =
-  | 'Featured' | 'Custom Apps' | 'Infrastructure' | 'Secrets'
-  | 'API registry' | 'MCP registry';
+  | 'MCP Apps' | 'Custom Apps' | 'Infrastructure' | 'Secrets'
+  | 'API Apps';
 
 /**
  * Prefill for a branded API row: everything the add form needs so the user
@@ -136,7 +136,7 @@ export const CATALOG: CatalogEntry[] = [
     name: 'GitHub',
     icon: 'github',
     description: 'Repos, issues, PRs',
-    section: 'Featured',
+    section: 'MCP Apps',
     via: 'connection',
     connType: 'api',
     mcp: true,
@@ -152,7 +152,7 @@ export const CATALOG: CatalogEntry[] = [
     name: 'Slack',
     icon: 'slack',
     description: 'Messages, channels & users',
-    section: 'Featured',
+    section: 'MCP Apps',
     via: 'connection',
     connType: 'api',
     requiresSetup: true,
@@ -176,7 +176,7 @@ export const CATALOG: CatalogEntry[] = [
     name: 'Gmail',
     icon: 'gmail',
     description: 'Read & send email',
-    section: 'Featured',
+    section: 'MCP Apps',
     via: 'connection',
     connType: 'api',
     mcp: true,
@@ -204,7 +204,7 @@ export const CATALOG: CatalogEntry[] = [
     name: 'Notion',
     icon: 'notion',
     description: 'Pages & databases',
-    section: 'Featured',
+    section: 'MCP Apps',
     via: 'connection',
     connType: 'api',
     mcp: true,
@@ -220,7 +220,7 @@ export const CATALOG: CatalogEntry[] = [
     name: 'Airtable',
     icon: 'airtable',
     description: 'Bases, tables & records',
-    section: 'Featured',
+    section: 'MCP Apps',
     via: 'connection',
     connType: 'api',
     mcp: true,
@@ -243,7 +243,7 @@ export const CATALOG: CatalogEntry[] = [
     name: 'Anthropic',
     icon: 'anthropic',
     description: 'Claude models & messages',
-    section: 'API registry',
+    section: 'API Apps',
     via: 'connection',
     connType: 'api',
     keywords: ['claude', 'llm', 'ai', 'models'],
@@ -261,7 +261,7 @@ export const CATALOG: CatalogEntry[] = [
     name: 'OpenAI',
     icon: 'openai',
     description: 'GPT models & responses',
-    section: 'API registry',
+    section: 'API Apps',
     via: 'connection',
     connType: 'api',
     keywords: ['gpt', 'llm', 'ai', 'models'],
@@ -278,7 +278,7 @@ export const CATALOG: CatalogEntry[] = [
     name: 'Linear',
     icon: 'linear',
     description: 'Issues, projects & cycles',
-    section: 'Featured',
+    section: 'MCP Apps',
     via: 'connection',
     connType: 'api',
     mcp: true,
@@ -309,7 +309,7 @@ export const CATALOG: CatalogEntry[] = [
     name: 'Sentry',
     icon: 'sentry',
     description: 'Errors, issues & releases',
-    section: 'Featured',
+    section: 'MCP Apps',
     via: 'connection',
     connType: 'api',
     mcp: true,
@@ -332,7 +332,7 @@ export const CATALOG: CatalogEntry[] = [
     name: 'Stripe',
     icon: 'stripe',
     description: 'Payments, customers & invoices',
-    section: 'Featured',
+    section: 'MCP Apps',
     via: 'connection',
     connType: 'api',
     mcp: true,
@@ -358,7 +358,7 @@ export const CATALOG: CatalogEntry[] = [
     // clients, so the API key stays the reliable path; the MCP row lives in
     // the registry tail for anyone allowlisted.
     description: 'Deployments, projects & domains',
-    section: 'API registry',
+    section: 'API Apps',
     via: 'connection',
     connType: 'api',
     keywords: ['deploy', 'hosting', 'domains', 'frontend'],
@@ -375,7 +375,7 @@ export const CATALOG: CatalogEntry[] = [
     name: 'Cloudflare',
     icon: 'cloudflare',
     description: 'DNS, Workers & zone config',
-    section: 'Featured',
+    section: 'MCP Apps',
     via: 'connection',
     connType: 'api',
     mcp: true,
@@ -450,20 +450,20 @@ export const CATALOG: CatalogEntry[] = [
 ];
 
 export const CATALOG_SECTIONS: CatalogSection[] =
-  ['Infrastructure', 'Featured', 'Custom Apps', 'API registry', 'MCP registry', 'Secrets'];
+  ['Infrastructure', 'MCP Apps', 'API Apps', 'Custom Apps', 'Secrets'];
 
 /**
  * The registry tail: hosted MCP servers from the public index, each an
  * ordinary addable MCP row (OAuth-first, endpoint prefilled but editable),
- * shown by default in its own section after the curated rows. Some brands
- * appear twice — a curated REST preset row and a hosted-MCP registry row.
+ * shown after the curated rows in the combined MCP Apps section. Some
+ * brands appear twice — a curated REST preset row and a hosted-MCP row.
  */
 export const REGISTRY_CATALOG: CatalogEntry[] = REGISTRY_SERVERS.map((server) => ({
   id: server.id,
   name: server.name,
   icon: server.icon,
   description: server.description,
-  section: 'MCP registry',
+  section: 'MCP Apps',
   via: 'connection',
   connType: 'api',
   mcp: true,

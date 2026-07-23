@@ -139,6 +139,7 @@ interface ConnectionReadyState {
 /** The remote-broker configuration form's transient state. */
 interface RemoteSetupState {
   open: boolean;
+  advancedOpen: boolean;
   url: string;
   token: string;
   busy: boolean;
@@ -256,7 +257,7 @@ const state: AppState = {
   tab: 'connections',
   broker: LOCAL_BROKER,
   brokerMenuOpen: false,
-  remoteSetup: { open: false, url: '', token: '', busy: false, error: null },
+  remoteSetup: { open: false, advancedOpen: false, url: '', token: '', busy: false, error: null },
   localUsername: '',
   secrets: [],
   connections: [],
@@ -1002,7 +1003,7 @@ function catalogRowHTML(entry: CatalogEntry): string {
     <div class="cat-row ${rowToggle ? 'is-toggle' : ''} ${count ? 'is-configured' : ''}"${rowToggle}>
       <span class="cat-ico" aria-hidden="true">${ICONS[entry.icon] || ''}</span>
       <div class="cat-tx"><b>${esc(entry.name)}</b><span>${esc(entry.description)}</span></div>
-      ${entry.limitedSupport ? `<span class="cat-limited" tabindex="0" data-tippy-content="${escAttr(entry.name)} only accepts OAuth sign-ins from pre-approved clients. Contact your representative at the company for support.">Limited support</span>` : ''}
+      ${entry.limitedSupport ? `<span class="cat-limited" tabindex="0" data-tippy-content="${escAttr(entry.name)} only accepts OAuth sign-ins from pre-approved clients. Use the API connector, or contact your representative at the company for support.">Limited support</span>` : ''}
       ${action}
     </div>${expansion}</div>`;
 }
@@ -1013,9 +1014,9 @@ function isMcpDraft(draft: { isMcp?: boolean; mcpPath?: string | null }): boolea
 }
 
 // Sections that collapse to their connected/minimum rows behind a "More
-// tools" disclosure. The API registry holds few rows today but is expected
+// tools" disclosure. API Apps holds few rows today but is expected
 // to grow, so it collapses the same way as the larger sections.
-const COLLAPSIBLE_SECTIONS: string[] = ['Featured', 'API registry', 'MCP registry'];
+const COLLAPSIBLE_SECTIONS: string[] = ['MCP Apps', 'API Apps'];
 
 function connectionsHTML() {
   const ready = state.connectionReady;
@@ -1037,8 +1038,7 @@ function connectionsHTML() {
     connectionsForEntry(entry, state.connections).length > 0;
   const connected = entries.filter((entry) => entry.section !== 'Secrets' && isConnected(entry));
   const connectedSection = connected.length
-    ? `<div class="cat-section"><div class="cat-section-h">CONNECTED TOOLS</div>
-      <div class="cat-rows">${connected.map(catalogRowHTML).join('')}</div></div>`
+    ? `<div class="cat-section"><div class="cat-rows">${connected.map(catalogRowHTML).join('')}</div></div>`
     : '';
   const sections = CATALOG_SECTIONS.filter((section) => section !== 'Secrets').map((section) => {
     const sectionEntries = entries.filter(
@@ -1055,7 +1055,7 @@ function connectionsHTML() {
     const disclosure = collapsible && collapsed.hiddenCount > 0
       ? `<button class="cat-more" data-act="toggle-section-expanded" data-id="${escAttr(section)}"
           aria-expanded="${expanded}">
-          <span>${expanded ? 'Show fewer tools' : `More tools (${collapsed.hiddenCount})`}</span>
+          <span>${expanded ? 'Show fewer tools' : 'Show more tools'}</span>
           <span class="cat-more-chev ${expanded ? 'open' : ''}" aria-hidden="true">${ICONS.chevronDown}</span>
         </button>`
       : '';
@@ -1407,14 +1407,14 @@ function brokerSwitchHTML(): string {
         <button class="menu-item" role="menuitem" data-act="broker-pick-local">
           <span class="broker-check">${state.broker.mode === 'local' ? '✓' : ''}</span> Local</button>
         <button class="menu-item" role="menuitem" data-act="broker-pick-remote">
-          <span class="broker-check">${state.broker.mode === 'remote' ? '✓' : ''}</span> Remote broker…</button>
+          <span class="broker-check">${state.broker.mode === 'remote' ? '✓' : ''}</span> Connect hosted instance…</button>
       </div>`
     : '';
   return `<div class="broker-switch-wrap">
     <button class="broker-btn ${state.brokerMenuOpen ? 'on' : ''}" data-act="broker-menu"
       aria-haspopup="menu" aria-expanded="${state.brokerMenuOpen}" title="Which broker this app manages">
       <span class="broker-dot ${tone}"></span><span class="broker-label">${esc(label)}</span>
-      <span class="broker-caret" aria-hidden="true">▾</span>
+      <span class="broker-caret" aria-hidden="true">${ICONS.chevronDown}</span>
     </button>${menu}</div>`;
 }
 
@@ -1429,14 +1429,20 @@ function brokerPaneHTML(): string {
     const cancelBtn = state.broker.mode === 'remote' && !state.broker.connected
       ? `<button class="btn ghost" data-act="broker-pick-local">Use this Mac instead</button>`
       : `<button class="btn ghost" data-act="broker-setup-cancel">Cancel</button>`;
-    return `<div class="broker-pane" role="form" aria-label="Connect to a remote broker">
+    return `<div class="broker-pane" role="form" aria-label="Connect to hosted Multitool">
       <div class="bp-icon">${ICONS.blocks}</div>
-      <h2>Connect to a remote broker</h2>
-      <p class="bp-lead">Manage a Multitool broker running on another Mac. On that machine, run
-        <code>aka serve --listen 0.0.0.0:4780</code> (behind your TLS proxy or tunnel) and issue a
-        management token with <code>aka manage token</code>.</p>
-      <div class="f-row"><label for="rb-url">Broker URL</label>
-        <input id="rb-url" placeholder="https://broker.example.dev" value="${escAttr(setup.url)}"
+      <h2>Connect to hosted Multitool</h2>
+      <p class="bp-lead">Connect to a remote Multitool server with a management token.</p>
+      <div class="adv-collapse">
+        <button type="button" class="adv-toggle" aria-expanded="${setup.advancedOpen}"
+          data-act="toggle-remote-advanced">
+          <span class="adv-toggle-icon" aria-hidden="true">${ICONS.chevronDown}</span>Advanced</button>
+        ${setup.advancedOpen ? `<pre class="setup-instructions bp-setup-code"><code># To start a remote instance, run this behind a TLS proxy or tunnel:
+aka serve --listen 0.0.0.0:4780
+aka manage token</code></pre>` : ''}
+      </div>
+      <div class="f-row"><label for="rb-url">Hosted instance URL</label>
+        <input id="rb-url" placeholder="https://multitool.aka.com" value="${escAttr(setup.url)}"
           autocomplete="off" spellcheck="false"></div>
       <div class="f-row"><label for="rb-token">Management token</label>
         <input id="rb-token" type="password" placeholder="${hasSaved ? 'Using the saved token (paste to replace)' : 'akamgr_…'}"
@@ -3078,6 +3084,7 @@ document.addEventListener('click', async (e) => {
       state.brokerMenuOpen = false;
       state.remoteSetup = {
         open: true,
+        advancedOpen: false,
         url: state.broker.url ?? state.remoteSetup.url,
         token: '',
         busy: false,
@@ -3086,6 +3093,11 @@ document.addEventListener('click', async (e) => {
       render();
       break;
     }
+    case 'toggle-remote-advanced':
+      captureDrafts();
+      state.remoteSetup.advancedOpen = !state.remoteSetup.advancedOpen;
+      render();
+      break;
     case 'broker-setup-cancel':
       state.remoteSetup.open = false;
       state.remoteSetup.error = null;
@@ -3094,6 +3106,7 @@ document.addEventListener('click', async (e) => {
     case 'broker-edit':
       state.remoteSetup = {
         open: true,
+        advancedOpen: false,
         url: state.broker.url ?? '',
         token: '',
         busy: false,
@@ -3110,7 +3123,9 @@ document.addEventListener('click', async (e) => {
       render();
       try {
         state.broker = await invoke('connect_remote_broker', { url, token: token || null });
-        state.remoteSetup = { open: false, url: '', token: '', busy: false, error: null };
+        state.remoteSetup = {
+          open: false, advancedOpen: false, url: '', token: '', busy: false, error: null,
+        };
         await refresh('all');
         try { state.agentSetupInstructions = await invoke('get_agent_setup'); } catch { /* pane shows loading */ }
         toast(`Managing ${brokerLabel(state.broker)}`);
@@ -3835,7 +3850,9 @@ document.addEventListener('keydown', (e) => {
     const n = TABS.length;
     state.tab = TABS[(i + (e.shiftKey ? -1 : 1) + n) % n];
     state.menuOpen = false;
+    syncShowAllExpansion();
     render();
+    resetScroll();
     return;
   }
   if (e.key === 'Escape') {

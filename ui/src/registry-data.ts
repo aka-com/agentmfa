@@ -33,7 +33,7 @@ export interface RegistryServer {
 export const REGISTRY_SERVERS: RegistryServer[] = [
   {
     id: 'mcp-vercel',
-    name: 'Vercel',
+    name: 'Vercel MCP',
     icon: 'vercel',
     description: 'Deployments, projects & domains',
     serverUrl: 'https://mcp.vercel.com/',
@@ -42,7 +42,7 @@ export const REGISTRY_SERVERS: RegistryServer[] = [
   },
   {
     id: 'mcp-figma',
-    name: 'Figma',
+    name: 'Figma MCP',
     icon: 'figma',
     description: 'Design files & components',
     serverUrl: 'https://mcp.figma.com/mcp',
