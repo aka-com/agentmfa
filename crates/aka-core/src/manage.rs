@@ -291,50 +291,169 @@ pub fn agent_setup_instructions_remote(base: &str) -> String {
     )
 }
 
+/* ------------------------------- event bus -------------------------------- */
+
+/// One numbered manage event. The seq lets a reconnecting client resume from
+/// where it left off (SSE `Last-Event-ID`) instead of refetching everything.
+#[derive(Clone, Debug)]
+pub struct SeqEvent {
+    pub seq: u64,
+    pub event: aka_api::ManageEvent,
+}
+
+/// How much history the bus keeps for reconnect replay. A client offline
+/// long enough to fall off the back of this window gets a resync instead —
+/// safe, just less efficient.
+const MANAGE_RING_CAP: usize = 512;
+
+/// What a reconnecting client should be sent.
+pub enum ManageReplay {
+    /// The client is caught up (its last id is the current head).
+    UpToDate,
+    /// Deliver exactly these missed events, in order.
+    Replay(Vec<SeqEvent>),
+    /// The client's position is unknown, foreign, or evicted: it must
+    /// refetch everything.
+    Resync,
+}
+
+/// The manage-plane event bus: a broadcast channel for live delivery plus a
+/// bounded ring buffer and monotonic sequence for reconnect replay. The
+/// `epoch` is minted per broker process, so a client resuming against a
+/// restarted broker (whose seq reset) is detected and resynced rather than
+/// silently misaligned.
+pub struct ManageBus {
+    tx: tokio::sync::broadcast::Sender<SeqEvent>,
+    seq: std::sync::atomic::AtomicU64,
+    ring: std::sync::Mutex<std::collections::VecDeque<SeqEvent>>,
+    epoch: String,
+}
+
+impl Default for ManageBus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ManageBus {
+    pub fn new() -> Self {
+        let (tx, _) = tokio::sync::broadcast::channel(MANAGE_RING_CAP);
+        let mut bytes = [0u8; 8];
+        getrandom::fill(&mut bytes).expect("os rng");
+        let epoch = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        Self {
+            tx,
+            seq: std::sync::atomic::AtomicU64::new(0),
+            ring: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            epoch,
+        }
+    }
+
+    /// This process's event epoch, part of every event id.
+    pub fn epoch(&self) -> &str {
+        &self.epoch
+    }
+
+    /// Number and publish an event: append to the ring (evicting the oldest
+    /// past the cap) and broadcast to live subscribers.
+    pub fn emit(&self, event: aka_api::ManageEvent) {
+        let seq = self
+            .seq
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        let item = SeqEvent { seq, event };
+        {
+            let mut ring = self.ring.lock().unwrap();
+            ring.push_back(item.clone());
+            while ring.len() > MANAGE_RING_CAP {
+                ring.pop_front();
+            }
+        }
+        // A send error only means no live subscribers; the ring still has it.
+        let _ = self.tx.send(item);
+    }
+
+    /// Subscribe to live events. Subscribe *before* snapshotting the ring so
+    /// no event slips through the gap between the two.
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<SeqEvent> {
+        self.tx.subscribe()
+    }
+
+    /// Decide what to send a (re)connecting client. `last` is the parsed
+    /// `Last-Event-ID` (`epoch`, `seq`); `None` (fresh client, or a header
+    /// from another broker process) means resync.
+    pub fn replay_since(&self, last: Option<(&str, u64)>) -> ManageReplay {
+        let Some((epoch, last_seq)) = last else {
+            return ManageReplay::Resync;
+        };
+        if epoch != self.epoch {
+            // A different broker process (restart): the client's seq refers
+            // to a history this process never had.
+            return ManageReplay::Resync;
+        }
+        let ring = self.ring.lock().unwrap();
+        let head = ring.back().map(|e| e.seq).unwrap_or(0);
+        if last_seq >= head {
+            return ManageReplay::UpToDate;
+        }
+        // Replayable only if the first event we'd need (last_seq + 1) is
+        // still retained; otherwise events were evicted and we must resync.
+        match ring.front().map(|e| e.seq) {
+            Some(oldest) if last_seq + 1 >= oldest => {
+                ManageReplay::Replay(ring.iter().filter(|e| e.seq > last_seq).cloned().collect())
+            }
+            _ => ManageReplay::Resync,
+        }
+    }
+}
+
+/// Parse an SSE `Last-Event-ID` of the form `epoch:seq`.
+pub fn parse_event_id(id: &str) -> Option<(&str, u64)> {
+    let (epoch, seq) = id.split_once(':')?;
+    Some((epoch, seq.parse().ok()?))
+}
+
 /* ----------------------------- event fanout ------------------------------- */
 
 /// Wraps a shell's `BrokerEvents` observer so every state-change
-/// notification also lands on the broker's manage-event broadcast (the SSE
-/// stream remote shells subscribe to). Confirmation gates and the browser
-/// hook delegate untouched — fanout observes, it never authorizes.
+/// notification also lands on the broker's manage-event bus (the SSE stream
+/// remote shells subscribe to). Confirmation gates and the browser hook
+/// delegate untouched — fanout observes, it never authorizes.
 pub struct FanoutEvents {
     inner: Arc<dyn crate::events::BrokerEvents>,
-    tx: tokio::sync::broadcast::Sender<aka_api::ManageEvent>,
+    bus: Arc<ManageBus>,
 }
 
 impl FanoutEvents {
-    pub fn new(
-        inner: Arc<dyn crate::events::BrokerEvents>,
-        tx: tokio::sync::broadcast::Sender<aka_api::ManageEvent>,
-    ) -> Self {
-        Self { inner, tx }
+    pub fn new(inner: Arc<dyn crate::events::BrokerEvents>, bus: Arc<ManageBus>) -> Self {
+        Self { inner, bus }
     }
 }
 
 impl crate::events::BrokerEvents for FanoutEvents {
     fn sessions_changed(&self) {
         self.inner.sessions_changed();
-        let _ = self.tx.send(aka_api::ManageEvent::SessionsChanged);
+        self.bus.emit(aka_api::ManageEvent::SessionsChanged);
     }
 
     fn agents_changed(&self) {
         self.inner.agents_changed();
-        let _ = self.tx.send(aka_api::ManageEvent::AgentsChanged);
+        self.bus.emit(aka_api::ManageEvent::AgentsChanged);
     }
 
     fn wirings_changed(&self) {
         self.inner.wirings_changed();
-        let _ = self.tx.send(aka_api::ManageEvent::WiringsChanged);
+        self.bus.emit(aka_api::ManageEvent::WiringsChanged);
     }
 
     fn connections_changed(&self) {
         self.inner.connections_changed();
-        let _ = self.tx.send(aka_api::ManageEvent::ConnectionsChanged);
+        self.bus.emit(aka_api::ManageEvent::ConnectionsChanged);
     }
 
     fn audit_appended(&self, entry: &AuditEntry) {
         self.inner.audit_appended(entry);
-        let _ = self.tx.send(aka_api::ManageEvent::ActivityAppended {
+        self.bus.emit(aka_api::ManageEvent::ActivityAppended {
             entry: activity_dto(entry),
         });
     }
@@ -342,15 +461,14 @@ impl crate::events::BrokerEvents for FanoutEvents {
     fn mcp_auth_changed(&self, state: &crate::mcp_auth::McpAuthState) {
         self.inner.mcp_auth_changed(state);
         if let Ok(value) = serde_json::to_value(state) {
-            let _ = self
-                .tx
-                .send(aka_api::ManageEvent::McpAuthChanged { state: value });
+            self.bus
+                .emit(aka_api::ManageEvent::McpAuthChanged { state: value });
         }
     }
 
     fn connect_requested(&self, agent: &str, service: &str) {
         self.inner.connect_requested(agent, service);
-        let _ = self.tx.send(aka_api::ManageEvent::ConnectRequested {
+        self.bus.emit(aka_api::ManageEvent::ConnectRequested {
             agent: agent.to_string(),
             service: service.to_string(),
         });

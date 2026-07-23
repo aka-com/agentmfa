@@ -112,9 +112,10 @@ pub struct Broker {
     task_runtime: tokio::runtime::Handle,
     pub audit: Arc<AuditLog>,
     pub events: Arc<dyn BrokerEvents>,
-    /// Manage-plane change notifications: everything `events` reports also
-    /// lands here (via [`crate::manage::FanoutEvents`]) for SSE subscribers.
-    manage_events: tokio::sync::broadcast::Sender<aka_api::ManageEvent>,
+    /// Manage-plane change bus: everything `events` reports also lands here
+    /// (via [`crate::manage::FanoutEvents`]), numbered and buffered so a
+    /// reconnecting SSE client resumes instead of refetching everything.
+    manage_bus: Arc<crate::manage::ManageBus>,
     /// Last-known per-connection health (tests + brokered-call outcomes).
     pub health: Arc<crate::health::HealthRegistry>,
     /// Tickets + live WS/PG sessions.
@@ -178,11 +179,9 @@ impl Broker {
         reject_legacy_live_socket(&paths).await?;
         // Every shell observer is wrapped in the manage-event fanout so the
         // SSE stream sees exactly what the shell sees.
-        let (manage_events, _) = tokio::sync::broadcast::channel(256);
-        let events: Arc<dyn BrokerEvents> = Arc::new(crate::manage::FanoutEvents::new(
-            events,
-            manage_events.clone(),
-        ));
+        let manage_bus = Arc::new(crate::manage::ManageBus::new());
+        let events: Arc<dyn BrokerEvents> =
+            Arc::new(crate::manage::FanoutEvents::new(events, manage_bus.clone()));
         let audit = Arc::new(AuditLog::open(paths.audit_file())?);
         {
             let events = events.clone();
@@ -277,7 +276,7 @@ impl Broker {
             task_runtime,
             audit,
             events,
-            manage_events,
+            manage_bus,
             health,
             http_client,
             _instance_lock: instance_lock,
@@ -342,17 +341,15 @@ impl Broker {
             .unwrap_or_else(|| "127.0.0.1".to_string())
     }
 
-    /// Subscribe to manage-plane change notifications (the SSE feed).
-    pub fn subscribe_manage_events(
-        &self,
-    ) -> tokio::sync::broadcast::Receiver<aka_api::ManageEvent> {
-        self.manage_events.subscribe()
+    /// The manage-plane event bus (SSE subscription + reconnect replay).
+    pub fn manage_bus(&self) -> &Arc<crate::manage::ManageBus> {
+        &self.manage_bus
     }
 
     /// Publish a synthetic manage event with no `BrokerEvents` counterpart
     /// (e.g. the activity log was cleared through the manage API).
     pub fn publish_manage_event(&self, event: aka_api::ManageEvent) {
-        let _ = self.manage_events.send(event);
+        self.manage_bus.emit(event);
     }
 
     /// The sidecar's MCP URL, when one is running.

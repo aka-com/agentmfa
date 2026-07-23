@@ -165,22 +165,104 @@ async fn whoami(State(state): State<AppState>, _authed: ManageAuthed) -> Respons
     }))
 }
 
-/// The SSE change feed. On lag (a slow consumer dropped notifications) the
-/// stream emits `resync` so the client refetches everything rather than
-/// trusting incremental updates.
+/// The SSE change feed with reconnect resume. Each frame carries an
+/// `id: <epoch>:<seq>`; a client reconnecting with `Last-Event-ID` is sent
+/// only the events it missed (or a single `resync` when its position is
+/// unknown, foreign to this broker process, or has aged out of the buffer).
+/// Live delivery still emits `resync` on broadcast lag.
 async fn events(
     State(state): State<AppState>,
     _authed: ManageAuthed,
+    headers: axum::http::HeaderMap,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let rx = state.broker.subscribe_manage_events();
-    let stream = futures::stream::unfold(rx, |mut rx| async move {
-        let event = match rx.recv().await {
-            Ok(event) => event,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => ManageEvent::Resync,
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
-        };
-        let sse = Event::default().json_data(&event).ok()?;
-        Some((Ok::<_, Infallible>(sse), rx))
+    use crate::manage::{parse_event_id, ManageReplay, SeqEvent};
+
+    let bus = state.broker.manage_bus().clone();
+    // Subscribe *before* asking for replay so nothing slips through the gap
+    // between the ring snapshot and going live; live events at or below the
+    // replayed head are then deduped by seq.
+    let rx = bus.subscribe();
+    let last = headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let parsed = last.as_deref().and_then(parse_event_id);
+
+    let epoch = bus.epoch().to_string();
+    let mut backlog: std::collections::VecDeque<SeqEvent> = std::collections::VecDeque::new();
+    let mut delivered_head = parsed.map(|(_, seq)| seq).unwrap_or(0);
+    let mut resync_first = false;
+    match bus.replay_since(parsed) {
+        ManageReplay::Replay(events) => {
+            delivered_head = events.last().map(|e| e.seq).unwrap_or(delivered_head);
+            backlog.extend(events);
+        }
+        ManageReplay::UpToDate => {}
+        ManageReplay::Resync => resync_first = true,
+    }
+
+    struct StreamState {
+        rx: tokio::sync::broadcast::Receiver<SeqEvent>,
+        backlog: std::collections::VecDeque<SeqEvent>,
+        epoch: String,
+        // Highest seq already sent, so a live event the backlog covered is
+        // not sent twice.
+        delivered_head: u64,
+        resync_first: bool,
+    }
+    let init = StreamState {
+        rx,
+        backlog,
+        epoch,
+        delivered_head,
+        resync_first,
+    };
+
+    let stream = futures::stream::unfold(init, |mut st| async move {
+        // A resync marker leads, carrying the current head id so the client
+        // has a baseline to resume from next time.
+        if std::mem::take(&mut st.resync_first) {
+            let id = format!("{}:{}", st.epoch, st.delivered_head);
+            let sse = Event::default()
+                .id(id)
+                .json_data(&ManageEvent::Resync)
+                .ok()?;
+            return Some((Ok::<_, Infallible>(sse), st));
+        }
+        // Drain any replay backlog before live events.
+        if let Some(item) = st.backlog.pop_front() {
+            st.delivered_head = item.seq;
+            let sse = Event::default()
+                .id(format!("{}:{}", st.epoch, item.seq))
+                .json_data(&item.event)
+                .ok()?;
+            return Some((Ok(sse), st));
+        }
+        loop {
+            let item = match st.rx.recv().await {
+                Ok(item) => item,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    // Dropped live notifications: force a full refetch.
+                    let id = format!("{}:{}", st.epoch, st.delivered_head);
+                    let sse = Event::default()
+                        .id(id)
+                        .json_data(&ManageEvent::Resync)
+                        .ok()?;
+                    return Some((Ok(sse), st));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+            };
+            // Skip anything the replay backlog already covered.
+            if item.seq <= st.delivered_head {
+                continue;
+            }
+            st.delivered_head = item.seq;
+            let sse = Event::default()
+                .id(format!("{}:{}", st.epoch, item.seq))
+                .json_data(&item.event)
+                .ok()?;
+            return Some((Ok(sse), st));
+        }
     });
     Sse::new(stream).keep_alive(KeepAlive::default())
 }

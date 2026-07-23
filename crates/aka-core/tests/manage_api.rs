@@ -349,11 +349,114 @@ async fn identity_settings_and_activity_surface_over_the_manage_api() {
         .contains("--unix-socket"));
 }
 
+/// Read SSE frames off a manage `/events` stream until `want` completes on
+/// the accumulated text or the deadline passes; returns everything read.
+async fn read_sse_until(
+    socket: &std::path::Path,
+    token: &str,
+    last_event_id: Option<&str>,
+    want: impl Fn(&str) -> bool,
+) -> String {
+    use http_body_util::BodyExt as _;
+    let stream = tokio::net::UnixStream::connect(socket).await.unwrap();
+    let io = hyper_util::rt::TokioIo::new(stream);
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await.unwrap();
+    tokio::spawn(conn);
+    let mut builder = hyper::Request::builder()
+        .method("GET")
+        .uri("/v1/manage/events")
+        .header("host", "localhost")
+        .header("authorization", format!("Bearer {token}"));
+    if let Some(id) = last_event_id {
+        builder = builder.header("last-event-id", id);
+    }
+    let response = sender.send_request(builder.body(String::new()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), 200);
+    let mut body = response.into_body();
+    let mut collected = String::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(std::time::Duration::from_millis(1500), body.frame()).await {
+            Ok(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref() {
+                    collected.push_str(&String::from_utf8_lossy(data));
+                    if want(&collected) {
+                        break;
+                    }
+                }
+            }
+            _ => break,
+        }
+    }
+    collected
+}
+
+/// Pull the last `id:` field out of an accumulated SSE text.
+fn last_id(sse: &str) -> Option<String> {
+    sse.lines()
+        .filter_map(|l| l.strip_prefix("id:"))
+        .map(|l| l.trim().to_string())
+        .next_back()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reconnect_resumes_from_last_event_id_instead_of_resyncing() {
+    let h = harness().await;
+
+    // First connection: fresh client → a resync leads, then live events.
+    // Make one change so the stream advances and we capture an id.
+    let sse = {
+        let socket = h.socket.clone();
+        let token = h.manage_token.clone();
+        let reader = tokio::spawn(async move {
+            read_sse_until(&socket, &token, None, |s| s.contains("SEEN")).await
+        });
+        // Give the reader a moment to attach, then add a secret.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let (status, _) = h
+            .manage("POST", "/v1/manage/secrets", Some(json!({ "name": "SEEN", "value": "v" })))
+            .await;
+        assert_eq!(status, 200);
+        reader.await.unwrap()
+    };
+    assert!(sse.contains("\"event\":\"resync\""), "fresh client resyncs: {sse}");
+    let resume_id = last_id(&sse).expect("stream carried an id");
+
+    // While "offline", make two more changes.
+    for name in ["MISSED_A", "MISSED_B"] {
+        let (status, _) = h
+            .manage("POST", "/v1/manage/secrets", Some(json!({ "name": name, "value": "v" })))
+            .await;
+        assert_eq!(status, 200);
+    }
+
+    // Reconnect with the saved id: the broker replays the missed events and
+    // does NOT lead with another resync.
+    let resumed = read_sse_until(&h.socket, &h.manage_token, Some(&resume_id), |s| {
+        s.contains("MISSED_A") && s.contains("MISSED_B")
+    })
+    .await;
+    assert!(resumed.contains("MISSED_A"), "replayed the first miss: {resumed}");
+    assert!(resumed.contains("MISSED_B"), "replayed the second miss: {resumed}");
+    assert!(
+        !resumed.contains("\"event\":\"resync\""),
+        "a valid resume must not force a full refetch: {resumed}"
+    );
+
+    // A foreign/garbage id forces a resync (a different broker process, or a
+    // position aged out of the buffer).
+    let foreign = read_sse_until(&h.socket, &h.manage_token, Some("deadbeef:1"), |s| {
+        s.contains("resync")
+    })
+    .await;
+    assert!(foreign.contains("\"event\":\"resync\""), "foreign id resyncs: {foreign}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_event_stream_reports_manage_changes() {
     let h = harness().await;
 
-    let mut rx = h.broker.subscribe_manage_events();
+    let mut rx = h.broker.manage_bus().subscribe();
     let (status, _) = h
         .manage(
             "POST",
@@ -363,16 +466,19 @@ async fn the_event_stream_reports_manage_changes() {
         .await;
     assert_eq!(status, 200);
 
-    // The add is audited, so the feed carries an activity_appended entry.
+    // The add is audited, so the feed carries an activity_appended entry —
+    // numbered, so a reconnecting client could resume from its seq.
     let mut saw_activity = false;
     for _ in 0..4 {
         match tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await {
-            Ok(Ok(aka_api::ManageEvent::ActivityAppended { entry })) => {
-                assert!(entry.text.contains("KEY"));
-                saw_activity = true;
-                break;
+            Ok(Ok(item)) => {
+                assert!(item.seq > 0, "events are numbered from 1");
+                if let aka_api::ManageEvent::ActivityAppended { entry } = item.event {
+                    assert!(entry.text.contains("KEY"));
+                    saw_activity = true;
+                    break;
+                }
             }
-            Ok(Ok(_)) => continue,
             other => panic!("event stream stalled: {other:?}"),
         }
     }
@@ -419,7 +525,9 @@ async fn the_event_stream_reports_manage_changes() {
             Ok(Some(Ok(frame))) => {
                 if let Some(data) = frame.data_ref() {
                     collected.push_str(&String::from_utf8_lossy(data));
+                    // Frames carry an id: <epoch>:<seq> for reconnect resume.
                     if collected.contains("activity_appended") && collected.contains("KEY2") {
+                        assert!(collected.contains("id:"), "frames must carry ids: {collected}");
                         return;
                     }
                 }

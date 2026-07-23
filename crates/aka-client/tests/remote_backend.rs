@@ -295,7 +295,7 @@ async fn the_event_stream_connects_and_carries_changes() {
         .unwrap();
     assert_eq!(state, LinkState::Connected);
 
-    // The first event after connecting is the synthetic resync.
+    // A fresh client (no Last-Event-ID) gets a server-driven resync first.
     let first = tokio::time::timeout(std::time::Duration::from_secs(5), event_rx.recv())
         .await
         .unwrap()
