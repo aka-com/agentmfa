@@ -54,6 +54,16 @@ aka conn add github --kind api --host api.github.com \
 aka conn list
 ```
 
+Open Postgres and SSH sessions straight from the shell — each command
+prints the one value a stock client needs, minted by the running broker
+(the DSN embeds a short-lived session ticket):
+
+```sh
+psql "$(aka dsn analytics)"
+export SSH_AUTH_SOCK="$(aka ssh production)"
+git push production main
+```
+
 Teach the agents in a repository about the broker:
 
 ```sh

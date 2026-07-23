@@ -10,6 +10,10 @@
 //!   seed the store from the terminal — the dev/headless counterpart of the
 //!   app's Secrets and Connections tabs — with the same validation, so a
 //!   `serve --root` harness never hand-writes (sealed) store files.
+//! - `aka dsn` / `aka ssh` open data-plane sessions on a running broker
+//!   and print the one value a stock client needs — a ticket-embedded DSN,
+//!   an `SSH_AUTH_SOCK` path — so `psql "$(aka dsn …)"` works as a
+//!   one-liner.
 
 use std::ops::Deref;
 use std::os::unix::fs::FileTypeExt as _;
@@ -29,6 +33,7 @@ use aka_core::vault::{platform_vault, platform_vault_for_root, SecretVault};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use zeroize::Zeroizing;
 
+mod client;
 mod mcp_bridge;
 
 #[derive(Parser)]
@@ -107,6 +112,37 @@ enum Command {
     /// discovers the MCP endpoint itself, so configs stay static.
     Mcp {
         /// Bridge to a broker rooted here instead of the default layout.
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Label this client in the user's activity log (e.g. claude-code).
+        /// Attribution only, never authorization.
+        #[arg(long)]
+        client: Option<String>,
+    },
+    /// Open a Postgres session on a running broker and print a ready-to-run
+    /// DSN with the short-lived session ticket embedded:
+    /// `psql "$(aka dsn analytics)"`. The ticket sits in ps-visible argv
+    /// and shell history for its short window; POST /v1/pg/open with
+    /// PGPASSWORD keeps it out when that matters.
+    Dsn {
+        /// The pg connection's name.
+        connection: String,
+        /// Open against a broker rooted here instead of the default layout.
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Label this client in the user's activity log (e.g. claude-code).
+        /// Attribution only, never authorization.
+        #[arg(long)]
+        client: Option<String>,
+    },
+    /// Open an SSH session on a running broker and print the agent socket
+    /// path: `export SSH_AUTH_SOCK="$(aka ssh production)"` — then stock
+    /// `ssh`/`git`/`scp`/`rsync` work while the broker signs only for the
+    /// connection's pinned user and server host key.
+    Ssh {
+        /// The ssh connection's name.
+        connection: String,
+        /// Open against a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
         /// Label this client in the user's activity log (e.g. claude-code).
@@ -271,6 +307,16 @@ fn main() {
             no_sidecar,
         }),
         Command::Mcp { root, client } => cmd_mcp(root, client),
+        Command::Dsn {
+            connection,
+            root,
+            client,
+        } => cmd_dsn(connection, root, client),
+        Command::Ssh {
+            connection,
+            root,
+            client,
+        } => cmd_ssh(connection, root, client),
         Command::Secret {
             command:
                 SecretCommand::Add {
@@ -717,6 +763,71 @@ fn cmd_manage_token(revoke: bool, ttl_days: Option<u64>, root: Option<PathBuf>) 
     }
 }
 
+/// Open a capability session on the running broker and hand back the
+/// parsed 200 body; any failure dies with the client module's one-liner.
+fn open_session(
+    endpoint: &str,
+    connection: &str,
+    root: Option<PathBuf>,
+    label: Option<String>,
+) -> serde_json::Value {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let paths = store_paths(root.as_deref());
+    match runtime.block_on(client::open_session(
+        &paths,
+        endpoint,
+        connection,
+        label.as_deref(),
+    )) {
+        Ok(body) => body,
+        Err(message) => die(message),
+    }
+}
+
+/// Embed the session ticket as the DSN's password. The broker returns the
+/// two separately so callers can keep the ticket out of ps-visible argv
+/// (PGPASSWORD); `aka dsn` exists for the one-liner and accepts that
+/// exposure for the ticket's short window.
+fn embed_ticket(dsn: &str, ticket: &str) -> Result<String, String> {
+    match dsn.split_once("://ticket@") {
+        Some((scheme, rest)) => Ok(format!("{scheme}://ticket:{ticket}@{rest}")),
+        None => Err(format!("unexpected DSN shape from the broker: {dsn}")),
+    }
+}
+
+fn cmd_dsn(connection: String, root: Option<PathBuf>, client: Option<String>) {
+    let body = open_session("/v1/pg/open", &connection, root, client);
+    let (Some(dsn), Some(ticket)) = (body["dsn"].as_str(), body["ticket"].as_str()) else {
+        die("the broker's response carried no DSN and ticket");
+    };
+    let dsn = match embed_ticket(dsn, ticket) {
+        Ok(dsn) => dsn,
+        Err(message) => die(message),
+    };
+    if let Some(secs) = body["expires_in_seconds"].as_u64() {
+        eprintln!("  ticket expires in {secs}s — connect before then; a later connection needs a fresh open");
+    }
+    println!("{dsn}");
+}
+
+fn cmd_ssh(connection: String, root: Option<PathBuf>, client: Option<String>) {
+    let body = open_session("/v1/ssh/open", &connection, root, client);
+    let Some(auth_sock) = body["auth_sock"].as_str() else {
+        die("the broker's response carried no agent socket path");
+    };
+    if let (Some(user), Some(host)) = (body["user"].as_str(), body["host"].as_str()) {
+        let expiry = body["expires_in_seconds"]
+            .as_u64()
+            .map(|secs| format!("; connect within {secs}s"))
+            .unwrap_or_default();
+        eprintln!("  signs only for {user}@{host}{expiry}");
+    }
+    println!("{auth_sock}");
+}
+
 fn cmd_mcp(root: Option<PathBuf>, client: Option<String>) {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -916,6 +1027,21 @@ mod tests {
         ));
         drop(broker);
         assert!(acquire_offline_store_lock(&paths).is_ok());
+    }
+
+    #[test]
+    fn embed_ticket_fills_the_password_slot() {
+        assert_eq!(
+            embed_ticket(
+                "postgres://ticket@127.0.0.1:5599/app?sslmode=disable",
+                "tkt_ab12"
+            )
+            .unwrap(),
+            "postgres://ticket:tkt_ab12@127.0.0.1:5599/app?sslmode=disable"
+        );
+        // A DSN without the expected placeholder user is a contract change
+        // worth failing loudly on, not silently mangling.
+        assert!(embed_ticket("postgres://other@host/db", "tkt_x").is_err());
     }
 
     fn args(kind: ConnKind) -> ConnAdd {

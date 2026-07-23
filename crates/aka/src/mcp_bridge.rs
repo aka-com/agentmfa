@@ -17,7 +17,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use aka_core::paths::Paths;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+use crate::client::{shared_key, unix_http};
 
 /// How long to wait for the broker (and its MCP host) to appear before
 /// giving up, and how often to re-probe while waiting.
@@ -26,82 +28,23 @@ const DISCOVER_INTERVAL: Duration = Duration::from_secs(2);
 
 /* ------------------------------ discovery --------------------------------- */
 
-/// One minimal HTTP/1.1 request over the broker's Unix socket. The broker
-/// answers small JSON bodies with a Content-Length, so read-to-EOF with
-/// `Connection: close` is sufficient — no HTTP client dependency can reach
-/// a Unix socket portably anyway.
-async fn unix_http(
-    socket: &Path,
-    method: &str,
-    path: &str,
-    body: Option<&str>,
-) -> std::io::Result<(u16, String)> {
-    let mut stream = tokio::net::UnixStream::connect(socket).await?;
-    let mut request = format!(
-        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nConnection: close\r\n"
-    );
-    if let Some(body) = body {
-        request.push_str(&format!(
-            "Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-            body.len()
-        ));
-    } else {
-        request.push_str("\r\n");
-    }
-    stream.write_all(request.as_bytes()).await?;
-    let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).await?;
-    let raw = String::from_utf8_lossy(&raw).into_owned();
-    let Some((head, payload)) = raw.split_once("\r\n\r\n") else {
-        return Err(std::io::Error::other("malformed HTTP response"));
-    };
-    let status: u16 = head
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .ok_or_else(|| std::io::Error::other("malformed HTTP status line"))?;
-    // Bodies here are Content-Length JSON; a chunked body would carry size
-    // markers, so refuse it loudly rather than pass garbage along.
-    if head
-        .to_ascii_lowercase()
-        .contains("transfer-encoding: chunked")
-    {
-        return Err(std::io::Error::other("unexpected chunked response"));
-    }
-    Ok((status, payload.to_string()))
-}
-
 /// The broker's discovery manifest.
 async fn manifest(socket: &Path) -> std::io::Result<serde_json::Value> {
-    let (status, body) = unix_http(socket, "GET", "/.well-known/agent-broker.json", None).await?;
+    let (status, body) = unix_http(
+        socket,
+        "GET",
+        "/.well-known/agent-broker.json",
+        None,
+        None,
+        None,
+    )
+    .await?;
     if status != 200 {
         return Err(std::io::Error::other(format!(
             "manifest fetch failed with HTTP {status}"
         )));
     }
     serde_json::from_str(&body).map_err(std::io::Error::other)
-}
-
-/// This computer's shared key: read the token file, or fetch the same key
-/// through the compat pair endpoint when the file is unreadable.
-async fn shared_key(paths: &Paths, label: Option<&str>) -> Result<String, String> {
-    if let Ok(token) = std::fs::read_to_string(paths.token_file()) {
-        let token = token.trim().to_string();
-        if !token.is_empty() {
-            return Ok(token);
-        }
-    }
-    let body = format!(r#"{{"agent_name": "{}"}}"#, label.unwrap_or("mcp-bridge"));
-    let (status, payload) = unix_http(&paths.socket_file(), "POST", "/v1/pair", Some(&body))
-        .await
-        .map_err(|e| format!("could not reach the broker to fetch the shared key: {e}"))?;
-    if status != 200 {
-        return Err(format!("the broker refused to hand out the key: {payload}"));
-    }
-    serde_json::from_str::<serde_json::Value>(&payload)
-        .ok()
-        .and_then(|v| v["token"].as_str().map(str::to_string))
-        .ok_or_else(|| "the pair response carried no token".to_string())
 }
 
 /// Wait for the broker's manifest to advertise a running MCP host.

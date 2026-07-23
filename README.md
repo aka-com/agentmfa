@@ -22,6 +22,18 @@ The tool supports most common workflows:
   re-exposed — served by a bundled Node sidecar built on
   [executor](https://executor.sh)
 
+The Postgres and SSH sessions have shell one-liners: `aka dsn` and
+`aka ssh` open a session on the running broker and print the one value a
+stock client needs. The printed DSN embeds the short-lived session
+ticket — an accepted argv exposure for its window; supply the ticket via
+PGPASSWORD (`POST /v1/pg/open`) when that matters:
+
+```sh
+psql "$(aka dsn analytics)"
+export SSH_AUTH_SOCK="$(aka ssh production)"
+git push production main
+```
+
 ## Tools, the shared key, and agent access
 
 Tools (connections) are added in the app, globally — they belong to

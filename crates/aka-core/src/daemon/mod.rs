@@ -1535,9 +1535,10 @@ async fn post_pg_open(
 
     // Executor: issue the ticket and hand back the password-less DSN.
     // Unlike WS, nothing is dialed here, the proxy dials upstream at
-    // redemption time. The ticket is deliberately NOT embedded in the DSN
-    // (it would sit in ps-visible argv and shell history for its window):
-    // agents supply it out-of-band via PGPASSWORD.
+    // redemption time. The ticket is NOT embedded in the DSN: returning
+    // the two separately lets callers keep it out of ps-visible argv via
+    // PGPASSWORD, while callers that accept the exposure for the ticket's
+    // short window (`aka dsn`) embed it themselves.
     let executor: crate::executions::Executor = {
         let broker = broker.clone();
         let conn = conn.clone();

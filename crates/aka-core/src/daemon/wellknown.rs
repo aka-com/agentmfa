@@ -301,9 +301,10 @@ reconnect after the ticket window needs a fresh open.
             "expires_in_seconds": {ticket},
             "example": "PGPASSWORD=<ticket> psql \"<dsn>\""}}
 
-Run any unmodified client against the DSN, supplying the ticket **via
-PGPASSWORD or a passfile**, never on the command line, where it would sit
-in `ps`-visible argv and shell history:
+Run any unmodified client against the DSN. PGPASSWORD or a passfile keeps
+the ticket out of `ps`-visible argv and shell history; embedding it in the
+DSN as the password (what `aka dsn <connection>` prints) is an accepted
+tradeoff for the ticket's short window:
 
     PGPASSWORD=<ticket> psql "<dsn>" -c "SELECT 1;"
 
