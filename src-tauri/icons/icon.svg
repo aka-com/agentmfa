@@ -16,9 +16,12 @@
   <g transform="translate(57.379 57.379) scale(0.887931)">
     <rect x="48" y="48" width="928" height="928" rx="220" fill="#26262c"/>
     <rect x="96" y="96" width="832" height="832" rx="180" fill="#303038"/>
-    <path d="M350 462V352c0-102 72-168 162-168s162 66 162 168v110" fill="none" stroke="#f5bc52" stroke-linecap="round" stroke-width="72"/>
-    <rect x="260" y="430" width="504" height="354" rx="72" fill="#f5bc52"/>
-    <circle cx="512" cy="585" r="44" fill="#26262c"/>
-    <rect x="486" y="584" width="52" height="105" rx="26" fill="#26262c"/>
+    <!-- Lucide "key" (ISC), 24px grid scaled to fill the inner panel;
+         matches the tray icon's glyph. -->
+    <g transform="translate(158 158) scale(29.5)" fill="none" stroke="#f5b154" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4"/>
+      <path d="m21 2-9.6 9.6"/>
+      <circle cx="7.5" cy="15.5" r="5.5"/>
+    </g>
   </g>
 </svg>
