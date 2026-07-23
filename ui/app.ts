@@ -99,6 +99,9 @@ interface ConnectionDraft {
   hostKeyFingerprint?: string | null;
   proxyJump?: string | null;
   sslmode?: string | null;
+  /** True while sslmode was set from a loopback host rather than picked, so
+   * a host change may keep adjusting it; false once the user picks one. */
+  sslmodeIsAutomatic?: boolean;
   pgCaBundlePath?: string | null;
   url?: string | null;
   template?: string | null;
@@ -1707,9 +1710,40 @@ async function connectionDraftFromImport(
 // behind the "Advanced" disclosure, so opening the sheet shows what is set.
 function draftUsesAdvancedFields(d: ConnectionDraft, t: ConnectionType): boolean {
   if (t === 'ssh') return Boolean((d.hostKeyFingerprint || '').trim());
-  if (t === 'pg') {
-    return Boolean((d.pgCaBundlePath || '').trim())
-      || Boolean(d.sslmode && d.sslmode !== 'verify-full');
+  if (t === 'pg') return Boolean((d.pgCaBundlePath || '').trim());
+  return false;
+}
+
+const PG_SSL_OPTIONS: Array<[string, string]> = [
+  ['verify-full', 'Verify full'],
+  ['require', 'Require TLS (no certificate verification)'],
+  ['verify-ca', 'Verify CA only (no hostname verification)'],
+  ['prefer', 'Prefer (TLS optional)'],
+  ['disable', 'Disable'],
+];
+
+/** Loopback never benefits from TLS to itself; a stock local Postgres does
+ * not even offer it, so the verify-full default would fail every dial. */
+function isLoopbackHost(host: string | null | undefined): boolean {
+  const h = (host || '').trim().toLowerCase();
+  return h === 'localhost' || h === '::1' || h === '[::1]'
+    || h === '127.0.0.1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+}
+
+/** Keep sslmode tracking a loopback host until the user picks one: default →
+ * disable when the host goes loopback, and back when it stops being one.
+ * Returns whether the draft changed so callers can sync the rendered field. */
+function applyLoopbackTlsPrefill(d: ConnectionDraft): boolean {
+  if (d.sslmodeIsAutomatic === false) return false;
+  const loopback = isLoopbackHost(d.host);
+  if (loopback && (d.sslmode ?? 'verify-full') === 'verify-full') {
+    d.sslmode = 'disable';
+    d.sslmodeIsAutomatic = true;
+    return true;
+  }
+  if (!loopback && d.sslmodeIsAutomatic && d.sslmode === 'disable') {
+    d.sslmode = 'verify-full';
+    return true;
   }
   return false;
 }
@@ -1767,22 +1801,15 @@ function connSheet(editing: boolean): string {
       <div class="rule-note">The server’s identity (host key) is confirmed with you the first time an agent connects.</div></div>`;
   } else if (t === 'pg') {
     const sslmode = d.sslmode || 'verify-full';
-    const sslOpts: Array<[string, string]> = [
-      ['verify-full', 'Verify full'],
-      ['require', 'Require TLS (no certificate verification)'],
-      ['verify-ca', 'Verify CA only (no hostname verification)'],
-      ['prefer', 'Prefer (TLS optional)'],
-      ['disable', 'Disable'],
-    ];
     fields += `<div class="f-2col compact-field-row">
       <div class="f-row"><label for="f-host">Host</label><input id="f-host" class="${fieldCls('host')}" placeholder="db.internal.example.com" value="${escAttr(d.host ?? '')}">${fieldErr('host')}</div>
       <div class="f-row" style="flex:0 0 90px"><label for="f-port">Port</label><input id="f-port" class="${fieldCls('port')}" inputmode="numeric" value="${escAttr(d.port ?? '5432')}">${fieldErr('port')}</div></div>
       <div class="f-2col compact-field-row">
       <div class="f-row"><label for="f-db">Database</label><input id="f-db" class="${fieldCls('dbname')}" placeholder="app_production" value="${escAttr(d.dbname ?? '')}">${fieldErr('dbname')}</div>
-      <div class="f-row" style="flex:0 0 90px"><label for="f-user">User</label><input id="f-user" class="${fieldCls('user')}" placeholder="${escAttr(state.localUsername)}" value="${escAttr(d.user ?? '')}">${fieldErr('user')}</div></div>`;
-    pgTlsFields = `<div class="f-row"><label for="f-sslmode">TLS mode</label>${customSelectHTML('f-sslmode', sslOpts, sslmode, fieldCls('sslmode'))}${fieldErr('sslmode')}
-        ${sslmode === 'require' ? '<div class="pair-identity-warning">The server certificate will not be verified.</div>' : ''}</div>
-      <div class="f-row"><label for="f-pg-ca-bundle">Trusted CA bundle <span class="label-detail">(optional)</span></label>
+      <div class="f-row" style="flex:0 0 90px"><label for="f-user">User</label><input id="f-user" class="${fieldCls('user')}" placeholder="${escAttr(state.localUsername)}" value="${escAttr(d.user ?? '')}">${fieldErr('user')}</div></div>
+      <div class="f-row"><label for="f-sslmode">TLS mode</label>${customSelectHTML('f-sslmode', PG_SSL_OPTIONS, sslmode, fieldCls('sslmode'))}${fieldErr('sslmode')}
+        ${sslmode === 'require' ? '<div class="pair-identity-warning">The server certificate will not be verified.</div>' : ''}</div>`;
+    pgTlsFields = `<div class="f-row"><label for="f-pg-ca-bundle">Trusted CA bundle <span class="label-detail">(optional)</span></label>
         <input id="f-pg-ca-bundle" placeholder="/path/to/private-ca.pem" value="${escAttr(d.pgCaBundlePath ?? '')}"></div>`;
   } else {
     fields += `<div class="f-row"><label for="f-url">URL</label><input id="f-url" class="${fieldCls('url')}" placeholder="wss://stream.example.com/feed" value="${escAttr(d.url ?? '')}">${fieldErr('url')}</div>`;
@@ -1885,7 +1912,7 @@ function connSheet(editing: boolean): string {
   if (advancedFields) {
     // Force the section open when one of its fields has a validation error,
     // so the inline message (and the focused input) is visible.
-    const advancedError = ['hostKeyFingerprint', 'sslmode', 'pgCaBundlePath']
+    const advancedError = ['hostKeyFingerprint', 'pgCaBundlePath']
       .some((key) => state.sheetErrors[key]);
     const advOpen = state.connAdvancedOpen || advancedError;
     fields += `<div class="adv-collapse">
@@ -2327,6 +2354,7 @@ async function openCatalogConnectionForm(
   if (!entry.connType || !await holdDropdownFormOpen()) return;
   state.sheet = { kind: 'add-conn' };
   initializeCatalogConnectionDraft(entry, mcpAuthMode, asApi);
+  if (entry.connType === 'pg') applyLoopbackTlsPrefill(state.draft);
   render();
   focusField(initialCatalogConnectionFocusTarget(entry));
 }
@@ -2917,6 +2945,11 @@ document.addEventListener('click', async (e) => {
         }
         state.draft = imported.draft;
         if (state.draft.nameIsAutomatic) state.draft.name = automaticConnectionName();
+        // A pasted DSN that says nothing about TLS gets the same loopback
+        // prefill as a typed host; an explicit sslmode= is the user's call.
+        if (state.connType === 'pg' && !/sslmode=/i.test(source)) {
+          applyLoopbackTlsPrefill(state.draft);
+        }
         state.connImportError = null;
         state.sheetErrors = {};
         state.connAdvancedOpen = draftUsesAdvancedFields(state.draft, state.connType);
@@ -3106,7 +3139,10 @@ document.addEventListener('click', async (e) => {
       const errKey = ERR_KEY_BY_INPUT[menuId as keyof typeof ERR_KEY_BY_INPUT];
       if (errKey) delete state.sheetErrors[errKey];
       if (menuId === 'c-auth-mode') state.draft.authMode = id;
-      else if (menuId === 'f-sslmode') state.draft.sslmode = id;
+      else if (menuId === 'f-sslmode') {
+        state.draft.sslmode = id;
+        state.draft.sslmodeIsAutomatic = false;
+      }
       else if (menuId === 'c-identity-file') state.draft.identityFile = id;
       render(false);
       focusField(menuId);
@@ -3536,6 +3572,18 @@ function updateToolNameWarning(): void {
   hint.hidden = !nameTaken;
 }
 
+/** Sync the rendered TLS-mode select with the draft without a re-render
+ * (the host field keeps focus while the prefill tracks it). */
+function updateSslmodeField(): void {
+  const trigger = document.getElementById('f-sslmode') as HTMLButtonElement | null;
+  if (!trigger) return;
+  const sslmode = state.draft.sslmode || 'verify-full';
+  trigger.value = sslmode;
+  const label = trigger.querySelector('.cred-name');
+  const option = PG_SSL_OPTIONS.find(([value]) => value === sslmode);
+  if (label && option) label.textContent = option[1];
+}
+
 function updateAutomaticConnectionName(): void {
   if (state.sheet?.kind !== 'add-conn' || !state.draft.nameIsAutomatic) return;
   const input = document.getElementById('f-cname') as HTMLInputElement | null;
@@ -3596,6 +3644,10 @@ document.addEventListener('input', (e) => {
   if (target?.id === 'f-host') {
     state.draft.host = target.value;
     updateAutomaticConnectionName();
+    if (state.sheet?.kind === 'add-conn' && state.connType === 'pg'
+        && applyLoopbackTlsPrefill(state.draft)) {
+      updateSslmodeField();
+    }
   }
   if (target?.id === 'f-port') {
     state.draft.port = target.value;
