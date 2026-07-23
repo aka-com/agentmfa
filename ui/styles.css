@@ -1015,6 +1015,19 @@
    reads as the start of its group, not the tail of the previous card. */
 .add-section { margin-top: 10px; }
 .add-section .cat-section-h { margin-bottom: 10px; }
+/* The whole add view reads as secondary while it is open: subheadings and
+   the not-yet-added rows sit dimmed as a group. Dimming lives on the row
+   wrap so the entire row — icon, text, and action button — fades together.
+   The row being engaged (hover, keyboard focus, or an open connect menu)
+   comes back to full strength; "Soon" rows keep their own deeper dim. */
+.add-section .cat-section-h { opacity: .55; }
+.add-section .cat-rows > .cat-row-wrap:not(.is-soon),
+.add-section .cat-more { opacity: .55; transition: opacity .12s ease; }
+.add-section .cat-rows > .cat-row-wrap:not(.is-soon):hover,
+.add-section .cat-rows > .cat-row-wrap:not(.is-soon):focus-within,
+.add-section .cat-rows > .cat-row-wrap.menu-open,
+.add-section .cat-more:hover,
+.add-section .cat-more:focus-visible { opacity: 1; }
 .flat-cred { cursor: default; }
 .flat-tx .cat-meta-tools { vertical-align: -2px; }
 .sheet-actions .conn-delete-btn { margin-right: 0; }
