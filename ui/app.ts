@@ -197,6 +197,11 @@ interface AppState {
   connMenuOpen: string | null;
   /** Tools tab: the catalog "add" view is open (the flat list otherwise). */
   addToolOpen: boolean;
+  /** Tools tab: the connection whose detail panel is shown (null falls
+   * back to the first row that needs attention, then the first row). */
+  selectedConn: string | null;
+  /** Narrow layout only: the detail panel is open as a slide-over. */
+  connDetailOpen: boolean;
   copied: string | null;
   readyCopied: boolean;
   connectionReady: ConnectionReadyState | null;
@@ -293,6 +298,8 @@ const state: AppState = {
   agentMenuOpen: null,   // 'identity' while the key card's ⋯ menu is open
   connMenuOpen: null,    // connection id whose ⋯ options menu is open (Tools tab)
   addToolOpen: false,    // Tools tab: catalog add-view open (flat list otherwise)
+  selectedConn: null,    // Tools tab: detail-panel selection (null = automatic)
+  connDetailOpen: false, // narrow layout: detail panel open as a slide-over
 
   copied: null,          // secretId whose value was just copied (transient "Copied" flash)
   readyCopied: false,    // transient feedback on the setup-instructions status button
@@ -541,6 +548,10 @@ function secretsTableHTML(query = '') {
 // Kinds that can be issued a stable direct endpoint (a pasteable
 // DSN/socket/URL an unmodified tool uses). WebSocket lands later.
 const ENDPOINTABLE: Record<ConnectionType, boolean> = { pg: true, ssh: true, api: true, ws: false };
+
+// Below this width the Tools tab's detail panel is a slide-over rather
+// than a second column. Must match the styles.css breakpoint.
+const NARROW_LAYOUT = '(max-width: 920px)';
 
 /**
  * The on-screen form of an issued endpoint address: scheme, a masked
@@ -854,13 +865,16 @@ function connectionToolsChipHTML(c: ConnectionSummary): string {
           : 'All tools'}</span></button>`;
 }
 
-// The always-visible strip under a connected row: just the direct
-// endpoint and the row's one options menu. Everything identifying lives
-// on the row above; issues and test results render as lines beneath.
-function connPanelHTML(c: ConnectionSummary): string {
+// The Tools tab's detail panel: everything about connecting to the
+// selected tool that the compact rows no longer carry — the direct
+// endpoint, what brokering means for it, issues with their fixes, and the
+// row's one options menu. Beside the list when the window is wide;
+// a slide-over when it isn't.
+function connDetailHTML(c: ConnectionSummary): string {
   const test = state.connTests[c.id];
   const menuOpen = state.connMenuOpen === c.id;
   const enabled = c.agent_access.enabled;
+  const entry = entryForConnection(c);
   const mcpStatus = c.mcp_path ? state.mcpStatus[c.id] : undefined;
   const running = c.mcp_path
     ? Boolean(mcpStatus && mcpStatus.running)
@@ -879,10 +893,34 @@ function connPanelHTML(c: ConnectionSummary): string {
     ? `<div class="cc-issues">${issues.map((issue) =>
         `<div class="cc-issue"><span>${esc(issue.text)}</span>${issue.fix ?? ''}</div>`).join('')}</div>`
     : '';
-  return `<div class="conn-panel">
-    <div class="conn-panel-main">
-      ${endpointStripHTML(c)}
-      <span class="grow"></span>
+  // What pointing a client at the endpoint means, said once, per protocol.
+  const endpointHelp = c.type === 'pg'
+    ? 'Point any Postgres client at this address. The broker injects the password on the upstream leg — it never reaches the agent.'
+    : c.type === 'ssh'
+    ? 'Agents get an SSH agent socket; the broker signs only for this connection’s pinned user and server host key.'
+    : 'Point any HTTP client at this address. The broker adds the credential upstream — it never reaches the agent.';
+  const endpointSection = enabled && ENDPOINTABLE[c.type]
+    ? `<div class="cd-sec"><div class="cd-sec-lbl">Direct endpoint
+          <span class="cd-chip" title="The broker sits between agent and upstream and injects the credential">Brokered</span></div>
+        ${endpointStripHTML(c)}
+        <div class="cd-help">${endpointHelp}</div></div>`
+    : '';
+  // MCP tools reach agents through the broker's MCP surface, not an
+  // address to paste — the panel says so and hosts the tool picker.
+  const mcpSection = enabled && c.mcp_path
+    ? `<div class="cd-sec"><div class="cd-sec-lbl">Tools
+          <span class="cd-chip cd-chip-mcp" title="Served to agents over Multitool’s MCP server">Via MCP</span></div>
+        <div class="cd-mcp-row">${connectionToolsChipHTML(c)}</div>
+        <div class="cd-help">Agents call this app’s tools through Multitool’s MCP server; the sign-in stays in the broker.</div></div>`
+    : '';
+  const offNote = enabled ? ''
+    : '<div class="cd-help cd-off-note">Switched off — agents may not use this tool, and its endpoints are refused.</div>';
+  return `<div class="cd-head">
+      <span class="cat-ico kind-${connectionKind(c)}" aria-hidden="true">${entry ? ICONS[entry.icon] || '' : ''}</span>
+      <div class="cd-title"><b title="${escAttr(c.name)}">${esc(connectionRowName(c))}</b>
+        <span title="${escAttr(c.target)}">${esc(c.target)}</span></div>
+      <button class="icon-btn" title="Edit ${escAttr(connectionRowName(c))}"
+        aria-label="Edit ${escAttr(c.name)}" data-act="edit-conn" data-id="${c.id}">${ICONS.pencil}</button>
       <div class="tile-menu-wrap">
         <button class="icon-btn tile-menu-btn ${menuOpen ? 'on' : ''}" title="Tool options"
           aria-label="Options for ${escAttr(c.name)}" aria-haspopup="menu"
@@ -892,9 +930,12 @@ function connPanelHTML(c: ConnectionSummary): string {
           ${endpointItems}
         </div>` : ''}
       </div>
+      <button class="icon-btn cd-close" title="Close" aria-label="Close connection details"
+        data-act="close-conn-detail">${ICONS.x}</button>
     </div>
-    ${issuesBlock}${connTestResultHTML(c)}${mcpStatusHTML(c)}
-  </div>`;
+    ${issuesBlock}${offNote}${c.mcp_path
+      ? mcpSection + endpointSection
+      : endpointSection + mcpSection}${connTestResultHTML(c)}${mcpStatusHTML(c)}`;
 }
 
 // The status check's result, rendered under the MCP connection it belongs
@@ -1039,8 +1080,10 @@ function flatHealthHTML(c: ConnectionSummary): string {
   }
   const issues = connectionIssues(c);
   if (!issues.length) return '<span class="cc-dot ok" role="img" title="Ready" aria-label="Ready"></span>';
-  return `<span class="cc-health attn" title="${escAttr(issues.map((issue) => issue.text).join(' '))}">
-      <span class="cc-dot warn"></span><span>${issues.length} issue${issues.length === 1 ? '' : 's'}</span></span>`;
+  // A dot, not a badge: the count and the issues themselves are read in
+  // the detail panel the row opens.
+  return `<span class="cc-dot warn" role="img" title="${escAttr(issues.map((issue) => issue.text).join(' '))}"
+      aria-label="${issues.length} issue${issues.length === 1 ? '' : 's'}"></span>`;
 }
 
 function attentionBannerHTML(): string {
@@ -1059,21 +1102,37 @@ function attentionBannerHTML(): string {
       — ${esc(connectionTitle(first))}: ${esc(firstIssue.text)}${more}</span></button>`;
 }
 
+/** The connection the detail panel shows: the explicit selection while it
+ * still exists, else the first row that needs attention, else the first
+ * row — the panel never opens empty. */
+function selectedConnection(): ConnectionSummary | null {
+  if (!state.connections.length) return null;
+  const chosen = state.connections.find((c) => c.id === state.selectedConn);
+  if (chosen) return chosen;
+  const attn = state.connections.find(
+    (c) => c.agent_access.enabled && connectionIssues(c).length,
+  );
+  return attn ?? state.connections[0];
+}
+
 function flatConnRowHTML(c: ConnectionSummary): string {
   const kind = connectionKind(c);
   const live = liveCount(c);
   const entry = entryForConnection(c);
-  return `<div class="flat-conn-wrap" data-conn-row="${c.id}">
-    <div class="flat-conn-row">
+  const selected = selectedConnection()?.id === c.id;
+  // The row is the detail panel's opener; its own controls (the switch)
+  // sit inside and win the click.
+  return `<div class="flat-conn-wrap ${selected ? 'sel' : ''}" data-conn-row="${c.id}">
+    <div class="flat-conn-row" role="button" tabindex="0" data-act="select-conn" data-id="${c.id}"
+      aria-expanded="${selected}" aria-label="Show details for ${escAttr(connectionRowName(c))}">
       <span class="cat-ico kind-${kind}" aria-hidden="true">${entry ? ICONS[entry.icon] || '' : ''}</span>
       <div class="flat-tx"><b title="${escAttr(c.name)}">${esc(connectionRowName(c))}</b>
         <span>${connectionSublineHTML(c)}</span></div>
       ${live ? `<span class="cc-live">● ${live} live</span>` : ''}
       <div class="cat-conn-status">${flatHealthHTML(c)}</div>
       ${connToggleHTML(c)}
-      <button class="icon-btn conn-edit-btn" title="Edit ${escAttr(connectionRowName(c))}"
-        aria-label="Edit ${escAttr(c.name)}" data-act="edit-conn" data-id="${c.id}">${ICONS.pencil}</button>
-    </div>${connPanelHTML(c)}</div>`;
+      <span class="cat-chev flat-conn-chev" aria-hidden="true">${ICONS.chevronRight}</span>
+    </div></div>`;
 }
 
 
@@ -1121,8 +1180,7 @@ function connectionsHTML() {
     || (c.account || '').toLowerCase().includes(needle)
     || entryMatches(c));
   const connectedList = state.connections.length
-    ? `<div class="cat-section"><div class="cat-section-h">TOOLS</div>
-      <div class="cat-rows">${matching.length
+    ? `<div class="cat-section"><div class="cat-rows">${matching.length
         ? matching.map(flatConnRowHTML).join('')
         : '<div class="muted-note">No tools match your search.</div>'}</div></div>`
     : '';
@@ -1174,8 +1232,20 @@ function connectionsHTML() {
     ? `<input id="tool-search" class="cat-search" type="search" placeholder="Search tools…"
         aria-label="Search tools" value="${escAttr(state.toolSearch)}">`
     : '';
-  return readyCard + `<div class="catalog">${search}${attentionBannerHTML()}
-    ${connectedList}${addRow}${addOpen && !sections ? '<div class="muted-note">No tools match your search.</div>' : sections}
+  // Master–detail: the rows keep only what identifies a tool; everything
+  // about connecting to it lives in the panel beside the list. Narrow
+  // windows get the same panel as a slide-over instead (see styles).
+  const detail = selectedConnection();
+  const detailPane = detail
+    ? `<aside class="conn-detail-pane" aria-label="Connection details">${connDetailHTML(detail)}</aside>`
+    : '';
+  const backdrop = detail && state.connDetailOpen
+    ? '<button class="conn-detail-backdrop" data-act="close-conn-detail" aria-label="Close connection details" tabindex="-1"></button>'
+    : '';
+  return readyCard + `<div class="catalog ${state.connDetailOpen ? 'detail-open' : ''}">${search}${attentionBannerHTML()}
+    <div class="tools-split"><div class="tools-list">
+      ${connectedList}${addRow}${addOpen && !sections ? '<div class="muted-note">No tools match your search.</div>' : sections}
+    </div>${detailPane}</div>${backdrop}
   </div>`;
 }
 
@@ -3504,9 +3574,23 @@ document.addEventListener('click', async (e) => {
       }
       break;
     }
+    case 'select-conn':
+      state.selectedConn = id;
+      // In the wide layout the panel is always on screen and this flag is
+      // inert; in the narrow layout it opens the slide-over.
+      state.connDetailOpen = true;
+      render();
+      break;
+    case 'close-conn-detail':
+      state.connDetailOpen = false;
+      render();
+      break;
     case 'focus-attn': {
-      // Pure navigation, no state: scroll the offending row into view and
-      // flash it so the eye lands on the issue the banner summarized.
+      // The issue and its fix live in the detail panel, so the banner
+      // selects the offending row, then scrolls to and flashes it.
+      state.selectedConn = id;
+      state.connDetailOpen = true;
+      render();
       const row = document.querySelector(`[data-conn-row="${CSS.escape(id)}"]`);
       if (row) {
         row.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -3961,6 +4045,14 @@ document.addEventListener('click', async (e) => {
 });
 
 document.addEventListener('keydown', (e) => {
+  // Divs acting as buttons (connection rows, the add-tools row) activate
+  // from the keyboard like the real thing.
+  if ((e.key === 'Enter' || e.key === ' ') && e.target instanceof HTMLElement
+      && e.target.getAttribute('role') === 'button' && e.target.dataset.act) {
+    e.preventDefault();
+    e.target.click();
+    return;
+  }
   // Ctrl-Tab / Ctrl-Shift-Tab cycle the left-nav tabs when the main window is
   // open (a modal sheet keeps focus).
   if (e.key === 'Tab' && e.ctrlKey && !state.sheet) {
@@ -3977,6 +4069,11 @@ document.addEventListener('keydown', (e) => {
     if (state.catalogActionMenuOpen) { state.catalogActionMenuOpen = null; render(); return; }
     if (state.agentMenuOpen) { state.agentMenuOpen = null; render(); return; }
     if (state.connMenuOpen) { state.connMenuOpen = null; render(); return; }
+    // The detail slide-over only exists in the narrow layout; in the wide
+    // layout the flag is inert and Escape passes through.
+    if (state.connDetailOpen && window.matchMedia(NARROW_LAYOUT).matches) {
+      state.connDetailOpen = false; render(); return;
+    }
     if (state.menuOpen) { state.menuOpen = false; render(); return; }
     if (state.formMenuOpen) {
       const menuId = state.formMenuOpen;
