@@ -6,12 +6,13 @@ import {
   CONNECT_CLIENTS,
   CONNECT_MODE_LABELS,
   START_OPTIONS,
-  START_PROMISE,
   clientMatchesLabel,
   connectClientById,
   connectModesFor,
+  directStartTask,
   firstTaskPrompt,
   resolveConnectMode,
+  startKindLabel,
   startOptionById,
   startProgress,
   startTask,
@@ -60,10 +61,6 @@ test('the picker omits Custom API and keeps labeled Custom MCP last', () => {
   );
   assert.equal(START_OPTIONS.at(-1)?.label, 'Custom MCP');
   assert.equal(START_OPTIONS.filter((option) => option.showPickerLabel).length, 1);
-  assert.equal(
-    START_PROMISE,
-    "Give your agent a whole app's tools — GitHub, Notion, anything with MCP.",
-  );
 });
 
 test('progress tracks add, connect, and enable independently', () => {
@@ -107,8 +104,24 @@ test('the ready nudge and the walkthrough resolve to the same first task', () =>
   for (const type of ['pg', 'ssh'] as const) {
     const option = START_OPTIONS.find((o) => o.connType === type && !o.mcp);
     assert.ok(option, `an option exists for ${type}`);
-    assert.equal(firstTaskPrompt('prod', type), option!.task('prod'));
+    assert.equal(firstTaskPrompt('prod', type), `Using my Multitool tool "prod", ${option!.taskBody}`);
   }
+});
+
+test('the direct-mode task leads with the endpoint, secret included', () => {
+  const postgres = startOptionById('postgres');
+  const progress = startProgress(postgres, [], false);
+  const dsn = 'postgresql://app:end_s3cret@/app?host=~/.aka/endpoints/e1&port=5432';
+  const withDsn = directStartTask(postgres, progress, { dsn });
+  assert.ok(withDsn.startsWith(`Connect with this Postgres DSN (secret included): ${dsn}`));
+  assert.match(withDsn, /10 largest tables/);
+  // SSH endpoints retain no DSN — the lead points at the agent socket.
+  const ssh = startOptionById('ssh');
+  const socket = directStartTask(ssh, startProgress(ssh, [], false), { dsn: null });
+  assert.match(socket, /^Connect with the SSH agent socket/);
+  assert.match(socket, /SSH_AUTH_SOCK/);
+  // No endpoint issued yet: fall back to the tool-name prompt.
+  assert.equal(directStartTask(postgres, progress, null), startTask(postgres, progress));
 });
 
 test('an unenumerated type (ws) gets a generic read-only first task', () => {
@@ -149,6 +162,18 @@ test('Direct is offered first, and only for kinds with a direct endpoint', () =>
   for (const mode of connectModesFor(startOptionById('postgres'))) {
     assert.ok(CONNECT_MODE_LABELS[mode], mode);
   }
+  // Other MCP client stays a guides card, not a step-2 mode.
+  assert.equal(connectModesFor(startOptionById('postgres')).includes('mcp'), false);
+  assert.equal(connectModesFor(startOptionById('notion')).includes('mcp'), false);
+});
+
+test('picker kind labels: MCP for MCP-backed, API for plain APIs, none otherwise', () => {
+  assert.equal(startKindLabel(startOptionById('postgres')), '');
+  assert.equal(startKindLabel(startOptionById('ssh')), '');
+  assert.equal(startKindLabel(startOptionById('slack')), 'API');
+  assert.equal(startKindLabel(startOptionById('github')), 'MCP');
+  // Custom MCP already says MCP in its name.
+  assert.equal(startKindLabel(startOptionById('mcp')), '');
 });
 
 test('the picked mode survives while offered and falls back when not', () => {

@@ -14,9 +14,9 @@ import {
 } from '/src/catalog';
 import type { ConnectionPreset } from '/src/catalog';
 import {
-  CONNECT_CLIENTS, CONNECT_MODE_LABELS, START_OPTIONS, START_PROMISE, clientMatchesLabel,
-  connectClientById, connectModesFor, firstTaskPrompt, resolveConnectMode, startOptionById,
-  startProgress, startTask,
+  CONNECT_CLIENTS, CONNECT_MODE_LABELS, START_OPTIONS, clientMatchesLabel,
+  connectClientById, connectModesFor, directStartTask, firstTaskPrompt, resolveConnectMode,
+  startKindLabel, startOptionById, startProgress, startTask,
 } from '/src/getting-started';
 import type {
   ConnectClient, ConnectClientEnv, ConnectModeId, ConnectStep, Platform, StartOption,
@@ -1200,11 +1200,13 @@ function secretsHTML(): string {
     ? `<input id="secret-search" class="cat-search" type="search" placeholder="Search secrets…"
         aria-label="Search secrets" value="${escAttr(state.secretSearch)}">`
     : '';
-  const section = rows.length
-    ? `<div class="cat-section"><div class="cat-section-h">SECRETS</div>
-        <div class="cat-rows">${rows.map((entry) => catalogRowHTML(entry)).join('')}</div></div>`
+  // Each store renders as its own card so the Keychain credentials and the
+  // 1Password placeholder read as separate groups, not rows of one list.
+  const sections = rows.length
+    ? rows.map((entry) =>
+      `<div class="cat-section"><div class="cat-rows">${catalogRowHTML(entry)}</div></div>`).join('')
     : '<div class="muted-note">No secrets match your search.</div>';
-  return `<div class="catalog">${search}${section}
+  return `<div class="catalog">${search}${sections}
   </div>`;
 }
 
@@ -1340,22 +1342,26 @@ function startConnectPaneHTML(mode: ConnectModeId, option: StartOption, progress
     case 'direct': {
       if (!conn) {
         return `<p>Direct endpoints are issued per tool — add the ${esc(option.label)} tool above first.</p>
-          ${actions('<button class="btn primary sm" disabled>Issue direct endpoint</button>')}`;
+          <div class="start-actions"><button class="btn primary sm" disabled>Issue direct endpoint</button></div>`;
       }
       const endpoint = conn.agent_access.endpoint ?? null;
-      const lead = endpoint
-        ? `A direct endpoint is issued for “${esc(conn.name)}”. ${conn.type === 'pg'
-            ? 'Copy its address (secret included) from the tool’s row anytime — reissue to rotate the secret.'
-            : 'Its socket path was shown at issue — reissue to get a new one.'}`
-        : conn.type === 'pg'
-        ? `Issue a local DSN for “${esc(conn.name)}” that any unmodified Postgres client can use —
-            psql, drivers, ORMs.`
-        : `Issue a signing-agent socket for “${esc(conn.name)}”. Plain ssh, git, and rsync work
-            unmodified; the private key never leaves this machine.`;
-      const label = !endpoint ? 'Issue direct endpoint'
-        : conn.type === 'pg' ? 'Reissue (new secret)' : 'Reissue';
-      return `<p>${lead}</p>
-        ${actions(`<button class="btn primary sm" data-act="issue-endpoint" data-conn="${conn.id}">${label}</button>`)}`;
+      if (!endpoint) {
+        const lead = conn.type === 'pg'
+          ? `Issue a local DSN for “${esc(conn.name)}” that any unmodified Postgres client can use —
+              psql, drivers, ORMs.`
+          : `Issue a signing-agent socket for “${esc(conn.name)}”. Plain ssh, git, and rsync work
+              unmodified; the private key never leaves this machine.`;
+        return `<p>${lead}</p>
+          <div class="start-actions"><button class="btn primary sm" data-act="issue-endpoint"
+            data-conn="${conn.id}">Issue direct endpoint</button></div>`;
+      }
+      // The endpoint itself is the deliverable: the same strip as the tool's
+      // row (click the address to copy). Reissue/revoke stay in that row's
+      // options menu.
+      const lead = `A direct endpoint is issued for “${esc(conn.name)}”. ${conn.type === 'pg'
+        ? 'Click the address to copy it, secret included — reissue from the tool’s row to rotate the secret.'
+        : 'Its socket path was shown at issue — reissue from the tool’s row to get a new one.'}`;
+      return `<p>${lead}</p>${endpointStripHTML(conn)}`;
     }
   }
 
@@ -1398,11 +1404,14 @@ function startWalkthroughHTML(): string {
   const picker = START_OPTIONS.map((candidate) => {
     const visibleLabel = candidate.showPickerLabel
       ? `<span class="start-pick-label">${esc(candidate.label)}</span>` : '';
+    const kind = startKindLabel(candidate);
+    const kindBadge = kind ? `<span class="start-pick-kind">${kind}</span>` : '';
+    const fullLabel = kind ? `${candidate.label} ${kind}` : candidate.label;
     return `<button class="start-pick ${candidate.showPickerLabel ? 'has-label' : ''} ${candidate.id === option.id ? 'on' : ''}"
       aria-pressed="${candidate.id === option.id}"
-      aria-label="${escAttr(candidate.label)}" title="${escAttr(candidate.label)}"
+      aria-label="${escAttr(fullLabel)}" title="${escAttr(fullLabel)}"
       data-act="start-option" data-id="${candidate.id}">
-      <span class="start-pick-icon" aria-hidden="true">${ICONS[candidate.icon] || ''}</span>${visibleLabel}</button>`;
+      <span class="start-pick-icon" aria-hidden="true">${ICONS[candidate.icon] || ''}</span>${visibleLabel}${kindBadge}</button>`;
   }).join('');
 
   const step = (n: number, title: string, done: boolean, body: string): string =>
@@ -1430,7 +1439,14 @@ function startWalkthroughHTML(): string {
     <div class="start-picker" role="group" aria-label="How your agent connects">${modePicker}</div>
     ${startConnectPaneHTML(connectMode, option, progress)}`;
 
-  const task = startTask(option, progress);
+  // Over the direct endpoint the agent talks straight to the DSN/socket, so
+  // the task leads with that endpoint (secret included) instead of the tool.
+  const directConn = progress.toolName
+    ? state.connections.find((candidate) => candidate.name === progress.toolName) ?? null
+    : null;
+  const task = connectMode === 'direct'
+    ? directStartTask(option, progress, directConn?.agent_access.endpoint)
+    : startTask(option, progress);
   const wireBody = `<p>Tools are enabled for all agents when you add them.</p>
     <pre class="setup-instructions"><code>${esc(task)}</code></pre>
     <div class="start-actions">
@@ -1440,10 +1456,9 @@ function startWalkthroughHTML(): string {
 
   return `<div class="start-hero">
       <h3>Connect your agent to everything</h3>
-      <p class="start-promise">${esc(START_PROMISE)}</p>
     </div>
     <ol class="start-steps">
-      ${step(1, option.connType ? `Add the ${option.label} tool` : `Add an ${option.label}`, progress.added, addBody)}
+      ${step(1, 'Select a tool to connect', progress.added, addBody)}
       ${step(2, 'Connect your agent', progress.connected, connectBody)}
       ${step(3, 'Ask for something useful', progress.wired, wireBody)}
     </ol>`;

@@ -22,11 +22,13 @@ export interface StartOption {
   catalogId: string | null;
   /** This option is backed by an MCP connection. */
   mcp?: boolean;
-  /** The first ask — chosen to be immediately useful, not a hello-world. */
-  task: (toolName: string) => string;
+  /**
+   * The first ask's body — chosen to be immediately useful, not a
+   * hello-world. The lead-in (the broker tool's name, or the direct
+   * endpoint itself) is prepended by startTask/directStartTask.
+   */
+  taskBody: string;
 }
-
-export const START_PROMISE = "Give your agent a whole app's tools — GitHub, Notion, anything with MCP.";
 
 export const START_OPTIONS: StartOption[] = [
   {
@@ -35,9 +37,7 @@ export const START_OPTIONS: StartOption[] = [
     icon: 'postgres',
     connType: 'pg',
     catalogId: 'postgres',
-    task: (name) =>
-      `Using my Multitool tool "${name}", list the 10 largest tables with their row ` +
-      `counts, and flag any foreign key that has no index.`,
+    taskBody: `list the 10 largest tables with their row counts, and flag any foreign key that has no index.`,
   },
   {
     id: 'ssh',
@@ -45,9 +45,7 @@ export const START_OPTIONS: StartOption[] = [
     icon: 'terminal',
     connType: 'ssh',
     catalogId: 'ssh',
-    task: (name) =>
-      `Using my Multitool tool "${name}", report disk and memory usage, then show the ` +
-      `last 20 lines of any log that contains errors.`,
+    taskBody: `report disk and memory usage, then show the last 20 lines of any log that contains errors.`,
   },
   {
     id: 'notion',
@@ -56,9 +54,7 @@ export const START_OPTIONS: StartOption[] = [
     connType: 'api',
     catalogId: 'notion',
     mcp: true,
-    task: (name) =>
-      `Using my Multitool tool "${name}", summarize the pages I changed this week and ` +
-      `list any open action items.`,
+    taskBody: `summarize the pages I changed this week and list any open action items.`,
   },
   {
     id: 'github',
@@ -67,9 +63,7 @@ export const START_OPTIONS: StartOption[] = [
     connType: 'api',
     catalogId: 'github',
     mcp: true,
-    task: (name) =>
-      `Using my Multitool tool "${name}", summarize the pull requests and issues that ` +
-      `changed this week.`,
+    taskBody: `summarize the pull requests and issues that changed this week.`,
   },
   {
     id: 'slack',
@@ -77,9 +71,7 @@ export const START_OPTIONS: StartOption[] = [
     icon: 'slack',
     connType: 'api',
     catalogId: 'slack',
-    task: (name) =>
-      `Using my Multitool tool "${name}", summarize the important conversations from ` +
-      `this week and list the decisions that were made.`,
+    taskBody: `summarize the important conversations from this week and list the decisions that were made.`,
   },
   {
     id: 'stripe',
@@ -88,9 +80,7 @@ export const START_OPTIONS: StartOption[] = [
     connType: 'api',
     catalogId: 'stripe',
     mcp: true,
-    task: (name) =>
-      `Using my Multitool tool "${name}", summarize payment activity from the last seven ` +
-      `days and flag anything that needs attention.`,
+    taskBody: `summarize payment activity from the last seven days and flag anything that needs attention.`,
   },
   {
     id: 'sentry',
@@ -99,9 +89,7 @@ export const START_OPTIONS: StartOption[] = [
     connType: 'api',
     catalogId: 'sentry',
     mcp: true,
-    task: (name) =>
-      `Using my Multitool tool "${name}", summarize the highest-impact unresolved issues ` +
-      `from this week.`,
+    taskBody: `summarize the highest-impact unresolved issues from this week.`,
   },
   {
     id: 'vercel',
@@ -110,9 +98,7 @@ export const START_OPTIONS: StartOption[] = [
     connType: 'api',
     catalogId: 'mcp-vercel',
     mcp: true,
-    task: (name) =>
-      `Using my Multitool tool "${name}", summarize this week’s deployments and explain ` +
-      `any failures.`,
+    taskBody: `summarize this week’s deployments and explain any failures.`,
   },
   {
     id: 'mcp',
@@ -122,14 +108,22 @@ export const START_OPTIONS: StartOption[] = [
     connType: 'api',
     catalogId: 'mcp',
     mcp: true,
-    task: (name) =>
-      `Using my Multitool tool "${name}", list the tools it exposes, then use them to ` +
-      `summarize what changed this week.`,
+    taskBody: `list the tools it exposes, then use them to summarize what changed this week.`,
   },
 ];
 
 export function startOptionById(id: string): StartOption {
   return START_OPTIONS.find((option) => option.id === id) ?? START_OPTIONS[0];
+}
+
+/**
+ * Suffix shown after the tool's name in the step-1 picker: MCP-backed tools
+ * say MCP, plain API integrations say API, databases and SSH say nothing.
+ * Skipped when the name already carries it (Custom MCP).
+ */
+export function startKindLabel(option: StartOption): string {
+  const kind = option.mcp ? 'MCP' : option.connType === 'api' ? 'API' : '';
+  return kind && !option.label.includes(kind) ? kind : '';
 }
 
 /**
@@ -149,8 +143,9 @@ export const CONNECT_MODE_LABELS: Record<ConnectModeId, string> = {
   cli: 'Anything else (HTTP API)',
 };
 
+// Other MCP clients still have a guides card; step 2 keeps to named clients.
 const SHARED_KEY_MODES: ConnectModeId[] =
-  ['claude-code', 'claude-desktop', 'codex', 'mcp', 'cli'];
+  ['claude-code', 'claude-desktop', 'codex', 'cli'];
 
 /* ---- per-client definitions -------------------------------------------- */
 // One definition per client drives both step 2 of the walkthrough (the
@@ -236,7 +231,7 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
     mark: 'CC',
     icon: 'anthropic',
     labels: ['claude-code'],
-    lead: () => 'Run this once in a terminal. Claude Code finds the broker and key itself.',
+    lead: () => 'Run this once in a terminal. Claude Code will find the broker and key itself.',
     copyLabel: 'Copy command',
     snippet: SNIPPETS['claude-code'],
     steps: (env) => [
@@ -260,7 +255,7 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
     icon: 'anthropic',
     labels: ['claude-desktop'],
     lead: (env) =>
-      `Merge this into ${CLAUDE_DESKTOP_CONFIG_PATH[env.platform]}, then restart Claude Desktop.`,
+      `Add this to ${CLAUDE_DESKTOP_CONFIG_PATH[env.platform]}, then restart Claude.`,
     copyLabel: 'Copy config',
     snippet: SNIPPETS['claude-desktop'],
     steps: (env) => [
@@ -283,7 +278,7 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
     mark: 'CX',
     icon: 'openai',
     labels: ['codex', 'codex-desktop'],
-    lead: () => 'Add this to ~/.codex/config.toml — Codex Desktop shares its config with the Codex CLI.',
+    lead: () => 'Add this to ~/.codex/config.toml. This covers both Codex Desktop and Codex CLI.',
     copyLabel: 'Copy config',
     snippet: SNIPPETS.codex,
     steps: (env) => [
@@ -400,7 +395,25 @@ export function startProgress(
 
 /** The example task, with a placeholder while no tool exists yet. */
 export function startTask(option: StartOption, progress: StartProgress): string {
-  return option.task(progress.toolName ?? 'my-tool');
+  return `Using my Multitool tool "${progress.toolName ?? 'my-tool'}", ${option.taskBody}`;
+}
+
+/**
+ * Step 3's prompt when the agent connects over the direct endpoint: the
+ * lead-in hands the agent the endpoint itself — the full DSN, secret
+ * included, or the issued SSH agent socket — instead of naming a broker
+ * tool. Falls back to the tool-name prompt while no endpoint is issued.
+ */
+export function directStartTask(
+  option: StartOption,
+  progress: StartProgress,
+  endpoint: { dsn?: string | null } | null | undefined,
+): string {
+  if (!endpoint) return startTask(option, progress);
+  const lead = endpoint.dsn
+    ? `Connect with this Postgres DSN (secret included): ${endpoint.dsn}`
+    : 'Connect with the SSH agent socket Multitool issued — set SSH_AUTH_SOCK to the socket path from the issue sheet.';
+  return `${lead}\nThen ${option.taskBody}`;
 }
 
 /**
@@ -413,8 +426,10 @@ export function firstTaskPrompt(name: string, type: ConnectionType): string {
   const option = START_OPTIONS.find(
     (candidate) => ['postgres', 'ssh'].includes(candidate.id) && candidate.connType === type,
   );
-  if (option) return option.task(name);
-  // Branded APIs and protocols without a walkthrough use a generic read-only
-  // ask rather than borrowing one particular provider's copy.
-  return `Using my Multitool tool "${name}", make one read-only request and summarize what comes back.`;
+  const body = option
+    ? option.taskBody
+    // Branded APIs and protocols without a walkthrough use a generic
+    // read-only ask rather than borrowing one particular provider's copy.
+    : 'make one read-only request and summarize what comes back.';
+  return `Using my Multitool tool "${name}", ${body}`;
 }
