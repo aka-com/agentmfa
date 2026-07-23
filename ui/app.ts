@@ -177,6 +177,7 @@ interface AppState {
   connectOpen: string | null;
   agentMenuOpen: string | null;
   connMenuOpen: string | null;
+  epMenuOpen: string | null;
   copied: string | null;
   readyCopied: boolean;
   connectionReady: ConnectionReadyState | null;
@@ -267,6 +268,7 @@ const state: AppState = {
   connectOpen: 'claude-code', // connection-guide card that starts expanded
   agentMenuOpen: null,   // 'identity' while the key card's ⋯ menu is open
   connMenuOpen: null,    // connection id whose ⋯ options menu is open (Tools tab)
+  epMenuOpen: null,      // connection id whose endpoint ⋮ menu is open
 
   copied: null,          // secretId whose value was just copied (transient "Copied" flash)
   readyCopied: false,    // transient feedback on the setup-instructions status button
@@ -540,14 +542,20 @@ function endpointStripHTML(c: ConnectionSummary): string {
           : `<span class="ghost-copy">${ICONS.copy}<span>Copy</span></span>`}</span>
       </button>`
     : '<span class="ep-addr ep-addr-hidden">Agent socket — shown at issue</span>';
+  const menuOpen = state.epMenuOpen === c.id;
   return `<div class="ep-strip">
     <span class="ep-ico" title="Direct endpoint">${ICONS.plugSm}</span>
     ${address}
     <span class="ep-spacer"></span>
-    <button class="btn ghost sm ep-act" data-act="reissue-endpoint-ask" data-conn="${c.id}"
-      title="Reissue endpoint" aria-label="Reissue endpoint for ${escAttr(c.name)}">${ICONS.refresh}</button>
-    <button class="btn ghost sm ep-act rv" data-act="revoke-endpoint-ask" data-conn="${c.id}"
-      title="Revoke endpoint" aria-label="Revoke endpoint for ${escAttr(c.name)}">${ICONS.x}</button>
+    <div class="tile-menu-wrap ep-menu-wrap">
+      <button class="icon-btn ep-menu-btn ${menuOpen ? 'on' : ''}" title="Endpoint options"
+        aria-label="Endpoint options for ${escAttr(c.name)}" aria-haspopup="menu"
+        aria-expanded="${menuOpen}" data-act="toggle-ep-menu" data-conn="${c.id}">${ICONS.ellipsisVertical}</button>
+      ${menuOpen ? `<div class="tile-menu" role="menu" aria-label="Endpoint options for ${escAttr(c.name)}">
+        <button class="menu-item" role="menuitem" data-act="reissue-endpoint-ask" data-conn="${c.id}">${ICONS.refresh} Reissue endpoint…</button>
+        <button class="menu-item danger" role="menuitem" data-act="revoke-endpoint-ask" data-conn="${c.id}">${ICONS.x} Revoke endpoint…</button>
+      </div>` : ''}
+    </div>
   </div>`;
 }
 
@@ -1360,7 +1368,7 @@ function endpointConfirmHTML(): string {
     <div class="sheet wide confirm-sheet" role="dialog" aria-modal="true" aria-labelledby="ep-confirm-title">
       <h3 id="ep-confirm-title">${reissue ? 'Reissue this endpoint?' : 'Revoke this endpoint?'}</h3>
       <p>${reissue
-        ? `${esc(name)} gets a new secret; the current one stops working immediately.`
+        ? 'You’ll get a new secret to paste into your tools. The current secret stops working the moment you reissue.'
         : `Tools using ${esc(name)}’s direct address lose access immediately.`}</p>
       <div class="sheet-actions">
         <button class="btn" data-act="confirm-cancel">Cancel</button>
@@ -2596,6 +2604,19 @@ async function saveConn(): Promise<void> {
         if (entry && !state.toolsOpen.includes(entry.id)) state.toolsOpen.push(entry.id);
         render();
         void runConnectionTest(saved.id);
+        // Endpointable kinds get their direct endpoint issued on creation —
+        // the one-time sheet still has to show, since the secret (or SSH
+        // socket path) leaves the broker only at issue.
+        if (ENDPOINTABLE[saved.type] && saved.agent_access.enabled && !saved.agent_access.endpoint) {
+          try {
+            const info = await invoke('issue_endpoint', { connectionId: saved.id });
+            state.sheet = { kind: 'endpoint-issued', endpoint: info };
+            await refresh('all');
+          } catch {
+            // The row still offers "Issue direct endpoint…" as the fallback.
+          }
+          render();
+        }
       }
     } else {
       void runConnectionTest(sheet.id ?? '');
@@ -2708,6 +2729,11 @@ document.addEventListener('click', async (e) => {
     if (!btn) { render(); return; }
     // fall through: the clicked action runs and its render reflects the close
   }
+  if (state.epMenuOpen && !target?.closest('.ep-menu-wrap')) {
+    state.epMenuOpen = null;
+    if (!btn) { render(); return; }
+    // fall through: the clicked action runs and its render reflects the close
+  }
   if (state.formMenuOpen && !target?.closest('.cred-select') && !target?.closest('.cred-menu')) {
     state.formMenuOpen = null;
     if (!btn) { render(); return; }
@@ -2725,6 +2751,7 @@ document.addEventListener('click', async (e) => {
       state.agentMenuOpen = null;
       state.catalogActionMenuOpen = null;
       state.connMenuOpen = null;
+      state.epMenuOpen = null;
       render();
       resetScroll();
       break;
@@ -2747,6 +2774,12 @@ document.addEventListener('click', async (e) => {
       state.connMenuOpen = state.connMenuOpen === id ? null : id;
       render();
       break;
+    case 'toggle-ep-menu': {
+      const connectionId = btn.dataset.conn || '';
+      state.epMenuOpen = state.epMenuOpen === connectionId ? null : connectionId;
+      render();
+      break;
+    }
     case 'issue-endpoint':
     case 'reissue-endpoint-confirm': {
       const connectionId = btn.dataset.conn || '';
@@ -2763,10 +2796,12 @@ document.addEventListener('click', async (e) => {
       break;
     }
     case 'reissue-endpoint-ask':
+      state.epMenuOpen = null;
       state.confirm = { kind: 'reissue-endpoint', id: btn.dataset.conn || '' };
       render();
       break;
     case 'revoke-endpoint-ask':
+      state.epMenuOpen = null;
       state.confirm = { kind: 'revoke-endpoint', id: btn.dataset.conn || '' };
       render();
       break;
@@ -3407,6 +3442,7 @@ document.addEventListener('keydown', (e) => {
     if (state.catalogActionMenuOpen) { state.catalogActionMenuOpen = null; render(); return; }
     if (state.agentMenuOpen) { state.agentMenuOpen = null; render(); return; }
     if (state.connMenuOpen) { state.connMenuOpen = null; render(); return; }
+    if (state.epMenuOpen) { state.epMenuOpen = null; render(); return; }
     if (state.menuOpen) { state.menuOpen = false; render(); return; }
     if (state.formMenuOpen) {
       const menuId = state.formMenuOpen;
@@ -3681,6 +3717,7 @@ async function boot() {
     state.catalogActionMenuOpen = null;
     state.agentMenuOpen = null;
     state.connMenuOpen = null;
+    state.epMenuOpen = null;
     render();
   });
 }

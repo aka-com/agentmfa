@@ -218,7 +218,9 @@
   font-size: 13.5px; color: var(--ink-2);
 }
   .menu-item:hover{ background: var(--hover); }
-  .menu-item svg{ flex: 0 0 auto; color: var(--muted-2); }
+  /* Icons come in mixed intrinsic sizes; a fixed square keeps every row's
+     glyph and label on the same vertical lines. */
+  .menu-item svg{ flex: 0 0 15px; width: 15px; height: 15px; color: var(--muted-2); }
   /* ---- segmented tabs (dropdown) --------------------------------------- */
 .seg{ display: flex; gap: 2px; margin: 0 14px 10px; background: var(--seg-bg); border-radius: 8px; padding: 2px; }
   .seg-btn{
@@ -1068,10 +1070,7 @@
    copy — the secret-value dim-and-overlay effect), and the reissue/revoke
    pair (each behind a confirm dialog). The plug matches the copy button's
    spec — 14px stroke icon in the muted icon color. */
-.ep-strip{
-  display: flex; align-items: center; gap: 8px; margin-top: 9px; padding-top: 9px;
-  border-top: 1px solid var(--line-soft);
-}
+.ep-strip{ display: flex; align-items: center; gap: 8px; margin-top: 9px; }
 .ep-strip .ep-ico{ flex: 0 0 auto; line-height: 0; color: var(--muted-2); }
 .ep-strip .ep-addr-wrap{
   position: relative; top: -1px; flex: 0 1 auto; min-width: 0; display: inline-flex;
@@ -1083,15 +1082,18 @@
   white-space: nowrap; color: var(--ink-2); font-family: inherit; font-size: 12px;
 }
 .ep-strip .ep-addr-wrap .ep-addr{ transition: opacity .14s ease; }
-.ep-strip .ep-addr-wrap:hover .ep-addr,
+/* The address stays half as dimmed on hover as a masked secret — it is not
+   sensitive, so it should stay legible under the copy affordance. */
+.ep-strip .ep-addr-wrap:hover .ep-addr{ opacity: .6; }
 .ep-strip .ep-addr-wrap.is-copied .ep-addr{ opacity: .22; }
 .ep-strip .ep-addr-wrap:hover .ghost-copy,
 .ep-strip .ep-addr-wrap:focus-visible .ghost-copy{ opacity: 1; }
 .ep-strip .ep-addr-hidden{ color: var(--muted); }
 .ep-strip .ep-spacer{ flex: 1; }
-/* Icon-only ghost pair: refresh = reissue, x = revoke. Reissue is routine
-   maintenance, not a call to action: icon-btn monochrome, not accent. */
-.ep-strip .ep-act{ line-height: 0; padding: 4px 6px; color: var(--muted-2); }
-.ep-strip .ep-act:hover{ background: var(--hover-2); color: var(--ink-2); }
-.ep-strip .ep-act.rv{ color: var(--danger-ink); }
-.ep-strip .ep-act.rv:hover{ background: var(--danger-wash); }
+/* One ⋮ menu owns reissue/revoke; the trigger is a fixed square so the
+   glyph centers exactly. */
+.ep-menu-btn{
+  width: 24px; height: 24px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.ep-menu-btn.on{ background: var(--hover-2); color: var(--ink-2); }
