@@ -285,8 +285,8 @@ const state: AppState = {
   toolSearch: '',        // Add-tools catalog search query
   secretSearch: '',      // Secrets catalog search query
   toolsOpen: [],         // catalog entry ids whose connections are expanded
-  showAllTools: false,   // checkbox state; checking expands every tool row
-  showAllSecrets: false, // checkbox state; checking expands every secret row
+  showAllTools: true,    // checkbox state; checking expands every tool row (on by default)
+  showAllSecrets: true,  // checkbox state; checking expands every secret row (on by default)
   catalogActionMenuOpen: null, // catalog id whose quick-connect chevron menu is open
   sectionsExpanded: [],  // sections showing beyond their connected/minimum rows
   startOption: 'postgres', // which walkthrough the Get started tab shows
@@ -364,6 +364,7 @@ async function refresh(which: RefreshTarget = 'all'): Promise<void> {
   }
   if (which === 'all' || which === 'settings') jobs.push(loadSettings());
   await Promise.all(jobs);
+  syncShowAllExpansion();
   render();
 }
 async function load<K extends CommandName>(
@@ -1307,6 +1308,16 @@ function expandableCatalogIds(): string[] {
     .filter((entry) => entry.via === 'builtin'
       || connectionsForEntry(entry, state.connections).length > 0)
     .map((entry) => entry.id);
+}
+
+// "Show all" starts checked, but expansion lives in per-row state
+// (toolsOpen), so rows that appear after the checkbox was last toggled —
+// data finishing loading, a new connection, a tab switch — must fold in
+// for the checked box to keep its promise.
+function syncShowAllExpansion(): void {
+  const on = state.tab === 'secrets' ? state.showAllSecrets : state.showAllTools;
+  if (!on) return;
+  state.toolsOpen = [...new Set([...state.toolsOpen, ...expandableCatalogIds()])];
 }
 
 // "Show all" expands every configured row on the page; there is nothing to
@@ -2973,6 +2984,7 @@ document.addEventListener('click', async (e) => {
       state.catalogActionMenuOpen = null;
       state.connMenuOpen = null;
       state.epMenuOpen = null;
+      syncShowAllExpansion();
       render();
       resetScroll();
       break;
@@ -4064,7 +4076,7 @@ async function boot() {
     const { agent, service } = ev.payload;
     state.tab = 'connections';
     state.toolSearch = service;
-    state.toolsOpen = [];
+    state.toolsOpen = state.showAllTools ? expandableCatalogIds() : [];
     toast(`🤖 ${agent} asked to connect “${service}”`);
     render();
   });
