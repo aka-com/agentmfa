@@ -149,6 +149,12 @@ pub struct Broker {
     /// surfaced only in open responses' DSNs.
     pub(crate) pg_proxy_port: std::sync::OnceLock<u16>,
     pub(crate) http_client: reqwest::Client,
+    /// Last successfully-listed upstream MCP tools per connection. The
+    /// per-wiring tool picker falls back to this when a live listing can't be
+    /// fetched (an OAuth access token lapsed, the upstream is briefly
+    /// unreachable), so curating and saving a tool subset never forces a
+    /// reconnect. Runtime only; enforcement on `tools/call` is always by name.
+    mcp_tools_cache: Mutex<HashMap<Uuid, Vec<crate::mcp::McpToolInfo>>>,
     /// Admission backstop acquired before direct HTTP request bodies are
     /// read. Each listener has a narrower semaphore as well.
     pub(crate) endpoint_uploads: Arc<tokio::sync::Semaphore>,
@@ -286,6 +292,7 @@ impl Broker {
             manage_bus,
             health,
             http_client,
+            mcp_tools_cache: Mutex::new(HashMap::new()),
             _instance_lock: instance_lock,
         });
         // Keeps OAuth-minted MCP access tokens fresh in the background; the
@@ -680,6 +687,8 @@ impl Broker {
             // A health result for the old destination says nothing about
             // the new one.
             self.health.forget(id);
+            // Nor do the old destination's advertised tools.
+            self.forget_mcp_tools_cache(id);
         }
         let mut entry = AuditEntry::new(
             AuditKind::ConnectionUpdated,
@@ -729,6 +738,7 @@ impl Broker {
         }
         let conn = self.store.delete_connection(id)?;
         self.health.forget(id);
+        self.forget_mcp_tools_cache(id);
         let dropped = self.access.remove_for_connection(id)?;
         let endpoints = self.endpoints.remove_for_connection(id)?;
         self.teardown_endpoints(&endpoints);
@@ -1751,12 +1761,39 @@ impl Broker {
         let connection = self.store.connection_by_id(id)?;
         // Same pre-authorization as tests: this reads the connection's own
         // credential to talk to its own pinned upstream.
-        crate::authorization::scope(
+        let live = crate::authorization::scope(
             true,
             crate::mcp::list_tools(&self.store, &self.http_client, &connection),
         )
-        .await
-        .map_err(CoreError::InvalidConnectionConfig)
+        .await;
+        match live {
+            Ok(tools) => {
+                // Remember the last good listing so a later open can still
+                // curate the subset once the credential has lapsed.
+                self.mcp_tools_cache
+                    .lock()
+                    .unwrap()
+                    .insert(*id, tools.clone());
+                Ok(tools)
+            }
+            Err(error) => {
+                // A live listing needs a valid credential; when it can't be
+                // had — a lapsed OAuth token, a brief upstream outage — fall
+                // back to the last good listing rather than forcing a
+                // reconnect just to change which tools agents may call.
+                if let Some(cached) = self.mcp_tools_cache.lock().unwrap().get(id).cloned() {
+                    return Ok(cached);
+                }
+                Err(CoreError::InvalidConnectionConfig(error))
+            }
+        }
+    }
+
+    /// Drop a connection's cached MCP tool listing. Called when the pinned
+    /// destination changes (the old server's tools say nothing about the new
+    /// one) or the connection is removed.
+    fn forget_mcp_tools_cache(&self, id: &Uuid) {
+        self.mcp_tools_cache.lock().unwrap().remove(id);
     }
 
     /* ------------------------- shared identity (UI) ------------------------ */

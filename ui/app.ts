@@ -1878,30 +1878,38 @@ function wiringToolsSheet(): string {
   const wt = state.wiringTools;
   if (!wt) return '';
   const title = `Tools agents may call on ${wt.connectionName}`;
+  const allChecked = wt.selected === null;
+  const isChecked = (name: string): boolean => allChecked || (wt.selected || []).includes(name);
   let body = '';
   if (wt.loading) {
     body = '<div class="cc-test running">Asking the server for its tools…</div>';
-  } else if (wt.error) {
-    body = `<div class="cc-test err">${ICONS.circleX}<span>${esc(wt.error)}</span></div>`;
   } else {
     const tools = wt.tools || [];
-    const allChecked = wt.selected === null;
-    const isChecked = (name: string): boolean => allChecked || (wt.selected || []).includes(name);
     const rows = tools.map((tool) => `<label class="wt-row">
         <input type="checkbox" data-act="wt-toggle" data-tool="${escAttr(tool.name)}"
           ${isChecked(tool.name) ? 'checked' : ''}>
         <span class="wt-name"><code>${esc(tool.name)}</code>
           ${tool.description ? `<span class="wt-desc">${esc(tool.description)}</span>` : ''}</span>
       </label>`).join('');
-    // A curated subset may name tools the server no longer advertises;
-    // keep them visible so unchecking them is possible.
+    // A curated subset may name tools the live list doesn't include — the
+    // server stopped advertising them, or the list couldn't be fetched at
+    // all (a lapsed sign-in). Keep them visible and editable so the subset
+    // can still be trimmed and saved without reconnecting first.
     const stale = (wt.selected || []).filter((name) => !tools.some((tool) => tool.name === name));
+    const staleNote = wt.error ? 'Saved earlier — reconnect to confirm it still exists'
+      : 'No longer advertised by the server';
     const staleRows = stale.map((name) => `<label class="wt-row wt-stale">
         <input type="checkbox" data-act="wt-toggle" data-tool="${escAttr(name)}" checked>
         <span class="wt-name"><code>${esc(name)}</code>
-          <span class="wt-desc">No longer advertised by the server</span></span>
+          <span class="wt-desc">${staleNote}</span></span>
       </label>`).join('');
-    body = `<label class="wt-row wt-all">
+    // When the live list is unavailable, the picker still works off the saved
+    // selection: keep or trim it and save, no sign-in required. A soft note
+    // explains that reconnecting later restores the full list.
+    const notice = wt.error
+      ? `<div class="cc-test warn">${ICONS.circleX}<span>Couldn’t refresh the tool list from the server — showing your saved selection. Reconnect the tool to see every tool.</span></div>`
+      : '';
+    body = `${notice}<label class="wt-row wt-all">
         <input type="checkbox" data-act="wt-all" ${allChecked ? 'checked' : ''}>
         <span class="wt-name"><b>All tools</b>
           <span class="wt-desc">New tools the server adds later are callable too</span></span>

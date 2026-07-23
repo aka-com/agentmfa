@@ -1166,6 +1166,7 @@
 .cc-test svg { flex: 0 0 auto; }
 .cc-test.ok { color: var(--ok-ink); }
 .cc-test.err { color: var(--danger-ink); }
+.cc-test.warn { color: var(--amber-ink); }
 .cc-test.running { opacity: .8; }
 /* Resources the server advertises, listed under the connection the same
    way credentials and wirings are. */
