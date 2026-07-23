@@ -303,6 +303,7 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
     name: 'Other MCP client',
     sub: 'Any MCP client that speaks HTTP — no stdio needed',
     mark: '⌁',
+    icon: 'plug',
     lead: () =>
       "For MCP clients that speak HTTP: connect to the broker's mcp_url with this computer's key as the bearer token.",
     copyLabel: 'Copy setup instructions',
@@ -324,6 +325,7 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
     name: 'Anything else (HTTP API)',
     sub: 'curl, scripts, your own agent loop — HTTP over the local socket',
     mark: '>_',
+    icon: 'terminal',
     lead: () =>
       "Paste this into any agent. It reads this computer's shared key and gets full API docs from the broker.",
     copyLabel: 'Copy setup instructions',

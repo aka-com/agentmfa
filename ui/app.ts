@@ -1195,7 +1195,7 @@ function startViewToggleHTML(): string {
     `<button class="seg-btn ${state.startView === view ? 'on' : ''}"
       aria-pressed="${state.startView === view}" data-act="start-view" data-id="${view}">${label}</button>`;
   return `<div class="start-view-toggle"><div class="seg" role="group" aria-label="Get started view">
-    ${btn('walkthrough', 'Walkthrough')}${btn('guides', 'Connection guides')}</div></div>`;
+    ${btn('walkthrough', 'Quick start')}${btn('guides', 'Connection guides')}</div></div>`;
 }
 
 function startHTML(): string {
