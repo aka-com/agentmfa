@@ -575,6 +575,8 @@ async fn identity(State(state): State<AppState>, _authed: ManageAuthed) -> Respo
 /// The agent key's plaintext, for the shell-side "copy key" affordance.
 /// Holders of the manage token could read the token file on the host
 /// anyway; this keeps the Connect page's copy button working remotely.
+/// (`LocalBackend::agent_key` audits the release, so remote copies land
+/// in the activity log exactly once.)
 async fn agent_key(State(state): State<AppState>, _authed: ManageAuthed) -> Response {
     respond(
         state

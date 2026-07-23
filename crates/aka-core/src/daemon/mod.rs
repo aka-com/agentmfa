@@ -557,6 +557,26 @@ pub async fn serve_with(
     // crashed broker left behind, mirroring the stale control-socket check
     // above.
     crate::capability::ssh::sweep_stale_sockets(&paths.ssh_agent_dir());
+    // The optional TCP control-plane listener is bound before any serving
+    // task starts: a bad --listen address fails startup as a diagnosis, and
+    // a failure past this point must not leave live data-plane tasks behind
+    // (a dropped JoinHandle detaches its task rather than aborting it).
+    let tcp_listener = match &options.listen {
+        Some(addr) => {
+            let tcp_listener = tokio::net::TcpListener::bind(addr).await?;
+            let bound = tcp_listener.local_addr()?;
+            if !bound.ip().is_loopback() {
+                tracing::warn!(
+                    %bound,
+                    "control plane bound to a non-loopback address; every \
+                     network client with the key can use enabled tools — \
+                     front this with TLS (proxy or tunnel)"
+                );
+            }
+            Some((tcp_listener, bound))
+        }
+        None => None,
+    };
     // The WS bridge data plane: loopback-only, OS-assigned port.
     let (ws_bridge_port, bridge_task) = crate::capability::ws::start_bridge(broker.clone()).await?;
     let _ = broker.ws_bridge_port.set(ws_bridge_port);
@@ -576,23 +596,11 @@ pub async fn serve_with(
     // run, so a stable DSN survives a broker restart with no agent lifecycle.
     broker.rebind_endpoints().await;
 
-    // The optional TCP listener serves the same router, marked so pairing
-    // is refused and discovery renders for network clients. Bound before
-    // the UDS serving task so a bad address fails startup as a diagnosis,
-    // not a background log line.
+    // The TCP listener (bound above) serves the same router, marked so
+    // pairing is refused and discovery renders for network clients.
     broker.set_public_url(options.public_url.clone());
-    let (tcp_addr, tcp_task) = match &options.listen {
-        Some(addr) => {
-            let tcp_listener = tokio::net::TcpListener::bind(addr).await?;
-            let bound = tcp_listener.local_addr()?;
-            if !bound.ip().is_loopback() {
-                tracing::warn!(
-                    %bound,
-                    "control plane bound to a non-loopback address; every \
-                     network client with the key can use enabled tools — \
-                     front this with TLS (proxy or tunnel)"
-                );
-            }
+    let (tcp_addr, tcp_task) = match tcp_listener {
+        Some((tcp_listener, bound)) => {
             let tcp_app = router_for(
                 broker.clone(),
                 Transport::Tcp {
@@ -1204,7 +1212,9 @@ async fn proxy_mcp(State(state): State<AppState>, request: axum::extract::Reques
         if hop_by_hop(name.as_str()) {
             continue;
         }
-        headers.insert(name.clone(), value.clone());
+        // append, not insert: iteration yields one entry per value, and a
+        // repeated field must keep all of them.
+        headers.append(name.clone(), value.clone());
     }
     let stream = http_body_util::BodyDataStream::new(body);
     let upstream = state

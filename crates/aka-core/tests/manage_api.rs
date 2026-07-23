@@ -312,6 +312,15 @@ async fn identity_settings_and_activity_surface_over_the_manage_api() {
     let (status, body) = h.manage("GET", "/v1/manage/identity/agent-key", None).await;
     assert_eq!(status, 200);
     assert!(body["token"].as_str().unwrap().starts_with("aka_"));
+    // The key's release is audited (in `LocalBackend::agent_key`) — a
+    // manage-token holder cannot read it without leaving a trace.
+    let (_, activity) = h.manage("GET", "/v1/manage/activity", None).await;
+    assert!(
+        activity.as_array().unwrap().iter().any(|entry| entry["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("Shared key copied"))),
+        "agent-key release missing from the activity log: {activity}"
+    );
 
     let (status, body) = h
         .manage(
