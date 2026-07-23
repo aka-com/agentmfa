@@ -751,6 +751,38 @@ pub async fn test_connection(
         .map_err(|e| e.to_string())
 }
 
+/// Test an add-form draft before anything is persisted. A typed-in
+/// credential rides along for a full sign-in; a chosen stored secret is
+/// never read here (the core's draft test refuses the store by design), so
+/// this command needs no gate.
+#[tauri::command]
+pub async fn test_connection_draft(
+    state: State<'_, AppState>,
+    mut input: ConnectionInput,
+) -> FormResult<aka_core::broker::ConnectionTestReport> {
+    let kind = input.kind.clone();
+    let _ = input.new_secret_name.take();
+    let typed_secret = input.new_secret_value.take().map(Zeroizing::new);
+    // The reachability test performs no key exchange, so a pending SSH
+    // import needs no resolution for a draft dial.
+    let _ = input.ssh_import_id.take();
+    let _ = input.identity_file.take();
+    let spec = input.into_spec()?;
+    state
+        .broker
+        .ui_test_connection_draft(spec, typed_secret)
+        .await
+        .map_err(|error| {
+            FormError::from_core(
+                error,
+                FormContext::Connection {
+                    kind: &kind,
+                    includes_new_secret: false,
+                },
+            )
+        })
+}
+
 /* -------------------------------- MCP ------------------------------------ */
 
 /// Begin the MCP sign-in flow (OAuth with discovery + PKCE). The token
@@ -1086,6 +1118,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         edit_connection,
         delete_connection,
         test_connection,
+        test_connection_draft,
         start_mcp_auth,
         get_mcp_auth,
         cancel_mcp_auth,

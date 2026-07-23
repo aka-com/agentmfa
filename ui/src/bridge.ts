@@ -625,6 +625,29 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         : `GET https://${c.host}/ answered HTTP 200 OK`;
       return { ok, detail };
     }
+    case 'test_connection_draft': {
+      const i = args.input as ConnectionInput;
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      const host = String(i.host ?? '');
+      const sslmode = String(i.sslmode ?? 'verify-full');
+      const loopback = /^(localhost|127\.|\[?::1)/i.test(host.trim());
+      // Deterministic mock: a loopback host with a TLS-requiring mode fails
+      // the way a stock local Postgres (no TLS) would; 'unreachable' in the
+      // host fails to connect; everything else passes.
+      if (/unreachable/.test(host)) {
+        return { ok: false, detail: `tcp connect failed: could not reach ${host}` };
+      }
+      if (i.type === 'pg' && loopback && sslmode !== 'disable' && sslmode !== 'prefer') {
+        return { ok: false, detail: `upstream declined TLS (sslmode=${sslmode})` };
+      }
+      if (i.type === 'ssh') {
+        return { ok: true, detail: `${host}:${i.port ?? 22} answered with SSH-2.0-OpenSSH_9.8. Login and host key are not verified by this test.` };
+      }
+      const detail = i.secret_id
+        ? `Reached ${host} and TLS checks passed; the saved credential is verified after adding`
+        : `Signed in to ${i.dbname} as ${i.user}`;
+      return { ok: true, detail };
+    }
     case 'start_mcp_auth': {
       const draft = args.input as unknown as McpAuthDraft;
       if (!draft.reauth_connection_id && db.connections.some((c) => c.name === draft.name)) {

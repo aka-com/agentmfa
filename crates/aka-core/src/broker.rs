@@ -607,6 +607,64 @@ impl Broker {
         Ok(conn)
     }
 
+    /// Test a connection *draft* — an add-form's config before anything is
+    /// persisted. The invariant that makes this safe without a gate: it
+    /// never reads the secret store. A credential typed into the form is
+    /// used for a full sign-in (it came from the same user gesture that is
+    /// about to store it); a draft that references an already-stored secret
+    /// gets a reachability + TLS dial only, with the credential exchange
+    /// deferred to after the gated add. No health is recorded — there is no
+    /// connection yet.
+    pub async fn ui_test_connection_draft(
+        &self,
+        spec: crate::store::ConnectionSpec,
+        typed_secret: Option<SecretValue>,
+    ) -> Result<ConnectionTestReport> {
+        const TEST_TIMEOUT: Duration = Duration::from_secs(15);
+        let credential_deferred = !spec.secrets.is_empty();
+        let now = chrono::Utc::now();
+        let connection = Connection {
+            id: Uuid::new_v4(),
+            name: spec.name,
+            config: spec.config,
+            secrets: Vec::new(),
+            account: None,
+            oauth: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let test = async {
+            match connection.config.kind() {
+                ConnectionKind::Pg => {
+                    crate::capability::pg::test_draft_upstream(
+                        &connection,
+                        typed_secret.as_ref().map(|value| value.as_str()),
+                        credential_deferred,
+                    )
+                    .await
+                }
+                // The reachability test performs no key exchange, so the
+                // draft's key — stored or typed — is simply not consulted.
+                ConnectionKind::Ssh => {
+                    crate::capability::ssh::test_reachability(&self.store, &connection).await
+                }
+                _ => Err("draft tests cover Postgres and SSH connections".to_string()),
+            }
+        };
+        let outcome = match tokio::time::timeout(TEST_TIMEOUT, test).await {
+            Ok(result) => result,
+            Err(_) => Err(format!(
+                "no answer within {} seconds",
+                TEST_TIMEOUT.as_secs()
+            )),
+        };
+        let (ok, detail) = match outcome {
+            Ok(detail) => (true, detail),
+            Err(detail) => (false, detail),
+        };
+        Ok(ConnectionTestReport { ok, detail })
+    }
+
     /// UI-initiated connectivity/credential test against the connection's
     /// pinned destination. The credential travels only on the upstream leg,
     /// exactly as it would for a brokered agent request; only a pass/fail

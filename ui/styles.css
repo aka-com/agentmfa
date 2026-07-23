@@ -1065,6 +1065,18 @@
 .cat-meta-tools svg{ color: var(--muted-2); }
 .cat-meta-cred{ display: inline-flex; align-items: center; gap: 5px; }
 .cat-meta-cred svg{ color: var(--muted-2); }
+/* Draft-test verdict in the add sheet: between the fields (below the
+   Advanced toggle) and the action row. Same voice as the row-level .cc-test,
+   sized for the sheet. */
+.draft-test{
+  display: flex; align-items: flex-start; gap: 6px; margin-top: 14px;
+  font-size: 12px; color: var(--muted);
+}
+.draft-test.err{ color: var(--danger-ink); }
+.draft-test.err b{ font-weight: 600; }
+.draft-test svg{ flex: 0 0 auto; margin-top: 1px; }
+.draft-test .draft-test-fix{ margin-top: 8px; }
+.draft-test .draft-test-hint{ margin-top: 6px; color: var(--muted); }
 /* Direct-endpoint lifecycle strip: a hairline footer inside the row. Absent:
    just the issue button. Issued: plug icon, the pasteable address (click to
    copy — the secret-value dim-and-overlay effect), and the reissue/revoke

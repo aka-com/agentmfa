@@ -186,6 +186,11 @@ interface AppState {
   connectionReady: ConnectionReadyState | null;
   connectionTaskCopied: boolean;
   connTests: Record<string, ConnectionTestState>;
+  /** Verdict of testing the add-form draft; null when no test has run. */
+  draftTest: ConnectionTestState | null;
+  /** Armed by a failed draft test: the next Add saves without re-testing.
+   * Any edit to the form disarms it, so changed details test again. */
+  draftTestOverride: boolean;
   /** Live MCP sign-in session shown by the mcp-auth sheet. */
   mcpAuth: McpAuthState | null;
   /** The submitted draft, kept for Try again. */
@@ -278,6 +283,8 @@ const state: AppState = {
   connectionReady: null,
   connectionTaskCopied: false,
   connTests: {},         // connectionId -> in-flight/last test result (transient)
+  draftTest: null,
+  draftTestOverride: false,
   mcpAuth: null,
   mcpAuthDraft: null,
   mcpAuthOpenedUrl: null,
@@ -1937,10 +1944,25 @@ function connSheet(editing: boolean): string {
         <button class="btn" data-act="discard-keep">Keep editing</button>
         <button class="btn danger" data-act="discard-confirm">Discard</button>
       </div></div>` : '';
+  // The draft-test verdict sits between the fields (below the Advanced
+  // toggle) and the action row: the failure, a TLS-shaped fix when the
+  // detail identifies one, and the promise that Add now saves anyway.
+  const dt = !editing ? state.draftTest : null;
+  const tlsDeclined = Boolean(dt?.detail && /declined TLS/i.test(dt.detail));
+  const certFailed = Boolean(dt?.detail && /certificate/i.test(dt.detail));
+  const draftTestHTML = !dt ? ''
+    : dt.running
+    ? '<div class="draft-test running">Testing the connection…</div>'
+    : `<div class="draft-test err">${ICONS.circleX}<div>
+        <b>Connection test failed.</b> ${esc(dt.detail || '')}
+        ${tlsDeclined ? `<div class="draft-test-fix"><button type="button" class="btn sm" data-act="draft-test-disable-tls">Set TLS mode to Disable</button></div>` : ''}
+        ${certFailed && t === 'pg' ? '<div class="draft-test-hint">Trust the server’s CA under Advanced → Trusted CA bundle, or pick a different TLS mode.</div>' : ''}
+        <div class="draft-test-hint">Press “Add ${esc(label)}” again to save it without a passing test.</div>
+      </div></div>`;
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
-    <div class="sheet wide"><h3>${title}</h3>${fields}
+    <div class="sheet wide"><h3>${title}</h3>${fields}${draftTestHTML}
     <div class="sheet-actions"><button class="btn" data-act="sheet-cancel">Cancel</button>
-      <button class="btn primary" data-act="save-conn">${editing ? 'Save' : oauthSelected ? 'Sign in & connect' : `Add ${label}`}</button></div></div>${discardConfirm}`;
+      <button class="btn primary" data-act="save-conn" ${dt?.running ? 'disabled' : ''}>${editing ? 'Save' : oauthSelected ? 'Sign in & connect' : `Add ${label}`}</button></div></div>${discardConfirm}`;
 }
 
 /* ------------------------- MCP sign-in sheet ------------------------------ */
@@ -2421,6 +2443,7 @@ async function saveSecret(): Promise<void> {
 }
 
 async function saveConn(): Promise<void> {
+  if (state.draftTest?.running) return;
   captureDrafts();
   const sheet = state.sheet;
   if (!sheet || (sheet.kind !== 'add-conn' && sheet.kind !== 'edit-conn')) return;
@@ -2607,6 +2630,27 @@ async function saveConn(): Promise<void> {
     input.template = injectionTemplate || null;
     if (selectedSecret) input.secret_id = selectedSecret.id;
   }
+  // Adding a Postgres/SSH tool dials it first, so a wrong TLS mode (or an
+  // unreachable host) surfaces while the form is still open. A failed test
+  // is advice, not a wall: it arms the override and the next Add saves
+  // as-entered.
+  if (adding && (t === 'pg' || t === 'ssh') && !state.draftTestOverride) {
+    state.draftTest = { running: true };
+    render();
+    let report: { ok: boolean; detail: string };
+    try {
+      report = await invoke('test_connection_draft', { input });
+    } catch (error) {
+      report = { ok: false, detail: formErrorMessage(error) };
+    }
+    if (!report.ok) {
+      state.draftTest = { running: false, ok: false, detail: report.detail };
+      state.draftTestOverride = true;
+      render();
+      return;
+    }
+    state.draftTest = null;
+  }
   try {
     if (adding) await invoke('add_connection', { input });
     else await invoke('edit_connection', { id: sheet.id ?? '', input });
@@ -2669,6 +2713,8 @@ function closeSheet() {
   state.sheetErrors = {};
   state.sheetBaseline = null;
   state.confirmDiscard = false;
+  state.draftTest = null;
+  state.draftTestOverride = false;
   state.formMenuOpen = null;
   state.connPreset = null;
   render();
@@ -3118,6 +3164,14 @@ document.addEventListener('click', async (e) => {
       state.connAdvancedOpen = draftUsesAdvancedFields(state.draft, state.connType);
       render(); focusField('f-cname'); break;
     }
+    case 'draft-test-disable-tls':
+      captureDrafts();
+      state.draft.sslmode = 'disable';
+      state.draft.sslmodeIsAutomatic = false;
+      state.draftTest = null;
+      state.draftTestOverride = false;
+      render();
+      break;
     case 'toggle-conn-advanced':
       captureDrafts();
       state.connAdvancedOpen = !state.connAdvancedOpen;
@@ -3142,6 +3196,9 @@ document.addEventListener('click', async (e) => {
       else if (menuId === 'f-sslmode') {
         state.draft.sslmode = id;
         state.draft.sslmodeIsAutomatic = false;
+        // A changed TLS mode voids the failed verdict: the next Add re-tests.
+        state.draftTest = null;
+        state.draftTestOverride = false;
       }
       else if (menuId === 'c-identity-file') state.draft.identityFile = id;
       render(false);
@@ -3654,6 +3711,12 @@ document.addEventListener('input', (e) => {
     updateAutomaticConnectionName();
   }
   if (target?.id === 'c-new-secret-name') updateCredentialNameWarning();
+  // Any edit to the add form disarms a failed draft test's override: the
+  // details changed, so the next Add tests the new details instead of
+  // saving unverified. The stale verdict stays visible until then.
+  if (target && state.sheet?.kind === 'add-conn' && state.draftTestOverride) {
+    state.draftTestOverride = false;
+  }
   if (key && state.sheetErrors[key]) {
     delete state.sheetErrors[key];
     render();

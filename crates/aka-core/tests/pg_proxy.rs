@@ -1069,3 +1069,66 @@ async fn pipelined_first_query_survives_the_handoff() {
     assert!(saw_auth_ok && saw_key_data);
     assert_eq!(row.as_deref(), Some("1"));
 }
+
+/* ----------------------------- draft testing ------------------------------ */
+
+#[tokio::test]
+async fn draft_test_signs_in_with_a_typed_credential_and_defers_stored_ones() {
+    let h = harness(BrokerConfig::default()).await;
+    let fake = fake_pg(FakeAuth::Cleartext).await;
+    let spec = |secrets| ConnectionSpec {
+        name: "draft-db".into(),
+        config: ConnectionConfig::Pg {
+            host: "127.0.0.1".into(),
+            port: fake.port,
+            dbname: "app_production".into(),
+            user: "app".into(),
+            sslmode: PgSslMode::Disable,
+            trusted_ca_bundle_path: None,
+        },
+        secrets,
+    };
+
+    // A credential typed into the form performs the full sign-in.
+    let report = h
+        .broker
+        .ui_test_connection_draft(spec(vec![]), Some(Zeroizing::new(REAL_PG_PASSWORD.into())))
+        .await
+        .unwrap();
+    assert!(report.ok, "{}", report.detail);
+    assert!(report.detail.contains("Signed in"), "{}", report.detail);
+
+    // A chosen *stored* secret is never sent pre-add: the dial stops where
+    // the server asks for a password and reports a qualified pass.
+    h.broker
+        .store
+        .add_secret("STORED_PG", Zeroizing::new(REAL_PG_PASSWORD.into()))
+        .unwrap();
+    let stored = h.broker.store.secret_by_name("STORED_PG").unwrap();
+    let report = h
+        .broker
+        .ui_test_connection_draft(spec(vec![stored.id]), None)
+        .await
+        .unwrap();
+    assert!(report.ok, "{}", report.detail);
+    assert!(
+        report.detail.contains("verified after adding"),
+        "{}",
+        report.detail
+    );
+
+    // No credential at all against a password-demanding server is a real
+    // failure, as is a wrong typed password.
+    let report = h
+        .broker
+        .ui_test_connection_draft(spec(vec![]), None)
+        .await
+        .unwrap();
+    assert!(!report.ok);
+    let report = h
+        .broker
+        .ui_test_connection_draft(spec(vec![]), Some(Zeroizing::new("wrong".into())))
+        .await
+        .unwrap();
+    assert!(!report.ok);
+}

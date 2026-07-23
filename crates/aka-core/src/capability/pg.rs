@@ -1119,9 +1119,35 @@ struct UpstreamSession {
 /// and drive the client side of the startup/auth exchange up to ReadyForQuery.
 /// The client's non-auth startup parameters (application_name,
 /// client_encoding, options, search_path, …) are forwarded for fidelity.
+/// The distinguished "server wants a password we don't have" failure, so the
+/// draft test can tell it apart from a real refusal.
+const NEEDS_PASSWORD: &str = "upstream requires a password, but this connection has no secret";
+
 async fn dial_upstream(
     store: &Arc<Store>,
     connection: &Connection,
+    client_params: &[(String, String)],
+) -> Result<UpstreamSession, String> {
+    let password = match connection.secrets.first() {
+        Some(secret_id) => Some(
+            store
+                .secret_value(secret_id)
+                .await
+                .map_err(|e| format!("credential unavailable: {e}"))?,
+        ),
+        None => None,
+    };
+    dial_upstream_with_password(
+        connection,
+        password.as_deref().map(String::as_str),
+        client_params,
+    )
+    .await
+}
+
+async fn dial_upstream_with_password(
+    connection: &Connection,
+    password: Option<&str>,
     client_params: &[(String, String)],
 ) -> Result<UpstreamSession, String> {
     let ConnectionConfig::Pg {
@@ -1134,15 +1160,6 @@ async fn dial_upstream(
     } = &connection.config
     else {
         return Err("not a postgres connection".into());
-    };
-    let password = match connection.secrets.first() {
-        Some(secret_id) => Some(
-            store
-                .secret_value(secret_id)
-                .await
-                .map_err(|e| format!("credential unavailable: {e}"))?,
-        ),
-        None => None,
     };
     let (stream, cert_digest) =
         tls_connect(host, *port, *sslmode, trusted_ca_bundle_path.as_deref()).await?;
@@ -1189,10 +1206,7 @@ async fn dial_upstream(
                 0 => break, // AuthenticationOk
                 3 => {
                     // AuthenticationCleartextPassword
-                    let password = password.as_ref().ok_or_else(|| {
-                        "upstream requires a password, but this connection has no secret"
-                            .to_string()
-                    })?;
+                    let password = password.ok_or_else(|| NEEDS_PASSWORD.to_string())?;
                     let mut p = Vec::new();
                     put_cstr(&mut p, password);
                     stream
@@ -1202,10 +1216,7 @@ async fn dial_upstream(
                 }
                 5 => {
                     // AuthenticationMD5Password: md5(md5(password + user) + salt).
-                    let password = password.as_ref().ok_or_else(|| {
-                        "upstream requires a password, but this connection has no secret"
-                            .to_string()
-                    })?;
+                    let password = password.ok_or_else(|| NEEDS_PASSWORD.to_string())?;
                     if payload.len() < 8 {
                         return Err("short md5 auth request".into());
                     }
@@ -1220,10 +1231,7 @@ async fn dial_upstream(
                 10 => {
                     // AuthenticationSASL, SCRAM-SHA-256(-PLUS), the design's
                     // primary path.
-                    let password = password.as_ref().ok_or_else(|| {
-                        "upstream requires a password, but this connection has no secret"
-                            .to_string()
-                    })?;
+                    let password = password.ok_or_else(|| NEEDS_PASSWORD.to_string())?;
                     sasl_auth(
                         &mut stream,
                         &payload[4..],
@@ -1296,6 +1304,37 @@ pub async fn test_upstream(store: &Arc<Store>, connection: &Connection) -> Resul
     let _ = upstream.stream.write_all(&frame(b'X', &[])).await;
     let _ = upstream.stream.shutdown().await;
     Ok(format!("Signed in to {dbname} as {user}"))
+}
+
+/// Test an unsaved draft, never touching the secret store. A password typed
+/// into the form is used for a full sign-in — it already traveled from the
+/// same form that is about to persist it. A *stored* secret chosen for the
+/// draft is deliberately not sent: attaching it to a new destination is what
+/// the add gate confirms, so the dial stops where the server asks for it —
+/// which still exercises everything TLS (`credential_deferred` turns that
+/// stop into a qualified pass instead of a failure).
+pub async fn test_draft_upstream(
+    connection: &Connection,
+    typed_password: Option<&str>,
+    credential_deferred: bool,
+) -> Result<String, String> {
+    let ConnectionConfig::Pg {
+        host, dbname, user, ..
+    } = &connection.config
+    else {
+        return Err("not a postgres connection".into());
+    };
+    match dial_upstream_with_password(connection, typed_password, &[]).await {
+        Ok(mut upstream) => {
+            let _ = upstream.stream.write_all(&frame(b'X', &[])).await;
+            let _ = upstream.stream.shutdown().await;
+            Ok(format!("Signed in to {dbname} as {user}"))
+        }
+        Err(detail) if credential_deferred && detail == NEEDS_PASSWORD => Ok(format!(
+            "Reached {host} and TLS checks passed; the saved credential is verified after adding"
+        )),
+        Err(detail) => Err(detail),
+    }
 }
 
 /// md5 auth: `"md5" + md5hex(md5hex(password + user) + salt4)`.
