@@ -1124,31 +1124,13 @@ async fn tls_connect(
     }
     let (tcp, answer) = connect_and_probe_tls(host, port).await?;
     match answer {
-        b'S' => match wrap_tls(host, tcp, sslmode, ca_bundle_path).await {
-            Ok(stream) => Ok(stream),
-            Err(e)
-                if matches!(sslmode, PgSslMode::VerifyCa | PgSslMode::VerifyFull)
-                    && e.kind == TestErrorKind::CertUnverified =>
-            {
-                Err(TestError::new(
-                    e.kind,
-                    format!(
-                        "{}. Edit the tool to trust the server's CA (Advanced → \
-                         Trusted CA bundle) or lower its TLS mode to \"require\" \
-                         to connect without certificate verification",
-                        e.detail
-                    ),
-                ))
-            }
-            Err(e) => Err(e),
-        },
+        b'S' => wrap_tls(host, tcp, sslmode, ca_bundle_path).await,
         b'N' if sslmode == PgSslMode::Prefer => Ok((PgStream::Plain(tcp), None)),
         b'N' => Err(TestError::new(
             TestErrorKind::TlsDeclined,
             format!(
                 "The server refused to start TLS, but this connection's TLS \
-                 mode (\"{}\") requires it. Edit the tool and set TLS mode to \
-                 \"prefer\" or \"disable\" if this server can't use TLS",
+                 mode (\"{}\") requires it",
                 sslmode_name(sslmode)
             ),
         )),

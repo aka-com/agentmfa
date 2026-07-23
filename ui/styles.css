@@ -1123,10 +1123,13 @@
   margin-top: 4px; max-width: 520px;
 }
 .cc-issue {
-  display: flex; align-items: center; gap: 10px;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 8px;
   font-size: 12px; color: var(--amber-ink);
 }
-.cc-issue > span { flex: 1 1 auto; min-width: 0; }
+.cc-issue > span { min-width: 0; }
+/* Fixes sit under the message, not beside it: a wrapping row of compact
+   outline buttons (a targeted fix, then the retry). */
+.cc-issue-fixes { display: flex; flex-wrap: wrap; gap: 6px; }
 .cat-conns .sec-table { margin: 0; }
 /* Credential rows share the darker card surface of their "Saved
    credentials" parent row. */

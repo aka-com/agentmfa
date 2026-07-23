@@ -701,7 +701,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         return { ok: false, detail: `Could not reach ${host}:${i.port ?? 5432}: connection refused`, kind: 'unreachable' };
       }
       if (i.type === 'pg' && loopback && sslmode !== 'disable' && sslmode !== 'prefer') {
-        return { ok: false, detail: `The server refused to start TLS, but this connection's TLS mode ("${sslmode}") requires it. Edit the tool and set TLS mode to "prefer" or "disable" if this server can't use TLS`, kind: 'tls_declined' };
+        return { ok: false, detail: `The server refused to start TLS, but this connection's TLS mode ("${sslmode}") requires it`, kind: 'tls_declined' };
       }
       if (i.type === 'ssh') {
         return { ok: true, detail: `${host}:${i.port ?? 22} answered with SSH-2.0-OpenSSH_9.8. Login and host key are not verified by this test.` };

@@ -763,6 +763,19 @@ function connectionKind(c: ConnectionSummary): ConnKind {
   return c.mcp_path ? 'mcp' : 'api';
 }
 
+// The fix affordances an issue row can carry: compact outline buttons,
+// stacked under the issue text. A fix names the action ("Edit…"), never the
+// remedy in prose — the message stays diagnosis-only so it reads the same in
+// the banner, the tooltip, and the panel.
+const fixBtn = (act: string, id: string, label: string): string =>
+  `<button class="btn outline sm cat-meta-fix" data-act="${act}" data-id="${id}">${label}</button>`;
+/** Open the connection editor — the fix for a TLS/cert mismatch. */
+const editFix = (c: ConnectionSummary): string => fixBtn('edit-conn', c.id, 'Edit…');
+/** Re-run the connection's own check: the MCP status probe for MCP rows,
+ * the reachability test otherwise. */
+const retryFix = (c: ConnectionSummary): string =>
+  c.mcp_path ? fixBtn('mcp-status', c.id, 'Check again') : fixBtn('test-conn', c.id, 'Test again');
+
 // One row inside an expanded catalog entry. It spans the full card width and
 // carries enough to identify the connection without opening it: who is signed
 // in (accounts differ between connections; the server rarely does), where it
@@ -772,7 +785,7 @@ function connectionKind(c: ConnectionSummary): ConnKind {
  * key, a passively recorded rejected credential (brokered calls and
  * background token renewals set needs_reconnect without anyone pressing
  * Test), and the most recent failed test or MCP check each become one
- * line in the expansion, with the fix action beside it. One verdict per
+ * line in the expansion, with its fix actions stacked below it. One verdict per
  * row: a failed check moves the indicator, it never sits beside a green
  * one. */
 function connectionIssues(c: ConnectionSummary): Array<{ text: string; fix?: string }> {
@@ -782,7 +795,7 @@ function connectionIssues(c: ConnectionSummary): Array<{ text: string; fix?: str
       text: c.sslmode === 'disable'
         ? 'TLS is disabled for this connection.'
         : `TLS is relaxed to ${c.sslmode}.`,
-      fix: `<button class="btn ghost sm cat-meta-fix" data-act="edit-conn" data-id="${c.id}">Edit…</button>`,
+      fix: editFix(c),
     });
   }
   if (c.type === 'ssh' && !c.host_key_fingerprint) {
@@ -792,10 +805,10 @@ function connectionIssues(c: ConnectionSummary): Array<{ text: string; fix?: str
     issues.push({
       text: c.last_detail || 'The credential was rejected; reconnect to refresh it.',
       fix: c.mcp_path
-        ? `<button class="btn ghost sm cat-meta-fix" data-act="reconnect-mcp" data-id="${c.id}">Reconnect…</button>`
+        ? fixBtn('reconnect-mcp', c.id, 'Reconnect…')
         : c.oauth_spec
-        ? `<button class="btn ghost sm cat-meta-fix" data-act="oauth-reconnect" data-id="${c.id}">Reconnect…</button>`
-        : `<button class="btn ghost sm cat-meta-fix" data-act="test-conn" data-id="${c.id}">Test again</button>`,
+        ? fixBtn('oauth-reconnect', c.id, 'Reconnect…')
+        : retryFix(c),
     });
   }
   // A test or check finished this session supersedes the broker's
@@ -811,7 +824,7 @@ function connectionIssues(c: ConnectionSummary): Array<{ text: string; fix?: str
           detail: mcpStatus.error ?? mcpStatus.report?.detail }
       : null
     : test && !test.running && test.detail !== undefined
-    ? { ok: test.ok, detail: test.detail }
+    ? { ok: test.ok, detail: test.detail, kind: test.kind }
     : null;
   const failure = fresh
     ? fresh.ok ? null : fresh.detail
@@ -819,11 +832,15 @@ function connectionIssues(c: ConnectionSummary): Array<{ text: string; fix?: str
     ? c.last_detail || 'The last connection check failed.'
     : null;
   if (failure && !issues.some((issue) => issue.text === failure)) {
+    // A fresh test carries a failure kind; when it's one editing the
+    // connection fixes (a declined or unverifiable TLS handshake), lead with
+    // Edit… before the retry. The passively-recorded verdict has no kind, so
+    // it only offers the retry.
+    const fixable = !c.mcp_path && fresh && !fresh.ok
+      && (fresh.kind === 'tls_declined' || fresh.kind === 'cert_unverified');
     issues.push({
       text: failure,
-      fix: c.mcp_path
-        ? `<button class="btn ghost sm cat-meta-fix" data-act="mcp-status" data-id="${c.id}">Check again</button>`
-        : `<button class="btn ghost sm cat-meta-fix" data-act="test-conn" data-id="${c.id}">Test again</button>`,
+      fix: (fixable ? editFix(c) : '') + retryFix(c),
     });
   }
   return issues;
@@ -904,7 +921,8 @@ function connDetailHTML(c: ConnectionSummary): string {
   const issues = connectionIssues(c);
   const issuesBlock = enabled && issues.length
     ? `<div class="cc-issues">${issues.map((issue) =>
-        `<div class="cc-issue"><span>${esc(issue.text)}</span>${issue.fix ?? ''}</div>`).join('')}</div>`
+        `<div class="cc-issue"><span>${esc(issue.text)}</span>${
+          issue.fix ? `<div class="cc-issue-fixes">${issue.fix}</div>` : ''}</div>`).join('')}</div>`
     : '';
   // What pointing a client at the endpoint means, said once, per kind.
   // Keyed on the user-facing kind, not the internal transport: a tool that
