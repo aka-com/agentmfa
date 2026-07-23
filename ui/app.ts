@@ -532,8 +532,10 @@ function endpointStripHTML(c: ConnectionSummary): string {
     <span class="ep-ico" title="Direct endpoint">${ICONS.plugSm}</span>
     ${address}
     <span class="ep-spacer"></span>
-    <button class="btn outline sm ep-act" data-act="reissue-endpoint-ask" data-conn="${c.id}">Reissue…</button>
-    <button class="btn outline sm ep-act rv" data-act="revoke-endpoint-ask" data-conn="${c.id}">Revoke…</button>
+    <button class="btn ghost sm ep-act" data-act="reissue-endpoint-ask" data-conn="${c.id}"
+      title="Reissue endpoint" aria-label="Reissue endpoint for ${escAttr(c.name)}">${ICONS.refresh}</button>
+    <button class="btn ghost sm ep-act rv" data-act="revoke-endpoint-ask" data-conn="${c.id}"
+      title="Revoke endpoint" aria-label="Revoke endpoint for ${escAttr(c.name)}">${ICONS.x}</button>
   </div>`;
 }
 

@@ -1083,4 +1083,7 @@
 .ep-strip .ep-addr-wrap:focus-visible .ghost-copy{ opacity: 1; }
 .ep-strip .ep-addr-hidden{ color: var(--muted); }
 .ep-strip .ep-spacer{ flex: 1; }
-.ep-strip .ep-act.rv{ color: var(--danger-ink); border-color: var(--danger-border); }
+/* Icon-only ghost pair: refresh = reissue, x = revoke. */
+.ep-strip .ep-act{ line-height: 0; padding: 4px 6px; }
+.ep-strip .ep-act.rv{ color: var(--danger-ink); }
+.ep-strip .ep-act.rv:hover{ background: var(--danger-wash); }
