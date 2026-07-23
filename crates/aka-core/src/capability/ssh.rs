@@ -44,6 +44,7 @@ use tokio::sync::Notify;
 
 use uuid::Uuid;
 
+use super::{TestError, TestErrorKind};
 use crate::audit::{AuditEntry, AuditKind};
 use crate::broker::Broker;
 use crate::endpoints::EndpointListenerHandle;
@@ -224,7 +225,7 @@ impl SshSigner {
         let pem = store
             .secret_value(secret_id)
             .await
-            .map_err(|e| format!("credential unavailable: {e}"))?;
+            .map_err(|e| format!("The saved credential could not be read: {e}"))?;
         let key = parse_supported_private_key(pem.as_bytes())?;
         let public_blob = key
             .public_key()
@@ -432,14 +433,22 @@ struct AgentState {
 /// UI-initiated reachability test: load a stored key when configured
 /// (validating that it parses) and read the server's version banner.
 /// No key exchange is performed, so login and the host key stay unverified.
-pub async fn test_reachability(store: &Store, connection: &Connection) -> Result<String, String> {
+pub async fn test_reachability(
+    store: &Store,
+    connection: &Connection,
+) -> Result<String, TestError> {
     let ConnectionConfig::Ssh { host, port, .. } = &connection.config else {
         return Err("not an ssh connection".into());
     };
     let has_key = SshSigner::load_optional(store, connection).await?.is_some();
     let stream = tokio::net::TcpStream::connect((host.as_str(), *port))
         .await
-        .map_err(|e| format!("could not reach {host}:{port}: {e}"))?;
+        .map_err(|e| {
+            TestError::new(
+                TestErrorKind::Unreachable,
+                format!("Could not reach {host}:{port}: {e}"),
+            )
+        })?;
     let banner = read_version_banner(stream).await?;
     let key_detail = if has_key { "Key loaded; " } else { "" };
     Ok(format!(
@@ -450,17 +459,20 @@ pub async fn test_reachability(store: &Store, connection: &Connection) -> Result
 /// Read until the SSH identification line arrives. RFC 4253 §4.2 lets the
 /// server send other lines first, so scan complete lines for the `SSH-`
 /// prefix, capped so a non-SSH endpoint cannot stall the test.
-async fn read_version_banner(mut stream: tokio::net::TcpStream) -> Result<String, String> {
+async fn read_version_banner(mut stream: tokio::net::TcpStream) -> Result<String, TestError> {
     const BANNER_SCAN_CAP: usize = 4096;
     let mut buf = Vec::new();
     let mut chunk = [0u8; 512];
     loop {
-        let n = stream
-            .read(&mut chunk)
-            .await
-            .map_err(|e| format!("banner read failed: {e}"))?;
+        let n = stream.read(&mut chunk).await.map_err(|e| {
+            format!("The connection was lost while waiting for the SSH banner: {e}")
+        })?;
         if n == 0 {
-            return Err("server closed the connection before sending an SSH banner".into());
+            return Err(TestError::new(
+                TestErrorKind::WrongProtocol,
+                "The server closed the connection before sending an SSH banner — \
+                 check that this is an SSH server",
+            ));
         }
         buf.extend_from_slice(&chunk[..n]);
         let mut start = 0;
@@ -473,7 +485,11 @@ async fn read_version_banner(mut stream: tokio::net::TcpStream) -> Result<String
             start += pos + 1;
         }
         if buf.len() > BANNER_SCAN_CAP {
-            return Err("the server did not present an SSH banner".into());
+            return Err(TestError::new(
+                TestErrorKind::WrongProtocol,
+                "The server answered with something other than an SSH banner — \
+                 check that this is an SSH server",
+            ));
         }
     }
 }

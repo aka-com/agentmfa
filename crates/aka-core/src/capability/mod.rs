@@ -10,6 +10,69 @@ pub mod ws;
 use std::io::{Read as _, Seek as _, Write as _};
 use std::sync::Mutex;
 
+/// Why a connection dial or test failed, as a value the UI (and the broker's
+/// own health grading) can branch on. The prose in [`TestError::detail`] is
+/// presentation only — nothing may match on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TestErrorKind {
+    /// Nothing usable answered at the configured destination.
+    Unreachable,
+    /// The server answered but refused to start TLS while the connection's
+    /// TLS mode requires it.
+    TlsDeclined,
+    /// TLS started but the server's certificate could not be verified.
+    CertUnverified,
+    /// The server asked for a password the dial deliberately did not carry
+    /// (a draft test referencing a stored secret, or a connection with no
+    /// secret bound).
+    NeedsPassword,
+    /// The destination answered and rejected the credential.
+    AuthRejected,
+    /// The destination answered with something other than the expected
+    /// protocol (e.g. the port is not actually Postgres).
+    WrongProtocol,
+    /// The test hit its deadline.
+    Timeout,
+    /// Any other failure; the detail carries all there is to know.
+    Other,
+}
+
+/// A failed connection dial or test: machine-readable kind + human prose.
+#[derive(Debug, Clone)]
+pub struct TestError {
+    pub kind: TestErrorKind,
+    pub detail: String,
+}
+
+impl TestError {
+    pub fn new(kind: TestErrorKind, detail: impl Into<String>) -> Self {
+        Self {
+            kind,
+            detail: detail.into(),
+        }
+    }
+}
+
+/// Plain-string errors (the long tail of internal failures) carry no kind.
+impl From<String> for TestError {
+    fn from(detail: String) -> Self {
+        Self::new(TestErrorKind::Other, detail)
+    }
+}
+
+impl From<&str> for TestError {
+    fn from(detail: &str) -> Self {
+        Self::new(TestErrorKind::Other, detail.to_string())
+    }
+}
+
+impl std::fmt::Display for TestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+
 /// A request body, held in memory below the spool threshold and in an
 /// unlinked temp file above it, a parked, awaiting-approval request holds
 /// its body, so concurrent uploads must not pin RAM.

@@ -21,7 +21,7 @@ use zeroize::Zeroizing;
 
 use crate::audit::{AuditEntry, AuditKind, AuditLog};
 use crate::broker::Broker;
-use crate::capability::{BodySpool, SpoolError, SpooledBody};
+use crate::capability::{BodySpool, SpoolError, SpooledBody, TestError, TestErrorKind};
 use crate::config::BrokerConfig;
 use crate::endpoints::EndpointListenerHandle;
 use crate::executions::ExecOutcome;
@@ -622,7 +622,7 @@ pub async fn test_upstream(
     client: &reqwest::Client,
     timeout: std::time::Duration,
     connection: &Connection,
-) -> Result<String, String> {
+) -> Result<String, TestError> {
     if !matches!(&connection.config, ConnectionConfig::Api { .. }) {
         return Err("not an api connection".into());
     }
@@ -643,17 +643,28 @@ pub async fn test_upstream(
             client.request(Method::GET, url.clone())
         }
     };
-    let response = request
-        .timeout(timeout)
-        .send()
-        .await
+    let response = request.timeout(timeout).send().await.map_err(|e| {
+        let kind = if e.is_connect() {
+            TestErrorKind::Unreachable
+        } else if e.is_timeout() {
+            TestErrorKind::Timeout
+        } else {
+            TestErrorKind::Other
+        };
+        let cause = match kind {
+            TestErrorKind::Unreachable => format!("Could not reach {host}"),
+            TestErrorKind::Timeout => format!("The server at {host} did not answer in time"),
+            _ => format!("The request to {host} failed"),
+        };
         // reqwest's Display embeds the URL, which can carry a query-injected
         // credential; strip it exactly as the relay path does.
-        .map_err(|e| e.without_url().to_string())?;
+        TestError::new(kind, format!("{cause}: {}", e.without_url()))
+    })?;
     let status = response.status();
     if matches!(status.as_u16(), 401 | 403) {
-        return Err(format!(
-            "{host} answered but rejected the credential (HTTP {status})"
+        return Err(TestError::new(
+            TestErrorKind::AuthRejected,
+            format!("The server at {host} answered but rejected the credential (HTTP {status})"),
         ));
     }
     Ok(format!("GET {scheme}://{host}/ answered HTTP {status}"))

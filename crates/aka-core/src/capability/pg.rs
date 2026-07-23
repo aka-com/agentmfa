@@ -40,6 +40,7 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, Bu
 use tokio::net::{TcpStream, UnixListener, UnixStream};
 use tokio::sync::Notify;
 
+use super::{TestError, TestErrorKind};
 use crate::broker::Broker;
 use crate::endpoints::EndpointListenerHandle;
 use crate::sessions::{RedeemError, SessionHandle};
@@ -153,8 +154,8 @@ fn error_response(severity: &str, sqlstate: &str, message: &str) -> Vec<u8> {
     frame(b'E', &p)
 }
 
-/// Extract the human message (and code) from an upstream `ErrorResponse`.
-fn parse_error_response(payload: &[u8]) -> String {
+/// Extract the human message and SQLSTATE from an upstream `ErrorResponse`.
+fn parse_error_response(payload: &[u8]) -> (String, String) {
     let mut code = String::new();
     let mut message = String::new();
     let mut rest = payload;
@@ -172,11 +173,36 @@ fn parse_error_response(payload: &[u8]) -> String {
         }
         rest = tail;
     }
-    if code.is_empty() {
-        message
+    (code, message)
+}
+
+fn sentence_case(message: String) -> String {
+    let mut chars = message.chars();
+    let Some(first) = chars.next() else {
+        return message;
+    };
+    first.to_uppercase().chain(chars).collect()
+}
+
+/// An upstream `ErrorResponse` as a `TestError`: the server's own message
+/// leads, sentence-cased, with the SQLSTATE parenthesized for looking up.
+/// SQLSTATE class 28 (invalid authorization specification) is a credential
+/// rejection.
+fn upstream_error(payload: &[u8]) -> TestError {
+    let (code, message) = parse_error_response(payload);
+    let message = sentence_case(message);
+    let kind = if code.starts_with("28") {
+        TestErrorKind::AuthRejected
     } else {
-        format!("{code}: {message}")
-    }
+        TestErrorKind::Other
+    };
+    let detail = match (message.is_empty(), code.is_empty()) {
+        (false, false) => format!("{message} ({code})"),
+        (false, true) => message,
+        (true, false) => format!("The server reported error {code}"),
+        (true, true) => "The server reported an error with no detail".into(),
+    };
+    TestError::new(kind, detail)
 }
 
 /// Parse StartupMessage parameters (the bytes after the protocol version):
@@ -743,7 +769,7 @@ async fn handle_cancel(state: &Arc<ProxyState>, pid: i32, key: i32) {
             .await
             .map_err(|e| format!("cancel write failed: {e}"))?;
         let _ = stream.shutdown().await;
-        Ok::<(), String>(())
+        Ok::<(), TestError>(())
     };
     match tokio::time::timeout(Duration::from_secs(10), send).await {
         Ok(Ok(())) => {}
@@ -1003,21 +1029,24 @@ fn tls_config(
     }
 }
 
-async fn connect_and_probe_tls(host: &str, port: u16) -> Result<(TcpStream, u8), String> {
-    let mut tcp = TcpStream::connect((host, port))
-        .await
-        .map_err(|e| format!("tcp connect failed: {e}"))?;
+async fn connect_and_probe_tls(host: &str, port: u16) -> Result<(TcpStream, u8), TestError> {
+    let mut tcp = TcpStream::connect((host, port)).await.map_err(|e| {
+        TestError::new(
+            TestErrorKind::Unreachable,
+            format!("Could not reach {host}:{port}: {e}"),
+        )
+    })?;
     let _ = tcp.set_nodelay(true);
     let mut probe = Vec::with_capacity(8);
     put_i32(&mut probe, 8);
     put_i32(&mut probe, SSL_REQUEST_CODE);
-    tcp.write_all(&probe)
-        .await
-        .map_err(|e| format!("ssl probe failed: {e}"))?;
+    tcp.write_all(&probe).await.map_err(|e| {
+        format!("The connection was lost while asking the server to start TLS: {e}")
+    })?;
     let mut answer = [0u8; 1];
-    tcp.read_exact(&mut answer)
-        .await
-        .map_err(|e| format!("ssl probe reply failed: {e}"))?;
+    tcp.read_exact(&mut answer).await.map_err(|e| {
+        format!("The connection was lost while waiting for the server's TLS answer: {e}")
+    })?;
     Ok((tcp, answer[0]))
 }
 
@@ -1026,19 +1055,36 @@ async fn wrap_tls(
     tcp: TcpStream,
     sslmode: PgSslMode,
     ca_bundle_path: Option<&str>,
-) -> Result<(PgStream, Option<Vec<u8>>), String> {
+) -> Result<(PgStream, Option<Vec<u8>>), TestError> {
     // rustls 0.23's default provider (aws-lc-rs) is named explicitly:
     // reqwest pulls the ring feature in too, and with both enabled
     // `ClientConfig::builder()` refuses to pick one itself.
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let config = tls_config(provider, sslmode, ca_bundle_path)?;
     let name = rustls::pki_types::ServerName::try_from(host.to_string())
-        .map_err(|e| format!("bad tls server name: {e}"))?;
+        .map_err(|e| format!("The host {host:?} is not a valid TLS server name: {e}"))?;
     let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
-    let tls = connector
-        .connect(name, tcp)
-        .await
-        .map_err(|e| format!("tls handshake failed: {e}"))?;
+    // A certificate that fails verification is its own kind: the fix
+    // (trust the CA, or lower the mode) differs from every other TLS
+    // failure. tokio-rustls wraps the rustls error in io::Error, so the
+    // typed rustls error is recovered rather than sniffed out of prose.
+    let tls = connector.connect(name, tcp).await.map_err(|e| {
+        let cert_problem = e
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<rustls::Error>())
+            .is_some_and(|e| matches!(e, rustls::Error::InvalidCertificate(_)));
+        if cert_problem {
+            TestError::new(
+                TestErrorKind::CertUnverified,
+                format!("The server's TLS certificate could not be verified: {e}"),
+            )
+        } else {
+            TestError::new(
+                TestErrorKind::Other,
+                format!("The TLS handshake failed: {e}"),
+            )
+        }
+    })?;
     let digest = tls
         .get_ref()
         .1
@@ -1049,10 +1095,6 @@ async fn wrap_tls(
             Sha256::digest(cert.as_ref()).to_vec()
         });
     Ok((PgStream::Tls(Box::new(tls)), digest))
-}
-
-fn is_cert_verification_error(detail: &str) -> bool {
-    detail.to_ascii_lowercase().contains("certificate")
 }
 
 /// TCP connect + TLS per the connection's `sslmode`: `Disable` →
@@ -1069,11 +1111,14 @@ async fn tls_connect(
     port: u16,
     sslmode: PgSslMode,
     ca_bundle_path: Option<&str>,
-) -> Result<(PgStream, Option<Vec<u8>>), String> {
+) -> Result<(PgStream, Option<Vec<u8>>), TestError> {
     if sslmode == PgSslMode::Disable {
-        let tcp = TcpStream::connect((host, port))
-            .await
-            .map_err(|e| format!("tcp connect failed: {e}"))?;
+        let tcp = TcpStream::connect((host, port)).await.map_err(|e| {
+            TestError::new(
+                TestErrorKind::Unreachable,
+                format!("Could not reach {host}:{port}: {e}"),
+            )
+        })?;
         let _ = tcp.set_nodelay(true);
         return Ok((PgStream::Plain(tcp), None));
     }
@@ -1083,23 +1128,38 @@ async fn tls_connect(
             Ok(stream) => Ok(stream),
             Err(e)
                 if matches!(sslmode, PgSslMode::VerifyCa | PgSslMode::VerifyFull)
-                    && is_cert_verification_error(&e) =>
+                    && e.kind == TestErrorKind::CertUnverified =>
             {
-                Err(format!(
-                    "tls certificate verification failed: {e}. Edit the tool to \
-                     trust the server's CA (Advanced → Trusted CA bundle) or \
-                     lower its TLS mode to \"require\" to connect without \
-                     certificate verification"
+                Err(TestError::new(
+                    e.kind,
+                    format!(
+                        "{}. Edit the tool to trust the server's CA (Advanced → \
+                         Trusted CA bundle) or lower its TLS mode to \"require\" \
+                         to connect without certificate verification",
+                        e.detail
+                    ),
                 ))
             }
             Err(e) => Err(e),
         },
         b'N' if sslmode == PgSslMode::Prefer => Ok((PgStream::Plain(tcp), None)),
-        b'N' => Err(format!(
-            "upstream declined TLS (sslmode={})",
-            sslmode_name(sslmode)
+        b'N' => Err(TestError::new(
+            TestErrorKind::TlsDeclined,
+            format!(
+                "The server refused to start TLS, but this connection's TLS \
+                 mode (\"{}\") requires it. Edit the tool and set TLS mode to \
+                 \"prefer\" or \"disable\" if this server can't use TLS",
+                sslmode_name(sslmode)
+            ),
         )),
-        other => Err(format!("unexpected SSLRequest reply 0x{other:02x}")),
+        other => Err(TestError::new(
+            TestErrorKind::WrongProtocol,
+            format!(
+                "The reply to the TLS request doesn't look like Postgres — \
+                 check that {host}:{port} is really a PostgreSQL server \
+                 (reply byte 0x{other:02x})"
+            ),
+        )),
     }
 }
 
@@ -1119,21 +1179,27 @@ struct UpstreamSession {
 /// and drive the client side of the startup/auth exchange up to ReadyForQuery.
 /// The client's non-auth startup parameters (application_name,
 /// client_encoding, options, search_path, …) are forwarded for fidelity.
-/// The distinguished "server wants a password we don't have" failure, so the
-/// draft test can tell it apart from a real refusal.
-const NEEDS_PASSWORD: &str = "upstream requires a password, but this connection has no secret";
+/// The distinguished "server wants a password we don't have" failure
+/// (`TestErrorKind::NeedsPassword`), so the draft test can tell it apart
+/// from a real refusal.
+fn needs_password() -> TestError {
+    TestError::new(
+        TestErrorKind::NeedsPassword,
+        "The server asks for a password, but this connection has no saved credential",
+    )
+}
 
 async fn dial_upstream(
     store: &Arc<Store>,
     connection: &Connection,
     client_params: &[(String, String)],
-) -> Result<UpstreamSession, String> {
+) -> Result<UpstreamSession, TestError> {
     let password = match connection.secrets.first() {
         Some(secret_id) => Some(
             store
                 .secret_value(secret_id)
                 .await
-                .map_err(|e| format!("credential unavailable: {e}"))?,
+                .map_err(|e| format!("The saved credential could not be read: {e}"))?,
         ),
         None => None,
     };
@@ -1149,7 +1215,7 @@ async fn dial_upstream_with_password(
     connection: &Connection,
     password: Option<&str>,
     client_params: &[(String, String)],
-) -> Result<UpstreamSession, String> {
+) -> Result<UpstreamSession, TestError> {
     let ConnectionConfig::Pg {
         host,
         port,
@@ -1195,18 +1261,13 @@ async fn dial_upstream_with_password(
             .await
             .map_err(|e| format!("auth read failed: {e}"))?;
         match tag {
-            b'E' => {
-                return Err(format!(
-                    "upstream error: {}",
-                    parse_error_response(&payload)
-                ))
-            }
+            b'E' => return Err(upstream_error(&payload)),
             b'R' if payload.len() < 4 => return Err("short auth request".into()),
             b'R' => match be_i32(&payload[..4]) {
                 0 => break, // AuthenticationOk
                 3 => {
                     // AuthenticationCleartextPassword
-                    let password = password.ok_or_else(|| NEEDS_PASSWORD.to_string())?;
+                    let password = password.ok_or_else(needs_password)?;
                     let mut p = Vec::new();
                     put_cstr(&mut p, password);
                     stream
@@ -1216,7 +1277,7 @@ async fn dial_upstream_with_password(
                 }
                 5 => {
                     // AuthenticationMD5Password: md5(md5(password + user) + salt).
-                    let password = password.ok_or_else(|| NEEDS_PASSWORD.to_string())?;
+                    let password = password.ok_or_else(needs_password)?;
                     if payload.len() < 8 {
                         return Err("short md5 auth request".into());
                     }
@@ -1231,7 +1292,7 @@ async fn dial_upstream_with_password(
                 10 => {
                     // AuthenticationSASL, SCRAM-SHA-256(-PLUS), the design's
                     // primary path.
-                    let password = password.ok_or_else(|| NEEDS_PASSWORD.to_string())?;
+                    let password = password.ok_or_else(needs_password)?;
                     sasl_auth(
                         &mut stream,
                         &payload[4..],
@@ -1240,13 +1301,20 @@ async fn dial_upstream_with_password(
                     )
                     .await?;
                 }
-                other => return Err(format!("unsupported upstream auth request {other}")),
+                other => {
+                    return Err(format!(
+                        "The server asked for an authentication method \
+                         Multitool doesn't support (code {other})"
+                    )
+                    .into())
+                }
             },
             other => {
                 return Err(format!(
                     "unexpected message '{}' during upstream auth",
                     other as char
-                ))
+                )
+                .into())
             }
         }
     }
@@ -1270,17 +1338,13 @@ async fn dial_upstream_with_password(
                 backend_key = be_i32(&payload[4..8]);
             }
             b'Z' => break *payload.first().unwrap_or(&b'I'),
-            b'E' => {
-                return Err(format!(
-                    "upstream error: {}",
-                    parse_error_response(&payload)
-                ))
-            }
+            b'E' => return Err(upstream_error(&payload)),
             other => {
                 return Err(format!(
                     "unexpected message '{}' during upstream startup",
                     other as char
-                ))
+                )
+                .into())
             }
         }
     };
@@ -1296,7 +1360,10 @@ async fn dial_upstream_with_password(
 
 /// UI-initiated connectivity/credential test: dial and authenticate exactly
 /// as a brokered session would, then send Terminate without issuing a query.
-pub async fn test_upstream(store: &Arc<Store>, connection: &Connection) -> Result<String, String> {
+pub async fn test_upstream(
+    store: &Arc<Store>,
+    connection: &Connection,
+) -> Result<String, TestError> {
     let ConnectionConfig::Pg { dbname, user, .. } = &connection.config else {
         return Err("not a postgres connection".into());
     };
@@ -1317,7 +1384,7 @@ pub async fn test_draft_upstream(
     connection: &Connection,
     typed_password: Option<&str>,
     credential_deferred: bool,
-) -> Result<String, String> {
+) -> Result<String, TestError> {
     let ConnectionConfig::Pg {
         host, dbname, user, ..
     } = &connection.config
@@ -1330,10 +1397,10 @@ pub async fn test_draft_upstream(
             let _ = upstream.stream.shutdown().await;
             Ok(format!("Signed in to {dbname} as {user}"))
         }
-        Err(detail) if credential_deferred && detail == NEEDS_PASSWORD => Ok(format!(
+        Err(e) if credential_deferred && e.kind == TestErrorKind::NeedsPassword => Ok(format!(
             "Reached {host} and TLS checks passed; the saved credential is verified after adding"
         )),
-        Err(detail) => Err(detail),
+        Err(e) => Err(e),
     }
 }
 
@@ -1360,7 +1427,7 @@ async fn sasl_auth(
     mechanisms_payload: &[u8],
     password: &[u8],
     cert_digest: Option<&[u8]>,
-) -> Result<(), String> {
+) -> Result<(), TestError> {
     let mut mechanisms = Vec::new();
     let mut rest = mechanisms_payload;
     loop {
@@ -1387,7 +1454,8 @@ async fn sasl_auth(
             return Err(format!(
                 "no supported SASL mechanism (offered: {})",
                 mechanisms.join(", ")
-            ))
+            )
+            .into())
         }
     };
 
@@ -1409,12 +1477,9 @@ async fn sasl_auth(
         .map_err(|e| format!("SASL read failed: {e}"))?;
     match tag {
         b'R' if payload.len() >= 4 && be_i32(&payload[..4]) == 11 => {}
-        b'E' => {
-            return Err(format!(
-                "upstream error: {}",
-                parse_error_response(&payload)
-            ))
-        }
+        // A bad password under SCRAM surfaces as an ErrorResponse here,
+        // mid-exchange, so this arm is the credential-rejection path.
+        b'E' => return Err(upstream_error(&payload)),
         _ => return Err("expected AuthenticationSASLContinue".into()),
     }
     scram
@@ -1431,12 +1496,7 @@ async fn sasl_auth(
         .map_err(|e| format!("SASL read failed: {e}"))?;
     match tag {
         b'R' if payload.len() >= 4 && be_i32(&payload[..4]) == 12 => {}
-        b'E' => {
-            return Err(format!(
-                "upstream error: {}",
-                parse_error_response(&payload)
-            ))
-        }
+        b'E' => return Err(upstream_error(&payload)),
         _ => return Err("expected AuthenticationSASLFinal".into()),
     }
     scram
@@ -1578,7 +1638,28 @@ mod tests {
     fn error_response_carries_sqlstate() {
         let msg = error_response("FATAL", "28P01", "AKA: unknown_ticket");
         assert_eq!(msg[0], b'E');
-        let text = parse_error_response(&msg[5..]);
-        assert_eq!(text, "28P01: AKA: unknown_ticket");
+        let (code, message) = parse_error_response(&msg[5..]);
+        assert_eq!(code, "28P01");
+        assert_eq!(message, "AKA: unknown_ticket");
+    }
+
+    #[test]
+    fn upstream_error_reads_message_first_and_flags_auth_rejections() {
+        let msg = error_response(
+            "FATAL",
+            "28P01",
+            "password authentication failed for user \"dev\"",
+        );
+        let e = upstream_error(&msg[5..]);
+        assert_eq!(e.kind, TestErrorKind::AuthRejected);
+        assert_eq!(
+            e.detail,
+            "Password authentication failed for user \"dev\" (28P01)"
+        );
+
+        let msg = error_response("FATAL", "3D000", "database \"missing\" does not exist");
+        let e = upstream_error(&msg[5..]);
+        assert_eq!(e.kind, TestErrorKind::Other);
+        assert_eq!(e.detail, "Database \"missing\" does not exist (3D000)");
     }
 }

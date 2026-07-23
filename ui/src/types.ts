@@ -219,10 +219,24 @@ export interface ConnectionInput {
   url?: string | null;
 }
 
+/** Why a connection test failed, as the broker serializes it. The detail
+ * prose is presentation only — branch on this, never on the text. */
+export type TestErrorKind =
+  | 'unreachable'
+  | 'tls_declined'
+  | 'cert_unverified'
+  | 'needs_password'
+  | 'auth_rejected'
+  | 'wrong_protocol'
+  | 'timeout'
+  | 'other';
+
 // Pass/fail summary of a broker-side service connectivity test.
 export interface ConnectionTestReport {
   ok: boolean;
   detail: string;
+  /** Present on failures. */
+  kind?: TestErrorKind;
 }
 
 /* ------------------------------- MCP types -------------------------------- */

@@ -31,12 +31,17 @@ use crate::Result;
 /// 2 hours.
 pub const PRESENCE_WINDOW_CHOICES: &[u64] = &[15 * 60, 60 * 60, 2 * 60 * 60];
 
-/// Outcome of a UI-initiated connection test: a pass/fail flag plus a short
-/// human-readable summary (never credential material).
+/// Outcome of a UI-initiated connection test: a pass/fail flag, a short
+/// human-readable summary (never credential material), and — on failure —
+/// the machine-readable kind the UI keys fix affordances off. The detail
+/// is presentation only; anything branching on a failure branches on
+/// `kind`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConnectionTestReport {
     pub ok: bool,
     pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<crate::capability::TestErrorKind>,
 }
 
 /// The result of issuing a direct endpoint: the pasteable connection string
@@ -781,21 +786,30 @@ impl Broker {
                 ConnectionKind::Ssh => {
                     crate::capability::ssh::test_reachability(&self.store, &connection).await
                 }
-                _ => Err("draft tests cover Postgres and SSH connections".to_string()),
+                _ => Err(crate::capability::TestError::from(
+                    "Draft tests cover Postgres and SSH connections",
+                )),
             }
         };
         let outcome = match tokio::time::timeout(TEST_TIMEOUT, test).await {
             Ok(result) => result,
-            Err(_) => Err(format!(
-                "no answer within {} seconds",
-                TEST_TIMEOUT.as_secs()
+            Err(_) => Err(crate::capability::TestError::new(
+                crate::capability::TestErrorKind::Timeout,
+                format!("No answer within {} seconds", TEST_TIMEOUT.as_secs()),
             )),
         };
-        let (ok, detail) = match outcome {
-            Ok(detail) => (true, detail),
-            Err(detail) => (false, detail),
-        };
-        Ok(ConnectionTestReport { ok, detail })
+        Ok(match outcome {
+            Ok(detail) => ConnectionTestReport {
+                ok: true,
+                detail,
+                kind: None,
+            },
+            Err(e) => ConnectionTestReport {
+                ok: false,
+                detail: e.detail,
+                kind: Some(e.kind),
+            },
+        })
     }
 
     /// UI-initiated connectivity/credential test against the connection's
@@ -848,28 +862,34 @@ impl Broker {
         let test = crate::authorization::scope(true, test);
         let outcome = match tokio::time::timeout(TEST_TIMEOUT, test).await {
             Ok(result) => result,
-            Err(_) => Err(format!(
-                "no answer within {} seconds",
-                TEST_TIMEOUT.as_secs()
+            Err(_) => Err(crate::capability::TestError::new(
+                crate::capability::TestErrorKind::Timeout,
+                format!("No answer within {} seconds", TEST_TIMEOUT.as_secs()),
             )),
         };
-        let (ok, detail) = match outcome {
-            Ok(detail) => (true, detail),
-            Err(detail) => (false, detail),
+        let report = match outcome {
+            Ok(detail) => ConnectionTestReport {
+                ok: true,
+                detail,
+                kind: None,
+            },
+            Err(e) => ConnectionTestReport {
+                ok: false,
+                detail: e.detail,
+                kind: Some(e.kind),
+            },
         };
         // The test result is the connection's new last-known health. A
         // credential rejection reads as "reconnect", not "retry".
-        let status = if ok {
+        let status = if report.ok {
             crate::types::HealthStatus::Ok
-        } else if detail.contains("rejected the credential")
-            || detail.contains("password authentication failed")
-        {
+        } else if report.kind == Some(crate::capability::TestErrorKind::AuthRejected) {
             crate::types::HealthStatus::NeedsReconnect
         } else {
             crate::types::HealthStatus::Failed
         };
-        self.health.record(id, status, detail.clone());
-        Ok(ConnectionTestReport { ok, detail })
+        self.health.record(id, status, report.detail.clone());
+        Ok(report)
     }
 
     /* ---------------------- OAuth (BYO app, REST rows) --------------------- */

@@ -679,9 +679,10 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       // Deterministic mock: the internal-api fixture fails, everything else
       // passes, so both result presentations are exercisable standalone.
       const ok = c.type !== 'api' || !/internal/.test(c.name);
-      const detail = !ok
-        ? `${c.host} answered but rejected the credential (HTTP 401)`
-        : c.type === 'pg' ? `Signed in to ${c.dbname} as ${c.user}`
+      if (!ok) {
+        return { ok, detail: `The server at ${c.host} answered but rejected the credential (HTTP 401)`, kind: 'auth_rejected' };
+      }
+      const detail = c.type === 'pg' ? `Signed in to ${c.dbname} as ${c.user}`
         : c.type === 'ssh' ? `Key loaded; ${c.host}:${c.port || 22} answered with SSH-2.0-OpenSSH_9.8. Login and host key are not verified by this test.`
         : c.type === 'ws' ? 'WebSocket handshake succeeded'
         : `GET https://${c.host}/ answered HTTP 200 OK`;
@@ -697,10 +698,10 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       // the way a stock local Postgres (no TLS) would; 'unreachable' in the
       // host fails to connect; everything else passes.
       if (/unreachable/.test(host)) {
-        return { ok: false, detail: `tcp connect failed: could not reach ${host}` };
+        return { ok: false, detail: `Could not reach ${host}:${i.port ?? 5432}: connection refused`, kind: 'unreachable' };
       }
       if (i.type === 'pg' && loopback && sslmode !== 'disable' && sslmode !== 'prefer') {
-        return { ok: false, detail: `upstream declined TLS (sslmode=${sslmode})` };
+        return { ok: false, detail: `The server refused to start TLS, but this connection's TLS mode ("${sslmode}") requires it. Edit the tool and set TLS mode to "prefer" or "disable" if this server can't use TLS`, kind: 'tls_declined' };
       }
       if (i.type === 'ssh') {
         return { ok: true, detail: `${host}:${i.port ?? 22} answered with SSH-2.0-OpenSSH_9.8. Login and host key are not verified by this test.` };

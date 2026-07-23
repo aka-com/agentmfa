@@ -939,8 +939,8 @@
 /* The status rail: kind tag + one health verdict per row, right-aligned
    into a fixed column so the eye runs down the pane instead of re-scanning
    each row. Color is spent only where it means something: a green dot for
-   healthy, amber for needs-attention (a button that expands the issue
-   list), a muted dot when agents are switched off. */
+   healthy, amber for needs-attention (the issue itself renders as a line
+   under the row), a muted dot when agents are switched off. */
 .cat-conn-status {
   display: flex; align-items: center; gap: 8px;
   flex: 0 0 auto; margin-top: 2px; min-height: 18px;
@@ -1091,7 +1091,7 @@
 /* The row's issue list: plain warning text with its fix pinned right. */
 .cc-issues {
   display: flex; flex-direction: column; gap: 6px;
-  margin-top: 8px; max-width: 520px;
+  margin-top: 4px; max-width: 520px;
 }
 .cc-issue {
   display: flex; align-items: center; gap: 10px;

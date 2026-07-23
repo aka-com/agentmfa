@@ -26,6 +26,7 @@ use tokio_tungstenite::tungstenite::protocol::CloseFrame as TCloseFrame;
 use tokio_tungstenite::tungstenite::Message as TMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
+use super::{TestError, TestErrorKind};
 use crate::broker::Broker;
 use crate::capability::http::{injection_form, InjectionForm};
 use crate::sessions::SessionHandle;
@@ -41,11 +42,11 @@ pub type WsUpstream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 pub async fn dial_upstream(
     store: &Arc<Store>,
     connection: &Connection,
-) -> Result<WsUpstream, String> {
+) -> Result<WsUpstream, TestError> {
     let ConnectionConfig::Ws { url, template } = &connection.config else {
         return Err("not a websocket connection".into());
     };
-    let mut url = url::Url::parse(url).map_err(|e| format!("bad url: {e}"))?;
+    let mut url = url::Url::parse(url).map_err(|e| format!("The WebSocket URL is invalid: {e}"))?;
     let mut header: Option<(String, String)> = None;
     match template {
         None => {
@@ -56,7 +57,7 @@ pub async fn dial_upstream(
             let value = store
                 .secret_value(secret_id)
                 .await
-                .map_err(|e| format!("credential unavailable: {e}"))?;
+                .map_err(|e| format!("The saved credential could not be read: {e}"))?;
             header = Some(("Authorization".into(), format!("Bearer {}", &*value)));
         }
         Some(src) => {
@@ -64,7 +65,7 @@ pub async fn dial_upstream(
             let rendered = store
                 .render_template(&parsed)
                 .await
-                .map_err(|e| format!("credential unavailable: {e}"))?;
+                .map_err(|e| format!("The saved credential could not be read: {e}"))?;
             let trimmed = rendered.trim_start();
             match injection_form(src) {
                 Some(InjectionForm::Query) => {
@@ -89,7 +90,7 @@ pub async fn dial_upstream(
     let mut request = url
         .as_str()
         .into_client_request()
-        .map_err(|e| format!("bad request: {e}"))?;
+        .map_err(|e| format!("The WebSocket URL is invalid: {e}"))?;
     if let Some((name, value)) = header {
         let name = http::HeaderName::from_bytes(name.as_bytes())
             .map_err(|_| "rendered header name invalid".to_string())?;
@@ -97,15 +98,51 @@ pub async fn dial_upstream(
             .map_err(|_| "rendered header value invalid".to_string())?;
         request.headers_mut().insert(name, value);
     }
-    let (stream, _response) = tokio_tungstenite::connect_async(request)
-        .await
-        .map_err(|e| format!("upstream connect failed: {e}"))?;
+    let host = url.host_str().unwrap_or("the server").to_string();
+    let (stream, _response) =
+        tokio_tungstenite::connect_async(request)
+            .await
+            .map_err(|e| match e {
+                // A non-101 answer is the server speaking: an auth status is
+                // a rejected credential, anything else refused the upgrade.
+                tokio_tungstenite::tungstenite::Error::Http(response) => {
+                    let status = response.status();
+                    if matches!(status.as_u16(), 401 | 403) {
+                        TestError::new(
+                            TestErrorKind::AuthRejected,
+                            format!(
+                                "The server at {host} answered but rejected the credential \
+                                 (HTTP {status})"
+                            ),
+                        )
+                    } else {
+                        TestError::new(
+                            TestErrorKind::Other,
+                            format!(
+                                "The server at {host} answered HTTP {status} instead of \
+                                 accepting the WebSocket upgrade"
+                            ),
+                        )
+                    }
+                }
+                tokio_tungstenite::tungstenite::Error::Io(e) => TestError::new(
+                    TestErrorKind::Unreachable,
+                    format!("Could not reach {host}: {e}"),
+                ),
+                other => TestError::new(
+                    TestErrorKind::Other,
+                    format!("The WebSocket handshake failed: {other}"),
+                ),
+            })?;
     Ok(stream)
 }
 
 /// UI-initiated test: perform the upstream WebSocket handshake with the
 /// credential injected, then close immediately.
-pub async fn test_upstream(store: &Arc<Store>, connection: &Connection) -> Result<String, String> {
+pub async fn test_upstream(
+    store: &Arc<Store>,
+    connection: &Connection,
+) -> Result<String, TestError> {
     let mut stream = dial_upstream(store, connection).await?;
     let _ = stream.close(None).await;
     Ok("WebSocket handshake succeeded".into())
@@ -168,7 +205,7 @@ async fn bridge_handler(
                 // Redemption drops → budget slot released.
                 return (
                     axum::http::StatusCode::BAD_GATEWAY,
-                    Json(json!({ "reason": "upstream_connect_failed", "detail": e })),
+                    Json(json!({ "reason": "upstream_connect_failed", "detail": e.detail })),
                 )
                     .into_response();
             }

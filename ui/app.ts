@@ -52,6 +52,7 @@ import type {
   SecretSummary,
   SessionSummary,
   Settings,
+  TestErrorKind,
 } from '/src/types';
 
 const EDIT_SECRET_MASK = '••••••••••••';
@@ -249,6 +250,7 @@ interface ConnectionTestState {
   running: boolean;
   ok?: boolean;
   detail?: string;
+  kind?: TestErrorKind;
 }
 
 /* ------------------------------ local state ------------------------------ */
@@ -999,10 +1001,11 @@ function catalogRowHTML(entry: CatalogEntry): string {
   const quickConnect = canQuickConnectMcp(entry);
   const actionMenuOpen = state.catalogActionMenuOpen === entry.id;
   const label = `${count} saved credential${count === 1 ? '' : 's'}`;
-  // Call out rows that need provider-side setup; generic MCP and HTTP rows
-  // still use Configure because the user supplies their endpoint.
+  // Rows that need provider-side setup (Slack, Gmail) and generic MCP and
+  // HTTP rows all say Configure: the user supplies something before the
+  // connection can be made.
   const addLabel = entry.requiresSetup
-    ? 'Setup'
+    ? 'Configure'
     : ['mcp', 'http'].includes(entry.id)
     ? 'Configure'
     : entry.preset
@@ -2356,8 +2359,8 @@ function connSheet(editing: boolean): string {
   // toggle) and the action row: the failure, a TLS-shaped fix when the
   // detail identifies one, and the promise that Add now saves anyway.
   const dt = !editing ? state.draftTest : null;
-  const tlsDeclined = Boolean(dt?.detail && /declined TLS/i.test(dt.detail));
-  const certFailed = Boolean(dt?.detail && /certificate/i.test(dt.detail));
+  const tlsDeclined = dt?.kind === 'tls_declined';
+  const certFailed = dt?.kind === 'cert_unverified';
   const draftTestHTML = !dt ? ''
     : dt.running
     ? '<div class="draft-test running">Testing the connection…</div>'
@@ -2720,7 +2723,7 @@ async function runConnectionTest(id: string): Promise<void> {
   render();
   try {
     const report = await invoke('test_connection', { id });
-    state.connTests[id] = { running: false, ok: report.ok, detail: report.detail };
+    state.connTests[id] = { running: false, ok: report.ok, detail: report.detail, kind: report.kind };
   } catch (error) {
     state.connTests[id] = { running: false, ok: false, detail: errorMessage(error) };
   }
@@ -3075,14 +3078,14 @@ async function saveConn(): Promise<void> {
   if (adding && (t === 'pg' || t === 'ssh') && !state.draftTestOverride) {
     state.draftTest = { running: true };
     render();
-    let report: { ok: boolean; detail: string };
+    let report: { ok: boolean; detail: string; kind?: TestErrorKind };
     try {
       report = await invoke('test_connection_draft', { input });
     } catch (error) {
       report = { ok: false, detail: formErrorMessage(error) };
     }
     if (!report.ok) {
-      state.draftTest = { running: false, ok: false, detail: report.detail };
+      state.draftTest = { running: false, ok: false, detail: report.detail, kind: report.kind };
       state.draftTestOverride = true;
       render();
       return;

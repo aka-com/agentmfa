@@ -1343,9 +1343,9 @@ async fn post_ws_open(
                         }),
                     }
                 }
-                Err(detail) => ExecOutcome {
+                Err(e) => ExecOutcome {
                     status: 502,
-                    body: json!({ "reason": ErrorReason::UpstreamConnectFailed, "detail": detail }),
+                    body: json!({ "reason": ErrorReason::UpstreamConnectFailed, "detail": e.detail }),
                 },
             }
         })
