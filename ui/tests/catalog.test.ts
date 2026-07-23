@@ -38,21 +38,21 @@ test('every entry lives in a known section; only connection entries are addable'
   }
 });
 
-test('infrastructure precedes apps and generic endpoints live under Custom Apps', () => {
+test('infrastructure precedes featured and generic endpoints live under Custom Apps', () => {
   assert.ok(
-    CATALOG_SECTIONS.indexOf('Infrastructure') < CATALOG_SECTIONS.indexOf('Apps'),
+    CATALOG_SECTIONS.indexOf('Infrastructure') < CATALOG_SECTIONS.indexOf('Featured'),
   );
-  assert.ok(CATALOG_SECTIONS.indexOf('Apps') < CATALOG_SECTIONS.indexOf('Custom Apps'));
+  assert.ok(CATALOG_SECTIONS.indexOf('Featured') < CATALOG_SECTIONS.indexOf('Custom Apps'));
   assert.deepEqual(
     CATALOG.filter((entry) => entry.section === 'Custom Apps').map((entry) => entry.id),
     ['mcp', 'http'],
   );
 });
 
-test('setup-required apps lead the disconnected app rows', () => {
-  const apps = CATALOG.filter((entry) => entry.section === 'Apps').map((entry) => entry.id);
+test('setup-required apps lead the disconnected featured rows', () => {
+  const apps = CATALOG.filter((entry) => entry.section === 'Featured').map((entry) => entry.id);
   const displayed = connectedCatalogFirst(
-    CATALOG.filter((entry) => entry.section === 'Apps'),
+    CATALOG.filter((entry) => entry.section === 'Featured'),
     [],
   );
   assert.deepEqual(displayed.slice(0, 2).map((entry) => entry.id), ['slack', 'gmail']);
@@ -63,7 +63,7 @@ test('setup-required apps lead the disconnected app rows', () => {
   assert.ok(apps.indexOf('airtable') < apps.indexOf('linear'));
 });
 
-test('key-only vendors live in the API registry, not Apps', () => {
+test('key-only vendors live in the API registry, not Featured', () => {
   assert.deepEqual(
     CATALOG.filter((entry) => entry.section === 'API registry').map((entry) => entry.id),
     ['anthropic', 'openai', 'vercel'],
@@ -230,7 +230,7 @@ test('every connection is counted by exactly one row', () => {
 });
 
 test('connected tools sort above setup-required tools', () => {
-  const apps = CATALOG.filter((entry) => entry.section === 'Apps');
+  const apps = CATALOG.filter((entry) => entry.section === 'Featured');
   const sorted = connectedCatalogFirst(apps, [
     conn('api', 'api.stripe.com', 'billing'),
     conn('api', 'sentry.io', 'errors'),
@@ -240,7 +240,7 @@ test('connected tools sort above setup-required tools', () => {
 });
 
 test('collapsed app groups show at least three rows and never hide connected tools', () => {
-  const apps = CATALOG.filter((entry) => entry.section === 'Apps');
+  const apps = CATALOG.filter((entry) => entry.section === 'Featured');
   const oneConnected = collapsedCatalogGroup(apps, [
     conn('api', 'api.stripe.com', 'billing'),
   ]);

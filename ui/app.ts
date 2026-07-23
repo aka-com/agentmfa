@@ -950,7 +950,7 @@ function isMcpDraft(draft: { isMcp?: boolean; mcpPath?: string | null }): boolea
 // Sections that collapse to their connected/minimum rows behind a "More
 // tools" disclosure. The API registry holds few rows today but is expected
 // to grow, so it collapses the same way as the larger sections.
-const COLLAPSIBLE_SECTIONS: string[] = ['Apps', 'API registry', 'MCP registry'];
+const COLLAPSIBLE_SECTIONS: string[] = ['Featured', 'API registry', 'MCP registry'];
 
 function connectionsHTML() {
   const ready = state.connectionReady;
@@ -966,8 +966,19 @@ function connectionsHTML() {
     showWebsockets: state.settings.show_websockets,
     connections: state.connections,
   });
+  // Anything already configured surfaces in one place at the top; the
+  // catalog sections below then only offer what could still be added.
+  const isConnected = (entry: CatalogEntry): boolean =>
+    connectionsForEntry(entry, state.connections).length > 0;
+  const connected = entries.filter((entry) => entry.section !== 'Secrets' && isConnected(entry));
+  const connectedSection = connected.length
+    ? `<div class="cat-section"><div class="cat-section-h">CONNECTED TOOLS</div>
+      <div class="cat-rows">${connected.map(catalogRowHTML).join('')}</div></div>`
+    : '';
   const sections = CATALOG_SECTIONS.filter((section) => section !== 'Secrets').map((section) => {
-    const sectionEntries = entries.filter((entry) => entry.section === section);
+    const sectionEntries = entries.filter(
+      (entry) => entry.section === section && !isConnected(entry),
+    );
     if (!sectionEntries.length) return '';
     const ordered = connectedCatalogFirst(sectionEntries, state.connections);
     const collapsible = COLLAPSIBLE_SECTIONS.includes(section) && !state.toolSearch.trim();
@@ -991,7 +1002,7 @@ function connectionsHTML() {
         aria-label="Search tools" value="${escAttr(state.toolSearch)}">`
     : '';
   return readyCard + `<div class="catalog">${search}
-    ${sections || '<div class="muted-note">No tools match your search.</div>'}
+    ${connectedSection}${sections || (connectedSection ? '' : '<div class="muted-note">No tools match your search.</div>')}
   </div>`;
 }
 

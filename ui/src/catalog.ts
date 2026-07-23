@@ -29,7 +29,7 @@ import type { ConnectionSummary, ConnectionType } from './types';
 import { REGISTRY_SERVERS } from './registry-data';
 
 export type CatalogSection =
-  | 'Apps' | 'Custom Apps' | 'Infrastructure' | 'Secrets'
+  | 'Featured' | 'Custom Apps' | 'Infrastructure' | 'Secrets'
   | 'API registry' | 'MCP registry';
 
 /**
@@ -136,7 +136,7 @@ export const CATALOG: CatalogEntry[] = [
     name: 'GitHub',
     icon: 'github',
     description: 'Repos, issues, PRs',
-    section: 'Apps',
+    section: 'Featured',
     via: 'connection',
     connType: 'api',
     mcp: true,
@@ -152,7 +152,7 @@ export const CATALOG: CatalogEntry[] = [
     name: 'Slack',
     icon: 'slack',
     description: 'Messages, channels & users',
-    section: 'Apps',
+    section: 'Featured',
     via: 'connection',
     connType: 'api',
     requiresSetup: true,
@@ -176,7 +176,7 @@ export const CATALOG: CatalogEntry[] = [
     name: 'Gmail',
     icon: 'gmail',
     description: 'Read & send email',
-    section: 'Apps',
+    section: 'Featured',
     via: 'connection',
     connType: 'api',
     mcp: true,
@@ -204,7 +204,7 @@ export const CATALOG: CatalogEntry[] = [
     name: 'Notion',
     icon: 'notion',
     description: 'Pages & databases',
-    section: 'Apps',
+    section: 'Featured',
     via: 'connection',
     connType: 'api',
     mcp: true,
@@ -220,7 +220,7 @@ export const CATALOG: CatalogEntry[] = [
     name: 'Airtable',
     icon: 'airtable',
     description: 'Bases, tables & records',
-    section: 'Apps',
+    section: 'Featured',
     via: 'connection',
     connType: 'api',
     mcp: true,
@@ -278,7 +278,7 @@ export const CATALOG: CatalogEntry[] = [
     name: 'Linear',
     icon: 'linear',
     description: 'Issues, projects & cycles',
-    section: 'Apps',
+    section: 'Featured',
     via: 'connection',
     connType: 'api',
     mcp: true,
@@ -309,7 +309,7 @@ export const CATALOG: CatalogEntry[] = [
     name: 'Sentry',
     icon: 'sentry',
     description: 'Errors, issues & releases',
-    section: 'Apps',
+    section: 'Featured',
     via: 'connection',
     connType: 'api',
     mcp: true,
@@ -332,7 +332,7 @@ export const CATALOG: CatalogEntry[] = [
     name: 'Stripe',
     icon: 'stripe',
     description: 'Payments, customers & invoices',
-    section: 'Apps',
+    section: 'Featured',
     via: 'connection',
     connType: 'api',
     mcp: true,
@@ -375,7 +375,7 @@ export const CATALOG: CatalogEntry[] = [
     name: 'Cloudflare',
     icon: 'cloudflare',
     description: 'DNS, Workers & zone config',
-    section: 'Apps',
+    section: 'Featured',
     via: 'connection',
     connType: 'api',
     mcp: true,
@@ -450,7 +450,7 @@ export const CATALOG: CatalogEntry[] = [
 ];
 
 export const CATALOG_SECTIONS: CatalogSection[] =
-  ['Infrastructure', 'Apps', 'Custom Apps', 'API registry', 'MCP registry', 'Secrets'];
+  ['Infrastructure', 'Featured', 'Custom Apps', 'API registry', 'MCP registry', 'Secrets'];
 
 /**
  * The registry tail: hosted MCP servers from the public index, each an
