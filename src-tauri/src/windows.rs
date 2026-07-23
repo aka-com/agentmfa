@@ -407,11 +407,8 @@ fn retreat_to_menu_bar(app: &AppHandle) {
 /// window-event path cannot await a network round trip.
 fn menu_bar_hides_dock(app: &AppHandle) -> bool {
     app.try_state::<crate::commands::AppState>()
-        .and_then(|s| {
-            s._local
-                .as_ref()
-                .map(|local| local.broker.settings().menu_bar_hides_dock)
-        })
+        .and_then(|s| s.brokers.local_broker())
+        .map(|broker| broker.settings().menu_bar_hides_dock)
         .unwrap_or(false)
 }
 

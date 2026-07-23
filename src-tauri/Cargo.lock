@@ -26,6 +26,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "aka-client"
+version = "0.0.1"
+dependencies = [
+ "aka-api",
+ "aka-core",
+ "async-trait",
+ "bytes",
+ "futures",
+ "keyring",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "aka-core"
 version = "0.0.1"
 dependencies = [
@@ -73,6 +94,7 @@ name = "aka-desktop"
 version = "0.1.0"
 dependencies = [
  "aka-api",
+ "aka-client",
  "aka-core",
  "block2",
  "glob",

@@ -30,9 +30,13 @@ import {
   quickSetupPlaceholder, shouldResolveSshImport, sshImportFromPreview, suggestedSecretName,
 } from '/src/connection-input';
 import { formErrorKind, formErrorMessage, inlineFormError } from '/src/form-errors';
+import {
+  LOCAL_BROKER, brokerLabel, brokerTakeover, brokerTone, remoteFeatureNote,
+} from '/src/broker';
 import type { HostKeyCandidate } from '/src/connection-input';
 import type {
   ActivityEntry,
+  BrokerProfile,
   CommandArgs,
   CommandName,
   ConnectionInput,
@@ -132,8 +136,23 @@ interface ConnectionReadyState {
   type: ConnectionType;
 }
 
+/** The remote-broker configuration form's transient state. */
+interface RemoteSetupState {
+  open: boolean;
+  url: string;
+  token: string;
+  busy: boolean;
+  error: string | null;
+}
+
 interface AppState {
   tab: Tab;
+  /** Which broker the app manages and its link state. */
+  broker: BrokerProfile;
+  /** The header's broker-switcher menu is open. */
+  brokerMenuOpen: boolean;
+  /** The remote-broker configuration form (a full-pane takeover). */
+  remoteSetup: RemoteSetupState;
   localUsername: string;
   secrets: SecretSummary[];
   connections: ConnectionSummary[];
@@ -233,6 +252,9 @@ interface ConnectionTestState {
 /* ------------------------------ local state ------------------------------ */
 const state: AppState = {
   tab: 'connections',
+  broker: LOCAL_BROKER,
+  brokerMenuOpen: false,
+  remoteSetup: { open: false, url: '', token: '', busy: false, error: null },
   localUsername: '',
   secrets: [],
   connections: [],
@@ -537,6 +559,7 @@ function endpointStripHTML(c: ConnectionSummary): string {
   if (!endpoint) {
     return `<div class="ep-strip">
       <button class="btn primary sm" data-act="issue-endpoint" data-conn="${c.id}"
+        ${remoteFeatureNote(state.broker, 'endpoints') ? `disabled data-tippy-content="${escAttr(remoteFeatureNote(state.broker, 'endpoints') ?? '')}"` : ''}
         title="A pasteable address for an unmodified tool">Issue direct endpoint…</button>
     </div>`;
   }
@@ -1012,6 +1035,10 @@ function activityRowHTML(a: ActivityEntry): string {
     a.agent ? `<span class="act-chip" title="Agent">${esc(a.agent)}</span>` : '',
     typeof a.duration_ms === 'number'
       ? `<span class="act-chip act-chip-time" title="Duration">${a.duration_ms} ms</span>` : '',
+    // A hosted broker authorizes gated actions by manage-token possession;
+    // mark those so the trail reads honestly next to Touch-ID-confirmed rows.
+    a.confirmation === 'management_token'
+      ? `<span class="act-chip act-chip-manage" title="Authorized by the management token">via manage token</span>` : '',
   ].join('');
   const tool = a.connection
     ? `<span class="act-chip act-tool" title="Tool: ${escAttr(a.connection)}">${esc(a.connection)}</span>`
@@ -1248,10 +1275,14 @@ function tabContentHTML() {
 
 function brokerReadyHTML() {
   const copied = state.readyCopied;
+  // The badge tracks the *managed* broker: a remote link that is down must
+  // not sit under a green "Ready".
+  const tone = brokerTone(state.broker);
+  const label = tone === 'error' ? 'Unreachable' : tone === 'pending' ? 'Connecting…' : 'Ready';
   return `<button class="dd-sub ready-copy ${copied ? 'is-copied' : ''}"
     data-act="copy-ready-setup" title="${copied ? 'Setup instructions copied' : 'Copy setup instructions'}"
-    aria-label="Copy setup instructions"><span class="dot"></span>
-    <span class="ready-copy-label" aria-live="polite">${copied ? `${ICONS.check} Copied` : 'Ready'}</span></button>`;
+    aria-label="Copy setup instructions"><span class="dot dot-${tone}"></span>
+    <span class="ready-copy-label" aria-live="polite">${copied ? `${ICONS.check} Copied` : label}</span></button>`;
 }
 
 // Every row on the current tab that can expand — mirrors the render-time
@@ -1280,9 +1311,87 @@ function showAllToggleHTML(checked: boolean, enabled: boolean): string {
     <span>Show all</span></label>`;
 }
 
+/* --------------------------- broker switcher ------------------------------ */
+
+/** The header's custom local/remote dropdown (right-justified). */
+function brokerSwitchHTML(): string {
+  const tone = brokerTone(state.broker);
+  const label = brokerLabel(state.broker);
+  const menu = state.brokerMenuOpen
+    ? `<div class="broker-menu" role="menu">
+        <button class="menu-item" role="menuitem" data-act="broker-pick-local">
+          <span class="broker-check">${state.broker.mode === 'local' ? '✓' : ''}</span> This Mac</button>
+        <button class="menu-item" role="menuitem" data-act="broker-pick-remote">
+          <span class="broker-check">${state.broker.mode === 'remote' ? '✓' : ''}</span> Remote broker…</button>
+      </div>`
+    : '';
+  return `<div class="broker-switch-wrap">
+    <button class="broker-btn ${state.brokerMenuOpen ? 'on' : ''}" data-act="broker-menu"
+      aria-haspopup="menu" aria-expanded="${state.brokerMenuOpen}" title="Which broker this app manages">
+      <span class="broker-dot ${tone}"></span><span class="broker-label">${esc(label)}</span>
+      <span class="broker-caret" aria-hidden="true">▾</span>
+    </button>${menu}</div>`;
+}
+
+/** The full-content-pane takeover while a remote link is not usable. */
+function brokerPaneHTML(): string {
+  const kind = brokerTakeover(state.broker, state.remoteSetup.open);
+  if (!kind) return '';
+  if (kind === 'setup') {
+    const setup = state.remoteSetup;
+    const hasSaved = state.broker.has_saved_token
+      && (setup.url.trim() === '' || setup.url.trim().replace(/\/+$/, '') === (state.broker.url ?? ''));
+    const cancelBtn = state.broker.mode === 'remote' && !state.broker.connected
+      ? `<button class="btn ghost" data-act="broker-pick-local">Use this Mac instead</button>`
+      : `<button class="btn ghost" data-act="broker-setup-cancel">Cancel</button>`;
+    return `<div class="broker-pane" role="form" aria-label="Connect to a remote broker">
+      <div class="bp-icon">${ICONS.blocks}</div>
+      <h2>Connect to a remote broker</h2>
+      <p class="bp-lead">Manage a Multitool broker running on another Mac. On that machine, run
+        <code>aka serve --listen 0.0.0.0:4780</code> (behind your TLS proxy or tunnel) and issue a
+        management token with <code>aka manage token</code>.</p>
+      <div class="f-row"><label for="rb-url">Broker URL</label>
+        <input id="rb-url" placeholder="https://broker.example.dev" value="${escAttr(setup.url)}"
+          autocomplete="off" spellcheck="false"></div>
+      <div class="f-row"><label for="rb-token">Management token</label>
+        <input id="rb-token" type="password" placeholder="${hasSaved ? 'Using the saved token (paste to replace)' : 'akamgr_…'}"
+          value="${escAttr(setup.token)}" autocomplete="off"></div>
+      ${setup.error ? `<div class="inline-error" role="alert">${esc(setup.error)}</div>` : ''}
+      <div class="bp-actions">
+        <button class="btn primary" data-act="broker-connect-submit" ${setup.busy ? 'disabled' : ''}>
+          ${setup.busy ? 'Connecting…' : 'Connect'}</button>
+        ${cancelBtn}
+      </div>
+    </div>`;
+  }
+  if (kind === 'connecting') {
+    return `<div class="broker-pane" role="status">
+      <span class="app-loading-spinner"></span>
+      <h2>Connecting to the remote broker</h2>
+      <p class="bp-lead"><code>${esc(state.broker.url ?? '')}</code></p>
+      <div class="bp-actions">
+        <button class="btn ghost" data-act="broker-pick-local">Use this Mac instead</button>
+      </div>
+    </div>`;
+  }
+  return `<div class="broker-pane broker-pane-error" role="alert">
+    <div class="bp-icon bp-icon-error">${ICONS.circleX}</div>
+    <h2>Can’t reach the remote broker</h2>
+    <p class="bp-lead"><code>${esc(state.broker.url ?? '')}</code></p>
+    ${state.broker.error ? `<p class="bp-detail">${esc(state.broker.error)}</p>` : ''}
+    <div class="bp-actions">
+      <button class="btn primary" data-act="broker-retry">Retry</button>
+      <button class="btn" data-act="broker-edit">Edit connection…</button>
+      <button class="btn ghost" data-act="broker-pick-local">Use this Mac</button>
+    </div>
+  </div>`;
+}
+
 function renderMainWindow() {
+  const takeover = brokerPaneHTML();
   const navItem = (tab: Tab): string =>
-    `<button class="nav-item ${state.tab === tab ? 'on' : ''}" data-act="tab" data-tab="${tab}">${tabLabel(tab)}</button>`;
+    `<button class="nav-item ${state.tab === tab ? 'on' : ''}" data-act="tab" data-tab="${tab}"
+      ${takeover ? 'disabled' : ''}>${tabLabel(tab)}</button>`;
   const nav = TABS.map(navItem).join('');
   // One view-specific action, always in the header row next to the title.
   const actionBtn = state.tab === 'connections'
@@ -1309,26 +1418,39 @@ function renderMainWindow() {
         <button class="menu-item" data-act="open-settings">${ICONS.gear} Settings</button>
       </div>` : '';
   root().innerHTML = `<div class="surface">
-    <div class="dw-titlebar" data-tauri-drag-region><span class="dw-title">Multitool</span></div>
+    <div class="dw-titlebar" data-tauri-drag-region>
+      <span class="dw-title dw-title-center">Multitool</span>
+      ${brokerSwitchHTML()}
+    </div>
     <div class="dw-body">
-      <div class="dw-side">
+      <div class="dw-side ${takeover ? 'disabled' : ''}">
         <div class="dw-brand"><div class="dd-appicon">${ICONS.blocks}</div>
           <div><div class="dd-title">Multitool</div>${brokerReadyHTML()}</div></div>
         <div class="dw-nav">${nav}</div>
-        <div class="dw-settings">${menu}
-          <button class="nav-item gear-btn ${state.menuOpen ? 'on' : ''}" data-act="toggle-settings-menu" title="Settings" aria-label="Settings">${ICONS.gear}</button>
+        <div class="dw-settings">${takeover ? '' : menu}
+          <button class="nav-item gear-btn ${state.menuOpen ? 'on' : ''}" data-act="toggle-settings-menu"
+            title="Settings" aria-label="Settings" ${takeover ? 'disabled' : ''}>${ICONS.gear}</button>
         </div>
       </div>
       <div class="dw-main">
-        ${pageHead}
+        ${takeover ? `<div class="content broker-takeover">${takeover}</div>` : `${pageHead}
         ${globalSectionsHTML()}
-        <div class="content">${tabContentHTML()}</div>
+        <div class="content">${tabContentHTML()}</div>`}
       </div>
-    </div></div>${sheetsHTML()}${endpointConfirmHTML()}`;
+    </div></div>${takeover ? '' : sheetsHTML() + endpointConfirmHTML()}`;
 }
 
 function renderDropdown() {
   if (state.tab === 'start') state.tab = 'connections';
+  const takeover = brokerPaneHTML();
+  if (takeover) {
+    root().innerHTML = `<div class="surface dropdown-surface">
+      <div class="dd-head"><div class="dd-appicon">${ICONS.blocks}</div>
+        <div class="dd-identity"><div class="dd-title">Multitool</div></div>
+        <button class="icon-btn" title="Open as a window" aria-label="Open as a window" data-act="mode-window">${ICONS.expand}</button></div>
+      <div class="content dd-content broker-takeover">${takeover}</div></div>`;
+    return;
+  }
   const tabs = DROPDOWN_TABS.map((tb) =>
     `<button class="seg-btn ${state.tab === tb ? 'on' : ''}" data-act="tab" data-tab="${tb}">${tabLabel(tb)}</button>`).join('');
   const footer = '';
@@ -1841,13 +1963,17 @@ function connSheet(editing: boolean): string {
     }
   } else if (t === 'api' || t === 'ws') {
     const mcpAdd = t === 'api' && isMcpDraft(d);
-    const oauthPreset = !mcpAdd && t === 'api' && d.entryId
+    // Browser sign-ins redirect to a loopback on the broker's machine, so
+    // they are offered only for a local broker; remote setups paste tokens.
+    const oauthAvailable = !remoteFeatureNote(state.broker, 'oauth');
+    const oauthPreset = oauthAvailable && !mcpAdd && t === 'api' && d.entryId
       ? catalogEntryById(d.entryId)?.oauthPreset : undefined;
-    const modeValue = d.authMode || (mcpAdd ? 'oauth' : 'bearer');
+    const modeValue = d.authMode || (mcpAdd && oauthAvailable ? 'oauth' : 'bearer');
     const recipes: Array<[string, string]> = [
       // MCP servers advertise their own sign-in flow; the browser dance is
       // the default and a pasted token stays one select away.
-      ...(mcpAdd ? [['oauth', 'Sign in with your account (OAuth)'] as [string, string]] : []),
+      ...(mcpAdd && oauthAvailable
+        ? [['oauth', 'Sign in with your account (OAuth)'] as [string, string]] : []),
       ['bearer', 'Bearer token'], ['header', 'Custom header'],
       ...(t === 'api' ? [['query', 'Query parameter'] as [string, string]] : []),
       // Plain REST rows with documented OAuth endpoints offer a browser
@@ -1933,8 +2059,9 @@ function connSheet(editing: boolean): string {
       ${advOpen ? advancedFields : ''}</div>`;
   }
   if (editing && conn && (conn.mcp_path || conn.oauth_spec)) {
+    const remoteNote = remoteFeatureNote(state.broker, 'oauth');
     fields += `<div class="f-row"><button class="btn" data-act="${conn.mcp_path ? 'reconnect-mcp' : 'oauth-reconnect'}"
-      data-id="${conn.id}">Reconnect (sign in again)</button></div>`;
+      data-id="${conn.id}" ${remoteNote ? `disabled title="${escAttr(remoteNote)}"` : ''}>Reconnect (sign in again)</button></div>`;
   }
   const label = (!editing && state.connEntryName) || catalogNameForType(t);
   const oauthSelected = !editing && t === 'api' && isMcpDraft(d)
@@ -2220,6 +2347,8 @@ function captureDrafts(): void {
     const el = document.getElementById(id) as HTMLInputElement | HTMLSelectElement | null;
     return el?.value;
   };
+  if (g('rb-url') !== undefined) state.remoteSetup.url = g('rb-url') ?? '';
+  if (g('rb-token') !== undefined) state.remoteSetup.token = g('rb-token') ?? '';
   if (state.sheet && (state.sheet.kind === 'add-secret' || state.sheet.kind === 'edit-secret')) {
     if (g('f-name') !== undefined) state.draft.name = g('f-name');
     if (g('f-value') !== undefined) state.draft.value = g('f-value');
@@ -2793,6 +2922,11 @@ document.addEventListener('click', async (e) => {
     if (!btn) { render(); return; }
     // fall through: the clicked action runs and its render reflects the close
   }
+  if (state.brokerMenuOpen && !target?.closest('.broker-switch-wrap')) {
+    state.brokerMenuOpen = false;
+    if (!btn) { render(); return; }
+    // fall through: the clicked action runs and its render reflects the close
+  }
   if (state.agentMenuOpen && !target?.closest('.agent-menu-wrap')) {
     state.agentMenuOpen = null;
     if (!btn) { render(); return; }
@@ -2835,6 +2969,80 @@ document.addEventListener('click', async (e) => {
       resetScroll();
       break;
     }
+    case 'broker-menu': state.brokerMenuOpen = !state.brokerMenuOpen; render(); break;
+    case 'broker-pick-local': {
+      state.brokerMenuOpen = false;
+      state.remoteSetup.open = false;
+      state.remoteSetup.error = null;
+      if (state.broker.mode === 'local') { render(); break; }
+      try {
+        state.broker = await invoke('switch_broker_local');
+        await refresh('all');
+        try { state.agentSetupInstructions = await invoke('get_agent_setup'); } catch { /* pane shows loading */ }
+        toast('Managing this Mac’s broker');
+      } catch (error) {
+        toast(`Couldn’t start the local broker: ${String(error)}`);
+      }
+      render();
+      break;
+    }
+    case 'broker-pick-remote': {
+      state.brokerMenuOpen = false;
+      state.remoteSetup = {
+        open: true,
+        url: state.broker.url ?? state.remoteSetup.url,
+        token: '',
+        busy: false,
+        error: null,
+      };
+      render();
+      break;
+    }
+    case 'broker-setup-cancel':
+      state.remoteSetup.open = false;
+      state.remoteSetup.error = null;
+      render();
+      break;
+    case 'broker-edit':
+      state.remoteSetup = {
+        open: true,
+        url: state.broker.url ?? '',
+        token: '',
+        busy: false,
+        error: null,
+      };
+      render();
+      break;
+    case 'broker-connect-submit': {
+      captureDrafts();
+      const url = state.remoteSetup.url.trim();
+      const token = state.remoteSetup.token.trim();
+      state.remoteSetup.busy = true;
+      state.remoteSetup.error = null;
+      render();
+      try {
+        state.broker = await invoke('connect_remote_broker', { url, token: token || null });
+        state.remoteSetup = { open: false, url: '', token: '', busy: false, error: null };
+        await refresh('all');
+        try { state.agentSetupInstructions = await invoke('get_agent_setup'); } catch { /* pane shows loading */ }
+        toast(`Managing ${brokerLabel(state.broker)}`);
+      } catch (error) {
+        state.remoteSetup.busy = false;
+        state.remoteSetup.error = String(error);
+      }
+      render();
+      break;
+    }
+    case 'broker-retry': {
+      try {
+        state.broker = await invoke('retry_remote_broker');
+        await refresh('all');
+      } catch {
+        // The profile event carries the failure; nothing else to do.
+      }
+      render();
+      break;
+    }
     case 'mode-tray': state.menuOpen = false; run(() => invoke('ui_set_mode', { mode: 'tray' })); break;
     case 'mode-window': run(() => invoke('ui_set_mode', { mode: 'window' })); break;
     case 'toggle-settings-menu': state.menuOpen = !state.menuOpen; render(); break;
@@ -2861,6 +3069,8 @@ document.addEventListener('click', async (e) => {
     }
     case 'issue-endpoint':
     case 'reissue-endpoint-confirm': {
+      const remoteNote = remoteFeatureNote(state.broker, 'endpoints');
+      if (remoteNote) { toast(remoteNote); break; }
       const connectionId = btn.dataset.conn || '';
       state.confirm = null;
       // Not via run(): we need the one-time result to show its secret.
@@ -3104,6 +3314,12 @@ document.addEventListener('click', async (e) => {
     case 'catalog-connect-oauth': {
       const entry = catalogEntryById(id);
       state.catalogActionMenuOpen = null;
+      // Browser sign-in can't relay to a remote broker yet: open the same
+      // row's manual (token) form instead of a flow that would dead-end.
+      if (entry && remoteFeatureNote(state.broker, 'oauth')) {
+        await openCatalogConnectionForm(entry, 'bearer');
+        break;
+      }
       render(false);
       if (entry) await quickConnectCatalogMcp(entry);
       break;
@@ -3754,6 +3970,8 @@ async function boot() {
   // A webview reload must not leave a stale native lock behind. Forms acquire
   // it again before they are shown.
   if (mode === 'dropdown') await invoke('ui_set_dropdown_form_active', { active: false });
+  // Which broker this app manages decides everything else about boot.
+  try { state.broker = await invoke('get_broker_profile'); } catch (e) { console.error(e); }
   // Choose the landing tab before the first paint: nothing configured yet
   // means the walkthrough is the useful screen.
   await Promise.all([
@@ -3784,6 +4002,17 @@ async function boot() {
     if (state.tab === 'activity' && !state.sheet && !state.menuOpen) render();
   }, 60000);
   // Live updates from the core.
+  await listen('aka://broker-changed', async (ev) => {
+    const wasConnected = state.broker.connected && state.broker.mode === ev.payload.mode;
+    state.broker = ev.payload;
+    // A link that just came (back) up: refetch everything rather than
+    // trusting whatever was on screen for the previous broker.
+    if (ev.payload.connected && !wasConnected) {
+      await refresh('all');
+      try { state.agentSetupInstructions = await invoke('get_agent_setup'); } catch { /* pane shows loading */ }
+    }
+    render();
+  });
   await listen('aka://sessions-changed', () => refresh('sessions'));
   await listen('aka://elicitations-changed', async () => {
     await refresh('elicitations');

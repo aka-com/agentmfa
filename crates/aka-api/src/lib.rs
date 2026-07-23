@@ -64,6 +64,9 @@ pub enum ManageError {
     /// The management feature exists but this backend cannot perform it —
     /// e.g. OAuth sign-in against a remote broker before the relay ships.
     RemoteUnsupported { feature: String },
+    /// The remote broker rejected the management token (revoked or
+    /// rotated). Local backends never produce this.
+    InvalidManageToken,
     /// The remote broker could not be reached (or answered outside the
     /// protocol). Local backends never produce this.
     Unreachable { message: String },
@@ -137,6 +140,10 @@ impl std::fmt::Display for ManageError {
             Self::RemoteUnsupported { feature } => write!(
                 f,
                 "{feature} is not available while managing a remote broker"
+            ),
+            Self::InvalidManageToken => write!(
+                f,
+                "the broker rejected the management token; re-issue it with `aka manage token` and enter the new one"
             ),
             Self::Unreachable { message } => {
                 write!(f, "the remote broker could not be reached: {message}")
@@ -311,6 +318,11 @@ pub struct ActivityDto {
     pub connection: Option<String>,
     /// How long a brokered call or session took, when measured.
     pub duration_ms: Option<u64>,
+    /// How a confirmation-required action was authorized, when one was
+    /// (e.g. "os_authentication", "management_token"). Lets the activity
+    /// view mark actions a hosted broker authorized by token possession.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation: Option<String>,
     /// RFC 3339 timestamp; the UI renders it relative (<24h) or absolute and
     /// shows the full value in a hover tooltip.
     pub at: String,
@@ -435,6 +447,7 @@ mod tests {
                 agent: None,
                 connection: None,
                 duration_ms: None,
+                confirmation: None,
                 at: "2026-01-01T00:00:00Z".into(),
             },
         };

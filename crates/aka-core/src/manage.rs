@@ -243,6 +243,11 @@ pub fn activity_dto(entry: &AuditEntry) -> ActivityDto {
         agent: entry.agent.clone(),
         connection: entry.connection.clone(),
         duration_ms: entry.duration_ms,
+        confirmation: entry.confirmation.and_then(|method| {
+            serde_json::to_value(method)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string))
+        }),
         at: entry.ts.to_rfc3339(),
     }
 }
@@ -272,6 +277,15 @@ fn issued_endpoint_dto(info: IssuedEndpointInfo) -> IssuedEndpointDto {
 pub fn agent_setup_instructions(socket: &str, token_path: &str) -> String {
     format!(
         "Connect to the local Multitool broker. Read its current instructions, then list the available connections:\n\ncurl -fsS --unix-socket {socket} http://localhost/instructions\n\nAuthenticate with this computer's shared key — read it from {token_path} and send it as `Authorization: Bearer <key>`."
+    )
+}
+
+/// The agent-setup snippet for a broker reached over the network: agents on
+/// other machines use the public URL and the operator-provided shared key.
+pub fn agent_setup_instructions_remote(base: &str) -> String {
+    let base = base.trim_end_matches('/');
+    format!(
+        "Connect to the Multitool broker at {base}. Read its current instructions, then list the available connections:\n\ncurl -fsS -H \"Authorization: Bearer <key>\" {base}/instructions\n\nAuthenticate with the broker's shared key — ask the broker's operator for it (on the broker host it lives in ~/.aka/token). MCP clients connect straight to {base}/mcp with the same Authorization header."
     )
 }
 
@@ -802,6 +816,11 @@ impl ManagementBackend for LocalBackend {
     }
 
     async fn agent_setup(&self) -> ManageResult<String> {
+        // A broker serving a public URL is being reached by remote agents;
+        // the setup snippet must describe their path, not the host's socket.
+        if let Some(base) = self.broker.public_url() {
+            return Ok(agent_setup_instructions_remote(&base));
+        }
         Ok(agent_setup_instructions(
             &self.broker.paths.socket_display(),
             &self.broker.paths.token_display(),
@@ -916,6 +935,15 @@ mod tests {
                 name: "MISSING".into()
             }
         );
+    }
+
+    #[test]
+    fn remote_agent_setup_names_the_public_url_not_host_paths() {
+        let text = agent_setup_instructions_remote("https://broker.example.dev/");
+        assert!(text.contains("https://broker.example.dev/instructions"));
+        assert!(text.contains("https://broker.example.dev/mcp"));
+        assert!(text.contains("Authorization: Bearer"));
+        assert!(!text.contains("--unix-socket"));
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -198,10 +198,81 @@
 }
   .dw-titlebar .dw-title{
   font-size: 13px; font-weight: 600; color: var(--ink-3);
-  /* Nudge the centered title clear of the traffic lights by half their width. */
-  transform: translateX(calc(var(--traffic-lights) / 2));
   -webkit-user-select: none; user-select: none;
 }
+  /* The title sits in the true middle of the window (not nudged by the
+     traffic lights); the broker switcher is pinned to the right edge. */
+  .dw-titlebar .dw-title-center{
+  position: absolute; left: 50%; transform: translateX(-50%);
+}
+
+  /* ---- broker switcher (titlebar, right) ------------------------------- */
+  .broker-switch-wrap{
+  position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+}
+  .broker-btn{
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 24px; padding: 0 8px;
+  font-size: 12px; font-weight: 500; color: var(--ink-2);
+  background: transparent; border: 1px solid transparent; border-radius: 6px;
+  cursor: default;
+}
+  .broker-btn:hover, .broker-btn.on{ background: var(--hover); border-color: var(--line); }
+  .broker-label{ max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .broker-caret{ font-size: 9px; color: var(--muted-2); }
+  .broker-dot{
+  width: 7px; height: 7px; border-radius: 50%; display: inline-block;
+  background: var(--muted-2);
+}
+  .broker-dot.local{ background: var(--muted-2); }
+  .broker-dot.ok{ background: #30c94e; box-shadow: 0 0 4px rgba(48,201,78,.7); }
+  .broker-dot.pending{ background: #f5a623; }
+  .broker-dot.error{ background: var(--danger); box-shadow: 0 0 4px rgba(255,59,48,.6); }
+  .broker-menu{
+  position: absolute; right: 0; top: calc(100% + 4px); z-index: 60;
+  min-width: 180px; padding: 4px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 9px;
+  box-shadow: 0 8px 28px rgba(0,0,0,.16);
+  display: flex; flex-direction: column;
+}
+  .broker-check{ width: 14px; display: inline-block; color: var(--accent-text); }
+
+  /* ---- remote-broker takeover panes ------------------------------------ */
+  .content.broker-takeover{
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+}
+  .broker-pane{
+  width: min(440px, 100%);
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 26px 28px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+}
+  .broker-pane h2{ margin: 0; font-size: 16px; }
+  .broker-pane .bp-lead{ margin: 0; font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+  .broker-pane .bp-lead code, .broker-pane > p code{ font-size: 11.5px; }
+  .broker-pane .bp-detail{
+  margin: 0; font-size: 12px; color: var(--danger-text);
+  background: rgba(255,59,48,.07); border: 1px solid rgba(255,59,48,.2);
+  border-radius: 7px; padding: 8px 10px; word-break: break-word;
+}
+  .broker-pane .bp-icon{ width: 30px; height: 30px; color: var(--muted-2); }
+  .broker-pane .bp-icon svg{ width: 30px; height: 30px; }
+  .broker-pane .bp-icon-error{ color: var(--danger); }
+  .broker-pane .f-row label{ font-size: 12px; }
+  .broker-pane .inline-error{
+  font-size: 12px; color: var(--danger-ink); word-break: break-word;
+}
+  .broker-pane .bp-actions{ display: flex; gap: 8px; margin-top: 6px; }
+  .broker-pane .app-loading-spinner{ align-self: flex-start; }
+
+  .act-chip-manage{ color: var(--accent-ink); background: var(--accent-wash); }
+  .dd-sub .dot.dot-pending{ background: #f5a623; box-shadow: 0 0 4px rgba(245,166,35,.6); }
+  .dd-sub .dot.dot-error{ background: var(--danger); box-shadow: 0 0 4px rgba(255,59,48,.6); }
+
+  /* While a takeover owns the content pane, the sidebar is inert. */
+  .dw-side.disabled .dw-nav .nav-item,
+  .dw-side.disabled .gear-btn{ opacity: .45; pointer-events: none; }
+  .dw-side.disabled .dw-brand{ opacity: .7; }
   /* ---- settings popover (gear, sidebar bottom) ------------------------- */
 .dw-settings{ position: relative; }
   .gear-btn{ justify-content: center; }

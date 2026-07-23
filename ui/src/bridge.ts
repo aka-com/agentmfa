@@ -176,6 +176,7 @@ interface MockArgs {
   enabled: boolean;
   tools?: string[] | null;
   clientSecret?: string | null;
+  token?: string | null;
   source: string;
   host: string;
   port: number;
@@ -477,6 +478,43 @@ function mockStatusReport(c: MockConnection): McpStatusReport {
   };
 }
 
+// Broker-switcher mock: local by default. A URL containing "down" plays an
+// unreachable broker and "badtoken" a rejected token, so the takeover panes
+// are reviewable in a plain browser.
+let mockBroker: import('./types').BrokerProfile = {
+  mode: 'local', url: null, connected: true, error: null, has_saved_token: false,
+};
+
+function mockConnectRemote(url: string, token: string | null): unknown {
+  const trimmed = url.trim().replace(/\/+$/, '');
+  if (!trimmed) throw 'enter the broker\u2019s URL';
+  if (!/^https?:\/\//.test(trimmed)) throw 'enter a full URL, e.g. https://broker.example.dev';
+  if (!token && !(mockBroker.has_saved_token && mockBroker.url === trimmed)) {
+    throw 'enter the broker\u2019s management token';
+  }
+  if (trimmed.includes('down')) {
+    throw 'the remote broker could not be reached: connection refused';
+  }
+  if (token?.includes('badtoken')) {
+    throw 'the broker rejected the management token; re-issue it with `aka manage token` and enter the new one';
+  }
+  mockBroker = { mode: 'remote', url: trimmed, connected: true, error: null, has_saved_token: true };
+  emit('aka://broker-changed', mockBroker);
+  // A "flaky" broker connects, then drops the link shortly after — the
+  // full-pane error state is reviewable in a plain browser this way.
+  if (trimmed.includes('flaky')) {
+    setTimeout(() => {
+      mockBroker = {
+        ...mockBroker,
+        connected: false,
+        error: 'the remote broker could not be reached: connection refused',
+      };
+      emit('aka://broker-changed', mockBroker);
+    }, 800);
+  }
+  return { ...mockBroker };
+}
+
 async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
   switch (cmd) {
     case 'get_local_username': return 'satoshi';
@@ -490,6 +528,23 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
     case 'list_sessions': return db.sessions.slice();
     case 'list_activity': return db.activity.slice(0, Math.min(args.limit ?? MOCK_ACTIVITY_LIMIT, MOCK_ACTIVITY_LIMIT));
     case 'clear_activity': db.activity = []; emit('aka://activity-changed', {}); return;
+    case 'get_broker_profile': return { ...mockBroker };
+    case 'connect_remote_broker': return mockConnectRemote(args.url as string, (args.token as string | null) ?? null);
+    case 'retry_remote_broker': {
+      if (mockBroker.url?.includes('down')) {
+        mockBroker = { ...mockBroker, connected: false, error: 'the remote broker could not be reached: connection refused' };
+        emit('aka://broker-changed', mockBroker);
+        throw mockBroker.error;
+      }
+      mockBroker = { ...mockBroker, connected: true, error: null };
+      emit('aka://broker-changed', mockBroker);
+      return { ...mockBroker };
+    }
+    case 'switch_broker_local': {
+      mockBroker = { mode: 'local', url: mockBroker.url, connected: true, error: null, has_saved_token: mockBroker.has_saved_token };
+      emit('aka://broker-changed', mockBroker);
+      return { ...mockBroker };
+    }
     case 'get_settings': return { ...db.settings };
     case 'get_agent_setup': return MOCK_AGENT_SETUP;
     case 'copy_agent_setup': return;

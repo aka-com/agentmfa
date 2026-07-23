@@ -87,6 +87,9 @@ pub struct Broker {
     pub health: Arc<crate::health::HealthRegistry>,
     /// Tickets + live WS/PG sessions.
     pub data_plane: DataPlane,
+    /// The URL remote clients reach this broker at (`serve --public-url`),
+    /// when one is configured. Drives remote-flavored agent-setup text.
+    public_url: Mutex<Option<String>>,
     /// The sidecar's loopback MCP port, reported by the shell that
     /// supervises it (restarts move it; `None` while it is not running).
     /// Advertised in the discovery manifest so `aka mcp` and other bridges
@@ -202,6 +205,7 @@ impl Broker {
             data_plane,
             mcp_auth: crate::mcp_auth::McpAuthSessions::default(),
             connect_request_debounce: Mutex::new(std::collections::HashMap::new()),
+            public_url: Mutex::new(None),
             sidecar_mcp_port: Mutex::new(None),
             ws_bridge_port: std::sync::OnceLock::new(),
             pg_proxy_port: std::sync::OnceLock::new(),
@@ -247,6 +251,16 @@ impl Broker {
     /// manifest advertises it.
     pub fn set_sidecar_mcp_port(&self, port: Option<u16>) {
         *self.sidecar_mcp_port.lock().unwrap() = port;
+    }
+
+    /// Record the URL remote clients reach this broker at.
+    pub fn set_public_url(&self, url: Option<String>) {
+        *self.public_url.lock().unwrap() = url;
+    }
+
+    /// The configured public URL, when serving one.
+    pub fn public_url(&self) -> Option<String> {
+        self.public_url.lock().unwrap().clone()
     }
 
     /// Subscribe to manage-plane change notifications (the SSE feed).

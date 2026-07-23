@@ -561,6 +561,7 @@ pub async fn serve_with(
     // is refused and discovery renders for network clients. Bound before
     // the UDS serving task so a bad address fails startup as a diagnosis,
     // not a background log line.
+    broker.set_public_url(options.public_url.clone());
     let (tcp_addr, tcp_task) = match &options.listen {
         Some(addr) => {
             let tcp_listener = tokio::net::TcpListener::bind(addr).await?;

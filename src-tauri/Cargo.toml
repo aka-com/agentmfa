@@ -25,6 +25,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 aka-api = { path = "../crates/aka-api" }
+aka-client = { path = "../crates/aka-client" }
 aka-core = { path = "../crates/aka-core" }
 tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
 tauri-plugin-notification = "2"

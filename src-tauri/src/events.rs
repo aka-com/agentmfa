@@ -113,6 +113,54 @@ pub fn observer(app: AppHandle) -> Arc<dyn BrokerEvents> {
     Arc::new(TauriEvents::new(app))
 }
 
+/// Re-emit a remote broker's manage event as the Tauri event local mode
+/// would have produced, so the webview never knows which mode it is in.
+pub fn emit_manage_event(app: &AppHandle, event: aka_api::ManageEvent) {
+    use aka_api::ManageEvent;
+    match event {
+        ManageEvent::SessionsChanged => {
+            let _ = app.emit(EVT_SESSIONS, ());
+        }
+        ManageEvent::AgentsChanged => {
+            let _ = app.emit(EVT_AGENTS, ());
+        }
+        ManageEvent::WiringsChanged => {
+            let _ = app.emit(EVT_WIRINGS, ());
+        }
+        ManageEvent::ConnectionsChanged => {
+            let _ = app.emit(EVT_CONNECTIONS, ());
+        }
+        ManageEvent::ActivityAppended { entry } => {
+            let _ = app.emit(EVT_ACTIVITY, entry);
+        }
+        ManageEvent::ActivityCleared => {
+            let _ = app.emit(EVT_ACTIVITY_CHANGED, ());
+        }
+        ManageEvent::McpAuthChanged { state } => {
+            let _ = app.emit(EVT_MCP_AUTH, state);
+        }
+        ManageEvent::ConnectRequested { agent, service } => {
+            let _ = app.emit(
+                EVT_CONNECT_REQUESTED,
+                serde_json::json!({ "agent": agent, "service": service }),
+            );
+        }
+        // The stream (re)connected or dropped notifications: refetch
+        // everything rather than trusting incremental state.
+        ManageEvent::Resync => {
+            for topic in [
+                EVT_CONNECTIONS,
+                EVT_SESSIONS,
+                EVT_WIRINGS,
+                EVT_AGENTS,
+                EVT_ACTIVITY_CHANGED,
+            ] {
+                let _ = app.emit(topic, ());
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

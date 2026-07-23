@@ -84,6 +84,7 @@ fn manage_error_response(error: ManageError) -> Response {
             StatusCode::FORBIDDEN
         }
         ManageError::RemoteUnsupported { .. } => StatusCode::NOT_IMPLEMENTED,
+        ManageError::InvalidManageToken => StatusCode::UNAUTHORIZED,
         ManageError::Unreachable { .. } => StatusCode::BAD_GATEWAY,
         ManageError::OAuth { .. } | ManageError::Vault { .. } | ManageError::Internal { .. } => {
             StatusCode::INTERNAL_SERVER_ERROR

@@ -114,6 +114,9 @@ export interface ActivityEntry {
   connection?: string | null;
   /** Brokered call / session duration, when measured. */
   duration_ms?: number | null;
+  /** How a gated action was authorized ("os_authentication",
+   * "management_token", …), when one was. */
+  confirmation?: string | null;
   at: string;
 }
 
@@ -145,6 +148,20 @@ export interface ElicitationRequest {
   requested_at: string;
   /** The request disappears on its own at this time. */
   expires_at: string;
+}
+
+/**
+ * Which broker this app manages and the state of the link to it. Local
+ * mode is always connected (the broker runs in-process); remote mode
+ * reflects the manage-API link.
+ */
+export interface BrokerProfile {
+  mode: 'local' | 'remote';
+  url: string | null;
+  connected: boolean;
+  error: string | null;
+  /** A saved management token exists for `url`. */
+  has_saved_token: boolean;
 }
 
 export interface Settings {
@@ -295,6 +312,10 @@ interface CommandSpec<Args, Result> {
 
 export interface CommandMap {
   get_local_username: CommandSpec<undefined, string>;
+  get_broker_profile: CommandSpec<undefined, BrokerProfile>;
+  connect_remote_broker: CommandSpec<{ url: string; token?: string | null }, BrokerProfile>;
+  retry_remote_broker: CommandSpec<undefined, BrokerProfile>;
+  switch_broker_local: CommandSpec<undefined, BrokerProfile>;
   list_secrets: CommandSpec<undefined, SecretSummary[]>;
   list_connections: CommandSpec<undefined, ConnectionSummary[]>;
   get_identity: CommandSpec<undefined, IdentityInfo>;
@@ -357,6 +378,7 @@ export type CommandArgs<K extends CommandName> = CommandMap[K]['args'];
 export type CommandResult<K extends CommandName> = CommandMap[K]['result'];
 
 export interface EventMap {
+  'aka://broker-changed': BrokerProfile;
   'aka://activity-appended': ActivityEntry;
   'aka://activity-changed': Record<string, never>;
   'aka://agents-changed': Record<string, never>;

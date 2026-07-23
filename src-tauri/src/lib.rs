@@ -8,6 +8,7 @@
 //! command surface.
 
 mod auth;
+mod broker_mode;
 mod clipboard;
 mod commands;
 mod events;
@@ -21,13 +22,62 @@ use aka_core::broker::Broker;
 use aka_core::config::BrokerConfig;
 use aka_core::daemon;
 use aka_core::error::CoreError;
-use aka_core::manage::{LocalBackend, ManagementBackend};
 use aka_core::paths::Paths;
 use aka_core::vault::platform_vault;
-use tauri::{Manager, WindowEvent};
+use tauri::{AppHandle, Manager, WindowEvent};
 use tauri_plugin_dialog::{DialogExt as _, MessageDialogKind};
 
+use broker_mode::BrokerState;
 use commands::{AppState, LocalRuntime};
+
+/// Start the in-process broker stack: runtime, broker, daemon, sidecar.
+/// Callable from the setup hook and from a blocking thread when the user
+/// switches back to local mode.
+pub(crate) fn start_local_runtime(handle: &AppHandle) -> Result<LocalRuntime, CoreError> {
+    // The broker's tokio runtime hosts the daemon listeners and the
+    // execution tasks. Broker::new must run inside it (executions spawn
+    // tasks; the integrity key loads via the async vault).
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+
+    let paths = Paths::default_locations()?;
+    let vault = platform_vault(&paths)?;
+    let config = BrokerConfig::default();
+    let events = events::observer(handle.clone());
+
+    let broker: Arc<Broker> = runtime.block_on(Broker::new(paths, vault, config, events))?;
+
+    // Start the agent-facing daemon (UDS control plane + WS/PG data
+    // planes). Kept in state; dropping the handle stops it.
+    let daemon = runtime.block_on(daemon::serve(broker.clone()))?;
+    tracing::info!(
+        "Multitool daemon listening on {}",
+        daemon.socket_path.display()
+    );
+
+    // Supervised on the broker's runtime, so it is torn down with
+    // everything else it depends on. `block_on` is only for the spawn
+    // context — starting the sidecar does not block.
+    let sidecar = runtime.block_on(async { sidecar::start(handle, daemon.socket_path.clone()) });
+    // Keep the broker told where the MCP endpoint is listening (restarts
+    // move the port), so the discovery manifest can advertise it to
+    // `aka mcp` and other bridges.
+    if let Some(sidecar) = &sidecar {
+        let watch = sidecar.watch();
+        let broker = broker.clone();
+        runtime.spawn(watch.follow(move |endpoint| {
+            broker.set_sidecar_mcp_port(endpoint.map(|e| e.port));
+        }));
+    }
+
+    Ok(LocalRuntime {
+        broker,
+        _sidecar: sidecar,
+        _daemon: daemon,
+        _runtime: runtime,
+    })
+}
 
 enum IntegrityRecoveryDecision {
     Quit,
@@ -230,65 +280,27 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
 
-            // Everything that can fail before the app is usable runs inside
-            // this closure; a failure becomes a dialog via fatal_startup,
-            // never an `Err` out of the hook (a nounwind context, so any Err
-            // here aborts the process with a crash report whose guidance —
-            // reinstall, report a bug — is wrong for every actionable case).
-            let started = || -> Result<
-                (Arc<Broker>, daemon::DaemonHandle, tokio::runtime::Runtime),
-                CoreError,
-            > {
-                // The broker's tokio runtime hosts the daemon listeners and
-                // the execution tasks. Broker::new must run inside it
-                // (executions spawn tasks; the integrity key loads via the
-                // async vault).
-                let runtime = tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()?;
+            let data_dir = Paths::default_locations()
+                .map(|paths| paths.data_dir)
+                .unwrap_or_default();
 
-                let paths = Paths::default_locations()?;
-                let vault = platform_vault(&paths)?;
-                let config = BrokerConfig::default();
-                let events = events::observer(handle.clone());
-
-                let broker: Arc<Broker> = runtime.block_on(Broker::new(
-                    paths,
-                    vault,
-                    config,
-                    events,
-                ))?;
-
-                // Start the agent-facing daemon (UDS control plane + WS/PG
-                // data planes). Kept in state; dropping the handle stops it.
-                let daemon = runtime.block_on(daemon::serve(broker.clone()))?;
-                Ok((broker, daemon, runtime))
+            // The saved mode decides what starts. Local failures are fatal
+            // dialogs (the broker is the product); a remote broker that is
+            // down is a recoverable in-window state, never a dialog.
+            let brokers = match broker_mode::saved_remote(&data_dir) {
+                Some(url) => {
+                    let state = Arc::new(BrokerState::new_remote_pending(data_dir, url));
+                    state.clone().start_saved_remote(handle.clone());
+                    state
+                }
+                None => {
+                    let runtime = match start_local_runtime(&handle) {
+                        Ok(runtime) => runtime,
+                        Err(e) => fatal_startup(app, e),
+                    };
+                    Arc::new(BrokerState::new_local(data_dir, runtime))
+                }
             };
-            let (broker, daemon, runtime) = match started() {
-                Ok(parts) => parts,
-                Err(e) => fatal_startup(app, e),
-            };
-            tracing::info!(
-                "Multitool daemon listening on {}",
-                daemon.socket_path.display()
-            );
-
-            // Supervised on the broker's runtime, so it is torn down with
-            // everything else it depends on. `block_on` is only for the
-            // spawn context — starting the sidecar does not block.
-            let sidecar = runtime.block_on(async {
-                sidecar::start(&handle, daemon.socket_path.clone())
-            });
-            // Keep the broker told where the MCP endpoint is listening
-            // (restarts move the port), so the discovery manifest can
-            // advertise it to `aka mcp` and other bridges.
-            if let Some(sidecar) = &sidecar {
-                let watch = sidecar.watch();
-                let broker = broker.clone();
-                runtime.spawn(watch.follow(move |endpoint| {
-                    broker.set_sidecar_mcp_port(endpoint.map(|e| e.port));
-                }));
-            }
 
             windows::setup_app_menu(&handle)?;
             windows::setup_dropdown_panel(&handle)?;
@@ -323,16 +335,9 @@ pub fn run() {
                 });
             }
 
-            let backend: Arc<dyn ManagementBackend> = Arc::new(LocalBackend::new(broker.clone()));
             app.manage(AppState {
-                backend,
+                brokers,
                 ssh_imports: Default::default(),
-                _local: Some(LocalRuntime {
-                    broker,
-                    _sidecar: sidecar,
-                    _daemon: daemon,
-                    _runtime: runtime,
-                }),
             });
             Ok(())
         })

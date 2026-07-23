@@ -105,6 +105,32 @@ without it otherwise, so a checkout that skips `sidecar:build` still
 works. `AKA_SIDECAR_NODE` and `AKA_SIDECAR_SCRIPT` override what gets
 run. `npm run build` performs both sidecar steps for you.
 
+## Remote management (hosted broker)
+
+The desktop app can manage a broker running on another Mac instead of its
+own: the broker serves a **manage API** (`/v1/manage/*`, mirroring the
+app's whole management surface, plus an SSE change feed) on an optional
+TCP listener, authorized by a dedicated **management token** —
+`akamgr_…`, issued with `aka manage token`, fully distinct from the agent
+key. In the app, the broker switcher at the right of the title bar flips
+between **This Mac** and a remote broker; an unreachable remote takes
+over the content pane with a retry/error state. Gated configuration
+actions on a hosted broker are authorized by token possession and the
+activity log records them as such (`via manage token`).
+
+```sh
+aka manage token                  # on the broker host, broker stopped
+aka serve --listen 127.0.0.1:4780 --public-url https://broker.example.dev
+```
+
+`aka serve` also supervises the MCP sidecar itself now (checkout builds
+or `AKA_SIDECAR_SCRIPT`), and the daemon reverse-proxies `/mcp`, so
+remote agents reach MCP at `<public-url>/mcp` with the shared agent key.
+`/v1/pair` is never served over TCP. TLS is the operator's proxy or
+tunnel; see `dev/hosted-mac/` for the runbook and a LaunchAgent. Browser
+OAuth sign-ins and direct endpoints are not yet available remotely, and
+WS/PG/SSH opens still hand out broker-host-local addresses.
+
 ## Developing
 
 ```sh
