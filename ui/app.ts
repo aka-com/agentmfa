@@ -1072,7 +1072,7 @@ function flatConnRowHTML(c: ConnectionSummary): string {
       <div class="cat-conn-status">${flatHealthHTML(c)}</div>
       ${connToggleHTML(c)}
       <button class="icon-btn conn-edit-btn" title="Edit ${escAttr(connectionRowName(c))}"
-        aria-label="Edit ${escAttr(c.name)}" data-act="edit-conn" data-id="${c.id}">${ICONS.squarePen}</button>
+        aria-label="Edit ${escAttr(c.name)}" data-act="edit-conn" data-id="${c.id}">${ICONS.pencil}</button>
     </div>${connPanelHTML(c)}</div>`;
 }
 

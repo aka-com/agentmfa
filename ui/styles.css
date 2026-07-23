@@ -999,15 +999,18 @@
   display: block; margin-top: 1px; overflow: hidden; color: var(--muted-2);
   font-size: 12px; text-overflow: ellipsis; white-space: nowrap;
 }
-.flat-cred { display: inline-flex; align-items: center; gap: 3px; }
+.flat-cred { display: inline-flex; align-items: center; gap: 3px; vertical-align: -2px; }
 .flat-cred svg { width: 11px; height: 11px; }
 .flat-conn-row .cat-conn-status { margin-top: 0; }
+.flat-conn-row > .switch,
+.flat-conn-row > .conn-edit-btn { transform: translateY(-1px); }
 /* The always-visible strip under each connected row: endpoint + menu. */
-.conn-panel { display: flex; flex-direction: column; gap: 5px; padding: 0 8px 9px 64px; }
+.conn-panel { display: flex; flex-direction: column; padding: 0 8px 9px 64px; }
 .conn-panel-main { display: flex; align-items: center; gap: 8px; min-height: 26px; }
 .conn-panel-main .ep-strip { margin-top: 0; min-width: 0; }
+.conn-panel-main .tile-menu-wrap { margin-right: 6px; }
 .conn-panel .cc-issues { margin-right: 6px; }
-.conn-edit-btn { flex: 0 0 auto; transform: translateY(1px); }
+.conn-edit-btn { flex: 0 0 auto; }
 /* Catalog groups in the add view: room above each heading so the label
    reads as the start of its group, not the tail of the previous card. */
 .add-section { margin-top: 10px; }
@@ -1018,12 +1021,10 @@
 /* Delete + its ⋯ sit left; the menu drops upward, clear of the sheet edge. */
 .sheet-actions .sheet-conn-menu { margin-right: auto; }
 .sheet-conn-menu .tile-menu { top: auto; bottom: calc(100% + 5px); right: auto; left: 0; }
-/* The row's issue list: one line per issue, its fix action beside it. */
+/* The row's issue list: plain warning text with its fix pinned right. */
 .cc-issues {
   display: flex; flex-direction: column; gap: 6px;
-  margin-top: 8px; padding: 7px 10px; max-width: 520px;
-  border: 1px solid var(--amber-border); border-radius: 8px;
-  background: var(--amber-wash);
+  margin-top: 8px; max-width: 520px;
 }
 .cc-issue {
   display: flex; align-items: center; gap: 10px;
