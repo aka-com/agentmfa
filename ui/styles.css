@@ -177,11 +177,12 @@
   .nav-item.on{ background: var(--accent-wash-2); color: var(--accent-ink); font-weight: 600; }
   .dw-main{
   flex: 1; display: flex; flex-direction: column; min-width: 0;
-  width: 100%; max-width: var(--content-max); margin: 0 auto;
+  width: 100%;
 }
   .dw-head{
   flex: 0 0 auto;
   display: flex; align-items: center; justify-content: space-between;
+  width: 100%; max-width: var(--content-max); margin: 0 auto;
   padding: 12px 16px;
 }
   .dw-head h2{ font-size: 17px; }/* ---- custom title bar (main window) ---------------------------------- */
@@ -319,7 +320,15 @@
   flex: 1; overflow-y: scroll; overflow-x: hidden; padding: 0 14px 12px;
 }
   .dd-content{ position: relative; min-height: 0; }
-  .dw-main .content{ padding: 0 16px 28px; }
+  /* The main scroll pane spans the available app region so its scrollbar
+     stays at the window edge. Its page content retains the narrower centered
+     measure shared with the header; the extra 8px of left padding balances
+     the reserved scrollbar track on the right. */
+  .dw-main .content{ padding: 0 16px 28px 24px; }
+  .dw-main .content > *{
+  width: min(100%, calc(var(--content-max) - 32px));
+  margin-left: auto; margin-right: auto;
+}
   .content::-webkit-scrollbar, .dd-global::-webkit-scrollbar{ width: 8px; }
   .content::-webkit-scrollbar-thumb, .dd-global::-webkit-scrollbar-thumb{ background: var(--scroll-thumb); border-radius: 4px; }/* ---- global band ------------------------------------------------------ */
 /* Reserve the scrollbar track here too (see .content): the Active sessions and
@@ -327,7 +336,10 @@
    the 8px keeps the band from jumping sideways when its scrollbar appears. */
 .dd-global{ padding: 0 14px; margin-bottom: 8px; max-height: 172px; overflow-y: scroll; border-bottom: 1px solid var(--line); }
   .dd-global.onboarding-global{ max-height: none; overflow: visible; border-bottom: 0; }
-  .dw-main .dd-global{ margin: 0 16px 8px; padding: 0; }
+  .dw-main .dd-global{
+  width: calc(100% - 32px); max-width: calc(var(--content-max) - 32px);
+  margin: 0 auto 8px; padding: 0;
+}
   .live-head{ font-size: 12.5px; font-weight: 600; color: var(--muted); padding: 9px 2px 4px; }
   .live-row{ display: flex; align-items: center; gap: 9px; padding: 7px 2px; border-bottom: 1px solid var(--line-soft); }
   .dd-global > .live-row:last-child{ border-bottom: 0; }
@@ -818,7 +830,10 @@
    icon chip + name + one-line description, then either an Add button, a
    dimmed "Soon" chip (MCP-backed integrations), or a count badge that
    expands the row into what is configured. */
-.catalog { display: flex; flex-direction: column; gap: 18px; max-width: 720px; }
+.catalog {
+  display: flex; flex-direction: column; gap: 18px;
+  max-width: calc(var(--content-max) - 32px);
+}
 .cat-search {
   width: 260px; max-width: 100%; padding: 8px 12px;
   border: 1px solid var(--line); border-radius: 10px;
