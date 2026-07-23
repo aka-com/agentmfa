@@ -939,10 +939,37 @@
   flex: 1 1 auto; min-width: 0; color: var(--muted); font-size: 11.5px;
 }
 .cat-meta-idle { color: var(--amber-ink); }
-/* Warnings differ by color and icon only — never weight. */
-.cat-meta-warn { display: inline-flex; align-items: center; gap: 5px; color: var(--amber-strong); }
-.cat-meta-warn svg { flex: 0 0 auto; color: var(--amber-strong); }
 .cat-conn-danger { display: block; margin-top: 2px; color: var(--danger-ink); font-size: 11.5px; }
+/* One health chip per row: Ready / Attention · N / Off. It rides the right
+   edge of the head line; the attention variant is a button that expands the
+   row's issue list. */
+.cc-health {
+  display: inline-flex; align-items: center; gap: 4px;
+  margin-left: auto; padding: 1.5px 9px; flex: 0 0 auto;
+  border: 1px solid transparent; border-radius: 999px;
+  font-size: 11px; font-weight: 600; white-space: nowrap;
+}
+.cc-health.ok { color: var(--ok-ink); background: var(--ok-wash); border-color: var(--ok-border); }
+.cc-health.attn {
+  color: var(--amber-ink); background: var(--amber-wash);
+  border-color: var(--amber-border); cursor: pointer;
+}
+.cc-health.off { color: var(--muted); background: var(--chip-bg); }
+.cc-health svg { width: 11px; height: 11px; flex: 0 0 auto; }
+.cc-health .cat-chev { opacity: .7; }
+.cc-health[aria-expanded="true"] .cat-chev { transform: rotate(180deg); }
+/* The chip's expansion: one line per issue, its fix action beside it. */
+.cc-issues {
+  display: flex; flex-direction: column; gap: 6px;
+  margin-top: 8px; padding: 7px 10px; max-width: 520px;
+  border: 1px solid var(--amber-border); border-radius: 8px;
+  background: var(--amber-wash);
+}
+.cc-issue {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 12px; color: var(--amber-ink);
+}
+.cc-issue > span { flex: 1 1 auto; min-width: 0; }
 .cat-conns .sec-table { margin: 0; }
 /* Align the credential table with the connection rows' text spine. */
 .cat-conns .sec-table td:first-child { padding-left: 64px; }
@@ -1116,9 +1143,6 @@
    and the agents on/off switch pinned rightmost. */
 .cat-conn-ctl{ display: flex; align-items: center; gap: 6px; flex: 0 0 auto; margin-top: 1px; }
 /* Connection state at a glance: green = agents on, grey = off, amber = needs attention. */
-.conn-dot{ flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: var(--ok-solid); }
-.conn-dot.off{ background: var(--faint); }
-.conn-dot.warn{ background: var(--amber-strong); }
 /* The enable/disable switch — the row's master control. */
 .switch{
   position: relative; flex: 0 0 auto; width: 34px; height: 20px; padding: 0;

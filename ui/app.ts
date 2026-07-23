@@ -200,6 +200,8 @@ interface AppState {
   agentMenuOpen: string | null;
   connMenuOpen: string | null;
   epMenuOpen: string | null;
+  /** Connection ids whose health-chip issue list is expanded. */
+  connIssuesOpen: string[];
   copied: string | null;
   readyCopied: boolean;
   connectionReady: ConnectionReadyState | null;
@@ -299,6 +301,7 @@ const state: AppState = {
   agentMenuOpen: null,   // 'identity' while the key card's ⋯ menu is open
   connMenuOpen: null,    // connection id whose ⋯ options menu is open (Tools tab)
   epMenuOpen: null,      // connection id whose endpoint ⋮ menu is open
+  connIssuesOpen: [],    // connection ids with the health chip's issue list expanded
 
   copied: null,          // secretId whose value was just copied (transient "Copied" flash)
   readyCopied: false,    // transient feedback on the setup-instructions status button
@@ -550,6 +553,24 @@ function secretsTableHTML(query = '') {
 // DSN/socket/URL an unmodified tool uses). WebSocket lands later.
 const ENDPOINTABLE: Record<ConnectionType, boolean> = { pg: true, ssh: true, api: true, ws: false };
 
+/**
+ * The on-screen form of an issued endpoint address: scheme, a masked
+ * password slot, host, and path. The embedded token and any query (the
+ * socket-path form of a local DSN) stay off the screen — the full address
+ * only lands on the clipboard.
+ */
+function briefEndpointAddress(dsn: string): string {
+  try {
+    const url = new URL(dsn);
+    const auth = url.username
+      ? `${url.username}${url.password ? ':…' : ''}@`
+      : url.password ? '…@' : '';
+    return `${url.protocol}//${auth}${url.host}${url.pathname === '/' ? '' : url.pathname}`;
+  } catch {
+    return dsn;
+  }
+}
+
 // The direct-endpoint lifecycle strip on an enabled Postgres/SSH/HTTP row:
 // a hairline footer that owns issue → live badge → reissue/revoke. The
 // address shown is never the capability itself — SSH's socket path (which is
@@ -567,9 +588,9 @@ function endpointStripHTML(c: ConnectionSummary): string {
   // same dim-and-overlay effect as copying a secret value.
   const copied = state.copied === `ep:${c.id}`;
   const address = endpoint.dsn
-    ? `<button class="ep-addr-wrap ${copied ? 'is-copied' : ''}" title="${escAttr(endpoint.dsn)} — click to copy"
+    ? `<button class="ep-addr-wrap ${copied ? 'is-copied' : ''}" title="Copy the full endpoint address"
         aria-label="Copy endpoint address for ${escAttr(c.name)}" data-act="copy-endpoint-dsn" data-conn="${c.id}">
-        <code class="ep-addr">${esc(endpoint.dsn)}</code>
+        <code class="ep-addr">${esc(briefEndpointAddress(endpoint.dsn))}</code>
         <span class="val-overlay">${copied
           ? `<span class="copied-badge">${ICONS.check}<span>Copied</span></span>`
           : `<span class="ghost-copy">${ICONS.copy}<span>Copy</span></span>`}</span>
@@ -773,7 +794,6 @@ function catalogConnRowHTML(c: ConnectionSummary): string {
   // Account-first title: the signed-in identity is what tells two
   // connections to the same server apart. The row name stays on hover.
   const title = c.mcp_path && c.account ? c.account : c.name;
-  const dot = !enabled ? ' off' : c.last_status === 'needs_reconnect' ? ' warn' : '';
   const toolsChip = enabled && c.mcp_path
     ? `<button class="cat-meta-tools" data-act="wiring-tools" data-conn="${c.id}"
         aria-label="Choose which tools agents may call on ${escAttr(c.name)}"
@@ -787,37 +807,59 @@ function catalogConnRowHTML(c: ConnectionSummary): string {
         ${mcpStatus && mcpStatus.running ? 'disabled' : ''}>${ICONS.refresh} ${
           mcpStatus && mcpStatus.running ? 'Checking…' : 'Check server & account'}</button>`
     : '';
-  // Only call out TLS when it is weaker than the default.
-  const tls = c.type === 'pg' && c.sslmode && c.sslmode !== 'verify-full'
-    ? `<span class="cat-meta-warn">${ICONS.triangleAlert}<span>${
-        c.sslmode === 'disable' ? 'TLS disabled' : `TLS ${esc(c.sslmode)}`}</span></span>` : '';
-  const hostKey = c.type === 'ssh' && !c.host_key_fingerprint
-    ? `<span class="cat-meta-warn">${ICONS.triangleAlert}<span>Host key not pinned yet</span></span>` : '';
-  // Passive health: brokered agent calls and background token renewals
-  // record a rejected credential without anyone pressing Test. The badge
-  // carries the fix: sign in again for MCP connections, re-test otherwise.
-  const needsReconnect = c.last_status === 'needs_reconnect'
-    ? `<span class="cat-meta-warn" title="${escAttr(c.last_detail || '')}">${ICONS.triangleAlert}<span>Needs reconnect</span></span>
-       ${c.mcp_path
-         ? `<button class="btn ghost sm cat-meta-fix" data-act="reconnect-mcp" data-id="${c.id}">Reconnect…</button>`
-         : c.oauth_spec
-         ? `<button class="btn ghost sm cat-meta-fix" data-act="oauth-reconnect" data-id="${c.id}">Reconnect…</button>`
-         : `<button class="btn ghost sm cat-meta-fix" data-act="test-conn" data-id="${c.id}">Test again</button>`}`
+  // Everything wrong with the row, folded into one health chip. TLS
+  // weaker than the default, an unpinned host key, and a passively
+  // recorded rejected credential (brokered calls and background token
+  // renewals set needs_reconnect without anyone pressing Test) each become
+  // one line in the chip's expansion, with the fix action beside it.
+  const issues: Array<{ text: string; fix?: string }> = [];
+  if (c.type === 'pg' && c.sslmode && c.sslmode !== 'verify-full') {
+    issues.push({
+      text: c.sslmode === 'disable'
+        ? 'TLS is disabled for this connection.'
+        : `TLS is relaxed to ${c.sslmode}.`,
+      fix: `<button class="btn ghost sm cat-meta-fix" data-act="edit-conn" data-id="${c.id}">Edit…</button>`,
+    });
+  }
+  if (c.type === 'ssh' && !c.host_key_fingerprint) {
+    issues.push({ text: 'Host key not pinned yet — pins on the first connection.' });
+  }
+  if (c.last_status === 'needs_reconnect') {
+    issues.push({
+      text: c.last_detail || 'The credential was rejected; reconnect to refresh it.',
+      fix: c.mcp_path
+        ? `<button class="btn ghost sm cat-meta-fix" data-act="reconnect-mcp" data-id="${c.id}">Reconnect…</button>`
+        : c.oauth_spec
+        ? `<button class="btn ghost sm cat-meta-fix" data-act="oauth-reconnect" data-id="${c.id}">Reconnect…</button>`
+        : `<button class="btn ghost sm cat-meta-fix" data-act="test-conn" data-id="${c.id}">Test again</button>`,
+    });
+  }
+  const issuesOpen = state.connIssuesOpen.includes(c.id);
+  const health = !enabled
+    ? '<span class="cc-health off">Off</span>'
+    : issues.length
+    ? `<button class="cc-health attn" data-act="toggle-conn-issues" data-id="${c.id}"
+        aria-expanded="${issuesOpen}" title="${escAttr(issues.map((issue) => issue.text).join(' '))}">
+        ${ICONS.triangleAlert}<span>Attention · ${issues.length}</span>
+        <span class="cat-chev ${issuesOpen ? 'open' : ''}">${ICONS.chevronDown}</span></button>`
+    : '<span class="cc-health ok">Ready</span>';
+  const issuesBlock = enabled && issuesOpen && issues.length
+    ? `<div class="cc-issues">${issues.map((issue) =>
+        `<div class="cc-issue"><span>${esc(issue.text)}</span>${issue.fix ?? ''}</div>`).join('')}</div>`
     : '';
   const purpose = connectionPurpose(c);
   return `<div class="cat-conn">
     <div class="cat-conn-tx">
-      <div class="cat-conn-head"><b title="${escAttr(c.name)}">${esc(title)}</b><span class="conn-dot${dot}"></span>${live ? ` <span class="cc-live">● ${live} live</span>` : ''}</div>
+      <div class="cat-conn-head"><b title="${escAttr(c.name)}">${esc(title)}</b>${live ? ` <span class="cc-live">● ${live} live</span>` : ''}${health}</div>
       <div class="cat-conn-sub">
         <code title="${escAttr(c.target)}">${esc(c.target)}</code>
         <div class="cat-conn-meta">
           ${purpose ? `<span>${esc(purpose)}</span>` : ''}
           ${toolsChip}
           <span class="cat-meta-cred">${ICONS.keyRound}<span>${esc(connectionCredential(c))}</span></span>
-          ${tls}${hostKey}${needsReconnect}
         </div>
       </div>
-      ${connTestResultHTML(c)}${mcpStatusHTML(c)}${endpointStripHTML(c)}</div>
+      ${issuesBlock}${connTestResultHTML(c)}${mcpStatusHTML(c)}${endpointStripHTML(c)}</div>
     <div class="cat-conn-ctl"><div class="tile-menu-wrap">
       <button class="icon-btn tile-menu-btn ${menuOpen ? 'on' : ''}" title="Tool options"
         aria-label="Options for ${escAttr(c.name)}" aria-haspopup="menu"
@@ -3336,6 +3378,12 @@ document.addEventListener('click', async (e) => {
         state.toolsOpen = [...state.toolsOpen, id];
       }
       render(); break;
+    case 'toggle-conn-issues':
+      state.connIssuesOpen = state.connIssuesOpen.includes(id)
+        ? state.connIssuesOpen.filter((openId) => openId !== id)
+        : [...state.connIssuesOpen, id];
+      render();
+      break;
     case 'toggle-section-expanded':
       state.sectionsExpanded = state.sectionsExpanded.includes(id)
         ? state.sectionsExpanded.filter((section) => section !== id)
