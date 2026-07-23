@@ -187,6 +187,22 @@
 }
   .nav-item:hover{ background: var(--hover); }
   .nav-item.on{ background: var(--accent-wash-2); color: var(--accent-ink); font-weight: 600; }
+  /* Below the narrow breakpoint (keep in step with NARROW_LAYOUT in app.ts)
+     the left bar turns sideways: it collapses to a slim rail and each menu
+     option rotates 90° to read down the bar. The order is unchanged — "Get
+     started" stays on top, the rest follow below it. */
+  @media (max-width: 720px) {
+    .dw-side{ flex: 0 0 52px; padding: 12px 6px 10px; align-items: center; }
+    .dw-brand{ flex-direction: column; gap: 6px; padding: 2px 0 12px; }
+    .dw-brand > div:not(.dd-appicon){ display: none; }
+    .dw-nav{ align-items: center; gap: 6px; }
+    .nav-item{
+      writing-mode: vertical-rl; text-orientation: mixed;
+      justify-content: center; padding: 10px 7px;
+    }
+    .dw-settings{ align-self: center; }
+    .settings-menu{ left: 0; right: auto; }
+  }
   .dw-main{
   flex: 1; display: flex; flex-direction: column; min-width: 0;
   width: 100%;
