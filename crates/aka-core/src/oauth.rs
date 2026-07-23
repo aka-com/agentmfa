@@ -56,6 +56,20 @@ impl TokenSet {
     }
 }
 
+/// Whether a URL's host is loopback (dev/test providers run on
+/// 127.0.0.1; production providers must be https).
+fn is_loopback_url(url: &Url) -> bool {
+    matches!(url.host_str(), Some("127.0.0.1") | Some("localhost") | Some("[::1]"))
+}
+
+fn require_https_or_loopback(url: &Url, what: &str) -> Result<(), String> {
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" if is_loopback_url(url) => Ok(()),
+        _ => Err(format!("the {what} URL must be https")),
+    }
+}
+
 fn base64url(bytes: &[u8]) -> String {
     use base64::Engine as _;
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
@@ -77,36 +91,27 @@ pub struct PendingAuthorization {
     state: String,
 }
 
-/// Build the authorization URL (PKCE S256) and bind the loopback listener.
-pub async fn begin(spec: &OAuthSpec) -> Result<PendingAuthorization, String> {
-    let verifier = Zeroizing::new(random_token()?);
-    let state = random_token()?;
+fn authorize_url_for(
+    spec: &OAuthSpec,
+    redirect_uri: &str,
+    state: &str,
+    verifier: &str,
+) -> Result<String, String> {
     let challenge = {
         use sha2::{Digest, Sha256};
         base64url(&Sha256::digest(verifier.as_bytes()))
     };
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .map_err(|e| format!("could not open the loopback listener: {e}"))?;
-    let port = listener
-        .local_addr()
-        .map_err(|e| format!("loopback listener has no address: {e}"))?
-        .port();
-    let redirect_uri = format!("http://127.0.0.1:{port}/callback");
-
     let mut authorize = Url::parse(&spec.auth_url)
         .map_err(|_| "the authorization URL is not a valid URL".to_string())?;
-    if authorize.scheme() != "https" {
-        return Err("the authorization URL must be https".into());
-    }
+    require_https_or_loopback(&authorize, "authorization")?;
     {
         let mut query = authorize.query_pairs_mut();
         query
             .append_pair("response_type", "code")
             .append_pair("client_id", &spec.client_id)
-            .append_pair("redirect_uri", &redirect_uri)
+            .append_pair("redirect_uri", redirect_uri)
             .append_pair("scope", &spec.scopes.join(" "))
-            .append_pair("state", &state)
+            .append_pair("state", state)
             .append_pair("code_challenge", &challenge)
             .append_pair("code_challenge_method", "S256");
         // Provider-specific extras (e.g. Google's access_type=offline) so a
@@ -115,38 +120,73 @@ pub async fn begin(spec: &OAuthSpec) -> Result<PendingAuthorization, String> {
             query.append_pair(key, value);
         }
     }
+    Ok(authorize.to_string())
+}
 
+/// Build the authorization URL (PKCE S256) and bind the loopback listener.
+pub async fn begin(spec: &OAuthSpec) -> Result<PendingAuthorization, String> {
+    let verifier = Zeroizing::new(random_token()?);
+    let state = random_token()?;
+    let catcher = LoopbackCatcher::bind().await?;
+    let redirect_uri = catcher.redirect_uri();
+    let authorize_url = authorize_url_for(spec, &redirect_uri, &state, &verifier)?;
     Ok(PendingAuthorization {
-        authorize_url: authorize.to_string(),
+        authorize_url,
         redirect_uri,
-        listener,
+        listener: catcher.listener,
         verifier,
         state,
     })
 }
 
-/// Await the browser redirect and exchange the code for tokens.
-pub async fn finish(
-    pending: PendingAuthorization,
+/// One authorization attempt whose redirect lands on *another machine* (the
+/// desktop shell managing this broker remotely): the caller supplies the
+/// redirect URI its own loopback catcher is bound to, and later brings the
+/// code back for [`exchange_code`]. Loopback redirect targets only
+/// (RFC 8252) — this must never become an open relay.
+pub struct ExternalAuthorization {
+    pub authorize_url: String,
+    pub state: String,
+    pub verifier: Zeroizing<String>,
+}
+
+pub fn begin_external(
+    spec: &OAuthSpec,
+    redirect_uri: &str,
+) -> Result<ExternalAuthorization, String> {
+    let parsed = Url::parse(redirect_uri)
+        .map_err(|_| "the redirect URI is not a valid URL".to_string())?;
+    if parsed.scheme() != "http" || !is_loopback_url(&parsed) || parsed.path() != "/callback" {
+        return Err(
+            "the redirect URI must be a loopback http://127.0.0.1:<port>/callback".into(),
+        );
+    }
+    let verifier = Zeroizing::new(random_token()?);
+    let state = random_token()?;
+    let authorize_url = authorize_url_for(spec, redirect_uri, &state, &verifier)?;
+    Ok(ExternalAuthorization {
+        authorize_url,
+        state,
+        verifier,
+    })
+}
+
+/// Exchange an authorization code for tokens (the tail of both the local
+/// flow and the remote relay).
+pub async fn exchange_code(
+    code: &str,
+    redirect_uri: &str,
+    verifier: &str,
     spec: &OAuthSpec,
     client_secret: Option<SecretValue>,
     http: &reqwest::Client,
 ) -> Result<TokenSet, String> {
-    let code = tokio::time::timeout(CONNECT_TIMEOUT, wait_for_code(&pending))
-        .await
-        .map_err(|_| {
-            format!(
-                "no sign-in within {} minutes; try connecting again",
-                CONNECT_TIMEOUT.as_secs() / 60
-            )
-        })??;
-
     let mut form: Vec<(&str, &str)> = vec![
         ("grant_type", "authorization_code"),
-        ("code", &code),
-        ("redirect_uri", &pending.redirect_uri),
+        ("code", code),
+        ("redirect_uri", redirect_uri),
         ("client_id", &spec.client_id),
-        ("code_verifier", pending.verifier.as_str()),
+        ("code_verifier", verifier),
     ];
     if let Some(secret) = client_secret.as_deref() {
         form.push(("client_secret", secret));
@@ -159,12 +199,73 @@ pub async fn finish(
     )
 }
 
+/// A one-shot loopback listener for the browser redirect, usable on either
+/// side: the broker's own flow binds one here, and a remote shell binds one
+/// on the user's machine.
+pub struct LoopbackCatcher {
+    listener: tokio::net::TcpListener,
+}
+
+impl LoopbackCatcher {
+    pub async fn bind() -> Result<Self, String> {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .map_err(|e| format!("could not open the loopback listener: {e}"))?;
+        Ok(Self { listener })
+    }
+
+    pub fn redirect_uri(&self) -> String {
+        let port = self
+            .listener
+            .local_addr()
+            .map(|addr| addr.port())
+            .unwrap_or(0);
+        format!("http://127.0.0.1:{port}/callback")
+    }
+
+    /// Await the state-matching redirect and hand back the code.
+    pub async fn wait_for_code(&self, expected_state: &str) -> Result<String, String> {
+        wait_for_code_on(&self.listener, expected_state).await
+    }
+}
+
+/// Await the browser redirect and exchange the code for tokens.
+pub async fn finish(
+    pending: PendingAuthorization,
+    spec: &OAuthSpec,
+    client_secret: Option<SecretValue>,
+    http: &reqwest::Client,
+) -> Result<TokenSet, String> {
+    let code = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        wait_for_code_on(&pending.listener, &pending.state),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "no sign-in within {} minutes; try connecting again",
+            CONNECT_TIMEOUT.as_secs() / 60
+        )
+    })??;
+    exchange_code(
+        &code,
+        &pending.redirect_uri,
+        pending.verifier.as_str(),
+        spec,
+        client_secret,
+        http,
+    )
+    .await
+}
+
 /// One redirect, parsed by hand: the listener serves exactly one request and
 /// closes. Anything but a state-matching `GET /callback?code=…` fails.
-async fn wait_for_code(pending: &PendingAuthorization) -> Result<String, String> {
+async fn wait_for_code_on(
+    listener: &tokio::net::TcpListener,
+    expected_state: &str,
+) -> Result<String, String> {
     loop {
-        let (mut stream, peer) = pending
-            .listener
+        let (mut stream, peer) = listener
             .accept()
             .await
             .map_err(|e| format!("loopback accept failed: {e}"))?;
@@ -211,7 +312,7 @@ async fn wait_for_code(pending: &PendingAuthorization) -> Result<String, String>
             .await;
             return Err(format!("the provider reported: {error}"));
         }
-        if state.as_deref() != Some(pending.state.as_str()) {
+        if state.as_deref() != Some(expected_state) {
             let _ = respond(&mut stream, "400 Bad Request", "State mismatch.").await;
             return Err("authorization state mismatch; try connecting again".into());
         }
@@ -253,9 +354,7 @@ async fn token_request(
     form: &[(&str, &str)],
 ) -> Result<String, String> {
     let url = Url::parse(token_url).map_err(|_| "the token URL is not a valid URL".to_string())?;
-    if url.scheme() != "https" {
-        return Err("the token URL must be https".into());
-    }
+    require_https_or_loopback(&url, "token")?;
     let response = http
         .post(url)
         // GitHub answers form-encoded unless JSON is requested explicitly.

@@ -54,6 +54,38 @@ pub struct IssuedEndpointInfo {
     pub example: String,
 }
 
+/// A begun remotely-relayed OAuth flow: what the shell needs to open the
+/// browser and match the callback.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ManageOAuthStart {
+    pub flow_id: Uuid,
+    pub authorize_url: String,
+    pub state: String,
+}
+
+/// What happens when a relayed flow's code comes back.
+enum ManageOAuthPlan {
+    Connect {
+        secret_name: String,
+        client_secret: Option<crate::types::SecretValue>,
+        spec: Box<ConnectionSpec>,
+    },
+    Reconnect {
+        connection_id: Uuid,
+        secret_id: Uuid,
+        client_secret: Option<crate::types::SecretValue>,
+    },
+}
+
+struct PendingManageOAuth {
+    oauth_spec: crate::types::OAuthSpec,
+    redirect_uri: String,
+    state: String,
+    verifier: zeroize::Zeroizing<String>,
+    plan: ManageOAuthPlan,
+    created_at: Instant,
+}
+
 pub struct Broker {
     pub config: BrokerConfig,
     pub paths: Paths,
@@ -107,6 +139,10 @@ pub struct Broker {
     pub(crate) endpoint_uploads: Arc<tokio::sync::Semaphore>,
     /// Live and recently finished MCP sign-in sessions (`mcp_auth` module).
     pub mcp_auth: crate::mcp_auth::McpAuthSessions,
+    /// Pending remotely-relayed OAuth flows (manage API): the shell on the
+    /// user's machine holds the loopback catcher; the verifier and the
+    /// completion plan wait here for the code to come back.
+    manage_oauth: Mutex<HashMap<Uuid, PendingManageOAuth>>,
     /// Recent agent connect-requests, so a retrying agent cannot spam the
     /// activity log or the shell's attention. Keyed on the self-reported
     /// client label. Never leaves memory.
@@ -204,6 +240,7 @@ impl Broker {
         let broker = Arc::new(Self {
             data_plane,
             mcp_auth: crate::mcp_auth::McpAuthSessions::default(),
+            manage_oauth: Mutex::new(HashMap::new()),
             connect_request_debounce: Mutex::new(std::collections::HashMap::new()),
             public_url: Mutex::new(None),
             sidecar_mcp_port: Mutex::new(None),
@@ -778,6 +815,204 @@ impl Broker {
     }
 
     /* ---------------------- OAuth (BYO app, REST rows) --------------------- */
+
+    /// Begin a remotely-relayed OAuth connect: the shell (on the user's
+    /// machine) bound a loopback catcher and sends its redirect URI; the
+    /// broker validates the draft, builds the authorize URL, and parks the
+    /// verifier + completion plan under a flow id until the code returns.
+    pub fn manage_oauth_start(
+        &self,
+        secret_name: &str,
+        client_secret: Option<SecretValue>,
+        spec: ConnectionSpec,
+        redirect_uri: &str,
+    ) -> Result<ManageOAuthStart> {
+        let crate::types::ConnectionConfig::Api {
+            oauth: Some(oauth_spec),
+            mcp_path: None,
+            ..
+        } = spec.config.clone()
+        else {
+            return Err(CoreError::InvalidConnectionConfig(
+                "OAuth connect requires a plain api config with an oauth section                  (MCP servers use the sign-in flow instead)"
+                    .into(),
+            ));
+        };
+        self.store
+            .preflight_add_connection_with_secret(secret_name, &spec)?;
+        let authorization =
+            crate::oauth::begin_external(&oauth_spec, redirect_uri).map_err(CoreError::OAuth)?;
+        self.park_manage_oauth(
+            authorization,
+            oauth_spec,
+            redirect_uri,
+            ManageOAuthPlan::Connect {
+                secret_name: secret_name.to_string(),
+                client_secret,
+                spec: Box::new(spec),
+            },
+        )
+    }
+
+    /// Begin a remotely-relayed OAuth reconnect for an existing connection.
+    pub async fn manage_oauth_reconnect_start(
+        &self,
+        id: &Uuid,
+        redirect_uri: &str,
+    ) -> Result<ManageOAuthStart> {
+        let conn = self.store.connection_by_id(id)?;
+        let crate::types::ConnectionConfig::Api {
+            oauth: Some(oauth_spec),
+            ..
+        } = conn.config.clone()
+        else {
+            return Err(CoreError::InvalidConnectionConfig(
+                "this tool is not an OAuth connection".into(),
+            ));
+        };
+        let secret_id = *conn.secrets.first().ok_or_else(|| {
+            CoreError::InvalidConnectionConfig("the OAuth connection has no token secret".into())
+        })?;
+        // Carry the client secret across, exactly like the local reconnect.
+        let previous = self
+            .store
+            .secret_value(&secret_id)
+            .await
+            .ok()
+            .and_then(|value| crate::oauth::TokenSet::from_secret_value(&value).ok());
+        let client_secret = previous
+            .and_then(|tokens| tokens.client_secret)
+            .map(zeroize::Zeroizing::new);
+        let authorization =
+            crate::oauth::begin_external(&oauth_spec, redirect_uri).map_err(CoreError::OAuth)?;
+        self.park_manage_oauth(
+            authorization,
+            oauth_spec,
+            redirect_uri,
+            ManageOAuthPlan::Reconnect {
+                connection_id: conn.id,
+                secret_id,
+                client_secret,
+            },
+        )
+    }
+
+    fn park_manage_oauth(
+        &self,
+        authorization: crate::oauth::ExternalAuthorization,
+        oauth_spec: crate::types::OAuthSpec,
+        redirect_uri: &str,
+        plan: ManageOAuthPlan,
+    ) -> Result<ManageOAuthStart> {
+        let flow_id = Uuid::new_v4();
+        let mut flows = self.manage_oauth.lock().unwrap();
+        // Abandoned flows expire; prune on the way in so the map is bounded.
+        flows.retain(|_, flow| flow.created_at.elapsed() < crate::oauth::CONNECT_TIMEOUT);
+        flows.insert(
+            flow_id,
+            PendingManageOAuth {
+                oauth_spec,
+                redirect_uri: redirect_uri.to_string(),
+                state: authorization.state.clone(),
+                verifier: authorization.verifier,
+                plan,
+                created_at: Instant::now(),
+            },
+        );
+        Ok(ManageOAuthStart {
+            flow_id,
+            authorize_url: authorization.authorize_url,
+            state: authorization.state,
+        })
+    }
+
+    /// Complete a remotely-relayed flow: exchange the returned code and run
+    /// the parked plan (add the connection + token secret, or replace the
+    /// token in place). The flow is consumed either way.
+    pub async fn manage_oauth_complete(
+        &self,
+        flow_id: &Uuid,
+        code: &str,
+        state: &str,
+    ) -> Result<()> {
+        let flow = {
+            let mut flows = self.manage_oauth.lock().unwrap();
+            flows.retain(|_, flow| flow.created_at.elapsed() < crate::oauth::CONNECT_TIMEOUT);
+            flows.remove(flow_id).ok_or_else(|| {
+                CoreError::OAuth("this sign-in expired or was already completed".into())
+            })?
+        };
+        if flow.state != state {
+            return Err(CoreError::OAuth(
+                "authorization state mismatch; try connecting again".into(),
+            ));
+        }
+        let client_secret = match &flow.plan {
+            ManageOAuthPlan::Connect { client_secret, .. } => client_secret.clone(),
+            ManageOAuthPlan::Reconnect { client_secret, .. } => client_secret.clone(),
+        };
+        let tokens = crate::oauth::exchange_code(
+            code,
+            &flow.redirect_uri,
+            flow.verifier.as_str(),
+            &flow.oauth_spec,
+            client_secret,
+            &self.http_client,
+        )
+        .await
+        .map_err(CoreError::OAuth)?;
+        match flow.plan {
+            ManageOAuthPlan::Connect {
+                secret_name, spec, ..
+            } => {
+                let (_, conn) = self.store.add_connection_with_secret(
+                    &secret_name,
+                    tokens.to_secret_value(),
+                    *spec,
+                )?;
+                self.health.record(
+                    &conn.id,
+                    crate::types::HealthStatus::Ok,
+                    "Connected via OAuth",
+                );
+                self.audit.append(
+                    AuditEntry::new(
+                        AuditKind::ConnectionAdded,
+                        format!("Tool connected via OAuth: {}", conn.name),
+                    )
+                    .connection(conn.name.clone())
+                    .detail(format!("{} → {}", conn.kind().label(), conn.target()))
+                    .field("kind", conn.kind().as_str())
+                    .field("target", conn.target())
+                    .field("oauth", true),
+                );
+                self.events.connections_changed();
+            }
+            ManageOAuthPlan::Reconnect {
+                connection_id,
+                secret_id,
+                ..
+            } => {
+                let conn = self.store.connection_by_id(&connection_id)?;
+                self.store
+                    .replace_secret_value(&secret_id, tokens.to_secret_value())?;
+                self.health.record(
+                    &conn.id,
+                    crate::types::HealthStatus::Ok,
+                    "Reconnected via OAuth",
+                );
+                self.audit.append(
+                    AuditEntry::new(
+                        AuditKind::ConnectionUpdated,
+                        format!("Tool reconnected via OAuth: {}", conn.name),
+                    )
+                    .connection(conn.name.clone()),
+                );
+                self.events.connections_changed();
+            }
+        }
+        Ok(())
+    }
 
     /// Connect a new OAuth tool: confirm, open the provider's consent page
     /// in the user's browser, catch the loopback redirect, exchange the

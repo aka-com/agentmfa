@@ -428,6 +428,30 @@ pub struct AllowedToolsBody {
     pub tools: Option<Vec<String>>,
 }
 
+/// `POST /v1/manage/oauth/start`: begin a relayed BYO-app OAuth connect.
+/// The redirect URI is the shell's own loopback catcher.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct OAuthStartBody {
+    pub secret_name: String,
+    #[serde(default)]
+    pub client_secret: Option<String>,
+    pub spec: ConnectionSpec,
+    pub redirect_uri: String,
+}
+
+/// `POST /v1/manage/oauth/reconnect/{connection_id}`.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct OAuthReconnectBody {
+    pub redirect_uri: String,
+}
+
+/// `POST /v1/manage/oauth/complete/{flow_id}`: the browser came back.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct OAuthCompleteBody {
+    pub code: String,
+    pub state: String,
+}
+
 /// `PATCH /v1/manage/settings`: partial update, absent fields unchanged.
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct SettingsPatchBody {

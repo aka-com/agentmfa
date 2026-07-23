@@ -57,9 +57,9 @@ test('the takeover pane renders exactly when the remote link is unusable', () =>
   );
 });
 
-test('remote-only feature notes gate OAuth and endpoints', () => {
-  assert.equal(remoteFeatureNote(LOCAL_BROKER, 'oauth'), null);
+test('remote-only feature notes gate MCP sign-in and endpoints', () => {
+  assert.equal(remoteFeatureNote(LOCAL_BROKER, 'mcp-auth'), null);
   assert.equal(remoteFeatureNote(LOCAL_BROKER, 'endpoints'), null);
-  assert.match(remoteFeatureNote(remote(), 'oauth') ?? '', /paste a token/);
+  assert.match(remoteFeatureNote(remote(), 'mcp-auth') ?? '', /paste a token/);
   assert.match(remoteFeatureNote(remote(), 'endpoints') ?? '', /Direct endpoints/);
 });

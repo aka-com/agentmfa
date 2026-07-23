@@ -7,10 +7,11 @@
 //! listener); this client just refuses to pretend — it sends the
 //! management token as a bearer on whatever URL it was given.
 //!
-//! OAuth sign-in flows (BYO-app and MCP) are not yet relayable to a remote
-//! broker — their loopback redirect lands on the broker host, not the
-//! user's machine — so those methods answer `RemoteUnsupported` until the
-//! relay ships.
+//! BYO-app OAuth flows are relayed: this client binds the loopback
+//! catcher on the *user's* machine, the broker keeps the PKCE verifier,
+//! and only the authorization code crosses back — tokens never touch this
+//! machine. MCP sign-in is not yet relayable and answers
+//! `RemoteUnsupported` until its relay ships.
 
 pub mod credentials;
 pub mod events;
@@ -22,8 +23,8 @@ use aka_api::{
 use aka_core::broker::ConnectionTestReport;
 use aka_core::manage::{
     AccessBody, AllowedToolsBody, BackendProfile, ConnectionAddBody, ConnectionUpdateBody,
-    DraftTestBody, ManageResult, ManagementBackend, SecretAddBody, SecretEditBody,
-    SettingsPatchBody,
+    DraftTestBody, ManageResult, ManagementBackend, OAuthCompleteBody, OAuthReconnectBody,
+    OAuthStartBody, SecretAddBody, SecretEditBody, SettingsPatchBody,
 };
 use aka_core::store::ConnectionSpec;
 use aka_core::types::SecretValue;
@@ -91,10 +92,17 @@ impl RemoteConfig {
     }
 }
 
+/// Opens a URL in the user's default browser (relayed OAuth consent
+/// pages). Returns false when it could not.
+pub type UrlOpener = std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 /// The manage-plane HTTP backend.
 pub struct RemoteBackend {
     config: RemoteConfig,
     http: reqwest::Client,
+    /// How to open a browser on *this* machine — relayed OAuth needs one.
+    /// Defaults to "cannot", which surfaces the URL in the error.
+    opener: Option<UrlOpener>,
 }
 
 impl RemoteBackend {
@@ -104,7 +112,60 @@ impl RemoteBackend {
             .connect_timeout(CONNECT_TIMEOUT)
             .build()
             .expect("http client");
-        Self { config, http }
+        Self {
+            config,
+            http,
+            opener: None,
+        }
+    }
+
+    /// Attach the shell's browser opener (enables relayed OAuth flows).
+    pub fn with_opener(mut self, opener: UrlOpener) -> Self {
+        self.opener = Some(opener);
+        self
+    }
+
+    /// Drive one relayed OAuth flow: catcher here, verifier on the broker.
+    async fn run_relayed_oauth(
+        &self,
+        start: aka_core::broker::ManageOAuthStart,
+        catcher: aka_core::oauth::LoopbackCatcher,
+    ) -> ManageResult<()> {
+        let opened = self
+            .opener
+            .as_ref()
+            .map(|opener| opener(&start.authorize_url))
+            .unwrap_or(false);
+        if !opened {
+            return Err(ManageError::OAuth {
+                message: format!(
+                    "could not open the browser; open this URL yourself: {}",
+                    start.authorize_url
+                ),
+            });
+        }
+        let code = tokio::time::timeout(
+            aka_core::oauth::CONNECT_TIMEOUT,
+            catcher.wait_for_code(&start.state),
+        )
+        .await
+        .map_err(|_| ManageError::OAuth {
+            message: format!(
+                "no sign-in within {} minutes; try connecting again",
+                aka_core::oauth::CONNECT_TIMEOUT.as_secs() / 60
+            ),
+        })?
+        .map_err(|message| ManageError::OAuth { message })?;
+        let _: serde_json::Value = self
+            .post(
+                &format!("/v1/manage/oauth/complete/{}", start.flow_id),
+                &OAuthCompleteBody {
+                    code,
+                    state: start.state,
+                },
+            )
+            .await?;
+        Ok(())
     }
 
     pub fn config(&self) -> &RemoteConfig {
@@ -390,17 +451,46 @@ impl ManagementBackend for RemoteBackend {
             .await
     }
 
+    /// Relayed BYO-app OAuth: the consent page opens in *this* machine's
+    /// browser and redirects to a loopback catcher here; only the code goes
+    /// to the broker, which holds the verifier and does the exchange. The
+    /// token never touches this machine.
     async fn oauth_connect(
         &self,
-        _secret_name: String,
-        _client_secret: Option<SecretValue>,
-        _spec: ConnectionSpec,
+        secret_name: String,
+        client_secret: Option<SecretValue>,
+        spec: ConnectionSpec,
     ) -> ManageResult<()> {
-        Err(remote_unsupported("OAuth sign-in"))
+        let catcher = aka_core::oauth::LoopbackCatcher::bind()
+            .await
+            .map_err(|message| ManageError::OAuth { message })?;
+        let start: aka_core::broker::ManageOAuthStart = self
+            .post(
+                "/v1/manage/oauth/start",
+                &OAuthStartBody {
+                    secret_name,
+                    client_secret: client_secret.map(|value| value.to_string()),
+                    spec,
+                    redirect_uri: catcher.redirect_uri(),
+                },
+            )
+            .await?;
+        self.run_relayed_oauth(start, catcher).await
     }
 
-    async fn oauth_reconnect(&self, _id: Uuid) -> ManageResult<()> {
-        Err(remote_unsupported("OAuth reconnect"))
+    async fn oauth_reconnect(&self, id: Uuid) -> ManageResult<()> {
+        let catcher = aka_core::oauth::LoopbackCatcher::bind()
+            .await
+            .map_err(|message| ManageError::OAuth { message })?;
+        let start: aka_core::broker::ManageOAuthStart = self
+            .post(
+                &format!("/v1/manage/oauth/reconnect/{id}"),
+                &OAuthReconnectBody {
+                    redirect_uri: catcher.redirect_uri(),
+                },
+            )
+            .await?;
+        self.run_relayed_oauth(start, catcher).await
     }
 
     async fn set_tool_access(&self, connection_id: Uuid, enabled: bool) -> ManageResult<bool> {

@@ -43,6 +43,7 @@ dependencies = [
  "aka-api",
  "aka-core",
  "async-trait",
+ "axum",
  "bytes",
  "futures",
  "keyring",

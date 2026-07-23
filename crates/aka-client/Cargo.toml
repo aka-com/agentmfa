@@ -27,3 +27,4 @@ keyring = { version = "3", features = ["apple-native"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+axum = { workspace = true }

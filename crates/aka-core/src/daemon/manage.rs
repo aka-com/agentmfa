@@ -29,7 +29,8 @@ use zeroize::Zeroizing;
 use super::{bearer_token, err_missing_token, ApiJson, AppState};
 use crate::manage::{
     AccessBody, AllowedToolsBody, ConnectionAddBody, ConnectionUpdateBody, DraftTestBody,
-    ManagementBackend, SecretAddBody, SecretEditBody, SettingsPatchBody,
+    ManagementBackend, OAuthCompleteBody, OAuthReconnectBody, OAuthStartBody, SecretAddBody,
+    SecretEditBody, SettingsPatchBody,
 };
 
 /// Bearer authentication against the management token.
@@ -129,6 +130,9 @@ pub fn router() -> Router<AppState> {
         .route("/connections/{id}/mcp-status", post(mcp_status))
         .route("/connections/{id}/endpoint", post(issue_endpoint))
         .route("/endpoints/{id}", delete(revoke_endpoint))
+        .route("/oauth/start", post(oauth_start))
+        .route("/oauth/reconnect/{id}", post(oauth_reconnect_start))
+        .route("/oauth/complete/{id}", post(oauth_complete))
         .route("/identity", get(identity))
         .route("/identity/agent-key", get(agent_key))
         .route("/identity/rotate", post(rotate_key))
@@ -374,6 +378,51 @@ async fn revoke_endpoint(
             .await
             .map(|revoked| json!({ "revoked": revoked })),
     )
+}
+
+/* ------------------------- relayed OAuth (BYO app) ------------------------ */
+
+/// Begin a relayed OAuth connect. The shell's loopback catcher receives the
+/// browser redirect on the *user's* machine; the broker keeps the verifier
+/// and completes on `/oauth/complete/{flow_id}`.
+async fn oauth_start(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+    ApiJson(body): ApiJson<OAuthStartBody>,
+) -> Response {
+    let result = state.broker.manage_oauth_start(
+        &body.secret_name,
+        body.client_secret.map(Zeroizing::new),
+        body.spec,
+        &body.redirect_uri,
+    );
+    respond(result.map_err(ManageError::from))
+}
+
+async fn oauth_reconnect_start(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+    Path(id): Path<Uuid>,
+    ApiJson(body): ApiJson<OAuthReconnectBody>,
+) -> Response {
+    let result = state
+        .broker
+        .manage_oauth_reconnect_start(&id, &body.redirect_uri)
+        .await;
+    respond(result.map_err(ManageError::from))
+}
+
+async fn oauth_complete(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+    Path(id): Path<Uuid>,
+    ApiJson(body): ApiJson<OAuthCompleteBody>,
+) -> Response {
+    let result = state
+        .broker
+        .manage_oauth_complete(&id, &body.code, &body.state)
+        .await;
+    respond(result.map_err(ManageError::from))
 }
 
 /* ---------------------- identity, sessions, activity ---------------------- */

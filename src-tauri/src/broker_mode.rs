@@ -140,7 +140,10 @@ impl BrokerState {
             .unwrap_or_else(|| zeroize::Zeroizing::new("akamgr_unconfigured".into()));
         let config = RemoteConfig::new(&url, &token)
             .unwrap_or_else(|_| RemoteConfig::new("http://127.0.0.1:1", "akamgr_unconfigured").expect("static config"));
-        let backend: Arc<dyn ManagementBackend> = Arc::new(RemoteBackend::new(config));
+        let backend: Arc<dyn ManagementBackend> = Arc::new(
+            RemoteBackend::new(config)
+                .with_opener(Arc::new(crate::events::open_consent_url)),
+        );
         Self {
             backend: RwLock::new(backend),
             local: Mutex::new(None),
@@ -213,7 +216,10 @@ impl BrokerState {
         };
         let config = RemoteConfig::new(&url, &token)?;
         let url = config.base_url();
-        let backend = Arc::new(RemoteBackend::new(config));
+        let backend = Arc::new(
+            RemoteBackend::new(config)
+                .with_opener(Arc::new(crate::events::open_consent_url)),
+        );
         backend
             .whoami()
             .await

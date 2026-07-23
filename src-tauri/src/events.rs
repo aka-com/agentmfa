@@ -93,19 +93,24 @@ impl BrokerEvents for TauriEvents {
 
     /// Open the OAuth authorize page in the user's default browser.
     fn open_external_url(&self, url: &str) -> bool {
-        // Only web URLs, ever: this hook exists for the OAuth consent page.
-        if !url.starts_with("https://") {
-            return false;
-        }
-        #[cfg(target_os = "macos")]
-        let launcher = "open";
-        #[cfg(not(target_os = "macos"))]
-        let launcher = "xdg-open";
-        std::process::Command::new(launcher)
-            .arg(url)
-            .spawn()
-            .is_ok()
+        open_consent_url(url)
     }
+}
+
+/// Open an OAuth consent page in the default browser. Only web URLs, ever:
+/// this exists for the consent page, local mode and relayed-remote alike.
+pub fn open_consent_url(url: &str) -> bool {
+    if !url.starts_with("https://") {
+        return false;
+    }
+    #[cfg(target_os = "macos")]
+    let launcher = "open";
+    #[cfg(not(target_os = "macos"))]
+    let launcher = "xdg-open";
+    std::process::Command::new(launcher)
+        .arg(url)
+        .spawn()
+        .is_ok()
 }
 
 /// Convenience for the shell to construct the observer as a trait object.

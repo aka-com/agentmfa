@@ -136,9 +136,10 @@ async fn the_remote_backend_manages_a_tcp_broker_end_to_end() {
 
     assert!(!backend.activity(50).await.unwrap().is_empty());
 
-    // OAuth flows are explicitly not relayable yet.
+    // BYO OAuth relays now; reconnecting a non-OAuth connection is the
+    // structured config error, not a transport failure.
     let error = backend.oauth_reconnect(id).await.unwrap_err();
-    assert!(matches!(error, ManageError::RemoteUnsupported { .. }));
+    assert!(matches!(error, ManageError::InvalidConnectionConfig { .. }));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -160,6 +161,115 @@ async fn bad_tokens_and_dead_brokers_map_to_distinct_errors() {
         dead.list_secrets().await.unwrap_err(),
         ManageError::Unreachable { .. }
     ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn byo_oauth_relays_through_the_client_loopback() {
+    let h = harness().await;
+
+    // A stub provider: only the token endpoint is ever dialed (by the
+    // broker); the authorize page is "visited" by this test acting as the
+    // browser. Loopback http is allowed for exactly this kind of harness.
+    let provider = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let provider_port = provider.local_addr().unwrap().port();
+    let app = axum::Router::new().route(
+        "/token",
+        axum::routing::post(|body: String| async move {
+            assert!(body.contains("grant_type=authorization_code"), "{body}");
+            assert!(body.contains("code=test-code"), "{body}");
+            assert!(body.contains("code_verifier="), "{body}");
+            axum::Json(serde_json::json!({
+                "access_token": "at-relayed",
+                "refresh_token": "rt-relayed",
+                "expires_in": 3600,
+            }))
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(provider, app).await.unwrap();
+    });
+
+    // The opener stands in for the user's browser: capture the consent URL.
+    let (url_tx, mut url_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let backend = RemoteBackend::new(
+        RemoteConfig::new(
+            &h.base,
+            h.backend.config().token(),
+        )
+        .unwrap(),
+    )
+    .with_opener(std::sync::Arc::new(move |url: &str| {
+        let _ = url_tx.send(url.to_string());
+        true
+    }));
+
+    // "The browser": follow the consent page's redirect back to the
+    // client-side catcher with a code and the flow's state.
+    let browser = tokio::spawn(async move {
+        let authorize_url = url_rx.recv().await.expect("consent URL opened");
+        let parsed = url::Url::parse(&authorize_url).unwrap();
+        let pairs: std::collections::HashMap<_, _> =
+            parsed.query_pairs().into_owned().collect();
+        let redirect = format!(
+            "{}?code=test-code&state={}",
+            pairs["redirect_uri"], pairs["state"]
+        );
+        assert!(pairs["redirect_uri"].starts_with("http://127.0.0.1:"));
+        let response = reqwest::get(redirect).await.unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+    });
+
+    let spec = ConnectionSpec {
+        name: "github-oauth".into(),
+        config: ConnectionConfig::Api {
+            host: "api.github.com".into(),
+            scheme: "https".into(),
+            port: None,
+            template: "Authorization: Bearer {{GH_OAUTH_TOKEN}}".into(),
+            mcp_path: None,
+            oauth: Some(aka_core::types::OAuthSpec {
+                auth_url: format!("http://127.0.0.1:{provider_port}/authorize"),
+                token_url: format!("http://127.0.0.1:{provider_port}/token"),
+                client_id: "Iv1.test".into(),
+                scopes: vec!["repo".into()],
+                extra_auth_params: vec![],
+            }),
+        },
+        secrets: vec![],
+    };
+    backend
+        .oauth_connect("GH_OAUTH_TOKEN".into(), None, spec)
+        .await
+        .expect("relayed OAuth completes");
+    browser.await.unwrap();
+
+    // The connection landed on the broker with its token secret bound.
+    let connections = backend.list_connections().await.unwrap();
+    let conn = connections
+        .iter()
+        .find(|c| c.name == "github-oauth")
+        .expect("connection exists");
+    // BYO-app connections carry their oauth_spec (conn.oauth is the MCP
+    // grant marker, a different mechanism).
+    assert!(conn.oauth_spec.is_some());
+    assert_eq!(conn.secret_names, vec!["GH_OAUTH_TOKEN".to_string()]);
+    let activity = backend.activity(50).await.unwrap();
+    assert!(activity
+        .iter()
+        .any(|entry| entry.text.contains("connected via OAuth")));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_completed_or_stale_relay_flow_cannot_be_replayed() {
+    let h = harness().await;
+    // Completing an unknown flow id fails cleanly.
+    let bogus = uuid::Uuid::new_v4();
+    let error = h
+        ._broker
+        .manage_oauth_complete(&bogus, "code", "state")
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("expired or was already completed"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -1156,8 +1156,18 @@ fn validate_config_and_bind_secrets(
                 }
             }
             if let Some(oauth) = oauth {
-                let https_url =
-                    |value: &str| url::Url::parse(value).is_ok_and(|url| url.scheme() == "https");
+                // https, or plain http to a loopback host (dev/test
+                // providers) — the same rule the OAuth module enforces.
+                let https_url = |value: &str| {
+                    url::Url::parse(value).is_ok_and(|url| {
+                        url.scheme() == "https"
+                            || (url.scheme() == "http"
+                                && matches!(
+                                    url.host_str(),
+                                    Some("127.0.0.1") | Some("localhost") | Some("[::1]")
+                                ))
+                    })
+                };
                 if !https_url(&oauth.auth_url) || !https_url(&oauth.token_url) {
                     return Err(CoreError::InvalidConnectionField {
                         field: ConnectionField::Url,
