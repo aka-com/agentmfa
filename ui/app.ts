@@ -889,7 +889,7 @@ function catalogRowHTML(entry: CatalogEntry): string {
   // Call out rows that need provider-side setup; generic MCP and HTTP rows
   // still use Configure because the user supplies their endpoint.
   const addLabel = entry.requiresSetup
-    ? 'Requires setup'
+    ? 'Setup'
     : ['mcp', 'http'].includes(entry.id)
     ? 'Configure'
     : entry.preset
@@ -910,13 +910,33 @@ function catalogRowHTML(entry: CatalogEntry): string {
       </div>
       ${actionMenuOpen ? `<div class="cat-connect-menu" role="menu" aria-label="Connect ${escAttr(entry.name)}">
         <button class="menu-item" role="menuitem" data-act="catalog-connect-oauth" data-id="${entry.id}">Connect</button>
-        <button class="menu-item" role="menuitem" data-act="catalog-connect-manual" data-id="${entry.id}">Connect custom MCP</button>
+        <button class="menu-item" role="menuitem" data-act="catalog-connect-manual" data-id="${entry.id}">Connect via custom URL</button>
         ${entry.preset ? `<button class="menu-item" role="menuitem" data-act="catalog-connect-api" data-id="${entry.id}">Connect custom API</button>` : ''}
       </div>` : ''}
     </div>`;
-  const action = count || builtin
+  // Connected rows split like the quick-connect control: the count half
+  // toggles the row open, the chevron half opens the add-another menu.
+  // Quick-connect rows keep both connect paths in that menu.
+  const connectedMenuItems = quickConnect
+    ? `<button class="menu-item" role="menuitem" data-act="catalog-connect-oauth" data-id="${entry.id}">Add another connection</button>
+        <button class="menu-item" role="menuitem" data-act="catalog-connect-manual" data-id="${entry.id}">Add another connection (custom)</button>`
+    : `<button class="menu-item" role="menuitem" data-act="catalog-add" data-id="${entry.id}">Add another connection</button>`;
+  const connectedAction = `<div class="cat-connect-wrap ${actionMenuOpen ? 'open' : ''}">
+      <div class="cat-connect-buttons">
+        <button class="cat-count cat-connect-primary ${open ? 'on' : ''}" data-act="catalog-toggle"
+          data-id="${entry.id}" aria-expanded="${open}" title="${escAttr(label)}">${count} connected</button>
+        <button class="cat-count cat-connect-menu-btn" data-act="toggle-catalog-connect-menu"
+          data-id="${entry.id}" title="Add another ${escAttr(entry.name)} connection"
+          aria-label="Add another ${escAttr(entry.name)} connection" aria-haspopup="menu"
+          aria-expanded="${actionMenuOpen}">${ICONS.chevronDown}</button>
+      </div>
+      ${actionMenuOpen ? `<div class="cat-connect-menu" role="menu" aria-label="Add another ${escAttr(entry.name)} connection">${connectedMenuItems}</div>` : ''}
+    </div>`;
+  const action = builtin
     ? `<button class="cat-count ${open ? 'on' : ''}" data-act="catalog-toggle" data-id="${entry.id}"
-        aria-expanded="${open}" title="${escAttr(label)}">${builtin ? `${ICONS.fileKey} ${count}` : 'Connected'}<span class="cat-chev">${ICONS.chevronDown}</span></button>`
+        aria-expanded="${open}" title="${escAttr(label)}">${ICONS.fileKey} ${count}<span class="cat-chev">${ICONS.chevronDown}</span></button>`
+    : count
+    ? connectedAction
     : quickConnect
     ? quickConnectAction
     : entry.via === 'connection'
@@ -926,7 +946,6 @@ function catalogRowHTML(entry: CatalogEntry): string {
     : builtin ? credentialsExpansionHTML()
     : `<div class="cat-conns">
       <div class="cat-conn-list">${connectionsForEntry(entry, state.connections).map(catalogConnRowHTML).join('')}</div>
-      <button class="btn outline sm cat-add-another" data-act="catalog-add" data-id="${entry.id}">＋ Add another ${esc(entry.name)} connection</button>
     </div>`;
   // While "Show all" is checked the row body is inert (no pointer cursor, no
   // toggle); only the trailing count button collapses, and doing so unchecks
@@ -938,7 +957,7 @@ function catalogRowHTML(entry: CatalogEntry): string {
     <div class="cat-row ${rowToggle ? 'is-toggle' : ''} ${count ? 'is-configured' : ''}"${rowToggle}>
       <span class="cat-ico" aria-hidden="true">${ICONS[entry.icon] || ''}</span>
       <div class="cat-tx"><b>${esc(entry.name)}</b><span>${esc(entry.description)}</span></div>
-      ${entry.limitedSupport ? `<span class="cat-limited" title="This vendor only admits pre-approved OAuth clients, so connecting may be refused.">Limited support</span>` : ''}
+      ${entry.limitedSupport ? `<span class="cat-limited" tabindex="0" data-tippy-content="${escAttr(entry.name)} only accepts OAuth sign-ins from clients it has pre-approved, and Multitool isn't on that list yet, so connecting may be refused.">Limited support</span>` : ''}
       ${action}
     </div>${expansion}</div>`;
 }
@@ -1341,7 +1360,7 @@ function brokerSwitchHTML(): string {
   const menu = state.brokerMenuOpen
     ? `<div class="broker-menu" role="menu">
         <button class="menu-item" role="menuitem" data-act="broker-pick-local">
-          <span class="broker-check">${state.broker.mode === 'local' ? '✓' : ''}</span> This Mac</button>
+          <span class="broker-check">${state.broker.mode === 'local' ? '✓' : ''}</span> Local</button>
         <button class="menu-item" role="menuitem" data-act="broker-pick-remote">
           <span class="broker-check">${state.broker.mode === 'remote' ? '✓' : ''}</span> Remote broker…</button>
       </div>`

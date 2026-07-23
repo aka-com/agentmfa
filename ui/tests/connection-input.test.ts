@@ -137,6 +137,9 @@ test('builds transparent templates for common authentication recipes', () => {
   assert.equal(authTemplate('api', 'header', 'API_KEY', 'X-API-Key'), 'X-API-Key: {{API_KEY}}');
   assert.equal(authTemplate('api', 'query', 'API_KEY', 'token'), '?token={{url(API_KEY)}}');
   assert.throws(() => authTemplate('api', 'header', 'API_KEY', 'Bad Header'), /valid HTTP header/);
-  assert.equal(suggestedSecretName('prod-db', 'pg'), 'PROD_DB_PASSWORD');
-  assert.equal(suggestedSecretName('deploy ssh', 'ssh'), 'DEPLOY_SSH_SSH_KEY');
+  // Postgres/SSH suggestions come from the tool, not the connection name —
+  // names like "SSH (localhost)" would double the tool into SSH_LOCALHOST_SSH_KEY.
+  assert.equal(suggestedSecretName('prod-db', 'pg'), 'POSTGRES_PASSWORD');
+  assert.equal(suggestedSecretName('SSH (localhost)', 'ssh'), 'SSH_KEY');
+  assert.equal(suggestedSecretName('github', 'api'), 'GITHUB_TOKEN');
 });

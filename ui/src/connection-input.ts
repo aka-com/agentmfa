@@ -325,10 +325,14 @@ export function parseConnectionImport(value: unknown): ConnectionImport {
 }
 
 export function suggestedSecretName(connectionName: string, type: ConnectionType): string {
+  // Postgres and SSH connection names already embed the tool ("SSH
+  // (localhost)"), so deriving the credential name from them doubles it up
+  // (SSH_LOCALHOST_SSH_KEY). The tool's base name alone is the suggestion.
+  if (type === 'pg') return 'POSTGRES_PASSWORD';
+  if (type === 'ssh') return 'SSH_KEY';
   const base = String(connectionName || 'CONNECTION')
     .toUpperCase().replace(/[^A-Z0-9_]+/g, '_').replace(/^_+|_+$/g, '') || 'CONNECTION';
-  const suffix = type === 'pg' ? 'PASSWORD' : type === 'ssh' ? 'SSH_KEY' : 'TOKEN';
-  return `${base}_${suffix}`.slice(0, 64);
+  return `${base}_TOKEN`.slice(0, 64);
 }
 
 export function authTemplate(

@@ -22,7 +22,7 @@ function remote(overrides: Partial<BrokerProfile> = {}): BrokerProfile {
 }
 
 test('the switcher labels local mode and remote hosts', () => {
-  assert.equal(brokerLabel(LOCAL_BROKER), 'This Mac');
+  assert.equal(brokerLabel(LOCAL_BROKER), 'Local');
   assert.equal(brokerLabel(remote()), 'broker.example.dev');
   assert.equal(brokerLabel(remote({ url: 'http://10.0.1.5:4780' })), '10.0.1.5:4780');
   // An unparseable URL falls back to the raw value rather than throwing.

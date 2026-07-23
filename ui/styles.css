@@ -224,15 +224,16 @@
   width: 7px; height: 7px; border-radius: 50%; display: inline-block;
   background: var(--muted-2);
 }
-  .broker-dot.local{ background: var(--muted-2); }
+  /* Local mode has no link state to signal; the switcher reads just "Local". */
+  .broker-dot.local{ display: none; }
   .broker-dot.ok{ background: #30c94e; box-shadow: 0 0 4px rgba(48,201,78,.7); }
   .broker-dot.pending{ background: #f5a623; }
   .broker-dot.error{ background: var(--danger); box-shadow: 0 0 4px rgba(255,59,48,.6); }
   .broker-menu{
   position: absolute; right: 0; top: calc(100% + 4px); z-index: 60;
   min-width: 180px; padding: 4px;
-  background: var(--panel); border: 1px solid var(--line); border-radius: 9px;
-  box-shadow: 0 8px 28px rgba(0,0,0,.16);
+  background: var(--panel); border: 1px solid var(--line-mid); border-radius: 9px;
+  box-shadow: 0 10px 28px rgba(10,15,40,.22);
   display: flex; flex-direction: column;
 }
   .broker-check{ width: 14px; display: inline-block; color: var(--accent-text); }
@@ -900,13 +901,21 @@
    flips when the row is open. */
 .cat-chev { display: inline-flex; transition: transform .15s ease; opacity: .8; }
 .cat-count.on .cat-chev { transform: rotate(180deg); }
+/* Connected rows split the pill: the count half toggles the row open, the
+   chevron half opens the add-another menu. A panel-colored hairline is the
+   seam between the two filled halves. */
+.cat-count.cat-connect-primary { padding: 5px 10px 5px 13px; border-radius: 999px 0 0 999px; }
+.cat-count.cat-connect-menu-btn {
+  margin-left: 0; padding: 5px 9px 5px 7px; border-radius: 0 999px 999px 0;
+  border-left: 1px solid var(--panel);
+}
+.cat-count.cat-connect-menu-btn svg { transform: none; }
 /* Expanded rows are full-bleed: they span the whole card and align with the
    parent row's text, so a tool reads as one object rather than a card-in-card. */
 .cat-conns {
   display: flow-root; background: var(--wash); border-top: 1px solid var(--line);
 }
-/* The hairline under the last connection separates it from "Add another". */
-.cat-conn-list { display: flex; flex-direction: column; border-bottom: 1px solid var(--line-soft); }
+.cat-conn-list { display: flex; flex-direction: column; }
 .cat-conn {
   display: flex; align-items: flex-start; gap: 10px;
   padding: 10px 14px 10px 64px; min-width: 0;
@@ -939,8 +948,6 @@
 .cat-conns .sec-table td:first-child { padding-left: 64px; }
 .cat-conns .sec-table td:last-child { padding-right: 14px; }
 .cat-conns > .muted-note { padding: 10px 14px; }
-/* Add-actions read as part of the list, not as calls to action: ink, not accent. */
-.cat-conns .cat-add-another { margin: 8px 14px 10px 64px; color: var(--ink); }
 /* "Add credential" is a full-bleed activatable row like "More tools"; the
    table's last-row hairline is the divider above it, so the row itself draws
    no border of its own. */
@@ -968,7 +975,7 @@
   display: flex; align-items: flex-start; gap: 5px; margin-top: 5px;
   font-size: 11.5px; color: var(--muted);
 }
-.cc-test svg { flex: 0 0 auto; margin-top: 1px; }
+.cc-test svg { flex: 0 0 auto; }
 .cc-test.ok { color: var(--ok-ink); }
 .cc-test.err { color: var(--danger-ink); }
 .cc-test.running { opacity: .8; }

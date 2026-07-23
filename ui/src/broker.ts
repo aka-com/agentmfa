@@ -13,9 +13,9 @@ export const LOCAL_BROKER: BrokerProfile = {
   has_saved_token: false,
 };
 
-/** The switcher's label: "This Mac", or the remote host. */
+/** The switcher's label: "Local" for this machine, or the remote host. */
 export function brokerLabel(profile: BrokerProfile): string {
-  if (profile.mode === 'local') return 'This Mac';
+  if (profile.mode === 'local') return 'Local';
   if (!profile.url) return 'Remote broker';
   try {
     return new URL(profile.url).host;
