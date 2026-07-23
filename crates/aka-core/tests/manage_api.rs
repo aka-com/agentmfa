@@ -249,6 +249,47 @@ async fn secrets_and_connections_round_trip_over_the_manage_api() {
     let (_, body) = h.manage("GET", "/v1/manage/connections", None).await;
     assert_eq!(body[0]["agent_access"]["enabled"], false);
 
+    // Add a second tool, then drag-reorder the list over the manage API and
+    // observe the new order persist in the listing.
+    let (status, _) = h
+        .manage(
+            "POST",
+            "/v1/manage/connections",
+            Some(json!({ "spec": {
+                "name": "gitlab",
+                "config": { "kind": "api", "host": "gitlab.com", "scheme": "https", "template": "" },
+                "secrets": [],
+            }})),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (_, body) = h.manage("GET", "/v1/manage/connections", None).await;
+    let names: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["github", "gitlab"], "insertion order until reordered");
+    let gitlab_id = body[1]["id"].as_str().unwrap().to_string();
+
+    let (status, _) = h
+        .manage(
+            "POST",
+            "/v1/manage/connections/reorder",
+            Some(json!({ "ordered_ids": [gitlab_id, id] })),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (_, body) = h.manage("GET", "/v1/manage/connections", None).await;
+    let names: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["gitlab", "github"], "reorder persisted");
+
     // Reveal returns only the short prefix; copy-value returns the value
     // (the shell writes it to the clipboard, never the webview).
     let (_, secrets) = h.manage("GET", "/v1/manage/secrets", None).await;

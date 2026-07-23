@@ -621,10 +621,12 @@ impl Store {
 
     /* ---------------------------- connections ---------------------------- */
 
+    /// Connections in their persisted order. New tools append to the end
+    /// (`add_connection`), deletes preserve the rest, and `reorder_connections`
+    /// permutes the list — so this order is the user-chosen one the Tools tab
+    /// renders and every consumer (MCP listing, CLI, manage API) mirrors.
     pub fn list_connections(&self) -> Vec<Connection> {
-        let mut conns = self.state.lock().unwrap().connections.clone();
-        conns.sort_by(|a, b| a.name.cmp(&b.name));
-        conns
+        self.state.lock().unwrap().connections.clone()
     }
 
     pub fn connection_by_id(&self, id: &Uuid) -> Result<Connection> {
@@ -969,6 +971,34 @@ impl Store {
             }
         }
         Ok(conn)
+    }
+
+    /// Persist a new order for the connection list. `ordered_ids` is the
+    /// desired front-to-back order; connections it names move into that order,
+    /// and any current connection it omits (a tool added or dropped in another
+    /// window while the user was dragging) keeps its relative position at the
+    /// end. Unknown ids are ignored. This is display order only — no
+    /// capability, secret binding, or `updated_at` changes — so it never trips
+    /// the edit-conflict guard. Returns the reordered list.
+    pub fn reorder_connections(&self, ordered_ids: &[Uuid]) -> Result<Vec<Connection>> {
+        let mut state = self.state.lock().unwrap();
+        let mut next = state.clone();
+        let mut remaining = std::mem::take(&mut next.connections);
+        let mut ordered = Vec::with_capacity(remaining.len());
+        for id in ordered_ids {
+            if let Some(pos) = remaining.iter().position(|c| &c.id == id) {
+                ordered.push(remaining.remove(pos));
+            }
+        }
+        // Leftovers keep their prior relative order behind the named ones.
+        ordered.append(&mut remaining);
+        // A no-op reorder must not rewrite the index (nor wake listeners).
+        if ordered == state.connections {
+            return Ok(ordered);
+        }
+        next.connections = ordered;
+        self.commit(&mut state, next)?;
+        Ok(state.connections.clone())
     }
 
     /* ------------------------------ settings ------------------------------ */
@@ -1710,6 +1740,43 @@ mod tests {
                 .unwrap_err(),
             CoreError::UnknownTemplateRef(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn reorder_connections_permutes_persists_and_is_lenient() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Arc::new(MemoryVault::new());
+        let (a, b, c);
+        {
+            let store = Store::open(Paths::under(dir.path()), vault.clone())
+                .await
+                .unwrap();
+            a = store.add_connection(api_spec("alpha", "a.example.com", "")).unwrap().id;
+            b = store.add_connection(api_spec("bravo", "b.example.com", "")).unwrap().id;
+            c = store.add_connection(api_spec("charlie", "c.example.com", "")).unwrap().id;
+            // Insertion order until reordered.
+            let ids: Vec<_> = store.list_connections().iter().map(|conn| conn.id).collect();
+            assert_eq!(ids, vec![a, b, c]);
+
+            // A full permutation is applied in the given order.
+            store.reorder_connections(&[c, a, b]).unwrap();
+            let ids: Vec<_> = store.list_connections().iter().map(|conn| conn.id).collect();
+            assert_eq!(ids, vec![c, a, b]);
+
+            // A partial list moves the named ids to the front; omitted ones keep
+            // their relative order behind them, and an unknown id is ignored.
+            let ghost = Uuid::new_v4();
+            store.reorder_connections(&[ghost, b]).unwrap();
+            let ids: Vec<_> = store.list_connections().iter().map(|conn| conn.id).collect();
+            assert_eq!(ids, vec![b, c, a]);
+        }
+
+        // Order survives a reopen of the index.
+        let store = Store::open(Paths::under(dir.path()), vault.clone())
+            .await
+            .unwrap();
+        let ids: Vec<_> = store.list_connections().iter().map(|conn| conn.id).collect();
+        assert_eq!(ids, vec![b, c, a]);
     }
 
     #[tokio::test]

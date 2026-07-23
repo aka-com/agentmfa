@@ -756,6 +756,23 @@ pub async fn delete_connection(state: State<'_, AppState>, id: String) -> CmdRes
         .map_err(|e| e.to_string())
 }
 
+/// Persist the user's drag-reordered Tools list. `ordered_ids` is the full
+/// front-to-back order; the broker is lenient about a list that raced an
+/// add/delete in another window.
+#[tauri::command]
+pub async fn reorder_connections(
+    state: State<'_, AppState>,
+    ordered_ids: Vec<String>,
+) -> CmdResult<()> {
+    let ordered_ids = ordered_ids
+        .iter()
+        .map(|id| parse_id(id))
+        .collect::<Result<Vec<_>, _>>()?;
+    state.brokers.backend().reorder_connections(ordered_ids)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Broker-side connectivity/credential test against the service's pinned
 /// destination; only the pass/fail summary reaches the webview.
 #[tauri::command]
@@ -1114,6 +1131,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         add_connection,
         edit_connection,
         delete_connection,
+        reorder_connections,
         test_connection,
         test_connection_draft,
         start_mcp_auth,

@@ -23,9 +23,9 @@ use aka_api::{
 use aka_core::broker::ConnectionTestReport;
 use aka_core::manage::{
     AccessBody, AllowedToolsBody, BackendProfile, ConnectionAddBody, ConnectionUpdateBody,
-    DraftTestBody, ManageResult, ManagementBackend, McpAuthDeliverBody, McpAuthStartBody,
-    OAuthCompleteBody, OAuthReconnectBody, OAuthStartBody, SecretAddBody, SecretEditBody,
-    SettingsPatchBody,
+    ConnectionsReorderBody, DraftTestBody, ManageResult, ManagementBackend, McpAuthDeliverBody,
+    McpAuthStartBody, OAuthCompleteBody, OAuthReconnectBody, OAuthStartBody, SecretAddBody,
+    SecretEditBody, SettingsPatchBody,
 };
 use aka_core::store::ConnectionSpec;
 use aka_core::types::SecretValue;
@@ -413,6 +413,14 @@ impl ManagementBackend for RemoteBackend {
 
     async fn delete_connection(&self, id: Uuid) -> ManageResult<()> {
         self.delete(&format!("/v1/manage/connections/{id}")).await
+    }
+
+    async fn reorder_connections(&self, ordered_ids: Vec<Uuid>) -> ManageResult<()> {
+        self.post(
+            "/v1/manage/connections/reorder",
+            &ConnectionsReorderBody { ordered_ids },
+        )
+        .await
     }
 
     async fn test_connection(&self, id: Uuid) -> ManageResult<ConnectionTestReport> {

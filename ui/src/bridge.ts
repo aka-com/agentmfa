@@ -183,6 +183,7 @@ interface MockArgs {
   approved: boolean;
   values?: Record<string, string>;
   endpointId?: string;
+  orderedIds?: string[];
 }
 
 const db: MockDatabase = {
@@ -672,6 +673,20 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       db.connections = db.connections.filter((x) => x.id !== args.id);
       db.access = db.access.filter((a) => a.connection_id !== args.id);
       audit('connectionDeleted', `Tool deleted: ${c.name}`); return;
+    }
+    case 'reorder_connections': {
+      // Lenient, like the broker: named ids move to the front in order, any
+      // omitted connection keeps its relative position at the end.
+      const ids = (args.orderedIds ?? []) as string[];
+      const remaining = db.connections.slice();
+      const ordered: MockConnection[] = [];
+      for (const id of ids) {
+        const pos = remaining.findIndex((c) => c.id === id);
+        if (pos !== -1) ordered.push(remaining.splice(pos, 1)[0]);
+      }
+      db.connections = ordered.concat(remaining);
+      emit('aka://connections-changed', {});
+      return;
     }
     case 'test_connection': {
       const c = db.connections.find((x) => x.id === args.id); if (!c) throw new Error('no such connection');

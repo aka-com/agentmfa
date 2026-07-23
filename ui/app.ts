@@ -1159,14 +1159,25 @@ function selectedConnection(): ConnectionSummary | null {
   return attn ?? state.connections[0];
 }
 
-function flatConnRowHTML(c: ConnectionSummary): string {
+function flatConnRowHTML(c: ConnectionSummary, reorderable = false): string {
   const kind = connectionKind(c);
   const live = liveCount(c);
   const entry = entryForConnection(c);
   const selected = selectedConnection()?.id === c.id;
+  // When the list is reorderable a grip on the left is the drag source (so
+  // clicks and text selection on the rest of the row are unaffected) and also
+  // carries keyboard reordering via the arrow keys. The drag ghost is set to
+  // the whole row in the dragstart handler.
+  const grip = reorderable
+    ? `<button class="flat-conn-grip" draggable="true" data-act="reorder-key" data-id="${c.id}"
+        aria-label="Reorder ${escAttr(connectionRowName(c))}. Press the up or down arrow keys to move it."
+        title="Drag to reorder">${ICONS.gripVertical}</button>`
+    : '';
   // The row is the detail panel's opener; its own controls (the switch)
   // sit inside and win the click.
-  return `<div class="flat-conn-wrap ${selected ? 'sel' : ''}" data-conn-row="${c.id}">
+  return `<div class="flat-conn-wrap ${selected ? 'sel' : ''}${reorderable ? ' reorderable' : ''}"
+    data-conn-row="${c.id}">
+    ${grip}
     <div class="flat-conn-row" role="button" tabindex="0" data-act="select-conn" data-id="${c.id}"
       aria-expanded="${selected}" aria-label="Show details for ${escAttr(connectionRowName(c))}">
       <span class="cat-ico kind-${kind}" aria-hidden="true">${entry ? ICONS[entry.icon] || '' : ''}</span>
@@ -1223,9 +1234,13 @@ function connectionsHTML() {
     || c.target.toLowerCase().includes(needle)
     || (c.account || '').toLowerCase().includes(needle)
     || entryMatches(c));
+  // Reordering persists the full list order, so it is only offered when the
+  // whole list is on screen: no active search filter, and more than one tool.
+  const reorderable = !needle && matching.length > 1;
   const connectedList = state.connections.length
-    ? `<div class="cat-section"><div class="cat-rows">${matching.length
-        ? matching.map(flatConnRowHTML).join('')
+    ? `<div class="cat-section"><div class="cat-rows${reorderable ? ' reorderable' : ''}"
+        data-conn-list${reorderable ? '="on"' : ''}>${matching.length
+        ? matching.map((c) => flatConnRowHTML(c, reorderable)).join('')
         : '<div class="muted-note">No tools match your search.</div>'}</div></div>`
     : '';
   // With nothing connected, adding is the only thing to do — the catalog
@@ -4099,7 +4114,129 @@ document.addEventListener('click', async (e) => {
   }
 });
 
+/* ---------------------- Tools list drag reordering ----------------------- */
+// The connected-tools list on the Tools tab can be reordered by dragging a
+// row's grip (or, for keyboard users, focusing the grip and pressing the
+// arrow keys). The chosen order is persisted on the broker via
+// `reorder_connections`; the broker echoes `connections-changed`, which
+// refreshes every window back to the stored order.
+
+// The connection id currently being dragged, or null when no drag is active.
+let dragConnId: string | null = null;
+
+function connListEl(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('[data-conn-list="on"]');
+}
+
+// The row a dropped item should land *before*: the first whose vertical
+// midpoint sits below the pointer. `null` means append at the end.
+function connRowAfter(list: HTMLElement, y: number): HTMLElement | null {
+  const rows = [...list.querySelectorAll<HTMLElement>('.flat-conn-wrap:not(.dragging)')];
+  for (const row of rows) {
+    const box = row.getBoundingClientRect();
+    if (y < box.top + box.height / 2) return row;
+  }
+  return null;
+}
+
+async function persistConnOrder(orderedIds: string[]): Promise<void> {
+  await run(() => invoke('reorder_connections', { orderedIds }));
+}
+
+// Sync `state.connections` to the live DOM row order and, if it changed,
+// persist it. Used at the end of a pointer drag.
+function commitConnDrag(): void {
+  if (!dragConnId) return;
+  const list = connListEl();
+  document.querySelectorAll('.flat-conn-wrap.dragging')
+    .forEach((el) => el.classList.remove('dragging'));
+  dragConnId = null;
+  if (!list) return;
+  const ids = [...list.querySelectorAll<HTMLElement>('.flat-conn-wrap')]
+    .map((el) => el.dataset.connRow)
+    .filter((id): id is string => Boolean(id));
+  const byId = new Map(state.connections.map((c) => [c.id, c] as const));
+  const next = ids.map((id) => byId.get(id)).filter((c): c is ConnectionSummary => Boolean(c));
+  // Preserve any connection not represented in the DOM (a filtered-out row
+  // cannot happen while reordering is enabled, but stay total to be safe).
+  for (const c of state.connections) if (!ids.includes(c.id)) next.push(c);
+  const changed = next.some((c, i) => c.id !== state.connections[i]?.id);
+  if (!changed) return;
+  state.connections = next;
+  void persistConnOrder(next.map((c) => c.id));
+}
+
+// Move one connection up (-1) or down (+1) by keyboard, optimistically
+// re-rendering and keeping the moved grip focused, then persisting.
+function moveConnByKeyboard(id: string, delta: number): void {
+  const ids = state.connections.map((c) => c.id);
+  const from = ids.indexOf(id);
+  if (from === -1) return;
+  const to = from + delta;
+  if (to < 0 || to >= ids.length) return;
+  ids.splice(to, 0, ids.splice(from, 1)[0]);
+  const byId = new Map(state.connections.map((c) => [c.id, c] as const));
+  state.connections = ids.map((cid) => byId.get(cid)!)
+    .filter((c): c is ConnectionSummary => Boolean(c));
+  render();
+  document.querySelector<HTMLElement>(
+    `[data-conn-row="${CSS.escape(id)}"] .flat-conn-grip`,
+  )?.focus();
+  void persistConnOrder(ids);
+}
+
+document.addEventListener('dragstart', (e) => {
+  const grip = (e.target instanceof Element ? e.target : null)?.closest('.flat-conn-grip');
+  const wrap = grip?.closest<HTMLElement>('.flat-conn-wrap.reorderable');
+  if (!wrap) return;
+  dragConnId = wrap.dataset.connRow ?? null;
+  if (!dragConnId) return;
+  wrap.classList.add('dragging');
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = 'move';
+    // Firefox refuses to start a drag unless some data is attached.
+    e.dataTransfer.setData('text/plain', dragConnId);
+    // Drag the whole row, not just the little grip.
+    e.dataTransfer.setDragImage(wrap, 24, wrap.offsetHeight / 2);
+  }
+});
+
+document.addEventListener('dragover', (e) => {
+  if (!dragConnId) return;
+  const list = (e.target instanceof Element ? e.target : null)?.closest<HTMLElement>('[data-conn-list="on"]');
+  if (!list) return;
+  e.preventDefault(); // mark this a valid drop target
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+  const dragging = list.querySelector<HTMLElement>('.flat-conn-wrap.dragging');
+  if (!dragging) return;
+  const after = connRowAfter(list, e.clientY);
+  if (after === null) list.appendChild(dragging);
+  else if (after !== dragging) list.insertBefore(dragging, after);
+});
+
+document.addEventListener('drop', (e) => {
+  if (!dragConnId) return;
+  if ((e.target instanceof Element ? e.target : null)?.closest('[data-conn-list="on"]')) {
+    e.preventDefault();
+  }
+  commitConnDrag();
+});
+
+// Fires after every drag, including one cancelled outside the list; it is the
+// backstop that clears the dragging state and commits the final order.
+document.addEventListener('dragend', () => commitConnDrag());
+
 document.addEventListener('keydown', (e) => {
+  // A focused reorder grip moves its row with the up/down arrows — the
+  // keyboard-accessible equivalent of dragging it.
+  if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && e.target instanceof HTMLElement) {
+    const grip = e.target.closest<HTMLElement>('.flat-conn-grip');
+    if (grip?.dataset.id) {
+      e.preventDefault();
+      moveConnByKeyboard(grip.dataset.id, e.key === 'ArrowDown' ? 1 : -1);
+      return;
+    }
+  }
   // Divs acting as buttons (connection rows, the add-tools row) activate
   // from the keyboard like the real thing.
   if ((e.key === 'Enter' || e.key === ' ') && e.target instanceof HTMLElement

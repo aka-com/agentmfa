@@ -353,6 +353,7 @@ export interface CommandMap {
   add_connection: CommandSpec<{ input: ConnectionInput }, void>;
   edit_connection: CommandSpec<{ id: string; input: ConnectionInput }, void>;
   delete_connection: CommandSpec<{ id: string }, void>;
+  reorder_connections: CommandSpec<{ orderedIds: string[] }, void>;
   test_connection: CommandSpec<{ id: string }, ConnectionTestReport>;
   test_connection_draft: CommandSpec<{ input: ConnectionInput }, ConnectionTestReport>;
   start_mcp_auth: CommandSpec<{ input: McpAuthDraft }, McpAuthState>;

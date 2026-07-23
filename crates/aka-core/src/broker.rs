@@ -755,6 +755,19 @@ impl Broker {
         Ok(conn)
     }
 
+    /// Persist a user-chosen order for the Tools list (drag to reorder).
+    /// `ordered_ids` is the full desired front-to-back order; the store is
+    /// lenient about a list that raced an add/delete. This is display metadata
+    /// only — it touches no capability, secret, or access state — so there is
+    /// no native confirmation and no audit entry, but every observer refreshes
+    /// so all windows (and a remote manager) converge on the new order.
+    pub fn ui_reorder_connections(&self, ordered_ids: &[Uuid]) -> Result<()> {
+        let _gate = self.config_gate.lock().unwrap();
+        self.store.reorder_connections(ordered_ids)?;
+        self.events.connections_changed();
+        Ok(())
+    }
+
     /// Test a connection *draft* — an add-form's config before anything is
     /// persisted. The invariant that makes this safe without a gate: it
     /// never reads the secret store. A credential typed into the form is

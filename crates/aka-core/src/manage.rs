@@ -534,6 +534,13 @@ pub struct ConnectionUpdateBody {
     pub spec: ConnectionSpec,
 }
 
+/// `POST /v1/manage/connections/reorder`: the full desired front-to-back
+/// order of connection ids.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct ConnectionsReorderBody {
+    pub ordered_ids: Vec<Uuid>,
+}
+
 /// `POST /v1/manage/connections/test-draft`.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct DraftTestBody {
@@ -654,6 +661,9 @@ pub trait ManagementBackend: Send + Sync {
     ) -> ManageResult<()>;
     async fn update_connection(&self, id: Uuid, spec: ConnectionSpec) -> ManageResult<()>;
     async fn delete_connection(&self, id: Uuid) -> ManageResult<()>;
+    /// Persist a user-chosen order for the Tools list. `ordered_ids` is the
+    /// full desired front-to-back order.
+    async fn reorder_connections(&self, ordered_ids: Vec<Uuid>) -> ManageResult<()>;
     async fn test_connection(&self, id: Uuid) -> ManageResult<ConnectionTestReport>;
     async fn test_connection_draft(
         &self,
@@ -835,6 +845,11 @@ impl ManagementBackend for LocalBackend {
 
     async fn delete_connection(&self, id: Uuid) -> ManageResult<()> {
         self.blocking(move |broker| broker.ui_delete_connection(&id).map(|_| ()))
+            .await
+    }
+
+    async fn reorder_connections(&self, ordered_ids: Vec<Uuid>) -> ManageResult<()> {
+        self.blocking(move |broker| broker.ui_reorder_connections(&ordered_ids))
             .await
     }
 

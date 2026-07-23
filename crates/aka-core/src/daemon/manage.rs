@@ -28,8 +28,8 @@ use zeroize::Zeroizing;
 
 use super::{bearer_token, err_missing_token, ApiJson, AppState};
 use crate::manage::{
-    AccessBody, AllowedToolsBody, ConnectionAddBody, ConnectionUpdateBody, DraftTestBody,
-    ManagementBackend, McpAuthDeliverBody, McpAuthStartBody, OAuthCompleteBody,
+    AccessBody, AllowedToolsBody, ConnectionAddBody, ConnectionUpdateBody, ConnectionsReorderBody,
+    DraftTestBody, ManagementBackend, McpAuthDeliverBody, McpAuthStartBody, OAuthCompleteBody,
     OAuthReconnectBody, OAuthStartBody, SecretAddBody, SecretEditBody, SettingsPatchBody,
 };
 
@@ -127,6 +127,7 @@ pub fn router() -> Router<AppState> {
             "/connections/test-draft",
             post(test_connection_draft),
         )
+        .route("/connections/reorder", post(reorder_connections))
         .route(
             "/connections/{id}",
             put(update_connection).delete(delete_connection),
@@ -395,6 +396,14 @@ async fn delete_connection(
     Path(id): Path<Uuid>,
 ) -> Response {
     respond(state.manage.delete_connection(id).await)
+}
+
+async fn reorder_connections(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+    ApiJson(body): ApiJson<ConnectionsReorderBody>,
+) -> Response {
+    respond(state.manage.reorder_connections(body.ordered_ids).await)
 }
 
 async fn test_connection(
