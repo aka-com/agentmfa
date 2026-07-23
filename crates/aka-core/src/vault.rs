@@ -7,14 +7,20 @@
 //!
 //! Backends:
 //! - `MacKeychainVault` (macOS): the real thing, via the `keyring` crate.
-//! - `FileVault`: dev fallback for non-macOS builds, a `0600` JSON file,
-//!   *not encrypted*, loudly not for production.
+//! - `EncryptedFileVault`: the production non-macOS backend (hosted Linux),
+//!   a `0600` JSON file whose values are XChaCha20-Poly1305 sealed under a
+//!   master key the host provides (`AKA_VAULT_KEY`/`AKA_VAULT_KEY_FILE`).
+//! - `FileVault`: dev fallback for non-macOS builds with no key configured,
+//!   a `0600` JSON file, *not encrypted*, loudly not for production.
 //! - `MemoryVault`: tests.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use base64::Engine as _;
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
@@ -244,6 +250,220 @@ impl SecretVault for FileVault {
     }
 }
 
+/* ---------------------------- encrypted file ----------------------------- */
+
+/// The master-key environment variables, in precedence order: the key value
+/// directly, then a file to read it from.
+pub const VAULT_KEY_ENV: &str = "AKA_VAULT_KEY";
+pub const VAULT_KEY_FILE_ENV: &str = "AKA_VAULT_KEY_FILE";
+
+/// Parse a 32-byte master key from text: 64 hex chars, or base64 (standard
+/// or url-safe) of 32 bytes. Whitespace is trimmed.
+fn parse_master_key(text: &str) -> Result<Zeroizing<[u8; 32]>, CoreError> {
+    let text = text.trim();
+    let bytes = if text.len() == 64 && text.bytes().all(|b| b.is_ascii_hexdigit()) {
+        (0..32)
+            .map(|i| u8::from_str_radix(&text[i * 2..i * 2 + 2], 16))
+            .collect::<Result<Vec<u8>, _>>()
+            .ok()
+    } else {
+        base64::engine::general_purpose::STANDARD
+            .decode(text)
+            .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(text))
+            .ok()
+    };
+    match bytes {
+        Some(bytes) if bytes.len() == 32 => {
+            let mut key = Zeroizing::new([0u8; 32]);
+            key.copy_from_slice(&bytes);
+            Ok(key)
+        }
+        _ => Err(CoreError::Vault(
+            "the vault master key must be 32 bytes as 64 hex chars or base64".into(),
+        )),
+    }
+}
+
+/// Load the configured master key, if any. `AKA_VAULT_KEY` wins over
+/// `AKA_VAULT_KEY_FILE`; a file may hold the key as text (hex/base64) or as
+/// 32 raw bytes. Returns `None` when neither is set.
+pub fn master_key_from_env() -> Option<Result<Zeroizing<[u8; 32]>, CoreError>> {
+    if let Ok(value) = std::env::var(VAULT_KEY_ENV) {
+        if !value.trim().is_empty() {
+            return Some(parse_master_key(&value));
+        }
+    }
+    if let Ok(path) = std::env::var(VAULT_KEY_FILE_ENV) {
+        if !path.trim().is_empty() {
+            return Some(load_master_key_file(Path::new(path.trim())));
+        }
+    }
+    None
+}
+
+fn load_master_key_file(path: &Path) -> Result<Zeroizing<[u8; 32]>, CoreError> {
+    let raw = std::fs::read(path).map_err(|e| {
+        CoreError::Vault(format!("could not read {} ({e})", path.display()))
+    })?;
+    // 32 raw bytes are taken as the key directly; anything else is parsed as
+    // text (a hex/base64 line, trailing newline tolerated).
+    if raw.len() == 32 {
+        let mut key = Zeroizing::new([0u8; 32]);
+        key.copy_from_slice(&raw);
+        return Ok(key);
+    }
+    let text = String::from_utf8(raw)
+        .map_err(|_| CoreError::Vault("the vault key file is neither 32 bytes nor text".into()))?;
+    parse_master_key(&text)
+}
+
+/// The production non-macOS vault: a `0600` JSON file whose secret values
+/// are XChaCha20-Poly1305 sealed under a host-provided master key. The
+/// secret's UUID is the AEAD associated data, binding each ciphertext to
+/// its slot so a value cannot be moved between ids. Attribute metadata
+/// (name, created-at) is non-secret and stored in the clear, exactly as the
+/// index does.
+pub struct EncryptedFileVault {
+    path: PathBuf,
+    cipher: XChaCha20Poly1305,
+    state: Mutex<EncryptedVaultState>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct EncryptedVaultState {
+    items: HashMap<Uuid, EncryptedVaultItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EncryptedVaultItem {
+    attrs: VaultAttrs,
+    /// base64 XNonce (24 bytes).
+    nonce: String,
+    /// base64 ciphertext (includes the Poly1305 tag).
+    ciphertext: String,
+}
+
+impl EncryptedFileVault {
+    pub fn open(path: PathBuf, key: &[u8; 32]) -> Result<Self, CoreError> {
+        let cipher = XChaCha20Poly1305::new(key.into());
+        let state = match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => EncryptedVaultState::default(),
+            Err(e) => return Err(e.into()),
+        };
+        let vault = Self {
+            path,
+            cipher,
+            state: Mutex::new(state),
+        };
+        // A wrong key must fail loudly at open, not silently on the first
+        // read: verify we can decrypt one existing item.
+        if let Some((id, item)) = vault.state.lock().unwrap().items.iter().next() {
+            vault.decrypt(id, item).map_err(|_| {
+                CoreError::Vault(
+                    "the encrypted vault would not open: wrong master key (AKA_VAULT_KEY) \
+                     or the store was tampered with"
+                        .into(),
+                )
+            })?;
+        }
+        Ok(vault)
+    }
+
+    fn encrypt(&self, id: &Uuid, value: &SecretValue) -> Result<EncryptedVaultItem, CoreError> {
+        let mut nonce = [0u8; 24];
+        getrandom::fill(&mut nonce)
+            .map_err(|e| CoreError::Vault(format!("nonce entropy: {e}")))?;
+        let ciphertext = self
+            .cipher
+            .encrypt(
+                XNonce::from_slice(&nonce),
+                Payload {
+                    msg: value.as_bytes(),
+                    aad: id.as_bytes(),
+                },
+            )
+            .map_err(|_| CoreError::Vault("vault encryption failed".into()))?;
+        Ok(EncryptedVaultItem {
+            attrs: VaultAttrs {
+                name: String::new(),
+                created_at: chrono::Utc::now(),
+            },
+            nonce: base64::engine::general_purpose::STANDARD.encode(nonce),
+            ciphertext: base64::engine::general_purpose::STANDARD.encode(ciphertext),
+        })
+    }
+
+    fn decrypt(&self, id: &Uuid, item: &EncryptedVaultItem) -> Result<SecretValue, CoreError> {
+        let nonce = base64::engine::general_purpose::STANDARD
+            .decode(&item.nonce)
+            .map_err(|_| CoreError::Vault("corrupt vault nonce".into()))?;
+        let ciphertext = base64::engine::general_purpose::STANDARD
+            .decode(&item.ciphertext)
+            .map_err(|_| CoreError::Vault("corrupt vault ciphertext".into()))?;
+        let plaintext = self
+            .cipher
+            .decrypt(
+                XNonce::from_slice(&nonce),
+                Payload {
+                    msg: &ciphertext,
+                    aad: id.as_bytes(),
+                },
+            )
+            .map_err(|_| CoreError::Vault("vault decryption failed (wrong key or tampered)".into()))?;
+        String::from_utf8(plaintext)
+            .map(Zeroizing::new)
+            .map_err(|_| CoreError::Vault("decrypted vault value is not valid UTF-8".into()))
+    }
+
+    fn persist(&self, state: &EncryptedVaultState) -> Result<(), CoreError> {
+        let bytes = serde_json::to_vec_pretty(state)?;
+        crate::paths::write_private_atomic(&self.path, &bytes)?;
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl SecretVault for EncryptedFileVault {
+    fn set(&self, id: &Uuid, attrs: &VaultAttrs, value: &SecretValue) -> Result<(), CoreError> {
+        let mut item = self.encrypt(id, value)?;
+        item.attrs = attrs.clone();
+        let mut state = self.state.lock().unwrap();
+        let mut next = state.clone();
+        next.items.insert(*id, item);
+        self.persist(&next)?;
+        *state = next;
+        Ok(())
+    }
+
+    async fn get(&self, id: &Uuid) -> Result<SecretValue, CoreError> {
+        let item = {
+            let state = self.state.lock().unwrap();
+            state.items.get(id).cloned().ok_or(CoreError::SecretNotFound)?
+        };
+        self.decrypt(id, &item)
+    }
+
+    fn delete(&self, id: &Uuid) -> Result<(), CoreError> {
+        let mut state = self.state.lock().unwrap();
+        let mut next = state.clone();
+        next.items.remove(id).ok_or(CoreError::SecretNotFound)?;
+        self.persist(&next)?;
+        *state = next;
+        Ok(())
+    }
+
+    fn set_attrs(&self, id: &Uuid, attrs: &VaultAttrs) -> Result<(), CoreError> {
+        let mut state = self.state.lock().unwrap();
+        let mut next = state.clone();
+        let item = next.items.get_mut(id).ok_or(CoreError::SecretNotFound)?;
+        item.attrs = attrs.clone();
+        self.persist(&next)?;
+        *state = next;
+        Ok(())
+    }
+}
+
 /* -------------------------------- tests ---------------------------------- */
 
 /// In-memory vault for unit tests.
@@ -325,8 +545,10 @@ fn encode_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The platform-default vault: Keychain on macOS, the dev file vault
-/// elsewhere.
+/// The platform-default vault: Keychain on macOS; on other platforms the
+/// XChaCha20-Poly1305 [`EncryptedFileVault`] when a master key is configured
+/// (`AKA_VAULT_KEY`/`AKA_VAULT_KEY_FILE` — the hosted path), else the
+/// unencrypted dev [`FileVault`].
 pub fn platform_vault(
     paths: &crate::paths::Paths,
 ) -> Result<std::sync::Arc<dyn SecretVault>, CoreError> {
@@ -337,9 +559,27 @@ pub fn platform_vault(
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Ok(std::sync::Arc::new(FileVault::open(
-            paths.dev_vault_file(),
-        )?))
+        non_macos_vault(paths.encrypted_vault_file(), paths.dev_vault_file())
+    }
+}
+
+/// Choose the non-macOS backend from the environment: encrypted when a
+/// master key is set (and it seals the state-integrity key too, so tamper
+/// protection is not left in the clear), otherwise the loud dev fallback.
+#[cfg(not(target_os = "macos"))]
+fn non_macos_vault(
+    encrypted_path: PathBuf,
+    plain_path: PathBuf,
+) -> Result<std::sync::Arc<dyn SecretVault>, CoreError> {
+    match master_key_from_env() {
+        Some(key) => {
+            let key = key?;
+            Ok(std::sync::Arc::new(EncryptedFileVault::open(
+                encrypted_path,
+                &key,
+            )?))
+        }
+        None => Ok(std::sync::Arc::new(FileVault::open(plain_path)?)),
     }
 }
 
@@ -359,9 +599,7 @@ pub fn platform_vault_for_root(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = root;
-        Ok(std::sync::Arc::new(FileVault::open(
-            paths.dev_vault_file(),
-        )?))
+        non_macos_vault(paths.encrypted_vault_file(), paths.dev_vault_file())
     }
 }
 
@@ -406,6 +644,103 @@ mod tests {
             vault.get(&rejected).await,
             Err(CoreError::SecretNotFound)
         ));
+    }
+
+    fn test_key(byte: u8) -> [u8; 32] {
+        [byte; 32]
+    }
+
+    #[tokio::test]
+    async fn encrypted_vault_round_trips_and_seals_the_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.enc.json");
+        let key = test_key(7);
+        let vault = EncryptedFileVault::open(path.clone(), &key).unwrap();
+        let id = Uuid::new_v4();
+        let attrs = VaultAttrs {
+            name: "API_KEY".into(),
+            created_at: chrono::Utc::now(),
+        };
+        vault
+            .set(&id, &attrs, &Zeroizing::new("s3cr3t-value".into()))
+            .unwrap();
+        assert_eq!(&*vault.get(&id).await.unwrap(), "s3cr3t-value");
+
+        // The plaintext never touches the file; the name (non-secret) does.
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(!on_disk.contains("s3cr3t-value"), "value is encrypted at rest");
+        assert!(on_disk.contains("API_KEY"), "attrs stay in the clear");
+
+        // It survives reopen with the same key.
+        let reopened = EncryptedFileVault::open(path.clone(), &key).unwrap();
+        assert_eq!(&*reopened.get(&id).await.unwrap(), "s3cr3t-value");
+    }
+
+    #[tokio::test]
+    async fn a_wrong_key_fails_at_open_not_silently() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.enc.json");
+        {
+            let vault = EncryptedFileVault::open(path.clone(), &test_key(1)).unwrap();
+            vault
+                .set(
+                    &Uuid::new_v4(),
+                    &VaultAttrs {
+                        name: "K".into(),
+                        created_at: chrono::Utc::now(),
+                    },
+                    &Zeroizing::new("v".into()),
+                )
+                .unwrap();
+        }
+        // Reopening with the wrong key is rejected up front.
+        match EncryptedFileVault::open(path, &test_key(2)) {
+            Err(CoreError::Vault(msg)) => assert!(msg.contains("AKA_VAULT_KEY"), "{msg}"),
+            Ok(_) => panic!("a wrong key must be rejected at open"),
+            Err(other) => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tampering_with_the_ciphertext_is_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.enc.json");
+        let key = test_key(9);
+        let id = Uuid::new_v4();
+        {
+            let vault = EncryptedFileVault::open(path.clone(), &key).unwrap();
+            vault
+                .set(
+                    &id,
+                    &VaultAttrs {
+                        name: "K".into(),
+                        created_at: chrono::Utc::now(),
+                    },
+                    &Zeroizing::new("value".into()),
+                )
+                .unwrap();
+        }
+        // Flip a byte inside the base64 ciphertext. The AEAD tag catches it;
+        // the open-time verify makes it fail fast rather than on first read.
+        let _ = id;
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mutated = text.replacen("\"ciphertext\": \"", "\"ciphertext\": \"AA", 1);
+        std::fs::write(&path, mutated).unwrap();
+        match EncryptedFileVault::open(path, &key) {
+            Err(CoreError::Vault(_)) => {}
+            Ok(_) => panic!("tampered ciphertext must be rejected"),
+            Err(other) => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn master_key_parses_hex_and_base64_and_rejects_wrong_length() {
+        let hex = "00".repeat(32);
+        assert_eq!(parse_master_key(&hex).unwrap()[..], [0u8; 32]);
+        let b64 = base64::engine::general_purpose::STANDARD.encode([5u8; 32]);
+        assert_eq!(parse_master_key(&b64).unwrap()[..], [5u8; 32]);
+        assert!(parse_master_key("tooshort").is_err());
+        assert!(parse_master_key(&"00".repeat(16)).is_err());
     }
 
     #[test]

@@ -55,6 +55,7 @@ rustls-pki-types = "1"
 webpki-roots = "0.26"
 md-5 = "0.10"
 pbkdf2 = "0.12"
+chacha20poly1305 = "0.10"
 tokio-postgres = "0.7"
 
 # SSH agent adapter

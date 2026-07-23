@@ -122,6 +122,11 @@ impl Paths {
     pub fn dev_vault_file(&self) -> PathBuf {
         self.data_dir.join("dev-vault.json")
     }
+    /// Encrypted vault (non-macOS production); see `vault::EncryptedFileVault`.
+    /// Distinct from the dev vault so the two formats never collide.
+    pub fn encrypted_vault_file(&self) -> PathBuf {
+        self.data_dir.join("vault.enc.json")
+    }
     pub fn socket_file(&self) -> PathBuf {
         self.socket_dir.join("broker.sock")
     }

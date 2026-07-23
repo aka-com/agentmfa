@@ -41,6 +41,7 @@ tokio-rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
 webpki-roots = { workspace = true }
 md-5 = { workspace = true }
+chacha20poly1305 = { workspace = true }
 
 ssh-key = { workspace = true }
 rsa = { workspace = true }
