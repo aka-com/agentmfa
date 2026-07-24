@@ -71,6 +71,6 @@ Prerequisites: one-time macOS cross-linker setup: `brew install zig`
    build with a Developer ID Application certificate.
 
    ```sh
-   npm run build      # signed universal .app + .dmg (auto-detects the identity)
-   npm run release    # will also notarize, staple, and validate
+   npm run build          # signed universal .app + .dmg (auto-detects identity)
+   npm run build:release  # will also notarize, staple, and validate
    ```
