@@ -36,6 +36,7 @@
   --amber-strong: #b06a00;
   --amber-wash: rgba(255, 190, 50, .16);
   --amber-border: rgba(200, 140, 20, .3);
+  --warning-dot: #d59600;
   --ok-ink: #1a8f3c;
   --ok-solid: #34c759;                  /* filled switch track, status dot */
   --ok-wash: rgba(52, 199, 89, .09);
@@ -642,17 +643,24 @@
   .acc-row .btn{ flex: 0 0 auto; }
 
   /* Issued-endpoint sheet: pasteable address / secret / example, each with a
-     copy button; the code wraps so long DSNs stay readable. */
-  .ep-field{ margin: 12px 0; }
-  .ep-label{ font-size: 12px; font-weight: 600; color: var(--muted-ink); margin-bottom: 4px; }
+     copy button. A shared three-column grid keeps labels, values, and actions
+     aligned while the code wraps independently in the flexible middle. */
+  .issued-ep-field{
+    display: grid; grid-template-columns: 84px minmax(0, 1fr) 64px;
+    align-items: center; gap: 12px; margin: 12px 0; padding: 6px 10px;
+    background: var(--field-bg); border: 1px solid var(--line); border-radius: 9px;
+  }
+  .issued-ep-field .ep-label{
+    margin: 0; color: var(--ink); font-size: 12px; font-weight: 600;
+  }
   .ep-note{ font-weight: 500; color: var(--amber-ink); }
-  .ep-row{ display: flex; align-items: flex-start; gap: 8px; }
   .ep-code{
-    flex: 1 1 auto; min-width: 0; padding: 8px 10px; border-radius: 8px;
+    min-width: 0; width: 100%; padding: 8px 10px; border-radius: 8px;
     background: var(--chip-bg); border: 1px solid var(--hair);
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
     overflow-wrap: anywhere; white-space: pre-wrap; user-select: all;
   }
+  .issued-ep-field .btn{ width: 64px; text-align: center; }
   .menu-check{ flex: 0 0 14px; width: 14px; line-height: 0; padding-top: 1px; }
   .menu-check svg{ color: var(--ok-ink); }
   .menu-lbl{ display: flex; flex-direction: column; gap: 1px; min-width: 0; }
@@ -767,6 +775,7 @@
   .set-panel{ padding: 9px 0 2px; }
   .pair-identity-warning{ margin: 0 0 12px; padding: 9px 11px; border-radius: 8px; font-size: 12.5px; line-height: 1.4; }
   .pair-identity-warning{ background: var(--amber-wash); border: 1px solid var(--amber-border); color: var(--amber-ink); }
+  .f-row > .pair-identity-warning{ margin: 4px 0 0; }
   .import-warning b{ display: block; }
   .import-warning ul{ margin-top: 4px; list-style: none; }
   .import-warning li{ position: relative; padding-left: 14px; }
@@ -800,6 +809,7 @@
     --amber-strong: #ffb04d;
     --amber-wash: rgba(255,190,50,.13);
     --amber-border: rgba(255,190,80,.32);
+    --warning-dot: var(--amber-strong);
     --ok-ink: #4cd07d;
     --ok-solid: #30d158;
     --ok-wash: rgba(76,208,125,.10);
@@ -965,7 +975,7 @@
 }
 .cc-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; }
 .cc-dot.ok { background: var(--ok-solid); }
-.cc-dot.warn { background: var(--amber-strong); }
+.cc-dot.warn { background: var(--warning-dot); }
 .cc-dot.off { background: var(--muted-2); opacity: .55; }
 .cat-ico.kind-mcp { color: var(--kind-mcp-ink); background: var(--kind-mcp-wash); }
 .cat-ico.kind-db { color: var(--accent-ink); background: var(--accent-wash); }
@@ -1042,8 +1052,8 @@
 .conn-detail-pane {
   flex: 0 0 clamp(280px, 38%, 380px);
   position: sticky; top: 0;
-  max-height: calc(100vh - 130px); overflow-y: auto;
-  padding: 14px 16px 16px;
+  height: fit-content; max-height: calc(100vh - 130px); overflow-y: auto;
+  padding: 14px 16px 14px;
   border: 1px solid var(--line); border-radius: 12px;
   background: var(--card-bg); box-shadow: 0 1px 3px rgba(20,24,50,.06);
 }
@@ -1080,11 +1090,12 @@
    the text ink — an invitation ("Connect to this database"), not another
    tracked-caps machinery label — with the endpoint glyph beside it. */
 .cd-connect-lbl {
-  display: flex; align-items: center; gap: 7px; margin-bottom: 7px;
+  display: flex; align-items: center; gap: 7px; margin-bottom: 3px;
   font-size: 13px; font-weight: 600;
 }
 .cd-connect-lbl svg { flex: 0 0 auto; color: var(--muted); }
 .cd-help { margin-top: 7px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.cd-connect-subhead { margin: 0 0 10px; line-height: 1.25; }
 .cd-off-note { margin-top: 12px; }
 .conn-detail-pane .ep-strip { margin-top: 0; }
 .conn-detail-pane .cc-issues { margin-top: 12px; max-width: none; }
@@ -1097,7 +1108,7 @@
   .conn-detail-pane {
     display: none;
     position: fixed; top: 0; right: 0; bottom: 0; z-index: 7;
-    width: min(400px, 92vw); max-height: none;
+    width: min(400px, 92vw); height: auto; max-height: none;
     border: none; border-left: 1px solid var(--line); border-radius: 0;
     background: var(--panel);
     box-shadow: -16px 0 40px rgba(10,15,40,.28);
@@ -1148,11 +1159,9 @@
 /* Fixes sit under the message, not beside it: a wrapping row of compact
    buttons (the targeted fix, then the retry). */
 .cc-issue-fixes { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; }
-/* When the verdict was reached, under the attention card it explains. */
-.cd-checked { margin-top: 9px; color: var(--muted); font-size: 11.5px; }
 /* The attention card carries its own weight — a section hairline right
    under it would double the separation, so the next section drops it. */
-.cc-issues + .cd-sec, .cd-checked + .cd-sec { border-top: 0; padding-top: 0; }
+.cc-issues + .cd-sec { border-top: 0; padding-top: 0; }
 .cat-conns .sec-table { margin: 0; }
 /* Credential rows share the darker card surface of their "Saved
    credentials" parent row. */
@@ -1362,27 +1371,28 @@
 .draft-test svg{ flex: 0 0 auto; margin-top: 1px; }
 .draft-test .draft-test-fix{ margin-top: 8px; }
 .draft-test .draft-test-hint{ margin-top: 6px; color: var(--muted); }
-/* Direct-endpoint lifecycle strip: a hairline footer inside the row. Absent:
-   just the issue button. Issued: plug icon, the pasteable address (click to
-   copy — the secret-value dim-and-overlay effect), and the reissue/revoke
-   pair (each behind a confirm dialog). The plug matches the copy button's
-   spec — 14px stroke icon in the muted icon color. */
+/* Direct-endpoint lifecycle strip. Absent: just the issue button. Issued:
+   the pasteable address in an input-like field with its Copy button always
+   showing — copying is the one thing everyone does with this string, so
+   the affordance is explicit rather than a hover reveal. Reissue/revoke
+   stay behind the row's options menu. */
 .ep-strip{ display: flex; align-items: center; gap: 8px; margin-top: 9px; }
-.ep-strip .ep-ico{ flex: 0 0 auto; line-height: 0; color: var(--muted-2); }
-.ep-strip .ep-addr-wrap{
-  position: relative; top: -1px; flex: 0 1 auto; min-width: 0; display: inline-flex;
-  align-items: center; border: none; background: transparent; padding: 0;
-  cursor: pointer; text-align: left;
+.ep-strip .ep-field{
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px;
+  padding: 6px 6px 6px 11px;
+  background: var(--field-bg); border: 1px solid var(--line); border-radius: 9px;
 }
-.ep-strip .ep-addr{
-  min-width: 0; overflow: hidden; text-overflow: ellipsis;
-  white-space: nowrap; color: var(--ink-2); font-family: inherit; font-size: 12px;
+/* The address never truncates — it wraps. A cut-off address reads as
+   untouchable; a wrapped one reads as yours to take. */
+.ep-strip .ep-field .ep-addr{
+  flex: 1; min-width: 0; overflow-wrap: anywhere;
+  color: var(--ink-2); font-size: 12px; line-height: 1.35;
 }
-.ep-strip .ep-addr-wrap .ep-addr{ transition: opacity .14s ease; }
-/* The address stays half as dimmed on hover as a masked secret — it is not
-   sensitive, so it should stay legible under the copy affordance. */
-.ep-strip .ep-addr-wrap:hover .ep-addr{ opacity: .6; }
-.ep-strip .ep-addr-wrap.is-copied .ep-addr{ opacity: .22; }
-.ep-strip .ep-addr-wrap:hover .ghost-copy,
-.ep-strip .ep-addr-wrap:focus-visible .ghost-copy{ opacity: 1; }
-.ep-strip .ep-addr-hidden{ color: var(--muted); }
+/* Reserve the wider feedback label up front so Copy → Copied never
+   reflows the address or changes the control's footprint. */
+.ep-strip .ep-field .ep-copy{
+  flex: 0 0 76px; display: inline-flex; align-items: center;
+  justify-content: center; gap: 5px; width: 76px; margin-right: 3px; white-space: nowrap;
+}
+.ep-strip .ep-field .ep-copy svg{ width: 14px; height: 14px; }
+.ep-strip .ep-addr-hidden{ color: var(--muted); font-size: 12px; }

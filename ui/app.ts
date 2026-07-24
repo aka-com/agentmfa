@@ -244,8 +244,6 @@ interface McpStatusState {
   running: boolean;
   report?: McpStatusReport;
   error?: string;
-  /** When the check finished, for the panel's "Last checked" line. */
-  at?: string;
 }
 
 interface ConnectionTestState {
@@ -253,8 +251,6 @@ interface ConnectionTestState {
   ok?: boolean;
   detail?: string;
   kind?: TestErrorKind;
-  /** When the test finished, for the panel's "Last checked" line. */
-  at?: string;
 }
 
 /* ------------------------------ local state ------------------------------ */
@@ -573,9 +569,11 @@ function briefEndpointAddress(dsn: string): string {
       : url.password ? '…@' : '';
     return `${url.protocol}//${auth}${url.host}${url.pathname === '/' ? '' : url.pathname}`;
   } catch {
-    // Unparseable DSNs must never fall through with a credential in them:
-    // drop everything between the username and the `@` before showing it.
-    return dsn.replace(/\/\/([^/@:]*)(:[^@]*)?@/, '//$1@');
+    // The socket-path form of a local DSN (empty host) is unparseable as a
+    // URL and always lands here. It must never fall through with a
+    // credential or its query in it: drop everything between the username
+    // and the `@`, then the query — same shape the parsed branch returns.
+    return dsn.replace(/\/\/([^/@:]*)(:[^@]*)?@/, '//$1@').replace(/\?.*$/, '');
   }
 }
 
@@ -592,24 +590,22 @@ function endpointStripHTML(c: ConnectionSummary): string {
         title="A pasteable address for an unmodified tool">Issue direct endpoint…</button>
     </div>`;
   }
-  // The address itself is the copy affordance — clicking it copies, with the
-  // same dim-and-overlay effect as copying a secret value.
+  // The address rides in a field with its Copy button showing — copying is
+  // what everyone does with this string, so the affordance is explicit, not
+  // a hover reveal. The button copies the full DSN; the field shows the
+  // credential-free brief form.
   const copied = state.copied === `ep:${c.id}`;
   const address = endpoint.dsn
-    ? `<button class="ep-addr-wrap ${copied ? 'is-copied' : ''}" title="Copy the full endpoint address"
-        aria-label="Copy endpoint address for ${escAttr(c.name)}" data-act="copy-endpoint-dsn" data-conn="${c.id}">
+    ? `<div class="ep-field">
         <code class="ep-addr">${esc(briefEndpointAddress(endpoint.dsn))}</code>
-        <span class="val-overlay">${copied
-          ? `<span class="copied-badge">${ICONS.check}<span>Copied</span></span>`
-          : `<span class="ghost-copy">${ICONS.copy}<span>Copy</span></span>`}</span>
-      </button>`
+        <button class="btn sm ep-copy" title="Copy the full endpoint address"
+          aria-label="Copy endpoint address for ${escAttr(c.name)}" data-act="copy-endpoint-dsn" data-conn="${c.id}">${
+          copied ? `${ICONS.check} Copied` : `${ICONS.copy} Copy`}</button>
+      </div>`
     : '<span class="ep-addr ep-addr-hidden">Agent socket — shown at issue</span>';
-  // The strip is plug + address + copy, nothing more: reissue/revoke live
-  // in the row's one options menu.
-  return `<div class="ep-strip">
-    <span class="ep-ico" title="Connection address">${ICONS.plugSm}</span>
-    ${address}
-  </div>`;
+  // The strip is the field, nothing more: reissue/revoke live in the row's
+  // one options menu.
+  return `<div class="ep-strip">${address}</div>`;
 }
 
 /** The agents on/off switch a connection row carries — the row's primary
@@ -849,13 +845,13 @@ function connectionIssues(c: ConnectionSummary): Array<{ title?: string; text: s
     ? c.last_detail || 'The last connection check failed.'
     : null;
   if (failure && !issues.some((issue) => issue.text === failure)) {
-    // A fresh test carries a failure kind; when it's one editing the
-    // connection fixes (a declined or unverifiable TLS handshake), lead with
-    // Fix settings before the retry. The passively-recorded verdict has no
-    // kind, so it only offers the retry.
+    // A fresh test carries a failure kind; when it's one the connection
+    // editor could plausibly fix — a wrong host, port, credential, or TLS
+    // expectation — lead with Fix settings before the retry. 'other' stays
+    // retry-only: with no diagnosis, the fix shouldn't point at settings.
+    // The passively-recorded verdict has no kind, so it only offers the retry.
     const kind = fresh && !fresh.ok ? fresh.kind : undefined;
-    const fixable = !c.mcp_path
-      && (kind === 'tls_declined' || kind === 'cert_unverified');
+    const fixable = !c.mcp_path && kind !== undefined && kind !== 'other';
     issues.push({
       title: kind ? FAILURE_HEADLINES[kind] : undefined,
       // The broker's TLS diagnosis is protocol-speak ("refused to start TLS",
@@ -926,14 +922,6 @@ function connDetailHTML(c: ConnectionSummary): string {
         }<span>${esc(issue.text)}</span>${
           issue.fix ? `<div class="cc-issue-fixes">${issue.fix}</div>` : ''}</div></div>`).join('')}</div>`
     : '';
-  // When the verdict the card shows was reached: a fresh test or status
-  // check this session, else the broker's recorded check time.
-  const checkedAt = (c.mcp_path
-    ? (mcpStatus && !mcpStatus.running ? mcpStatus.at : undefined)
-    : (test && !test.running ? test.at : undefined)) ?? c.last_checked_at;
-  const checkedLine = issuesBlock && checkedAt
-    ? `<div class="cd-checked">Last checked <span data-tippy-content="${escAttr(absTime(checkedAt))}">${esc(relTime(checkedAt))}</span></div>`
-    : '';
   // What pointing a client at the endpoint means, said once, per kind.
   // Keyed on the user-facing kind, not the internal transport: a tool that
   // rides one protocol under the hood (MCP is served over HTTP) advertises
@@ -958,15 +946,16 @@ function connDetailHTML(c: ConnectionSummary): string {
   })();
   const endpointSection = enabled && ENDPOINTABLE[c.type] && !c.mcp_path
     ? `<div class="cd-sec"><div class="cd-connect-lbl">${ICONS.chevronsLeftRightEllipsis}<span>${connectTitle}</span></div>
+        <div class="cd-help cd-connect-subhead">${endpointHelp}</div>
         ${endpointStripHTML(c)}
-        <div class="cd-help">${endpointHelp}</div></div>`
+      </div>`
     : '';
   // MCP tools combine their filter and direct endpoint into one section:
   // both describe how agents reach and constrain this tool.
   const mcpSection = enabled && c.mcp_path
     ? `<div class="cd-sec"><div class="cd-sec-lbl">Tools<span class="cd-sec-lbl-aside">${connectionToolsChipHTML(c)}</span></div>
-        ${ENDPOINTABLE[c.type] ? `${endpointStripHTML(c)}
-          <div class="cd-help">${endpointHelp}</div>` : ''}</div>`
+        ${ENDPOINTABLE[c.type] ? `<div class="cd-help cd-connect-subhead">${endpointHelp}</div>
+          ${endpointStripHTML(c)}` : ''}</div>`
     : '';
   // How a disabled tool turns agents away, in the terms of the surface they
   // actually hit: the brokered MCP/HTTP path answers a 403; a Postgres or SSH
@@ -997,7 +986,7 @@ function connDetailHTML(c: ConnectionSummary): string {
         </div>
       </div>
     </div>
-    ${issuesBlock}${checkedLine}${offNote}${c.mcp_path
+    ${issuesBlock}${offNote}${c.mcp_path
       ? mcpSection + endpointSection
       : endpointSection + mcpSection}${connTestResultHTML(c)}${mcpStatusHTML(c)}`;
 }
@@ -1482,11 +1471,10 @@ function startConnectPaneHTML(mode: ConnectModeId, option: StartOption, progress
           <div class="start-actions"><button class="btn primary sm" data-act="issue-endpoint"
             data-conn="${conn.id}">Issue direct endpoint</button></div>`;
       }
-      // The endpoint itself is the deliverable: the same strip as the tool's
-      // row (click the address to copy). Reissue/revoke stay in that row's
-      // options menu.
+      // The endpoint itself is the deliverable: the same address field as
+      // the tool's row. Reissue/revoke stay in that row's options menu.
       const lead = `A direct endpoint is issued for “${esc(conn.name)}”. ${conn.type === 'pg'
-        ? 'Click the address to copy it, secret included — reissue from the tool’s row to rotate the secret.'
+        ? 'Copy copies the full address, secret included — reissue from the tool’s row to rotate the secret.'
         : 'Its socket path was shown at issue — reissue from the tool’s row to get a new one.'}`;
       return `<p>${lead}</p>${endpointStripHTML(conn)}`;
     }
@@ -1797,9 +1785,11 @@ function endpointIssuedSheet(): string {
   if (!info) return '';
   const addressLabel = info.type === 'ssh' ? 'Agent socket' : info.type === 'pg' ? 'DSN' : 'Base URL';
   const field = (label: string, value: string, fieldKey: string, note = ''): string =>
-    `<div class="ep-field"><div class="ep-label">${label}${note ? ` <span class="ep-note">${note}</span>` : ''}</div>
-      <div class="ep-row"><code class="ep-code">${esc(value)}</code>
-      <button class="btn ghost sm" data-act="copy-endpoint" data-field="${fieldKey}" aria-label="Copy ${label}">Copy</button></div></div>`;
+    `<div class="issued-ep-field">
+      <div class="ep-label">${label}${note ? ` <span class="ep-note">${note}</span>` : ''}</div>
+      <code class="ep-code">${esc(value)}</code>
+      <button class="btn ghost sm" data-act="copy-endpoint" data-field="${fieldKey}" aria-label="Copy ${label}">Copy</button>
+    </div>`;
   const secretField = info.secret
     ? field('Secret', info.secret, 'secret')
     : '<div class="ep-note">SSH endpoints present no secret — the socket path is the whole capability.</div>';
@@ -2803,9 +2793,9 @@ async function runConnectionTest(id: string): Promise<void> {
   render();
   try {
     const report = await invoke('test_connection', { id });
-    state.connTests[id] = { running: false, ok: report.ok, detail: report.detail, kind: report.kind, at: new Date().toISOString() };
+    state.connTests[id] = { running: false, ok: report.ok, detail: report.detail, kind: report.kind };
   } catch (error) {
-    state.connTests[id] = { running: false, ok: false, detail: errorMessage(error), at: new Date().toISOString() };
+    state.connTests[id] = { running: false, ok: false, detail: errorMessage(error) };
   }
   render();
 }
@@ -3856,9 +3846,9 @@ document.addEventListener('click', async (e) => {
             whoami_tool: template?.whoamiTool ?? null,
           },
         });
-        state.mcpStatus[id] = { running: false, report, at: new Date().toISOString() };
+        state.mcpStatus[id] = { running: false, report };
       } catch (error) {
-        state.mcpStatus[id] = { running: false, error: errorMessage(error), at: new Date().toISOString() };
+        state.mcpStatus[id] = { running: false, error: errorMessage(error) };
       }
       // The check can update the stored account acknowledgment.
       await load('connections', 'list_connections');
