@@ -350,9 +350,9 @@
   .dd-content{ position: relative; min-height: 0; }
   /* The main scroll pane spans the available app region so its scrollbar
      stays at the window edge. Its page content retains the narrower centered
-     measure shared with the header; the extra 8px of left padding balances
-     the reserved scrollbar track on the right. */
-  .dw-main .content{ padding: 0 16px 28px 24px; }
+     measure shared with the header. The 8px right inset plus the reserved
+     8px scrollbar track matches the header's 16px right inset. */
+  .dw-main .content{ padding: 0 8px 28px 24px; }
   .dw-main .content > *{
   width: min(100%, calc(var(--content-max) - 32px));
   margin-left: auto; margin-right: auto;
@@ -1015,6 +1015,11 @@
 }
 .flat-conn-grip svg { width: 15px; height: 15px; }
 .flat-conn-grip:hover { color: var(--ink); background: var(--hover); }
+/* The row and its grip read as one hover surface when the detail opener is
+   hovered. Hovering the grip alone remains isolated to the grip. */
+.flat-conn-wrap.reorderable:not(.dragging):has(.flat-conn-row:hover) .flat-conn-grip {
+  background: var(--hover);
+}
 .flat-conn-grip:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .flat-conn-grip:active { cursor: grabbing; }
 .flat-conn-wrap.dragging {
@@ -1054,7 +1059,6 @@
   display: block; margin-top: 1px; overflow: hidden; color: var(--muted);
   font-size: 12px; text-overflow: ellipsis; white-space: nowrap;
 }
-.cd-close { display: none; }
 .cd-sec {
   margin-top: 16px; padding-top: 16px;
   border-top: 1px solid var(--line-soft);
@@ -1094,7 +1098,6 @@
     display: block; position: fixed; inset: 0; z-index: 6;
     border: 0; padding: 0; background: rgba(15,17,30,.38); cursor: default;
   }
-  .cd-close { display: flex; }
 }
 @keyframes cd-slide { from { transform: translateX(36px); opacity: 0; } }
 @media (prefers-reduced-motion: reduce) {
@@ -1104,19 +1107,6 @@
    reads as the start of its group, not the tail of the previous card. */
 .add-section { margin-top: 10px; }
 .add-section .cat-section-h { margin-bottom: 10px; }
-/* The whole add view reads as secondary while it is open: subheadings and
-   the not-yet-added rows sit dimmed as a group. Dimming lives on the row
-   wrap so the entire row — icon, text, and action button — fades together.
-   The row being engaged (hover, keyboard focus, or an open connect menu)
-   comes back to full strength; "Soon" rows keep their own deeper dim. */
-.add-section .cat-section-h { opacity: .55; }
-.add-section .cat-rows > .cat-row-wrap:not(.is-soon),
-.add-section .cat-more { opacity: .55; transition: opacity .12s ease; }
-.add-section .cat-rows > .cat-row-wrap:not(.is-soon):hover,
-.add-section .cat-rows > .cat-row-wrap:not(.is-soon):focus-within,
-.add-section .cat-rows > .cat-row-wrap.menu-open,
-.add-section .cat-more:hover,
-.add-section .cat-more:focus-visible { opacity: 1; }
 .sheet-actions .conn-delete-btn { margin-right: 0; }
 /* On the connection edit sheet, Delete (and any Reconnect / ⋯ beside it) sits
    left while Cancel + Save stay right. Pushing Cancel handles every branch. */

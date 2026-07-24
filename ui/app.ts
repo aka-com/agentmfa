@@ -951,8 +951,6 @@ function connDetailHTML(c: ConnectionSummary): string {
             ${endpointItems}
           </div>` : ''}
         </div>
-        <button class="icon-btn cd-close" title="Close" aria-label="Close connection details"
-          data-act="close-conn-detail">${ICONS.x}</button>
       </div>
     </div>
     ${issuesBlock}${offNote}${c.mcp_path
