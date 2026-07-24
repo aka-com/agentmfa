@@ -756,14 +756,16 @@ function endpointStripHTML(c: ConnectionSummary, runnableSsh = false): string {
   return `<div class="ep-strip">${address}</div>`;
 }
 
-/** The agents on/off switch a connection row carries — the row's primary
- * control, pinned to its right edge. */
+/** The agents on/off switch, in the detail panel's header — the tool's one
+ * primary control, labeled now that it has the room the list rows lacked.
+ * The list rows carry only the health dot (gray = off). */
 function connToggleHTML(c: ConnectionSummary): string {
   const enabled = c.agent_access.enabled;
-  return `<button class="switch ${enabled ? 'on' : ''}" role="switch" aria-checked="${enabled}"
+  return `<span class="cd-switch"><span class="cd-switch-lbl">${enabled ? 'Enabled' : 'Off'}</span>
+    <button class="switch ${enabled ? 'on' : ''}" role="switch" aria-checked="${enabled}"
     title="${enabled ? 'Agents may use this tool' : 'Agents may not use this tool'}"
     aria-label="${enabled ? 'Disable' : 'Enable'} ${escAttr(c.name)} for agents"
-    data-act="${enabled ? 'disable-tool' : 'enable-tool'}" data-conn="${c.id}"></button>`;
+    data-act="${enabled ? 'disable-tool' : 'enable-tool'}" data-conn="${c.id}"></button></span>`;
 }
 
 /* ---- connection guides ---- */
@@ -1141,6 +1143,7 @@ function connDetailHTML(c: ConnectionSummary): string {
       <div class="cd-title"><b title="${escAttr(c.name)}">${esc(connectionRowName(c))}</b>
         <span title="${escAttr(c.target)}">${esc(c.target)}</span></div>
       <div class="cd-actions">
+        ${connToggleHTML(c)}
         <div class="tile-menu-wrap">
           <button class="icon-btn tile-menu-btn ${menuOpen ? 'on' : ''}" title="Tool options"
             aria-label="Options for ${escAttr(c.name)}" aria-haspopup="menu"
@@ -1151,7 +1154,7 @@ function connDetailHTML(c: ConnectionSummary): string {
         </div>
       </div>
     </div>
-    ${issuesBlock}${connTestResultHTML(c)}${offNote}${c.mcp_path
+    ${offNote}${issuesBlock}${connTestResultHTML(c)}${c.mcp_path
       ? mcpSection + endpointSection
       : endpointSection + mcpSection}${detailsSection}${mcpStatusHTML(c)}`;
 }
@@ -1326,8 +1329,8 @@ function flatConnRowHTML(c: ConnectionSummary, reorderable = false): string {
         aria-label="Reorder ${escAttr(connectionRowName(c))}. Press the up or down arrow keys to move it."
         title="Drag to reorder">${ICONS.gripVertical}</button>`
     : '';
-  // The row is the detail panel's opener; its own controls (the switch)
-  // sit inside and win the click.
+  // The row is the detail panel's opener; the on/off switch lives in the
+  // detail header, so the health dot alone carries state here (gray = off).
   return `<div class="flat-conn-wrap ${selected ? 'sel' : ''}${reorderable ? ' reorderable' : ''}${dragConnId === c.id ? ' dragging' : ''}"
     data-conn-row="${c.id}">
     ${grip}
@@ -1338,7 +1341,6 @@ function flatConnRowHTML(c: ConnectionSummary, reorderable = false): string {
         <span>${connectionSublineHTML(c)}</span></div>
       ${live ? `<span class="cc-live">● ${live} live</span>` : ''}
       <div class="cat-conn-status">${flatHealthHTML(c)}</div>
-      ${connToggleHTML(c)}
     </div></div>`;
 }
 

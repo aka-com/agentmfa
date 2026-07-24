@@ -1074,6 +1074,10 @@
 }
 .cd-head { display: flex; align-items: flex-start; gap: 10px; }
 .cd-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+/* The agents on/off switch, labeled: the header has the room the list
+   rows lacked. */
+.cd-switch { display: inline-flex; align-items: center; gap: 7px; }
+.cd-switch-lbl { color: var(--muted); font-size: 12px; }
 .cd-actions .icon-btn, .cd-actions .tile-menu-wrap { flex: 0 0 auto; }
 .cd-actions .tile-menu { min-width: 250px; }
 .cd-actions .icon-btn {
@@ -1131,6 +1135,9 @@
 .cd-live-link:hover { text-decoration: underline; }
 .conn-detail-pane .ep-strip { margin-top: 0; }
 .conn-detail-pane .cc-issues { margin-top: 12px; max-width: none; }
+/* The test verdict sits directly under the header — give it the same
+   breathing room the issues block gets, not the row-level 5px. */
+.conn-detail-pane .cc-test { margin-top: 12px; }
 .conn-detail-backdrop { display: none; }
 
 @media (max-width: 720px) {
@@ -1375,7 +1382,7 @@
 .connect-recent-row .grow{ flex: 1; }
 
 /* Connection state at a glance: green = agents on, grey = off, amber = needs attention. */
-/* The enable/disable switch — the row's master control. */
+/* The enable/disable switch — the detail header's master control. */
 .switch{
   position: relative; flex: 0 0 auto; width: 34px; height: 20px; padding: 0;
   border: none; border-radius: 999px; background: var(--hover-2); cursor: pointer;
