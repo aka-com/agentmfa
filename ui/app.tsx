@@ -1072,8 +1072,8 @@ function connectionMenuItemsHTML(c: ConnectionSummary): string {
     : Boolean(test && test.running);
   const endpointItems = c.agent_access.enabled && c.agent_access.endpoint
     ? `<div class="menu-divider" role="separator"></div>
-        <button class="menu-item" role="menuitem" data-act="reissue-endpoint-ask" data-conn="${c.id}">${ICONS.refresh} Get a new direct connection…</button>
-        <button class="menu-item danger" role="menuitem" data-act="revoke-endpoint-ask" data-conn="${c.id}">${ICONS.x} Revoke direct connection</button>`
+        <button class="menu-item" role="menuitem" data-act="reissue-endpoint-ask" data-conn="${c.id}">${ICONS.refresh} Rotate connection address</button>
+        <button class="menu-item danger" role="menuitem" data-act="revoke-endpoint-ask" data-conn="${c.id}">${ICONS.x} Revoke connection address</button>`
     : '';
   return `<button class="menu-item" role="menuitem" data-act="edit-conn" data-id="${c.id}">${ICONS.pencil} Edit tool</button>
     <button class="menu-item" role="menuitem" data-act="${c.mcp_path ? 'mcp-status' : 'test-conn'}"
@@ -1121,20 +1121,12 @@ function connDetailHTML(c: ConnectionSummary): string {
   // speaks in the connect headline's sentence-case register — the panel
   // has one voice, no tracked-caps machinery labels.
   const mcpSection = enabled && c.mcp_path
-    ? `<div class="cd-sec"><div class="cd-connect-lbl">${ICONS.chevronsLeftRightEllipsis}<span>Connect to MCP</span><span class="cd-lbl-aside">${connectionToolsChipHTML(c)}</span></div>
+    ? `<div class="cd-sec"><div class="cd-connect-lbl">${ICONS.chevronsLeftRightEllipsis}<span>Multitool MCP</span><span class="cd-lbl-aside">${connectionToolsChipHTML(c)}</span></div>
         ${ENDPOINTABLE[c.type] ? endpointStripHTML(c) : ''}</div>`
     : '';
-  // How a disabled tool turns agents away, in the terms of the surface they
-  // actually hit: the brokered MCP/HTTP path answers a 403; a Postgres or SSH
-  // client on the direct endpoint has its connection refused, with no HTTP
-  // status to quote.
-  const offNote = enabled ? '' : `<div class="cd-help cd-off-note">${
-    connectionKind(c) === 'db'
-      ? 'This tool is disabled. New connections to its address are refused.'
-      : connectionKind(c) === 'ssh'
-      ? 'This tool is disabled. Its SSH agent socket stops signing for agents.'
-      : 'This tool is disabled. Requests from agents will be rejected with a 403 error.'
-  }</div>`;
+  const offNote = enabled
+    ? ''
+    : '<div class="cd-help cd-off-note">This tool is disabled.</div>';
   // The tool's facts, unpacked. The row keeps the terse machine target;
   // this card is where its parts are readable — only facts
   // the summary actually carries render, so every kind contributes what it
@@ -1250,7 +1242,7 @@ function catalogRowHTML(entry: CatalogEntry): string {
       <div class="cat-row">
         <span class="cat-ico" aria-hidden="true">${ICONS[entry.icon] || ''}</span>
         <div class="cat-tx"><b>${esc(entry.name)}</b></div>
-        <span class="cat-soon" title="Not available yet">Soon</span>
+        <span class="cat-soon" title="Not available yet">Coming soon</span>
       </div></div>`;
   }
   const builtin = entry.via === 'builtin';
@@ -1357,22 +1349,13 @@ function flatConnRowHTML(c: ConnectionSummary, reorderable = false): string {
   const live = liveCount(c);
   const entry = entryForConnection(c);
   const selected = selectedConnection()?.id === c.id;
-  // When the list is reorderable a grip on the left is the drag source (so
-  // clicks and text selection on the rest of the row are unaffected) and also
-  // carries keyboard reordering via the arrow keys. The drag ghost is set to
-  // the whole row in the dragstart handler.
-  const grip = reorderable
-    ? `<button class="flat-conn-grip" draggable="true" data-act="reorder-key" data-id="${c.id}"
-        aria-label="Reorder ${escAttr(connectionRowName(c))}. Press the up or down arrow keys to move it."
-        title="Drag to reorder">${ICONS.gripVertical}</button>`
-    : '';
   // The row is the detail panel's opener; the on/off switch lives in the
   // detail header, so the health dot alone carries state here (gray = off).
   return `<div class="flat-conn-wrap ${selected ? 'sel' : ''}${reorderable ? ' reorderable' : ''}${dragConnId === c.id ? ' dragging' : ''}"
-    data-conn-row="${c.id}">
-    ${grip}
+    data-conn-row="${c.id}"${reorderable ? ' draggable="true"' : ''}>
     <div class="flat-conn-row" role="button" tabindex="0" data-act="select-conn" data-id="${c.id}"
-      aria-expanded="${selected}" aria-label="Show details for ${escAttr(connectionRowName(c))}">
+      aria-expanded="${selected}" aria-label="Show details for ${escAttr(connectionRowName(c))}"${
+        reorderable ? ' aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"' : ''}>
       <span class="cat-ico kind-${kind}" aria-hidden="true">${entry ? ICONS[entry.icon] || '' : ''}</span>
       <div class="flat-tx"><b title="${escAttr(c.name)}">${esc(connectionRowName(c))}</b>
         <span>${connectionSublineHTML(c)}</span></div>
@@ -1455,14 +1438,16 @@ function connectionsHTML(withReadyCard = true) {
   // With nothing connected, adding is the only thing to do — the catalog
   // starts open.
   const addOpen = state.addToolOpen || !state.connections.length;
-  const addRow = `<div class="cat-section"><div class="cat-rows">
-      <div class="cat-row is-toggle add-tools-row" role="button" tabindex="0"
-        data-act="toggle-add-tools" aria-expanded="${addOpen}"
-        aria-label="${addOpen ? 'Hide' : 'Show'} tools that can be added">
-        <span class="cat-ico" aria-hidden="true">${ICONS.plus}</span>
-        <div class="cat-tx"><b>Add a tool</b></div>
-        <span class="cat-chev group-chev ${addOpen ? 'open' : ''}" aria-hidden="true">${ICONS.chevronDown}</span>
-      </div></div></div>`;
+  const addRow = state.connections.length
+    ? `<div class="cat-section"><div class="cat-rows">
+        <div class="cat-row is-toggle add-tools-row" role="button" tabindex="0"
+          data-act="toggle-add-tools" aria-expanded="${addOpen}"
+          aria-label="${addOpen ? 'Hide' : 'Show'} tools that can be added">
+          <span class="cat-ico" aria-hidden="true">${ICONS.plus}</span>
+          <div class="cat-tx"><b>Add a tool</b></div>
+          <span class="cat-chev group-chev ${addOpen ? 'open' : ''}" aria-hidden="true">${ICONS.chevronDown}</span>
+        </div></div></div>`
+    : '';
   // Generic rows are tool types, not accounts: they stay addable even
   // while connected, or there would be no way to add a second database.
   const alwaysAddable = (entry: CatalogEntry): boolean =>
@@ -1676,7 +1661,12 @@ function startConnectPaneHTML(mode: ConnectModeId, option: StartOption, progress
   switch (mode) {
     case 'direct': {
       if (!conn) {
-        return `<p>Connection addresses are per tool — add the ${esc(option.label)} tool above first.</p>
+        const prerequisite = option.connType === 'pg'
+          ? 'Add a Postgres database first.'
+          : option.connType === 'ssh'
+          ? 'Add an SSH server first.'
+          : `Add a ${esc(option.label)} tool first.`;
+        return `<p>${prerequisite}</p>
           <div class="start-actions"><button class="btn primary sm" disabled>Get connection address</button></div>`;
       }
       const endpoint = conn.agent_access.endpoint ?? null;
@@ -1818,7 +1808,6 @@ function startWalkthroughHTML(): string {
     <pre class="setup-instructions"><code>${esc(task)}</code></pre>
     <div class="start-actions">
       <button class="btn primary sm" data-act="copy-text" data-text="${escAttr(task)}">Copy</button>
-      <button class="btn ghost sm" data-act="open-connect-guides">Open agent guides</button>
     </div>`;
 
   return `<ol class="start-steps">
@@ -2268,7 +2257,7 @@ function endpointIssuedSheet(): string {
     ? field('Secret', info.secret, 'secret')
     : '<div class="ep-note">SSH addresses present no secret — the socket path is the whole capability.</div>';
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
-    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="ep-title">
+    <div class="sheet endpoint-issued-sheet" role="dialog" aria-modal="true" aria-labelledby="ep-title">
       <h3 id="ep-title">Your connection address</h3>
       <p class="sheet-sub">Paste this into your tool's config. You can copy it again anytime from the tool's details.</p>
       ${field(addressLabel, info.dsn, 'dsn')}
@@ -3807,6 +3796,15 @@ async function saveConn(): Promise<void> {
   const d = state.draft;
   const name = (d.name || '').trim();
   const t = state.connType;
+  const usesLocalUser = t === 'pg' || t === 'ssh';
+  const user = usesLocalUser
+    ? (d.user || '').trim() || state.localUsername.trim()
+    : '';
+  // The local account is shown as the username placeholder, so submitting an
+  // untouched field should accept that visible default. Materialize it in the
+  // draft too, so another validation error leaves the form showing exactly
+  // what the next submission will save.
+  if (usesLocalUser && !(d.user || '').trim() && user) d.user = user;
   const adding = sheet.kind === 'add-conn';
   const toolNameTaken = adding && toolNameIsTaken(name);
   const mcpAdd = adding && t === 'api' && isMcpDraft(d);
@@ -3828,7 +3826,7 @@ async function saveConn(): Promise<void> {
       errs.port = 'Port must be 1–65535';
     }
     if (t === 'pg' && !(d.dbname || '').trim()) errs.dbname = 'Database is required';
-    if (!(d.user || '').trim()) errs.user = 'User is required';
+    if (!user) errs.user = 'User is required';
     // The SSH host key fingerprint is optional: empty saves the service
     // unpinned, and the key is confirmed at the first agent connection.
   }
@@ -3972,7 +3970,7 @@ async function saveConn(): Promise<void> {
     input.host = (d.host || '').trim();
     input.port = port;
     input.dbname = (d.dbname || '').trim();
-    input.user = (d.user || '').trim();
+    input.user = user;
     input.sslmode = d.sslmode || 'verify-full';
     input.trusted_ca_bundle_path = (d.pgCaBundlePath || '').trim() || null;
     if (selectedSecret) input.secret_id = selectedSecret.id;
@@ -3980,7 +3978,7 @@ async function saveConn(): Promise<void> {
     input.destination = (d.destination || '').trim() || null;
     input.host = (d.host || '').trim();
     input.port = port;
-    input.user = (d.user || '').trim();
+    input.user = user;
     input.host_key_fingerprint = (d.hostKeyFingerprint || '').trim();
     if (selectedSecret) input.secret_id = selectedSecret.id;
   } else {
@@ -4563,12 +4561,6 @@ document.addEventListener('click', async (e) => {
         render();
       }
       break;
-    case 'open-connect-guides':
-      state.tab = 'start';
-      state.startView = 'guides';
-      render();
-      resetScroll();
-      break;
     case 'copy-text': {
       const text = btn.dataset.text ?? '';
       if (!text) break;
@@ -5012,8 +5004,8 @@ document.addEventListener('click', async (e) => {
 
 /* ---------------------- Tools list drag reordering ----------------------- */
 // The connected-tools list on the Tools tab can be reordered by dragging a
-// row's grip (or, for keyboard users, focusing the grip and pressing the
-// arrow keys). The chosen order is persisted on the broker via
+// row (or, for keyboard users, focusing it and pressing Alt+Up/Down). The
+// chosen order is persisted on the broker via
 // `reorder_connections`; the broker echoes `connections-changed`, which
 // refreshes every window back to the stored order.
 
@@ -5058,7 +5050,7 @@ function commitConnDrag(): void {
 }
 
 // Move one connection up (-1) or down (+1) by keyboard, optimistically
-// re-rendering and keeping the moved grip focused, then persisting.
+// re-rendering and keeping the moved row focused, then persisting.
 function moveConnByKeyboard(id: string, delta: number): void {
   const ids = state.connections.map((c) => c.id);
   const from = ids.indexOf(id);
@@ -5071,14 +5063,14 @@ function moveConnByKeyboard(id: string, delta: number): void {
     .filter((c): c is ConnectionSummary => Boolean(c));
   render();
   document.querySelector<HTMLElement>(
-    `[data-conn-row="${CSS.escape(id)}"] .flat-conn-grip`,
+    `[data-conn-row="${CSS.escape(id)}"] .flat-conn-row`,
   )?.focus();
   void persistConnOrder(ids);
 }
 
 document.addEventListener('dragstart', (e) => {
-  const grip = (e.target instanceof Element ? e.target : null)?.closest('.flat-conn-grip');
-  const wrap = grip?.closest<HTMLElement>('.flat-conn-wrap.reorderable');
+  const wrap = (e.target instanceof Element ? e.target : null)
+    ?.closest<HTMLElement>('.flat-conn-wrap.reorderable');
   if (!wrap) return;
   dragConnId = wrap.dataset.connRow ?? null;
   if (!dragConnId) return;
@@ -5120,13 +5112,15 @@ document.addEventListener('drop', (e) => {
 document.addEventListener('dragend', () => commitConnDrag());
 
 document.addEventListener('keydown', (e) => {
-  // A focused reorder grip moves its row with the up/down arrows — the
-  // keyboard-accessible equivalent of dragging it.
-  if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && e.target instanceof HTMLElement) {
-    const grip = e.target.closest<HTMLElement>('.flat-conn-grip');
-    if (grip?.dataset.id) {
+  // A focused row moves with Alt+Up/Down — the keyboard-accessible
+  // equivalent of dragging it.
+  if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')
+      && e.target instanceof HTMLElement) {
+    const row = e.target.closest<HTMLElement>('.flat-conn-row');
+    const wrap = row?.closest<HTMLElement>('.flat-conn-wrap.reorderable');
+    if (wrap?.dataset.connRow) {
       e.preventDefault();
-      moveConnByKeyboard(grip.dataset.id, e.key === 'ArrowDown' ? 1 : -1);
+      moveConnByKeyboard(wrap.dataset.connRow, e.key === 'ArrowDown' ? 1 : -1);
       return;
     }
   }

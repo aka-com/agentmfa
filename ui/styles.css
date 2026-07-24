@@ -48,8 +48,8 @@
 
   /* per-kind tints: muted washes that let a mixed tool list sort itself
      visually (MCP app / database / SSH / plain API) without grouping it */
-  --kind-mcp-ink: #6d4fd0;
-  --kind-mcp-wash: rgba(124, 92, 255, .10);
+  --kind-mcp-ink: #557a18;
+  --kind-mcp-wash: rgba(116, 168, 38, .12);
   --kind-ssh-ink: #0f8a7a;
   --kind-ssh-wash: rgba(20, 160, 140, .12);
   --kind-api-ink: #b05c14;
@@ -57,6 +57,7 @@
 
   /* surfaces */
   --surface: rgba(246, 246, 249, 0.98);
+  --main-surface: rgba(249, 249, 252, 0.98);
   --panel: #fbfbfd;                     /* sheets, popovers */
   --field-bg: #fff;
   --code-block-bg: #fff;
@@ -207,7 +208,7 @@
   }
   .dw-main{
   flex: 1; display: flex; flex-direction: column; min-width: 0;
-  width: 100%;
+  width: 100%; background: var(--main-surface);
 }
   .dw-head{
   flex: 0 0 auto;
@@ -655,9 +656,11 @@
   /* Issued-endpoint sheet: pasteable address / secret / example, each with a
      copy button. A shared three-column grid keeps labels, values, and actions
      aligned while the code wraps independently in the flexible middle. */
+  .endpoint-issued-sheet h3{ font-size: 18px; margin-bottom: 6px; }
+  .endpoint-issued-sheet .sheet-sub{ margin-bottom: 12px; }
   .issued-ep-field{
     display: grid; grid-template-columns: 84px minmax(0, 1fr) 64px;
-    align-items: center; gap: 12px; margin: 12px 0; padding: 6px 10px;
+    align-items: center; gap: 12px; margin: 4px 0; padding: 6px 10px;
     background: var(--field-bg); border: 1px solid var(--line); border-radius: 9px;
   }
   .issued-ep-field .ep-label{
@@ -829,14 +832,15 @@
     --brand-claude-ink: #ef9a7d;
     --brand-openai-bg: rgba(82,207,172,.16);
     --brand-openai-ink: #72d9bb;
-    --kind-mcp-ink: #c9b8fd;
-    --kind-mcp-wash: rgba(167,139,250,.14);
+    --kind-mcp-ink: #b8dc78;
+    --kind-mcp-wash: rgba(132,190,54,.14);
     --kind-ssh-ink: #6fe0cd;
     --kind-ssh-wash: rgba(45,212,191,.13);
     --kind-api-ink: #f8b184;
     --kind-api-wash: rgba(240,136,62,.14);
 
     --surface: rgba(30,30,36,.98);
+    --main-surface: var(--surface);
     --panel: #26262c;
     --field-bg: #1c1c22;
     --code-block-bg: var(--wash-2);
@@ -1023,28 +1027,9 @@
 .flat-conn-wrap.sel { background: var(--accent-wash); box-shadow: inset 2px 0 0 var(--accent); }
 
 /* ---- drag-to-reorder (Tools list) ------------------------------------- */
-/* When the list is reorderable each row grows a left-edge grip: the drag
-   source, and the keyboard move handle (focus it, arrow up/down). The order
-   is persisted on the broker, so it survives restarts and every window. */
-.flat-conn-wrap.reorderable { position: relative; display: flex; align-items: stretch; }
-.flat-conn-wrap.reorderable .flat-conn-row { flex: 1 1 auto; min-width: 0; }
-/* The grip floats over the row's left padding instead of taking a column of
-   its own, so the icon blocks line up with the other rows' (Add a tool, the
-   catalog). Hidden until the row is hovered or the grip holds focus. */
-.flat-conn-grip {
-  position: absolute; left: 0; top: 0; bottom: 0; z-index: 1;
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 14px; padding: 0; border: 0; border-radius: 0;
-  background: none; color: var(--muted-2); cursor: grab; touch-action: none;
-  opacity: 0;
-  -webkit-user-drag: element; -webkit-user-select: none; user-select: none;
-}
-.flat-conn-grip svg { width: 12px; height: 12px; }
-.flat-conn-wrap.reorderable:hover .flat-conn-grip,
-.flat-conn-grip:focus-visible { opacity: 1; }
-.flat-conn-grip:hover { color: var(--ink); }
-.flat-conn-grip:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.flat-conn-grip:active { cursor: grabbing; }
+/* Reorderable rows are themselves the drag source; no separate handle shifts
+   or decorates the list. The order persists across restarts and windows. */
+.flat-conn-wrap.reorderable { -webkit-user-drag: element; }
 .flat-conn-wrap.dragging {
   opacity: .5; background: var(--accent-wash);
   outline: 1px dashed var(--accent); outline-offset: -2px;
@@ -1064,7 +1049,7 @@
 .tools-list { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 18px; }
 .conn-detail-pane {
   --cd-gutter-x: 16px;
-  flex: 0 0 clamp(280px, 38%, 380px);
+  flex: 0 0 clamp(320px, calc(38% + 40px), 420px);
   position: sticky; top: 0;
   height: fit-content; max-height: calc(100vh - 130px); overflow-y: auto;
   height: calc(100cqh - 14px); max-height: calc(100cqh - 14px);
@@ -1097,7 +1082,7 @@
   border-top: 1px solid var(--line-soft);
 }
 /* Every section headline in the panel speaks to the user in sentence case
-   and the text ink — "Connect to this database", "Connect to MCP",
+   and the text ink — "Connect to this database", "Multitool MCP",
    "Details" — one register, no tracked-caps machinery labels. */
 .cd-connect-lbl {
   display: flex; align-items: center; gap: 7px; margin-bottom: 3px;
@@ -1106,7 +1091,7 @@
 .cd-connect-lbl svg { flex: 0 0 auto; color: var(--muted); }
 /* The tool-filter chip rides the headline's right edge — a control, not
    more of the headline. */
-.cd-lbl-aside { margin-left: auto; font-weight: 400; }
+.cd-lbl-aside { margin-left: auto; margin-right: -7px; font-weight: 400; }
 .cd-help { margin-top: 7px; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .cd-off-note { margin-top: 12px; }
 /* The Details card: the target's parts spelled out as label–value rows.
@@ -1436,7 +1421,7 @@
 /* Copy sits below the DSN so the address gets the field's full width.
    Reserve the wider feedback label so Copy → Copied keeps a steady size. */
 .ep-strip .ep-field .ep-copy{
-  align-self: flex-start; flex: 0 0 auto; display: inline-flex; align-items: center;
+  align-self: flex-end; flex: 0 0 auto; display: inline-flex; align-items: center;
   justify-content: center; gap: 5px; width: 76px; white-space: nowrap;
 }
 .ep-strip .ep-field .ep-copy svg{ width: 14px; height: 14px; }
