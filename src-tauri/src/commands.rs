@@ -1319,7 +1319,10 @@ mod tests {
         assert!(instructions.contains("Read its current instructions"));
         assert!(instructions.contains("~/.aka/token"));
         assert!(instructions.contains("Authorization: Bearer"));
-        assert!(!instructions.contains("\\\n"));
+        assert!(instructions.contains("$(cat ~/.aka/token)"));
+        assert!(!instructions.contains("Bearer <key>"));
+        assert!(!instructions.contains("Authenticate with this computer"));
+        assert!(instructions.contains("\\\n  -H"));
         assert!(!instructions.contains("--max-time"));
         assert!(!instructions.contains("Reuse an existing token before pairing"));
     }

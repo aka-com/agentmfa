@@ -200,8 +200,7 @@ pub struct AccessDto {
 
 /// The direct endpoint on a wiring row. `dsn` is the pasteable address with
 /// the retained endpoint secret in its password slot, so copying the chip is
-/// enough to connect; it is omitted for SSH, whose socket path is itself the
-/// capability and is shown only in the issue sheet.
+/// enough to connect. For SSH it carries the stable agent-socket path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EndpointChip {
     pub endpoint_id: String,

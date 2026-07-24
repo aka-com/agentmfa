@@ -121,7 +121,14 @@ claude mcp add multitool -- aka mcp --client claude-code
 **Claude Desktop** in `claude_desktop_config.json`:
 
 ```json
-{ "mcpServers": { "multitool": { "command": "aka", "args": ["mcp", "--client", "claude-desktop"] } } }
+{
+  "mcpServers": {
+    "multitool": {
+      "command": "aka",
+      "args": ["mcp", "--client", "claude-desktop"]
+    }
+  }
+}
 ```
 
 **Codex** in `~/.codex/config.toml`:

@@ -172,7 +172,9 @@ export interface ConnectClientEnv {
 
 export interface ConnectStep {
   title: string;
-  detail: string;
+  detail?: string;
+  /** A distinct follow-up paragraph under the main detail. */
+  followup?: string;
   /** A copyable snippet, rendered monospace with a Copy button. */
   snippet?: string;
 }
@@ -197,6 +199,11 @@ export interface ConnectClient {
   /** The walkthrough pane's copy-button label. */
   copyLabel: string;
   snippet: (env: ConnectClientEnv) => string;
+  /** This client launches `aka mcp`, which must be installed separately. */
+  requiresCli?: boolean;
+  /** Its Quick Start snippet is shell commands, so CLI installation can be
+   * prepended to the same runnable block. */
+  inlineCliInstall?: boolean;
   /**
    * The walkthrough pane normally shows `snippet`; 'agent-setup' shows the
    * broker-generated setup message instead (guides still use `snippet`).
@@ -207,10 +214,35 @@ export interface ConnectClient {
   note?: string;
 }
 
+export const CLI_INSTALL_COMMAND = 'npm install -g @aka-labs/multitool';
+
+/** Connection-guide steps include the CLI prerequisite as its own first step
+ * for clients that launch the stdio bridge. */
+export function connectGuideSteps(client: ConnectClient, env: ConnectClientEnv): ConnectStep[] {
+  const steps = client.steps(env);
+  if (!client.requiresCli) return steps;
+  return [{
+    title: 'Install the Multitool CLI',
+    detail: 'Install the aka command globally and keep it available on PATH. Requires Node.js 22 or newer.',
+    snippet: CLI_INSTALL_COMMAND,
+  }, ...steps];
+}
+
 const SNIPPETS: Record<string, (env: ConnectClientEnv) => string> = {
   'claude-code': () => 'claude mcp add multitool -- aka mcp --client claude-code',
   'claude-desktop': () =>
-    '{\n  "mcpServers": {\n    "multitool": { "command": "aka", "args": ["mcp", "--client", "claude-desktop"] }\n  }\n}',
+    '{\n'
+    + '  "mcpServers": {\n'
+    + '    "multitool": {\n'
+    + '      "command": "aka",\n'
+    + '      "args": [\n'
+    + '        "mcp",\n'
+    + '        "--client",\n'
+    + '        "claude-desktop"\n'
+    + '      ]\n'
+    + '    }\n'
+    + '  }\n'
+    + '}',
   codex: () => '[mcp_servers.multitool]\ncommand = "aka"\nargs = ["mcp", "--client", "codex"]',
   mcp: (env: ConnectClientEnv) =>
     `# the MCP URL's port moves with restarts — read mcp_url from the manifest\n`
@@ -231,21 +263,22 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
     mark: 'CC',
     icon: 'anthropic',
     labels: ['claude-code'],
-    lead: () => 'Run this once in a terminal. Claude Code will find the broker and key itself.',
-    copyLabel: 'Copy command',
+    lead: () => 'Install the Multitool CLI, then add it to Claude Code:',
+    copyLabel: 'Copy commands',
     snippet: SNIPPETS['claude-code'],
+    requiresCli: true,
+    inlineCliInstall: true,
     steps: (env) => [
       {
         title: 'Add Multitool as an MCP server',
-        detail: 'Run once, anywhere. No key to paste — aka mcp finds the broker and key itself.',
         snippet: SNIPPETS['claude-code'](env),
       },
       {
         title: 'Check for valid tools',
-        detail: 'In any Claude Code session, ask it to run multitool_status — it should report your enabled tools.',
+        detail: 'In any Claude Code session, ask it to run multitool_status to list your enabled tools.',
+        followup: 'Working over the raw API? Use the plain-HTTP setup under “Anything else (HTTP API)”.',
       },
     ],
-    note: 'Working over the raw API instead? Use the plain-HTTP setup under “Anything else (HTTP API)”.',
   },
   {
     id: 'claude-desktop',
@@ -255,13 +288,14 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
     icon: 'anthropic',
     labels: ['claude-desktop'],
     lead: (env) =>
-      `Add this to ${CLAUDE_DESKTOP_CONFIG_PATH[env.platform]}, then restart Claude.`,
+      `Add this to ${CLAUDE_DESKTOP_CONFIG_PATH[env.platform]}, then restart Claude Desktop.`,
     copyLabel: 'Copy config',
     snippet: SNIPPETS['claude-desktop'],
+    requiresCli: true,
     steps: (env) => [
       {
         title: 'Add Multitool to Claude Desktop’s config',
-        detail: `Merge this into ${CLAUDE_DESKTOP_CONFIG_PATH[env.platform]} — or copy the whole file if you don’t have one yet.`,
+        detail: `Merge this into ${CLAUDE_DESKTOP_CONFIG_PATH[env.platform]}, or copy the whole file if you don’t have one yet.`,
         snippet: SNIPPETS['claude-desktop'](env),
       },
       {
@@ -278,13 +312,14 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
     mark: 'CX',
     icon: 'openai',
     labels: ['codex', 'codex-desktop'],
-    lead: () => 'Add this to ~/.codex/config.toml. This covers both Codex Desktop and Codex CLI.',
+    lead: () => 'Add this to ~/.codex/config.toml:',
     copyLabel: 'Copy config',
     snippet: SNIPPETS.codex,
+    requiresCli: true,
     steps: (env) => [
       {
         title: 'Register the MCP server',
-        detail: 'Add to ~/.codex/config.toml — Codex Desktop shares this config with the Codex CLI:',
+        detail: 'Add this to ~/.codex/config.toml:',
         snippet: SNIPPETS.codex(env),
       },
       {
@@ -311,7 +346,7 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
       },
       {
         title: 'Or skip HTTP entirely',
-        detail: 'Clients that launch stdio servers can run aka mcp directly — no URL or key to paste.',
+        detail: 'After installing the Multitool CLI, clients that launch stdio servers can run aka mcp directly — no URL or key to paste.',
       },
     ],
   },
@@ -321,8 +356,7 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
     sub: 'curl, scripts, your own agent loop — HTTP over the local socket',
     mark: '>_',
     icon: 'terminal',
-    lead: () =>
-      "Paste this into any agent. It reads this computer's shared key and gets full API docs from the broker.",
+    lead: () => 'Paste this into any agent:',
     copyLabel: 'Copy setup instructions',
     snippet: SNIPPETS.cli,
     paneSource: 'agent-setup',
@@ -364,21 +398,16 @@ export function resolveConnectMode(picked: string, option: StartOption): Connect
 export interface StartProgress {
   /** A tool of this kind exists. */
   added: boolean;
-  /** An agent has fetched the shared key (a pair/whoami has been seen). */
-  connected: boolean;
   /** A tool of this kind is enabled for agents. */
   wired: boolean;
   /** The tool the example task should name. */
   toolName: string | null;
 }
 
-/** Live progress for the chosen option, read straight from broker state.
- * `agentConnected` is supplied by the caller (there is no agent registry
- * under the shared identity — the signal is activity, not a roster). */
+/** Live progress for the chosen option, read straight from broker state. */
 export function startProgress(
   option: StartOption,
   connections: ConnectionSummary[],
-  agentConnected: boolean,
 ): StartProgress {
   const entry = option.catalogId ? catalogEntryById(option.catalogId) : undefined;
   const matching = entry ? connectionsForEntry(entry, connections) : [];
@@ -387,7 +416,6 @@ export function startProgress(
   const tool = enabledTool ?? matching[0] ?? null;
   return {
     added: matching.length > 0,
-    connected: agentConnected,
     wired: Boolean(enabledTool),
     toolName: tool ? tool.name : null,
   };
@@ -395,7 +423,62 @@ export function startProgress(
 
 /** The example task, with a placeholder while no tool exists yet. */
 export function startTask(option: StartOption, progress: StartProgress): string {
-  return `Using my Multitool tool "${progress.toolName ?? 'my-tool'}", ${option.taskBody}`;
+  return `Using my Multitool connection "${progress.toolName ?? 'my-tool'}", ${option.taskBody}`;
+}
+
+function sshAuthSockAssignment(socket: string): string {
+  const quoted = socket.replace(/[\\"`$]/g, '\\$&');
+  return `SSH_AUTH_SOCK="${quoted}"`;
+}
+
+/** A ready-to-run shell assignment for a persistent SSH agent socket. */
+export function sshAuthSockCommand(socket: string): string {
+  return `export ${sshAuthSockAssignment(socket)}`;
+}
+
+/** The configured SSH invocation, preserving imported aliases and ports. */
+export function sshInvocationCommand(
+  connection: {
+    destination?: string | null;
+    user?: string | null;
+    host?: string | null;
+    port?: number | null;
+    target: string;
+  },
+): string {
+  const importedDestination = connection.destination?.trim();
+  const destination = importedDestination
+    || (connection.user && connection.host ? `${connection.user}@${connection.host}` : connection.target);
+  const port = !importedDestination && connection.port && connection.port !== 22
+    ? ` -p ${connection.port}`
+    : '';
+  return `ssh${port} ${destination}`;
+}
+
+/** One command that uses the issued signing socket to reach its SSH target. */
+export function sshDirectCommand(
+  socket: string,
+  connection: Parameters<typeof sshInvocationCommand>[0],
+): string {
+  return `${sshAuthSockAssignment(socket)} ${sshInvocationCommand(connection)}`;
+}
+
+/**
+ * Resolve an issued endpoint's address. Older brokers omitted SSH's socket
+ * path from connection summaries, but its stable location is derivable from
+ * the broker socket directory and endpoint id.
+ */
+export function directEndpointAddress(
+  type: ConnectionType,
+  endpoint: { endpoint_id: string; dsn?: string | null } | null | undefined,
+  brokerSocket: string,
+): string | null {
+  if (!endpoint) return null;
+  if (endpoint.dsn) return endpoint.dsn;
+  if (type !== 'ssh') return null;
+  const slash = brokerSocket.lastIndexOf('/');
+  const socketDir = slash >= 0 ? brokerSocket.slice(0, slash) : '.';
+  return `${socketDir}/endpoints/${endpoint.endpoint_id}/agent.sock`;
 }
 
 /**
@@ -407,13 +490,22 @@ export function startTask(option: StartOption, progress: StartProgress): string 
 export function directStartTask(
   option: StartOption,
   progress: StartProgress,
-  endpoint: { dsn?: string | null } | null | undefined,
+  endpoint: { dsn?: string | null; sshInvocation?: string | null } | null | undefined,
 ): string {
   if (!endpoint) return startTask(option, progress);
+  if (option.connType === 'ssh') {
+    const socket = endpoint.dsn
+      ? `Use this SSH agent socket: ${sshAuthSockAssignment(endpoint.dsn)}`
+      : 'Use the SSH agent socket Multitool issued.';
+    const connect = endpoint.sshInvocation
+      ? `SSH to the server with ${endpoint.sshInvocation}`
+      : 'SSH to the configured server';
+    return `${socket}\n${connect}, then ${option.taskBody}`;
+  }
   const lead = endpoint.dsn
-    ? `Connect with this Postgres DSN (secret included): ${endpoint.dsn}`
-    : 'Connect with the SSH agent socket Multitool issued — set SSH_AUTH_SOCK to the socket path from the issue sheet.';
-  return `${lead}\nThen ${option.taskBody}`;
+    ? `Connect to this Postgres DSN: ${endpoint.dsn}`
+    : `Connect to the direct endpoint Multitool issued.`;
+  return `${lead}\n\nThen ${option.taskBody}`;
 }
 
 /**
@@ -431,5 +523,5 @@ export function firstTaskPrompt(name: string, type: ConnectionType): string {
     // Branded APIs and protocols without a walkthrough use a generic
     // read-only ask rather than borrowing one particular provider's copy.
     : 'make one read-only request and summarize what comes back.';
-  return `Using my Multitool tool "${name}", ${body}`;
+  return `Using my Multitool connection "${name}", ${body}`;
 }

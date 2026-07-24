@@ -22,9 +22,11 @@ import {
 } from '/src/catalog';
 import type { ConnectionPreset } from '/src/catalog';
 import {
-  CONNECT_CLIENTS, CONNECT_MODE_LABELS, START_OPTIONS, clientMatchesLabel,
-  connectClientById, connectModesFor, directStartTask, firstTaskPrompt, resolveConnectMode,
-  startKindLabel, startOptionById, startProgress, startTask,
+  CLI_INSTALL_COMMAND, CONNECT_CLIENTS, CONNECT_MODE_LABELS, START_OPTIONS, clientMatchesLabel,
+  connectClientById, connectModesFor, directEndpointAddress, directStartTask, firstTaskPrompt,
+  resolveConnectMode,
+  connectGuideSteps, sshAuthSockCommand, sshDirectCommand, sshInvocationCommand, startKindLabel,
+  startOptionById, startProgress, startTask,
 } from '/src/getting-started';
 import type {
   ConnectClient, ConnectClientEnv, ConnectModeId, ConnectStep, Platform, StartOption,
@@ -258,8 +260,6 @@ interface McpStatusState {
   running: boolean;
   report?: McpStatusReport;
   error?: string;
-  /** When the check finished, for the status row's "Checked …" stamp. */
-  at?: string;
 }
 
 interface ConnectionTestState {
@@ -267,8 +267,6 @@ interface ConnectionTestState {
   ok?: boolean;
   detail?: string;
   kind?: TestErrorKind;
-  /** When the test finished, for the status row's "Checked …" stamp. */
-  at?: string;
 }
 
 /* ------------------------------ local state ------------------------------ */
@@ -693,29 +691,7 @@ const ENDPOINTABLE: Record<ConnectionType, boolean> = { pg: true, ssh: true, api
 // than a second column. Must match the styles.css breakpoint.
 const NARROW_LAYOUT = '(max-width: 720px)';
 
-/**
- * The on-screen form of an issued endpoint address: scheme, a masked
- * password slot, host, and path. The embedded token and any query (the
- * socket-path form of a local DSN) stay off the screen — the full address
- * only lands on the clipboard.
- */
-function briefEndpointAddress(dsn: string): string {
-  try {
-    const url = new URL(dsn);
-    const auth = url.username
-      ? `${url.username}${url.password ? ':…' : ''}@`
-      : url.password ? '…@' : '';
-    return `${url.protocol}//${auth}${url.host}${url.pathname === '/' ? '' : url.pathname}`;
-  } catch {
-    // The socket-path form of a local DSN (empty host) is unparseable as a
-    // URL and always lands here. It must never fall through with a
-    // credential or its query in it: drop everything between the username
-    // and the `@`, then the query — same shape the parsed branch returns.
-    return dsn.replace(/\/\/([^/@:]*)(:[^@]*)?@/, '//$1@').replace(/\?.*$/, '');
-  }
-}
-
-/** The brief address as markup with soft break opportunities after its own
+/** The full address as markup with soft break opportunities after its own
  * punctuation — so a long address wraps at "/", "@", or ":" instead of
  * mid-identifier. Runs of separators stay whole ("://" never splits), and
  * each segment is escaped individually so the injected tags survive. */
@@ -725,9 +701,9 @@ function breakableAddress(address: string): string {
 
 // The direct-endpoint lifecycle strip on an enabled Postgres/SSH/HTTP row:
 // a hairline footer that owns issue → live badge → reissue/revoke. The
-// address shown is never the capability itself — SSH's socket path (which is
-// the whole capability) appears only in the one-time issue sheet.
-function endpointStripHTML(c: ConnectionSummary): string {
+// SSH renders the socket as an SSH_AUTH_SOCK assignment so it can be copied
+// and run directly.
+function endpointStripHTML(c: ConnectionSummary, runnableSsh = false): string {
   if (!c.agent_access.enabled || !ENDPOINTABLE[c.type]) return '';
   const endpoint = c.agent_access.endpoint ?? null;
   if (!endpoint) {
@@ -738,17 +714,31 @@ function endpointStripHTML(c: ConnectionSummary): string {
   }
   // The address rides in a field with its Copy button showing — copying is
   // what everyone does with this string, so the affordance is explicit, not
-  // a hover reveal. The button copies the full DSN; the field shows the
-  // credential-free brief form.
+  // a hover reveal. The field and the button use the same complete DSN,
+  // including its issued credential and any socket-path query.
   const copied = state.copied === `ep:${c.id}`;
-  const address = endpoint.dsn
+  const endpointAddress = directEndpointAddress(
+    c.type,
+    endpoint,
+    state.identity?.socket_path ?? '~/.aka/broker.sock',
+  );
+  const endpointText = endpointAddress
+    ? c.type === 'ssh'
+      ? runnableSsh ? sshDirectCommand(endpointAddress, c) : sshAuthSockCommand(endpointAddress)
+      : endpointAddress
+    : null;
+  const copyTitle = c.type === 'ssh' && runnableSsh
+    ? 'Copy the SSH command'
+    : 'Copy the connection command';
+  const address = endpointText
     ? `<div class="ep-field">
-        <code class="ep-addr">${breakableAddress(briefEndpointAddress(endpoint.dsn))}</code>
-        <button class="btn sm ep-copy" title="Copy the full connection address"
-          aria-label="Copy connection address for ${escAttr(c.name)}" data-act="copy-endpoint-dsn" data-conn="${c.id}">${
+        <code class="ep-addr">${breakableAddress(endpointText)}</code>
+        <button class="btn sm ep-copy" title="${copyTitle}"
+          aria-label="${copyTitle} for ${escAttr(c.name)}" data-act="copy-endpoint-dsn"
+          data-conn="${c.id}" data-text="${escAttr(endpointText)}">${
           copied ? `${ICONS.check} Copied` : `${ICONS.copy} Copy`}</button>
       </div>`
-    : '<span class="ep-addr ep-addr-hidden">Agent socket — shown at issue</span>';
+    : '<span class="ep-addr ep-addr-hidden">Connection address unavailable</span>';
   // The strip is the field, nothing more: reissue/revoke live in the row's
   // one options menu.
   return `<div class="ep-strip">${address}</div>`;
@@ -836,7 +826,9 @@ function connectStepHTML(step: ConnectStep, n: number): string {
   return `<div class="connect-step">
     <span class="connect-step-n" aria-hidden="true">${n}</span>
     <div class="connect-step-bd"><b>${esc(step.title)}</b>
-      <div class="connect-step-d">${esc(step.detail)}</div>${snippet}</div>
+      ${step.detail ? `<div class="connect-step-d">${esc(step.detail)}</div>` : ''}
+      ${step.followup ? `<div class="connect-step-d connect-step-followup">${esc(step.followup)}</div>` : ''}
+      ${snippet}</div>
   </div>`;
 }
 
@@ -847,7 +839,7 @@ function connectCardHTML(client: ConnectClient, env: ConnectClientEnv): string {
     ? `<span class="connect-seen" title="An agent using this label reached the broker">● seen ${relTime(seen.at)}</span>`
     : '';
   const steps = open
-    ? `<div class="connect-steps">${client.steps(env).map((step, i) => connectStepHTML(step, i + 1)).join('')}
+    ? `<div class="connect-steps">${connectGuideSteps(client, env).map((step, i) => connectStepHTML(step, i + 1)).join('')}
         ${client.note ? `<div class="connect-note">${esc(client.note)}</div>` : ''}</div>`
     : '';
   return `<div class="agent-block connect-card ${open ? 'open' : ''}">
@@ -913,29 +905,20 @@ function connectionKind(c: ConnectionSummary): ConnKind {
 // The fix affordances an issue row can carry: compact buttons stacked under
 // the issue text. A fix names the action ("Fix settings", "Reconnect…"),
 // never the remedy in prose — the message stays diagnosis-only so it reads
-// the same in the banner, the tooltip, and the panel. A card carries only
-// its targeted fix; the retry is the panel status row's Test button.
+// the same in the banner, the tooltip, and the panel.
 const fixBtn = (act: string, id: string, label: string, primary = false): string =>
   `<button class="btn ${primary ? 'primary' : 'outline'} sm cat-meta-fix" data-act="${act}" data-id="${id}">${label}</button>`;
 /** Open the connection editor — the fix for a TLS/cert mismatch. */
 const editFix = (c: ConnectionSummary): string => fixBtn('edit-conn', c.id, 'Fix settings', true);
+/** Re-run the connection's own check from inside an attention card. */
+const testFix = (c: ConnectionSummary, running: boolean): string =>
+  `<button class="btn outline sm cat-meta-fix" data-act="${c.mcp_path ? 'mcp-status' : 'test-conn'}"
+    data-id="${c.id}" ${running ? 'disabled' : ''}>Test</button>`;
 
 // One row inside an expanded catalog entry. It spans the full card width and
 // carries enough to identify the connection without opening it: who is signed
 // in (accounts differ between connections; the server rarely does), where it
 // points, which tools agents get, and which credential the broker injects.
-/** Plain-words headlines for the failure kinds the broker can name (branch
- * on kind, never on the detail text). The broker's detail stays the body
- * under the headline; kinds without one render their detail alone. */
-const FAILURE_HEADLINES: Partial<Record<TestErrorKind, string>> = {
-  unreachable: 'Couldn’t reach the server',
-  tls_declined: 'Couldn’t connect securely',
-  cert_unverified: 'Couldn’t verify the server',
-  needs_password: 'A password is needed',
-  auth_rejected: 'Couldn’t sign in',
-  timeout: 'The server didn’t answer in time',
-};
-
 /** Everything wrong with a connection, folded into the one list the
  * health indicator owns. TLS weaker than the default, an unpinned host
  * key, a passively recorded rejected credential (brokered calls and
@@ -944,8 +927,8 @@ const FAILURE_HEADLINES: Partial<Record<TestErrorKind, string>> = {
  * line in the expansion, with its fix actions stacked below it. One verdict per
  * row: a failed check moves the indicator, it never sits beside a green
  * one. */
-function connectionIssues(c: ConnectionSummary): Array<{ title?: string; text: string; fix?: string }> {
-  const issues: Array<{ title?: string; text: string; fix?: string }> = [];
+function connectionIssues(c: ConnectionSummary): Array<{ text: string; fix?: string }> {
+  const issues: Array<{ text: string; fix?: string }> = [];
   if (c.type === 'pg' && c.sslmode && c.sslmode !== 'verify-full' && !isLoopbackHost(c.host)) {
     issues.push({
       text: c.sslmode === 'disable'
@@ -991,15 +974,14 @@ function connectionIssues(c: ConnectionSummary): Array<{ title?: string; text: s
     // A fresh test carries a failure kind; when it's one the connection
     // editor could plausibly fix — a wrong host, port, credential, or TLS
     // expectation — the card leads with Fix settings. 'other' and the
-    // passively-recorded (kindless) verdict carry no fix of their own; the
-    // status row's Test button is the retry in every state.
+    // passively-recorded (kindless) verdict carry no targeted fix of their
+    // own; the panel adds its Test action to the final attention card.
     const kind = fresh && !fresh.ok ? fresh.kind : undefined;
     const fixable = !c.mcp_path && kind !== undefined && kind !== 'other';
     issues.push({
-      title: kind ? FAILURE_HEADLINES[kind] : undefined,
       // The broker's TLS diagnosis is protocol-speak ("refused to start TLS",
-      // the sslmode by name); under its headline the body says the same
-      // thing in the user's words. Every other kind keeps the broker's detail.
+      // the sslmode by name), so its body says the same thing in the user's
+      // words. Every other kind keeps the broker's detail.
       text: kind === 'tls_declined'
         ? 'This server doesn’t offer encrypted connections, but this connection requires them.'
         : failure,
@@ -1048,42 +1030,37 @@ function connDetailHTML(c: ConnectionSummary): string {
   const running = c.mcp_path
     ? Boolean(mcpStatus && mcpStatus.running)
     : Boolean(test && test.running);
-  // The ⋯ menu owns only the address lifecycle; testing lives in the
-  // status row, visible in every state.
+  // The ⋯ menu owns connection management first, then the address lifecycle;
+  // testing lives in the status row or, when attention is needed, inside the
+  // attention card.
   const endpointItems = enabled && c.agent_access.endpoint
-    ? `<button class="menu-item" role="menuitem" data-act="reissue-endpoint-ask" data-conn="${c.id}">${ICONS.refresh} Get a new address…</button>
-        <button class="menu-item danger" role="menuitem" data-act="revoke-endpoint-ask" data-conn="${c.id}">${ICONS.x} Revoke address…</button>`
+    ? `<div class="menu-divider" role="separator"></div>
+        <button class="menu-item" role="menuitem" data-act="reissue-endpoint-ask" data-conn="${c.id}">${ICONS.refresh} Get a new direct connection…</button>
+        <button class="menu-item danger" role="menuitem" data-act="revoke-endpoint-ask" data-conn="${c.id}">${ICONS.x} Revoke direct connection</button>`
     : '';
   const issues = connectionIssues(c);
-  // The status row under the header: the verdict pill (the row dot's
-  // vocabulary, written down), when that verdict was reached, and the Test
-  // action — health has one home, in every state. The stamp is the fresh
-  // test/check completion when one ran this session, else the broker's
-  // recorded check time; relative on screen, absolute in the tooltip.
-  const checkedAt = (c.mcp_path
-    ? (mcpStatus && !mcpStatus.running ? mcpStatus.at : undefined)
-    : (test && !test.running ? test.at : undefined)) ?? c.last_checked_at;
+  // The status row under the header carries healthy, off, and running states.
+  // An attention card already communicates a failed state, so it replaces
+  // this entire row and carries the Test action itself.
   const statusPill = !enabled
     ? '<span class="cd-pill off">Off</span>'
     : running
     ? '<span class="cd-pill run">Testing…</span>'
-    : issues.length
-    ? `<span class="cd-pill warn">${ICONS.triangleAlert}<span>Attention</span></span>`
     : `<span class="cd-pill ok">${ICONS.check}<span>Ready</span></span>`;
-  const statusRow = `<div class="cd-status">
+  const statusRow = enabled && issues.length ? '' : `<div class="cd-status">
       ${statusPill}
-      <span class="cd-status-meta">${checkedAt
-        ? `Checked <span data-tippy-content="${escAttr(absTime(checkedAt))}">${esc(relTime(checkedAt))}</span>`
-        : 'Never checked'}</span>
       <button class="btn sm cd-test" data-act="${c.mcp_path ? 'mcp-status' : 'test-conn'}"
         data-id="${c.id}" ${running ? 'disabled' : ''}>Test</button>
     </div>`;
   const issuesBlock = enabled && issues.length
-    ? `<div class="cc-issues">${issues.map((issue) =>
-        `<div class="cc-issue">${ICONS.triangleAlert}<div class="cc-issue-body">${
-          issue.title ? `<div class="cc-issue-title">${esc(issue.title)}</div>` : ''
-        }<span>${esc(issue.text)}</span>${
-          issue.fix ? `<div class="cc-issue-fixes">${issue.fix}</div>` : ''}</div></div>`).join('')}</div>`
+    ? `<div class="cc-issues">${issues.map((issue, index) =>
+        `<div class="cc-issue">${ICONS.triangleAlert}<div class="cc-issue-body">
+          <span>${esc(issue.text)}</span>${
+          issue.fix || index === issues.length - 1
+            ? `<div class="cc-issue-fixes">${issue.fix ?? ''}${
+                index === issues.length - 1 ? testFix(c, running) : ''
+              }</div>`
+            : ''}</div></div>`).join('')}</div>`
     : '';
   // What pointing a client at the endpoint means, said once, per kind.
   // Keyed on the user-facing kind, not the internal transport: a tool that
@@ -1127,7 +1104,7 @@ function connDetailHTML(c: ConnectionSummary): string {
   // speaks in the connect headline's sentence-case register — the panel
   // has one voice, no tracked-caps machinery labels.
   const mcpSection = enabled && c.mcp_path
-    ? `<div class="cd-sec"><div class="cd-connect-lbl">${ICONS.blocks}<span>Available tools</span><span class="cd-lbl-aside">${connectionToolsChipHTML(c)}</span></div>
+    ? `<div class="cd-sec"><div class="cd-connect-lbl">${ICONS.chevronsLeftRightEllipsis}<span>Connect to MCP</span><span class="cd-lbl-aside">${connectionToolsChipHTML(c)}</span></div>
         ${ENDPOINTABLE[c.type] ? `<div class="cd-help cd-connect-subhead">${endpointHelp}</div>
           ${endpointStripHTML(c)}` : ''}</div>`
     : '';
@@ -1187,16 +1164,16 @@ function connDetailHTML(c: ConnectionSummary): string {
       <div class="cd-title"><b title="${escAttr(c.name)}">${esc(connectionRowName(c))}</b>
         <span title="${escAttr(c.target)}">${esc(c.target)}</span></div>
       <div class="cd-actions">
-        <button class="icon-btn" title="Edit ${escAttr(connectionRowName(c))}"
-          aria-label="Edit ${escAttr(c.name)}" data-act="edit-conn" data-id="${c.id}">${ICONS.pencil}</button>
-        ${endpointItems ? `<div class="tile-menu-wrap">
+        <div class="tile-menu-wrap">
           <button class="icon-btn tile-menu-btn ${menuOpen ? 'on' : ''}" title="Tool options"
             aria-label="Options for ${escAttr(c.name)}" aria-haspopup="menu"
             aria-expanded="${menuOpen}" data-act="toggle-conn-menu" data-id="${c.id}">${ICONS.ellipsis}</button>
           ${menuOpen ? `<div class="tile-menu" role="menu" aria-label="Options for ${escAttr(c.name)}">
+            <button class="menu-item" role="menuitem" data-act="edit-conn" data-id="${c.id}">${ICONS.pencil} Edit tool</button>
+            <button class="menu-item danger" role="menuitem" data-act="del-conn-ask" data-id="${c.id}">${ICONS.trash} Delete tool</button>
             ${endpointItems}
           </div>` : ''}
-        </div>` : ''}
+        </div>
       </div>
     </div>
     ${statusRow}${issuesBlock}${connTestResultHTML(c)}${offNote}${c.mcp_path
@@ -1387,7 +1364,6 @@ function flatConnRowHTML(c: ConnectionSummary, reorderable = false): string {
       ${live ? `<span class="cc-live">● ${live} live</span>` : ''}
       <div class="cat-conn-status">${flatHealthHTML(c)}</div>
       ${connToggleHTML(c)}
-      <span class="cat-chev flat-conn-chev" aria-hidden="true">${ICONS.chevronRight}</span>
     </div></div>`;
 }
 
@@ -1672,41 +1648,16 @@ async function receiveActivity(entry: ActivityEntry | null | undefined): Promise
   render();
 }
 
-/** The right-aligned status on a step-2 pane. One vocabulary for every mode:
- * "Connected · <when>" once the broker has seen a call, "Waiting for first
- * call" before that, and "No address yet" for a direct pane pre-issue. */
-function startModeStatusHTML(mode: ConnectModeId, conn: ConnectionSummary | null): string {
-  const idle = (text: string) =>
-    `<span class="start-status idle"><span class="start-status-dot"></span>${text}</span>`;
-  let seenAt: string | undefined;
-  if (mode === 'direct') {
-    if (!conn?.agent_access.endpoint) return idle('No address yet');
-    seenAt = state.activity.find(
-      (entry) => entry.agent === 'endpoint' && entry.connection === conn.name)?.at;
-  } else {
-    // Each client claims its own activity labels; self-named clients (Other
-    // MCP client, HTTP API harnesses) match any label no branded client claims.
-    const client = connectClientById(mode);
-    seenAt = client
-      ? recentClients().find((recent) => clientMatchesLabel(client, recent.name))?.at
-      : undefined;
-  }
-  return seenAt
-    ? `<span class="start-status"><span class="start-status-dot"></span>Connected · ${esc(relTime(seenAt))}</span>`
-    : idle('Waiting for first call');
-}
-
-/** Step 2's pane for one connect mode: a one-line lead, the snippet, and an
- * actions row with the status pinned right. */
+/** Step 2's pane for one connect mode: a one-line lead, the snippet, and its
+ * action row. */
 function startConnectPaneHTML(mode: ConnectModeId, option: StartOption, progress: StartProgress): string {
   const conn = progress.toolName
     ? state.connections.find((candidate) => candidate.name === progress.toolName) ?? null
     : null;
-  const status = startModeStatusHTML(mode, conn);
   const snip = (text: string) => `<pre class="setup-instructions"><code>${esc(text)}</code></pre>`;
   const copyBtn = (text: string, label: string) =>
     `<button class="btn primary sm" data-act="copy-text" data-text="${escAttr(text)}">${label}</button>`;
-  const actions = (inner: string) => `<div class="start-actions">${inner}${status}</div>`;
+  const actions = (inner: string) => `<div class="start-actions">${inner}</div>`;
 
   switch (mode) {
     case 'direct': {
@@ -1727,10 +1678,10 @@ function startConnectPaneHTML(mode: ConnectModeId, option: StartOption, progress
       }
       // The address itself is the deliverable: the same field as the
       // tool's row. Getting a new one / revoking stay in that row's ⋯ menu.
-      const lead = `“${esc(conn.name)}” has a connection address. ${conn.type === 'pg'
-        ? 'Copy copies the full address, secret included — get a new secret from the tool’s row anytime.'
-        : 'Its socket path was shown when created — get a new one from the tool’s row.'}`;
-      return `<p>${lead}</p>${endpointStripHTML(conn)}`;
+      const lead = conn.type === 'pg'
+        ? 'Connect directly to this database via Multitool.'
+        : 'Connect directly to this remote server via Multitool.';
+      return `<p>${lead}</p>${endpointStripHTML(conn, true)}`;
     }
   }
 
@@ -1743,12 +1694,22 @@ function startConnectPaneHTML(mode: ConnectModeId, option: StartOption, progress
       <pre class="setup-instructions"><code>${esc(state.agentSetupInstructions || 'Loading…')}</code></pre>
       ${actions(`<button class="btn primary sm" data-act="copy-agent-setup">${client.copyLabel}</button>`)}`;
   }
-  const snippet = client.snippet(env);
+  const clientSnippet = client.snippet(env);
+  if (client.requiresCli && !client.inlineCliInstall) {
+    return `<p>Install the Multitool CLI:</p>
+      ${snip(CLI_INSTALL_COMMAND)}
+      <p class="start-pane-next">${esc(client.lead(env))}</p>
+      ${snip(clientSnippet)}
+      ${actions(copyBtn(clientSnippet, client.copyLabel))}`;
+  }
+  const snippet = client.inlineCliInstall
+    ? `${CLI_INSTALL_COMMAND}\n${clientSnippet}`
+    : clientSnippet;
   return `<p>${esc(client.lead(env))}</p>
     ${snip(snippet)}${actions(copyBtn(snippet, client.copyLabel))}`;
 }
 
-// The centered walkthrough/guides switch at the top of the Get started tab.
+// The centered walkthrough/guides switch directly under the page heading.
 function startViewToggleHTML(): string {
   const btn = (view: StartView, label: string) =>
     `<button class="seg-btn ${state.startView === view ? 'on' : ''}"
@@ -1761,14 +1722,17 @@ function startHTML(): string {
   const body = state.startView === 'guides'
     ? connectGuidesHTML()
     : startWalkthroughHTML();
-  return `<div class="start">${startViewToggleHTML()}${body}</div>`;
+  return `<div class="start">
+    <div class="start-hero"><h3>Connect your agent to tools and services</h3></div>
+    ${startViewToggleHTML()}
+    <div class="start-view-body">${body}</div>
+  </div>`;
 }
 
 function startWalkthroughHTML(): string {
   const option = startOptionById(state.startOption);
   const catalogEntry = option.catalogId ? catalogEntryById(option.catalogId) : undefined;
-  const agentConnected = state.activity.some((entry) => entry.text.startsWith('Agent connected'));
-  const progress = startProgress(option, state.connections, agentConnected);
+  const progress = startProgress(option, state.connections);
 
   const picker = START_OPTIONS.map((candidate) => {
     const visibleLabel = candidate.showPickerLabel
@@ -1792,8 +1756,7 @@ function startWalkthroughHTML(): string {
   const optionKind = startKindLabel(option);
   const optionName = optionKind ? `${option.label} ${optionKind}` : option.label;
   const addLabel = progress.added ? `${optionName} Connected` : `Add ${optionName}`;
-  const addBody = `<p>Save the destination and its credential. The credential goes to your Keychain;
-        agents can use it but never read it.</p>
+  const addBody = `<p>Multitool supports databases, SSH, APIs, and MCPs.</p>
       <div class="start-picker" role="group" aria-label="What to connect">${picker}</div>
       <div class="start-actions">
         <button class="btn primary sm" data-act="${addAction}" data-id="${option.catalogId}"
@@ -1814,22 +1777,39 @@ function startWalkthroughHTML(): string {
   const directConn = progress.toolName
     ? state.connections.find((candidate) => candidate.name === progress.toolName) ?? null
     : null;
+  const directEndpoint = directConn?.agent_access.endpoint ?? null;
+  const directAddress = directConn && directEndpoint
+    ? directEndpointAddress(
+        directConn.type,
+        directEndpoint,
+        state.identity?.socket_path ?? '~/.aka/broker.sock',
+      )
+    : null;
   const task = connectMode === 'direct'
-    ? directStartTask(option, progress, directConn?.agent_access.endpoint)
+    ? directStartTask(
+        option,
+        progress,
+        directEndpoint
+          ? {
+              ...directEndpoint,
+              dsn: directAddress,
+              sshInvocation: directConn?.type === 'ssh'
+                ? sshInvocationCommand(directConn)
+                : null,
+            }
+          : null,
+      )
     : startTask(option, progress);
   const wireBody = `<p>Tools are enabled for all agents when you add them.</p>
     <pre class="setup-instructions"><code>${esc(task)}</code></pre>
     <div class="start-actions">
-      <button class="btn primary sm" data-act="copy-text" data-text="${escAttr(task)}">Copy this task</button>
+      <button class="btn primary sm" data-act="copy-text" data-text="${escAttr(task)}">Copy</button>
       <button class="btn ghost sm" data-act="open-connect-guides">Open connection guides</button>
     </div>`;
 
-  return `<div class="start-hero">
-      <h3>Connect your agent to everything</h3>
-    </div>
-    <ol class="start-steps">
+  return `<ol class="start-steps">
       ${step(1, 'Select a tool to connect', progress.added, addBody)}
-      ${step(2, 'Connect your agent', progress.connected, connectBody)}
+      ${step(2, 'Connect your agent', false, connectBody)}
       ${step(3, 'Ask for something useful', progress.wired, wireBody)}
     </ol>`;
 }
@@ -1898,7 +1878,7 @@ function brokerSwitchHTML(): string {
         <button class="menu-item" role="menuitem" data-act="broker-pick-local">
           <span class="broker-check">${state.broker.mode === 'local' ? '✓' : ''}</span> Local</button>
         <button class="menu-item" role="menuitem" data-act="broker-pick-remote">
-          <span class="broker-check">${state.broker.mode === 'remote' ? '✓' : ''}</span> Connect hosted instance…</button>
+          <span class="broker-check">${state.broker.mode === 'remote' ? '✓' : ''}</span> Connect remote…</button>
       </div>`
     : '';
   return `<div class="broker-switch-wrap">
@@ -2274,7 +2254,7 @@ function endpointConfirmHTML(): string {
     <div class="sheet wide confirm-sheet" role="dialog" aria-modal="true" aria-labelledby="ep-confirm-title">
       <h3 id="ep-confirm-title">${reissue ? 'Get a new address?' : 'Revoke this address?'}</h3>
       <p>${reissue
-        ? 'You’ll get a new secret to paste into your tools. The current secret stops working the moment the new one is issued.'
+        ? 'You’ll get a new address to paste into your tools. The current address stops working the moment the new one is issued.'
         : `Tools using ${esc(name)}’s address lose access immediately.`}</p>
       <div class="sheet-actions">
         <button class="btn" data-act="confirm-cancel">Cancel</button>
@@ -3000,8 +2980,6 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
         <CustomSelect id="f-sslmode" options={PG_SSL_OPTIONS} selectedValue={sslmode}
           errCls={fieldCls('sslmode')} />
         <FieldError k="sslmode" />
-        {sslmode === 'require'
-          ? <div className="pair-identity-warning">The server certificate will not be verified.</div> : null}
       </div>,
     );
     pgTlsFields = (
@@ -3611,10 +3589,10 @@ async function runConnectionTest(id: string): Promise<void> {
   try {
     const report = await invoke('test_connection', { id });
     if (!brokerEpochIsCurrent(epoch)) return;
-    state.connTests[id] = { running: false, ok: report.ok, detail: report.detail, kind: report.kind, at: new Date().toISOString() };
+    state.connTests[id] = { running: false, ok: report.ok, detail: report.detail, kind: report.kind };
   } catch (error) {
     if (!brokerEpochIsCurrent(epoch)) return;
-    state.connTests[id] = { running: false, ok: false, detail: errorMessage(error), at: new Date().toISOString() };
+    state.connTests[id] = { running: false, ok: false, detail: errorMessage(error) };
   }
   render();
 }
@@ -4332,10 +4310,19 @@ document.addEventListener('click', async (e) => {
     }
     case 'copy-endpoint-dsn': {
       const conn = state.connections.find((candidate) => candidate.id === btn.dataset.conn);
-      const dsn = conn?.agent_access.endpoint?.dsn;
-      if (conn && dsn) {
+      const address = conn
+        ? directEndpointAddress(
+            conn.type,
+            conn.agent_access.endpoint,
+            state.identity?.socket_path ?? '~/.aka/broker.sock',
+          )
+        : null;
+      if (conn && address) {
         try {
-          await navigator.clipboard.writeText(dsn);
+          await navigator.clipboard.writeText(
+            btn.dataset.text
+              ?? (conn.type === 'ssh' ? sshAuthSockCommand(address) : address),
+          );
           flashCopied(`ep:${conn.id}`);
         } catch {
           toast('⚠ Copy failed — select the text and copy it manually');
@@ -4702,10 +4689,10 @@ document.addEventListener('click', async (e) => {
           },
         });
         if (!brokerEpochIsCurrent(epoch)) break;
-        state.mcpStatus[id] = { running: false, report, at: new Date().toISOString() };
+        state.mcpStatus[id] = { running: false, report };
       } catch (error) {
         if (!brokerEpochIsCurrent(epoch)) break;
-        state.mcpStatus[id] = { running: false, error: errorMessage(error), at: new Date().toISOString() };
+        state.mcpStatus[id] = { running: false, error: errorMessage(error) };
       }
       // The check can update the stored account acknowledgment.
       await load('connections', 'list_connections');

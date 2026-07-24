@@ -2,16 +2,20 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  CLAUDE_DESKTOP_CONFIG_PATH,
+  CLAUDE_DESKTOP_CONFIG_PATH, CLI_INSTALL_COMMAND,
   CONNECT_CLIENTS,
   CONNECT_MODE_LABELS,
   START_OPTIONS,
   clientMatchesLabel,
-  connectClientById,
+  connectClientById, connectGuideSteps,
   connectModesFor,
+  directEndpointAddress,
   directStartTask,
   firstTaskPrompt,
   resolveConnectMode,
+  sshAuthSockCommand,
+  sshDirectCommand,
+  sshInvocationCommand,
   startKindLabel,
   startOptionById,
   startProgress,
@@ -63,28 +67,22 @@ test('the picker omits Custom API and keeps labeled Custom MCP last', () => {
   assert.equal(START_OPTIONS.filter((option) => option.showPickerLabel).length, 1);
 });
 
-test('progress tracks add, connect, and enable independently', () => {
+test('progress tracks added and enabled tools independently', () => {
   const option = startOptionById('postgres');
 
-  const empty = startProgress(option, [], false);
-  assert.deepEqual(
-    [empty.added, empty.connected, empty.wired],
-    [false, false, false],
-  );
+  const empty = startProgress(option, []);
+  assert.deepEqual([empty.added, empty.wired], [false, false]);
 
-  const added = startProgress(option, [conn('pg', 'prod-db')], false);
-  assert.deepEqual([added.added, added.connected, added.wired], [true, false, false]);
+  const added = startProgress(option, [conn('pg', 'prod-db')]);
+  assert.deepEqual([added.added, added.wired], [true, false]);
   assert.equal(added.toolName, 'prod-db');
 
-  const connected = startProgress(option, [conn('pg', 'prod-db')], true);
-  assert.deepEqual([connected.added, connected.connected, connected.wired], [true, true, false]);
-
-  const enabled = startProgress(option, [conn('pg', 'prod-db', true)], true);
+  const enabled = startProgress(option, [conn('pg', 'prod-db', true)]);
   assert.ok(enabled.wired);
 });
 
 test('a tool of another type does not count toward this option', () => {
-  const progress = startProgress(startOptionById('postgres'), [conn('ssh', 'prod-ssh')], false);
+  const progress = startProgress(startOptionById('postgres'), [conn('ssh', 'prod-ssh')]);
   assert.equal(progress.added, false);
   assert.equal(progress.toolName, null);
 });
@@ -93,7 +91,6 @@ test('the example names an enabled tool when there is one', () => {
   const progress = startProgress(
     startOptionById('postgres'),
     [conn('pg', 'scratch'), conn('pg', 'prod-db', true)],
-    true,
   );
   assert.equal(progress.toolName, 'prod-db');
 });
@@ -104,24 +101,87 @@ test('the ready nudge and the walkthrough resolve to the same first task', () =>
   for (const type of ['pg', 'ssh'] as const) {
     const option = START_OPTIONS.find((o) => o.connType === type && !o.mcp);
     assert.ok(option, `an option exists for ${type}`);
-    assert.equal(firstTaskPrompt('prod', type), `Using my Multitool tool "prod", ${option!.taskBody}`);
+    assert.equal(firstTaskPrompt('prod', type), `Using my Multitool connection "prod", ${option!.taskBody}`);
   }
 });
 
 test('the direct-mode task leads with the endpoint, secret included', () => {
   const postgres = startOptionById('postgres');
-  const progress = startProgress(postgres, [], false);
+  const progress = startProgress(postgres, []);
   const dsn = 'postgresql://app:end_s3cret@/app?host=~/.aka/endpoints/e1&port=5432';
   const withDsn = directStartTask(postgres, progress, { dsn });
-  assert.ok(withDsn.startsWith(`Connect with this Postgres DSN (secret included): ${dsn}`));
+  assert.ok(withDsn.startsWith(`Connect to this Postgres DSN: ${dsn}`));
+  assert.match(withDsn, /\n\nThen list the 10 largest tables/);
   assert.match(withDsn, /10 largest tables/);
-  // SSH endpoints retain no DSN — the lead points at the agent socket.
+  // SSH carries its stable socket into the copied task as a runnable export.
   const ssh = startOptionById('ssh');
-  const socket = directStartTask(ssh, startProgress(ssh, [], false), { dsn: null });
-  assert.match(socket, /^Connect with the SSH agent socket/);
-  assert.match(socket, /SSH_AUTH_SOCK/);
+  const authSock = '/Users/test/.aka/endpoints/e1/agent.sock';
+  const socket = directStartTask(ssh, startProgress(ssh, []), {
+    dsn: authSock,
+    sshInvocation: 'ssh deploy@prod.example.com',
+  });
+  assert.equal(
+    socket,
+    `Use this SSH agent socket: SSH_AUTH_SOCK="${authSock}"\nSSH to the server with ssh deploy@prod.example.com, then report disk and memory usage, then show the last 20 lines of any log that contains errors.`,
+  );
+  assert.equal(socket.split('\n').length, 2);
   // No endpoint issued yet: fall back to the tool-name prompt.
   assert.equal(directStartTask(postgres, progress, null), startTask(postgres, progress));
+});
+
+test('SSH_AUTH_SOCK commands quote shell-sensitive socket paths', () => {
+  assert.equal(
+    sshAuthSockCommand('/Users/test/$work/"agent".sock'),
+    'export SSH_AUTH_SOCK="/Users/test/\\$work/\\"agent\\".sock"',
+  );
+});
+
+test('direct SSH commands combine the socket with the configured destination', () => {
+  assert.equal(
+    sshInvocationCommand({
+      destination: null,
+      user: 'deploy',
+      host: 'prod.example.com',
+      port: 2222,
+      target: 'deploy@prod.example.com:2222',
+    }),
+    'ssh -p 2222 deploy@prod.example.com',
+  );
+  assert.equal(
+    sshDirectCommand('/tmp/agent.sock', {
+      destination: 'production',
+      user: 'deploy',
+      host: 'prod.example.com',
+      port: 2222,
+      target: 'deploy@prod.example.com:2222',
+    }),
+    'SSH_AUTH_SOCK="/tmp/agent.sock" ssh production',
+  );
+  assert.equal(
+    sshDirectCommand('/tmp/agent.sock', {
+      destination: null,
+      user: 'deploy',
+      host: 'prod.example.com',
+      port: 2222,
+      target: 'deploy@prod.example.com:2222',
+    }),
+    'SSH_AUTH_SOCK="/tmp/agent.sock" ssh -p 2222 deploy@prod.example.com',
+  );
+});
+
+test('older SSH endpoint summaries derive their stable agent socket', () => {
+  assert.equal(
+    directEndpointAddress(
+      'ssh',
+      { endpoint_id: 'endpoint-1', dsn: null },
+      '/Users/test/.aka/broker.sock',
+    ),
+    '/Users/test/.aka/endpoints/endpoint-1/agent.sock',
+  );
+  assert.equal(
+    directEndpointAddress('pg', { endpoint_id: 'endpoint-1', dsn: null }, '~/.aka/broker.sock'),
+    null,
+  );
 });
 
 test('an unenumerated type (ws) gets a generic read-only first task', () => {
@@ -132,7 +192,7 @@ test('an unenumerated type (ws) gets a generic read-only first task', () => {
 
 test('the task reads sensibly before any tool exists', () => {
   const option = startOptionById('ssh');
-  const task = startTask(option, startProgress(option, [], false));
+  const task = startTask(option, startProgress(option, []));
   assert.match(task, /my-tool/);
   assert.match(task, /disk and memory/);
 });
@@ -140,12 +200,12 @@ test('the task reads sensibly before any tool exists', () => {
 test('the MCP option is not satisfied by a plain API connection', () => {
   const mcp = startOptionById('mcp');
   const plainApi = conn('api', 'billing-api');
-  assert.equal(startProgress(mcp, [plainApi], false).added, false);
+  assert.equal(startProgress(mcp, [plainApi]).added, false);
 
   const server = {
     ...conn('api', 'custom'), host: 'mcp.internal.example.com', mcp_path: '/mcp',
   };
-  assert.equal(startProgress(mcp, [server], false).added, true);
+  assert.equal(startProgress(mcp, [server]).added, true);
 });
 
 test('Direct is offered first, and only for kinds with a direct endpoint', () => {
@@ -211,6 +271,32 @@ test('every shared-key mode renders from a client definition; direct has none', 
   assert.equal(CONNECT_MODE_LABELS.cli, 'Anything else (HTTP API)');
 });
 
+test('stdio connection guides and quick-start clients require the separate CLI', () => {
+  const requiringCli = CONNECT_CLIENTS.filter((client) => client.requiresCli);
+  assert.deepEqual(
+    requiringCli.map((client) => client.id),
+    ['claude-code', 'claude-desktop', 'codex'],
+  );
+  assert.equal(connectClientById('claude-code')!.inlineCliInstall, true);
+  assert.match(
+    connectClientById('claude-code')!.steps(ENV)[1].followup ?? '',
+    /Working over the raw API/,
+  );
+  assert.equal(connectClientById('claude-code')!.note, undefined);
+  assert.equal(connectClientById('claude-desktop')!.inlineCliInstall, undefined);
+  assert.equal(connectClientById('codex')!.inlineCliInstall, undefined);
+  for (const client of requiringCli) {
+    const [install, ...steps] = connectGuideSteps(client, ENV);
+    assert.equal(install.title, 'Install the Multitool CLI', client.id);
+    assert.equal(install.snippet, CLI_INSTALL_COMMAND, client.id);
+    assert.deepEqual(steps, client.steps(ENV), client.id);
+  }
+  assert.match(
+    connectClientById('mcp')!.steps(ENV)[1].detail ?? '',
+    /After installing the Multitool CLI/,
+  );
+});
+
 test('activity labels attribute to the right client', () => {
   const codex = connectClientById('codex')!;
   const claudeCode = connectClientById('claude-code')!;
@@ -233,7 +319,7 @@ test('the Claude Desktop lead names the config path for each platform', () => {
     assert.ok(path.length, platform);
     const env = { ...ENV, platform };
     assert.ok(claudeDesktop.lead(env).includes(path), platform);
-    assert.ok(claudeDesktop.steps(env)[0].detail.includes(path), platform);
+    assert.ok(claudeDesktop.steps(env)[0].detail?.includes(path), platform);
   }
 });
 
@@ -258,6 +344,6 @@ test('a branded option is satisfied only by its own connection', () => {
   const githubServer = {
     ...conn('api', 'GitHub'), host: 'api.githubcopilot.com', mcp_path: '/mcp',
   };
-  assert.equal(startProgress(notion, [githubServer], false).added, false);
-  assert.equal(startProgress(notion, [notionServer], false).added, true);
+  assert.equal(startProgress(notion, [githubServer]).added, false);
+  assert.equal(startProgress(notion, [notionServer]).added, true);
 });

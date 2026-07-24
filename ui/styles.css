@@ -168,14 +168,14 @@
   /* ---- main window layout ---------------------------------------------- */
 .dw-body{ flex: 1; display: flex; min-height: 0; }
 .dw-side{
-  flex: 0 0 176px; display: flex; flex-direction: column;
+  flex: 0 0 156px; display: flex; flex-direction: column;
   padding: 14px 10px 10px;
   border-right: 1px solid var(--line);
   background: var(--wash);
   -webkit-user-select: none; user-select: none;
 }
 @media (max-width: 800px) {
-  .dw-side { flex-basis: 136px; }
+  .dw-side { flex-basis: 116px; }
 }
   .dw-brand{ display: flex; align-items: center; gap: 9px; padding: 2px 4px 14px; }
   .dw-brand .dd-title{ font-size: 14.5px; }
@@ -354,7 +354,10 @@
      stays at the window edge. Its page content retains the narrower centered
      measure shared with the header. The 8px right inset plus the reserved
      8px scrollbar track matches the header's 16px right inset. */
-  .dw-main .content{ padding: 0 8px 28px 24px; }
+  .dw-main .content{
+  container-type: size;
+  padding: 0 8px 0 24px;
+}
   .dw-main .content > *{
   width: min(100%, calc(var(--content-max) - 32px));
   margin-left: auto; margin-right: auto;
@@ -418,13 +421,15 @@
   /* The Get started tab: a centered column so the walkthrough reads as a
      document rather than a dashboard. */
   .start{ max-width: 620px; margin: 0 auto; padding: 20px 0 24px; }
-  /* Centered walkthrough/guides switch above the hero. */
-  .start-view-toggle{ display: flex; justify-content: center; margin-bottom: 18px; }
-  .start-view-toggle .seg{ display: inline-flex; margin: 0; }
-  .start-view-toggle .seg-btn{ flex: none; padding: 5px 16px; }
   .start-hero{ text-align: center; }
   .start-hero h3{ font-size: 19px; }
-  .start-hero > p{ margin-top: 5px; color: var(--muted); font-size: 13px; }
+  /* The view switch follows the shared heading; both views begin on the
+     same content line below it. */
+  .start-view-toggle{ display: flex; justify-content: center; margin-top: 14px; }
+  .start-view-toggle .seg{ display: inline-flex; margin: 0; }
+  .start-view-toggle .seg-btn{ flex: none; padding: 5px 16px; }
+  .start-view-body{ margin-top: 18px; }
+  .start-view-body > .agent-block:first-child{ margin-top: 0; }
   /* Small toggle row: which tool the walkthrough is written for. */
   .start-picker{ display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
   .start-pick{
@@ -438,7 +443,7 @@
   .start-pick-icon svg{ width: 16px; height: 16px; }
   .start-pick:hover{ background: var(--btn-hover); }
   .start-pick.on{ border-color: var(--accent); background: var(--accent-wash); color: var(--accent-ink); }
-  .start-steps{ margin: 18px 0 0; padding: 0; list-style: none; }
+  .start-steps{ margin: 0; padding: 0; list-style: none; }
   .start-step{ display: flex; gap: 12px; padding: 14px 0; border-top: 1px solid var(--line); }
   .start-num{
     display: flex; align-items: center; justify-content: center; flex: 0 0 auto;
@@ -449,16 +454,9 @@
   .start-body > b:first-child{ display: block; font-size: 14px; }
   .start-body p{ margin-top: 4px; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
   .start-body > b:first-child + p{ margin-top: 3px; }
+  .start-body > .start-picker + p{ margin-top: 10px; }
   .start-actions{ display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 9px; }
-  /* Per-mode connection status, pinned to the right edge of the actions row
-   * so it stays put while switching modes. */
-  .start-status{
-    display: inline-flex; align-items: center; gap: 6px; margin-left: auto;
-    color: var(--ok-ink); font-size: 12px; font-weight: 600; text-align: right;
-  }
-  .start-status-dot{ width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
-  .start-status.idle{ color: var(--muted); }
-  .start-status.idle .start-status-dot{ opacity: .5; }
+  .start-body .start-pane-next{ margin-top: 16px; color: var(--muted); }
   .start .setup-instructions{ margin-top: 9px; }
   /* The paste-ready setup message shown in the agent card. */
   .setup-instructions{
@@ -555,7 +553,8 @@
   .act-row{ display: flex; gap: 9px; align-items: flex-start; padding: 8px 2px; font-size: 13px; }
   .act-gutter{ flex: 0 0 56px; font-size: 12px; line-height: 18px; color: var(--muted-2); }
   .act-time{ display: inline-block; }
-  .tippy-box[data-theme~='activity-time']{ font-size: 12px; line-height: 1.3; }
+  /* Tooltips speak in the app's caption size, not Tippy's 14px default. */
+  .tippy-box{ font-size: 12px; line-height: 1.3; }
   .tippy-box[data-theme~='activity-time'] .tippy-content{ padding: 3px 6px; }
   .act-ico{ flex: 0 0 18px; width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center; color: var(--muted-2); }
   .act-ico svg{ width: 15px; height: 15px; stroke-width: 1.8; }
@@ -591,6 +590,7 @@
   background: var(--panel); border: 1px solid var(--line-mid); border-radius: 9px;
   box-shadow: 0 10px 28px rgba(10,15,40,.22);
 }
+.menu-divider{ height: 1px; margin: 4px 6px; background: var(--line-soft); }
   .menu-item:disabled{ opacity: .5; cursor: default; }
   .menu-item:disabled:hover{ background: transparent; }
   /* delete-confirm state of a tile: same object, danger dress, Cancel/Delete */
@@ -995,7 +995,7 @@
 .group-chev.open { transform: rotate(180deg); }
 .flat-conn-row {
   display: flex; align-items: center; gap: 12px;
-  padding: 11px 11px 11px 14px; min-width: 0; cursor: pointer;
+  padding: 11px 13px 11px 14px; min-width: 0; cursor: pointer;
 }
 .flat-conn-row:hover { background: var(--hover); }
 .flat-conn-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
@@ -1007,8 +1007,7 @@
   font-size: 12px; text-overflow: ellipsis; white-space: nowrap;
 }
 .flat-conn-row .cat-conn-status { margin-top: 0; }
-/* The row's open-details affordance; the selected row carries the accent. */
-.flat-conn-chev { flex: 0 0 auto; margin-left: -2px; color: var(--muted-2); }
+/* The selected row carries the detail pane's accent. */
 .flat-conn-wrap.sel { background: var(--accent-wash); box-shadow: inset 2px 0 0 var(--accent); }
 
 /* ---- drag-to-reorder (Tools list) ------------------------------------- */
@@ -1017,7 +1016,7 @@
    is persisted on the broker, so it survives restarts and every window. */
 .flat-conn-wrap.reorderable { display: flex; align-items: stretch; }
 .flat-conn-wrap.reorderable .flat-conn-row {
-  flex: 1 1 auto; min-width: 0; padding-left: 12px;
+  flex: 1 1 auto; min-width: 0; padding-left: 6px;
 }
 .flat-conn-grip {
   display: inline-flex; align-items: center; justify-content: center;
@@ -1047,12 +1046,16 @@
    lives in the detail panel. Wide windows show the panel as a second,
    sticky column; narrow ones (the media query below — keep in step with
    NARROW_LAYOUT in app.tsx) show the same panel as a slide-over. */
-.tools-split { display: flex; gap: 14px; align-items: flex-start; }
+.tools-split {
+  display: flex; gap: 14px; align-items: flex-start; padding-bottom: 7px;
+}
 .tools-list { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 18px; }
 .conn-detail-pane {
+  --cd-gutter-x: 16px;
   flex: 0 0 clamp(280px, 38%, 380px);
   position: sticky; top: 0;
   height: fit-content; max-height: calc(100vh - 130px); overflow-y: auto;
+  height: calc(100cqh - 7px); max-height: calc(100cqh - 7px);
   padding: 14px 16px 14px;
   border: 1px solid var(--line); border-radius: 12px;
   background: var(--card-bg); box-shadow: 0 1px 3px rgba(20,24,50,.06);
@@ -1060,6 +1063,7 @@
 .cd-head { display: flex; align-items: flex-start; gap: 10px; }
 .cd-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
 .cd-actions .icon-btn, .cd-actions .tile-menu-wrap { flex: 0 0 auto; }
+.cd-actions .tile-menu { min-width: 250px; }
 .cd-actions .icon-btn {
   display: inline-flex; align-items: center; justify-content: center;
   width: 24px; height: 24px; padding: 0;
@@ -1072,11 +1076,16 @@
   font-size: 12px; text-overflow: ellipsis; white-space: nowrap;
 }
 .cd-sec {
+  position: relative;
   margin-top: 16px; padding-top: 16px;
+}
+.cd-sec::before {
+  content: ''; position: absolute; top: 0;
+  left: calc(-1 * var(--cd-gutter-x)); right: calc(-1 * var(--cd-gutter-x));
   border-top: 1px solid var(--line-soft);
 }
 /* Every section headline in the panel speaks to the user in sentence case
-   and the text ink — "Connect to this database", "Available tools",
+   and the text ink — "Connect to this database", "Connect to MCP",
    "Details" — one register, no tracked-caps machinery labels. */
 .cd-connect-lbl {
   display: flex; align-items: center; gap: 7px; margin-bottom: 3px;
@@ -1089,20 +1098,18 @@
 .cd-help { margin-top: 7px; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .cd-connect-subhead { margin: 0 0 10px; line-height: 1.25; }
 .cd-off-note { margin-top: 12px; }
-/* The panel's status row: the verdict pill (the row dot's vocabulary,
-   written down), when it was last checked, and the Test action — health
-   has one visible home in every state. */
+/* The panel's healthy/off/running row: verdict and Test.
+   Attention cards replace it when a problem is shown. */
 .cd-status { display: flex; align-items: center; gap: 9px; margin-top: 12px; }
 .cd-pill {
   display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto;
+  transform: translateY(1px);
   padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 650;
 }
 .cd-pill svg { width: 11px; height: 11px; flex: 0 0 auto; }
 .cd-pill.ok { color: var(--ok-ink); background: var(--ok-wash); }
-.cd-pill.warn { color: var(--amber-ink); background: var(--amber-wash); }
 .cd-pill.off, .cd-pill.run { color: var(--muted); background: var(--wash-2); }
-.cd-status-meta { flex: 1; min-width: 0; color: var(--muted-2); font-size: 11.5px; }
-.cd-status .cd-test { flex: 0 0 auto; }
+.cd-status .cd-test { flex: 0 0 auto; margin-left: auto; }
 /* The Details card: the target's parts spelled out as label–value rows.
    Values are mono and wrap; labels stay put. */
 .cd-facts {
@@ -1132,13 +1139,14 @@
      sheets (z 8/9) opened from the panel (issue endpoint, the tool
      picker, confirms) must cover it. */
   .conn-detail-pane {
+    --cd-gutter-x: 18px;
     display: none;
     position: fixed; top: 0; right: 0; bottom: 0; z-index: 7;
     width: min(400px, 92vw); height: auto; max-height: none;
     border: none; border-left: 1px solid var(--line); border-radius: 0;
     background: var(--panel);
     box-shadow: -16px 0 40px rgba(10,15,40,.28);
-    padding: 16px 18px;
+    padding: 16px 18px 8px;
   }
   .catalog.detail-open .conn-detail-pane { display: block; animation: cd-slide .2s ease; }
   .catalog.detail-open .conn-detail-backdrop {
@@ -1174,20 +1182,20 @@
   background: var(--amber-wash);
   border-left: 3px solid var(--amber-strong);
   border-radius: 9px;
-  font-size: 12px; color: var(--amber-ink); line-height: 1.5;
+  font-size: 12px; color: var(--amber-ink); line-height: 1.35;
 }
 .cc-issue > svg { flex: 0 0 auto; margin-top: 2px; color: var(--amber-strong); }
 .cc-issue-body {
   display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
   min-width: 0;
 }
-.cc-issue-title { color: var(--ink); font-size: 12.5px; font-weight: 600; }
 /* Fixes sit under the message, not beside it: a wrapping row of compact
    buttons (the targeted fix, then the retry). */
 .cc-issue-fixes { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; }
 /* The attention card carries its own weight — a section hairline right
    under it would double the separation, so the next section drops it. */
-.cc-issues + .cd-sec { border-top: 0; padding-top: 0; }
+.cc-issues + .cd-sec { padding-top: 0; }
+.cc-issues + .cd-sec::before { display: none; }
 .cat-conns .sec-table { margin: 0; }
 /* Credential rows share the darker card surface of their "Saved
    credentials" parent row. */
@@ -1352,6 +1360,7 @@
 .connect-step-bd{ flex: 1; min-width: 0; }
 .connect-step-bd b{ font-size: 13px; font-weight: 600; }
 .connect-step-d{ font-size: 12.5px; color: var(--muted); margin-top: 1px; line-height: 1.5; }
+.connect-step-followup{ margin-top: 8px; }
 .connect-snip{ position: relative; margin-top: 8px; background: var(--wash-2);
   border: 1px solid var(--line); border-radius: 7px; padding: 9px 12px; overflow-x: auto; }
 .connect-snip pre{ margin: 0; }
@@ -1407,22 +1416,23 @@
    stay behind the row's options menu. */
 .ep-strip{ display: flex; align-items: center; gap: 8px; margin-top: 9px; }
 .ep-strip .ep-field{
-  flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px;
-  padding: 6px 6px 6px 11px;
+  flex: 1; min-width: 0; display: flex; flex-direction: column;
+  align-items: stretch; gap: 8px;
+  padding: 9px 6px 10px 11px;
   background: var(--field-bg); border: 1px solid var(--line); border-radius: 9px;
 }
-/* The address never truncates — it wraps, at its own punctuation: the
+/* The complete DSN never truncates — it wraps at its own punctuation. The
    markup carries <wbr> after separators (breakableAddress), so break-word
    only fires mid-identifier when a single segment outgrows the line. */
 .ep-strip .ep-field .ep-addr{
   flex: 1; min-width: 0; overflow-wrap: break-word;
   color: var(--ink-2); font-size: 12px; line-height: 1.35;
 }
-/* Reserve the wider feedback label up front so Copy → Copied never
-   reflows the address or changes the control's footprint. */
+/* Copy sits below the DSN so the address gets the field's full width.
+   Reserve the wider feedback label so Copy → Copied keeps a steady size. */
 .ep-strip .ep-field .ep-copy{
-  flex: 0 0 76px; display: inline-flex; align-items: center;
-  justify-content: center; gap: 5px; width: 76px; margin-right: 3px; white-space: nowrap;
+  align-self: flex-start; flex: 0 0 auto; display: inline-flex; align-items: center;
+  justify-content: center; gap: 5px; width: 76px; white-space: nowrap;
 }
 .ep-strip .ep-field .ep-copy svg{ width: 14px; height: 14px; }
 .ep-strip .ep-addr-hidden{ color: var(--muted); font-size: 12px; }

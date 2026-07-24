@@ -701,6 +701,12 @@ async fn direct_endpoint_serves_the_ssh_agent_protocol() {
     // The ssh-agent protocol has no password, so an SSH endpoint carries no
     // presented secret: the socket path is the whole capability.
     assert!(info.secret.is_empty());
+    let conn = h.broker.store.connection_by_name("prod-ssh").unwrap();
+    let chip = aka_core::manage::connection_dto(&h.broker, &conn)
+        .agent_access
+        .endpoint
+        .expect("issued SSH endpoint appears in connection summary");
+    assert_eq!(chip.dsn.as_deref(), Some(info.dsn.as_str()));
 
     let key_blob = key.public_key().to_bytes().unwrap();
     let host_blob = host_key.public_key().to_bytes().unwrap();

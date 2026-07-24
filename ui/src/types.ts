@@ -20,10 +20,9 @@ export interface AgentAccess {
   allowed_tools?: string[] | null;
   /**
    * The direct endpoint issued for this connection, if any. Its presence
-   * flips the row's control from "Issue" to "Reissue / Revoke". Never
-   * carries the secret — that leaves the broker once, at issue. `dsn` is the
-   * pasteable, non-secret address; absent for SSH, whose socket path is the
-   * whole capability.
+   * flips the row's control from "Issue" to "Reissue / Revoke". `dsn` is the
+   * pasteable address (including the retained Postgres endpoint credential)
+   * or, for SSH, the stable agent-socket path.
    */
   endpoint?: { endpoint_id: string; type: ConnectionType; dsn?: string | null } | null;
 }

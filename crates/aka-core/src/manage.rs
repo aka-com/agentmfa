@@ -109,6 +109,14 @@ pub fn connection_dto(broker: &Broker, conn: &Connection) -> ConnectionDto {
                     dbname,
                     (!e.secret.is_empty()).then_some(e.secret.as_str()),
                 )),
+                Ssh { .. } => Some(
+                    broker
+                        .paths
+                        .endpoint_dir(&e.id)
+                        .join(crate::capability::ssh::ENDPOINT_SOCK)
+                        .display()
+                        .to_string(),
+                ),
                 Api { .. } => e
                     .port
                     .map(|port| format!("http://{}:{port}", broker.advertise_host())),
@@ -279,7 +287,15 @@ fn issued_endpoint_dto(info: IssuedEndpointInfo) -> IssuedEndpointDto {
 /// broker reached over its Unix socket.
 pub fn agent_setup_instructions(socket: &str, token_path: &str) -> String {
     format!(
-        "Connect to the local Multitool broker. Read its current instructions, then list the available connections:\n\ncurl -fsS --unix-socket {socket} http://localhost/instructions\n\nAuthenticate with this computer's shared key — read it from {token_path} and send it as `Authorization: Bearer <key>`."
+        concat!(
+            "Connect to the local Multitool broker. Read its current instructions, ",
+            "then list the available connections:\n\n",
+            "curl -fsS --unix-socket {socket} \\\n",
+            "  -H \"Authorization: Bearer $(cat {token_path})\" \\\n",
+            "  http://localhost/instructions"
+        ),
+        socket = socket,
+        token_path = token_path,
     )
 }
 

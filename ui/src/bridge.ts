@@ -78,7 +78,13 @@ const MOCK_ACTIVITY_META = {
   inputProvided: { icon: 'circleCheck', tone: 'success' },
   inputRefused: { icon: 'circleX', tone: 'danger' },
 };
-const MOCK_AGENT_SETUP = "Connect to the local Multitool broker. Read its current instructions, then list the available connections:\n\ncurl -fsS --unix-socket ~/.aka/broker.sock http://localhost/instructions\n\nAuthenticate with this computer's shared key — read it from ~/.aka/token and send it as `Authorization: Bearer <key>`.";
+const MOCK_AGENT_SETUP = [
+  'Connect to the local Multitool broker. Read its current instructions, then list the available connections:',
+  '',
+  'curl -fsS --unix-socket ~/.aka/broker.sock \\',
+  '  -H "Authorization: Bearer $(cat ~/.aka/token)" \\',
+  '  http://localhost/instructions',
+].join('\n');
 function emit<K extends EventName>(event: K, payload: EventMap[K]): void {
   (listeners[event] || []).forEach((callback) => callback({ event, payload }));
 }
@@ -867,9 +873,9 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         dsn = 'http://127.0.0.1:52000';
         example = `curl -H "Authorization: Bearer ${secret}" ${dsn}/<path>`;
       }
-      // The retained secret rides in the chip's DSN (null for SSH, whose
-      // socket path is the whole capability).
-      record.endpoint = { endpoint_id: endpointId, type: kind, dsn: kind === 'ssh' ? null : dsn };
+      // Postgres retains its credential in the DSN; SSH retains the stable
+      // socket path so the setup command remains copyable after issue.
+      record.endpoint = { endpoint_id: endpointId, type: kind, dsn };
       audit('wired', `Direct endpoint issued: ${connection.name}`);
       emit('aka://wirings-changed', {});
       return { endpoint_id: endpointId, type: kind, dsn, secret: shownSecret, example };
