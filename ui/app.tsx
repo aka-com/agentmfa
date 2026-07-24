@@ -1297,16 +1297,24 @@ function isMcpDraft(draft: { isMcp?: boolean; mcpPath?: string | null }): boolea
 // to grow, so it collapses the same way as the larger sections.
 const COLLAPSIBLE_SECTIONS: string[] = ['MCP Apps', 'API Apps'];
 
-function connectionsHTML() {
+// The "<tool> is ready" banner shown after adding a tool. Rendered by
+// connectionsHTML in the wide window; the dropdown hoists it above its
+// inline search (see TabContent), so it keeps topping the tab either way.
+function connectionReadyCardHTML(): string {
   const ready = state.connectionReady;
-  const readyPrompt = ready ? firstTaskPrompt(ready.name, ready.type) : '';
-  const readyCard = ready ? `<div class="connection-ready">
+  if (!ready) return '';
+  const readyPrompt = firstTaskPrompt(ready.name, ready.type);
+  return `<div class="connection-ready">
     <div class="connection-ready-copy"><b>${esc(ready.name)} is ready</b>
       <span>Ask your agent:</span><code>${esc(readyPrompt)}</code></div>
     <div class="connection-ready-actions">
       <button class="btn sm" data-act="copy-first-task">${state.connectionTaskCopied ? `${ICONS.check} Copied` : 'Copy task'}</button>
       <button class="icon-btn" title="Dismiss" aria-label="Dismiss tool ready message" data-act="dismiss-connection-ready">${ICONS.circleX}</button>
-    </div></div>` : '';
+    </div></div>`;
+}
+
+function connectionsHTML(withReadyCard = true) {
+  const readyCard = withReadyCard ? connectionReadyCardHTML() : '';
   // One view, no navigation: the connected tools stay at the top as flat
   // rows, and an "Add a tool" row at the bottom of the list expands the
   // catalog of everything not yet connected, in place, beneath it.
@@ -1733,19 +1741,22 @@ function DropdownCatalogSearch({ kind }: { kind: 'tool' | 'secret' }): ReactNode
 
 function TabContent(): ReactNode {
   if (state.tab === 'activity') return <ActivityView />;
-  const markup = state.tab === 'start' ? startHTML()
-    : state.tab === 'connections' ? connectionsHTML()
-    : secretsHTML();
   // The dropdown puts its catalog search inline above the list; the wide
-  // window has it in the header instead (see MainWindow).
+  // window has it in the header instead (see MainWindow). The ready card
+  // stays above the search, where the one-markup-blob layout had it.
   if (mode === 'dropdown' && (state.tab === 'connections' || state.tab === 'secrets')) {
+    const isTools = state.tab === 'connections';
     return (
       <>
-        <DropdownCatalogSearch kind={state.tab === 'connections' ? 'tool' : 'secret'} />
-        <SafeMarkup markup={markup} />
+        {isTools && <SafeMarkup markup={connectionReadyCardHTML()} />}
+        <DropdownCatalogSearch kind={isTools ? 'tool' : 'secret'} />
+        <SafeMarkup markup={isTools ? connectionsHTML(false) : secretsHTML()} />
       </>
     );
   }
+  const markup = state.tab === 'start' ? startHTML()
+    : state.tab === 'connections' ? connectionsHTML()
+    : secretsHTML();
   return <SafeMarkup markup={markup} />;
 }
 
@@ -2007,9 +2018,9 @@ function DropdownWindow(): ReactNode {
  *
  * The returned HTML is sanitized, parsed into React elements, and reconciled
  * in place by React—never assigned to innerHTML, never remounted wholesale.
- * Forms live in controlled TSX components, not here; the few inputs still
- * crossing this boundary (the elicitation dialog's fields) are uncontrolled
- * and only ever user-written. Elements carrying an id or data-id are keyed
+ * Forms live in controlled TSX components, not here; no form inputs cross
+ * this boundary today (the input/textarea branch below is a safety net that
+ * keeps any future one uncontrolled). Elements carrying an id or data-id are keyed
  * on it, so list reorders move DOM instead of re-pairing it positionally.
  * New screens should be ordinary TSX components.
  */
@@ -2779,6 +2790,7 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
         <label htmlFor="f-origin">MCP server URL</label>
         <input id="f-origin" className={fieldCls('origin')} placeholder="https://mcp.example.com/mcp"
           value={url} readOnly={managedMcpOAuth}
+          aria-readonly={managedMcpOAuth ? 'true' : undefined}
           onChange={(e) => setDraftField('origin', 'origin', e.currentTarget.value)} />
         <FieldError k="origin" />
         {managedMcpOAuth
@@ -3889,6 +3901,9 @@ function closeSheet() {
   state.wiringTools = null;
   setSheet(null);
   state.draft = {};
+  // The elicitation dialog's answers may include secrets; they must not
+  // outlive the dialog that collected them.
+  state.elicitValues = {};
   state.sheetErrors = {};
   state.sheetBaseline = null;
   state.confirmDiscard = false;
@@ -4658,9 +4673,10 @@ document.addEventListener('click', async (e) => {
 
     // SEP-2322 elicitation (DESIGN MOCK, see ELICITATION.md): the queue row
     // opens the dialog; answering or refusing there resumes the paused
-    // upstream call broker-side. Values are read from the DOM at click time
-    // and handed straight to the command — they are never mirrored into
-    // state, so a re-render cannot repaint them.
+    // upstream call broker-side. The dialog's fields are controlled, held in
+    // state.elicitValues for the dialog's lifetime only — seeded empty here,
+    // cleared again by closeSheet so answers (possibly secrets) don't
+    // outlive the dialog.
     case 'elicit-open': {
       state.elicitValues = {};
       setSheet({ kind: 'elicitation', id });
@@ -4887,9 +4903,11 @@ document.addEventListener('keydown', (e) => {
   // open (a modal sheet keeps focus).
   if (e.key === 'Tab' && e.ctrlKey && !state.sheet) {
     e.preventDefault();
-    const i = TABS.indexOf(state.tab);
-    const n = TABS.length;
-    state.tab = TABS[(i + (e.shiftKey ? -1 : 1) + n) % n];
+    // The dropdown has no Get started tab; cycle only the tabs it shows.
+    const ring: readonly Tab[] = mode === 'dropdown' ? DROPDOWN_TABS : TABS;
+    const i = ring.indexOf(state.tab);
+    const n = ring.length;
+    state.tab = ring[(i + (e.shiftKey ? -1 : 1) + n) % n];
     state.menuOpen = false;
     state.connDetailOpen = false;
     render();
