@@ -194,7 +194,7 @@
      while the primary setup/navigation destinations stay grouped at the top.
      The compact vertical rail keeps its existing uninterrupted tab order. */
   @media (min-width: 721px) {
-    .dw-nav .nav-item[data-tab="activity"]{ margin-top: auto; }
+    .dw-nav .nav-item[data-tab="activity"]{ margin-top: auto; margin-bottom: 4px; }
   }
   /* Below the narrow breakpoint (keep in step with NARROW_LAYOUT in app.tsx)
      the left bar turns sideways: it collapses to a slim rail and each menu

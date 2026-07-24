@@ -67,6 +67,10 @@ pub fn setup_dropdown_panel(app: &AppHandle) -> tauri::Result<()> {
     let panel = window.to_panel::<AkaDropdownPanel>()?;
     let style = panel.as_panel().styleMask() | NSWindowStyleMask::NonactivatingPanel;
     panel.set_style_mask(style);
+    // The panel frame is rectangular even though the web surface is rounded.
+    // Its native shadow therefore sticks past the lower CSS corners; the
+    // surface supplies its own radius-aware shadow instead.
+    panel.set_has_shadow(false);
     panel.set_floating_panel(true);
     panel.set_becomes_key_only_if_needed(true);
     panel.set_hides_on_deactivate(false);

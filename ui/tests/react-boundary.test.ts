@@ -149,7 +149,7 @@ test('Activity Log sits above the normal sidebar footer', async () => {
 
   assert.match(
     styles,
-    /@media \(min-width: 721px\) \{[\s\S]*?\.dw-nav \.nav-item\[data-tab="activity"\]\s*\{\s*margin-top: auto;/,
+    /@media \(min-width: 721px\) \{[\s\S]*?\.dw-nav \.nav-item\[data-tab="activity"\]\s*\{\s*margin-top: auto;\s*margin-bottom: 4px;/,
   );
 });
 
