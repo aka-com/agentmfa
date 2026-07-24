@@ -11,6 +11,8 @@ dist/
 src-tauri/entitlements.signed.plist
 src-tauri/tauri.build.conf.json
 
+*.provisionprofile
+
 .env
 .DS_Store
 .claude/

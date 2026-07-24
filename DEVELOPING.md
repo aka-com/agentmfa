@@ -84,6 +84,9 @@ What that means while developing:
   ID from `APPLE_TEAM_ID` or off the signing identity's name. It refuses to
   build if it cannot resolve one; `AGENTMFA_NO_KEYCHAIN_ENTITLEMENT=1` opts
   out and accepts the prompts.
+- `scripts/build.sh` loads signing settings from the ignored repository
+  `.env` when it exists. Variables explicitly exported by the caller take
+  precedence, so CI and one-off command-line overrides still work.
 - Items written by earlier builds are in the login keychain. They migrate on
   first read: copied across, original deleted. Each one may prompt once more
   on the way, and never again.

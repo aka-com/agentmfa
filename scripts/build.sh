@@ -35,6 +35,34 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
 repo_root="$(cd "$script_dir/.." >/dev/null && pwd)"
 cd "$repo_root"
 
+# Load ignored, machine-local build settings when present. Preserve variables
+# the caller explicitly exported so CI and one-off command-line overrides take
+# precedence over .env. `set -a` makes ordinary NAME=value entries available
+# to the programs this script launches.
+if [[ -f "$repo_root/.env" ]]; then
+  inherited_names=()
+  inherited_values=()
+  while IFS= read -r name; do
+    inherited_names+=("$name")
+    inherited_values+=("${!name}")
+  done < <(compgen -e)
+
+  set -a
+  # shellcheck disable=SC1091
+  source "$repo_root/.env"
+  set +a
+
+  for ((i = 0; i < ${#inherited_names[@]}; i++)); do
+    export "${inherited_names[$i]}=${inherited_values[$i]}"
+  done
+  unset inherited_names inherited_values name i
+fi
+
+# build.sh deliberately signs but does not notarize. Do not let credentials
+# loaded from .env activate Tauri's separate automatic notarization path;
+# release.sh owns submission and stapling.
+unset APPLE_ID APPLE_PASSWORD APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_PATH
+
 # The sidecar bundle rides along as a Tauri resource, and the pinned Node it
 # runs on is an externalBin. Both must exist before the bundler looks for
 # them, or the build fails late with a missing-file error.
