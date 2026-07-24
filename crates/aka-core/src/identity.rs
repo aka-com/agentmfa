@@ -355,7 +355,12 @@ impl IdentityStore {
     /// Whether a management token has been issued (the manage API is closed
     /// until one exists).
     pub fn manage_token_issued(&self) -> bool {
-        self.state.lock().unwrap().identity.manage_token_hash.is_some()
+        self.state
+            .lock()
+            .unwrap()
+            .identity
+            .manage_token_hash
+            .is_some()
     }
 
     /// Issue (or rotate) the management token with no expiry, returning its
@@ -802,7 +807,10 @@ mod tests {
         let (s, _dir) = store(Duration::from_secs(3600));
         // Closed until issued; the agent key never opens the manage plane.
         assert!(!s.manage_token_issued());
-        assert_eq!(s.verify_manage(&s.token()).unwrap_err(), TokenError::Invalid);
+        assert_eq!(
+            s.verify_manage(&s.token()).unwrap_err(),
+            TokenError::Invalid
+        );
 
         let manage = s.issue_manage_token().unwrap();
         assert!(manage.starts_with("akamgr_"));
@@ -881,7 +889,8 @@ mod tests {
             integrity,
         )
         .unwrap();
-        s.verify_manage(&token).expect("live TTL token survives reopen");
+        s.verify_manage(&token)
+            .expect("live TTL token survives reopen");
         assert!(s.manage_token_expires_at().unwrap() > Utc::now());
     }
 

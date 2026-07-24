@@ -467,8 +467,7 @@ mod tests {
 
         // With an advertised host, WS/PG are reachable and only SSH stays
         // host-local.
-        let text =
-            remote_instructions_banner(Some("https://b.example.dev"), Some("broker.lan"));
+        let text = remote_instructions_banner(Some("https://b.example.dev"), Some("broker.lan"));
         assert!(text.contains("`broker.lan`"), "{text}");
         assert!(!text.contains("broker-host-local addresses"));
         assert!(text.contains("SSH opens"), "{text}");

@@ -37,41 +37,80 @@ pub enum ConnectionField {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum ManageError {
-    SecretNameTaken { name: String },
-    ConnectionNameTaken { name: String },
-    ConnectionTargetTaken { name: String },
+    SecretNameTaken {
+        name: String,
+    },
+    ConnectionNameTaken {
+        name: String,
+    },
+    ConnectionTargetTaken {
+        name: String,
+    },
     SecretNotFound,
     ConnectionNotFound,
     ApprovalConnectionChanged,
-    SecretInUse { connections: Vec<String> },
-    InvalidSecretName { name: String },
-    InvalidConnectionName { name: String },
-    Template { message: String },
-    UnknownTemplateRef { name: String },
-    WrongSecretCount { kind: String },
-    InvalidConnectionConfig { message: String },
-    InvalidSetting { message: String },
-    InvalidConnectionField { field: ConnectionField, message: String },
+    SecretInUse {
+        connections: Vec<String>,
+    },
+    InvalidSecretName {
+        name: String,
+    },
+    InvalidConnectionName {
+        name: String,
+    },
+    Template {
+        message: String,
+    },
+    UnknownTemplateRef {
+        name: String,
+    },
+    WrongSecretCount {
+        kind: String,
+    },
+    InvalidConnectionConfig {
+        message: String,
+    },
+    InvalidSetting {
+        message: String,
+    },
+    InvalidConnectionField {
+        field: ConnectionField,
+        message: String,
+    },
     KindChange,
     EndpointNotFound,
-    EndpointLimit { max: usize },
+    EndpointLimit {
+        max: usize,
+    },
     EndpointRequiresWiring,
-    EndpointUnsupportedKind { kind: String },
+    EndpointUnsupportedKind {
+        kind: String,
+    },
     SecretReadNotAuthenticated,
     NotConfirmed,
-    OAuth { message: String },
-    Vault { message: String },
+    OAuth {
+        message: String,
+    },
+    Vault {
+        message: String,
+    },
     /// The management feature exists but this backend cannot perform it —
     /// e.g. OAuth sign-in against a remote broker before the relay ships.
-    RemoteUnsupported { feature: String },
+    RemoteUnsupported {
+        feature: String,
+    },
     /// The remote broker rejected the management token (revoked or
     /// rotated). Local backends never produce this.
     InvalidManageToken,
     /// The remote broker could not be reached (or answered outside the
     /// protocol). Local backends never produce this.
-    Unreachable { message: String },
+    Unreachable {
+        message: String,
+    },
     /// Everything without a field mapping (I/O, corrupt state, internals).
-    Internal { message: String },
+    Internal {
+        message: String,
+    },
 }
 
 impl std::fmt::Display for ManageError {
@@ -353,13 +392,20 @@ pub enum ManageEvent {
     AgentsChanged,
     WiringsChanged,
     ConnectionsChanged,
-    ActivityAppended { entry: ActivityDto },
+    ActivityAppended {
+        entry: ActivityDto,
+    },
     /// The activity log was cleared (as opposed to appended to).
     ActivityCleared,
     /// An MCP sign-in flow progressed; the payload is the core's
     /// `McpAuthState` serialization, passed through opaquely.
-    McpAuthChanged { state: serde_json::Value },
-    ConnectRequested { agent: String, service: String },
+    McpAuthChanged {
+        state: serde_json::Value,
+    },
+    ConnectRequested {
+        agent: String,
+        service: String,
+    },
     /// The event stream dropped notifications (a slow consumer): refetch
     /// everything instead of trusting incremental updates.
     Resync,

@@ -302,9 +302,8 @@ pub fn master_key_from_env() -> Option<Result<Zeroizing<[u8; 32]>, CoreError>> {
 }
 
 fn load_master_key_file(path: &Path) -> Result<Zeroizing<[u8; 32]>, CoreError> {
-    let raw = std::fs::read(path).map_err(|e| {
-        CoreError::Vault(format!("could not read {} ({e})", path.display()))
-    })?;
+    let raw = std::fs::read(path)
+        .map_err(|e| CoreError::Vault(format!("could not read {} ({e})", path.display())))?;
     // 32 raw bytes are taken as the key directly; anything else is parsed as
     // text (a hex/base64 line, trailing newline tolerated).
     if raw.len() == 32 {
@@ -372,8 +371,7 @@ impl EncryptedFileVault {
 
     fn encrypt(&self, id: &Uuid, value: &SecretValue) -> Result<EncryptedVaultItem, CoreError> {
         let mut nonce = [0u8; 24];
-        getrandom::fill(&mut nonce)
-            .map_err(|e| CoreError::Vault(format!("nonce entropy: {e}")))?;
+        getrandom::fill(&mut nonce).map_err(|e| CoreError::Vault(format!("nonce entropy: {e}")))?;
         let ciphertext = self
             .cipher
             .encrypt(
@@ -410,7 +408,9 @@ impl EncryptedFileVault {
                     aad: id.as_bytes(),
                 },
             )
-            .map_err(|_| CoreError::Vault("vault decryption failed (wrong key or tampered)".into()))?;
+            .map_err(|_| {
+                CoreError::Vault("vault decryption failed (wrong key or tampered)".into())
+            })?;
         String::from_utf8(plaintext)
             .map(Zeroizing::new)
             .map_err(|_| CoreError::Vault("decrypted vault value is not valid UTF-8".into()))
@@ -439,7 +439,11 @@ impl SecretVault for EncryptedFileVault {
     async fn get(&self, id: &Uuid) -> Result<SecretValue, CoreError> {
         let item = {
             let state = self.state.lock().unwrap();
-            state.items.get(id).cloned().ok_or(CoreError::SecretNotFound)?
+            state
+                .items
+                .get(id)
+                .cloned()
+                .ok_or(CoreError::SecretNotFound)?
         };
         self.decrypt(id, &item)
     }
@@ -668,7 +672,10 @@ mod tests {
 
         // The plaintext never touches the file; the name (non-secret) does.
         let on_disk = std::fs::read_to_string(&path).unwrap();
-        assert!(!on_disk.contains("s3cr3t-value"), "value is encrypted at rest");
+        assert!(
+            !on_disk.contains("s3cr3t-value"),
+            "value is encrypted at rest"
+        );
         assert!(on_disk.contains("API_KEY"), "attrs stay in the clear");
 
         // It survives reopen with the same key.

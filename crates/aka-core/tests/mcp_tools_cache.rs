@@ -44,7 +44,8 @@ async fn mock_mcp() -> MockMcp {
             let flag = flag.clone();
             async move {
                 if !flag.load(Ordering::SeqCst) {
-                    return (axum::http::StatusCode::UNAUTHORIZED, axum::Json(json!({}))); // credential rejected
+                    return (axum::http::StatusCode::UNAUTHORIZED, axum::Json(json!({})));
+                    // credential rejected
                 }
                 let id = body.0.get("id").cloned().unwrap_or(Value::Null);
                 let method = body.0.get("method").and_then(Value::as_str).unwrap_or("");

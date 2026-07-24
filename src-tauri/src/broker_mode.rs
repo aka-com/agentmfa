@@ -125,9 +125,8 @@ pub fn saved_remote(data_dir: &Path) -> Option<String> {
 impl BrokerState {
     /// Construct for local mode with an already-started local runtime.
     pub fn new_local(data_dir: PathBuf, runtime: LocalRuntime) -> Self {
-        let backend: Arc<dyn ManagementBackend> = Arc::new(
-            aka_core::manage::LocalBackend::new(runtime.broker.clone()),
-        );
+        let backend: Arc<dyn ManagementBackend> =
+            Arc::new(aka_core::manage::LocalBackend::new(runtime.broker.clone()));
         Self {
             backend: RwLock::new(backend),
             local: Mutex::new(Some(runtime)),
@@ -151,11 +150,11 @@ impl BrokerState {
         let token = tokens
             .load(&url)
             .unwrap_or_else(|| zeroize::Zeroizing::new("akamgr_unconfigured".into()));
-        let config = RemoteConfig::new(&url, &token)
-            .unwrap_or_else(|_| RemoteConfig::new("http://127.0.0.1:1", "akamgr_unconfigured").expect("static config"));
+        let config = RemoteConfig::new(&url, &token).unwrap_or_else(|_| {
+            RemoteConfig::new("http://127.0.0.1:1", "akamgr_unconfigured").expect("static config")
+        });
         let backend: Arc<dyn ManagementBackend> = Arc::new(
-            RemoteBackend::new(config)
-                .with_opener(Arc::new(crate::events::open_consent_url)),
+            RemoteBackend::new(config).with_opener(Arc::new(crate::events::open_consent_url)),
         );
         Self {
             backend: RwLock::new(backend),
@@ -252,14 +251,10 @@ impl BrokerState {
         let config = RemoteConfig::new(&url, &token)?;
         let url = config.base_url();
         let backend = Arc::new(
-            RemoteBackend::new(config)
-                .with_opener(Arc::new(crate::events::open_consent_url)),
+            RemoteBackend::new(config).with_opener(Arc::new(crate::events::open_consent_url)),
         );
         let epoch = self.begin_transition();
-        backend
-            .whoami()
-            .await
-            .map_err(|error| error.to_string())?;
+        backend.whoami().await.map_err(|error| error.to_string())?;
 
         // The probe succeeded: persist, swap, and (re)arm the link — unless
         // another transition began while the probe was in flight (the user
@@ -337,7 +332,9 @@ impl BrokerState {
     /// from the profile either way.
     pub fn start_saved_remote(self: Arc<Self>, app: AppHandle) {
         tauri::async_runtime::spawn(async move {
-            let Some(url) = self.profile().url else { return };
+            let Some(url) = self.profile().url else {
+                return;
+            };
             match self.connect_remote(&app, url, None).await {
                 Ok(_) => {}
                 // A superseded attempt lost to a user-initiated transition
@@ -367,12 +364,11 @@ impl BrokerState {
         // holds the instance lock, say), the remote link must stay armed so
         // the user still has a working mode to stand on.
         let handle = app.clone();
-        let runtime = tauri::async_runtime::spawn_blocking(move || {
-            crate::start_local_runtime(&handle)
-        })
-        .await
-        .map_err(|error| format!("local broker start stopped: {error}"))?
-        .map_err(|error| error.to_string())?;
+        let runtime =
+            tauri::async_runtime::spawn_blocking(move || crate::start_local_runtime(&handle))
+                .await
+                .map_err(|error| format!("local broker start stopped: {error}"))?
+                .map_err(|error| error.to_string())?;
         // Commit under the transition lock; `runtime` stays in the slot
         // when the commit is refused so it can be dropped off-thread below
         // (the guard must not be held across an await).
@@ -382,9 +378,8 @@ impl BrokerState {
                 Some(_commit) => {
                     self.teardown_remote();
                     let started = runtime.take().expect("freshly started runtime");
-                    let backend: Arc<dyn ManagementBackend> = Arc::new(
-                        aka_core::manage::LocalBackend::new(started.broker.clone()),
-                    );
+                    let backend: Arc<dyn ManagementBackend> =
+                        Arc::new(aka_core::manage::LocalBackend::new(started.broker.clone()));
                     *self.local.lock().unwrap() = Some(started);
                     *self.backend.write().unwrap() = backend;
                     save_config(
@@ -408,8 +403,7 @@ impl BrokerState {
                 // drop the fresh runtime off the async thread (dropping a
                 // tokio runtime in async context panics) and apply nothing.
                 if let Some(started) = runtime.take() {
-                    let _ =
-                        tauri::async_runtime::spawn_blocking(move || drop(started)).await;
+                    let _ = tauri::async_runtime::spawn_blocking(move || drop(started)).await;
                 }
                 Err(TRANSITION_SUPERSEDED.into())
             }

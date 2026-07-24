@@ -18,7 +18,9 @@ use crate::RemoteBackend;
 pub enum LinkState {
     Connected,
     /// Not connected; retrying with backoff. The message names the cause.
-    Disconnected { message: String },
+    Disconnected {
+        message: String,
+    },
 }
 
 /// Minimum/maximum reconnect backoff.

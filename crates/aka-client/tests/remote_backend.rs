@@ -105,9 +105,11 @@ async fn the_remote_backend_manages_a_tcp_broker_end_to_end() {
     let id = connections[0].id.parse().unwrap();
 
     assert!(backend.set_tool_access(id, false).await.unwrap());
-    assert!(!backend.list_connections().await.unwrap()[0]
-        .agent_access
-        .enabled);
+    assert!(
+        !backend.list_connections().await.unwrap()[0]
+            .agent_access
+            .enabled
+    );
 
     // Structured errors survive the wire.
     let error = backend
@@ -155,9 +157,7 @@ async fn bad_tokens_and_dead_brokers_map_to_distinct_errors() {
         ManageError::InvalidManageToken
     );
 
-    let dead = RemoteBackend::new(
-        RemoteConfig::new("http://127.0.0.1:9", "akamgr_x").unwrap(),
-    );
+    let dead = RemoteBackend::new(RemoteConfig::new("http://127.0.0.1:9", "akamgr_x").unwrap());
     assert!(matches!(
         dead.list_secrets().await.unwrap_err(),
         ManageError::Unreachable { .. }
@@ -193,11 +193,7 @@ async fn byo_oauth_relays_through_the_client_loopback() {
     // The opener stands in for the user's browser: capture the consent URL.
     let (url_tx, mut url_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let backend = RemoteBackend::new(
-        RemoteConfig::new(
-            &h.base,
-            h.backend.config().expect("http backend").token(),
-        )
-        .unwrap(),
+        RemoteConfig::new(&h.base, h.backend.config().expect("http backend").token()).unwrap(),
     )
     .with_opener(std::sync::Arc::new(move |url: &str| {
         let _ = url_tx.send(url.to_string());
@@ -209,8 +205,7 @@ async fn byo_oauth_relays_through_the_client_loopback() {
     let browser = tokio::spawn(async move {
         let authorize_url = url_rx.recv().await.expect("consent URL opened");
         let parsed = url::Url::parse(&authorize_url).unwrap();
-        let pairs: std::collections::HashMap<_, _> =
-            parsed.query_pairs().into_owned().collect();
+        let pairs: std::collections::HashMap<_, _> = parsed.query_pairs().into_owned().collect();
         let redirect = format!(
             "{}?code=test-code&state={}",
             pairs["redirect_uri"], pairs["state"]
@@ -270,7 +265,9 @@ async fn a_completed_or_stale_relay_flow_cannot_be_replayed() {
         .manage_oauth_complete(&bogus, "code", "state")
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("expired or was already completed"));
+    assert!(error
+        .to_string()
+        .contains("expired or was already completed"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

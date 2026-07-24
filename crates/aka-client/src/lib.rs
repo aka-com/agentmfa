@@ -17,8 +17,8 @@ pub mod credentials;
 pub mod events;
 
 use aka_api::{
-    ActivityDto, ConnectionDto, IdentityDto, IssuedEndpointDto, ManageError, SecretDto,
-    SessionDto, SettingsDto,
+    ActivityDto, ConnectionDto, IdentityDto, IssuedEndpointDto, ManageError, SecretDto, SessionDto,
+    SettingsDto,
 };
 use aka_core::broker::ConnectionTestReport;
 use aka_core::manage::{
@@ -181,13 +181,12 @@ impl Transport {
                         .header(reqwest::header::CONTENT_TYPE, "application/json")
                         .body(body);
                 }
-                let response =
-                    request
-                        .send()
-                        .await
-                        .map_err(|error| ManageError::Unreachable {
-                            message: error.to_string(),
-                        })?;
+                let response = request
+                    .send()
+                    .await
+                    .map_err(|error| ManageError::Unreachable {
+                        message: error.to_string(),
+                    })?;
                 let status = response.status().as_u16();
                 let bytes = response
                     .bytes()
@@ -197,19 +196,17 @@ impl Transport {
                     })?;
                 Ok((status, bytes.to_vec()))
             }
-            Transport::Unix { socket, token } => {
-                tokio::time::timeout(
-                    REQUEST_TIMEOUT,
-                    unix_request(socket, method.as_str(), path, token, body.as_deref()),
-                )
-                .await
-                .map_err(|_| ManageError::Unreachable {
-                    message: format!(
-                        "no answer from the broker socket within {}s",
-                        REQUEST_TIMEOUT.as_secs()
-                    ),
-                })?
-            }
+            Transport::Unix { socket, token } => tokio::time::timeout(
+                REQUEST_TIMEOUT,
+                unix_request(socket, method.as_str(), path, token, body.as_deref()),
+            )
+            .await
+            .map_err(|_| ManageError::Unreachable {
+                message: format!(
+                    "no answer from the broker socket within {}s",
+                    REQUEST_TIMEOUT.as_secs()
+                ),
+            })?,
         }
     }
 }
@@ -276,9 +273,10 @@ async fn unix_request(
         .find_map(|line| line.strip_prefix("content-length:"))
         .and_then(|value| value.trim().parse::<usize>().ok())
     {
-        payload.get(..length).map(<[u8]>::to_vec).ok_or_else(|| {
-            unreachable("truncated response from the broker socket".into())
-        })?
+        payload
+            .get(..length)
+            .map(<[u8]>::to_vec)
+            .ok_or_else(|| unreachable("truncated response from the broker socket".into()))?
     } else {
         // Connection: close — EOF delimits the body.
         payload.to_vec()
@@ -796,10 +794,7 @@ impl ManagementBackend for RemoteBackend {
             .await
     }
 
-    async fn get_endpoint(
-        &self,
-        connection_id: Uuid,
-    ) -> ManageResult<Option<IssuedEndpointDto>> {
+    async fn get_endpoint(&self, connection_id: Uuid) -> ManageResult<Option<IssuedEndpointDto>> {
         self.get(&format!("/v1/manage/connections/{connection_id}/endpoint"))
             .await
     }
@@ -835,7 +830,8 @@ impl ManagementBackend for RemoteBackend {
     }
 
     async fn activity(&self, limit: usize) -> ManageResult<Vec<ActivityDto>> {
-        self.get(&format!("/v1/manage/activity?limit={limit}")).await
+        self.get(&format!("/v1/manage/activity?limit={limit}"))
+            .await
     }
 
     async fn clear_activity(&self) -> ManageResult<()> {
@@ -906,7 +902,9 @@ mod tests {
         assert!(RemoteConfig::new("broker.example.dev", "t")
             .unwrap_err()
             .contains("full URL"));
-        assert!(RemoteConfig::new("ftp://x", "t").unwrap_err().contains("scheme"));
+        assert!(RemoteConfig::new("ftp://x", "t")
+            .unwrap_err()
+            .contains("scheme"));
         for url in [
             "https://broker.example.dev/manage",
             "https://broker.example.dev?tenant=a",
@@ -951,7 +949,10 @@ mod tests {
             b"Wikipedia"
         );
         // Chunk extensions are ignored; a truncated chunk is refused.
-        assert_eq!(decode_chunked(b"3;ext=1\r\nabc\r\n0\r\n\r\n").unwrap(), b"abc");
+        assert_eq!(
+            decode_chunked(b"3;ext=1\r\nabc\r\n0\r\n\r\n").unwrap(),
+            b"abc"
+        );
         assert!(decode_chunked(b"5\r\nabc").is_none());
     }
 
@@ -1006,7 +1007,9 @@ mod tests {
         }
         // The endpoint read crosses as Option<IssuedEndpointDto>: an issued
         // connection returns the DTO, an un-issued one returns JSON null.
-        async fn endpoint(axum::extract::Path(id): axum::extract::Path<String>) -> axum::response::Response {
+        async fn endpoint(
+            axum::extract::Path(id): axum::extract::Path<String>,
+        ) -> axum::response::Response {
             use axum::response::IntoResponse as _;
             if id.ends_with("222222222222") {
                 return axum::Json(serde_json::Value::Null).into_response();

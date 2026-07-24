@@ -518,10 +518,7 @@ pub async fn serve(broker: Arc<Broker>) -> crate::Result<DaemonHandle> {
 }
 
 /// [`serve`] plus the optional TCP listener.
-pub async fn serve_with(
-    broker: Arc<Broker>,
-    options: ServeOptions,
-) -> crate::Result<DaemonHandle> {
+pub async fn serve_with(broker: Arc<Broker>, options: ServeOptions) -> crate::Result<DaemonHandle> {
     broker.set_data_plane_address(options.data_plane_listen, options.advertise_host.clone());
     if let Some(bind) = options.data_plane_listen {
         if !bind.is_loopback() {
@@ -1238,9 +1235,7 @@ async fn proxy_mcp(State(state): State<AppState>, request: axum::extract::Reques
             }
             builder
                 .body(axum::body::Body::from_stream(upstream.bytes_stream()))
-                .unwrap_or_else(|_| {
-                    err(StatusCode::BAD_GATEWAY, ErrorReason::UpstreamError)
-                })
+                .unwrap_or_else(|_| err(StatusCode::BAD_GATEWAY, ErrorReason::UpstreamError))
         }
         Err(error) => err_detail(
             StatusCode::BAD_GATEWAY,

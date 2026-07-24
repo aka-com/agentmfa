@@ -134,8 +134,11 @@ async fn both_planes_authenticate_over_tcp() {
     assert_eq!(status, 200, "{body}");
 
     // Manage plane: the manage token works over TCP; the agent key does not.
-    let (status, body) =
-        get_json(&format!("{}/v1/manage/whoami", h.base), Some(&h.manage_token)).await;
+    let (status, body) = get_json(
+        &format!("{}/v1/manage/whoami", h.base),
+        Some(&h.manage_token),
+    )
+    .await;
     assert_eq!(status, 200, "{body}");
     let (status, _) = get_json(&format!("{}/v1/manage/whoami", h.base), Some(&agent_key)).await;
     assert_eq!(status, 401);
@@ -185,8 +188,7 @@ async fn mcp_is_reverse_proxied_to_the_sidecar() {
     h.broker.set_sidecar_mcp_port(Some(port));
 
     // The manifest now advertises the proxied endpoint.
-    let (_, manifest) =
-        get_json(&format!("{}/.well-known/agent-broker.json", h.base), None).await;
+    let (_, manifest) = get_json(&format!("{}/.well-known/agent-broker.json", h.base), None).await;
     assert_eq!(manifest["mcp_path"], "/mcp");
     assert_eq!(manifest["mcp_url"], "https://broker.example.dev/mcp");
 
@@ -234,15 +236,15 @@ async fn data_plane_opens_advertise_the_configured_host() {
     .await
     .unwrap();
     assert_eq!(broker.advertise_host(), "broker.lan");
-    assert!(broker.data_plane_bind().is_loopback(), "bind stays loopback");
+    assert!(
+        broker.data_plane_bind().is_loopback(),
+        "bind stays loopback"
+    );
 
     // Add a WS connection and open it: the bridge URL names the advertised
     // host, not 127.0.0.1.
     broker
-        .ui_add_secret(
-            "FEED",
-            zeroize::Zeroizing::new("wss-tok".into()),
-        )
+        .ui_add_secret("FEED", zeroize::Zeroizing::new("wss-tok".into()))
         .unwrap();
     let secret_id = broker.store.list_secrets()[0].id;
     broker

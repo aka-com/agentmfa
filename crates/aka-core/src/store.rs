@@ -1751,23 +1751,44 @@ mod tests {
             let store = Store::open(Paths::under(dir.path()), vault.clone())
                 .await
                 .unwrap();
-            a = store.add_connection(api_spec("alpha", "a.example.com", "")).unwrap().id;
-            b = store.add_connection(api_spec("bravo", "b.example.com", "")).unwrap().id;
-            c = store.add_connection(api_spec("charlie", "c.example.com", "")).unwrap().id;
+            a = store
+                .add_connection(api_spec("alpha", "a.example.com", ""))
+                .unwrap()
+                .id;
+            b = store
+                .add_connection(api_spec("bravo", "b.example.com", ""))
+                .unwrap()
+                .id;
+            c = store
+                .add_connection(api_spec("charlie", "c.example.com", ""))
+                .unwrap()
+                .id;
             // Insertion order until reordered.
-            let ids: Vec<_> = store.list_connections().iter().map(|conn| conn.id).collect();
+            let ids: Vec<_> = store
+                .list_connections()
+                .iter()
+                .map(|conn| conn.id)
+                .collect();
             assert_eq!(ids, vec![a, b, c]);
 
             // A full permutation is applied in the given order.
             store.reorder_connections(&[c, a, b]).unwrap();
-            let ids: Vec<_> = store.list_connections().iter().map(|conn| conn.id).collect();
+            let ids: Vec<_> = store
+                .list_connections()
+                .iter()
+                .map(|conn| conn.id)
+                .collect();
             assert_eq!(ids, vec![c, a, b]);
 
             // A partial list moves the named ids to the front; omitted ones keep
             // their relative order behind them, and an unknown id is ignored.
             let ghost = Uuid::new_v4();
             store.reorder_connections(&[ghost, b]).unwrap();
-            let ids: Vec<_> = store.list_connections().iter().map(|conn| conn.id).collect();
+            let ids: Vec<_> = store
+                .list_connections()
+                .iter()
+                .map(|conn| conn.id)
+                .collect();
             assert_eq!(ids, vec![b, c, a]);
         }
 
@@ -1775,7 +1796,11 @@ mod tests {
         let store = Store::open(Paths::under(dir.path()), vault.clone())
             .await
             .unwrap();
-        let ids: Vec<_> = store.list_connections().iter().map(|conn| conn.id).collect();
+        let ids: Vec<_> = store
+            .list_connections()
+            .iter()
+            .map(|conn| conn.id)
+            .collect();
         assert_eq!(ids, vec![b, c, a]);
     }
 

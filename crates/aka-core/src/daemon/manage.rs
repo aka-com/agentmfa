@@ -123,10 +123,7 @@ pub fn router() -> Router<AppState> {
         .route("/secrets/{id}/reveal-prefix", post(reveal_secret_prefix))
         .route("/secrets/{id}/copy-value", post(secret_value_for_copy))
         .route("/connections", get(list_connections).post(add_connection))
-        .route(
-            "/connections/test-draft",
-            post(test_connection_draft),
-        )
+        .route("/connections/test-draft", post(test_connection_draft))
         .route("/connections/reorder", post(reorder_connections))
         .route(
             "/connections/{id}",

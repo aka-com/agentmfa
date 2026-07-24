@@ -1584,7 +1584,9 @@ impl Broker {
                 }
             }
             ConnectionConfig::Ws { .. } => {
-                return Err(CoreError::EndpointUnsupportedKind(connection.kind().label()))
+                return Err(CoreError::EndpointUnsupportedKind(
+                    connection.kind().label(),
+                ))
             }
         };
         Ok(info)

@@ -379,10 +379,7 @@ impl ManageBus {
     /// client's monotonic last-id tracking) would miss events.
     pub fn emit(&self, event: aka_api::ManageEvent) {
         let mut ring = self.ring.lock().unwrap();
-        let seq = self
-            .seq
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1;
+        let seq = self.seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         let item = SeqEvent { seq, event };
         ring.push_back(item.clone());
         while ring.len() > MANAGE_RING_CAP {
@@ -722,8 +719,7 @@ pub trait ManagementBackend: Send + Sync {
     /// Read the connection's already-issued direct endpoint without minting or
     /// rotating; `None` when none is issued. `GET
     /// /v1/manage/connections/{id}/endpoint`.
-    async fn get_endpoint(&self, connection_id: Uuid)
-        -> ManageResult<Option<IssuedEndpointDto>>;
+    async fn get_endpoint(&self, connection_id: Uuid) -> ManageResult<Option<IssuedEndpointDto>>;
     async fn revoke_endpoint(&self, endpoint_id: Uuid) -> ManageResult<bool>;
 
     /* identity */
@@ -957,10 +953,7 @@ impl ManagementBackend for LocalBackend {
             .map(issued_endpoint_dto)?)
     }
 
-    async fn get_endpoint(
-        &self,
-        connection_id: Uuid,
-    ) -> ManageResult<Option<IssuedEndpointDto>> {
+    async fn get_endpoint(&self, connection_id: Uuid) -> ManageResult<Option<IssuedEndpointDto>> {
         Ok(self
             .broker
             .ui_get_endpoint(&connection_id)?
@@ -1122,9 +1115,11 @@ mod tests {
         // Returns whether the setting changed; disabling from the default
         // (enabled) is a change.
         assert!(backend.set_tool_access(id, false).await.unwrap());
-        assert!(!backend.list_connections().await.unwrap()[0]
-            .agent_access
-            .enabled);
+        assert!(
+            !backend.list_connections().await.unwrap()[0]
+                .agent_access
+                .enabled
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1139,10 +1134,7 @@ mod tests {
             .add_secret("KEY".into(), Zeroizing::new("v".into()))
             .await
             .unwrap_err();
-        assert_eq!(
-            error,
-            ManageError::SecretNameTaken { name: "KEY".into() }
-        );
+        assert_eq!(error, ManageError::SecretNameTaken { name: "KEY".into() });
 
         let error = backend
             .add_connection(ConnectionSpec {

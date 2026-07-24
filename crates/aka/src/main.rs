@@ -792,7 +792,12 @@ fn read_secret_value(value_env: &Option<String>) -> SecretValue {
     value
 }
 
-fn cmd_secret_add(name: String, value_env: Option<String>, root: Option<PathBuf>, url: Option<String>) {
+fn cmd_secret_add(
+    name: String,
+    value_env: Option<String>,
+    root: Option<PathBuf>,
+    url: Option<String>,
+) {
     let value = read_secret_value(&value_env);
     let managed = management_backend(root, url);
     managed.run(managed.backend.add_secret(name.clone(), value));
@@ -941,7 +946,10 @@ struct OfflineEvents;
 
 impl BrokerEvents for OfflineEvents {
     fn confirm_secret_read(&self, secret: &SecretMeta) -> bool {
-        eprintln!("  secret read authorized for {} (offline edit)", secret.name);
+        eprintln!(
+            "  secret read authorized for {} (offline edit)",
+            secret.name
+        );
         true
     }
 
@@ -969,7 +977,9 @@ fn conn_dto(managed: &Managed, name: &str) -> ConnectionDto {
     let connections = managed.run(managed.backend.list_connections());
     match connections.into_iter().find(|c| c.name == name) {
         Some(dto) => dto,
-        None => die(format!("no connection named {name:?} (see `aka conn list`)")),
+        None => die(format!(
+            "no connection named {name:?} (see `aka conn list`)"
+        )),
     }
 }
 
@@ -1006,7 +1016,11 @@ fn cmd_secret_replace(
     let value = read_secret_value(&value_env);
     let managed = management_backend(root, url);
     let dto = secret_dto(&managed, &name);
-    managed.run(managed.backend.edit_secret(dto_id(&dto.id), None, Some(value)));
+    managed.run(
+        managed
+            .backend
+            .edit_secret(dto_id(&dto.id), None, Some(value)),
+    );
     eprintln!("replaced the value of secret {name}");
 }
 
@@ -1037,7 +1051,10 @@ fn cmd_conn_add(args: ConnAdd) {
         secrets,
     }));
     let dto = conn_dto(&managed, &name);
-    eprintln!("added connection {} ({} · {})", dto.name, dto.kind, dto.target);
+    eprintln!(
+        "added connection {} ({} · {})",
+        dto.name, dto.kind, dto.target
+    );
 }
 
 /// Build the type-specific config, naming exactly which flag is missing or
@@ -1978,7 +1995,10 @@ fn cmd_activity(limit: usize, json: bool, root: Option<PathBuf>, url: Option<Str
     let content = match std::fs::read_to_string(&file) {
         Ok(content) => content,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("no activity recorded yet ({} does not exist)", file.display());
+            eprintln!(
+                "no activity recorded yet ({} does not exist)",
+                file.display()
+            );
             return;
         }
         Err(e) => die(format!("could not read {}: {e}", file.display())),
@@ -2119,9 +2139,7 @@ fn cmd_serve(args: ServeArgs) {
     } else {
         match resolve_sidecar(daemon.socket_path.clone()) {
             Some(config) => {
-                let sidecar = runtime.block_on(async {
-                    aka_core::sidecar::Sidecar::spawn(config)
-                });
+                let sidecar = runtime.block_on(async { aka_core::sidecar::Sidecar::spawn(config) });
                 let watch = sidecar.watch();
                 let broker_for_watch = broker.clone();
                 runtime.spawn(watch.follow(move |endpoint| {
@@ -2328,7 +2346,10 @@ mod tests {
              — GET api.github.com/user/repos  [claude-code]"
         );
         let bare = serde_json::json!({ "kind": "wired", "text": "Agent access enabled" });
-        assert_eq!(format_audit_line(&bare), "-  wired                 Agent access enabled");
+        assert_eq!(
+            format_audit_line(&bare),
+            "-  wired                 Agent access enabled"
+        );
     }
 
     fn update_args() -> ConnUpdate {
@@ -2432,7 +2453,9 @@ mod tests {
         }
         // A stray flag for the kind is named, same as `conn add`.
         a.dbname = Some("stray".into());
-        assert!(merged_config(&existing, &a).unwrap_err().contains("--dbname"));
+        assert!(merged_config(&existing, &a)
+            .unwrap_err()
+            .contains("--dbname"));
     }
 
     #[test]
@@ -2503,7 +2526,11 @@ mod tests {
                 ..
             } => {
                 assert_eq!(host_key_fingerprint, "", "'' clears the pin for re-TOFU");
-                assert_eq!(destination.as_deref(), Some("prod"), "destination carries over");
+                assert_eq!(
+                    destination.as_deref(),
+                    Some("prod"),
+                    "destination carries over"
+                );
             }
             other => panic!("wrong config: {other:?}"),
         }

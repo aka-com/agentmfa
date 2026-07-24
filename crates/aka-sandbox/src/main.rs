@@ -288,7 +288,9 @@ fn mcp_result(id: serde_json::Value, result: serde_json::Value) -> Response {
 }
 
 fn mcp_error(id: serde_json::Value, code: i64, message: &str) -> Response {
-    mcp_response(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }))
+    mcp_response(
+        json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }),
+    )
 }
 
 fn mcp_response(payload: serde_json::Value) -> Response {

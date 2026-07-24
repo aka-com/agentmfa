@@ -61,15 +61,16 @@ async fn harness() -> Harness {
 }
 
 impl Harness {
-    async fn manage(
-        &self,
-        method: &str,
-        path: &str,
-        body: Option<Value>,
-    ) -> (u16, Value) {
+    async fn manage(&self, method: &str, path: &str, body: Option<Value>) -> (u16, Value) {
         let token = self.manage_token.clone();
-        uds_request(&self.socket, method, path, &[("authorization", &format!("Bearer {token}"))], body)
-            .await
+        uds_request(
+            &self.socket,
+            method,
+            path,
+            &[("authorization", &format!("Bearer {token}"))],
+            body,
+        )
+        .await
     }
 }
 
@@ -270,7 +271,11 @@ async fn secrets_and_connections_round_trip_over_the_manage_api() {
         .iter()
         .map(|c| c["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, vec!["github", "gitlab"], "insertion order until reordered");
+    assert_eq!(
+        names,
+        vec!["github", "gitlab"],
+        "insertion order until reordered"
+    );
     let gitlab_id = body[1]["id"].as_str().unwrap().to_string();
 
     let (status, _) = h
@@ -317,10 +322,14 @@ async fn secrets_and_connections_round_trip_over_the_manage_api() {
     // honor: the activity log carries the copy without any follow-up call.
     let (_, activity) = h.manage("GET", "/v1/manage/activity", None).await;
     assert!(
-        activity.as_array().unwrap().iter().any(|entry| entry["text"]
-            .as_str()
+        activity
+            .as_array()
             .unwrap()
-            .contains("Secret value copied")),
+            .iter()
+            .any(|entry| entry["text"]
+                .as_str()
+                .unwrap()
+                .contains("Secret value copied")),
         "{activity}"
     );
 
@@ -357,9 +366,13 @@ async fn identity_settings_and_activity_surface_over_the_manage_api() {
     // manage-token holder cannot read it without leaving a trace.
     let (_, activity) = h.manage("GET", "/v1/manage/activity", None).await;
     assert!(
-        activity.as_array().unwrap().iter().any(|entry| entry["text"]
-            .as_str()
-            .is_some_and(|text| text.contains("Shared key copied"))),
+        activity
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("Shared key copied"))),
         "agent-key release missing from the activity log: {activity}"
     );
 
@@ -420,7 +433,10 @@ async fn read_sse_until(
     if let Some(id) = last_event_id {
         builder = builder.header("last-event-id", id);
     }
-    let response = sender.send_request(builder.body(String::new()).unwrap()).await.unwrap();
+    let response = sender
+        .send_request(builder.body(String::new()).unwrap())
+        .await
+        .unwrap();
     assert_eq!(response.status(), 200);
     let mut body = response.into_body();
     let mut collected = String::new();
@@ -464,18 +480,29 @@ async fn a_reconnect_resumes_from_last_event_id_instead_of_resyncing() {
         // Give the reader a moment to attach, then add a secret.
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let (status, _) = h
-            .manage("POST", "/v1/manage/secrets", Some(json!({ "name": "SEEN", "value": "v" })))
+            .manage(
+                "POST",
+                "/v1/manage/secrets",
+                Some(json!({ "name": "SEEN", "value": "v" })),
+            )
             .await;
         assert_eq!(status, 200);
         reader.await.unwrap()
     };
-    assert!(sse.contains("\"event\":\"resync\""), "fresh client resyncs: {sse}");
+    assert!(
+        sse.contains("\"event\":\"resync\""),
+        "fresh client resyncs: {sse}"
+    );
     let resume_id = last_id(&sse).expect("stream carried an id");
 
     // While "offline", make two more changes.
     for name in ["MISSED_A", "MISSED_B"] {
         let (status, _) = h
-            .manage("POST", "/v1/manage/secrets", Some(json!({ "name": name, "value": "v" })))
+            .manage(
+                "POST",
+                "/v1/manage/secrets",
+                Some(json!({ "name": name, "value": "v" })),
+            )
             .await;
         assert_eq!(status, 200);
     }
@@ -486,8 +513,14 @@ async fn a_reconnect_resumes_from_last_event_id_instead_of_resyncing() {
         s.contains("MISSED_A") && s.contains("MISSED_B")
     })
     .await;
-    assert!(resumed.contains("MISSED_A"), "replayed the first miss: {resumed}");
-    assert!(resumed.contains("MISSED_B"), "replayed the second miss: {resumed}");
+    assert!(
+        resumed.contains("MISSED_A"),
+        "replayed the first miss: {resumed}"
+    );
+    assert!(
+        resumed.contains("MISSED_B"),
+        "replayed the second miss: {resumed}"
+    );
     assert!(
         !resumed.contains("\"event\":\"resync\""),
         "a valid resume must not force a full refetch: {resumed}"
@@ -499,7 +532,10 @@ async fn a_reconnect_resumes_from_last_event_id_instead_of_resyncing() {
         s.contains("resync")
     })
     .await;
-    assert!(foreign.contains("\"event\":\"resync\""), "foreign id resyncs: {foreign}");
+    assert!(
+        foreign.contains("\"event\":\"resync\""),
+        "foreign id resyncs: {foreign}"
+    );
 }
 
 /// A client resuming from a *foreign* position whose seq is far above this
@@ -512,7 +548,11 @@ async fn a_high_foreign_resume_position_does_not_swallow_live_events() {
 
     // Give the stream a real (small) head first.
     let (status, _) = h
-        .manage("POST", "/v1/manage/secrets", Some(json!({ "name": "BEFORE", "value": "v" })))
+        .manage(
+            "POST",
+            "/v1/manage/secrets",
+            Some(json!({ "name": "BEFORE", "value": "v" })),
+        )
         .await;
     assert_eq!(status, 200);
 
@@ -520,17 +560,27 @@ async fn a_high_foreign_resume_position_does_not_swallow_live_events() {
         let socket = h.socket.clone();
         let token = h.manage_token.clone();
         let reader = tokio::spawn(async move {
-            read_sse_until(&socket, &token, Some("deadbeef:5000"), |s| s.contains("AFTER")).await
+            read_sse_until(&socket, &token, Some("deadbeef:5000"), |s| {
+                s.contains("AFTER")
+            })
+            .await
         });
         // Let the subscriber attach, then publish a live change.
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let (status, _) = h
-            .manage("POST", "/v1/manage/secrets", Some(json!({ "name": "AFTER", "value": "v" })))
+            .manage(
+                "POST",
+                "/v1/manage/secrets",
+                Some(json!({ "name": "AFTER", "value": "v" })),
+            )
             .await;
         assert_eq!(status, 200);
         reader.await.unwrap()
     };
-    assert!(sse.contains("\"event\":\"resync\""), "foreign id resyncs: {sse}");
+    assert!(
+        sse.contains("\"event\":\"resync\""),
+        "foreign id resyncs: {sse}"
+    );
     assert!(
         sse.contains("AFTER"),
         "live events after the resync must still be delivered: {sse}"
@@ -617,7 +667,10 @@ async fn the_event_stream_reports_manage_changes() {
                     collected.push_str(&String::from_utf8_lossy(data));
                     // Frames carry an id: <epoch>:<seq> for reconnect resume.
                     if collected.contains("activity_appended") && collected.contains("KEY2") {
-                        assert!(collected.contains("id:"), "frames must carry ids: {collected}");
+                        assert!(
+                            collected.contains("id:"),
+                            "frames must carry ids: {collected}"
+                        );
                         return;
                     }
                 }

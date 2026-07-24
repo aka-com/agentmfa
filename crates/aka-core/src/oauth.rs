@@ -59,7 +59,10 @@ impl TokenSet {
 /// Whether a URL's host is loopback (dev/test providers run on
 /// 127.0.0.1; production providers must be https).
 fn is_loopback_url(url: &Url) -> bool {
-    matches!(url.host_str(), Some("127.0.0.1") | Some("localhost") | Some("[::1]"))
+    matches!(
+        url.host_str(),
+        Some("127.0.0.1") | Some("localhost") | Some("[::1]")
+    )
 }
 
 fn require_https_or_loopback(url: &Url, what: &str) -> Result<(), String> {
@@ -154,12 +157,10 @@ pub fn begin_external(
     spec: &OAuthSpec,
     redirect_uri: &str,
 ) -> Result<ExternalAuthorization, String> {
-    let parsed = Url::parse(redirect_uri)
-        .map_err(|_| "the redirect URI is not a valid URL".to_string())?;
+    let parsed =
+        Url::parse(redirect_uri).map_err(|_| "the redirect URI is not a valid URL".to_string())?;
     if parsed.scheme() != "http" || !is_loopback_url(&parsed) || parsed.path() != "/callback" {
-        return Err(
-            "the redirect URI must be a loopback http://127.0.0.1:<port>/callback".into(),
-        );
+        return Err("the redirect URI must be a loopback http://127.0.0.1:<port>/callback".into());
     }
     let verifier = Zeroizing::new(random_token()?);
     let state = random_token()?;

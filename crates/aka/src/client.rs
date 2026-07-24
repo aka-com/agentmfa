@@ -129,7 +129,9 @@ pub async fn open_session(
             .or_else(|| value["reason"].as_str())
             .map(str::to_string)
             .unwrap_or_else(|| payload.trim().to_string());
-        return Err(format!("the broker refused the open (HTTP {status}): {detail}"));
+        return Err(format!(
+            "the broker refused the open (HTTP {status}): {detail}"
+        ));
     }
     if !value.is_object() {
         return Err("the broker returned a malformed response".into());
@@ -150,7 +152,10 @@ mod tests {
         paths.ensure().unwrap();
         std::fs::write(paths.token_file(), "aka_testkey\n").unwrap();
 
-        async fn pg_open(headers: HeaderMap, body: String) -> ([(&'static str, &'static str); 1], String) {
+        async fn pg_open(
+            headers: HeaderMap,
+            body: String,
+        ) -> ([(&'static str, &'static str); 1], String) {
             assert_eq!(headers.get("authorization").unwrap(), "Bearer aka_testkey");
             assert_eq!(headers.get("x-multitool-client").unwrap(), "test-cli");
             let request: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -163,7 +168,8 @@ mod tests {
         async fn denied() -> (axum::http::StatusCode, String) {
             (
                 axum::http::StatusCode::FORBIDDEN,
-                r#"{"reason":"denied_by_policy","detail":"agent access is off for prod"}"#.to_string(),
+                r#"{"reason":"denied_by_policy","detail":"agent access is off for prod"}"#
+                    .to_string(),
             )
         }
         let app = axum::Router::new()

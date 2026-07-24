@@ -99,10 +99,7 @@ pub fn move_traffic_lights_down(window: &tauri::WebviewWindow, offset: f64) -> t
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn move_traffic_lights_down(
-    _window: &tauri::WebviewWindow,
-    _offset: f64,
-) -> tauri::Result<()> {
+pub fn move_traffic_lights_down(_window: &tauri::WebviewWindow, _offset: f64) -> tauri::Result<()> {
     Ok(())
 }
 
@@ -143,8 +140,7 @@ pub fn setup_app_menu(app: &AppHandle) -> tauri::Result<()> {
         }
     }
 
-    let app_window =
-        MenuItem::with_id(app, APP_WINDOW_MENU_ID, "Multitool", true, None::<&str>)?;
+    let app_window = MenuItem::with_id(app, APP_WINDOW_MENU_ID, "Multitool", true, None::<&str>)?;
     if let Some(MenuItemKind::Submenu(window_menu)) = menu.get(WINDOW_SUBMENU_ID) {
         let separator = PredefinedMenuItem::separator(app)?;
         window_menu.append_items(&[&separator, &app_window])?;
@@ -520,7 +516,10 @@ mod tests {
         let alpha = icon.rgba().chunks_exact(4).map(|pixel| pixel[3]);
         let pixel_count = alpha.len();
         let (transparent, visible) = alpha.fold((0, 0), |(transparent, visible), value| {
-            (transparent + usize::from(value == 0), visible + usize::from(value > 0))
+            (
+                transparent + usize::from(value == 0),
+                visible + usize::from(value > 0),
+            )
         });
 
         assert!(

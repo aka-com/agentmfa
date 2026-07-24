@@ -337,26 +337,44 @@ fn parse_id(id: &str) -> CmdResult<Uuid> {
 
 #[tauri::command]
 pub async fn list_secrets(state: State<'_, AppState>) -> CmdResult<Vec<aka_api::SecretDto>> {
-    state.brokers.backend().list_secrets().await.map_err(|e| e.to_string())
+    state
+        .brokers
+        .backend()
+        .list_secrets()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn list_connections(
     state: State<'_, AppState>,
 ) -> CmdResult<Vec<aka_api::ConnectionDto>> {
-    state.brokers.backend().list_connections()
+    state
+        .brokers
+        .backend()
+        .list_connections()
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn get_identity(state: State<'_, AppState>) -> CmdResult<aka_api::IdentityDto> {
-    state.brokers.backend().identity().await.map_err(|e| e.to_string())
+    state
+        .brokers
+        .backend()
+        .identity()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn list_sessions(state: State<'_, AppState>) -> CmdResult<Vec<aka_api::SessionDto>> {
-    state.brokers.backend().sessions().await.map_err(|e| e.to_string())
+    state
+        .brokers
+        .backend()
+        .sessions()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -365,14 +383,20 @@ pub async fn list_activity(
     limit: Option<usize>,
 ) -> CmdResult<Vec<aka_api::ActivityDto>> {
     let limit = activity_view_limit(limit);
-    state.brokers.backend().activity(limit)
+    state
+        .brokers
+        .backend()
+        .activity(limit)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn clear_activity(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
-    state.brokers.backend().clear_activity()
+    state
+        .brokers
+        .backend()
+        .clear_activity()
         .await
         .map_err(|e| e.to_string())?;
     let _ = app.emit(crate::events::EVT_ACTIVITY_CHANGED, ());
@@ -381,17 +405,32 @@ pub async fn clear_activity(app: AppHandle, state: State<'_, AppState>) -> CmdRe
 
 #[tauri::command]
 pub async fn get_settings(state: State<'_, AppState>) -> CmdResult<aka_api::SettingsDto> {
-    state.brokers.backend().settings().await.map_err(|e| e.to_string())
+    state
+        .brokers
+        .backend()
+        .settings()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn get_agent_setup(state: State<'_, AppState>) -> CmdResult<String> {
-    state.brokers.backend().agent_setup().await.map_err(|e| e.to_string())
+    state
+        .brokers
+        .backend()
+        .agent_setup()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn copy_agent_setup(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
-    let instructions = state.brokers.backend().agent_setup().await.map_err(|e| e.to_string())?;
+    let instructions = state
+        .brokers
+        .backend()
+        .agent_setup()
+        .await
+        .map_err(|e| e.to_string())?;
     app.clipboard()
         .write_text(instructions)
         .map_err(|error| error.to_string())
@@ -426,7 +465,10 @@ pub async fn check_known_hosts(
 
 #[tauri::command]
 pub async fn add_secret(state: State<'_, AppState>, name: String, value: String) -> FormResult<()> {
-    state.brokers.backend().add_secret(name, Zeroizing::new(value))
+    state
+        .brokers
+        .backend()
+        .add_secret(name, Zeroizing::new(value))
         .await
         .map_err(|error| FormError::from_manage(error, FormContext::Secret))
 }
@@ -447,7 +489,10 @@ pub async fn edit_secret(
         )
     })?;
     let value = new_value.filter(|v| !v.is_empty()).map(Zeroizing::new);
-    state.brokers.backend().edit_secret(id, new_name, value)
+    state
+        .brokers
+        .backend()
+        .edit_secret(id, new_name, value)
         .await
         .map_err(|error| FormError::from_manage(error, FormContext::Secret))
 }
@@ -456,7 +501,10 @@ pub async fn edit_secret(
 pub async fn delete_secret(state: State<'_, AppState>, id: String) -> CmdResult<()> {
     let id = parse_id(&id)?;
     // The core refuses in-use deletion; the UI's inline confirm is the gate.
-    state.brokers.backend().delete_secret(id)
+    state
+        .brokers
+        .backend()
+        .delete_secret(id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -465,7 +513,10 @@ pub async fn delete_secret(state: State<'_, AppState>, id: String) -> CmdResult<
 #[tauri::command]
 pub async fn reveal_secret_prefix(state: State<'_, AppState>, id: String) -> CmdResult<String> {
     let id = parse_id(&id)?;
-    state.brokers.backend().reveal_secret_prefix(id)
+    state
+        .brokers
+        .backend()
+        .reveal_secret_prefix(id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -476,11 +527,17 @@ pub async fn reveal_secret_prefix(state: State<'_, AppState>, id: String) -> Cmd
 #[tauri::command]
 pub async fn copy_secret(state: State<'_, AppState>, id: String) -> CmdResult<()> {
     let id = parse_id(&id)?;
-    let value = state.brokers.backend().secret_value_for_copy(id)
+    let value = state
+        .brokers
+        .backend()
+        .secret_value_for_copy(id)
         .await
         .map_err(|e| e.to_string())?;
     crate::clipboard::copy_with_hygiene(value)?;
-    state.brokers.backend().note_secret_copied(id)
+    state
+        .brokers
+        .backend()
+        .note_secret_copied(id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -690,7 +747,10 @@ pub async fn add_connection(
         new_secret_name.is_some() || new_secret_value.is_some() || imported_value.is_some();
     let result = match (new_secret_name, new_secret_value.or(imported_value)) {
         (Some(name), Some(value)) if !name.is_empty() && !value.is_empty() => {
-            state.brokers.backend().add_connection_with_secret(name, value, spec)
+            state
+                .brokers
+                .backend()
+                .add_connection_with_secret(name, value, spec)
                 .await
         }
         (None, None) => state.brokers.backend().add_connection(spec).await,
@@ -735,7 +795,10 @@ pub async fn edit_connection(
         )
     })?;
     let spec = input.into_spec()?;
-    state.brokers.backend().update_connection(id, spec)
+    state
+        .brokers
+        .backend()
+        .update_connection(id, spec)
         .await
         .map_err(|error| {
             FormError::from_manage(
@@ -751,7 +814,10 @@ pub async fn edit_connection(
 #[tauri::command]
 pub async fn delete_connection(state: State<'_, AppState>, id: String) -> CmdResult<()> {
     let id = parse_id(&id)?;
-    state.brokers.backend().delete_connection(id)
+    state
+        .brokers
+        .backend()
+        .delete_connection(id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -768,7 +834,10 @@ pub async fn reorder_connections(
         .iter()
         .map(|id| parse_id(id))
         .collect::<Result<Vec<_>, _>>()?;
-    state.brokers.backend().reorder_connections(ordered_ids)
+    state
+        .brokers
+        .backend()
+        .reorder_connections(ordered_ids)
         .await
         .map_err(|e| e.to_string())
 }
@@ -781,7 +850,10 @@ pub async fn test_connection(
     id: String,
 ) -> CmdResult<aka_core::broker::ConnectionTestReport> {
     let id = parse_id(&id)?;
-    state.brokers.backend().test_connection(id)
+    state
+        .brokers
+        .backend()
+        .test_connection(id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -803,7 +875,10 @@ pub async fn test_connection_draft(
     let _ = input.ssh_import_id.take();
     let _ = input.identity_file.take();
     let spec = input.into_spec()?;
-    state.brokers.backend().test_connection_draft(spec, typed_secret)
+    state
+        .brokers
+        .backend()
+        .test_connection_draft(spec, typed_secret)
         .await
         .map_err(|error| {
             FormError::from_manage(
@@ -826,15 +901,20 @@ pub async fn start_mcp_auth(
     state: State<'_, AppState>,
     input: aka_core::mcp_auth::McpAuthDraft,
 ) -> FormResult<aka_core::mcp_auth::McpAuthState> {
-    state.brokers.backend().start_mcp_auth(input).await.map_err(|error| {
-        FormError::from_manage(
-            error,
-            FormContext::Connection {
-                kind: "api",
-                includes_new_secret: true,
-            },
-        )
-    })
+    state
+        .brokers
+        .backend()
+        .start_mcp_auth(input)
+        .await
+        .map_err(|error| {
+            FormError::from_manage(
+                error,
+                FormContext::Connection {
+                    kind: "api",
+                    includes_new_secret: true,
+                },
+            )
+        })
 }
 
 #[tauri::command]
@@ -843,7 +923,10 @@ pub async fn get_mcp_auth(
     id: String,
 ) -> CmdResult<Option<aka_core::mcp_auth::McpAuthState>> {
     let id = parse_id(&id)?;
-    state.brokers.backend().get_mcp_auth(id)
+    state
+        .brokers
+        .backend()
+        .get_mcp_auth(id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -851,7 +934,10 @@ pub async fn get_mcp_auth(
 #[tauri::command]
 pub async fn cancel_mcp_auth(state: State<'_, AppState>, id: String) -> CmdResult<bool> {
     let id = parse_id(&id)?;
-    state.brokers.backend().cancel_mcp_auth(id)
+    state
+        .brokers
+        .backend()
+        .cancel_mcp_auth(id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -866,7 +952,10 @@ pub async fn mcp_status(
     options: Option<aka_core::mcp::McpCheckOptions>,
 ) -> CmdResult<aka_core::mcp::McpStatusReport> {
     let id = parse_id(&id)?;
-    state.brokers.backend().mcp_status(id, options.unwrap_or_default())
+    state
+        .brokers
+        .backend()
+        .mcp_status(id, options.unwrap_or_default())
         .await
         .map_err(|e| e.to_string())
 }
@@ -912,7 +1001,10 @@ pub async fn oauth_connect(
     input.template = Some(format!("Authorization: Bearer {{{{{secret_name}}}}}"));
     let kind = input.kind.clone();
     let spec = input.into_spec()?;
-    state.brokers.backend().oauth_connect(
+    state
+        .brokers
+        .backend()
+        .oauth_connect(
             secret_name,
             client_secret
                 .filter(|value| !value.trim().is_empty())
@@ -946,7 +1038,10 @@ async fn suggested_oauth_secret_name(state: &State<'_, AppState>, connection_nam
     } else {
         base.to_string()
     };
-    let taken: std::collections::HashSet<String> = state.brokers.backend().list_secrets()
+    let taken: std::collections::HashSet<String> = state
+        .brokers
+        .backend()
+        .list_secrets()
         .await
         .unwrap_or_default()
         .into_iter()
@@ -970,7 +1065,10 @@ async fn suggested_oauth_secret_name(state: &State<'_, AppState>, connection_nam
 #[tauri::command]
 pub async fn oauth_reconnect(state: State<'_, AppState>, id: String) -> CmdResult<()> {
     let id = parse_id(&id)?;
-    state.brokers.backend().oauth_reconnect(id)
+    state
+        .brokers
+        .backend()
+        .oauth_reconnect(id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -987,7 +1085,10 @@ pub async fn set_tool_access(
     enabled: bool,
 ) -> CmdResult<bool> {
     let connection_id = parse_id(&connection_id)?;
-    state.brokers.backend().set_tool_access(connection_id, enabled)
+    state
+        .brokers
+        .backend()
+        .set_tool_access(connection_id, enabled)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1002,7 +1103,10 @@ pub async fn set_allowed_tools(
     tools: Option<Vec<String>>,
 ) -> CmdResult<bool> {
     let connection_id = parse_id(&connection_id)?;
-    state.brokers.backend().set_allowed_tools(connection_id, tools)
+    state
+        .brokers
+        .backend()
+        .set_allowed_tools(connection_id, tools)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1015,7 +1119,10 @@ pub async fn list_mcp_tools(
     id: String,
 ) -> CmdResult<Vec<aka_core::mcp::McpToolInfo>> {
     let id = parse_id(&id)?;
-    state.brokers.backend().list_mcp_tools(id)
+    state
+        .brokers
+        .backend()
+        .list_mcp_tools(id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1030,7 +1137,10 @@ pub async fn issue_endpoint(
     connection_id: String,
 ) -> CmdResult<IssuedEndpointDto> {
     let connection_id = parse_id(&connection_id)?;
-    state.brokers.backend().issue_endpoint(connection_id)
+    state
+        .brokers
+        .backend()
+        .issue_endpoint(connection_id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1039,7 +1149,10 @@ pub async fn issue_endpoint(
 #[tauri::command]
 pub async fn revoke_endpoint(state: State<'_, AppState>, endpoint_id: String) -> CmdResult<bool> {
     let endpoint_id = parse_id(&endpoint_id)?;
-    state.brokers.backend().revoke_endpoint(endpoint_id)
+    state
+        .brokers
+        .backend()
+        .revoke_endpoint(endpoint_id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1051,7 +1164,12 @@ pub async fn revoke_endpoint(state: State<'_, AppState>, endpoint_id: String) ->
 #[tauri::command]
 pub async fn rotate_key(state: State<'_, AppState>) -> CmdResult<()> {
     // The backend keeps the blocking native sheet off the async runtime.
-    state.brokers.backend().rotate_key().await.map_err(|e| e.to_string())
+    state
+        .brokers
+        .backend()
+        .rotate_key()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Copy the shared key to the clipboard. The key never enters the webview:
@@ -1059,7 +1177,12 @@ pub async fn rotate_key(state: State<'_, AppState>) -> CmdResult<()> {
 /// need it — agents read the token file themselves.
 #[tauri::command]
 pub async fn copy_key(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
-    let token = state.brokers.backend().agent_key().await.map_err(|e| e.to_string())?;
+    let token = state
+        .brokers
+        .backend()
+        .agent_key()
+        .await
+        .map_err(|e| e.to_string())?;
     app.clipboard()
         .write_text(token)
         .map_err(|error| error.to_string())
@@ -1069,7 +1192,10 @@ pub async fn copy_key(app: AppHandle, state: State<'_, AppState>) -> CmdResult<(
 
 #[tauri::command]
 pub async fn close_session(state: State<'_, AppState>, id: u64) -> CmdResult<bool> {
-    state.brokers.backend().close_session(id)
+    state
+        .brokers
+        .backend()
+        .close_session(id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1078,28 +1204,40 @@ pub async fn close_session(state: State<'_, AppState>, id: u64) -> CmdResult<boo
 
 #[tauri::command]
 pub async fn set_reauth_on_read(state: State<'_, AppState>, on: bool) -> CmdResult<()> {
-    state.brokers.backend().set_reauth_on_read(on)
+    state
+        .brokers
+        .backend()
+        .set_reauth_on_read(on)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn set_show_websockets(state: State<'_, AppState>, on: bool) -> CmdResult<()> {
-    state.brokers.backend().set_show_websockets(on)
+    state
+        .brokers
+        .backend()
+        .set_show_websockets(on)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn set_menu_bar_hides_dock(state: State<'_, AppState>, on: bool) -> CmdResult<()> {
-    state.brokers.backend().set_menu_bar_hides_dock(on)
+    state
+        .brokers
+        .backend()
+        .set_menu_bar_hides_dock(on)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn set_presence_window(state: State<'_, AppState>, secs: u64) -> CmdResult<()> {
-    state.brokers.backend().set_presence_window(secs)
+    state
+        .brokers
+        .backend()
+        .set_presence_window(secs)
         .await
         .map_err(|e| e.to_string())
 }
