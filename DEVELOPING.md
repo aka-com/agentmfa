@@ -47,23 +47,30 @@ should be written as TSX components rather than adding new HTML-string
 templates; a regression test (`ui/tests/react-boundary.test.ts`) guards the
 boundary.
 
-## Publishing the CLI
+## Publishing
 
-```sh
-brew install zig # one-time macOS cross-linker setup
-npm run npm:dist
-npm run npm:publish -- --dry-run
-```
+Prerequisites: one-time macOS cross-linker setup: `brew install zig`
 
-The distribution script also uses GNU cross-toolchains when they are already
-available or explicitly configured through Cargo's target linker variables.
+1. Bump the workspace version in `Cargo.toml`; run
+   `node scripts/npm/sync-versions.mjs`; commit.
+2. Run `npm run npm:dist` on a host configured to cross-build every target.
+3. Publish from the workspace root. The command verifies all five packages
+   before publishing anything, then publishes the four platform packages
+   first and the main package last, so no install can ever resolve a launcher
+   whose binary package is missing:
 
-## Publishing the main application
+   ```sh
+   npm run npm:publish -- --dry-run
+   ```
 
-For a distributable `.app`/`.dmg`, build with the Tauri CLI and a
-Developer ID Application certificate.
+   ```sh
+   npm run npm:publish
+   ```
 
-```sh
-npm run build      # signed universal .app + .dmg (auto-detects the identity)
-npm run release    # will also notarize, staple, and validate
-```
+4. Publish the main application. For a distributable `.app`/`.dmg`,
+   build with a Developer ID Application certificate.
+
+   ```sh
+   npm run build      # signed universal .app + .dmg (auto-detects the identity)
+   npm run release    # will also notarize, staple, and validate
+   ```

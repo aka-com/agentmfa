@@ -1,13 +1,13 @@
 # Multitool
 
-Multitool lets your agents make API calls, open database connections,
-access servers, and connect to MCPs without sensitive credentials.
+Multitool lets your agents make API calls, connect to databases and
+servers, and talk to MCPs without exposing credentials.
 
-It combines a **secrets vault**, **connection broker**, and **router**
-into one application, so your agents can use unmodified CLI tools like
-`curl`, `psql`, and `git`, plus MCP servers where those exist.
+It combines a secrets vault, connection broker, and tool router into
+one application, so your agents can use unmodified CLI tools like
+`curl`, `psql`, and `git`, with credentials stored in a secure vault.
 
-## Why Multitool
+## How it works
 
 Giving an agent real access usually means pasting live credentials
 into its environment, whether through a `.env` file or global
@@ -18,23 +18,26 @@ environment variables. That means:
 - Rotating a key means hunting down every config that copied it.
 - There's no record of which agent used which credential, or when.
 
-Multitool sits between your agents and everything they reach. Secrets
-stay sealed in a local vault, and agents talk to services through
-brokered endpoints to make API calls, or open streaming connections.
-Credentials are injected on the upstream leg only, and never enter an
-agent's context.
+Multitool sits between your agents and everything they reach. Agents
+talk to services through a local proxied endpoint to make API calls or
+open database connections, Credentials are injected on the upstream
+leg only, and never enter an agent's context.
+
+Multitool is primarily tested locally today, but a hosted version has
+been implemented, that can be used with a shared vault. We also
+support limited audit logging, and team management is coming soon.
 
 ## How it works
 
-1. **Store a secret.** Add API tokens, database passwords, or SSH keys to
-   the vault, by using the desktop app or `aka secret add`.
+1. **Create a connection.** Select a destination to connect to: an API
+   host, Postgres database, SSH server, WebSocket URL, or MCP server.
 
-2. **Create a connection.** Pin a secret to a destination: an API host, a
-   Postgres database, an SSH server, a WebSocket URL, or an MCP server.
+2. **Create a secret.** Pin an API token, database password, or SSH key
+   inside the application, using the desktop app or `aka secret add`.
 
-3. **Hand your agent an endpoint.** Each connection gets is own local
+3. **Give your agent the endpoint.** Each connection gets its own local
    credential-free endpoint, that you can provide to your agent as a
-   DATABASE_URL, SSH endpoint, etc.
+   DATABASE_URL, SSH endpoint, etc., while MCPs get a unified tool.
 
    ```sh
    psql "$(aka dsn analytics)"                     # passwordless DSN
@@ -42,16 +45,17 @@ agent's context.
    claude mcp add multitool -- aka mcp             # unified MCP tool
    ```
 
-   The broker validates each call against the pinned destination, injects
-   the real credential upstream, and strips it from anything the agent
-   sees. To revoke access, turn the connection off inside the app.
+   For each connection type, the broker injects the real credential on
+   the upstream connection, and strips it from anything the agent sees
+   coming downstream. Revoking access is easy - just turn off the
+   connection inside the app.
 
-## Using Multitool
+## Supported agents
 
-Anything that speaks MCP or plain HTTP works: Claude Code, Claude
-Desktop, Codex, Cursor, or your own harness with `curl`.
+Any agent that uses MCP or the CLI works: Claude Code, Claude Desktop,
+Codex, Cursor, your own harness using `curl`.
 
-### Using direct connections
+### Direct connection setup
 
 Agents that run shell commands don't need MCP at all: each connection
 is automatically exposed as a local endpoint, that automatically
@@ -99,15 +103,16 @@ injects the credential on the upstream.
   websocat "ws://127.0.0.1:<port>/v1/ws/bridge/<ticket>"
   ```
 
-### Using Multitool over MCP
+### Multitool MCP setup
 
-Every connection is exposed as an MCP tool. API connections are exposed
- as `multitool_<name>_request`, and databases/servers as
+Every connection is also exposed as an MCP tool. API connections are
+exposed as `multitool_<name>_request`, and databases/servers as
 `multitool_<name>_open`, which returns a ready-to-use local endpoint.
+
 Upstream MCP servers are proxied through the same broker, so their
 credentials stay in the vault too.
 
-**Claude Code** in the terminal:
+**Claude Code**:
 
 ```sh
 claude mcp add multitool -- aka mcp --client claude-code
