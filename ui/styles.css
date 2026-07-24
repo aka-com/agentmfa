@@ -1195,6 +1195,9 @@
   display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
   min-width: 0;
 }
+/* When an issue carries a detail line, the first line reads as its
+   headline; single-line issues keep the plain weight they had. */
+.cc-issue-body:has(.cc-issue-detail) .cc-issue-headline { font-weight: 600; }
 /* Fixes sit under the message, not beside it: a wrapping row of compact
    buttons (the targeted fix, then the retry). */
 .cc-issue-fixes { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; }
@@ -1442,4 +1445,16 @@
   justify-content: center; gap: 5px; width: 76px; white-space: nowrap;
 }
 .ep-strip .ep-field .ep-copy svg{ width: 14px; height: 14px; }
+/* Collapsed by default in the detail pane: a masked one-liner with Copy
+   beside it. Clicking the line expands to the full wrapping DSN. */
+.ep-strip .ep-field.collapsed{ flex-direction: row; align-items: center; }
+.ep-strip .ep-field .ep-addr-masked{
+  flex: 1; min-width: 0; overflow: hidden; padding: 0; border: none;
+  background: none; cursor: pointer; text-align: left;
+  color: var(--ink-2); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px; line-height: 1.35;
+  white-space: nowrap; text-overflow: ellipsis;
+}
+.ep-strip .ep-field .ep-addr-masked:hover{ color: var(--ink); }
+.ep-strip .ep-field.collapsed .ep-copy{ align-self: center; }
 .ep-strip .ep-addr-hidden{ color: var(--muted); font-size: 12px; }

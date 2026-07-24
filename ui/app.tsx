@@ -187,6 +187,8 @@ interface AppState {
   agentSetupInstructions: string;
   settings: Settings;
   reveal: Record<string, string>;
+  /** Direct-endpoint fields expanded from their masked one-liner, by connection id. */
+  epExpanded: Record<string, boolean>;
   sheet: SheetState | null;
   draft: ConnectionDraft;
   sheetErrors: Record<string, string>;
@@ -301,6 +303,7 @@ const initialState: AppState = {
   agentSetupInstructions: '', // short paste-ready setup message (lazy-loaded)
   settings: { ...DEFAULT_SETTINGS },
   reveal: {},            // secretId -> prefix string (transient)
+  epExpanded: {},        // connId -> endpoint field expanded (transient)
   // sheet / confirm state
   sheet: null,           // {kind:'add-secret'|'edit-secret'|'add-conn'|'edit-conn'|'settings', ...}
   draft: {},
@@ -379,6 +382,7 @@ function clearBrokerOwnedState(): void {
   state.agentSetupInstructions = '';
   state.settings = { ...DEFAULT_SETTINGS };
   state.reveal = {};
+  state.epExpanded = {};
   setSheet(null);
   state.draft = {};
   state.sheetErrors = {};
@@ -703,6 +707,13 @@ const ENDPOINTABLE: Record<ConnectionType, boolean> = { pg: true, ssh: true, api
 // than a second column. Must match the styles.css breakpoint.
 const NARROW_LAYOUT = '(max-width: 720px)';
 
+/** The address with its embedded credential replaced by bullets — the
+ * collapsed field's display text. Addresses without an inline password
+ * (SSH socket commands, plain URLs) pass through unchanged. */
+function maskedEndpoint(address: string): string {
+  return address.replace(/(:\/\/[^:@/\s]*:)[^@\s]+(?=@)/, '$1••••••');
+}
+
 /** The full address as markup with soft break opportunities after its own
  * punctuation — so a long address wraps at "/", "@", or ":" instead of
  * mid-identifier. Runs of separators stay whole ("://" never splits), and
@@ -728,7 +739,13 @@ function endpointStripHTML(c: ConnectionSummary, runnableSsh = false): string {
   // what everyone does with this string, so the affordance is explicit, not
   // a hover reveal. The field and the button use the same complete DSN,
   // including its issued credential and any socket-path query.
+  //
+  // In the detail pane the field starts as a masked one-liner (credential
+  // bulleted, address ellipsized) — Copy still carries the complete DSN;
+  // clicking the line expands it. The connect guides keep the full address:
+  // there it is the deliverable being read, not shoulder-surfable chrome.
   const copied = state.copied === `ep:${c.id}`;
+  const expanded = runnableSsh || Boolean(state.epExpanded[c.id]);
   const endpointAddress = directEndpointAddress(
     c.type,
     endpoint,
@@ -742,14 +759,25 @@ function endpointStripHTML(c: ConnectionSummary, runnableSsh = false): string {
   const copyTitle = c.type === 'ssh' && runnableSsh
     ? 'Copy the SSH command'
     : 'Copy the connection command';
+  const copyBtn = endpointText
+    ? `<button class="btn sm ep-copy" title="${copyTitle}"
+        aria-label="${copyTitle} for ${escAttr(c.name)}" data-act="copy-endpoint-dsn"
+        data-conn="${c.id}" data-text="${escAttr(endpointText)}">${
+        copied ? `${ICONS.check} Copied` : `${ICONS.copy} Copy`}</button>`
+    : '';
   const address = endpointText
-    ? `<div class="ep-field">
-        <code class="ep-addr">${breakableAddress(endpointText)}</code>
-        <button class="btn sm ep-copy" title="${copyTitle}"
-          aria-label="${copyTitle} for ${escAttr(c.name)}" data-act="copy-endpoint-dsn"
-          data-conn="${c.id}" data-text="${escAttr(endpointText)}">${
-          copied ? `${ICONS.check} Copied` : `${ICONS.copy} Copy`}</button>
-      </div>`
+    ? expanded
+      ? `<div class="ep-field">
+          <code class="ep-addr">${breakableAddress(endpointText)}</code>
+          ${copyBtn}
+        </div>`
+      : `<div class="ep-field collapsed">
+          <button class="ep-addr ep-addr-masked" title="Show the full address"
+            aria-label="Show the full connection address for ${escAttr(c.name)}"
+            aria-expanded="false" data-act="expand-endpoint" data-conn="${c.id}">${
+            esc(maskedEndpoint(endpointText))}</button>
+          ${copyBtn}
+        </div>`
     : '<span class="ep-addr ep-addr-hidden">Connection address unavailable</span>';
   // The strip is the field, nothing more: reissue/revoke live in the row's
   // one options menu.
@@ -937,8 +965,10 @@ const editFix = (c: ConnectionSummary): string => fixBtn('edit-conn', c.id, 'Fix
  * line in the expansion, with its fix actions stacked below it. One verdict per
  * row: a failed check moves the indicator, it never sits beside a green
  * one. */
-function connectionIssues(c: ConnectionSummary): Array<{ text: string; fix?: string }> {
-  const issues: Array<{ text: string; fix?: string }> = [];
+function connectionIssues(
+  c: ConnectionSummary,
+): Array<{ text: string; detail?: string; fix?: string }> {
+  const issues: Array<{ text: string; detail?: string; fix?: string }> = [];
   if (c.type === 'pg' && c.sslmode && c.sslmode !== 'verify-full' && !isLoopbackHost(c.host)) {
     issues.push({
       text: c.sslmode === 'disable'
@@ -988,14 +1018,19 @@ function connectionIssues(c: ConnectionSummary): Array<{ text: string; fix?: str
     // own; testing remains available from the panel's options menu.
     const kind = fresh && !fresh.ok ? fresh.kind : undefined;
     const fixable = !c.mcp_path && kind !== undefined && kind !== 'other';
-    issues.push({
-      // Override broker's TLS protocol-speak ("refused to start TLS",
-      // the sslmode by name).
-      text: kind === 'tls_declined'
-        ? 'Connection failed: Encrypted connection required.'
-        : failure,
-      fix: fixable ? editFix(c) : '',
-    });
+    // The TLS refusal gets a short headline with the protocol-speak
+    // ("refused to start TLS", the sslmode by name) demoted to a detail
+    // line. The stored broker verdict carries no kind, so the raw message
+    // is recognized by its text.
+    const tlsDeclined = kind === 'tls_declined' || /refused to start TLS/i.test(failure);
+    issues.push(tlsDeclined
+      ? {
+          text: 'TLS handshake failed',
+          detail: `The server refused TLS; this connection requires ${
+            c.sslmode ? `"${c.sslmode}"` : 'it'}.`,
+          fix: fixable ? editFix(c) : '',
+        }
+      : { text: failure, fix: fixable ? editFix(c) : '' });
   }
   return issues;
 }
@@ -1059,7 +1094,8 @@ function connDetailHTML(c: ConnectionSummary): string {
   const issuesBlock = enabled && issues.length
     ? `<div class="cc-issues">${issues.map((issue) =>
         `<div class="cc-issue">${ICONS.triangleAlert}<div class="cc-issue-body">
-          <span>${esc(issue.text)}</span>${
+          <span class="cc-issue-headline">${esc(issue.text)}</span>${
+          issue.detail ? `<span class="cc-issue-detail">${esc(issue.detail)}</span>` : ''}${
           issue.fix
             ? `<div class="cc-issue-fixes">${issue.fix}</div>`
             : ''}</div></div>`).join('')}</div>`
@@ -1107,7 +1143,7 @@ function connDetailHTML(c: ConnectionSummary): string {
     const rows: Array<[string, string]> = [];
     if (c.mcp_path) {
       if (c.host) rows.push(['Server', `${c.host}${c.mcp_path === '/' ? '' : c.mcp_path}`]);
-      if (c.account) rows.push(['Signed in as', c.account]);
+      if (c.account) rows.push(['Signs in as', c.account]);
     } else if (c.type === 'pg') {
       if (c.host) rows.push(['Host', c.host]);
       if (c.port != null) rows.push(['Port', String(c.port)]);
@@ -1217,10 +1253,8 @@ function catalogRowHTML(entry: CatalogEntry): string {
       </div></div>`;
   }
   const builtin = entry.via === 'builtin';
-  const count = builtin ? state.secrets.length : 0;
   const quickConnect = canQuickConnectMcp(entry);
   const actionMenuOpen = state.catalogActionMenuOpen === entry.id;
-  const label = `${count} saved credential${count === 1 ? '' : 's'}`;
   // Rows that need provider-side setup (Slack, Gmail) and generic MCP and
   // HTTP rows all say Configure: the user supplies something before the
   // connection can be made.
@@ -1250,8 +1284,10 @@ function catalogRowHTML(entry: CatalogEntry): string {
         ${entry.preset ? `<button class="menu-item" role="menuitem" data-act="catalog-connect-api" data-id="${entry.id}">Connect custom API</button>` : ''}
       </div>` : ''}
     </div>`;
+  // The credentials store renders its table right below (always expanded),
+  // so the row itself carries no trailing badge — the table is the count.
   const action = builtin
-    ? `<span class="cat-count is-static" title="${escAttr(label)}">${ICONS.fileKey} ${count}</span>`
+    ? ''
     : quickConnect
     ? quickConnectAction
     : entry.via === 'connection'
@@ -4340,6 +4376,11 @@ document.addEventListener('click', async (e) => {
       }
       break;
     }
+    case 'expand-endpoint': {
+      const id = btn.dataset.conn;
+      if (id) { state.epExpanded[id] = true; render(); }
+      break;
+    }
     case 'copy-endpoint-dsn': {
       const conn = state.connections.find((candidate) => candidate.id === btn.dataset.conn);
       const address = conn
@@ -5333,6 +5374,7 @@ async function boot() {
   await listen('aka://dropdown-hidden', () => {
     releaseDropdownForm();
     state.reveal = {};
+    state.epExpanded = {};
     setSheet(null);
     state.draft = {};
     state.sheetErrors = {};
