@@ -785,15 +785,16 @@ function endpointStripHTML(c: ConnectionSummary, runnableSsh = false): string {
 }
 
 /** The agents on/off switch, in the detail panel's header — the tool's one
- * primary control, labeled now that it has the room the list rows lacked.
- * The list rows carry only the health dot (gray = off). */
+ * primary control. Its state is written out in the title's subline
+ * ("Enabled" / "Off"), so the switch itself stays unlabeled and the header
+ * keeps its width for the name. The list rows carry only the health dot
+ * (gray = off). */
 function connToggleHTML(c: ConnectionSummary): string {
   const enabled = c.agent_access.enabled;
-  return `<span class="cd-switch"><span class="cd-switch-lbl">${enabled ? 'Enabled' : 'Off'}</span>
-    <button class="switch ${enabled ? 'on' : ''}" role="switch" aria-checked="${enabled}"
+  return `<button class="switch ${enabled ? 'on' : ''}" role="switch" aria-checked="${enabled}"
     title="${enabled ? 'Agents may use this tool' : 'Agents may not use this tool'}"
     aria-label="${enabled ? 'Disable' : 'Enable'} ${escAttr(c.name)} for agents"
-    data-act="${enabled ? 'disable-tool' : 'enable-tool'}" data-conn="${c.id}"></button></span>`;
+    data-act="${enabled ? 'disable-tool' : 'enable-tool'}" data-conn="${c.id}"></button>`;
 }
 
 /* ---- connection guides ---- */
@@ -1134,8 +1135,8 @@ function connDetailHTML(c: ConnectionSummary): string {
       ? 'This tool is disabled. Its SSH agent socket stops signing for agents.'
       : 'This tool is disabled. Requests from agents will be rejected with a 403 error.'
   }</div>`;
-  // The tool's facts, unpacked. The row and the header keep the terse
-  // machine target; this card is where its parts are readable — only facts
+  // The tool's facts, unpacked. The row keeps the terse machine target;
+  // this card is where its parts are readable — only facts
   // the summary actually carries render, so every kind contributes what it
   // has. The live-session line surfaces what the list's "N live" badge
   // counts and links it to the log that explains it.
@@ -1177,7 +1178,7 @@ function connDetailHTML(c: ConnectionSummary): string {
   return `<div class="cd-head">
       <span class="cat-ico kind-${connectionKind(c)}" aria-hidden="true">${entry ? ICONS[entry.icon] || '' : ''}</span>
       <div class="cd-title"><b title="${escAttr(c.name)}">${esc(connectionRowName(c))}</b>
-        <span title="${escAttr(c.target)}">${esc(c.target)}</span></div>
+        <span>${enabled ? 'Enabled' : 'Off'}</span></div>
       <div class="cd-actions">
         ${connToggleHTML(c)}
         <div class="tile-menu-wrap">
@@ -1997,8 +1998,11 @@ function ThemeButton({ className }: { className: string }): ReactNode {
 
 function MainWindow(): ReactNode {
   const takeover = brokerTakeover(state.broker, state.remoteSetup.open);
-  const pageTitle = state.tab === 'connections' ? 'Manage tools'
+  const pageTitle = state.tab === 'connections' ? 'Connect tools'
     : state.tab === 'secrets' ? 'Manage secrets'
+    // The sidebar keeps the tab's title-case label; the page header speaks
+    // sentence case.
+    : state.tab === 'activity' ? 'Activity log'
     : tabLabel(state.tab);
 
   const pageAction = state.tab === 'connections'
@@ -2627,11 +2631,11 @@ function toolNameIsTaken(name: string): boolean {
   return Boolean(candidate) && state.connections.some((connection) => connection.name === candidate);
 }
 
-function automaticConnectionName(draft: ConnectionDraft = state.draft): string {
+function automaticConnectionName(): string {
   return defaultConnectionName(
     state.connType,
     state.connEntryName || catalogNameForType(state.connType),
-    { user: draft.user, host: draft.host, port: draft.port },
+    state.connections.map((connection) => connection.name),
   );
 }
 

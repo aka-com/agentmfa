@@ -30,21 +30,21 @@ export function isLoopbackHost(host: string | null | undefined): boolean {
     && octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255);
 }
 
+/** The default name for a new connection: the tool's label, numbered when
+ * the label is already taken — "Postgres", then "Postgres 2". The endpoint
+ * never rides in the name; the row's subline carries the live target. */
 export function defaultConnectionName(
   type: ConnectionType,
   label: string,
-  endpoint: { user?: string | null; host?: string | null; port?: string | number | null } = {},
+  existingNames: string[] = [],
 ): string {
   const base = label.trim() || (type === 'pg' ? 'Postgres' : type === 'ssh' ? 'SSH' : 'Connection');
-  if (type !== 'pg' && type !== 'ssh') return base;
-  const user = String(endpoint.user || '').trim();
-  const rawHost = String(endpoint.host || '').trim();
-  if (!user || !rawHost) return base;
-  const host = rawHost.includes(':') && !(rawHost.startsWith('[') && rawHost.endsWith(']'))
-    ? `[${rawHost}]`
-    : rawHost;
-  const port = String(endpoint.port || '').trim();
-  return `${base} (${user}@${host}${port ? `:${port}` : ''})`;
+  const taken = new Set(existingNames.map((name) => name.trim().toLowerCase()));
+  if (!taken.has(base.toLowerCase())) return base;
+  for (let n = 2; ; n++) {
+    const candidate = `${base} ${n}`;
+    if (!taken.has(candidate.toLowerCase())) return candidate;
+  }
 }
 
 export interface HostKeyCandidate {
