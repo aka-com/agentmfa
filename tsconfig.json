@@ -4,6 +4,7 @@
     "useDefineForClassFields": true,
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
     "paths": {
       "/src/*": ["./ui/src/*"]
     },
@@ -13,6 +14,6 @@
     "skipLibCheck": true,
     "types": ["node", "vite/client"]
   },
-  "include": ["ui/**/*.ts", "sidecar/**/*.ts", "scripts/**/*.ts", "vite.config.ts"],
+  "include": ["ui/**/*.ts", "ui/**/*.tsx", "sidecar/**/*.ts", "scripts/**/*.ts", "vite.config.ts"],
   "exclude": ["dist", "node_modules", "ui/public"]
 }

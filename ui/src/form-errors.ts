@@ -1,5 +1,5 @@
 // Pure helpers for routing structured backend form errors. Keeping this out
-// of app.ts makes the IPC contract testable without a browser.
+// of app.tsx makes the IPC contract testable without a browser.
 
 export interface StructuredFormError {
   kind?: string;

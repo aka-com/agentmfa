@@ -188,7 +188,7 @@
 }
   .nav-item:hover{ background: var(--hover); }
   .nav-item.on{ background: var(--accent-wash-2); color: var(--accent-ink); font-weight: 600; }
-  /* Below the narrow breakpoint (keep in step with NARROW_LAYOUT in app.ts)
+  /* Below the narrow breakpoint (keep in step with NARROW_LAYOUT in app.tsx)
      the left bar turns sideways: it collapses to a slim rail and each menu
      option rotates 90° to read down the bar. The order is unchanged — "Get
      started" stays on top, the rest follow below it. */
@@ -735,8 +735,8 @@
   .cred-name{ font-size: 13.5px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .cred-placeholder{ color: var(--muted); font-weight: 400; }
   .cred-menu{
-  /* app.ts portals this under #root so the scrolling sheet cannot clip it,
-     then anchors it to the trigger after each render. */
+  /* app.tsx portals this under #overlays so the scrolling sheet cannot clip
+     it, then anchors it to the trigger after each render. */
   position: fixed; z-index: 12; visibility: hidden;
   padding: 5px; background: var(--panel);
   border: 1px solid var(--line-mid); border-radius: 10px;
@@ -1046,7 +1046,7 @@
 /* Rows keep only what identifies a tool; everything about connecting to it
    lives in the detail panel. Wide windows show the panel as a second,
    sticky column; narrow ones (the media query below — keep in step with
-   NARROW_LAYOUT in app.ts) show the same panel as a slide-over. */
+   NARROW_LAYOUT in app.tsx) show the same panel as a slide-over. */
 .tools-split { display: flex; gap: 14px; align-items: flex-start; }
 .tools-list { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 18px; }
 .conn-detail-pane {
@@ -1177,6 +1177,9 @@
 .credentials-expansion .cat-add-secret:hover { background: var(--hover); }
 .dropdown-surface .catalog { gap: 12px; }
 .dropdown-surface .cat-search { width: 100%; }
+/* The dropdown catalog search sits just above the list (its own flex/gap
+   context is the list's, so restore the spacing it had as a catalog child). */
+.dd-cat-search { margin-bottom: 12px; }
 
 /* The add sheet's paste-to-prefill accelerator: the field uses the sheet's
    own input styling, and the button matches its height. */

@@ -1,4 +1,4 @@
-// Pure connection-form helpers. Kept separate from app.ts so the security-
+// Pure connection-form helpers. Kept separate from app.tsx so the security-
 // relevant normalization rules can be exercised without a browser/Tauri.
 
 export type ConnectionType = 'api' | 'pg' | 'ws' | 'ssh';

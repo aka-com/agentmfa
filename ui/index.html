@@ -12,21 +12,24 @@
 </head>
 <body>
   <!-- The chrome (main window / tray dropdown) is chosen from
-       location.hash by app.ts, so all Tauri windows share one file. -->
+       location.hash by app.tsx, so all Tauri windows share one file. -->
   <div id="root">
-    <!-- Placeholder until app.ts mounts and render() replaces #root. Without
+    <!-- Placeholder until app.tsx mounts the React root. Without
          it the first paint is a blank white webview for a beat — most visible
          in dev, where Vite transpiles each module on demand. -->
     <div class="app-loading" role="status" aria-label="Loading Multitool">
       <span class="app-loading-spinner"></span>
     </div>
   </div>
+  <!-- Portal target for fixed-position overlays (the credential listbox),
+       kept outside #root so React's tree and positioned DOM never mix. -->
+  <div id="overlays"></div>
   <div id="toasts" class="toasts"></div>
   <!-- Tooltip library (Tippy.js on Popper, self-hosted for the 'self'-only
        CSP). Popper must load first — it defines window.Popper, which Tippy
-       consumes; Tippy then exposes window.tippy for app.ts. -->
+       consumes; Tippy then exposes window.tippy for app.tsx. -->
   <script src="/vendor/popper.min.js"></script>
   <script src="/vendor/tippy.umd.min.js"></script>
-  <script src="/app.ts" type="module"></script>
+  <script src="/app.tsx" type="module"></script>
 </body>
 </html>

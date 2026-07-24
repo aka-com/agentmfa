@@ -31,6 +31,22 @@ Then open:
 - <http://127.0.0.1:1420/> — the main window
 - <http://127.0.0.1:1420/#dropdown> — the compact menu-bar dropdown
 
+### Frontend architecture
+
+React owns the main-window and dropdown shells in `ui/app.tsx`. Transient UI
+state lives in the small external store in `ui/src/ui-store.ts`; broker-owned
+reads go through the broker-scoped TanStack Query client in
+`ui/src/query-client.ts`.
+
+Every form is a controlled TSX component reading and writing the store
+directly, so React reconciles in place and renders leave focus, selection,
+and scroll untouched. The remaining legacy view helpers (catalog, secrets
+list, get-started, and the elicitation/mcp-auth dialogs) still emit HTML
+strings that cross one compatibility boundary (`SafeMarkup`), where they are
+sanitized with DOMPurify and parsed into React elements. New UI should be
+written as TSX components rather than adding new HTML-string templates; a
+regression test (`ui/tests/react-boundary.test.ts`) guards the boundary.
+
 ## Publishing the CLI
 
 ```sh

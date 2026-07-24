@@ -1,4 +1,4 @@
-// Multitool frontend. One file drives all Tauri windows (main, tray
+// Multitool React frontend. One file drives all Tauri windows (main, tray
 // and dropdown), chosen from location.hash.
 //
 // Every mutation and read goes through the Rust core via Tauri
@@ -7,6 +7,14 @@
 // UI is developable standalone.
 
 import { invoke, listen, mode } from '/src/bridge';
+import { QueryClientProvider } from '@tanstack/react-query';
+import DOMPurify from 'dompurify';
+import parse, { attributesToProps, domToReact, Element as ParsedElement } from 'html-react-parser';
+import type { DOMNode, HTMLReactParserOptions } from 'html-react-parser';
+import { createElement, StrictMode, useMemo } from 'react';
+import type { ReactNode } from 'react';
+import { createPortal, flushSync } from 'react-dom';
+import { createRoot } from 'react-dom/client';
 import {
   CATALOG_SECTIONS, canQuickConnectMcp, catalogEntryById, catalogNameForType,
   collapsedCatalogGroup, connectedCatalogFirst, connectionEditPresentation,
@@ -33,6 +41,7 @@ import { formErrorKind, formErrorMessage, inlineFormError } from '/src/form-erro
 import {
   LOCAL_BROKER, brokerLabel, brokerTakeover, brokerTone, remoteEndpointCaution,
 } from '/src/broker';
+import { sameBrokerScope } from '/src/broker-scope';
 import type { HostKeyCandidate } from '/src/connection-input';
 import type {
   ActivityEntry,
@@ -54,6 +63,8 @@ import type {
   Settings,
   TestErrorKind,
 } from '/src/types';
+import { queryClient, refetchBrokerQuery, removeBrokerQueries } from '/src/query-client';
+import { UiStore, useUiRevision } from '/src/ui-store';
 
 const EDIT_SECRET_MASK = '••••••••••••';
 const ACTIVITY_RENDER_LIMIT = 200;
@@ -163,6 +174,8 @@ interface AppState {
   sessions: SessionSummary[];
   activity: ActivityEntry[];
   elicitations: ElicitationRequest[];
+  /** The open elicitation dialog's field values, keyed by field name. */
+  elicitValues: Record<string, string>;
   agentSetupInstructions: string;
   settings: Settings;
   reveal: Record<string, string>;
@@ -254,7 +267,14 @@ interface ConnectionTestState {
 }
 
 /* ------------------------------ local state ------------------------------ */
-const state: AppState = {
+const DEFAULT_SETTINGS: Settings = {
+  reauth_on_read: true,
+  show_websockets: false,
+  menu_bar_hides_dock: false,
+  presence_window_secs: 15 * 60,
+};
+
+const initialState: AppState = {
   tab: 'connections',
   broker: LOCAL_BROKER,
   brokerMenuOpen: false,
@@ -266,13 +286,9 @@ const state: AppState = {
   sessions: [],
   activity: [],
   elicitations: [],      // paused upstream tool calls awaiting the user (SEP-2322)
+  elicitValues: {},      // open elicitation dialog's field values (transient)
   agentSetupInstructions: '', // short paste-ready setup message (lazy-loaded)
-  settings: {
-    reauth_on_read: true,
-    show_websockets: false,
-    menu_bar_hides_dock: false,
-    presence_window_secs: 15 * 60,
-  },
+  settings: { ...DEFAULT_SETTINGS },
   reveal: {},            // secretId -> prefix string (transient)
   // sheet / confirm state
   sheet: null,           // {kind:'add-secret'|'edit-secret'|'add-conn'|'edit-conn'|'settings', ...}
@@ -320,20 +336,86 @@ const state: AppState = {
   activityIssuesOnly: false,
 };
 
-// Re-rendering replaces #root wholesale, which would drop the scroll
-// position of the scrolling panes — expanding a catalog row would jump you
-// back to the top. Snapshot and restore them around every render.
+const uiStore = new UiStore(initialState);
+const state = uiStore.state;
+let reactMounted = false;
+/** False until boot() has loaded the first broker data; AppRoot keeps
+ * showing the loading splash instead of painting an empty window. */
+let booted = false;
+
+function clearBrokerOwnedState(): void {
+  if (state.sheet) releaseDropdownForm();
+  state.secrets = [];
+  state.connections = [];
+  state.identity = null;
+  state.sessions = [];
+  state.activity = [];
+  state.elicitations = [];
+  state.elicitValues = {};
+  state.agentSetupInstructions = '';
+  state.settings = { ...DEFAULT_SETTINGS };
+  state.reveal = {};
+  setSheet(null);
+  state.draft = {};
+  state.sheetErrors = {};
+  state.sheetBaseline = null;
+  state.confirmDiscard = false;
+  state.formMenuOpen = null;
+  state.confirm = null;
+  state.connPreset = null;
+  state.connEntryName = null;
+  state.selectedConn = null;
+  state.connectionReady = null;
+  state.connTests = {};
+  state.draftTest = null;
+  state.draftTestOverride = false;
+  state.mcpAuth = null;
+  state.mcpAuthDraft = null;
+  state.mcpAuthOpenedUrl = null;
+  state.mcpStatus = {};
+  state.wiringTools = null;
+  // View-local filters and panel state also describe the old broker's data:
+  // an agent filter from broker A would silently empty broker B's activity.
+  state.activityQuery = '';
+  state.activityAgent = null;
+  state.activityIssuesOnly = false;
+  state.toolSearch = '';
+  state.secretSearch = '';
+  state.sectionsExpanded = [];
+  state.connDetailOpen = false;
+}
+
+/** The one place sheet transitions happen, so a future cross-cutting
+ * concern (analytics, focus policy) has a single seam. */
+function setSheet(sheet: SheetState | null): void {
+  state.sheet = sheet;
+}
+
+/** Change broker identity without ever showing the previous broker's data under it. */
+function setBrokerProfile(profile: BrokerProfile): void {
+  if (!sameBrokerScope(state.broker, profile)) {
+    removeBrokerQueries(state.broker);
+    clearBrokerOwnedState();
+  }
+  state.broker = profile;
+}
+
+// With in-place reconciliation, scroll positions and focus normally survive
+// a render because the DOM nodes themselves survive. The snapshots below are
+// a safety net for the cases where React did replace a node (a key change,
+// a subtree swap): restore compares element identity and only touches what
+// was actually replaced.
 const SCROLLERS = ['.content', '.dd-global', '.conn-detail-pane'];
-function captureScroll(): Array<[string, number]> {
-  return SCROLLERS.flatMap((sel): Array<[string, number]> => {
+function captureScroll(): Array<[string, Element, number]> {
+  return SCROLLERS.flatMap((sel): Array<[string, Element, number]> => {
     const el = document.querySelector(sel);
-    return el && el.scrollTop ? [[sel, el.scrollTop]] : [];
+    return el && el.scrollTop ? [[sel, el, el.scrollTop]] : [];
   });
 }
-function restoreScroll(saved: Array<[string, number]>): void {
-  for (const [sel, top] of saved) {
-    const el = document.querySelector(sel);
-    if (el) el.scrollTop = top;
+function restoreScroll(saved: Array<[string, Element, number]>): void {
+  for (const [sel, el, top] of saved) {
+    const now = document.querySelector(sel);
+    if (now && now !== el) now.scrollTop = top;
   }
 }
 /** Switching tabs should start at the top, not inherit the old offset. */
@@ -347,6 +429,14 @@ function resetScroll(): void {
 const root = (): HTMLElement => {
   const element = document.getElementById('root');
   if (!element) throw new Error('Missing #root element');
+  return element;
+};
+/** Portal target for fixed-position overlays (the credential listbox).
+ * A sibling of #root, so React-managed children and manually positioned
+ * DOM never share a container. */
+const overlays = (): HTMLElement => {
+  const element = document.getElementById('overlays');
+  if (!element) throw new Error('Missing #overlays element');
   return element;
 };
 /* ------------------------------ data loading ----------------------------- */
@@ -374,8 +464,10 @@ async function load<K extends CommandName>(
   cmd: K,
   args?: CommandArgs<K>,
 ): Promise<void> {
+  const broker = state.broker;
   try {
-    const result: unknown = await invoke(cmd, args);
+    const result: unknown = await refetchBrokerQuery(broker, cmd, args);
+    if (!sameBrokerScope(broker, state.broker)) return;
     switch (key) {
       case 'secrets': state.secrets = result as SecretSummary[]; break;
       case 'connections': state.connections = result as ConnectionSummary[]; break;
@@ -388,15 +480,29 @@ async function load<K extends CommandName>(
   }
 }
 async function loadSettings(): Promise<void> {
-  try { state.settings = await invoke('get_settings'); } catch (e) { console.error(e); }
+  const broker = state.broker;
+  try {
+    const settings = await refetchBrokerQuery(broker, 'get_settings');
+    if (sameBrokerScope(broker, state.broker)) state.settings = settings;
+  }
+  catch (e) { console.error(e); }
 }
 async function loadLocalUsername(): Promise<void> {
   try { state.localUsername = await invoke('get_local_username'); }
   catch (e) { console.error('get_local_username', e); }
 }
 async function loadIdentity(): Promise<void> {
-  try { state.identity = await invoke('get_identity'); }
+  const broker = state.broker;
+  try {
+    const identity = await refetchBrokerQuery(broker, 'get_identity');
+    if (sameBrokerScope(broker, state.broker)) state.identity = identity;
+  }
   catch (e) { console.error('get_identity', e); }
+}
+async function loadAgentSetup(): Promise<void> {
+  const broker = state.broker;
+  const instructions = await refetchBrokerQuery(broker, 'get_agent_setup');
+  if (sameBrokerScope(broker, state.broker)) state.agentSetupInstructions = instructions;
 }
 async function refreshAgentsView(): Promise<void> {
   await Promise.all([
@@ -407,13 +513,13 @@ async function refreshAgentsView(): Promise<void> {
 }
 
 /* --------------------------------- render -------------------------------- */
-// Rebuilding #root from scratch would drop anything the DOM holds that state
-// doesn't: in-progress sheet input and the focused control. Broker events
-// (sessions/activity changes) re-render at arbitrary times, so every
-// render first captures open drafts and then puts focus (and any text
-// selection) back where it was.
-function render(capture = true): void {
-  if (capture) captureDrafts();
+// The action layer publishes one external-store revision per logical update.
+// React owns #root and reconciles in place; form fields are controlled, so
+// focus, selection, and scroll normally survive a render untouched. The
+// snapshots here are a safety net for renders that replace the focused
+// control (a remaining legacy-markup subtree swap, e.g. the elicitation
+// dialog); restore runs only when that actually happened.
+function render(): void {
   const active = document.activeElement instanceof HTMLInputElement ||
     document.activeElement instanceof HTMLTextAreaElement
     ? document.activeElement
@@ -424,12 +530,16 @@ function render(capture = true): void {
     : null;
   const scroll = captureScroll();
 
-  if (mode === 'dropdown') renderDropdown();
-  else renderMainWindow();
+  if (reactMounted) {
+    flushSync(() => uiStore.publish());
+  }
 
   restoreScroll(scroll);
 
-  if (focusId) {
+  // The focused control survived (still focused): leave it alone. Restore
+  // only when React replaced it — the old node lost focus, but its
+  // same-id successor should carry on as if it hadn't.
+  if (focusId && document.activeElement !== active) {
     const el = document.getElementById(focusId) as HTMLInputElement | HTMLTextAreaElement | null;
     if (el) {
       el.focus();
@@ -441,11 +551,10 @@ function render(capture = true): void {
 
   if (state.formMenuOpen) positionFormMenu();
 
-  // First render of a connection sheet: snapshot the draft as the form
-  // presents it (defaults included) so cancelling can detect real edits.
+  // First render of a connection sheet: snapshot the draft so cancelling
+  // can detect real edits.
   if (state.sheet && (state.sheet.kind === 'add-conn' || state.sheet.kind === 'edit-conn') &&
       state.sheetBaseline === null) {
-    captureDrafts();
     state.sheetBaseline = connDraftSignature();
   }
 }
@@ -1274,10 +1383,6 @@ function connectionsHTML() {
     return `<div class="cat-section add-section"><div class="cat-section-h">${section.toUpperCase()}</div>
       <div class="cat-rows">${rows.map(catalogRowHTML).join('')}${disclosure}</div></div>`;
   }).join('');
-  const search = mode === 'dropdown'
-    ? `<input id="tool-search" class="cat-search" type="search" placeholder="Search tools…"
-        aria-label="Search tools" value="${escAttr(state.toolSearch)}">`
-    : '';
   // Master–detail: the rows keep only what identifies a tool; everything
   // about connecting to it lives in the panel beside the list. Narrow
   // windows get the same panel as a slide-over instead (see styles).
@@ -1288,7 +1393,7 @@ function connectionsHTML() {
   const backdrop = detail && state.connDetailOpen
     ? '<button class="conn-detail-backdrop" data-act="close-conn-detail" aria-label="Close connection details" tabindex="-1"></button>'
     : '';
-  return readyCard + `<div class="catalog ${state.connDetailOpen ? 'detail-open' : ''}">${search}
+  return readyCard + `<div class="catalog ${state.connDetailOpen ? 'detail-open' : ''}">
     <div class="tools-split"><div class="tools-list">
       ${connectedList}${addRow}${addOpen && !sections ? '<div class="muted-note">No tools match your search.</div>' : sections}
     </div>${detailPane}</div>${backdrop}
@@ -1312,43 +1417,63 @@ function secretsHTML(): string {
     return entryMatch || savedSecretMatch;
   });
   const rows = connectedCatalogFirst(entries, state.connections);
-  const search = mode === 'dropdown'
-    ? `<input id="secret-search" class="cat-search" type="search" placeholder="Search secrets…"
-        aria-label="Search secrets" value="${escAttr(state.secretSearch)}">`
-    : '';
   // Each store renders as its own card so the Keychain credentials and the
   // 1Password placeholder read as separate groups, not rows of one list.
   const sections = rows.length
     ? rows.map((entry) =>
       `<div class="cat-section"><div class="cat-rows">${catalogRowHTML(entry)}</div></div>`).join('')
     : '<div class="muted-note">No secrets match your search.</div>';
-  return `<div class="catalog">${search}${sections}
+  return `<div class="catalog">${sections}
   </div>`;
 }
 
 // Console.app-style rows: a proportional timestamp gutter, restrained
 // semantic Lucide icon, then plain primary text with optional detail.
-function activityRowHTML(a: ActivityEntry): string {
-  const icon = ICONS[a.icon] || '';
+function ActivityRow({ entry }: { entry: ActivityEntry }): ReactNode {
   // Attribution and timing stay under the message. The tool gets its own
   // right-side column so it can be scanned independently across rows.
-  const chips = [
-    a.agent ? `<span class="act-chip" title="Agent">${esc(a.agent)}</span>` : '',
-    typeof a.duration_ms === 'number'
-      ? `<span class="act-chip act-chip-time" title="Duration">${a.duration_ms} ms</span>` : '',
-    // A hosted broker authorizes gated actions by manage-token possession;
-    // mark those so the trail reads honestly next to Touch-ID-confirmed rows.
-    a.confirmation === 'management_token'
-      ? `<span class="act-chip act-chip-manage" title="Authorized by the management token">via manage token</span>` : '',
-  ].join('');
-  const tool = a.connection
-    ? `<span class="act-chip act-tool" title="Tool: ${escAttr(a.connection)}">${esc(a.connection)}</span>`
-    : '';
-  return `<div class="act-row">
-    <span class="act-gutter"><span class="act-time" data-tippy-content="${escAttr(absTime(a.at))}" data-tippy-theme="activity-time">${esc(relTime(a.at))}</span></span>
-    <span class="act-ico tone-${escAttr(a.tone || 'neutral')}">${icon}</span>
-    <span class="act-txt">${esc(a.text)}${a.detail ? `<div class="act-detail">${esc(a.detail)}</div>` : ''}${chips ? `<div class="act-chips">${chips}</div>` : ''}</span>
-    ${tool}</div>`;
+  const hasChips = Boolean(entry.agent) || typeof entry.duration_ms === 'number'
+    || entry.confirmation === 'management_token';
+  return (
+    <div className="act-row">
+      <span className="act-gutter">
+        <span className="act-time" data-tippy-content={absTime(entry.at)}
+          data-tippy-theme="activity-time">{relTime(entry.at)}</span>
+      </span>
+      <span className={`act-ico tone-${entry.tone || 'neutral'}`}>
+        <Icon markup={ICONS[entry.icon] || ''} />
+      </span>
+      <span className="act-txt">
+        {entry.text}
+        {entry.detail ? <div className="act-detail">{entry.detail}</div> : null}
+        {hasChips && (
+          <div className="act-chips">
+            {entry.agent ? <span className="act-chip" title="Agent">{entry.agent}</span> : null}
+            {typeof entry.duration_ms === 'number'
+              ? <span className="act-chip act-chip-time" title="Duration">{entry.duration_ms} ms</span> : null}
+            {/* A hosted broker authorizes gated actions by manage-token
+                possession; mark those so the trail reads honestly next to
+                Touch-ID-confirmed rows. */}
+            {entry.confirmation === 'management_token'
+              ? <span className="act-chip act-chip-manage" title="Authorized by the management token">via manage token</span> : null}
+          </div>
+        )}
+      </span>
+      {entry.connection
+        ? <span className="act-chip act-tool" title={`Tool: ${entry.connection}`}>{entry.connection}</span>
+        : null}
+    </div>
+  );
+}
+
+/** A stable row identity: entries carry no broker id, so key on content and
+ * disambiguate identical repeats by occurrence. Prepends then move rows
+ * instead of rewriting every position. */
+function activityKey(entry: ActivityEntry, seen: Map<string, number>): string {
+  const base = `${entry.at}|${entry.icon}|${entry.text}|${entry.detail ?? ''}`;
+  const n = seen.get(base) ?? 0;
+  seen.set(base, n + 1);
+  return n ? `${base}#${n}` : base;
 }
 
 /** The activity entries the current filters keep. */
@@ -1367,28 +1492,40 @@ function filteredActivity(): ActivityEntry[] {
   });
 }
 
-function activityHTML() {
+function ActivityView(): ReactNode {
   if (!state.activity.length) {
-    return `<div class="muted-note">No activity yet.${mode === 'dropdown' ? '' : '<br>Requests and broker actions will appear here.'}</div>`;
+    return (
+      <div className="muted-note">
+        No activity yet.
+        {mode === 'dropdown' ? null : <><br />Requests and broker actions will appear here.</>}
+      </div>
+    );
   }
   // Agents seen in the loaded window; chips beat a dropdown at this scale.
   const agents = [...new Set(state.activity.map((entry) => entry.agent).filter(Boolean))] as string[];
-  const chip = (label: string, act: string, on: boolean, value = ''): string =>
-    `<button class="seg-btn act-filter ${on ? 'on' : ''}" data-act="${act}"
-      ${value ? `data-value="${escAttr(value)}"` : ''}>${esc(label)}</button>`;
-  const filterBar = `<div class="act-filters">
-    <input id="activity-search" class="cat-search act-search" type="search"
-      placeholder="Filter activity…" aria-label="Filter activity"
-      value="${escAttr(state.activityQuery)}">
-    ${chip('Issues', 'act-filter-issues', state.activityIssuesOnly)}
-    ${agents.map((agent) =>
-      chip(agent, 'act-filter-agent', state.activityAgent === agent, agent)).join('')}
-  </div>`;
   const entries = filteredActivity().slice(0, ACTIVITY_RENDER_LIMIT);
-  const list = entries.length
-    ? '<div class="act-list">' + entries.map(activityRowHTML).join('') + '</div>'
-    : '<div class="muted-note">Nothing matches these filters.</div>';
-  return filterBar + list;
+  const seen = new Map<string, number>();
+  return (
+    <>
+      <div className="act-filters">
+        <input id="activity-search" className="cat-search act-search" type="search"
+          placeholder="Filter activity…" aria-label="Filter activity"
+          value={state.activityQuery}
+          onChange={(e) => { state.activityQuery = e.currentTarget.value; render(); }} />
+        <button className={`seg-btn act-filter ${state.activityIssuesOnly ? 'on' : ''}`}
+          data-act="act-filter-issues">Issues</button>
+        {agents.map((agent) => (
+          <button key={agent} className={`seg-btn act-filter ${state.activityAgent === agent ? 'on' : ''}`}
+            data-act="act-filter-agent" data-value={agent}>{agent}</button>
+        ))}
+      </div>
+      {entries.length
+        ? <div className="act-list">
+            {entries.map((entry) => <ActivityRow key={activityKey(entry, seen)} entry={entry} />)}
+          </div>
+        : <div className="muted-note">Nothing matches these filters.</div>}
+    </>
+  );
 }
 
 async function receiveActivity(entry: ActivityEntry | null | undefined): Promise<void> {
@@ -1409,13 +1546,7 @@ async function receiveActivity(entry: ActivityEntry | null | undefined): Promise
     render();
     return;
   }
-  const list = document.querySelector('.act-list');
-  if (!list) {
-    render();
-    return;
-  }
-  list.insertAdjacentHTML('afterbegin', activityRowHTML(entry));
-  while (list.children.length > ACTIVITY_RENDER_LIMIT) list.lastElementChild?.remove();
+  render();
 }
 
 /** The right-aligned status on a step-2 pane. One vocabulary for every mode:
@@ -1580,11 +1711,42 @@ function startWalkthroughHTML(): string {
     </ol>`;
 }
 
-function tabContentHTML() {
-  return state.tab === 'start' ? startHTML()
+/** The active tab's content: TSX for converted views, legacy markup for the
+ * rest (crossing the SafeMarkup boundary). */
+/** The dropdown's inline catalog search (the main window's lives in its
+ * header). Controlled, so it needs no delegated handler; the legacy catalog
+ * markup it sits above stays read-only. */
+function DropdownCatalogSearch({ kind }: { kind: 'tool' | 'secret' }): ReactNode {
+  const isTool = kind === 'tool';
+  return (
+    <input className="cat-search dd-cat-search" type="search"
+      placeholder={isTool ? 'Search tools…' : 'Search secrets…'}
+      aria-label={isTool ? 'Search tools' : 'Search secrets'}
+      value={isTool ? state.toolSearch : state.secretSearch}
+      onChange={(e) => {
+        if (isTool) state.toolSearch = e.currentTarget.value;
+        else state.secretSearch = e.currentTarget.value;
+        render();
+      }} />
+  );
+}
+
+function TabContent(): ReactNode {
+  if (state.tab === 'activity') return <ActivityView />;
+  const markup = state.tab === 'start' ? startHTML()
     : state.tab === 'connections' ? connectionsHTML()
-    : state.tab === 'secrets' ? secretsHTML()
-    : activityHTML();
+    : secretsHTML();
+  // The dropdown puts its catalog search inline above the list; the wide
+  // window has it in the header instead (see MainWindow).
+  if (mode === 'dropdown' && (state.tab === 'connections' || state.tab === 'secrets')) {
+    return (
+      <>
+        <DropdownCatalogSearch kind={state.tab === 'connections' ? 'tool' : 'secret'} />
+        <SafeMarkup markup={markup} />
+      </>
+    );
+  }
+  return <SafeMarkup markup={markup} />;
 }
 
 function brokerReadyHTML() {
@@ -1622,63 +1784,76 @@ function brokerSwitchHTML(): string {
 }
 
 /** The full-content-pane takeover while a remote link is not usable. */
-function brokerPaneHTML(): string {
-  const kind = brokerTakeover(state.broker, state.remoteSetup.open);
-  if (!kind) return '';
+/** The full-pane broker takeover: the remote-setup form (controlled),
+ * the connecting spinner, or the unreachable-broker error. */
+function BrokerPane({ kind }: { kind: 'setup' | 'connecting' | 'error' }): ReactNode {
   if (kind === 'setup') {
     const setup = state.remoteSetup;
     const hasSaved = state.broker.has_saved_token
       && (setup.url.trim() === '' || setup.url.trim().replace(/\/+$/, '') === (state.broker.url ?? ''));
-    const cancelBtn = state.broker.mode === 'remote' && !state.broker.connected
-      ? `<button class="btn ghost" data-act="broker-pick-local">Use this Mac instead</button>`
-      : `<button class="btn ghost" data-act="broker-setup-cancel">Cancel</button>`;
-    return `<div class="broker-pane" role="form" aria-label="Connect to hosted Multitool">
-      <div class="bp-icon">${ICONS.blocks}</div>
-      <h2>Connect to hosted Multitool</h2>
-      <p class="bp-lead">Connect to a remote Multitool server with a management token.</p>
-      <div class="adv-collapse">
-        <button type="button" class="adv-toggle" aria-expanded="${setup.advancedOpen}"
-          data-act="toggle-remote-advanced">
-          <span class="adv-toggle-icon" aria-hidden="true">${ICONS.chevronDown}</span>Advanced</button>
-        ${setup.advancedOpen ? `<pre class="setup-instructions bp-setup-code"><code># To start a remote instance, run this behind a TLS proxy or tunnel:
-aka serve --listen 0.0.0.0:4780
-aka manage token</code></pre>` : ''}
+    return (
+      <div className="broker-pane" role="form" aria-label="Connect to hosted Multitool">
+        <div className="bp-icon"><Icon markup={ICONS.blocks} /></div>
+        <h2>Connect to hosted Multitool</h2>
+        <p className="bp-lead">Connect to a remote Multitool server with a management token.</p>
+        <div className="adv-collapse">
+          <button type="button" className="adv-toggle" aria-expanded={setup.advancedOpen}
+            data-act="toggle-remote-advanced">
+            <span className="adv-toggle-icon" aria-hidden="true"><Icon markup={ICONS.chevronDown} /></span>Advanced</button>
+          {setup.advancedOpen && (
+            <pre className="setup-instructions bp-setup-code"><code>{
+              '# To start a remote instance, run this behind a TLS proxy or tunnel:\naka serve --listen 0.0.0.0:4780\naka manage token'
+            }</code></pre>
+          )}
+        </div>
+        <div className="f-row">
+          <label htmlFor="rb-url">Hosted instance URL</label>
+          <input id="rb-url" placeholder="https://multitool.aka.com" value={setup.url}
+            autoComplete="off" spellCheck={false}
+            onChange={(e) => { setup.url = e.currentTarget.value; render(); }} />
+        </div>
+        <div className="f-row">
+          <label htmlFor="rb-token">Management token</label>
+          <input id="rb-token" type="password" value={setup.token} autoComplete="off"
+            placeholder={hasSaved ? 'Using the saved token (paste to replace)' : 'akamgr_…'}
+            onChange={(e) => { setup.token = e.currentTarget.value; render(); }} />
+        </div>
+        {setup.error && <div className="inline-error" role="alert">{setup.error}</div>}
+        <div className="bp-actions">
+          <button className="btn primary" data-act="broker-connect-submit" disabled={setup.busy}>
+            {setup.busy ? 'Connecting…' : 'Connect'}</button>
+          {state.broker.mode === 'remote' && !state.broker.connected
+            ? <button className="btn ghost" data-act="broker-pick-local">Use this Mac instead</button>
+            : <button className="btn ghost" data-act="broker-setup-cancel">Cancel</button>}
+        </div>
       </div>
-      <div class="f-row"><label for="rb-url">Hosted instance URL</label>
-        <input id="rb-url" placeholder="https://multitool.aka.com" value="${escAttr(setup.url)}"
-          autocomplete="off" spellcheck="false"></div>
-      <div class="f-row"><label for="rb-token">Management token</label>
-        <input id="rb-token" type="password" placeholder="${hasSaved ? 'Using the saved token (paste to replace)' : 'akamgr_…'}"
-          value="${escAttr(setup.token)}" autocomplete="off"></div>
-      ${setup.error ? `<div class="inline-error" role="alert">${esc(setup.error)}</div>` : ''}
-      <div class="bp-actions">
-        <button class="btn primary" data-act="broker-connect-submit" ${setup.busy ? 'disabled' : ''}>
-          ${setup.busy ? 'Connecting…' : 'Connect'}</button>
-        ${cancelBtn}
-      </div>
-    </div>`;
+    );
   }
   if (kind === 'connecting') {
-    return `<div class="broker-pane" role="status">
-      <span class="app-loading-spinner"></span>
-      <h2>Connecting to the remote broker</h2>
-      <p class="bp-lead"><code>${esc(state.broker.url ?? '')}</code></p>
-      <div class="bp-actions">
-        <button class="btn ghost" data-act="broker-pick-local">Use this Mac instead</button>
+    return (
+      <div className="broker-pane" role="status">
+        <span className="app-loading-spinner"></span>
+        <h2>Connecting to the remote broker</h2>
+        <p className="bp-lead"><code>{state.broker.url ?? ''}</code></p>
+        <div className="bp-actions">
+          <button className="btn ghost" data-act="broker-pick-local">Use this Mac instead</button>
+        </div>
       </div>
-    </div>`;
+    );
   }
-  return `<div class="broker-pane broker-pane-error" role="alert">
-    <div class="bp-icon bp-icon-error">${ICONS.circleX}</div>
-    <h2>Can’t reach the remote broker</h2>
-    <p class="bp-lead"><code>${esc(state.broker.url ?? '')}</code></p>
-    ${state.broker.error ? `<p class="bp-detail">${esc(state.broker.error)}</p>` : ''}
-    <div class="bp-actions">
-      <button class="btn primary" data-act="broker-retry">Retry</button>
-      <button class="btn" data-act="broker-edit">Edit connection…</button>
-      <button class="btn ghost" data-act="broker-pick-local">Use this Mac</button>
+  return (
+    <div className="broker-pane broker-pane-error" role="alert">
+      <div className="bp-icon bp-icon-error"><Icon markup={ICONS.circleX} /></div>
+      <h2>Can’t reach the remote broker</h2>
+      <p className="bp-lead"><code>{state.broker.url ?? ''}</code></p>
+      {state.broker.error && <p className="bp-detail">{state.broker.error}</p>}
+      <div className="bp-actions">
+        <button className="btn primary" data-act="broker-retry">Retry</button>
+        <button className="btn" data-act="broker-edit">Edit connection…</button>
+        <button className="btn ghost" data-act="broker-pick-local">Use this Mac</button>
+      </div>
     </div>
-  </div>`;
+  );
 }
 
 /** The effective appearance, as theme.js stamped it on <html> pre-paint. */
@@ -1686,92 +1861,246 @@ function currentTheme(): 'light' | 'dark' {
   return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
 }
 
-/** The appearance toggle riding beside the settings gear, in both chromes.
- * Shows the theme it switches to; the choice is stored, so it outlives the
- * OS preference theme.js would otherwise follow. */
-function themeBtnHTML(cls: string): string {
-  const dark = currentTheme() === 'dark';
-  const label = `Switch to ${dark ? 'light' : 'dark'} appearance`;
-  return `<button class="${cls}" data-act="toggle-theme"
-    title="${label}" aria-label="${label}">${dark ? ICONS.sun : ICONS.moon}</button>`;
+function Icon({ markup }: { markup: string }): ReactNode {
+  return <SafeMarkup markup={markup} />;
 }
 
-function renderMainWindow() {
-  const takeover = brokerPaneHTML();
-  const navItem = (tab: Tab): string =>
-    `<button class="nav-item ${state.tab === tab ? 'on' : ''}" data-act="tab" data-tab="${tab}"
-      ${takeover ? 'disabled' : ''}>${tabLabel(tab)}</button>`;
-  const nav = TABS.map(navItem).join('');
-  // One view-specific action, always in the header row next to the title.
-  const actionBtn = state.tab === 'connections'
-    ? `<div class="dw-head-actions">
-        <input id="tool-search" class="cat-search" type="search" placeholder="Search tools…"
-          aria-label="Search tools" value="${escAttr(state.toolSearch)}"></div>`
-    : state.tab === 'secrets'
-    ? `<div class="dw-head-actions">
-        <input id="secret-search" class="cat-search" type="search" placeholder="Search secrets…"
-          aria-label="Search secrets" value="${escAttr(state.secretSearch)}"></div>`
-    : state.tab === 'activity'
-    ? `<button class="btn" data-act="clear-activity-ask" ${state.activity.length ? '' : 'disabled'}>Clear activity</button>`
-    : '';
+/** The appearance toggle riding beside the settings gear, in both chromes. */
+function ThemeButton({ className }: { className: string }): ReactNode {
+  const dark = currentTheme() === 'dark';
+  const label = `Switch to ${dark ? 'light' : 'dark'} appearance`;
+  return (
+    <button className={className} data-act="toggle-theme" title={label} aria-label={label}>
+      <Icon markup={dark ? ICONS.sun : ICONS.moon} />
+    </button>
+  );
+}
+
+function MainWindow(): ReactNode {
+  const takeover = brokerTakeover(state.broker, state.remoteSetup.open);
   const pageTitle = state.tab === 'connections' ? 'Manage tools'
     : state.tab === 'secrets' ? 'Manage secrets'
     : tabLabel(state.tab);
-  const pageHead = state.tab === 'start' ? ''
-    : `<div class="dw-head"><h2>${pageTitle}</h2>${actionBtn}</div>`;
-  const menu = state.menuOpen
-    ? `<div class="settings-menu">
-        <button class="menu-item" data-act="mode-tray">${ICONS.menubar} Minimize to menu bar</button>
-        <button class="menu-item" data-act="open-settings">${ICONS.gear} Settings</button>
-      </div>` : '';
-  root().innerHTML = `<div class="surface">
-    <div class="dw-titlebar" data-tauri-drag-region>
-      <span class="dw-title dw-title-center">Multitool</span>
-      ${brokerSwitchHTML()}
-    </div>
-    <div class="dw-body">
-      <div class="dw-side ${takeover ? 'disabled' : ''}">
-        <div class="dw-brand"><div class="dd-appicon">${ICONS.blocks}</div>
-          <div><div class="dd-title">Multitool</div>${brokerReadyHTML()}</div></div>
-        <div class="dw-nav">${nav}</div>
-        <div class="dw-settings">${takeover ? '' : menu}
-          <button class="nav-item gear-btn ${state.menuOpen ? 'on' : ''}" data-act="toggle-settings-menu"
-            title="Settings" aria-label="Settings" ${takeover ? 'disabled' : ''}>${ICONS.gear}</button>
-          ${themeBtnHTML('nav-item theme-btn')}
+
+  const pageAction = state.tab === 'connections'
+    ? <div className="dw-head-actions">
+        <input id="tool-search" className="cat-search" type="search" placeholder="Search tools…"
+          aria-label="Search tools" value={state.toolSearch}
+          onChange={(e) => { state.toolSearch = e.currentTarget.value; render(); }} />
+      </div>
+    : state.tab === 'secrets'
+      ? <div className="dw-head-actions">
+          <input id="secret-search" className="cat-search" type="search" placeholder="Search secrets…"
+            aria-label="Search secrets" value={state.secretSearch}
+            onChange={(e) => { state.secretSearch = e.currentTarget.value; render(); }} />
+        </div>
+      : state.tab === 'activity'
+        ? <button className="btn" data-act="clear-activity-ask"
+            disabled={!state.activity.length}>Clear activity</button>
+        : null;
+
+  return (
+    <>
+      <div className="surface">
+        <div className="dw-titlebar" data-tauri-drag-region="">
+          <span className="dw-title dw-title-center">Multitool</span>
+          <SafeMarkup markup={brokerSwitchHTML()} />
+        </div>
+        <div className="dw-body">
+          <div className={`dw-side ${takeover ? 'disabled' : ''}`}>
+            <div className="dw-brand">
+              <div className="dd-appicon"><Icon markup={ICONS.blocks} /></div>
+              <div><div className="dd-title">Multitool</div><SafeMarkup markup={brokerReadyHTML()} /></div>
+            </div>
+            <div className="dw-nav">
+              {TABS.map((tab) => (
+                <button key={tab} className={`nav-item ${state.tab === tab ? 'on' : ''}`}
+                  data-act="tab" data-tab={tab} disabled={Boolean(takeover)}>
+                  {tabLabel(tab)}
+                </button>
+              ))}
+            </div>
+            <div className="dw-settings">
+              {!takeover && state.menuOpen && (
+                <div className="settings-menu">
+                  <button className="menu-item" data-act="mode-tray">
+                    <Icon markup={ICONS.menubar} /> Minimize to menu bar
+                  </button>
+                  <button className="menu-item" data-act="open-settings">
+                    <Icon markup={ICONS.gear} /> Settings
+                  </button>
+                </div>
+              )}
+              <button className={`nav-item gear-btn ${state.menuOpen ? 'on' : ''}`}
+                data-act="toggle-settings-menu" title="Settings" aria-label="Settings"
+                disabled={Boolean(takeover)}>
+                <Icon markup={ICONS.gear} />
+              </button>
+              <ThemeButton className="nav-item theme-btn" />
+            </div>
+          </div>
+          <div className="dw-main">
+            {takeover
+              ? <div className="content broker-takeover"><BrokerPane kind={takeover} /></div>
+              : <>
+                  {state.tab !== 'start' && (
+                    <div className="dw-head"><h2>{pageTitle}</h2>{pageAction}</div>
+                  )}
+                  <SafeMarkup markup={globalSectionsHTML()} />
+                  <div className="content"><TabContent /></div>
+                </>}
+          </div>
         </div>
       </div>
-      <div class="dw-main">
-        ${takeover ? `<div class="content broker-takeover">${takeover}</div>` : `${pageHead}
-        ${globalSectionsHTML()}
-        <div class="content">${tabContentHTML()}</div>`}
-      </div>
-    </div></div>${takeover ? '' : sheetsHTML() + endpointConfirmHTML() + deleteConnConfirmHTML()}`;
+      {!takeover && (
+        <><Sheets /><SafeMarkup markup={endpointConfirmHTML() + deleteConnConfirmHTML()} /></>
+      )}
+    </>
+  );
 }
 
-function renderDropdown() {
-  if (state.tab === 'start') state.tab = 'connections';
-  const takeover = brokerPaneHTML();
+function DropdownWindow(): ReactNode {
+  const takeover = brokerTakeover(state.broker, state.remoteSetup.open);
   if (takeover) {
-    root().innerHTML = `<div class="surface dropdown-surface">
-      <div class="dd-head"><div class="dd-appicon">${ICONS.blocks}</div>
-        <div class="dd-identity"><div class="dd-title">Multitool</div></div>
-        <button class="icon-btn" title="Open as a window" aria-label="Open as a window" data-act="mode-window">${ICONS.expand}</button></div>
-      <div class="content dd-content broker-takeover">${takeover}</div></div>`;
-    return;
+    return (
+      <div className="surface dropdown-surface">
+        <div className="dd-head">
+          <div className="dd-appicon"><Icon markup={ICONS.blocks} /></div>
+          <div className="dd-identity"><div className="dd-title">Multitool</div></div>
+          <button className="icon-btn" title="Open as a window" aria-label="Open as a window"
+            data-act="mode-window"><Icon markup={ICONS.expand} /></button>
+        </div>
+        <div className="content dd-content broker-takeover"><BrokerPane kind={takeover} /></div>
+      </div>
+    );
   }
-  const tabs = DROPDOWN_TABS.map((tb) =>
-    `<button class="seg-btn ${state.tab === tb ? 'on' : ''}" data-act="tab" data-tab="${tb}">${tabLabel(tb)}</button>`).join('');
-  const footer = '';
-  root().innerHTML = `<div class="surface dropdown-surface">
-    <div class="dd-head"><div class="dd-appicon">${ICONS.blocks}</div>
-      <div class="dd-identity"><div class="dd-title">Multitool</div>${brokerReadyHTML()}</div>
-      <button class="icon-btn" title="Open as a window" aria-label="Open as a window" data-act="mode-window">${ICONS.expand}</button>
-      ${themeBtnHTML('icon-btn')}
-      <button class="icon-btn" title="Settings" aria-label="Settings" data-act="open-settings">${ICONS.gear}</button></div>
-    <div class="seg">${tabs}</div>
-    ${globalSectionsHTML()}
-    <div class="content dd-content">${tabContentHTML()}</div>
-    ${footer}</div>${sheetsHTML()}${endpointConfirmHTML()}${deleteConnConfirmHTML()}`;
+  return (
+    <>
+      <div className="surface dropdown-surface">
+        <div className="dd-head">
+          <div className="dd-appicon"><Icon markup={ICONS.blocks} /></div>
+          <div className="dd-identity">
+            <div className="dd-title">Multitool</div><SafeMarkup markup={brokerReadyHTML()} />
+          </div>
+          <button className="icon-btn" title="Open as a window" aria-label="Open as a window"
+            data-act="mode-window"><Icon markup={ICONS.expand} /></button>
+          <ThemeButton className="icon-btn" />
+          <button className="icon-btn" title="Settings" aria-label="Settings"
+            data-act="open-settings"><Icon markup={ICONS.gear} /></button>
+        </div>
+        <div className="seg">
+          {DROPDOWN_TABS.map((tab) => (
+            <button key={tab} className={`seg-btn ${state.tab === tab ? 'on' : ''}`}
+              data-act="tab" data-tab={tab}>{tabLabel(tab)}</button>
+          ))}
+        </div>
+        <SafeMarkup markup={globalSectionsHTML()} />
+        <div className="content dd-content"><TabContent /></div>
+      </div>
+      <><Sheets /><SafeMarkup markup={endpointConfirmHTML() + deleteConnConfirmHTML()} /></>
+    </>
+  );
+}
+
+/**
+ * Compatibility boundary for the remaining read-mostly view functions.
+ *
+ * The returned HTML is sanitized, parsed into React elements, and reconciled
+ * in place by React—never assigned to innerHTML, never remounted wholesale.
+ * Forms live in controlled TSX components, not here; the few inputs still
+ * crossing this boundary (the elicitation dialog's fields) are uncontrolled
+ * and only ever user-written. Elements carrying an id or data-id are keyed
+ * on it, so list reorders move DOM instead of re-pairing it positionally.
+ * New screens should be ordinary TSX components.
+ */
+function SafeMarkup({ markup }: { markup: string }): ReactNode {
+  const clean = useMemo(() => {
+    const out = String(DOMPurify.sanitize(markup, {
+      USE_PROFILES: { html: true, svg: true, svgFilters: true },
+      // focusable is the SVG a11y attribute keeping icons out of tab order;
+      // the profiles don't know it and would silently strip it.
+      ADD_ATTR: ['data-tauri-drag-region', 'focusable'],
+    }));
+    // The sanitizer drops anything outside its profiles silently; a legacy
+    // helper using a new tag or attribute would just lose it. Surface that
+    // in dev so the fix (ADD_ATTR/ADD_TAGS above) is a warning away.
+    if (import.meta.env.DEV && DOMPurify.removed.length) {
+      console.warn('SafeMarkup: sanitizer dropped markup', DOMPurify.removed);
+    }
+    return out;
+  }, [markup]);
+
+  const nodes = useMemo(() => {
+    const options: HTMLReactParserOptions = {
+      replace(node) {
+        if (!(node instanceof ParsedElement)) return;
+        if (node.name === 'input' || node.name === 'textarea') {
+          const props = attributesToProps(node.attribs) as Record<string, unknown>;
+          if ('value' in props) {
+            props.defaultValue = props.value;
+            delete props.value;
+          }
+          if ('checked' in props) {
+            props.defaultChecked = props.checked;
+            delete props.checked;
+          }
+          // A textarea's text children are its default value; passing both
+          // them and defaultValue trips React's invariant and would take the
+          // whole window down.
+          if (node.name === 'textarea' && node.children.length) delete props.defaultValue;
+          const identity = node.attribs.id ?? node.attribs.name;
+          if (identity) props.key = identity;
+          return createElement(
+            node.name,
+            props,
+            node.name === 'textarea'
+              ? domToReact(node.children as DOMNode[], options)
+              : undefined,
+          );
+        }
+
+        // Parsed nodes otherwise reconcile positionally; give rows and other
+        // identified elements a stable key so reorders move DOM nodes
+        // instead of rewriting each position's contents.
+        const rowKey = node.attribs['data-id'] ?? node.attribs.id;
+        if (rowKey) {
+          // Sibling action buttons can share one data-id (one row's Connect
+          // and its ⋯ menu); the act name keeps their keys distinct.
+          const act = node.attribs['data-act'];
+          return createElement(
+            node.name,
+            { ...attributesToProps(node.attribs), key: `${node.name}:${act ?? ''}:${rowKey}` },
+            node.children.length
+              ? domToReact(node.children as DOMNode[], options)
+              : undefined,
+          );
+        }
+        return;
+      },
+    };
+    return parse(clean, options);
+  }, [clean]);
+
+  return nodes;
+}
+
+function AppRoot(): ReactNode {
+  // Subscribes this root to store publications; the revision itself is not
+  // used as a key — the windows reconcile in place rather than remounting.
+  useUiRevision(uiStore);
+  if (!booted) {
+    // Mounting React replaced index.html's placeholder; keep the same
+    // splash up until boot() has real data, instead of flashing a fully
+    // chromed but empty window that snaps to the landing tab a beat later.
+    return (
+      <div className="app-loading" role="status" aria-label="Loading Multitool">
+        <span className="app-loading-spinner" />
+      </div>
+    );
+  }
+  return mode === 'dropdown'
+    ? <DropdownWindow />
+    : <MainWindow />;
 }
 
 /* --------------------------------- sheets -------------------------------- */
@@ -1847,20 +2176,22 @@ function deleteConnConfirmHTML(): string {
       </div></div>`;
 }
 
-function sheetsHTML() {
-  if (!state.sheet) return '';
+/** The open sheet: converted forms render as controlled TSX, the rest as
+ * legacy markup across the SafeMarkup boundary. */
+function Sheets(): ReactNode {
+  if (!state.sheet) return null;
   switch (state.sheet.kind) {
-    case 'add-secret': return addSecretSheet(false);
-    case 'edit-secret': return addSecretSheet(true);
-    case 'add-conn': return connSheet(false);
-    case 'edit-conn': return connSheet(true);
-    case 'settings': return settingsSheet();
-    case 'clear-activity': return clearActivitySheet();
-    case 'elicitation': return elicitationSheet();
-    case 'mcp-auth': return mcpAuthSheet();
-    case 'wiring-tools': return wiringToolsSheet();
-    case 'endpoint-issued': return endpointIssuedSheet();
-    default: return '';
+    case 'add-secret': return <SecretSheet editing={false} />;
+    case 'edit-secret': return <SecretSheet editing />;
+    case 'add-conn': return <ConnSheet editing={false} />;
+    case 'edit-conn': return <ConnSheet editing />;
+    case 'wiring-tools': return <WiringToolsSheet />;
+    case 'settings': return <SafeMarkup markup={settingsSheet()} />;
+    case 'clear-activity': return <SafeMarkup markup={clearActivitySheet()} />;
+    case 'elicitation': return <ElicitationSheet />;
+    case 'mcp-auth': return <SafeMarkup markup={mcpAuthSheet()} />;
+    case 'endpoint-issued': return <SafeMarkup markup={endpointIssuedSheet()} />;
+    default: return null;
   }
 }
 
@@ -1873,38 +2204,51 @@ function sheetsHTML() {
  * default action last. The prompt is third-party text: rendered verbatim
  * and inert, and the chrome (title, not prompt) is what says who is asking.
  */
-function elicitationSheet(): string {
+function ElicitationSheet(): ReactNode {
   const request = state.elicitations.find((r) => r.id === state.sheet?.id);
   if (!request) {
-    return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
-      <div class="sheet elicit-sheet" role="alertdialog" aria-modal="true" aria-labelledby="elicit-title">
-        <div class="elicit-dlg-ico">${ICONS.bell}</div>
-        <h3 id="elicit-title" class="elicit-dlg-title">This request is gone</h3>
-        <div class="elicit-dlg-context">It was answered somewhere else or expired.</div>
-        <div class="sheet-actions elicit-dlg-actions">
-          <button class="btn primary" data-act="sheet-cancel">OK</button>
-        </div></div>`;
+    return (
+      <>
+        <div className="sheet-backdrop" data-act="sheet-cancel"></div>
+        <div className="sheet elicit-sheet" role="alertdialog" aria-modal="true" aria-labelledby="elicit-title">
+          <div className="elicit-dlg-ico"><Icon markup={ICONS.bell} /></div>
+          <h3 id="elicit-title" className="elicit-dlg-title">This request is gone</h3>
+          <div className="elicit-dlg-context">It was answered somewhere else or expired.</div>
+          <div className="sheet-actions elicit-dlg-actions">
+            <button className="btn primary" data-act="sheet-cancel">OK</button>
+          </div>
+        </div>
+      </>
+    );
   }
-  const fields = request.fields.map((field) => `
-    <label class="elicit-field">
-      <span>${esc(field.label)}</span>
-      <input id="elicit-${escAttr(request.id)}-${escAttr(field.name)}"
-        type="${field.secret ? 'password' : 'text'}"
-        autocomplete="off" spellcheck="false">
-    </label>`).join('');
-  return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
-    <div class="sheet elicit-sheet" role="alertdialog" aria-modal="true" aria-labelledby="elicit-title">
-      <div class="elicit-dlg-ico">${ICONS.bell}</div>
-      <h3 id="elicit-title" class="elicit-dlg-title">${esc(request.connection)} asked for input</h3>
-      <div class="elicit-dlg-question">${esc(request.prompt)}</div>
-      <div class="elicit-dlg-fields">${fields}</div>
-      <div class="sheet-actions elicit-dlg-actions">
-        <button class="btn elicit-refuse-btn" data-act="elicit-refuse" data-id="${escAttr(request.id)}">Refuse</button>
-        <span class="elicit-dlg-spacer"></span>
-        <button class="btn" data-act="sheet-cancel">Cancel</button>
-        <button class="btn primary" data-act="elicit-send" data-id="${escAttr(request.id)}">Send to ${esc(request.connection)}</button>
+  return (
+    <>
+      <div className="sheet-backdrop" data-act="sheet-cancel"></div>
+      <div className="sheet elicit-sheet" role="alertdialog" aria-modal="true" aria-labelledby="elicit-title">
+        <div className="elicit-dlg-ico"><Icon markup={ICONS.bell} /></div>
+        <h3 id="elicit-title" className="elicit-dlg-title">{request.connection} asked for input</h3>
+        {/* Third-party text: rendered verbatim and inert. */}
+        <div className="elicit-dlg-question">{request.prompt}</div>
+        <div className="elicit-dlg-fields">
+          {request.fields.map((field) => (
+            <label className="elicit-field" key={field.name}>
+              <span>{field.label}</span>
+              <input id={`elicit-${request.id}-${field.name}`}
+                type={field.secret ? 'password' : 'text'} autoComplete="off" spellCheck={false}
+                value={state.elicitValues[field.name] ?? ''}
+                onChange={(e) => { state.elicitValues[field.name] = e.currentTarget.value; render(); }} />
+            </label>
+          ))}
+        </div>
+        <div className="sheet-actions elicit-dlg-actions">
+          <button className="btn elicit-refuse-btn" data-act="elicit-refuse" data-id={request.id}>Refuse</button>
+          <span className="elicit-dlg-spacer"></span>
+          <button className="btn" data-act="sheet-cancel">Cancel</button>
+          <button className="btn primary" data-act="elicit-send" data-id={request.id}>Send to {request.connection}</button>
+        </div>
       </div>
-    </div>`;
+    </>
+  );
 }
 
 /**
@@ -1913,23 +2257,33 @@ function elicitationSheet(): string {
  * enforced broker-side on every tools/call, and the sidecar lists only
  * what is callable.
  */
-function wiringToolsSheet(): string {
+function WiringToolsSheet(): ReactNode {
   const wt = state.wiringTools;
-  if (!wt) return '';
-  const title = `Tools agents may call on ${wt.connectionName}`;
+  if (!wt) return null;
   const allChecked = wt.selected === null;
   const isChecked = (name: string): boolean => allChecked || (wt.selected || []).includes(name);
-  let body = '';
+  const tools = wt.tools || [];
+  const toggleTool = (tool: string): void => {
+    if (wt.selected === null) {
+      // Unchecking one tool from "all" starts a subset of the rest.
+      wt.selected = tools.map((t) => t.name).filter((name) => name !== tool);
+    } else if (wt.selected.includes(tool)) {
+      wt.selected = wt.selected.filter((name) => name !== tool);
+    } else {
+      wt.selected = [...wt.selected, tool];
+    }
+    render();
+  };
+  const toggleAll = (): void => {
+    // Checking "All tools" clears curation; unchecking starts a subset
+    // from everything currently advertised.
+    wt.selected = wt.selected === null ? tools.map((t) => t.name) : null;
+    render();
+  };
+  let body: ReactNode;
   if (wt.loading) {
-    body = '<div class="cc-test running">Asking the server for its tools…</div>';
+    body = <div className="cc-test running">Asking the server for its tools…</div>;
   } else {
-    const tools = wt.tools || [];
-    const rows = tools.map((tool) => `<label class="wt-row">
-        <input type="checkbox" data-act="wt-toggle" data-tool="${escAttr(tool.name)}"
-          ${isChecked(tool.name) ? 'checked' : ''}>
-        <span class="wt-name"><code>${esc(tool.name)}</code>
-          ${tool.description ? `<span class="wt-desc">${esc(tool.description)}</span>` : ''}</span>
-      </label>`).join('');
     // A curated subset may name tools the live list doesn't include — the
     // server stopped advertising them, or the list couldn't be fetched at
     // all (a lapsed sign-in). Keep them visible and editable so the subset
@@ -1937,38 +2291,59 @@ function wiringToolsSheet(): string {
     const stale = (wt.selected || []).filter((name) => !tools.some((tool) => tool.name === name));
     const staleNote = wt.error ? 'Saved earlier — reconnect to confirm it still exists'
       : 'No longer advertised by the server';
-    const staleRows = stale.map((name) => `<label class="wt-row wt-stale">
-        <input type="checkbox" data-act="wt-toggle" data-tool="${escAttr(name)}" checked>
-        <span class="wt-name"><code>${esc(name)}</code>
-          <span class="wt-desc">${staleNote}</span></span>
-      </label>`).join('');
-    // When the live list is unavailable, the picker still works off the saved
-    // selection: keep or trim it and save, no sign-in required. A soft note
-    // explains that reconnecting later restores the full list.
-    const notice = wt.error
-      ? `<div class="cc-test warn">${ICONS.circleX}<span>Couldn’t refresh the tool list from the server — showing your saved selection. Reconnect the tool to see every tool.</span></div>`
-      : '';
-    body = `${notice}<label class="wt-row wt-all">
-        <input type="checkbox" data-act="wt-all" ${allChecked ? 'checked' : ''}>
-        <span class="wt-name"><b>All tools</b>
-          <span class="wt-desc">New tools the server adds later are callable too</span></span>
-      </label>
-      <div class="wt-list ${allChecked ? 'wt-dim' : ''}">${rows}${staleRows}</div>`;
+    body = (
+      <>
+        {/* When the live list is unavailable, the picker still works off the
+            saved selection: keep or trim it and save, no sign-in required. */}
+        {wt.error && (
+          <div className="cc-test warn"><Icon markup={ICONS.circleX} />
+            <span>Couldn’t refresh the tool list from the server — showing your saved selection.
+              Reconnect the tool to see every tool.</span></div>
+        )}
+        <label className="wt-row wt-all">
+          <input type="checkbox" checked={allChecked} onChange={toggleAll} />
+          <span className="wt-name"><b>All tools</b>
+            <span className="wt-desc">New tools the server adds later are callable too</span></span>
+        </label>
+        <div className={`wt-list ${allChecked ? 'wt-dim' : ''}`}>
+          {tools.map((tool) => (
+            <label key={tool.name} className="wt-row">
+              <input type="checkbox" checked={isChecked(tool.name)}
+                onChange={() => toggleTool(tool.name)} />
+              <span className="wt-name"><code>{tool.name}</code>
+                {tool.description ? <span className="wt-desc">{tool.description}</span> : null}</span>
+            </label>
+          ))}
+          {stale.map((name) => (
+            <label key={`stale:${name}`} className="wt-row wt-stale">
+              <input type="checkbox" checked onChange={() => toggleTool(name)} />
+              <span className="wt-name"><code>{name}</code>
+                <span className="wt-desc">{staleNote}</span></span>
+            </label>
+          ))}
+        </div>
+      </>
+    );
   }
   const count = wt.selected === null
     ? 'every tool'
     : `${wt.selected.length} tool${wt.selected.length === 1 ? '' : 's'}`;
-  return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
-    <div class="sheet wide" role="dialog" aria-modal="true" aria-labelledby="wt-title">
-      <h3 id="wt-title">${esc(title)}</h3>
-      <p class="wt-sub">Agents can call ${esc(count)} on this server. Everything
-        unchecked is refused by the broker and hidden from the agent's tool list.</p>
-      ${body}
-      <div class="sheet-actions">
-        <button class="btn" data-act="sheet-cancel">Cancel</button>
-        <button class="btn primary" data-act="wt-save" ${wt.loading || wt.saving ? 'disabled' : ''}>
-          ${wt.saving ? 'Saving…' : 'Save'}</button>
-      </div></div>`;
+  return (
+    <>
+      <div className="sheet-backdrop" data-act="sheet-cancel"></div>
+      <div className="sheet wide" role="dialog" aria-modal="true" aria-labelledby="wt-title">
+        <h3 id="wt-title">Tools agents may call on {wt.connectionName}</h3>
+        <p className="wt-sub">Agents can call {count} on this server. Everything
+          unchecked is refused by the broker and hidden from the agent's tool list.</p>
+        {body}
+        <div className="sheet-actions">
+          <button className="btn" data-act="sheet-cancel">Cancel</button>
+          <button className="btn primary" data-act="wt-save" disabled={wt.loading || wt.saving}>
+            {wt.saving ? 'Saving…' : 'Save'}</button>
+        </div>
+      </div>
+    </>
+  );
 }
 
 function clearActivitySheet() {
@@ -1985,48 +2360,90 @@ function clearActivitySheet() {
 // Inline per-field validation: saveSecret/saveConn fill state.sheetErrors
 // keyed by field, the sheet renders the message under the offending input,
 // and editing the field clears its error (the `input` listener below).
-const fieldErr = (key: string): string =>
-  state.sheetErrors[key] ? `<div class="field-error">${esc(state.sheetErrors[key])}</div>` : '';
 const fieldCls = (key: string): string => (state.sheetErrors[key] ? 'err' : '');
-// Custom select shared by every dropdown in the form sheets: a trigger
-// button plus a fixed-position listbox (see positionFormMenu). The trigger
-// carries the selection as its value so captureDrafts reads it like the
-// native select it replaces.
-function customSelectHTML(
-  id: string,
-  options: Array<[string, string]>,
-  selectedValue: string | null | undefined,
-  errCls = '',
-): string {
+/** Custom select shared by every dropdown in the form sheets: a trigger
+ * button plus a fixed-position listbox portaled under #overlays so the
+ * scrolling sheet cannot clip it (see positionFormMenu). Selection is
+ * applied by the delegated select-pick handler writing the draft. */
+function CustomSelect({ id, options, selectedValue, errCls = '' }: {
+  id: string;
+  options: Array<[string, string]>;
+  selectedValue: string | null | undefined;
+  errCls?: string;
+}): ReactNode {
   const open = state.formMenuOpen === id;
   const selected = options.find(([value]) => value === selectedValue) ?? options[0];
-  const rows = options.map(([value, label]) =>
-    `<button type="button" class="cred-opt" role="option" data-act="select-pick"
-      data-menu="${id}" data-id="${escAttr(value)}" aria-selected="${value === selected[0]}">
-      <span class="cred-opt-col"><span class="cred-name">${esc(label)}</span></span>
-      ${value === selected[0] ? `<span class="cred-opt-check">${ICONS.check}</span>` : ''}</button>`).join('');
-  return `<div class="cred-select">
-    <button type="button" id="${id}" class="cred-trigger ${errCls}" value="${escAttr(selected[0])}"
-      data-act="select-toggle" data-menu="${id}" aria-haspopup="listbox" aria-expanded="${open}">
-      <span class="cred-name">${esc(selected[1])}</span>
-      <span class="cred-chevron" aria-hidden="true">${ICONS.chevronDown}</span></button>
-    ${open ? `<div class="cred-menu" role="listbox">${rows}</div>` : ''}</div>`;
+  return (
+    <div className="cred-select">
+      <button type="button" id={id} className={`cred-trigger ${errCls}`} value={selected[0]}
+        data-act="select-toggle" data-menu={id} aria-haspopup="listbox" aria-expanded={open}>
+        <span className="cred-name">{selected[1]}</span>
+        <span className="cred-chevron" aria-hidden="true"><Icon markup={ICONS.chevronDown} /></span>
+      </button>
+      {open && createPortal(
+        <div className="cred-menu" role="listbox">
+          {options.map(([value, label]) => (
+            <button type="button" key={value} className="cred-opt" role="option" data-act="select-pick"
+              data-menu={id} data-id={value} aria-selected={value === selected[0]}>
+              <span className="cred-opt-col"><span className="cred-name">{label}</span></span>
+              {value === selected[0]
+                ? <span className="cred-opt-check"><Icon markup={ICONS.check} /></span> : null}
+            </button>
+          ))}
+        </div>,
+        overlays(),
+        `select:${id}`,
+      )}
+    </div>
+  );
 }
 
-function addSecretSheet(editing: boolean): string {
+/** Inline validation message under a controlled field. */
+function FieldError({ k }: { k: string }): ReactNode {
+  return state.sheetErrors[k] ? <div className="field-error">{state.sheetErrors[k]}</div> : null;
+}
+
+/** Controlled-field write: update the draft, clear the field's stale
+ * validation error (matching the old delegated-input behavior), and any
+ * add-form edit disarms a failed draft test's save-anyway override. */
+function setDraftField(key: keyof ConnectionDraft & string, errKey: string, value: string): void {
+  (state.draft as Record<string, unknown>)[key] = value;
+  if (state.sheetErrors[errKey]) delete state.sheetErrors[errKey];
+  if (state.sheet?.kind === 'add-conn' && state.draftTestOverride) {
+    state.draftTestOverride = false;
+  }
+  render();
+}
+
+function SecretSheet({ editing }: { editing: boolean }): ReactNode {
   const d = state.draft;
-  const sheetId = state.sheet?.id;
-  const s = editing ? state.secrets.find((x) => x.id === sheetId) : null;
-  const title = editing ? 'Edit secret' : 'Add secret';
-  const valueLabel = editing ? 'New value (saved to macOS Keychain)' : 'Value';
-  const valuePlaceholder = editing ? '' : 'Your secret (saved in Keychain)';
-  return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
-    <div class="sheet wide"><h3>${title}</h3>
-    <div class="f-row"><label for="f-name">Name</label><input id="f-name" class="${fieldCls('name')}" placeholder="e.g. STRIPE_API_KEY" value="${escAttr(d.name ?? (s ? s.name : ''))}">${fieldErr('name')}</div>
-    <div class="f-row"><label for="f-value">${valueLabel}</label><input id="f-value" class="${fieldCls('value')}" type="password" placeholder="${valuePlaceholder}" value="${escAttr(d.value ?? '')}">${fieldErr('value')}</div>
-    <div class="sheet-actions">
-      <button class="btn" data-act="sheet-cancel">Cancel</button>
-      <button class="btn primary" data-act="save-secret">Save</button></div></div>`;
+  return (
+    <>
+      <div className="sheet-backdrop" data-act="sheet-cancel"></div>
+      <div className="sheet wide">
+        <h3>{editing ? 'Edit secret' : 'Add secret'}</h3>
+        <div className="f-row">
+          <label htmlFor="f-name">Name</label>
+          <input id="f-name" className={fieldCls('name')} placeholder="e.g. STRIPE_API_KEY"
+            value={d.name ?? ''}
+            onChange={(e) => setDraftField('name', 'name', e.currentTarget.value)} />
+          <FieldError k="name" />
+        </div>
+        <div className="f-row">
+          <label htmlFor="f-value">{editing ? 'New value (saved to macOS Keychain)' : 'Value'}</label>
+          <input id="f-value" className={fieldCls('value')} type="password"
+            placeholder={editing ? '' : 'Your secret (saved in Keychain)'}
+            value={d.value ?? ''}
+            onChange={(e) => setDraftField('value', 'value', e.currentTarget.value)} />
+          <FieldError k="value" />
+        </div>
+        <div className="sheet-actions">
+          <button className="btn" data-act="sheet-cancel">Cancel</button>
+          <button className="btn primary" data-act="save-secret">Save</button>
+        </div>
+      </div>
+    </>
+  );
 }
 
 // Sentinel option value in the saved-credential select that switches the
@@ -2072,88 +2489,146 @@ function automaticConnectionName(draft: ConnectionDraft = state.draft): string {
   );
 }
 
-function credentialChooserHTML(
-  type: ConnectionType,
-  draft: ConnectionDraft,
-  allowNew = true,
-  valueHint?: string,
-): string {
+function CredentialChooser({ type, allowNew = true, valueHint }: {
+  type: ConnectionType;
+  allowNew?: boolean;
+  valueHint?: string;
+}): ReactNode {
+  const draft = state.draft;
   const allowNone = secretAllowsNone(type);
   const source = defaultSecretSource(type, draft, allowNew);
   const secretLabel = type === 'pg' ? 'Database password'
     : type === 'ssh' ? 'SSH private key'
     : 'Token or API key';
-  let picker = '';
+  const keyBadge = <span className="cred-badge" aria-hidden="true"><Icon markup={ICONS.keyRound} /></span>;
+  const plusBadge = <span className="cred-badge plus" aria-hidden="true"><Icon markup={ICONS.plus} /></span>;
+  const noneBadge = <span className="cred-badge none" aria-hidden="true"><Icon markup={ICONS.circleSlash} /></span>;
+  let picker: ReactNode = null;
   if (state.secrets.length || allowNew || allowNone) {
     // No default selection: a wrong prefilled secret (a password where a
     // private key belongs, or vice versa) is worse than an explicit choice.
     const selected = source === 'existing'
       ? state.secrets.find((secret) => secret.id === draft.secretId) || null
       : null;
-    const keyBadge = `<span class="cred-badge" aria-hidden="true">${ICONS.keyRound}</span>`;
-    const plusBadge = `<span class="cred-badge plus" aria-hidden="true">${ICONS.plus}</span>`;
-    const noneBadge = `<span class="cred-badge none" aria-hidden="true">${ICONS.circleSlash}</span>`;
+    const open = state.formMenuOpen === 'c-secret';
     const triggerContent = selected
-      ? `${keyBadge}<span class="cred-name">${esc(selected.name)}</span>`
+      ? <>{keyBadge}<span className="cred-name">{selected.name}</span></>
       : source === 'new'
-      ? `${plusBadge}<span class="cred-name">New secret…</span>`
+      ? <>{plusBadge}<span className="cred-name">New secret…</span></>
       : source === 'none'
-      ? `${noneBadge}<span class="cred-name">None</span>`
-      : `<span class="cred-name cred-placeholder">Choose a secret…</span>`;
-    const options = state.secrets.map((secret) => {
-      const picked = selected !== null && selected.id === secret.id;
-      return `<button type="button" class="cred-opt" role="option" data-act="credential-pick"
-        data-id="${escAttr(secret.id)}" aria-selected="${picked}">${keyBadge}
-        <span class="cred-opt-col"><span class="cred-name">${esc(secret.name)}</span></span>
-        ${picked ? `<span class="cred-opt-check">${ICONS.check}</span>` : ''}</button>`;
-    }).join('');
-    const newOption = allowNew
-      ? `${state.secrets.length ? '<div class="cred-menu-divider"></div>' : ''}
-        <button type="button" class="cred-opt" role="option" data-act="credential-pick"
-          data-id="${NEW_CREDENTIAL_OPTION}" aria-selected="${source === 'new'}">${plusBadge}
-          <span class="cred-opt-col"><span class="cred-name">New secret…</span></span></button>`
-      : '';
-    const noneOption = allowNone
-      ? `${allowNew || !state.secrets.length ? '' : '<div class="cred-menu-divider"></div>'}
-        <button type="button" class="cred-opt" role="option" data-act="credential-pick"
-          data-id="${NO_CREDENTIAL_OPTION}" aria-selected="${source === 'none'}">${noneBadge}
-          <span class="cred-opt-col"><span class="cred-name">None</span></span>
-          ${source === 'none' ? `<span class="cred-opt-check">${ICONS.check}</span>` : ''}</button>`
-      : '';
-    const menu = state.formMenuOpen === 'c-secret'
-      ? `<div class="cred-menu" role="listbox">${options}${newOption}${noneOption}</div>`
-      : '';
-    // The trigger carries the selection as its value so captureDrafts and the
-    // sheet-open baseline read it exactly like the native select it replaced.
-    picker = `<div class="f-row"><label for="c-secret">${secretLabel}</label>
-      <div class="cred-select">
-        <button type="button" id="c-secret" class="cred-trigger ${fieldCls('secret')}"
-          value="${escAttr(selected ? selected.id : source === 'new' ? NEW_CREDENTIAL_OPTION : source === 'none' ? NO_CREDENTIAL_OPTION : '')}" data-act="select-toggle" data-menu="c-secret"
-          aria-haspopup="listbox" aria-expanded="${state.formMenuOpen === 'c-secret'}">
-          ${triggerContent}<span class="cred-chevron" aria-hidden="true">${ICONS.chevronDown}</span></button>
-        ${menu}</div>${fieldErr('secret')}</div>`;
+      ? <>{noneBadge}<span className="cred-name">None</span></>
+      : <span className="cred-name cred-placeholder">Choose a secret…</span>;
+    picker = (
+      <div className="f-row">
+        <label htmlFor="c-secret">{secretLabel}</label>
+        <div className="cred-select">
+          {/* The trigger carries the selection as its value so the sheet-open
+              baseline reads it exactly like the native select it replaced. */}
+          <button type="button" id="c-secret" className={`cred-trigger ${fieldCls('secret')}`}
+            value={selected ? selected.id
+              : source === 'new' ? NEW_CREDENTIAL_OPTION
+              : source === 'none' ? NO_CREDENTIAL_OPTION : ''}
+            data-act="select-toggle" data-menu="c-secret"
+            aria-haspopup="listbox" aria-expanded={open}>
+            {triggerContent}
+            <span className="cred-chevron" aria-hidden="true"><Icon markup={ICONS.chevronDown} /></span>
+          </button>
+          {open && createPortal(
+            <div className="cred-menu" role="listbox">
+              {state.secrets.map((secret) => {
+                const picked = selected !== null && selected.id === secret.id;
+                return (
+                  <button type="button" key={secret.id} className="cred-opt" role="option"
+                    data-act="credential-pick" data-id={secret.id} aria-selected={picked}>
+                    {keyBadge}
+                    <span className="cred-opt-col"><span className="cred-name">{secret.name}</span></span>
+                    {picked ? <span className="cred-opt-check"><Icon markup={ICONS.check} /></span> : null}
+                  </button>
+                );
+              })}
+              {allowNew && (
+                <>
+                  {state.secrets.length ? <div className="cred-menu-divider"></div> : null}
+                  <button type="button" className="cred-opt" role="option" data-act="credential-pick"
+                    data-id={NEW_CREDENTIAL_OPTION} aria-selected={source === 'new'}>
+                    {plusBadge}
+                    <span className="cred-opt-col"><span className="cred-name">New secret…</span></span>
+                  </button>
+                </>
+              )}
+              {allowNone && (
+                <>
+                  {allowNew || !state.secrets.length ? null : <div className="cred-menu-divider"></div>}
+                  <button type="button" className="cred-opt" role="option" data-act="credential-pick"
+                    data-id={NO_CREDENTIAL_OPTION} aria-selected={source === 'none'}>
+                    {noneBadge}
+                    <span className="cred-opt-col"><span className="cred-name">None</span></span>
+                    {source === 'none'
+                      ? <span className="cred-opt-check"><Icon markup={ICONS.check} /></span> : null}
+                  </button>
+                </>
+              )}
+            </div>,
+            overlays(),
+            'select:c-secret',
+          )}
+        </div>
+        <FieldError k="secret" />
+      </div>
+    );
   } else if (source === 'new') {
-    picker = `<div class="f-row"><label>${secretLabel}</label></div>`;
+    picker = <div className="f-row"><label>{secretLabel}</label></div>;
   }
   if (source !== 'new') {
-    return `<div class="credential-group">${picker}</div>`;
+    return <div className="credential-group">{picker}</div>;
   }
   const suggested = suggestedSecretName(draft.name ?? '', type);
   const effectiveName = (draft.newSecretName || suggested).trim();
   const nameTaken = credentialNameIsTaken(effectiveName);
-  const nameRow = `<div class="f-row"><label for="c-new-secret-name">Credential name</label><input id="c-new-secret-name" class="${fieldCls('newSecretName')} ${nameTaken ? 'name-conflict-warning' : ''}" aria-describedby="credential-name-warning" placeholder="${escAttr(suggested)}" value="${escAttr(draft.newSecretName ?? '')}">${fieldErr('newSecretName')}<div id="credential-name-warning" class="field-warning" role="status" aria-live="polite"${nameTaken ? '' : ' hidden'}>Name used by an existing credential</div></div>`;
+  const nameRow = (
+    <div className="f-row">
+      <label htmlFor="c-new-secret-name">Credential name</label>
+      <input id="c-new-secret-name"
+        className={`${fieldCls('newSecretName')} ${nameTaken ? 'name-conflict-warning' : ''}`}
+        aria-describedby="credential-name-warning" placeholder={suggested}
+        value={draft.newSecretName ?? ''}
+        onChange={(e) => setDraftField('newSecretName', 'newSecretName', e.currentTarget.value)} />
+      <FieldError k="newSecretName" />
+      <div id="credential-name-warning" className="field-warning" role="status" aria-live="polite"
+        hidden={!nameTaken}>Name used by an existing credential</div>
+    </div>
+  );
   if (type === 'ssh' && draft.sshImportId && draft.identityFiles && draft.identityFiles.length) {
     const identityOptions = draft.identityFiles.map((path): [string, string] => [path, path]);
-    return `<div class="credential-group">${picker}${nameRow}
-      <div class="f-row"><label for="c-identity-file">Identity file</label>${customSelectHTML('c-identity-file', identityOptions, draft.identityFile)}${fieldErr('newSecretValue')}
-        <div class="rule-note">Saved directly to macOS Keychain</div></div></div>`;
+    return (
+      <div className="credential-group">
+        {picker}{nameRow}
+        <div className="f-row">
+          <label htmlFor="c-identity-file">Identity file</label>
+          <CustomSelect id="c-identity-file" options={identityOptions} selectedValue={draft.identityFile} />
+          <FieldError k="newSecretValue" />
+          <div className="rule-note">Saved directly to macOS Keychain</div>
+        </div>
+      </div>
+    );
   }
   const valuePlaceholder = valueHint ? `Paste your key (${valueHint})`
     : type === 'pg' ? 'Paste the database password'
     : type === 'ssh' ? 'Paste the private key'
     : 'Paste the token or API key';
-  return `<div class="credential-group">${picker}${nameRow}
-    <div class="f-row"><label for="c-new-secret-value">Credential value</label><input id="c-new-secret-value" class="${fieldCls('newSecretValue')}" type="password" placeholder="${valuePlaceholder}" value="${escAttr(draft.newSecretValue ?? draft.importedCredential ?? '')}">${fieldErr('newSecretValue')}</div></div>`;
+  return (
+    <div className="credential-group">
+      {picker}{nameRow}
+      <div className="f-row">
+        <label htmlFor="c-new-secret-value">Credential value</label>
+        <input id="c-new-secret-value" className={fieldCls('newSecretValue')} type="password"
+          placeholder={valuePlaceholder}
+          value={draft.newSecretValue ?? draft.importedCredential ?? ''}
+          onChange={(e) => setDraftField('newSecretValue', 'newSecretValue', e.currentTarget.value)} />
+        <FieldError k="newSecretValue" />
+      </div>
+    </div>
+  );
 }
 
 async function connectionDraftFromImport(
@@ -2214,37 +2689,84 @@ function applyLoopbackTlsPrefill(d: ConnectionDraft): boolean {
   return false;
 }
 
-function connSheet(editing: boolean): string {
+function ConnSheet({ editing }: { editing: boolean }): ReactNode {
   const d = state.draft;
   const t = state.connType;
   const sheetId = state.sheet?.id;
   const conn = editing ? state.connections.find((c) => c.id === sheetId) : null;
   const editPresentation = conn ? connectionEditPresentation(conn) : null;
   const managedMcpOAuth = Boolean(editPresentation?.managedMcpOAuth);
+  // Identity fields keep deriving the automatic name until the user edits
+  // the name directly; a pg host may keep adjusting the TLS prefill.
+  const onIdentityField = (key: 'user' | 'host' | 'port', errKey: string) =>
+    (e: { currentTarget: HTMLInputElement }) => {
+      d[key] = e.currentTarget.value;
+      if (state.sheetErrors[errKey]) delete state.sheetErrors[errKey];
+      if (state.draftTestOverride) state.draftTestOverride = false;
+      if (state.sheet?.kind === 'add-conn' && d.nameIsAutomatic) {
+        d.name = automaticConnectionName();
+      }
+      if (key === 'host' && state.sheet?.kind === 'add-conn' && t === 'pg') {
+        applyLoopbackTlsPrefill(d);
+      }
+      render();
+    };
   const importWarnings = !editing && d.importWarnings && d.importWarnings.length
-    ? `<div class="pair-identity-warning import-warning"><b>Review imported details</b><ul>${d.importWarnings.map((warning) => `<li>${esc(warning)}</li>`).join('')}</ul></div>` : '';
+    ? <div className="pair-identity-warning import-warning" key="import-warnings"><b>Review imported details</b>
+        <ul>{d.importWarnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></div>
+    : null;
   // Paste-to-prefill: a Postgres DSN or `ssh` command fills the form below
   // instead of making the user retype what they already have.
   const canImport = !editing && (t === 'pg' || t === 'ssh');
-  const importRow = !canImport ? '' : `<div class="f-row sheet-import">
-      <label for="conn-import">Connection string</label>
-      <div class="sheet-import-row">
-        <input id="conn-import" class="${state.connImportError ? 'field-invalid' : ''}" type="text"
-          spellcheck="false" autocapitalize="off" autocorrect="off"
-          placeholder="${escAttr(quickSetupPlaceholder(t))}" value="${escAttr(state.connImportSource)}">
-        <button class="btn" data-act="conn-import" ${state.connImportSource.trim() ? '' : 'disabled'}>Prefill</button></div>
-      ${state.connImportError ? `<div class="field-error">${esc(state.connImportError)}</div>` : ''}</div>`;
-  const importDivider = canImport
-    ? '<div class="sheet-import-divider"><span>or</span></div>'
-    : '';
-  let sshHostKeyField = '';
-  let pgTlsFields = '';
-  let fields = importRow + importDivider + importWarnings;
+  const importRow = canImport && (
+    <div className="f-row sheet-import" key="import">
+      <label htmlFor="conn-import">Connection string</label>
+      <div className="sheet-import-row">
+        <input id="conn-import" className={state.connImportError ? 'field-invalid' : ''} type="text"
+          spellCheck={false} autoCapitalize="off" autoCorrect="off"
+          placeholder={quickSetupPlaceholder(t)} value={state.connImportSource}
+          onChange={(e) => {
+            state.connImportSource = e.currentTarget.value;
+            state.connImportError = null;
+            if (state.draftTestOverride) state.draftTestOverride = false;
+            render();
+          }} />
+        <button className="btn" data-act="conn-import"
+          disabled={!state.connImportSource.trim()}>Prefill</button>
+      </div>
+      {state.connImportError && <div className="field-error">{state.connImportError}</div>}
+    </div>
+  );
+  const importDivider = canImport && <div className="sheet-import-divider" key="import-divider"><span>or</span></div>;
+  const fields: ReactNode[] = [importRow, importDivider, importWarnings];
   const nameTaken = !editing && toolNameIsTaken(d.name ?? '');
-  const nameWarning = editing ? ''
-    : `<div id="tool-name-warning" class="field-warning" role="status" aria-live="polite"${nameTaken ? '' : ' hidden'}>Name used by an existing tool</div>`;
   const namePlaceholder = (!editing && state.connEntryName) || catalogNameForType(t);
-  fields += `<div class="f-row"><label for="f-cname">Name</label><input id="f-cname" class="${fieldCls('name')} ${nameTaken ? 'name-conflict-warning' : ''}"${editing ? '' : ' aria-describedby="tool-name-warning"'} placeholder="${escAttr(namePlaceholder)}" value="${escAttr(d.name ?? '')}">${fieldErr('name')}${nameWarning}</div>`;
+  fields.push(
+    <div className="f-row" key="name">
+      <label htmlFor="f-cname">Name</label>
+      <input id="f-cname" className={`${fieldCls('name')} ${nameTaken ? 'name-conflict-warning' : ''}`}
+        aria-describedby={editing ? undefined : 'tool-name-warning'}
+        placeholder={namePlaceholder} value={d.name ?? ''}
+        onChange={(e) => {
+          d.nameIsAutomatic = false;
+          setDraftField('name', 'name', e.currentTarget.value);
+        }}
+        onBlur={(e) => {
+          // Internal spaces are valid service-name characters, but edge
+          // whitespace is not part of the stored name. Reflect the submitted
+          // value as soon as the field is left instead of trimming invisibly.
+          const trimmed = e.currentTarget.value.trim();
+          if (trimmed !== d.name) { d.name = trimmed; render(); }
+        }} />
+      <FieldError k="name" />
+      {!editing && (
+        <div id="tool-name-warning" className="field-warning" role="status" aria-live="polite"
+          hidden={!nameTaken}>Name used by an existing tool</div>
+      )}
+    </div>,
+  );
+  let sshHostKeyField: ReactNode = null;
+  let pgTlsFields: ReactNode = null;
   if (t === 'api' && isMcpDraft(d)) {
     const url = d.origin
       ?? (d.host
@@ -2252,70 +2774,176 @@ function connSheet(editing: boolean): string {
         : '');
     const entry = d.entryId ? catalogEntryById(d.entryId) : undefined;
     const hint = entry?.mcpTemplate?.urlHint;
-    fields += `<div class="f-row"><label for="f-origin">MCP server URL</label>
-      <input id="f-origin" class="${fieldCls('origin')}" placeholder="https://mcp.example.com/mcp"
-        value="${escAttr(url)}"${managedMcpOAuth ? ' readonly aria-readonly="true"' : ''}>${fieldErr('origin')}
-      ${managedMcpOAuth
-        ? '<div class="rule-note">This OAuth connection is pinned to its MCP server. Add another MCP server to use a different URL.</div>'
-        : hint ? `<div class="rule-note">${esc(hint)}</div>` : ''}</div>`;
+    fields.push(
+      <div className="f-row" key="origin">
+        <label htmlFor="f-origin">MCP server URL</label>
+        <input id="f-origin" className={fieldCls('origin')} placeholder="https://mcp.example.com/mcp"
+          value={url} readOnly={managedMcpOAuth}
+          onChange={(e) => setDraftField('origin', 'origin', e.currentTarget.value)} />
+        <FieldError k="origin" />
+        {managedMcpOAuth
+          ? <div className="rule-note">This OAuth connection is pinned to its MCP server. Add another MCP server to use a different URL.</div>
+          : hint ? <div className="rule-note">{hint}</div> : null}
+      </div>,
+    );
   } else if (t === 'api') {
     const origin = d.origin ?? apiOriginFromParts(d.scheme ?? undefined, d.host ?? undefined, d.port ?? null);
-    fields += `<div class="f-row"><label for="f-origin">API root</label><input id="f-origin" class="${fieldCls('origin')}" placeholder="https://api.github.com" value="${escAttr(origin)}">${fieldErr('origin')}</div>`;
+    fields.push(
+      <div className="f-row" key="origin">
+        <label htmlFor="f-origin">API root</label>
+        <input id="f-origin" className={fieldCls('origin')} placeholder="https://api.github.com"
+          value={origin}
+          onChange={(e) => setDraftField('origin', 'origin', e.currentTarget.value)} />
+        <FieldError k="origin" />
+      </div>,
+    );
   } else if (t === 'ssh') {
-    fields += `<div class="f-2col compact-field-row">
-      <div class="f-row" style="flex:0 0 90px"><label for="f-user">User</label><input id="f-user" class="${fieldCls('user')}" placeholder="${escAttr(state.localUsername)}" value="${escAttr(d.user ?? '')}">${fieldErr('user')}</div>
-      <div class="f-row"><label for="f-host">Host</label><input id="f-host" class="${fieldCls('host')}" placeholder="prod.example.com" value="${escAttr(d.host ?? '')}">${fieldErr('host')}</div>
-      <div class="f-row" style="flex:0 0 90px"><label for="f-port">Port</label><input id="f-port" class="${fieldCls('port')}" inputmode="numeric" value="${escAttr(d.port ?? '22')}">${fieldErr('port')}</div></div>`;
-    fields += d.proxyJump ? `<div class="rule-note">ProxyJump: ${esc(d.proxyJump)}</div>` : '';
-    sshHostKeyField = `<div class="f-row"><label for="f-host-key">Host key fingerprint <span class="label-detail">(optional)</span></label>
-      <input id="f-host-key" class="${fieldCls('hostKeyFingerprint')}" placeholder="SHA256:…" value="${escAttr(d.hostKeyFingerprint ?? '')}">${fieldErr('hostKeyFingerprint')}
-      <div class="rule-note">The server’s identity (host key) is confirmed with you the first time an agent connects.</div></div>`;
+    fields.push(
+      <div className="f-2col compact-field-row" key="ssh-identity">
+        <div className="f-row" style={{ flex: '0 0 90px' }}>
+          <label htmlFor="f-user">User</label>
+          <input id="f-user" className={fieldCls('user')} placeholder={state.localUsername}
+            value={d.user ?? ''} onChange={onIdentityField('user', 'user')} />
+          <FieldError k="user" />
+        </div>
+        <div className="f-row">
+          <label htmlFor="f-host">Host</label>
+          <input id="f-host" className={fieldCls('host')} placeholder="prod.example.com"
+            value={d.host ?? ''} onChange={onIdentityField('host', 'host')} />
+          <FieldError k="host" />
+        </div>
+        <div className="f-row" style={{ flex: '0 0 90px' }}>
+          <label htmlFor="f-port">Port</label>
+          <input id="f-port" className={fieldCls('port')} inputMode="numeric"
+            value={d.port ?? '22'} onChange={onIdentityField('port', 'port')} />
+          <FieldError k="port" />
+        </div>
+      </div>,
+      d.proxyJump ? <div className="rule-note" key="proxyjump">ProxyJump: {d.proxyJump}</div> : null,
+    );
+    sshHostKeyField = (
+      <div className="f-row" key="host-key">
+        <label htmlFor="f-host-key">Host key fingerprint <span className="label-detail">(optional)</span></label>
+        <input id="f-host-key" className={fieldCls('hostKeyFingerprint')} placeholder="SHA256:…"
+          value={d.hostKeyFingerprint ?? ''}
+          onChange={(e) => setDraftField('hostKeyFingerprint', 'hostKeyFingerprint', e.currentTarget.value)} />
+        <FieldError k="hostKeyFingerprint" />
+        <div className="rule-note">The server’s identity (host key) is confirmed with you the first time an agent connects.</div>
+      </div>
+    );
   } else if (t === 'pg') {
     const sslmode = d.sslmode || 'verify-full';
-    fields += `<div class="f-2col compact-field-row">
-      <div class="f-row"><label for="f-host">Host</label><input id="f-host" class="${fieldCls('host')}" placeholder="db.internal.example.com" value="${escAttr(d.host ?? '')}">${fieldErr('host')}</div>
-      <div class="f-row" style="flex:0 0 90px"><label for="f-port">Port</label><input id="f-port" class="${fieldCls('port')}" inputmode="numeric" value="${escAttr(d.port ?? '5432')}">${fieldErr('port')}</div></div>
-      <div class="f-2col compact-field-row">
-      <div class="f-row"><label for="f-db">Database</label><input id="f-db" class="${fieldCls('dbname')}" placeholder="app_production" value="${escAttr(d.dbname ?? '')}">${fieldErr('dbname')}</div>
-      <div class="f-row" style="flex:0 0 90px"><label for="f-user">User</label><input id="f-user" class="${fieldCls('user')}" placeholder="${escAttr(state.localUsername)}" value="${escAttr(d.user ?? '')}">${fieldErr('user')}</div></div>
-      <div class="f-row"><label for="f-sslmode">TLS mode</label>${customSelectHTML('f-sslmode', PG_SSL_OPTIONS, sslmode, fieldCls('sslmode'))}${fieldErr('sslmode')}
-        ${sslmode === 'require' ? '<div class="pair-identity-warning">The server certificate will not be verified.</div>' : ''}</div>`;
-    pgTlsFields = `<div class="f-row"><label for="f-pg-ca-bundle">Trusted CA bundle <span class="label-detail">(optional)</span></label>
-        <input id="f-pg-ca-bundle" placeholder="/path/to/private-ca.pem" value="${escAttr(d.pgCaBundlePath ?? '')}"></div>`;
+    fields.push(
+      <div className="f-2col compact-field-row" key="pg-host">
+        <div className="f-row">
+          <label htmlFor="f-host">Host</label>
+          <input id="f-host" className={fieldCls('host')} placeholder="db.internal.example.com"
+            value={d.host ?? ''} onChange={onIdentityField('host', 'host')} />
+          <FieldError k="host" />
+        </div>
+        <div className="f-row" style={{ flex: '0 0 90px' }}>
+          <label htmlFor="f-port">Port</label>
+          <input id="f-port" className={fieldCls('port')} inputMode="numeric"
+            value={d.port ?? '5432'} onChange={onIdentityField('port', 'port')} />
+          <FieldError k="port" />
+        </div>
+      </div>,
+      <div className="f-2col compact-field-row" key="pg-db">
+        <div className="f-row">
+          <label htmlFor="f-db">Database</label>
+          <input id="f-db" className={fieldCls('dbname')} placeholder="app_production"
+            value={d.dbname ?? ''}
+            onChange={(e) => setDraftField('dbname', 'dbname', e.currentTarget.value)} />
+          <FieldError k="dbname" />
+        </div>
+        <div className="f-row" style={{ flex: '0 0 90px' }}>
+          <label htmlFor="f-user">User</label>
+          <input id="f-user" className={fieldCls('user')} placeholder={state.localUsername}
+            value={d.user ?? ''} onChange={onIdentityField('user', 'user')} />
+          <FieldError k="user" />
+        </div>
+      </div>,
+      <div className="f-row" key="pg-tls">
+        <label htmlFor="f-sslmode">TLS mode</label>
+        <CustomSelect id="f-sslmode" options={PG_SSL_OPTIONS} selectedValue={sslmode}
+          errCls={fieldCls('sslmode')} />
+        <FieldError k="sslmode" />
+        {sslmode === 'require'
+          ? <div className="pair-identity-warning">The server certificate will not be verified.</div> : null}
+      </div>,
+    );
+    pgTlsFields = (
+      <div className="f-row" key="ca-bundle">
+        <label htmlFor="f-pg-ca-bundle">Trusted CA bundle <span className="label-detail">(optional)</span></label>
+        <input id="f-pg-ca-bundle" placeholder="/path/to/private-ca.pem"
+          value={d.pgCaBundlePath ?? ''}
+          onChange={(e) => setDraftField('pgCaBundlePath', 'pgCaBundlePath', e.currentTarget.value)} />
+      </div>
+    );
   } else {
-    fields += `<div class="f-row"><label for="f-url">URL</label><input id="f-url" class="${fieldCls('url')}" placeholder="wss://stream.example.com/feed" value="${escAttr(d.url ?? '')}">${fieldErr('url')}</div>`;
+    fields.push(
+      <div className="f-row" key="url">
+        <label htmlFor="f-url">URL</label>
+        <input id="f-url" className={fieldCls('url')} placeholder="wss://stream.example.com/feed"
+          value={d.url ?? ''}
+          onChange={(e) => setDraftField('url', 'url', e.currentTarget.value)} />
+        <FieldError k="url" />
+      </div>,
+    );
   }
+  const templateField = (placeholder?: string, note?: ReactNode): ReactNode => (
+    <div className="f-row">
+      <label htmlFor="c-template">Credential template</label>
+      <input id="c-template" className={fieldCls('template')} placeholder={placeholder}
+        value={d.template ?? ''}
+        onChange={(e) => setDraftField('template', 'template', e.currentTarget.value)} />
+      <FieldError k="template" />
+      {note}
+    </div>
+  );
   // OAuth-managed MCP authentication belongs to the sign-in flow. Keep its
   // generated secret name and injection template out of the ordinary editor:
   // reconnect is the only supported way to replace that grant.
   if (managedMcpOAuth) {
-    fields += `<div class="f-row"><label>Authentication</label>
-      <input value="OAuth (managed by Multitool)" readonly aria-readonly="true">
-      <div class="rule-note">${conn?.account
-        ? `Connected account: ${esc(conn.account)}. `
-        : ''}Tokens are stored securely, refreshed automatically, and sent only to this MCP server.</div></div>`;
+    fields.push(
+      <div className="f-row" key="auth">
+        <label>Authentication</label>
+        <input value="OAuth (managed by Multitool)" readOnly aria-readonly="true" />
+        <div className="rule-note">{conn?.account ? `Connected account: ${conn.account}. ` : ''}Tokens are stored securely, refreshed automatically, and sent only to this MCP server.</div>
+      </div>,
+    );
   // Existing manual API authentication still round-trips every config, but
   // the implementation template belongs behind an explicit advanced
   // disclosure rather than defining the connection's product identity.
   } else if (editing && t === 'api') {
     const credentialNames = conn?.secret_names.join(', ') || '';
-    fields += `<div class="f-row"><label>Authentication</label>
-      <input value="${credentialNames ? 'Saved credential' : 'No credential'}" readonly aria-readonly="true">
-      ${credentialNames
-        ? `<div class="rule-note">Uses ${esc(credentialNames)}. Advanced authentication can change the saved credential reference.</div>`
-        : ''}</div>
-      <details class="set-collapse" ${state.sheetErrors.template ? 'open' : ''}>
+    fields.push(
+      <div className="f-row" key="auth">
+        <label>Authentication</label>
+        <input value={credentialNames ? 'Saved credential' : 'No credential'} readOnly aria-readonly="true" />
+        {credentialNames
+          ? <div className="rule-note">Uses {credentialNames}. Advanced authentication can change the saved credential reference.</div>
+          : null}
+      </div>,
+      <details className="set-collapse" open={Boolean(state.sheetErrors.template)} key="auth-template">
         <summary>Custom authentication</summary>
-        <div class="set-panel"><div class="f-row"><label for="c-template">Credential template</label>
-          <input id="c-template" class="${fieldCls('template')}" value="${escAttr(d.template ?? '')}">${fieldErr('template')}
-          <div class="rule-note">References saved credentials by name using <code>{{ … }}</code>.</div>
-        </div></div></details>`;
+        <div className="set-panel">
+          {templateField(undefined,
+            <div className="rule-note">References saved credentials by name using <code>{'{{ … }}'}</code>.</div>)}
+        </div>
+      </details>,
+    );
   } else if (editing) {
-    if (t !== 'ws' || !d.template) fields += credentialChooserHTML(t, d, false);
+    if (t !== 'ws' || !d.template) {
+      fields.push(<CredentialChooser type={t} allowNew={false} key="chooser" />);
+    }
     if (t === 'ws' && d.template) {
-      fields += `<details class="set-collapse" ${d.template ? 'open' : ''}><summary>Custom authentication header</summary>
-        <div class="set-panel"><div class="f-row"><label for="c-template">Credential template</label>
-        <input id="c-template" class="${fieldCls('template')}" placeholder="Authorization: Bearer {{TOKEN_NAME}}" value="${escAttr(d.template ?? '')}">${fieldErr('template')}</div></div></details>`;
+      fields.push(
+        <details className="set-collapse" open={Boolean(d.template)} key="auth-template">
+          <summary>Custom authentication header</summary>
+          <div className="set-panel">{templateField('Authorization: Bearer {{TOKEN_NAME}}')}</div>
+        </details>,
+      );
     }
   } else if (t === 'api' || t === 'ws') {
     const mcpAdd = t === 'api' && isMcpDraft(d);
@@ -2333,82 +2961,144 @@ function connSheet(editing: boolean): string {
       ...(oauthPreset ? [['oauth', 'Sign in with your browser (your OAuth app)'] as [string, string]] : []),
       ['advanced', 'Bearer token + template'],
     ];
+    const clientIdField = (detail: string): ReactNode => (
+      <>
+        <div className="f-row">
+          <label htmlFor="c-oauth-client-id">Client ID</label>
+          <input id="c-oauth-client-id" className={fieldCls('oauthClientId')}
+            value={d.oauthClientId ?? ''}
+            onChange={(e) => setDraftField('oauthClientId', 'oauthClientId', e.currentTarget.value)} />
+          <FieldError k="oauthClientId" />
+        </div>
+        <div className="f-row">
+          <label htmlFor="c-oauth-client-secret">Client secret <span className="label-detail">({detail})</span></label>
+          <input id="c-oauth-client-secret" type="password" value={d.oauthClientSecret ?? ''}
+            onChange={(e) => setDraftField('oauthClientSecret', 'oauthClientSecret', e.currentTarget.value)} />
+        </div>
+      </>
+    );
     // Decision first: the authentication type governs which detail field and
     // credential inputs appear, so those render beneath the select.
-    fields += `<div class="f-row"><label for="c-auth-mode">Authentication type</label>${customSelectHTML('c-auth-mode', recipes, modeValue)}</div>`;
+    fields.push(
+      <div className="f-row" key="auth-mode">
+        <label htmlFor="c-auth-mode">Authentication type</label>
+        <CustomSelect id="c-auth-mode" options={recipes} selectedValue={modeValue} />
+      </div>,
+    );
     if (modeValue === 'oauth' && oauthPreset) {
       const checked = d.oauthScopes ?? oauthPreset.scopes;
-      const scopeBoxes = oauthPreset.scopes.map((scope) => `<label class="wt-row">
-          <input type="checkbox" data-act="oauth-scope-toggle" data-scope="${escAttr(scope)}"
-            ${checked.includes(scope) ? 'checked' : ''}>
-          <span class="wt-name"><code>${esc(scope)}</code></span>
-        </label>`).join('');
-      fields += `<div class="rule-note oauth-note">Uses your own OAuth app: create one at
-          <code>${esc(oauthPreset.appDocsUrl || 'the provider')}</code>, allow a
+      fields.push(
+        <div className="rule-note oauth-note" key="oauth-note">Uses your own OAuth app: create one at{' '}
+          <code>{oauthPreset.appDocsUrl || 'the provider'}</code>, allow a{' '}
           <code>http://127.0.0.1</code> redirect, and paste its client ID. You’ll approve access in
-          your browser; tokens live in your Keychain and refresh automatically.</div>
-        <div class="f-row"><label for="c-oauth-client-id">Client ID</label>
-          <input id="c-oauth-client-id" class="${fieldCls('oauthClientId')}" value="${escAttr(d.oauthClientId ?? '')}">${fieldErr('oauthClientId')}</div>
-        <div class="f-row"><label for="c-oauth-client-secret">Client secret <span class="label-detail">(only if your provider requires one)</span></label>
-          <input id="c-oauth-client-secret" type="password" value="${escAttr(d.oauthClientSecret ?? '')}"></div>
-        <div class="f-row"><label>Scopes</label><div class="wt-list">${scopeBoxes}</div></div>
-        <div class="adv-collapse"><details class="set-collapse"><summary>OAuth endpoints</summary>
-          <div class="set-panel">
-          <div class="f-row"><label for="c-oauth-auth-url">Authorization URL</label>
-            <input id="c-oauth-auth-url" class="${fieldCls('oauthAuthUrl')}" value="${escAttr(d.oauthAuthUrl ?? oauthPreset.authUrl)}">${fieldErr('oauthAuthUrl')}</div>
-          <div class="f-row"><label for="c-oauth-token-url">Token URL</label>
-            <input id="c-oauth-token-url" class="${fieldCls('oauthTokenUrl')}" value="${escAttr(d.oauthTokenUrl ?? oauthPreset.tokenUrl)}">${fieldErr('oauthTokenUrl')}</div>
-          </div></details></div>`;
+          your browser; tokens live in your Keychain and refresh automatically.</div>,
+        <div key="oauth-client">{clientIdField('only if your provider requires one')}</div>,
+        <div className="f-row" key="oauth-scopes">
+          <label>Scopes</label>
+          <div className="wt-list">
+            {oauthPreset.scopes.map((scope) => (
+              <label key={scope} className="wt-row">
+                <input type="checkbox" checked={checked.includes(scope)}
+                  onChange={() => {
+                    const current = d.oauthScopes ?? oauthPreset.scopes;
+                    d.oauthScopes = current.includes(scope)
+                      ? current.filter((candidate) => candidate !== scope)
+                      : [...current, scope];
+                    render();
+                  }} />
+                <span className="wt-name"><code>{scope}</code></span>
+              </label>
+            ))}
+          </div>
+        </div>,
+        <div className="adv-collapse" key="oauth-endpoints">
+          <details className="set-collapse">
+            <summary>OAuth endpoints</summary>
+            <div className="set-panel">
+              <div className="f-row">
+                <label htmlFor="c-oauth-auth-url">Authorization URL</label>
+                <input id="c-oauth-auth-url" className={fieldCls('oauthAuthUrl')}
+                  value={d.oauthAuthUrl ?? oauthPreset.authUrl}
+                  onChange={(e) => setDraftField('oauthAuthUrl', 'oauthAuthUrl', e.currentTarget.value)} />
+                <FieldError k="oauthAuthUrl" />
+              </div>
+              <div className="f-row">
+                <label htmlFor="c-oauth-token-url">Token URL</label>
+                <input id="c-oauth-token-url" className={fieldCls('oauthTokenUrl')}
+                  value={d.oauthTokenUrl ?? oauthPreset.tokenUrl}
+                  onChange={(e) => setDraftField('oauthTokenUrl', 'oauthTokenUrl', e.currentTarget.value)} />
+                <FieldError k="oauthTokenUrl" />
+              </div>
+            </div>
+          </details>
+        </div>,
+      );
     } else if (modeValue === 'oauth') {
-      fields += `<div class="rule-note oauth-note">You’ll approve access in your browser. The token is saved
-        to your Keychain and injected into the connection. You can connect multiple accounts.</div>`;
+      fields.push(
+        <div className="rule-note oauth-note" key="oauth-note">You’ll approve access in your browser. The token is saved
+          to your Keychain and injected into the connection. You can connect multiple accounts.</div>,
+      );
       // Vendors without automatic client registration (Google Workspace)
       // need a one-time OAuth client the user creates with the provider.
       const oauthApp = mcpAdd && d.entryId
         ? catalogEntryById(d.entryId)?.mcpTemplate?.oauthApp : undefined;
       if (oauthApp) {
-        fields += `<div class="rule-note oauth-note">This provider has no automatic client registration:
-            create an OAuth client at <code>${esc(oauthApp.docsUrl || 'the provider')}</code> and paste
-            its ID here. It is used once per sign-in and stored with the connection.</div>
-          <div class="f-row"><label for="c-oauth-client-id">Client ID</label>
-            <input id="c-oauth-client-id" class="${fieldCls('oauthClientId')}" value="${escAttr(d.oauthClientId ?? '')}">${fieldErr('oauthClientId')}</div>
-          <div class="f-row"><label for="c-oauth-client-secret">Client secret <span class="label-detail">(only if your provider issued one)</span></label>
-            <input id="c-oauth-client-secret" type="password" value="${escAttr(d.oauthClientSecret ?? '')}"></div>`;
+        fields.push(
+          <div className="rule-note oauth-note" key="oauth-app-note">This provider has no automatic client registration:
+            create an OAuth client at <code>{oauthApp.docsUrl || 'the provider'}</code> and paste
+            its ID here. It is used once per sign-in and stored with the connection.</div>,
+          <div key="oauth-client">{clientIdField('only if your provider issued one')}</div>,
+        );
       }
-    } else if (modeValue === 'header') {
-      fields += `<div class="f-row"><label for="c-auth-detail">Header name</label><input id="c-auth-detail" class="${fieldCls('authDetail')}" placeholder="X-API-Key" value="${escAttr(d.authDetail ?? '')}">${fieldErr('authDetail')}</div>`;
-    } else if (modeValue === 'query') {
-      fields += `<div class="f-row"><label for="c-auth-detail">Query parameter</label><input id="c-auth-detail" class="${fieldCls('authDetail')}" placeholder="api_key" value="${escAttr(d.authDetail ?? '')}">${fieldErr('authDetail')}</div>`;
+    } else if (modeValue === 'header' || modeValue === 'query') {
+      fields.push(
+        <div className="f-row" key="auth-detail">
+          <label htmlFor="c-auth-detail">{modeValue === 'header' ? 'Header name' : 'Query parameter'}</label>
+          <input id="c-auth-detail" className={fieldCls('authDetail')}
+            placeholder={modeValue === 'header' ? 'X-API-Key' : 'api_key'}
+            value={d.authDetail ?? ''}
+            onChange={(e) => setDraftField('authDetail', 'authDetail', e.currentTarget.value)} />
+          <FieldError k="authDetail" />
+        </div>,
+      );
     }
     if (modeValue === 'advanced') {
-      fields += `<div class="f-row"><label for="c-template">Credential template</label><input id="c-template" class="${fieldCls('template')}" placeholder="Authorization: Bearer {{TOKEN_NAME}}" value="${escAttr(d.template ?? '')}">${fieldErr('template')}
-        <div class="rule-note">References credentials by name using <code>{{ … }}</code>. Use this for Basic auth or composed credentials.</div></div>`;
+      fields.push(
+        <div key="auth-template">{templateField('Authorization: Bearer {{TOKEN_NAME}}',
+          <div className="rule-note">References credentials by name using <code>{'{{ … }}'}</code>. Use this for Basic auth or composed credentials.</div>)}</div>,
+      );
     } else if (modeValue !== 'oauth') {
-      fields += credentialChooserHTML(t, d, true, state.connPreset?.credentialHint);
+      fields.push(
+        <CredentialChooser type={t} valueHint={state.connPreset?.credentialHint} key="chooser" />,
+      );
     }
     // Branded rows say where the credential comes from — the equivalent of a
     // provider's "get your API key" page, opened outside the app.
     if (state.connPreset?.docsUrl && modeValue !== 'oauth') {
       const docsLabel = state.connPreset.docsUrl;
       const docsUrl = /^https?:\/\//i.test(docsLabel) ? docsLabel : `https://${docsLabel}`;
-      fields += `<div class="rule-note">Create or find your ${esc(state.connEntryName || 'API')} key at
-        <code><a class="external-doc-link" href="${escAttr(docsUrl)}" data-act="open-external-url"
-          data-url="${escAttr(docsUrl)}">${esc(docsLabel)}</a></code></div>`;
+      fields.push(
+        <div className="rule-note" key="docs">Create or find your {state.connEntryName || 'API'} key at{' '}
+          <code><a className="external-doc-link" href={docsUrl} data-act="open-external-url"
+            data-url={docsUrl}>{docsLabel}</a></code></div>,
+      );
     }
   } else {
-    fields += credentialChooserHTML(t, d);
+    fields.push(<CredentialChooser type={t} key="chooser" />);
   }
-  const advancedFields = pgTlsFields + sshHostKeyField;
-  if (advancedFields) {
+  if (pgTlsFields || sshHostKeyField) {
     // Force the section open when one of its fields has a validation error,
     // so the inline message (and the focused input) is visible.
     const advancedError = ['hostKeyFingerprint', 'pgCaBundlePath']
       .some((key) => state.sheetErrors[key]);
     const advOpen = state.connAdvancedOpen || advancedError;
-    fields += `<div class="adv-collapse">
-      <button type="button" class="adv-toggle" aria-expanded="${advOpen}" data-act="toggle-conn-advanced">
-        <span class="adv-toggle-icon" aria-hidden="true">${ICONS.chevronDown}</span>Advanced</button>
-      ${advOpen ? advancedFields : ''}</div>`;
+    fields.push(
+      <div className="adv-collapse" key="advanced">
+        <button type="button" className="adv-toggle" aria-expanded={advOpen} data-act="toggle-conn-advanced">
+          <span className="adv-toggle-icon" aria-hidden="true"><Icon markup={ICONS.chevronDown} /></span>Advanced</button>
+        {advOpen ? <>{pgTlsFields}{sshHostKeyField}</> : null}
+      </div>,
+    );
   }
   const label = editing
     ? editPresentation?.label ?? catalogNameForType(t)
@@ -2416,50 +3106,85 @@ function connSheet(editing: boolean): string {
   const oauthSelected = !editing && t === 'api' && isMcpDraft(d)
     && (d.authMode || 'oauth') === 'oauth';
   const title = `${editing ? 'Edit' : oauthSelected ? 'Connect' : 'Add'} ${label}`;
-  const discardConfirm = state.confirmDiscard ? `
-    <div class="sheet-backdrop over-sheet" data-act="discard-keep"></div>
-    <div class="sheet wide confirm-sheet discard-confirm" role="dialog" aria-modal="true" aria-labelledby="discard-conn-title">
-      <h3 id="discard-conn-title">${editing ? 'Discard changes?' : 'Discard this tool?'}</h3>
-      <p>You have unsaved changes in this form. Closing it discards them.</p>
-      <div class="sheet-actions">
-        <button class="btn" data-act="discard-keep">Keep editing</button>
-        <button class="btn danger" data-act="discard-confirm">Discard</button>
-      </div></div>` : '';
   // The draft-test verdict sits between the fields (below the Advanced
   // toggle) and the action row: the failure, a TLS-shaped fix when the
   // detail identifies one, and the promise that Add now saves anyway.
   const dt = !editing ? state.draftTest : null;
-  const tlsDeclined = dt?.kind === 'tls_declined';
-  const certFailed = dt?.kind === 'cert_unverified';
-  const draftTestHTML = !dt ? ''
+  const draftTest = !dt ? null
     : dt.running
-    ? '<div class="draft-test running">Testing the connection…</div>'
-    : `<div class="draft-test err">${ICONS.circleX}<div>
-        <b>Connection test failed.</b> ${esc(dt.detail || '')}
-        ${tlsDeclined ? `<div class="draft-test-fix"><button type="button" class="btn sm" data-act="draft-test-disable-tls">Set TLS mode to Disable</button></div>` : ''}
-        ${certFailed && t === 'pg' ? '<div class="draft-test-hint">Trust the server’s CA under Advanced → Trusted CA bundle, or pick a different TLS mode.</div>' : ''}
-        <div class="draft-test-hint">Press “Add ${esc(label)}” again to save it without a passing test.</div>
-      </div></div>`;
-  return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
-    <div class="sheet wide"><h3>${title}</h3>${fields}${draftTestHTML}
-    <div class="sheet-actions">${editing && conn
-      ? `<button class="btn danger conn-delete-btn" data-act="del-conn-from-edit" data-id="${conn.id}">Delete…</button>${
-          managedMcpOAuth
-          ? `<button class="btn" data-act="reconnect-mcp" data-id="${conn.id}">Reconnect…</button>`
-          : conn.mcp_path || conn.oauth_spec
-          ? `<div class="tile-menu-wrap sheet-conn-menu">
-              <button class="icon-btn tile-menu-btn ${state.connMenuOpen === `sheet:${conn.id}` ? 'on' : ''}"
-                title="More options" aria-label="More options for ${escAttr(conn.name)}" aria-haspopup="menu"
-                aria-expanded="${state.connMenuOpen === `sheet:${conn.id}`}"
-                data-act="toggle-conn-menu" data-id="sheet:${conn.id}">${ICONS.ellipsis}</button>
-              ${state.connMenuOpen === `sheet:${conn.id}` ? `<div class="tile-menu" role="menu" aria-label="More options for ${escAttr(conn.name)}">
-                <button class="menu-item" role="menuitem" data-act="${conn.mcp_path ? 'reconnect-mcp' : 'oauth-reconnect'}"
-                  data-id="${conn.id}">${ICONS.refresh} Reconnect (sign in again)</button>
-              </div>` : ''}
-            </div>`
-          : ''}`
-      : ''}<button class="btn" data-act="sheet-cancel">Cancel</button>
-      <button class="btn primary" data-act="save-conn" ${dt?.running ? 'disabled' : ''}>${editing ? 'Save' : oauthSelected ? 'Sign in & connect' : `Add ${label}`}</button></div></div>${discardConfirm}`;
+    ? <div className="draft-test running">Testing the connection…</div>
+    : (
+      <div className="draft-test err">
+        <Icon markup={ICONS.circleX} />
+        <div>
+          <b>Connection test failed.</b> {dt.detail || ''}
+          {dt.kind === 'tls_declined' && (
+            <div className="draft-test-fix">
+              <button type="button" className="btn sm" data-act="draft-test-disable-tls">Set TLS mode to Disable</button>
+            </div>
+          )}
+          {dt.kind === 'cert_unverified' && t === 'pg' && (
+            <div className="draft-test-hint">Trust the server’s CA under Advanced → Trusted CA bundle, or pick a different TLS mode.</div>
+          )}
+          <div className="draft-test-hint">Press “Add {label}” again to save it without a passing test.</div>
+        </div>
+      </div>
+    );
+  const menuOpen = conn ? state.connMenuOpen === `sheet:${conn.id}` : false;
+  return (
+    <>
+      <div className="sheet-backdrop" data-act="sheet-cancel"></div>
+      <div className="sheet wide">
+        <h3>{title}</h3>
+        {fields}
+        {draftTest}
+        <div className="sheet-actions">
+          {editing && conn && (
+            <>
+              <button className="btn danger conn-delete-btn" data-act="del-conn-from-edit"
+                data-id={conn.id}>Delete…</button>
+              {managedMcpOAuth
+                ? <button className="btn" data-act="reconnect-mcp" data-id={conn.id}>Reconnect…</button>
+                : conn.mcp_path || conn.oauth_spec
+                ? <div className="tile-menu-wrap sheet-conn-menu">
+                    <button className={`icon-btn tile-menu-btn ${menuOpen ? 'on' : ''}`}
+                      title="More options" aria-label={`More options for ${conn.name}`}
+                      aria-haspopup="menu" aria-expanded={menuOpen}
+                      data-act="toggle-conn-menu" data-id={`sheet:${conn.id}`}>
+                      <Icon markup={ICONS.ellipsis} /></button>
+                    {menuOpen && (
+                      <div className="tile-menu" role="menu" aria-label={`More options for ${conn.name}`}>
+                        <button className="menu-item" role="menuitem"
+                          data-act={conn.mcp_path ? 'reconnect-mcp' : 'oauth-reconnect'}
+                          data-id={conn.id}>
+                          <Icon markup={ICONS.refresh} /> Reconnect (sign in again)</button>
+                      </div>
+                    )}
+                  </div>
+                : null}
+            </>
+          )}
+          <button className="btn" data-act="sheet-cancel">Cancel</button>
+          <button className="btn primary" data-act="save-conn" disabled={dt?.running}>
+            {editing ? 'Save' : oauthSelected ? 'Sign in & connect' : `Add ${label}`}</button>
+        </div>
+      </div>
+      {state.confirmDiscard && (
+        <>
+          <div className="sheet-backdrop over-sheet" data-act="discard-keep"></div>
+          <div className="sheet wide confirm-sheet discard-confirm" role="dialog" aria-modal="true"
+            aria-labelledby="discard-conn-title">
+            <h3 id="discard-conn-title">{editing ? 'Discard changes?' : 'Discard this tool?'}</h3>
+            <p>You have unsaved changes in this form. Closing it discards them.</p>
+            <div className="sheet-actions">
+              <button className="btn" data-act="discard-keep">Keep editing</button>
+              <button className="btn danger" data-act="discard-confirm">Discard</button>
+            </div>
+          </div>
+        </>
+      )}
+    </>
+  );
 }
 
 /* ------------------------- MCP sign-in sheet ------------------------------ */
@@ -2539,7 +3264,7 @@ async function startMcpAuth(draft: McpAuthDraft): Promise<boolean> {
     state.mcpAuthDraft = draft;
     state.mcpAuth = auth;
     state.mcpAuthOpenedUrl = null;
-    state.sheet = { kind: 'mcp-auth' };
+    setSheet({ kind: 'mcp-auth' });
     state.sheetErrors = {};
     state.confirmDiscard = false;
     state.formMenuOpen = null;
@@ -2637,10 +3362,8 @@ function positionFormMenu(): void {
   const trigger = state.formMenuOpen ? document.getElementById(state.formMenuOpen) : null;
   const menu = document.querySelector<HTMLElement>('.cred-menu');
   if (!trigger || !menu) return;
-  // A fixed descendant is still clipped by an ancestor's overflow. Move the
-  // listbox out of the scrolling sheet before positioning it so the sheet can
-  // keep its scrollbar without cutting the menu off.
-  if (menu.parentElement !== root()) root().appendChild(menu);
+  // The custom selects portal their fixed listbox under #overlays, outside
+  // the scrolling sheet that would otherwise clip it; anchor it here.
   const rect = trigger.getBoundingClientRect();
   menu.style.left = `${rect.left}px`;
   menu.style.width = `${rect.width}px`;
@@ -2706,69 +3429,13 @@ function showFormError(error: unknown): void {
 function selectEditSecretMask() {
   setTimeout(() => {
     const el = document.getElementById('f-value') as HTMLInputElement | null;
-    if (state.sheet && state.sheet.kind === 'edit-secret' && el && el.value === EDIT_SECRET_MASK) {
+    if (state.sheet?.kind === 'edit-secret' && state.draft.value === EDIT_SECRET_MASK && el) {
       el.focus();
       el.select();
     }
   }, 0);
 }
 
-function captureDrafts(): void {
-  const g = (id: string): string | undefined => {
-    const el = document.getElementById(id) as HTMLInputElement | HTMLSelectElement | null;
-    return el?.value;
-  };
-  // Capture the remote-broker form only while state still shows it: after a
-  // successful connect resets the form, the old inputs are in the DOM until
-  // the next paint, and capturing then would copy the deliberately cleared
-  // token back into JS state.
-  if (brokerTakeover(state.broker, state.remoteSetup.open) === 'setup') {
-    if (g('rb-url') !== undefined) state.remoteSetup.url = g('rb-url') ?? '';
-    if (g('rb-token') !== undefined) state.remoteSetup.token = g('rb-token') ?? '';
-  }
-  if (state.sheet && (state.sheet.kind === 'add-secret' || state.sheet.kind === 'edit-secret')) {
-    if (g('f-name') !== undefined) state.draft.name = g('f-name');
-    if (g('f-value') !== undefined) state.draft.value = g('f-value');
-  }
-  if (state.sheet && (state.sheet.kind === 'add-conn' || state.sheet.kind === 'edit-conn')) {
-    if (g('f-cname') !== undefined) state.draft.name = g('f-cname');
-    if (g('f-origin') !== undefined) state.draft.origin = g('f-origin');
-    if (g('f-host') !== undefined) state.draft.host = g('f-host');
-    if (g('f-port') !== undefined) state.draft.port = g('f-port');
-    if (g('f-db') !== undefined) state.draft.dbname = g('f-db');
-    if (g('f-user') !== undefined) state.draft.user = g('f-user');
-    if (g('f-host-key') !== undefined) state.draft.hostKeyFingerprint = g('f-host-key');
-    if (g('f-sslmode') !== undefined) state.draft.sslmode = g('f-sslmode');
-    if (g('f-pg-ca-bundle') !== undefined) state.draft.pgCaBundlePath = g('f-pg-ca-bundle');
-    if (g('f-url') !== undefined) state.draft.url = g('f-url');
-    if (g('c-template') !== undefined) state.draft.template = g('c-template');
-    const secretChoice = g('c-secret');
-    if (secretChoice !== undefined) {
-      if (secretChoice === NEW_CREDENTIAL_OPTION) {
-        state.draft.secretSource = 'new';
-      } else if (secretChoice === NO_CREDENTIAL_OPTION) {
-        state.draft.secretSource = 'none';
-        state.draft.secretId = null;
-      } else if (secretChoice) {
-        state.draft.secretId = secretChoice;
-        state.draft.secretSource = 'existing';
-      }
-      // An empty value is the unselected placeholder: leave the draft as-is.
-    }
-    if (g('c-new-secret-name') !== undefined) state.draft.newSecretName = g('c-new-secret-name');
-    if (g('c-identity-file') !== undefined) state.draft.identityFile = g('c-identity-file');
-    if (g('c-new-secret-value') !== undefined) {
-      state.draft.newSecretValue = g('c-new-secret-value');
-      delete state.draft.importedCredential;
-    }
-    if (g('c-auth-mode') !== undefined) state.draft.authMode = g('c-auth-mode');
-    if (g('c-auth-detail') !== undefined) state.draft.authDetail = g('c-auth-detail');
-    if (g('c-oauth-client-id') !== undefined) state.draft.oauthClientId = g('c-oauth-client-id');
-    if (g('c-oauth-client-secret') !== undefined) state.draft.oauthClientSecret = g('c-oauth-client-secret');
-    if (g('c-oauth-auth-url') !== undefined) state.draft.oauthAuthUrl = g('c-oauth-auth-url');
-    if (g('c-oauth-token-url') !== undefined) state.draft.oauthTokenUrl = g('c-oauth-token-url');
-  }
-}
 
 /* --------------------------------- actions ------------------------------- */
 function errorMessage(error: unknown): string {
@@ -2801,19 +3468,22 @@ async function runConnectionTest(id: string): Promise<void> {
 }
 
 async function loadWiringTools(connectionId: string): Promise<void> {
+  const broker = state.broker;
   try {
-    const tools = await invoke('list_mcp_tools', { id: connectionId });
+    const tools = await refetchBrokerQuery(broker, 'list_mcp_tools', { id: connectionId });
+    if (!sameBrokerScope(broker, state.broker)) return;
     const wt = state.wiringTools;
     if (!wt || wt.connectionId !== connectionId) return;
     wt.loading = false;
     wt.tools = tools;
   } catch (error) {
+    if (!sameBrokerScope(broker, state.broker)) return;
     const wt = state.wiringTools;
     if (!wt || wt.connectionId !== connectionId) return;
     wt.loading = false;
     wt.error = errorMessage(error);
   }
-  render(false);
+  render();
 }
 
 async function holdDropdownFormOpen(): Promise<boolean> {
@@ -2885,7 +3555,7 @@ async function openCatalogConnectionForm(
   asApi = false,
 ): Promise<void> {
   if (!entry.connType || !await holdDropdownFormOpen()) return;
-  state.sheet = { kind: 'add-conn' };
+  setSheet({ kind: 'add-conn' });
   initializeCatalogConnectionDraft(entry, mcpAuthMode, asApi);
   if (entry.connType === 'pg') applyLoopbackTlsPrefill(state.draft);
   render();
@@ -2921,7 +3591,6 @@ async function quickConnectCatalogMcp(entry: CatalogEntry): Promise<void> {
 }
 
 async function saveSecret(): Promise<void> {
-  captureDrafts();
   const sheet = state.sheet;
   if (!sheet || (sheet.kind !== 'add-secret' && sheet.kind !== 'edit-secret')) return;
   const name = (state.draft.name || '').trim();
@@ -2955,7 +3624,6 @@ async function saveSecret(): Promise<void> {
 
 async function saveConn(): Promise<void> {
   if (state.draftTest?.running) return;
-  captureDrafts();
   const sheet = state.sheet;
   if (!sheet || (sheet.kind !== 'add-conn' && sheet.kind !== 'edit-conn')) return;
   const d = state.draft;
@@ -3193,7 +3861,7 @@ async function saveConn(): Promise<void> {
         if (ENDPOINTABLE[saved.type] && saved.agent_access.enabled && !saved.agent_access.endpoint) {
           try {
             const info = await invoke('issue_endpoint', { connectionId: saved.id });
-            state.sheet = { kind: 'endpoint-issued', endpoint: info };
+            setSheet({ kind: 'endpoint-issued', endpoint: info });
             await refresh('all');
           } catch {
             // The row still offers "Issue direct endpoint…" as the fallback.
@@ -3219,7 +3887,7 @@ function closeSheet() {
   }
   state.mcpAuth = null;
   state.wiringTools = null;
-  state.sheet = null;
+  setSheet(null);
   state.draft = {};
   state.sheetErrors = {};
   state.sheetBaseline = null;
@@ -3258,10 +3926,9 @@ function connDraftSignature(): string {
 function requestCloseSheet(): void {
   const kind = state.sheet?.kind;
   if ((kind === 'add-conn' || kind === 'edit-conn') && state.sheetBaseline !== null) {
-    captureDrafts();
     if (connDraftSignature() !== state.sheetBaseline) {
       state.confirmDiscard = true;
-      render(false);
+      render();
       return;
     }
   }
@@ -3349,9 +4016,9 @@ document.addEventListener('click', async (e) => {
       state.remoteSetup.error = null;
       if (state.broker.mode === 'local') { render(); break; }
       try {
-        state.broker = await invoke('switch_broker_local');
+        setBrokerProfile(await invoke('switch_broker_local'));
         await refresh('all');
-        try { state.agentSetupInstructions = await invoke('get_agent_setup'); } catch { /* pane shows loading */ }
+        try { await loadAgentSetup(); } catch { /* pane shows loading */ }
         toast('Managing this Mac’s broker');
       } catch (error) {
         toast(`Couldn’t start the local broker: ${String(error)}`);
@@ -3373,7 +4040,6 @@ document.addEventListener('click', async (e) => {
       break;
     }
     case 'toggle-remote-advanced':
-      captureDrafts();
       state.remoteSetup.advancedOpen = !state.remoteSetup.advancedOpen;
       render();
       break;
@@ -3394,19 +4060,18 @@ document.addEventListener('click', async (e) => {
       render();
       break;
     case 'broker-connect-submit': {
-      captureDrafts();
       const url = state.remoteSetup.url.trim();
       const token = state.remoteSetup.token.trim();
       state.remoteSetup.busy = true;
       state.remoteSetup.error = null;
       render();
       try {
-        state.broker = await invoke('connect_remote_broker', { url, token: token || null });
+        setBrokerProfile(await invoke('connect_remote_broker', { url, token: token || null }));
         state.remoteSetup = {
           open: false, advancedOpen: false, url: '', token: '', busy: false, error: null,
         };
         await refresh('all');
-        try { state.agentSetupInstructions = await invoke('get_agent_setup'); } catch { /* pane shows loading */ }
+        try { await loadAgentSetup(); } catch { /* pane shows loading */ }
         toast(`Managing ${brokerLabel(state.broker)}`);
       } catch (error) {
         state.remoteSetup.busy = false;
@@ -3417,7 +4082,7 @@ document.addEventListener('click', async (e) => {
     }
     case 'broker-retry': {
       try {
-        state.broker = await invoke('retry_remote_broker');
+        setBrokerProfile(await invoke('retry_remote_broker'));
         await refresh('all');
       } catch {
         // The profile event carries the failure; nothing else to do.
@@ -3459,7 +4124,7 @@ document.addEventListener('click', async (e) => {
       // Not via run(): we need the one-time result to show its secret.
       try {
         const info = await invoke('issue_endpoint', { connectionId });
-        state.sheet = { kind: 'endpoint-issued', endpoint: info };
+        setSheet({ kind: 'endpoint-issued', endpoint: info });
         await refresh('all');
       } catch (error) {
         toast('⚠ ' + errorMessage(error));
@@ -3516,7 +4181,7 @@ document.addEventListener('click', async (e) => {
       }
       break;
     }
-    case 'open-settings': state.menuOpen = false; state.sheet = { kind: 'settings' }; render(); break;
+    case 'open-settings': state.menuOpen = false; setSheet({ kind: 'settings' }); render(); break;
     case 'copy-agent-setup':
       if (state.agentMenuOpen) { state.agentMenuOpen = null; render(); }
       if (await run(() => invoke('copy_agent_setup'))) toast('📋 Setup instructions copied');
@@ -3525,7 +4190,7 @@ document.addEventListener('click', async (e) => {
       if (await run(() => invoke('copy_agent_setup'))) flashReadyCopied();
       break;
     case 'clear-activity-ask':
-      state.sheet = { kind: 'clear-activity' };
+      setSheet({ kind: 'clear-activity' });
       render();
       break;
     case 'clear-activity-confirm':
@@ -3560,21 +4225,25 @@ document.addEventListener('click', async (e) => {
       break;
     case 'edit-secret':
       if (!await holdDropdownFormOpen()) break;
-      state.sheet = { kind: 'edit-secret', id };
-      state.draft = { value: EDIT_SECRET_MASK };
+      setSheet({ kind: 'edit-secret', id });
+      // Controlled fields read the draft, so seed it with what the form
+      // shows: the current name and the masked value.
+      state.draft = {
+        name: state.secrets.find((s) => s.id === id)?.name ?? '',
+        value: EDIT_SECRET_MASK,
+      };
       state.sheetErrors = {};
       render();
       selectEditSecretMask();
       break;
     case 'open-add-secret':
       if (!await holdDropdownFormOpen()) break;
-      state.sheet = { kind: 'add-secret' }; state.draft = {}; state.sheetErrors = {};
+      setSheet({ kind: 'add-secret' }); state.draft = {}; state.sheetErrors = {};
       render(); focusField('f-name'); break;
     case 'save-secret': await saveSecret(); break;
 
     case 'conn-import': {
-      const source = (document.getElementById('conn-import') as HTMLInputElement | null)?.value
-        ?? state.connImportSource;
+      const source = state.connImportSource;
       if (!source.trim()) break;
       try {
         const imported = await connectionDraftFromImport(source, state.draft);
@@ -3687,7 +4356,7 @@ document.addEventListener('click', async (e) => {
     case 'catalog-connect-oauth': {
       const entry = catalogEntryById(id);
       state.catalogActionMenuOpen = null;
-      render(false);
+      render();
       if (entry) await quickConnectCatalogMcp(entry);
       break;
     }
@@ -3723,7 +4392,7 @@ document.addEventListener('click', async (e) => {
       const entry = entryForConnection(c);
       state.connMenuOpen = null;
       if (!await holdDropdownFormOpen()) break;
-      state.sheet = { kind: 'edit-conn', id }; state.connType = c.type;
+      setSheet({ kind: 'edit-conn', id }); state.connType = c.type;
       state.connEntryName = entry?.name ?? null;
       state.connPreset = null;
       state.sheetErrors = {};
@@ -3755,7 +4424,6 @@ document.addEventListener('click', async (e) => {
       render(); focusField('f-cname'); break;
     }
     case 'draft-test-disable-tls':
-      captureDrafts();
       state.draft.sslmode = 'disable';
       state.draft.sslmodeIsAutomatic = false;
       state.draftTest = null;
@@ -3763,22 +4431,19 @@ document.addEventListener('click', async (e) => {
       render();
       break;
     case 'toggle-conn-advanced':
-      captureDrafts();
       state.connAdvancedOpen = !state.connAdvancedOpen;
-      render(false);
+      render();
       break;
     case 'select-toggle': {
       const menuId = btn.dataset.menu ?? '';
-      captureDrafts();
       state.formMenuOpen = state.formMenuOpen === menuId ? null : menuId;
-      render(false);
+      render();
       if (state.formMenuOpen) focusMenuOption();
       else focusField(menuId);
       break;
     }
     case 'select-pick': {
       const menuId = btn.dataset.menu ?? '';
-      captureDrafts();
       state.formMenuOpen = null;
       const errKey = ERR_KEY_BY_INPUT[menuId as keyof typeof ERR_KEY_BY_INPUT];
       if (errKey) delete state.sheetErrors[errKey];
@@ -3791,12 +4456,11 @@ document.addEventListener('click', async (e) => {
         state.draftTestOverride = false;
       }
       else if (menuId === 'c-identity-file') state.draft.identityFile = id;
-      render(false);
+      render();
       focusField(menuId);
       break;
     }
     case 'credential-pick':
-      captureDrafts();
       state.formMenuOpen = null;
       delete state.sheetErrors.secret;
       if (id === NEW_CREDENTIAL_OPTION) {
@@ -3808,7 +4472,7 @@ document.addEventListener('click', async (e) => {
         state.draft.secretSource = 'existing';
         state.draft.secretId = id;
       }
-      render(false);
+      render();
       focusField(id === NEW_CREDENTIAL_OPTION ? 'c-new-secret-name' : 'c-secret');
       break;
     case 'save-conn': await saveConn(); break;
@@ -3882,25 +4546,12 @@ document.addEventListener('click', async (e) => {
     }
     case 'act-filter-issues':
       state.activityIssuesOnly = !state.activityIssuesOnly;
-      render(false);
+      render();
       break;
     case 'act-filter-agent': {
       const value = btn.dataset.value || '';
       state.activityAgent = state.activityAgent === value ? null : value;
-      render(false);
-      break;
-    }
-    case 'oauth-scope-toggle': {
-      captureDrafts();
-      const entry = state.draft.entryId ? catalogEntryById(state.draft.entryId) : undefined;
-      const preset = entry?.oauthPreset;
-      if (!preset) break;
-      const scope = btn.dataset.scope || '';
-      const current = state.draft.oauthScopes ?? preset.scopes;
-      state.draft.oauthScopes = current.includes(scope)
-        ? current.filter((candidate) => candidate !== scope)
-        : [...current, scope];
-      render(false);
+      render();
       break;
     }
     case 'oauth-reconnect': {
@@ -3915,7 +4566,7 @@ document.addEventListener('click', async (e) => {
     case 'wiring-tools': {
       const connection = state.connections.find((x) => x.id === btn.dataset.conn);
       if (!connection) break;
-      state.sheet = { kind: 'wiring-tools' };
+      setSheet({ kind: 'wiring-tools' });
       state.wiringTools = {
         connectionId: connection.id,
         connectionName: connection.name,
@@ -3928,35 +4579,12 @@ document.addEventListener('click', async (e) => {
       void loadWiringTools(connection.id);
       break;
     }
-    case 'wt-all': {
-      const wt = state.wiringTools;
-      if (!wt) break;
-      // Checking "All tools" clears curation; unchecking starts a subset
-      // from everything currently advertised.
-      wt.selected = wt.selected === null ? (wt.tools || []).map((t) => t.name) : null;
-      render(false);
-      break;
-    }
-    case 'wt-toggle': {
-      const wt = state.wiringTools;
-      if (!wt) break;
-      const tool = btn.dataset.tool || '';
-      if (wt.selected === null) {
-        // Unchecking one tool from "all" starts a subset of the rest.
-        wt.selected = (wt.tools || []).map((t) => t.name).filter((name) => name !== tool);
-      } else if (wt.selected.includes(tool)) {
-        wt.selected = wt.selected.filter((name) => name !== tool);
-      } else {
-        wt.selected = [...wt.selected, tool];
-      }
-      render(false);
-      break;
-    }
+    // wt-all / wt-toggle live on WiringToolsSheet's controlled checkboxes.
     case 'wt-save': {
       const wt = state.wiringTools;
       if (!wt || wt.saving) break;
       wt.saving = true;
-      render(false);
+      render();
       if (await run(() => invoke('set_allowed_tools', {
         connectionId: wt.connectionId, tools: wt.selected,
       }))) {
@@ -3967,7 +4595,7 @@ document.addEventListener('click', async (e) => {
         await refresh('all');
       } else {
         wt.saving = false;
-        render(false);
+        render();
       }
       break;
     }
@@ -3990,7 +4618,7 @@ document.addEventListener('click', async (e) => {
     case 'mcp-auth-token':
       // Back to the add form with the same draft, token mode selected.
       state.mcpAuth = null;
-      state.sheet = { kind: 'add-conn' };
+      setSheet({ kind: 'add-conn' });
       state.draft.authMode = 'bearer';
       state.sheetErrors = {};
       state.sheetBaseline = null;
@@ -4034,7 +4662,8 @@ document.addEventListener('click', async (e) => {
     // and handed straight to the command — they are never mirrored into
     // state, so a re-render cannot repaint them.
     case 'elicit-open': {
-      state.sheet = { kind: 'elicitation', id };
+      state.elicitValues = {};
+      setSheet({ kind: 'elicitation', id });
       render();
       const request = state.elicitations.find((r) => r.id === id);
       if (request?.fields[0]) focusField(`elicit-${id}-${request.fields[0].name}`);
@@ -4046,9 +4675,8 @@ document.addEventListener('click', async (e) => {
       const values: Record<string, string> = {};
       let missing = false;
       for (const field of request.fields) {
-        const input = document.getElementById(`elicit-${id}-${field.name}`) as HTMLInputElement | null;
-        const value = input?.value.trim() ?? '';
-        if (!value) { missing = true; input?.focus(); break; }
+        const value = (state.elicitValues[field.name] ?? '').trim();
+        if (!value) { missing = true; focusField(`elicit-${id}-${field.name}`); break; }
         values[field.name] = value;
       }
       if (missing) break;
@@ -4070,7 +4698,7 @@ document.addEventListener('click', async (e) => {
     }
 
     case 'sheet-cancel': requestCloseSheet(); break;
-    case 'discard-keep': state.confirmDiscard = false; render(false); break;
+    case 'discard-keep': state.confirmDiscard = false; render(); break;
     case 'discard-confirm': closeSheet(); break;
     case 'toggle-reauth':
       {
@@ -4281,11 +4909,11 @@ document.addEventListener('keydown', (e) => {
     if (state.formMenuOpen) {
       const menuId = state.formMenuOpen;
       state.formMenuOpen = null;
-      render(false);
+      render();
       focusField(menuId);
       return;
     }
-    if (state.confirmDiscard) { state.confirmDiscard = false; render(false); return; }
+    if (state.confirmDiscard) { state.confirmDiscard = false; render(); return; }
     if (state.sheet) { requestCloseSheet(); return; }
     if (state.confirm) { state.confirm = null; render(); return; }
     if (mode === 'dropdown') invoke('ui_hide_dropdown');
@@ -4297,7 +4925,7 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     if (!state.formMenuOpen) {
       state.formMenuOpen = (document.activeElement as HTMLElement).id;
-      render(false);
+      render();
       focusMenuOption();
       return;
     }
@@ -4333,144 +4961,15 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// Editing a field clears its inline validation error.
+// Custom-select triggers map to the draft field whose inline validation
+// error a new pick clears (text fields clear their own via setDraftField).
 const ERR_KEY_BY_INPUT = {
-  'f-name': 'name', 'f-value': 'value',
-  'f-cname': 'name', 'f-origin': 'origin', 'f-host': 'host', 'f-port': 'port',
-  'f-db': 'dbname', 'f-user': 'user', 'f-host-key': 'hostKeyFingerprint',
-  'f-url': 'url', 'f-sslmode': 'sslmode', 'c-template': 'template', 'c-secret': 'secret',
-  'c-new-secret-name': 'newSecretName', 'c-new-secret-value': 'newSecretValue',
-  'c-auth-detail': 'authDetail',
+  'f-sslmode': 'sslmode', 'c-secret': 'secret', 'c-auth-mode': 'authMode',
+  'c-identity-file': 'newSecretValue',
 };
 
-function updateCredentialNamePlaceholder(connectionName: string): void {
-  const input = document.getElementById('c-new-secret-name') as HTMLInputElement | null;
-  if (input) input.placeholder = suggestedSecretName(connectionName, state.connType);
-}
-
-function updateCredentialNameWarning(): void {
-  const input = document.getElementById('c-new-secret-name') as HTMLInputElement | null;
-  const hint = document.getElementById('credential-name-warning');
-  if (!input || !hint) return;
-  const connectionName = (document.getElementById('f-cname') as HTMLInputElement | null)?.value
-    ?? state.draft.name
-    ?? '';
-  const effectiveName = (input.value || suggestedSecretName(connectionName, state.connType)).trim();
-  const nameTaken = credentialNameIsTaken(effectiveName);
-  input.classList.toggle('name-conflict-warning', nameTaken);
-  hint.hidden = !nameTaken;
-}
-
-function updateToolNameWarning(): void {
-  const input = document.getElementById('f-cname') as HTMLInputElement | null;
-  const hint = document.getElementById('tool-name-warning');
-  if (!input || !hint) return;
-  const nameTaken = toolNameIsTaken(input.value);
-  input.classList.toggle('name-conflict-warning', nameTaken);
-  hint.hidden = !nameTaken;
-}
-
-/** Sync the rendered TLS-mode select with the draft without a re-render
- * (the host field keeps focus while the prefill tracks it). */
-function updateSslmodeField(): void {
-  const trigger = document.getElementById('f-sslmode') as HTMLButtonElement | null;
-  if (!trigger) return;
-  const sslmode = state.draft.sslmode || 'verify-full';
-  trigger.value = sslmode;
-  const label = trigger.querySelector('.cred-name');
-  const option = PG_SSL_OPTIONS.find(([value]) => value === sslmode);
-  if (label && option) label.textContent = option[1];
-}
-
-function updateAutomaticConnectionName(): void {
-  if (state.sheet?.kind !== 'add-conn' || !state.draft.nameIsAutomatic) return;
-  const input = document.getElementById('f-cname') as HTMLInputElement | null;
-  if (!input) return;
-  const name = automaticConnectionName();
-  state.draft.name = name;
-  input.value = name;
-  updateCredentialNamePlaceholder(name);
-  updateCredentialNameWarning();
-  updateToolNameWarning();
-}
-
-document.addEventListener('input', (e) => {
-  const target = e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement
-    ? e.target
-    : null;
-  const key = target
-    ? ERR_KEY_BY_INPUT[target.id as keyof typeof ERR_KEY_BY_INPUT]
-    : undefined;
-  if (target?.id === 'conn-import') {
-    state.connImportSource = target.value;
-    state.connImportError = null;
-    // Toggle the button in place: a full re-render per keystroke would be
-    // wasteful, and leaving it stale would make Prefill permanently dead.
-    document.querySelector('[data-act="conn-import"]')
-      ?.toggleAttribute('disabled', !target.value.trim());
-  }
-  if (target?.id === 'tool-search') {
-    state.toolSearch = target.value;
-    render();
-    return;
-  }
-  if (target?.id === 'secret-search') {
-    state.secretSearch = target.value;
-    render();
-    return;
-  }
-  if (target?.id === 'activity-search') {
-    state.activityQuery = target.value;
-    render();
-    return;
-  }
-  if (target?.id === 'f-cname') {
-    state.draft.name = target.value;
-    state.draft.nameIsAutomatic = false;
-    updateCredentialNamePlaceholder(target.value);
-    updateCredentialNameWarning();
-    updateToolNameWarning();
-  }
-  if (target?.id === 'f-user') {
-    state.draft.user = target.value;
-    updateAutomaticConnectionName();
-  }
-  if (target?.id === 'f-host') {
-    state.draft.host = target.value;
-    updateAutomaticConnectionName();
-    if (state.sheet?.kind === 'add-conn' && state.connType === 'pg'
-        && applyLoopbackTlsPrefill(state.draft)) {
-      updateSslmodeField();
-    }
-  }
-  if (target?.id === 'f-port') {
-    state.draft.port = target.value;
-    updateAutomaticConnectionName();
-  }
-  if (target?.id === 'c-new-secret-name') updateCredentialNameWarning();
-  // Any edit to the add form disarms a failed draft test's override: the
-  // details changed, so the next Add tests the new details instead of
-  // saving unverified. The stale verdict stays visible until then.
-  if (target && state.sheet?.kind === 'add-conn' && state.draftTestOverride) {
-    state.draftTestOverride = false;
-  }
-  if (key && state.sheetErrors[key]) {
-    delete state.sheetErrors[key];
-    render();
-  }
-});
-
-document.addEventListener('focusout', (e) => {
-  const target = e.target instanceof HTMLInputElement ? e.target : null;
-  if (target?.id === 'f-cname') {
-    // Internal spaces are valid service-name characters, but edge whitespace
-    // is not part of the stored name. Reflect the submitted value as soon as
-    // the field is left instead of waiting for Save to trim it invisibly.
-    target.value = target.value.trim();
-    state.draft.name = target.value;
-    updateCredentialNamePlaceholder(target.value);
-  }
-});
+// Form fields are controlled React inputs; their onChange handlers own
+// draft updates, error clearing, and the draft-test-override disarm.
 
 // Keep an open fixed-position listbox glued to its trigger while the sheet
 // scrolls or the window resizes.
@@ -4483,11 +4982,12 @@ window.addEventListener('resize', () => {
 
 /* --------------------------------- boot ---------------------------------- */
 async function boot() {
+  if (mode === 'dropdown' && state.tab === 'start') state.tab = 'connections';
   // A webview reload must not leave a stale native lock behind. Forms acquire
   // it again before they are shown.
   if (mode === 'dropdown') await invoke('ui_set_dropdown_form_active', { active: false });
   // Which broker this app manages decides everything else about boot.
-  try { state.broker = await invoke('get_broker_profile'); } catch (e) { console.error(e); }
+  try { setBrokerProfile(await invoke('get_broker_profile')); } catch (e) { console.error(e); }
   // Choose the landing tab before the first paint: nothing configured yet
   // means the walkthrough is the useful screen.
   await Promise.all([
@@ -4498,9 +4998,11 @@ async function boot() {
   if (mode !== 'dropdown' && !state.connections.length) {
     state.tab = 'start';
   }
+  // The landing tab is decided; the next render is the first real paint.
+  booted = true;
   await refresh('all');
   // The setup card always shows the paste-ready message.
-  try { state.agentSetupInstructions = await invoke('get_agent_setup'); render(); }
+  try { await loadAgentSetup(); render(); }
   catch (error) { console.error('get_agent_setup', error); }
   // Hover tooltips (absolute timestamps on activity rows, etc.). Delegated
   // from #root so they survive re-renders; content is each element's
@@ -4524,12 +5026,12 @@ async function boot() {
     const wasConnected = state.broker.connected
       && state.broker.mode === ev.payload.mode
       && state.broker.url === ev.payload.url;
-    state.broker = ev.payload;
+    setBrokerProfile(ev.payload);
     // A link that just came (back) up: refetch everything rather than
     // trusting whatever was on screen for the previous broker.
     if (ev.payload.connected && !wasConnected) {
       await refresh('all');
-      try { state.agentSetupInstructions = await invoke('get_agent_setup'); } catch { /* pane shows loading */ }
+      try { await loadAgentSetup(); } catch { /* pane shows loading */ }
     }
     render();
   });
@@ -4545,10 +5047,10 @@ async function boot() {
       if (state.broker === bootProfile) {
         const cameUp = profile.connected
           && !(bootProfile.connected && bootProfile.mode === profile.mode && bootProfile.url === profile.url);
-        state.broker = profile;
+        setBrokerProfile(profile);
         if (cameUp) {
           await refresh('all');
-          try { state.agentSetupInstructions = await invoke('get_agent_setup'); } catch { /* pane shows loading */ }
+          try { await loadAgentSetup(); } catch { /* pane shows loading */ }
         }
         render();
       }
@@ -4586,7 +5088,7 @@ async function boot() {
   await listen('aka://activity-changed', () => refresh('activity'));
   await listen('aka://open-settings', () => {
     if (isProtectedFormSheet()) return;
-    state.sheet = { kind: 'settings' };
+    setSheet({ kind: 'settings' });
     state.draft = {};
     state.sheetErrors = {};
     render();
@@ -4597,7 +5099,7 @@ async function boot() {
   await listen('aka://dropdown-hidden', () => {
     releaseDropdownForm();
     state.reveal = {};
-    state.sheet = null;
+    setSheet(null);
     state.draft = {};
     state.sheetErrors = {};
     state.sheetBaseline = null;
@@ -4609,4 +5111,16 @@ async function boot() {
     render();
   });
 }
-boot();
+
+const reactRoot = createRoot(root());
+flushSync(() => {
+  reactRoot.render(
+    <StrictMode>
+      <QueryClientProvider client={queryClient}>
+        <AppRoot />
+      </QueryClientProvider>
+    </StrictMode>,
+  );
+});
+reactMounted = true;
+void boot();
