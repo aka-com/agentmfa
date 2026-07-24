@@ -22,6 +22,7 @@
         "minHeight": 520,
         "resizable": true,
         "visible": true,
+        "dragDropEnabled": false,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
         "url": "index.html"
@@ -36,6 +37,7 @@
         "transparent": true,
         "alwaysOnTop": true,
         "visible": false,
+        "dragDropEnabled": false,
         "skipTaskbar": true,
         "focus": true,
         "url": "index.html#dropdown"

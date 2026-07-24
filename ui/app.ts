@@ -770,7 +770,7 @@ function connectionKind(c: ConnectionSummary): ConnKind {
 const fixBtn = (act: string, id: string, label: string): string =>
   `<button class="btn outline sm cat-meta-fix" data-act="${act}" data-id="${id}">${label}</button>`;
 /** Open the connection editor — the fix for a TLS/cert mismatch. */
-const editFix = (c: ConnectionSummary): string => fixBtn('edit-conn', c.id, 'Edit…');
+const editFix = (c: ConnectionSummary): string => fixBtn('edit-conn', c.id, 'Edit');
 /** Re-run the connection's own check: the MCP status probe for MCP rows,
  * the reachability test otherwise. */
 const retryFix = (c: ConnectionSummary): string =>
@@ -872,30 +872,6 @@ function connectionToolsChipHTML(c: ConnectionSummary): string {
           : 'All tools'}</span></button>`;
 }
 
-// The one endpoint every app's tools are actually reached through:
-// Multitool's own unified MCP server, not the upstream a connection
-// proxies. Agents point a single MCP client here and get every enabled
-// tool. The broker serves it on the same origin as its HTTP API — a remote
-// broker under its own URL, a local one on the loopback origin it hands out
-// for direct endpoints (the sidecar shares one port for the API and the MCP
-// host). Empty only until that origin is known (a fresh local broker with
-// no endpoint issued yet), never the upstream server's address.
-function unifiedMcpUrl(): string {
-  const trimSlash = (u: string) => u.replace(/\/+$/, '');
-  if (state.broker.mode === 'remote' && state.broker.url) {
-    return `${trimSlash(state.broker.url)}/mcp`;
-  }
-  for (const conn of state.connections) {
-    const dsn = conn.agent_access.endpoint?.dsn;
-    if (!dsn) continue;
-    try {
-      const { origin } = new URL(dsn);
-      if (origin.startsWith('http')) return `${origin}/mcp`;
-    } catch { /* not a URL-shaped endpoint (an SSH socket path) — keep looking */ }
-  }
-  return '';
-}
-
 // The Tools tab's detail panel: everything about connecting to the
 // selected tool that the compact rows no longer carry — its connection
 // endpoints, issues with their fixes, and the row's one options menu.
@@ -936,23 +912,17 @@ function connDetailHTML(c: ConnectionSummary): string {
       default: return 'Point any HTTP client at this address.';
     }
   })();
-  const endpointSection = enabled && ENDPOINTABLE[c.type]
+  const endpointSection = enabled && ENDPOINTABLE[c.type] && !c.mcp_path
     ? `<div class="cd-sec"><div class="cd-sec-lbl">Direct endpoint</div>
         ${endpointStripHTML(c)}
         <div class="cd-help">${endpointHelp}</div></div>`
     : '';
-  const mcpEndpoint = unifiedMcpUrl();
-  // MCP tools reach agents through the broker's MCP surface. The subhead
-  // carries the tool-filter chip on its right; the connection endpoint names
-  // our unified MCP server (never the upstream), with the one-line
-  // explanation sitting under the address it explains.
+  // MCP tools combine their filter and direct endpoint into one section:
+  // both describe how agents reach and constrain this tool.
   const mcpSection = enabled && c.mcp_path
     ? `<div class="cd-sec"><div class="cd-sec-lbl">Tools<span class="cd-sec-lbl-aside">${connectionToolsChipHTML(c)}</span></div>
-        ${mcpEndpoint ? `<div class="cd-connection-endpoint">
-          <span>Connection endpoint</span>
-          <code title="${escAttr(mcpEndpoint)}">${esc(mcpEndpoint)}</code>
-        </div>` : ''}
-        <div class="cd-help">Call this app’s tools through Multitool’s MCP server.</div></div>`
+        ${ENDPOINTABLE[c.type] ? `${endpointStripHTML(c)}
+          <div class="cd-help">${endpointHelp}</div>` : ''}</div>`
     : '';
   // How a disabled tool turns agents away, in the terms of the surface they
   // actually hit: the brokered MCP/HTTP path answers a 403; a Postgres or SSH
@@ -969,19 +939,21 @@ function connDetailHTML(c: ConnectionSummary): string {
       <span class="cat-ico kind-${connectionKind(c)}" aria-hidden="true">${entry ? ICONS[entry.icon] || '' : ''}</span>
       <div class="cd-title"><b title="${escAttr(c.name)}">${esc(connectionRowName(c))}</b>
         <span title="${escAttr(c.target)}">${esc(c.target)}</span></div>
-      <button class="icon-btn" title="Edit ${escAttr(connectionRowName(c))}"
-        aria-label="Edit ${escAttr(c.name)}" data-act="edit-conn" data-id="${c.id}">${ICONS.pencil}</button>
-      <div class="tile-menu-wrap">
-        <button class="icon-btn tile-menu-btn ${menuOpen ? 'on' : ''}" title="Tool options"
-          aria-label="Options for ${escAttr(c.name)}" aria-haspopup="menu"
-          aria-expanded="${menuOpen}" data-act="toggle-conn-menu" data-id="${c.id}">${ICONS.ellipsis}</button>
-        ${menuOpen ? `<div class="tile-menu" role="menu" aria-label="Options for ${escAttr(c.name)}">
-          ${connectionCheckItem}
-          ${endpointItems}
-        </div>` : ''}
+      <div class="cd-actions">
+        <button class="icon-btn" title="Edit ${escAttr(connectionRowName(c))}"
+          aria-label="Edit ${escAttr(c.name)}" data-act="edit-conn" data-id="${c.id}">${ICONS.pencil}</button>
+        <div class="tile-menu-wrap">
+          <button class="icon-btn tile-menu-btn ${menuOpen ? 'on' : ''}" title="Tool options"
+            aria-label="Options for ${escAttr(c.name)}" aria-haspopup="menu"
+            aria-expanded="${menuOpen}" data-act="toggle-conn-menu" data-id="${c.id}">${ICONS.ellipsis}</button>
+          ${menuOpen ? `<div class="tile-menu" role="menu" aria-label="Options for ${escAttr(c.name)}">
+            ${connectionCheckItem}
+            ${endpointItems}
+          </div>` : ''}
+        </div>
+        <button class="icon-btn cd-close" title="Close" aria-label="Close connection details"
+          data-act="close-conn-detail">${ICONS.x}</button>
       </div>
-      <button class="icon-btn cd-close" title="Close" aria-label="Close connection details"
-        data-act="close-conn-detail">${ICONS.x}</button>
     </div>
     ${issuesBlock}${offNote}${c.mcp_path
       ? mcpSection + endpointSection
@@ -1128,22 +1100,6 @@ function flatHealthHTML(c: ConnectionSummary): string {
   // the detail panel the row opens.
   return `<span class="cc-dot warn" role="img" title="${escAttr(issues.map((issue) => issue.text).join(' '))}"
       aria-label="${issues.length} issue${issues.length === 1 ? '' : 's'}"></span>`;
-}
-
-function attentionBannerHTML(): string {
-  const attn = state.connections.filter(
-    (c) => c.agent_access.enabled && connectionIssues(c).length,
-  );
-  if (!attn.length) return '';
-  const first = attn[0];
-  const firstIssue = connectionIssues(first)[0];
-  const more = attn.length > 1 ? ` · +${attn.length - 1} more` : '';
-  // The banner is a jump, not just a summary: clicking it lands on the
-  // first row that needs attention, where the issue and its fix live.
-  return `<button class="attn-banner" data-act="focus-attn" data-id="${first.id}"
-    title="Show ${escAttr(connectionTitle(first))}">${ICONS.triangleAlert}
-    <span><b>${attn.length === 1 ? '1 tool needs' : `${attn.length} tools need`} attention</b>
-      — ${esc(connectionTitle(first))}: ${esc(firstIssue.text)}${more}</span></button>`;
 }
 
 /** The connection the detail panel shows: the explicit selection while it
@@ -1301,7 +1257,7 @@ function connectionsHTML() {
   const backdrop = detail && state.connDetailOpen
     ? '<button class="conn-detail-backdrop" data-act="close-conn-detail" aria-label="Close connection details" tabindex="-1"></button>'
     : '';
-  return readyCard + `<div class="catalog ${state.connDetailOpen ? 'detail-open' : ''}">${search}${attentionBannerHTML()}
+  return readyCard + `<div class="catalog ${state.connDetailOpen ? 'detail-open' : ''}">${search}
     <div class="tools-split"><div class="tools-list">
       ${connectedList}${addRow}${addOpen && !sections ? '<div class="muted-note">No tools match your search.</div>' : sections}
     </div>${detailPane}</div>${backdrop}
@@ -3656,21 +3612,6 @@ document.addEventListener('click', async (e) => {
       state.connDetailOpen = false;
       render();
       break;
-    case 'focus-attn': {
-      // The issue and its fix live in the detail panel, so the banner
-      // selects the offending row, then scrolls to and flashes it.
-      state.selectedConn = id;
-      state.connDetailOpen = true;
-      render();
-      const row = document.querySelector(`[data-conn-row="${CSS.escape(id)}"]`);
-      if (row) {
-        row.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        row.classList.remove('flash');
-        void (row as HTMLElement).offsetWidth; // restart the animation
-        row.classList.add('flash');
-      }
-      break;
-    }
     case 'toggle-add-tools':
       state.addToolOpen = !state.addToolOpen;
       render();
@@ -4129,6 +4070,11 @@ function connListEl(): HTMLElement | null {
   return document.querySelector<HTMLElement>('[data-conn-list="on"]');
 }
 
+function clearConnDragIndicator(): void {
+  document.querySelectorAll('.cat-rows.drag-active')
+    .forEach((el) => el.classList.remove('drag-active'));
+}
+
 // The row a dropped item should land *before*: the first whose vertical
 // midpoint sits below the pointer. `null` means append at the end.
 function connRowAfter(list: HTMLElement, y: number): HTMLElement | null {
@@ -4149,6 +4095,7 @@ async function persistConnOrder(orderedIds: string[]): Promise<void> {
 function commitConnDrag(): void {
   if (!dragConnId) return;
   const list = connListEl();
+  clearConnDragIndicator();
   document.querySelectorAll('.flat-conn-wrap.dragging')
     .forEach((el) => el.classList.remove('dragging'));
   dragConnId = null;
@@ -4193,6 +4140,7 @@ document.addEventListener('dragstart', (e) => {
   dragConnId = wrap.dataset.connRow ?? null;
   if (!dragConnId) return;
   wrap.classList.add('dragging');
+  wrap.closest('.cat-rows')?.classList.add('drag-active');
   if (e.dataTransfer) {
     e.dataTransfer.effectAllowed = 'move';
     // Firefox refuses to start a drag unless some data is attached.
@@ -4211,8 +4159,11 @@ document.addEventListener('dragover', (e) => {
   const dragging = list.querySelector<HTMLElement>('.flat-conn-wrap.dragging');
   if (!dragging) return;
   const after = connRowAfter(list, e.clientY);
-  if (after === null) list.appendChild(dragging);
-  else if (after !== dragging) list.insertBefore(dragging, after);
+  if (after === null) {
+    list.appendChild(dragging);
+  } else {
+    if (after !== dragging) list.insertBefore(dragging, after);
+  }
 });
 
 document.addEventListener('drop', (e) => {
