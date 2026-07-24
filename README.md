@@ -55,9 +55,10 @@ its row on the Tools tab, or headless with `aka conn disable`. An enabled call e
 prompt; a disabled call is refused with `403 denied_by_policy` — for
 every agent at once. Access binds to the connection's pinned destination:
 retargeting a tool resets its MCP tool selection and revokes its direct
-endpoints (a disabled tool stays disabled). Rotating the key from the
-Connect page disconnects everything at once; agents that read the token
-file recover on their own.
+endpoints (a disabled tool stays disabled). Rotating the key — from the
+Connect page, or headless with `aka key --rotate` — disconnects
+everything at once; agents that read the token file recover on their
+own.
 
 Locally, we use the `keyring` crate's apple-native backend, which
 targets the login keychain. Copying a secret's full value from the app

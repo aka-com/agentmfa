@@ -17,6 +17,9 @@
 //!   and print the one value a stock client needs — a ticket-embedded DSN,
 //!   an `SSH_AUTH_SOCK` path — so `psql "$(aka dsn …)"` works as a
 //!   one-liner.
+//! - `aka key` / `aka status` / `aka activity` are the operator's view:
+//!   the shared agent key (and its rotation), whether a broker is up and
+//!   what it serves, and the audit trail.
 
 use std::ops::Deref;
 use std::os::unix::fs::FileTypeExt as _;
@@ -170,6 +173,38 @@ enum Command {
     Conn {
         #[command(subcommand)]
         command: ConnCommand,
+    },
+    /// Print this computer's shared agent key — what agents send as their
+    /// Bearer token, and what remote agents need from the operator.
+    Key {
+        /// Rotate the key instead: agents' old keys stop working, and
+        /// agents that read the token file reconnect on their own.
+        /// Offline: stop the broker first.
+        #[arg(long)]
+        rotate: bool,
+        /// Operate on a broker rooted here instead of the default layout.
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// Report whether a broker is running on this layout and what it
+    /// serves (MCP host, tools, key file). Exits nonzero when none is up.
+    Status {
+        /// Check a broker rooted here instead of the default layout.
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// Show the broker's audit trail, newest last. Reads the append-only
+    /// log directly, so it works while the broker is running.
+    Activity {
+        /// Show only the last N entries; 0 shows everything.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Print the raw JSON lines instead of formatted text.
+        #[arg(long)]
+        json: bool,
+        /// Read a broker rooted here instead of the default layout.
+        #[arg(long)]
+        root: Option<PathBuf>,
     },
 }
 
@@ -505,6 +540,9 @@ fn main() {
                     root,
                 },
         } => cmd_manage_token(revoke, ttl_days, root),
+        Command::Key { rotate, root } => cmd_key(rotate, root),
+        Command::Status { root } => cmd_status(root),
+        Command::Activity { limit, json, root } => cmd_activity(limit, json, root),
     }
 }
 
@@ -1360,6 +1398,181 @@ fn cmd_ssh(connection: String, root: Option<PathBuf>, client: Option<String>) {
     println!("{auth_sock}");
 }
 
+/// Print the shared agent key from its plaintext home (the same file
+/// agents read), rotating it first when asked. Printing is a plain file
+/// read and works alongside a running broker; rotation is an offline edit
+/// like the rest.
+fn cmd_key(rotate: bool, root: Option<PathBuf>) {
+    if rotate {
+        let offline = open_broker(root.clone());
+        if let Err(e) = offline.broker.ui_rotate_key() {
+            die(e);
+        }
+        eprintln!("key rotated; agents that read the token file reconnect on their own");
+    }
+    let paths = store_paths(root.as_deref());
+    let token_file = paths.token_file();
+    match std::fs::read_to_string(&token_file) {
+        Ok(token) if !token.trim().is_empty() => println!("{}", token.trim()),
+        _ => die(format!(
+            "no shared key at {} — the broker mints it when it first starts",
+            token_file.display()
+        )),
+    }
+}
+
+fn cmd_status(root: Option<PathBuf>) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let paths = store_paths(root.as_deref());
+    let socket = paths.socket_file();
+    let key_present = std::fs::read_to_string(paths.token_file())
+        .map(|t| !t.trim().is_empty())
+        .unwrap_or(false);
+    let manifest = runtime.block_on(client::unix_http(
+        &socket,
+        "GET",
+        "/.well-known/agent-broker.json",
+        None,
+        None,
+        None,
+    ));
+    let manifest: serde_json::Value = match manifest {
+        Ok((200, body)) => serde_json::from_str(&body).unwrap_or_default(),
+        Ok((status, _)) => die(format!(
+            "the broker at {} answered discovery with HTTP {status}",
+            socket.display()
+        )),
+        Err(_) => {
+            println!("no broker is running at {}", socket.display());
+            println!(
+                "  shared key: {}",
+                if key_present {
+                    format!("present at {}", paths.token_file().display())
+                } else {
+                    "not minted yet (starts with the broker)".to_string()
+                }
+            );
+            std::process::exit(1);
+        }
+    };
+    println!("broker running on {}", socket.display());
+    if let (Some(version), Some(protocol)) = (
+        manifest["version"].as_str(),
+        manifest["protocol_version"].as_u64(),
+    ) {
+        println!("  version: {version} (protocol {protocol})");
+    }
+    match manifest["mcp_url"].as_str() {
+        Some(url) => println!("  MCP host: {url}"),
+        None => println!("  MCP host: not running"),
+    }
+    println!(
+        "  shared key: {}",
+        if key_present {
+            format!("{}", paths.token_file().display())
+        } else {
+            "not minted yet".to_string()
+        }
+    );
+    // The tools, as an agent sees them (this appears in the activity log
+    // as a listing by aka-status).
+    let listing = runtime.block_on(async {
+        let key = client::shared_key(&paths, Some("aka-status")).await?;
+        let (status, body) = client::unix_http(
+            &socket,
+            "GET",
+            "/v1/connections",
+            None,
+            Some(&key),
+            Some("aka-status"),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        if status != 200 {
+            return Err(format!("HTTP {status}"));
+        }
+        serde_json::from_str::<serde_json::Value>(&body).map_err(|e| e.to_string())
+    });
+    match listing {
+        Ok(listing) => {
+            let rows = listing["connections"]
+                .as_array()
+                .cloned()
+                .or_else(|| listing.as_array().cloned())
+                .unwrap_or_default();
+            if rows.is_empty() {
+                println!("  tools: none configured");
+            } else {
+                println!("  tools:");
+                for row in rows {
+                    println!(
+                        "    {}  {}  {}  {}",
+                        row["name"].as_str().unwrap_or("?"),
+                        row["type"].as_str().unwrap_or("?"),
+                        row["target"].as_str().unwrap_or("?"),
+                        if row["wired"].as_bool().unwrap_or(false) {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        }
+                    );
+                }
+            }
+        }
+        Err(e) => println!("  tools: could not list ({e})"),
+    }
+}
+
+/// One formatted line per audit entry: timestamp (seconds precision),
+/// kind, summary, detail, and the acting agent when recorded.
+fn format_audit_line(entry: &serde_json::Value) -> String {
+    let ts = entry["ts"].as_str().unwrap_or("-");
+    let ts = if ts.len() >= 19 { &ts[..19] } else { ts };
+    let kind = entry["kind"].as_str().unwrap_or("?");
+    let text = entry["text"].as_str().unwrap_or("");
+    let mut line = format!("{ts}  {kind:<20}  {text}");
+    if let Some(detail) = entry["detail"].as_str() {
+        line.push_str(&format!(" — {detail}"));
+    }
+    if let Some(agent) = entry["agent"].as_str() {
+        line.push_str(&format!("  [{agent}]"));
+    }
+    line
+}
+
+fn cmd_activity(limit: usize, json: bool, root: Option<PathBuf>) {
+    let paths = store_paths(root.as_deref());
+    let file = paths.audit_file();
+    let content = match std::fs::read_to_string(&file) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("no activity recorded yet ({} does not exist)", file.display());
+            return;
+        }
+        Err(e) => die(format!("could not read {}: {e}", file.display())),
+    };
+    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+    let start = if limit == 0 {
+        0
+    } else {
+        lines.len().saturating_sub(limit)
+    };
+    for line in &lines[start..] {
+        if json {
+            println!("{line}");
+            continue;
+        }
+        // A trailing line the broker is mid-append on parses as garbage;
+        // skip it rather than break the listing.
+        if let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) {
+            println!("{}", format_audit_line(&entry));
+        }
+    }
+}
+
 fn cmd_mcp(root: Option<PathBuf>, client: Option<String>) {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -1668,6 +1881,24 @@ mod tests {
         ));
         a.host = Some("stray".into());
         assert!(conn_config(&a).unwrap_err().contains("--host"));
+    }
+
+    #[test]
+    fn audit_lines_format_with_optional_fields() {
+        let entry = serde_json::json!({
+            "ts": "2026-07-24T12:00:00.123456Z",
+            "kind": "http_request",
+            "text": "claude-code requested github",
+            "detail": "GET api.github.com/user/repos",
+            "agent": "claude-code",
+        });
+        assert_eq!(
+            format_audit_line(&entry),
+            "2026-07-24T12:00:00  http_request          claude-code requested github \
+             — GET api.github.com/user/repos  [claude-code]"
+        );
+        let bare = serde_json::json!({ "kind": "wired", "text": "Agent access enabled" });
+        assert_eq!(format_audit_line(&bare), "-  wired                 Agent access enabled");
     }
 
     fn update_args() -> ConnUpdate {

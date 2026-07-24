@@ -42,8 +42,9 @@ Notes:
   `AKA_SIDECAR_SCRIPT` points at one; `node` must be on PATH (or set
   `AKA_SIDECAR_NODE`). Remote MCP clients then use `<public-url>/mcp`.
 - `/v1/pair` is not served on the TCP listener: remote clients get the
-  shared agent key from you (it lives in `~/.aka/token` on this Mac), and
-  the desktop app manages the broker with the `akamgr_…` token only.
+  shared agent key from you (`aka key` prints it; it lives in
+  `~/.aka/token` on this Mac), and the desktop app manages the broker
+  with the `akamgr_…` token only.
 
 A LaunchAgent that keeps it running (edit the paths, then
 `launchctl load ~/Library/LaunchAgents/com.aka.serve.plist`):

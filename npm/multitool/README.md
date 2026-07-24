@@ -61,6 +61,11 @@ connection against its pinned destination. These edits run through the
 broker's own management layer, so audit entries and side effects (a
 retarget revoking direct endpoints, for example) match the app exactly.
 
+The operator's view is covered by `aka key` (print the shared agent
+key; `--rotate` disconnects every agent at once), `aka status` (is a
+broker up, and what does it serve), and `aka activity` (the audit
+trail, readable while the broker runs).
+
 Open Postgres and SSH sessions straight from the shell — each command
 prints the one value a stock client needs, minted by the running broker
 (the DSN embeds a short-lived session ticket):
