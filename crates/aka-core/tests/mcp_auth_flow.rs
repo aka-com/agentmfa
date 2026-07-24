@@ -174,6 +174,7 @@ async fn spawn_mock_vendor() -> (u16, Arc<Mutex<MockAuthServer>>) {
         move |body: axum::Json<Value>| {
             let state = state.clone();
             async move {
+                assert_eq!(body.0["client_name"], json!("Multitool"));
                 assert_eq!(body.0["token_endpoint_auth_method"], json!("none"));
                 let redirect = body.0["redirect_uris"][0]
                     .as_str()

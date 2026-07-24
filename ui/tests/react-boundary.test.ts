@@ -41,6 +41,33 @@ test('window components reconcile in place rather than remounting per revision',
   assert.doesNotMatch(app, /key=\{revision\}/);
 });
 
+test('drag reordering leaves React-owned DOM order to reconciliation', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+
+  assert.doesNotMatch(app, /\.appendChild\(/);
+  assert.doesNotMatch(app, /\.insertBefore\(/);
+  assert.match(app, /dragConnOrder = next;\s+render\(\)/);
+});
+
+test('activity row block content has a block container', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+
+  assert.match(app, /<div className="act-txt">/);
+  assert.doesNotMatch(app, /<span className="act-txt">/);
+});
+
+test('portaled listbox tabbing closes the menu relative to its trigger', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+  const portalTab = app.match(
+    /e\.key === 'Tab' && state\.formMenuOpen([\s\S]*?)e\.key === 'Enter'/,
+  )?.[1];
+
+  assert.ok(portalTab, 'portaled listbox Tab handler is present');
+  assert.match(portalTab, /e\.target\.closest\('\.cred-menu'\)/);
+  assert.match(portalTab, /state\.formMenuOpen = null/);
+  assert.match(portalTab, /focusables\[\(triggerIndex \+ offset/);
+});
+
 test('form state is not read back out of the DOM', async () => {
   const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
 
@@ -51,4 +78,15 @@ test('form state is not read back out of the DOM', async () => {
   assert.doesNotMatch(app, /function captureDrafts/);
   assert.doesNotMatch(app, /getElementById\([^)]*\)\s+as[^;]*;\s*\n[^\n]*\.value(?!\s*=)/);
   assert.doesNotMatch(app, /getElementById\([^)]*\)[^;\n]*\.value(?!\s*=)/);
+});
+
+test('credential listbox edits invalidate a failed draft-test override', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+  const selectPick = app.match(/case 'select-pick': \{([\s\S]*?)case 'credential-pick'/)?.[1];
+  const credentialPick = app.match(/case 'credential-pick':([\s\S]*?)case 'save-conn'/)?.[1];
+
+  assert.ok(selectPick, 'select-pick handler is present');
+  assert.ok(credentialPick, 'credential-pick handler is present');
+  assert.match(selectPick, /disarmDraftTestOverride\(\)/);
+  assert.match(credentialPick, /disarmDraftTestOverride\(\)/);
 });

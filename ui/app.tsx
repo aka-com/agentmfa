@@ -42,6 +42,7 @@ import {
   LOCAL_BROKER, brokerLabel, brokerTakeover, brokerTone, remoteEndpointCaution,
 } from '/src/broker';
 import { sameBrokerScope } from '/src/broker-scope';
+import { activityIdentity } from '/src/activity';
 import type { HostKeyCandidate } from '/src/connection-input';
 import type {
   ActivityEntry,
@@ -343,9 +344,21 @@ const initialState: AppState = {
 const uiStore = new UiStore(initialState);
 const state = uiStore.state;
 let reactMounted = false;
+/** Changes whenever the active broker profile changes. Async work captures
+ * this value so a result from an earlier backend cannot update the current
+ * broker's UI or launch a follow-up command against it. */
+let brokerEpoch = 0;
+/** Pointer-drag preview state. The connection rows render this order through
+ * React; drag handlers never move React-owned DOM nodes themselves. */
+let dragConnId: string | null = null;
+let dragConnOrder: string[] | null = null;
 /** False until boot() has loaded the first broker data; AppRoot keeps
  * showing the loading splash instead of painting an empty window. */
 let booted = false;
+
+function brokerEpochIsCurrent(epoch: number): boolean {
+  return epoch === brokerEpoch;
+}
 
 function clearBrokerOwnedState(): void {
   if (state.sheet) releaseDropdownForm();
@@ -387,6 +400,8 @@ function clearBrokerOwnedState(): void {
   state.secretSearch = '';
   state.sectionsExpanded = [];
   state.connDetailOpen = false;
+  dragConnId = null;
+  dragConnOrder = null;
 }
 
 /** The one place sheet transitions happen, so a future cross-cutting
@@ -397,7 +412,13 @@ function setSheet(sheet: SheetState | null): void {
 
 /** Change broker identity without ever showing the previous broker's data under it. */
 function setBrokerProfile(profile: BrokerProfile): void {
-  if (!sameBrokerScope(state.broker, profile)) {
+  const scopeChanged = !sameBrokerScope(state.broker, profile);
+  const profileChanged = scopeChanged
+    || state.broker.connected !== profile.connected
+    || state.broker.error !== profile.error
+    || state.broker.has_saved_token !== profile.has_saved_token;
+  if (profileChanged) brokerEpoch += 1;
+  if (scopeChanged) {
     removeBrokerQueries(state.broker);
     clearBrokerOwnedState();
   }
@@ -469,9 +490,10 @@ async function load<K extends CommandName>(
   args?: CommandArgs<K>,
 ): Promise<void> {
   const broker = state.broker;
+  const epoch = brokerEpoch;
   try {
     const result: unknown = await refetchBrokerQuery(broker, cmd, args);
-    if (!sameBrokerScope(broker, state.broker)) return;
+    if (!brokerEpochIsCurrent(epoch)) return;
     switch (key) {
       case 'secrets': state.secrets = result as SecretSummary[]; break;
       case 'connections': state.connections = result as ConnectionSummary[]; break;
@@ -485,9 +507,10 @@ async function load<K extends CommandName>(
 }
 async function loadSettings(): Promise<void> {
   const broker = state.broker;
+  const epoch = brokerEpoch;
   try {
     const settings = await refetchBrokerQuery(broker, 'get_settings');
-    if (sameBrokerScope(broker, state.broker)) state.settings = settings;
+    if (brokerEpochIsCurrent(epoch)) state.settings = settings;
   }
   catch (e) { console.error(e); }
 }
@@ -497,16 +520,18 @@ async function loadLocalUsername(): Promise<void> {
 }
 async function loadIdentity(): Promise<void> {
   const broker = state.broker;
+  const epoch = brokerEpoch;
   try {
     const identity = await refetchBrokerQuery(broker, 'get_identity');
-    if (sameBrokerScope(broker, state.broker)) state.identity = identity;
+    if (brokerEpochIsCurrent(epoch)) state.identity = identity;
   }
   catch (e) { console.error('get_identity', e); }
 }
 async function loadAgentSetup(): Promise<void> {
   const broker = state.broker;
+  const epoch = brokerEpoch;
   const instructions = await refetchBrokerQuery(broker, 'get_agent_setup');
-  if (sameBrokerScope(broker, state.broker)) state.agentSetupInstructions = instructions;
+  if (brokerEpochIsCurrent(epoch)) state.agentSetupInstructions = instructions;
 }
 async function refreshAgentsView(): Promise<void> {
   await Promise.all([
@@ -520,9 +545,9 @@ async function refreshAgentsView(): Promise<void> {
 // The action layer publishes one external-store revision per logical update.
 // React owns #root and reconciles in place; form fields are controlled, so
 // focus, selection, and scroll normally survive a render untouched. The
-// snapshots here are a safety net for renders that replace the focused
-// control (a remaining legacy-markup subtree swap, e.g. the elicitation
-// dialog); restore runs only when that actually happened.
+// snapshots here are a safety net for transitions that replace the focused
+// control with another instance carrying the same id; restore runs only when
+// that actually happened.
 function render(): void {
   const active = document.activeElement instanceof HTMLInputElement ||
     document.activeElement instanceof HTMLTextAreaElement
@@ -1351,7 +1376,7 @@ function flatConnRowHTML(c: ConnectionSummary, reorderable = false): string {
     : '';
   // The row is the detail panel's opener; its own controls (the switch)
   // sit inside and win the click.
-  return `<div class="flat-conn-wrap ${selected ? 'sel' : ''}${reorderable ? ' reorderable' : ''}"
+  return `<div class="flat-conn-wrap ${selected ? 'sel' : ''}${reorderable ? ' reorderable' : ''}${dragConnId === c.id ? ' dragging' : ''}"
     data-conn-row="${c.id}">
     ${grip}
     <div class="flat-conn-row" role="button" tabindex="0" data-act="select-conn" data-id="${c.id}"
@@ -1395,6 +1420,16 @@ function connectionReadyCardHTML(): string {
 
 function connectionsHTML(withReadyCard = true) {
   const readyCard = withReadyCard ? connectionReadyCardHTML() : '';
+  const byId = new Map(state.connections.map((connection) => [connection.id, connection] as const));
+  const previewOrder = dragConnOrder;
+  const orderedConnections = previewOrder
+    ? [
+        ...previewOrder.map((id) => byId.get(id)).filter(
+          (connection): connection is ConnectionSummary => Boolean(connection),
+        ),
+        ...state.connections.filter((connection) => !previewOrder.includes(connection.id)),
+      ]
+    : state.connections;
   // One view, no navigation: the connected tools stay at the top as flat
   // rows, and an "Add a tool" row at the bottom of the list expands the
   // catalog of everything not yet connected, in place, beneath it.
@@ -1413,7 +1448,7 @@ function connectionsHTML(withReadyCard = true) {
     return Boolean(entry) && [entry!.name, entry!.description, ...(entry!.keywords || [])]
       .some((text) => text.toLowerCase().includes(needle));
   };
-  const matching = state.connections.filter((c) => !needle
+  const matching = orderedConnections.filter((c) => !needle
     || c.name.toLowerCase().includes(needle)
     || c.target.toLowerCase().includes(needle)
     || (c.account || '').toLowerCase().includes(needle)
@@ -1422,7 +1457,7 @@ function connectionsHTML(withReadyCard = true) {
   // whole list is on screen: no active search filter, and more than one tool.
   const reorderable = !needle && matching.length > 1;
   const connectedList = state.connections.length
-    ? `<div class="cat-section"><div class="cat-rows${reorderable ? ' reorderable' : ''}"
+    ? `<div class="cat-section"><div class="cat-rows${reorderable ? ' reorderable' : ''}${dragConnId ? ' drag-active' : ''}"
         data-conn-list${reorderable ? '="on"' : ''}>${matching.length
         ? matching.map((c) => flatConnRowHTML(c, reorderable)).join('')
         : '<div class="muted-note">No tools match your search.</div>'}</div></div>`
@@ -1531,7 +1566,7 @@ function ActivityRow({ entry }: { entry: ActivityEntry }): ReactNode {
       <span className={`act-ico tone-${entry.tone || 'neutral'}`}>
         <Icon markup={ICONS[entry.icon] || ''} />
       </span>
-      <span className="act-txt">
+      <div className="act-txt">
         {entry.text}
         {entry.detail ? <div className="act-detail">{entry.detail}</div> : null}
         {hasChips && (
@@ -1546,7 +1581,7 @@ function ActivityRow({ entry }: { entry: ActivityEntry }): ReactNode {
               ? <span className="act-chip act-chip-manage" title="Authorized by the management token">via manage token</span> : null}
           </div>
         )}
-      </span>
+      </div>
       {entry.connection
         ? <span className="act-chip act-tool" title={`Tool: ${entry.connection}`}>{entry.connection}</span>
         : null}
@@ -1558,7 +1593,7 @@ function ActivityRow({ entry }: { entry: ActivityEntry }): ReactNode {
  * disambiguate identical repeats by occurrence. Prepends then move rows
  * instead of rewriting every position. */
 function activityKey(entry: ActivityEntry, seen: Map<string, number>): string {
-  const base = `${entry.at}|${entry.icon}|${entry.text}|${entry.detail ?? ''}`;
+  const base = activityIdentity(entry);
   const n = seen.get(base) ?? 0;
   seen.set(base, n + 1);
   return n ? `${base}#${n}` : base;
@@ -1623,8 +1658,8 @@ async function receiveActivity(entry: ActivityEntry | null | undefined): Promise
     return;
   }
 
-  const duplicate = state.activity.some((item) =>
-    item.at === entry.at && item.icon === entry.icon && item.text === entry.text && item.detail === entry.detail);
+  const identity = activityIdentity(entry);
+  const duplicate = state.activity.some((item) => activityIdentity(item) === identity);
   if (duplicate) return;
   state.activity = [entry, ...state.activity].slice(0, ACTIVITY_RENDER_LIMIT);
 
@@ -2494,15 +2529,20 @@ function FieldError({ k }: { k: string }): ReactNode {
   return state.sheetErrors[k] ? <div className="field-error">{state.sheetErrors[k]}</div> : null;
 }
 
+/** Any add-form edit makes the last failed connection test stale. */
+function disarmDraftTestOverride(): void {
+  if (state.sheet?.kind === 'add-conn' && state.draftTestOverride) {
+    state.draftTestOverride = false;
+  }
+}
+
 /** Controlled-field write: update the draft, clear the field's stale
  * validation error (matching the old delegated-input behavior), and any
  * add-form edit disarms a failed draft test's save-anyway override. */
 function setDraftField(key: keyof ConnectionDraft & string, errKey: string, value: string): void {
   (state.draft as Record<string, unknown>)[key] = value;
   if (state.sheetErrors[errKey]) delete state.sheetErrors[errKey];
-  if (state.sheet?.kind === 'add-conn' && state.draftTestOverride) {
-    state.draftTestOverride = false;
-  }
+  disarmDraftTestOverride();
   render();
 }
 
@@ -2793,7 +2833,7 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
     (e: { currentTarget: HTMLInputElement }) => {
       d[key] = e.currentTarget.value;
       if (state.sheetErrors[errKey]) delete state.sheetErrors[errKey];
-      if (state.draftTestOverride) state.draftTestOverride = false;
+      disarmDraftTestOverride();
       if (state.sheet?.kind === 'add-conn' && d.nameIsAutomatic) {
         d.name = automaticConnectionName();
       }
@@ -3351,8 +3391,10 @@ function mcpAuthSheet(): string {
 
 /** Kick off (or restart) a sign-in and switch to the progress sheet. */
 async function startMcpAuth(draft: McpAuthDraft): Promise<boolean> {
+  const epoch = brokerEpoch;
   try {
     const auth = await invoke('start_mcp_auth', { input: draft });
+    if (!brokerEpochIsCurrent(epoch)) return false;
     state.mcpAuthDraft = draft;
     state.mcpAuth = auth;
     state.mcpAuthOpenedUrl = null;
@@ -3363,6 +3405,7 @@ async function startMcpAuth(draft: McpAuthDraft): Promise<boolean> {
     render();
     return true;
   } catch (error) {
+    if (!brokerEpochIsCurrent(epoch)) return false;
     showFormError(error);
     return false;
   }
@@ -3476,6 +3519,13 @@ function focusMenuOption(): void {
   }, 0);
 }
 
+const SHEET_FOCUSABLE_SELECTOR =
+  'button:not([disabled]), input:not([disabled]), select:not([disabled]), summary';
+
+function sheetFocusables(sheet: HTMLElement): HTMLElement[] {
+  return Array.from(sheet.querySelectorAll<HTMLElement>(SHEET_FOCUSABLE_SELECTOR));
+}
+
 function focusImportedConnectionDraft(): void {
   const d = state.draft;
   const type = state.connType;
@@ -3535,7 +3585,14 @@ function errorMessage(error: unknown): string {
 }
 
 async function run(fn: () => Promise<unknown>): Promise<boolean> {
-  try { await fn(); return true; } catch (error) { toast('⚠ ' + errorMessage(error)); return false; }
+  const epoch = brokerEpoch;
+  try {
+    await fn();
+    return brokerEpochIsCurrent(epoch);
+  } catch (error) {
+    if (brokerEpochIsCurrent(epoch)) toast('⚠ ' + errorMessage(error));
+    return false;
+  }
 }
 
 function isProtectedFormSheet(sheet: SheetState | null = state.sheet): boolean {
@@ -3548,12 +3605,15 @@ function isProtectedFormSheet(sheet: SheetState | null = state.sheet): boolean {
 // Shared by the panel's status row and the automatic post-save health check.
 async function runConnectionTest(id: string): Promise<void> {
   if (!id || state.connTests[id]?.running) return;
+  const epoch = brokerEpoch;
   state.connTests[id] = { running: true };
   render();
   try {
     const report = await invoke('test_connection', { id });
+    if (!brokerEpochIsCurrent(epoch)) return;
     state.connTests[id] = { running: false, ok: report.ok, detail: report.detail, kind: report.kind, at: new Date().toISOString() };
   } catch (error) {
+    if (!brokerEpochIsCurrent(epoch)) return;
     state.connTests[id] = { running: false, ok: false, detail: errorMessage(error), at: new Date().toISOString() };
   }
   render();
@@ -3561,15 +3621,16 @@ async function runConnectionTest(id: string): Promise<void> {
 
 async function loadWiringTools(connectionId: string): Promise<void> {
   const broker = state.broker;
+  const epoch = brokerEpoch;
   try {
     const tools = await refetchBrokerQuery(broker, 'list_mcp_tools', { id: connectionId });
-    if (!sameBrokerScope(broker, state.broker)) return;
+    if (!brokerEpochIsCurrent(epoch)) return;
     const wt = state.wiringTools;
     if (!wt || wt.connectionId !== connectionId) return;
     wt.loading = false;
     wt.tools = tools;
   } catch (error) {
-    if (!sameBrokerScope(broker, state.broker)) return;
+    if (!brokerEpochIsCurrent(epoch)) return;
     const wt = state.wiringTools;
     if (!wt || wt.connectionId !== connectionId) return;
     wt.loading = false;
@@ -3685,6 +3746,7 @@ async function quickConnectCatalogMcp(entry: CatalogEntry): Promise<void> {
 async function saveSecret(): Promise<void> {
   const sheet = state.sheet;
   if (!sheet || (sheet.kind !== 'add-secret' && sheet.kind !== 'edit-secret')) return;
+  const epoch = brokerEpoch;
   const name = (state.draft.name || '').trim();
   const value = state.draft.value || '';
   const errs: Record<string, string> = {};
@@ -3693,7 +3755,11 @@ async function saveSecret(): Promise<void> {
   if (Object.keys(errs).length) { state.sheetErrors = errs; render(); return; }
   if (sheet.kind === 'add-secret') {
     try { await invoke('add_secret', { name, value }); }
-    catch (error) { showFormError(error); return; }
+    catch (error) {
+      if (brokerEpochIsCurrent(epoch)) showFormError(error);
+      return;
+    }
+    if (!brokerEpochIsCurrent(epoch)) return;
     toast('🔑 Saved to macOS Keychain');
   } else {
     if (value !== EDIT_SECRET_MASK && (!value || value.includes('•'))) {
@@ -3707,7 +3773,11 @@ async function saveSecret(): Promise<void> {
         newName: name,
         newValue: value === EDIT_SECRET_MASK ? null : value,
       });
-    } catch (error) { showFormError(error); return; }
+    } catch (error) {
+      if (brokerEpochIsCurrent(epoch)) showFormError(error);
+      return;
+    }
+    if (!brokerEpochIsCurrent(epoch)) return;
     toast('✏️ Secret updated');
   }
   closeSheet();
@@ -3718,6 +3788,7 @@ async function saveConn(): Promise<void> {
   if (state.draftTest?.running) return;
   const sheet = state.sheet;
   if (!sheet || (sheet.kind !== 'add-conn' && sheet.kind !== 'edit-conn')) return;
+  const epoch = brokerEpoch;
   const d = state.draft;
   const name = (d.name || '').trim();
   const t = state.connType;
@@ -3859,6 +3930,7 @@ async function saveConn(): Promise<void> {
     if (await run(() => invoke('oauth_connect', {
       input, clientSecret: (d.oauthClientSecret || '').trim() || null,
     }))) {
+      if (!brokerEpochIsCurrent(epoch)) return;
       toast('🔌 Connected');
       closeSheet();
       await refresh('all');
@@ -3912,8 +3984,10 @@ async function saveConn(): Promise<void> {
     try {
       report = await invoke('test_connection_draft', { input });
     } catch (error) {
+      if (!brokerEpochIsCurrent(epoch)) return;
       report = { ok: false, detail: formErrorMessage(error) };
     }
+    if (!brokerEpochIsCurrent(epoch)) return;
     if (!report.ok) {
       state.draftTest = { running: false, ok: false, detail: report.detail, kind: report.kind };
       state.draftTestOverride = true;
@@ -3922,9 +3996,11 @@ async function saveConn(): Promise<void> {
     }
     state.draftTest = null;
   }
+  if (!brokerEpochIsCurrent(epoch)) return;
   try {
     if (adding) await invoke('add_connection', { input });
     else await invoke('edit_connection', { id: sheet.id ?? '', input });
+    if (!brokerEpochIsCurrent(epoch)) return;
     toast(adding ? '🔌 Tool saved' : '✏️ Tool updated');
     if (adding) {
       // The first-task prompt names the service just saved — the very first
@@ -3940,6 +4016,7 @@ async function saveConn(): Promise<void> {
     }
     closeSheet();
     await refresh('all');
+    if (!brokerEpochIsCurrent(epoch)) return;
     // Answer "did that actually work?" immediately: test the saved tool and
     // show the result on its row in the flat list.
     if (adding) {
@@ -3953,6 +4030,7 @@ async function saveConn(): Promise<void> {
         if (ENDPOINTABLE[saved.type] && saved.agent_access.enabled && !saved.agent_access.endpoint) {
           try {
             const info = await invoke('issue_endpoint', { connectionId: saved.id });
+            if (!brokerEpochIsCurrent(epoch)) return;
             setSheet({ kind: 'endpoint-issued', endpoint: info });
             await refresh('all');
           } catch {
@@ -3965,7 +4043,7 @@ async function saveConn(): Promise<void> {
       void runConnectionTest(sheet.id ?? '');
     }
   } catch (e) {
-    showFormError(e);
+    if (brokerEpochIsCurrent(epoch)) showFormError(e);
   }
 }
 
@@ -4214,14 +4292,17 @@ document.addEventListener('click', async (e) => {
       break;
     case 'issue-endpoint':
     case 'reissue-endpoint-confirm': {
+      const epoch = brokerEpoch;
       const connectionId = btn.dataset.conn || '';
       state.confirm = null;
       // Not via run(): we need the one-time result to show its secret.
       try {
         const info = await invoke('issue_endpoint', { connectionId });
+        if (!brokerEpochIsCurrent(epoch)) break;
         setSheet({ kind: 'endpoint-issued', endpoint: info });
         await refresh('all');
       } catch (error) {
+        if (!brokerEpochIsCurrent(epoch)) break;
         toast('⚠ ' + errorMessage(error));
         render();
       }
@@ -4296,9 +4377,18 @@ document.addEventListener('click', async (e) => {
       }
       break;
 
-    case 'reveal-secret':
-      await run(async () => { state.reveal[id] = await invoke('reveal_secret_prefix', { id }); render(); });
+    case 'reveal-secret': {
+      const epoch = brokerEpoch;
+      try {
+        const prefix = await invoke('reveal_secret_prefix', { id });
+        if (!brokerEpochIsCurrent(epoch)) break;
+        state.reveal[id] = prefix;
+        render();
+      } catch (error) {
+        if (brokerEpochIsCurrent(epoch)) toast('⚠ ' + errorMessage(error));
+      }
       break;
+    }
     case 'hide-secret':
       delete state.reveal[id]; render(); break;
     case 'copy-secret':
@@ -4338,10 +4428,12 @@ document.addEventListener('click', async (e) => {
     case 'save-secret': await saveSecret(); break;
 
     case 'conn-import': {
+      const epoch = brokerEpoch;
       const source = state.connImportSource;
       if (!source.trim()) break;
       try {
         const imported = await connectionDraftFromImport(source, state.draft);
+        if (!brokerEpochIsCurrent(epoch)) break;
         if (imported.type !== state.connType) {
           // The row you opened decided the type; a mismatched paste belongs
           // to a different tool rather than silently switching this one.
@@ -4364,6 +4456,7 @@ document.addEventListener('click', async (e) => {
         render();
         focusImportedConnectionDraft();
       } catch (error) {
+        if (!brokerEpochIsCurrent(epoch)) break;
         state.connImportError = errorMessage(error);
         render();
         focusField('conn-import');
@@ -4551,6 +4644,7 @@ document.addEventListener('click', async (e) => {
         state.draftTestOverride = false;
       }
       else if (menuId === 'c-identity-file') state.draft.identityFile = id;
+      disarmDraftTestOverride();
       render();
       focusField(menuId);
       break;
@@ -4567,6 +4661,7 @@ document.addEventListener('click', async (e) => {
         state.draft.secretSource = 'existing';
         state.draft.secretId = id;
       }
+      disarmDraftTestOverride();
       render();
       focusField(id === NEW_CREDENTIAL_OPTION ? 'c-new-secret-name' : 'c-secret');
       break;
@@ -4592,6 +4687,7 @@ document.addEventListener('click', async (e) => {
       break;
     case 'mcp-status': {
       if (state.mcpStatus[id] && state.mcpStatus[id].running) break;
+      const epoch = brokerEpoch;
       state.connMenuOpen = null;
       const connection = state.connections.find((x) => x.id === id);
       if (!connection) break;
@@ -4605,8 +4701,10 @@ document.addEventListener('click', async (e) => {
             whoami_tool: template?.whoamiTool ?? null,
           },
         });
+        if (!brokerEpochIsCurrent(epoch)) break;
         state.mcpStatus[id] = { running: false, report, at: new Date().toISOString() };
       } catch (error) {
+        if (!brokerEpochIsCurrent(epoch)) break;
         state.mcpStatus[id] = { running: false, error: errorMessage(error), at: new Date().toISOString() };
       }
       // The check can update the stored account acknowledgment.
@@ -4845,54 +4943,43 @@ document.addEventListener('click', async (e) => {
 // `reorder_connections`; the broker echoes `connections-changed`, which
 // refreshes every window back to the stored order.
 
-// The connection id currently being dragged, or null when no drag is active.
-let dragConnId: string | null = null;
-
-function connListEl(): HTMLElement | null {
-  return document.querySelector<HTMLElement>('[data-conn-list="on"]');
-}
-
-function clearConnDragIndicator(): void {
-  document.querySelectorAll('.cat-rows.drag-active')
-    .forEach((el) => el.classList.remove('drag-active'));
-}
-
 // The row a dropped item should land *before*: the first whose vertical
 // midpoint sits below the pointer. `null` means append at the end.
-function connRowAfter(list: HTMLElement, y: number): HTMLElement | null {
+function connRowAfter(list: HTMLElement, y: number): string | null {
   const rows = [...list.querySelectorAll<HTMLElement>('.flat-conn-wrap:not(.dragging)')];
   for (const row of rows) {
     const box = row.getBoundingClientRect();
-    if (y < box.top + box.height / 2) return row;
+    if (y < box.top + box.height / 2) return row.dataset.connRow ?? null;
   }
   return null;
+}
+
+function moveConnectionBefore(ids: string[], movedId: string, beforeId: string | null): string[] {
+  const next = ids.filter((id) => id !== movedId);
+  const before = beforeId === null ? next.length : next.indexOf(beforeId);
+  next.splice(before < 0 ? next.length : before, 0, movedId);
+  return next;
 }
 
 async function persistConnOrder(orderedIds: string[]): Promise<void> {
   await run(() => invoke('reorder_connections', { orderedIds }));
 }
 
-// Sync `state.connections` to the live DOM row order and, if it changed,
-// persist it. Used at the end of a pointer drag.
+// Commit the React-rendered preview order and persist it.
 function commitConnDrag(): void {
   if (!dragConnId) return;
-  const list = connListEl();
-  clearConnDragIndicator();
-  document.querySelectorAll('.flat-conn-wrap.dragging')
-    .forEach((el) => el.classList.remove('dragging'));
+  const ids = dragConnOrder ?? state.connections.map((connection) => connection.id);
   dragConnId = null;
-  if (!list) return;
-  const ids = [...list.querySelectorAll<HTMLElement>('.flat-conn-wrap')]
-    .map((el) => el.dataset.connRow)
-    .filter((id): id is string => Boolean(id));
+  dragConnOrder = null;
   const byId = new Map(state.connections.map((c) => [c.id, c] as const));
   const next = ids.map((id) => byId.get(id)).filter((c): c is ConnectionSummary => Boolean(c));
   // Preserve any connection not represented in the DOM (a filtered-out row
   // cannot happen while reordering is enabled, but stay total to be safe).
   for (const c of state.connections) if (!ids.includes(c.id)) next.push(c);
   const changed = next.some((c, i) => c.id !== state.connections[i]?.id);
+  if (changed) state.connections = next;
+  render();
   if (!changed) return;
-  state.connections = next;
   void persistConnOrder(next.map((c) => c.id));
 }
 
@@ -4921,8 +5008,7 @@ document.addEventListener('dragstart', (e) => {
   if (!wrap) return;
   dragConnId = wrap.dataset.connRow ?? null;
   if (!dragConnId) return;
-  wrap.classList.add('dragging');
-  wrap.closest('.cat-rows')?.classList.add('drag-active');
+  dragConnOrder = state.connections.map((connection) => connection.id);
   if (e.dataTransfer) {
     e.dataTransfer.effectAllowed = 'move';
     // Firefox refuses to start a drag unless some data is attached.
@@ -4930,6 +5016,7 @@ document.addEventListener('dragstart', (e) => {
     // Drag the whole row, not just the little grip.
     e.dataTransfer.setDragImage(wrap, 24, wrap.offsetHeight / 2);
   }
+  render();
 });
 
 document.addEventListener('dragover', (e) => {
@@ -4938,14 +5025,12 @@ document.addEventListener('dragover', (e) => {
   if (!list) return;
   e.preventDefault(); // mark this a valid drop target
   if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
-  const dragging = list.querySelector<HTMLElement>('.flat-conn-wrap.dragging');
-  if (!dragging) return;
-  const after = connRowAfter(list, e.clientY);
-  if (after === null) {
-    list.appendChild(dragging);
-  } else {
-    if (after !== dragging) list.insertBefore(dragging, after);
-  }
+  const beforeId = connRowAfter(list, e.clientY);
+  const current = dragConnOrder ?? state.connections.map((connection) => connection.id);
+  const next = moveConnectionBefore(current, dragConnId, beforeId);
+  if (next.every((id, index) => id === current[index])) return;
+  dragConnOrder = next;
+  render();
 });
 
 document.addEventListener('drop', (e) => {
@@ -5035,6 +5120,23 @@ document.addEventListener('keydown', (e) => {
       ? (e.key === 'ArrowDown' ? 0 : options.length - 1)
       : Math.min(Math.max(index + (e.key === 'ArrowDown' ? 1 : -1), 0), options.length - 1);
     options[next].focus();
+  } else if (e.key === 'Tab' && state.formMenuOpen && e.target instanceof Element
+      && e.target.closest('.cred-menu')) {
+    // The listbox is portaled outside .sheet, so close it and move relative
+    // to its trigger before the modal trap mistakes the option for escaped
+    // focus and wraps all the way to an edge.
+    e.preventDefault();
+    const menuId = state.formMenuOpen;
+    state.formMenuOpen = null;
+    render();
+    const sheet = document.querySelector<HTMLElement>('.sheet');
+    if (!sheet) return;
+    const focusables = sheetFocusables(sheet);
+    const trigger = document.getElementById(menuId);
+    const triggerIndex = trigger instanceof HTMLElement ? focusables.indexOf(trigger) : -1;
+    if (triggerIndex === -1 || !focusables.length) return;
+    const offset = e.shiftKey ? -1 : 1;
+    focusables[(triggerIndex + offset + focusables.length) % focusables.length].focus();
   } else if (e.key === 'Enter' && e.target instanceof Element && e.target.tagName === 'INPUT') {
     if (state.confirmDiscard) return;
     if (state.sheet && (state.sheet.kind === 'add-secret' || state.sheet.kind === 'edit-secret')) { e.preventDefault(); saveSecret(); }
@@ -5045,8 +5147,7 @@ document.addEventListener('keydown', (e) => {
     const sheet = document.querySelector<HTMLElement>('.sheet.discard-confirm')
       ?? document.querySelector<HTMLElement>('.sheet');
     if (!sheet) return;
-    const focusables = sheet.querySelectorAll<HTMLElement>(
-      'button:not([disabled]), input:not([disabled]), select:not([disabled]), summary');
+    const focusables = sheetFocusables(sheet);
     if (!focusables.length) return;
     const first = focusables[0];
     const last = focusables[focusables.length - 1];
@@ -5158,7 +5259,7 @@ async function boot() {
   await listen('aka://elicitations-changed', async () => {
     await refresh('elicitations');
     // The open dialog's request may have been answered elsewhere or
-    // expired; the sheet re-renders as "gone" via elicitationSheet, which
+    // expired; the sheet re-renders as "gone" via ElicitationSheet, which
     // is correct — nothing to close here, the user dismisses it informed.
   });
   await listen('aka://agents-changed', async () => {

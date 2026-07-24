@@ -1142,7 +1142,7 @@ async fn register(
         ));
     };
     let mut body = json!({
-        "client_name": "AKA Multitool",
+        "client_name": "Multitool",
         "redirect_uris": [redirect_uri],
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
