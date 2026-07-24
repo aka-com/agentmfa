@@ -61,6 +61,22 @@ connection against its pinned destination. These edits run through the
 broker's own management layer, so audit entries and side effects (a
 retarget revoking direct endpoints, for example) match the app exactly.
 
+Management commands also work against a **running** broker — no
+stop/start needed — over its manage API, authorized by the management
+token (never the agent key):
+
+```sh
+aka manage token                # once, while the broker is stopped
+aka manage login                # paste the token; stored per broker
+aka conn disable github        # edits the live broker over its socket
+aka conn list --broker https://broker.example.dev   # hosted brokers too
+```
+
+`aka manage login --broker <url>` stores a token for a hosted broker
+(macOS: login Keychain; elsewhere a 0600 file), and `AKA_MANAGE_TOKEN`
+overrides for CI. With no broker running, the same commands fall back
+to editing the local files offline, exactly as before.
+
 The operator's view is covered by `aka key` (print the shared agent
 key; `--rotate` disconnects every agent at once), `aka status` (is a
 broker up, and what does it serve), and `aka activity` (the audit

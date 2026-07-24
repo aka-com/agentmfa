@@ -25,6 +25,8 @@ dependencies = [
 name = "aka"
 version = "0.1.0"
 dependencies = [
+ "aka-api",
+ "aka-client",
  "aka-core",
  "axum",
  "clap",
@@ -35,6 +37,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing-subscriber",
+ "uuid",
  "zeroize",
 ]
 
@@ -60,6 +63,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror",
  "tokio",

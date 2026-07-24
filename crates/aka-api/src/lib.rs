@@ -176,6 +176,11 @@ pub struct OAuthDto {
     pub token_url: String,
     pub client_id: String,
     pub scopes: Vec<String>,
+    /// Non-secret authorize-endpoint parameters required by some providers
+    /// (for example, requesting an offline refresh token). Clients that
+    /// round-trip a connection config must preserve these.
+    #[serde(default)]
+    pub extra_auth_params: Vec<(String, String)>,
 }
 
 /// A connection's agent access, as the UI toggles it. There is one shared

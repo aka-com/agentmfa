@@ -10,8 +10,11 @@ name = "aka"
 path = "src/main.rs"
 
 [dependencies]
+aka-api = { workspace = true }
+aka-client = { workspace = true }
 aka-core = { workspace = true }
 clap = { workspace = true }
+uuid = { workspace = true }
 dirs = { workspace = true }
 libc = { workspace = true }
 reqwest = { workspace = true }

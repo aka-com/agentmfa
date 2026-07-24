@@ -61,6 +61,20 @@ docker run --rm -e AKA_VAULT_KEY="$AKA_VAULT_KEY" -v aka-state:/var/lib/aka \
 docker start aka-broker
 ```
 
+That one-time issuance is the only stop/start: with the token stored
+(`aka manage login --broker <public-url>`, from any machine with the
+CLI), every management command drives the **running** broker over its
+manage API — seed secrets and tools, flip agent access, test
+connections, read the activity trail:
+
+```sh
+printf '%s' "$GITHUB_TOKEN" | aka secret add GITHUB_TOKEN --broker https://broker.example.dev
+aka conn add github --kind api --host api.github.com \
+    --template 'Authorization: Bearer {{GITHUB_TOKEN}}' --broker https://broker.example.dev
+aka conn disable github --broker https://broker.example.dev
+aka activity --broker https://broker.example.dev
+```
+
 ## Run it (systemd, no container)
 
 Build `aka` (`cargo build --release -p aka`) and the sidecar

@@ -167,6 +167,7 @@ pub fn connection_dto(broker: &Broker, conn: &Connection) -> ConnectionDto {
                 token_url: o.token_url.clone(),
                 client_id: o.client_id.clone(),
                 scopes: o.scopes.clone(),
+                extra_auth_params: o.extra_auth_params.clone(),
             });
         }
         Pg {
@@ -702,6 +703,11 @@ pub trait ManagementBackend: Send + Sync {
         tools: Option<Vec<String>>,
     ) -> ManageResult<bool>;
     async fn issue_endpoint(&self, connection_id: Uuid) -> ManageResult<IssuedEndpointDto>;
+    /// Read the connection's already-issued direct endpoint without minting or
+    /// rotating; `None` when none is issued. `GET
+    /// /v1/manage/connections/{id}/endpoint`.
+    async fn get_endpoint(&self, connection_id: Uuid)
+        -> ManageResult<Option<IssuedEndpointDto>>;
     async fn revoke_endpoint(&self, endpoint_id: Uuid) -> ManageResult<bool>;
 
     /* identity */
@@ -714,6 +720,7 @@ pub trait ManagementBackend: Send + Sync {
     /* sessions + activity */
     async fn sessions(&self) -> ManageResult<Vec<SessionDto>>;
     async fn close_session(&self, id: u64) -> ManageResult<bool>;
+    /// Newest-first activity tail; `0` requests the full retained log.
     async fn activity(&self, limit: usize) -> ManageResult<Vec<ActivityDto>>;
     async fn clear_activity(&self) -> ManageResult<()>;
 
@@ -934,6 +941,16 @@ impl ManagementBackend for LocalBackend {
             .map(issued_endpoint_dto)?)
     }
 
+    async fn get_endpoint(
+        &self,
+        connection_id: Uuid,
+    ) -> ManageResult<Option<IssuedEndpointDto>> {
+        Ok(self
+            .broker
+            .ui_get_endpoint(&connection_id)?
+            .map(issued_endpoint_dto))
+    }
+
     async fn revoke_endpoint(&self, endpoint_id: Uuid) -> ManageResult<bool> {
         self.blocking(move |broker| broker.ui_revoke_endpoint(&endpoint_id))
             .await
@@ -968,6 +985,7 @@ impl ManagementBackend for LocalBackend {
     }
 
     async fn activity(&self, limit: usize) -> ManageResult<Vec<ActivityDto>> {
+        let limit = if limit == 0 { usize::MAX } else { limit };
         Ok(self
             .broker
             .audit
@@ -1151,6 +1169,10 @@ mod tests {
         assert!(identity.token_path.ends_with("token"));
         let key = backend.agent_key().await.unwrap();
         assert!(key.starts_with("aka_"));
+        assert!(
+            !backend.activity(0).await.unwrap().is_empty(),
+            "zero requests the full activity log"
+        );
 
         let settings = backend.settings().await.unwrap();
         assert!(settings.reauth_on_read);

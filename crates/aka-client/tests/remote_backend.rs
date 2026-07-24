@@ -195,7 +195,7 @@ async fn byo_oauth_relays_through_the_client_loopback() {
     let backend = RemoteBackend::new(
         RemoteConfig::new(
             &h.base,
-            h.backend.config().token(),
+            h.backend.config().expect("http backend").token(),
         )
         .unwrap(),
     )

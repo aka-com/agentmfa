@@ -76,6 +76,20 @@ impl RemoteConfig {
             "http" | "https" => {}
             other => return Err(format!("unsupported scheme {other:?}: use http or https")),
         }
+        if base.host_str().is_none() {
+            return Err("enter a full URL with a host, e.g. https://broker.example.dev".into());
+        }
+        if !base.username().is_empty() || base.password().is_some() {
+            return Err(
+                "the broker URL must not contain embedded credentials; use the management token"
+                    .into(),
+            );
+        }
+        if base.path() != "/" || base.query().is_some() || base.fragment().is_some() {
+            return Err(
+                "the broker URL must be an origin only (scheme, host, and optional port)".into(),
+            );
+        }
         Ok(base)
     }
 
@@ -118,10 +132,182 @@ impl RemoteConfig {
 /// pages). Returns false when it could not.
 pub type UrlOpener = std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
-/// The manage-plane HTTP backend.
+/// How a management request reaches the broker: HTTPS to a hosted broker's
+/// manage URL, or HTTP over the local broker's Unix control socket (the
+/// same `/v1/manage` routes, served on the 0600 socket). The management
+/// token authorizes both — socket access alone must never grant manage
+/// rights, because local agents share the OS user and the socket.
+#[derive(Clone)]
+enum Transport {
+    Http {
+        http: reqwest::Client,
+        config: RemoteConfig,
+    },
+    Unix {
+        socket: std::path::PathBuf,
+        token: Zeroizing<String>,
+    },
+}
+
+impl Transport {
+    /// Where this backend points, for profiles and error messages.
+    fn label(&self) -> String {
+        match self {
+            Transport::Http { config, .. } => config.base_url(),
+            Transport::Unix { socket, .. } => socket.display().to_string(),
+        }
+    }
+
+    /// One request → (status, body bytes). The HTTP arm rides reqwest; the
+    /// Unix arm hand-rolls HTTP/1.1 over the socket (no HTTP client crate
+    /// reaches a Unix socket portably), reading Content-Length, chunked,
+    /// and EOF-delimited bodies alike.
+    async fn raw(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<String>,
+    ) -> ManageResult<(u16, Vec<u8>)> {
+        match self {
+            Transport::Http { http, config } => {
+                let mut request = http
+                    .request(method, format!("{}{path}", config.base_url()))
+                    .header(
+                        reqwest::header::AUTHORIZATION,
+                        format!("Bearer {}", config.token()),
+                    );
+                if let Some(body) = body {
+                    request = request
+                        .header(reqwest::header::CONTENT_TYPE, "application/json")
+                        .body(body);
+                }
+                let response =
+                    request
+                        .send()
+                        .await
+                        .map_err(|error| ManageError::Unreachable {
+                            message: error.to_string(),
+                        })?;
+                let status = response.status().as_u16();
+                let bytes = response
+                    .bytes()
+                    .await
+                    .map_err(|error| ManageError::Unreachable {
+                        message: error.to_string(),
+                    })?;
+                Ok((status, bytes.to_vec()))
+            }
+            Transport::Unix { socket, token } => {
+                tokio::time::timeout(
+                    REQUEST_TIMEOUT,
+                    unix_request(socket, method.as_str(), path, token, body.as_deref()),
+                )
+                .await
+                .map_err(|_| ManageError::Unreachable {
+                    message: format!(
+                        "no answer from the broker socket within {}s",
+                        REQUEST_TIMEOUT.as_secs()
+                    ),
+                })?
+            }
+        }
+    }
+}
+
+/// One HTTP/1.1 request over the broker's Unix control socket.
+/// `Connection: close` keeps the framing simple: the body is delimited by
+/// Content-Length, chunked encoding, or EOF.
+async fn unix_request(
+    socket: &std::path::Path,
+    method: &str,
+    path: &str,
+    token: &str,
+    body: Option<&str>,
+) -> ManageResult<(u16, Vec<u8>)> {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let unreachable = |message: String| ManageError::Unreachable { message };
+    let mut stream = tokio::net::UnixStream::connect(socket)
+        .await
+        .map_err(|error| {
+            unreachable(format!(
+                "could not reach the broker at {}: {error}",
+                socket.display()
+            ))
+        })?;
+    let mut request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\n\
+         Connection: close\r\nAuthorization: Bearer {token}\r\n"
+    );
+    match body {
+        Some(body) => request.push_str(&format!(
+            "Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )),
+        None => request.push_str("\r\n"),
+    }
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|error| unreachable(format!("write to the broker socket failed: {error}")))?;
+    let mut raw = Vec::new();
+    stream
+        .read_to_end(&mut raw)
+        .await
+        .map_err(|error| unreachable(format!("read from the broker socket failed: {error}")))?;
+
+    let header_end = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .ok_or_else(|| unreachable("malformed HTTP response from the broker socket".into()))?;
+    let head = String::from_utf8_lossy(&raw[..header_end]).into_owned();
+    let payload = &raw[header_end + 4..];
+    let status: u16 = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| unreachable("malformed HTTP status line from the broker socket".into()))?;
+    let head_lower = head.to_ascii_lowercase();
+    let body = if head_lower.contains("transfer-encoding: chunked") {
+        decode_chunked(payload)
+            .ok_or_else(|| unreachable("malformed chunked body from the broker socket".into()))?
+    } else if let Some(length) = head_lower
+        .lines()
+        .find_map(|line| line.strip_prefix("content-length:"))
+        .and_then(|value| value.trim().parse::<usize>().ok())
+    {
+        payload.get(..length).map(<[u8]>::to_vec).ok_or_else(|| {
+            unreachable("truncated response from the broker socket".into())
+        })?
+    } else {
+        // Connection: close — EOF delimits the body.
+        payload.to_vec()
+    };
+    Ok((status, body))
+}
+
+/// Decode a chunked transfer-encoded body; `None` on any framing error.
+fn decode_chunked(mut input: &[u8]) -> Option<Vec<u8>> {
+    let mut body = Vec::new();
+    loop {
+        let line_end = input.windows(2).position(|w| w == b"\r\n")?;
+        let size_line = std::str::from_utf8(&input[..line_end]).ok()?;
+        // Chunk extensions (";…") are permitted by the grammar; ignore them.
+        let size = usize::from_str_radix(size_line.split(';').next()?.trim(), 16).ok()?;
+        input = &input[line_end + 2..];
+        if size == 0 {
+            return Some(body);
+        }
+        body.extend_from_slice(input.get(..size)?);
+        input = input.get(size..)?;
+        input = input.strip_prefix(b"\r\n")?;
+    }
+}
+
+/// The manage-plane client. One backend, two transports: HTTP(S) to a
+/// hosted broker, or the local broker's Unix control socket.
 pub struct RemoteBackend {
-    config: RemoteConfig,
-    http: reqwest::Client,
+    transport: Transport,
     /// How to open a browser on *this* machine — relayed OAuth needs one.
     /// Defaults to "cannot", which surfaces the URL in the error.
     opener: Option<UrlOpener>,
@@ -135,8 +321,20 @@ impl RemoteBackend {
             .build()
             .expect("http client");
         Self {
-            config,
-            http,
+            transport: Transport::Http { http, config },
+            opener: None,
+        }
+    }
+
+    /// Manage the local broker over its Unix control socket. The management
+    /// token still authorizes every call — the 0600 socket is shared with
+    /// agents, which must never reach the manage plane.
+    pub fn over_unix_socket(socket: std::path::PathBuf, token: &str) -> Self {
+        Self {
+            transport: Transport::Unix {
+                socket,
+                token: Zeroizing::new(token.trim().to_string()),
+            },
             opener: None,
         }
     }
@@ -190,40 +388,24 @@ impl RemoteBackend {
         Ok(())
     }
 
-    pub fn config(&self) -> &RemoteConfig {
-        &self.config
-    }
-
-    fn url(&self, path: &str) -> String {
-        format!("{}{}", self.config.base_url(), path)
-    }
-
-    fn authed(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        request.header(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", self.config.token()),
-        )
+    /// The HTTP configuration, when this backend speaks HTTP — `None` over
+    /// the Unix socket. The SSE event feed and anything else needing a URL
+    /// checks here.
+    pub fn config(&self) -> Option<&RemoteConfig> {
+        match &self.transport {
+            Transport::Http { config, .. } => Some(config),
+            Transport::Unix { .. } => None,
+        }
     }
 
     async fn send<T: DeserializeOwned>(
         &self,
-        request: reqwest::RequestBuilder,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<String>,
     ) -> ManageResult<T> {
-        let response = self
-            .authed(request)
-            .send()
-            .await
-            .map_err(|error| ManageError::Unreachable {
-                message: error.to_string(),
-            })?;
-        let status = response.status();
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|error| ManageError::Unreachable {
-                message: error.to_string(),
-            })?;
-        if status.is_success() {
+        let (status, bytes) = self.transport.raw(method, path, body).await?;
+        if (200..300).contains(&status) {
             return serde_json::from_slice(&bytes).map_err(|error| ManageError::Internal {
                 message: format!("unexpected response shape: {error}"),
             });
@@ -234,7 +416,7 @@ impl RemoteBackend {
         if let Ok(error) = serde_json::from_slice::<ManageError>(&bytes) {
             return Err(error);
         }
-        if status == reqwest::StatusCode::UNAUTHORIZED {
+        if status == 401 {
             return Err(ManageError::InvalidManageToken);
         }
         Err(ManageError::Internal {
@@ -246,7 +428,7 @@ impl RemoteBackend {
     }
 
     async fn get<T: DeserializeOwned>(&self, path: &str) -> ManageResult<T> {
-        self.send(self.http.get(self.url(path))).await
+        self.send(reqwest::Method::GET, path, None).await
     }
 
     async fn post<T: DeserializeOwned, B: serde::Serialize>(
@@ -254,15 +436,46 @@ impl RemoteBackend {
         path: &str,
         body: &B,
     ) -> ManageResult<T> {
-        self.send(self.http.post(self.url(path)).json(body)).await
+        self.send(
+            reqwest::Method::POST,
+            path,
+            Some(serde_json::to_string(body).expect("serializable body")),
+        )
+        .await
     }
 
     async fn post_empty<T: DeserializeOwned>(&self, path: &str) -> ManageResult<T> {
-        self.send(self.http.post(self.url(path))).await
+        self.send(reqwest::Method::POST, path, None).await
+    }
+
+    async fn put<T: DeserializeOwned, B: serde::Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> ManageResult<T> {
+        self.send(
+            reqwest::Method::PUT,
+            path,
+            Some(serde_json::to_string(body).expect("serializable body")),
+        )
+        .await
+    }
+
+    async fn patch<T: DeserializeOwned, B: serde::Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> ManageResult<T> {
+        self.send(
+            reqwest::Method::PATCH,
+            path,
+            Some(serde_json::to_string(body).expect("serializable body")),
+        )
+        .await
     }
 
     async fn delete<T: DeserializeOwned>(&self, path: &str) -> ManageResult<T> {
-        self.send(self.http.delete(self.url(path))).await
+        self.send(reqwest::Method::DELETE, path, None).await
     }
 
     /// Probe the broker: cheap, authenticated, version-carrying.
@@ -310,7 +523,7 @@ struct InstructionsBody {
 impl ManagementBackend for RemoteBackend {
     fn profile(&self) -> BackendProfile {
         BackendProfile::Remote {
-            url: self.config.base_url(),
+            url: self.transport.label(),
         }
     }
 
@@ -335,13 +548,12 @@ impl ManagementBackend for RemoteBackend {
         new_name: Option<String>,
         new_value: Option<SecretValue>,
     ) -> ManageResult<()> {
-        self.send(
-            self.http
-                .patch(self.url(&format!("/v1/manage/secrets/{id}")))
-                .json(&SecretEditBody {
-                    new_name,
-                    new_value: new_value.map(|value| value.to_string()),
-                }),
+        self.patch(
+            &format!("/v1/manage/secrets/{id}"),
+            &SecretEditBody {
+                new_name,
+                new_value: new_value.map(|value| value.to_string()),
+            },
         )
         .await
     }
@@ -403,10 +615,9 @@ impl ManagementBackend for RemoteBackend {
     }
 
     async fn update_connection(&self, id: Uuid, spec: ConnectionSpec) -> ManageResult<()> {
-        self.send(
-            self.http
-                .put(self.url(&format!("/v1/manage/connections/{id}")))
-                .json(&ConnectionUpdateBody { spec }),
+        self.put(
+            &format!("/v1/manage/connections/{id}"),
+            &ConnectionUpdateBody { spec },
         )
         .await
     }
@@ -466,20 +677,20 @@ impl ManagementBackend for RemoteBackend {
         // The delivery leg outlives this call: the browser dance takes as
         // long as the user does. The broker verifies the state nonce.
         let session = state.id.clone();
-        let http = self.http.clone();
-        let deliver_url = self.url(&format!("/v1/manage/mcp-auth/{session}/deliver"));
-        let bearer = format!("Bearer {}", self.config.token());
+        let transport = self.transport.clone();
+        let deliver_path = format!("/v1/manage/mcp-auth/{session}/deliver");
         tokio::spawn(async move {
             let redirect =
                 tokio::time::timeout(MCP_SIGNIN_TIMEOUT, catcher.wait_for_redirect()).await;
             let Ok(Ok((code, state))) = redirect else {
                 return;
             };
-            let _ = http
-                .post(deliver_url)
-                .header(reqwest::header::AUTHORIZATION, bearer)
-                .json(&McpAuthDeliverBody { code, state })
-                .send()
+            let _ = transport
+                .raw(
+                    reqwest::Method::POST,
+                    &deliver_path,
+                    serde_json::to_string(&McpAuthDeliverBody { code, state }).ok(),
+                )
                 .await;
         });
         Ok(state)
@@ -585,6 +796,14 @@ impl ManagementBackend for RemoteBackend {
             .await
     }
 
+    async fn get_endpoint(
+        &self,
+        connection_id: Uuid,
+    ) -> ManageResult<Option<IssuedEndpointDto>> {
+        self.get(&format!("/v1/manage/connections/{connection_id}/endpoint"))
+            .await
+    }
+
     async fn revoke_endpoint(&self, endpoint_id: Uuid) -> ManageResult<bool> {
         self.delete::<RevokedBody>(&format!("/v1/manage/endpoints/{endpoint_id}"))
             .await
@@ -668,13 +887,7 @@ impl ManagementBackend for RemoteBackend {
 
 impl RemoteBackend {
     async fn patch_settings(&self, patch: SettingsPatchBody) -> ManageResult<()> {
-        let _: SettingsDto = self
-            .send(
-                self.http
-                    .patch(self.url("/v1/manage/settings"))
-                    .json(&patch),
-            )
-            .await?;
+        let _: SettingsDto = self.patch("/v1/manage/settings", &patch).await?;
         Ok(())
     }
 }
@@ -694,6 +907,14 @@ mod tests {
             .unwrap_err()
             .contains("full URL"));
         assert!(RemoteConfig::new("ftp://x", "t").unwrap_err().contains("scheme"));
+        for url in [
+            "https://broker.example.dev/manage",
+            "https://broker.example.dev?tenant=a",
+            "https://broker.example.dev#manage",
+            "https://user:pass@broker.example.dev",
+        ] {
+            assert!(RemoteConfig::new(url, "t").is_err(), "{url}");
+        }
         assert!(RemoteConfig::new("http://127.0.0.1:4780", "")
             .unwrap_err()
             .contains("management token"));
@@ -721,5 +942,152 @@ mod tests {
         );
         assert!(RemoteConfig::normalize_url("").is_err());
         assert!(RemoteConfig::normalize_url("broker.example.dev").is_err());
+    }
+
+    #[test]
+    fn chunked_bodies_decode_and_reject_bad_framing() {
+        assert_eq!(
+            decode_chunked(b"4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n").unwrap(),
+            b"Wikipedia"
+        );
+        // Chunk extensions are ignored; a truncated chunk is refused.
+        assert_eq!(decode_chunked(b"3;ext=1\r\nabc\r\n0\r\n\r\n").unwrap(), b"abc");
+        assert!(decode_chunked(b"5\r\nabc").is_none());
+    }
+
+    /// The Unix transport against a real manage-shaped server on a Unix
+    /// socket: bearer auth rides every method, success bodies parse,
+    /// ManageError bodies cross with their shape intact, and 401 maps to
+    /// InvalidManageToken.
+    #[tokio::test]
+    async fn unix_transport_round_trips_the_manage_contract() {
+        use axum::http::HeaderMap;
+        use axum::routing::{get, patch, post};
+
+        async fn check_auth(headers: &HeaderMap) -> bool {
+            headers
+                .get("authorization")
+                .map(|v| v == "Bearer akamgr_test")
+                .unwrap_or(false)
+        }
+        async fn secrets(headers: HeaderMap) -> axum::response::Response {
+            use axum::response::IntoResponse as _;
+            if !check_auth(&headers).await {
+                return (
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    "missing token".to_string(),
+                )
+                    .into_response();
+            }
+            axum::Json(serde_json::json!([{
+                "id": "9d5e2c9e-7c5d-4f5e-9b7a-111111111111",
+                "name": "API_KEY", "used_by": 1,
+                "used_by_names": ["github"],
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+            }]))
+            .into_response()
+        }
+        async fn edit(body: String) -> axum::response::Response {
+            use axum::response::IntoResponse as _;
+            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(parsed["new_name"], "GH_TOKEN", "PATCH body crosses");
+            axum::Json(serde_json::json!(())).into_response()
+        }
+        async fn taken() -> axum::response::Response {
+            use axum::response::IntoResponse as _;
+            (
+                axum::http::StatusCode::CONFLICT,
+                axum::Json(serde_json::json!({
+                    "code": "secret_name_taken", "name": "PGPASS",
+                })),
+            )
+                .into_response()
+        }
+        // The endpoint read crosses as Option<IssuedEndpointDto>: an issued
+        // connection returns the DTO, an un-issued one returns JSON null.
+        async fn endpoint(axum::extract::Path(id): axum::extract::Path<String>) -> axum::response::Response {
+            use axum::response::IntoResponse as _;
+            if id.ends_with("222222222222") {
+                return axum::Json(serde_json::Value::Null).into_response();
+            }
+            axum::Json(serde_json::json!({
+                "endpoint_id": "aaaaaaaa-0000-0000-0000-000000000000",
+                "type": "api", "dsn": "http://127.0.0.1:52001",
+                "secret": "end_abc", "example": "curl -H \"Authorization: Bearer end_abc\" http://127.0.0.1:52001/<path>",
+            }))
+            .into_response()
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("manage.sock");
+        let app = axum::Router::new()
+            .route("/v1/manage/secrets", get(secrets).post(taken))
+            .route("/v1/manage/secrets/{id}", patch(edit))
+            .route(
+                "/v1/manage/whoami",
+                get(|| async { axum::Json(serde_json::json!({"ok": true})) }),
+            )
+            .route(
+                "/v1/manage/identity/rotate",
+                post(|| async { axum::Json(serde_json::json!(())) }),
+            )
+            .route("/v1/manage/connections/{id}/endpoint", get(endpoint));
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let backend = RemoteBackend::over_unix_socket(socket.clone(), "akamgr_test");
+        assert!(backend.config().is_none(), "no HTTP config over a socket");
+        assert!(matches!(
+            backend.profile(),
+            BackendProfile::Remote { url } if url.contains("manage.sock")
+        ));
+
+        // GET with auth → parsed DTOs.
+        let secrets = backend.list_secrets().await.unwrap();
+        assert_eq!(secrets[0].name, "API_KEY");
+        assert_eq!(secrets[0].used_by_names, vec!["github"]);
+
+        // PATCH body crosses; unit response parses.
+        backend
+            .edit_secret(
+                secrets[0].id.parse().unwrap(),
+                Some("GH_TOKEN".into()),
+                None,
+            )
+            .await
+            .unwrap();
+
+        // The endpoint read crosses as Some for an issued connection and None
+        // for an un-issued one (JSON null), over the socket transport.
+        let issued = backend
+            .get_endpoint("aaaaaaaa-0000-0000-0000-000000000000".parse().unwrap())
+            .await
+            .unwrap()
+            .expect("an issued endpoint parses to Some");
+        assert_eq!(issued.dsn, "http://127.0.0.1:52001");
+        assert_eq!(issued.secret, "end_abc");
+        let none = backend
+            .get_endpoint("00000000-0000-0000-0000-222222222222".parse().unwrap())
+            .await
+            .unwrap();
+        assert!(none.is_none(), "an un-issued endpoint parses to None");
+
+        // A ManageError body crosses with its shape intact.
+        let error = backend
+            .add_secret("PGPASS".into(), Zeroizing::new("x".into()))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ManageError::SecretNameTaken { ref name } if name == "PGPASS"),
+            "{error:?}"
+        );
+
+        // The wrong token maps to InvalidManageToken.
+        let wrong = RemoteBackend::over_unix_socket(socket, "akamgr_wrong");
+        assert!(matches!(
+            wrong.list_secrets().await.unwrap_err(),
+            ManageError::InvalidManageToken
+        ));
     }
 }

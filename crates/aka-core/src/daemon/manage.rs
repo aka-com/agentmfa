@@ -137,7 +137,10 @@ pub fn router() -> Router<AppState> {
         .route("/connections/{id}/allowed-tools", post(set_allowed_tools))
         .route("/connections/{id}/mcp-tools", get(list_mcp_tools))
         .route("/connections/{id}/mcp-status", post(mcp_status))
-        .route("/connections/{id}/endpoint", post(issue_endpoint))
+        .route(
+            "/connections/{id}/endpoint",
+            post(issue_endpoint).get(get_endpoint),
+        )
         .route("/endpoints/{id}", delete(revoke_endpoint))
         .route("/mcp-auth", post(mcp_auth_start))
         .route(
@@ -482,6 +485,14 @@ async fn issue_endpoint(
     respond(state.manage.issue_endpoint(id).await)
 }
 
+async fn get_endpoint(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+    Path(id): Path<Uuid>,
+) -> Response {
+    respond(state.manage.get_endpoint(id).await)
+}
+
 async fn revoke_endpoint(
     State(state): State<AppState>,
     _authed: ManageAuthed,
@@ -635,7 +646,7 @@ struct ActivityQuery {
     limit: Option<usize>,
 }
 
-/// The manage view's activity cap, mirroring the shell's own limit.
+/// Default activity tail when the caller does not choose a limit.
 const ACTIVITY_VIEW_LIMIT: usize = 200;
 
 async fn activity(
@@ -643,10 +654,7 @@ async fn activity(
     _authed: ManageAuthed,
     Query(query): Query<ActivityQuery>,
 ) -> Response {
-    let limit = query
-        .limit
-        .unwrap_or(ACTIVITY_VIEW_LIMIT)
-        .min(ACTIVITY_VIEW_LIMIT);
+    let limit = query.limit.unwrap_or(ACTIVITY_VIEW_LIMIT);
     respond(state.manage.activity(limit).await)
 }
 

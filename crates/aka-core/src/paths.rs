@@ -148,6 +148,13 @@ impl Paths {
         self.socket_dir.join("token")
     }
 
+    /// Client-side stored management tokens (`aka manage login`), one file
+    /// per broker, 0600. macOS clients store in the login Keychain instead;
+    /// see aka-client's `TokenStore`.
+    pub fn manage_tokens_dir(&self) -> PathBuf {
+        self.data_dir.join("manage-tokens")
+    }
+
     /// Per-open SSH agent sockets live here, one `agent-<suffix>.sock` per
     /// approved `/v1/ssh/open`.
     pub fn ssh_agent_dir(&self) -> PathBuf {

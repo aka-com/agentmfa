@@ -9,6 +9,7 @@
 
 use std::path::PathBuf;
 
+use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
 /// Keychain service for stored management tokens.
@@ -16,17 +17,19 @@ use zeroize::Zeroizing;
 const KEYCHAIN_SERVICE: &str = "com.aka.desktop.manage";
 
 pub struct TokenStore {
-    /// Directory for the non-macOS fallback file(s).
+    /// Directory for the non-macOS fallback file(s); the macOS build stores
+    /// in the Keychain and never reads it.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     dir: PathBuf,
 }
 
-/// The account/filename key for a broker URL: scheme, host, and port only,
-/// filesystem- and keychain-safe.
-fn key_for(url: &str) -> String {
-    url.trim_end_matches('/')
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect()
+/// A fixed-length, collision-resistant account/filename key for a broker
+/// origin or local socket path. Replacing punctuation is not enough:
+/// `/tmp/a-b` and `/tmp/a_b` would otherwise share a management token, and a
+/// long custom root can exceed the filesystem's component-length limit.
+fn key_for(broker: &str) -> String {
+    let digest = Sha256::digest(broker.trim_end_matches('/').as_bytes());
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 impl TokenStore {
@@ -56,9 +59,10 @@ impl TokenStore {
     }
 
     #[cfg(target_os = "macos")]
-    pub fn delete(&self, url: &str) {
-        if let Ok(entry) = Self::entry(url) {
-            let _ = entry.delete_credential();
+    pub fn delete(&self, url: &str) -> Result<(), String> {
+        match Self::entry(url)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(error.to_string()),
         }
     }
 
@@ -101,8 +105,12 @@ impl TokenStore {
     }
 
     #[cfg(not(target_os = "macos"))]
-    pub fn delete(&self, url: &str) {
-        let _ = std::fs::remove_file(self.path_for(url));
+    pub fn delete(&self, url: &str) -> Result<(), String> {
+        match std::fs::remove_file(self.path_for(url)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.to_string()),
+        }
     }
 }
 
@@ -112,11 +120,13 @@ mod tests {
 
     #[test]
     fn keys_are_scoped_per_url_and_safe() {
-        assert_eq!(
-            key_for("https://broker.example.dev/"),
-            "https___broker_example_dev"
-        );
+        let key = key_for("https://broker.example.dev/");
+        assert_eq!(key.len(), 64);
+        assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(key, key_for("https://broker.example.dev"));
         assert_ne!(key_for("http://a:1"), key_for("http://a:2"));
+        assert_ne!(key_for("/tmp/a-b"), key_for("/tmp/a_b"));
+        assert_eq!(key_for(&"x".repeat(1_000)).len(), 64);
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -130,12 +140,16 @@ mod tests {
         assert_eq!(store.load("http://a:1").unwrap().as_str(), "akamgr_one");
         assert_eq!(store.load("http://a:2").unwrap().as_str(), "akamgr_two");
         use std::os::unix::fs::PermissionsExt as _;
-        let mode = std::fs::metadata(dir.path().join("manage-token-http___a_1"))
-            .unwrap()
-            .permissions()
-            .mode();
+        let mode = std::fs::metadata(
+            dir.path()
+                .join(format!("manage-token-{}", key_for("http://a:1"))),
+        )
+        .unwrap()
+        .permissions()
+        .mode();
         assert_eq!(mode & 0o777, 0o600);
-        store.delete("http://a:1");
+        store.delete("http://a:1").unwrap();
         assert!(store.load("http://a:1").is_none());
+        store.delete("http://a:1").unwrap();
     }
 }

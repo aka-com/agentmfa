@@ -20,24 +20,35 @@
 //! - `aka key` / `aka status` / `aka activity` are the operator's view:
 //!   the shared agent key (and its rotation), whether a broker is up and
 //!   what it serves, and the audit trail.
+//! - Management commands work online too: against the running local
+//!   broker over its socket, or a hosted broker via `--broker <url>` —
+//!   both through the manage API, authorized by the management token
+//!   (`aka manage login` stores it). With no broker running they fall
+//!   back to the offline construction above.
 
-use std::ops::Deref;
 use std::os::unix::fs::FileTypeExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use aka_api::{ConnectionDto, ManageError, SecretDto};
+use aka_client::credentials::TokenStore;
+use aka_client::{RemoteBackend, RemoteConfig};
 use aka_core::broker::Broker;
 use aka_core::config::BrokerConfig;
 use aka_core::daemon;
 use aka_core::daemon::wellknown;
 use aka_core::error::CoreError;
 use aka_core::events::BrokerEvents;
+use aka_core::manage::{LocalBackend, ManageResult, ManagementBackend};
 use aka_core::paths::{BrokerInstanceLock, Paths};
-use aka_core::store::{ConnectionSpec, Store};
+use aka_core::store::ConnectionSpec;
 use aka_core::template::Template;
-use aka_core::types::{ConfirmationMethod, ConnectionConfig, PgSslMode, SecretMeta, SecretValue};
+use aka_core::types::{
+    ConfirmationMethod, ConnectionConfig, OAuthSpec, PgSslMode, SecretMeta, SecretValue,
+};
 use aka_core::vault::{platform_vault, platform_vault_for_root, SecretVault};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use uuid::Uuid;
 use zeroize::Zeroizing;
 
 mod client;
@@ -185,6 +196,10 @@ enum Command {
         /// Operate on a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Manage the broker at this manage-API URL instead of this
+        /// machine's.
+        #[arg(long)]
+        broker: Option<String>,
     },
     /// Report whether a broker is running on this layout and what it
     /// serves (MCP host, tools, key file). Exits nonzero when none is up.
@@ -192,6 +207,10 @@ enum Command {
         /// Check a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Manage the broker at this manage-API URL instead of this
+        /// machine's.
+        #[arg(long)]
+        broker: Option<String>,
     },
     /// Show the broker's audit trail, newest last. Reads the append-only
     /// log directly, so it works while the broker is running.
@@ -205,6 +224,10 @@ enum Command {
         /// Read a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Manage the broker at this manage-API URL instead of this
+        /// machine's.
+        #[arg(long)]
+        broker: Option<String>,
     },
 }
 
@@ -221,12 +244,20 @@ enum SecretCommand {
         /// Operate on a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Manage the broker at this manage-API URL instead of this
+        /// machine's.
+        #[arg(long)]
+        broker: Option<String>,
     },
     /// List secrets and the connections using them.
     List {
         /// Operate on a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Manage the broker at this manage-API URL instead of this
+        /// machine's.
+        #[arg(long)]
+        broker: Option<String>,
     },
     /// Rename a secret; every injection template referencing it is
     /// rewritten atomically with the rename.
@@ -238,6 +269,10 @@ enum SecretCommand {
         /// Operate on a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Manage the broker at this manage-API URL instead of this
+        /// machine's.
+        #[arg(long)]
+        broker: Option<String>,
     },
     /// Replace a secret's value (rotation). Like add, the value is read
     /// from stdin or --value-env, never from argv.
@@ -250,6 +285,10 @@ enum SecretCommand {
         /// Operate on a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Manage the broker at this manage-API URL instead of this
+        /// machine's.
+        #[arg(long)]
+        broker: Option<String>,
     },
     /// Delete a secret. Refused while a connection still uses it.
     Rm {
@@ -258,11 +297,40 @@ enum SecretCommand {
         /// Operate on a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Manage the broker at this manage-API URL instead of this
+        /// machine's.
+        #[arg(long)]
+        broker: Option<String>,
     },
 }
 
 #[derive(Subcommand)]
 enum ManageCommand {
+    /// Store a management token so management commands can drive a broker
+    /// while it runs — this machine's broker over its socket, or a hosted
+    /// one by URL. The token is read from stdin (or --token-env), never
+    /// argv, and is verified against the broker when it is reachable.
+    Login {
+        /// The hosted broker's manage URL; omit to store the token for
+        /// this machine's broker (keyed by its socket path).
+        #[arg(long)]
+        broker: Option<String>,
+        /// Read the token from this environment variable instead of stdin.
+        #[arg(long, value_name = "VAR")]
+        token_env: Option<String>,
+        /// Operate on a broker rooted here instead of the default layout.
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// Forget a stored management token.
+    Logout {
+        /// The hosted broker's manage URL; omit for this machine's broker.
+        #[arg(long)]
+        broker: Option<String>,
+        /// Operate on a broker rooted here instead of the default layout.
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
     /// Issue (or rotate) this broker's management token and print it once.
     /// Enter it in the desktop app to manage this broker remotely. Offline:
     /// run on the broker host while the broker is stopped.
@@ -291,6 +359,10 @@ enum ConnCommand {
         /// Operate on a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Manage the broker at this manage-API URL instead of this
+        /// machine's.
+        #[arg(long)]
+        broker: Option<String>,
     },
     /// Update fields on a connection (its kind is fixed). Only the flags
     /// you pass change; changing the destination revokes the tool's direct
@@ -305,6 +377,10 @@ enum ConnCommand {
         /// Operate on a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Manage the broker at this manage-API URL instead of this
+        /// machine's.
+        #[arg(long)]
+        broker: Option<String>,
     },
     /// Delete a connection. Its agent access and direct endpoints die with
     /// it; its secrets stay in the vault.
@@ -314,6 +390,10 @@ enum ConnCommand {
         /// Operate on a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Manage the broker at this manage-API URL instead of this
+        /// machine's.
+        #[arg(long)]
+        broker: Option<String>,
     },
     /// Enable agent access for a connection: calls execute immediately,
     /// for every agent at once.
@@ -323,6 +403,10 @@ enum ConnCommand {
         /// Operate on a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Manage the broker at this manage-API URL instead of this
+        /// machine's.
+        #[arg(long)]
+        broker: Option<String>,
     },
     /// Disable agent access for a connection: every agent's calls are
     /// refused with 403 denied_by_policy until re-enabled.
@@ -332,6 +416,10 @@ enum ConnCommand {
         /// Operate on a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Manage the broker at this manage-API URL instead of this
+        /// machine's.
+        #[arg(long)]
+        broker: Option<String>,
     },
     /// Test a connection against its pinned destination with its stored
     /// credential (the credential travels only on the upstream leg).
@@ -342,6 +430,10 @@ enum ConnCommand {
         /// Operate on a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Manage the broker at this manage-API URL instead of this
+        /// machine's.
+        #[arg(long)]
+        broker: Option<String>,
     },
     /// Print the connection's already-issued direct endpoint: the pasteable
     /// address and its endpoint secret. Read-only — issue or rotate the
@@ -362,6 +454,10 @@ enum ConnCommand {
         /// Operate on a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Read from the broker at this manage-API URL instead of this
+        /// machine's.
+        #[arg(long)]
+        broker: Option<String>,
     },
 }
 
@@ -418,6 +514,10 @@ struct ConnAdd {
     /// Operate on a broker rooted here instead of the default layout.
     #[arg(long)]
     root: Option<PathBuf>,
+    /// Manage the broker at this manage-API URL instead of this
+    /// machine's.
+    #[arg(long)]
+    broker: Option<String>,
 }
 
 #[derive(ValueEnum, Clone, Copy)]
@@ -476,6 +576,10 @@ struct ConnUpdate {
     /// Operate on a broker rooted here instead of the default layout.
     #[arg(long)]
     root: Option<PathBuf>,
+    /// Manage the broker at this manage-API URL instead of this
+    /// machine's.
+    #[arg(long)]
+    broker: Option<String>,
 }
 
 fn main() {
@@ -524,51 +628,72 @@ fn main() {
                 name,
                 value_env,
                 root,
-            } => cmd_secret_add(name, value_env, root),
-            SecretCommand::List { root } => cmd_secret_list(root),
+                broker,
+            } => cmd_secret_add(name, value_env, root, broker),
+            SecretCommand::List { root, broker } => cmd_secret_list(root, broker),
             SecretCommand::Rename {
                 name,
                 new_name,
                 root,
-            } => cmd_secret_rename(name, new_name, root),
+                broker,
+            } => cmd_secret_rename(name, new_name, root, broker),
             SecretCommand::Replace {
                 name,
                 value_env,
                 root,
-            } => cmd_secret_replace(name, value_env, root),
-            SecretCommand::Rm { name, root } => cmd_secret_rm(name, root),
+                broker,
+            } => cmd_secret_replace(name, value_env, root, broker),
+            SecretCommand::Rm { name, root, broker } => cmd_secret_rm(name, root, broker),
         },
         Command::Conn { command } => match command {
             ConnCommand::Add(args) => cmd_conn_add(args),
-            ConnCommand::List { root } => cmd_conn_list(root),
+            ConnCommand::List { root, broker } => cmd_conn_list(root, broker),
             ConnCommand::Update(args) => cmd_conn_update(args),
             ConnCommand::Rename {
                 name,
                 new_name,
                 root,
-            } => cmd_conn_rename(name, new_name, root),
-            ConnCommand::Rm { name, root } => cmd_conn_rm(name, root),
-            ConnCommand::Enable { name, root } => cmd_conn_access(name, root, true),
-            ConnCommand::Disable { name, root } => cmd_conn_access(name, root, false),
-            ConnCommand::Test { name, root } => cmd_conn_test(name, root),
+                broker,
+            } => cmd_conn_rename(name, new_name, root, broker),
+            ConnCommand::Rm { name, root, broker } => cmd_conn_rm(name, root, broker),
+            ConnCommand::Enable { name, root, broker } => cmd_conn_access(name, root, broker, true),
+            ConnCommand::Disable { name, root, broker } => {
+                cmd_conn_access(name, root, broker, false)
+            }
+            ConnCommand::Test { name, root, broker } => cmd_conn_test(name, root, broker),
             ConnCommand::Endpoint {
                 name,
                 url,
                 secret,
                 root,
-            } => cmd_conn_endpoint(name, url, secret, root),
+                broker,
+            } => cmd_conn_endpoint(name, url, secret, root, broker),
         },
-        Command::Manage {
-            command:
-                ManageCommand::Token {
-                    revoke,
-                    ttl_days,
-                    root,
-                },
-        } => cmd_manage_token(revoke, ttl_days, root),
-        Command::Key { rotate, root } => cmd_key(rotate, root),
-        Command::Status { root } => cmd_status(root),
-        Command::Activity { limit, json, root } => cmd_activity(limit, json, root),
+        Command::Manage { command } => match command {
+            ManageCommand::Login {
+                broker,
+                token_env,
+                root,
+            } => cmd_manage_login(broker, token_env, root),
+            ManageCommand::Logout { broker, root } => cmd_manage_logout(broker, root),
+            ManageCommand::Token {
+                revoke,
+                ttl_days,
+                root,
+            } => cmd_manage_token(revoke, ttl_days, root),
+        },
+        Command::Key {
+            rotate,
+            root,
+            broker,
+        } => cmd_key(rotate, root, broker),
+        Command::Status { root, broker } => cmd_status(root, broker),
+        Command::Activity {
+            limit,
+            json,
+            root,
+            broker,
+        } => cmd_activity(limit, json, root, broker),
     }
 }
 
@@ -591,22 +716,6 @@ fn open_vault(
     match root {
         Some(root) => platform_vault_for_root(paths, root),
         None => platform_vault(paths),
-    }
-}
-
-/// An offline store handle coupled to the exclusive lease protecting it.
-struct OfflineStore {
-    store: Store,
-    // Declared last so state handles close before another process can acquire
-    // the lease and open the same files.
-    _instance_lock: BrokerInstanceLock,
-}
-
-impl Deref for OfflineStore {
-    type Target = Store;
-
-    fn deref(&self) -> &Self::Target {
-        &self.store
     }
 }
 
@@ -656,38 +765,6 @@ fn acquire_offline_store_lock(paths: &Paths) -> Result<BrokerInstanceLock, CoreE
     Ok(instance_lock)
 }
 
-/// Open the store for offline edits (`secret add`, `conn add`): the same
-/// files a broker on this root serves, so a live broker — which holds the
-/// store in memory and would overwrite the edit on its next persist — is
-/// refused before any state is opened.
-fn open_store(root: Option<PathBuf>) -> OfflineStore {
-    let paths = store_paths(root.as_deref());
-    let instance_lock = match acquire_offline_store_lock(&paths) {
-        Ok(instance_lock) => instance_lock,
-        Err(CoreError::BrokerAlreadyRunning(_)) => die(format!(
-            "a broker is running on {} — stop it first (its in-memory state \
-             would overwrite this change), or add through the app",
-            paths.socket_file().display()
-        )),
-        Err(error) => die(format!("could not acquire the broker state lease: {error}")),
-    };
-    let vault = match open_vault(&paths, root.as_deref()) {
-        Ok(vault) => vault,
-        Err(e) => die(format!("could not open the secret vault: {e}")),
-    };
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
-    match runtime.block_on(Store::open(paths, vault)) {
-        Ok(store) => OfflineStore {
-            store,
-            _instance_lock: instance_lock,
-        },
-        Err(e) => die(format!("could not open the store: {e}")),
-    }
-}
-
 /// Read a secret value from `--value-env` or stdin — never argv, where it
 /// would sit in `ps` output and shell history.
 fn read_secret_value(value_env: &Option<String>) -> SecretValue {
@@ -715,52 +792,126 @@ fn read_secret_value(value_env: &Option<String>) -> SecretValue {
     value
 }
 
-fn cmd_secret_add(name: String, value_env: Option<String>, root: Option<PathBuf>) {
+fn cmd_secret_add(name: String, value_env: Option<String>, root: Option<PathBuf>, url: Option<String>) {
     let value = read_secret_value(&value_env);
-    let store = open_store(root);
-    match store.add_secret(&name, value) {
-        Ok(meta) => eprintln!("added secret {}", meta.name),
-        Err(e) => die(e),
-    }
+    let managed = management_backend(root, url);
+    managed.run(managed.backend.add_secret(name.clone(), value));
+    eprintln!("added secret {name}");
 }
 
-fn cmd_secret_list(root: Option<PathBuf>) {
-    let store = open_store(root);
-    let secrets = store.list_secrets();
+fn cmd_secret_list(root: Option<PathBuf>, url: Option<String>) {
+    let managed = management_backend(root, url);
+    let secrets = managed.run(managed.backend.list_secrets());
     if secrets.is_empty() {
         eprintln!("no secrets configured (add one with `aka secret add <name>`)");
         return;
     }
-    for meta in secrets {
-        let users = store.connections_using(&meta.id);
-        if users.is_empty() {
-            println!("{}", meta.name);
+    for dto in secrets {
+        if dto.used_by_names.is_empty() {
+            println!("{}", dto.name);
         } else {
-            println!("{}  used by {}", meta.name, users.join(", "));
+            println!("{}  used by {}", dto.name, dto.used_by_names.join(", "));
         }
     }
 }
 
-/// The lifecycle edits run through the broker's own `ui_*` layer instead of
-/// the bare store, so their side effects — audit entries, access-table
-/// cleanup, endpoint revocation on retarget — are the app's, not a CLI
-/// reimplementation. Constructing the broker acquires the same exclusive
-/// lease as `open_store`: a live broker is refused before any state opens.
-struct OfflineBroker {
+/// A management backend plus the runtime driving it. Every mode routes
+/// through the broker's own management layer — the same audit entries and
+/// side effects as the app — the modes differ only in how calls reach it.
+struct Managed {
     runtime: tokio::runtime::Runtime,
-    broker: Arc<Broker>,
+    backend: Arc<dyn ManagementBackend>,
 }
 
-fn open_broker(root: Option<PathBuf>) -> OfflineBroker {
-    let paths = store_paths(root.as_deref());
-    let vault = match open_vault(&paths, root.as_deref()) {
-        Ok(vault) => vault,
-        Err(e) => die(format!("could not open the secret vault: {e}")),
-    };
+impl Managed {
+    /// Run one management call to completion; a failure exits with the
+    /// broker's own error line.
+    fn run<T>(&self, call: impl std::future::Future<Output = ManageResult<T>>) -> T {
+        match self.runtime.block_on(call) {
+            Ok(value) => value,
+            Err(e) => die(e),
+        }
+    }
+}
+
+fn manage_token_store(paths: &Paths) -> TokenStore {
+    TokenStore::new(paths.manage_tokens_dir())
+}
+
+/// Resolve the management token for `key` (a manage URL, or the local
+/// socket path): the AKA_MANAGE_TOKEN environment variable wins, then the
+/// token stored by `aka manage login`.
+fn manage_token(paths: &Paths, key: &str) -> Option<Zeroizing<String>> {
+    if let Ok(token) = std::env::var("AKA_MANAGE_TOKEN") {
+        let token = token.trim().to_string();
+        if !token.is_empty() {
+            return Some(Zeroizing::new(token));
+        }
+    }
+    manage_token_store(paths).load(key)
+}
+
+/// Pick how a management command reaches its broker:
+/// - `--url` → that broker's manage API over HTTP (a hosted broker, or a
+///   local one serving `--listen`);
+/// - no URL with a broker running on the socket → its manage API over the
+///   Unix socket, so live edits need no stop/start. The management token
+///   still authorizes every call: the 0600 socket is shared with agents,
+///   which must never reach the manage plane;
+/// - no broker running → construct the broker offline, as before.
+fn management_backend(root: Option<PathBuf>, url: Option<String>) -> Managed {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("tokio runtime");
+    let paths = store_paths(root.as_deref());
+    if let Some(url) = url {
+        let url = match RemoteConfig::normalize_url(&url) {
+            Ok(url) => url,
+            Err(e) => die(e),
+        };
+        let Some(token) = manage_token(&paths, &url) else {
+            die(format!(
+                "no management token for {url} — set AKA_MANAGE_TOKEN, or store \
+                 one with `aka manage login --broker {url}` (issued by `aka \
+                 manage token` on the broker host)"
+            ));
+        };
+        let config = match RemoteConfig::new(&url, &token) {
+            Ok(config) => config,
+            Err(e) => die(e),
+        };
+        eprintln!("  managing the broker at {url}");
+        return Managed {
+            runtime,
+            backend: Arc::new(RemoteBackend::new(config)),
+        };
+    }
+    let socket = paths.socket_file();
+    let broker_running = runtime
+        .block_on(tokio::net::UnixStream::connect(&socket))
+        .is_ok();
+    if broker_running {
+        let key = socket.display().to_string();
+        let Some(token) = manage_token(&paths, &key) else {
+            die(format!(
+                "a broker is running on {key}.\n\
+                 To edit it live, store its management token with `aka manage \
+                 login` (issue one with `aka manage token` while the broker is \
+                 stopped) or set AKA_MANAGE_TOKEN — or stop the broker for an \
+                 offline edit."
+            ));
+        };
+        eprintln!("  managing the running broker over {key}");
+        return Managed {
+            runtime,
+            backend: Arc::new(RemoteBackend::over_unix_socket(socket, &token)),
+        };
+    }
+    let vault = match open_vault(&paths, root.as_deref()) {
+        Ok(vault) => vault,
+        Err(e) => die(format!("could not open the secret vault: {e}")),
+    };
     let events: Arc<dyn BrokerEvents> = Arc::new(OfflineEvents);
     let broker = match runtime.block_on(Broker::new_for_offline_management(
         paths.clone(),
@@ -770,13 +921,16 @@ fn open_broker(root: Option<PathBuf>) -> OfflineBroker {
     )) {
         Ok(broker) => broker,
         Err(CoreError::BrokerAlreadyRunning(_)) => die(format!(
-            "a broker is running on {} — stop it first (its in-memory state \
-             would overwrite this change), or use the app",
+            "a broker started on {} while this command was connecting — retry \
+             to manage it live, or stop it for an offline edit",
             paths.socket_file().display()
         )),
         Err(e) => die(format!("could not open the broker state: {e}")),
     };
-    OfflineBroker { runtime, broker }
+    Managed {
+        runtime,
+        backend: Arc::new(LocalBackend::new(broker)),
+    }
 }
 
 /// Events for offline lifecycle edits: the operator typed the command on
@@ -796,84 +950,94 @@ impl BrokerEvents for OfflineEvents {
     }
 }
 
-fn secret_named(broker: &Broker, name: &str) -> SecretMeta {
-    match broker.store.secret_by_name(name) {
-        Some(meta) => meta,
-        None => die(format!(
-            "no secret named {name:?} (see `aka secret list`)"
-        )),
+/// Parse an id the broker handed out; it minted it, so failure is a wire
+/// bug worth naming, not a user error.
+fn dto_id(id: &str) -> Uuid {
+    id.parse()
+        .unwrap_or_else(|_| die(format!("malformed id {id:?} from the broker")))
+}
+
+fn secret_dto(managed: &Managed, name: &str) -> SecretDto {
+    let secrets = managed.run(managed.backend.list_secrets());
+    match secrets.into_iter().find(|s| s.name == name) {
+        Some(dto) => dto,
+        None => die(format!("no secret named {name:?} (see `aka secret list`)")),
     }
 }
 
-fn conn_named(broker: &Broker, name: &str) -> aka_core::types::Connection {
-    match broker.store.connection_by_name(name) {
-        Some(conn) => conn,
-        None => die(format!(
-            "no connection named {name:?} (see `aka conn list`)"
-        )),
+fn conn_dto(managed: &Managed, name: &str) -> ConnectionDto {
+    let connections = managed.run(managed.backend.list_connections());
+    match connections.into_iter().find(|c| c.name == name) {
+        Some(dto) => dto,
+        None => die(format!("no connection named {name:?} (see `aka conn list`)")),
     }
 }
 
-fn cmd_secret_rename(name: String, new_name: String, root: Option<PathBuf>) {
-    let offline = open_broker(root);
-    let meta = secret_named(&offline.broker, &name);
-    match offline.broker.ui_edit_secret(&meta.id, Some(&new_name), None) {
-        Ok(meta) => eprintln!("renamed secret {name} → {}", meta.name),
-        Err(e) => die(e),
-    }
+/// Resolve secret names to ids in one listing round trip (keeping a
+/// connection's existing bindings across an update).
+fn secret_ids_by_names(managed: &Managed, names: &[String]) -> Vec<Uuid> {
+    let secrets = managed.run(managed.backend.list_secrets());
+    names
+        .iter()
+        .map(|name| match secrets.iter().find(|s| &s.name == name) {
+            Some(dto) => dto_id(&dto.id),
+            None => die(format!("no secret named {name:?} (see `aka secret list`)")),
+        })
+        .collect()
 }
 
-fn cmd_secret_replace(name: String, value_env: Option<String>, root: Option<PathBuf>) {
+fn cmd_secret_rename(name: String, new_name: String, root: Option<PathBuf>, url: Option<String>) {
+    let managed = management_backend(root, url);
+    let dto = secret_dto(&managed, &name);
+    managed.run(
+        managed
+            .backend
+            .edit_secret(dto_id(&dto.id), Some(new_name.clone()), None),
+    );
+    eprintln!("renamed secret {name} → {new_name}");
+}
+
+fn cmd_secret_replace(
+    name: String,
+    value_env: Option<String>,
+    root: Option<PathBuf>,
+    url: Option<String>,
+) {
     let value = read_secret_value(&value_env);
-    let offline = open_broker(root);
-    let meta = secret_named(&offline.broker, &name);
-    match offline.broker.ui_edit_secret(&meta.id, None, Some(value)) {
-        Ok(meta) => eprintln!("replaced the value of secret {}", meta.name),
-        Err(e) => die(e),
-    }
+    let managed = management_backend(root, url);
+    let dto = secret_dto(&managed, &name);
+    managed.run(managed.backend.edit_secret(dto_id(&dto.id), None, Some(value)));
+    eprintln!("replaced the value of secret {name}");
 }
 
-fn cmd_secret_rm(name: String, root: Option<PathBuf>) {
-    let offline = open_broker(root);
-    let meta = secret_named(&offline.broker, &name);
-    match offline.broker.ui_delete_secret(&meta.id) {
-        Ok(meta) => eprintln!("deleted secret {}", meta.name),
-        Err(e) => die(e),
-    }
+fn cmd_secret_rm(name: String, root: Option<PathBuf>, url: Option<String>) {
+    let managed = management_backend(root, url);
+    let dto = secret_dto(&managed, &name);
+    managed.run(managed.backend.delete_secret(dto_id(&dto.id)));
+    eprintln!("deleted secret {name}");
 }
 
 fn cmd_conn_add(args: ConnAdd) {
-    let store = open_store(args.root.clone());
     let config = match conn_config(&args) {
         Ok(config) => config,
         Err(e) => die(e),
     };
+    let managed = management_backend(args.root.clone(), args.broker.clone());
     // pg/ws/ssh bind exactly one secret by name; api derives its secrets
     // from the template's refs inside add_connection.
     let secrets = match (&args.secret, args.kind) {
         (_, ConnKind::Api) => Vec::new(),
-        (Some(name), _) => match store.secret_by_name(name) {
-            Some(meta) => vec![meta.id],
-            None => die(format!(
-                "no secret named {name:?}; add it first with `aka secret add {name}`"
-            )),
-        },
+        (Some(name), _) => vec![dto_id(&secret_dto(&managed, name).id)],
         (None, _) => Vec::new(),
     };
-    let spec = ConnectionSpec {
-        name: args.name,
+    let name = args.name.clone();
+    managed.run(managed.backend.add_connection(ConnectionSpec {
+        name: name.clone(),
         config,
         secrets,
-    };
-    match store.add_connection(spec) {
-        Ok(conn) => eprintln!(
-            "added connection {} ({} · {})",
-            conn.name,
-            conn.kind().as_str(),
-            conn.target()
-        ),
-        Err(e) => die(e),
-    }
+    }));
+    let dto = conn_dto(&managed, &name);
+    eprintln!("added connection {} ({} · {})", dto.name, dto.kind, dto.target);
 }
 
 /// Build the type-specific config, naming exactly which flag is missing or
@@ -991,15 +1155,83 @@ fn parse_sslmode(value: Option<&str>) -> Result<PgSslMode, String> {
     })
 }
 
-fn cmd_conn_list(root: Option<PathBuf>) {
-    let store = open_store(root);
-    let connections = store.list_connections();
+fn cmd_conn_list(root: Option<PathBuf>, url: Option<String>) {
+    let managed = management_backend(root, url);
+    let connections = managed.run(managed.backend.list_connections());
     if connections.is_empty() {
         eprintln!("no connections configured (add one with `aka conn add`)");
         return;
     }
-    for conn in connections {
-        println!("{}  {}  {}", conn.name, conn.kind().as_str(), conn.target());
+    for dto in connections {
+        let state = if dto.agent_access.enabled {
+            ""
+        } else {
+            "  disabled"
+        };
+        println!("{}  {}  {}{}", dto.name, dto.kind, dto.target, state);
+    }
+}
+
+/// Rebuild a connection's `ConnectionConfig` from its listing DTO, so
+/// `conn update` can merge flags over it in any mode. The DTO carries every
+/// field the CLI manages; OAuth-managed connections are refused before this
+/// runs (their credential config cannot be reconstructed client-side).
+fn config_from_dto(dto: &ConnectionDto) -> Result<ConnectionConfig, String> {
+    let need = |field: &str, value: &Option<String>| -> Result<String, String> {
+        value
+            .clone()
+            .ok_or_else(|| format!("the broker's listing omitted {field} for {}", dto.name))
+    };
+    let need_port = || -> Result<u16, String> {
+        dto.port
+            .ok_or_else(|| format!("the broker's listing omitted port for {}", dto.name))
+    };
+    match dto.kind.as_str() {
+        "api" => Ok(ConnectionConfig::Api {
+            host: need("host", &dto.host)?,
+            scheme: need("scheme", &dto.scheme)?,
+            port: dto.port,
+            template: need("template", &dto.template)?,
+            mcp_path: dto.mcp_path.clone(),
+            oauth: dto.oauth_spec.as_ref().map(|oauth| OAuthSpec {
+                auth_url: oauth.auth_url.clone(),
+                token_url: oauth.token_url.clone(),
+                client_id: oauth.client_id.clone(),
+                scopes: oauth.scopes.clone(),
+                extra_auth_params: oauth.extra_auth_params.clone(),
+            }),
+        }),
+        "pg" => Ok(ConnectionConfig::Pg {
+            host: need("host", &dto.host)?,
+            port: need_port()?,
+            dbname: need("dbname", &dto.dbname)?,
+            user: need("user", &dto.user)?,
+            sslmode: parse_sslmode(dto.sslmode.as_deref())?,
+            trusted_ca_bundle_path: dto.trusted_ca_bundle_path.clone(),
+        }),
+        "ws" => Ok(ConnectionConfig::Ws {
+            url: need("url", &dto.url)?,
+            template: dto.template.clone(),
+        }),
+        "ssh" => Ok(ConnectionConfig::Ssh {
+            destination: dto.destination.clone(),
+            host: need("host", &dto.host)?,
+            port: need_port()?,
+            user: need("user", &dto.user)?,
+            host_key_fingerprint: dto.host_key_fingerprint.clone().unwrap_or_default(),
+        }),
+        other => Err(format!("unknown connection kind {other:?}")),
+    }
+}
+
+/// The CLI edits capability fields; a broker-managed OAuth grant is not
+/// reconstructible client-side, so those connections are app-managed.
+fn refuse_oauth_managed(dto: &ConnectionDto) {
+    if dto.oauth || dto.oauth_spec.is_some() {
+        die(format!(
+            "{} is an OAuth-managed connection; edit it in the Multitool app",
+            dto.name
+        ));
     }
 }
 
@@ -1141,93 +1373,88 @@ fn merged_config(
 }
 
 fn cmd_conn_update(args: ConnUpdate) {
-    let offline = open_broker(args.root.clone());
-    let existing = conn_named(&offline.broker, &args.name);
-    let config = match merged_config(&existing.config, &args) {
+    let managed = management_backend(args.root.clone(), args.broker.clone());
+    let dto = conn_dto(&managed, &args.name);
+    refuse_oauth_managed(&dto);
+    let existing = match config_from_dto(&dto) {
+        Ok(config) => config,
+        Err(e) => die(e),
+    };
+    let config = match merged_config(&existing, &args) {
         Ok(config) => config,
         Err(e) => die(e),
     };
     // api derives its secrets from the template; pg/ws/ssh rebind when
     // --secret is given and keep the current binding otherwise.
-    let secrets = match (&args.secret, existing.kind()) {
-        (_, aka_core::types::ConnectionKind::Api) => Vec::new(),
-        (Some(name), _) => match offline.broker.store.secret_by_name(name) {
-            Some(meta) => vec![meta.id],
-            None => die(format!(
-                "no secret named {name:?}; add it first with `aka secret add {name}`"
-            )),
+    let secrets = match (&args.secret, dto.kind.as_str()) {
+        (_, "api") => Vec::new(),
+        (Some(name), _) => vec![dto_id(&secret_dto(&managed, name).id)],
+        (None, _) => secret_ids_by_names(&managed, &dto.secret_names),
+    };
+    managed.run(managed.backend.update_connection(
+        dto_id(&dto.id),
+        ConnectionSpec {
+            name: dto.name.clone(),
+            config,
+            secrets,
         },
-        (None, _) => existing.secrets.clone(),
-    };
-    let old_target = existing.target();
-    let spec = ConnectionSpec {
-        name: existing.name.clone(),
-        config,
-        secrets,
-    };
-    match offline.broker.ui_update_connection(&existing.id, spec) {
-        Ok(conn) => {
-            eprintln!(
-                "updated connection {} ({} · {})",
-                conn.name,
-                conn.kind().as_str(),
-                conn.target()
-            );
-            if conn.target() != old_target {
-                eprintln!("  target changed: its direct endpoints are revoked");
-            }
-        }
-        Err(e) => die(e),
+    ));
+    let updated = conn_dto(&managed, &dto.name);
+    eprintln!(
+        "updated connection {} ({} · {})",
+        updated.name, updated.kind, updated.target
+    );
+    if updated.target != dto.target {
+        eprintln!("  target changed: its direct endpoints are revoked");
     }
 }
 
-fn cmd_conn_rename(name: String, new_name: String, root: Option<PathBuf>) {
-    let offline = open_broker(root);
-    let existing = conn_named(&offline.broker, &name);
-    let spec = ConnectionSpec {
-        name: new_name,
-        config: existing.config.clone(),
-        secrets: existing.secrets.clone(),
+fn cmd_conn_rename(name: String, new_name: String, root: Option<PathBuf>, url: Option<String>) {
+    let managed = management_backend(root, url);
+    let dto = conn_dto(&managed, &name);
+    let config = match config_from_dto(&dto) {
+        Ok(config) => config,
+        Err(e) => die(e),
     };
-    match offline.broker.ui_update_connection(&existing.id, spec) {
-        Ok(conn) => eprintln!("renamed connection {name} → {}", conn.name),
-        Err(e) => die(e),
-    }
+    let secrets = if dto.kind == "api" {
+        Vec::new()
+    } else {
+        secret_ids_by_names(&managed, &dto.secret_names)
+    };
+    managed.run(managed.backend.update_connection(
+        dto_id(&dto.id),
+        ConnectionSpec {
+            name: new_name.clone(),
+            config,
+            secrets,
+        },
+    ));
+    eprintln!("renamed connection {name} → {new_name}");
 }
 
-fn cmd_conn_rm(name: String, root: Option<PathBuf>) {
-    let offline = open_broker(root);
-    let existing = conn_named(&offline.broker, &name);
-    match offline.broker.ui_delete_connection(&existing.id) {
-        Ok(conn) => eprintln!(
-            "deleted connection {} (its secrets stay in the vault)",
-            conn.name
-        ),
-        Err(e) => die(e),
-    }
+fn cmd_conn_rm(name: String, root: Option<PathBuf>, url: Option<String>) {
+    let managed = management_backend(root, url);
+    let dto = conn_dto(&managed, &name);
+    managed.run(managed.backend.delete_connection(dto_id(&dto.id)));
+    eprintln!("deleted connection {name} (its secrets stay in the vault)");
 }
 
-fn cmd_conn_access(name: String, root: Option<PathBuf>, enabled: bool) {
-    let offline = open_broker(root);
-    let existing = conn_named(&offline.broker, &name);
+fn cmd_conn_access(name: String, root: Option<PathBuf>, url: Option<String>, enabled: bool) {
+    let managed = management_backend(root, url);
+    let dto = conn_dto(&managed, &name);
     let state = if enabled { "enabled" } else { "disabled" };
-    match offline.broker.ui_set_tool_access(&existing.id, enabled) {
-        Ok(true) => eprintln!("agent access {state} for {}", existing.name),
-        Ok(false) => eprintln!("agent access was already {state} for {}", existing.name),
-        Err(e) => die(e),
+    let changed = managed.run(managed.backend.set_tool_access(dto_id(&dto.id), enabled));
+    if changed {
+        eprintln!("agent access {state} for {name}");
+    } else {
+        eprintln!("agent access was already {state} for {name}");
     }
 }
 
-fn cmd_conn_test(name: String, root: Option<PathBuf>) {
-    let offline = open_broker(root);
-    let existing = conn_named(&offline.broker, &name);
-    let report = match offline
-        .runtime
-        .block_on(offline.broker.ui_test_connection(&existing.id))
-    {
-        Ok(report) => report,
-        Err(e) => die(e),
-    };
+fn cmd_conn_test(name: String, root: Option<PathBuf>, url: Option<String>) {
+    let managed = management_backend(root, url);
+    let dto = conn_dto(&managed, &name);
+    let report = managed.run(managed.backend.test_connection(dto_id(&dto.id)));
     if report.ok {
         eprintln!("ok: {}", report.detail);
     } else {
@@ -1240,19 +1467,25 @@ fn cmd_conn_test(name: String, root: Option<PathBuf>) {
 }
 
 /// Print an already-issued direct endpoint's address and secret. Read-only:
-/// issuance/rotation binds a live listener and only the running broker (or the
-/// app) can do that; this reconstructs the pasteable address from the sealed,
-/// persisted record. `--url`/`--secret` print a single field for `$(...)` use.
-fn cmd_conn_endpoint(name: String, url: bool, secret: bool, root: Option<PathBuf>) {
-    let offline = open_broker(root);
-    let existing = conn_named(&offline.broker, &name);
-    let info = match offline.broker.ui_get_endpoint(&existing.id) {
-        Ok(Some(info)) => info,
-        Ok(None) => die(format!(
-            "no direct endpoint issued for {} — issue one from the Multitool app first",
-            existing.name
+/// issuance/rotation binds a live listener, so it belongs to the app; this
+/// reads the persisted record through the same managed backend as the other
+/// `conn` subcommands (live over the socket with a stored token, hosted with
+/// `--broker`, or offline with the broker stopped). `--url`/`--secret` print a
+/// single field for `$(...)` use.
+fn cmd_conn_endpoint(
+    name: String,
+    url: bool,
+    secret: bool,
+    root: Option<PathBuf>,
+    broker: Option<String>,
+) {
+    let managed = management_backend(root, broker);
+    let dto = conn_dto(&managed, &name);
+    let info = match managed.run(managed.backend.get_endpoint(dto_id(&dto.id))) {
+        Some(info) => info,
+        None => die(format!(
+            "no direct endpoint issued for {name} — issue one from the Multitool app first"
         )),
-        Err(e) => die(e),
     };
     // Selectors print exactly one field with no decoration, so a `$(...)`
     // capture carries only the value.
@@ -1327,6 +1560,69 @@ impl BrokerEvents for CliEvents {
     fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
         Some(ConfirmationMethod::ManagementToken)
     }
+}
+
+/// Store a management token for later online edits: keyed by the hosted
+/// broker's manage URL, or by the local socket path. Verified against the
+/// broker when it is reachable — a rejected token is never stored.
+fn cmd_manage_login(url: Option<String>, token_env: Option<String>, root: Option<PathBuf>) {
+    if std::io::IsTerminal::is_terminal(&std::io::stdin()) && token_env.is_none() {
+        eprintln!("  paste the management token (akamgr_…); end with Ctrl-D");
+    }
+    let token = read_secret_value(&token_env);
+    let paths = store_paths(root.as_deref());
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let (key, backend) = match url {
+        Some(url) => {
+            let url = match RemoteConfig::normalize_url(&url) {
+                Ok(url) => url,
+                Err(e) => die(e),
+            };
+            let config = match RemoteConfig::new(&url, &token) {
+                Ok(config) => config,
+                Err(e) => die(e),
+            };
+            (url, RemoteBackend::new(config))
+        }
+        None => {
+            let socket = paths.socket_file();
+            let key = socket.display().to_string();
+            (key, RemoteBackend::over_unix_socket(socket, &token))
+        }
+    };
+    match runtime.block_on(backend.whoami()) {
+        Ok(_) => eprintln!("token verified against the running broker"),
+        Err(ManageError::InvalidManageToken) => die(
+            "the broker rejected this management token — issue a fresh one \
+             with `aka manage token`",
+        ),
+        Err(ManageError::Unreachable { .. }) => {
+            eprintln!("the broker is not reachable right now; storing the token unverified");
+        }
+        Err(e) => die(e),
+    }
+    if let Err(e) = manage_token_store(&paths).save(&key, &token) {
+        die(format!("could not store the token: {e}"));
+    }
+    eprintln!("management token stored for {key}");
+}
+
+fn cmd_manage_logout(url: Option<String>, root: Option<PathBuf>) {
+    let paths = store_paths(root.as_deref());
+    let key = match url {
+        Some(url) => match RemoteConfig::normalize_url(&url) {
+            Ok(url) => url,
+            Err(e) => die(e),
+        },
+        None => paths.socket_file().display().to_string(),
+    };
+    if let Err(e) = manage_token_store(&paths).delete(&key) {
+        die(format!("could not forget the management token: {e}"));
+    }
+    eprintln!("management token forgotten for {key}");
 }
 
 /// Issue, rotate, or revoke the management token. Offline like `secret add`:
@@ -1458,30 +1754,73 @@ fn cmd_ssh(connection: String, root: Option<PathBuf>, client: Option<String>) {
     println!("{auth_sock}");
 }
 
-/// Print the shared agent key from its plaintext home (the same file
-/// agents read), rotating it first when asked. Printing is a plain file
-/// read and works alongside a running broker; rotation is an offline edit
-/// like the rest.
-fn cmd_key(rotate: bool, root: Option<PathBuf>) {
-    if rotate {
-        let offline = open_broker(root.clone());
-        if let Err(e) = offline.broker.ui_rotate_key() {
-            die(e);
+/// Print the shared agent key, rotating it first when asked. The plain
+/// print without `--url` is a file read of the key's plaintext home (the
+/// same file agents read), so it works alongside a running broker with no
+/// token; rotation and remote reads go through the management backend.
+fn cmd_key(rotate: bool, root: Option<PathBuf>, url: Option<String>) {
+    if url.is_none() && !rotate {
+        let paths = store_paths(root.as_deref());
+        let token_file = paths.token_file();
+        match std::fs::read_to_string(&token_file) {
+            Ok(token) if !token.trim().is_empty() => println!("{}", token.trim()),
+            _ => die(format!(
+                "no shared key at {} — the broker mints it when it first starts",
+                token_file.display()
+            )),
         }
+        return;
+    }
+    let managed = management_backend(root, url);
+    if rotate {
+        managed.run(managed.backend.rotate_key());
         eprintln!("key rotated; agents that read the token file reconnect on their own");
     }
-    let paths = store_paths(root.as_deref());
-    let token_file = paths.token_file();
-    match std::fs::read_to_string(&token_file) {
-        Ok(token) if !token.trim().is_empty() => println!("{}", token.trim()),
-        _ => die(format!(
-            "no shared key at {} — the broker mints it when it first starts",
-            token_file.display()
-        )),
+    let key = managed.run(managed.backend.agent_key());
+    println!("{key}");
+}
+
+/// The tools listing shared by local and remote status output.
+fn print_tools(connections: &[ConnectionDto]) {
+    if connections.is_empty() {
+        println!("  tools: none configured");
+        return;
+    }
+    println!("  tools:");
+    for dto in connections {
+        println!(
+            "    {}  {}  {}  {}",
+            dto.name,
+            dto.kind,
+            dto.target,
+            if dto.agent_access.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
     }
 }
 
-fn cmd_status(root: Option<PathBuf>) {
+/// `status --url`: the broker as its manage API reports it.
+fn cmd_status_remote(root: Option<PathBuf>, url: String) {
+    let managed = management_backend(root, Some(url.clone()));
+    let identity = managed.run(managed.backend.identity());
+    let connections = managed.run(managed.backend.list_connections());
+    println!("broker reachable at {url} (manage API)");
+    println!("  client id: {}", identity.client_id);
+    println!(
+        "  agent key file (on the broker host): {}",
+        identity.token_path
+    );
+    print_tools(&connections);
+}
+
+fn cmd_status(root: Option<PathBuf>, url: Option<String>) {
+    if let Some(url) = url {
+        cmd_status_remote(root, url);
+        return;
+    }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1603,7 +1942,37 @@ fn format_audit_line(entry: &serde_json::Value) -> String {
     line
 }
 
-fn cmd_activity(limit: usize, json: bool, root: Option<PathBuf>) {
+/// `activity --url`: entries as the manage API renders them.
+fn cmd_activity_remote(limit: usize, json: bool, root: Option<PathBuf>, url: String) {
+    let managed = management_backend(root, Some(url));
+    let mut entries = managed.run(managed.backend.activity(limit));
+    // The manage API returns newest first; match the local newest-last view.
+    entries.reverse();
+    for entry in entries {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string(&entry).expect("serializable entry")
+            );
+            continue;
+        }
+        let ts = entry.at.get(..19).unwrap_or(&entry.at);
+        let mut line = format!("{ts}  {}", entry.text);
+        if let Some(detail) = &entry.detail {
+            line.push_str(&format!(" — {detail}"));
+        }
+        if let Some(agent) = &entry.agent {
+            line.push_str(&format!("  [{agent}]"));
+        }
+        println!("{line}");
+    }
+}
+
+fn cmd_activity(limit: usize, json: bool, root: Option<PathBuf>, url: Option<String>) {
+    if let Some(url) = url {
+        cmd_activity_remote(limit, json, root, url);
+        return;
+    }
     let paths = store_paths(root.as_deref());
     let file = paths.audit_file();
     let content = match std::fs::read_to_string(&file) {
@@ -1866,6 +2235,7 @@ mod tests {
             ca_bundle: None,
             mcp_path: None,
             root: None,
+            broker: None,
         }
     }
 
@@ -1976,7 +2346,61 @@ mod tests {
             sslmode: None,
             ca_bundle: None,
             root: None,
+            broker: None,
         }
+    }
+
+    #[test]
+    fn dto_reconstruction_preserves_byo_oauth_coordinates_for_renames() {
+        use aka_api::{AccessDto, OAuthDto};
+
+        let dto = ConnectionDto {
+            id: Uuid::new_v4().to_string(),
+            name: "calendar".into(),
+            kind: "api".into(),
+            target: "https://api.example.com".into(),
+            secret_names: vec!["CALENDAR_OAUTH".into()],
+            oauth: false,
+            agent_access: AccessDto {
+                enabled: true,
+                allowed_tools: None,
+                endpoint: None,
+            },
+            host: Some("api.example.com".into()),
+            scheme: Some("https".into()),
+            port: None,
+            template: Some("Authorization: Bearer {{CALENDAR_OAUTH}}".into()),
+            dbname: None,
+            user: None,
+            host_key_fingerprint: None,
+            destination: None,
+            sslmode: None,
+            trusted_ca_bundle_path: None,
+            url: None,
+            mcp_path: None,
+            account: Some("operator@example.com".into()),
+            oauth_spec: Some(OAuthDto {
+                auth_url: "https://accounts.example.com/authorize".into(),
+                token_url: "https://accounts.example.com/token".into(),
+                client_id: "client-id".into(),
+                scopes: vec!["calendar.read".into()],
+                extra_auth_params: vec![("access_type".into(), "offline".into())],
+            }),
+            last_status: None,
+            last_detail: None,
+            last_checked_at: None,
+        };
+
+        let ConnectionConfig::Api { oauth, .. } = config_from_dto(&dto).unwrap() else {
+            panic!("expected API config");
+        };
+        let oauth = oauth.expect("BYO OAuth coordinates survive DTO reconstruction");
+        assert_eq!(oauth.client_id, "client-id");
+        assert_eq!(oauth.scopes, vec!["calendar.read"]);
+        assert_eq!(
+            oauth.extra_auth_params,
+            vec![("access_type".into(), "offline".into())]
+        );
     }
 
     #[test]

@@ -117,11 +117,16 @@ async fn open_stream(
         .read_timeout(IDLE_TIMEOUT)
         .build()
         .map_err(|error| error.to_string())?;
+    // The SSE feed is HTTP-only: a Unix-socket backend (the CLI's local
+    // online mode) has no event stream, and nothing subscribes one.
+    let config = backend
+        .config()
+        .ok_or_else(|| "the manage event stream requires an HTTP broker URL".to_string())?;
     let mut request = client
-        .get(format!("{}/v1/manage/events", backend.config().base_url()))
+        .get(format!("{}/v1/manage/events", config.base_url()))
         .header(
             reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", backend.config().token()),
+            format!("Bearer {}", config.token()),
         );
     if let Some(id) = last_event_id {
         request = request.header("last-event-id", id);

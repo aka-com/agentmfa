@@ -376,7 +376,9 @@ impl AuditLog {
             return Vec::new();
         };
 
-        let mut entries = Vec::with_capacity(limit);
+        // Callers may use usize::MAX for an explicitly unbounded management
+        // read. Grow with the data instead of trying to reserve that sentinel.
+        let mut entries = Vec::with_capacity(limit.min(1_024));
         let mut chunk = vec![0u8; TAIL_CHUNK_BYTES];
         let mut reversed_line = Vec::new();
         let mut oversized = false;
@@ -554,6 +556,11 @@ mod tests {
         assert_eq!(recent.first().unwrap().text, "request 999");
         assert_eq!(recent.last().unwrap().text, "request 975");
         assert!(log.recent(0).is_empty());
+        assert_eq!(
+            log.recent(usize::MAX).len(),
+            1_000,
+            "an unbounded management read grows with the log"
+        );
     }
 
     #[test]
