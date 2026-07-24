@@ -37,9 +37,20 @@ mfa serve --listen 127.0.0.1:4780 --public-url https://broker.example.dev
 Notes:
 
 - **Keychain needs a logged-in session.** The broker stores secret values
-  in the macOS login Keychain, so run it inside a logged-in user session —
+  in the macOS Keychain, so run it inside a logged-in user session —
   a launchd *agent* (`~/Library/LaunchAgents`), never a launch *daemon*.
-  A headless Mac mini works with auto-login enabled.
+  A headless Mac mini works with auto-login enabled. Items are stored
+  `AfterFirstUnlock`, so the broker keeps reading once the Mac has been
+  unlocked once after boot; it cannot read before that.
+- **`mfa serve` uses the login Keychain, and it prompts.** The
+  data-protection keychain that makes reads silent is gated on a
+  `keychain-access-groups` entitlement, which the unsigned `mfa` binary does
+  not carry. On a headless box that means an approval dialog per secret, per
+  build of `mfa` — click *Always Allow* once per item, or sign your own `mfa`
+  build. `mfa status` prints which keychain is in use. If this host also runs
+  the signed desktop app against the same store, see the note in
+  `crates/aka-core/src/keychain/mod.rs`: the app moves values somewhere `mfa`
+  cannot follow, and `mfa` will say so rather than show an empty vault.
 - **MCP host**: `mfa serve` starts the Node sidecar when it finds
   `dist/sidecar/main.mjs` (a checkout after `npm run sidecar:build`) or
   `AKA_SIDECAR_SCRIPT` points at one; `node` must be on PATH (or set
@@ -74,7 +85,7 @@ Open the broker switcher at the right of the title bar → **Remote
 broker…** → enter the URL and the `akamgr_…` token. The app manages the
 hosted broker exactly like a local one; the switcher's dot shows the live
 link. Switch back to **This Mac** anytime — the token stays saved (in
-your login Keychain) per broker URL.
+your Keychain) per broker URL.
 
 Browser OAuth sign-ins (BYO-app and MCP) are relayed — the consent page
 opens in *your* browser, the token stays on the broker. Direct endpoints

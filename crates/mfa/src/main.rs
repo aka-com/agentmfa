@@ -1833,6 +1833,23 @@ fn cmd_status_remote(root: Option<PathBuf>, url: String) {
     print_tools(&connections);
 }
 
+/// Which macOS keychain this store's secret values are in — the difference
+/// between reads that are silent and reads that put an OS approval dialog in
+/// front of whoever is at the machine. Nothing to say before the first write,
+/// or on a platform with one keychain.
+fn print_keychain_line(paths: &Paths) {
+    #[cfg(target_os = "macos")]
+    if let Some(keychain) = aka_core::keychain::read_record(&paths.keychain_file()) {
+        let note = match keychain {
+            aka_core::keychain::Keychain::DataProtection => "no prompts",
+            aka_core::keychain::Keychain::Login => "prompts per secret; build is unsigned",
+        };
+        println!("  keychain: {keychain} ({note})");
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = paths;
+}
+
 fn cmd_status(root: Option<PathBuf>, url: Option<String>) {
     if let Some(url) = url {
         cmd_status_remote(root, url);
@@ -1893,6 +1910,7 @@ fn cmd_status(root: Option<PathBuf>, url: Option<String>) {
             "not minted yet".to_string()
         }
     );
+    print_keychain_line(&paths);
     // The tools, as an agent sees them (this appears in the activity log
     // as a listing by mfa-status).
     let listing = runtime.block_on(async {

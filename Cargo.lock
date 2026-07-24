@@ -39,7 +39,6 @@ dependencies = [
  "axum",
  "bytes",
  "futures",
- "keyring",
  "reqwest",
  "serde",
  "serde_json",
@@ -63,6 +62,8 @@ dependencies = [
  "base64",
  "chacha20poly1305",
  "chrono",
+ "core-foundation",
+ "core-foundation-sys",
  "dirs",
  "futures",
  "getrandom 0.3.4",
@@ -71,7 +72,6 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
- "keyring",
  "libc",
  "md-5 0.10.6",
  "percent-encoding",
@@ -80,6 +80,7 @@ dependencies = [
  "rsa",
  "rustls",
  "rustls-pki-types",
+ "security-framework-sys",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -484,16 +485,6 @@ name = "const-oid"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
-
-[[package]]
-name = "core-foundation"
-version = "0.9.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91e195e091a93c46f7102ec7818a2aa394e1e1771c3ab4825963fa03e45afb8f"
-dependencies = [
- "core-foundation-sys",
- "libc",
-]
 
 [[package]]
 name = "core-foundation"
@@ -1295,18 +1286,6 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "keyring"
-version = "3.6.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eebcc3aff044e5944a8fbaf69eb277d11986064cba30c468730e8b9909fb551c"
-dependencies = [
- "log",
- "security-framework 2.11.1",
- "security-framework 3.7.0",
- "zeroize",
 ]
 
 [[package]]
@@ -2130,32 +2109,6 @@ dependencies = [
  "pkcs8",
  "subtle",
  "zeroize",
-]
-
-[[package]]
-name = "security-framework"
-version = "2.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "897b2245f0b511c87893af39b033e5ca9cce68824c4d7e7630b5a1d339658d02"
-dependencies = [
- "bitflags",
- "core-foundation 0.9.4",
- "core-foundation-sys",
- "libc",
- "security-framework-sys",
-]
-
-[[package]]
-name = "security-framework"
-version = "3.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7f4bc775c73d9a02cde8bf7b2ec4c9d12743edf609006c7facc23998404cd1d"
-dependencies = [
- "bitflags",
- "core-foundation 0.10.1",
- "core-foundation-sys",
- "libc",
- "security-framework-sys",
 ]
 
 [[package]]

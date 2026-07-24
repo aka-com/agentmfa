@@ -73,7 +73,7 @@ mfa conn list --broker https://broker.example.dev   # hosted brokers too
 ```
 
 `mfa manage login --broker <url>` stores a token for a hosted broker
-(macOS: login Keychain; elsewhere a 0600 file), and `AKA_MANAGE_TOKEN`
+(macOS: the Keychain; elsewhere a 0600 file), and `AKA_MANAGE_TOKEN`
 overrides for CI. With no broker running, the same commands fall back
 to editing the local files offline, exactly as before.
 
@@ -116,6 +116,14 @@ demos, tests, and CI.
   require native reauthentication (Touch ID). ABP/0
   agents authenticate with the machine's shared broker key; the key is not
   bound to a process or code-signing identity.
+
+  The signed AgentMFA app reads its Keychain items without any OS approval
+  dialog, because it is entitled to the data-protection keychain. This `mfa`
+  binary is published unsigned, so when it opens the store *offline* (with no
+  broker running) it uses the login keychain and macOS asks you to approve
+  each item. Working against a running broker — the normal path, and every
+  `--broker` command — goes over the socket and never touches the Keychain.
+  `mfa status` reports which keychain the store is on.
 - **Linux** support is developer-grade: secrets are kept in a `0600` JSON
   file vault that is **not encrypted at rest**. `mfa serve` prints a warning
   to this effect. It is intended for development, integration testing, and

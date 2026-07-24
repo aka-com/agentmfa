@@ -47,6 +47,55 @@ should be written as TSX components rather than adding new HTML-string
 templates; a regression test (`ui/tests/react-boundary.test.ts`) guards the
 boundary.
 
+## The macOS Keychain
+
+Secret values are one Keychain item each. macOS has two keychains behind the
+same API and the choice decides whether reads are silent:
+
+- The **data-protection keychain** grants access by code identity — a process
+  may open a keychain access group only if its signature carries the matching
+  `keychain-access-groups` entitlement. No per-item ACL, so no
+  "…wants to use your confidential information…" dialog, ever, and no
+  *Always Allow*.
+- The **login keychain** grants access by per-item ACL, which is what puts
+  that dialog up, once per item per signature.
+
+`crates/aka-core/src/keychain/` probes at startup — a lookup of an item that
+cannot exist, where `errSecItemNotFound` means "allowed" and
+`errSecMissingEntitlement` means "not" — and uses the data-protection keychain
+whenever the running binary can. Everything except the Security.framework
+binding in `keychain/darwin.rs` is platform-independent and tested on Linux
+through the `KeychainApi` seam.
+
+What that means while developing:
+
+- `npm start` / `tauri dev` and `cargo run` produce builds with no
+  entitlement, so they use the login keychain and *do* prompt. That is the
+  expected dev experience, not a bug.
+- `npm run build` signs with the entitlement. `scripts/build.sh` generates
+  `src-tauri/entitlements.signed.plist` from `src-tauri/entitlements.plist`
+  plus `keychain-access-groups = <TEAMID>.com.aka.desktop`, reading the team
+  ID from `APPLE_TEAM_ID` or off the signing identity's name. It refuses to
+  build if it cannot resolve one; `AGENTMFA_NO_KEYCHAIN_ENTITLEMENT=1` opts
+  out and accepts the prompts.
+- Items written by earlier builds are in the login keychain. They migrate on
+  first read: copied across, original deleted. Each one may prompt once more
+  on the way, and never again.
+- `mfa status` prints which keychain the store is on, and
+  `<data-dir>/keychain.json` records it. A binary that cannot reach the
+  data-protection keychain but finds a store recorded on it fails with an
+  explanation rather than presenting an empty vault.
+- `AKA_KEYCHAIN=login` forces the old behaviour — the escape hatch for
+  running an unsigned `aka` against a store the signed app owns.
+
+Human presence is *not* enforced by the Keychain. It is enforced by the
+shell's own LocalAuthentication gate (`src-tauri/src/auth.rs`) and the
+presence window in `Store` — one prompt, then a sliding window
+(`presence_window_secs`, 15 minutes by default, 12-hour hard ceiling).
+Attaching `SecAccessControl(userPresence)` to the items instead would move
+that decision into the OS, but Touch ID reuse there caps at five minutes, so
+it would prompt more often than the app does today rather than less.
+
 ## Publishing
 
 Prerequisites: one-time macOS cross-linker setup: `brew install zig`

@@ -23,9 +23,6 @@ reqwest = { workspace = true }
 futures = { workspace = true }
 sha2 = { workspace = true }
 
-[target.'cfg(target_os = "macos")'.dependencies]
-keyring = { version = "3", features = ["apple-native"] }
-
 [dev-dependencies]
 tempfile = { workspace = true }
 axum = { workspace = true }

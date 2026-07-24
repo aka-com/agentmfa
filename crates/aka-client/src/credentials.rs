@@ -2,15 +2,24 @@
 //!
 //! The token authorizes full management of a (possibly remote) broker, so
 //! it gets the same treatment the broker gives its own secrets: the macOS
-//! login Keychain where available, and a 0600 file fallback elsewhere
-//! (dev/CI parity with the core's `FileVault`, with the same warning).
-//! One token is stored per broker URL, so switching brokers never silently
-//! reuses the wrong credential.
+//! Keychain where available, and a 0600 file fallback elsewhere (dev/CI
+//! parity with the core's `FileVault`, with the same warning). One token is
+//! stored per broker URL, so switching brokers never silently reuses the
+//! wrong credential.
+//!
+//! On macOS this goes through the same data-protection keychain the vault
+//! uses (see `aka_core::keychain`), so a signed build reads its stored token
+//! without an ACL dialog. Unlike a secret value a token is re-obtainable, so
+//! a build that cannot reach that keychain quietly falls back to the login
+//! keychain and, finding nothing, asks for `aka manage login` again.
 
 use std::path::PathBuf;
 
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
+
+#[cfg(target_os = "macos")]
+use aka_core::keychain::{darwin::SecurityFramework, Keychain, KeychainApi as _, KeychainError};
 
 /// Keychain service for stored management tokens.
 #[cfg(target_os = "macos")]
@@ -37,31 +46,54 @@ impl TokenStore {
         Self { dir }
     }
 
+    /// Which keychain this process can use, probed once. The answer is a
+    /// property of the running binary's code signature, so it cannot change
+    /// underneath us.
     #[cfg(target_os = "macos")]
-    fn entry(url: &str) -> Result<keyring::Entry, String> {
-        keyring::Entry::new(KEYCHAIN_SERVICE, &key_for(url)).map_err(|error| error.to_string())
+    fn keychain() -> Keychain {
+        static KEYCHAIN: std::sync::OnceLock<Keychain> = std::sync::OnceLock::new();
+        *KEYCHAIN.get_or_init(|| aka_core::keychain::best_effort(&SecurityFramework))
     }
 
     #[cfg(target_os = "macos")]
     pub fn save(&self, url: &str, token: &str) -> Result<(), String> {
-        Self::entry(url)?
-            .set_password(token)
+        SecurityFramework
+            .write(
+                Self::keychain(),
+                KEYCHAIN_SERVICE,
+                &key_for(url),
+                &format!("AgentMFA management token ({url})"),
+                token.as_bytes(),
+            )
             .map_err(|error| error.to_string())
     }
 
     #[cfg(target_os = "macos")]
     pub fn load(&self, url: &str) -> Option<Zeroizing<String>> {
-        Self::entry(url)
-            .ok()?
-            .get_password()
+        let bytes = aka_core::keychain::read_migrating(
+            &SecurityFramework,
+            Self::keychain(),
+            KEYCHAIN_SERVICE,
+            &key_for(url),
+        )
+        .ok()?;
+        std::str::from_utf8(&bytes)
             .ok()
-            .map(Zeroizing::new)
+            .map(|token| Zeroizing::new(token.trim().to_string()))
     }
 
     #[cfg(target_os = "macos")]
     pub fn delete(&self, url: &str) -> Result<(), String> {
-        match Self::entry(url)?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        let account = key_for(url);
+        let keychain = Self::keychain();
+        let removed = SecurityFramework.remove(keychain, KEYCHAIN_SERVICE, &account);
+        // A copy the migration never got to must go too, or a logged-out
+        // broker would log itself back in on the next read.
+        if keychain == Keychain::DataProtection {
+            let _ = SecurityFramework.remove(Keychain::Login, KEYCHAIN_SERVICE, &account);
+        }
+        match removed {
+            Ok(()) | Err(KeychainError::NotFound) => Ok(()),
             Err(error) => Err(error.to_string()),
         }
     }

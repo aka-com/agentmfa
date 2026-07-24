@@ -6,7 +6,9 @@
 //! stores values and nothing else.
 //!
 //! Backends:
-//! - `MacKeychainVault` (macOS): the real thing, via the `keyring` crate.
+//! - `MacKeychainVault` (macOS): the real thing, over Security.framework
+//!   directly — see [`crate::keychain`] for which of the two macOS keychains
+//!   it lands in and why.
 //! - `EncryptedFileVault`: the production non-macOS backend (hosted Linux),
 //!   a `0600` JSON file whose values are XChaCha20-Poly1305 sealed under a
 //!   master key the host provides (`AKA_VAULT_KEY`/`AKA_VAULT_KEY_FILE`).
@@ -60,99 +62,41 @@ pub trait SecretVault: Send + Sync {
 
 const MAC_KEYCHAIN_SERVICE: &str = "com.aka.desktop";
 
-/// The macOS Keychain backend (service `com.aka.desktop`, account = the
-/// secret's UUID), via the `keyring` crate. Dev roots use a root-scoped service
-/// so `mfa serve --root ...` cannot create or rotate production vault
-/// state.
+/// The macOS Keychain backend: one generic-password item per secret (service
+/// `com.aka.desktop`, account = the secret's UUID), over Security.framework
+/// directly. Dev roots use a root-scoped service so `mfa serve --root ...`
+/// cannot create or rotate production vault state.
 ///
-/// The `keyring` crate's apple-native backend targets the file-based login
-/// keychain and does not expose `kSecUseDataProtectionKeychain` or
-/// `SecAccessControl`. AKA still gates broker-side reads with the shell's
-/// native re-auth hook before calling `get`. Keychain-enforced per-item ACLs
-/// require direct Security.framework calls and the appropriate entitlement.
+/// Which of the two macOS keychains those items live in — and therefore
+/// whether reads put an OS dialog in front of the user — is decided at open
+/// time by [`crate::keychain`]. AKA additionally gates broker-side reads with
+/// the shell's own LocalAuthentication hook before calling `get`; that gate,
+/// not the Keychain, is what enforces human presence and its window.
 #[cfg(target_os = "macos")]
-pub struct MacKeychainVault {
-    service: String,
-    /// Attribute sidecar (name/created) kept next to the index so the
-    /// UI can enumerate without touching the Keychain.
-    attrs: Mutex<HashMap<Uuid, VaultAttrs>>,
-}
+pub type MacKeychainVault =
+    crate::keychain::KeychainVault<crate::keychain::darwin::SecurityFramework>;
 
 #[cfg(target_os = "macos")]
 impl MacKeychainVault {
     pub const SERVICE: &'static str = MAC_KEYCHAIN_SERVICE;
 
-    pub fn new() -> Self {
-        Self::with_service(Self::SERVICE)
+    /// The production vault for `paths`.
+    pub fn open_default(paths: &crate::paths::Paths) -> Result<Self, CoreError> {
+        Self::open(
+            crate::keychain::darwin::SecurityFramework,
+            Self::SERVICE,
+            &paths.keychain_file(),
+        )
     }
 
-    pub fn with_service(service: impl Into<String>) -> Self {
-        Self {
-            service: service.into(),
-            attrs: Mutex::new(HashMap::new()),
-        }
-    }
-
-    pub fn for_dev_root(root: &Path) -> Result<Self, CoreError> {
-        Ok(Self::with_service(dev_root_vault_service(root)?))
-    }
-
-    fn entry(&self, id: &Uuid) -> Result<keyring::Entry, CoreError> {
-        keyring::Entry::new(&self.service, &id.to_string())
-            .map_err(|e| CoreError::Vault(e.to_string()))
-    }
-}
-
-#[cfg(target_os = "macos")]
-impl Default for MacKeychainVault {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(target_os = "macos")]
-#[async_trait::async_trait]
-impl SecretVault for MacKeychainVault {
-    fn set(&self, id: &Uuid, attrs: &VaultAttrs, value: &SecretValue) -> Result<(), CoreError> {
-        self.entry(id)?
-            .set_password(value)
-            .map_err(|e| CoreError::Vault(e.to_string()))?;
-        self.attrs.lock().unwrap().insert(*id, attrs.clone());
-        Ok(())
-    }
-
-    async fn get(&self, id: &Uuid) -> Result<SecretValue, CoreError> {
-        // Security.framework calls block; keep them off the async workers.
-        let service = self.service.clone();
-        let account = id.to_string();
-        let looked_up = tokio::task::spawn_blocking(move || {
-            keyring::Entry::new(&service, &account)
-                .map_err(|e| CoreError::Vault(e.to_string()))?
-                .get_password()
-                .map_err(|e| match e {
-                    // Distinguish "absent" from real Keychain errors, so
-                    // callers (e.g. the integrity key's create-on-first-run)
-                    // can branch.
-                    keyring::Error::NoEntry => CoreError::SecretNotFound,
-                    other => CoreError::Vault(other.to_string()),
-                })
-        })
-        .await
-        .map_err(|e| CoreError::Vault(format!("keychain task: {e}")))??;
-        Ok(Zeroizing::new(looked_up))
-    }
-
-    fn delete(&self, id: &Uuid) -> Result<(), CoreError> {
-        self.entry(id)?
-            .delete_credential()
-            .map_err(|e| CoreError::Vault(e.to_string()))?;
-        self.attrs.lock().unwrap().remove(id);
-        Ok(())
-    }
-
-    fn set_attrs(&self, id: &Uuid, attrs: &VaultAttrs) -> Result<(), CoreError> {
-        self.attrs.lock().unwrap().insert(*id, attrs.clone());
-        Ok(())
+    /// The vault for an explicit CLI/dev root: same keychain, a service name
+    /// derived from the root so it can never touch production items.
+    pub fn open_for_dev_root(paths: &crate::paths::Paths, root: &Path) -> Result<Self, CoreError> {
+        Self::open(
+            crate::keychain::darwin::SecurityFramework,
+            dev_root_vault_service(root)?,
+            &paths.keychain_file(),
+        )
     }
 }
 
@@ -558,8 +502,7 @@ pub fn platform_vault(
 ) -> Result<std::sync::Arc<dyn SecretVault>, CoreError> {
     #[cfg(target_os = "macos")]
     {
-        let _ = paths;
-        Ok(std::sync::Arc::new(MacKeychainVault::new()))
+        Ok(std::sync::Arc::new(MacKeychainVault::open_default(paths)?))
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -598,7 +541,9 @@ pub fn platform_vault_for_root(
     paths.ensure()?;
     #[cfg(target_os = "macos")]
     {
-        Ok(std::sync::Arc::new(MacKeychainVault::for_dev_root(root)?))
+        Ok(std::sync::Arc::new(MacKeychainVault::open_for_dev_root(
+            paths, root,
+        )?))
     }
     #[cfg(not(target_os = "macos"))]
     {

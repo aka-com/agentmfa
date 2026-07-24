@@ -127,6 +127,13 @@ impl Paths {
     pub fn encrypted_vault_file(&self) -> PathBuf {
         self.data_dir.join("vault.enc.json")
     }
+    /// Which macOS keychain this store's secret values were last written to;
+    /// see `keychain`. Advisory, and deliberately outside the integrity seal:
+    /// the key that seals state is itself a vault item, so this has to be
+    /// readable before the vault opens.
+    pub fn keychain_file(&self) -> PathBuf {
+        self.data_dir.join("keychain.json")
+    }
     pub fn socket_file(&self) -> PathBuf {
         self.socket_dir.join("broker.sock")
     }

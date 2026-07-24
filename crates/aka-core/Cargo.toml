@@ -48,7 +48,13 @@ rsa = { workspace = true }
 signature = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-keyring = { version = "3", features = ["apple-native"] }
+# Security.framework directly, rather than the `keyring` crate: only the raw
+# SecItem API exposes `kSecUseDataProtectionKeychain`, which is what keeps
+# Keychain reads from putting an ACL dialog in front of the user. The
+# OSX_10_15 feature is what gates that constant in the -sys crate.
+core-foundation = "0.10"
+core-foundation-sys = "0.8"
+security-framework-sys = { version = "2.17", features = ["OSX_10_15"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

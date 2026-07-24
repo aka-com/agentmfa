@@ -4,8 +4,14 @@ set -euo pipefail
 # Build the signed macOS bundle (.app + .dmg), by reading the
 # APPLE_SIGNING_IDENTITY environment variable, or auto-detecting
 # the machine's single Developer ID Application identity as a fallback.
-# This allows "Always Allow" keychain selections to persist across builds.
 # Notarization is not included. Use scripts/release.sh to also notarize.
+#
+# The signature is also what decides whether the app can read its own secrets
+# without an OS dialog: the entitlements this signs with carry a
+# keychain-access-groups entry, and only a build carrying it can use the
+# macOS data-protection keychain (see crates/aka-core/src/keychain). That
+# entry needs the signing team's ID, so entitlements.signed.plist is generated
+# here from the checked-in entitlements.plist rather than committed.
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
 repo_root="$(cd "$script_dir/.." >/dev/null && pwd)"
@@ -32,6 +38,37 @@ if [[ "$(uname)" == "Darwin" ]]; then
     fi
     export APPLE_SIGNING_IDENTITY="$identities"
     echo "Signing as: $APPLE_SIGNING_IDENTITY"
+  fi
+
+  # The team ID prefixes the keychain access group. Signing identities are
+  # named "Developer ID Application: Name (TEAMID)", so it can be read off the
+  # identity when APPLE_TEAM_ID is not set outright.
+  team_id="${APPLE_TEAM_ID:-}"
+  if [[ -z "$team_id" ]]; then
+    team_id="$(printf '%s' "$APPLE_SIGNING_IDENTITY" | sed -n 's/.*(\([A-Z0-9]\{10\}\))[[:space:]]*$/\1/p')"
+  fi
+
+  bundle_id="$(node -p "require('$repo_root/src-tauri/tauri.conf.json').identifier")"
+  entitlements="$repo_root/src-tauri/entitlements.signed.plist"
+  cp "$repo_root/src-tauri/entitlements.plist" "$entitlements"
+
+  if [[ -n "$team_id" ]]; then
+    /usr/libexec/PlistBuddy \
+      -c "Add :keychain-access-groups array" \
+      -c "Add :keychain-access-groups:0 string ${team_id}.${bundle_id}" \
+      "$entitlements" >/dev/null
+    echo "Keychain access group: ${team_id}.${bundle_id}"
+  elif [[ -n "${AGENTMFA_NO_KEYCHAIN_ENTITLEMENT:-}" ]]; then
+    # Deliberate opt-out, for signing setups with no usable team ID. The app
+    # still runs; it falls back to the login keychain, which means an OS
+    # approval dialog per secret per build.
+    echo "WARNING: building without a keychain access group — this app will" >&2
+    echo "         prompt for Keychain access on every secret it reads." >&2
+  else
+    echo "Could not determine the signing team ID from APPLE_SIGNING_IDENTITY." >&2
+    echo "Set APPLE_TEAM_ID, or set AGENTMFA_NO_KEYCHAIN_ENTITLEMENT=1 to build" >&2
+    echo "without the entitlement and accept a Keychain prompt per secret." >&2
+    exit 1
   fi
 
   # Universal binary: one DMG runs on Apple silicon and Intel. The fat build

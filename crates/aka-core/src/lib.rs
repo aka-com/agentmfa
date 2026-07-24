@@ -23,6 +23,7 @@ pub mod executions;
 pub mod health;
 pub mod identity;
 pub mod integrity;
+pub mod keychain;
 pub mod manage;
 pub mod mcp;
 pub mod mcp_auth;
