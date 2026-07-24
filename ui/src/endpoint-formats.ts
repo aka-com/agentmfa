@@ -90,8 +90,9 @@ function sshParts(
 
 /**
  * An scp command over the issued signing socket, mirroring
- * sshInvocationCommand's destination logic (imported alias wins, resolved
- * non-default port is pinned) — scp spells the port flag -P.
+ * sshInvocationCommand's destination logic (imported alias wins, the
+ * import-time non-default port is pinned over whatever the alias resolves to
+ * today) — scp spells the port flag -P.
  */
 export function scpCommand(socket: string, c: ConnectionSummary): string {
   const importedDestination = c.destination?.trim();
@@ -179,10 +180,13 @@ export const ENDPOINT_FORMATS: Record<ConnectionType, EndpointFormat[]> = {
     {
       key: 'curl',
       label: 'curl',
-      title: 'Copy a curl command presenting the endpoint secret',
+      // Runnable as-is, and the trailing slash is the only thing marking
+      // where an upstream route goes — the proxy forwards the path through,
+      // so the bare root is a 404 against most APIs.
+      title: 'Copy a curl command presenting the endpoint secret to the API root',
       needsSecret: true,
       build: (_c, base, secret) =>
-        `curl -H "Authorization: Bearer ${secret || SECRET_PLACEHOLDER}" ${base}`,
+        `curl -H "Authorization: Bearer ${secret || SECRET_PLACEHOLDER}" ${base}/`,
     },
     {
       key: 'env',

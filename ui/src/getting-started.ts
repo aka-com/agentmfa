@@ -435,7 +435,16 @@ export function sshAuthSockCommand(socket: string): string {
   return `export ${sshAuthSockAssignment(socket)}`;
 }
 
-/** The configured SSH invocation, preserving imported aliases and ports. */
+/**
+ * The configured SSH invocation, preserving imported aliases and ports.
+ *
+ * An imported alias keeps its name so ~/.ssh/config still supplies ProxyJump
+ * and friends, but a non-default port is spelled out rather than left to the
+ * alias. The port is the one resolved at import: re-point the alias at a new
+ * port and this command keeps overriding it with the old one until the tool
+ * is re-imported. That is the lesser surprise — deferring to the alias sends
+ * the command to a port the tool was never configured for.
+ */
 export function sshInvocationCommand(
   connection: {
     destination?: string | null;

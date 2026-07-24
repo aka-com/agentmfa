@@ -152,11 +152,11 @@ test('api formats embed the fetched secret, or a placeholder without one', () =>
   assert.equal(curl?.needsSecret, true);
   assert.equal(
     curl?.build(c, base, 'end_secret'),
-    `curl -H "Authorization: Bearer end_secret" ${base}`,
+    `curl -H "Authorization: Bearer end_secret" ${base}/`,
   );
   assert.equal(
     curl?.build(c, base, null),
-    `curl -H "Authorization: Bearer <endpoint-secret>" ${base}`,
+    `curl -H "Authorization: Bearer <endpoint-secret>" ${base}/`,
   );
   assert.equal(
     endpointFormatByKey('api', 'env')?.build(c, base, 'end_secret'),

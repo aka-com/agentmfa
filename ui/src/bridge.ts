@@ -875,7 +875,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         shownSecret = ''; // ssh-agent has no presented secret
       } else {
         dsn = 'http://127.0.0.1:52000';
-        example = `curl -H "Authorization: Bearer ${secret}" ${dsn}`;
+        example = `curl -H "Authorization: Bearer ${secret}" ${dsn}/`;
       }
       // Postgres retains its credential in the DSN; SSH retains the stable
       // socket path so the setup command remains copyable after issue.
@@ -895,7 +895,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       const example = connection.type === 'pg' ? `DATABASE_URL="${dsn}"`
         : connection.type === 'ssh'
           ? `SSH_AUTH_SOCK="${dsn}" ${sshInvocationCommand({ ...connection, target: connTarget(connection) })}`
-        : `curl -H "Authorization: Bearer ${secret}" ${dsn}`;
+        : `curl -H "Authorization: Bearer ${secret}" ${dsn}/`;
       return { endpoint_id: endpoint.endpoint_id, type: connection.type, dsn, secret, example };
     }
     case 'revoke_endpoint': {

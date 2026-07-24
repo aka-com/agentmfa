@@ -900,9 +900,7 @@ impl Broker {
                 ConnectionKind::Ws => {
                     crate::capability::ws::test_upstream(&self.store, &connection).await
                 }
-                ConnectionKind::Ssh => {
-                    crate::capability::ssh::test_login(&self.store, &connection).await
-                }
+                ConnectionKind::Ssh => crate::capability::ssh::test_login(self, &connection).await,
             }
         };
         // Testing rides the same pre-authorization as the agent plane: any
@@ -1576,7 +1574,10 @@ impl Broker {
                     // The secret rides an Authorization header, not the URL, so
                     // it stays out of argv and shell history; the proxy strips
                     // it and injects the real credential upstream.
-                    example: format!("curl -H \"Authorization: Bearer {secret}\" {base}"),
+                    // Runnable as-is; the trailing slash is what marks where
+                    // an upstream route goes, since the proxy forwards the
+                    // path through and the bare root 404s on most APIs.
+                    example: format!("curl -H \"Authorization: Bearer {secret}\" {base}/"),
                 }
             }
             ConnectionConfig::Ws { .. } => {
@@ -1954,27 +1955,15 @@ impl Broker {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::ssh_endpoint_invocation;
-
-    #[test]
-    fn ssh_endpoint_invocation_preserves_imported_non_default_ports() {
-        assert_eq!(
-            ssh_endpoint_invocation(Some("sandbox@127.0.0.1"), "sandbox", "127.0.0.1", 12222),
-            "ssh -p 12222 sandbox@127.0.0.1"
-        );
-        assert_eq!(
-            ssh_endpoint_invocation(Some("production"), "deploy", "prod.example.com", 2200),
-            "ssh -p 2200 production"
-        );
-        assert_eq!(
-            ssh_endpoint_invocation(Some("production"), "deploy", "prod.example.com", 22),
-            "ssh production"
-        );
-    }
-}
-
+/// The `ssh` command an issued endpoint hands the user.
+///
+/// A non-default port is spelled out even behind an imported alias, so the
+/// command reaches the port the tool was configured for rather than whatever
+/// `~/.ssh/config` resolves the alias to today. That is a snapshot taken at
+/// import: re-point the alias at a new port and the copied command keeps
+/// overriding it with the old one until the tool is re-imported. Pinning the
+/// tool's own port is the lesser surprise — the alternative silently sends
+/// the endpoint somewhere the tool was never configured to reach.
 fn ssh_endpoint_invocation(destination: Option<&str>, user: &str, host: &str, port: u16) -> String {
     match destination {
         Some(dest) if port == 22 => format!("ssh {dest}"),
@@ -2037,5 +2026,26 @@ async fn reject_legacy_live_socket(paths: &Paths) -> Result<()> {
                 socket.display()
             ),
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ssh_endpoint_invocation;
+
+    #[test]
+    fn ssh_endpoint_invocation_preserves_imported_non_default_ports() {
+        assert_eq!(
+            ssh_endpoint_invocation(Some("sandbox@127.0.0.1"), "sandbox", "127.0.0.1", 12222),
+            "ssh -p 12222 sandbox@127.0.0.1"
+        );
+        assert_eq!(
+            ssh_endpoint_invocation(Some("production"), "deploy", "prod.example.com", 2200),
+            "ssh -p 2200 production"
+        );
+        assert_eq!(
+            ssh_endpoint_invocation(Some("production"), "deploy", "prod.example.com", 22),
+            "ssh production"
+        );
     }
 }

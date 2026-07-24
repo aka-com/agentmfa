@@ -464,7 +464,7 @@ pub async fn test_reachability(
 /// A connection with no brokered key has nothing to log in *with*, so it
 /// falls back to the reachability probe rather than grading as a rejection:
 /// an empty identity list is a supported configuration here, not a fault.
-pub async fn test_login(store: &Store, connection: &Connection) -> Result<String, TestError> {
+pub async fn test_login(broker: &Broker, connection: &Connection) -> Result<String, TestError> {
     let ConnectionConfig::Ssh {
         destination,
         host,
@@ -475,8 +475,8 @@ pub async fn test_login(store: &Store, connection: &Connection) -> Result<String
     else {
         return Err("not an ssh connection".into());
     };
-    let Some(signer) = SshSigner::load_optional(store, connection).await? else {
-        return test_reachability(store, connection).await;
+    let Some(signer) = SshSigner::load_optional(&broker.store, connection).await? else {
+        return test_reachability(&broker.store, connection).await;
     };
     let expected_host_key = if host_key_fingerprint.is_empty() {
         None
@@ -516,7 +516,7 @@ pub async fn test_login(store: &Store, connection: &Connection) -> Result<String
         refusal: std::sync::Mutex::new(None),
     });
     let listener_state = state.clone();
-    let listener_task = tokio::spawn(async move {
+    let _listener_task = AbortOnDrop(tokio::spawn(async move {
         while let Ok((mut stream, _)) = listener.accept().await {
             let state = listener_state.clone();
             tokio::spawn(async move {
@@ -533,7 +533,7 @@ pub async fn test_login(store: &Store, connection: &Connection) -> Result<String
                 let _ = stream.shutdown().await;
             });
         }
-    });
+    }));
 
     // Use the original alias when one was imported so ProxyJump and other
     // routing from ~/.ssh/config still apply. User/port and all credential
@@ -596,11 +596,32 @@ pub async fn test_login(store: &Store, connection: &Connection) -> Result<String
             format!("Could not start the system SSH client: {e}"),
         )
     });
-    listener_task.abort();
     let output = output?;
     // Only ssh's own log is evidence. Anything the peer chose — the banner,
     // a jump host's inherited stderr — is read for nothing.
     let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+
+    let graded = grade_login(broker, connection, &state, output.status, &log);
+    audit_login_attempt(broker, connection, &state, &graded);
+    graded
+}
+
+/// Grade the finished `ssh` run. Split out of `test_login` so the attempt
+/// audits exactly once whichever way it went, without an audit call before
+/// each of the early returns.
+fn grade_login(
+    broker: &Broker,
+    connection: &Connection,
+    state: &TestAgentState,
+    status: std::process::ExitStatus,
+    log: &str,
+) -> Result<String, TestError> {
+    let ConnectionConfig::Ssh {
+        host, port, user, ..
+    } = &connection.config
+    else {
+        return Err("not an ssh connection".into());
+    };
 
     // A signature is the one thing that proves *this* connection's key
     // authenticated: the agent issues it only after a session-bind matching
@@ -614,8 +635,8 @@ pub async fn test_login(store: &Store, connection: &Connection) -> Result<String
     // non-zero long after authenticating, so the log line stands in for the
     // exit status there.
     let authenticated = log.contains("Authenticated to ");
-    if signed && (output.status.success() || authenticated) {
-        let host_key_detail = if expected_host_key.is_some() {
+    if signed && (status.success() || authenticated) {
+        let host_key_detail = if state.expected_host_key.is_some() {
             " Verified the pinned host key.".to_string()
         } else {
             let (observed, observed_sha512) =
@@ -625,8 +646,23 @@ pub async fn test_login(store: &Store, connection: &Connection) -> Result<String
                         "SSH signed in without reporting the server host key",
                     )
                 })?;
-            let pinned = match store.pin_ssh_host_key(&connection.id, &observed) {
-                Ok(PinOutcome::Pinned(pinned)) => pinned,
+            let pinned = match broker.store.pin_ssh_host_key(&connection.id, &observed) {
+                // Trust-on-first-use, same as the open path: record the pin
+                // and tell the UI, or the newly pinned fingerprint sits in
+                // the store with nothing to show it arrived.
+                Ok(PinOutcome::Pinned(pinned)) => {
+                    broker.audit.append(
+                        AuditEntry::new(
+                            AuditKind::SshHostKeyPinned,
+                            format!("SSH host key trusted: {}", connection.name),
+                        )
+                        .connection(connection.name.clone())
+                        .detail(format!("{pinned} pinned by a connection test"))
+                        .outcome("pinned"),
+                    );
+                    broker.events.connections_changed();
+                    pinned
+                }
                 Ok(PinOutcome::AlreadyPinned(pinned))
                     if pinned == observed || pinned == observed_sha512 =>
                 {
@@ -654,7 +690,8 @@ pub async fn test_login(store: &Store, connection: &Connection) -> Result<String
         ));
     }
 
-    if let Some(reason) = state.refusal.lock().unwrap().take() {
+    // Cloned, not taken: the audit pass reads the same reason afterwards.
+    if let Some(reason) = state.refusal.lock().unwrap().clone() {
         return Err(TestError::new(
             TestErrorKind::AuthRejected,
             format!("SSH login was refused: {reason}"),
@@ -684,6 +721,45 @@ pub async fn test_login(store: &Store, connection: &Connection) -> Result<String
         TestErrorKind::Other,
         format!("SSH login to {host}:{port} as {user} failed"),
     ))
+}
+
+/// One activity line per login test. The open path audits per agent message
+/// because each one is an independent grant; a test is a single attempt the
+/// user asked for, so it reads better as a single entry — but it is still a
+/// real signature with the connection's key, and must not be silent.
+fn audit_login_attempt(
+    broker: &Broker,
+    connection: &Connection,
+    state: &TestAgentState,
+    graded: &Result<String, TestError>,
+) {
+    let refusal = state.refusal.lock().unwrap().clone();
+    let (outcome, detail) = match (graded, refusal) {
+        (Ok(detail), _) => ("signed", detail.clone()),
+        (Err(_), Some(reason)) => ("refused", reason),
+        (Err(error), None) => ("failed", error.detail.clone()),
+    };
+    broker.audit.append(
+        AuditEntry::new(
+            AuditKind::SshSigned,
+            format!("SSH login tested: {}", connection.name),
+        )
+        .connection(connection.name.clone())
+        .detail(detail)
+        .outcome(outcome),
+    );
+}
+
+/// Ends the agent's accept loop however `test_login` ends. An inline abort
+/// after the `ssh` run would be skipped entirely when the caller's timeout
+/// drops the whole future, leaking the task and its listening socket for the
+/// life of the process — dropping a `JoinHandle` does not cancel its task.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 struct TestAgentState {
