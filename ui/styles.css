@@ -1362,8 +1362,9 @@
 .connect-step-followup{ margin-top: 8px; }
 .connect-snip{ position: relative; margin-top: 8px; background: var(--code-block-bg);
   border: 1px solid var(--line); border-radius: 7px; padding: 9px 12px; overflow-x: auto; }
-.connect-snip pre{ margin: 0; }
-.connect-snip code{ font-size: 12px; line-height: 1.6; white-space: pre; color: var(--ink-2); }
+.connect-snip pre{ box-sizing: border-box; margin: 0; padding-right: 52px; }
+.connect-snip code{ font-size: 12px; line-height: 1.6; white-space: pre-wrap;
+  overflow-wrap: anywhere; color: var(--ink-2); }
 .connect-copy{ position: absolute; top: 6px; right: 6px; }
 .connect-note{ font-size: 12px; color: var(--muted); margin-top: 12px; }
 .connect-recent{ display: flex; flex-direction: column; }

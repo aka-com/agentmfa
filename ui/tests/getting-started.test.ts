@@ -278,13 +278,16 @@ test('stdio connection guides and quick-start clients require the separate CLI',
     ['claude-code', 'claude-desktop', 'codex'],
   );
   assert.equal(connectClientById('claude-code')!.inlineCliInstall, true);
-  assert.match(
-    connectClientById('claude-code')!.steps(ENV)[1].followup ?? '',
-    /Working over the raw API/,
-  );
+  assert.equal(connectClientById('claude-code')!.steps(ENV)[1].followup, undefined);
   assert.equal(connectClientById('claude-code')!.note, undefined);
   assert.equal(connectClientById('claude-desktop')!.inlineCliInstall, undefined);
+  assert.equal(connectClientById('claude-desktop')!.note, undefined);
   assert.equal(connectClientById('codex')!.inlineCliInstall, undefined);
+  assert.equal(connectClientById('cli')!.note, undefined);
+  assert.equal(
+    connectClientById('cli')!.steps(ENV)[0].followup,
+    'Speaking MCP over HTTP instead? See “Other MCP client” above.',
+  );
   for (const client of requiringCli) {
     const [install, ...steps] = connectGuideSteps(client, ENV);
     assert.equal(install.title, 'Install the Multitool CLI', client.id);
@@ -295,6 +298,7 @@ test('stdio connection guides and quick-start clients require the separate CLI',
     connectClientById('mcp')!.steps(ENV)[1].detail ?? '',
     /After installing the Multitool CLI/,
   );
+  assert.equal(connectClientById('mcp')!.steps(ENV)[1].snippet, CLI_INSTALL_COMMAND);
 });
 
 test('activity labels attribute to the right client', () => {

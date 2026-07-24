@@ -839,8 +839,8 @@ function connectStepHTML(step: ConnectStep, n: number): string {
     <span class="connect-step-n" aria-hidden="true">${n}</span>
     <div class="connect-step-bd"><b>${esc(step.title)}</b>
       ${step.detail ? `<div class="connect-step-d">${esc(step.detail)}</div>` : ''}
-      ${step.followup ? `<div class="connect-step-d connect-step-followup">${esc(step.followup)}</div>` : ''}
-      ${snippet}</div>
+      ${snippet}
+      ${step.followup ? `<div class="connect-step-d connect-step-followup">${esc(step.followup)}</div>` : ''}</div>
   </div>`;
 }
 

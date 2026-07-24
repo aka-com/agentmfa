@@ -276,7 +276,6 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
       {
         title: 'Check for valid tools',
         detail: 'In any Claude Code session, ask it to run multitool_status to list your enabled tools.',
-        followup: 'Working over the raw API? Use the plain-HTTP setup under “Anything else (HTTP API)”.',
       },
     ],
   },
@@ -303,7 +302,6 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
         detail: 'Multitool appears under the tools icon. Ask Claude to run multitool_status to confirm.',
       },
     ],
-    note: 'Claude Desktop launches aka mcp itself; the key never appears in the config file.',
   },
   {
     id: 'codex',
@@ -346,14 +344,15 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
       },
       {
         title: 'Or skip HTTP entirely',
-        detail: 'After installing the Multitool CLI, clients that launch stdio servers can run aka mcp directly — no URL or key to paste.',
+        detail: 'After installing the Multitool CLI, clients that launch stdio servers can run aka mcp directly.',
+        snippet: CLI_INSTALL_COMMAND,
       },
     ],
   },
   {
     id: 'cli',
     name: 'Anything else (HTTP API)',
-    sub: 'curl, scripts, your own agent loop — HTTP over the local socket',
+    sub: 'curl, scripts, your own agent loop',
     mark: '>_',
     icon: 'terminal',
     lead: () => 'Paste this into any agent:',
@@ -365,9 +364,9 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
         title: 'Point your harness at the broker',
         detail: `The socket and key live in ${env.socket.replace(/\/broker\.sock$/, '')}. Everything is plain HTTP with a bearer header.`,
         snippet: SNIPPETS.cli(env),
+        followup: 'Speaking MCP over HTTP instead? See “Other MCP client” above.',
       },
     ],
-    note: 'Speaking MCP over HTTP instead? See “Other MCP client” above.',
   },
 ];
 
