@@ -39,6 +39,7 @@ import {
   isLoopbackHost, parseMcpServerUrl,
   quickSetupPlaceholder, shouldResolveSshImport, sshImportFromPreview, suggestedSecretName,
 } from '/src/connection-input';
+import { ENDPOINT_FORMATS, endpointFormatByKey } from '/src/endpoint-formats';
 import { formErrorKind, formErrorMessage, inlineFormError, sentenceCase } from '/src/form-errors';
 import {
   LOCAL_BROKER, brokerLabel, brokerTakeover, brokerTone, remoteEndpointCaution,
@@ -723,7 +724,7 @@ function breakableAddress(address: string): string {
 // a hairline footer that owns issue → live badge → reissue/revoke. The
 // SSH renders the socket assignment together with its configured `ssh`
 // invocation so the copied value connects immediately.
-function endpointStripHTML(c: ConnectionSummary, runnableSsh = false): string {
+function endpointStripHTML(c: ConnectionSummary, runnableSsh = false, withFormats = false): string {
   if (!c.agent_access.enabled || !ENDPOINTABLE[c.type]) return '';
   const endpoint = c.agent_access.endpoint ?? null;
   if (!endpoint) {
@@ -777,8 +778,33 @@ function endpointStripHTML(c: ConnectionSummary, runnableSsh = false): string {
         </div>`
     : '<span class="ep-addr ep-addr-hidden">Connection address unavailable</span>';
   // The strip is the field, nothing more: reissue/revoke live in the row's
-  // one options menu.
-  return `<div class="ep-strip">${address}</div>`;
+  // one options menu. The detail pane adds the per-application copy row
+  // beneath it; the guides keep just the address they narrate.
+  const formats = withFormats && endpointText && endpointAddress
+    ? endpointFormatRowHTML(c, endpointAddress)
+    : '';
+  return `<div class="ep-strip">${address}</div>${formats}`;
+}
+
+// One button per common client rendering of the issued endpoint (psql,
+// libpq keywords, .env, ssh config, …). Each copies a string derived from
+// the same summary + address the field shows; formats that embed the
+// retained secret (HTTP) read it back from the broker at click time, so
+// none of these put a secret in more DOM attributes than the field does.
+function endpointFormatRowHTML(c: ConnectionSummary, address: string): string {
+  const buttons = ENDPOINT_FORMATS[c.type]
+    .filter((format) => format.needsSecret || format.build(c, address) != null)
+    .map((format) => {
+      const copied = state.copied === `epf:${c.id}:${format.key}`;
+      return `<button class="btn sm ep-fmt" title="${escAttr(format.title)}"
+        aria-label="${escAttr(`${format.title} for ${c.name}`)}"
+        data-act="copy-endpoint-format" data-conn="${c.id}" data-format="${format.key}">${
+        copied ? `${ICONS.check} Copied` : esc(format.label)}</button>`;
+    })
+    .join('');
+  if (!buttons) return '';
+  return `<div class="ep-formats" role="group" aria-label="Copy the connection for other applications">
+    <span class="ep-formats-lbl">Copy for</span>${buttons}</div>`;
 }
 
 /** The agents on/off switch, in the detail panel's header — the tool's one
@@ -1111,7 +1137,7 @@ function connDetailHTML(c: ConnectionSummary): string {
   })();
   const endpointSection = enabled && ENDPOINTABLE[c.type] && !c.mcp_path
     ? `<div class="cd-sec"><div class="cd-connect-lbl"><span>${connectTitle}</span></div>
-        ${endpointStripHTML(c)}
+        ${endpointStripHTML(c, false, true)}
       </div>`
     : '';
   // MCP tools combine their filter and direct endpoint into one section:
@@ -4391,6 +4417,36 @@ document.addEventListener('click', async (e) => {
         } catch {
           toast('⚠ Copy failed — select the text and copy it manually');
         }
+      }
+      break;
+    }
+    case 'copy-endpoint-format': {
+      const conn = state.connections.find((candidate) => candidate.id === btn.dataset.conn);
+      const format = conn ? endpointFormatByKey(conn.type, btn.dataset.format ?? '') : null;
+      const address = conn
+        ? directEndpointAddress(
+            conn.type,
+            conn.agent_access.endpoint,
+            state.identity?.socket_path ?? '~/.aka/broker.sock',
+          )
+        : null;
+      if (!conn || !format || !address) break;
+      // HTTP formats embed the retained endpoint secret, which summaries
+      // never carry — read it back from the broker (no gate: it re-reads
+      // already-surfaced state). A failed read copies the placeholder form.
+      let secret: string | null = null;
+      if (format.needsSecret) {
+        try {
+          secret = (await invoke('get_endpoint', { connectionId: conn.id }))?.secret || null;
+        } catch { /* placeholder */ }
+      }
+      const text = format.build(conn, address, secret);
+      if (!text) break;
+      try {
+        await navigator.clipboard.writeText(text);
+        flashCopied(`epf:${conn.id}:${format.key}`);
+      } catch {
+        toast('⚠ Copy failed — select the text and copy it manually');
       }
       break;
     }

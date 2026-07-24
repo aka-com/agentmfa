@@ -1145,6 +1145,24 @@ pub async fn issue_endpoint(
         .map_err(|e| e.to_string())
 }
 
+/// Read a connection's already-issued direct endpoint (address, retained
+/// secret, example) without minting or rotating; `None` when none is issued.
+/// Unlike issuance this takes no native gate — it re-reads surfaced state,
+/// so the UI's per-application copy buttons can embed the secret on demand.
+#[tauri::command]
+pub async fn get_endpoint(
+    state: State<'_, AppState>,
+    connection_id: String,
+) -> CmdResult<Option<IssuedEndpointDto>> {
+    let connection_id = parse_id(&connection_id)?;
+    state
+        .brokers
+        .backend()
+        .get_endpoint(connection_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Revoke a direct endpoint: stop its listener and close its live sessions.
 #[tauri::command]
 pub async fn revoke_endpoint(state: State<'_, AppState>, endpoint_id: String) -> CmdResult<bool> {
@@ -1283,6 +1301,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         set_allowed_tools,
         list_mcp_tools,
         issue_endpoint,
+        get_endpoint,
         revoke_endpoint,
         rotate_key,
         copy_key,

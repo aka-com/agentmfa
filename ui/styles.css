@@ -1440,3 +1440,12 @@
 .ep-strip .ep-field .ep-addr-masked:hover{ color: var(--ink); }
 .ep-strip .ep-field.collapsed .ep-copy{ align-self: center; }
 .ep-strip .ep-addr-hidden{ color: var(--muted); font-size: 12px; }
+/* Per-application copy row under the detail pane's endpoint field: each
+   button copies the same endpoint rendered for one common client (psql,
+   libpq keywords, .env, ssh config, …). */
+.ep-formats{ display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
+.ep-formats .ep-formats-lbl{ color: var(--muted); font-size: 12px; margin-right: 2px; }
+.ep-formats .ep-fmt{
+  display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
+}
+.ep-formats .ep-fmt svg{ width: 14px; height: 14px; }

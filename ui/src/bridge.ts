@@ -57,6 +57,9 @@ export async function listen<K extends EventName>(
 type MockListener = (event: EventPayload<unknown>) => void;
 const listeners: Record<string, MockListener[]> = {};
 const MOCK_ACTIVITY_LIMIT = 200;
+// The demo endpoint credential: fixed so a get_endpoint read-back
+// reproduces exactly what issuance showed.
+const MOCK_ENDPOINT_SECRET = 'end_' + 'demo0'.repeat(12) + '0000';
 const MOCK_ACTIVITY_META = {
   denied: { icon: 'circleX', tone: 'danger' },
   secretCopied: { icon: 'clipboardCopy', tone: 'neutral' },
@@ -856,7 +859,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         db.access.push(record);
       }
       const endpointId = record.endpoint?.endpoint_id ?? `mock-endpoint-${connection.id}`;
-      const secret = 'end_' + 'demo0'.repeat(12) + '0000';
+      const secret = MOCK_ENDPOINT_SECRET;
       const dir = `~/.aka/endpoints/${endpointId}`;
       let dsn: string;
       let example: string;
@@ -879,6 +882,19 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       audit('wired', `Direct endpoint issued: ${connection.name}`);
       emit('aka://wirings-changed', {});
       return { endpoint_id: endpointId, type: kind, dsn, secret: shownSecret, example };
+    }
+    case 'get_endpoint': {
+      // A no-gate read-back of the issued endpoint. The mock's secret is a
+      // fixed demo value, so re-reading reproduces what issuance showed.
+      const connection = db.connections.find((c) => c.id === args.connectionId);
+      const endpoint = db.access.find((a) => a.connection_id === args.connectionId)?.endpoint;
+      if (!connection || !endpoint) return null;
+      const dsn = endpoint.dsn ?? '';
+      const secret = connection.type === 'ssh' ? '' : MOCK_ENDPOINT_SECRET;
+      const example = connection.type === 'pg' ? `DATABASE_URL="${dsn}"`
+        : connection.type === 'ssh' ? `SSH_AUTH_SOCK="${dsn}" ssh ${connection.destination ?? `${connection.user ?? 'deploy'}@${connection.host ?? 'host'}`}`
+        : `curl -H "Authorization: Bearer ${secret}" ${dsn}/<path>`;
+      return { endpoint_id: endpoint.endpoint_id, type: connection.type, dsn, secret, example };
     }
     case 'revoke_endpoint': {
       const record = db.access.find((a) => a.endpoint?.endpoint_id === args.endpointId);

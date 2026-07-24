@@ -366,6 +366,7 @@ export interface CommandMap {
   open_url: CommandSpec<{ url: string }, void>;
   set_tool_access: CommandSpec<{ connectionId: string; enabled: boolean }, boolean>;
   issue_endpoint: CommandSpec<{ connectionId: string }, IssuedEndpoint>;
+  get_endpoint: CommandSpec<{ connectionId: string }, IssuedEndpoint | null>;
   revoke_endpoint: CommandSpec<{ endpointId: string }, boolean>;
   rotate_key: CommandSpec<undefined, void>;
   copy_key: CommandSpec<undefined, void>;
