@@ -411,6 +411,16 @@ export const CATALOG: CatalogEntry[] = [
     keywords: ['rest', 'http', 'endpoint'],
   },
   {
+    id: 'websocket',
+    name: 'Custom WebSocket',
+    icon: 'radioTower',
+    description: 'Streaming connections',
+    section: 'Custom Apps',
+    via: 'connection',
+    connType: 'ws',
+    keywords: ['stream', 'realtime', 'socket'],
+  },
+  {
     id: 'postgres',
     name: 'Postgres',
     icon: 'postgres',
@@ -429,16 +439,6 @@ export const CATALOG: CatalogEntry[] = [
     via: 'connection',
     connType: 'ssh',
     keywords: ['server', 'shell', 'remote', 'terminal'],
-  },
-  {
-    id: 'websocket',
-    name: 'Custom WebSocket',
-    icon: 'radioTower',
-    description: 'Streaming connections',
-    section: 'Infrastructure',
-    via: 'connection',
-    connType: 'ws',
-    keywords: ['stream', 'realtime', 'socket'],
   },
   {
     id: 'credentials',
@@ -643,29 +643,13 @@ export function filterCatalog(query: string): CatalogEntry[] {
   return CATALOG.filter((entry) => matchesQuery(entry, needle));
 }
 
-export interface CatalogVisibility {
-  /** The "Show WebSockets" setting; off by default. */
-  showWebsockets: boolean;
-  connections: ConnectionSummary[];
-}
-
-/**
- * The rows to render: the search filter, minus anything switched off.
- *
- * A hidden row still appears when something is configured under it — a tool
- * you already have must never become invisible (and therefore unmanageable)
- * because of a display preference.
- */
-export function visibleCatalog(query: string, visibility: CatalogVisibility): CatalogEntry[] {
+/** The curated and registry rows matching the search filter. */
+export function visibleCatalog(query: string): CatalogEntry[] {
   const needle = query.trim().toLowerCase();
-  const curated = filterCatalog(query).filter((entry) => {
-    if (entry.id !== 'websocket' || visibility.showWebsockets) return true;
-    return connectionsForEntry(entry, visibility.connections).length > 0;
-  });
   const registry = needle
     ? REGISTRY_CATALOG.filter((entry) => matchesQuery(entry, needle))
     : REGISTRY_CATALOG;
-  return [...curated, ...registry];
+  return [...filterCatalog(query), ...registry];
 }
 
 /** The catalog's name for a connection type — the dialog titles reuse it. */

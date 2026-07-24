@@ -597,16 +597,23 @@ struct FlowFailure {
     hint: Option<String>,
 }
 
+fn capitalize_message(mut message: String) -> String {
+    if let Some(first) = message.get_mut(..1) {
+        first.make_ascii_uppercase();
+    }
+    message
+}
+
 impl FlowFailure {
     fn plain(message: impl Into<String>) -> Self {
         Self {
-            message: message.into(),
+            message: capitalize_message(message.into()),
             hint: None,
         }
     }
     fn hinted(message: impl Into<String>, hint: impl Into<String>) -> Self {
         Self {
-            message: message.into(),
+            message: capitalize_message(message.into()),
             hint: Some(hint.into()),
         }
     }
@@ -1120,7 +1127,7 @@ async fn discover(
         });
     }
     Err(FlowFailure::hinted(
-        "the authorization server published no usable metadata",
+        "The authorization server published no usable metadata",
         "The server may not support browser sign-in — add it with a token instead.",
     ))
 }
@@ -1495,6 +1502,18 @@ mod tests {
         assert!(require_secure(&local, "x").is_ok());
         let plain = Url::parse("http://auth.example.com/authorize").unwrap();
         assert!(require_secure(&plain, "x").is_err());
+    }
+
+    #[test]
+    fn flow_failures_start_with_a_capital() {
+        assert_eq!(
+            FlowFailure::plain("the server did not answer").message,
+            "The server did not answer"
+        );
+        assert_eq!(
+            FlowFailure::hinted("could not sign in", "Try again.").message,
+            "Could not sign in"
+        );
     }
 
     #[test]

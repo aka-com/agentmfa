@@ -11,7 +11,6 @@ import {
   connectModesFor,
   directEndpointAddress,
   directStartTask,
-  firstTaskPrompt,
   resolveConnectMode,
   sshAuthSockCommand,
   sshDirectCommand,
@@ -95,16 +94,6 @@ test('the example names an enabled tool when there is one', () => {
   assert.equal(progress.toolName, 'prod-db');
 });
 
-test('the ready nudge and the walkthrough resolve to the same first task', () => {
-  // Both surfaces route through firstTaskPrompt / the option task, so a given
-  // connection type can never show two different first asks.
-  for (const type of ['pg', 'ssh'] as const) {
-    const option = START_OPTIONS.find((o) => o.connType === type && !o.mcp);
-    assert.ok(option, `an option exists for ${type}`);
-    assert.equal(firstTaskPrompt('prod', type), `Using my Multitool connection "prod", ${option!.taskBody}`);
-  }
-});
-
 test('the direct-mode task leads with the endpoint, secret included', () => {
   const postgres = startOptionById('postgres');
   const progress = startProgress(postgres, []);
@@ -182,12 +171,6 @@ test('older SSH endpoint summaries derive their stable agent socket', () => {
     directEndpointAddress('pg', { endpoint_id: 'endpoint-1', dsn: null }, '~/.aka/broker.sock'),
     null,
   );
-});
-
-test('an unenumerated type (ws) gets a generic read-only first task', () => {
-  const task = firstTaskPrompt('feed', 'ws');
-  assert.match(task, /feed/);
-  assert.match(task, /read-only/);
 });
 
 test('the task reads sensibly before any tool exists', () => {
@@ -323,8 +306,17 @@ test('the Claude Desktop lead names the config path for each platform', () => {
     assert.ok(path.length, platform);
     const env = { ...ENV, platform };
     assert.ok(claudeDesktop.lead(env).includes(path), platform);
+    assert.ok(claudeDesktop.lead(env).endsWith('then restart Claude.'), platform);
     assert.ok(claudeDesktop.steps(env)[0].detail?.includes(path), platform);
   }
+});
+
+test('the Codex config instruction includes the required restart', () => {
+  const codex = connectClientById('codex')!;
+  const instruction = 'Add this to ~/.codex/config.toml, then restart Codex.';
+
+  assert.equal(codex.lead(ENV), instruction);
+  assert.equal(codex.steps(ENV)[0].detail, instruction);
 });
 
 test('snippets interpolate the broker socket and token paths', () => {

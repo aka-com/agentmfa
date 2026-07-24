@@ -123,19 +123,6 @@ cat <<'LOGO'
 LOGO
 cat <<EOF
 
-AKA sandbox services
-
-Open AKA Desktop from the menu bar icon; Services is the first tab. At
-the top is an “Add a service for your agent” card. (If the card isn't
-shown, re-enable it from the Walkthroughs menu — the ? button in the
-Services header — or use “＋ Add service” to fill the form by hand.)
-
-For HTTP API and WebSocket, use “＋ Add service” and enter the fields
-listed below. For Postgres and SSH, paste the Quick setup line into the
-card and press Continue — the service type is detected automatically
-and the form opens pre-filled. Enter any remaining values, press
-“Add service”, then press Test on the service's card in the list.
-
 HTTP API
   Name:             sandbox-http
   API root:         http://127.0.0.1:$http_port

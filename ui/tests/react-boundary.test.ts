@@ -90,3 +90,105 @@ test('credential listbox edits invalidate a failed draft-test override', async (
   assert.match(selectPick, /disarmDraftTestOverride\(\)/);
   assert.match(credentialPick, /disarmDraftTestOverride\(\)/);
 });
+
+test('creating a credential does not auto-trigger the endpoint confirmation gate', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+  const postSave = app.match(
+    /const createdCredential = adding && newSecretName !== null;([\s\S]*?)function closeSheet/,
+  )?.[1];
+
+  assert.ok(postSave, 'post-save connection flow is present');
+  assert.match(
+    postSave,
+    /if \(!createdCredential[\s\S]*?invoke\('issue_endpoint'/,
+    'automatic endpoint issuance must remain behind the new-credential guard',
+  );
+});
+
+test('the post-add banner stays a compact success message', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+  const readyCard = app.match(
+    /function connectionReadyCardHTML\(\): string \{([\s\S]*?)function connectionsHTML/,
+  )?.[1];
+
+  assert.ok(readyCard, 'connection success banner is present');
+  assert.match(readyCard, /\$\{esc\(ready\.name\)\} successfully added/);
+  assert.doesNotMatch(readyCard, /Ask your agent|Copy task|copy-first-task/);
+});
+
+test('the MCP tool filter is pinned to the detail heading’s right edge', async () => {
+  const styles = await readFile(new URL('../styles.css', import.meta.url), 'utf8');
+  const aside = styles.match(/\.cd-lbl-aside \{([\s\S]*?)\}/)?.[1];
+
+  assert.ok(aside, 'MCP heading aside styles are present');
+  assert.match(aside, /flex: 1 1 auto/);
+  assert.match(aside, /justify-content: flex-end/);
+  assert.match(styles, /\.cd-lbl-aside \.cat-meta-tools \{[^}]*margin-left: auto/);
+});
+
+test('connection detail headings have no leading connection icon', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+  const detail = app.match(
+    /function connDetailHTML\([\s\S]*?\): string \{([\s\S]*?)function mcpStatusHTML/,
+  )?.[1];
+
+  assert.ok(detail, 'connection detail renderer is present');
+  assert.doesNotMatch(detail, /ICONS\.chevronsLeftRightEllipsis/);
+});
+
+test('selected master rows have no left accent border', async () => {
+  const styles = await readFile(new URL('../styles.css', import.meta.url), 'utf8');
+  const selected = styles.match(/\.flat-conn-wrap\.sel \{([^}]*)\}/)?.[1];
+
+  assert.ok(selected, 'selected master-row styles are present');
+  assert.doesNotMatch(selected, /border-left|inset\s+\d+px\s+0/);
+});
+
+test('Activity Log sits above the normal sidebar footer', async () => {
+  const styles = await readFile(new URL('../styles.css', import.meta.url), 'utf8');
+
+  assert.match(
+    styles,
+    /@media \(min-width: 721px\) \{[\s\S]*?\.dw-nav \.nav-item\[data-tab="activity"\]\s*\{\s*margin-top: auto;/,
+  );
+});
+
+test('the SSH endpoint field includes the configured ssh invocation', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+  const endpointStrip = app.match(
+    /function endpointStripHTML\([\s\S]*?\): string \{([\s\S]*?)function connToggleHTML/,
+  )?.[1];
+
+  assert.ok(endpointStrip, 'endpoint strip renderer is present');
+  assert.match(endpointStrip, /c\.type === 'ssh'\s*\?\s*sshDirectCommand\(endpointAddress, c\)/);
+  assert.doesNotMatch(endpointStrip, /sshAuthSockCommand/);
+});
+
+test('direct connection guides tell the user to hand the address to their agent', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+
+  assert.match(app, /Tell your agent to connect directly to this database\./);
+  assert.match(app, /Tell your agent to connect directly to this server\./);
+  assert.doesNotMatch(app, /Connect directly to this (?:database|remote server) via Multitool\./);
+});
+
+test('the first-use task does not restate automatic agent access', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+
+  assert.doesNotMatch(app, /Tools are enabled for all agents when you add them\./);
+});
+
+test('Custom WebSocket uses the Configure catalog action', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+
+  assert.match(app, /\['mcp', 'http', 'websocket'\]\.includes\(entry\.id\)/);
+});
+
+test('connection-string credentials are masked with asterisks', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+  const masker = app.match(/function maskedEndpoint\(address: string\): string \{([\s\S]*?)\}/)?.[1];
+
+  assert.ok(masker, 'connection-string masker is present');
+  assert.match(masker, /\$1\*{6}/);
+  assert.doesNotMatch(masker, /•/);
+});

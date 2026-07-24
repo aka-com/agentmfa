@@ -190,6 +190,12 @@
 }
   .nav-item:hover{ background: var(--hover); }
   .nav-item.on{ background: var(--accent-wash-2); color: var(--accent-ink); font-weight: 600; }
+  /* Keep the history destination beside the sidebar controls it relates to,
+     while the primary setup/navigation destinations stay grouped at the top.
+     The compact vertical rail keeps its existing uninterrupted tab order. */
+  @media (min-width: 721px) {
+    .dw-nav .nav-item[data-tab="activity"]{ margin-top: auto; }
+  }
   /* Below the narrow breakpoint (keep in step with NARROW_LAYOUT in app.tsx)
      the left bar turns sideways: it collapses to a slim rail and each menu
      option rotates 90° to read down the bar. The order is unchanged — "Get
@@ -565,20 +571,12 @@
   .act-ico.tone-danger{ color: var(--danger-ink); }
   .act-txt{ flex: 1; min-width: 0; line-height: 18px; color: var(--ink-2); word-break: break-word; }
   .act-detail{ font-size: 12px; color: var(--faint); line-height: 1.4; margin-top: 2px; }
-  /* ---- the “tool is ready” nudge shown after the first tool ---- */
+  /* ---- compact success message shown after the first tool ---- */
   .connection-ready{
-  display: flex; align-items: center; gap: 12px; margin: 3px 0 9px; padding: 10px 11px;
+  display: flex; align-items: center; gap: 8px; margin: 3px 0 9px; padding: 8px 9px 8px 11px;
   border: 1px solid var(--ok-border); border-radius: 10px; background: var(--ok-wash);
 }
-  .connection-ready-copy{ flex: 1; min-width: 0; }
-  .connection-ready-copy b, .connection-ready-copy span, .connection-ready-copy code{ display: block; }
-  .connection-ready-copy b{ font-size: 13.5px; }
-  .connection-ready-copy span{ margin-top: 2px; color: var(--muted); font-size: 12px; }
-  .connection-ready-copy code{
-  margin-top: 5px; overflow: hidden; color: var(--ink-2); font-size: 11.5px;
-  text-overflow: ellipsis; white-space: nowrap;
-}
-  .connection-ready-actions{ display: flex; align-items: center; gap: 3px; flex: 0 0 auto; }
+  .connection-ready b{ flex: 1; min-width: 0; font-size: 13.5px; }
 .tile-menu-wrap{ position: relative; flex: 0 0 auto; }
   /* Tool and endpoint menus use the same strong horizontal-ellipsis trigger. */
 .tile-menu-btn{
@@ -1023,8 +1021,8 @@
   font-size: 12px; text-overflow: ellipsis; white-space: nowrap;
 }
 .flat-conn-row .cat-conn-status { margin-top: 0; }
-/* The selected row carries the detail pane's accent. */
-.flat-conn-wrap.sel { background: var(--accent-wash); box-shadow: inset 2px 0 0 var(--accent); }
+/* Selection stays visible without adding a rail along the list edge. */
+.flat-conn-wrap.sel { background: var(--accent-wash); }
 
 /* ---- drag-to-reorder (Tools list) ------------------------------------- */
 /* Reorderable rows are themselves the drag source; no separate handle shifts
@@ -1091,7 +1089,11 @@
 .cd-connect-lbl svg { flex: 0 0 auto; color: var(--muted); }
 /* The tool-filter chip rides the headline's right edge — a control, not
    more of the headline. */
-.cd-lbl-aside { margin-left: auto; margin-right: -7px; font-weight: 400; }
+.cd-lbl-aside {
+  display: flex; flex: 1 1 auto; justify-content: flex-end;
+  min-width: 0; margin-left: 8px; font-weight: 400; text-align: right;
+}
+.cd-lbl-aside .cat-meta-tools { margin-left: auto; justify-content: flex-end; }
 .cd-help { margin-top: 7px; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .cd-off-note { margin-top: 12px; }
 /* The Details card: the target's parts spelled out as label–value rows.

@@ -287,7 +287,7 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
     icon: 'anthropic',
     labels: ['claude-desktop'],
     lead: (env) =>
-      `Add this to ${CLAUDE_DESKTOP_CONFIG_PATH[env.platform]}, then restart Claude Desktop.`,
+      `Add this to ${CLAUDE_DESKTOP_CONFIG_PATH[env.platform]}, then restart Claude.`,
     copyLabel: 'Copy config',
     snippet: SNIPPETS['claude-desktop'],
     requiresCli: true,
@@ -310,14 +310,14 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
     mark: 'CX',
     icon: 'openai',
     labels: ['codex', 'codex-desktop'],
-    lead: () => 'Add this to ~/.codex/config.toml:',
+    lead: () => 'Add this to ~/.codex/config.toml, then restart Codex.',
     copyLabel: 'Copy config',
     snippet: SNIPPETS.codex,
     requiresCli: true,
     steps: (env) => [
       {
         title: 'Register the MCP server',
-        detail: 'Add this to ~/.codex/config.toml:',
+        detail: 'Add this to ~/.codex/config.toml, then restart Codex.',
         snippet: SNIPPETS.codex(env),
       },
       {
@@ -505,22 +505,4 @@ export function directStartTask(
     ? `Connect to this Postgres DSN: ${endpoint.dsn}`
     : `Connect to the direct endpoint Multitool issued.`;
   return `${lead}\n\nThen ${option.taskBody}`;
-}
-
-/**
- * The first ask for a freshly-added tool, keyed by its connection type. The
- * Get started walkthrough (through each option's own task) and the Tools-tab
- * "ready" nudge both resolve their prompt here, so the two can never suggest a
- * different first task for the same kind of tool.
- */
-export function firstTaskPrompt(name: string, type: ConnectionType): string {
-  const option = START_OPTIONS.find(
-    (candidate) => ['postgres', 'ssh'].includes(candidate.id) && candidate.connType === type,
-  );
-  const body = option
-    ? option.taskBody
-    // Branded APIs and protocols without a walkthrough use a generic
-    // read-only ask rather than borrowing one particular provider's copy.
-    : 'make one read-only request and summarize what comes back.';
-  return `Using my Multitool connection "${name}", ${body}`;
 }

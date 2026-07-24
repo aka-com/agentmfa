@@ -23,9 +23,9 @@ import {
 import type { ConnectionPreset } from '/src/catalog';
 import {
   CLI_INSTALL_COMMAND, CONNECT_CLIENTS, CONNECT_MODE_LABELS, START_OPTIONS, clientMatchesLabel,
-  connectClientById, connectModesFor, directEndpointAddress, directStartTask, firstTaskPrompt,
+  connectClientById, connectModesFor, directEndpointAddress, directStartTask,
   resolveConnectMode,
-  connectGuideSteps, sshAuthSockCommand, sshDirectCommand, sshInvocationCommand, startKindLabel,
+  connectGuideSteps, sshDirectCommand, sshInvocationCommand, startKindLabel,
   startOptionById, startProgress, startTask,
 } from '/src/getting-started';
 import type {
@@ -39,7 +39,7 @@ import {
   isLoopbackHost, parseMcpServerUrl,
   quickSetupPlaceholder, shouldResolveSshImport, sshImportFromPreview, suggestedSecretName,
 } from '/src/connection-input';
-import { formErrorKind, formErrorMessage, inlineFormError } from '/src/form-errors';
+import { formErrorKind, formErrorMessage, inlineFormError, sentenceCase } from '/src/form-errors';
 import {
   LOCAL_BROKER, brokerLabel, brokerTakeover, brokerTone, remoteEndpointCaution,
 } from '/src/broker';
@@ -148,7 +148,6 @@ interface ConnectionDraft {
 
 interface ConnectionReadyState {
   name: string;
-  type: ConnectionType;
 }
 
 /** The remote-broker configuration form's transient state. */
@@ -232,7 +231,6 @@ interface AppState {
   copied: string | null;
   readyCopied: boolean;
   connectionReady: ConnectionReadyState | null;
-  connectionTaskCopied: boolean;
   connTests: Record<string, ConnectionTestState>;
   /** Verdict of testing the add-form draft; null when no test has run. */
   draftTest: ConnectionTestState | null;
@@ -337,7 +335,6 @@ const initialState: AppState = {
   copied: null,          // secretId whose value was just copied (transient "Copied" flash)
   readyCopied: false,    // transient feedback on the setup-instructions status button
   connectionReady: null,
-  connectionTaskCopied: false,
   connTests: {},         // connectionId -> in-flight/last test result (transient)
   draftTest: null,
   draftTestOverride: false,
@@ -711,7 +708,7 @@ const NARROW_LAYOUT = '(max-width: 720px)';
  * collapsed field's display text. Addresses without an inline password
  * (SSH socket commands, plain URLs) pass through unchanged. */
 function maskedEndpoint(address: string): string {
-  return address.replace(/(:\/\/[^:@/\s]*:)[^@\s]+(?=@)/, '$1••••••');
+  return address.replace(/(:\/\/[^:@/\s]*:)[^@\s]+(?=@)/, '$1******');
 }
 
 /** The full address as markup with soft break opportunities after its own
@@ -724,8 +721,8 @@ function breakableAddress(address: string): string {
 
 // The direct-endpoint lifecycle strip on an enabled Postgres/SSH/HTTP row:
 // a hairline footer that owns issue → live badge → reissue/revoke. The
-// SSH renders the socket as an SSH_AUTH_SOCK assignment so it can be copied
-// and run directly.
+// SSH renders the socket assignment together with its configured `ssh`
+// invocation so the copied value connects immediately.
 function endpointStripHTML(c: ConnectionSummary, runnableSsh = false): string {
   if (!c.agent_access.enabled || !ENDPOINTABLE[c.type]) return '';
   const endpoint = c.agent_access.endpoint ?? null;
@@ -741,7 +738,7 @@ function endpointStripHTML(c: ConnectionSummary, runnableSsh = false): string {
   // including its issued credential and any socket-path query.
   //
   // In the detail pane the field starts as a masked one-liner (credential
-  // bulleted, address ellipsized) — Copy still carries the complete DSN;
+  // replaced with asterisks, address ellipsized) — Copy still carries the complete DSN;
   // clicking the line expands it. The connect guides keep the full address:
   // there it is the deliverable being read, not shoulder-surfable chrome.
   const copied = state.copied === `ep:${c.id}`;
@@ -753,10 +750,10 @@ function endpointStripHTML(c: ConnectionSummary, runnableSsh = false): string {
   );
   const endpointText = endpointAddress
     ? c.type === 'ssh'
-      ? runnableSsh ? sshDirectCommand(endpointAddress, c) : sshAuthSockCommand(endpointAddress)
+      ? sshDirectCommand(endpointAddress, c)
       : endpointAddress
     : null;
-  const copyTitle = c.type === 'ssh' && runnableSsh
+  const copyTitle = c.type === 'ssh'
     ? 'Copy the SSH command'
     : 'Copy the connection command';
   const copyBtn = endpointText
@@ -1006,11 +1003,12 @@ function connectionIssues(
     : test && !test.running && test.detail !== undefined
     ? { ok: test.ok, detail: test.detail, kind: test.kind }
     : null;
-  const failure = fresh
+  const rawFailure = fresh
     ? fresh.ok ? null : fresh.detail
     : c.last_status === 'failed'
     ? c.last_detail || 'The last connection check failed.'
     : null;
+  const failure = rawFailure ? sentenceCase(rawFailure) : null;
   if (failure && !issues.some((issue) => issue.text === failure)) {
     // A fresh test carries a failure kind; when it's one the connection
     // editor could plausibly fix — a wrong host, port, credential, or TLS
@@ -1112,7 +1110,7 @@ function connDetailHTML(c: ConnectionSummary): string {
     }
   })();
   const endpointSection = enabled && ENDPOINTABLE[c.type] && !c.mcp_path
-    ? `<div class="cd-sec"><div class="cd-connect-lbl">${ICONS.chevronsLeftRightEllipsis}<span>${connectTitle}</span></div>
+    ? `<div class="cd-sec"><div class="cd-connect-lbl"><span>${connectTitle}</span></div>
         ${endpointStripHTML(c)}
       </div>`
     : '';
@@ -1121,7 +1119,7 @@ function connDetailHTML(c: ConnectionSummary): string {
   // speaks in the connect headline's sentence-case register — the panel
   // has one voice, no tracked-caps machinery labels.
   const mcpSection = enabled && c.mcp_path
-    ? `<div class="cd-sec"><div class="cd-connect-lbl">${ICONS.chevronsLeftRightEllipsis}<span>Multitool MCP</span><span class="cd-lbl-aside">${connectionToolsChipHTML(c)}</span></div>
+    ? `<div class="cd-sec"><div class="cd-connect-lbl"><span>Multitool MCP</span><span class="cd-lbl-aside">${connectionToolsChipHTML(c)}</span></div>
         ${ENDPOINTABLE[c.type] ? endpointStripHTML(c) : ''}</div>`
     : '';
   const offNote = enabled
@@ -1248,12 +1246,12 @@ function catalogRowHTML(entry: CatalogEntry): string {
   const builtin = entry.via === 'builtin';
   const quickConnect = canQuickConnectMcp(entry);
   const actionMenuOpen = state.catalogActionMenuOpen === entry.id;
-  // Rows that need provider-side setup (Slack, Gmail) and generic MCP and
-  // HTTP rows all say Configure: the user supplies something before the
-  // connection can be made.
+  // Rows that need provider-side setup (Slack, Gmail) and generic custom
+  // connection rows all say Configure: the user supplies something before
+  // the connection can be made.
   const addLabel = entry.requiresSetup
     ? 'Configure'
-    : ['mcp', 'http'].includes(entry.id)
+    : ['mcp', 'http', 'websocket'].includes(entry.id)
     ? 'Configure'
     : entry.preset
     ? 'Configure'
@@ -1375,20 +1373,17 @@ function isMcpDraft(draft: { isMcp?: boolean; mcpPath?: string | null }): boolea
 // to grow, so it collapses the same way as the larger sections.
 const COLLAPSIBLE_SECTIONS: string[] = ['MCP Apps', 'API Apps'];
 
-// The "<tool> is ready" banner shown after adding a tool. Rendered by
+// The compact success banner shown after adding a tool. Rendered by
 // connectionsHTML in the wide window; the dropdown hoists it above its
 // inline search (see TabContent), so it keeps topping the tab either way.
 function connectionReadyCardHTML(): string {
   const ready = state.connectionReady;
   if (!ready) return '';
-  const readyPrompt = firstTaskPrompt(ready.name, ready.type);
   return `<div class="connection-ready">
-    <div class="connection-ready-copy"><b>${esc(ready.name)} is ready</b>
-      <span>Ask your agent:</span><code>${esc(readyPrompt)}</code></div>
-    <div class="connection-ready-actions">
-      <button class="btn sm" data-act="copy-first-task">${state.connectionTaskCopied ? `${ICONS.check} Copied` : 'Copy task'}</button>
-      <button class="icon-btn" title="Dismiss" aria-label="Dismiss tool ready message" data-act="dismiss-connection-ready">${ICONS.circleX}</button>
-    </div></div>`;
+    <b>${esc(ready.name)} successfully added</b>
+    <button class="icon-btn" title="Dismiss" aria-label="Dismiss success message"
+      data-act="dismiss-connection-ready">${ICONS.circleX}</button>
+  </div>`;
 }
 
 function connectionsHTML(withReadyCard = true) {
@@ -1406,10 +1401,7 @@ function connectionsHTML(withReadyCard = true) {
   // One view, no navigation: the connected tools stay at the top as flat
   // rows, and an "Add a tool" row at the bottom of the list expands the
   // catalog of everything not yet connected, in place, beneath it.
-  const entries = visibleCatalog(state.toolSearch, {
-    showWebsockets: state.settings.show_websockets,
-    connections: state.connections,
-  });
+  const entries = visibleCatalog(state.toolSearch);
   const isConnected = (entry: CatalogEntry): boolean =>
     connectionsForEntry(entry, state.connections).length > 0;
   const needle = state.toolSearch.trim().toLowerCase();
@@ -1499,10 +1491,7 @@ function connectionsHTML(withReadyCard = true) {
 }
 
 function secretsHTML(): string {
-  const allEntries = visibleCatalog('', {
-    showWebsockets: state.settings.show_websockets,
-    connections: state.connections,
-  }).filter((entry) => entry.section === 'Secrets');
+  const allEntries = visibleCatalog('').filter((entry) => entry.section === 'Secrets');
   const needle = state.secretSearch.trim().toLowerCase();
   const entries = allEntries.filter((entry) => {
     const entryMatch = !needle
@@ -1683,8 +1672,8 @@ function startConnectPaneHTML(mode: ConnectModeId, option: StartOption, progress
       // The address itself is the deliverable: the same field as the
       // tool's row. Getting a new one / revoking stay in that row's ⋯ menu.
       const lead = conn.type === 'pg'
-        ? 'Connect directly to this database via Multitool.'
-        : 'Connect directly to this remote server via Multitool.';
+        ? 'Tell your agent to connect directly to this database.'
+        : 'Tell your agent to connect directly to this server.';
       return `<p>${lead}</p>${endpointStripHTML(conn, true)}`;
     }
   }
@@ -1804,8 +1793,7 @@ function startWalkthroughHTML(): string {
           : null,
       )
     : startTask(option, progress);
-  const wireBody = `<p>Tools are enabled for all agents when you add them.</p>
-    <pre class="setup-instructions"><code>${esc(task)}</code></pre>
+  const wireBody = `<pre class="setup-instructions"><code>${esc(task)}</code></pre>
     <div class="start-actions">
       <button class="btn primary sm" data-act="copy-text" data-text="${escAttr(task)}">Copy</button>
     </div>`;
@@ -3366,7 +3354,7 @@ function mcpAuthSheet(): string {
     body = `<div class="auth-done">${ICONS.circleCheck}
       <div><b>${esc(auth.connection_name)} is connected${auth.account ? ` as ${esc(auth.account)}` : ''}.</b>
       ${auth.warning
-        ? `<div class="auth-warning">Token saved, but verification did not complete: ${esc(auth.warning)}</div>`
+        ? `<div class="auth-warning">Token saved, but verification did not complete: ${esc(sentenceCase(auth.warning))}</div>`
         : '<div class="auth-sub">Use the status button on the tool any time to re-check the server and account.</div>'}
       </div></div>`;
     actions = `<button class="btn primary" data-act="mcp-auth-done">Done</button>`;
@@ -3452,12 +3440,9 @@ function settingsSheet() {
       <div class="st-sub">When minimized to the menu bar, hide the Dock icon.</div></div>
       <button class="switch ${s.menu_bar_hides_dock ? 'on' : ''}" data-act="toggle-menubar-dock" role="checkbox" aria-checked="${s.menu_bar_hides_dock ? 'true' : 'false'}"></button></div>`
     : '';
-  const websocketRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Show WebSockets</div>
-      <div class="st-sub">Adds Custom WebSocket to the tool catalog.</div></div>
-      <button class="switch ${s.show_websockets ? 'on' : ''}" data-act="toggle-websockets" role="checkbox" aria-checked="${s.show_websockets ? 'true' : 'false'}"></button></div>`;
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
     <div class="sheet wide"><h3>Settings</h3>
-    ${reauthRow}${presenceRow}${websocketRow}${dockRow}
+    ${reauthRow}${presenceRow}${dockRow}
     <div class="sheet-actions"><button class="btn primary" data-act="sheet-cancel">Done</button></div></div>`;
 }
 
@@ -3585,7 +3570,7 @@ function selectEditSecretMask() {
 
 /* --------------------------------- actions ------------------------------- */
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return sentenceCase(error instanceof Error ? error.message : String(error));
 }
 
 async function run(fn: () => Promise<unknown>): Promise<boolean> {
@@ -4010,6 +3995,7 @@ async function saveConn(): Promise<void> {
     state.draftTest = null;
   }
   if (!brokerEpochIsCurrent(epoch)) return;
+  const createdCredential = adding && newSecretName !== null;
   try {
     if (adding) await invoke('add_connection', { input });
     else await invoke('edit_connection', { id: sheet.id ?? '', input });
@@ -4019,12 +4005,11 @@ async function saveConn(): Promise<void> {
       // The first-task prompt names the service just saved — the very first
       // one, and every guided save after it — never an older neighbor.
       const hadConnections = state.connections.length > 0;
-      // The first tool added gets the "ready — ask your agent" nudge.
+      // The first tool added gets a compact success message.
       if (!hadConnections) {
-        state.connectionReady = { name, type: t };
+        state.connectionReady = { name };
         // A finished add lands back on the flat list, where the new tool is.
         state.addToolOpen = false;
-        state.connectionTaskCopied = false;
       }
     }
     closeSheet();
@@ -4037,10 +4022,14 @@ async function saveConn(): Promise<void> {
       if (saved) {
         render();
         void runConnectionTest(saved.id);
-        // Endpointable kinds get their direct endpoint issued on creation —
-        // the one-time sheet still has to show, since the secret (or SSH
-        // socket path) leaves the broker only at issue.
-        if (ENDPOINTABLE[saved.type] && saved.agent_access.enabled && !saved.agent_access.endpoint) {
+        // Keep the new-credential flow confirmation-free. A direct endpoint
+        // grants standing access and has its own native gate, so leave that
+        // explicit action on the saved row instead of folding its prompt into
+        // credential creation.
+        if (!createdCredential
+            && ENDPOINTABLE[saved.type]
+            && saved.agent_access.enabled
+            && !saved.agent_access.endpoint) {
           try {
             const info = await invoke('issue_endpoint', { connectionId: saved.id });
             if (!brokerEpochIsCurrent(epoch)) return;
@@ -4396,7 +4385,7 @@ document.addEventListener('click', async (e) => {
         try {
           await navigator.clipboard.writeText(
             btn.dataset.text
-              ?? (conn.type === 'ssh' ? sshAuthSockCommand(address) : address),
+              ?? (conn.type === 'ssh' ? sshDirectCommand(address, conn) : address),
           );
           flashCopied(`ep:${conn.id}`);
         } catch {
@@ -4525,22 +4514,8 @@ document.addEventListener('click', async (e) => {
       }
       break;
     }
-    case 'copy-first-task': {
-      const ready = state.connectionReady;
-      if (!ready) break;
-      try {
-        await navigator.clipboard.writeText(firstTaskPrompt(ready.name, ready.type));
-        state.connectionTaskCopied = true;
-        render();
-        setTimeout(() => { state.connectionTaskCopied = false; render(); }, 1400);
-      } catch {
-        toast('⚠ Could not copy the task');
-      }
-      break;
-    }
     case 'dismiss-connection-ready':
       state.connectionReady = null;
-      state.connectionTaskCopied = false;
       render();
       break;
     case 'start-option':
@@ -4965,16 +4940,6 @@ document.addEventListener('click', async (e) => {
         const on = !state.settings.reauth_on_read;
         await run(() => invoke('set_reauth_on_read', { on }));
         toast(on ? '💳 Confirmation required before using saved secrets' : '💳 Extra confirmation removed');
-      }
-      await refresh('settings');
-      break;
-    case 'toggle-websockets':
-      {
-        const on = !state.settings.show_websockets;
-        if (await run(() => invoke('set_show_websockets', { on }))) {
-          state.settings.show_websockets = on;
-          toast(on ? '🔌 WebSockets shown in the catalog' : '🔌 WebSockets hidden');
-        }
       }
       await refresh('settings');
       break;

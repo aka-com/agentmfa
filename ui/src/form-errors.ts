@@ -26,18 +26,22 @@ function structuredError(error: unknown): StructuredFormError | null {
   return null;
 }
 
+export function sentenceCase(message: string): string {
+  return message.charAt(0).toUpperCase() + message.slice(1);
+}
+
 export function inlineFormError(error: unknown): { field: string; message: string } | null {
   const parsed = structuredError(error);
   if (!parsed || !parsed.field) return null;
   if (parsed.kind !== 'validation' && parsed.kind !== 'conflict') return null;
-  return { field: parsed.field, message: parsed.message };
+  return { field: parsed.field, message: sentenceCase(parsed.message) };
 }
 
 export function formErrorMessage(error: unknown): string {
   const parsed = structuredError(error);
-  if (parsed) return parsed.message;
-  if (error instanceof Error) return error.message;
-  return String(error || 'Couldn’t save your changes');
+  if (parsed) return sentenceCase(parsed.message);
+  if (error instanceof Error) return sentenceCase(error.message);
+  return sentenceCase(String(error || 'Couldn’t save your changes'));
 }
 
 export function formErrorKind(error: unknown): string | null {

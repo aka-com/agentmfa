@@ -47,8 +47,11 @@ test('infrastructure precedes MCP Apps and generic endpoints live under Custom A
   assert.ok(CATALOG_SECTIONS.indexOf('API Apps') < CATALOG_SECTIONS.indexOf('Custom Apps'));
   assert.deepEqual(
     CATALOG.filter((entry) => entry.section === 'Custom Apps').map((entry) => entry.id),
-    ['mcp', 'http'],
+    ['mcp', 'http', 'websocket'],
   );
+  const custom = CATALOG.filter((entry) => entry.section === 'Custom Apps');
+  assert.equal(custom.findIndex((entry) => entry.id === 'websocket'),
+    custom.findIndex((entry) => entry.id === 'http') + 1);
 });
 
 test('setup-required apps lead the disconnected MCP app rows', () => {
@@ -292,33 +295,14 @@ test('search filters by name and description, empty query returns all', () => {
   assert.equal(filterCatalog('zzz-nothing').length, 0);
 });
 
-test('WebSockets are hidden until the setting is on', () => {
-  const ids = (entries: { id: string }[]) => entries.map((entry) => entry.id);
-
-  const off = visibleCatalog('', { showWebsockets: false, connections: [] });
-  assert.ok(!ids(off).includes('websocket'));
-  assert.ok(ids(off).includes('postgres'), 'only WebSocket is affected');
-
-  const on = visibleCatalog('', { showWebsockets: true, connections: [] });
-  assert.ok(ids(on).includes('websocket'));
-});
-
-test('a configured WebSocket tool stays visible even with the setting off', () => {
-  // Hiding a row must never strand a tool the user already has.
-  const entries = visibleCatalog('', {
-    showWebsockets: false,
-    connections: [conn('ws', null, 'market-feed')],
-  });
-  assert.ok(entries.map((entry) => entry.id).includes('websocket'));
-});
-
-test('search still respects the WebSocket setting', () => {
-  const hidden = visibleCatalog('websocket', { showWebsockets: false, connections: [] });
-  assert.equal(hidden.length, 0);
+test('Custom WebSocket is always available to add', () => {
+  const all = visibleCatalog('');
+  assert.ok(all.some((entry) => entry.id === 'websocket'));
+  assert.deepEqual(visibleCatalog('websocket').map((entry) => entry.id), ['websocket']);
 });
 
 test('the registry tail follows the curated MCP app rows and is searchable', () => {
-  const all = visibleCatalog('', { showWebsockets: true, connections: [] });
+  const all = visibleCatalog('');
   for (const entry of REGISTRY_CATALOG) {
     assert.ok(all.some((row) => row.id === entry.id), entry.id);
   }
@@ -328,7 +312,7 @@ test('the registry tail follows the curated MCP app rows and is searchable', () 
   assert.equal(mcpApps.indexOf('mcp-figma'), mcpApps.indexOf('mcp-vercel') + 1);
   assert.equal(mcpApps.indexOf('mcp-atlassian'), mcpApps.indexOf('mcp-figma') + 1);
 
-  const hits = visibleCatalog('paypal', { showWebsockets: true, connections: [] });
+  const hits = visibleCatalog('paypal');
   assert.ok(hits.some((entry) => entry.id === 'mcp-paypal'));
 
   // Registry rows are ordinary addable MCP rows.
@@ -358,7 +342,7 @@ test('a configured registry server stays visible and groups under its row', () =
   assert.equal(entryForConnection(paypal)?.id, 'mcp-paypal');
   // …and the row surfaces even with no search query, so a configured tool
   // never becomes unreachable.
-  const rows = visibleCatalog('', { showWebsockets: true, connections: [paypal] });
+  const rows = visibleCatalog('');
   assert.ok(rows.some((entry) => entry.id === 'mcp-paypal'));
   const row = REGISTRY_CATALOG.find((entry) => entry.id === 'mcp-paypal')!;
   assert.deepEqual(connectionsForEntry(row, [paypal]).map((c) => c.name), ['paypal-main']);
