@@ -65,9 +65,9 @@ struct Cli {
 #[allow(clippy::large_enum_variant)] // one short-lived instance per invocation
 enum Command {
     /// Emit the /instructions content as a skill file. Prints to stdout by
-    /// default; `--write` writes .claude/skills/aka/SKILL.md.
+    /// default; `--write` writes .claude/skills/mfa/SKILL.md.
     Skill {
-        /// Write the file to `path` (default .claude/skills/aka/SKILL.md)
+        /// Write the file to `path` (default .claude/skills/mfa/SKILL.md)
         /// instead of printing to stdout.
         #[arg(long)]
         write: bool,
@@ -75,7 +75,7 @@ enum Command {
         #[arg(long, conflicts_with = "user")]
         path: Option<PathBuf>,
         /// With --write, target the user-level skills directory
-        /// (~/.claude/skills/aka/SKILL.md) instead of the repo-local
+        /// (~/.claude/skills/mfa/SKILL.md) instead of the repo-local
         /// default, so every project's agents see it.
         #[arg(long)]
         user: bool,
@@ -1542,8 +1542,8 @@ fn cmd_skill(write: bool, path: Option<PathBuf>, user: bool, root: Option<PathBu
         (Some(path), _) => path,
         (None, true) => dirs::home_dir()
             .expect("home directory")
-            .join(".claude/skills/aka/SKILL.md"),
-        (None, false) => PathBuf::from(".claude/skills/aka/SKILL.md"),
+            .join(".claude/skills/mfa/SKILL.md"),
+        (None, false) => PathBuf::from(".claude/skills/mfa/SKILL.md"),
     };
     if let Some(dir) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(dir) {

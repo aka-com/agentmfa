@@ -95,8 +95,8 @@ git push production main
 Teach the agents in a repository about the broker:
 
 ```sh
-mfa skill --write          # writes .claude/skills/aka/SKILL.md
-mfa skill --write --user   # or ~/.claude/skills/aka/SKILL.md for all repos
+mfa skill --write          # writes .claude/skills/mfa/SKILL.md
+mfa skill --write --user   # or ~/.claude/skills/mfa/SKILL.md for all repos
 ```
 
 Agents discover the live contract from the broker itself:

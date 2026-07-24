@@ -407,10 +407,10 @@ host-key-mismatched signing requests.
 pub fn skill_file(config: &BrokerConfig, paths: &Paths) -> String {
     format!(
         r#"---
-name: aka
+name: mfa
 description: >-
   Broker credentialed HTTP, WebSocket, Postgres and SSH access through the
-  local AKA daemon. Use when a task needs an API key, database, stream,
+  local AgentMFA daemon. Use when a task needs an API key, database, stream,
   or SSH key the developer has configured. The broker does not directly expose
   the stored secret; access is authorization-gated. Start by reading the live
   instructions over the broker socket.
@@ -541,7 +541,7 @@ mod tests {
     fn skill_file_embeds_instructions() {
         let cfg = BrokerConfig::default();
         let skill = skill_file(&cfg, &paths());
-        assert!(skill.starts_with("---\nname: aka"));
+        assert!(skill.starts_with("---\nname: mfa"));
         assert!(skill.contains(&instructions(&cfg, &paths())));
     }
 }
