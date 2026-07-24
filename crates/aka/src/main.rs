@@ -343,6 +343,26 @@ enum ConnCommand {
         #[arg(long)]
         root: Option<PathBuf>,
     },
+    /// Print the connection's already-issued direct endpoint: the pasteable
+    /// address and its endpoint secret. Read-only — issue or rotate the
+    /// endpoint from the desktop app. Like the other `conn` subcommands this
+    /// reads the offline store, so stop the broker first. Exits nonzero when
+    /// no endpoint has been issued yet.
+    Endpoint {
+        /// The connection whose endpoint to print.
+        name: String,
+        /// Print only the pasteable address (the base URL / DSN / agent
+        /// socket), for `$(aka conn endpoint <name> --url)`.
+        #[arg(long, conflicts_with = "secret")]
+        url: bool,
+        /// Print only the endpoint secret (empty for SSH, whose socket path
+        /// is the whole capability), for scripting.
+        #[arg(long)]
+        secret: bool,
+        /// Operate on a broker rooted here instead of the default layout.
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
 }
 
 #[derive(Args)]
@@ -531,6 +551,12 @@ fn main() {
             ConnCommand::Enable { name, root } => cmd_conn_access(name, root, true),
             ConnCommand::Disable { name, root } => cmd_conn_access(name, root, false),
             ConnCommand::Test { name, root } => cmd_conn_test(name, root),
+            ConnCommand::Endpoint {
+                name,
+                url,
+                secret,
+                root,
+            } => cmd_conn_endpoint(name, url, secret, root),
         },
         Command::Manage {
             command:
@@ -1210,6 +1236,40 @@ fn cmd_conn_test(name: String, root: Option<PathBuf>) {
             None => eprintln!("failed: {}", report.detail),
         }
         std::process::exit(1);
+    }
+}
+
+/// Print an already-issued direct endpoint's address and secret. Read-only:
+/// issuance/rotation binds a live listener and only the running broker (or the
+/// app) can do that; this reconstructs the pasteable address from the sealed,
+/// persisted record. `--url`/`--secret` print a single field for `$(...)` use.
+fn cmd_conn_endpoint(name: String, url: bool, secret: bool, root: Option<PathBuf>) {
+    let offline = open_broker(root);
+    let existing = conn_named(&offline.broker, &name);
+    let info = match offline.broker.ui_get_endpoint(&existing.id) {
+        Ok(Some(info)) => info,
+        Ok(None) => die(format!(
+            "no direct endpoint issued for {} — issue one from the Multitool app first",
+            existing.name
+        )),
+        Err(e) => die(e),
+    };
+    // Selectors print exactly one field with no decoration, so a `$(...)`
+    // capture carries only the value.
+    if url {
+        println!("{}", info.dsn);
+        return;
+    }
+    if secret {
+        println!("{}", info.secret);
+        return;
+    }
+    // Default: the copy-ready example on stderr (guidance), the address on
+    // stdout (the pasteable value), and the secret when the kind has one.
+    eprintln!("{}", info.example);
+    println!("{}", info.dsn);
+    if !info.secret.is_empty() {
+        eprintln!("endpoint secret: {}", info.secret);
     }
 }
 

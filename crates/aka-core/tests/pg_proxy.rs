@@ -720,6 +720,36 @@ async fn direct_endpoint_serves_an_unmodified_client() {
 }
 
 #[tokio::test]
+async fn get_endpoint_reads_back_the_issued_address_without_rotating() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let fake = fake_pg(FakeAuth::Cleartext).await;
+    add_pg_connection(&h.broker, fake.port);
+    h.pair().await;
+    let conn = h.broker.store.connection_by_name("prod-db").unwrap();
+
+    // No endpoint issued yet: the read is a clean absence, not an error.
+    assert!(h.broker.ui_get_endpoint(&conn.id).unwrap().is_none());
+
+    let issued = h.issue_endpoint().await;
+    let read = h
+        .broker
+        .ui_get_endpoint(&conn.id)
+        .unwrap()
+        .expect("endpoint should read back after issue");
+
+    // The read reconstructs the identical address, secret, and example from
+    // the persisted record — no new mint.
+    assert_eq!(read.endpoint_id, issued.endpoint_id);
+    assert_eq!(read.dsn, issued.dsn);
+    assert_eq!(read.secret, issued.secret);
+    assert_eq!(read.example, issued.example);
+
+    // A second read is stable: reading never rotates the secret.
+    let again = h.broker.ui_get_endpoint(&conn.id).unwrap().unwrap();
+    assert_eq!(again.secret, issued.secret);
+}
+
+#[tokio::test]
 async fn wrong_endpoint_secret_is_rejected() {
     let mut h = harness(BrokerConfig::default()).await;
     let fake = fake_pg(FakeAuth::Cleartext).await;

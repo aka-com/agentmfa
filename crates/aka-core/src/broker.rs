@@ -1484,24 +1484,58 @@ impl Broker {
             }
         }
 
-        let dir = self.paths.endpoint_dir(&issued.endpoint.id);
+        // Read back the just-persisted record so the API loopback port
+        // (assigned during bind) is present; the retained secret rides it too.
+        let record = self
+            .endpoints
+            .get(&issued.endpoint.id)
+            .unwrap_or_else(|| issued.endpoint.clone());
+        let info = self.endpoint_info(&connection, &record)?;
+        let mut entry = AuditEntry::new(
+            AuditKind::Wired,
+            format!("Direct endpoint issued: {}", connection.name),
+        )
+        .connection(connection.name.clone())
+        .field("endpoint_id", issued.endpoint.id.to_string())
+        .field("kind", connection.kind().as_str());
+        if let Some(confirmation) = confirmation {
+            entry = entry.confirmation(confirmation);
+        }
+        self.audit.append(entry);
+        self.events.wirings_changed();
+        Ok(info)
+    }
+
+    /// Build the pasteable address (DSN / socket path / base URL), the
+    /// retained secret, and a copy-ready example for an existing endpoint
+    /// record. Shared by issuance and read-back so both present the identical
+    /// address; performs no minting, gating, or listener work.
+    fn endpoint_info(
+        &self,
+        connection: &Connection,
+        endpoint: &DirectEndpoint,
+    ) -> Result<IssuedEndpointInfo> {
+        let dir = self.paths.endpoint_dir(&endpoint.id);
+        let secret = endpoint.secret.as_str();
         let info = match &connection.config {
             ConnectionConfig::Pg { user, dbname, .. } => {
+                // A pre-retention record (empty secret) prints the
+                // password-less DSN until it is reissued.
                 let dsn = crate::capability::pg::endpoint_dsn(
                     dir.as_path(),
                     user,
                     dbname,
-                    Some(&issued.secret),
+                    (!secret.is_empty()).then_some(secret),
                 );
                 // .env-shaped on purpose: the expected home for a brokered
                 // DSN is a config file, not a shell command — argv would
                 // leave the embedded secret in history and `ps` output.
                 let example = format!("DATABASE_URL=\"{dsn}\"");
                 IssuedEndpointInfo {
-                    endpoint_id: issued.endpoint.id,
+                    endpoint_id: endpoint.id,
                     kind: ConnectionKind::Pg,
                     dsn,
-                    secret: issued.secret,
+                    secret: endpoint.secret.clone(),
                     example,
                 }
             }
@@ -1525,7 +1559,7 @@ impl Broker {
                 // password, so the socket path is the whole capability. The
                 // minted secret is not surfaced.
                 IssuedEndpointInfo {
-                    endpoint_id: issued.endpoint.id,
+                    endpoint_id: endpoint.id,
                     kind: ConnectionKind::Ssh,
                     dsn: sock.clone(),
                     secret: String::new(),
@@ -1534,41 +1568,38 @@ impl Broker {
             }
             ConnectionConfig::Api { .. } => {
                 // The loopback port was assigned (and persisted) during bind.
-                let port = self
-                    .endpoints
-                    .get(&issued.endpoint.id)
-                    .and_then(|e| e.port)
+                let port = endpoint
+                    .port
                     .ok_or_else(|| CoreError::Vault("http endpoint bound no port".to_string()))?;
                 let base = format!("http://{}:{port}", self.advertise_host());
                 IssuedEndpointInfo {
-                    endpoint_id: issued.endpoint.id,
+                    endpoint_id: endpoint.id,
                     kind: ConnectionKind::Api,
                     dsn: base.clone(),
-                    secret: issued.secret.clone(),
+                    secret: endpoint.secret.clone(),
                     // The secret rides an Authorization header, not the URL, so
                     // it stays out of argv and shell history; the proxy strips
                     // it and injects the real credential upstream.
-                    example: format!(
-                        "curl -H \"Authorization: Bearer {}\" {base}/<path>",
-                        issued.secret
-                    ),
+                    example: format!("curl -H \"Authorization: Bearer {secret}\" {base}/<path>"),
                 }
             }
-            ConnectionConfig::Ws { .. } => unreachable!("kind checked above"),
+            ConnectionConfig::Ws { .. } => {
+                return Err(CoreError::EndpointUnsupportedKind(connection.kind().label()))
+            }
         };
-        let mut entry = AuditEntry::new(
-            AuditKind::Wired,
-            format!("Direct endpoint issued: {}", connection.name),
-        )
-        .connection(connection.name.clone())
-        .field("endpoint_id", issued.endpoint.id.to_string())
-        .field("kind", connection.kind().as_str());
-        if let Some(confirmation) = confirmation {
-            entry = entry.confirmation(confirmation);
-        }
-        self.audit.append(entry);
-        self.events.wirings_changed();
         Ok(info)
+    }
+
+    /// Read an existing direct endpoint's pasteable address and retained
+    /// secret without minting or rotating; `None` when none is issued for the
+    /// connection. Unlike issuance this is a read of already-surfaced state,
+    /// so it takes no native gate — it grants nothing the issue did not.
+    pub fn ui_get_endpoint(&self, connection_id: &Uuid) -> Result<Option<IssuedEndpointInfo>> {
+        let connection = self.store.connection_by_id(connection_id)?;
+        let Some(endpoint) = self.endpoints.get_for_connection(connection_id) else {
+            return Ok(None);
+        };
+        self.endpoint_info(&connection, &endpoint).map(Some)
     }
 
     /// Revoke one direct endpoint: drop the record, stop its listener, and
