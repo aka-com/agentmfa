@@ -41,7 +41,7 @@
   }
 
   html[data-theme="light"] {
-    --bg: oklch(97.5% 0.004 85);
+    --bg: oklch(99% 0 0);
     --fg: oklch(22% 0.008 75);
     --card: oklch(95% 0.005 85);
     --muted: oklch(90.5% 0.006 82);
@@ -240,6 +240,41 @@
     margin-top: -23rem;
     margin-bottom: 3rem;
     padding: 0 1rem;
+  }
+
+  /* screenshot + terminal composition that sits over the graphic band */
+  .hx-visual {
+    max-width: 52rem;
+    margin-left: auto;
+    margin-right: auto;
+  }
+  .hx-shot {
+    position: relative;
+    border: 1px solid var(--border);
+    border-radius: 2% / 2.45%;
+    overflow: hidden;
+    box-shadow: 0 30px 60px -24px rgb(0 0 0 / 0.4);
+  }
+  .hx-shot-img { display: block; width: 100%; height: auto; }
+  .hx-shot-light { display: none; }
+  html[data-theme="light"] .hx-shot-dark { display: none; }
+  html[data-theme="light"] .hx-shot-light { display: block; }
+
+  .hx-cli-float { margin-top: 1.25rem; }
+  .hx-cli-float .term { max-width: none; }
+
+  @media (min-width: 768px) {
+    .hx-cli-float {
+      position: absolute;
+      z-index: 3;
+      left: -1.5rem;
+      bottom: -2.5rem;
+      width: min(30rem, 58%);
+      margin-top: 0;
+    }
+    .hx-visual.hx-cli-overlap {
+      margin-bottom: 6rem;
+    }
   }
 
   /* centered copy on top, full-bleed graphic band, CLI overlapping */
@@ -897,7 +932,7 @@
 
       <div class="hx hx-stack">
         <h1>Secure access for AI agents</h1>
-        <p class="hero-lead">Connect to databases, servers, MCPs, and APIs without exposing secrets. AgentMFA is a desktop gateway that lets you protect and monitor agent access.</p>
+        <p class="hero-lead">Connect to databases, servers, MCPs, and APIs without exposing secrets. AgentMFA secures access to your critical services, from one desktop app.</p>
         <div class="hero-actions">
           <a class="btn primary" href="#get-agentmfa">Download AgentMFA
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
@@ -909,7 +944,12 @@
           <div class="hx-gfx" aria-hidden="true"><canvas></canvas></div>
         </div>
       </div>
-      <div class="hx-cli hx-cli-overlap">
+      <div class="hx-visual hx-cli-overlap">
+        <div class="hx-shot">
+          <img class="hx-shot-img hx-shot-dark" src="agentmfa-dark.png" alt="AgentMFA desktop app showing connected tools: Sandbox, Postgres, and SSH" width="1718" height="1397" loading="lazy">
+          <img class="hx-shot-img hx-shot-light" src="agentmfa-light.png" alt="AgentMFA desktop app showing connected tools: Sandbox, Postgres, and SSH" width="1718" height="1398" loading="lazy">
+        </div>
+        <div class="hx-cli hx-cli-float">
         <div class="term">
           <div class="term-bar">
             <span class="light"></span><span class="light"></span><span class="light"></span>
@@ -924,6 +964,7 @@
 <span class="p">$</span> psql "$(mfa dsn analytics)"
 <span class="c">analytics=&gt;</span> select count(*) from signups;
 <span class="p">▪ ok!</span><span class="c"> · 100 rows read · 0 secrets exposed</span></code></pre>
+        </div>
         </div>
       </div>
     </div>
