@@ -200,7 +200,7 @@
       writing-mode: vertical-rl; text-orientation: mixed;
       justify-content: center; padding: 10px 7px;
     }
-    .dw-settings{ align-self: center; }
+    .dw-settings{ align-self: center; flex-direction: column; }
     .settings-menu{ left: 0; right: auto; }
   }
   .dw-main{
@@ -308,8 +308,9 @@
   .dw-side.disabled .gear-btn{ opacity: .45; pointer-events: none; }
   .dw-side.disabled .dw-brand{ opacity: .7; }
   /* ---- settings popover (gear, sidebar bottom) ------------------------- */
-.dw-settings{ position: relative; }
-  .gear-btn{ justify-content: center; }
+/* The sidebar footer pairs the appearance toggle with the settings gear. */
+.dw-settings{ position: relative; display: flex; align-items: center; gap: 2px; }
+  .gear-btn, .theme-btn{ justify-content: center; }
   .settings-menu{
   position: absolute; left: 0; right: -40px; bottom: calc(100% + 4px); z-index: 12;
   display: flex; flex-direction: column; gap: 2px; padding: 4px;
@@ -775,9 +776,11 @@
 .toasts{ position: fixed; bottom: 16px; left: 0; right: 0; z-index: 40; display: flex; flex-direction: column; align-items: center; gap: 8px; pointer-events: none; }
   .toast{ background: rgba(30,30,36,.94); color: #f2f2f5; border-radius: 9px; padding: 8px 16px; font-size: 13px; box-shadow: 0 8px 22px rgba(10,15,40,.35); opacity: 0; transform: translateY(10px); transition: opacity .25s, transform .25s; }
   .toast.show{ opacity: 1; transform: none; }
-  /* ---- dark mode: token overrides only ---------------------------------- */
-@media (prefers-color-scheme: dark){
-  :root {
+  /* ---- dark mode: token overrides only. theme.js stamps data-theme on
+     <html> before first paint — the stored appearance choice, else the live
+     OS preference — so this one selector serves both and the
+     prefers-color-scheme media query lives in JS, not here. -------------- */
+:root[data-theme="dark"] {
     --ink: #ececf0;
     --ink-2: #d8d8de;
     --ink-3: #c9c9d2;
@@ -845,7 +848,6 @@
     --b-ws-bg: rgba(165,105,240,.20);   --b-ws-ink: #cfadf7;
     --b-ssh-bg: rgba(80,190,120,.18);   --b-ssh-ink: #96dcae;
     --b-agent-bg: rgba(255,255,255,.10); --b-agent-ink: #b8b8c0;
-  }
 }
   /* The header's trailing controls: search sits beside the primary action. */
 .dw-head-actions { display: flex; align-items: center; gap: 16px; flex: 0 0 auto; }

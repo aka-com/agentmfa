@@ -1693,6 +1693,21 @@ aka manage token</code></pre>` : ''}
   </div>`;
 }
 
+/** The effective appearance, as theme.js stamped it on <html> pre-paint. */
+function currentTheme(): 'light' | 'dark' {
+  return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+}
+
+/** The appearance toggle riding beside the settings gear, in both chromes.
+ * Shows the theme it switches to; the choice is stored, so it outlives the
+ * OS preference theme.js would otherwise follow. */
+function themeBtnHTML(cls: string): string {
+  const dark = currentTheme() === 'dark';
+  const label = `Switch to ${dark ? 'light' : 'dark'} appearance`;
+  return `<button class="${cls}" data-act="toggle-theme"
+    title="${label}" aria-label="${label}">${dark ? ICONS.sun : ICONS.moon}</button>`;
+}
+
 function renderMainWindow() {
   const takeover = brokerPaneHTML();
   const navItem = (tab: Tab): string =>
@@ -1734,6 +1749,7 @@ function renderMainWindow() {
         <div class="dw-settings">${takeover ? '' : menu}
           <button class="nav-item gear-btn ${state.menuOpen ? 'on' : ''}" data-act="toggle-settings-menu"
             title="Settings" aria-label="Settings" ${takeover ? 'disabled' : ''}>${ICONS.gear}</button>
+          ${themeBtnHTML('nav-item theme-btn')}
         </div>
       </div>
       <div class="dw-main">
@@ -1762,6 +1778,7 @@ function renderDropdown() {
     <div class="dd-head"><div class="dd-appicon">${ICONS.blocks}</div>
       <div class="dd-identity"><div class="dd-title">Multitool</div>${brokerReadyHTML()}</div>
       <button class="icon-btn" title="Open as a window" aria-label="Open as a window" data-act="mode-window">${ICONS.expand}</button>
+      ${themeBtnHTML('icon-btn')}
       <button class="icon-btn" title="Settings" aria-label="Settings" data-act="open-settings">${ICONS.gear}</button></div>
     <div class="seg">${tabs}</div>
     ${globalSectionsHTML()}
@@ -3421,6 +3438,15 @@ document.addEventListener('click', async (e) => {
     case 'mode-tray': state.menuOpen = false; run(() => invoke('ui_set_mode', { mode: 'tray' })); break;
     case 'mode-window': run(() => invoke('ui_set_mode', { mode: 'window' })); break;
     case 'toggle-settings-menu': state.menuOpen = !state.menuOpen; render(); break;
+    case 'toggle-theme': {
+      const next = currentTheme() === 'dark' ? 'light' : 'dark';
+      document.documentElement.dataset.theme = next;
+      // Storage can be unavailable (private contexts); the switch still
+      // applies for this window, the choice just won't stick.
+      try { localStorage.setItem('theme', next); } catch { /* see above */ }
+      render();
+      break;
+    }
     case 'connect-toggle':
       state.connectOpen = state.connectOpen === id ? null : id;
       render();
