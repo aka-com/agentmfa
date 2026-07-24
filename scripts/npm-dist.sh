@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build the `aka` CLI in release mode and stage it into the npm distribution
+# Build the `mfa` CLI in release mode and stage it into the npm distribution
 # under npm/ (the main `agentmfa` launcher package plus per-platform binary
 # packages). One invocation stages one target, or all supported targets when
 # the required Rust targets and cross-linkers are available.
@@ -116,7 +116,7 @@ node scripts/npm/sync-versions.mjs --check
 
 # The npm launcher reuses its own Node 22 runtime, but it still needs the
 # self-contained MCP host script. Build and stage that one-file bundle beside
-# the launcher so `aka serve` can host MCP from any working directory.
+# the launcher so `mfa serve` can host MCP from any working directory.
 npm run sidecar:build
 install -d "npm/agentmfa/sidecar"
 install -m 0644 "dist/sidecar/main.mjs" "npm/agentmfa/sidecar/main.mjs"
@@ -153,7 +153,7 @@ for target in "${targets[@]}"; do
 
   configure_linux_toolchain "$target"
 
-  build_args=(--release --package aka)
+  build_args=(--release --package mfa)
   bin_dir="target/release"
   if [[ "$target" != "$host" ]]; then
     rustup target add "$target"
@@ -164,8 +164,8 @@ for target in "${targets[@]}"; do
   cargo build "${build_args[@]}"
 
   install -d "npm/$platform_pkg/bin"
-  install -m 0755 "$bin_dir/aka" "npm/$platform_pkg/bin/aka"
-  echo "staged $bin_dir/aka -> npm/$platform_pkg/bin/aka"
+  install -m 0755 "$bin_dir/mfa" "npm/$platform_pkg/bin/mfa"
+  echo "staged $bin_dir/mfa -> npm/$platform_pkg/bin/mfa"
   node scripts/npm/verify-package.mjs "npm/$platform_pkg"
 
   if [[ "$pack" -eq 1 ]]; then

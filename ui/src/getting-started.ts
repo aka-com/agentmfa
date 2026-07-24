@@ -199,7 +199,7 @@ export interface ConnectClient {
   /** The walkthrough pane's copy-button label. */
   copyLabel: string;
   snippet: (env: ConnectClientEnv) => string;
-  /** This client launches `aka mcp`, which must be installed separately. */
+  /** This client launches `mfa mcp`, which must be installed separately. */
   requiresCli?: boolean;
   /** Its Quick Start snippet is shell commands, so CLI installation can be
    * prepended to the same runnable block. */
@@ -223,18 +223,18 @@ export function connectGuideSteps(client: ConnectClient, env: ConnectClientEnv):
   if (!client.requiresCli) return steps;
   return [{
     title: 'Install the AgentMFA CLI',
-    detail: 'Install the aka command globally and keep it available on PATH. Requires Node.js 22 or newer.',
+    detail: 'Install the mfa command globally and keep it available on PATH. Requires Node.js 22 or newer.',
     snippet: CLI_INSTALL_COMMAND,
   }, ...steps];
 }
 
 const SNIPPETS: Record<string, (env: ConnectClientEnv) => string> = {
-  'claude-code': () => 'claude mcp add agentmfa -- aka mcp --client claude-code',
+  'claude-code': () => 'claude mcp add agentmfa -- mfa mcp --client claude-code',
   'claude-desktop': () =>
     '{\n'
     + '  "mcpServers": {\n'
     + '    "agentmfa": {\n'
-    + '      "command": "aka",\n'
+    + '      "command": "mfa",\n'
     + '      "args": [\n'
     + '        "mcp",\n'
     + '        "--client",\n'
@@ -243,7 +243,7 @@ const SNIPPETS: Record<string, (env: ConnectClientEnv) => string> = {
     + '    }\n'
     + '  }\n'
     + '}',
-  codex: () => '[mcp_servers.agentmfa]\ncommand = "aka"\nargs = ["mcp", "--client", "codex"]',
+  codex: () => '[mcp_servers.agentmfa]\ncommand = "mfa"\nargs = ["mcp", "--client", "codex"]',
   mcp: (env: ConnectClientEnv) =>
     `# the MCP URL's port moves with restarts — read mcp_url from the manifest\n`
     + `curl -fsS --unix-socket ${env.socket} http://localhost/.well-known/agent-broker.json\n\n`
@@ -344,7 +344,7 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
       },
       {
         title: 'Or skip HTTP entirely',
-        detail: 'After installing the AgentMFA CLI, clients that launch stdio servers can run aka mcp directly.',
+        detail: 'After installing the AgentMFA CLI, clients that launch stdio servers can run mfa mcp directly.',
         snippet: CLI_INSTALL_COMMAND,
       },
     ],

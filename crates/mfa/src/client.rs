@@ -1,7 +1,7 @@
 //! Shared client for talking to a running broker over its Unix control
 //! socket: minimal HTTP, shared-key loading, and authenticated capability
-//! opens. `aka mcp` builds its discovery loop on the low-level pieces;
-//! `aka dsn` and `aka ssh` drive [`open_session`] directly.
+//! opens. `mfa mcp` builds its discovery loop on the low-level pieces;
+//! `mfa dsn` and `mfa ssh` drive [`open_session`] directly.
 
 use std::path::Path;
 
@@ -114,7 +114,7 @@ pub async fn open_session(
     .await
     .map_err(|error| match error.kind() {
         std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => format!(
-            "no broker is running at {} — start the AgentMFA app or `aka serve`",
+            "no broker is running at {} — start the AgentMFA app or `mfa serve`",
             socket.display()
         ),
         _ => format!(

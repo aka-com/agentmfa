@@ -1,7 +1,7 @@
-//! `aka mcp`: a stdio ⇄ streamable-HTTP MCP bridge.
+//! `mfa mcp`: a stdio ⇄ streamable-HTTP MCP bridge.
 //!
 //! Every MCP client that can launch a stdio server — Claude Code, Claude
-//! Desktop, Codex, custom harnesses — can be pointed at `aka mcp` and needs
+//! Desktop, Codex, custom harnesses — can be pointed at `mfa mcp` and needs
 //! no token pasting and no port discovery: the bridge reads this computer's
 //! shared key from the broker's token file and finds the MCP host through
 //! the broker's discovery manifest (the sidecar's loopback port is dynamic,
@@ -60,7 +60,7 @@ async fn discover_mcp_url(socket: &Path) -> Result<String, String> {
                 }
                 if !reported_no_mcp {
                     eprintln!(
-                        "aka mcp: the broker is running but its MCP host is not; \
+                        "mfa mcp: the broker is running but its MCP host is not; \
                          open the AgentMFA app (waiting)"
                     );
                     reported_no_mcp = true;
@@ -68,7 +68,7 @@ async fn discover_mcp_url(socket: &Path) -> Result<String, String> {
             }
             Err(_) if !reported_waiting => {
                 eprintln!(
-                    "aka mcp: waiting for the AgentMFA broker at {}",
+                    "mfa mcp: waiting for the AgentMFA broker at {}",
                     socket.display()
                 );
                 reported_waiting = true;
@@ -245,7 +245,7 @@ fn one_line(message: &str) -> Option<String> {
     match serde_json::from_str::<serde_json::Value>(message) {
         Ok(value) => Some(value.to_string()),
         Err(_) => {
-            eprintln!("aka mcp: dropped a non-JSON frame from the MCP host");
+            eprintln!("mfa mcp: dropped a non-JSON frame from the MCP host");
             None
         }
     }

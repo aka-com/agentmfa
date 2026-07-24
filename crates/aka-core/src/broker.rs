@@ -139,7 +139,7 @@ pub struct Broker {
     advertise_host: std::sync::OnceLock<String>,
     /// The sidecar's loopback MCP port, reported by the shell that
     /// supervises it (restarts move it; `None` while it is not running).
-    /// Advertised in the discovery manifest so `aka mcp` and other bridges
+    /// Advertised in the discovery manifest so `mfa mcp` and other bridges
     /// can find the MCP endpoint without a config file.
     sidecar_mcp_port: Mutex<Option<u16>>,
     /// The WS bridge's ephemeral loopback port, set when the daemon starts;

@@ -1,29 +1,29 @@
-//! `aka` CLI.
+//! `mfa` CLI.
 //!
-//! - `aka skill` emits the `/instructions` content as a checked-in
+//! - `mfa skill` emits the `/instructions` content as a checked-in
 //!   skill file, the same content the daemon serves, so the convention
 //!   layer can't drift from the daemon.
-//! - `aka serve` runs the broker headless, so the whole control plane +
+//! - `mfa serve` runs the broker headless, so the whole control plane +
 //!   WS/PG data planes can be exercised without the desktop UI (useful for
 //!   agent integration and CI).
-//! - `aka secret add|list|rename|replace|rm` and
-//!   `aka conn add|list|update|rename|rm|enable|disable|test` manage the
+//! - `mfa secret add|list|rename|replace|rm` and
+//!   `mfa conn add|list|update|rename|rm|enable|disable|test` manage the
 //!   store from the terminal — the dev/headless counterpart of the app's
 //!   Secrets and Tools tabs — with the same validation, so a `serve --root`
 //!   harness never hand-writes (sealed) store files. Mutations beyond
 //!   seeding run through the broker's own `ui_*` layer, so audit entries
 //!   and access/endpoint side effects cannot drift from the app.
-//! - `aka dsn` / `aka ssh` open data-plane sessions on a running broker
+//! - `mfa dsn` / `mfa ssh` open data-plane sessions on a running broker
 //!   and print the one value a stock client needs — a ticket-embedded DSN,
-//!   an `SSH_AUTH_SOCK` path — so `psql "$(aka dsn …)"` works as a
+//!   an `SSH_AUTH_SOCK` path — so `psql "$(mfa dsn …)"` works as a
 //!   one-liner.
-//! - `aka key` / `aka status` / `aka activity` are the operator's view:
+//! - `mfa key` / `mfa status` / `mfa activity` are the operator's view:
 //!   the shared agent key (and its rotation), whether a broker is up and
 //!   what it serves, and the audit trail.
 //! - Management commands work online too: against the running local
 //!   broker over its socket, or a hosted broker via `--broker <url>` —
 //!   both through the manage API, authorized by the management token
-//!   (`aka manage login` stores it). With no broker running they fall
+//!   (`mfa manage login` stores it). With no broker running they fall
 //!   back to the offline construction above.
 
 use std::os::unix::fs::FileTypeExt as _;
@@ -55,7 +55,7 @@ mod client;
 mod mcp_bridge;
 
 #[derive(Parser)]
-#[command(name = "aka", version, about = "AgentMFA broker CLI")]
+#[command(name = "mfa", version, about = "AgentMFA broker CLI")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -93,7 +93,7 @@ enum Command {
     },
     /// Run the broker headless (no desktop UI). Every local agent shares
     /// one key (~/.aka/token under the root); tools are enabled for agents
-    /// by default and managed remotely via the manage API (`aka manage
+    /// by default and managed remotely via the manage API (`mfa manage
     /// token`) or locally from the desktop app.
     Serve {
         /// Use an isolated root dir (data + socket under it) instead of the
@@ -126,7 +126,7 @@ enum Command {
         no_sidecar: bool,
     },
     /// Bridge stdio MCP to the local AgentMFA broker's MCP host. Point any
-    /// MCP client at `aka mcp` — it reads this computer's shared key and
+    /// MCP client at `mfa mcp` — it reads this computer's shared key and
     /// discovers the MCP endpoint itself, so configs stay static.
     Mcp {
         /// Bridge to a broker rooted here instead of the default layout.
@@ -139,7 +139,7 @@ enum Command {
     },
     /// Open a Postgres session on a running broker and print a ready-to-run
     /// DSN with the short-lived session ticket embedded:
-    /// `psql "$(aka dsn analytics)"`. The ticket sits in ps-visible argv
+    /// `psql "$(mfa dsn analytics)"`. The ticket sits in ps-visible argv
     /// and shell history for its short window; POST /v1/pg/open with
     /// PGPASSWORD keeps it out when that matters.
     Dsn {
@@ -154,7 +154,7 @@ enum Command {
         client: Option<String>,
     },
     /// Open an SSH session on a running broker and print the agent socket
-    /// path: `export SSH_AUTH_SOCK="$(aka ssh production)"` — then stock
+    /// path: `export SSH_AUTH_SOCK="$(mfa ssh production)"` — then stock
     /// `ssh`/`git`/`scp`/`rsync` work while the broker signs only for the
     /// connection's pinned user and server host key.
     Ssh {
@@ -444,7 +444,7 @@ enum ConnCommand {
         /// The connection whose endpoint to print.
         name: String,
         /// Print only the pasteable address (the base URL / DSN / agent
-        /// socket), for `$(aka conn endpoint <name> --url)`.
+        /// socket), for `$(mfa conn endpoint <name> --url)`.
         #[arg(long, conflicts_with = "secret")]
         url: bool,
         /// Print only the endpoint secret (empty for SSH, whose socket path
@@ -808,7 +808,7 @@ fn cmd_secret_list(root: Option<PathBuf>, url: Option<String>) {
     let managed = management_backend(root, url);
     let secrets = managed.run(managed.backend.list_secrets());
     if secrets.is_empty() {
-        eprintln!("no secrets configured (add one with `aka secret add <name>`)");
+        eprintln!("no secrets configured (add one with `mfa secret add <name>`)");
         return;
     }
     for dto in secrets {
@@ -845,7 +845,7 @@ fn manage_token_store(paths: &Paths) -> TokenStore {
 
 /// Resolve the management token for `key` (a manage URL, or the local
 /// socket path): the AKA_MANAGE_TOKEN environment variable wins, then the
-/// token stored by `aka manage login`.
+/// token stored by `mfa manage login`.
 fn manage_token(paths: &Paths, key: &str) -> Option<Zeroizing<String>> {
     if let Ok(token) = std::env::var("AKA_MANAGE_TOKEN") {
         let token = token.trim().to_string();
@@ -878,7 +878,7 @@ fn management_backend(root: Option<PathBuf>, url: Option<String>) -> Managed {
         let Some(token) = manage_token(&paths, &url) else {
             die(format!(
                 "no management token for {url} — set AKA_MANAGE_TOKEN, or store \
-                 one with `aka manage login --broker {url}` (issued by `aka \
+                 one with `mfa manage login --broker {url}` (issued by `mfa \
                  manage token` on the broker host)"
             ));
         };
@@ -901,8 +901,8 @@ fn management_backend(root: Option<PathBuf>, url: Option<String>) -> Managed {
         let Some(token) = manage_token(&paths, &key) else {
             die(format!(
                 "a broker is running on {key}.\n\
-                 To edit it live, store its management token with `aka manage \
-                 login` (issue one with `aka manage token` while the broker is \
+                 To edit it live, store its management token with `mfa manage \
+                 login` (issue one with `mfa manage token` while the broker is \
                  stopped) or set AKA_MANAGE_TOKEN — or stop the broker for an \
                  offline edit."
             ));
@@ -969,7 +969,7 @@ fn secret_dto(managed: &Managed, name: &str) -> SecretDto {
     let secrets = managed.run(managed.backend.list_secrets());
     match secrets.into_iter().find(|s| s.name == name) {
         Some(dto) => dto,
-        None => die(format!("no secret named {name:?} (see `aka secret list`)")),
+        None => die(format!("no secret named {name:?} (see `mfa secret list`)")),
     }
 }
 
@@ -978,7 +978,7 @@ fn conn_dto(managed: &Managed, name: &str) -> ConnectionDto {
     match connections.into_iter().find(|c| c.name == name) {
         Some(dto) => dto,
         None => die(format!(
-            "no connection named {name:?} (see `aka conn list`)"
+            "no connection named {name:?} (see `mfa conn list`)"
         )),
     }
 }
@@ -991,7 +991,7 @@ fn secret_ids_by_names(managed: &Managed, names: &[String]) -> Vec<Uuid> {
         .iter()
         .map(|name| match secrets.iter().find(|s| &s.name == name) {
             Some(dto) => dto_id(&dto.id),
-            None => die(format!("no secret named {name:?} (see `aka secret list`)")),
+            None => die(format!("no secret named {name:?} (see `mfa secret list`)")),
         })
         .collect()
 }
@@ -1176,7 +1176,7 @@ fn cmd_conn_list(root: Option<PathBuf>, url: Option<String>) {
     let managed = management_backend(root, url);
     let connections = managed.run(managed.backend.list_connections());
     if connections.is_empty() {
-        eprintln!("no connections configured (add one with `aka conn add`)");
+        eprintln!("no connections configured (add one with `mfa conn add`)");
         return;
     }
     for dto in connections {
@@ -1614,7 +1614,7 @@ fn cmd_manage_login(url: Option<String>, token_env: Option<String>, root: Option
         Ok(_) => eprintln!("token verified against the running broker"),
         Err(ManageError::InvalidManageToken) => die(
             "the broker rejected this management token — issue a fresh one \
-             with `aka manage token`",
+             with `mfa manage token`",
         ),
         Err(ManageError::Unreachable { .. }) => {
             eprintln!("the broker is not reachable right now; storing the token unverified");
@@ -1732,7 +1732,7 @@ fn open_session(
 
 /// Embed the session ticket as the DSN's password. The broker returns the
 /// two separately so callers can keep the ticket out of ps-visible argv
-/// (PGPASSWORD); `aka dsn` exists for the one-liner and accepts that
+/// (PGPASSWORD); `mfa dsn` exists for the one-liner and accepts that
 /// exposure for the ticket's short window.
 fn embed_ticket(dsn: &str, ticket: &str) -> Result<String, String> {
     match dsn.split_once("://ticket@") {
@@ -1894,16 +1894,16 @@ fn cmd_status(root: Option<PathBuf>, url: Option<String>) {
         }
     );
     // The tools, as an agent sees them (this appears in the activity log
-    // as a listing by aka-status).
+    // as a listing by mfa-status).
     let listing = runtime.block_on(async {
-        let key = client::shared_key(&paths, Some("aka-status")).await?;
+        let key = client::shared_key(&paths, Some("mfa-status")).await?;
         let (status, body) = client::unix_http(
             &socket,
             "GET",
             "/v1/connections",
             None,
             Some(&key),
-            Some("aka-status"),
+            Some("mfa-status"),
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -2070,7 +2070,7 @@ fn resolve_sidecar(broker_socket: PathBuf) -> Option<aka_core::sidecar::SidecarC
     })
 }
 
-/// Everything `aka serve` accepts, bundled so the call site stays legible.
+/// Everything `mfa serve` accepts, bundled so the call site stays legible.
 struct ServeArgs {
     root: Option<PathBuf>,
     listen: Option<std::net::SocketAddr>,
@@ -2168,14 +2168,14 @@ fn cmd_serve(args: ServeArgs) {
             Some(url) => eprintln!("  advertised to remote clients as {url}"),
             None => eprintln!("  no --public-url set: TCP discovery omits absolute URLs"),
         }
-        eprintln!("  remote management: enter this broker's `aka manage token` in the app");
+        eprintln!("  remote management: enter this broker's `mfa manage token` in the app");
     }
     eprintln!(
         "  discovery: curl --unix-socket {} http://localhost/instructions",
         daemon.socket_path.display()
     );
     eprintln!(
-        "  skill file: `aka skill --write` in a repo (or --write --user) \
+        "  skill file: `mfa skill --write` in a repo (or --write --user) \
          teaches agents this broker"
     );
     eprintln!("  agents authenticate with the shared key at the root's token file");

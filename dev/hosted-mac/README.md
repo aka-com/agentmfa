@@ -14,24 +14,24 @@ Install the CLI (`npm install -g agentmfa`) or use a checkout. Then:
 # Issue the management token (offline; stop any running broker first).
 # Printed once — only its hash is stored. This is what you enter in the
 # desktop app.
-aka manage token
+mfa manage token
 
 # Optionally bound a leaked token's blast radius with an expiry; the app
 # re-prompts for a fresh one when it lapses. Re-run to rotate, --revoke
 # to close the manage API.
-aka manage token --ttl-days 90
+mfa manage token --ttl-days 90
 
 # Optionally seed tools/secrets offline (or do it all from the app later,
-# or live once the broker is up: `aka manage login`, then the same
+# or live once the broker is up: `mfa manage login`, then the same
 # commands drive the running broker — remotely too, with
 # `--broker <public-url>`):
-aka secret add GITHUB_API_KEY
-aka conn add github --kind api --host api.github.com \
+mfa secret add GITHUB_API_KEY
+mfa conn add github --kind api --host api.github.com \
     --template 'Authorization: Bearer {{GITHUB_API_KEY}}'
 
 # Serve. --listen adds the TCP control plane (loopback here; see below),
 # --public-url is what remote clients will reach it at through your proxy.
-aka serve --listen 127.0.0.1:4780 --public-url https://broker.example.dev
+mfa serve --listen 127.0.0.1:4780 --public-url https://broker.example.dev
 ```
 
 Notes:
@@ -40,12 +40,12 @@ Notes:
   in the macOS login Keychain, so run it inside a logged-in user session —
   a launchd *agent* (`~/Library/LaunchAgents`), never a launch *daemon*.
   A headless Mac mini works with auto-login enabled.
-- **MCP host**: `aka serve` starts the Node sidecar when it finds
+- **MCP host**: `mfa serve` starts the Node sidecar when it finds
   `dist/sidecar/main.mjs` (a checkout after `npm run sidecar:build`) or
   `AKA_SIDECAR_SCRIPT` points at one; `node` must be on PATH (or set
   `AKA_SIDECAR_NODE`). Remote MCP clients then use `<public-url>/mcp`.
 - `/v1/pair` is not served on the TCP listener: remote clients get the
-  shared agent key from you (`aka key` prints it; it lives in
+  shared agent key from you (`mfa key` prints it; it lives in
   `~/.aka/token` on this Mac), and the desktop app manages the broker
   with the `akamgr_…` token only.
 
@@ -84,7 +84,7 @@ For agents on other machines to use the **WebSocket/Postgres** data
 planes, serve them on a reachable address:
 
 ```sh
-aka serve --listen 127.0.0.1:4780 --public-url https://broker.example.dev \
+mfa serve --listen 127.0.0.1:4780 --public-url https://broker.example.dev \
     --data-plane-listen 0.0.0.0 --advertise-host broker.lan
 ```
 

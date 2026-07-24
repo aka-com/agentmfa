@@ -1,7 +1,7 @@
 # Host a broker on Linux
 
 The broker runs headless on Linux the same way it does on a Mac
-(`aka serve`), with one difference: **secrets are sealed by an encrypted
+(`mfa serve`), with one difference: **secrets are sealed by an encrypted
 vault** instead of the macOS Keychain, so you must provide a master key.
 Everything else — the manage API, the `akamgr_` token, TCP control plane,
 relayed OAuth, data-plane advertise — works identically. Manage it from
@@ -46,10 +46,10 @@ docker run -d --name aka-broker \
     aka-broker --public-url https://broker.example.dev --advertise-host broker.lan
 ```
 
-The image builds the `aka` CLI (glibc/Debian — no musl needed) and the
-Node MCP sidecar, and `aka serve` supervises the sidecar so `<public-url>/mcp`
+The image builds the `mfa` CLI (glibc/Debian — no musl needed) and the
+Node MCP sidecar, and `mfa serve` supervises the sidecar so `<public-url>/mcp`
 works. Args after the image name are appended to the entrypoint's
-`aka serve --root /var/lib/aka --listen 0.0.0.0:4780`.
+`mfa serve --root /var/lib/aka --listen 0.0.0.0:4780`.
 
 Issue the management token once (offline; the broker holds identity state
 in memory, so stop it first), then enter it in the desktop app:
@@ -57,34 +57,34 @@ in memory, so stop it first), then enter it in the desktop app:
 ```sh
 docker stop aka-broker
 docker run --rm -e AKA_VAULT_KEY="$AKA_VAULT_KEY" -v aka-state:/var/lib/aka \
-    --entrypoint aka aka-broker manage token --root /var/lib/aka
+    --entrypoint mfa aka-broker manage token --root /var/lib/aka
 docker start aka-broker
 ```
 
 That one-time issuance is the only stop/start: with the token stored
-(`aka manage login --broker <public-url>`, from any machine with the
+(`mfa manage login --broker <public-url>`, from any machine with the
 CLI), every management command drives the **running** broker over its
 manage API — seed secrets and tools, flip agent access, test
 connections, read the activity trail:
 
 ```sh
-printf '%s' "$GITHUB_TOKEN" | aka secret add GITHUB_TOKEN --broker https://broker.example.dev
-aka conn add github --kind api --host api.github.com \
+printf '%s' "$GITHUB_TOKEN" | mfa secret add GITHUB_TOKEN --broker https://broker.example.dev
+mfa conn add github --kind api --host api.github.com \
     --template 'Authorization: Bearer {{GITHUB_TOKEN}}' --broker https://broker.example.dev
-aka conn disable github --broker https://broker.example.dev
-aka activity --broker https://broker.example.dev
+mfa conn disable github --broker https://broker.example.dev
+mfa activity --broker https://broker.example.dev
 ```
 
 ## Run it (systemd, no container)
 
-Build `aka` (`cargo build --release -p aka`) and the sidecar
+Build `mfa` (`cargo build --release -p mfa`) and the sidecar
 (`npm run sidecar:build`), install them, create the `aka` user and
 `/var/lib/aka`, drop the key in `/etc/aka/vault.env`
 (`AKA_VAULT_KEY=…`, mode 0400), then use
 [`aka-broker.service`](aka-broker.service):
 
 ```sh
-install -Dm755 target/release/aka /usr/local/bin/aka
+install -Dm755 target/release/mfa /usr/local/bin/mfa
 install -Dm644 dist/sidecar/main.mjs /usr/local/share/aka/sidecar/main.mjs
 useradd --system --home /var/lib/aka --create-home aka
 install -Dm644 dev/hosted-linux/aka-broker.service /etc/systemd/system/aka-broker.service
@@ -97,7 +97,7 @@ systemctl daemon-reload && systemctl enable --now aka-broker
 Same as the Mac runbook (`dev/hosted-mac/`): put TLS in front of the TCP
 port (reverse proxy or tunnel), `--data-plane-listen`/`--advertise-host`
 for WS/PG agents on other machines (plaintext legs → trusted network only),
-and SSH stays same-machine. `--ttl-days` on `aka manage token` bounds a
+and SSH stays same-machine. `--ttl-days` on `mfa manage token` bounds a
 leaked token.
 
 ## Still open

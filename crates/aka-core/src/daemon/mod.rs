@@ -1533,7 +1533,7 @@ async fn post_pg_open(
     // redemption time. The ticket is NOT embedded in the DSN: returning
     // the two separately lets callers keep it out of ps-visible argv via
     // PGPASSWORD, while callers that accept the exposure for the ticket's
-    // short window (`aka dsn`) embed it themselves.
+    // short window (`mfa dsn`) embed it themselves.
     let executor: crate::executions::Executor = {
         let broker = broker.clone();
         let conn = conn.clone();

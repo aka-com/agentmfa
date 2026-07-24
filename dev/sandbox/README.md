@@ -31,7 +31,7 @@ A copy of this walkthrough formatted for the browser is in
   `bash scripts/sandbox-up.sh` works without it)
 - `curl`, `ssh-keygen`, and `ssh-keyscan` (preinstalled on macOS)
 - AKA Desktop: the desktop app, or the headless broker
-  (`cargo run -p aka -- serve`) on any platform
+  (`cargo run -p mfa -- serve`) on any platform
 
 ## 2. Start the sandbox
 
@@ -185,8 +185,8 @@ Silicon and amd64 hosts; update each tag and digest together after
 reviewing a new upstream release. The walkthrough above adds each
 service through AKA Desktop; the same checks run headless on Linux
 (where the desktop app does not build) by seeding the store with
-`aka conn add` (the MCP connection needs `--mcp-path /mcp`), starting
-`aka serve`, and driving the broker over its Unix socket the way an
+`mfa conn add` (the MCP connection needs `--mcp-path /mcp`), starting
+`mfa serve`, and driving the broker over its Unix socket the way an
 agent would.
 
 Do not mount the repository, home directory, or real credentials into

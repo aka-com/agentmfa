@@ -4,7 +4,7 @@
 //! drive a [`LocalBackend`] so a remote shell exercises exactly the code
 //! path an in-process shell does. Authorization is the management token
 //! (`akamgr_…`) — a credential distinct from the agent key, closed until
-//! `aka manage token` issues one. Agent keys never authenticate here and
+//! `mfa manage token` issues one. Agent keys never authenticate here and
 //! the manage token never authenticates the agent plane.
 //!
 //! Failures cross the wire as the `aka-api` [`ManageError`] serialization,
@@ -52,10 +52,10 @@ impl FromRequestParts<AppState> for ManageAuthed {
                 // knows whether to re-issue or check what they pasted.
                 let detail = if error == crate::identity::TokenError::Expired {
                     "the management token has expired; issue a fresh one on the \
-                     broker host with `aka manage token`"
+                     broker host with `mfa manage token`"
                 } else {
                     "manage routes require this broker's management token \
-                     (issue one on the broker host with `aka manage token`)"
+                     (issue one on the broker host with `mfa manage token`)"
                 };
                 Err((
                     StatusCode::UNAUTHORIZED,

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Keep the npm distribution's package versions in lock-step with the Cargo
-// workspace version — the single source of truth the `aka` binary reports
+// workspace version — the single source of truth the `mfa` binary reports
 // via `--version`. Covers the five package.json files under npm/ and the
 // main package's exact-pinned optionalDependencies on the platform packages.
 //

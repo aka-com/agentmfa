@@ -15,8 +15,8 @@ including Linux where the Tauri app doesn't build.
 ## Launch
 
 ```sh
-cargo build --workspace                          # binary: target/debug/aka
-./target/debug/aka serve --root "$DIR/root" >"$DIR/serve.log" 2>&1 &
+cargo build --workspace                          # binary: target/debug/mfa
+./target/debug/mfa serve --root "$DIR/root" >"$DIR/serve.log" 2>&1 &
 ```
 
 The socket is `<root>/sock/broker.sock`. On Linux the vault falls back to
@@ -28,10 +28,10 @@ Seed the store with the CLI **before starting the broker** (the commands
 refuse while a broker is live on the root):
 
 ```sh
-printf 'dummy' | ./target/debug/aka secret add GITHUB_API_KEY --root "$DIR/root"
-./target/debug/aka conn add github --kind api --host api.github.com \
+printf 'dummy' | ./target/debug/mfa secret add GITHUB_API_KEY --root "$DIR/root"
+./target/debug/mfa conn add github --kind api --host api.github.com \
     --template 'Authorization: Bearer {{GITHUB_API_KEY}}' --root "$DIR/root"
-./target/debug/aka conn list --root "$DIR/root"
+./target/debug/mfa conn list --root "$DIR/root"
 ```
 
 pg/ws/ssh kinds bind one secret by name (`--secret NAME`); `conn add`
@@ -58,4 +58,4 @@ Gotchas:
   connection off via `Broker::ui_set_tool_access` in a Rust test instead.
 - Pairing is globally rate limited (3 per 5 s): `sleep 5` between bursts
   or unrelated probes will 429.
-- `pkill -f "aka serve"` to clean up.
+- `pkill -f "mfa serve"` to clean up.

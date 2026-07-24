@@ -182,7 +182,7 @@ impl std::fmt::Display for ManageError {
             ),
             Self::InvalidManageToken => write!(
                 f,
-                "the broker rejected the management token; re-issue it with `aka manage token` and enter the new one"
+                "the broker rejected the management token; re-issue it with `mfa manage token` and enter the new one"
             ),
             Self::Unreachable { message } => {
                 write!(f, "the remote broker could not be reached: {message}")

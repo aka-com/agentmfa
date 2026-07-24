@@ -118,33 +118,33 @@ function verifyPlatformPackage(directory, expectedVersion) {
     fail(`${name} must declare cpu ${expected.cpu}`);
   }
 
-  const binary = path.join(packageDir, "bin", "aka");
+  const binary = path.join(packageDir, "bin", "mfa");
   try {
     accessSync(binary, constants.R_OK | constants.X_OK);
   } catch {
-    fail(`${name} is missing an executable bin/aka; build and stage it first`);
+    fail(`${name} is missing an executable bin/mfa; build and stage it first`);
   }
-  if (!statSync(binary).isFile()) fail(`${name}/bin/aka is not a regular file`);
+  if (!statSync(binary).isFile()) fail(`${name}/bin/mfa is not a regular file`);
 
   const identity = binaryIdentity(binary);
   if (identity.format !== expected.format || identity.cpu !== expected.cpu) {
     fail(
-      `${name}/bin/aka is ${identity.format}-${identity.cpu}, expected ` +
+      `${name}/bin/mfa is ${identity.format}-${identity.cpu}, expected ` +
         `${expected.format}-${expected.cpu}`
     );
   }
 
   if (process.platform === expected.os && process.arch === expected.cpu) {
     const result = spawnSync(binary, ["--version"], { encoding: "utf8" });
-    if (result.error) fail(`${name}/bin/aka --version: ${result.error.message}`);
+    if (result.error) fail(`${name}/bin/mfa --version: ${result.error.message}`);
     if (result.status !== 0) {
-      fail(`${name}/bin/aka --version exited with status ${result.status}`);
+      fail(`${name}/bin/mfa --version exited with status ${result.status}`);
     }
     const actual = result.stdout.trim();
-    if (actual !== `aka ${expectedVersion}`) {
+    if (actual !== `mfa ${expectedVersion}`) {
       fail(
-        `${name}/bin/aka reports ${JSON.stringify(actual)}, expected ` +
-          `${JSON.stringify(`aka ${expectedVersion}`)}`
+        `${name}/bin/mfa reports ${JSON.stringify(actual)}, expected ` +
+          `${JSON.stringify(`mfa ${expectedVersion}`)}`
       );
     }
   }

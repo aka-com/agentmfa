@@ -296,7 +296,7 @@ impl FormError {
             ManageError::InvalidManageToken => Self::global(
                 "system",
                 "invalid_manage_token",
-                "The broker rejected the management token — re-enter it from `aka manage token`",
+                "The broker rejected the management token — re-enter it from `mfa manage token`",
                 None,
             ),
             ManageError::Unreachable { message } => Self::global(

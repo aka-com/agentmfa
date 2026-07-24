@@ -18,7 +18,7 @@ Environment=AKA_SIDECAR_SCRIPT=/usr/local/share/aka/sidecar/main.mjs
 # reads (EnvironmentFile), or inject AKA_VAULT_KEY from your secret manager.
 # NEVER put the key literal in this unit file.
 EnvironmentFile=/etc/aka/vault.env
-ExecStart=/usr/local/bin/aka serve \
+ExecStart=/usr/local/bin/mfa serve \
     --root /var/lib/aka \
     --listen 127.0.0.1:4780 \
     --public-url https://broker.example.dev

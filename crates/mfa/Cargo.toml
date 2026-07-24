@@ -1,12 +1,12 @@
 [package]
-name = "aka"
+name = "mfa"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "AgentMFA command line: broker, MCP bridge, and headless management"
 
 [[bin]]
-name = "aka"
+name = "mfa"
 path = "src/main.rs"
 
 [dependencies]

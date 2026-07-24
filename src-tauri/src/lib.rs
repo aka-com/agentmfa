@@ -62,7 +62,7 @@ pub(crate) fn start_local_runtime(handle: &AppHandle) -> Result<LocalRuntime, Co
     let sidecar = runtime.block_on(async { sidecar::start(handle, daemon.socket_path.clone()) });
     // Keep the broker told where the MCP endpoint is listening (restarts
     // move the port), so the discovery manifest can advertise it to
-    // `aka mcp` and other bridges.
+    // `mfa mcp` and other bridges.
     if let Some(sidecar) = &sidecar {
         let watch = sidecar.watch();
         let broker = broker.clone();

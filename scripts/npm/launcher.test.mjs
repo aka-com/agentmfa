@@ -28,7 +28,7 @@ const packagedSidecar = path.join(
 
 function runLauncher(overrides = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "agentmfa-launcher-"));
-  const stub = path.join(dir, "aka-stub");
+  const stub = path.join(dir, "mfa-stub");
   const capture = path.join(dir, "capture.json");
   writeFileSync(
     stub,

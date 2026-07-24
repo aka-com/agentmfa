@@ -514,7 +514,7 @@ function mockConnectRemote(url: string, token: string | null): unknown {
     throw 'the remote broker could not be reached: connection refused';
   }
   if (token?.includes('badtoken')) {
-    throw 'the broker rejected the management token; re-issue it with `aka manage token` and enter the new one';
+    throw 'the broker rejected the management token; re-issue it with `mfa manage token` and enter the new one';
   }
   mockBroker = { mode: 'remote', url: trimmed, connected: true, error: null, has_saved_token: true };
   emit('aka://broker-changed', mockBroker);

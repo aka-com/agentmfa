@@ -4,7 +4,7 @@
   "description": "AgentMFA CLI binary for Linux (x64, glibc). Install agentmfa instead of installing this directly.",
   "homepage": "https://github.com/aka-com/agentmfa",
   "files": [
-    "bin/aka"
+    "bin/mfa"
   ],
   "engines": {
     "node": ">=22"

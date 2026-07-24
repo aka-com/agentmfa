@@ -1,5 +1,5 @@
-# A hosted AKA broker for Linux: builds the `aka` CLI and the Node MCP
-# sidecar, then runs `aka serve` with the control plane on TCP and secrets
+# A hosted AKA broker for Linux: builds the `mfa` CLI and the Node MCP
+# sidecar, then runs `mfa serve` with the control plane on TCP and secrets
 # in the encrypted vault. TLS is your reverse proxy's job (see the runbook);
 # this image serves plain HTTP on 4780.
 #
@@ -8,14 +8,14 @@
 # Run (see dev/hosted-linux/README.md for the full command and the vault key):
 #   docker run -e AKA_VAULT_KEY=... -p 4780:4780 -v aka-state:/var/lib/aka aka-broker
 
-# --- build the aka CLI (glibc; Debian base means no musl needed) ---
+# --- build the mfa CLI (glibc; Debian base means no musl needed) ---
 FROM rust:1-bookworm AS rust
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 # Build only the CLI + core (the desktop crate is excluded from the workspace
 # and needs a webview toolchain we don't want in a server image).
-RUN cargo build --release -p aka
+RUN cargo build --release -p mfa
 
 # --- build the MCP sidecar bundle ---
 FROM node:22-bookworm-slim AS sidecar
@@ -29,11 +29,11 @@ RUN npm run sidecar:build
 
 # --- runtime: slim glibc image with Node for the sidecar ---
 FROM node:22-bookworm-slim AS runtime
-# `aka serve` supervises the sidecar and needs `node` on PATH (present in
+# `mfa serve` supervises the sidecar and needs `node` on PATH (present in
 # this base image). Nothing else is required.
 RUN useradd --create-home --uid 10001 aka \
     && mkdir -p /var/lib/aka && chown aka:aka /var/lib/aka
-COPY --from=rust /src/target/release/aka /usr/local/bin/aka
+COPY --from=rust /src/target/release/mfa /usr/local/bin/mfa
 COPY --from=sidecar /src/dist/sidecar/main.mjs /usr/local/share/aka/sidecar/main.mjs
 
 USER aka
@@ -47,4 +47,4 @@ EXPOSE 4780
 # The vault master key (AKA_VAULT_KEY) MUST be provided at runtime — the
 # image ships no key. Without it the broker falls back to an unencrypted
 # dev vault and logs a warning; a hosted deployment always sets it.
-ENTRYPOINT ["aka", "serve", "--root", "/var/lib/aka", "--listen", "0.0.0.0:4780"]
+ENTRYPOINT ["mfa", "serve", "--root", "/var/lib/aka", "--listen", "0.0.0.0:4780"]

@@ -2,7 +2,7 @@
 "use strict";
 
 // Launcher for the `agentmfa` npm package. The real CLI is the prebuilt Rust
-// `aka` binary shipped in the platform-specific package that npm selected via
+// `mfa` binary shipped in the platform-specific package that npm selected via
 // optionalDependencies (agentmfa-<os>-<arch>); this script only resolves it
 // and hands over argv. There is deliberately no postinstall step and no
 // network access here: a credential broker's install should be inert.
@@ -24,7 +24,7 @@ function fail(message) {
 
 function resolveBinary() {
   // Escape hatch for development and unusual layouts: point AGENTMFA_BIN at
-  // any `aka` binary (e.g. target/release/aka) and the launcher uses it.
+  // any `mfa` binary (e.g. target/release/mfa) and the launcher uses it.
   if (process.env.AGENTMFA_BIN) return process.env.AGENTMFA_BIN;
 
   const key = `${process.platform} ${process.arch}`;
@@ -39,7 +39,7 @@ function resolveBinary() {
 
   let binPath;
   try {
-    binPath = require.resolve(`${pkg}/bin/aka`);
+    binPath = require.resolve(`${pkg}/bin/mfa`);
   } catch {
     fail(
       `the ${pkg} package holding the binary for ${key} is not installed.\n` +
@@ -65,7 +65,7 @@ function resolveBinary() {
 
 // The npm package carries the self-contained JavaScript MCP host, while the
 // Node process already running this launcher supplies its runtime. Point the
-// Rust supervisor at both exact paths so `aka serve` works from any cwd and
+// Rust supervisor at both exact paths so `mfa serve` works from any cwd and
 // does not accidentally select a different `node` from PATH. Explicit
 // overrides remain useful for development and diagnostics.
 const childEnv = { ...process.env };

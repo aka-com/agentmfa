@@ -62,7 +62,7 @@ const MAC_KEYCHAIN_SERVICE: &str = "com.aka.desktop";
 
 /// The macOS Keychain backend (service `com.aka.desktop`, account = the
 /// secret's UUID), via the `keyring` crate. Dev roots use a root-scoped service
-/// so `aka serve --root ...` cannot create or rotate production vault
+/// so `mfa serve --root ...` cannot create or rotate production vault
 /// state.
 ///
 /// The `keyring` crate's apple-native backend targets the file-based login

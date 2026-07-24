@@ -33,16 +33,16 @@ support limited audit logging, and team management is coming soon.
    host, Postgres database, SSH server, WebSocket URL, or MCP server.
 
 2. **Create a secret.** Pin an API token, database password, or SSH key
-   inside the application, using the desktop app or `aka secret add`.
+   inside the application, using the desktop app or `mfa secret add`.
 
 3. **Give your agent the endpoint.** Each connection gets its own local
    credential-free endpoint, that you can provide to your agent as a
    DATABASE_URL, SSH endpoint, etc., while MCPs get a unified tool.
 
    ```sh
-   psql "$(aka dsn analytics)"                     # passwordless DSN
-   export SSH_AUTH_SOCK="$(aka ssh production)"    # scoped signing agent
-   claude mcp add agentmfa -- aka mcp             # unified MCP tool
+   psql "$(mfa dsn analytics)"                     # passwordless DSN
+   export SSH_AUTH_SOCK="$(mfa ssh production)"    # scoped signing agent
+   claude mcp add agentmfa -- mfa mcp             # unified MCP tool
    ```
 
    For each connection type, the broker injects the real credential on
@@ -61,19 +61,19 @@ Agents that run shell commands don't need MCP at all: each connection
 is automatically exposed as a local endpoint, that automatically
 injects the credential on the upstream.
 
-- **Postgres** — `aka dsn <connection>` prints a passwordless DSN with a
+- **Postgres** — `mfa dsn <connection>` prints a passwordless DSN with a
   short-lived ticket, ready for `psql`, ORMs, or migration tools:
 
   ```sh
-  psql "$(aka dsn analytics)"
+  psql "$(mfa dsn analytics)"
   ```
 
-- **SSH** — `aka ssh <connection>` prints an `SSH_AUTH_SOCK` backed by a
+- **SSH** — `mfa ssh <connection>` prints an `SSH_AUTH_SOCK` backed by a
   scoped signing agent; the private key never leaves the broker. Works
   with stock `ssh`, `git`, `scp`, and `rsync`:
 
   ```sh
-  export SSH_AUTH_SOCK="$(aka ssh production)"
+  export SSH_AUTH_SOCK="$(mfa ssh production)"
   ssh production uptime
   git push production main
   scp app.tar.gz production:/srv/app/
@@ -115,7 +115,7 @@ credentials stay in the vault too.
 **Claude Code**:
 
 ```sh
-claude mcp add agentmfa -- aka mcp --client claude-code
+claude mcp add agentmfa -- mfa mcp --client claude-code
 ```
 
 **Claude Desktop** in `claude_desktop_config.json`:
@@ -124,7 +124,7 @@ claude mcp add agentmfa -- aka mcp --client claude-code
 {
   "mcpServers": {
     "agentmfa": {
-      "command": "aka",
+      "command": "mfa",
       "args": ["mcp", "--client", "claude-desktop"]
     }
   }
@@ -135,11 +135,11 @@ claude mcp add agentmfa -- aka mcp --client claude-code
 
 ```toml
 [mcp_servers.agentmfa]
-command = "aka"
+command = "mfa"
 args = ["mcp", "--client", "codex"]
 ```
 
-Any client that launches stdio servers can run `aka mcp` directly,
+Any client that launches stdio servers can run `mfa mcp` directly,
 which discovers the broker and its key automatically.
 
 ## Contributing

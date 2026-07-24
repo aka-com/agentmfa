@@ -4,7 +4,7 @@
   "description": "AgentMFA credential broker for coding agents, without exposing credentials.",
   "keywords": [
     "agentmfa",
-    "aka",
+    "mfa",
     "credentials",
     "secrets",
     "broker",
@@ -20,7 +20,7 @@
   "homepage": "https://github.com/aka-com/agentmfa",
   "bin": {
     "agentmfa": "bin/agentmfa.js",
-    "aka": "bin/agentmfa.js"
+    "mfa": "bin/agentmfa.js"
   },
   "files": [
     "bin/agentmfa.js",

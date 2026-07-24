@@ -915,13 +915,13 @@
             <span class="light"></span><span class="light"></span><span class="light"></span>
           </div>
           <pre><code><span class="p">$</span> npm install -g agentmfa
-<span class="p">$</span> aka secret add ANALYTICS_DB
+<span class="p">$</span> mfa secret add ANALYTICS_DB
 <span class="c">✓ saved to vault</span>
 
-<span class="p">$</span> aka conn add analytics --kind pg --host db.example.com
+<span class="p">$</span> mfa conn add analytics --kind pg --host db.example.com
 <span class="c">✓ analytics ready</span>
 
-<span class="p">$</span> psql "$(aka dsn analytics)"
+<span class="p">$</span> psql "$(mfa dsn analytics)"
 <span class="c">analytics=&gt;</span> select count(*) from signups;
 <span class="p">▪ ok!</span><span class="c"> · 100 rows read · 0 secrets exposed</span></code></pre>
         </div>

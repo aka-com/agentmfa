@@ -10,7 +10,7 @@
   <string>com.aka.serve</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/local/bin/aka</string>
+    <string>/usr/local/bin/mfa</string>
     <string>serve</string>
     <string>--listen</string>
     <string>127.0.0.1:4780</string>

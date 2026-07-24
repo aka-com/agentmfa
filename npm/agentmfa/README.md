@@ -10,7 +10,7 @@ Access is authorized per tool: an enabled connection executes
 immediately, a disabled one is refused for every agent at once.
 
 This package installs the broker's command line as both `agentmfa` and
-`aka`: the headless broker, the store seeding commands, and the
+`mfa`: the headless broker, the store seeding commands, and the
 skill-file generator that teaches agents how to use the broker.
 
 - **HTTP**: the agent supplies method/path/headers/body to a pinned host
@@ -27,7 +27,7 @@ npm install -g agentmfa
 
 This requires Node 22 or newer. It installs a prebuilt binary via a
 platform-specific optional dependency plus a self-contained JavaScript MCP
-host. The MCP host reuses the Node executable that launches `aka`; npm does not
+host. The MCP host reuses the Node executable that launches `mfa`; npm does not
 install a second runtime. There is no postinstall script and no install-time
 network access beyond npm itself.
 
@@ -41,22 +41,22 @@ Run a broker headless (the desktop app is the primary interface; the
 CLI is its dev/headless counterpart):
 
 ```sh
-aka serve
+mfa serve
 ```
 
 Seed the store from another terminal (offline edits require the broker to
 be stopped first, so it cannot overwrite them from memory):
 
 ```sh
-printf '%s' "$GITHUB_TOKEN" | aka secret add GITHUB_TOKEN
-aka conn add github --kind api --host api.github.com \
+printf '%s' "$GITHUB_TOKEN" | mfa secret add GITHUB_TOKEN
+mfa conn add github --kind api --host api.github.com \
     --template 'Authorization: Bearer {{GITHUB_TOKEN}}'
-aka conn list
+mfa conn list
 ```
 
-The rest of the lifecycle is headless too: `aka secret
-list|rename|replace|rm`, `aka conn update|rename|rm`, per-tool agent
-access with `aka conn enable|disable`, and `aka conn test` to check a
+The rest of the lifecycle is headless too: `mfa secret
+list|rename|replace|rm`, `mfa conn update|rename|rm`, per-tool agent
+access with `mfa conn enable|disable`, and `mfa conn test` to check a
 connection against its pinned destination. These edits run through the
 broker's own management layer, so audit entries and side effects (a
 retarget revoking direct endpoints, for example) match the app exactly.
@@ -66,20 +66,20 @@ stop/start needed — over its manage API, authorized by the management
 token (never the agent key):
 
 ```sh
-aka manage token                # once, while the broker is stopped
-aka manage login                # paste the token; stored per broker
-aka conn disable github        # edits the live broker over its socket
-aka conn list --broker https://broker.example.dev   # hosted brokers too
+mfa manage token                # once, while the broker is stopped
+mfa manage login                # paste the token; stored per broker
+mfa conn disable github        # edits the live broker over its socket
+mfa conn list --broker https://broker.example.dev   # hosted brokers too
 ```
 
-`aka manage login --broker <url>` stores a token for a hosted broker
+`mfa manage login --broker <url>` stores a token for a hosted broker
 (macOS: login Keychain; elsewhere a 0600 file), and `AKA_MANAGE_TOKEN`
 overrides for CI. With no broker running, the same commands fall back
 to editing the local files offline, exactly as before.
 
-The operator's view is covered by `aka key` (print the shared agent
-key; `--rotate` disconnects every agent at once), `aka status` (is a
-broker up, and what does it serve), and `aka activity` (the audit
+The operator's view is covered by `mfa key` (print the shared agent
+key; `--rotate` disconnects every agent at once), `mfa status` (is a
+broker up, and what does it serve), and `mfa activity` (the audit
 trail, readable while the broker runs).
 
 Open Postgres and SSH sessions straight from the shell — each command
@@ -87,16 +87,16 @@ prints the one value a stock client needs, minted by the running broker
 (the DSN embeds a short-lived session ticket):
 
 ```sh
-psql "$(aka dsn analytics)"
-export SSH_AUTH_SOCK="$(aka ssh production)"
+psql "$(mfa dsn analytics)"
+export SSH_AUTH_SOCK="$(mfa ssh production)"
 git push production main
 ```
 
 Teach the agents in a repository about the broker:
 
 ```sh
-aka skill --write          # writes .claude/skills/aka/SKILL.md
-aka skill --write --user   # or ~/.claude/skills/aka/SKILL.md for all repos
+mfa skill --write          # writes .claude/skills/aka/SKILL.md
+mfa skill --write --user   # or ~/.claude/skills/aka/SKILL.md for all repos
 ```
 
 Agents discover the live contract from the broker itself:
@@ -117,6 +117,6 @@ demos, tests, and CI.
   agents authenticate with the machine's shared broker key; the key is not
   bound to a process or code-signing identity.
 - **Linux** support is developer-grade: secrets are kept in a `0600` JSON
-  file vault that is **not encrypted at rest**. `aka serve` prints a warning
+  file vault that is **not encrypted at rest**. `mfa serve` prints a warning
   to this effect. It is intended for development, integration testing, and
   evaluation rather than production use.
