@@ -30,8 +30,12 @@ RUN npm run sidecar:build
 # --- runtime: slim glibc image with Node for the sidecar ---
 FROM node:22-bookworm-slim AS runtime
 # `mfa serve` supervises the sidecar and needs `node` on PATH (present in
-# this base image). Nothing else is required.
-RUN useradd --create-home --uid 10001 aka \
+# this base image). Testing an SSH tool authenticates a stock OpenSSH client
+# against the target, so `ssh` has to be here too — the slim base omits it.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssh-client \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 10001 aka \
     && mkdir -p /var/lib/aka && chown aka:aka /var/lib/aka
 COPY --from=rust /src/target/release/mfa /usr/local/bin/mfa
 COPY --from=sidecar /src/dist/sidecar/main.mjs /usr/local/share/aka/sidecar/main.mjs

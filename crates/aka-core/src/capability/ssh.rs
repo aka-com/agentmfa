@@ -29,7 +29,7 @@
 //! selected by the client's SIGN_REQUEST flags) keys.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -460,6 +460,10 @@ pub async fn test_reachability(
 /// through a short-lived, connection-scoped agent. The private key stays in
 /// the broker; the client receives only signatures. A configured host-key
 /// fingerprint is enforced by the agent's OpenSSH session binding.
+///
+/// A connection with no brokered key has nothing to log in *with*, so it
+/// falls back to the reachability probe rather than grading as a rejection:
+/// an empty identity list is a supported configuration here, not a fault.
 pub async fn test_login(store: &Store, connection: &Connection) -> Result<String, TestError> {
     let ConnectionConfig::Ssh {
         destination,
@@ -471,14 +475,9 @@ pub async fn test_login(store: &Store, connection: &Connection) -> Result<String
     else {
         return Err("not an ssh connection".into());
     };
-    let signer = SshSigner::load_optional(store, connection)
-        .await?
-        .ok_or_else(|| {
-            TestError::new(
-                TestErrorKind::AuthRejected,
-                "No SSH private key is attached to this tool",
-            )
-        })?;
+    let Some(signer) = SshSigner::load_optional(store, connection).await? else {
+        return test_reachability(store, connection).await;
+    };
     let expected_host_key = if host_key_fingerprint.is_empty() {
         None
     } else {
@@ -502,11 +501,18 @@ pub async fn test_login(store: &Store, connection: &Connection) -> Result<String
             .map_err(|e| format!("Could not secure the SSH test agent: {e}"))?;
     }
 
+    // `ssh -E` sends the client's own diagnostics here instead of stderr.
+    // That separation is load-bearing: stderr also carries the server's
+    // pre-auth banner verbatim, so a server could otherwise write any
+    // sentence this function looks for into the text it grades.
+    let log_path = socket_dir.path().join("ssh.log");
+
     let state = Arc::new(TestAgentState {
         user: user.clone(),
         expected_host_key,
         observed_host_key: std::sync::Mutex::new(None),
         signer: Arc::new(signer),
+        signed: AtomicBool::new(false),
         refusal: std::sync::Mutex::new(None),
     });
     let listener_state = state.clone();
@@ -539,8 +545,13 @@ pub async fn test_login(store: &Store, connection: &Connection) -> Result<String
         .kill_on_drop(true)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
+        // With `-E` carrying the diagnostics, stderr holds only the peer's
+        // banner. Nothing reads it, so let it go nowhere rather than buffer
+        // an arbitrary amount of remote text.
+        .stderr(std::process::Stdio::null())
         .arg("-v")
+        .arg("-E")
+        .arg(&log_path)
         .arg("-o")
         .arg("BatchMode=yes")
         .arg("-o")
@@ -587,9 +598,23 @@ pub async fn test_login(store: &Store, connection: &Connection) -> Result<String
     });
     listener_task.abort();
     let output = output?;
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let authenticated = stderr.contains("Authenticated to ");
-    if output.status.success() || authenticated {
+    // Only ssh's own log is evidence. Anything the peer chose — the banner,
+    // a jump host's inherited stderr — is read for nothing.
+    let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+
+    // A signature is the one thing that proves *this* connection's key
+    // authenticated: the agent issues it only after a session-bind matching
+    // the configured host key and for userauth naming the configured user.
+    // The exit status alone would also accept a login that got in some other
+    // way; the log line alone would accept a session the server cut off
+    // after the banner. Requiring both a signature and a completed login
+    // leaves no path to a false success.
+    let signed = state.signed.load(Ordering::Relaxed);
+    // A restricted shell (git-shell and friends) refuses `true` and exits
+    // non-zero long after authenticating, so the log line stands in for the
+    // exit status there.
+    let authenticated = log.contains("Authenticated to ");
+    if signed && (output.status.success() || authenticated) {
         let host_key_detail = if expected_host_key.is_some() {
             " Verified the pinned host key.".to_string()
         } else {
@@ -635,20 +660,20 @@ pub async fn test_login(store: &Store, connection: &Connection) -> Result<String
             format!("SSH login was refused: {reason}"),
         ));
     }
-    let stderr_lower = stderr.to_ascii_lowercase();
-    if stderr_lower.contains("permission denied")
-        || stderr_lower.contains("no supported authentication methods")
+    let log_lower = log.to_ascii_lowercase();
+    if log_lower.contains("permission denied")
+        || log_lower.contains("no supported authentication methods")
     {
         return Err(TestError::new(
             TestErrorKind::AuthRejected,
             format!("The server rejected the saved key for {user}@{host}"),
         ));
     }
-    if stderr_lower.contains("could not resolve hostname")
-        || stderr_lower.contains("connection refused")
-        || stderr_lower.contains("connection timed out")
-        || stderr_lower.contains("operation timed out")
-        || stderr_lower.contains("no route to host")
+    if log_lower.contains("could not resolve hostname")
+        || log_lower.contains("connection refused")
+        || log_lower.contains("connection timed out")
+        || log_lower.contains("operation timed out")
+        || log_lower.contains("no route to host")
     {
         return Err(TestError::new(
             TestErrorKind::Unreachable,
@@ -666,11 +691,19 @@ struct TestAgentState {
     expected_host_key: Option<Fingerprint>,
     observed_host_key: std::sync::Mutex<Option<(Fingerprint, Fingerprint)>>,
     signer: Arc<SshSigner>,
+    /// Set once the agent has actually signed a host-bound userauth for this
+    /// connection's key. The login report is gated on it.
+    signed: AtomicBool,
     refusal: std::sync::Mutex<Option<String>>,
 }
 
+/// Record why the agent said no. The *first* refusal is kept: it is the root
+/// cause, and later ones (a second connection re-binding, say) would bury it.
 fn refuse_test(state: &TestAgentState, reason: impl Into<String>) -> Vec<u8> {
-    *state.refusal.lock().unwrap() = Some(reason.into());
+    let mut refusal = state.refusal.lock().unwrap();
+    if refusal.is_none() {
+        *refusal = Some(reason.into());
+    }
     frame(SSH_AGENT_FAILURE, &[])
 }
 
@@ -743,6 +776,7 @@ async fn handle_test_request(
             }
             match sign_on_blocking_thread(state.signer.clone(), data.to_vec(), flags).await {
                 Ok(sig_blob) => {
+                    state.signed.store(true, Ordering::Relaxed);
                     let mut body = Vec::new();
                     put_string(&mut body, &sig_blob);
                     frame(SSH_AGENT_SIGN_RESPONSE, &body)
@@ -1550,6 +1584,7 @@ mod tests {
             expected_host_key: Some(host_key.public_key().fingerprint(HashAlg::Sha256)),
             observed_host_key: std::sync::Mutex::new(None),
             signer,
+            signed: AtomicBool::new(false),
             refusal: std::sync::Mutex::new(None),
         });
         let mut binding = None;
@@ -1574,9 +1609,12 @@ mod tests {
         put_string(&mut request, &public_blob);
         put_string(&mut request, &auth);
         request.extend_from_slice(&0u32.to_be_bytes());
+        assert!(!state.signed.load(Ordering::Relaxed));
         let response =
             handle_test_request(&state, &mut binding, SSH_AGENTC_SIGN_REQUEST, &request).await;
         assert_eq!(response[4], SSH_AGENT_SIGN_RESPONSE);
+        // The signature is what the login report is gated on.
+        assert!(state.signed.load(Ordering::Relaxed));
 
         let wrong_host = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
         let mut wrong_binding = None;
@@ -1589,6 +1627,64 @@ mod tests {
         .await;
         assert_eq!(response[4], SSH_AGENT_FAILURE);
         assert!(wrong_binding.is_none());
+    }
+
+    /// The report a caller can build from a refused login: no signature was
+    /// ever issued, and the reason kept is the one that started the failure.
+    #[tokio::test]
+    async fn a_refused_login_never_signs_and_keeps_the_first_reason() {
+        let auth_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let public_blob = auth_key.public_key().to_bytes().unwrap();
+        let host_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let state = Arc::new(TestAgentState {
+            user: "deploy".into(),
+            expected_host_key: Some(host_key.public_key().fingerprint(HashAlg::Sha256)),
+            observed_host_key: std::sync::Mutex::new(None),
+            signer: Arc::new(SshSigner {
+                key: auth_key,
+                public_blob: public_blob.clone(),
+            }),
+            signed: AtomicBool::new(false),
+            refusal: std::sync::Mutex::new(None),
+        });
+
+        // A server presenting the wrong host key is refused at session-bind.
+        let wrong_host = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let mut binding = None;
+        let response = handle_test_request(
+            &state,
+            &mut binding,
+            SSH_AGENTC_EXTENSION,
+            &session_bind(&wrong_host, b"session-id", 0),
+        )
+        .await;
+        assert_eq!(response[4], SSH_AGENT_FAILURE);
+
+        // A sign request on the unbound connection is refused in turn, but
+        // the mismatch — not this follow-on — is what the user is told.
+        let auth = userauth_blob(
+            "deploy",
+            "ssh-connection",
+            "publickey-hostbound-v00@openssh.com",
+            &public_blob,
+            &wrong_host.public_key().to_bytes().unwrap(),
+        );
+        let mut request = Vec::new();
+        put_string(&mut request, &public_blob);
+        put_string(&mut request, &auth);
+        request.extend_from_slice(&0u32.to_be_bytes());
+        let response =
+            handle_test_request(&state, &mut binding, SSH_AGENTC_SIGN_REQUEST, &request).await;
+        assert_eq!(response[4], SSH_AGENT_FAILURE);
+
+        assert!(!state.signed.load(Ordering::Relaxed));
+        let refusal = state.refusal.lock().unwrap().clone().unwrap();
+        assert!(
+            refusal.contains("does not match configured"),
+            "kept {refusal:?}"
+        );
+        // Nothing was observed, so there is no key a caller could pin.
+        assert!(state.observed_host_key.lock().unwrap().is_none());
     }
 
     #[test]
