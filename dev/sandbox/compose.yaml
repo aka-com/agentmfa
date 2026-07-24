@@ -9,6 +9,9 @@ services:
     environment:
       SANDBOX_HTTP_TOKEN: aka-test-token
       SANDBOX_WEBSOCKET_TOKEN: aka-ws-test-token
+      # The MCP server shares this container and the HTTP port; an MCP
+      # connection is an API connection carrying an mcp_path (/mcp).
+      SANDBOX_MCP_TOKEN: aka-mcp-test-token
       SANDBOX_CROSS_ORIGIN_URL: http://127.0.0.1:${SANDBOX_WS_PORT:-18081}/credential-sink
     ports:
       # Override any occupied port with SANDBOX_*_PORT environment variables;

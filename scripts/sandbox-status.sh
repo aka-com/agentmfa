@@ -50,6 +50,16 @@ check_websocket_server() {
   [[ "$response" == "HTTP/1.1 101 "* ]]
 }
 
+check_mcp() {
+  # An authenticated MCP `initialize` over the shared HTTP port; the server
+  # answers with its serverInfo name.
+  curl --fail --silent --max-time 2 \
+    --header 'Authorization: Bearer aka-mcp-test-token' \
+    --header 'Content-Type: application/json' \
+    --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+    "http://127.0.0.1:$http_port/mcp" 2>/dev/null | grep -q 'aka-sandbox-mcp'
+}
+
 check_postgres() {
   # TCP, not the Unix socket: initdb's temporary first-boot server answers
   # on the socket while the real server is not accepting connections yet.
@@ -84,6 +94,7 @@ if $wait_for_services; then
   echo "Waiting for sandbox services..."
   wait_for HTTP check_http
   wait_for WebSocket check_websocket_server
+  wait_for MCP check_mcp
   wait_for Postgres check_postgres
   wait_for SSH check_ssh
 else
@@ -140,6 +151,16 @@ WebSocket
   Credential name:  SANDBOX_WEBSOCKET_TOKEN
   Credential value: aka-ws-test-token
   Test → expect:    WebSocket handshake succeeded
+
+MCP server
+  Name:             sandbox-mcp
+  Server URL:       http://127.0.0.1:$http_port/mcp
+  Authentication type: Bearer token
+  Credential name:  SANDBOX_MCP_TOKEN
+  Credential value: aka-mcp-test-token
+  Test → expect:    reachable; tools sandbox_echo, sandbox_ping
+                    (add via the generic “MCP server” row; it shares the
+                    HTTP fixture on port $http_port at path /mcp)
 
 Postgres
   Quick setup:      postgres://aka:aka-test-password@127.0.0.1:$pg_port/aka_sandbox?sslmode=disable

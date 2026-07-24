@@ -14,7 +14,7 @@ use axum::{
     },
     http::{
         header::{AUTHORIZATION, CONTENT_TYPE, LOCATION, WWW_AUTHENTICATE},
-        HeaderMap, HeaderValue, StatusCode,
+        HeaderMap, HeaderName, HeaderValue, StatusCode,
     },
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -24,15 +24,19 @@ use serde_json::json;
 
 const DEFAULT_HTTP_TOKEN: &str = "aka-test-token";
 const DEFAULT_WEBSOCKET_TOKEN: &str = "aka-ws-test-token";
+const DEFAULT_MCP_TOKEN: &str = "aka-mcp-test-token";
 const DEFAULT_CROSS_ORIGIN: &str = "http://127.0.0.1:18081/credential-sink";
 const MAX_DELAY_SECONDS: u64 = 20;
 const MAX_GENERATED_BODY: usize = 12 * 1024 * 1024;
 const MAX_ECHO_BODY: usize = 160 * 1024 * 1024;
+/// Protocol revision the broker's MCP client requests; we echo it back.
+const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 
 #[derive(Clone)]
 struct AppState {
     http_authorization: HeaderValue,
     websocket_authorization: HeaderValue,
+    mcp_authorization: HeaderValue,
     cross_origin: HeaderValue,
 }
 
@@ -42,11 +46,14 @@ impl AppState {
             env::var("SANDBOX_HTTP_TOKEN").unwrap_or_else(|_| DEFAULT_HTTP_TOKEN.to_string());
         let websocket_token = env::var("SANDBOX_WEBSOCKET_TOKEN")
             .unwrap_or_else(|_| DEFAULT_WEBSOCKET_TOKEN.to_string());
+        let mcp_token =
+            env::var("SANDBOX_MCP_TOKEN").unwrap_or_else(|_| DEFAULT_MCP_TOKEN.to_string());
         let cross_origin = env::var("SANDBOX_CROSS_ORIGIN_URL")
             .unwrap_or_else(|_| DEFAULT_CROSS_ORIGIN.to_string());
         Self {
             http_authorization: bearer_value(&http_token),
             websocket_authorization: bearer_value(&websocket_token),
+            mcp_authorization: bearer_value(&mcp_token),
             cross_origin: HeaderValue::from_str(&cross_origin)
                 .expect("SANDBOX_CROSS_ORIGIN_URL must be a valid header value"),
         }
@@ -193,6 +200,108 @@ async fn credential_sink() -> Response {
         .into_response()
 }
 
+/// A minimal streamable-HTTP MCP server, so the sandbox covers AKA's fifth
+/// connection type. An MCP connection is an API connection carrying an
+/// `mcp_path`, so this endpoint lives on the same host/port as the HTTP API
+/// and is guarded by its own fake bearer token. It answers the handshake the
+/// broker's own MCP client drives — `initialize`, `tools/list`, `tools/call`
+/// — with JSON (not SSE) responses; that is all the broker's status check and
+/// the sidecar's tool re-exposure need. Deterministic tools only.
+async fn mcp(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    if let Some(response) = require_authorization(&headers, &state.mcp_authorization) {
+        return response;
+    }
+    let request: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(_) => return mcp_error(json!(null), -32700, "parse error"),
+    };
+    let method = request
+        .get("method")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    // Notifications (e.g. notifications/initialized) carry no id and expect
+    // only an acknowledgement.
+    let Some(id) = request.get("id").cloned() else {
+        return StatusCode::ACCEPTED.into_response();
+    };
+    match method {
+        "initialize" => mcp_result(
+            id,
+            json!({
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "serverInfo": { "name": "aka-sandbox-mcp", "version": env!("CARGO_PKG_VERSION") },
+                "capabilities": { "tools": {} },
+            }),
+        ),
+        "ping" => mcp_result(id, json!({})),
+        "tools/list" => mcp_result(id, json!({ "tools": mcp_tools() })),
+        "tools/call" => mcp_tools_call(id, request.get("params")),
+        _ => mcp_error(id, -32601, "method not found"),
+    }
+}
+
+fn mcp_tools() -> serde_json::Value {
+    json!([
+        {
+            "name": "sandbox_echo",
+            "description": "Echo back the provided text.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "text": { "type": "string" } },
+                "required": ["text"],
+            },
+        },
+        {
+            "name": "sandbox_ping",
+            "description": "Return the string \"pong\".",
+            "inputSchema": { "type": "object", "properties": {} },
+        },
+    ])
+}
+
+fn mcp_tools_call(id: serde_json::Value, params: Option<&serde_json::Value>) -> Response {
+    let name = params
+        .and_then(|params| params.get("name"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let text = match name {
+        "sandbox_ping" => "pong".to_string(),
+        "sandbox_echo" => params
+            .and_then(|params| params.get("arguments"))
+            .and_then(|args| args.get("text"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        _ => return mcp_error(id, -32602, "unknown tool"),
+    };
+    mcp_result(
+        id,
+        json!({
+            "content": [{ "type": "text", "text": text }],
+            "isError": false,
+        }),
+    )
+}
+
+fn mcp_result(id: serde_json::Value, result: serde_json::Value) -> Response {
+    mcp_response(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+}
+
+fn mcp_error(id: serde_json::Value, code: i64, message: &str) -> Response {
+    mcp_response(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }))
+}
+
+fn mcp_response(payload: serde_json::Value) -> Response {
+    let mut response = Json(payload).into_response();
+    // A fixed session id exercises the broker's `Mcp-Session-Id` tracking
+    // without any per-request state to keep.
+    response.headers_mut().insert(
+        HeaderName::from_static("mcp-session-id"),
+        HeaderValue::from_static("aka-sandbox"),
+    );
+    response
+}
+
 async fn websocket(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -238,6 +347,7 @@ async fn main() {
         .route("/binary", get(binary))
         .route("/large/{bytes}", get(generated_body))
         .route("/credential-sink", get(credential_sink))
+        .route("/mcp", post(mcp))
         .route("/ws", get(websocket))
         .layer(DefaultBodyLimit::max(MAX_ECHO_BODY))
         .with_state(state);

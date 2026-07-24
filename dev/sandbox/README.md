@@ -11,11 +11,15 @@
 
 The sandbox is a disposable Docker Compose stack with one upstream for
 every AKA connection type — an authenticated HTTP API, a WebSocket
-echo, Postgres, and SSH — so you can try the whole app in minutes
-without touching a real service. Every port binds to `127.0.0.1` and
-every credential is a fake, fixed test value that must never be reused
-outside the sandbox. AKA Desktop runs natively so it keeps using the
-host Keychain, webview, and Unix socket.
+echo, an MCP server, Postgres, and SSH — so you can try the whole app in
+minutes without touching a real service. Every port binds to `127.0.0.1`
+and every credential is a fake, fixed test value that must never be
+reused outside the sandbox. AKA Desktop runs natively so it keeps using
+the host Keychain, webview, and Unix socket.
+
+The HTTP API and the MCP server are the same fixture container on one
+port: an MCP connection is just an API connection carrying an `mcp_path`,
+so the MCP server answers at `http://127.0.0.1:18080/mcp`.
 
 A copy of this walkthrough formatted for the browser is in
 [`quickstart.html`](quickstart.html).
@@ -37,10 +41,10 @@ From the repository root:
 npm run sandbox:up
 ```
 
-The first start compiles the HTTP/WebSocket fixture inside Docker and
+The first start compiles the HTTP/WebSocket/MCP fixture inside Docker and
 can take several minutes; later starts take seconds. The command
 generates a sandbox-only SSH key under the ignored `dev/sandbox/state/`
-directory, waits until all four services answer, and prints the exact
+directory, waits until all five services answer, and prints the exact
 values to enter in AKA Desktop — including paste-ready “Quick setup” lines
 for Postgres and SSH and the current SSH host-key fingerprint.
 
@@ -61,19 +65,21 @@ isn't shown, re-enable it from the **Walkthroughs** menu — the ?
 button in the Services header — or use **＋ Add service** to fill the
 form by hand.)
 
-For HTTP API and WebSocket, use **＋ Add service** and enter the printed
-fields manually. For Postgres and SSH, paste the **Quick setup** line
-from the `sandbox:up` output into the card and press **Continue** — the
-service type is detected automatically and the form opens pre-filled.
-Enter any remaining values, press **Add service**, then press **Test**
-on the service's card in the list. The Postgres **TLS mode** and SSH
-**Host key fingerprint** fields are under the form's **Advanced**
-section. With the default ports:
+For HTTP API, WebSocket, and MCP, use **＋ Add service** and enter the
+printed fields manually (MCP is the generic **MCP server** row). For
+Postgres and SSH, paste the **Quick setup** line from the `sandbox:up`
+output into the card and press **Continue** — the service type is
+detected automatically and the form opens pre-filled. Enter any
+remaining values, press **Add service**, then press **Test** on the
+service's card in the list. The Postgres **TLS mode** and SSH **Host key
+fingerprint** fields are under the form's **Advanced** section. With the
+default ports:
 
 | Service | Setup | Then |
 | --- | --- | --- |
 | HTTP API | Enter manually: API root `http://127.0.0.1:18080` | Name `sandbox-http`, authentication type **Bearer token**, credential value `aka-test-token` |
 | WebSocket | Enter manually: URL `ws://127.0.0.1:18081/ws` | Name `sandbox-websocket`, authentication type **Bearer token**, credential value `aka-ws-test-token` |
+| MCP server | **MCP server** row: server URL `http://127.0.0.1:18080/mcp` | Name `sandbox-mcp`, custom authentication `Authorization: Bearer {{SANDBOX_MCP_TOKEN}}`, credential value `aka-mcp-test-token` |
 | Postgres | Quick setup: `postgres://aka:aka-test-password@127.0.0.1:15432/aka_sandbox?sslmode=disable` | Name `sandbox-postgres`; host, database, TLS mode **Disable** (under **Advanced**), and password all pre-fill |
 | SSH | Quick setup: `ssh -i <printed key path> -p 12222 sandbox@127.0.0.1` | Name `sandbox-ssh`; AKA Desktop reads the key file itself — never paste key contents |
 
@@ -86,6 +92,8 @@ Press **Test** on each service's card and expect:
 
 - **sandbox-http** — an authenticated `HTTP 200 OK` from the API root.
 - **sandbox-websocket** — `WebSocket handshake succeeded`.
+- **sandbox-mcp** — the MCP handshake succeeds and the two tools
+  `sandbox_echo` and `sandbox_ping` are listed.
 - **sandbox-postgres** — `Signed in to aka_sandbox as aka`.
 - **sandbox-ssh** — `Key loaded; 127.0.0.1:12222 answered with
   SSH-2.0-…`. This test checks key parsing and reachability only; a
@@ -104,6 +112,10 @@ command), then ask it to use the services in plain language, e.g.:
 - “Using my AKA service `sandbox-ssh`, run `uname -a`.”
 - “Using my AKA service `sandbox-websocket`, connect and echo a
   message.”
+- “Using my AKA MCP service `sandbox-mcp`, call the `sandbox_echo` tool
+  with `hello`.” (The MCP tools appear as
+  `multitool_sandbox-mcp_sandbox_echo` and `…_sandbox_ping` once the
+  sidecar is built — `npm run sidecar:build`.)
 
 Approve the prompts AKA Desktop raises. GET/HEAD requests fit a read-scoped
 access session; POST, Postgres, SSH, and WebSocket opens require full
@@ -123,6 +135,9 @@ GET  /large/{bytes}            generated body up to 12 MiB; /large/12582912
                                exceeds the broker's 10 MB cap → 502
                                response_too_large
 POST /echo                     reflects the request body and content type
+POST /mcp                      MCP over streamable HTTP (initialize,
+                               tools/list, tools/call); a separate bearer
+                               token, the tools sandbox_echo and sandbox_ping
 ```
 
 The fixture checks the documented fake tokens but never returns or logs
@@ -167,9 +182,12 @@ connecting again.
 The builder, runtime, Postgres, and OpenSSH images are pinned to
 multi-platform manifest digests for reproducibility across Apple
 Silicon and amd64 hosts; update each tag and digest together after
-reviewing a new upstream release. The full two-layer test plan
-(container checks, then the same surfaces through AKA) is in
-[`TESTPLAN.md`](TESTPLAN.md).
+reviewing a new upstream release. The walkthrough above adds each
+service through AKA Desktop; the same checks run headless on Linux
+(where the desktop app does not build) by seeding the store with
+`aka conn add` (the MCP connection needs `--mcp-path /mcp`), starting
+`aka serve`, and driving the broker over its Unix socket the way an
+agent would.
 
 Do not mount the repository, home directory, or real credentials into
 these containers.

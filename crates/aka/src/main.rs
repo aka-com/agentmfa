@@ -355,6 +355,11 @@ struct ConnAdd {
     /// pg: optional PEM bundle for a private certificate authority.
     #[arg(long)]
     ca_bundle: Option<String>,
+    /// api: expose this connection as an MCP server by giving the upstream's
+    /// JSON-RPC path (e.g. `/mcp`). The sidecar then re-exposes its tools;
+    /// the credential still rides the pinned host's `/v1/http` plane.
+    #[arg(long)]
+    mcp_path: Option<String>,
     /// Operate on a broker rooted here instead of the default layout.
     #[arg(long)]
     root: Option<PathBuf>,
@@ -839,7 +844,7 @@ fn conn_config(args: &ConnAdd) -> Result<ConnectionConfig, String> {
                 port: args.port,
                 template: require("template", &args.template)?,
 
-                mcp_path: None,
+                mcp_path: args.mcp_path.clone(),
                 oauth: None,
             })
         }
@@ -849,6 +854,7 @@ fn conn_config(args: &ConnAdd) -> Result<ConnectionConfig, String> {
                 ("template", args.template.is_some()),
                 ("url", args.url.is_some()),
                 ("host-key-fingerprint", args.host_key_fingerprint.is_some()),
+                ("mcp-path", args.mcp_path.is_some()),
             ])?;
             require("secret", &args.secret)?;
             Ok(ConnectionConfig::Pg {
@@ -870,6 +876,7 @@ fn conn_config(args: &ConnAdd) -> Result<ConnectionConfig, String> {
                 ("sslmode", args.sslmode.is_some()),
                 ("ca-bundle", args.ca_bundle.is_some()),
                 ("host-key-fingerprint", args.host_key_fingerprint.is_some()),
+                ("mcp-path", args.mcp_path.is_some()),
             ])?;
             if args.secret.is_none() && args.template.is_none() {
                 return Err("--secret (or --template) is required for this kind".into());
@@ -887,6 +894,7 @@ fn conn_config(args: &ConnAdd) -> Result<ConnectionConfig, String> {
                 ("dbname", args.dbname.is_some()),
                 ("sslmode", args.sslmode.is_some()),
                 ("ca-bundle", args.ca_bundle.is_some()),
+                ("mcp-path", args.mcp_path.is_some()),
             ])?;
             require("secret", &args.secret)?;
             Ok(ConnectionConfig::Ssh {
@@ -1583,6 +1591,7 @@ mod tests {
             secret: None,
             sslmode: None,
             ca_bundle: None,
+            mcp_path: None,
             root: None,
         }
     }
@@ -1600,6 +1609,32 @@ mod tests {
         // misunderstanding worth naming, not ignoring.
         a.secret = Some("KEY".into());
         assert!(conn_config(&a).unwrap_err().contains("--secret"));
+    }
+
+    #[test]
+    fn api_carries_an_optional_mcp_path() {
+        let mut a = args(ConnKind::Api);
+        a.host = Some("mcp.example.com".into());
+        a.template = Some("Authorization: Bearer {{KEY}}".into());
+        // Absent by default; set when --mcp-path is given.
+        assert!(matches!(
+            conn_config(&a).unwrap(),
+            ConnectionConfig::Api { mcp_path: None, .. }
+        ));
+        a.mcp_path = Some("/mcp".into());
+        assert!(matches!(
+            conn_config(&a).unwrap(),
+            ConnectionConfig::Api { mcp_path: Some(ref path), .. } if path == "/mcp"
+        ));
+        // --mcp-path is an api-only concept; naming it on another kind is an
+        // error, not a silent no-op.
+        let mut p = args(ConnKind::Pg);
+        p.host = Some("db.internal".into());
+        p.dbname = Some("app".into());
+        p.user = Some("app".into());
+        p.secret = Some("PGPASS".into());
+        p.mcp_path = Some("/mcp".into());
+        assert!(conn_config(&p).unwrap_err().contains("--mcp-path"));
     }
 
     #[test]

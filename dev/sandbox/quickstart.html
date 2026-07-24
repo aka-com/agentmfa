@@ -65,10 +65,12 @@
   <p class="subtitle">Try every AKA connection type against disposable
   local containers — no real credentials involved.</p>
 
-  <p>The sandbox starts four upstreams on <code>127.0.0.1</code>: an
-  authenticated HTTP API, a WebSocket echo, Postgres, and SSH. All
-  credentials are fixed, fake test values; never reuse them anywhere
-  else. AKA Desktop runs natively on your machine.</p>
+  <p>The sandbox starts five upstreams on <code>127.0.0.1</code>: an
+  authenticated HTTP API, a WebSocket echo, an MCP server, Postgres, and
+  SSH. All credentials are fixed, fake test values; never reuse them
+  anywhere else. AKA Desktop runs natively on your machine. The MCP
+  server shares the HTTP fixture on one port — an MCP connection is an
+  API connection carrying an <code>mcp_path</code> (<code>/mcp</code>).</p>
 
   <h2><span class="step">1</span>Check what you need</h2>
   <ul>
@@ -83,11 +85,11 @@ cd aka
 npm run sandbox:up</code></pre>
   <p>The first start compiles the test fixture inside Docker and can take
   several minutes; later starts take seconds. When everything is ready it
-  prints <span class="ok">ready</span> for HTTP, WebSocket, Postgres, and
-  SSH, followed by the exact values to enter in AKA Desktop. Re-print them
-  any time with <code>npm run sandbox:status</code>.</p>
+  prints <span class="ok">ready</span> for HTTP, WebSocket, MCP, Postgres,
+  and SSH, followed by the exact values to enter in AKA Desktop. Re-print
+  them any time with <code>npm run sandbox:status</code>.</p>
 
-  <h2><span class="step">3</span>Add the four services in AKA</h2>
+  <h2><span class="step">3</span>Add the services in AKA</h2>
   <!-- Keep this walkthrough in sync with scripts/sandbox-status.sh and
        dev/sandbox/README.md (section 3). -->
   <p>Open AKA Desktop from the menu bar icon; <b>Services</b> is the first
@@ -95,14 +97,14 @@ npm run sandbox:up</code></pre>
   the card isn't shown, re-enable it from the <b>Walkthroughs</b> menu —
   the ? button in the Services header — or use <b>＋ Add service</b> to
   fill the form by hand.)</p>
-  <p>For HTTP API and WebSocket, use <b>＋ Add service</b> and enter the
-  printed fields manually. For Postgres and SSH, paste the <b>Quick
-  setup</b> line into the card and press <b>Continue</b> — the service
-  type is detected automatically and the form opens pre-filled. Enter
-  any remaining values, press <b>Add service</b>, then press <b>Test</b>
-  on the service's card in the list. Postgres <b>TLS mode</b> and the
-  SSH <b>Host key fingerprint</b> are under the form's <b>Advanced</b>
-  section. With the default ports:</p>
+  <p>For HTTP API, WebSocket, and MCP, use <b>＋ Add service</b> and enter
+  the printed fields manually (MCP is the generic <b>MCP server</b> row).
+  For Postgres and SSH, paste the <b>Quick setup</b> line into the card
+  and press <b>Continue</b> — the service type is detected automatically
+  and the form opens pre-filled. Enter any remaining values, press
+  <b>Add service</b>, then press <b>Test</b> on the service's card in the
+  list. Postgres <b>TLS mode</b> and the SSH <b>Host key fingerprint</b>
+  are under the form's <b>Advanced</b> section. With the default ports:</p>
   <div class="wide">
   <table>
     <tr><th>Type</th><th>Setup</th><th>Then</th></tr>
@@ -117,6 +119,13 @@ npm run sandbox:up</code></pre>
       <td>Enter URL <code>ws://127.0.0.1:18081/ws</code> manually</td>
       <td>Name <code>sandbox-websocket</code> · Bearer token
           <code>aka-ws-test-token</code></td>
+    </tr>
+    <tr>
+      <td>MCP&nbsp;server</td>
+      <td>Enter server URL <code>http://127.0.0.1:18080/mcp</code> manually</td>
+      <td>Name <code>sandbox-mcp</code> · custom auth
+          <code>Authorization: Bearer {{SANDBOX_MCP_TOKEN}}</code> ·
+          value <code>aka-mcp-test-token</code></td>
     </tr>
     <tr>
       <td>Postgres</td>
@@ -141,6 +150,8 @@ npm run sandbox:up</code></pre>
   <div class="card">
     <b>sandbox-http</b> — an authenticated HTTP 200<br>
     <b>sandbox-websocket</b> — <code>WebSocket handshake succeeded</code><br>
+    <b>sandbox-mcp</b> — the handshake succeeds; tools
+    <code>sandbox_echo</code> and <code>sandbox_ping</code> are listed<br>
     <b>sandbox-postgres</b> — <code>Signed in to aka_sandbox as aka</code><br>
     <b>sandbox-ssh</b> — <code>Key loaded; 127.0.0.1:12222 answered with SSH-2.0-…</code>
     <span class="muted">(reachability only; a real agent connection tests login)</span>
