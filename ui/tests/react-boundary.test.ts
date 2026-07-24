@@ -169,7 +169,7 @@ test('direct connection guides tell the user to hand the address to their agent'
 
   assert.match(app, /Tell your agent to connect directly to this database\./);
   assert.match(app, /Tell your agent to connect directly to this server\./);
-  assert.doesNotMatch(app, /Connect directly to this (?:database|remote server) via Multitool\./);
+  assert.doesNotMatch(app, /Connect directly to this (?:database|remote server) via AgentMFA\./);
 });
 
 test('the first-use task does not restate automatic agent access', async () => {

@@ -13,11 +13,11 @@ node scripts/npm/sync-versions.mjs --check
 node scripts/npm/verify-package.mjs --all
 
 packages=(
-  multitool-darwin-arm64
-  multitool-darwin-x64
-  multitool-linux-arm64
-  multitool-linux-x64
-  multitool
+  agentmfa-darwin-arm64
+  agentmfa-darwin-x64
+  agentmfa-linux-arm64
+  agentmfa-linux-x64
+  agentmfa
 )
 
 for package in "${packages[@]}"; do

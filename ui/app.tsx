@@ -1,4 +1,4 @@
-// Multitool React frontend. One file drives all Tauri windows (main, tray
+// AgentMFA React frontend. One file drives all Tauri windows (main, tray
 // and dropdown), chosen from location.hash.
 //
 // Every mutation and read goes through the Rust core via Tauri
@@ -823,7 +823,7 @@ function connToggleHTML(c: ConnectionSummary): string {
 /* ---- connection guides ---- */
 // The guides' job is no longer to manage identities the broker stores —
 // there is exactly one, this computer's key — but to get the user's own
-// agents talking to Multitool: a key card, one guide card per client from
+// agents talking to AgentMFA: a key card, one guide card per client from
 // the shared CONNECT_CLIENTS definitions (the same ones step 2 of the
 // walkthrough renders), and a cosmetic recently-seen list built from
 // activity labels. Per-tool access lives on the Tools tab.
@@ -1145,7 +1145,7 @@ function connDetailHTML(c: ConnectionSummary): string {
   // speaks in the connect headline's sentence-case register — the panel
   // has one voice, no tracked-caps machinery labels.
   const mcpSection = enabled && c.mcp_path
-    ? `<div class="cd-sec"><div class="cd-connect-lbl"><span>Multitool MCP</span><span class="cd-lbl-aside">${connectionToolsChipHTML(c)}</span></div>
+    ? `<div class="cd-sec"><div class="cd-connect-lbl"><span>AgentMFA MCP</span><span class="cd-lbl-aside">${connectionToolsChipHTML(c)}</span></div>
         ${ENDPOINTABLE[c.type] ? endpointStripHTML(c) : ''}</div>`
     : '';
   const offNote = enabled
@@ -1179,7 +1179,7 @@ function connDetailHTML(c: ConnectionSummary): string {
       rows.push(['Server', `${c.scheme ? `${c.scheme}://` : ''}${c.host}`]);
     }
     if (c.secret_names.length) rows.push(['Credential', c.secret_names.join(', ')]);
-    else if (c.oauth) rows.push(['Credential', 'OAuth, renewed by Multitool']);
+    else if (c.oauth) rows.push(['Credential', 'OAuth, renewed by AgentMFA']);
     return rows;
   })();
   const live = liveCount(c);
@@ -1715,7 +1715,7 @@ function startConnectPaneHTML(mode: ConnectModeId, option: StartOption, progress
   }
   const clientSnippet = client.snippet(env);
   if (client.requiresCli && !client.inlineCliInstall) {
-    return `<p>Install the Multitool CLI:</p>
+    return `<p>Install the AgentMFA CLI:</p>
       ${snip(CLI_INSTALL_COMMAND)}
       <p class="start-pane-next">${esc(client.lead(env))}</p>
       ${snip(clientSnippet)}
@@ -1775,7 +1775,7 @@ function startWalkthroughHTML(): string {
   const optionKind = startKindLabel(option);
   const optionName = optionKind ? `${option.label} ${optionKind}` : option.label;
   const addLabel = progress.added ? `${optionName} Connected` : `Add ${optionName}`;
-  const addBody = `<p>Multitool supports databases, SSH, APIs, and MCPs.</p>
+  const addBody = `<p>AgentMFA supports databases, SSH, APIs, and MCPs.</p>
       <div class="start-picker" role="group" aria-label="What to connect">${picker}</div>
       <div class="start-actions">
         <button class="btn primary sm" data-act="${addAction}" data-id="${option.catalogId}"
@@ -1915,10 +1915,10 @@ function BrokerPane({ kind }: { kind: 'setup' | 'connecting' | 'error' }): React
     const hasSaved = state.broker.has_saved_token
       && (setup.url.trim() === '' || setup.url.trim().replace(/\/+$/, '') === (state.broker.url ?? ''));
     return (
-      <div className="broker-pane" role="form" aria-label="Connect to hosted Multitool">
+      <div className="broker-pane" role="form" aria-label="Connect to hosted AgentMFA">
         <div className="bp-icon"><Icon markup={ICONS.blocks} /></div>
-        <h2>Connect to hosted Multitool</h2>
-        <p className="bp-lead">Connect to a remote Multitool server with a management token.</p>
+        <h2>Connect to hosted AgentMFA</h2>
+        <p className="bp-lead">Connect to a remote AgentMFA server with a management token.</p>
         <div className="adv-collapse">
           <button type="button" className="adv-toggle" aria-expanded={setup.advancedOpen}
             data-act="toggle-remote-advanced">
@@ -1931,7 +1931,7 @@ function BrokerPane({ kind }: { kind: 'setup' | 'connecting' | 'error' }): React
         </div>
         <div className="f-row">
           <label htmlFor="rb-url">Hosted instance URL</label>
-          <input id="rb-url" placeholder="https://multitool.aka.com" value={setup.url}
+          <input id="rb-url" placeholder="https://agentmfa.aka.com" value={setup.url}
             autoComplete="off" spellCheck={false}
             onChange={(e) => { setup.url = e.currentTarget.value; render(); }} />
         </div>
@@ -2029,14 +2029,14 @@ function MainWindow(): ReactNode {
     <>
       <div className="surface">
         <div className="dw-titlebar" data-tauri-drag-region="">
-          <span className="dw-title dw-title-center">Multitool</span>
+          <span className="dw-title dw-title-center">AgentMFA</span>
           <SafeMarkup markup={brokerSwitchHTML()} />
         </div>
         <div className="dw-body">
           <div className={`dw-side ${takeover ? 'disabled' : ''}`}>
             <div className="dw-brand">
               <div className="dd-appicon"><Icon markup={ICONS.blocks} /></div>
-              <div><div className="dd-title">Multitool</div><SafeMarkup markup={brokerReadyHTML()} /></div>
+              <div><div className="dd-title">AgentMFA</div><SafeMarkup markup={brokerReadyHTML()} /></div>
             </div>
             <div className="dw-nav">
               {TABS.map((tab) => (
@@ -2092,7 +2092,7 @@ function DropdownWindow(): ReactNode {
       <div className="surface dropdown-surface">
         <div className="dd-head">
           <div className="dd-appicon"><Icon markup={ICONS.blocks} /></div>
-          <div className="dd-identity"><div className="dd-title">Multitool</div></div>
+          <div className="dd-identity"><div className="dd-title">AgentMFA</div></div>
           <button className="icon-btn" title="Open as a window" aria-label="Open as a window"
             data-act="mode-window"><Icon markup={ICONS.expand} /></button>
         </div>
@@ -2106,7 +2106,7 @@ function DropdownWindow(): ReactNode {
         <div className="dd-head">
           <div className="dd-appicon"><Icon markup={ICONS.blocks} /></div>
           <div className="dd-identity">
-            <div className="dd-title">Multitool</div><SafeMarkup markup={brokerReadyHTML()} />
+            <div className="dd-title">AgentMFA</div><SafeMarkup markup={brokerReadyHTML()} />
           </div>
           <button className="icon-btn" title="Open as a window" aria-label="Open as a window"
             data-act="mode-window"><Icon markup={ICONS.expand} /></button>
@@ -2238,7 +2238,7 @@ function AppRoot(): ReactNode {
     // splash up until boot() has real data, instead of flashing a fully
     // chromed but empty window that snaps to the landing tab a beat later.
     return (
-      <div className="app-loading" role="status" aria-label="Loading Multitool">
+      <div className="app-loading" role="status" aria-label="Loading AgentMFA">
         <span className="app-loading-spinner" />
       </div>
     );
@@ -3058,7 +3058,7 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
     fields.push(
       <div className="f-row" key="auth">
         <label>Authentication</label>
-        <input value="OAuth (managed by Multitool)" readOnly aria-readonly="true" />
+        <input value="OAuth (managed by AgentMFA)" readOnly aria-readonly="true" />
         <div className="rule-note">{conn?.account ? `Connected account: ${conn.account}. ` : ''}Tokens are stored securely, refreshed automatically, and sent only to this MCP server.</div>
       </div>,
     );
@@ -3342,7 +3342,7 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
 const AUTH_STEPS: Array<[string, string]> = [
   ['probing', 'Contacting the server'],
   ['discovering', 'Reading how to sign in'],
-  ['registering', 'Registering Multitool'],
+  ['registering', 'Registering AgentMFA'],
   ['awaiting_authorization', 'Approving in your browser'],
   ['exchanging', 'Finishing sign-in'],
   ['verifying', 'Confirming the account'],

@@ -36,7 +36,7 @@ const connectRequests = new Set<string>();
 const CONNECTIONS = [
   { name: 'prod-db', type: 'pg', target: 'db.internal:5432/app', endpoint: '/v1/pg/open' },
   { name: 'deploy-host', type: 'ssh', target: 'deploy@host.internal', endpoint: '/v1/ssh/open' },
-  // These two slug to the same MCP tool name: `multitool_prod_db_open`.
+  // These two slug to the same MCP tool name: `agentmfa_prod_db_open`.
   // Hyphens survive; dots and spaces do not.
   { name: 'prod.db', type: 'pg', target: 'db.other:5432/app', endpoint: '/v1/pg/open' },
   { name: 'prod db', type: 'pg', target: 'db.third:5432/app', endpoint: '/v1/pg/open' },
@@ -315,11 +315,11 @@ test('wired connections appear in tools/list as real tools', async () => {
     const { tools } = await client.listTools();
     // `prod-db` is wired and `deploy-host` is not, so exactly one tool.
     assert.deepEqual(tools.map((tool) => tool.name).sort(), [
-      'multitool_connect',
-      'multitool_prod-db_open',
-      'multitool_status',
+      'agentmfa_connect',
+      'agentmfa_prod-db_open',
+      'agentmfa_status',
     ]);
-    const db = tools.find((tool) => tool.name === 'multitool_prod-db_open');
+    const db = tools.find((tool) => tool.name === 'agentmfa_prod-db_open');
     assert.match(db?.description ?? '', /Postgres/);
   } finally {
     await app.close();
@@ -331,15 +331,15 @@ test('an agent wired to nothing is told so, not left guessing', async () => {
   try {
     const client = await app.connect('token-bare');
     const { tools } = await client.listTools();
-    // Even an unwired agent can ask for tools by name (multitool_connect);
+    // Even an unwired agent can ask for tools by name (agentmfa_connect);
     // status remains the "why can't I see it?" explainer.
     assert.deepEqual(tools.map((tool) => tool.name).sort(), [
-      'multitool_connect',
-      'multitool_status',
+      'agentmfa_connect',
+      'agentmfa_status',
     ]);
 
     const status = payload(
-      await client.callTool({ name: 'multitool_status', arguments: {} }),
+      await client.callTool({ name: 'agentmfa_status', arguments: {} }),
     ) as { tools: unknown[]; hint?: string };
     assert.deepEqual(status.tools, []);
     assert.match(status.hint ?? '', /wire this agent/i);
@@ -356,9 +356,9 @@ test('a colliding tool name costs one tool, not the whole session', async () => 
     // The session works, and the second colliding connection is dropped
     // rather than taking every other tool down with it.
     assert.deepEqual(tools.map((tool) => tool.name).sort(), [
-      'multitool_connect',
-      'multitool_prod_db_open',
-      'multitool_status',
+      'agentmfa_connect',
+      'agentmfa_prod_db_open',
+      'agentmfa_status',
     ]);
   } finally {
     await app.close();
@@ -373,7 +373,7 @@ test('status reports tools wired after the session opened', async () => {
     WIRED['client-bare'] = ['deploy-host'];
     try {
       const status = payload(
-        await client.callTool({ name: 'multitool_status', arguments: {} }),
+        await client.callTool({ name: 'agentmfa_status', arguments: {} }),
       ) as { pending?: string[]; hint?: string };
       assert.deepEqual(status.pending, ['deploy-host']);
       assert.match(status.hint ?? '', /reconnect/i);
@@ -392,14 +392,14 @@ test("an MCP upstream's own tools are re-exposed, credential-side untouched", as
     const { tools } = await client.listTools();
     // Both pages of the upstream's paginated `tools/list` are present.
     assert.deepEqual(tools.map((tool) => tool.name).sort(), [
-      'multitool_connect',
-      'multitool_notion_create_page',
-      'multitool_notion_search',
-      'multitool_status',
+      'agentmfa_connect',
+      'agentmfa_notion_create_page',
+      'agentmfa_notion_search',
+      'agentmfa_status',
     ]);
 
     const result = await client.callTool({
-      name: 'multitool_notion_search',
+      name: 'agentmfa_notion_search',
       arguments: { query: 'roadmap' },
     });
     // The upstream's own result comes back as it stands.
@@ -424,9 +424,9 @@ test('a curated wiring lists only its allowed subset of upstream tools', async (
     const client = await app.connect('token-mcp');
     const { tools } = await client.listTools();
     assert.deepEqual(tools.map((tool) => tool.name).sort(), [
-      'multitool_connect',
-      'multitool_notion_search',
-      'multitool_status',
+      'agentmfa_connect',
+      'agentmfa_notion_search',
+      'agentmfa_status',
     ]);
   } finally {
     delete notion.allowed_tools;
@@ -443,7 +443,7 @@ test('a stateful upstream sees the full handshake and no leaked sessions', async
   const app = await harness();
   try {
     const client = await app.connect('token-mcp');
-    await client.callTool({ name: 'multitool_notion_search', arguments: { query: 'x' } });
+    await client.callTool({ name: 'agentmfa_notion_search', arguments: { query: 'x' } });
     assert.ok(upstream.deleted.length >= 2, 'list + call should each close their session');
     assert.equal(upstream.sessions.size, 0, 'no upstream session may be left open');
   } finally {
@@ -460,7 +460,7 @@ test('an upstream tool call carries only the agent arguments', async () => {
   try {
     const client = await app.connect('token-mcp');
     const result = await client.callTool({
-      name: 'multitool_notion_search',
+      name: 'agentmfa_notion_search',
       arguments: { query: 'roadmap' },
     });
     const echoed = (result as { content: Array<{ text: string }> }).content[0].text;
@@ -485,10 +485,10 @@ test('an unreachable MCP upstream costs only its own tools', async () => {
       const { tools } = await client.listTools();
       // The session opened and the healthy tool survived.
       assert.ok(
-        tools.some((tool) => tool.name === 'multitool_prod-db_open'),
+        tools.some((tool) => tool.name === 'agentmfa_prod-db_open'),
         'the healthy tool should still be registered',
       );
-      assert.ok(!tools.some((tool) => tool.name.startsWith('multitool_notion')));
+      assert.ok(!tools.some((tool) => tool.name.startsWith('agentmfa_notion')));
     } finally {
       WIRED['client-wired'] = ['prod-db'];
       notion.mcp_path = '/mcp';
@@ -501,17 +501,17 @@ test('an unreachable MCP upstream costs only its own tools', async () => {
 test('status reports an MCP upstream by its real tool names', async () => {
   // Regression: status used to map every connection through the request-tool
   // naming convention, so an MCP upstream was advertised as
-  // `multitool_notion_request` — a tool that does not exist. It must report
-  // the names actually registered (`multitool_notion_search`).
+  // `agentmfa_notion_request` — a tool that does not exist. It must report
+  // the names actually registered (`agentmfa_notion_search`).
   const app = await harness();
   try {
     const client = await app.connect('token-mcp');
     const status = payload(
-      await client.callTool({ name: 'multitool_status', arguments: {} }),
+      await client.callTool({ name: 'agentmfa_status', arguments: {} }),
     ) as { tools: Array<{ tool: string; name: string }> };
     assert.deepEqual(
       status.tools.map((entry) => entry.tool).sort(),
-      ['multitool_notion_create_page', 'multitool_notion_search'],
+      ['agentmfa_notion_create_page', 'agentmfa_notion_search'],
     );
     assert.ok(status.tools.every((entry) => entry.name === 'notion'));
     // The advertised names are exactly the tools the agent can actually call.
@@ -532,7 +532,7 @@ test('status reports an unreachable MCP upstream as an error, not a phantom tool
     try {
       const client = await app.connect('token-wired');
       const status = payload(
-        await client.callTool({ name: 'multitool_status', arguments: {} }),
+        await client.callTool({ name: 'agentmfa_status', arguments: {} }),
       ) as {
         tools: Array<{ tool: string; name: string }>;
         errors?: Array<{ name: string; error: string }>;
@@ -540,7 +540,7 @@ test('status reports an unreachable MCP upstream as an error, not a phantom tool
       // No phantom tool for the dead upstream…
       assert.ok(!status.tools.some((entry) => entry.name === 'notion'));
       // …but the healthy connection is still reported…
-      assert.ok(status.tools.some((entry) => entry.tool === 'multitool_prod-db_open'));
+      assert.ok(status.tools.some((entry) => entry.tool === 'agentmfa_prod-db_open'));
       // …and the upstream's failure is surfaced, as the docstring promises.
       assert.deepEqual(status.errors?.map((entry) => entry.name), ['notion']);
     } finally {
@@ -596,7 +596,7 @@ test('an unwired connection is never even registered as a tool', async () => {
     // Calling it by the name it *would* have had must fail at the protocol
     // level: there is no such tool to invoke.
     const result = await client.callTool({
-      name: 'multitool_deploy-host_open',
+      name: 'agentmfa_deploy-host_open',
       arguments: {},
     });
     assert.equal((result as { isError?: boolean }).isError, true);
@@ -609,7 +609,7 @@ test('invoking a tool proxies to the broker data plane', async () => {
   const app = await harness();
   try {
     const client = await app.connect('token-wired');
-    const result = await client.callTool({ name: 'multitool_prod-db_open', arguments: {} });
+    const result = await client.callTool({ name: 'agentmfa_prod-db_open', arguments: {} });
     // The fake broker echoes the request it received, which is how we can
     // see the sidecar named the right connection on the right endpoint.
     assert.deepEqual(payload(result), {
@@ -671,37 +671,37 @@ test('the session count is capped', async () => {
 test('over-budget upstream tools are searchable and callable, not lost', async () => {
   // A budget of one: the upstream's first tool registers, the second is
   // search-only.
-  process.env.MULTITOOL_TOOL_BUDGET = '1';
+  process.env.AGENTMFA_TOOL_BUDGET = '1';
   const app = await harness();
   try {
     const client = await app.connect('token-mcp');
     const { tools } = await client.listTools();
     const names = tools.map((tool) => tool.name).sort();
-    assert.ok(names.includes('multitool_notion_search'), String(names));
-    assert.ok(!names.includes('multitool_notion_create_page'), 'second tool is withheld');
-    assert.ok(names.includes('multitool_search_tools'));
-    assert.ok(names.includes('multitool_call_tool'));
+    assert.ok(names.includes('agentmfa_notion_search'), String(names));
+    assert.ok(!names.includes('agentmfa_notion_create_page'), 'second tool is withheld');
+    assert.ok(names.includes('agentmfa_search_tools'));
+    assert.ok(names.includes('agentmfa_call_tool'));
 
     // Status owns up to the withheld tools instead of hiding them.
     const status = payload(
-      await client.callTool({ name: 'multitool_status', arguments: {} }),
+      await client.callTool({ name: 'agentmfa_status', arguments: {} }),
     ) as { search_only_tools?: number };
     assert.equal(status.search_only_tools, 1);
 
     // Search finds the withheld tool and says how to call it.
     const found = payload(
       await client.callTool({
-        name: 'multitool_search_tools',
+        name: 'agentmfa_search_tools',
         arguments: { query: 'create page' },
       }),
     ) as { results: Array<{ tool: string; call: { tool: string } }> };
     const hit = found.results.find((result) => result.tool === 'create_page');
     assert.ok(hit, JSON.stringify(found));
-    assert.equal(hit!.call.tool, 'multitool_call_tool');
+    assert.equal(hit!.call.tool, 'agentmfa_call_tool');
 
     // …and the generic invoker reaches it through the broker as usual.
     const result = await client.callTool({
-      name: 'multitool_call_tool',
+      name: 'agentmfa_call_tool',
       arguments: { connection: 'notion', tool: 'create_page', arguments: { title: 'Hi' } },
     });
     assert.deepEqual((result as { content: Array<{ text: string }> }).content, [
@@ -710,29 +710,29 @@ test('over-budget upstream tools are searchable and callable, not lost', async (
 
     // An unknown tool is refused with a pointer at search, not a crash.
     const missing = await client.callTool({
-      name: 'multitool_call_tool',
+      name: 'agentmfa_call_tool',
       arguments: { connection: 'notion', tool: 'not_a_tool', arguments: {} },
     });
     assert.equal((missing as { isError?: boolean }).isError, true);
   } finally {
-    delete process.env.MULTITOOL_TOOL_BUDGET;
+    delete process.env.AGENTMFA_TOOL_BUDGET;
     await app.close();
   }
 });
 
-test('multitool_connect files a request with the broker and reports back', async () => {
+test('agentmfa_connect files a request with the broker and reports back', async () => {
   const app = await harness();
   try {
     const client = await app.connect('token-bare');
     const text = (result: unknown): string =>
       (result as { content: Array<{ text: string }> }).content[0].text;
     const first = text(await client.callTool({
-      name: 'multitool_connect',
+      name: 'agentmfa_connect',
       arguments: { service: 'linear' },
     }));
-    assert.match(first, /add "linear" in the Multitool app/i);
+    assert.match(first, /add "linear" in the AgentMFA app/i);
     const again = text(await client.callTool({
-      name: 'multitool_connect',
+      name: 'agentmfa_connect',
       arguments: { service: 'linear' },
     }));
     assert.match(again, /already requested/i);

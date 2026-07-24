@@ -372,7 +372,7 @@ pub async fn list_tools(
             json!({
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {},
-                "clientInfo": { "name": "aka-multitool", "version": env!("CARGO_PKG_VERSION") },
+                "clientInfo": { "name": "aka-agentmfa", "version": env!("CARGO_PKG_VERSION") },
             }),
         )
         .await?;
@@ -442,7 +442,7 @@ async fn check_endpoint(
             json!({
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {},
-                "clientInfo": { "name": "aka-multitool", "version": env!("CARGO_PKG_VERSION") },
+                "clientInfo": { "name": "aka-agentmfa", "version": env!("CARGO_PKG_VERSION") },
             }),
         )
         .await

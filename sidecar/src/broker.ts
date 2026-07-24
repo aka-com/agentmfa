@@ -77,7 +77,7 @@ export class BrokerClient {
           headers: {
             authorization: `Bearer ${auth.token}`,
             accept: 'application/json',
-            ...(auth.label ? { 'x-multitool-client': auth.label } : {}),
+            ...(auth.label ? { 'x-agentmfa-client': auth.label } : {}),
             ...(payload ? { 'content-type': 'application/json', 'content-length': payload.length } : {}),
           },
         },

@@ -1357,7 +1357,7 @@ impl Broker {
     /* ------------------------ agent connect requests ----------------------- */
 
     /// An agent asked for a service that is not configured (the sidecar's
-    /// `multitool_connect` tool). This records the ask and pokes the shell
+    /// `agentmfa_connect` tool). This records the ask and pokes the shell
     /// so the user can add the tool — nothing is created or granted here,
     /// and the same client label asking for the same service within a minute
     /// is coalesced. Returns whether this call surfaced a fresh request.
@@ -1388,7 +1388,7 @@ impl Broker {
                 format!("{client} asked to connect: {service}"),
             )
             .agent(client.to_string())
-            .detail("A request only — add the tool in Multitool to grant it")
+            .detail("A request only — add the tool in AgentMFA to grant it")
             .field("service", service),
         );
         self.events.connect_requested(client, service);
@@ -1941,7 +1941,7 @@ impl Broker {
                 "presence window must be 900, 3600, or 7200 seconds, got {secs}"
             )));
         }
-        self.confirm_user_action("Change how long Multitool stays unlocked")?;
+        self.confirm_user_action("Change how long AgentMFA stays unlocked")?;
         self.store.set_presence_window_secs(secs)?;
         // Re-anchor the just-confirmed window so a shortened length takes
         // effect now instead of at the old deadline.

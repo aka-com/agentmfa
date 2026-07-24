@@ -1,6 +1,6 @@
 //! Tray + window
 //!
-//! Multitool has a resizable main window, an NSStatusItem-style tray
+//! AgentMFA has a resizable main window, an NSStatusItem-style tray
 //! dropdown. The tray icon
 //! is always present and toggles the compact dropdown beneath its status item.
 
@@ -55,7 +55,7 @@ tauri_panel! {
 }
 
 /// Convert the dropdown's ordinary Tauri NSWindow into a non-activating
-/// NSPanel. A panel can accept keyboard input without activating Multitool and
+/// NSPanel. A panel can accept keyboard input without activating AgentMFA and
 /// raising the already-visible main window above the user's current app.
 #[cfg(target_os = "macos")]
 pub fn setup_dropdown_panel(app: &AppHandle) -> tauri::Result<()> {
@@ -124,7 +124,7 @@ struct Bounds {
 }
 
 /// Extend Tauri's conventional macOS application menu with a reliable way
-/// back to Multitool when its Dock and tray affordances are unavailable.
+/// back to AgentMFA when its Dock and tray affordances are unavailable.
 pub fn setup_app_menu(app: &AppHandle) -> tauri::Result<()> {
     let menu = Menu::default(app)?;
     let new_window = MenuItem::with_id(
@@ -144,7 +144,7 @@ pub fn setup_app_menu(app: &AppHandle) -> tauri::Result<()> {
         }
     }
 
-    let app_window = MenuItem::with_id(app, APP_WINDOW_MENU_ID, "Multitool", true, None::<&str>)?;
+    let app_window = MenuItem::with_id(app, APP_WINDOW_MENU_ID, "AgentMFA", true, None::<&str>)?;
     if let Some(MenuItemKind::Submenu(window_menu)) = menu.get(WINDOW_SUBMENU_ID) {
         let separator = PredefinedMenuItem::separator(app)?;
         window_menu.append_items(&[&separator, &app_window])?;
@@ -179,10 +179,10 @@ fn focus_existing_or_reopen(app: &AppHandle) {
 /// Install the always-present tray icon. Left-click toggles the compact
 /// dropdown; right-click exposes the conventional app menu.
 pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
-    let open = MenuItem::with_id(app, "tray-open", "Open Multitool", true, None::<&str>)?;
+    let open = MenuItem::with_id(app, "tray-open", "Open AgentMFA", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "tray-settings", "Settings…", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
-    let quit = MenuItem::with_id(app, "tray-quit", "Quit Multitool", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "tray-quit", "Quit AgentMFA", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &settings, &separator, &quit])?;
 
     let tray = app
@@ -277,7 +277,7 @@ fn show_dropdown(app: &AppHandle) {
 
 /// Show the macOS dropdown through NSPanel rather than Tauri's `show` and
 /// `set_focus`: Tauri activates the whole application when focusing a native
-/// window, which also raises the main Multitool window.
+/// window, which also raises the main AgentMFA window.
 #[cfg(target_os = "macos")]
 fn show_dropdown_window(app: &AppHandle, window: &tauri::WebviewWindow) {
     if let Ok(panel) = app.get_webview_panel(DROPDOWN) {

@@ -28,7 +28,7 @@ pub async fn unix_http(
         request.push_str(&format!("Authorization: Bearer {bearer}\r\n"));
     }
     if let Some(label) = client_label {
-        request.push_str(&format!("X-Multitool-Client: {label}\r\n"));
+        request.push_str(&format!("X-AgentMFA-Client: {label}\r\n"));
     }
     if let Some(body) = body {
         request.push_str(&format!(
@@ -114,7 +114,7 @@ pub async fn open_session(
     .await
     .map_err(|error| match error.kind() {
         std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => format!(
-            "no broker is running at {} — start the Multitool app or `aka serve`",
+            "no broker is running at {} — start the AgentMFA app or `aka serve`",
             socket.display()
         ),
         _ => format!(
@@ -157,7 +157,7 @@ mod tests {
             body: String,
         ) -> ([(&'static str, &'static str); 1], String) {
             assert_eq!(headers.get("authorization").unwrap(), "Bearer aka_testkey");
-            assert_eq!(headers.get("x-multitool-client").unwrap(), "test-cli");
+            assert_eq!(headers.get("x-agentmfa-client").unwrap(), "test-cli");
             let request: serde_json::Value = serde_json::from_str(&body).unwrap();
             assert_eq!(request["connection"], "analytics");
             (

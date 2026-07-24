@@ -1286,7 +1286,7 @@ async fn dial_upstream_with_password(
                 other => {
                     return Err(format!(
                         "The server asked for an authentication method \
-                         Multitool doesn't support (code {other})"
+                         AgentMFA doesn't support (code {other})"
                     )
                     .into())
                 }

@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 "use strict";
 
-// Launcher for the `@aka-labs/multitool` npm package. The real CLI is the prebuilt Rust
+// Launcher for the `agentmfa` npm package. The real CLI is the prebuilt Rust
 // `aka` binary shipped in the platform-specific package that npm selected via
-// optionalDependencies (@aka-labs/multitool-<os>-<arch>); this script only resolves it
+// optionalDependencies (agentmfa-<os>-<arch>); this script only resolves it
 // and hands over argv. There is deliberately no postinstall step and no
 // network access here: a credential broker's install should be inert.
 
@@ -11,21 +11,21 @@ const { spawnSync } = require("child_process");
 const path = require("path");
 
 const PLATFORM_PACKAGES = {
-  "darwin arm64": "@aka-labs/multitool-darwin-arm64",
-  "darwin x64": "@aka-labs/multitool-darwin-x64",
-  "linux arm64": "@aka-labs/multitool-linux-arm64",
-  "linux x64": "@aka-labs/multitool-linux-x64",
+  "darwin arm64": "agentmfa-darwin-arm64",
+  "darwin x64": "agentmfa-darwin-x64",
+  "linux arm64": "agentmfa-linux-arm64",
+  "linux x64": "agentmfa-linux-x64",
 };
 
 function fail(message) {
-  console.error(`multitool: ${message}`);
+  console.error(`agentmfa: ${message}`);
   process.exit(1);
 }
 
 function resolveBinary() {
-  // Escape hatch for development and unusual layouts: point MULTITOOL_BIN at
+  // Escape hatch for development and unusual layouts: point AGENTMFA_BIN at
   // any `aka` binary (e.g. target/release/aka) and the launcher uses it.
-  if (process.env.MULTITOOL_BIN) return process.env.MULTITOOL_BIN;
+  if (process.env.AGENTMFA_BIN) return process.env.AGENTMFA_BIN;
 
   const key = `${process.platform} ${process.arch}`;
   const pkg = PLATFORM_PACKAGES[key];
@@ -43,7 +43,7 @@ function resolveBinary() {
   } catch {
     fail(
       `the ${pkg} package holding the binary for ${key} is not installed.\n` +
-        "It is an optionalDependency of @aka-labs/multitool: reinstall without " +
+        "It is an optionalDependency of agentmfa: reinstall without " +
         "--no-optional/--omit=optional, and make sure your package manager " +
         "installs platform-specific optional dependencies."
     );
@@ -56,8 +56,8 @@ function resolveBinary() {
   const got = require(`${pkg}/package.json`).version;
   if (want !== got) {
     fail(
-      `version mismatch: @aka-labs/multitool@${want} resolved ${pkg}@${got}; ` +
-        "reinstall @aka-labs/multitool to repair the pairing."
+      `version mismatch: agentmfa@${want} resolved ${pkg}@${got}; ` +
+        "reinstall agentmfa to repair the pairing."
     );
   }
   return binPath;

@@ -1102,7 +1102,7 @@ async fn changing_the_client_label_cannot_bypass_the_identity_rate_limit() {
             &h.socket,
             "GET",
             "/v1/connections",
-            &[("authorization", &auth), ("x-multitool-client", label)],
+            &[("authorization", &auth), ("x-agentmfa-client", label)],
             None,
         )
         .await;
@@ -1114,7 +1114,7 @@ async fn changing_the_client_label_cannot_bypass_the_identity_rate_limit() {
         "/v1/connections",
         &[
             ("authorization", &auth),
-            ("x-multitool-client", "fresh-label"),
+            ("x-agentmfa-client", "fresh-label"),
         ],
         None,
     )
@@ -1251,7 +1251,7 @@ async fn whoami_probes_a_stored_token() {
         "/v1/whoami",
         &[
             ("authorization", &auth),
-            ("x-multitool-client", "claude-code"),
+            ("x-agentmfa-client", "claude-code"),
         ],
         None,
     )
@@ -1524,7 +1524,7 @@ async fn agent_connect_requests_are_audited_and_debounced() {
         "/v1/connect-requests",
         &[
             ("authorization", &auth),
-            ("x-multitool-client", "claude-code"),
+            ("x-agentmfa-client", "claude-code"),
         ],
         Some(json!({ "service": "linear" })),
     )
@@ -1548,7 +1548,7 @@ async fn agent_connect_requests_are_audited_and_debounced() {
         "/v1/connect-requests",
         &[
             ("authorization", &auth),
-            ("x-multitool-client", "claude-code"),
+            ("x-agentmfa-client", "claude-code"),
         ],
         Some(json!({ "service": "linear" })),
     )
@@ -1563,7 +1563,7 @@ async fn agent_connect_requests_are_audited_and_debounced() {
         "/v1/connect-requests",
         &[
             ("authorization", &auth),
-            ("x-multitool-client", "claude-code"),
+            ("x-agentmfa-client", "claude-code"),
         ],
         Some(json!({ "service": "" })),
     )
@@ -1585,7 +1585,7 @@ async fn brokered_calls_audit_attribution_duration_and_outcome() {
         "/v1/http",
         &[
             ("authorization", &auth),
-            ("x-multitool-client", "claude-code"),
+            ("x-agentmfa-client", "claude-code"),
         ],
         Some(json!({ "connection": "github", "method": "GET", "path": "/user/repos" })),
     )

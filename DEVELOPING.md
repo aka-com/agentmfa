@@ -1,4 +1,4 @@
-## Developing Multitool
+## Developing AgentMFA
 
 ```sh
 npm install        # Install the pinned Tauri and TypeScript toolchain

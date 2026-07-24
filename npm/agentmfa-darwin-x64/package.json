@@ -1,8 +1,8 @@
 {
-  "name": "@aka-labs/multitool-darwin-arm64",
+  "name": "agentmfa-darwin-x64",
   "version": "0.1.0",
-  "description": "Multitool CLI binary for macOS (Apple silicon). Install @aka-labs/multitool instead of installing this directly.",
-  "homepage": "https://github.com/aka-com/multitool",
+  "description": "AgentMFA CLI binary for macOS (Intel). Install agentmfa instead of installing this directly.",
+  "homepage": "https://github.com/aka-com/agentmfa",
   "files": [
     "bin/aka"
   ],
@@ -16,7 +16,7 @@
     "darwin"
   ],
   "cpu": [
-    "arm64"
+    "x64"
   ],
   "publishConfig": {
     "access": "public"

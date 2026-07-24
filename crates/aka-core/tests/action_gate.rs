@@ -261,7 +261,7 @@ async fn one_confirmation_opens_the_presence_window_for_reads() {
 async fn an_action_gate_prompt_opens_the_user_plane_presence_window() {
     // A full-authority native auth (here, key rotation) is the strongest
     // prompt there is; opening the presence window afterward keeps the "one OS
-    // authentication keeps Multitool unlocked" model, so an immediately
+    // authentication keeps AgentMFA unlocked" model, so an immediately
     // following read or configuration change rides it instead of surprising
     // the user with a second prompt.
     let events = Arc::new(CountingEvents {

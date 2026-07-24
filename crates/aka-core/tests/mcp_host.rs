@@ -319,10 +319,10 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
     assert_eq!(
         tools,
         vec![
-            "multitool_connect",
-            "multitool_notes_search",
-            "multitool_prod-db_request",
-            "multitool_status"
+            "agentmfa_connect",
+            "agentmfa_notes_search",
+            "agentmfa_prod-db_request",
+            "agentmfa_status"
         ],
         "an MCP upstream contributes its own tools; disabled ones contribute none"
     );
@@ -331,7 +331,7 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
     // credential injected by the broker and never seen by the agent.
     let result = wired
         .call_tool(
-            "multitool_prod-db_request",
+            "agentmfa_prod-db_request",
             json!({"method": "GET", "path": "/whoami"}),
         )
         .await;
@@ -353,7 +353,7 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
     // The MCP upstream is reached *through* the broker, so its credential
     // is injected on the upstream leg exactly like any other API call.
     let searched = wired
-        .call_tool("multitool_notes_search", json!({"query": "roadmap"}))
+        .call_tool("agentmfa_notes_search", json!({"query": "roadmap"}))
         .await;
     let text = searched["content"][0]["text"].as_str().unwrap_or_default();
     assert!(
@@ -370,11 +370,11 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
         "the agent's own token must not reach the MCP upstream"
     );
 
-    // `multitool_status` — the tool an agent is told to trust when confused —
+    // `agentmfa_status` — the tool an agent is told to trust when confused —
     // names the upstream by its real tool names, not the request-tool naming
-    // convention. Regression: it used to advertise `multitool_notes_request`,
+    // convention. Regression: it used to advertise `agentmfa_notes_request`,
     // a tool that does not exist.
-    let status = tool_payload(&wired.call_tool("multitool_status", json!({})).await);
+    let status = tool_payload(&wired.call_tool("agentmfa_status", json!({})).await);
     let named: Vec<&str> = status["tools"]
         .as_array()
         .expect("status tools array")
@@ -382,7 +382,7 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
         .map(|entry| entry["tool"].as_str().expect("tool name"))
         .collect();
     assert!(
-        named.contains(&"multitool_notes_search"),
+        named.contains(&"agentmfa_notes_search"),
         "status must report the upstream by its real tool name: {status}"
     );
     assert!(
@@ -402,9 +402,9 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
     assert_eq!(bare.initialize().await, 200);
     assert_eq!(
         bare.list_tools().await,
-        vec!["multitool_connect", "multitool_status"]
+        vec!["agentmfa_connect", "agentmfa_status"]
     );
-    let status = tool_payload(&bare.call_tool("multitool_status", json!({})).await);
+    let status = tool_payload(&bare.call_tool("agentmfa_status", json!({})).await);
     assert_eq!(
         status["tools"],
         json!([]),

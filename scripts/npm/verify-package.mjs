@@ -18,15 +18,15 @@ const repoRoot = path.resolve(
 const npmRoot = path.join(repoRoot, "npm");
 
 const PLATFORM_PACKAGES = {
-  "multitool-darwin-arm64": { os: "darwin", cpu: "arm64", format: "macho" },
-  "multitool-darwin-x64": { os: "darwin", cpu: "x64", format: "macho" },
-  "multitool-linux-arm64": { os: "linux", cpu: "arm64", format: "elf" },
-  "multitool-linux-x64": { os: "linux", cpu: "x64", format: "elf" },
+  "agentmfa-darwin-arm64": { os: "darwin", cpu: "arm64", format: "macho" },
+  "agentmfa-darwin-x64": { os: "darwin", cpu: "x64", format: "macho" },
+  "agentmfa-linux-arm64": { os: "linux", cpu: "arm64", format: "elf" },
+  "agentmfa-linux-x64": { os: "linux", cpu: "x64", format: "elf" },
 };
-const MAIN_PACKAGE = "multitool";
+const MAIN_PACKAGE = "agentmfa";
 const ALL_PACKAGES = [...Object.keys(PLATFORM_PACKAGES), MAIN_PACKAGE];
 const REQUIRED_NODE_ENGINE = ">=22";
-const publishedName = (directory) => `@aka-labs/${directory}`;
+const publishedName = (directory) => directory;
 
 function fail(message) {
   throw new Error(`npm package verification failed: ${message}`);
@@ -156,36 +156,36 @@ function verifyPlatformPackage(directory, expectedVersion) {
 
 function verifyMainPackage(expectedVersion) {
   const { packageDir, manifest } = verifyManifest(MAIN_PACKAGE, expectedVersion);
-  const launcher = path.join(packageDir, "bin", "multitool.js");
+  const launcher = path.join(packageDir, "bin", "agentmfa.js");
   try {
     accessSync(launcher, constants.R_OK);
   } catch {
-    fail("@aka-labs/multitool is missing bin/multitool.js");
+    fail("agentmfa is missing bin/agentmfa.js");
   }
   const sidecar = path.join(packageDir, "sidecar", "main.mjs");
   try {
     accessSync(sidecar, constants.R_OK);
   } catch {
     fail(
-      "@aka-labs/multitool is missing sidecar/main.mjs; run npm run sidecar:build " +
+      "agentmfa is missing sidecar/main.mjs; run npm run sidecar:build " +
         "and stage the bundle with scripts/npm-dist.sh"
     );
   }
   if (!statSync(sidecar).isFile()) {
-    fail("multitool/sidecar/main.mjs is not a regular file");
+    fail("agentmfa/sidecar/main.mjs is not a regular file");
   }
   if (!manifest.files?.includes("sidecar/main.mjs")) {
-    fail("@aka-labs/multitool must include sidecar/main.mjs in its published files");
+    fail("agentmfa must include sidecar/main.mjs in its published files");
   }
   for (const directory of Object.keys(PLATFORM_PACKAGES)) {
     const name = publishedName(directory);
     if (manifest.optionalDependencies?.[name] !== expectedVersion) {
       fail(
-        `@aka-labs/multitool optionalDependency ${name} must be pinned to ${expectedVersion}`
+        `agentmfa optionalDependency ${name} must be pinned to ${expectedVersion}`
       );
     }
   }
-  console.log(`verified @aka-labs/multitool@${expectedVersion} launcher`);
+  console.log(`verified agentmfa@${expectedVersion} launcher`);
 }
 
 function packageNameFromEnvironment() {

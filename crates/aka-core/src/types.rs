@@ -585,7 +585,7 @@ pub struct Settings {
     /// Dock icon (accessory activation) until the window is reopened.
     #[serde(default)]
     pub menu_bar_hides_dock: bool,
-    /// How long one successful OS authentication keeps Multitool unlocked
+    /// How long one successful OS authentication keeps AgentMFA unlocked
     /// for user-plane actions (reads, copies, tool edits), in seconds; each
     /// such action slides the window forward. Granting an agent new
     /// authority always re-prompts regardless. Default 15 minutes.

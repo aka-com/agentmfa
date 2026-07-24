@@ -1,7 +1,7 @@
-// The Multitool sidecar entry point.
+// The AgentMFA sidecar entry point.
 //
 // A supervised Node process that will host the executor engine (MCP serving
-// plus the Multitool tool plugin). Phase 1 establishes only the lifecycle
+// plus the AgentMFA tool plugin). Phase 1 establishes only the lifecycle
 // the Rust supervisor in `aka-core::sidecar` expects:
 //
 //   * bind loopback on an ephemeral port, announced on stdout as a single

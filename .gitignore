@@ -15,5 +15,5 @@ dist/
 
 # Staged CLI binaries and MCP bundle for the npm distribution
 # (scripts/npm-dist.sh)
-/npm/multitool-*/bin/
-/npm/multitool/sidecar/
+/npm/agentmfa-*/bin/
+/npm/agentmfa/sidecar/

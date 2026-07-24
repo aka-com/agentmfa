@@ -122,7 +122,7 @@ pub struct Store {
     state: Mutex<IndexState>,
     /// Native-authentication grants. Any *native* prompt the user passes —
     /// configuration, full-authority, or the clipboard copy sheet — opens the
-    /// whole user-plane window ("one OS authentication keeps Multitool
+    /// whole user-plane window ("one OS authentication keeps AgentMFA
     /// unlocked"); only riding an existing read grant stays read-scoped. No
     /// grant can slide beyond its original 12-hour absolute lifetime. Never
     /// persisted.
@@ -228,7 +228,7 @@ impl Store {
     /// re-prompts — but a successful authentication here *opens* it, so an
     /// immediately following user-plane read or configuration change is not a
     /// surprise re-prompt. This keeps the documented "one OS authentication
-    /// keeps Multitool unlocked" model: the strongest prompt there is also
+    /// keeps AgentMFA unlocked" model: the strongest prompt there is also
     /// covers the weaker user-plane actions that follow it.
     pub fn confirm_action(&self, description: &str) -> Result<crate::types::ConfirmationMethod> {
         let _confirmation = self.presence.confirmation.lock().unwrap();

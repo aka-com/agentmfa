@@ -114,7 +114,7 @@ command), then ask it to use the services in plain language, e.g.:
   message.”
 - “Using my AKA MCP service `sandbox-mcp`, call the `sandbox_echo` tool
   with `hello`.” (The MCP tools appear as
-  `multitool_sandbox-mcp_sandbox_echo` and `…_sandbox_ping` once the
+  `agentmfa_sandbox-mcp_sandbox_echo` and `…_sandbox_ping` once the
   sidecar is built — `npm run sidecar:build`.)
 
 Approve the prompts AKA Desktop raises. GET/HEAD requests fit a read-scoped

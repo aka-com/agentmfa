@@ -1,4 +1,4 @@
-// Consuming an external MCP server as a Multitool tool.
+// Consuming an external MCP server as a AgentMFA tool.
 //
 // The important property here is where the credential lives. An MCP server
 // reached over HTTP is, to the broker, an ordinary API connection: pinned
@@ -46,7 +46,7 @@ export function namespaceFor(connection: BrokerConnection): string {
 /** The MCP tool name we expose for one of the upstream's tools. */
 export function upstreamToolName(connection: BrokerConnection, tool: string): string {
   const path = joinToolPath(namespaceFor(connection), tool);
-  return `multitool_${path}`.replace(/[^a-zA-Z0-9_-]/g, '_');
+  return `agentmfa_${path}`.replace(/[^a-zA-Z0-9_-]/g, '_');
 }
 
 /** The broker's relay of the upstream response: `PROTOCOL.md`, HTTP plane. */
@@ -143,7 +143,7 @@ class UpstreamClient {
       params: {
         protocolVersion: SUPPORTED_PROTOCOL_VERSION,
         capabilities: {},
-        clientInfo: { name: 'multitool', version: '0.1.0' },
+        clientInfo: { name: 'agentmfa', version: '0.1.0' },
       },
     });
     const result = this.result(response, id) as { protocolVersion?: string } | undefined;

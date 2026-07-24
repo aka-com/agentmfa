@@ -8,7 +8,7 @@ plain HTTP on the address you give it.
 
 ## 1. On the broker Mac
 
-Install the CLI (`npm install -g @aka-labs/multitool`) or use a checkout. Then:
+Install the CLI (`npm install -g agentmfa`) or use a checkout. Then:
 
 ```sh
 # Issue the management token (offline; stop any running broker first).

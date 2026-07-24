@@ -3,17 +3,17 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="Multitool — secure execution for AI agents. Connect your agents to databases, servers, MCPs, and APIs without exposing secrets.">
+<meta name="description" content="AgentMFA — secure execution for AI agents. Connect your agents to databases, servers, MCPs, and APIs without exposing secrets.">
 <meta name="theme-color" content="#171512">
 <meta property="og:type" content="website">
-<meta property="og:site_name" content="Multitool">
-<meta property="og:title" content="Multitool — Secure execution for AI agents">
+<meta property="og:site_name" content="AgentMFA">
+<meta property="og:title" content="AgentMFA — Secure execution for AI agents">
 <meta property="og:description" content="Connect your agents to databases, servers, MCPs, and APIs without exposing secrets. Works with CLI tools like curl, psql, and git, and your existing credential vault.">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="Multitool — Secure execution for AI agents">
+<meta name="twitter:title" content="AgentMFA — Secure execution for AI agents">
 <meta name="twitter:description" content="Connect your agents to databases, servers, MCPs, and APIs without exposing secrets. Works with CLI tools like curl, psql, and git, and your existing credential vault.">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23fabb41%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M10%2022V7a1%201%200%200%200-1-1H4a2%202%200%200%200-2%202v12a2%202%200%200%200%202%202h12a2%202%200%200%200%202-2v-5a1%201%200%200%200-1-1H2%22%2F%3E%3Crect%20x%3D%2214%22%20y%3D%222%22%20width%3D%228%22%20height%3D%228%22%20rx%3D%221%22%2F%3E%3C%2Fsvg%3E">
-<title>Multitool — Secure execution for AI agents</title>
+<title>AgentMFA — Secure execution for AI agents</title>
 <script>
 (function(){
   try {
@@ -836,7 +836,7 @@
       <nav>
         <span class="brand">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2"/><rect x="14" y="2" width="8" height="8" rx="1"/></svg>
-          <span class="word">multitool</span>
+          <span class="word">agentmfa</span>
         </span>
         <span class="nav-right">
           <span class="nav-byline">By AKA Labs</span>
@@ -851,7 +851,7 @@
         <h1>Secure execution for AI agents</h1>
         <p class="hero-lead">Connect your agents to databases, servers, MCPs, and APIs without exposing secrets, with a simple desktop interface.</p>
         <div class="hero-actions">
-          <a class="btn primary" href="#get-multitool">Download Multitool
+          <a class="btn primary" href="#get-agentmfa">Download AgentMFA
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
           </a>
           <a class="btn outline" href="#faq">Read the FAQ</a>
@@ -865,7 +865,7 @@
           <div class="term-bar">
             <span class="light"></span><span class="light"></span><span class="light"></span>
           </div>
-          <pre><code><span class="p">$</span> npm install -g @aka-labs/multitool
+          <pre><code><span class="p">$</span> npm install -g agentmfa
 <span class="p">$</span> aka secret add ANALYTICS_DB
 <span class="c">✓ saved to vault</span>
 
@@ -882,30 +882,30 @@
     <section class="panel">
       <div class="panel-head">
         <h2>Connect any agent to any tool.</h2>
-        <p>Multitool sits between your agents and everything they reach, so they get the access they need, securely.</p>
+        <p>AgentMFA sits between your agents and everything they reach, so they get the access they need, securely.</p>
       </div>
       <div class="split">
         <div class="split-left">
           <ul class="risk-list" role="list">
             <li class="risk">
               <span class="mark x"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></span>
-              <span class="struck"><span class="sr-only">Without Multitool: </span>Live API tokens pasted into every agent's env file.</span>
+              <span class="struck"><span class="sr-only">Without AgentMFA: </span>Live API tokens pasted into every agent's env file.</span>
             </li>
             <li class="risk">
               <span class="mark x"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></span>
-              <span class="struck"><span class="sr-only">Without Multitool: </span>One prompt injection reads every secret at once.</span>
+              <span class="struck"><span class="sr-only">Without AgentMFA: </span>One prompt injection reads every secret at once.</span>
             </li>
             <li class="risk">
               <span class="mark x"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></span>
-              <span class="struck"><span class="sr-only">Without Multitool: </span>Rotating a key means hunting through every config that copied it.</span>
+              <span class="struck"><span class="sr-only">Without AgentMFA: </span>Rotating a key means hunting through every config that copied it.</span>
             </li>
             <li class="risk">
               <span class="mark x"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></span>
-              <span class="struck"><span class="sr-only">Without Multitool: </span>No record of which agent used what credential, or when.</span>
+              <span class="struck"><span class="sr-only">Without AgentMFA: </span>No record of which agent used what credential, or when.</span>
             </li>
             <li class="risk">
               <span class="mark ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span>
-              <span class="kept"><span class="sr-only">With Multitool: </span>Secrets sealed in one vault, every call logged in one place.</span>
+              <span class="kept"><span class="sr-only">With AgentMFA: </span>Secrets sealed in one vault, every call logged in one place.</span>
             </li>
           </ul>
         </div>
@@ -926,7 +926,7 @@
   </div>
           </div>
           <figure>
-            <svg class="fan" viewBox="0 0 480 304" role="img" aria-label="Diagram: agents fan into Multitool, which fans out to tools and connects down to the Vault and 1Password secret vaults">
+            <svg class="fan" viewBox="0 0 480 304" role="img" aria-label="Diagram: agents fan into AgentMFA, which fans out to tools and connects down to the Vault and 1Password secret vaults">
               <g class="wire">
                 <path d="M122 25 C158 25 158 118 195 118"/><path d="M285 118 C322 118 322 25 358 25"/>
                 <path d="M122 75 C158 75 158 118 195 118"/><path d="M285 118 C322 118 322 75 358 75"/>
@@ -954,7 +954,7 @@
 
               <rect class="box hub" x="195" y="74" width="90" height="88" rx="5"/>
               <svg class="hub-ic" x="225" y="88" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2"/><rect x="14" y="2" width="8" height="8" rx="1"/></svg>
-              <text class="hub-lbl" text-anchor="middle" x="240" y="144">Multitool</text>
+              <text class="hub-lbl" text-anchor="middle" x="240" y="144">AgentMFA</text>
 
               <rect class="box" x="358" y="7" width="36" height="36" rx="4"/>
               <svg class="node-ic" x="368" y="17" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg>
@@ -984,14 +984,14 @@
       </div>
     </section>
 
-    <section class="panel" id="get-multitool">
+    <section class="panel" id="get-agentmfa">
       <div class="panel-head">
         <h2>Use it locally, or in the cloud.</h2>
         <p>Run on your machine, or use a hosted instance in the cloud. Your tools, keys, and activity log go wherever you choose.</p>
       </div>
       <div class="deploy">
         <div class="deploy-panel">
-          <h3>Local Multitool</h3>
+          <h3>Local AgentMFA</h3>
           <p>Native macOS app without any remote dependencies. Keys encrypted in your Keychain, agents talk to a local socket, and nothing leaves the machine.</p>
           <div class="mock" aria-hidden="true">
             <div class="menubar">
@@ -1014,8 +1014,8 @@
           </div>
         </div>
         <div class="deploy-panel">
-          <h3>Hosted Multitool</h3>
-          <p>Connect the desktop app to a hosted Multitool instance in the cloud, so your tools and activity log remain accessible from anywhere.</p>
+          <h3>Hosted AgentMFA</h3>
+          <p>Connect the desktop app to a hosted AgentMFA instance in the cloud, so your tools and activity log remain accessible from anywhere.</p>
           <div class="mock" aria-hidden="true">
             <div class="win">
               <div class="win-head">
@@ -1049,9 +1049,9 @@
         <div class="path">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19h8"/><path d="m4 17 6-6-6-6"/></svg>
           <h3>CLI</h3>
-          <p>Run your remote agents, servers, and CI with Multitool credentials.</p>
-          <button class="btn outline" type="button" disabled>npm install -g @aka-labs/multitool</button>
-          <!-- <code class="path-cmd">npm install -g @aka-labs/multitool</code> -->
+          <p>Run your remote agents, servers, and CI with AgentMFA credentials.</p>
+          <button class="btn outline" type="button" disabled>npm install -g agentmfa</button>
+          <!-- <code class="path-cmd">npm install -g agentmfa</code> -->
         </div>
         <div class="path">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg>
@@ -1091,7 +1091,7 @@
       <section class="cta">
         <h2>Connect every agent, every secret, every tool.</h2>
         <div class="cta-actions">
-          <a class="btn primary" href="#get-multitool">Download Multitool
+          <a class="btn primary" href="#get-agentmfa">Download AgentMFA
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
           </a>
           <a class="btn outline" href="#faq">Read the FAQ</a>
@@ -1100,7 +1100,7 @@
       <footer>
         <span class="brand">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2"/><rect x="14" y="2" width="8" height="8" rx="1"/></svg>
-          <span class="word" style="color: var(--fg);">multitool</span>
+          <span class="word" style="color: var(--fg);">agentmfa</span>
         </span>
         <span>© 2026 AKA LABS</span>
       </footer>

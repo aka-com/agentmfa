@@ -220,14 +220,14 @@ fn err_unknown_connection(broker: &Arc<Broker>) -> Response {
 
 /// The header a client may set to label itself in the activity log and the
 /// sessions band. Self-reported and cosmetic — never authorization.
-pub const CLIENT_LABEL_HEADER: &str = "x-multitool-client";
+pub const CLIENT_LABEL_HEADER: &str = "x-agentmfa-client";
 
 /// The label used when a client does not name itself.
 pub const DEFAULT_CLIENT_LABEL: &str = "agent";
 
 /// Bearer-token authentication against the shared broker key.
 pub struct Authed {
-    /// Self-reported client label (`X-Multitool-Client`), for attribution
+    /// Self-reported client label (`X-AgentMFA-Client`), for attribution
     /// only.
     pub client: String,
     /// The identity's stable principal id.
@@ -1011,7 +1011,7 @@ async fn post_http(
                         StatusCode::FORBIDDEN,
                         ErrorReason::DeniedByPolicy,
                         format!(
-                            "the tool {tool:?} is not enabled on {}; the user can enable it in Multitool",
+                            "the tool {tool:?} is not enabled on {}; the user can enable it in AgentMFA",
                             conn.name
                         ),
                     );
@@ -1090,7 +1090,7 @@ async fn post_connect_request(
             StatusCode::ACCEPTED,
             Json(serde_json::json!({
                 "status": if fresh { "requested" } else { "already_requested" },
-                "detail": "Ask the user to add and wire this tool in Multitool; \
+                "detail": "Ask the user to add and wire this tool in AgentMFA; \
                            its tools appear once they do.",
             })),
         )
@@ -1139,7 +1139,7 @@ async fn run_allowed(
             StatusCode::FORBIDDEN,
             ErrorReason::DeniedByPolicy,
             format!(
-                "{} is not enabled for agents; the user can enable it in Multitool",
+                "{} is not enabled for agents; the user can enable it in AgentMFA",
                 conn.name
             ),
         );

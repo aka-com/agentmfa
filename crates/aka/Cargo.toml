@@ -3,7 +3,7 @@ name = "aka"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Multitool command line: broker, MCP bridge, and headless management"
+description = "AgentMFA command line: broker, MCP bridge, and headless management"
 
 [[bin]]
 name = "aka"

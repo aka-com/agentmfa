@@ -1,18 +1,17 @@
-# Multitool CLI
+# AgentMFA CLI
 
 This directory is the npm distribution of the `aka` CLI, published as
-[`@aka-labs/multitool`](https://www.npmjs.com/package/@aka-labs/multitool).
+[`agentmfa`](https://www.npmjs.com/package/agentmfa).
 
 This is an open-source package (MIT License) that follows an esbuild-style layout:
 
-- `multitool/` — the package users install. It contains a Node launcher
-  (`bin/multitool.js`, exposed as both `multitool` and `aka`) plus the bundled
+- `agentmfa/` — the package users install. It contains a Node launcher
+  (`bin/agentmfa.js`, exposed as both `agentmfa` and `aka`) plus the bundled
   JavaScript MCP host. The launcher executes the prebuilt binary and gives its
   own Node executable to the broker for supervising that MCP host. It declares
   one exact-pinned `optionalDependency` per platform; npm installs the single
   matching one.
-- `multitool-{darwin,linux}-{arm64,x64}/` — per-platform packages published
-  under the `@aka-labs` scope, whose only
+- `agentmfa-{darwin,linux}-{arm64,x64}/` — per-platform packages whose only
   payload is `bin/aka`, the release binary for that `os`/`cpu` pair. The
   binaries are staged by `scripts/npm-dist.sh` and are gitignored; only the
   manifests are checked in.
@@ -51,16 +50,16 @@ CI runners when a single cross-build host is not available, then aggregate
 the staged `bin/aka` files.
 
 The command keeps its npm cache under `target/npm-cache`; set
-`MULTITOOL_NPM_CACHE` to override that location.
+`AGENTMFA_NPM_CACHE` to override that location.
 
 Smoke-test a native pair from the result in a scratch prefix:
 
 ```sh
-npm install --global --prefix /tmp/multitool-test \
-    dist/npm/aka-labs-multitool-linux-x64-*.tgz \
-    dist/npm/aka-labs-multitool-[0-9]*.tgz
-/tmp/multitool-test/bin/multitool --version
-/tmp/multitool-test/bin/aka skill | head
+npm install --global --prefix /tmp/agentmfa-test \
+    dist/npm/agentmfa-linux-x64-*.tgz \
+    dist/npm/agentmfa-[0-9]*.tgz
+/tmp/agentmfa-test/bin/agentmfa --version
+/tmp/agentmfa-test/bin/aka skill | head
 ```
 
 ## Platform support
@@ -68,7 +67,7 @@ npm install --global --prefix /tmp/multitool-test \
 Supported today: `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`
 (glibc). Not covered yet:
 
-- **musl/Alpine**: either add `multitool-linux-{x64,arm64}-musl` packages, or
+- **musl/Alpine**: either add `agentmfa-linux-{x64,arm64}-musl` packages, or
   build the linux binaries as static musl artifacts so one package covers
   both libcs.
 - **Windows**: unsupported by the broker itself (Unix-domain-socket

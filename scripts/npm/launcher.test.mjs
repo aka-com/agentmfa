@@ -14,35 +14,35 @@ const repoRoot = path.resolve(
 const launcher = path.join(
   repoRoot,
   "npm",
-  "multitool",
+  "agentmfa",
   "bin",
-  "multitool.js"
+  "agentmfa.js"
 );
 const packagedSidecar = path.join(
   repoRoot,
   "npm",
-  "multitool",
+  "agentmfa",
   "sidecar",
   "main.mjs"
 );
 
 function runLauncher(overrides = {}) {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "multitool-launcher-"));
+  const dir = mkdtempSync(path.join(os.tmpdir(), "agentmfa-launcher-"));
   const stub = path.join(dir, "aka-stub");
   const capture = path.join(dir, "capture.json");
   writeFileSync(
     stub,
     `#!/bin/sh
 printf '{"node":"%s","script":"%s","args":"%s"}' \
-  "$AKA_SIDECAR_NODE" "$AKA_SIDECAR_SCRIPT" "$*" > "$MULTITOOL_CAPTURE"
+  "$AKA_SIDECAR_NODE" "$AKA_SIDECAR_SCRIPT" "$*" > "$AGENTMFA_CAPTURE"
 `
   );
   chmodSync(stub, 0o755);
 
   const env = {
     ...process.env,
-    MULTITOOL_BIN: stub,
-    MULTITOOL_CAPTURE: capture,
+    AGENTMFA_BIN: stub,
+    AGENTMFA_CAPTURE: capture,
     ...overrides,
   };
   if (!Object.hasOwn(overrides, "AKA_SIDECAR_NODE")) {

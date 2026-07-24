@@ -55,7 +55,7 @@ mod client;
 mod mcp_bridge;
 
 #[derive(Parser)]
-#[command(name = "aka", version, about = "Multitool broker CLI")]
+#[command(name = "aka", version, about = "AgentMFA broker CLI")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -125,7 +125,7 @@ enum Command {
         #[arg(long)]
         no_sidecar: bool,
     },
-    /// Bridge stdio MCP to the local Multitool broker's MCP host. Point any
+    /// Bridge stdio MCP to the local AgentMFA broker's MCP host. Point any
     /// MCP client at `aka mcp` — it reads this computer's shared key and
     /// discovers the MCP endpoint itself, so configs stay static.
     Mcp {
@@ -1246,7 +1246,7 @@ fn config_from_dto(dto: &ConnectionDto) -> Result<ConnectionConfig, String> {
 fn refuse_oauth_managed(dto: &ConnectionDto) {
     if dto.oauth || dto.oauth_spec.is_some() {
         die(format!(
-            "{} is an OAuth-managed connection; edit it in the Multitool app",
+            "{} is an OAuth-managed connection; edit it in the AgentMFA app",
             dto.name
         ));
     }
@@ -1501,7 +1501,7 @@ fn cmd_conn_endpoint(
     let info = match managed.run(managed.backend.get_endpoint(dto_id(&dto.id))) {
         Some(info) => info,
         None => die(format!(
-            "no direct endpoint issued for {name} — issue one from the Multitool app first"
+            "no direct endpoint issued for {name} — issue one from the AgentMFA app first"
         )),
     };
     // Selectors print exactly one field with no decoration, so a `$(...)`
@@ -1691,7 +1691,7 @@ fn cmd_manage_token(revoke: bool, ttl_days: Option<u64>, root: Option<PathBuf>) 
         Ok(token) => {
             eprintln!("management token (shown once — only its hash is stored):\n");
             println!("{token}");
-            eprintln!("\nEnter it in the Multitool app to manage this broker remotely.");
+            eprintln!("\nEnter it in the AgentMFA app to manage this broker remotely.");
             match ttl_days {
                 Some(days) => eprintln!(
                     "Expires in {days} day{}; re-run to rotate, or --revoke to close the manage API.",

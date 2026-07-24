@@ -951,7 +951,7 @@ async fn probe(
         "params": {
             "protocolVersion": mcp::PROTOCOL_VERSION,
             "capabilities": {},
-            "clientInfo": { "name": "aka-multitool", "version": env!("CARGO_PKG_VERSION") },
+            "clientInfo": { "name": "aka-agentmfa", "version": env!("CARGO_PKG_VERSION") },
         },
     });
     let response = client
@@ -1149,7 +1149,7 @@ async fn register(
         ));
     };
     let mut body = json!({
-        "client_name": "Multitool",
+        "client_name": "AgentMFA",
         "redirect_uris": [redirect_uri],
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
@@ -1282,7 +1282,7 @@ async fn wait_for_callback(
         let _ = respond(
             &mut stream,
             200,
-            "You’re connected. You can close this tab and return to Multitool.",
+            "You’re connected. You can close this tab and return to AgentMFA.",
         )
         .await;
         return Ok(code);
@@ -1307,7 +1307,7 @@ async fn respond(
         _ => "Bad Request",
     };
     let body = format!(
-        "<!doctype html><meta charset=\"utf-8\"><title>Multitool</title>\
+        "<!doctype html><meta charset=\"utf-8\"><title>AgentMFA</title>\
          <body style=\"font-family:system-ui;display:grid;place-items:center;height:100vh;margin:0\">\
          <p>{message}</p></body>"
     );

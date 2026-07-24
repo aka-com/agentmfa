@@ -1,8 +1,8 @@
 {
-  "name": "@aka-labs/multitool-linux-arm64",
+  "name": "agentmfa-linux-x64",
   "version": "0.1.0",
-  "description": "Multitool CLI binary for Linux (arm64, glibc). Install @aka-labs/multitool instead of installing this directly.",
-  "homepage": "https://github.com/aka-com/multitool",
+  "description": "AgentMFA CLI binary for Linux (x64, glibc). Install agentmfa instead of installing this directly.",
+  "homepage": "https://github.com/aka-com/agentmfa",
   "files": [
     "bin/aka"
   ],
@@ -16,7 +16,7 @@
     "linux"
   ],
   "cpu": [
-    "arm64"
+    "x64"
   ],
   "publishConfig": {
     "access": "public"

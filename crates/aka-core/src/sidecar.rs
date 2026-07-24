@@ -1,7 +1,7 @@
 //! Supervision of the Node sidecar.
 //!
 //! The sidecar hosts the executor engine (MCP serving and, later, the
-//! Multitool tool plugin). It is a child process, not a library: it runs a
+//! AgentMFA tool plugin). It is a child process, not a library: it runs a
 //! different language runtime, and it is deliberately *not* trusted to
 //! authorize anything. This module owns only its lifecycle — spawn, learn
 //! the loopback port it chose, forward its logs, restart it if it dies, and

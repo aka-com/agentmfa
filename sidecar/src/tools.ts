@@ -1,6 +1,6 @@
-// Multitool's tools, as MCP sees them.
+// AgentMFA's tools, as MCP sees them.
 //
-// This is the `plugin-multitool` role from the plan: every connection the
+// This is the `plugin-agentmfa` role from the plan: every connection the
 // broker knows becomes an MCP tool whose invocation proxies to the broker's
 // existing data planes. The shape of each tool follows what its plane
 // actually does:
@@ -23,7 +23,7 @@ import type { AgentAuth, BrokerClient, BrokerConnection } from './broker';
 /** MCP tool names allow `[a-zA-Z0-9_-]`; connection names are freer. */
 export function toolNameFor(connection: BrokerConnection): string {
   const slug = connection.name.replace(/[^a-zA-Z0-9_-]/g, '_');
-  return connection.type === 'api' ? `multitool_${slug}_request` : `multitool_${slug}_open`;
+  return connection.type === 'api' ? `agentmfa_${slug}_request` : `agentmfa_${slug}_open`;
 }
 
 /** What an agent is told a tool is for, before it calls it. */
@@ -31,7 +31,7 @@ export function describe(connection: BrokerConnection): string {
   switch (connection.type) {
     case 'api':
       return (
-        `Make an HTTP request to ${connection.target} through Multitool. ` +
+        `Make an HTTP request to ${connection.target} through AgentMFA. ` +
         'The API credential is injected by the broker and never exposed here.'
       );
     case 'pg':
@@ -51,7 +51,7 @@ export function describe(connection: BrokerConnection): string {
         'ws://127.0.0.1 URL usable by any standard client.'
       );
     default:
-      return `Use the Multitool connection "${connection.name}" (${connection.target}).`;
+      return `Use the AgentMFA connection "${connection.name}" (${connection.target}).`;
   }
 }
 
@@ -154,10 +154,10 @@ export async function invoke(
     const failure = error as { status?: number; reason?: string; message?: string };
     if (failure.status === 403) {
       return toolError(
-        `Multitool refused this call: ${failure.reason ?? 'denied_by_policy'}. ` +
-          `Ask the user to wire this agent to "${connection.name}" in the Multitool app.`,
+        `AgentMFA refused this call: ${failure.reason ?? 'denied_by_policy'}. ` +
+          `Ask the user to wire this agent to "${connection.name}" in the AgentMFA app.`,
       );
     }
-    return toolError(`Multitool call failed: ${failure.message ?? String(error)}`);
+    return toolError(`AgentMFA call failed: ${failure.message ?? String(error)}`);
   }
 }

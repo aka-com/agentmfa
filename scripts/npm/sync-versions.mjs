@@ -17,14 +17,14 @@ const repoRoot = path.resolve(
   ".."
 );
 
-const MAIN_PACKAGE = "multitool";
+const MAIN_PACKAGE = "agentmfa";
 const PLATFORM_PACKAGES = [
-  "multitool-darwin-arm64",
-  "multitool-darwin-x64",
-  "multitool-linux-arm64",
-  "multitool-linux-x64",
+  "agentmfa-darwin-arm64",
+  "agentmfa-darwin-x64",
+  "agentmfa-linux-arm64",
+  "agentmfa-linux-x64",
 ];
-const publishedName = (directory) => `@aka-labs/${directory}`;
+const publishedName = (directory) => directory;
 
 function workspaceVersion() {
   const cargo = readFileSync(path.join(repoRoot, "Cargo.toml"), "utf8");

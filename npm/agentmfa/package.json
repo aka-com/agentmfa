@@ -1,9 +1,9 @@
 {
-  "name": "@aka-labs/multitool",
+  "name": "agentmfa",
   "version": "0.1.0",
-  "description": "Multitool credential broker for coding agents, without exposing credentials.",
+  "description": "AgentMFA credential broker for coding agents, without exposing credentials.",
   "keywords": [
-    "multitool",
+    "agentmfa",
     "aka",
     "credentials",
     "secrets",
@@ -17,13 +17,13 @@
     "websocket",
     "proxy"
   ],
-  "homepage": "https://github.com/aka-com/multitool",
+  "homepage": "https://github.com/aka-com/agentmfa",
   "bin": {
-    "multitool": "bin/multitool.js",
-    "aka": "bin/multitool.js"
+    "agentmfa": "bin/agentmfa.js",
+    "aka": "bin/agentmfa.js"
   },
   "files": [
-    "bin/multitool.js",
+    "bin/agentmfa.js",
     "sidecar/main.mjs"
   ],
   "engines": {
@@ -37,10 +37,10 @@
     "linux"
   ],
   "optionalDependencies": {
-    "@aka-labs/multitool-darwin-arm64": "0.1.0",
-    "@aka-labs/multitool-darwin-x64": "0.1.0",
-    "@aka-labs/multitool-linux-arm64": "0.1.0",
-    "@aka-labs/multitool-linux-x64": "0.1.0"
+    "agentmfa-darwin-arm64": "0.1.0",
+    "agentmfa-darwin-x64": "0.1.0",
+    "agentmfa-linux-arm64": "0.1.0",
+    "agentmfa-linux-x64": "0.1.0"
   },
   "publishConfig": {
     "access": "public"

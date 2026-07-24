@@ -1,6 +1,6 @@
-# Multitool
+# AgentMFA
 
-Multitool lets your agents make API calls, connect to databases and
+AgentMFA lets your agents make API calls, connect to databases and
 servers, and talk to MCPs without exposing credentials.
 
 It combines a secrets vault, connection broker, and tool router into
@@ -18,12 +18,12 @@ environment variables. That means:
 - Rotating a key means hunting down every config that copied it.
 - There's no record of which agent used which credential, or when.
 
-Multitool sits between your agents and everything they reach. Agents
+AgentMFA sits between your agents and everything they reach. Agents
 talk to services through a local proxied endpoint to make API calls or
 open database connections, Credentials are injected on the upstream
 leg only, and never enter an agent's context.
 
-Multitool is primarily tested locally today, but a hosted version has
+AgentMFA is primarily tested locally today, but a hosted version has
 been implemented, that can be used with a shared vault. We also
 support limited audit logging, and team management is coming soon.
 
@@ -42,7 +42,7 @@ support limited audit logging, and team management is coming soon.
    ```sh
    psql "$(aka dsn analytics)"                     # passwordless DSN
    export SSH_AUTH_SOCK="$(aka ssh production)"    # scoped signing agent
-   claude mcp add multitool -- aka mcp             # unified MCP tool
+   claude mcp add agentmfa -- aka mcp             # unified MCP tool
    ```
 
    For each connection type, the broker injects the real credential on
@@ -103,11 +103,11 @@ injects the credential on the upstream.
   websocat "ws://127.0.0.1:<port>/v1/ws/bridge/<ticket>"
   ```
 
-### Multitool MCP setup
+### AgentMFA MCP setup
 
 Every connection is also exposed as an MCP tool. API connections are
-exposed as `multitool_<name>_request`, and databases/servers as
-`multitool_<name>_open`, which returns a ready-to-use local endpoint.
+exposed as `agentmfa_<name>_request`, and databases/servers as
+`agentmfa_<name>_open`, which returns a ready-to-use local endpoint.
 
 Upstream MCP servers are proxied through the same broker, so their
 credentials stay in the vault too.
@@ -115,7 +115,7 @@ credentials stay in the vault too.
 **Claude Code**:
 
 ```sh
-claude mcp add multitool -- aka mcp --client claude-code
+claude mcp add agentmfa -- aka mcp --client claude-code
 ```
 
 **Claude Desktop** in `claude_desktop_config.json`:
@@ -123,7 +123,7 @@ claude mcp add multitool -- aka mcp --client claude-code
 ```json
 {
   "mcpServers": {
-    "multitool": {
+    "agentmfa": {
       "command": "aka",
       "args": ["mcp", "--client", "claude-desktop"]
     }
@@ -134,7 +134,7 @@ claude mcp add multitool -- aka mcp --client claude-code
 **Codex** in `~/.codex/config.toml`:
 
 ```toml
-[mcp_servers.multitool]
+[mcp_servers.agentmfa]
 command = "aka"
 args = ["mcp", "--client", "codex"]
 ```

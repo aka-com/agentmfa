@@ -1,4 +1,4 @@
-// The Multitool MCP host.
+// The AgentMFA MCP host.
 //
 // A reimplementation of executor's serving envelope, kept to the same two
 // seams their `host-mcp` reduces it to:
@@ -37,13 +37,13 @@ export const MCP_PATH = '/mcp';
  * How many upstream MCP tools are registered as first-class tools before
  * the rest become searchable-only. Big catalogs must not flood an agent's
  * context: beyond the budget, tools stay in the search index and are
- * callable through `multitool_call_tool` — enforcement is unchanged, the
+ * callable through `agentmfa_call_tool` — enforcement is unchanged, the
  * broker still checks the wiring and any curated subset on every call.
  */
 function upstreamToolBudget(): number {
   // Read per session build (not at import) so tests and operators can
   // adjust it without a restart.
-  const raw = Number(process.env.MULTITOOL_TOOL_BUDGET ?? 40);
+  const raw = Number(process.env.AGENTMFA_TOOL_BUDGET ?? 40);
   return Number.isFinite(raw) && raw >= 0 ? raw : 40;
 }
 
@@ -207,15 +207,15 @@ export async function createToolServer(
   principal: Principal,
 ): Promise<McpServer> {
   const server = new McpServer(
-    { name: 'multitool', version: '0.1.0' },
+    { name: 'agentmfa', version: '0.1.0' },
     {
       // Declared up front rather than implied by the first `registerTool`.
       // An agent wired to nothing has zero tools, and without this it would
       // meet `Method not found` on `tools/list` instead of an empty list.
       capabilities: { tools: {} },
       instructions:
-        'Multitool brokers database, SSH, API and WebSocket access. Tools appear ' +
-        'here only when the user has wired this agent to them in the Multitool ' +
+        'AgentMFA brokers database, SSH, API and WebSocket access. Tools appear ' +
+        'here only when the user has wired this agent to them in the AgentMFA ' +
         'app. Credentials are injected by the broker and never visible to you.',
     },
   );
@@ -232,7 +232,7 @@ export async function createToolServer(
   const wired = connections.filter((candidate) => candidate.wired);
 
   // Per-connection registration outcomes, filled in by the loop below and
-  // read by `multitool_status`. An MCP upstream contributes many tool names
+  // read by `agentmfa_status`. An MCP upstream contributes many tool names
   // (or none plus an error, when it is unreachable); a plain connection
   // contributes exactly one. Status must report the names actually
   // registered, not what a naming convention would guess them to be.
@@ -244,11 +244,11 @@ export async function createToolServer(
   // nothing to meet. And it gives that agent somewhere to look: the reply
   // says who it is and what to ask the user for.
   server.registerTool(
-    'multitool_status',
+    'agentmfa_status',
     {
-      title: 'Multitool status',
+      title: 'AgentMFA status',
       description:
-        'Report which Multitool tools this agent can use, and what to do when ' +
+        'Report which AgentMFA tools this agent can use, and what to do when ' +
         'there are none.',
       inputSchema: {},
     },
@@ -306,12 +306,12 @@ export async function createToolServer(
       if (live.length === 0) {
         hint =
           'This agent is not wired to any tools yet. Ask the user to open ' +
-          'Multitool, find the tool under Tools, and wire this agent ' +
+          'AgentMFA, find the tool under Tools, and wire this agent ' +
           `("${principal.agent}") to it.`;
       } else if (pending.length) {
         hint =
           `Wired since this session started: ${pending.join(', ')}. ` +
-          'Reconnect to Multitool to use them.';
+          'Reconnect to AgentMFA to use them.';
       } else if (errors.length) {
         hint =
           `Wired but unreachable this session: ${errors
@@ -332,7 +332,7 @@ export async function createToolServer(
                   ? {
                       search_only_tools: searchOnly,
                       search_hint:
-                        'more tools are available via multitool_search_tools',
+                        'more tools are available via agentmfa_search_tools',
                     }
                   : {}),
                 ...(errors.length ? { errors } : {}),
@@ -353,7 +353,7 @@ export async function createToolServer(
   // whole session — one awkwardly named connection must not cost an agent
   // every other tool it has.
   const taken = new Set<string>([
-    'multitool_status', 'multitool_connect', 'multitool_search_tools', 'multitool_call_tool',
+    'agentmfa_status', 'agentmfa_connect', 'agentmfa_search_tools', 'agentmfa_call_tool',
   ]);
   // Every upstream tool this session knows about, registered or not; the
   // search and generic-call meta-tools work over it.
@@ -406,7 +406,7 @@ export async function createToolServer(
 /**
  * The discovery meta-tools.
  *
- * `multitool_connect` is always present: it is how an agent asks the user
+ * `agentmfa_connect` is always present: it is how an agent asks the user
  * for a tool that is not configured (a request only — the broker audits it
  * and pokes the app; nothing exists until the user adds and wires it).
  *
@@ -423,14 +423,14 @@ function registerMetaTools(
   index: IndexedTool[],
 ): void {
   server.registerTool(
-    'multitool_connect',
+    'agentmfa_connect',
     {
       title: 'Request a new tool',
       description:
         'Ask the user to connect a service that is not configured (for example ' +
         '"linear" or "https://mcp.example.com/mcp"). This only files a request in ' +
-        'the Multitool app — the user adds and wires the tool there, and its ' +
-        'tools appear on your next session (check with multitool_status).',
+        'the AgentMFA app — the user adds and wires the tool there, and its ' +
+        'tools appear on your next session (check with agentmfa_status).',
       inputSchema: { service: z.string().min(1).max(120) },
     },
     async ({ service }: { service: string }) => {
@@ -441,10 +441,10 @@ function registerMetaTools(
             type: 'text' as const,
             text:
               outcome.status === 'already_requested'
-                ? `Already requested. Ask the user to approve "${service}" in Multitool; ` +
+                ? `Already requested. Ask the user to approve "${service}" in AgentMFA; ` +
                   'its tools appear once they wire it to you.'
-                : `Requested. Ask the user to add "${service}" in the Multitool app and ` +
-                  'wire it to you; then reconnect or call multitool_status.',
+                : `Requested. Ask the user to add "${service}" in the AgentMFA app and ` +
+                  'wire it to you; then reconnect or call agentmfa_status.',
           }],
         };
       } catch (error) {
@@ -460,13 +460,13 @@ function registerMetaTools(
   if (!withheld.length) return;
 
   server.registerTool(
-    'multitool_search_tools',
+    'agentmfa_search_tools',
     {
       title: 'Search available tools',
       description:
         `${withheld.length} of this session's upstream tools are not listed here ` +
         '(tool-budget). Search them by name or purpose; call the results with ' +
-        'multitool_call_tool (or directly, when a tool name is listed).',
+        'agentmfa_call_tool (or directly, when a tool name is listed).',
       inputSchema: { query: z.string().min(1).max(200) },
     },
     async ({ query }: { query: string }) => {
@@ -493,7 +493,7 @@ function registerMetaTools(
         call: entry.registeredAs
           ? { tool: entry.registeredAs }
           : {
-              tool: 'multitool_call_tool',
+              tool: 'agentmfa_call_tool',
               arguments: { connection: entry.connection.name, tool: entry.tool.name },
             },
       }));
@@ -511,11 +511,11 @@ function registerMetaTools(
   );
 
   server.registerTool(
-    'multitool_call_tool',
+    'agentmfa_call_tool',
     {
       title: 'Call a searchable tool',
       description:
-        'Invoke an upstream tool found via multitool_search_tools, by connection ' +
+        'Invoke an upstream tool found via agentmfa_search_tools, by connection ' +
         'and tool name. Subject to the same wiring and tool-selection checks as ' +
         'every other call.',
       inputSchema: {
@@ -536,7 +536,7 @@ function registerMetaTools(
           content: [{
             type: 'text' as const,
             text: `no such tool in this session: ${connection} / ${tool} — ` +
-              'find callable tools with multitool_search_tools',
+              'find callable tools with agentmfa_search_tools',
           }],
         };
       }
@@ -580,7 +580,7 @@ interface UpstreamRegistration {
  * Re-expose an upstream MCP server's tools under this connection's name.
  *
  * A server that cannot be reached costs its own tools and nothing else: the
- * session still opens, and `multitool_status` reports the failure (via the
+ * session still opens, and `agentmfa_status` reports the failure (via the
  * returned `error`), because one unreachable upstream must not take down
  * every other tool the agent has.
  */
@@ -624,7 +624,7 @@ async function registerUpstream(
       continue;
     }
     // Over the registration budget: the tool stays discoverable through
-    // multitool_search_tools and callable through multitool_call_tool, it
+    // agentmfa_search_tools and callable through agentmfa_call_tool, it
     // just doesn't occupy a slot in the agent's tool list.
     const upstreamCount = index.filter((entry) => entry.registeredAs !== null).length;
     if (upstreamCount >= upstreamToolBudget()) {

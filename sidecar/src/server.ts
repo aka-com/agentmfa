@@ -1,4 +1,4 @@
-// The Multitool sidecar's HTTP surface.
+// The AgentMFA sidecar's HTTP surface.
 //
 // Two audiences share this listener, and they authenticate differently:
 //
@@ -91,7 +91,7 @@ export function createSidecarServer(env: SidecarEnv): Server {
           if (error.retryAfterSeconds !== undefined) {
             res.setHeader('retry-after', String(error.retryAfterSeconds));
           }
-          rpcError(res, 429, RPC_RATE_LIMITED, 'Rate limited by Multitool; retry after a short delay');
+          rpcError(res, 429, RPC_RATE_LIMITED, 'Rate limited by AgentMFA; retry after a short delay');
           return;
         }
         log('error', 'mcp request failed', { error: String(error) });
@@ -140,14 +140,14 @@ async function handleMcp(
   // revoked in the app must stop working on the very next call. The
   // self-reported label rides along so the user's activity log names the
   // real client; it is attribution only, never authorization.
-  const rawLabel = req.headers['x-multitool-client'];
+  const rawLabel = req.headers['x-agentmfa-client'];
   const label = typeof rawLabel === 'string' && /^[A-Za-z0-9._-]{1,64}$/.test(rawLabel.trim())
     ? rawLabel.trim()
     : undefined;
   const principal = await auth.authenticate(bearer(req), label);
   if (!principal) {
     res.setHeader('www-authenticate', 'Bearer');
-    rpcError(res, 401, -32001, 'Unauthorized: pair this agent with Multitool first');
+    rpcError(res, 401, -32001, 'Unauthorized: pair this agent with AgentMFA first');
     return;
   }
 

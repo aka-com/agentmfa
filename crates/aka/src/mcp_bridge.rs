@@ -61,14 +61,14 @@ async fn discover_mcp_url(socket: &Path) -> Result<String, String> {
                 if !reported_no_mcp {
                     eprintln!(
                         "aka mcp: the broker is running but its MCP host is not; \
-                         open the Multitool app (waiting)"
+                         open the AgentMFA app (waiting)"
                     );
                     reported_no_mcp = true;
                 }
             }
             Err(_) if !reported_waiting => {
                 eprintln!(
-                    "aka mcp: waiting for the Multitool broker at {}",
+                    "aka mcp: waiting for the AgentMFA broker at {}",
                     socket.display()
                 );
                 reported_waiting = true;
@@ -77,7 +77,7 @@ async fn discover_mcp_url(socket: &Path) -> Result<String, String> {
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(format!(
-                "no MCP host within {}s — is the Multitool app running?",
+                "no MCP host within {}s — is the AgentMFA app running?",
                 DISCOVER_TIMEOUT.as_secs()
             ));
         }
@@ -165,7 +165,7 @@ impl Bridge {
             request = request.header("mcp-session-id", session.clone());
         }
         if let Some(label) = &self.label {
-            request = request.header("x-multitool-client", label.clone());
+            request = request.header("x-agentmfa-client", label.clone());
         }
         let response = match request.send().await {
             Ok(response) => response,
@@ -375,7 +375,7 @@ mod tests {
                 }
                 "tools/call" => {
                     assert_eq!(headers.get("mcp-session-id").unwrap(), "sess-1");
-                    assert_eq!(headers.get("x-multitool-client").unwrap(), "test-client");
+                    assert_eq!(headers.get("x-agentmfa-client").unwrap(), "test-client");
                     (
                         [("content-type", "text/event-stream")],
                         "event: message\ndata: {\"jsonrpc\":\"2.0\",\n\

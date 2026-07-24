@@ -273,13 +273,13 @@ test('stdio connection guides and quick-start clients require the separate CLI',
   );
   for (const client of requiringCli) {
     const [install, ...steps] = connectGuideSteps(client, ENV);
-    assert.equal(install.title, 'Install the Multitool CLI', client.id);
+    assert.equal(install.title, 'Install the AgentMFA CLI', client.id);
     assert.equal(install.snippet, CLI_INSTALL_COMMAND, client.id);
     assert.deepEqual(steps, client.steps(ENV), client.id);
   }
   assert.match(
     connectClientById('mcp')!.steps(ENV)[1].detail ?? '',
-    /After installing the Multitool CLI/,
+    /After installing the AgentMFA CLI/,
   );
   assert.equal(connectClientById('mcp')!.steps(ENV)[1].snippet, CLI_INSTALL_COMMAND);
 });

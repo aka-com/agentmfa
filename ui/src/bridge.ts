@@ -82,7 +82,7 @@ const MOCK_ACTIVITY_META = {
   inputRefused: { icon: 'circleX', tone: 'danger' },
 };
 const MOCK_AGENT_SETUP = [
-  'Connect to the local Multitool broker. Read its current instructions, then list the available connections:',
+  'Connect to the local AgentMFA broker. Read its current instructions, then list the available connections:',
   '',
   'curl -fsS --unix-socket ~/.aka/broker.sock \\',
   '  -H "Authorization: Bearer $(cat ~/.aka/token)" \\',
@@ -316,7 +316,7 @@ function seedFixtures() {
     id: uid(),
     agent: 'claude-code',
     connection: 'notion',
-    tool: 'multitool_notion_search',
+    tool: 'agentmfa_notion_search',
     prompt: 'Notion needs to know where to search: which workspace should this query run against?',
     fields: [{ name: 'workspace', label: 'Workspace' }],
     requested_at: t(1),
@@ -483,7 +483,7 @@ function mockStatusReport(c: MockConnection): McpStatusReport {
         'list_issues', 'create_issue', 'create_pull_request'],
       resources_supported: true,
       resources: [
-        { uri: 'repo://aka-com/multitool/contents', name: 'aka-com/multitool' },
+        { uri: 'repo://aka-com/agentmfa/contents', name: 'aka-com/agentmfa' },
       ],
     };
   }

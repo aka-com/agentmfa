@@ -47,7 +47,7 @@ pub fn manifest(
             "ssh_open": "/v1/ssh/open",
             "instructions": "/instructions",
         },
-        "pairing": "One shared key covers every local agent: read it from the token_file and send it as your Bearer token. If you cannot read files, POST /v1/pair with {\"agent_name\": \"<your-name>\"} returns the same key. Optionally send X-Multitool-Client: <your-name> to label your activity.",
+        "pairing": "One shared key covers every local agent: read it from the token_file and send it as your Bearer token. If you cannot read files, POST /v1/pair with {\"agent_name\": \"<your-name>\"} returns the same key. Optionally send X-AgentMFA-Client: <your-name> to label your activity.",
     });
     // Where the MCP host is listening right now, when one is running: the
     // loopback streamable-HTTP endpoint `aka mcp` (and any HTTP-native MCP
@@ -90,7 +90,7 @@ pub fn manifest_remote(
             "ssh_open": "/v1/ssh/open",
             "instructions": "/instructions",
         },
-        "pairing": "Not served remotely: every client of this broker uses its one shared key, obtained from the broker's operator (on the broker host it lives in the token file). Send it as your Bearer token, and optionally X-Multitool-Client: <your-name> to label your activity.",
+        "pairing": "Not served remotely: every client of this broker uses its one shared key, obtained from the broker's operator (on the broker host it lives in the token file). Send it as your Bearer token, and optionally X-AgentMFA-Client: <your-name> to label your activity.",
     });
     if let Some(base) = public_url {
         m["base_url"] = json!(base);
@@ -150,7 +150,7 @@ their use. Broker-produced fields do not expose vault-held values or secret
 names; you ask the broker to *use a named connection* (make an HTTP request
 through `github`, connect to `prod-db`) and the broker injects the credential
 on the upstream leg. Authorization is per **tool**: the user enables or
-disables each connection for agents in the Multitool app. An enabled call
+disables each connection for agents in the AgentMFA app. An enabled call
 executes immediately, with no prompt; a disabled call is refused with
 `403 denied_by_policy` — ask your user to enable the tool in the app.
 Relayed HTTP responses are scrubbed for recognized credential material, but
@@ -200,7 +200,7 @@ first recovery step. Rotating the key (user-initiated) invalidates
 outstanding data-plane capabilities and closes live WebSocket, Postgres,
 and SSH connections for every agent at once.
 
-**Label yourself.** Optionally send `X-Multitool-Client: <your-name>`
+**Label yourself.** Optionally send `X-AgentMFA-Client: <your-name>`
 (1-64 chars of `[A-Za-z0-9._-]`) on every call. It names you in the user's
 activity log and live-sessions view — attribution only, never
 authorization.
@@ -216,7 +216,7 @@ exposed. `endpoint` is where a call naming this connection goes (POST
 it). `wired` says whether agents may use the connection: an enabled call
 executes immediately, a disabled call is refused with
 `403 {{"reason": "denied_by_policy"}}`. Access is changed only by the user
-in the Multitool app — if you need a connection that is disabled, ask
+in the AgentMFA app — if you need a connection that is disabled, ask
 your user rather than retrying.
 
 ## 3. Retries and timeouts
@@ -503,7 +503,7 @@ mod tests {
         for needle in [
             "curl --unix-socket ~/.aka/broker.sock",
             "~/.aka/token",
-            "X-Multitool-Client",
+            "X-AgentMFA-Client",
             "/v1/whoami",
             "store_at",
             "token_superseded",

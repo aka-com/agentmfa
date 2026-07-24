@@ -1,5 +1,5 @@
 {
-  "name": "@multitool/sidecar",
+  "name": "@agentmfa/sidecar",
   "private": true,
   "type": "module"
 }
