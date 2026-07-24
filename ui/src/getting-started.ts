@@ -264,7 +264,7 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
     icon: 'anthropic',
     labels: ['claude-code'],
     lead: () => 'Install the Multitool CLI, then add it to Claude Code:',
-    copyLabel: 'Copy commands',
+    copyLabel: 'Copy',
     snippet: SNIPPETS['claude-code'],
     requiresCli: true,
     inlineCliInstall: true,

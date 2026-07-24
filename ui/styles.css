@@ -59,6 +59,7 @@
   --surface: rgba(246, 246, 249, 0.98);
   --panel: #fbfbfd;                     /* sheets, popovers */
   --field-bg: #fff;
+  --code-block-bg: #fff;
   --btn-bg: #fff;
   --btn-hover: #f2f2f5;
   --card-bg: rgba(255, 255, 255, .72);
@@ -463,7 +464,7 @@
   margin-top: 11px; padding: 8px 9px;
   overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere;
   border: 1px solid var(--line); border-radius: 7px;
-  background: var(--wash-2); color: var(--ink-2);
+  background: var(--code-block-bg); color: var(--ink-2);
   font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12.5px; line-height: 1.45;
 }
@@ -590,6 +591,15 @@
   background: var(--panel); border: 1px solid var(--line-mid); border-radius: 9px;
   box-shadow: 0 10px 28px rgba(10,15,40,.22);
 }
+.conn-context-menu-wrap {
+  position: fixed; z-index: 16; visibility: hidden;
+  max-width: calc(100vw - 16px); max-height: calc(100vh - 16px);
+}
+.conn-context-menu-wrap .tile-menu {
+  position: static; width: min(250px, calc(100vw - 16px)); min-width: 0;
+  max-width: calc(100vw - 16px); max-height: calc(100vh - 16px);
+  box-sizing: border-box; overflow-y: auto;
+}
 .menu-divider{ height: 1px; margin: 4px 6px; background: var(--line-soft); }
   .menu-item:disabled{ opacity: .5; cursor: default; }
   .menu-item:disabled:hover{ background: transparent; }
@@ -678,6 +688,7 @@
 }
   .sheet.wide{ left: 50%; right: auto; transform: translateX(-50%); width: 460px; max-width: calc(100% - 28px); }
   .sheet.confirm-sheet{ width: 360px; }
+  .sheet.confirm-sheet:not(.discard-confirm){ top: 64px; max-height: calc(100% - 78px); }
   .sheet h3{ font-size: 15px; margin-bottom: 12px; }
   .f-row{ margin-bottom: 10px; }
   .f-row label{ display: block; font-size: 12.5px; color: var(--muted); font-weight: 600; margin-bottom: 4px; }
@@ -828,6 +839,7 @@
     --surface: rgba(30,30,36,.98);
     --panel: #26262c;
     --field-bg: #1c1c22;
+    --code-block-bg: var(--wash-2);
     --btn-bg: #34343c;
     --btn-hover: #3d3d47;
     --card-bg: rgba(255,255,255,.045);
@@ -1047,7 +1059,7 @@
    sticky column; narrow ones (the media query below — keep in step with
    NARROW_LAYOUT in app.tsx) show the same panel as a slide-over. */
 .tools-split {
-  display: flex; gap: 14px; align-items: flex-start; padding-bottom: 7px;
+  display: flex; gap: 14px; align-items: flex-start; padding-bottom: 14px;
 }
 .tools-list { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 18px; }
 .conn-detail-pane {
@@ -1055,7 +1067,7 @@
   flex: 0 0 clamp(280px, 38%, 380px);
   position: sticky; top: 0;
   height: fit-content; max-height: calc(100vh - 130px); overflow-y: auto;
-  height: calc(100cqh - 7px); max-height: calc(100cqh - 7px);
+  height: calc(100cqh - 14px); max-height: calc(100cqh - 14px);
   padding: 14px 16px 14px;
   border: 1px solid var(--line); border-radius: 12px;
   background: var(--card-bg); box-shadow: 0 1px 3px rgba(20,24,50,.06);
@@ -1096,20 +1108,7 @@
    more of the headline. */
 .cd-lbl-aside { margin-left: auto; font-weight: 400; }
 .cd-help { margin-top: 7px; color: var(--muted); font-size: 12px; line-height: 1.5; }
-.cd-connect-subhead { margin: 0 0 10px; line-height: 1.25; }
 .cd-off-note { margin-top: 12px; }
-/* The panel's healthy/off/running row: verdict and Test.
-   Attention cards replace it when a problem is shown. */
-.cd-status { display: flex; align-items: center; gap: 9px; margin-top: 12px; }
-.cd-pill {
-  display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto;
-  transform: translateY(1px);
-  padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 650;
-}
-.cd-pill svg { width: 11px; height: 11px; flex: 0 0 auto; }
-.cd-pill.ok { color: var(--ok-ink); background: var(--ok-wash); }
-.cd-pill.off, .cd-pill.run { color: var(--muted); background: var(--wash-2); }
-.cd-status .cd-test { flex: 0 0 auto; margin-left: auto; }
 /* The Details card: the target's parts spelled out as label–value rows.
    Values are mono and wrap; labels stay put. */
 .cd-facts {
@@ -1361,7 +1360,7 @@
 .connect-step-bd b{ font-size: 13px; font-weight: 600; }
 .connect-step-d{ font-size: 12.5px; color: var(--muted); margin-top: 1px; line-height: 1.5; }
 .connect-step-followup{ margin-top: 8px; }
-.connect-snip{ position: relative; margin-top: 8px; background: var(--wash-2);
+.connect-snip{ position: relative; margin-top: 8px; background: var(--code-block-bg);
   border: 1px solid var(--line); border-radius: 7px; padding: 9px 12px; overflow-x: auto; }
 .connect-snip pre{ margin: 0; }
 .connect-snip code{ font-size: 12px; line-height: 1.6; white-space: pre; color: var(--ink-2); }

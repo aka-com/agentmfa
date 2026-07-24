@@ -161,6 +161,11 @@ interface RemoteSetupState {
   error: string | null;
 }
 
+interface ConnMenuPoint {
+  x: number;
+  y: number;
+}
+
 interface AppState {
   tab: Tab;
   /** Which broker the app manages and its link state. */
@@ -212,6 +217,9 @@ interface AppState {
   connectOpen: string | null;
   agentMenuOpen: string | null;
   connMenuOpen: string | null;
+  /** Pointer anchor for a row's right-click menu. Null means the same menu
+   * is anchored to the detail panel's ellipsis button instead. */
+  connMenuPoint: ConnMenuPoint | null;
   /** Tools tab: the catalog "add" view is open (the flat list otherwise). */
   addToolOpen: boolean;
   /** Tools tab: the connection whose detail panel is shown (null falls
@@ -318,6 +326,7 @@ const initialState: AppState = {
   connectOpen: 'claude-code', // connection-guide card that starts expanded
   agentMenuOpen: null,   // 'identity' while the key card's ⋯ menu is open
   connMenuOpen: null,    // connection id whose ⋯ options menu is open (Tools tab)
+  connMenuPoint: null,   // right-click pointer anchor; null uses the ⋯ button
   addToolOpen: false,    // Tools tab: catalog add-view open (flat list otherwise)
   selectedConn: null,    // Tools tab: detail-panel selection (null = automatic)
   connDetailOpen: false, // narrow layout: detail panel open as a slide-over
@@ -380,6 +389,8 @@ function clearBrokerOwnedState(): void {
   state.connPreset = null;
   state.connEntryName = null;
   state.selectedConn = null;
+  state.connMenuOpen = null;
+  state.connMenuPoint = null;
   state.connectionReady = null;
   state.connTests = {};
   state.draftTest = null;
@@ -577,6 +588,7 @@ function render(): void {
   }
 
   if (state.formMenuOpen) positionFormMenu();
+  if (state.connMenuPoint) positionConnContextMenu();
 
   // First render of a connection sheet: snapshot the draft so cancelling
   // can detect real edits.
@@ -910,10 +922,6 @@ const fixBtn = (act: string, id: string, label: string, primary = false): string
   `<button class="btn ${primary ? 'primary' : 'outline'} sm cat-meta-fix" data-act="${act}" data-id="${id}">${label}</button>`;
 /** Open the connection editor — the fix for a TLS/cert mismatch. */
 const editFix = (c: ConnectionSummary): string => fixBtn('edit-conn', c.id, 'Fix settings', true);
-/** Re-run the connection's own check from inside an attention card. */
-const testFix = (c: ConnectionSummary, running: boolean): string =>
-  `<button class="btn outline sm cat-meta-fix" data-act="${c.mcp_path ? 'mcp-status' : 'test-conn'}"
-    data-id="${c.id}" ${running ? 'disabled' : ''}>Test</button>`;
 
 // One row inside an expanded catalog entry. It spans the full card width and
 // carries enough to identify the connection without opening it: who is signed
@@ -975,7 +983,7 @@ function connectionIssues(c: ConnectionSummary): Array<{ text: string; fix?: str
     // editor could plausibly fix — a wrong host, port, credential, or TLS
     // expectation — the card leads with Fix settings. 'other' and the
     // passively-recorded (kindless) verdict carry no targeted fix of their
-    // own; the panel adds its Test action to the final attention card.
+    // own; testing remains available from the panel's options menu.
     const kind = fresh && !fresh.ok ? fresh.kind : undefined;
     const fixable = !c.mcp_path && kind !== undefined && kind !== 'other';
     issues.push({
@@ -1017,72 +1025,44 @@ function connectionToolsChipHTML(c: ConnectionSummary): string {
           : 'All tools'}</span></button>`;
 }
 
+/** The shared contents of a tool's options menu. Both the detail-panel
+ * ellipsis and a right-click on its master row open these exact actions. */
+function connectionMenuItemsHTML(c: ConnectionSummary): string {
+  const test = state.connTests[c.id];
+  const mcpStatus = c.mcp_path ? state.mcpStatus[c.id] : undefined;
+  const running = c.mcp_path
+    ? Boolean(mcpStatus && mcpStatus.running)
+    : Boolean(test && test.running);
+  const endpointItems = c.agent_access.enabled && c.agent_access.endpoint
+    ? `<div class="menu-divider" role="separator"></div>
+        <button class="menu-item" role="menuitem" data-act="reissue-endpoint-ask" data-conn="${c.id}">${ICONS.refresh} Get a new direct connection…</button>
+        <button class="menu-item danger" role="menuitem" data-act="revoke-endpoint-ask" data-conn="${c.id}">${ICONS.x} Revoke direct connection</button>`
+    : '';
+  return `<button class="menu-item" role="menuitem" data-act="edit-conn" data-id="${c.id}">${ICONS.pencil} Edit tool</button>
+    <button class="menu-item" role="menuitem" data-act="${c.mcp_path ? 'mcp-status' : 'test-conn'}"
+      data-id="${c.id}" ${running ? 'disabled' : ''}>${ICONS.flaskConical} ${running ? 'Testing…' : 'Test connection'}</button>
+    <button class="menu-item danger" role="menuitem" data-act="del-conn-ask" data-id="${c.id}">${ICONS.trash} Delete tool</button>
+    ${endpointItems}`;
+}
+
 // The Tools tab's detail panel: everything about connecting to the
 // selected tool that the compact rows no longer carry — its connection
 // endpoints, issues with their fixes, and the row's one options menu.
 // Beside the list when the window is wide; a slide-over when it isn't.
 function connDetailHTML(c: ConnectionSummary): string {
-  const test = state.connTests[c.id];
-  const menuOpen = state.connMenuOpen === c.id;
+  const menuOpen = state.connMenuOpen === c.id && !state.connMenuPoint;
   const enabled = c.agent_access.enabled;
   const entry = entryForConnection(c);
   const mcpStatus = c.mcp_path ? state.mcpStatus[c.id] : undefined;
-  const running = c.mcp_path
-    ? Boolean(mcpStatus && mcpStatus.running)
-    : Boolean(test && test.running);
-  // The ⋯ menu owns connection management first, then the address lifecycle;
-  // testing lives in the status row or, when attention is needed, inside the
-  // attention card.
-  const endpointItems = enabled && c.agent_access.endpoint
-    ? `<div class="menu-divider" role="separator"></div>
-        <button class="menu-item" role="menuitem" data-act="reissue-endpoint-ask" data-conn="${c.id}">${ICONS.refresh} Get a new direct connection…</button>
-        <button class="menu-item danger" role="menuitem" data-act="revoke-endpoint-ask" data-conn="${c.id}">${ICONS.x} Revoke direct connection</button>`
-    : '';
   const issues = connectionIssues(c);
-  // The status row under the header carries healthy, off, and running states.
-  // An attention card already communicates a failed state, so it replaces
-  // this entire row and carries the Test action itself.
-  const statusPill = !enabled
-    ? '<span class="cd-pill off">Off</span>'
-    : running
-    ? '<span class="cd-pill run">Testing…</span>'
-    : `<span class="cd-pill ok">${ICONS.check}<span>Ready</span></span>`;
-  const statusRow = enabled && issues.length ? '' : `<div class="cd-status">
-      ${statusPill}
-      <button class="btn sm cd-test" data-act="${c.mcp_path ? 'mcp-status' : 'test-conn'}"
-        data-id="${c.id}" ${running ? 'disabled' : ''}>Test</button>
-    </div>`;
   const issuesBlock = enabled && issues.length
-    ? `<div class="cc-issues">${issues.map((issue, index) =>
+    ? `<div class="cc-issues">${issues.map((issue) =>
         `<div class="cc-issue">${ICONS.triangleAlert}<div class="cc-issue-body">
           <span>${esc(issue.text)}</span>${
-          issue.fix || index === issues.length - 1
-            ? `<div class="cc-issue-fixes">${issue.fix ?? ''}${
-                index === issues.length - 1 ? testFix(c, running) : ''
-              }</div>`
+          issue.fix
+            ? `<div class="cc-issue-fixes">${issue.fix}</div>`
             : ''}</div></div>`).join('')}</div>`
     : '';
-  // What pointing a client at the endpoint means, said once, per kind.
-  // Keyed on the user-facing kind, not the internal transport: a tool that
-  // rides one protocol under the hood (MCP is served over HTTP) advertises
-  // what it actually is, never the transport it happens to travel on.
-  // The caption matches the section's tense: before an address exists it
-  // says what you can get; after, what to do with it.
-  const hasEndpoint = Boolean(c.agent_access.endpoint);
-  const endpointHelp = ((): string => {
-    switch (connectionKind(c)) {
-      case 'db': return hasEndpoint
-        ? 'Point any Postgres client at this address.'
-        : 'Get a stable local address any Postgres client can use.';
-      case 'ssh': return 'Agents get an SSH agent socket.';
-      case 'mcp': return hasEndpoint
-        ? 'Point any MCP client at this address.'
-        : 'Get a stable local address any MCP client can use.';
-      default: return hasEndpoint
-        ? 'Point any HTTP client at this address.'
-        : 'Get a stable local address any HTTP client can use.';
-    }
-  })();
   // The connect section is addressed to the user, not the machinery: a
   // sentence-case invitation naming what they're connecting to, where the
   // panel's other sections keep the tracked-caps label.
@@ -1095,7 +1075,6 @@ function connDetailHTML(c: ConnectionSummary): string {
   })();
   const endpointSection = enabled && ENDPOINTABLE[c.type] && !c.mcp_path
     ? `<div class="cd-sec"><div class="cd-connect-lbl">${ICONS.chevronsLeftRightEllipsis}<span>${connectTitle}</span></div>
-        <div class="cd-help cd-connect-subhead">${endpointHelp}</div>
         ${endpointStripHTML(c)}
       </div>`
     : '';
@@ -1105,8 +1084,7 @@ function connDetailHTML(c: ConnectionSummary): string {
   // has one voice, no tracked-caps machinery labels.
   const mcpSection = enabled && c.mcp_path
     ? `<div class="cd-sec"><div class="cd-connect-lbl">${ICONS.chevronsLeftRightEllipsis}<span>Connect to MCP</span><span class="cd-lbl-aside">${connectionToolsChipHTML(c)}</span></div>
-        ${ENDPOINTABLE[c.type] ? `<div class="cd-help cd-connect-subhead">${endpointHelp}</div>
-          ${endpointStripHTML(c)}` : ''}</div>`
+        ${ENDPOINTABLE[c.type] ? endpointStripHTML(c) : ''}</div>`
     : '';
   // How a disabled tool turns agents away, in the terms of the surface they
   // actually hit: the brokered MCP/HTTP path answers a 403; a Postgres or SSH
@@ -1169,14 +1147,12 @@ function connDetailHTML(c: ConnectionSummary): string {
             aria-label="Options for ${escAttr(c.name)}" aria-haspopup="menu"
             aria-expanded="${menuOpen}" data-act="toggle-conn-menu" data-id="${c.id}">${ICONS.ellipsis}</button>
           ${menuOpen ? `<div class="tile-menu" role="menu" aria-label="Options for ${escAttr(c.name)}">
-            <button class="menu-item" role="menuitem" data-act="edit-conn" data-id="${c.id}">${ICONS.pencil} Edit tool</button>
-            <button class="menu-item danger" role="menuitem" data-act="del-conn-ask" data-id="${c.id}">${ICONS.trash} Delete tool</button>
-            ${endpointItems}
+            ${connectionMenuItemsHTML(c)}
           </div>` : ''}
         </div>
       </div>
     </div>
-    ${statusRow}${issuesBlock}${connTestResultHTML(c)}${offNote}${c.mcp_path
+    ${issuesBlock}${connTestResultHTML(c)}${offNote}${c.mcp_path
       ? mcpSection + endpointSection
       : endpointSection + mcpSection}${detailsSection}${mcpStatusHTML(c)}`;
 }
@@ -1188,7 +1164,7 @@ function mcpStatusHTML(c: ConnectionSummary): string {
   if (!c.mcp_path) return '';
   const status = state.mcpStatus[c.id];
   if (!status) return '';
-  // While running, the status row's pill already says Testing…
+  // While running, the options-menu action already says Testing…
   if (status.running) return '';
   // Errors and failed reports surface through the row's issue list
   // (connectionIssues); only a healthy report renders here.
@@ -1715,7 +1691,7 @@ function startViewToggleHTML(): string {
     `<button class="seg-btn ${state.startView === view ? 'on' : ''}"
       aria-pressed="${state.startView === view}" data-act="start-view" data-id="${view}">${label}</button>`;
   return `<div class="start-view-toggle"><div class="seg" role="group" aria-label="Get started view">
-    ${btn('walkthrough', 'Quick start')}${btn('guides', 'Connection guides')}</div></div>`;
+    ${btn('walkthrough', 'Quick start')}${btn('guides', 'Agent guides')}</div></div>`;
 }
 
 function startHTML(): string {
@@ -1804,7 +1780,7 @@ function startWalkthroughHTML(): string {
     <pre class="setup-instructions"><code>${esc(task)}</code></pre>
     <div class="start-actions">
       <button class="btn primary sm" data-act="copy-text" data-text="${escAttr(task)}">Copy</button>
-      <button class="btn ghost sm" data-act="open-connect-guides">Open connection guides</button>
+      <button class="btn ghost sm" data-act="open-connect-guides">Open agent guides</button>
     </div>`;
 
   return `<ol class="start-steps">
@@ -2190,6 +2166,25 @@ function SafeMarkup({ markup }: { markup: string }): ReactNode {
   return nodes;
 }
 
+/** A row's right-click menu lives at the document root so no scroll pane or
+ * rounded card can clip it. render() measures this portal and clamps its
+ * pointer anchor to all four viewport edges. */
+function ConnectionContextMenu(): ReactNode {
+  const connection = state.connMenuPoint && state.connMenuOpen
+    ? state.connections.find((candidate) => candidate.id === state.connMenuOpen)
+    : null;
+  if (!connection) return null;
+  return createPortal(
+    <div className="tile-menu-wrap conn-context-menu-wrap">
+      <SafeMarkup markup={`<div class="tile-menu" role="menu"
+        aria-label="Options for ${escAttr(connection.name)}">
+        ${connectionMenuItemsHTML(connection)}
+      </div>`} />
+    </div>,
+    document.body,
+  );
+}
+
 function AppRoot(): ReactNode {
   // Subscribes this root to store publications; the revision itself is not
   // used as a key — the windows reconcile in place rather than remounting.
@@ -2204,9 +2199,12 @@ function AppRoot(): ReactNode {
       </div>
     );
   }
-  return mode === 'dropdown'
-    ? <DropdownWindow />
-    : <MainWindow />;
+  return (
+    <>
+      {mode === 'dropdown' ? <DropdownWindow /> : <MainWindow />}
+      <ConnectionContextMenu />
+    </>
+  );
 }
 
 /* --------------------------------- sheets -------------------------------- */
@@ -2275,7 +2273,7 @@ function deleteConnConfirmHTML(): string {
   return `<div class="sheet-backdrop" data-act="confirm-cancel"></div>
     <div class="sheet wide confirm-sheet" role="dialog" aria-modal="true" aria-labelledby="del-conn-title">
       <h3 id="del-conn-title">Delete ${esc(name)}?</h3>
-      <p>The connection and its settings are removed.${enabled ? ' Agents lose access immediately.' : ''}</p>
+      <p>The connection and its settings will be removed.${enabled ? ' Agents will lose access immediately.' : ''}</p>
       <div class="sheet-actions">
         <button class="btn" data-act="confirm-cancel">Cancel</button>
         <button class="btn danger" data-act="del-conn-confirm" data-id="${escAttr(String(confirm.id ?? ''))}">Delete</button>
@@ -2775,10 +2773,8 @@ function draftUsesAdvancedFields(d: ConnectionDraft, t: ConnectionType): boolean
 }
 
 const PG_SSL_OPTIONS: Array<[string, string]> = [
-  ['verify-full', 'Verify full'],
-  ['require', 'Require TLS (no certificate verification)'],
-  ['verify-ca', 'Verify CA only (no hostname verification)'],
-  ['prefer', 'Prefer (TLS optional)'],
+  ['verify-full', 'Require TLS (verify certificate)'],
+  ['require', 'Require encrypted connection'],
   ['disable', 'Disable'],
 ];
 
@@ -4087,6 +4083,22 @@ function requestCloseSheet(): void {
 }
 
 /* --------------------------------- events -------------------------------- */
+/** Keep the pointer-anchored tool menu wholly inside the current viewport.
+ * Measuring the rendered menu handles both the short base menu and the
+ * taller variant with direct-connection actions. */
+function positionConnContextMenu(): void {
+  const point = state.connMenuPoint;
+  const wrap = document.querySelector<HTMLElement>('.conn-context-menu-wrap');
+  if (!point || !wrap) return;
+  const inset = 8;
+  const box = wrap.getBoundingClientRect();
+  const maxLeft = Math.max(inset, window.innerWidth - box.width - inset);
+  const maxTop = Math.max(inset, window.innerHeight - box.height - inset);
+  wrap.style.left = `${Math.min(Math.max(inset, point.x), maxLeft)}px`;
+  wrap.style.top = `${Math.min(Math.max(inset, point.y), maxTop)}px`;
+  wrap.style.visibility = 'visible';
+}
+
 // Opportunistic re-check: coming back to the app re-tests anything the
 // broker last saw unhealthy, so a fixed credential clears its badge
 // without a manual test. Throttled so window-switching stays free.
@@ -4100,6 +4112,20 @@ window.addEventListener('focus', () => {
       void runConnectionTest(connection.id);
     }
   }
+});
+
+document.addEventListener('contextmenu', (e) => {
+  const target = e.target instanceof Element ? e.target : null;
+  const row = target?.closest<HTMLElement>('.flat-conn-wrap');
+  const id = row?.dataset.connRow;
+  if (!id) return;
+  e.preventDefault();
+  state.selectedConn = id;
+  state.connMenuOpen = id;
+  state.connMenuPoint = { x: e.clientX, y: e.clientY };
+  state.catalogActionMenuOpen = null;
+  state.agentMenuOpen = null;
+  render();
 });
 
 document.addEventListener('click', async (e) => {
@@ -4133,6 +4159,7 @@ document.addEventListener('click', async (e) => {
   }
   if (state.connMenuOpen && !target?.closest('.tile-menu-wrap')) {
     state.connMenuOpen = null;
+    state.connMenuPoint = null;
     if (!btn) { render(); return; }
     // fall through: the clicked action runs and its render reflects the close
   }
@@ -4153,6 +4180,7 @@ document.addEventListener('click', async (e) => {
       state.agentMenuOpen = null;
       state.catalogActionMenuOpen = null;
       state.connMenuOpen = null;
+      state.connMenuPoint = null;
       // The slide-over is a transient view; coming back to Tools starts
       // at the list, not with the panel already over it.
       state.connDetailOpen = false;
@@ -4265,6 +4293,7 @@ document.addEventListener('click', async (e) => {
       render();
       break;
     case 'toggle-conn-menu':
+      state.connMenuPoint = null;
       state.connMenuOpen = state.connMenuOpen === id ? null : id;
       render();
       break;
@@ -4288,11 +4317,13 @@ document.addEventListener('click', async (e) => {
     }
     case 'reissue-endpoint-ask':
       state.connMenuOpen = null;
+      state.connMenuPoint = null;
       state.confirm = { kind: 'reissue-endpoint', id: btn.dataset.conn || '' };
       render();
       break;
     case 'revoke-endpoint-ask':
       state.connMenuOpen = null;
+      state.connMenuPoint = null;
       state.confirm = { kind: 'revoke-endpoint', id: btn.dataset.conn || '' };
       render();
       break;
@@ -4566,6 +4597,7 @@ document.addEventListener('click', async (e) => {
       if (!c) break;
       const entry = entryForConnection(c);
       state.connMenuOpen = null;
+      state.connMenuPoint = null;
       if (!await holdDropdownFormOpen()) break;
       setSheet({ kind: 'edit-conn', id }); state.connType = c.type;
       state.connEntryName = entry?.name ?? null;
@@ -4653,7 +4685,12 @@ document.addEventListener('click', async (e) => {
       focusField(id === NEW_CREDENTIAL_OPTION ? 'c-new-secret-name' : 'c-secret');
       break;
     case 'save-conn': await saveConn(); break;
-    case 'del-conn-ask': state.connMenuOpen = null; state.confirm = { kind: 'del-conn', id }; render(); break;
+    case 'del-conn-ask':
+      state.connMenuOpen = null;
+      state.connMenuPoint = null;
+      state.confirm = { kind: 'del-conn', id };
+      render();
+      break;
     case 'del-conn-from-edit':
       closeSheet();
       state.confirm = { kind: 'del-conn', id };
@@ -4670,12 +4707,14 @@ document.addEventListener('click', async (e) => {
       break;
     case 'test-conn':
       state.connMenuOpen = null;
+      state.connMenuPoint = null;
       void runConnectionTest(id);
       break;
     case 'mcp-status': {
       if (state.mcpStatus[id] && state.mcpStatus[id].running) break;
       const epoch = brokerEpoch;
       state.connMenuOpen = null;
+      state.connMenuPoint = null;
       const connection = state.connections.find((x) => x.id === id);
       if (!connection) break;
       state.mcpStatus[id] = { running: true };
@@ -4703,6 +4742,7 @@ document.addEventListener('click', async (e) => {
       const connection = state.connections.find((x) => x.id === id);
       if (!connection || !connection.mcp_path) break;
       state.connMenuOpen = null;
+      state.connMenuPoint = null;
       if (!await holdDropdownFormOpen()) break;
       const template = mcpTemplateForConnection(connection);
       await startMcpAuth({
@@ -4736,6 +4776,7 @@ document.addEventListener('click', async (e) => {
     }
     case 'oauth-reconnect': {
       state.connMenuOpen = null;
+      state.connMenuPoint = null;
       toast('🌐 Approve access in your browser…');
       if (await run(() => invoke('oauth_reconnect', { id }))) {
         toast('🔌 Reconnected');
@@ -5069,7 +5110,12 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     if (state.catalogActionMenuOpen) { state.catalogActionMenuOpen = null; render(); return; }
     if (state.agentMenuOpen) { state.agentMenuOpen = null; render(); return; }
-    if (state.connMenuOpen) { state.connMenuOpen = null; render(); return; }
+    if (state.connMenuOpen) {
+      state.connMenuOpen = null;
+      state.connMenuPoint = null;
+      render();
+      return;
+    }
     // The detail slide-over only exists in the narrow layout; in the wide
     // layout the flag is inert and Escape passes through.
     if (state.connDetailOpen && window.matchMedia(NARROW_LAYOUT).matches) {
@@ -5164,6 +5210,7 @@ document.addEventListener('scroll', () => {
 }, true);
 window.addEventListener('resize', () => {
   if (state.formMenuOpen) positionFormMenu();
+  if (state.connMenuPoint) positionConnContextMenu();
 });
 
 /* --------------------------------- boot ---------------------------------- */
@@ -5294,6 +5341,7 @@ async function boot() {
     state.catalogActionMenuOpen = null;
     state.agentMenuOpen = null;
     state.connMenuOpen = null;
+    state.connMenuPoint = null;
     render();
   });
 }
