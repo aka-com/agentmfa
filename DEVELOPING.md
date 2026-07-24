@@ -86,7 +86,32 @@ What that means while developing:
   data-protection keychain but finds a store recorded on it fails with an
   explanation rather than presenting an empty vault.
 - `AKA_KEYCHAIN=login` forces the old behaviour — the escape hatch for
-  running an unsigned `aka` against a store the signed app owns.
+  running an unsigned `mfa` against a store the signed app owns.
+
+### If a signed build will not launch
+
+`keychain-access-groups` on its own, with no provisioning profile, is what
+the default build signs with, and as far as we can establish that is enough
+for Developer ID on macOS. The failure mode if it is not, is unambiguous:
+macOS refuses to launch code carrying a restricted entitlement no profile
+authorizes, so the app dies at startup rather than degrading. (The runtime
+probe cannot help there — it never gets to run.)
+
+The fix is a provisioning profile, and the build supports it:
+
+```sh
+APPLE_PROVISIONING_PROFILE=~/AgentMFA.provisionprofile npm run build
+```
+
+That adds `com.apple.application-identifier` — restricted for certain, which
+is why it only appears on this path — and embeds the profile at
+`Contents/embedded.provisionprofile`, which authorizes both entitlements.
+Get the profile from the Apple developer portal: a **Developer ID** profile
+for app id `com.aka.desktop` with the Keychain Sharing capability enabled.
+
+Nothing about the app's behaviour changes between the two — same entitlement,
+same access group, same runtime probe. The only question either answers is
+whether macOS honours the entitlement at all, so try the default first.
 
 Human presence is *not* enforced by the Keychain. It is enforced by the
 shell's own LocalAuthentication gate (`src-tauri/src/auth.rs`) and the

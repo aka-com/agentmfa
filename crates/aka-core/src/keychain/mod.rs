@@ -81,6 +81,42 @@ impl std::fmt::Display for Keychain {
     }
 }
 
+/// An `OSStatus` and, where the platform gave us one, its own words for it.
+///
+/// Security.framework can describe every status it returns
+/// (`SecCopyErrorMessageString`), and the tail of statuses worth enumerating
+/// here is long. Carrying the text means a report reads "User interaction is
+/// not allowed. (OSStatus -25308)" instead of a bare integer to go look up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OsError {
+    pub status: i32,
+    pub message: Option<String>,
+}
+
+impl OsError {
+    /// A status with no description — the platform had none, or the caller
+    /// is not on a platform that offers them.
+    pub fn new(status: i32) -> Self {
+        Self {
+            status,
+            message: None,
+        }
+    }
+
+    pub fn described(status: i32, message: Option<String>) -> Self {
+        Self { status, message }
+    }
+}
+
+impl std::fmt::Display for OsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.message {
+            Some(message) => write!(f, "{message} (OSStatus {})", self.status),
+            None => write!(f, "OSStatus {}", self.status),
+        }
+    }
+}
+
 /// What a Security.framework call can go wrong with, in the shapes callers
 /// actually branch on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,9 +131,9 @@ pub enum KeychainError {
     /// The user dismissed the login keychain's ACL dialog, or it could not be
     /// shown (`errSecUserCanceled`, `errSecAuthFailed`,
     /// `errSecInteractionNotAllowed`).
-    NotAuthorized(i32),
+    NotAuthorized(OsError),
     /// Any other `OSStatus`.
-    Os(i32),
+    Os(OsError),
     /// A value the Keychain returned that we could not make sense of.
     Malformed(String),
 }
@@ -110,10 +146,10 @@ impl std::fmt::Display for KeychainError {
                 "this build is not signed with the keychain-access-groups entitlement, \
                  so it cannot open the data-protection keychain (OSStatus -34018)",
             ),
-            Self::NotAuthorized(status) => {
-                write!(f, "Keychain access was not authorized (OSStatus {status})")
+            Self::NotAuthorized(error) => {
+                write!(f, "Keychain access was not authorized: {error}")
             }
-            Self::Os(status) => write!(f, "Keychain error (OSStatus {status})"),
+            Self::Os(error) => write!(f, "Keychain error: {error}"),
             Self::Malformed(what) => write!(f, "unusable Keychain item: {what}"),
         }
     }
@@ -536,7 +572,7 @@ pub(crate) mod tests {
 
         fn read_only() -> Self {
             Self {
-                write_error: Some(KeychainError::Os(-25243)),
+                write_error: Some(KeychainError::Os(OsError::new(-25243))),
                 ..Self::default()
             }
         }
@@ -710,6 +746,26 @@ pub(crate) mod tests {
             Err(KeychainError::MissingEntitlement)
         )
         .is_err());
+    }
+
+    #[test]
+    fn an_os_error_prefers_the_platforms_own_words() {
+        // What `SecCopyErrorMessageString` gives us on macOS.
+        let described = KeychainError::Os(OsError::described(
+            -25308,
+            Some("User interaction is not allowed.".into()),
+        ));
+        assert_eq!(
+            described.to_string(),
+            "Keychain error: User interaction is not allowed. (OSStatus -25308)"
+        );
+
+        // And what a status it cannot describe still has to say.
+        let bare = KeychainError::NotAuthorized(OsError::new(-128));
+        assert_eq!(
+            bare.to_string(),
+            "Keychain access was not authorized: OSStatus -128"
+        );
     }
 
     #[test]

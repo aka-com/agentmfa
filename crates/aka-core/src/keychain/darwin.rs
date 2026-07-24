@@ -21,7 +21,7 @@ use core_foundation::string::CFString;
 use core_foundation_sys::base::{CFTypeRef, OSStatus};
 use core_foundation_sys::string::CFStringRef;
 use security_framework_sys::access_control::kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly;
-use security_framework_sys::base::{errSecItemNotFound, errSecSuccess};
+use security_framework_sys::base::{errSecItemNotFound, errSecSuccess, SecCopyErrorMessageString};
 use security_framework_sys::item::{
     kSecAttrAccount, kSecAttrLabel, kSecAttrService, kSecAttrSynchronizable, kSecClass,
     kSecClassGenericPassword, kSecReturnData, kSecUseDataProtectionKeychain, kSecValueData,
@@ -31,7 +31,7 @@ use security_framework_sys::keychain_item::{
 };
 use zeroize::Zeroizing;
 
-use super::{Keychain, KeychainApi, KeychainError};
+use super::{Keychain, KeychainApi, KeychainError, OsError};
 
 /// `OSStatus` values `security-framework-sys` does not export.
 const ERR_SEC_MISSING_ENTITLEMENT: OSStatus = -34018;
@@ -111,6 +111,22 @@ fn label_pair(label: &str) -> (CFString, CFType) {
     }
 }
 
+/// Security.framework's own description of a status, so the statuses we do
+/// not enumerate still arrive as words rather than an integer to look up.
+/// `None` when the framework has no text for it.
+fn describe(status: OSStatus) -> Option<String> {
+    // SAFETY: returns a +1 CFString, or null for a status it cannot describe.
+    let raw = unsafe { SecCopyErrorMessageString(status, ptr::null_mut()) };
+    if raw.is_null() {
+        return None;
+    }
+    Some(unsafe { CFString::wrap_under_create_rule(raw) }.to_string())
+}
+
+fn os_error(status: OSStatus) -> OsError {
+    OsError::described(status, describe(status))
+}
+
 /// Turn an `OSStatus` into the shapes callers branch on.
 ///
 /// Written as comparisons rather than a `match`: the `errSec*` constants are
@@ -130,9 +146,9 @@ fn check(status: OSStatus) -> Result<(), KeychainError> {
         || status == ERR_SEC_AUTH_FAILED
         || status == ERR_SEC_INTERACTION_NOT_ALLOWED
     {
-        return Err(KeychainError::NotAuthorized(status));
+        return Err(KeychainError::NotAuthorized(os_error(status)));
     }
-    Err(KeychainError::Os(status))
+    Err(KeychainError::Os(os_error(status)))
 }
 
 impl KeychainApi for SecurityFramework {

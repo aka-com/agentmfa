@@ -12,6 +12,24 @@ set -euo pipefail
 # macOS data-protection keychain (see crates/aka-core/src/keychain). That
 # entry needs the signing team's ID, so entitlements.signed.plist is generated
 # here from the checked-in entitlements.plist rather than committed.
+#
+# Two ways to carry that entitlement, because Apple's rules for restricted
+# entitlements under Developer ID are not something to bet a release on:
+#
+#   default                       keychain-access-groups alone, no
+#                                 provisioning profile.
+#   APPLE_PROVISIONING_PROFILE=…  also adds com.apple.application-identifier
+#                                 and embeds the named .provisionprofile,
+#                                 which authorizes both.
+#
+# The default is the lighter setup and, as far as we can tell, sufficient. If
+# a build from it will not launch ("The application cannot be opened"), that
+# is macOS rejecting an unauthorized restricted entitlement: get a Developer
+# ID provisioning profile for this app id that includes the Keychain Sharing
+# capability and point APPLE_PROVISIONING_PROFILE at it. Runtime behaviour is
+# identical either way — the app probes what it can actually reach and falls
+# back to the login keychain — so the only thing at stake here is whether the
+# entitlement is honoured at all. DEVELOPING.md has the whole story.
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
 repo_root="$(cd "$script_dir/.." >/dev/null && pwd)"
@@ -29,6 +47,7 @@ npm run sidecar:build
 npm run sidecar:vendor
 
 target_args=()
+bundle_config="src-tauri/tauri.bundle.conf.json"
 if [[ "$(uname)" == "Darwin" ]]; then
   if [[ -z "${APPLE_SIGNING_IDENTITY:-}" ]]; then
     identities="$(security find-identity -v -p codesigning | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p')"
@@ -46,6 +65,22 @@ if [[ "$(uname)" == "Darwin" ]]; then
   team_id="${APPLE_TEAM_ID:-}"
   if [[ -z "$team_id" ]]; then
     team_id="$(printf '%s' "$APPLE_SIGNING_IDENTITY" | sed -n 's/.*(\([A-Z0-9]\{10\}\))[[:space:]]*$/\1/p')"
+  fi
+
+  profile=""
+  if [[ -n "${APPLE_PROVISIONING_PROFILE:-}" ]]; then
+    if [[ -n "${AGENTMFA_NO_KEYCHAIN_ENTITLEMENT:-}" ]]; then
+      echo "APPLE_PROVISIONING_PROFILE and AGENTMFA_NO_KEYCHAIN_ENTITLEMENT ask for" >&2
+      echo "opposite things. Unset one." >&2
+      exit 1
+    fi
+    if [[ ! -f "$APPLE_PROVISIONING_PROFILE" ]]; then
+      echo "APPLE_PROVISIONING_PROFILE is not a file: $APPLE_PROVISIONING_PROFILE" >&2
+      exit 1
+    fi
+    # Absolute: it goes into a Tauri config that the bundler resolves from
+    # its own directory, not this one.
+    profile="$(cd "$(dirname "$APPLE_PROVISIONING_PROFILE")" >/dev/null && pwd)/$(basename "$APPLE_PROVISIONING_PROFILE")"
   fi
 
   bundle_id="$(node -p "require('$repo_root/src-tauri/tauri.conf.json').identifier")"
@@ -71,6 +106,34 @@ if [[ "$(uname)" == "Darwin" ]]; then
     exit 1
   fi
 
+  if [[ -n "$profile" ]]; then
+    # application-identifier is unambiguously restricted, so it only goes on
+    # when there is a profile to authorize it. It is what a provisioned build
+    # uses to name its default keychain access group, and it must agree with
+    # the group above.
+    /usr/libexec/PlistBuddy \
+      -c "Add :com.apple.application-identifier string ${team_id}.${bundle_id}" \
+      "$entitlements" >/dev/null
+    # Tauri's macOS `files` map copies into Contents/, which is where macOS
+    # looks for the embedded profile. Merged over the checked-in bundle
+    # config rather than passed as a second --config, so there is exactly one
+    # config file either way.
+    bundle_config="src-tauri/tauri.build.conf.json"
+    node -e '
+      const fs = require("fs");
+      const [base, profile, out] = process.argv.slice(1);
+      const config = JSON.parse(fs.readFileSync(base, "utf8"));
+      config.bundle ??= {};
+      config.bundle.macOS ??= {};
+      config.bundle.macOS.files = {
+        ...(config.bundle.macOS.files ?? {}),
+        "embedded.provisionprofile": profile,
+      };
+      fs.writeFileSync(out, JSON.stringify(config, null, 2) + "\n");
+    ' "$repo_root/src-tauri/tauri.bundle.conf.json" "$profile" "$repo_root/$bundle_config"
+    echo "Embedding provisioning profile: $profile"
+  fi
+
   # Universal binary: one DMG runs on Apple silicon and Intel. The fat build
   # needs both std targets installed; `rustup target add` is a no-op when
   # they already are.
@@ -81,4 +144,4 @@ fi
 # CI=true makes the DMG bundler skip the Finder/AppleScript window-layout
 # step, which needs Apple-Events automation access and can hang a headless
 # or unattended build.
-exec env CI=true "$repo_root/node_modules/.bin/tauri" build --config src-tauri/tauri.bundle.conf.json --bundles app,dmg "${target_args[@]}" "$@"
+exec env CI=true "$repo_root/node_modules/.bin/tauri" build --config "$bundle_config" --bundles app,dmg "${target_args[@]}" "$@"
