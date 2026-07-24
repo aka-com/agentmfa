@@ -185,6 +185,29 @@ impl Broker {
         config: BrokerConfig,
         events: Arc<dyn BrokerEvents>,
     ) -> Result<Arc<Self>> {
+        Self::new_inner(paths, vault, config, events, true).await
+    }
+
+    /// Construct the broker state for a short-lived offline management
+    /// command. This exposes the same `ui_*` management layer and holds the
+    /// normal process lease, but does not start daemon-only background work
+    /// such as proactive OAuth refreshes.
+    pub async fn new_for_offline_management(
+        paths: Paths,
+        vault: Arc<dyn crate::vault::SecretVault>,
+        config: BrokerConfig,
+        events: Arc<dyn BrokerEvents>,
+    ) -> Result<Arc<Self>> {
+        Self::new_inner(paths, vault, config, events, false).await
+    }
+
+    async fn new_inner(
+        paths: Paths,
+        vault: Arc<dyn crate::vault::SecretVault>,
+        config: BrokerConfig,
+        events: Arc<dyn BrokerEvents>,
+        start_background_tasks: bool,
+    ) -> Result<Arc<Self>> {
         paths.ensure()?;
         let instance_lock = paths
             .try_acquire_broker_lock()?
@@ -295,9 +318,13 @@ impl Broker {
             mcp_tools_cache: Mutex::new(HashMap::new()),
             _instance_lock: instance_lock,
         });
-        // Keeps OAuth-minted MCP access tokens fresh in the background; the
-        // task holds only a weak reference and exits when the broker drops.
-        crate::mcp_refresh::spawn_refresh_sweeper(&broker);
+        if start_background_tasks {
+            // Keeps OAuth-minted MCP access tokens fresh in the background;
+            // the task holds only a weak reference and exits when the broker
+            // drops. Offline management commands must not contact providers
+            // or mutate unrelated connections.
+            crate::mcp_refresh::spawn_refresh_sweeper(&broker);
+        }
         Ok(broker)
     }
 

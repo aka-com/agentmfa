@@ -31,6 +31,7 @@ use aka_core::error::CoreError;
 use aka_core::events::BrokerEvents;
 use aka_core::paths::{BrokerInstanceLock, Paths};
 use aka_core::store::{ConnectionSpec, Store};
+use aka_core::template::Template;
 use aka_core::types::{ConfirmationMethod, ConnectionConfig, PgSslMode, SecretMeta, SecretValue};
 use aka_core::vault::{platform_vault, platform_vault_for_root, SecretVault};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -692,7 +693,7 @@ fn open_broker(root: Option<PathBuf>) -> OfflineBroker {
         .build()
         .expect("tokio runtime");
     let events: Arc<dyn BrokerEvents> = Arc::new(OfflineEvents);
-    let broker = match runtime.block_on(Broker::new(
+    let broker = match runtime.block_on(Broker::new_for_offline_management(
         paths.clone(),
         vault,
         BrokerConfig::default(),
@@ -1015,9 +1016,28 @@ fn merged_config(
                 ("ca-bundle", args.ca_bundle.is_some()),
                 ("host-key-fingerprint", args.host_key_fingerprint.is_some()),
             ])?;
+            let mut template = args.template.clone().or_else(|| template.clone());
+            if let (Some(source), Some(new_secret)) = (&template, args.secret.as_deref()) {
+                let parsed = Template::parse(source)
+                    .map_err(|error| format!("invalid --template: {error}"))?;
+                let refs = parsed.refs();
+                if refs.len() != 1 {
+                    return Err("WebSocket --template must reference exactly one secret".into());
+                }
+                let old_secret = refs.iter().next().expect("checked one ref");
+                if old_secret != new_secret {
+                    if args.template.is_some() {
+                        return Err(format!(
+                            "--template references {old_secret:?}, but --secret names \
+                             {new_secret:?}"
+                        ));
+                    }
+                    template = Some(parsed.rename_ref(old_secret, new_secret));
+                }
+            }
             Ok(ConnectionConfig::Ws {
                 url: keep(&args.url, url),
-                template: args.template.clone().or_else(|| template.clone()),
+                template,
             })
         }
         ConnectionConfig::Ssh {
@@ -1663,6 +1683,34 @@ mod tests {
         // A stray flag for the kind is named, same as `conn add`.
         a.dbname = Some("stray".into());
         assert!(merged_config(&existing, &a).unwrap_err().contains("--dbname"));
+    }
+
+    #[test]
+    fn update_rewrites_a_websocket_template_when_rebinding_its_secret() {
+        let existing = ConnectionConfig::Ws {
+            url: "wss://stream.example.com/feed".into(),
+            template: Some("Authorization: Basic {{base64(OLD_KEY \":\" OLD_KEY)}}".into()),
+        };
+        let mut a = update_args();
+        a.secret = Some("NEW_KEY".into());
+        match merged_config(&existing, &a).unwrap() {
+            ConnectionConfig::Ws { template, .. } => {
+                assert_eq!(
+                    template.as_deref(),
+                    Some("Authorization: Basic {{base64(NEW_KEY \":\" NEW_KEY)}}"),
+                    "every reference must follow the explicit rebind"
+                );
+            }
+            other => panic!("wrong config: {other:?}"),
+        }
+
+        a.template = Some("Authorization: Bearer {{OTHER_KEY}}".into());
+        assert!(
+            merged_config(&existing, &a)
+                .unwrap_err()
+                .contains("--template references"),
+            "contradictory explicit flags must not silently choose one credential"
+        );
     }
 
     #[test]
