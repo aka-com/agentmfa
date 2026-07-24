@@ -51,7 +51,7 @@ log (attribution only, never authorization).
 
 Authorization is per **tool**: a connection is enabled for agents when it
 is added (adding it was the deliberate act) and can be switched off from
-its row on the Tools tab. An enabled call executes immediately with no
+its row on the Tools tab, or headless with `aka conn disable`. An enabled call executes immediately with no
 prompt; a disabled call is refused with `403 denied_by_policy` — for
 every agent at once. Access binds to the connection's pinned destination:
 retargeting a tool resets its MCP tool selection and revokes its direct

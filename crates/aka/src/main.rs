@@ -6,10 +6,13 @@
 //! - `aka serve` runs the broker headless, so the whole control plane +
 //!   WS/PG data planes can be exercised without the desktop UI (useful for
 //!   agent integration and CI).
-//! - `aka secret add` / `aka conn add` / `aka conn list`
-//!   seed the store from the terminal — the dev/headless counterpart of the
-//!   app's Secrets and Connections tabs — with the same validation, so a
-//!   `serve --root` harness never hand-writes (sealed) store files.
+//! - `aka secret add|list|rename|replace|rm` and
+//!   `aka conn add|list|update|rename|rm|enable|disable|test` manage the
+//!   store from the terminal — the dev/headless counterpart of the app's
+//!   Secrets and Tools tabs — with the same validation, so a `serve --root`
+//!   harness never hand-writes (sealed) store files. Mutations beyond
+//!   seeding run through the broker's own `ui_*` layer, so audit entries
+//!   and access/endpoint side effects cannot drift from the app.
 //! - `aka dsn` / `aka ssh` open data-plane sessions on a running broker
 //!   and print the one value a stock client needs — a ticket-embedded DSN,
 //!   an `SSH_AUTH_SOCK` path — so `psql "$(aka dsn …)"` works as a
@@ -183,6 +186,43 @@ enum SecretCommand {
         #[arg(long)]
         root: Option<PathBuf>,
     },
+    /// List secrets and the connections using them.
+    List {
+        /// Operate on a broker rooted here instead of the default layout.
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// Rename a secret; every injection template referencing it is
+    /// rewritten atomically with the rename.
+    Rename {
+        /// The secret's current name.
+        name: String,
+        /// The new name.
+        new_name: String,
+        /// Operate on a broker rooted here instead of the default layout.
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// Replace a secret's value (rotation). Like add, the value is read
+    /// from stdin or --value-env, never from argv.
+    Replace {
+        /// The secret to rotate.
+        name: String,
+        /// Read the value from this environment variable instead of stdin.
+        #[arg(long, value_name = "VAR")]
+        value_env: Option<String>,
+        /// Operate on a broker rooted here instead of the default layout.
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// Delete a secret. Refused while a connection still uses it.
+    Rm {
+        /// The secret to delete.
+        name: String,
+        /// Operate on a broker rooted here instead of the default layout.
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -212,6 +252,57 @@ enum ConnCommand {
     Add(ConnAdd),
     /// List configured connections.
     List {
+        /// Operate on a broker rooted here instead of the default layout.
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// Update fields on a connection (its kind is fixed). Only the flags
+    /// you pass change; changing the destination revokes the tool's direct
+    /// endpoints, exactly as in the app.
+    Update(ConnUpdate),
+    /// Rename a connection without touching its capability fields.
+    Rename {
+        /// The connection's current name.
+        name: String,
+        /// The new name.
+        new_name: String,
+        /// Operate on a broker rooted here instead of the default layout.
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// Delete a connection. Its agent access and direct endpoints die with
+    /// it; its secrets stay in the vault.
+    Rm {
+        /// The connection to delete.
+        name: String,
+        /// Operate on a broker rooted here instead of the default layout.
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// Enable agent access for a connection: calls execute immediately,
+    /// for every agent at once.
+    Enable {
+        /// The connection to enable.
+        name: String,
+        /// Operate on a broker rooted here instead of the default layout.
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// Disable agent access for a connection: every agent's calls are
+    /// refused with 403 denied_by_policy until re-enabled.
+    Disable {
+        /// The connection to disable.
+        name: String,
+        /// Operate on a broker rooted here instead of the default layout.
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// Test a connection against its pinned destination with its stored
+    /// credential (the credential travels only on the upstream leg).
+    /// Exits nonzero when the test fails.
+    Test {
+        /// The connection to test.
+        name: String,
         /// Operate on a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
@@ -276,6 +367,56 @@ enum ConnKind {
     Ssh,
 }
 
+/// `conn update`: the same field flags as `conn add`, all optional — the
+/// kind comes from the existing connection and unspecified flags keep
+/// their current values.
+#[derive(Args)]
+struct ConnUpdate {
+    /// The connection to update.
+    name: String,
+    /// api/pg/ssh: upstream host (bare hostname, no scheme/port/path).
+    #[arg(long)]
+    host: Option<String>,
+    /// api: "https" or "http" (dev/test upstreams).
+    #[arg(long)]
+    scheme: Option<String>,
+    /// Upstream port.
+    #[arg(long)]
+    port: Option<u16>,
+    /// api: injection template, e.g. 'Authorization: Bearer {{KEY}}'.
+    /// ws: header-line template referencing exactly one secret.
+    #[arg(long)]
+    template: Option<String>,
+    /// ws: full upstream URL (ws:// or wss://).
+    #[arg(long)]
+    url: Option<String>,
+    /// pg: database name.
+    #[arg(long)]
+    dbname: Option<String>,
+    /// pg/ssh: login user.
+    #[arg(long)]
+    user: Option<String>,
+    /// ssh: pinned server host key fingerprint (SHA256:... or SHA512:...).
+    /// Pass '' to clear the pin: the key the server presents at the next
+    /// agent connection is pinned again.
+    #[arg(long)]
+    host_key_fingerprint: Option<String>,
+    /// pg/ws/ssh: rebind to this secret (api connections derive theirs
+    /// from the template).
+    #[arg(long)]
+    secret: Option<String>,
+    /// pg: disable | prefer | require | verify-ca | verify-full.
+    #[arg(long)]
+    sslmode: Option<String>,
+    /// pg: PEM bundle for a private certificate authority; pass '' to
+    /// clear it.
+    #[arg(long)]
+    ca_bundle: Option<String>,
+    /// Operate on a broker rooted here instead of the default layout.
+    #[arg(long)]
+    root: Option<PathBuf>,
+}
+
 fn main() {
     let cli = Cli::parse();
     match cli.command {
@@ -317,17 +458,38 @@ fn main() {
             root,
             client,
         } => cmd_ssh(connection, root, client),
-        Command::Secret {
-            command:
-                SecretCommand::Add {
-                    name,
-                    value_env,
-                    root,
-                },
-        } => cmd_secret_add(name, value_env, root),
+        Command::Secret { command } => match command {
+            SecretCommand::Add {
+                name,
+                value_env,
+                root,
+            } => cmd_secret_add(name, value_env, root),
+            SecretCommand::List { root } => cmd_secret_list(root),
+            SecretCommand::Rename {
+                name,
+                new_name,
+                root,
+            } => cmd_secret_rename(name, new_name, root),
+            SecretCommand::Replace {
+                name,
+                value_env,
+                root,
+            } => cmd_secret_replace(name, value_env, root),
+            SecretCommand::Rm { name, root } => cmd_secret_rm(name, root),
+        },
         Command::Conn { command } => match command {
             ConnCommand::Add(args) => cmd_conn_add(args),
             ConnCommand::List { root } => cmd_conn_list(root),
+            ConnCommand::Update(args) => cmd_conn_update(args),
+            ConnCommand::Rename {
+                name,
+                new_name,
+                root,
+            } => cmd_conn_rename(name, new_name, root),
+            ConnCommand::Rm { name, root } => cmd_conn_rm(name, root),
+            ConnCommand::Enable { name, root } => cmd_conn_access(name, root, true),
+            ConnCommand::Disable { name, root } => cmd_conn_access(name, root, false),
+            ConnCommand::Test { name, root } => cmd_conn_test(name, root),
         },
         Command::Manage {
             command:
@@ -456,8 +618,10 @@ fn open_store(root: Option<PathBuf>) -> OfflineStore {
     }
 }
 
-fn cmd_secret_add(name: String, value_env: Option<String>, root: Option<PathBuf>) {
-    let value: SecretValue = match &value_env {
+/// Read a secret value from `--value-env` or stdin — never argv, where it
+/// would sit in `ps` output and shell history.
+fn read_secret_value(value_env: &Option<String>) -> SecretValue {
+    let value: SecretValue = match value_env {
         Some(var) => match std::env::var(var) {
             Ok(value) => Zeroizing::new(value),
             Err(_) => die(format!("environment variable {var} is not set")),
@@ -478,9 +642,132 @@ fn cmd_secret_add(name: String, value_env: Option<String>, root: Option<PathBuf>
     if value.is_empty() {
         die("the secret value is empty");
     }
+    value
+}
+
+fn cmd_secret_add(name: String, value_env: Option<String>, root: Option<PathBuf>) {
+    let value = read_secret_value(&value_env);
     let store = open_store(root);
     match store.add_secret(&name, value) {
         Ok(meta) => eprintln!("added secret {}", meta.name),
+        Err(e) => die(e),
+    }
+}
+
+fn cmd_secret_list(root: Option<PathBuf>) {
+    let store = open_store(root);
+    let secrets = store.list_secrets();
+    if secrets.is_empty() {
+        eprintln!("no secrets configured (add one with `aka secret add <name>`)");
+        return;
+    }
+    for meta in secrets {
+        let users = store.connections_using(&meta.id);
+        if users.is_empty() {
+            println!("{}", meta.name);
+        } else {
+            println!("{}  used by {}", meta.name, users.join(", "));
+        }
+    }
+}
+
+/// The lifecycle edits run through the broker's own `ui_*` layer instead of
+/// the bare store, so their side effects — audit entries, access-table
+/// cleanup, endpoint revocation on retarget — are the app's, not a CLI
+/// reimplementation. Constructing the broker acquires the same exclusive
+/// lease as `open_store`: a live broker is refused before any state opens.
+struct OfflineBroker {
+    runtime: tokio::runtime::Runtime,
+    broker: Arc<Broker>,
+}
+
+fn open_broker(root: Option<PathBuf>) -> OfflineBroker {
+    let paths = store_paths(root.as_deref());
+    let vault = match open_vault(&paths, root.as_deref()) {
+        Ok(vault) => vault,
+        Err(e) => die(format!("could not open the secret vault: {e}")),
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let events: Arc<dyn BrokerEvents> = Arc::new(OfflineEvents);
+    let broker = match runtime.block_on(Broker::new(
+        paths.clone(),
+        vault,
+        BrokerConfig::default(),
+        events,
+    )) {
+        Ok(broker) => broker,
+        Err(CoreError::BrokerAlreadyRunning(_)) => die(format!(
+            "a broker is running on {} — stop it first (its in-memory state \
+             would overwrite this change), or use the app",
+            paths.socket_file().display()
+        )),
+        Err(e) => die(format!("could not open the broker state: {e}")),
+    };
+    OfflineBroker { runtime, broker }
+}
+
+/// Events for offline lifecycle edits: the operator typed the command on
+/// the broker host, and local file access is what the platform gates — the
+/// typed command is the deliberate act a confirmation would otherwise ask
+/// for.
+struct OfflineEvents;
+
+impl BrokerEvents for OfflineEvents {
+    fn confirm_secret_read(&self, secret: &SecretMeta) -> bool {
+        eprintln!("  secret read authorized for {} (offline edit)", secret.name);
+        true
+    }
+
+    fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
+        Some(ConfirmationMethod::Terminal)
+    }
+}
+
+fn secret_named(broker: &Broker, name: &str) -> SecretMeta {
+    match broker.store.secret_by_name(name) {
+        Some(meta) => meta,
+        None => die(format!(
+            "no secret named {name:?} (see `aka secret list`)"
+        )),
+    }
+}
+
+fn conn_named(broker: &Broker, name: &str) -> aka_core::types::Connection {
+    match broker.store.connection_by_name(name) {
+        Some(conn) => conn,
+        None => die(format!(
+            "no connection named {name:?} (see `aka conn list`)"
+        )),
+    }
+}
+
+fn cmd_secret_rename(name: String, new_name: String, root: Option<PathBuf>) {
+    let offline = open_broker(root);
+    let meta = secret_named(&offline.broker, &name);
+    match offline.broker.ui_edit_secret(&meta.id, Some(&new_name), None) {
+        Ok(meta) => eprintln!("renamed secret {name} → {}", meta.name),
+        Err(e) => die(e),
+    }
+}
+
+fn cmd_secret_replace(name: String, value_env: Option<String>, root: Option<PathBuf>) {
+    let value = read_secret_value(&value_env);
+    let offline = open_broker(root);
+    let meta = secret_named(&offline.broker, &name);
+    match offline.broker.ui_edit_secret(&meta.id, None, Some(value)) {
+        Ok(meta) => eprintln!("replaced the value of secret {}", meta.name),
+        Err(e) => die(e),
+    }
+}
+
+fn cmd_secret_rm(name: String, root: Option<PathBuf>) {
+    let offline = open_broker(root);
+    let meta = secret_named(&offline.broker, &name);
+    match offline.broker.ui_delete_secret(&meta.id) {
+        Ok(meta) => eprintln!("deleted secret {}", meta.name),
         Err(e) => die(e),
     }
 }
@@ -640,6 +927,223 @@ fn cmd_conn_list(root: Option<PathBuf>) {
     }
     for conn in connections {
         println!("{}  {}  {}", conn.name, conn.kind().as_str(), conn.target());
+    }
+}
+
+/// Build `conn update`'s new config: the existing config with the given
+/// flags overlaid, naming any flag stray for the kind. Fields the CLI does
+/// not manage (api `mcp_path`/`oauth`, ssh `destination`) carry over
+/// untouched; the deep validation stays in the store, one place.
+fn merged_config(
+    existing: &ConnectionConfig,
+    args: &ConnUpdate,
+) -> Result<ConnectionConfig, String> {
+    let forbid = |present: &[(&str, bool)]| -> Result<(), String> {
+        match present.iter().find(|(_, given)| *given) {
+            Some((flag, _)) => Err(format!("--{flag} does not apply to this connection's kind")),
+            None => Ok(()),
+        }
+    };
+    let keep = |new: &Option<String>, current: &str| -> String {
+        new.clone().unwrap_or_else(|| current.to_string())
+    };
+    match existing {
+        ConnectionConfig::Api {
+            host,
+            scheme,
+            port,
+            template,
+            mcp_path,
+            oauth,
+        } => {
+            forbid(&[
+                ("url", args.url.is_some()),
+                ("dbname", args.dbname.is_some()),
+                ("user", args.user.is_some()),
+                ("secret", args.secret.is_some()),
+                ("sslmode", args.sslmode.is_some()),
+                ("ca-bundle", args.ca_bundle.is_some()),
+                ("host-key-fingerprint", args.host_key_fingerprint.is_some()),
+            ])?;
+            Ok(ConnectionConfig::Api {
+                host: keep(&args.host, host),
+                scheme: keep(&args.scheme, scheme),
+                port: args.port.or(*port),
+                template: keep(&args.template, template),
+                mcp_path: mcp_path.clone(),
+                oauth: oauth.clone(),
+            })
+        }
+        ConnectionConfig::Pg {
+            host,
+            port,
+            dbname,
+            user,
+            sslmode,
+            trusted_ca_bundle_path,
+        } => {
+            forbid(&[
+                ("scheme", args.scheme.is_some()),
+                ("template", args.template.is_some()),
+                ("url", args.url.is_some()),
+                ("host-key-fingerprint", args.host_key_fingerprint.is_some()),
+            ])?;
+            Ok(ConnectionConfig::Pg {
+                host: keep(&args.host, host),
+                port: args.port.unwrap_or(*port),
+                dbname: keep(&args.dbname, dbname),
+                user: keep(&args.user, user),
+                sslmode: match args.sslmode.as_deref() {
+                    Some(value) => parse_sslmode(Some(value))?,
+                    None => *sslmode,
+                },
+                trusted_ca_bundle_path: match &args.ca_bundle {
+                    Some(path) if path.is_empty() => None,
+                    Some(path) => Some(path.clone()),
+                    None => trusted_ca_bundle_path.clone(),
+                },
+            })
+        }
+        ConnectionConfig::Ws { url, template } => {
+            forbid(&[
+                ("host", args.host.is_some()),
+                ("scheme", args.scheme.is_some()),
+                ("port", args.port.is_some()),
+                ("dbname", args.dbname.is_some()),
+                ("user", args.user.is_some()),
+                ("sslmode", args.sslmode.is_some()),
+                ("ca-bundle", args.ca_bundle.is_some()),
+                ("host-key-fingerprint", args.host_key_fingerprint.is_some()),
+            ])?;
+            Ok(ConnectionConfig::Ws {
+                url: keep(&args.url, url),
+                template: args.template.clone().or_else(|| template.clone()),
+            })
+        }
+        ConnectionConfig::Ssh {
+            destination,
+            host,
+            port,
+            user,
+            host_key_fingerprint,
+        } => {
+            forbid(&[
+                ("scheme", args.scheme.is_some()),
+                ("template", args.template.is_some()),
+                ("url", args.url.is_some()),
+                ("dbname", args.dbname.is_some()),
+                ("sslmode", args.sslmode.is_some()),
+                ("ca-bundle", args.ca_bundle.is_some()),
+            ])?;
+            Ok(ConnectionConfig::Ssh {
+                destination: destination.clone(),
+                host: keep(&args.host, host),
+                port: args.port.unwrap_or(*port),
+                user: keep(&args.user, user),
+                // '' clears the pin: the next agent connection re-pins the
+                // observed key.
+                host_key_fingerprint: keep(&args.host_key_fingerprint, host_key_fingerprint),
+            })
+        }
+    }
+}
+
+fn cmd_conn_update(args: ConnUpdate) {
+    let offline = open_broker(args.root.clone());
+    let existing = conn_named(&offline.broker, &args.name);
+    let config = match merged_config(&existing.config, &args) {
+        Ok(config) => config,
+        Err(e) => die(e),
+    };
+    // api derives its secrets from the template; pg/ws/ssh rebind when
+    // --secret is given and keep the current binding otherwise.
+    let secrets = match (&args.secret, existing.kind()) {
+        (_, aka_core::types::ConnectionKind::Api) => Vec::new(),
+        (Some(name), _) => match offline.broker.store.secret_by_name(name) {
+            Some(meta) => vec![meta.id],
+            None => die(format!(
+                "no secret named {name:?}; add it first with `aka secret add {name}`"
+            )),
+        },
+        (None, _) => existing.secrets.clone(),
+    };
+    let old_target = existing.target();
+    let spec = ConnectionSpec {
+        name: existing.name.clone(),
+        config,
+        secrets,
+    };
+    match offline.broker.ui_update_connection(&existing.id, spec) {
+        Ok(conn) => {
+            eprintln!(
+                "updated connection {} ({} · {})",
+                conn.name,
+                conn.kind().as_str(),
+                conn.target()
+            );
+            if conn.target() != old_target {
+                eprintln!("  target changed: its direct endpoints are revoked");
+            }
+        }
+        Err(e) => die(e),
+    }
+}
+
+fn cmd_conn_rename(name: String, new_name: String, root: Option<PathBuf>) {
+    let offline = open_broker(root);
+    let existing = conn_named(&offline.broker, &name);
+    let spec = ConnectionSpec {
+        name: new_name,
+        config: existing.config.clone(),
+        secrets: existing.secrets.clone(),
+    };
+    match offline.broker.ui_update_connection(&existing.id, spec) {
+        Ok(conn) => eprintln!("renamed connection {name} → {}", conn.name),
+        Err(e) => die(e),
+    }
+}
+
+fn cmd_conn_rm(name: String, root: Option<PathBuf>) {
+    let offline = open_broker(root);
+    let existing = conn_named(&offline.broker, &name);
+    match offline.broker.ui_delete_connection(&existing.id) {
+        Ok(conn) => eprintln!(
+            "deleted connection {} (its secrets stay in the vault)",
+            conn.name
+        ),
+        Err(e) => die(e),
+    }
+}
+
+fn cmd_conn_access(name: String, root: Option<PathBuf>, enabled: bool) {
+    let offline = open_broker(root);
+    let existing = conn_named(&offline.broker, &name);
+    let state = if enabled { "enabled" } else { "disabled" };
+    match offline.broker.ui_set_tool_access(&existing.id, enabled) {
+        Ok(true) => eprintln!("agent access {state} for {}", existing.name),
+        Ok(false) => eprintln!("agent access was already {state} for {}", existing.name),
+        Err(e) => die(e),
+    }
+}
+
+fn cmd_conn_test(name: String, root: Option<PathBuf>) {
+    let offline = open_broker(root);
+    let existing = conn_named(&offline.broker, &name);
+    let report = match offline
+        .runtime
+        .block_on(offline.broker.ui_test_connection(&existing.id))
+    {
+        Ok(report) => report,
+        Err(e) => die(e),
+    };
+    if report.ok {
+        eprintln!("ok: {}", report.detail);
+    } else {
+        match report.kind {
+            Some(kind) => eprintln!("failed ({kind:?}): {}", report.detail),
+            None => eprintln!("failed: {}", report.detail),
+        }
+        std::process::exit(1);
     }
 }
 
@@ -1109,6 +1613,102 @@ mod tests {
         ));
         a.host = Some("stray".into());
         assert!(conn_config(&a).unwrap_err().contains("--host"));
+    }
+
+    fn update_args() -> ConnUpdate {
+        ConnUpdate {
+            name: "test".into(),
+            host: None,
+            scheme: None,
+            port: None,
+            template: None,
+            url: None,
+            dbname: None,
+            user: None,
+            host_key_fingerprint: None,
+            secret: None,
+            sslmode: None,
+            ca_bundle: None,
+            root: None,
+        }
+    }
+
+    #[test]
+    fn update_merges_over_existing_and_preserves_unmanaged_fields() {
+        let existing = ConnectionConfig::Api {
+            host: "api.github.com".into(),
+            scheme: "https".into(),
+            port: None,
+            template: "Authorization: Bearer {{KEY}}".into(),
+            mcp_path: Some("/mcp".into()),
+            oauth: None,
+        };
+        let mut a = update_args();
+        a.host = Some("api.example.com".into());
+        match merged_config(&existing, &a).unwrap() {
+            ConnectionConfig::Api {
+                host,
+                scheme,
+                template,
+                mcp_path,
+                ..
+            } => {
+                assert_eq!(host, "api.example.com");
+                assert_eq!(scheme, "https", "unspecified flags keep their values");
+                assert_eq!(template, "Authorization: Bearer {{KEY}}");
+                assert_eq!(mcp_path.as_deref(), Some("/mcp"), "mcp_path carries over");
+            }
+            other => panic!("wrong config: {other:?}"),
+        }
+        // A stray flag for the kind is named, same as `conn add`.
+        a.dbname = Some("stray".into());
+        assert!(merged_config(&existing, &a).unwrap_err().contains("--dbname"));
+    }
+
+    #[test]
+    fn update_clears_pg_ca_bundle_and_ssh_pin_with_empty_strings() {
+        let pg = ConnectionConfig::Pg {
+            host: "db.internal".into(),
+            port: 5432,
+            dbname: "app".into(),
+            user: "app".into(),
+            sslmode: PgSslMode::VerifyCa,
+            trusted_ca_bundle_path: Some("/etc/ca.pem".into()),
+        };
+        let mut a = update_args();
+        a.ca_bundle = Some(String::new());
+        match merged_config(&pg, &a).unwrap() {
+            ConnectionConfig::Pg {
+                sslmode,
+                trusted_ca_bundle_path,
+                ..
+            } => {
+                assert_eq!(trusted_ca_bundle_path, None, "'' clears the bundle");
+                assert_eq!(sslmode, PgSslMode::VerifyCa, "sslmode kept");
+            }
+            other => panic!("wrong config: {other:?}"),
+        }
+
+        let ssh = ConnectionConfig::Ssh {
+            destination: Some("prod".into()),
+            host: "prod.example.com".into(),
+            port: 22,
+            user: "deploy".into(),
+            host_key_fingerprint: "SHA256:AAAA".into(),
+        };
+        let mut a = update_args();
+        a.host_key_fingerprint = Some(String::new());
+        match merged_config(&ssh, &a).unwrap() {
+            ConnectionConfig::Ssh {
+                destination,
+                host_key_fingerprint,
+                ..
+            } => {
+                assert_eq!(host_key_fingerprint, "", "'' clears the pin for re-TOFU");
+                assert_eq!(destination.as_deref(), Some("prod"), "destination carries over");
+            }
+            other => panic!("wrong config: {other:?}"),
+        }
     }
 
     #[test]

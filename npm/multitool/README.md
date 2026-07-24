@@ -54,6 +54,13 @@ aka conn add github --kind api --host api.github.com \
 aka conn list
 ```
 
+The rest of the lifecycle is headless too: `aka secret
+list|rename|replace|rm`, `aka conn update|rename|rm`, per-tool agent
+access with `aka conn enable|disable`, and `aka conn test` to check a
+connection against its pinned destination. These edits run through the
+broker's own management layer, so audit entries and side effects (a
+retarget revoking direct endpoints, for example) match the app exactly.
+
 Open Postgres and SSH sessions straight from the shell — each command
 prints the one value a stock client needs, minted by the running broker
 (the DSN embeds a short-lived session ticket):
