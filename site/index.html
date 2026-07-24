@@ -3,17 +3,25 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="Multitool — secure execution for AI agents. A local connection broker that keeps keys encrypted and injects credentials on the upstream leg only.">
+<meta name="description" content="Multitool — secure execution for AI agents. Connect your agents to databases, servers, MCPs, and APIs without exposing secrets.">
 <meta name="theme-color" content="#171512">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Multitool">
 <meta property="og:title" content="Multitool — Secure execution for AI agents">
-<meta property="og:description" content="A local connection broker for AI agents. Databases, servers, MCPs, and APIs through one vault — unmodified tools like curl, psql, and git work without an agent ever holding a raw secret.">
+<meta property="og:description" content="Connect your agents to databases, servers, MCPs, and APIs without exposing secrets. Works with CLI tools like curl, psql, and git, and your existing credential vault.">
 <meta name="twitter:card" content="summary">
 <meta name="twitter:title" content="Multitool — Secure execution for AI agents">
-<meta name="twitter:description" content="A local connection broker for AI agents. Keys stay in one encrypted vault; agents get brokered handles, logged and revocable in one place.">
+<meta name="twitter:description" content="Connect your agents to databases, servers, MCPs, and APIs without exposing secrets. Works with CLI tools like curl, psql, and git, and your existing credential vault.">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23fabb41%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M10%2022V7a1%201%200%200%200-1-1H4a2%202%200%200%200-2%202v12a2%202%200%200%200%202%202h12a2%202%200%200%200%202-2v-5a1%201%200%200%200-1-1H2%22%2F%3E%3Crect%20x%3D%2214%22%20y%3D%222%22%20width%3D%228%22%20height%3D%228%22%20rx%3D%221%22%2F%3E%3C%2Fsvg%3E">
 <title>Multitool — Secure execution for AI agents</title>
+<script>
+(function(){
+  try {
+    if (localStorage.getItem("mt-theme") === "light")
+      document.documentElement.setAttribute("data-theme", "light");
+  } catch (e) {}
+})();
+</script>
 <style>
   :root {
     --bg: oklch(16.5% 0.006 75);
@@ -26,9 +34,25 @@
     --grid-line: oklch(30% 0.006 75);
     --primary: oklch(83% 0.15 80);
     --primary-fg: oklch(18% 0.006 75);
+    --ok: oklch(78% 0.17 150);
     --font-sans: "Geist", "Inter", system-ui, "Segoe UI", Helvetica, Arial, sans-serif;
     --font-mono: "Geist Mono", ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
     color-scheme: dark;
+  }
+
+  html[data-theme="light"] {
+    --bg: oklch(97.5% 0.004 85);
+    --fg: oklch(22% 0.008 75);
+    --card: oklch(95% 0.005 85);
+    --muted: oklch(90.5% 0.006 82);
+    --muted-fg: oklch(46% 0.01 75);
+    --border: oklch(85% 0.008 80);
+    --joint: oklch(62% 0.01 75);
+    --grid-line: oklch(89% 0.006 80);
+    --primary: oklch(62% 0.13 72);
+    --primary-fg: oklch(98% 0.004 85);
+    --ok: oklch(55% 0.14 150);
+    color-scheme: light;
   }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -107,7 +131,7 @@
   .brand svg {
     width: 1rem;
     height: 1rem;
-    color: var(--primary);
+    color: var(--fg);
     flex-shrink: 0;
   }
   .brand .word {
@@ -124,6 +148,31 @@
     letter-spacing: 0.12em;
     color: var(--muted-fg);
   }
+  .nav-right {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+  .theme-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.75rem;
+    height: 1.75rem;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 0.375rem;
+    background: transparent;
+    color: var(--muted-fg);
+    cursor: pointer;
+    transition: background-color 0.15s, color 0.15s;
+  }
+  .theme-toggle:hover { color: var(--fg); background: var(--muted); }
+  .theme-toggle:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+  .theme-toggle svg { width: 0.875rem; height: 0.875rem; }
+  .theme-toggle .ic-moon { display: none; }
+  html[data-theme="light"] .theme-toggle .ic-moon { display: block; }
+  html[data-theme="light"] .theme-toggle .ic-sun { display: none; }
 
   /* ---------- buttons ---------- */
   .btn {
@@ -163,91 +212,60 @@
   .btn.ghost:hover { background: var(--muted); }
 
   /* ---------- hero ---------- */
-  .hero {
-    position: relative;
-    display: grid;
-    border: 1px solid var(--border);
-    border-top: 0;
-    background: var(--bg);
-  }
-  @media (min-width: 1024px) { .hero { grid-template-columns: 1.05fr 0.95fr; } }
-
   /* Grid/flex items min-size to 0 so wide content (the terminal pre, the
      path commands) scrolls inside its own box instead of stretching the
      track past the viewport on narrow screens. */
-  .hero > *, .split > *, .deploy > *, .paths > * { min-width: 0; }
+  .split > *, .deploy > *, .paths > * { min-width: 0; }
   .term { min-width: 0; }
 
-  .hero::after {
-    content: "";
-    position: absolute;
-    inset: -4.5px;
-    z-index: 10;
-    pointer-events: none;
-    background-image:
-      linear-gradient(var(--joint), var(--joint)), linear-gradient(var(--joint), var(--joint)),
-      linear-gradient(var(--joint), var(--joint)), linear-gradient(var(--joint), var(--joint)),
-      linear-gradient(var(--joint), var(--joint)), linear-gradient(var(--joint), var(--joint)),
-      linear-gradient(var(--joint), var(--joint)), linear-gradient(var(--joint), var(--joint));
-    background-repeat: no-repeat;
-    background-size: 9px 1px, 1px 9px, 9px 1px, 1px 9px, 9px 1px, 1px 9px, 9px 1px, 1px 9px;
-    background-position:
-      left 0 top 4px, left 4px top 0,
-      right 0 top 4px, right 4px top 0,
-      left 0 bottom 4px, left 4px bottom 0,
-      right 0 bottom 4px, right 4px bottom 0;
-  }
-
-  .hero-copy {
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    gap: 1.25rem;
-    padding: 2rem;
-    border-bottom: 1px solid var(--border);
-  }
-  @media (min-width: 640px) { .hero-copy { padding: 2.5rem; } }
-  @media (min-width: 1024px) { .hero-copy { border-bottom: 0; border-right: 1px solid var(--border); } }
-  @media (max-width: 1023.98px) {
-    nav { justify-content: center; }
-    .hero-copy { align-items: center; text-align: center; }
-    .hero-actions { justify-content: center; }
-  }
-
-  .badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.5rem;
-    width: fit-content;
-    height: 1.375rem;
-    padding: 0.125rem 0.5rem;
-    border: 1px solid var(--border);
-    border-radius: 0.25rem;
-    font-family: var(--font-mono);
-    font-size: 0.75rem;
-    color: var(--muted-fg);
-    white-space: nowrap;
-  }
-  .dot {
-    position: relative;
-    display: inline-flex;
-    width: 0.5rem;
-    height: 0.5rem;
-    border-radius: 9999px;
-    background: oklch(78% 0.17 150);
-    flex-shrink: 0;
-  }
-  .dot::after {
-    content: "";
+  .hx { position: relative; }
+  .hx canvas { display: block; width: 100%; height: 100%; }
+  .hx-gfx {
     position: absolute;
     inset: 0;
-    border-radius: 9999px;
-    background: oklch(78% 0.17 150);
-    opacity: 0.75;
+    overflow: hidden;
+    pointer-events: none;
   }
-  @media (prefers-reduced-motion: no-preference) {
-    .dot::after { animation: ping 1.2s cubic-bezier(0, 0, 0.2, 1) infinite; }
-    @keyframes ping { 75%, 100% { transform: scale(2.2); opacity: 0; } }
+
+  /* the terminal as its own centered unit below the fold */
+  .hx-cli {
+    display: flex;
+    justify-content: center;
+    margin-top: 0.75rem;
+  }
+  .hx-cli .term { width: 100%; max-width: 42rem; }
+  .hx-cli-overlap {
+    position: relative;
+    z-index: 2;
+    margin-top: -22rem;
+    margin-bottom: 3rem;
+    padding: 0 1rem;
+  }
+
+  /* centered copy on top, full-bleed graphic band, CLI overlapping */
+  .hx-stack {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1.25rem;
+    padding: 4.5rem 1rem 0;
+    text-align: center;
+  }
+  .hx-stack h1 { font-size: clamp(2.5rem, 6vw, 4rem); }
+  .hx-stack .hero-actions { justify-content: center; }
+  .hx-stack-band {
+    position: relative;
+    align-self: stretch;
+    width: auto;
+    margin-left: calc(50% - 50vw);
+    margin-right: calc(50% - 50vw);
+    height: clamp(19rem, 50svh, 27rem);
+    margin-top: 1rem;
+    overflow: hidden;
+  }
+
+  @media (max-width: 1023.98px) {
+    nav { justify-content: center; }
   }
 
   h1 {
@@ -275,22 +293,13 @@
     padding-top: 0.25rem;
   }
 
-  .hero-demo {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 1.5rem;
-    background: var(--card);
-  }
-  @media (min-width: 640px) { .hero-demo { padding: 2rem; } }
-
   .term {
     width: 100%;
     overflow: hidden;
     border: 1px solid var(--border);
     border-radius: 0.25rem;
     background: var(--card);
-    box-shadow: 0 25px 50px -12px rgb(0 0 0 / 0.5);
+    box-shadow: 0 18px 36px -16px rgb(0 0 0 / 0.28);
   }
   .term-bar {
     display: flex;
@@ -324,8 +333,10 @@
 
   /* ---------- sections ---------- */
   section.panel {
+    position: relative;
+    z-index: 1;
     border: 1px solid var(--border);
-    background: var(--bg);
+    background-color: var(--bg);
   }
   .panel-head {
     padding: 2rem 1.5rem;
@@ -380,7 +391,7 @@
   }
   .risk-list .mark svg { width: 0.875rem; height: 0.875rem; }
   .risk-list .mark.x { color: var(--muted-fg); }
-  .risk-list .mark.ok { color: oklch(78% 0.17 150); }
+  .risk-list .mark.ok { color: var(--ok); }
   .risk-list .struck {
     color: var(--muted-fg);
     text-decoration: line-through;
@@ -486,7 +497,7 @@
     width: 0.375rem;
     height: 0.375rem;
     border-radius: 9999px;
-    background: oklch(78% 0.17 150);
+    background: var(--ok);
     flex-shrink: 0;
   }
   .mock .sk {
@@ -728,16 +739,6 @@
   }
   .faq-item p .m { font-family: var(--font-mono); font-size: 0.9em; color: var(--fg); }
 
-  /* hero background */
-  .hbg {
-    position: absolute;
-    inset: 0;
-    overflow: hidden;
-    pointer-events: none;
-    visibility: hidden;
-  }
-  .hbg.on { visibility: visible; }
-  .hero-copy, .hero-demo { position: relative; z-index: 1; }
   .split-right { position: relative; }
   .graph-glow {
     position: absolute;
@@ -746,22 +747,11 @@
     pointer-events: none;
   }
   .split-right figure { position: relative; z-index: 1; }
-  .hero.has-bg .hero-demo { background: color-mix(in oklab, var(--card) 75%, transparent); }
   .btn:disabled {
     opacity: 0.45;
     cursor: not-allowed;
     pointer-events: none;
   }
-
-  /* hero pixel field */
-  .pixel-asym-bg {
-    position: absolute;
-    inset: 0;
-    z-index: 0;
-    pointer-events: none;
-    overflow: hidden;
-  }
-  .pixel-asym-bg canvas { width: 100%; height: 100%; display: block; }
 
   /* diagram glow: layered dim gradients + film grain */
   .hero-glow-bg {
@@ -833,6 +823,7 @@
       to   { transform: rotate(6deg) scale(1.05); }
     }
   }
+
 </style>
 </head>
 <body>
@@ -847,146 +838,43 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2"/><rect x="14" y="2" width="8" height="8" rx="1"/></svg>
           <span class="word">multitool</span>
         </span>
-        <span class="nav-byline">By AKA Labs</span>
+        <span class="nav-right">
+          <span class="nav-byline">By AKA Labs</span>
+          <button type="button" class="theme-toggle" aria-label="Switch to light theme">
+            <svg class="ic-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
+            <svg class="ic-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+          </button>
+        </span>
       </nav>
 
-      <div class="hero has-bg">
-      <div class="hbg on" data-bg="pixel-asym">
-  <div class="pixel-asym-bg" aria-hidden="true"><canvas></canvas></div>
-  <script>
-  (function(){
-    "use strict";
-    var host = document.currentScript.previousElementSibling;
-    var canvas = host.querySelector("canvas");
-    var ctx = canvas.getContext("2d");
-
-    function rng(seed){
-      return function(){
-        seed |= 0; seed = seed + 0x6D2B79F5 | 0;
-        var t = Math.imul(seed ^ seed >>> 15, 1 | seed);
-        t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
-        return ((t ^ t >>> 14) >>> 0) / 4294967296;
-      };
-    }
-
-    var BAYER = [0,8,2,10, 12,4,14,6, 3,11,1,9, 15,7,13,5];
-
-    var CELL = 14;
-    var PX   = 6;
-    var GRAY = "oklch(66% 0.005 75";
-    var GOLD = "oklch(83% 0.15 80";
-
-    var pixels = [], W = 0, H = 0, dpr = 1;
-
-    function build(){
-      var rect = host.getBoundingClientRect();
-      W = Math.max(1, Math.round(rect.width));
-      H = Math.max(1, Math.round(rect.height));
-      dpr = Math.min(window.devicePixelRatio || 1, 2);
-      canvas.width = W * dpr; canvas.height = H * dpr;
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
-      var rand = rng(20260723);
-      pixels.length = 0;
-
-      var cols = Math.ceil(W / CELL), rows = Math.ceil(H / CELL);
-      for (var j = 0; j < rows; j++){
-        for (var i = 0; i < cols; i++){
-          var r1 = rand(), r2 = rand(), r3 = rand();
-          var cx = i * CELL + CELL / 2, cy = j * CELL + CELL / 2;
-          var rx = cx / W;                        /* 0 left → 1 right */
-          var vy = Math.abs(cy / H * 2 - 1);      /* 0 middle → 1 top/bottom */
-          /* asymmetric: sweep in from the right edge, corners boosted,
-             nothing left of ~45% where the headline sits */
-          var e = Math.pow(Math.max(0, rx - 0.42) / 0.58, 2.0) * 0.85
-                + Math.pow(Math.max(0, rx - 0.55) / 0.45, 2.2) * Math.pow(vy, 1.6) * 0.55;
-          e = Math.min(1, e);
-          var density = Math.pow(e, 1.6) * 0.9;
-          var threshold = (BAYER[(j % 4) * 4 + (i % 4)] + 0.5) / 16;
-          if (density * (0.55 + 0.9 * r1) <= threshold) continue;
-
-          var gold = r2 < 0.30;
-          pixels.push({
-            x: Math.round(cx - PX / 2 + (r3 - 0.5) * 3),
-            y: Math.round(cy - PX / 2 + (r1 - 0.5) * 3),
-            s: r3 < 0.14 ? PX + 3 : (r2 > 0.86 ? PX - 3 : PX),
-            a: (gold ? 0.032 + 0.105 * e : 0.026 + 0.068 * e) * (0.6 + 0.8 * r3),
-            c: gold ? GOLD : GRAY,
-            ph: r2 * Math.PI * 2
-          });
-        }
-      }
-    }
-
-    function draw(t){
-      ctx.clearRect(0, 0, W, H);
-      for (var k = 0; k < pixels.length; k++){
-        var p = pixels[k], a = p.a;
-        if (t !== undefined && p.c === GOLD)
-          a *= 0.72 + 0.28 * Math.sin(t / 4200 + p.ph);
-        ctx.fillStyle = p.c + " / " + a.toFixed(3) + ")";
-        ctx.fillRect(p.x, p.y, p.s, p.s);
-      }
-    }
-
-    build();
-    draw();
-
-    if (matchMedia("(prefers-reduced-motion: no-preference)").matches){
-      var last = 0, visible = true;
-      var loop = function(t){
-        if (!visible) return;
-        requestAnimationFrame(loop);
-        if (t - last < 90) return;
-        last = t;
-        draw(t);
-      };
-      requestAnimationFrame(loop);
-      if (typeof IntersectionObserver !== "undefined"){
-        new IntersectionObserver(function(entries){
-          var was = visible;
-          visible = entries[0].isIntersecting;
-          if (visible && !was) requestAnimationFrame(loop);
-        }).observe(host);
-      }
-    }
-
-    if (typeof ResizeObserver !== "undefined"){
-      var pend;
-      new ResizeObserver(function(){
-        clearTimeout(pend);
-        pend = setTimeout(function(){ build(); draw(); }, 120);
-      }).observe(host);
-    }
-  })();
-  </script>
-      </div>
-        <div class="hero-copy">
-          <span class="badge"><span class="dot"></span> Broker online</span>
-          <h1>Secure execution for AI agents</h1>
-          <p class="hero-lead">Multitool lets your agents connect to databases, servers, MCPs, and APIs with credentials in a local vault. Unmodified tools like <span class="m">curl</span>, <span class="m">psql</span>, and <span class="m">git</span> work without an agent ever holding a raw secret.</p>
-          <div class="hero-actions">
-            <a class="btn primary" href="#get-multitool">Download Multitool
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
-            </a>
-            <a class="btn outline" href="#faq">Read the FAQ</a>
-          </div>
+      <div class="hx hx-stack">
+        <h1>Secure execution for AI agents</h1>
+        <p class="hero-lead">Connect your agents to databases, servers, MCPs, and APIs without exposing secrets, with a simple desktop interface.</p>
+        <div class="hero-actions">
+          <a class="btn primary" href="#get-multitool">Download Multitool
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+          </a>
+          <a class="btn outline" href="#faq">Read the FAQ</a>
         </div>
-        <div class="hero-demo">
-          <div class="term">
-            <div class="term-bar">
-              <span class="light"></span><span class="light"></span><span class="light"></span>
-              <span class="term-title">multitool</span>
-            </div>
-            <pre><code><span class="p">agent:~$</span> export SSH_AUTH_SOCK="$(aka ssh production)"
-<span class="p">agent:~$</span> git push production main
-
-<span class="c">// stock tools, brokered credentials</span>
-<span class="p">agent:~$</span> psql "$(aka dsn analytics)"
-<span class="c">analytics=&gt;</span> select count(*) from signups;
-
-<span class="p">▪ ok</span><span class="c"> · 2 tools brokered · 0 secrets exposed · audited</span></code></pre>
+        <div class="hx-stack-band">
+          <div class="hx-gfx" aria-hidden="true"><canvas></canvas></div>
+        </div>
+      </div>
+      <div class="hx-cli hx-cli-overlap">
+        <div class="term">
+          <div class="term-bar">
+            <span class="light"></span><span class="light"></span><span class="light"></span>
           </div>
+          <pre><code><span class="p">$</span> npm install -g @aka-labs/multitool
+<span class="p">$</span> aka secret add ANALYTICS_DB
+<span class="c">✓ saved to vault</span>
+
+<span class="p">$</span> aka conn add analytics --kind pg --host db.example.com
+<span class="c">✓ analytics ready</span>
+
+<span class="p">$</span> psql "$(aka dsn analytics)"
+<span class="c">analytics=&gt;</span> select count(*) from signups;
+<span class="p">▪ ok!</span><span class="c"> · 100 rows read · 0 secrets exposed</span></code></pre>
         </div>
       </div>
     </div>
@@ -1005,7 +893,7 @@
             </li>
             <li class="risk">
               <span class="mark x"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></span>
-              <span class="struck"><span class="sr-only">Without Multitool: </span>One prompt injection away from reading every secret at once.</span>
+              <span class="struck"><span class="sr-only">Without Multitool: </span>One prompt injection reads every secret at once.</span>
             </li>
             <li class="risk">
               <span class="mark x"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></span>
@@ -1220,5 +1108,153 @@
 
   </div>
 </main>
+
+<script>
+(function(){
+"use strict";
+
+/* seeded, deterministic ridge field: perspective dotted terrain
+   flowing toward the viewer, in the site palette */
+
+function rng(seed){
+  return function(){
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    var t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+function makeNoise(rand){
+  var P = new Uint8Array(512);
+  var perm = [];
+  for (var i = 0; i < 256; i++) perm[i] = i;
+  for (var j = 255; j > 0; j--){
+    var k = (rand() * (j + 1)) | 0;
+    var tmp = perm[j]; perm[j] = perm[k]; perm[k] = tmp;
+  }
+  for (var m = 0; m < 512; m++) P[m] = perm[m & 255];
+  function n2(x, y){
+    var xi = Math.floor(x), yi = Math.floor(y);
+    var xf = x - xi, yf = y - yi;
+    var u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+    var a = P[(P[xi & 255] + yi) & 255] / 255;
+    var b = P[(P[(xi + 1) & 255] + yi) & 255] / 255;
+    var c = P[(P[xi & 255] + yi + 1) & 255] / 255;
+    var d = P[(P[(xi + 1) & 255] + yi + 1) & 255] / 255;
+    return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+  }
+  return function fbm(x, y, oct){
+    var s = 0, amp = 0.5, f = 1;
+    for (var i = 0; i < oct; i++){ s += amp * n2(x * f, y * f); f *= 2; amp *= 0.5; }
+    return s;
+  };
+}
+
+function pal(){
+  return document.documentElement.getAttribute("data-theme") === "light"
+    ? { gray: "oklch(45% 0.01 75", gold: "oklch(60% 0.13 72" }
+    : { gray: "oklch(70% 0.006 75", gold: "oklch(83% 0.15 80" };
+}
+function col(base, a){
+  return base + " / " + Math.max(0, Math.min(1, a)).toFixed(3) + ")";
+}
+
+var host = document.querySelector(".hx-stack-band .hx-gfx");
+var canvas = host.querySelector("canvas");
+var ctx = canvas.getContext("2d");
+var fbm = makeNoise(rng(6612));
+var W = 0, H = 0, raf = 0, lastT = 0, pend = 0, visible = true;
+var reduced = !matchMedia("(prefers-reduced-motion: no-preference)").matches;
+
+function build(){
+  var r = host.getBoundingClientRect();
+  W = Math.max(1, Math.round(r.width));
+  H = Math.max(1, Math.round(r.height));
+  var dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function draw(t){
+  ctx.clearRect(0, 0, W, H);
+  var P = pal();
+  var cx = W / 2;
+  var rows = 42, cols = Math.max(120, Math.min(240, Math.round(W / 9)));
+  var horizon = H * 0.24, near = H * 1.02;
+  var scroll = t * 0.00008;
+  for (var j = 0; j < rows; j++){
+    var dd = j / (rows - 1);
+    var y0 = horizon + (near - horizon) * Math.pow(dd, 1.7);
+    var spread = W * (0.85 + 0.9 * Math.pow(dd, 1.3));
+    var amp = H * (0.02 + 0.26 * Math.pow(dd, 1.5));
+    for (var i = 0; i < cols; i++){
+      var fx = i / (cols - 1) - 0.5;
+      var n = fbm(fx * 4.6 + 2, (rows - 1 - j) * 0.33 + scroll, 4);
+      var center = Math.max(0.15, 1 - Math.abs(fx) * 1.1);
+      var h = Math.pow(n, 1.4) * amp * (0.5 + 0.9 * center);
+      var x = cx + fx * spread;
+      var y = y0 - h;
+      var a = 0.10 + 0.55 * Math.pow(dd, 1.1) * (0.4 + 0.6 * n);
+      var gold = n > 0.64;
+      ctx.fillStyle = col(gold ? P.gold : P.gray, gold ? a + 0.15 : a);
+      var sz = dd > 0.6 ? 2 : 1;
+      ctx.fillRect(x, y, sz, sz);
+    }
+  }
+}
+
+function frame(t){
+  if (!visible) return;
+  raf = requestAnimationFrame(frame);
+  if (t - lastT < 33) return;
+  lastT = t;
+  draw(t);
+}
+
+build();
+draw(0);
+if (!reduced) raf = requestAnimationFrame(frame);
+
+if (typeof IntersectionObserver !== "undefined"){
+  new IntersectionObserver(function(entries){
+    var was = visible;
+    visible = entries[0].isIntersecting;
+    if (visible && !was && !reduced) raf = requestAnimationFrame(frame);
+  }).observe(host);
+}
+if (typeof ResizeObserver !== "undefined"){
+  new ResizeObserver(function(){
+    clearTimeout(pend);
+    pend = setTimeout(function(){
+      build();
+      if (reduced) draw(0);
+    }, 120);
+  }).observe(host);
+}
+
+/* theme toggle */
+var toggle = document.querySelector(".theme-toggle");
+var themeMeta = document.querySelector('meta[name="theme-color"]');
+function syncTheme(){
+  var light = document.documentElement.getAttribute("data-theme") === "light";
+  if (themeMeta) themeMeta.content = light ? "#f6f4ef" : "#171512";
+  if (toggle) toggle.setAttribute("aria-label", light ? "Switch to dark theme" : "Switch to light theme");
+  draw(lastT);
+}
+if (toggle){
+  toggle.addEventListener("click", function(){
+    var root = document.documentElement;
+    var light = root.getAttribute("data-theme") === "light";
+    if (light) root.removeAttribute("data-theme");
+    else root.setAttribute("data-theme", "light");
+    try { localStorage.setItem("mt-theme", light ? "dark" : "light"); } catch (e) {}
+    syncTheme();
+  });
+}
+syncTheme();
+})();
+</script>
 </body>
 </html>
