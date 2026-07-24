@@ -90,14 +90,14 @@ function sshParts(
 
 /**
  * An scp command over the issued signing socket, mirroring
- * sshInvocationCommand's destination logic (imported alias wins, port
- * omitted with it and at 22) — scp spells the port flag -P.
+ * sshInvocationCommand's destination logic (imported alias wins, resolved
+ * non-default port is pinned) — scp spells the port flag -P.
  */
 export function scpCommand(socket: string, c: ConnectionSummary): string {
   const importedDestination = c.destination?.trim();
   const destination = importedDestination
     || (c.user && c.host ? `${c.user}@${c.host}` : c.target);
-  const port = !importedDestination && c.port && c.port !== 22 ? ` -P ${c.port}` : '';
+  const port = c.port && c.port !== 22 ? ` -P ${c.port}` : '';
   return `SSH_AUTH_SOCK=${shellQuoted(socket)} scp${port} <file> ${destination}:`;
 }
 
@@ -182,7 +182,7 @@ export const ENDPOINT_FORMATS: Record<ConnectionType, EndpointFormat[]> = {
       title: 'Copy a curl command presenting the endpoint secret',
       needsSecret: true,
       build: (_c, base, secret) =>
-        `curl -H "Authorization: Bearer ${secret || SECRET_PLACEHOLDER}" ${base}/<path>`,
+        `curl -H "Authorization: Bearer ${secret || SECRET_PLACEHOLDER}" ${base}`,
     },
     {
       key: 'env',

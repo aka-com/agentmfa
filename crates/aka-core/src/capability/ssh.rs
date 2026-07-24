@@ -456,6 +456,304 @@ pub async fn test_reachability(
     ))
 }
 
+/// UI-initiated saved-connection test: authenticate a stock OpenSSH client
+/// through a short-lived, connection-scoped agent. The private key stays in
+/// the broker; the client receives only signatures. A configured host-key
+/// fingerprint is enforced by the agent's OpenSSH session binding.
+pub async fn test_login(store: &Store, connection: &Connection) -> Result<String, TestError> {
+    let ConnectionConfig::Ssh {
+        destination,
+        host,
+        port,
+        user,
+        host_key_fingerprint,
+    } = &connection.config
+    else {
+        return Err("not an ssh connection".into());
+    };
+    let signer = SshSigner::load_optional(store, connection)
+        .await?
+        .ok_or_else(|| {
+            TestError::new(
+                TestErrorKind::AuthRejected,
+                "No SSH private key is attached to this tool",
+            )
+        })?;
+    let expected_host_key = if host_key_fingerprint.is_empty() {
+        None
+    } else {
+        Some(
+            host_key_fingerprint
+                .parse::<Fingerprint>()
+                .map_err(|e| format!("SSH host key fingerprint is invalid: {e}"))?,
+        )
+    };
+
+    let socket_dir = tempfile::Builder::new()
+        .prefix("aka-ssh-test-")
+        .tempdir()
+        .map_err(|e| format!("Could not create the SSH test socket: {e}"))?;
+    let socket_path = socket_dir.path().join("agent.sock");
+    let listener = UnixListener::bind(&socket_path)
+        .map_err(|e| format!("Could not create the SSH test agent: {e}"))?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("Could not secure the SSH test agent: {e}"))?;
+    }
+
+    let state = Arc::new(TestAgentState {
+        user: user.clone(),
+        expected_host_key,
+        observed_host_key: std::sync::Mutex::new(None),
+        signer: Arc::new(signer),
+        refusal: std::sync::Mutex::new(None),
+    });
+    let listener_state = state.clone();
+    let listener_task = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let state = listener_state.clone();
+            tokio::spawn(async move {
+                let mut binding = None;
+                loop {
+                    let Ok((kind, payload)) = read_message(&mut stream).await else {
+                        break;
+                    };
+                    let response = handle_test_request(&state, &mut binding, kind, &payload).await;
+                    if stream.write_all(&response).await.is_err() {
+                        break;
+                    }
+                }
+                let _ = stream.shutdown().await;
+            });
+        }
+    });
+
+    // Use the original alias when one was imported so ProxyJump and other
+    // routing from ~/.ssh/config still apply. User/port and all credential
+    // sources are pinned on the command line; an existing control socket
+    // cannot make the test pass without a fresh authentication.
+    let target = destination.as_deref().unwrap_or(host);
+    let mut command = tokio::process::Command::new("ssh");
+    command
+        .kill_on_drop(true)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .arg("-v")
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("PasswordAuthentication=no")
+        .arg("-o")
+        .arg("KbdInteractiveAuthentication=no")
+        .arg("-o")
+        .arg("PreferredAuthentications=publickey")
+        .arg("-o")
+        .arg("IdentityFile=none")
+        .arg("-o")
+        .arg("CertificateFile=none")
+        .arg("-o")
+        .arg(format!("IdentityAgent={}", socket_path.display()))
+        .arg("-o")
+        .arg("StrictHostKeyChecking=no")
+        .arg("-o")
+        .arg("UserKnownHostsFile=/dev/null")
+        .arg("-o")
+        .arg("GlobalKnownHostsFile=/dev/null")
+        .arg("-o")
+        .arg("ControlMaster=no")
+        .arg("-o")
+        .arg("ControlPath=none")
+        .arg("-o")
+        .arg("ClearAllForwardings=yes")
+        .arg("-o")
+        .arg("PermitLocalCommand=no")
+        .arg("-o")
+        .arg("RequestTTY=no")
+        .arg("-l")
+        .arg(user)
+        .arg("-p")
+        .arg(port.to_string())
+        .arg("--")
+        .arg(target)
+        .arg("true")
+        .env_remove("SSH_AUTH_SOCK");
+    let output = command.output().await.map_err(|e| {
+        TestError::new(
+            TestErrorKind::Other,
+            format!("Could not start the system SSH client: {e}"),
+        )
+    });
+    listener_task.abort();
+    let output = output?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let authenticated = stderr.contains("Authenticated to ");
+    if output.status.success() || authenticated {
+        let host_key_detail = if expected_host_key.is_some() {
+            " Verified the pinned host key.".to_string()
+        } else {
+            let (observed, observed_sha512) =
+                state.observed_host_key.lock().unwrap().ok_or_else(|| {
+                    TestError::new(
+                        TestErrorKind::Other,
+                        "SSH signed in without reporting the server host key",
+                    )
+                })?;
+            let pinned = match store.pin_ssh_host_key(&connection.id, &observed) {
+                Ok(PinOutcome::Pinned(pinned)) => pinned,
+                Ok(PinOutcome::AlreadyPinned(pinned))
+                    if pinned == observed || pinned == observed_sha512 =>
+                {
+                    pinned
+                }
+                Ok(PinOutcome::AlreadyPinned(pinned)) => {
+                    return Err(TestError::new(
+                        TestErrorKind::AuthRejected,
+                        format!(
+                            "SSH login saw host key {observed}, but the tool was pinned to {pinned}"
+                        ),
+                    ))
+                }
+                Err(error) => {
+                    return Err(TestError::new(
+                        TestErrorKind::Other,
+                        format!("Signed in, but could not pin the SSH host key: {error}"),
+                    ))
+                }
+            };
+            format!(" Pinned host key {pinned}.")
+        };
+        return Ok(format!(
+            "Signed in to {host}:{port} as {user} with the saved key.{host_key_detail}"
+        ));
+    }
+
+    if let Some(reason) = state.refusal.lock().unwrap().take() {
+        return Err(TestError::new(
+            TestErrorKind::AuthRejected,
+            format!("SSH login was refused: {reason}"),
+        ));
+    }
+    let stderr_lower = stderr.to_ascii_lowercase();
+    if stderr_lower.contains("permission denied")
+        || stderr_lower.contains("no supported authentication methods")
+    {
+        return Err(TestError::new(
+            TestErrorKind::AuthRejected,
+            format!("The server rejected the saved key for {user}@{host}"),
+        ));
+    }
+    if stderr_lower.contains("could not resolve hostname")
+        || stderr_lower.contains("connection refused")
+        || stderr_lower.contains("connection timed out")
+        || stderr_lower.contains("operation timed out")
+        || stderr_lower.contains("no route to host")
+    {
+        return Err(TestError::new(
+            TestErrorKind::Unreachable,
+            format!("Could not reach {host}:{port}"),
+        ));
+    }
+    Err(TestError::new(
+        TestErrorKind::Other,
+        format!("SSH login to {host}:{port} as {user} failed"),
+    ))
+}
+
+struct TestAgentState {
+    user: String,
+    expected_host_key: Option<Fingerprint>,
+    observed_host_key: std::sync::Mutex<Option<(Fingerprint, Fingerprint)>>,
+    signer: Arc<SshSigner>,
+    refusal: std::sync::Mutex<Option<String>>,
+}
+
+fn refuse_test(state: &TestAgentState, reason: impl Into<String>) -> Vec<u8> {
+    *state.refusal.lock().unwrap() = Some(reason.into());
+    frame(SSH_AGENT_FAILURE, &[])
+}
+
+async fn handle_test_request(
+    state: &Arc<TestAgentState>,
+    binding: &mut Option<SessionBinding>,
+    kind: u8,
+    payload: &[u8],
+) -> Vec<u8> {
+    match kind {
+        SSH_AGENTC_REQUEST_IDENTITIES => frame(
+            SSH_AGENT_IDENTITIES_ANSWER,
+            &state.signer.identities_answer("aka:test"),
+        ),
+        SSH_AGENTC_EXTENSION => {
+            if binding.is_some() {
+                return refuse_test(state, "agent connection is already session-bound");
+            }
+            let observed = match parse_and_verify_session_bind(payload) {
+                Ok(observed) => observed,
+                Err(reason) => return refuse_test(state, reason),
+            };
+            if let Some(expected) = state.expected_host_key {
+                let actual = observed.public.fingerprint(expected.algorithm());
+                if actual != expected {
+                    return refuse_test(
+                        state,
+                        format!(
+                            "host key fingerprint {actual} does not match configured {expected}"
+                        ),
+                    );
+                }
+            }
+            *state.observed_host_key.lock().unwrap() = Some((
+                observed.public.fingerprint(HashAlg::Sha256),
+                observed.public.fingerprint(HashAlg::Sha512),
+            ));
+            *binding = Some(observed.binding);
+            frame(SSH_AGENT_SUCCESS, &[])
+        }
+        SSH_AGENTC_SIGN_REQUEST => {
+            let Some(binding) = binding.as_ref() else {
+                return refuse_test(state, "SSH client did not bind the configured host key");
+            };
+            let mut r = Reader::new(payload);
+            let (Some(key_blob), Some(data), Some(flags)) = (r.string(), r.string(), r.u32())
+            else {
+                return refuse_test(state, "malformed sign request");
+            };
+            if !r.is_empty() || key_blob != state.signer.public_blob {
+                return refuse_test(state, "sign request names a different key");
+            }
+            let Some(auth) = hostbound_userauth(data, &state.signer.public_blob) else {
+                return refuse_test(
+                    state,
+                    "data is not host-bound publickey userauth for the configured key",
+                );
+            };
+            if auth.session_id != binding.session_id || auth.host_key != binding.host_key {
+                return refuse_test(state, "userauth does not match the bound SSH session");
+            }
+            if auth.user != state.user {
+                return refuse_test(
+                    state,
+                    format!(
+                        "userauth names {:?}, connection pins {:?}",
+                        auth.user, state.user
+                    ),
+                );
+            }
+            match sign_on_blocking_thread(state.signer.clone(), data.to_vec(), flags).await {
+                Ok(sig_blob) => {
+                    let mut body = Vec::new();
+                    put_string(&mut body, &sig_blob);
+                    frame(SSH_AGENT_SIGN_RESPONSE, &body)
+                }
+                Err(error) => refuse_test(state, format!("sign failed: {error}")),
+            }
+        }
+        _ => frame(SSH_AGENT_FAILURE, &[]),
+    }
+}
+
 /// Read until the SSH identification line arrives. RFC 4253 §4.2 lets the
 /// server send other lines first, so scan complete lines for the `SSH-`
 /// prefix, capped so a non-SSH endpoint cannot stall the test.
@@ -1235,6 +1533,62 @@ mod tests {
         put_string(&mut truncated, SESSION_BIND_EXTENSION);
         put_string(&mut truncated, &host_blob);
         assert!(parse_and_verify_session_bind(&truncated).is_err());
+    }
+
+    #[tokio::test]
+    async fn login_test_agent_requires_a_bound_matching_host_and_user() {
+        let auth_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let public_blob = auth_key.public_key().to_bytes().unwrap();
+        let signer = Arc::new(SshSigner {
+            key: auth_key,
+            public_blob: public_blob.clone(),
+        });
+        let host_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let host_blob = host_key.public_key().to_bytes().unwrap();
+        let state = Arc::new(TestAgentState {
+            user: "deploy".into(),
+            expected_host_key: Some(host_key.public_key().fingerprint(HashAlg::Sha256)),
+            observed_host_key: std::sync::Mutex::new(None),
+            signer,
+            refusal: std::sync::Mutex::new(None),
+        });
+        let mut binding = None;
+
+        let response = handle_test_request(
+            &state,
+            &mut binding,
+            SSH_AGENTC_EXTENSION,
+            &session_bind(&host_key, b"session-id", 0),
+        )
+        .await;
+        assert_eq!(response[4], SSH_AGENT_SUCCESS);
+
+        let auth = userauth_blob(
+            "deploy",
+            "ssh-connection",
+            "publickey-hostbound-v00@openssh.com",
+            &public_blob,
+            &host_blob,
+        );
+        let mut request = Vec::new();
+        put_string(&mut request, &public_blob);
+        put_string(&mut request, &auth);
+        request.extend_from_slice(&0u32.to_be_bytes());
+        let response =
+            handle_test_request(&state, &mut binding, SSH_AGENTC_SIGN_REQUEST, &request).await;
+        assert_eq!(response[4], SSH_AGENT_SIGN_RESPONSE);
+
+        let wrong_host = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let mut wrong_binding = None;
+        let response = handle_test_request(
+            &state,
+            &mut wrong_binding,
+            SSH_AGENTC_EXTENSION,
+            &session_bind(&wrong_host, b"session-id", 0),
+        )
+        .await;
+        assert_eq!(response[4], SSH_AGENT_FAILURE);
+        assert!(wrong_binding.is_none());
     }
 
     #[test]

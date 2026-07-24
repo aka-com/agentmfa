@@ -144,7 +144,7 @@ test('direct SSH commands combine the socket with the configured destination', (
       port: 2222,
       target: 'deploy@prod.example.com:2222',
     }),
-    'SSH_AUTH_SOCK="/tmp/agent.sock" ssh production',
+    'SSH_AUTH_SOCK="/tmp/agent.sock" ssh -p 2222 production',
   );
   assert.equal(
     sshDirectCommand('/tmp/agent.sock', {

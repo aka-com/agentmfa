@@ -1446,6 +1446,11 @@
 .ep-formats{ display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
 .ep-formats .ep-formats-lbl{ color: var(--muted); font-size: 12px; margin-right: 2px; }
 .ep-formats .ep-fmt{
-  display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
+  position: relative; display: inline-flex; align-items: center; justify-content: center;
+  white-space: nowrap;
+}
+.ep-formats .ep-fmt.is-copied .ep-fmt-label{ visibility: hidden; }
+.ep-formats .ep-fmt-check{
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
 }
 .ep-formats .ep-fmt svg{ width: 14px; height: 14px; }

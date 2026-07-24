@@ -106,7 +106,7 @@ test('scp mirrors the ssh destination logic with the -P flag', () => {
   const imported = conn('ssh', 'Alias', { destination: 'myserver', port: 2200 });
   assert.equal(
     scpCommand(SOCK, imported),
-    `SSH_AUTH_SOCK="${SOCK}" scp <file> myserver:`,
+    `SSH_AUTH_SOCK="${SOCK}" scp -P 2200 <file> myserver:`,
   );
 });
 
@@ -152,11 +152,11 @@ test('api formats embed the fetched secret, or a placeholder without one', () =>
   assert.equal(curl?.needsSecret, true);
   assert.equal(
     curl?.build(c, base, 'end_secret'),
-    `curl -H "Authorization: Bearer end_secret" ${base}/<path>`,
+    `curl -H "Authorization: Bearer end_secret" ${base}`,
   );
   assert.equal(
     curl?.build(c, base, null),
-    `curl -H "Authorization: Bearer <endpoint-secret>" ${base}/<path>`,
+    `curl -H "Authorization: Bearer <endpoint-secret>" ${base}`,
   );
   assert.equal(
     endpointFormatByKey('api', 'env')?.build(c, base, 'end_secret'),

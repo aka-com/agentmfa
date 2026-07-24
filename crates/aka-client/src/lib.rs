@@ -1017,7 +1017,7 @@ mod tests {
             axum::Json(serde_json::json!({
                 "endpoint_id": "aaaaaaaa-0000-0000-0000-000000000000",
                 "type": "api", "dsn": "http://127.0.0.1:52001",
-                "secret": "end_abc", "example": "curl -H \"Authorization: Bearer end_abc\" http://127.0.0.1:52001/<path>",
+                "secret": "end_abc", "example": "curl -H \"Authorization: Bearer end_abc\" http://127.0.0.1:52001",
             }))
             .into_response()
         }
@@ -1070,6 +1070,10 @@ mod tests {
             .expect("an issued endpoint parses to Some");
         assert_eq!(issued.dsn, "http://127.0.0.1:52001");
         assert_eq!(issued.secret, "end_abc");
+        assert_eq!(
+            issued.example,
+            "curl -H \"Authorization: Bearer end_abc\" http://127.0.0.1:52001"
+        );
         let none = backend
             .get_endpoint("00000000-0000-0000-0000-222222222222".parse().unwrap())
             .await

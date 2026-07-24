@@ -796,10 +796,11 @@ function endpointFormatRowHTML(c: ConnectionSummary, address: string): string {
     .filter((format) => format.needsSecret || format.build(c, address) != null)
     .map((format) => {
       const copied = state.copied === `epf:${c.id}:${format.key}`;
-      return `<button class="btn sm ep-fmt" title="${escAttr(format.title)}"
-        aria-label="${escAttr(`${format.title} for ${c.name}`)}"
+      return `<button class="btn sm ep-fmt ${copied ? 'is-copied' : ''}" title="${escAttr(format.title)}"
+        aria-label="${escAttr(`${copied ? 'Copied. ' : ''}${format.title} for ${c.name}`)}"
         data-act="copy-endpoint-format" data-conn="${c.id}" data-format="${format.key}">${
-        copied ? `${ICONS.check} Copied` : esc(format.label)}</button>`;
+        `<span class="ep-fmt-label">${esc(format.label)}</span>${
+          copied ? `<span class="ep-fmt-check" aria-hidden="true">${ICONS.check}</span>` : ''}`}</button>`;
     })
     .join('');
   if (!buttons) return '';
@@ -1099,9 +1100,9 @@ function connectionMenuItemsHTML(c: ConnectionSummary): string {
         <button class="menu-item" role="menuitem" data-act="reissue-endpoint-ask" data-conn="${c.id}">${ICONS.refresh} Rotate connection address</button>
         <button class="menu-item danger" role="menuitem" data-act="revoke-endpoint-ask" data-conn="${c.id}">${ICONS.x} Revoke connection address</button>`
     : '';
-  return `<button class="menu-item" role="menuitem" data-act="edit-conn" data-id="${c.id}">${ICONS.pencil} Edit tool</button>
-    <button class="menu-item" role="menuitem" data-act="${c.mcp_path ? 'mcp-status' : 'test-conn'}"
+  return `<button class="menu-item" role="menuitem" data-act="${c.mcp_path ? 'mcp-status' : 'test-conn'}"
       data-id="${c.id}" ${running ? 'disabled' : ''}>${ICONS.flaskConical} ${running ? 'Testing…' : 'Test connection'}</button>
+    <button class="menu-item" role="menuitem" data-act="edit-conn" data-id="${c.id}">${ICONS.pencil} Edit tool</button>
     <button class="menu-item danger" role="menuitem" data-act="del-conn-ask" data-id="${c.id}">${ICONS.trash} Delete tool</button>
     ${endpointItems}`;
 }

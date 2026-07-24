@@ -448,7 +448,7 @@ export function sshInvocationCommand(
   const importedDestination = connection.destination?.trim();
   const destination = importedDestination
     || (connection.user && connection.host ? `${connection.user}@${connection.host}` : connection.target);
-  const port = !importedDestination && connection.port && connection.port !== 22
+  const port = connection.port && connection.port !== 22
     ? ` -p ${connection.port}`
     : '';
   return `ssh${port} ${destination}`;

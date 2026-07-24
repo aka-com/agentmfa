@@ -23,6 +23,7 @@ import type {
   Settings,
   Unlisten,
 } from './types';
+import { sshInvocationCommand } from './getting-started';
 
 const tauri = typeof window !== 'undefined' ? window.__TAURI__ : undefined;
 
@@ -707,7 +708,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         return { ok, detail: `The server at ${c.host} answered but rejected the credential (HTTP 401)`, kind: 'auth_rejected' };
       }
       const detail = c.type === 'pg' ? `Signed in to ${c.dbname} as ${c.user}`
-        : c.type === 'ssh' ? `Key loaded; ${c.host}:${c.port || 22} answered with SSH-2.0-OpenSSH_9.8. Login and host key are not verified by this test.`
+        : c.type === 'ssh' ? `Signed in to ${c.host}:${c.port || 22} as ${c.user} with the saved key.`
         : c.type === 'ws' ? 'WebSocket handshake succeeded'
         : `GET https://${c.host}/ answered HTTP 200 OK`;
       return { ok, detail };
@@ -869,12 +870,12 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         example = `DATABASE_URL="${dsn}"`;
       } else if (kind === 'ssh') {
         dsn = `${dir}/agent.sock`;
-        const dest = connection.destination ?? `${connection.user ?? 'deploy'}@${connection.host ?? 'host'}`;
-        example = `SSH_AUTH_SOCK="${dsn}" ssh ${dest}`;
+        const invocation = sshInvocationCommand({ ...connection, target: connTarget(connection) });
+        example = `SSH_AUTH_SOCK="${dsn}" ${invocation}`;
         shownSecret = ''; // ssh-agent has no presented secret
       } else {
         dsn = 'http://127.0.0.1:52000';
-        example = `curl -H "Authorization: Bearer ${secret}" ${dsn}/<path>`;
+        example = `curl -H "Authorization: Bearer ${secret}" ${dsn}`;
       }
       // Postgres retains its credential in the DSN; SSH retains the stable
       // socket path so the setup command remains copyable after issue.
@@ -892,8 +893,9 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       const dsn = endpoint.dsn ?? '';
       const secret = connection.type === 'ssh' ? '' : MOCK_ENDPOINT_SECRET;
       const example = connection.type === 'pg' ? `DATABASE_URL="${dsn}"`
-        : connection.type === 'ssh' ? `SSH_AUTH_SOCK="${dsn}" ssh ${connection.destination ?? `${connection.user ?? 'deploy'}@${connection.host ?? 'host'}`}`
-        : `curl -H "Authorization: Bearer ${secret}" ${dsn}/<path>`;
+        : connection.type === 'ssh'
+          ? `SSH_AUTH_SOCK="${dsn}" ${sshInvocationCommand({ ...connection, target: connTarget(connection) })}`
+        : `curl -H "Authorization: Bearer ${secret}" ${dsn}`;
       return { endpoint_id: endpoint.endpoint_id, type: connection.type, dsn, secret, example };
     }
     case 'revoke_endpoint': {

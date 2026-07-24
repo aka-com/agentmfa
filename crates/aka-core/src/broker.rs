@@ -901,7 +901,7 @@ impl Broker {
                     crate::capability::ws::test_upstream(&self.store, &connection).await
                 }
                 ConnectionKind::Ssh => {
-                    crate::capability::ssh::test_reachability(&self.store, &connection).await
+                    crate::capability::ssh::test_login(&self.store, &connection).await
                 }
             }
         };
@@ -1550,11 +1550,7 @@ impl Broker {
                     .join(crate::capability::ssh::ENDPOINT_SOCK)
                     .display()
                     .to_string();
-                let target = match destination {
-                    Some(dest) => format!("ssh {dest}"),
-                    None if *port == 22 => format!("ssh {user}@{host}"),
-                    None => format!("ssh -p {port} {user}@{host}"),
-                };
+                let target = ssh_endpoint_invocation(destination.as_deref(), user, host, *port);
                 // SSH has no presented secret: the ssh-agent protocol offers no
                 // password, so the socket path is the whole capability. The
                 // minted secret is not surfaced.
@@ -1580,7 +1576,7 @@ impl Broker {
                     // The secret rides an Authorization header, not the URL, so
                     // it stays out of argv and shell history; the proxy strips
                     // it and injects the real credential upstream.
-                    example: format!("curl -H \"Authorization: Bearer {secret}\" {base}/<path>"),
+                    example: format!("curl -H \"Authorization: Bearer {secret}\" {base}"),
                 }
             }
             ConnectionConfig::Ws { .. } => {
@@ -1955,6 +1951,36 @@ impl Broker {
 
     pub fn ui_set_menu_bar_hides_dock(&self, on: bool) -> Result<()> {
         self.store.set_menu_bar_hides_dock(on)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ssh_endpoint_invocation;
+
+    #[test]
+    fn ssh_endpoint_invocation_preserves_imported_non_default_ports() {
+        assert_eq!(
+            ssh_endpoint_invocation(Some("sandbox@127.0.0.1"), "sandbox", "127.0.0.1", 12222),
+            "ssh -p 12222 sandbox@127.0.0.1"
+        );
+        assert_eq!(
+            ssh_endpoint_invocation(Some("production"), "deploy", "prod.example.com", 2200),
+            "ssh -p 2200 production"
+        );
+        assert_eq!(
+            ssh_endpoint_invocation(Some("production"), "deploy", "prod.example.com", 22),
+            "ssh production"
+        );
+    }
+}
+
+fn ssh_endpoint_invocation(destination: Option<&str>, user: &str, host: &str, port: u16) -> String {
+    match destination {
+        Some(dest) if port == 22 => format!("ssh {dest}"),
+        Some(dest) => format!("ssh -p {port} {dest}"),
+        None if port == 22 => format!("ssh {user}@{host}"),
+        None => format!("ssh -p {port} {user}@{host}"),
     }
 }
 
