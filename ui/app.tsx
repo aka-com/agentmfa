@@ -987,11 +987,10 @@ function connectionIssues(c: ConnectionSummary): Array<{ text: string; fix?: str
     const kind = fresh && !fresh.ok ? fresh.kind : undefined;
     const fixable = !c.mcp_path && kind !== undefined && kind !== 'other';
     issues.push({
-      // The broker's TLS diagnosis is protocol-speak ("refused to start TLS",
-      // the sslmode by name), so its body says the same thing in the user's
-      // words. Every other kind keeps the broker's detail.
+      // Override broker's TLS protocol-speak ("refused to start TLS",
+      // the sslmode by name).
       text: kind === 'tls_declined'
-        ? 'This server doesn’t offer encrypted connections, but this connection requires them.'
+        ? 'Connection failed: Encrypted connection required.'
         : failure,
       fix: fixable ? editFix(c) : '',
     });
