@@ -1074,6 +1074,14 @@
   position: relative; top: 1px; margin-left: auto;
   text-transform: none; letter-spacing: 0; font-weight: 400;
 }
+/* The connect section's headline speaks to the user in sentence case and
+   the text ink — an invitation ("Connect to this database"), not another
+   tracked-caps machinery label — with the endpoint glyph beside it. */
+.cd-connect-lbl {
+  display: flex; align-items: center; gap: 7px; margin-bottom: 7px;
+  font-size: 13px; font-weight: 600;
+}
+.cd-connect-lbl svg { flex: 0 0 auto; color: var(--muted); }
 .cd-help { margin-top: 7px; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .cd-off-note { margin-top: 12px; }
 .conn-detail-pane .ep-strip { margin-top: 0; }
@@ -1114,19 +1122,35 @@
 /* The ⋯ menu drops upward, clear of the sheet edge. */
 .sheet-actions .sheet-conn-menu { margin-right: auto; }
 .sheet-conn-menu .tile-menu { top: auto; bottom: calc(100% + 5px); right: auto; left: 0; }
-/* The row's issue list: plain warning text with its fix pinned right. */
+/* The row's issue list: each issue is an attention card — amber accent bar,
+   a plain-words headline when the failure kind names one, the diagnosis,
+   and the fix actions — so a problem and its remedy read as one unit. */
 .cc-issues {
-  display: flex; flex-direction: column; gap: 6px;
+  display: flex; flex-direction: column; gap: 8px;
   margin-top: 4px; max-width: 520px;
 }
 .cc-issue {
-  display: flex; flex-direction: column; align-items: flex-start; gap: 8px;
-  font-size: 12px; color: var(--amber-ink);
+  display: flex; align-items: flex-start; gap: 9px;
+  padding: 11px 12px 12px;
+  background: var(--amber-wash);
+  border-left: 3px solid var(--amber-strong);
+  border-radius: 9px;
+  font-size: 12px; color: var(--amber-ink); line-height: 1.5;
 }
-.cc-issue > span { min-width: 0; }
+.cc-issue > svg { flex: 0 0 auto; margin-top: 2px; color: var(--amber-strong); }
+.cc-issue-body {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
+  min-width: 0;
+}
+.cc-issue-title { color: var(--ink); font-size: 12.5px; font-weight: 600; }
 /* Fixes sit under the message, not beside it: a wrapping row of compact
-   outline buttons (a targeted fix, then the retry). */
-.cc-issue-fixes { display: flex; flex-wrap: wrap; gap: 6px; }
+   buttons (the targeted fix, then the retry). */
+.cc-issue-fixes { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; }
+/* When the verdict was reached, under the attention card it explains. */
+.cd-checked { margin-top: 9px; color: var(--muted); font-size: 11.5px; }
+/* The attention card carries its own weight — a section hairline right
+   under it would double the separation, so the next section drops it. */
+.cc-issues + .cd-sec, .cd-checked + .cd-sec { border-top: 0; padding-top: 0; }
 .cat-conns .sec-table { margin: 0; }
 /* Credential rows share the darker card surface of their "Saved
    credentials" parent row. */

@@ -244,6 +244,8 @@ interface McpStatusState {
   running: boolean;
   report?: McpStatusReport;
   error?: string;
+  /** When the check finished, for the panel's "Last checked" line. */
+  at?: string;
 }
 
 interface ConnectionTestState {
@@ -251,6 +253,8 @@ interface ConnectionTestState {
   ok?: boolean;
   detail?: string;
   kind?: TestErrorKind;
+  /** When the test finished, for the panel's "Last checked" line. */
+  at?: string;
 }
 
 /* ------------------------------ local state ------------------------------ */
@@ -603,7 +607,7 @@ function endpointStripHTML(c: ConnectionSummary): string {
   // The strip is plug + address + copy, nothing more: reissue/revoke live
   // in the row's one options menu.
   return `<div class="ep-strip">
-    <span class="ep-ico" title="Direct endpoint">${ICONS.plugSm}</span>
+    <span class="ep-ico" title="Connection address">${ICONS.plugSm}</span>
     ${address}
   </div>`;
 }
@@ -763,14 +767,15 @@ function connectionKind(c: ConnectionSummary): ConnKind {
   return c.mcp_path ? 'mcp' : 'api';
 }
 
-// The fix affordances an issue row can carry: compact outline buttons,
-// stacked under the issue text. A fix names the action ("Edit…"), never the
-// remedy in prose — the message stays diagnosis-only so it reads the same in
-// the banner, the tooltip, and the panel.
-const fixBtn = (act: string, id: string, label: string): string =>
-  `<button class="btn outline sm cat-meta-fix" data-act="${act}" data-id="${id}">${label}</button>`;
+// The fix affordances an issue row can carry: compact buttons stacked under
+// the issue text. A fix names the action ("Fix settings", "Test again"),
+// never the remedy in prose — the message stays diagnosis-only so it reads
+// the same in the banner, the tooltip, and the panel. The targeted fix is
+// the filled button; the retry stays an outline beside it.
+const fixBtn = (act: string, id: string, label: string, primary = false): string =>
+  `<button class="btn ${primary ? 'primary' : 'outline'} sm cat-meta-fix" data-act="${act}" data-id="${id}">${label}</button>`;
 /** Open the connection editor — the fix for a TLS/cert mismatch. */
-const editFix = (c: ConnectionSummary): string => fixBtn('edit-conn', c.id, 'Edit');
+const editFix = (c: ConnectionSummary): string => fixBtn('edit-conn', c.id, 'Fix settings', true);
 /** Re-run the connection's own check: the MCP status probe for MCP rows,
  * the reachability test otherwise. */
 const retryFix = (c: ConnectionSummary): string =>
@@ -780,6 +785,18 @@ const retryFix = (c: ConnectionSummary): string =>
 // carries enough to identify the connection without opening it: who is signed
 // in (accounts differ between connections; the server rarely does), where it
 // points, which tools agents get, and which credential the broker injects.
+/** Plain-words headlines for the failure kinds the broker can name (branch
+ * on kind, never on the detail text). The broker's detail stays the body
+ * under the headline; kinds without one render their detail alone. */
+const FAILURE_HEADLINES: Partial<Record<TestErrorKind, string>> = {
+  unreachable: 'Couldn’t reach the server',
+  tls_declined: 'Couldn’t connect securely',
+  cert_unverified: 'Couldn’t verify the server',
+  needs_password: 'A password is needed',
+  auth_rejected: 'Couldn’t sign in',
+  timeout: 'The server didn’t answer in time',
+};
+
 /** Everything wrong with a connection, folded into the one list the
  * health indicator owns. TLS weaker than the default, an unpinned host
  * key, a passively recorded rejected credential (brokered calls and
@@ -788,8 +805,8 @@ const retryFix = (c: ConnectionSummary): string =>
  * line in the expansion, with its fix actions stacked below it. One verdict per
  * row: a failed check moves the indicator, it never sits beside a green
  * one. */
-function connectionIssues(c: ConnectionSummary): Array<{ text: string; fix?: string }> {
-  const issues: Array<{ text: string; fix?: string }> = [];
+function connectionIssues(c: ConnectionSummary): Array<{ title?: string; text: string; fix?: string }> {
+  const issues: Array<{ title?: string; text: string; fix?: string }> = [];
   if (c.type === 'pg' && c.sslmode && c.sslmode !== 'verify-full' && !isLoopbackHost(c.host)) {
     issues.push({
       text: c.sslmode === 'disable'
@@ -834,12 +851,19 @@ function connectionIssues(c: ConnectionSummary): Array<{ text: string; fix?: str
   if (failure && !issues.some((issue) => issue.text === failure)) {
     // A fresh test carries a failure kind; when it's one editing the
     // connection fixes (a declined or unverifiable TLS handshake), lead with
-    // Edit… before the retry. The passively-recorded verdict has no kind, so
-    // it only offers the retry.
-    const fixable = !c.mcp_path && fresh && !fresh.ok
-      && (fresh.kind === 'tls_declined' || fresh.kind === 'cert_unverified');
+    // Fix settings before the retry. The passively-recorded verdict has no
+    // kind, so it only offers the retry.
+    const kind = fresh && !fresh.ok ? fresh.kind : undefined;
+    const fixable = !c.mcp_path
+      && (kind === 'tls_declined' || kind === 'cert_unverified');
     issues.push({
-      text: failure,
+      title: kind ? FAILURE_HEADLINES[kind] : undefined,
+      // The broker's TLS diagnosis is protocol-speak ("refused to start TLS",
+      // the sslmode by name); under its headline the body says the same
+      // thing in the user's words. Every other kind keeps the broker's detail.
+      text: kind === 'tls_declined'
+        ? 'This server doesn’t offer encrypted connections, but this connection requires them.'
+        : failure,
       fix: (fixable ? editFix(c) : '') + retryFix(c),
     });
   }
@@ -897,8 +921,18 @@ function connDetailHTML(c: ConnectionSummary): string {
   const issues = connectionIssues(c);
   const issuesBlock = enabled && issues.length
     ? `<div class="cc-issues">${issues.map((issue) =>
-        `<div class="cc-issue"><span>${esc(issue.text)}</span>${
-          issue.fix ? `<div class="cc-issue-fixes">${issue.fix}</div>` : ''}</div>`).join('')}</div>`
+        `<div class="cc-issue">${ICONS.triangleAlert}<div class="cc-issue-body">${
+          issue.title ? `<div class="cc-issue-title">${esc(issue.title)}</div>` : ''
+        }<span>${esc(issue.text)}</span>${
+          issue.fix ? `<div class="cc-issue-fixes">${issue.fix}</div>` : ''}</div></div>`).join('')}</div>`
+    : '';
+  // When the verdict the card shows was reached: a fresh test or status
+  // check this session, else the broker's recorded check time.
+  const checkedAt = (c.mcp_path
+    ? (mcpStatus && !mcpStatus.running ? mcpStatus.at : undefined)
+    : (test && !test.running ? test.at : undefined)) ?? c.last_checked_at;
+  const checkedLine = issuesBlock && checkedAt
+    ? `<div class="cd-checked">Last checked <span data-tippy-content="${escAttr(absTime(checkedAt))}">${esc(relTime(checkedAt))}</span></div>`
     : '';
   // What pointing a client at the endpoint means, said once, per kind.
   // Keyed on the user-facing kind, not the internal transport: a tool that
@@ -912,8 +946,18 @@ function connDetailHTML(c: ConnectionSummary): string {
       default: return 'Point any HTTP client at this address.';
     }
   })();
+  // The connect section is addressed to the user, not the machinery: a
+  // sentence-case invitation naming what they're connecting to, where the
+  // panel's other sections keep the tracked-caps label.
+  const connectTitle = ((): string => {
+    switch (connectionKind(c)) {
+      case 'db': return 'Connect to this database';
+      case 'ssh': return 'Connect to this server';
+      default: return 'Connect to this service';
+    }
+  })();
   const endpointSection = enabled && ENDPOINTABLE[c.type] && !c.mcp_path
-    ? `<div class="cd-sec"><div class="cd-sec-lbl">Direct endpoint</div>
+    ? `<div class="cd-sec"><div class="cd-connect-lbl">${ICONS.chevronsLeftRightEllipsis}<span>${connectTitle}</span></div>
         ${endpointStripHTML(c)}
         <div class="cd-help">${endpointHelp}</div></div>`
     : '';
@@ -953,7 +997,7 @@ function connDetailHTML(c: ConnectionSummary): string {
         </div>
       </div>
     </div>
-    ${issuesBlock}${offNote}${c.mcp_path
+    ${issuesBlock}${checkedLine}${offNote}${c.mcp_path
       ? mcpSection + endpointSection
       : endpointSection + mcpSection}${connTestResultHTML(c)}${mcpStatusHTML(c)}`;
 }
@@ -2742,9 +2786,9 @@ async function runConnectionTest(id: string): Promise<void> {
   render();
   try {
     const report = await invoke('test_connection', { id });
-    state.connTests[id] = { running: false, ok: report.ok, detail: report.detail, kind: report.kind };
+    state.connTests[id] = { running: false, ok: report.ok, detail: report.detail, kind: report.kind, at: new Date().toISOString() };
   } catch (error) {
-    state.connTests[id] = { running: false, ok: false, detail: errorMessage(error) };
+    state.connTests[id] = { running: false, ok: false, detail: errorMessage(error), at: new Date().toISOString() };
   }
   render();
 }
@@ -3786,9 +3830,9 @@ document.addEventListener('click', async (e) => {
             whoami_tool: template?.whoamiTool ?? null,
           },
         });
-        state.mcpStatus[id] = { running: false, report };
+        state.mcpStatus[id] = { running: false, report, at: new Date().toISOString() };
       } catch (error) {
-        state.mcpStatus[id] = { running: false, error: errorMessage(error) };
+        state.mcpStatus[id] = { running: false, error: errorMessage(error), at: new Date().toISOString() };
       }
       // The check can update the stored account acknowledgment.
       await load('connections', 'list_connections');
