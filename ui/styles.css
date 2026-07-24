@@ -1075,28 +1075,54 @@
   margin-top: 16px; padding-top: 16px;
   border-top: 1px solid var(--line-soft);
 }
-.cd-sec-lbl {
-  display: flex; align-items: center; gap: 7px; margin-bottom: 7px;
-  color: var(--muted); font-size: 11px; font-weight: 700;
-  letter-spacing: .07em; text-transform: uppercase;
-}
-/* The tool-filter chip rides the subhead's right edge — a control, not more
-   of the uppercase label, so it drops the label's casing and tracking. */
-.cd-sec-lbl-aside {
-  position: relative; top: 1px; margin-left: auto;
-  text-transform: none; letter-spacing: 0; font-weight: 400;
-}
-/* The connect section's headline speaks to the user in sentence case and
-   the text ink — an invitation ("Connect to this database"), not another
-   tracked-caps machinery label — with the endpoint glyph beside it. */
+/* Every section headline in the panel speaks to the user in sentence case
+   and the text ink — "Connect to this database", "Available tools",
+   "Details" — one register, no tracked-caps machinery labels. */
 .cd-connect-lbl {
   display: flex; align-items: center; gap: 7px; margin-bottom: 3px;
   font-size: 13px; font-weight: 600;
 }
 .cd-connect-lbl svg { flex: 0 0 auto; color: var(--muted); }
+/* The tool-filter chip rides the headline's right edge — a control, not
+   more of the headline. */
+.cd-lbl-aside { margin-left: auto; font-weight: 400; }
 .cd-help { margin-top: 7px; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .cd-connect-subhead { margin: 0 0 10px; line-height: 1.25; }
 .cd-off-note { margin-top: 12px; }
+/* The panel's status row: the verdict pill (the row dot's vocabulary,
+   written down), when it was last checked, and the Test action — health
+   has one visible home in every state. */
+.cd-status { display: flex; align-items: center; gap: 9px; margin-top: 12px; }
+.cd-pill {
+  display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto;
+  padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 650;
+}
+.cd-pill svg { width: 11px; height: 11px; flex: 0 0 auto; }
+.cd-pill.ok { color: var(--ok-ink); background: var(--ok-wash); }
+.cd-pill.warn { color: var(--amber-ink); background: var(--amber-wash); }
+.cd-pill.off, .cd-pill.run { color: var(--muted); background: var(--wash-2); }
+.cd-status-meta { flex: 1; min-width: 0; color: var(--muted-2); font-size: 11.5px; }
+.cd-status .cd-test { flex: 0 0 auto; }
+/* The Details card: the target's parts spelled out as label–value rows.
+   Values are mono and wrap; labels stay put. */
+.cd-facts {
+  margin-top: 8px; padding: 2px 12px;
+  background: var(--wash); border: 1px solid var(--line-soft); border-radius: 9px;
+}
+.cd-fact { display: flex; justify-content: space-between; gap: 14px; padding: 6px 0; font-size: 12px; }
+.cd-fact + .cd-fact { border-top: 1px solid var(--line-soft); }
+.cd-fact-k { flex: 0 0 auto; color: var(--muted); }
+.cd-fact-v {
+  min-width: 0; text-align: right; overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px; color: var(--ink-2);
+}
+.cd-live { margin-top: 8px; color: var(--muted); font-size: 11.5px; }
+.cd-live-link {
+  border: 0; padding: 0; background: none; color: var(--accent-text);
+  font: inherit; cursor: pointer;
+}
+.cd-live-link:hover { text-decoration: underline; }
 .conn-detail-pane .ep-strip { margin-top: 0; }
 .conn-detail-pane .cc-issues { margin-top: 12px; max-width: none; }
 .conn-detail-backdrop { display: none; }
@@ -1385,10 +1411,11 @@
   padding: 6px 6px 6px 11px;
   background: var(--field-bg); border: 1px solid var(--line); border-radius: 9px;
 }
-/* The address never truncates — it wraps. A cut-off address reads as
-   untouchable; a wrapped one reads as yours to take. */
+/* The address never truncates — it wraps, at its own punctuation: the
+   markup carries <wbr> after separators (breakableAddress), so break-word
+   only fires mid-identifier when a single segment outgrows the line. */
 .ep-strip .ep-field .ep-addr{
-  flex: 1; min-width: 0; overflow-wrap: anywhere;
+  flex: 1; min-width: 0; overflow-wrap: break-word;
   color: var(--ink-2); font-size: 12px; line-height: 1.35;
 }
 /* Reserve the wider feedback label up front so Copy → Copied never

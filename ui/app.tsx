@@ -257,6 +257,8 @@ interface McpStatusState {
   running: boolean;
   report?: McpStatusReport;
   error?: string;
+  /** When the check finished, for the status row's "Checked …" stamp. */
+  at?: string;
 }
 
 interface ConnectionTestState {
@@ -264,6 +266,8 @@ interface ConnectionTestState {
   ok?: boolean;
   detail?: string;
   kind?: TestErrorKind;
+  /** When the test finished, for the status row's "Checked …" stamp. */
+  at?: string;
 }
 
 /* ------------------------------ local state ------------------------------ */
@@ -686,6 +690,14 @@ function briefEndpointAddress(dsn: string): string {
   }
 }
 
+/** The brief address as markup with soft break opportunities after its own
+ * punctuation — so a long address wraps at "/", "@", or ":" instead of
+ * mid-identifier. Runs of separators stay whole ("://" never splits), and
+ * each segment is escaped individually so the injected tags survive. */
+function breakableAddress(address: string): string {
+  return address.split(/(?<=[/?&@:=])(?![/?&@:=])/).map(esc).join('<wbr>');
+}
+
 // The direct-endpoint lifecycle strip on an enabled Postgres/SSH/HTTP row:
 // a hairline footer that owns issue → live badge → reissue/revoke. The
 // address shown is never the capability itself — SSH's socket path (which is
@@ -696,7 +708,7 @@ function endpointStripHTML(c: ConnectionSummary): string {
   if (!endpoint) {
     return `<div class="ep-strip">
       <button class="btn primary sm" data-act="issue-endpoint" data-conn="${c.id}"
-        title="A pasteable address for an unmodified tool">Issue direct endpoint…</button>
+        title="A pasteable address for an unmodified tool">Get connection address…</button>
     </div>`;
   }
   // The address rides in a field with its Copy button showing — copying is
@@ -706,9 +718,9 @@ function endpointStripHTML(c: ConnectionSummary): string {
   const copied = state.copied === `ep:${c.id}`;
   const address = endpoint.dsn
     ? `<div class="ep-field">
-        <code class="ep-addr">${esc(briefEndpointAddress(endpoint.dsn))}</code>
-        <button class="btn sm ep-copy" title="Copy the full endpoint address"
-          aria-label="Copy endpoint address for ${escAttr(c.name)}" data-act="copy-endpoint-dsn" data-conn="${c.id}">${
+        <code class="ep-addr">${breakableAddress(briefEndpointAddress(endpoint.dsn))}</code>
+        <button class="btn sm ep-copy" title="Copy the full connection address"
+          aria-label="Copy connection address for ${escAttr(c.name)}" data-act="copy-endpoint-dsn" data-conn="${c.id}">${
           copied ? `${ICONS.check} Copied` : `${ICONS.copy} Copy`}</button>
       </div>`
     : '<span class="ep-addr ep-addr-hidden">Agent socket — shown at issue</span>';
@@ -852,7 +864,8 @@ const liveCount = (c: ConnectionSummary): number =>
 const connTestResultHTML = (c: ConnectionSummary): string => {
   const test = state.connTests[c.id];
   if (!test) return '';
-  if (test.running) return '<div class="cc-test running">Testing…</div>';
+  // While running, the status row's pill already says Testing…
+  if (test.running) return '';
   // Failures are health, not feedback: they render through the row's
   // issue list (connectionIssues), never as a line under a green verdict.
   if (test.detail === undefined || !test.ok) return '';
@@ -873,18 +886,14 @@ function connectionKind(c: ConnectionSummary): ConnKind {
 }
 
 // The fix affordances an issue row can carry: compact buttons stacked under
-// the issue text. A fix names the action ("Fix settings", "Test again"),
+// the issue text. A fix names the action ("Fix settings", "Reconnect…"),
 // never the remedy in prose — the message stays diagnosis-only so it reads
-// the same in the banner, the tooltip, and the panel. The targeted fix is
-// the filled button; the retry stays an outline beside it.
+// the same in the banner, the tooltip, and the panel. A card carries only
+// its targeted fix; the retry is the panel status row's Test button.
 const fixBtn = (act: string, id: string, label: string, primary = false): string =>
   `<button class="btn ${primary ? 'primary' : 'outline'} sm cat-meta-fix" data-act="${act}" data-id="${id}">${label}</button>`;
 /** Open the connection editor — the fix for a TLS/cert mismatch. */
 const editFix = (c: ConnectionSummary): string => fixBtn('edit-conn', c.id, 'Fix settings', true);
-/** Re-run the connection's own check: the MCP status probe for MCP rows,
- * the reachability test otherwise. */
-const retryFix = (c: ConnectionSummary): string =>
-  c.mcp_path ? fixBtn('mcp-status', c.id, 'Check again') : fixBtn('test-conn', c.id, 'Test again');
 
 // One row inside an expanded catalog entry. It spans the full card width and
 // carries enough to identify the connection without opening it: who is signed
@@ -930,7 +939,7 @@ function connectionIssues(c: ConnectionSummary): Array<{ title?: string; text: s
         ? fixBtn('reconnect-mcp', c.id, 'Reconnect…')
         : c.oauth_spec
         ? fixBtn('oauth-reconnect', c.id, 'Reconnect…')
-        : retryFix(c),
+        : '',
     });
   }
   // A test or check finished this session supersedes the broker's
@@ -956,9 +965,9 @@ function connectionIssues(c: ConnectionSummary): Array<{ title?: string; text: s
   if (failure && !issues.some((issue) => issue.text === failure)) {
     // A fresh test carries a failure kind; when it's one the connection
     // editor could plausibly fix — a wrong host, port, credential, or TLS
-    // expectation — lead with Fix settings before the retry. 'other' stays
-    // retry-only: with no diagnosis, the fix shouldn't point at settings.
-    // The passively-recorded verdict has no kind, so it only offers the retry.
+    // expectation — the card leads with Fix settings. 'other' and the
+    // passively-recorded (kindless) verdict carry no fix of their own; the
+    // status row's Test button is the retry in every state.
     const kind = fresh && !fresh.ok ? fresh.kind : undefined;
     const fixable = !c.mcp_path && kind !== undefined && kind !== 'other';
     issues.push({
@@ -969,7 +978,7 @@ function connectionIssues(c: ConnectionSummary): Array<{ title?: string; text: s
       text: kind === 'tls_declined'
         ? 'This server doesn’t offer encrypted connections, but this connection requires them.'
         : failure,
-      fix: (fixable ? editFix(c) : '') + retryFix(c),
+      fix: fixable ? editFix(c) : '',
     });
   }
   return issues;
@@ -1014,16 +1023,36 @@ function connDetailHTML(c: ConnectionSummary): string {
   const running = c.mcp_path
     ? Boolean(mcpStatus && mcpStatus.running)
     : Boolean(test && test.running);
-  // One name and one icon for the one action, whatever the protocol —
-  // MCP rows still run the server & account check underneath.
-  const connectionCheckItem = `<button class="menu-item" role="menuitem"
-      data-act="${c.mcp_path ? 'mcp-status' : 'test-conn'}" data-id="${c.id}"
-      ${running ? 'disabled' : ''}>${ICONS.flaskConical} ${running ? 'Testing…' : 'Test connection'}</button>`;
+  // The ⋯ menu owns only the address lifecycle; testing lives in the
+  // status row, visible in every state.
   const endpointItems = enabled && c.agent_access.endpoint
-    ? `<button class="menu-item" role="menuitem" data-act="reissue-endpoint-ask" data-conn="${c.id}">${ICONS.refresh} Reissue endpoint…</button>
-        <button class="menu-item danger" role="menuitem" data-act="revoke-endpoint-ask" data-conn="${c.id}">${ICONS.x} Revoke endpoint…</button>`
+    ? `<button class="menu-item" role="menuitem" data-act="reissue-endpoint-ask" data-conn="${c.id}">${ICONS.refresh} Get a new address…</button>
+        <button class="menu-item danger" role="menuitem" data-act="revoke-endpoint-ask" data-conn="${c.id}">${ICONS.x} Revoke address…</button>`
     : '';
   const issues = connectionIssues(c);
+  // The status row under the header: the verdict pill (the row dot's
+  // vocabulary, written down), when that verdict was reached, and the Test
+  // action — health has one home, in every state. The stamp is the fresh
+  // test/check completion when one ran this session, else the broker's
+  // recorded check time; relative on screen, absolute in the tooltip.
+  const checkedAt = (c.mcp_path
+    ? (mcpStatus && !mcpStatus.running ? mcpStatus.at : undefined)
+    : (test && !test.running ? test.at : undefined)) ?? c.last_checked_at;
+  const statusPill = !enabled
+    ? '<span class="cd-pill off">Off</span>'
+    : running
+    ? '<span class="cd-pill run">Testing…</span>'
+    : issues.length
+    ? `<span class="cd-pill warn">${ICONS.triangleAlert}<span>Attention</span></span>`
+    : `<span class="cd-pill ok">${ICONS.check}<span>Ready</span></span>`;
+  const statusRow = `<div class="cd-status">
+      ${statusPill}
+      <span class="cd-status-meta">${checkedAt
+        ? `Checked <span data-tippy-content="${escAttr(absTime(checkedAt))}">${esc(relTime(checkedAt))}</span>`
+        : 'Never checked'}</span>
+      <button class="btn sm cd-test" data-act="${c.mcp_path ? 'mcp-status' : 'test-conn'}"
+        data-id="${c.id}" ${running ? 'disabled' : ''}>Test</button>
+    </div>`;
   const issuesBlock = enabled && issues.length
     ? `<div class="cc-issues">${issues.map((issue) =>
         `<div class="cc-issue">${ICONS.triangleAlert}<div class="cc-issue-body">${
@@ -1035,12 +1064,21 @@ function connDetailHTML(c: ConnectionSummary): string {
   // Keyed on the user-facing kind, not the internal transport: a tool that
   // rides one protocol under the hood (MCP is served over HTTP) advertises
   // what it actually is, never the transport it happens to travel on.
+  // The caption matches the section's tense: before an address exists it
+  // says what you can get; after, what to do with it.
+  const hasEndpoint = Boolean(c.agent_access.endpoint);
   const endpointHelp = ((): string => {
     switch (connectionKind(c)) {
-      case 'db': return 'Point any Postgres client at this address.';
+      case 'db': return hasEndpoint
+        ? 'Point any Postgres client at this address.'
+        : 'Get a stable local address any Postgres client can use.';
       case 'ssh': return 'Agents get an SSH agent socket.';
-      case 'mcp': return 'Point any MCP client at this address.';
-      default: return 'Point any HTTP client at this address.';
+      case 'mcp': return hasEndpoint
+        ? 'Point any MCP client at this address.'
+        : 'Get a stable local address any MCP client can use.';
+      default: return hasEndpoint
+        ? 'Point any HTTP client at this address.'
+        : 'Get a stable local address any HTTP client can use.';
     }
   })();
   // The connect section is addressed to the user, not the machinery: a
@@ -1060,9 +1098,11 @@ function connDetailHTML(c: ConnectionSummary): string {
       </div>`
     : '';
   // MCP tools combine their filter and direct endpoint into one section:
-  // both describe how agents reach and constrain this tool.
+  // both describe how agents reach and constrain this tool. The label
+  // speaks in the connect headline's sentence-case register — the panel
+  // has one voice, no tracked-caps machinery labels.
   const mcpSection = enabled && c.mcp_path
-    ? `<div class="cd-sec"><div class="cd-sec-lbl">Tools<span class="cd-sec-lbl-aside">${connectionToolsChipHTML(c)}</span></div>
+    ? `<div class="cd-sec"><div class="cd-connect-lbl">${ICONS.blocks}<span>Available tools</span><span class="cd-lbl-aside">${connectionToolsChipHTML(c)}</span></div>
         ${ENDPOINTABLE[c.type] ? `<div class="cd-help cd-connect-subhead">${endpointHelp}</div>
           ${endpointStripHTML(c)}` : ''}</div>`
     : '';
@@ -1072,11 +1112,51 @@ function connDetailHTML(c: ConnectionSummary): string {
   // status to quote.
   const offNote = enabled ? '' : `<div class="cd-help cd-off-note">${
     connectionKind(c) === 'db'
-      ? 'This tool is disabled. New connections to its endpoint are refused.'
+      ? 'This tool is disabled. New connections to its address are refused.'
       : connectionKind(c) === 'ssh'
       ? 'This tool is disabled. Its SSH agent socket stops signing for agents.'
       : 'This tool is disabled. Requests from agents will be rejected with a 403 error.'
   }</div>`;
+  // The tool's facts, unpacked. The row and the header keep the terse
+  // machine target; this card is where its parts are readable — only facts
+  // the summary actually carries render, so every kind contributes what it
+  // has. The live-session line surfaces what the list's "N live" badge
+  // counts and links it to the log that explains it.
+  const factRows = ((): Array<[string, string]> => {
+    const rows: Array<[string, string]> = [];
+    if (c.mcp_path) {
+      if (c.host) rows.push(['Server', `${c.host}${c.mcp_path === '/' ? '' : c.mcp_path}`]);
+      if (c.account) rows.push(['Signed in as', c.account]);
+    } else if (c.type === 'pg') {
+      if (c.host) rows.push(['Host', c.host]);
+      if (c.port != null) rows.push(['Port', String(c.port)]);
+      if (c.dbname) rows.push(['Database', c.dbname]);
+      if (c.user) rows.push(['Signs in as', c.user]);
+      if (c.sslmode) rows.push(['TLS', c.sslmode]);
+    } else if (c.type === 'ssh') {
+      if (c.destination) rows.push(['Destination', c.destination]);
+      if (c.host) rows.push(['Host', c.host]);
+      if (c.port != null) rows.push(['Port', String(c.port)]);
+      if (c.user) rows.push(['User', c.user]);
+      rows.push(['Host key', c.host_key_fingerprint ? 'Pinned' : 'Not pinned yet']);
+    } else if (c.url) {
+      rows.push(['URL', c.url]);
+    } else if (c.host) {
+      rows.push(['Server', `${c.scheme ? `${c.scheme}://` : ''}${c.host}`]);
+    }
+    if (c.secret_names.length) rows.push(['Credential', c.secret_names.join(', ')]);
+    else if (c.oauth) rows.push(['Credential', 'OAuth, renewed by Multitool']);
+    return rows;
+  })();
+  const live = liveCount(c);
+  const detailsSection = factRows.length
+    ? `<div class="cd-sec"><div class="cd-connect-lbl"><span>Details</span></div>
+        <div class="cd-facts">${factRows.map(([key, value]) =>
+          `<div class="cd-fact"><span class="cd-fact-k">${esc(key)}</span><code class="cd-fact-v">${esc(value)}</code></div>`).join('')}</div>
+        ${live ? `<div class="cd-live">${live} live session${live === 1 ? '' : 's'} ·
+          <button class="cd-live-link" data-act="tab" data-tab="activity">View in Activity Log</button></div>` : ''}
+      </div>`
+    : '';
   return `<div class="cd-head">
       <span class="cat-ico kind-${connectionKind(c)}" aria-hidden="true">${entry ? ICONS[entry.icon] || '' : ''}</span>
       <div class="cd-title"><b title="${escAttr(c.name)}">${esc(connectionRowName(c))}</b>
@@ -1084,20 +1164,19 @@ function connDetailHTML(c: ConnectionSummary): string {
       <div class="cd-actions">
         <button class="icon-btn" title="Edit ${escAttr(connectionRowName(c))}"
           aria-label="Edit ${escAttr(c.name)}" data-act="edit-conn" data-id="${c.id}">${ICONS.pencil}</button>
-        <div class="tile-menu-wrap">
+        ${endpointItems ? `<div class="tile-menu-wrap">
           <button class="icon-btn tile-menu-btn ${menuOpen ? 'on' : ''}" title="Tool options"
             aria-label="Options for ${escAttr(c.name)}" aria-haspopup="menu"
             aria-expanded="${menuOpen}" data-act="toggle-conn-menu" data-id="${c.id}">${ICONS.ellipsis}</button>
           ${menuOpen ? `<div class="tile-menu" role="menu" aria-label="Options for ${escAttr(c.name)}">
-            ${connectionCheckItem}
             ${endpointItems}
           </div>` : ''}
-        </div>
+        </div>` : ''}
       </div>
     </div>
-    ${issuesBlock}${offNote}${c.mcp_path
+    ${statusRow}${issuesBlock}${connTestResultHTML(c)}${offNote}${c.mcp_path
       ? mcpSection + endpointSection
-      : endpointSection + mcpSection}${connTestResultHTML(c)}${mcpStatusHTML(c)}`;
+      : endpointSection + mcpSection}${detailsSection}${mcpStatusHTML(c)}`;
 }
 
 // The status check's result, rendered under the MCP connection it belongs
@@ -1107,7 +1186,8 @@ function mcpStatusHTML(c: ConnectionSummary): string {
   if (!c.mcp_path) return '';
   const status = state.mcpStatus[c.id];
   if (!status) return '';
-  if (status.running) return '<div class="cc-test running">Checking the server…</div>';
+  // While running, the status row's pill already says Testing…
+  if (status.running) return '';
   // Errors and failed reports surface through the row's issue list
   // (connectionIssues); only a healthy report renders here.
   if (status.error) return '';
@@ -1559,13 +1639,13 @@ async function receiveActivity(entry: ActivityEntry | null | undefined): Promise
 
 /** The right-aligned status on a step-2 pane. One vocabulary for every mode:
  * "Connected · <when>" once the broker has seen a call, "Waiting for first
- * call" before that, and "No endpoint yet" for a direct pane pre-issue. */
+ * call" before that, and "No address yet" for a direct pane pre-issue. */
 function startModeStatusHTML(mode: ConnectModeId, conn: ConnectionSummary | null): string {
   const idle = (text: string) =>
     `<span class="start-status idle"><span class="start-status-dot"></span>${text}</span>`;
   let seenAt: string | undefined;
   if (mode === 'direct') {
-    if (!conn?.agent_access.endpoint) return idle('No endpoint yet');
+    if (!conn?.agent_access.endpoint) return idle('No address yet');
     seenAt = state.activity.find(
       (entry) => entry.agent === 'endpoint' && entry.connection === conn.name)?.at;
   } else {
@@ -1596,25 +1676,25 @@ function startConnectPaneHTML(mode: ConnectModeId, option: StartOption, progress
   switch (mode) {
     case 'direct': {
       if (!conn) {
-        return `<p>Direct endpoints are issued per tool — add the ${esc(option.label)} tool above first.</p>
-          <div class="start-actions"><button class="btn primary sm" disabled>Issue direct endpoint</button></div>`;
+        return `<p>Connection addresses are per tool — add the ${esc(option.label)} tool above first.</p>
+          <div class="start-actions"><button class="btn primary sm" disabled>Get connection address</button></div>`;
       }
       const endpoint = conn.agent_access.endpoint ?? null;
       if (!endpoint) {
         const lead = conn.type === 'pg'
-          ? `Issue a local DSN for “${esc(conn.name)}” that any unmodified Postgres client can use —
+          ? `Get a local DSN for “${esc(conn.name)}” that any unmodified Postgres client can use —
               psql, drivers, ORMs.`
-          : `Issue a signing-agent socket for “${esc(conn.name)}”. Plain ssh, git, and rsync work
+          : `Get a signing-agent socket for “${esc(conn.name)}”. Plain ssh, git, and rsync work
               unmodified; the private key never leaves this machine.`;
         return `<p>${lead}</p>
           <div class="start-actions"><button class="btn primary sm" data-act="issue-endpoint"
-            data-conn="${conn.id}">Issue direct endpoint</button></div>`;
+            data-conn="${conn.id}">Get connection address</button></div>`;
       }
-      // The endpoint itself is the deliverable: the same address field as
-      // the tool's row. Reissue/revoke stay in that row's options menu.
-      const lead = `A direct endpoint is issued for “${esc(conn.name)}”. ${conn.type === 'pg'
-        ? 'Copy copies the full address, secret included — reissue from the tool’s row to rotate the secret.'
-        : 'Its socket path was shown at issue — reissue from the tool’s row to get a new one.'}`;
+      // The address itself is the deliverable: the same field as the
+      // tool's row. Getting a new one / revoking stay in that row's ⋯ menu.
+      const lead = `“${esc(conn.name)}” has a connection address. ${conn.type === 'pg'
+        ? 'Copy copies the full address, secret included — get a new secret from the tool’s row anytime.'
+        : 'Its socket path was shown when created — get a new one from the tool’s row.'}`;
       return `<p>${lead}</p>${endpointStripHTML(conn)}`;
     }
   }
@@ -2132,10 +2212,10 @@ function endpointIssuedSheet(): string {
     </div>`;
   const secretField = info.secret
     ? field('Secret', info.secret, 'secret')
-    : '<div class="ep-note">SSH endpoints present no secret — the socket path is the whole capability.</div>';
+    : '<div class="ep-note">SSH addresses present no secret — the socket path is the whole capability.</div>';
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
     <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="ep-title">
-      <h3 id="ep-title">Direct endpoint issued</h3>
+      <h3 id="ep-title">Your connection address</h3>
       <p class="sheet-sub">Paste this into your tool's config. You can copy it again anytime from the tool's details.</p>
       ${field(addressLabel, info.dsn, 'dsn')}
       ${secretField}
@@ -2157,14 +2237,14 @@ function endpointConfirmHTML(): string {
   const reissue = confirm.kind === 'reissue-endpoint';
   return `<div class="sheet-backdrop" data-act="confirm-cancel"></div>
     <div class="sheet wide confirm-sheet" role="dialog" aria-modal="true" aria-labelledby="ep-confirm-title">
-      <h3 id="ep-confirm-title">${reissue ? 'Reissue this endpoint?' : 'Revoke this endpoint?'}</h3>
+      <h3 id="ep-confirm-title">${reissue ? 'Get a new address?' : 'Revoke this address?'}</h3>
       <p>${reissue
-        ? 'You’ll get a new secret to paste into your tools. The current secret stops working the moment you reissue.'
-        : `Tools using ${esc(name)}’s direct address lose access immediately.`}</p>
+        ? 'You’ll get a new secret to paste into your tools. The current secret stops working the moment the new one is issued.'
+        : `Tools using ${esc(name)}’s address lose access immediately.`}</p>
       <div class="sheet-actions">
         <button class="btn" data-act="confirm-cancel">Cancel</button>
         ${reissue
-          ? `<button class="btn primary" data-act="reissue-endpoint-confirm" data-conn="${escAttr(String(confirm.id ?? ''))}">Reissue</button>`
+          ? `<button class="btn primary" data-act="reissue-endpoint-confirm" data-conn="${escAttr(String(confirm.id ?? ''))}">Get new address</button>`
           : `<button class="btn danger" data-act="revoke-endpoint-confirm" data-conn="${escAttr(String(confirm.id ?? ''))}">Revoke</button>`}
       </div></div>`;
 }
@@ -3465,16 +3545,16 @@ function isProtectedFormSheet(sheet: SheetState | null = state.sheet): boolean {
 }
 
 // Test a connection broker-side and pin the result to its catalog row.
-// Shared by the row's ⋯ menu and the automatic post-save health check.
+// Shared by the panel's status row and the automatic post-save health check.
 async function runConnectionTest(id: string): Promise<void> {
   if (!id || state.connTests[id]?.running) return;
   state.connTests[id] = { running: true };
   render();
   try {
     const report = await invoke('test_connection', { id });
-    state.connTests[id] = { running: false, ok: report.ok, detail: report.detail, kind: report.kind };
+    state.connTests[id] = { running: false, ok: report.ok, detail: report.detail, kind: report.kind, at: new Date().toISOString() };
   } catch (error) {
-    state.connTests[id] = { running: false, ok: false, detail: errorMessage(error) };
+    state.connTests[id] = { running: false, ok: false, detail: errorMessage(error), at: new Date().toISOString() };
   }
   render();
 }
@@ -4525,9 +4605,9 @@ document.addEventListener('click', async (e) => {
             whoami_tool: template?.whoamiTool ?? null,
           },
         });
-        state.mcpStatus[id] = { running: false, report };
+        state.mcpStatus[id] = { running: false, report, at: new Date().toISOString() };
       } catch (error) {
-        state.mcpStatus[id] = { running: false, error: errorMessage(error) };
+        state.mcpStatus[id] = { running: false, error: errorMessage(error), at: new Date().toISOString() };
       }
       // The check can update the stored account acknowledgment.
       await load('connections', 'list_connections');
