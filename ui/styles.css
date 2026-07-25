@@ -566,6 +566,9 @@
   /* ---- activity --------------------------------------------------------- */
 /* Console.app-style rows with restrained semantic Lucide icons. */
 .act-list{ display: flex; flex-direction: column; }
+  /* Stand-ins for the rows the window leaves unmounted. flex: none so the
+     column cannot shrink them and shorten the scroll range. */
+  .act-pad{ flex: 0 0 auto; }
   .act-row{ display: flex; gap: 9px; align-items: flex-start; padding: 8px 2px; font-size: 13px; }
   .act-gutter{ flex: 0 0 56px; font-size: 12px; line-height: 18px; color: var(--muted-2); }
   .act-time{ display: inline-block; }

@@ -643,8 +643,9 @@ struct ActivityQuery {
     limit: Option<usize>,
 }
 
-/// Default activity tail when the caller does not choose a limit.
-const ACTIVITY_VIEW_LIMIT: usize = 200;
+/// Default activity tail when the caller does not choose a limit. Matches the
+/// desktop view's ceiling so a default read and the app's own read agree.
+const ACTIVITY_VIEW_LIMIT: usize = 500;
 
 async fn activity(
     State(state): State<AppState>,

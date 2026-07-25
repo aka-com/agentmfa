@@ -56,6 +56,26 @@ test('activity row block content has a block container', async () => {
   assert.doesNotMatch(app, /<span className="act-txt">/);
 });
 
+test('the activity log mounts a window of rows, not the whole log', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+  const styles = await readFile(new URL('../styles.css', import.meta.url), 'utf8');
+  const list = app.match(/function ActivityList\(\{ entries \}[\s\S]*?\n\}\n/)?.[0];
+
+  assert.ok(list, 'windowed activity list is present');
+  // Mapping the whole array would put every loaded row back in the DOM, which
+  // is what the window exists to avoid — every live event and the per-minute
+  // timestamp refresh reconciles this list.
+  assert.match(list, /entries\.slice\(view\.start, view\.end\)\.map\([\s\S]{0,40}<ActivityRow/);
+  assert.doesNotMatch(list, /\{entries\.map\(/);
+  // Heights are cached by row identity, not position: a live prepend shifts
+  // every index, and index-keyed heights would then describe the wrong rows.
+  assert.match(list, /activityRowHeights\.get\(keys\[i\]\)/);
+  // Spacers stand in for the unmounted rows, and must not be shrinkable — a
+  // squashed spacer would shorten the scroll range and strand the oldest rows.
+  assert.match(list, /className="act-pad"/);
+  assert.match(styles, /\.act-pad\{ flex: 0 0 auto; \}/);
+});
+
 test('portaled listbox tabbing closes the menu relative to its trigger', async () => {
   const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
   const portalTab = app.match(

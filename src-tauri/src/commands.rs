@@ -51,7 +51,10 @@ pub struct AppState {
 
 type CmdResult<T> = Result<T, String>;
 type FormResult<T> = Result<T, FormError>;
-const ACTIVITY_VIEW_LIMIT: usize = 200;
+/// Ceiling on how much of the log one view read may pull across the IPC. The
+/// activity list windows its rows, so the cost of a larger tail is the read
+/// and the retained entries, not the DOM.
+const ACTIVITY_VIEW_LIMIT: usize = 500;
 
 /// The local OS account name is presentation-only: connection forms use it
 /// as a hint, never as a submitted or persisted value.

@@ -57,7 +57,9 @@ export async function listen<K extends EventName>(
 
 type MockListener = (event: EventPayload<unknown>) => void;
 const listeners: Record<string, MockListener[]> = {};
-const MOCK_ACTIVITY_LIMIT = 200;
+// Mirrors the broker's ACTIVITY_VIEW_LIMIT so the mock caps a view read where
+// the real command surface does.
+const MOCK_ACTIVITY_LIMIT = 500;
 // The demo endpoint credential: fixed so a get_endpoint read-back
 // reproduces exactly what issuance showed.
 const MOCK_ENDPOINT_SECRET = 'end_' + 'demo0'.repeat(12) + '0000';

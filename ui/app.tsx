@@ -11,7 +11,9 @@ import { QueryClientProvider } from '@tanstack/react-query';
 import DOMPurify from 'dompurify';
 import parse, { attributesToProps, domToReact, Element as ParsedElement } from 'html-react-parser';
 import type { DOMNode, HTMLReactParserOptions } from 'html-react-parser';
-import { createElement, StrictMode, useMemo } from 'react';
+import {
+  createElement, StrictMode, useEffect, useLayoutEffect, useMemo, useRef, useState,
+} from 'react';
 import type { ReactNode } from 'react';
 import { createPortal, flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
@@ -47,6 +49,7 @@ import {
 import { sameBrokerScope } from '/src/broker-scope';
 import { activityIdentity } from '/src/activity';
 import { APP_VERSION } from '/src/version';
+import { virtualListWindow } from '/src/virtual-list';
 import type { HostKeyCandidate } from '/src/connection-input';
 import type {
   ActivityEntry,
@@ -72,7 +75,19 @@ import { queryClient, refetchBrokerQuery, removeBrokerQueries } from '/src/query
 import { UiStore, useUiRevision } from '/src/ui-store';
 
 const EDIT_SECRET_MASK = '••••••••••••';
-const ACTIVITY_RENDER_LIMIT = 200;
+/** How much of the log a view read asks the broker for. Matches the broker's
+ * own ceiling (ACTIVITY_VIEW_LIMIT), which clamps anything larger. The list
+ * windows its rows, so this bounds the read and the filter scope rather than
+ * how many rows are mounted. */
+const ACTIVITY_RENDER_LIMIT = 500;
+/** Rows kept mounted past each edge of the activity window. Enough that a
+ * flick of the wheel, or a row that turns out taller than its estimate, never
+ * exposes a blank strip before the next frame. */
+const ACTIVITY_OVERSCAN = 8;
+/** Viewport assumed for the one render that precedes the first measurement.
+ * Generously tall: over-mounting for a single pre-paint frame is invisible,
+ * under-mounting would show a short list until the scroller is measured. */
+const ACTIVITY_PREPAINT_VIEWPORT = 1200;
 
 // The left-nav tabs, in order — also the cycle order for Ctrl-Tab.
 const TABS = ['start', 'connections', 'secrets', 'activity'] as const;
@@ -1596,6 +1611,169 @@ function activityKey(entry: ActivityEntry, seen: Map<string, number>): string {
   return n ? `${base}#${n}` : base;
 }
 
+/**
+ * A row's height before anything has been measured.
+ *
+ * Shaped by the entry rather than a single constant: rows are one 18px line of
+ * text inside 16px of padding, and grow by a detail line and a chip row when
+ * the entry carries them (see `.act-row` in styles.css). A guess that tracks
+ * content lands within a few pixels, so the scrollbar barely moves as real
+ * measurements arrive — one flat estimate would visibly resize it while
+ * scrolling through a run of detailed rows.
+ */
+function activityRowEstimate(entry: ActivityEntry): number {
+  let height = 34;
+  if (entry.detail) height += 19;
+  if (entry.agent || typeof entry.duration_ms === 'number'
+    || entry.confirmation === 'management_token') height += 21;
+  return height;
+}
+
+/** Measured row heights, keyed by row identity so a live prepend keeps every
+ * height already known. Invalidated when the scroller's width changes, since
+ * width is what decides how the text these heights came from wraps. */
+const activityRowHeights = new Map<string, number>();
+let activityRowHeightsWidth = 0;
+/** Enough for several full logs; the cache outlives filter changes, so bound
+ * it rather than letting stale identities accumulate for the session. */
+const ACTIVITY_HEIGHT_CACHE_MAX = 2_000;
+
+/** What the activity list needs from its scroller to place the window. */
+interface ScrollMetrics {
+  scrollTop: number;
+  viewport: number;
+  /** The list's top edge in the scroller's content coordinates. */
+  listTop: number;
+  /** Cached heights only describe the width they were measured at. */
+  width: number;
+}
+
+const PREPAINT_METRICS: ScrollMetrics = {
+  scrollTop: 0, viewport: ACTIVITY_PREPAINT_VIEWPORT, listTop: 0, width: 0,
+};
+
+/** Whole pixels: sub-pixel scroll and layout noise would otherwise re-render
+ * the window without ever moving it. */
+function readScrollMetrics(scroller: Element, list: Element): ScrollMetrics {
+  const scrollTop = scroller.scrollTop;
+  return {
+    scrollTop: Math.round(scrollTop),
+    viewport: Math.round(scroller.clientHeight),
+    listTop: Math.round(
+      list.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scrollTop,
+    ),
+    width: Math.round(scroller.clientWidth),
+  };
+}
+
+function sameMetrics(a: ScrollMetrics, b: ScrollMetrics): boolean {
+  return a.scrollTop === b.scrollTop && a.viewport === b.viewport
+    && a.listTop === b.listTop && a.width === b.width;
+}
+
+/**
+ * The activity rows, windowed.
+ *
+ * Only the rows near the viewport are mounted; spacer divs stand in for the
+ * rest so the scrollbar still describes the whole log. This matters less for
+ * the initial paint than for the re-renders: every live event and the
+ * once-a-minute relative-timestamp refresh reconcile this list, and windowing
+ * keeps that proportional to the viewport instead of the log.
+ *
+ * Rows are variable height and the list has no scroller of its own — it
+ * scrolls with `.content` — so the window is computed against that ancestor,
+ * and heights come from measuring the mounted rows before paint.
+ *
+ * The trade windowing makes: find-in-page and screen readers see the mounted
+ * window, not the whole log. The filter field above is the way to reach a row
+ * that isn't mounted.
+ */
+function ActivityList({ entries }: { entries: ActivityEntry[] }): ReactNode {
+  const seen = new Map<string, number>();
+  const keys = entries.map((entry) => activityKey(entry, seen));
+
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const [metrics, setMetrics] = useState<ScrollMetrics>(PREPAINT_METRICS);
+  const [, countMeasurements] = useState(0);
+
+  const view = virtualListWindow({
+    heights: entries.map((entry, i) =>
+      activityRowHeights.get(keys[i]) ?? activityRowEstimate(entry)),
+    listTop: metrics.listTop,
+    scrollTop: metrics.scrollTop,
+    viewport: metrics.viewport,
+    overscan: ACTIVITY_OVERSCAN,
+  });
+
+  // Scrolling and resizing move the window without any store revision, so
+  // this listener — not render() — is what drives those updates.
+  useEffect(() => {
+    const list = listRef.current;
+    const scroller = list?.closest('.content');
+    if (!list || !scroller) return;
+    const sync = (): void => {
+      const next = readScrollMetrics(scroller, list);
+      setMetrics((prev) => (sameMetrics(prev, next) ? prev : next));
+    };
+    sync();
+    scroller.addEventListener('scroll', sync, { passive: true });
+    const resize = new ResizeObserver(sync);
+    resize.observe(scroller);
+    return () => {
+      scroller.removeEventListener('scroll', sync);
+      resize.disconnect();
+    };
+  }, []);
+
+  // Runs after every render, before paint: the mounted rows just changed, and
+  // the filter chips above may have re-wrapped and moved the list. Both state
+  // updates bail when nothing moved, so this settles in at most one extra pass.
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    if (!list) return;
+    const scroller = list.closest('.content');
+    if (scroller) {
+      const next = readScrollMetrics(scroller, list);
+      setMetrics((prev) => (sameMetrics(prev, next) ? prev : next));
+      if (next.width && next.width !== activityRowHeightsWidth) {
+        activityRowHeightsWidth = next.width;
+        activityRowHeights.clear();
+      }
+    }
+    if (activityRowHeights.size > ACTIVITY_HEIGHT_CACHE_MAX) activityRowHeights.clear();
+    // Document order, so the nth mounted row is the nth key from the window.
+    const mounted = list.querySelectorAll<HTMLElement>(':scope > .act-row');
+    let changed = false;
+    mounted.forEach((el, i) => {
+      const key = keys[view.start + i];
+      if (key === undefined) return;
+      const height = el.getBoundingClientRect().height;
+      const known = activityRowHeights.get(key);
+      // Half a pixel of slack: fractional line boxes must not measure, differ,
+      // re-render and measure again forever.
+      if (height > 0 && (known === undefined || Math.abs(known - height) > 0.5)) {
+        activityRowHeights.set(key, height);
+        changed = true;
+      }
+    });
+    if (changed) countMeasurements((n) => n + 1);
+  });
+
+  return (
+    <div className="act-list" ref={listRef}>
+      {view.padTop > 0
+        ? <div className="act-pad" style={{ height: view.padTop }} aria-hidden="true" />
+        : null}
+      {entries.slice(view.start, view.end).map((entry, i) => (
+        <ActivityRow key={keys[view.start + i]} entry={entry} />
+      ))}
+      {view.padBottom > 0
+        ? <div className="act-pad" style={{ height: view.padBottom }} aria-hidden="true" />
+        : null}
+    </div>
+  );
+}
+
 /** The activity entries the current filters keep. */
 function filteredActivity(): ActivityEntry[] {
   const needle = state.activityQuery.trim().toLowerCase();
@@ -1624,7 +1802,6 @@ function ActivityView(): ReactNode {
   // Agents seen in the loaded window; chips beat a dropdown at this scale.
   const agents = [...new Set(state.activity.map((entry) => entry.agent).filter(Boolean))] as string[];
   const entries = filteredActivity().slice(0, ACTIVITY_RENDER_LIMIT);
-  const seen = new Map<string, number>();
   return (
     <>
       <div className="act-filters">
@@ -1640,9 +1817,7 @@ function ActivityView(): ReactNode {
         ))}
       </div>
       {entries.length
-        ? <div className="act-list">
-            {entries.map((entry) => <ActivityRow key={activityKey(entry, seen)} entry={entry} />)}
-          </div>
+        ? <ActivityList entries={entries} />
         : <div className="muted-note">Nothing matches these filters.</div>}
     </>
   );
