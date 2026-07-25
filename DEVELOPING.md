@@ -156,4 +156,10 @@ Prerequisites: one-time macOS cross-linker setup: `brew install zig`
    ```sh
    npm run build          # signed universal .app + .dmg (auto-detects identity)
    npm run build:release  # will also notarize, staple, and validate
+
+   gh release create v0.1.0 \
+     src-tauri/target/universal-apple-darwin/release/bundle/dmg/AgentMFA_0.1.0_universal.dmg \
+     --target main \
+     --title "AgentMFA 0.1.0" \
+     --generate-notes
    ```
