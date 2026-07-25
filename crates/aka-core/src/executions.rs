@@ -7,8 +7,9 @@
 //! execution — exactly one upstream execution, the same response fanned out
 //! to every waiter and replayed to late retries while its byte-bounded
 //! replay body remains cached. Every completed key keeps a compact tombstone
-//! for the retention window, except confirmation timeout/unavailability
-//! results that happened before execution and are therefore safe to retry.
+//! for the retention window, except pre-execution refusals (confirmation
+//! timeout/unavailability, policy) that never reached an upstream and are
+//! therefore safe to retry.
 //! Equality under the key is checked, not assumed: each key stores a hash of
 //! the full normalized request, and reusing a `request_id` with a different
 //! payload is rejected (409).
@@ -358,8 +359,13 @@ impl Executions {
 }
 
 /// These outcomes happen before the executor can reach an upstream. Keeping
-/// their idempotency tombstone would make "attach the app and retry" replay
-/// the old refusal for the full retention window.
+/// their idempotency tombstone would make "attach the app and retry" (or
+/// "re-enable the tool and retry") replay the old refusal for the full
+/// retention window. `denied_by_policy` qualifies because every executor
+/// that produces it refuses before dispatch — a policy refusal after
+/// upstream work would be an upstream response relayed inside a 200
+/// envelope, never this shape. A user's explicit `approval_denied` is
+/// deliberately retained: replaying it matches the denial cooldown.
 fn is_retryable_preflight_outcome(outcome: &ExecOutcome) -> bool {
     let reason = outcome
         .body
@@ -367,7 +373,9 @@ fn is_retryable_preflight_outcome(outcome: &ExecOutcome) -> bool {
         .and_then(serde_json::Value::as_str);
     matches!(
         (outcome.status, reason),
-        (408, Some("approval_timeout")) | (403, Some("approval_unavailable"))
+        (408, Some("approval_timeout"))
+            | (403, Some("approval_unavailable"))
+            | (403, Some("denied_by_policy"))
     )
 }
 
@@ -604,6 +612,41 @@ mod tests {
         assert!(is_retryable_preflight_outcome(&ExecOutcome::refusal(
             ErrorReason::ApprovalUnavailable
         )));
+    }
+
+    #[tokio::test]
+    async fn a_policy_refusal_before_execution_can_retry_with_the_same_key() {
+        // A call parked on confirmation can be refused by a disable or edit
+        // that raced it (`denied_by_policy`, produced before any upstream
+        // dispatch). Re-enabling the tool and retrying the same `request_id`
+        // must re-evaluate, not replay the stale refusal for ten minutes.
+        let e = executions();
+        let first = run_to_completion(
+            &e,
+            key("req-policy"),
+            Some("payload".into()),
+            Box::pin(async { ExecOutcome::refusal(ErrorReason::DeniedByPolicy) }),
+        )
+        .await;
+        assert_eq!(first.status, 403);
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let second = run_to_completion(
+            &e,
+            key("req-policy"),
+            Some("payload".into()),
+            counting_executor(count.clone(), serde_json::json!({"ok": true})),
+        )
+        .await;
+        assert_eq!(second.status, 200);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+
+        // The user's own refusal is different: it is retained, so a blind
+        // retry replays the denial instead of re-executing behind it.
+        assert!(!is_retryable_preflight_outcome(&ExecOutcome {
+            status: 403,
+            body: serde_json::json!({"reason": ErrorReason::ApprovalDenied}),
+        }));
     }
 
     #[tokio::test]

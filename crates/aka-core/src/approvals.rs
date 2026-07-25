@@ -68,12 +68,38 @@ impl ApprovalUnit {
 
 const APPROVAL_TEXT_CAP: usize = 400;
 
-fn cap_approval_text(mut text: String) -> String {
-    if let Some((cutoff, _)) = text.char_indices().nth(APPROVAL_TEXT_CAP) {
-        text.truncate(cutoff);
-        text.push('…');
+/// Directional-override and isolate characters. In text an agent controls
+/// they can visually reorder the very string the user is deciding on
+/// (`DELETE /prod` dressed up as something harmless), so a prompt never
+/// renders them.
+const BIDI_CONTROLS: [char; 12] = [
+    '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}',
+    '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+];
+
+/// Whether a character may appear in prompt text. Newlines and tabs keep a
+/// body preview readable; other controls (and the bidi set above) are
+/// replaced so they cannot reorder, hide, or corrupt what the user is shown.
+fn approval_text_char(c: char) -> char {
+    if BIDI_CONTROLS.contains(&c) || (c.is_control() && c != '\n' && c != '\t') {
+        '\u{FFFD}'
+    } else {
+        c
     }
-    text
+}
+
+/// Every string a prompt shows funnels through here: bounded, and stripped
+/// of characters that could visually rewrite the question.
+fn cap_approval_text(text: String) -> String {
+    let mut capped: String = text
+        .chars()
+        .take(APPROVAL_TEXT_CAP)
+        .map(approval_text_char)
+        .collect();
+    if text.chars().nth(APPROVAL_TEXT_CAP).is_some() {
+        capped.push('…');
+    }
+    capped
 }
 
 /// Bound an untrusted field before cloning it into a prompt. Callers use
@@ -261,14 +287,25 @@ struct Pending {
     deadline: Instant,
 }
 
+/// An open approval window, closed by whichever bound passes first. The
+/// monotonic bound caps it at the window of *running* time and cannot be
+/// stretched by setting the wall clock back; the wall bound keeps it from
+/// outliving the end time the user was shown when a suspend pauses the
+/// monotonic clock (`Instant` stops during sleep on macOS and Linux).
+#[derive(Debug, Clone, Copy)]
+struct Grant {
+    until: Instant,
+    wall_until: DateTime<Utc>,
+}
+
 #[derive(Default)]
 struct State {
     /// Prompt id → the prompt and everyone riding it.
     pending: HashMap<Uuid, Pending>,
     /// Connection id → its in-flight prompt, the coalescing index.
     inflight: HashMap<Uuid, Uuid>,
-    /// Connection id → when its approval window lapses.
-    grants: HashMap<Uuid, Instant>,
+    /// Connection id → its open approval window.
+    grants: HashMap<Uuid, Grant>,
     /// Connection id → when its post-denial cooldown lifts.
     cooldowns: HashMap<Uuid, Instant>,
 }
@@ -315,7 +352,7 @@ impl Approvals {
         // its waiters through their channels, which emit nothing.
         let lapsed = {
             let mut state = self.inner.state.lock().unwrap();
-            Self::sweep(&mut state, now)
+            Self::sweep(&mut state, now, Utc::now())
         };
         self.announce_lapsed(&lapsed);
 
@@ -476,11 +513,12 @@ impl Approvals {
     /// caller's job, and it takes its own confirmation.
     pub fn respond(&self, id: &Uuid, decision: ApprovalDecision) -> bool {
         let now = Instant::now();
+        let wall_now = Utc::now();
         let (pending, lapsed) = {
             let mut state = self.inner.state.lock().unwrap();
             // A response that loses the deadline race must not manufacture a
             // fresh approval window after the prompt has already expired.
-            let lapsed = Self::sweep(&mut state, now);
+            let lapsed = Self::sweep(&mut state, now, wall_now);
             let Some(pending) = state.pending.remove(id) else {
                 drop(state);
                 self.announce_lapsed(&lapsed);
@@ -492,9 +530,15 @@ impl Approvals {
             }
             match decision {
                 ApprovalDecision::ApproveWindow => {
-                    state
-                        .grants
-                        .insert(connection_id, now + self.inner.config.window);
+                    state.grants.insert(
+                        connection_id,
+                        Grant {
+                            until: now + self.inner.config.window,
+                            wall_until: wall_now
+                                + chrono::Duration::from_std(self.inner.config.window)
+                                    .unwrap_or_else(|_| chrono::Duration::seconds(900)),
+                        },
+                    );
                 }
                 ApprovalDecision::ApproveAll => {
                     // The switch is going off; nothing to remember here.
@@ -524,7 +568,7 @@ impl Approvals {
     pub fn pending(&self) -> Vec<PendingApproval> {
         let (mut pending, lapsed) = {
             let mut state = self.inner.state.lock().unwrap();
-            let lapsed = Self::sweep(&mut state, Instant::now());
+            let lapsed = Self::sweep(&mut state, Instant::now(), Utc::now());
             let pending: Vec<PendingApproval> =
                 state.pending.values().map(|p| p.info.clone()).collect();
             (pending, lapsed)
@@ -538,13 +582,16 @@ impl Approvals {
     /// shows it, so the user knows why nothing is asking).
     pub fn window_remaining(&self, connection_id: &Uuid) -> Option<Duration> {
         let now = Instant::now();
+        let wall_now = Utc::now();
         let (remaining, lapsed) = {
             let mut state = self.inner.state.lock().unwrap();
-            let lapsed = Self::sweep(&mut state, now);
-            let remaining = state
-                .grants
-                .get(connection_id)
-                .map(|until| until.saturating_duration_since(now));
+            let lapsed = Self::sweep(&mut state, now, wall_now);
+            let remaining = state.grants.get(connection_id).map(|grant| {
+                grant
+                    .until
+                    .saturating_duration_since(now)
+                    .min((grant.wall_until - wall_now).to_std().unwrap_or_default())
+            });
             (remaining, lapsed)
         };
         self.announce_lapsed(&lapsed);
@@ -694,24 +741,33 @@ impl Approvals {
     /// answering it must not open a window for traffic that no longer exists.
     /// Returns the prompts that left the queue, so the caller can tell the
     /// shell they are gone once the lock is released.
+    ///
+    /// Windows and prompts are checked against both clocks: `Instant` pauses
+    /// during a system suspend, so on its own a 15-minute window approved
+    /// before the lid closed would still be admitting traffic the next
+    /// morning, long past the end time the user was shown.
     #[must_use]
-    fn sweep(state: &mut State, now: Instant) -> Vec<Uuid> {
-        state.grants.retain(|_, until| *until > now);
+    fn sweep(state: &mut State, now: Instant, wall_now: DateTime<Utc>) -> Vec<Uuid> {
+        state
+            .grants
+            .retain(|_, grant| grant.until > now && grant.wall_until > wall_now);
         state.cooldowns.retain(|_, until| *until > now);
         for pending in state.pending.values_mut() {
             pending.waiters.retain(|waiter| !waiter.is_closed());
             pending.info.waiting = pending.waiters.len();
         }
+        let expired =
+            |pending: &Pending| pending.deadline <= now || pending.info.expires_at <= wall_now;
         let retired: Vec<Uuid> = state
             .pending
             .iter()
-            .filter(|(_, pending)| pending.deadline <= now || pending.waiters.is_empty())
+            .filter(|(_, pending)| expired(pending) || pending.waiters.is_empty())
             .map(|(id, _)| *id)
             .collect();
         for id in &retired {
             if let Some(pending) = state.pending.remove(id) {
                 state.inflight.remove(&pending.info.connection_id);
-                if pending.deadline <= now {
+                if expired(&pending) {
                     for waiter in pending.waiters {
                         let _ = waiter.send(Verdict::TimedOut);
                     }
@@ -1015,6 +1071,91 @@ mod tests {
             request.detail.unwrap().chars().count(),
             APPROVAL_TEXT_CAP + 1
         );
+    }
+
+    #[test]
+    fn untrusted_prompt_text_cannot_reorder_or_hide_what_the_user_reads() {
+        // A right-to-left override in a path or tool argument would render
+        // the decision string backwards; a bare control character can
+        // corrupt whatever surface shows it. Both are replaced, while the
+        // newlines and tabs of an ordinary body preview survive.
+        let conn = connection();
+        let request =
+            ApprovalRequest::new(&conn, "agent", "GET /safe\u{202E}dorp/ ETELED".to_string())
+                .detail("line one\n\tindented\u{0007}\u{200F}".to_string());
+        assert_eq!(request.summary, "GET /safe\u{FFFD}dorp/ ETELED");
+        assert_eq!(
+            request.detail.as_deref(),
+            Some("line one\n\tindented\u{FFFD}\u{FFFD}")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_window_is_bounded_by_the_wall_clock_as_well_as_uptime() {
+        // `Instant` pauses during a system suspend, so a window measured
+        // only in running time could still be admitting traffic the morning
+        // after the lid closed. The wall bound closes it on schedule.
+        let (approvals, events, _dir) = auto(ApprovalDecision::ApproveWindow);
+        let conn = connection();
+        assert_eq!(approvals.gate(request(&conn)).await, Verdict::Allowed);
+        assert!(approvals.window_remaining(&conn.id).is_some());
+
+        // Wall time passed while the monotonic clock stood still.
+        approvals
+            .inner
+            .state
+            .lock()
+            .unwrap()
+            .grants
+            .get_mut(&conn.id)
+            .unwrap()
+            .wall_until = Utc::now() - chrono::Duration::seconds(1);
+
+        assert_eq!(approvals.window_remaining(&conn.id), None);
+        assert_eq!(approvals.gate(request(&conn)).await, Verdict::Allowed);
+        assert_eq!(
+            events.seen.load(Ordering::SeqCst),
+            2,
+            "traffic after the advertised end must be asked about again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_prompt_past_its_advertised_expiry_cannot_be_answered() {
+        let (approvals, _dir) = registry(Arc::new(NeverAnswers));
+        let conn = connection();
+        let call = {
+            let approvals = approvals.clone();
+            let conn = conn.clone();
+            tokio::spawn(async move { approvals.gate(request(&conn)).await })
+        };
+        let prompt = tokio::time::timeout(Duration::from_millis(100), async {
+            loop {
+                if let Some(prompt) = approvals.pending().first() {
+                    return prompt.clone();
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the call should raise a prompt");
+
+        // Wall-expire the prompt while its monotonic deadline is still
+        // ahead, as a suspend across the deadline would.
+        approvals
+            .inner
+            .state
+            .lock()
+            .unwrap()
+            .pending
+            .get_mut(&prompt.id)
+            .unwrap()
+            .info
+            .expires_at = Utc::now() - chrono::Duration::seconds(1);
+
+        assert!(!approvals.respond(&prompt.id, ApprovalDecision::ApproveWindow));
+        assert_eq!(call.await.unwrap(), Verdict::TimedOut);
+        assert_eq!(approvals.window_remaining(&conn.id), None);
     }
 
     #[tokio::test]

@@ -1,0 +1,491 @@
+//! Native attention delivery for requests waiting on the user.
+//!
+//! The broker remains authoritative. This coordinator only remembers the
+//! active IDs it has already observed so reconnects and coalesced waiters do
+//! not produce duplicate desktop notifications. The inbox itself always
+//! refetches from the broker.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Mutex;
+use std::time::Duration;
+
+use aka_api::ApprovalDto;
+use tauri::{AppHandle, Manager as _};
+use tauri_plugin_notification::NotificationExt as _;
+
+use crate::broker_mode::{NotificationMode, NotificationSettings};
+
+const NOTIFICATION_DEBOUNCE: Duration = Duration::from_millis(400);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RequestSummary {
+    id: String,
+    agent: String,
+    connection: String,
+}
+
+impl From<ApprovalDto> for RequestSummary {
+    fn from(approval: ApprovalDto) -> Self {
+        Self {
+            id: approval.id,
+            agent: approval.agent,
+            connection: approval.connection,
+        }
+    }
+}
+
+#[derive(Default)]
+struct AttentionTracker {
+    scope: String,
+    active: BTreeMap<String, RequestSummary>,
+    pending_notification: BTreeSet<String>,
+}
+
+impl AttentionTracker {
+    fn set_scope(&mut self, scope: String) -> bool {
+        if self.scope == scope {
+            return false;
+        }
+        self.scope = scope;
+        self.active.clear();
+        self.pending_notification.clear();
+        true
+    }
+
+    fn upsert(&mut self, request: RequestSummary, announce_if_new: bool) -> TrackerChange {
+        let old_count = self.active.len();
+        let is_new = !self.active.contains_key(&request.id);
+        let id = request.id.clone();
+        self.active.insert(id.clone(), request);
+        if is_new && announce_if_new {
+            self.pending_notification.insert(id);
+        }
+        TrackerChange {
+            count: self.active.len(),
+            count_changed: old_count != self.active.len(),
+            notification_added: is_new && announce_if_new,
+        }
+    }
+
+    fn reconcile(&mut self, approvals: Vec<ApprovalDto>) -> TrackerChange {
+        let old_count = self.active.len();
+        let next = approvals
+            .into_iter()
+            .map(RequestSummary::from)
+            .map(|request| (request.id.clone(), request))
+            .collect::<BTreeMap<_, _>>();
+        let new_ids = next
+            .keys()
+            .filter(|id| !self.active.contains_key(*id))
+            .cloned()
+            .collect::<Vec<_>>();
+        self.active = next;
+        self.pending_notification
+            .retain(|id| self.active.contains_key(id));
+        self.pending_notification.extend(new_ids.iter().cloned());
+        TrackerChange {
+            count: self.active.len(),
+            count_changed: old_count != self.active.len(),
+            notification_added: !new_ids.is_empty(),
+        }
+    }
+
+    fn resolve(&mut self, id: &str) -> TrackerChange {
+        let old_count = self.active.len();
+        self.active.remove(id);
+        self.pending_notification.remove(id);
+        TrackerChange {
+            count: self.active.len(),
+            count_changed: old_count != self.active.len(),
+            notification_added: false,
+        }
+    }
+
+    fn take_pending(&mut self) -> Vec<RequestSummary> {
+        let ids = std::mem::take(&mut self.pending_notification);
+        ids.into_iter()
+            .filter_map(|id| self.active.get(&id).cloned())
+            .collect()
+    }
+}
+
+struct TrackerChange {
+    count: usize,
+    count_changed: bool,
+    notification_added: bool,
+}
+
+struct AttentionInner {
+    tracker: AttentionTracker,
+    settings: NotificationSettings,
+    flush_generation: u64,
+    flush_scheduled: bool,
+    /// Authoritative remote reads can complete out of order. Only the latest
+    /// event-triggered read may replace the active snapshot.
+    remote_refresh_generation: u64,
+}
+
+/// Managed Tauri state shared by local broker callbacks and the remote SSE
+/// reconciliation path.
+pub struct RequestAttention {
+    inner: Mutex<AttentionInner>,
+}
+
+impl RequestAttention {
+    pub fn new(settings: NotificationSettings) -> Self {
+        Self {
+            inner: Mutex::new(AttentionInner {
+                tracker: AttentionTracker::default(),
+                settings,
+                flush_generation: 0,
+                flush_scheduled: false,
+                remote_refresh_generation: 0,
+            }),
+        }
+    }
+
+    fn upsert(&self, app: &AppHandle, request: RequestSummary, announce_if_new: bool) {
+        let (change, generation) = {
+            let mut inner = self.inner.lock().unwrap();
+            let change = inner.tracker.upsert(request, announce_if_new);
+            let generation = schedule_generation(&mut inner, change.notification_added);
+            (change, generation)
+        };
+        apply_change(app, change, generation);
+    }
+
+    fn resolve(&self, app: &AppHandle, id: &str) {
+        let change = self.inner.lock().unwrap().tracker.resolve(id);
+        apply_change(app, change, None);
+    }
+
+    fn set_scope(&self, app: &AppHandle, scope: String) {
+        let changed = {
+            let mut inner = self.inner.lock().unwrap();
+            if !inner.tracker.set_scope(scope) {
+                false
+            } else {
+                inner.flush_generation = inner.flush_generation.wrapping_add(1);
+                inner.flush_scheduled = false;
+                inner.remote_refresh_generation = inner.remote_refresh_generation.wrapping_add(1);
+                true
+            }
+        };
+        if changed {
+            crate::windows::update_request_count(app, 0);
+        }
+    }
+
+    pub fn set_settings(&self, settings: NotificationSettings) {
+        self.inner.lock().unwrap().settings = settings;
+    }
+
+    pub fn count(&self) -> usize {
+        self.inner.lock().unwrap().tracker.active.len()
+    }
+
+    fn begin_remote_refresh(&self) -> u64 {
+        let mut inner = self.inner.lock().unwrap();
+        inner.remote_refresh_generation = inner.remote_refresh_generation.wrapping_add(1);
+        inner.remote_refresh_generation
+    }
+
+    fn reconcile_remote(&self, app: &AppHandle, generation: u64, approvals: Vec<ApprovalDto>) {
+        let (change, flush_generation) = {
+            let mut inner = self.inner.lock().unwrap();
+            if generation != inner.remote_refresh_generation {
+                return;
+            }
+            let change = inner.tracker.reconcile(approvals);
+            let flush_generation = schedule_generation(&mut inner, change.notification_added);
+            (change, flush_generation)
+        };
+        apply_change(app, change, flush_generation);
+    }
+
+    fn remote_refresh_is_current(&self, generation: u64) -> bool {
+        generation == self.inner.lock().unwrap().remote_refresh_generation
+    }
+}
+
+fn schedule_generation(inner: &mut AttentionInner, notification_added: bool) -> Option<u64> {
+    if !notification_added || inner.flush_scheduled {
+        return None;
+    }
+    inner.flush_scheduled = true;
+    Some(inner.flush_generation)
+}
+
+fn apply_change(app: &AppHandle, change: TrackerChange, generation: Option<u64>) {
+    if change.count_changed {
+        crate::windows::update_request_count(app, change.count);
+    }
+    if let Some(generation) = generation {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(NOTIFICATION_DEBOUNCE).await;
+            flush_notification(&app, generation);
+        });
+    }
+}
+
+fn flush_notification(app: &AppHandle, generation: u64) {
+    let Some(attention) = app.try_state::<RequestAttention>() else {
+        return;
+    };
+    let (requests, total, settings) = {
+        let mut inner = attention.inner.lock().unwrap();
+        if generation != inner.flush_generation {
+            return;
+        }
+        inner.flush_scheduled = false;
+        let requests = inner.tracker.take_pending();
+        (requests, inner.tracker.active.len(), inner.settings)
+    };
+    if requests.is_empty() {
+        return;
+    }
+
+    match settings.mode {
+        NotificationMode::Off => {
+            crate::windows::surface_for_approval(app);
+            return;
+        }
+        NotificationMode::WhenHidden if crate::windows::request_surface_focused(app) => return,
+        NotificationMode::WhenHidden | NotificationMode::Always => {}
+    }
+
+    if let Err(error) = show_notification(app, &requests, total, settings.show_context) {
+        tracing::warn!(%error, "could not deliver a native request notification");
+        crate::windows::surface_for_approval(app);
+    }
+}
+
+fn show_notification(
+    app: &AppHandle,
+    requests: &[RequestSummary],
+    total: usize,
+    show_context: bool,
+) -> tauri_plugin_notification::Result<()> {
+    let title = if requests.len() == 1 {
+        "AgentMFA needs your approval".to_string()
+    } else {
+        format!("{} new requests need your approval", requests.len())
+    };
+    let body = if show_context && requests.len() == 1 {
+        let request = &requests[0];
+        let agent = notification_label(&request.agent, "An agent");
+        let connection = notification_label(&request.connection, "a tool");
+        format!(
+            "{} is waiting to use {}. Open the Request Inbox to review.",
+            agent, connection
+        )
+    } else if total == 1 {
+        "Open the Request Inbox to review this request.".to_string()
+    } else {
+        format!("Open the Request Inbox to review {total} waiting requests.")
+    };
+    app.notification().builder().title(title).body(body).show()
+}
+
+fn notification_label(value: &str, fallback: &str) -> String {
+    let normalized = value
+        .chars()
+        // Directional formatting can make an untrusted agent label look
+        // like OS-owned text or reorder the trusted suffix around it.
+        .filter(|character| !is_bidi_formatting(*character))
+        .map(|character| {
+            if character.is_control() || character.is_whitespace() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(80)
+        .collect::<String>();
+    if normalized.is_empty() {
+        fallback.into()
+    } else {
+        normalized
+    }
+}
+
+fn is_bidi_formatting(character: char) -> bool {
+    matches!(
+        character,
+        '\u{061c}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}'
+    )
+}
+
+fn scope_key(mode: &str, url: Option<&str>) -> String {
+    match (mode, url) {
+        ("remote", Some(url)) => format!("remote:{url}"),
+        _ => "local".into(),
+    }
+}
+
+pub fn set_scope(app: &AppHandle, mode: &str, url: Option<&str>) {
+    if let Some(attention) = app.try_state::<RequestAttention>() {
+        attention.set_scope(app, scope_key(mode, url));
+    }
+}
+
+pub fn approval_requested(app: &AppHandle, pending: &aka_core::approvals::PendingApproval) {
+    if let Some(attention) = app.try_state::<RequestAttention>() {
+        let dto = aka_core::manage::approval_dto(pending);
+        attention.upsert(app, RequestSummary::from(dto), true);
+    }
+}
+
+pub fn approval_updated(app: &AppHandle, pending: &aka_core::approvals::PendingApproval) {
+    if let Some(attention) = app.try_state::<RequestAttention>() {
+        let dto = aka_core::manage::approval_dto(pending);
+        attention.upsert(app, RequestSummary::from(dto), false);
+    }
+}
+
+pub fn approval_resolved(app: &AppHandle, id: &uuid::Uuid) {
+    if let Some(attention) = app.try_state::<RequestAttention>() {
+        attention.resolve(app, &id.to_string());
+    }
+}
+
+pub fn begin_remote_refresh(app: &AppHandle) -> Option<u64> {
+    app.try_state::<RequestAttention>()
+        .map(|attention| attention.begin_remote_refresh())
+}
+
+pub fn reconcile_remote(app: &AppHandle, generation: u64, approvals: Vec<ApprovalDto>) {
+    if let Some(attention) = app.try_state::<RequestAttention>() {
+        attention.reconcile_remote(app, generation, approvals);
+    }
+}
+
+pub fn remote_refresh_is_current(app: &AppHandle, generation: u64) -> bool {
+    app.try_state::<RequestAttention>()
+        .is_some_and(|attention| attention.remote_refresh_is_current(generation))
+}
+
+pub fn sync_tray(app: &AppHandle) {
+    let count = app
+        .try_state::<RequestAttention>()
+        .map(|attention| attention.count())
+        .unwrap_or(0);
+    crate::windows::update_request_count(app, count);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn approval(id: &str, agent: &str) -> ApprovalDto {
+        ApprovalDto {
+            id: id.into(),
+            connection_id: "connection-id".into(),
+            connection: "github".into(),
+            kind: "api".into(),
+            unit: Some("request".into()),
+            target: "https://api.github.com".into(),
+            agent: agent.into(),
+            summary: "GET /user".into(),
+            detail: None,
+            waiting: 1,
+            requested_at: "2026-07-24T12:00:00Z".into(),
+            expires_at: "2026-07-24T12:01:30Z".into(),
+            window_secs: 900,
+        }
+    }
+
+    #[test]
+    fn updates_do_not_queue_duplicate_notifications() {
+        let mut tracker = AttentionTracker::default();
+        tracker.set_scope("local".into());
+        let first = tracker.upsert(RequestSummary::from(approval("one", "codex")), true);
+        let update = tracker.upsert(RequestSummary::from(approval("one", "claude")), false);
+
+        assert!(first.notification_added);
+        assert!(!update.notification_added);
+        assert_eq!(tracker.take_pending().len(), 1);
+        assert!(tracker.take_pending().is_empty());
+    }
+
+    #[test]
+    fn authoritative_reconcile_adds_and_removes_exactly_once() {
+        let mut tracker = AttentionTracker::default();
+        tracker.set_scope("remote:https://broker.example".into());
+
+        let first = tracker.reconcile(vec![approval("one", "codex")]);
+        let replay = tracker.reconcile(vec![approval("one", "codex")]);
+        let replacement = tracker.reconcile(vec![approval("two", "claude")]);
+
+        assert!(first.notification_added);
+        assert!(!replay.notification_added);
+        assert!(replacement.notification_added);
+        assert_eq!(replacement.count, 1);
+        assert_eq!(
+            tracker.take_pending(),
+            vec![RequestSummary::from(approval("two", "claude"))]
+        );
+    }
+
+    #[test]
+    fn resolving_before_the_debounce_cancels_delivery() {
+        let mut tracker = AttentionTracker::default();
+        tracker.set_scope("local".into());
+        tracker.upsert(RequestSummary::from(approval("one", "codex")), true);
+        tracker.resolve("one");
+
+        assert!(tracker.take_pending().is_empty());
+        assert_eq!(tracker.active.len(), 0);
+    }
+
+    #[test]
+    fn changing_brokers_clears_active_and_pending_state() {
+        let mut tracker = AttentionTracker::default();
+        tracker.set_scope("local".into());
+        tracker.upsert(RequestSummary::from(approval("one", "codex")), true);
+
+        assert!(tracker.set_scope("remote:https://broker.example".into()));
+        assert!(tracker.active.is_empty());
+        assert!(tracker.take_pending().is_empty());
+        assert!(!tracker.set_scope("remote:https://broker.example".into()));
+    }
+
+    #[test]
+    fn only_the_latest_remote_snapshot_may_apply() {
+        let attention = RequestAttention::new(NotificationSettings::default());
+        let first = attention.begin_remote_refresh();
+        let second = attention.begin_remote_refresh();
+
+        assert!(!attention.remote_refresh_is_current(first));
+        assert!(attention.remote_refresh_is_current(second));
+    }
+
+    #[test]
+    fn notification_labels_are_single_line_and_bounded() {
+        assert_eq!(
+            notification_label("codex\npretend this is a system alert", "An agent"),
+            "codex pretend this is a system alert"
+        );
+        assert_eq!(notification_label("\n\t", "An agent"), "An agent");
+        assert_eq!(
+            notification_label(&"a".repeat(120), "An agent")
+                .chars()
+                .count(),
+            80
+        );
+        assert_eq!(
+            notification_label("codex\u{202e}gpj.exe\u{202c}", "An agent"),
+            "codexgpj.exe"
+        );
+    }
+}

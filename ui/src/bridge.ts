@@ -21,6 +21,7 @@ import type {
   McpAuthDraft,
   McpAuthState,
   McpStatusReport,
+  NotificationSettings,
   SessionSummary,
   Settings,
   Unlisten,
@@ -205,6 +206,7 @@ interface MockArgs {
   values?: Record<string, string>;
   endpointId?: string;
   orderedIds?: string[];
+  settings: NotificationSettings;
 }
 
 const db: MockDatabase = {
@@ -536,6 +538,10 @@ function mockStatusReport(c: MockConnection): McpStatusReport {
 let mockBroker: import('./types').BrokerProfile = {
   mode: 'local', url: null, connected: true, error: null, has_saved_token: false,
 };
+let mockNotificationSettings: NotificationSettings = {
+  mode: 'when_hidden',
+  showContext: false,
+};
 
 function mockConnectRemote(url: string, token: string | null): unknown {
   const trimmed = url.trim().replace(/\/+$/, '');
@@ -598,6 +604,11 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       return { ...mockBroker };
     }
     case 'get_settings': return { ...db.settings };
+    case 'get_notification_settings': return { ...mockNotificationSettings };
+    case 'set_notification_settings':
+      mockNotificationSettings = { ...args.settings };
+      emit('aka://notification-settings-changed', { ...mockNotificationSettings });
+      return { ...mockNotificationSettings };
     case 'get_agent_setup': return MOCK_AGENT_SETUP;
     case 'copy_agent_setup': return;
     case 'inspect_ssh_import':
@@ -1029,6 +1040,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
     case 'set_presence_window': db.settings.presence_window_secs = args.secs; return;
     case 'ui_set_mode': case 'ui_hide_main': case 'ui_hide_dropdown':
     case 'ui_set_dropdown_form_active': return;
+    case 'ui_take_open_requests': return false;
     default: throw new Error(`mock: unknown command ${cmd}`);
   }
 }

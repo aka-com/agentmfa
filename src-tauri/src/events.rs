@@ -102,20 +102,23 @@ impl BrokerEvents for TauriEvents {
     /// `respond_approval`, which releases the call.
     fn approval_requested(
         &self,
-        _pending: &aka_core::approvals::PendingApproval,
+        pending: &aka_core::approvals::PendingApproval,
     ) -> ApprovalHandling {
+        crate::attention::approval_requested(&self.app, pending);
         let _ = self.app.emit(EVT_APPROVALS, ());
-        // A prompt nobody can see is a prompt nobody answers: bring a window
-        // forward when the app is tucked away in the menu bar.
-        crate::windows::surface_for_approval(&self.app);
+        // Native attention delivery is notification-first. It falls back to
+        // the existing window surfacing when notifications are disabled or
+        // the platform reports a delivery failure.
         ApprovalHandling::Taken
     }
 
-    fn approval_updated(&self, _pending: &aka_core::approvals::PendingApproval) {
+    fn approval_updated(&self, pending: &aka_core::approvals::PendingApproval) {
+        crate::attention::approval_updated(&self.app, pending);
         let _ = self.app.emit(EVT_APPROVALS, ());
     }
 
-    fn approval_resolved(&self, _id: &uuid::Uuid) {
+    fn approval_resolved(&self, id: &uuid::Uuid) {
+        crate::attention::approval_resolved(&self.app, id);
         let _ = self.app.emit(EVT_APPROVALS, ());
     }
 }

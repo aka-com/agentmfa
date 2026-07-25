@@ -201,6 +201,13 @@
 }
   .nav-item:hover{ background: var(--hover); }
   .nav-item.on{ background: var(--accent-wash-2); color: var(--accent-ink); font-weight: 600; }
+  .nav-tab-label{ flex: 1; min-width: 0; }
+  .nav-count{
+  flex: 0 0 auto; min-width: 19px; height: 19px; padding: 0 5px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 999px; background: var(--amber-wash); color: var(--amber-strong);
+  font-size: 11px; font-weight: 700; line-height: 1;
+}
   /* Keep the history destination beside the sidebar controls it relates to,
      while the primary setup/navigation destinations stay grouped at the top.
      The compact vertical rail keeps its existing uninterrupted tab order. */
@@ -220,6 +227,8 @@
       writing-mode: vertical-rl; text-orientation: mixed;
       justify-content: center; padding: 10px 7px;
     }
+    .nav-tab-label{ flex: none; }
+    .nav-count{ writing-mode: horizontal-tb; min-width: 17px; height: 17px; padding: 0 4px; }
     .dw-settings{ align-self: center; flex-direction: column; }
     .settings-menu{ left: 0; right: auto; }
   }
@@ -233,6 +242,7 @@
   width: 100%; max-width: calc(var(--content-max) + 8px); margin: 0 auto;
   padding: 12px 16px 12px 24px;
 }
+  .dw-head-title{ min-width: 0; display: flex; align-items: center; gap: 8px; }
   .dw-head h2{ font-size: 17px; }/* ---- custom title bar (main window) ---------------------------------- */
 /* The window uses titleBarStyle "Overlay": the native macOS traffic lights
    float over the top-left of this bar, so the app owns its own chrome and the
@@ -358,11 +368,18 @@
   /* ---- segmented tabs (dropdown) --------------------------------------- */
 .seg{ display: flex; gap: 2px; margin: 0 14px 10px; background: var(--seg-bg); border-radius: 8px; padding: 2px; }
   .seg-btn{
-  flex: 1; border: none; background: transparent;
+  flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  border: none; background: transparent;
   padding: 5px 0; font-size: 13.5px; color: var(--ink-3);
   border-radius: 6px; cursor: pointer;
 }
   .seg-btn.on{ background: var(--seg-on-bg); color: var(--seg-on-ink); box-shadow: 0 1px 3px rgba(0,0,0,.15); font-weight: 600; }
+  .seg-count{
+  min-width: 17px; height: 17px; padding: 0 4px; display: inline-flex;
+  align-items: center; justify-content: center; border-radius: 999px;
+  background: var(--amber-wash); color: var(--amber-strong);
+  font-size: 10.5px; font-weight: 700; line-height: 1;
+}
   .seg.in-form{ margin: 0; }
   /* ---- content ---------------------------------------------------------- */
 .content{
@@ -396,17 +413,116 @@
    the 8px keeps the band from jumping sideways when its scrollbar appears. */
 .dd-global{ padding: 0 14px; margin-bottom: 8px; max-height: 172px; overflow-y: scroll; border-bottom: 1px solid var(--line); }
   .dd-global.onboarding-global{ max-height: none; overflow: visible; border-bottom: 0; }
-  .dw-main .dd-global{
-  width: calc(100% - 32px); max-width: calc(var(--content-max) - 32px);
-  margin: 0 auto 8px; padding: 0;
+  /* A lone Inbox route is not a scrolling queue. Keeping the old scroll
+     container here can restore a previous queue's scroll offset and clip
+     the banner down to its borders after changing tabs. */
+  .dd-global.request-route-only{
+  max-height: none; overflow: visible; border-bottom: 0;
 }
-  .live-head{ font-size: 12.5px; font-weight: 600; color: var(--muted); padding: 9px 2px 4px; }
-  .live-row{ display: flex; align-items: center; gap: 9px; padding: 7px 2px; border-bottom: 1px solid var(--line-soft); }
-  .dd-global > .live-row:last-child{ border-bottom: 0; }
+  .dw-main .dd-global{
+  width: 100%; max-width: none; margin: 0 0 8px; padding: 0 8px 0 24px;
+}
+  /* The content pane also consumes an 8px scrollbar track. A request-only
+     band does not scroll, so reserve that track as extra right padding.
+     Its child then has exactly the same containing width as page content. */
+  .dw-main .dd-global.request-route-only{ padding-right: 16px; }
+  .dw-main .dd-global > *{
+  width: min(100%, calc(var(--content-max) - 32px));
+  margin-left: auto; margin-right: auto;
+}
+  .live-sessions{ margin-top: 8px; }
+  .live-head{ font-size: 12.5px; font-weight: 600; color: var(--muted); padding: 0 2px 6px; }
+  .live-list{ display: flex; flex-direction: column; gap: 8px; }
+  .live-row{
+  display: flex; align-items: center; gap: 9px; padding: 9px 10px;
+  border: 1px solid var(--line); border-radius: 9px;
+  background: var(--card-bg); box-shadow: 0 1px 3px rgba(20,24,50,.04);
+}
   .live-row .live-txt{ flex: 1; min-width: 0; }
-  .live-row .s-sub{ max-width: 250px; }
+  .live-row .s-sub{ max-width: 100%; }
   .live-row .agent-sub{ font-family: inherit; }
   .agent-onboarding{ margin: 9px 0; padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--card-bg); }
+  /* A compact route to the dedicated Inbox from every other screen. */
+  .request-banner{
+  width: 100%; display: flex; align-items: center; gap: 10px; margin: 8px 0;
+  padding: 9px 11px; border: 1px solid var(--amber-border); border-radius: 9px;
+  background: var(--amber-wash); color: var(--ink); text-align: left;
+  font: inherit; cursor: pointer;
+}
+  .request-banner:hover{ filter: brightness(.985); }
+  .request-banner:focus-visible{ outline: 2px solid var(--accent); outline-offset: 1px; }
+  .request-banner-ico{ flex: 0 0 auto; display: inline-flex; color: var(--amber-strong); }
+  .request-banner-copy{ flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  .request-banner-copy b{ font-size: 13.5px; font-weight: 650; }
+  .request-banner-copy span{ color: var(--muted); font-size: 11.5px; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .request-banner-cta{ flex: 0 0 auto; color: var(--accent-text); font-size: 12px; font-weight: 650; }
+
+  /* ---- Request Inbox --------------------------------------------------- */
+  .request-inbox{ padding: 4px 0 24px; }
+  .request-total{
+  flex: 0 0 auto; padding: 3px 8px; border-radius: 999px;
+  background: var(--chip-bg); color: var(--muted); font-size: 11.5px; font-weight: 650;
+}
+  .request-total.has-requests{ background: var(--amber-wash); color: var(--amber-strong); }
+  .request-list{
+  display: flex; flex-direction: column; overflow: hidden;
+  border: 1px solid var(--line); border-radius: 11px;
+  background: var(--card-bg); box-shadow: 0 1px 3px rgba(20,24,50,.05);
+}
+  .request-card{
+  width: 100%; display: flex; align-items: stretch; gap: 11px; padding: 12px;
+  border: 0; border-radius: 0; background: transparent;
+  color: var(--ink); text-align: left; font: inherit; cursor: pointer;
+}
+  .request-card + .request-card{ border-top: 1px solid var(--line); }
+  .request-card:hover{ background: var(--field-bg); }
+  .request-card:focus-visible{ outline: 2px solid var(--accent); outline-offset: -2px; }
+  .request-card-ico{
+  flex: 0 0 auto; align-self: flex-start; width: 34px; height: 34px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 9px; background: var(--amber-wash); color: var(--amber-strong);
+  border: 1px solid var(--amber-border);
+}
+  .request-card-ico svg{ width: 17px; height: 17px; }
+  .request-card-body{ flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+  .request-card-top{ display: flex; align-items: center; gap: 10px; }
+  .request-kind{
+  color: var(--amber-strong); font-size: 10.5px; font-weight: 750;
+  letter-spacing: .06em; text-transform: uppercase;
+}
+  .request-when{ color: var(--muted); font-size: 11px; white-space: nowrap; }
+  .request-card-body > b{ font-size: 13.5px; font-weight: 650; overflow-wrap: anywhere; }
+  .request-context{ color: var(--muted); font-size: 11.5px; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .request-summary{
+  align-self: flex-start; max-width: 100%; margin-top: 2px; color: var(--ink-2);
+  font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+  .request-prompt{
+  margin-top: 2px; color: var(--ink-2); font-size: 12px; line-height: 1.4;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+  .request-foot{ margin-top: 1px; color: var(--faint); font-size: 11px; }
+  .request-card-side{
+  flex: 0 0 auto; min-width: max-content; display: flex; flex-direction: column;
+  align-items: flex-end; justify-content: space-between; gap: 8px; padding: 1px 0;
+}
+  .request-card-action{
+  flex: 0 0 auto; color: var(--accent-text); font-size: 12px; font-weight: 650;
+}
+  .request-empty{ padding-block: 48px; border: 1px dashed var(--line); border-radius: 11px; }
+  .dropdown-surface .request-inbox{ padding-top: 0; }
+  .dropdown-surface .request-card{ padding: 10px; gap: 9px; }
+  .dropdown-surface .request-card-ico{ width: 30px; height: 30px; }
+  @media (max-width: 520px) {
+    .request-card{ display: grid; grid-template-columns: 30px minmax(0, 1fr); }
+    .request-card-ico{ grid-row: 1 / span 2; }
+    .request-card-side{
+      grid-column: 2; min-width: 0; flex-direction: row; align-items: center;
+    }
+    .request-when{ white-space: normal; }
+  }
   /* ---- elicitation (SEP-2322 design mock, see ELICITATION.md) ---------- */
   /* The queue carries only a one-line notification; clicking it opens the
      dialog. The row is a real button so it is keyboard-reachable. */
@@ -474,7 +590,19 @@
   .start-view-toggle{ display: flex; justify-content: center; margin-top: 14px; }
   .start-view-toggle .seg{ display: inline-flex; margin: 0; }
   .start-view-toggle .seg-btn{ flex: none; padding: 5px 16px; }
+  .dd-global.start-global{
+  width: 100%; max-width: none; max-height: none; overflow: visible;
+  margin: 8px 0 0; padding: 0; border-bottom: 0;
+}
+  .dd-global.start-global > *,
+  .dw-main .dd-global.start-global > *{
+  width: 100%; max-width: none; margin-left: 0; margin-right: 0;
+}
+  .dw-main .dd-global.start-global{
+  width: 100%; max-width: none; margin: 8px 0 0; padding: 0;
+}
   .start-view-body{ margin-top: 18px; }
+  .start-global + .start-view-body{ margin-top: 14px; }
   .start-view-body > .agent-block:first-child{ margin-top: 0; }
   /* Small toggle row: which tool the walkthrough is written for. */
   .start-picker{ display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
@@ -821,6 +949,8 @@
   .set-txt{ flex: 1; }
   .set-txt .st-title{ font-size: 14px; font-weight: 600; }
   .set-txt .st-sub{ font-size: 12.5px; color: var(--muted); line-height: 1.45; margin-top: 2px; }
+  .notification-setting{ flex-direction: column; gap: 9px; }
+  .notification-modes{ align-self: stretch; width: 100%; }
   .switch{ position: relative; flex: 0 0 auto; margin-top: 2px; width: 36px; height: 22px; border-radius: 11px; background: var(--switch-off); border: none; cursor: pointer; transition: background .18s ease; }
   .switch.on{ background: #34c759; }
   .switch::after{ content: ''; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.25); transition: left .18s ease; }
@@ -1033,6 +1163,10 @@
 .cat-conn-status {
   display: flex; align-items: center; gap: 8px;
   flex: 0 0 auto; margin-top: 2px; min-height: 18px;
+}
+.cc-live {
+  flex: 0 0 auto; color: var(--muted); font-size: 11.5px;
+  font-weight: 600; line-height: 1.2; white-space: nowrap;
 }
 .cc-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; }
 .cc-dot.ok { background: var(--ok-solid); }
@@ -1392,6 +1526,7 @@
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
   padding: 2px 2px 10px;
 }
+.activity-live-sessions { margin: 0 0 14px; }
 .act-search { flex: 1 1 160px; min-width: 140px; }
 .act-filter { flex: 0 0 auto; padding: 3px 10px; font-size: 12px; }
 .act-chips { display: flex; gap: 5px; margin-top: 3px; flex-wrap: wrap; }

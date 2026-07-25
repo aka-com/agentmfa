@@ -27,8 +27,13 @@ pub const DROPDOWN: &str = "dropdown";
 pub const EVT_DROPDOWN_HIDDEN: &str = "aka://dropdown-hidden";
 pub const EVT_DROPDOWN_SHOWN: &str = "aka://dropdown-shown";
 pub const EVT_OPEN_SETTINGS: &str = "aka://open-settings";
+pub const EVT_OPEN_REQUESTS: &str = "aka://open-requests";
 const APP_WINDOW_MENU_ID: &str = "app-window";
 const NEW_WINDOW_MENU_ID: &str = "new-window";
+const TRAY_OPEN_ID: &str = "tray-open";
+const TRAY_REQUESTS_ID: &str = "tray-requests";
+const TRAY_SETTINGS_ID: &str = "tray-settings";
+const TRAY_QUIT_ID: &str = "tray-quit";
 
 const DROPDOWN_GAP: f64 = 6.0;
 static LAST_TRAY_ANCHOR: Mutex<Option<TrayAnchor>> = Mutex::new(None);
@@ -36,6 +41,11 @@ static LAST_TRAY_ANCHOR: Mutex<Option<TrayAnchor>> = Mutex::new(None);
 /// authentication and any error returned afterwards. While it is open, focus
 /// loss (including the Touch ID sheet becoming key) must not dismiss it.
 static DROPDOWN_FORM_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Tray navigation can happen before a webview installs its event listener.
+/// Keep one pending bit per request surface so the destination can drain it
+/// after boot instead of silently losing the user's click.
+static MAIN_REQUESTS_PENDING: AtomicBool = AtomicBool::new(false);
+static DROPDOWN_REQUESTS_PENDING: AtomicBool = AtomicBool::new(false);
 
 fn dropdown_hide_allowed() -> bool {
     !DROPDOWN_FORM_ACTIVE.load(Ordering::SeqCst)
@@ -179,20 +189,16 @@ fn focus_existing_or_reopen(app: &AppHandle) {
 /// Install the always-present tray icon. Left-click toggles the compact
 /// dropdown; right-click exposes the conventional app menu.
 pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
-    let open = MenuItem::with_id(app, "tray-open", "Open AgentMFA", true, None::<&str>)?;
-    let settings = MenuItem::with_id(app, "tray-settings", "Settings…", true, None::<&str>)?;
-    let separator = PredefinedMenuItem::separator(app)?;
-    let quit = MenuItem::with_id(app, "tray-quit", "Quit AgentMFA", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &settings, &separator, &quit])?;
-
+    let menu = tray_menu(app, 0)?;
     let tray = app
         .tray_by_id("main")
         .ok_or_else(|| tauri::Error::AssetNotFound("configured tray icon".into()))?;
     tray.set_menu(Some(menu))?;
     tray.set_show_menu_on_left_click(false)?;
     tray.on_menu_event(|app, event| match event.id().as_ref() {
-        "tray-open" => open_main(app),
-        "tray-settings" => {
+        TRAY_OPEN_ID => open_main(app),
+        TRAY_REQUESTS_ID => open_request_inbox(app),
+        TRAY_SETTINGS_ID => {
             if !dropdown_hide_allowed() {
                 show_dropdown(app);
                 return;
@@ -200,7 +206,7 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
             show_dropdown(app);
             let _ = app.emit_to(DROPDOWN, EVT_OPEN_SETTINGS, ());
         }
-        "tray-quit" => app.exit(0),
+        TRAY_QUIT_ID => app.exit(0),
         _ => {}
     });
     tray.on_tray_icon_event(|tray, event| match event {
@@ -220,6 +226,54 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         _ => {}
     });
     Ok(())
+}
+
+fn tray_menu(app: &AppHandle, request_count: usize) -> tauri::Result<Menu<tauri::Wry>> {
+    let open = MenuItem::with_id(app, TRAY_OPEN_ID, "Open AgentMFA", true, None::<&str>)?;
+    let request_label = if request_count == 0 {
+        "Request Inbox…".to_string()
+    } else {
+        format!(
+            "Review {request_count} request{}…",
+            if request_count == 1 { "" } else { "s" }
+        )
+    };
+    let requests = MenuItem::with_id(app, TRAY_REQUESTS_ID, request_label, true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, TRAY_SETTINGS_ID, "Settings…", true, None::<&str>)?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let quit = MenuItem::with_id(app, TRAY_QUIT_ID, "Quit AgentMFA", true, None::<&str>)?;
+    Menu::with_items(app, &[&open, &requests, &settings, &separator, &quit])
+}
+
+/// Keep the native tray affordance in sync with the authoritative active
+/// queue. The count title is visible beside the icon on macOS and supported
+/// Linux panels; Windows still gets the dynamic menu label.
+pub fn update_request_count(app: &AppHandle, request_count: usize) {
+    let app = app.clone();
+    let _ = app.clone().run_on_main_thread(move || {
+        let Some(tray) = app.tray_by_id("main") else {
+            return;
+        };
+        match tray_menu(&app, request_count) {
+            Ok(menu) => {
+                let _ = tray.set_menu(Some(menu));
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not update the tray request menu");
+            }
+        }
+        let tooltip = if request_count == 0 {
+            "AgentMFA".to_string()
+        } else {
+            format!(
+                "AgentMFA — {request_count} request{} waiting",
+                if request_count == 1 { "" } else { "s" }
+            )
+        };
+        let _ = tray.set_tooltip(Some(tooltip));
+        let title = (request_count > 0).then(|| request_count.to_string());
+        let _ = tray.set_title(title.as_deref());
+    });
 }
 
 fn remember_tray_anchor(app: &AppHandle, rect: Rect) {
@@ -333,13 +387,23 @@ pub fn surface_for_approval(app: &AppHandle) {
     });
 }
 
+/// Whether one of the trusted request surfaces is actually focused. A
+/// visible main window can be covered by another application; in that case a
+/// native notification is still useful.
+pub fn request_surface_focused(app: &AppHandle) -> bool {
+    [MAIN, DROPDOWN].into_iter().any(|label| {
+        app.get_webview_window(label)
+            .and_then(|window| window.is_focused().ok())
+            .unwrap_or(false)
+    })
+}
+
 /// Visible and not minimized. Window managers may report a minimized window
 /// as visible; that is not enough for a 90-second approval prompt.
 fn window_presented(app: &AppHandle, label: &str) -> bool {
-    app.get_webview_window(label)
-        .is_some_and(|window| {
-            window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(false)
-        })
+    app.get_webview_window(label).is_some_and(|window| {
+        window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(false)
+    })
 }
 
 fn window_visible(app: &AppHandle, label: &str) -> bool {
@@ -411,6 +475,33 @@ fn open_main(app: &AppHandle) {
         let _ = win.unminimize();
         let _ = win.show();
         let _ = win.set_focus();
+    }
+}
+
+fn open_request_inbox(app: &AppHandle) {
+    // A protected dropdown form may contain credentials. Keep it open and
+    // queue the navigation until the form closes rather than destroying a
+    // draft or losing the user's request.
+    if !dropdown_hide_allowed() {
+        show_dropdown(app);
+        DROPDOWN_REQUESTS_PENDING.store(true, Ordering::SeqCst);
+        let _ = app.emit_to(DROPDOWN, EVT_OPEN_REQUESTS, ());
+        return;
+    }
+    open_main(app);
+    MAIN_REQUESTS_PENDING.store(true, Ordering::SeqCst);
+    let _ = app.emit_to(MAIN, EVT_OPEN_REQUESTS, ());
+}
+
+/// Consume a tray request-inbox route for the invoking webview. The pending
+/// bit makes tray navigation reliable during webview boot and while a
+/// protected form temporarily prevents navigation.
+#[tauri::command]
+pub fn ui_take_open_requests(window: tauri::WebviewWindow) -> bool {
+    match window.label() {
+        MAIN => MAIN_REQUESTS_PENDING.swap(false, Ordering::SeqCst),
+        DROPDOWN => DROPDOWN_REQUESTS_PENDING.swap(false, Ordering::SeqCst),
+        _ => false,
     }
 }
 

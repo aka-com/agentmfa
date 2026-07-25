@@ -173,6 +173,18 @@ test('Activity Log sits above the normal sidebar footer', async () => {
   );
 });
 
+test('the Activity Log shows live sessions independently of audit filters', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+  const activity = app.match(
+    /function ActivityView\(\): ReactNode \{([\s\S]*?)async function receiveActivity/,
+  )?.[1];
+
+  assert.ok(activity, 'Activity view is present');
+  assert.match(activity, /state\.sessions\.length/);
+  assert.match(activity, /liveSessionsHTML\('activity-live-sessions'\)/);
+  assert.match(activity, /\{liveSessions\}\s*<div className="act-filters">/);
+});
+
 test('the SSH endpoint field includes the configured ssh invocation', async () => {
   const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
   const endpointStrip = app.match(

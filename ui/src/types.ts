@@ -218,6 +218,13 @@ export interface Settings {
   presence_window_secs: number;
 }
 
+/** Native request notifications are local to this desktop shell. */
+export interface NotificationSettings {
+  mode: 'off' | 'when_hidden' | 'always';
+  /** Include agent and connection names, never request summaries/details. */
+  showContext: boolean;
+}
+
 export interface HostKeyCandidate {
   fingerprint: string;
   algorithm: string;
@@ -383,6 +390,10 @@ export interface CommandMap {
   list_activity: CommandSpec<{ limit: number }, ActivityEntry[]>;
   clear_activity: CommandSpec<undefined, void>;
   get_settings: CommandSpec<undefined, Settings>;
+  get_notification_settings: CommandSpec<undefined, NotificationSettings>;
+  set_notification_settings: CommandSpec<{
+    settings: NotificationSettings;
+  }, NotificationSettings>;
   get_agent_setup: CommandSpec<undefined, string>;
   copy_agent_setup: CommandSpec<undefined, void>;
   inspect_ssh_import: CommandSpec<{ source: string }, SshImportPreview>;
@@ -436,6 +447,7 @@ export interface CommandMap {
   ui_hide_main: CommandSpec<undefined, void>;
   ui_hide_dropdown: CommandSpec<undefined, void>;
   ui_set_dropdown_form_active: CommandSpec<{ active: boolean }, void>;
+  ui_take_open_requests: CommandSpec<undefined, boolean>;
 }
 
 export type CommandName = keyof CommandMap;
@@ -456,6 +468,8 @@ export interface EventMap {
   'aka://mcp-auth-changed': McpAuthState;
   'aka://connect-requested': { agent: string; service: string };
   'aka://open-settings': Record<string, never>;
+  'aka://open-requests': Record<string, never>;
+  'aka://notification-settings-changed': NotificationSettings;
   'aka://dropdown-hidden': Record<string, never>;
   'aka://dropdown-shown': Record<string, never>;
 }

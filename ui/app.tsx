@@ -50,6 +50,7 @@ import {
 } from '/src/broker';
 import { sameBrokerScope } from '/src/broker-scope';
 import { activityIdentity } from '/src/activity';
+import { activeRequestCount, activeRequests } from '/src/requests';
 import { APP_VERSION } from '/src/version';
 import { virtualListWindow } from '/src/virtual-list';
 import type { HostKeyCandidate } from '/src/connection-input';
@@ -69,6 +70,7 @@ import type {
   McpAuthState,
   McpStatusReport,
   McpToolInfo,
+  NotificationSettings,
   IssuedEndpoint,
   SecretSummary,
   SessionSummary,
@@ -94,7 +96,7 @@ const ACTIVITY_OVERSCAN = 8;
 const ACTIVITY_PREPAINT_VIEWPORT = 1200;
 
 // The left-nav tabs, in order — also the cycle order for Ctrl-Tab.
-const TABS = ['start', 'connections', 'secrets', 'activity'] as const;
+const TABS = ['start', 'inbox', 'connections', 'secrets', 'activity'] as const;
 // The tray dropdown is a quick-access panel; onboarding belongs in the window.
 const DROPDOWN_TABS = TABS.filter((tab) => tab !== 'start');
 type Tab = typeof TABS[number];
@@ -210,6 +212,8 @@ interface AppState {
   approvalAnswering: string | null;
   agentSetupInstructions: string;
   settings: Settings;
+  /** Native request notifications for this desktop shell, not the broker. */
+  notificationSettings: NotificationSettings;
   reveal: Record<string, string>;
   /** Direct-endpoint fields expanded from their masked one-liner, by connection id. */
   epExpanded: Record<string, boolean>;
@@ -309,6 +313,10 @@ const DEFAULT_SETTINGS: Settings = {
   menu_bar_hides_dock: false,
   presence_window_secs: 15 * 60,
 };
+const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
+  mode: 'when_hidden',
+  showContext: false,
+};
 
 const initialState: AppState = {
   tab: 'connections',
@@ -327,6 +335,7 @@ const initialState: AppState = {
   approvalAnswering: null,
   agentSetupInstructions: '', // short paste-ready setup message (lazy-loaded)
   settings: { ...DEFAULT_SETTINGS },
+  notificationSettings: { ...DEFAULT_NOTIFICATION_SETTINGS },
   reveal: {},            // secretId -> prefix string (transient)
   epExpanded: {},        // connId -> endpoint field expanded (transient)
   // sheet / confirm state
@@ -382,6 +391,10 @@ let reactMounted = false;
  * this value so a result from an earlier backend cannot update the current
  * broker's UI or launch a follow-up command against it. */
 let brokerEpoch = 0;
+/** Changes whenever another webview saves this desktop's notification
+ * preferences. It prevents an older in-flight read from overwriting the
+ * event's newer value. */
+let notificationSettingsEpoch = 0;
 /** Pointer-drag preview state. The connection rows render this order through
  * React; drag handlers never move React-owned DOM nodes themselves. */
 let dragConnId: string | null = null;
@@ -490,6 +503,28 @@ function resetScroll(): void {
   }
 }
 
+function showRequestInbox(): void {
+  state.tab = 'inbox';
+  state.confirm = null;
+  state.menuOpen = false;
+  state.agentMenuOpen = null;
+  state.catalogActionMenuOpen = null;
+  state.connMenuOpen = null;
+  state.connMenuPoint = null;
+  state.connDetailOpen = false;
+  render();
+  resetScroll();
+}
+
+async function consumePendingOpenRequests(): Promise<void> {
+  if (state.sheet) return;
+  try {
+    if (await invoke('ui_take_open_requests')) showRequestInbox();
+  } catch (error) {
+    console.error('ui_take_open_requests', error);
+  }
+}
+
 const root = (): HTMLElement => {
   const element = document.getElementById('root');
   if (!element) throw new Error('Missing #root element');
@@ -554,6 +589,14 @@ async function loadSettings(): Promise<void> {
     if (brokerEpochIsCurrent(epoch)) state.settings = settings;
   }
   catch (e) { console.error(e); }
+}
+async function loadNotificationSettings(): Promise<void> {
+  const epoch = notificationSettingsEpoch;
+  try {
+    const settings = await invoke('get_notification_settings');
+    if (epoch === notificationSettingsEpoch) state.notificationSettings = settings;
+  }
+  catch (e) { console.error('get_notification_settings', e); }
 }
 async function loadLocalUsername(): Promise<void> {
   try { state.localUsername = await invoke('get_local_username'); }
@@ -631,25 +674,6 @@ function render(): void {
 }
 
 /**
- * A paused upstream tool call asking the user for input (SEP-2322).
- *
- * DESIGN MOCK — see ELICITATION.md. This is the trusted surface the plan's
- * "approval routing" risk demands: the upstream's prompt is answered here,
- * in the app, and never through the agent. The queue shows a one-line
- * notification; the question itself is asked in a dialog (`elicitationSheet`).
- */
-function elicitationNoteHTML(request: ElicitationRequest): string {
-  return `<button class="elicit-note" data-act="elicit-open" data-id="${escAttr(request.id)}"
-    aria-label="Answer the input request from ${escAttr(request.connection)}">
-    <span class="elicit-ico">${ICONS.bell}</span>
-    <span class="elicit-note-txt"><b>${esc(request.connection)}</b> asked for input —
-      ${esc(request.agent)} is paused</span>
-    <span class="elicit-when" data-tippy-content="${escAttr(absTime(request.requested_at))}">${esc(relTime(request.requested_at))}</span>
-    <span class="elicit-note-cta">Answer…</span>
-  </button>`;
-}
-
-/**
  * What one prompt is asking about, in the words of the connection's own
  * plane. Postgres cannot be confirmed per statement — the proxy splices
  * bytes once connected — so it asks per session, and saying so is what
@@ -667,63 +691,149 @@ function approvalUnit(approval: Approval): string {
   return 'wants to send a request';
 }
 
-/**
- * A call parked on the user, in the queue that shows on every tab.
- *
- * It outranks an elicitation: an elicitation pauses an agent mid-task, but
- * this one is holding traffic that the user asked to be asked about, and it
- * expires into a refusal if nobody answers.
- */
-function approvalNoteHTML(approval: Approval): string {
-  const riders = approval.waiting > 1
-    ? ` <span class="elicit-when">+${approval.waiting - 1} more waiting</span>`
-    : '';
-  return `<button class="elicit-note approval-note" data-act="approval-open" data-id="${escAttr(approval.id)}"
-    aria-label="Answer the confirmation request from ${escAttr(approval.agent)} for ${escAttr(approval.connection)}">
-    <span class="elicit-ico">${ICONS.shieldAlert}</span>
-    <span class="elicit-note-txt"><b>${esc(approval.agent)}</b> ${esc(approvalUnit(approval))} on
-      <b>${esc(approval.connection)}</b> — ${esc(approval.summary)}</span>${riders}
-    <span class="elicit-note-cta">Review…</span>
-  </button>`;
+function liveSessionsHTML(extraClass = ''): string {
+  const sessions = state.sessions.map((session) => {
+    const type = TYPES[session.type];
+    const who = session.agent
+      ? `${esc(session.agent)} → ${esc(session.connection)}`
+      : esc(session.connection);
+    if (state.confirm?.kind === 'close-session' && state.confirm.id === session.id) {
+      return `<div class="live-row"><span class="badge ${type.cls}">${type.label}</span>
+        <div class="live-txt"><div class="c-name">${who}</div>
+        <div class="s-sub">Close this session now?</div></div>
+        <button class="btn sm" data-act="confirm-cancel">Cancel</button>
+        <button class="btn sm danger" data-act="close-session-confirm"
+          data-id="${session.id}">Close</button></div>`;
+    }
+    return `<div class="live-row"><span class="badge ${type.cls}">${type.label}</span>
+      <div class="live-txt"><div class="c-name">${who}</div>
+      <div class="s-sub" title="${escAttr(session.detail)}">${esc(session.detail)}</div></div>
+      <button class="btn sm" data-act="close-session-ask"
+        data-id="${session.id}">Close</button></div>`;
+  }).join('');
+  return `<section class="live-sessions ${extraClass}" aria-label="Active sessions">
+    <div class="live-head">Active sessions</div>
+    <div class="live-list">${sessions}</div></section>`;
 }
 
-function globalSectionsHTML() {
+function globalSectionsHTML(embeddedInStart = false) {
   let out = '';
   const hasOnboarding = false;
-  // Traffic parked on a decision outranks everything, including an
-  // elicitation: it is holding a call the user asked to be asked about, and
-  // an unanswered prompt lapses into a refusal.
-  if (state.approvals.length) {
-    out += '<div class="live-head">Waiting on you</div>'
-      + state.approvals.map(approvalNoteHTML).join('');
-  }
-  // Pending input requests outrank everything: an agent is paused on them.
-  // They show on every tab, in both the window and the dropdown.
-  if (state.elicitations.length) {
-    out += `${state.approvals.length ? '' : '<div class="live-head">Waiting on you</div>'}`
-      + state.elicitations.map(elicitationNoteHTML).join('');
+  const requestCount = activeRequestCount(state.approvals, state.elicitations);
+  const hasLiveSessions = state.tab === 'start'
+    && state.startView === 'guides'
+    && state.sessions.length > 0;
+  // Requests keep a compact, persistent route from every other screen. Their
+  // details and actions now live in the Inbox instead of being duplicated
+  // above every tab.
+  if (requestCount && state.tab !== 'inbox') {
+    const requests = activeRequests(state.approvals, state.elicitations);
+    const next = requests[0];
+    const label = requestCount === 1 ? '1 request needs attention'
+      : `${requestCount} requests need attention`;
+    const kinds = [
+      state.approvals.length
+        ? `${state.approvals.length} approval${state.approvals.length === 1 ? '' : 's'}`
+        : '',
+      state.elicitations.length
+        ? `${state.elicitations.length} input request${state.elicitations.length === 1 ? '' : 's'}`
+        : '',
+    ].filter(Boolean).join(' · ');
+    out += `<button class="request-banner" data-act="open-inbox"
+      aria-label="${escAttr(label)}. Open the Request Inbox.">
+      <span class="request-banner-ico">${state.approvals.length ? ICONS.shieldAlert : ICONS.bell}</span>
+      <span class="request-banner-copy"><b>${esc(label)}</b>
+        <span>${esc(kinds)} · next expires ${esc(timeLeft(next.expiresAt))}</span></span>
+      <span class="request-banner-cta">Open Inbox</span>
+    </button>`;
   }
   // Live sessions answer "what is my agent doing right now?", so they sit
   // with the connection guides rather than above every screen.
-  if (state.tab === 'start' && state.startView === 'guides' && state.sessions.length) {
-    out += '<div class="live-head">Active sessions</div>' + state.sessions.map((s) => {
-      const t = TYPES[s.type];
-      // who holds the session matters as much as what it's connected to
-      const who = s.agent ? `${esc(s.agent)} → ${esc(s.connection)}` : esc(s.connection);
-      if (state.confirm && state.confirm.kind === 'close-session' && state.confirm.id === s.id) {
-        return `<div class="live-row"><span class="badge ${t.cls}">${t.label}</span>
-          <div class="live-txt"><div class="c-name">${who}</div>
-          <div class="s-sub">Close this session now?</div></div>
-          <button class="btn sm" data-act="confirm-cancel">Cancel</button>
-          <button class="btn sm danger" data-act="close-session-confirm" data-id="${s.id}">Close</button></div>`;
-      }
-      return `<div class="live-row"><span class="badge ${t.cls}">${t.label}</span>
-        <div class="live-txt"><div class="c-name">${who}</div>
-        <div class="s-sub" title="${escAttr(s.detail)}">${esc(s.detail)}</div></div>
-        <button class="btn sm" data-act="close-session-ask" data-id="${s.id}">Close</button></div>`;
-    }).join('');
+  if (hasLiveSessions) {
+    out += liveSessionsHTML();
   }
-  return out ? `<div class="dd-global ${hasOnboarding ? 'onboarding-global' : ''}">${out}</div>` : '';
+  const requestRouteOnly = requestCount > 0
+    && state.tab !== 'inbox'
+    && !hasLiveSessions
+    && !hasOnboarding;
+  return out
+    ? `<div class="dd-global ${embeddedInStart ? 'start-global ' : ''}${
+      hasOnboarding ? 'onboarding-global' : ''
+    }${
+      requestRouteOnly ? ' request-route-only' : ''
+    }">${out}</div>`
+    : '';
+}
+
+function RequestInbox(): ReactNode {
+  const requests = activeRequests(state.approvals, state.elicitations);
+  const count = requests.length;
+  return (
+    <div className="request-inbox">
+      {count === 0
+        ? <div className="empty request-empty">
+            <div className="empty-ico"><Icon markup={ICONS.bell} /></div>
+            <h3>No requests waiting</h3>
+            <p>When an agent needs approval or a tool asks for input, it will appear here.</p>
+          </div>
+        : <div className="request-list">
+            {requests.map((item) => {
+              if (item.kind === 'approval') {
+                const approval = item.approval;
+                const riders = approval.waiting > 1
+                  ? `${approval.waiting} calls are waiting on this answer`
+                  : '1 call is waiting on this answer';
+                return (
+                  <button key={`approval:${approval.id}`}
+                    className="request-card request-card-approval"
+                    data-act="approval-open" data-id={approval.id}
+                    aria-label={`Review approval from ${approval.agent} for ${approval.connection}`}>
+                    <span className="request-card-ico"><Icon markup={ICONS.shieldAlert} /></span>
+                    <span className="request-card-body">
+                      <span className="request-card-top">
+                        <span className="request-kind">Approval</span>
+                      </span>
+                      <b>{approval.agent} {approvalUnit(approval)}</b>
+                      <span className="request-context">{approval.connection} · {approval.target}</span>
+                      <code className="request-summary">{approval.summary}</code>
+                      <span className="request-foot">{riders}</span>
+                    </span>
+                    <span className="request-card-side">
+                      <span className="request-when" title={absTime(approval.requested_at)}>
+                        {relTime(approval.requested_at)} · expires in {timeLeft(approval.expires_at)}
+                      </span>
+                      <span className="request-card-action">Review</span>
+                    </span>
+                  </button>
+                );
+              }
+              const request = item.elicitation;
+              return (
+                <button key={`elicitation:${request.id}`}
+                  className="request-card request-card-elicitation"
+                  data-act="elicit-open" data-id={request.id}
+                  aria-label={`Answer input request from ${request.connection}`}>
+                  <span className="request-card-ico"><Icon markup={ICONS.bell} /></span>
+                  <span className="request-card-body">
+                    <span className="request-card-top">
+                      <span className="request-kind">Input request</span>
+                    </span>
+                    <b>{request.connection} asked for input</b>
+                    <span className="request-context">{request.agent} is paused · {request.tool}</span>
+                    <span className="request-prompt">{request.prompt}</span>
+                  </span>
+                  <span className="request-card-side">
+                    <span className="request-when" title={absTime(request.requested_at)}>
+                      {relTime(request.requested_at)} · expires in {timeLeft(request.expires_at)}
+                    </span>
+                    <span className="request-card-action">Answer</span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>}
+    </div>
+  );
 }
 
 function secretsTableHTML(query = '') {
@@ -1201,25 +1311,6 @@ function confirmUnitLabel(c: ConnectionSummary): string {
   return c.mcp_path ? 'Ask before tool calls' : 'Ask before requests';
 }
 
-function confirmUnitHint(c: ConnectionSummary): string {
-  if (c.type === 'pg') {
-    return 'When no approval window is open, the next Postgres session is held for your answer. '
-      + 'Approval covers new sessions for the displayed window, never individual queries.';
-  }
-  if (c.mcp_path) {
-    const direct = c.agent_access.endpoint
-      ? Array.isArray(c.agent_access.allowed_tools)
-        ? ' Curated MCP calls must use the MCP address; the direct connection address refuses calls on the MCP path.'
-        : ' Calls through this tool’s connection address are confirmed as HTTP requests before their body is uploaded; opening or closing an MCP transport session is not.'
-      : '';
-    return 'When no approval window is open, the next tools/call is held for your answer. '
-      + 'Approval covers later calls for the displayed window; listing tools and opening a session are not asked about.'
-      + direct;
-  }
-  return 'When no approval window is open, the next request is held for your answer. '
-    + 'Approval covers later requests for the displayed window, including calls through this tool’s connection address.';
-}
-
 /**
  * The traffic-confirmation switch, in the detail panel under the tool's
  * connect section. Off by default: turning it on is the user asking to be
@@ -1238,7 +1329,6 @@ function confirmSectionHTML(c: ConnectionSummary): string {
       <div class="cd-confirm-row">
         <div class="cd-confirm-txt">
           <div class="cd-confirm-lbl">${esc(confirmUnitLabel(c))}</div>
-          <div class="cd-confirm-sub">${esc(confirmUnitHint(c))}</div>
         </div>
         <button class="switch ${on ? 'on' : ''}" role="switch" aria-checked="${on}"
           title="${on ? 'Traffic is confirmed with you first' : 'Traffic goes without asking'}"
@@ -1531,7 +1621,7 @@ function flatConnRowHTML(c: ConnectionSummary, reorderable = false): string {
       <span class="cat-ico kind-${kind}" aria-hidden="true">${entry ? ICONS[entry.icon] || '' : ''}</span>
       <div class="flat-tx"><b title="${escAttr(c.name)}">${esc(connectionRowName(c))}</b>
         <span>${connectionSublineHTML(c)}</span></div>
-      ${live ? `<span class="cc-live">● ${live} live</span>` : ''}
+      ${live ? `<span class="cc-live">${live} live</span>` : ''}
       <div class="cat-conn-status">${flatHealthHTML(c)}</div>
     </div></div>`;
 }
@@ -1917,12 +2007,18 @@ function filteredActivity(): ActivityEntry[] {
 }
 
 function ActivityView(): ReactNode {
+  const liveSessions = state.sessions.length
+    ? <SafeMarkup markup={liveSessionsHTML('activity-live-sessions')} />
+    : null;
   if (!state.activity.length) {
     return (
-      <div className="muted-note">
-        No activity yet.
-        {mode === 'dropdown' ? null : <><br />Requests and broker actions will appear here.</>}
-      </div>
+      <>
+        {liveSessions}
+        <div className="muted-note">
+          No activity yet.
+          {mode === 'dropdown' ? null : <><br />Requests and broker actions will appear here.</>}
+        </div>
+      </>
     );
   }
   // Agents seen in the loaded window; chips beat a dropdown at this scale.
@@ -1930,6 +2026,7 @@ function ActivityView(): ReactNode {
   const entries = filteredActivity().slice(0, ACTIVITY_RENDER_LIMIT);
   return (
     <>
+      {liveSessions}
       <div className="act-filters">
         <input id="activity-search" className="cat-search act-search" type="search"
           placeholder="Filter activity…" aria-label="Filter activity"
@@ -2052,6 +2149,7 @@ function startHTML(): string {
   return `<div class="start">
     <div class="start-hero"><h3>Connect your agent to tools and services</h3></div>
     ${startViewToggleHTML()}
+    ${globalSectionsHTML(true)}
     <div class="start-view-body">${body}</div>
   </div>`;
 }
@@ -2160,6 +2258,7 @@ function DropdownCatalogSearch({ kind }: { kind: 'tool' | 'secret' }): ReactNode
 }
 
 function TabContent(): ReactNode {
+  if (state.tab === 'inbox') return <RequestInbox />;
   if (state.tab === 'activity') return <ActivityView />;
   // The dropdown puts its catalog search inline above the list; the wide
   // window has it in the header instead (see MainWindow). The ready card
@@ -2309,8 +2408,10 @@ function ThemeButton({ className }: { className: string }): ReactNode {
 
 function MainWindow(): ReactNode {
   const takeover = brokerTakeover(state.broker, state.remoteSetup.open);
+  const requestCount = activeRequestCount(state.approvals, state.elicitations);
   const pageTitle = state.tab === 'connections' ? 'Connect tools'
     : state.tab === 'secrets' ? 'Manage secrets'
+    : state.tab === 'inbox' ? 'Request inbox'
     // The sidebar keeps the tab's title-case label; the page header speaks
     // sentence case.
     : state.tab === 'activity' ? 'Activity log'
@@ -2350,7 +2451,12 @@ function MainWindow(): ReactNode {
               {TABS.map((tab) => (
                 <button key={tab} className={`nav-item ${state.tab === tab ? 'on' : ''}`}
                   data-act="tab" data-tab={tab} disabled={Boolean(takeover)}>
-                  {tabLabel(tab)}
+                  <span className="nav-tab-label">{tabLabel(tab)}</span>
+                  {tab === 'inbox' && requestCount > 0
+                    ? <span className="nav-count" aria-label={`${requestCount} pending requests`}>
+                        {requestCount}
+                      </span>
+                    : null}
                 </button>
               ))}
             </div>
@@ -2379,9 +2485,20 @@ function MainWindow(): ReactNode {
               ? <div className="content broker-takeover"><BrokerPane kind={takeover} /></div>
               : <>
                   {state.tab !== 'start' && (
-                    <div className="dw-head"><h2>{pageTitle}</h2>{pageAction}</div>
+                    <div className="dw-head">
+                      <div className="dw-head-title">
+                        <h2>{pageTitle}</h2>
+                        {state.tab === 'inbox'
+                          ? <span className={`request-total ${requestCount ? 'has-requests' : ''}`}
+                              aria-live="polite">
+                              {requestCount} pending
+                            </span>
+                          : null}
+                      </div>
+                      {pageAction}
+                    </div>
                   )}
-                  <SafeMarkup markup={globalSectionsHTML()} />
+                  <SafeMarkup markup={state.tab === 'start' ? '' : globalSectionsHTML()} />
                   <div className="content"><TabContent /></div>
                 </>}
           </div>
@@ -2396,6 +2513,7 @@ function MainWindow(): ReactNode {
 
 function DropdownWindow(): ReactNode {
   const takeover = brokerTakeover(state.broker, state.remoteSetup.open);
+  const requestCount = activeRequestCount(state.approvals, state.elicitations);
   if (takeover) {
     return (
       <div className="surface dropdown-surface">
@@ -2426,10 +2544,15 @@ function DropdownWindow(): ReactNode {
         <div className="seg">
           {DROPDOWN_TABS.map((tab) => (
             <button key={tab} className={`seg-btn ${state.tab === tab ? 'on' : ''}`}
-              data-act="tab" data-tab={tab}>{tabLabel(tab)}</button>
+              data-act="tab" data-tab={tab}>
+              <span>{tabLabel(tab)}</span>
+              {tab === 'inbox' && requestCount > 0
+                ? <span className="seg-count">{requestCount}</span>
+                : null}
+            </button>
           ))}
         </div>
-        <SafeMarkup markup={globalSectionsHTML()} />
+        <SafeMarkup markup={state.tab === 'start' ? '' : globalSectionsHTML()} />
         <div className="content dd-content"><TabContent /></div>
       </div>
       <><Sheets /><SafeMarkup markup={endpointConfirmHTML() + deleteConnConfirmHTML()} /></>
@@ -3830,6 +3953,29 @@ function receiveMcpAuth(auth: McpAuthState): void {
 
 function settingsSheet() {
   const s = state.settings;
+  const notifications = state.notificationSettings;
+  const notificationModeBtn = (
+    value: NotificationSettings['mode'],
+    label: string,
+  ): string =>
+    `<button class="seg-btn ${notifications.mode === value ? 'on' : ''}"
+      data-act="set-notification-mode" data-id="${value}" role="radio"
+      aria-checked="${notifications.mode === value}">${label}</button>`;
+  const notificationRow = `<div class="set-row notification-setting"><div class="set-txt">
+      <div class="st-title">Request notifications</div>
+      <div class="st-sub">Native notifications are delivered by this computer and never include request details.</div></div>
+      <div class="seg in-form notification-modes" role="radiogroup" aria-label="Request notifications">
+        ${notificationModeBtn('off', 'Off')}
+        ${notificationModeBtn('when_hidden', 'When away')}
+        ${notificationModeBtn('always', 'Always')}
+      </div></div>`;
+  const notificationPreviewRow = notifications.mode === 'off' ? ''
+    : `<div class="set-row"><div class="set-txt"><div class="st-title">Show agent and tool names</div>
+      <div class="st-sub">Include only those names in notifications. Targets, summaries, and arguments always stay in the Inbox.</div></div>
+      <button class="switch ${notifications.showContext ? 'on' : ''}"
+        data-act="toggle-notification-context" role="checkbox"
+        aria-label="Show agent and tool names in notifications"
+        aria-checked="${notifications.showContext}"></button></div>`;
   const reauthRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Confirm before using saved secrets</div>
       <div class="st-sub">Use OS authentication before showing, copying, or sending a saved credential.</div></div>
       <button class="switch ${s.reauth_on_read ? 'on' : ''}" data-act="toggle-reauth" role="checkbox" aria-checked="${s.reauth_on_read ? 'true' : 'false'}"></button></div>`;
@@ -3853,7 +3999,7 @@ function settingsSheet() {
     : '';
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
     <div class="sheet wide"><h3>Settings</h3>
-    ${reauthRow}${presenceRow}${dockRow}
+    ${notificationRow}${notificationPreviewRow}${reauthRow}${presenceRow}${dockRow}
     <div class="sheet-actions"><button class="btn primary" data-act="sheet-cancel">Done</button></div></div>`;
 }
 
@@ -4009,12 +4155,18 @@ async function answerApproval(
   success: string,
 ): Promise<void> {
   if (state.approvalAnswering) return;
+  // "Stop asking" runs the broker's native authentication, whose sheet
+  // takes focus. In the menu-bar dropdown that focus loss would hide the
+  // chrome and dismiss this dialog mid-answer, so hold it open the way
+  // credential forms do.
+  if (decision === 'approve_all' && !await holdDropdownFormOpen()) return;
   state.approvalAnswering = id;
   render();
   let answered = false;
   const ok = await run(async () => {
     answered = await invoke('respond_approval', { id, decision });
   });
+  if (decision === 'approve_all') releaseDropdownForm();
   if (state.approvalAnswering === id) state.approvalAnswering = null;
   if (!ok) {
     render();
@@ -4515,6 +4667,7 @@ function closeSheet() {
   state.connPreset = null;
   render();
   if (releaseDropdown) releaseDropdownForm();
+  void consumePendingOpenRequests();
 }
 
 // Draft fields compared against the sheet-open baseline to decide whether
@@ -4658,6 +4811,9 @@ document.addEventListener('click', async (e) => {
       resetScroll();
       break;
     }
+    case 'open-inbox':
+      showRequestInbox();
+      break;
     case 'broker-menu': state.brokerMenuOpen = !state.brokerMenuOpen; render(); break;
     case 'broker-pick-local': {
       state.brokerMenuOpen = false;
@@ -5352,10 +5508,14 @@ document.addEventListener('click', async (e) => {
       break;
     case 'confirm-off':
       // Removing a gate the user put up: the broker authenticates before it
-      // applies, so a refused sheet leaves the switch on.
+      // applies, so a refused sheet leaves the switch on. That native sheet
+      // takes focus, so the menu-bar dropdown must hold itself open the way
+      // credential forms do.
+      if (!await holdDropdownFormOpen()) break;
       if (await run(() => invoke('set_confirm_mode', { connectionId: btn.dataset.conn || '', on: false }))) {
         toast('🔕 No longer asking about this tool’s traffic');
       }
+      releaseDropdownForm();
       await refresh('connections');
       break;
 
@@ -5455,6 +5615,42 @@ document.addEventListener('click', async (e) => {
     case 'sheet-cancel': requestCloseSheet(); break;
     case 'discard-keep': state.confirmDiscard = false; render(); break;
     case 'discard-confirm': closeSheet(); break;
+    case 'set-notification-mode': {
+      if (id !== 'off' && id !== 'when_hidden' && id !== 'always') break;
+      const settings: NotificationSettings = {
+        ...state.notificationSettings,
+        mode: id,
+      };
+      const settingsEpoch = notificationSettingsEpoch;
+      try {
+        const saved = await invoke('set_notification_settings', { settings });
+        if (settingsEpoch === notificationSettingsEpoch) state.notificationSettings = saved;
+        const label = id === 'off' ? 'off' : id === 'always' ? 'always on' : 'on when you’re away';
+        toast(`🔔 Request notifications ${label}`);
+      } catch (error) {
+        toast('⚠ ' + errorMessage(error));
+      }
+      render();
+      break;
+    }
+    case 'toggle-notification-context': {
+      const settings: NotificationSettings = {
+        ...state.notificationSettings,
+        showContext: !state.notificationSettings.showContext,
+      };
+      const settingsEpoch = notificationSettingsEpoch;
+      try {
+        const saved = await invoke('set_notification_settings', { settings });
+        if (settingsEpoch === notificationSettingsEpoch) state.notificationSettings = saved;
+        toast(settings.showContext
+          ? '🔔 Notifications show agent and tool names'
+          : '🔔 Notification previews are private');
+      } catch (error) {
+        toast('⚠ ' + errorMessage(error));
+      }
+      render();
+      break;
+    }
     case 'toggle-reauth':
       {
         const on = !state.settings.reauth_on_read;
@@ -5744,12 +5940,20 @@ async function boot() {
   // A webview reload must not leave a stale native lock behind. Forms acquire
   // it again before they are shown.
   if (mode === 'dropdown') await invoke('ui_set_dropdown_form_active', { active: false });
+  // This desktop setting can be edited from either webview. Subscribe before
+  // the initial read so a concurrent save cannot be lost during boot.
+  await listen('aka://notification-settings-changed', (event) => {
+    notificationSettingsEpoch += 1;
+    state.notificationSettings = event.payload;
+    if (booted) render();
+  });
   // Which broker this app manages decides everything else about boot.
   try { setBrokerProfile(await invoke('get_broker_profile')); } catch (e) { console.error(e); }
   // Choose the landing tab before the first paint: nothing configured yet
   // means the walkthrough is the useful screen.
   await Promise.all([
     loadLocalUsername(),
+    loadNotificationSettings(),
     load('connections', 'list_connections'),
     loadIdentity(),
   ]);
@@ -5775,7 +5979,7 @@ async function boot() {
   // Relative timestamps and approval-window horizons drift; refresh their
   // rendered state every minute while the relevant tab is open.
   setInterval(() => {
-    if ((state.tab === 'activity' || state.tab === 'connections')
+    if ((state.tab === 'activity' || state.tab === 'connections' || state.tab === 'inbox')
         && !state.sheet && !state.menuOpen) render();
   }, 60000);
   // Approval deadlines are measured in seconds; keep the visible countdown
@@ -5868,6 +6072,12 @@ async function boot() {
     state.sheetErrors = {};
     render();
   });
+  await listen('aka://open-requests', () => {
+    void consumePendingOpenRequests();
+  });
+  // A tray click may have preceded this listener or waited behind a
+  // protected dropdown form.
+  await consumePendingOpenRequests();
   await listen('aka://dropdown-shown', () => {
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
   });

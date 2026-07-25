@@ -54,6 +54,31 @@ struct ShellConfig {
     mode: Option<String>,
     #[serde(default)]
     remote_url: Option<String>,
+    /// Native request notifications are a property of this desktop shell,
+    /// not of whichever local or hosted broker it currently manages.
+    #[serde(default)]
+    notifications: NotificationSettings,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationMode {
+    Off,
+    #[default]
+    WhenHidden,
+    Always,
+}
+
+/// This-machine notification preferences. Preview text is deliberately
+/// limited to agent and connection names; request summaries and details can
+/// contain paths, arguments, or other lock-screen-inappropriate context.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationSettings {
+    #[serde(default)]
+    pub mode: NotificationMode,
+    #[serde(default)]
+    pub show_context: bool,
 }
 
 /// The remote link: the backend plus its event-stream task.
@@ -76,6 +101,10 @@ pub struct BrokerState {
     profile: Mutex<BrokerProfileInfo>,
     data_dir: PathBuf,
     tokens: TokenStore,
+    /// Serializes `shell.json` read-modify-write cycles. Broker transitions
+    /// and notification settings can be changed from different async tasks;
+    /// neither is allowed to overwrite the other's fields.
+    shell_write: Mutex<()>,
     /// Transition attempts, monotonically numbered. A transition captures
     /// the counter when it begins and refuses to commit if another attempt
     /// began while it awaited (probe/startup): the user's latest choice
@@ -104,13 +133,10 @@ fn load_config(data_dir: &Path) -> ShellConfig {
         .unwrap_or_default()
 }
 
-fn save_config(data_dir: &Path, config: &ShellConfig) {
-    let _ = std::fs::create_dir_all(data_dir);
-    if let Ok(bytes) = serde_json::to_vec_pretty(config) {
-        if let Err(error) = std::fs::write(config_path(data_dir), bytes) {
-            tracing::warn!(%error, "could not persist the broker-mode choice");
-        }
-    }
+fn save_config(data_dir: &Path, config: &ShellConfig) -> Result<(), String> {
+    std::fs::create_dir_all(data_dir).map_err(|error| error.to_string())?;
+    let bytes = serde_json::to_vec_pretty(config).map_err(|error| error.to_string())?;
+    std::fs::write(config_path(data_dir), bytes).map_err(|error| error.to_string())
 }
 
 /// The saved remote URL, when the persisted mode choice is remote.
@@ -120,6 +146,12 @@ pub fn saved_remote(data_dir: &Path) -> Option<String> {
         Some("remote") => config.remote_url,
         _ => None,
     }
+}
+
+/// Notification settings are loaded before the broker starts so even an
+/// early remote event observes the user's saved delivery preference.
+pub fn saved_notification_settings(data_dir: &Path) -> NotificationSettings {
+    load_config(data_dir).notifications
 }
 
 impl BrokerState {
@@ -134,6 +166,7 @@ impl BrokerState {
             profile: Mutex::new(BrokerProfileInfo::local()),
             tokens: TokenStore::new(data_dir.clone()),
             data_dir,
+            shell_write: Mutex::new(()),
             transition_epoch: Mutex::new(0),
         }
     }
@@ -169,6 +202,7 @@ impl BrokerState {
             }),
             tokens,
             data_dir,
+            shell_write: Mutex::new(()),
             transition_epoch: Mutex::new(0),
         }
     }
@@ -207,8 +241,29 @@ impl BrokerState {
         self.profile.lock().unwrap().clone()
     }
 
+    pub fn notification_settings(&self) -> NotificationSettings {
+        let _write = self.shell_write.lock().unwrap();
+        load_config(&self.data_dir).notifications
+    }
+
+    pub fn set_notification_settings(
+        &self,
+        settings: NotificationSettings,
+    ) -> Result<NotificationSettings, String> {
+        self.update_shell_config(|config| config.notifications = settings)?;
+        Ok(settings)
+    }
+
+    fn update_shell_config(&self, update: impl FnOnce(&mut ShellConfig)) -> Result<(), String> {
+        let _write = self.shell_write.lock().unwrap();
+        let mut config = load_config(&self.data_dir);
+        update(&mut config);
+        save_config(&self.data_dir, &config)
+    }
+
     fn set_profile(&self, app: &AppHandle, profile: BrokerProfileInfo) {
         *self.profile.lock().unwrap() = profile.clone();
+        crate::attention::set_scope(app, &profile.mode, profile.url.as_deref());
         let _ = app.emit(EVT_BROKER, profile);
     }
 
@@ -267,16 +322,19 @@ impl BrokerState {
             if let Err(error) = self.tokens.save(&url, &token) {
                 tracing::warn!(%error, "could not store the management token");
             }
-            save_config(
-                &self.data_dir,
-                &ShellConfig {
-                    mode: Some("remote".into()),
-                    remote_url: Some(url.clone()),
-                },
-            );
+            if let Err(error) = self.update_shell_config(|config| {
+                config.mode = Some("remote".into());
+                config.remote_url = Some(url.clone());
+            }) {
+                tracing::warn!(%error, "could not persist the broker-mode choice");
+            }
             self.teardown_remote();
             let stale_local = self.local.lock().unwrap().take();
             *self.backend.write().unwrap() = backend.clone();
+            // Establish the notification scope before the event stream can
+            // reconcile its first snapshot. `set_profile` repeats this with
+            // the same key, which is intentionally a no-op.
+            crate::attention::set_scope(app, "remote", Some(&url));
             self.arm_sse(app, backend);
             let profile = BrokerProfileInfo {
                 mode: "remote".into(),
@@ -380,15 +438,16 @@ impl BrokerState {
                     let started = runtime.take().expect("freshly started runtime");
                     let backend: Arc<dyn ManagementBackend> =
                         Arc::new(aka_core::manage::LocalBackend::new(started.broker.clone()));
+                    crate::attention::set_scope(app, "local", None);
                     *self.local.lock().unwrap() = Some(started);
                     *self.backend.write().unwrap() = backend;
-                    save_config(
-                        &self.data_dir,
-                        &ShellConfig {
-                            mode: Some("local".into()),
-                            remote_url: self.profile().url,
-                        },
-                    );
+                    let remote_url = self.profile().url;
+                    if let Err(error) = self.update_shell_config(|config| {
+                        config.mode = Some("local".into());
+                        config.remote_url = remote_url;
+                    }) {
+                        tracing::warn!(%error, "could not persist the broker-mode choice");
+                    }
                     let profile = BrokerProfileInfo::local();
                     self.set_profile(app, profile.clone());
                     Some(profile)
@@ -429,42 +488,61 @@ impl BrokerState {
                 sse_backend,
                 move |event| {
                     // A reconnect may replay an old request event, while a
-                    // lag resync may be the only signal for a live one. Check
-                    // the authoritative queue before bringing a hidden window
-                    // forward in either case.
-                    let should_surface = matches!(
+                    // lag resync may be the only signal for a live one. The
+                    // notification coordinator reconciles the authoritative
+                    // queue so replays do not duplicate native alerts.
+                    let should_reconcile = matches!(
                         &event,
                         aka_api::ManageEvent::ApprovalsChanged | aka_api::ManageEvent::Resync
                     );
                     crate::events::emit_manage_event(&event_app, event);
-                    if should_surface {
+                    if should_reconcile {
+                        let Some(refresh_generation) =
+                            crate::attention::begin_remote_refresh(&event_app)
+                        else {
+                            crate::windows::surface_for_approval(&event_app);
+                            return;
+                        };
                         let backend = event_backend.clone();
                         let app = event_app.clone();
                         tauri::async_runtime::spawn(async move {
-                            let should_surface = match tokio::time::timeout(
+                            match tokio::time::timeout(
                                 std::time::Duration::from_secs(5),
                                 backend.approvals(),
                             )
                             .await
                             {
-                                Ok(Ok(approvals)) => !approvals.is_empty(),
+                                Ok(Ok(approvals)) => {
+                                    crate::attention::reconcile_remote(
+                                        &app,
+                                        refresh_generation,
+                                        approvals,
+                                    );
+                                }
                                 Ok(Err(error)) => {
                                     // The event itself made it through. If
                                     // the authoritative follow-up fails,
                                     // prefer one unnecessary window over a
                                     // real prompt timing out unseen.
                                     tracing::warn!(%error, "could not check the remote approval queue");
-                                    true
+                                    if crate::attention::remote_refresh_is_current(
+                                        &app,
+                                        refresh_generation,
+                                    ) {
+                                        crate::windows::surface_for_approval(&app);
+                                    }
                                 }
                                 Err(_) => {
                                     tracing::warn!(
                                         "remote approval queue check timed out; surfacing defensively"
                                     );
-                                    true
+                                    if crate::attention::remote_refresh_is_current(
+                                        &app,
+                                        refresh_generation,
+                                    ) {
+                                        crate::windows::surface_for_approval(&app);
+                                    }
                                 }
-                            };
-                            if should_surface {
-                                crate::windows::surface_for_approval(&app);
                             }
                         });
                     }
@@ -484,5 +562,53 @@ impl BrokerState {
             _backend: backend,
             sse_task: task,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn older_shell_config_defaults_to_private_background_notifications() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            config_path(dir.path()),
+            br#"{"mode":"remote","remote_url":"https://broker.example"}"#,
+        )
+        .unwrap();
+
+        let config = load_config(dir.path());
+        assert_eq!(config.mode.as_deref(), Some("remote"));
+        assert_eq!(
+            config.notifications,
+            NotificationSettings {
+                mode: NotificationMode::WhenHidden,
+                show_context: false,
+            }
+        );
+    }
+
+    #[test]
+    fn saving_notification_settings_preserves_the_broker_choice() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = ShellConfig {
+            mode: Some("remote".into()),
+            remote_url: Some("https://broker.example".into()),
+            ..Default::default()
+        };
+        save_config(dir.path(), &config).unwrap();
+
+        config = load_config(dir.path());
+        config.notifications = NotificationSettings {
+            mode: NotificationMode::Always,
+            show_context: true,
+        };
+        save_config(dir.path(), &config).unwrap();
+
+        let saved = load_config(dir.path());
+        assert_eq!(saved.mode.as_deref(), Some("remote"));
+        assert_eq!(saved.remote_url.as_deref(), Some("https://broker.example"));
+        assert_eq!(saved.notifications, config.notifications);
     }
 }

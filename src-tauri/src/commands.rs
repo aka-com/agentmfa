@@ -22,7 +22,7 @@ use aka_api::{IssuedEndpointDto, ManageError};
 use aka_core::store::ConnectionSpec;
 use aka_core::types::{ConnectionConfig, PgSslMode};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter as _, State};
+use tauri::{AppHandle, Emitter as _, Manager as _, State};
 use tauri_plugin_clipboard_manager::ClipboardExt as _;
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -55,6 +55,7 @@ type FormResult<T> = Result<T, FormError>;
 /// activity list windows its rows, so the cost of a larger tail is the read
 /// and the retained entries, not the DOM.
 const ACTIVITY_VIEW_LIMIT: usize = 500;
+pub const EVT_NOTIFICATION_SETTINGS: &str = "aka://notification-settings-changed";
 
 /// The local OS account name is presentation-only: connection forms use it
 /// as a hint, never as a submitted or persisted value.
@@ -1316,6 +1317,29 @@ pub async fn set_presence_window(state: State<'_, AppState>, secs: u64) -> CmdRe
         .map_err(|e| e.to_string())
 }
 
+/// This desktop's native request-notification preferences. They live beside
+/// the local/remote shell choice, never on the managed broker.
+#[tauri::command]
+pub fn get_notification_settings(
+    state: State<'_, AppState>,
+) -> crate::broker_mode::NotificationSettings {
+    state.brokers.notification_settings()
+}
+
+#[tauri::command]
+pub fn set_notification_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    settings: crate::broker_mode::NotificationSettings,
+) -> CmdResult<crate::broker_mode::NotificationSettings> {
+    let saved = state.brokers.set_notification_settings(settings)?;
+    if let Some(attention) = app.try_state::<crate::attention::RequestAttention>() {
+        attention.set_settings(saved);
+    }
+    let _ = app.emit(EVT_NOTIFICATION_SETTINGS, saved);
+    Ok(saved)
+}
+
 /// Register every command with the Tauri builder.
 pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
@@ -1369,10 +1393,13 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         set_show_websockets,
         set_menu_bar_hides_dock,
         set_presence_window,
+        get_notification_settings,
+        set_notification_settings,
         crate::windows::ui_set_mode,
         crate::windows::ui_hide_main,
         crate::windows::ui_hide_dropdown,
         crate::windows::ui_set_dropdown_form_active,
+        crate::windows::ui_take_open_requests,
     ]
 }
 

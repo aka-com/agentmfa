@@ -7,6 +7,7 @@
 //! and windows, and exposes the minimal, OS-confirmation-gated
 //! command surface.
 
+mod attention;
 mod auth;
 mod broker_mode;
 mod clipboard;
@@ -284,16 +285,24 @@ pub fn run() {
                 .map(|paths| paths.data_dir)
                 .unwrap_or_default();
 
+            // Attention delivery must exist before either broker starts: a
+            // saved remote can reconnect and replay a waiting request while
+            // the rest of setup is still installing the windows and tray.
+            let notification_settings = broker_mode::saved_notification_settings(&data_dir);
+            app.manage(attention::RequestAttention::new(notification_settings));
+
             // The saved mode decides what starts. Local failures are fatal
             // dialogs (the broker is the product); a remote broker that is
             // down is a recoverable in-window state, never a dialog.
             let brokers = match broker_mode::saved_remote(&data_dir) {
                 Some(url) => {
+                    attention::set_scope(&handle, "remote", Some(&url));
                     let state = Arc::new(BrokerState::new_remote_pending(data_dir, url));
                     state.clone().start_saved_remote(handle.clone());
                     state
                 }
                 None => {
+                    attention::set_scope(&handle, "local", None);
                     let runtime = match start_local_runtime(&handle) {
                         Ok(runtime) => runtime,
                         Err(e) => fatal_startup(app, e),
@@ -305,6 +314,7 @@ pub fn run() {
             windows::setup_app_menu(&handle)?;
             windows::setup_dropdown_panel(&handle)?;
             windows::setup_tray(&handle)?;
+            attention::sync_tray(&handle);
 
             // The regular main window is shown at launch. The always-present
             // tray icon toggles a separate compact dropdown window.
