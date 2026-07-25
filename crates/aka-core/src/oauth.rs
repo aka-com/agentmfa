@@ -229,10 +229,11 @@ impl LoopbackCatcher {
         wait_for_code_on(&self.listener, expected_state).await
     }
 
-    /// Await any redirect and hand back `(code, state)` unverified — for
+    /// Await any redirect and hand back `(code, state, iss)` unverified — for
     /// relays where the party that minted the state nonce (the broker)
-    /// verifies it, not this catcher.
-    pub async fn wait_for_redirect(&self) -> Result<(String, String), String> {
+    /// verifies it, not this catcher. `iss` is the RFC 9207 issuer when the
+    /// provider supplied one.
+    pub async fn wait_for_redirect(&self) -> Result<(String, String, Option<String>), String> {
         wait_for_redirect_on(&self.listener).await
     }
 }
@@ -272,7 +273,7 @@ async fn wait_for_code_on(
     listener: &tokio::net::TcpListener,
     expected_state: &str,
 ) -> Result<String, String> {
-    let (code, _state) = wait_for_redirect_verified(listener, Some(expected_state)).await?;
+    let (code, _state, _iss) = wait_for_redirect_verified(listener, Some(expected_state)).await?;
     Ok(code)
 }
 
@@ -281,17 +282,17 @@ async fn wait_for_code_on(
 /// redirect was received, not that the sign-in succeeded.
 async fn wait_for_redirect_on(
     listener: &tokio::net::TcpListener,
-) -> Result<(String, String), String> {
+) -> Result<(String, String, Option<String>), String> {
     wait_for_redirect_verified(listener, None).await
 }
 
-/// The redirect-catching core: hands back `(code, state)`. With an
+/// The redirect-catching core: hands back `(code, state, iss)`. With an
 /// `expected_state`, a mismatched nonce answers the browser with a 400
 /// rather than the success page — the sign-in did fail.
 async fn wait_for_redirect_verified(
     listener: &tokio::net::TcpListener,
     expected_state: Option<&str>,
-) -> Result<(String, String), String> {
+) -> Result<(String, String, Option<String>), String> {
     loop {
         let (mut stream, peer) = listener
             .accept()
@@ -322,11 +323,13 @@ async fn wait_for_redirect_verified(
         }
         let mut code = None;
         let mut state = None;
+        let mut iss = None;
         let mut error = None;
         for (key, value) in url.query_pairs() {
             match key.as_ref() {
                 "code" => code = Some(value.into_owned()),
                 "state" => state = Some(value.into_owned()),
+                "iss" => iss = Some(value.into_owned()),
                 "error" => error = Some(value.into_owned()),
                 _ => {}
             }
@@ -357,7 +360,7 @@ async fn wait_for_redirect_verified(
             "You can close this window and return to AgentMFA.",
         )
         .await;
-        return Ok((code, state));
+        return Ok((code, state, iss));
     }
 }
 

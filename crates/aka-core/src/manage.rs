@@ -810,6 +810,10 @@ pub struct McpAuthStartBody {
 pub struct McpAuthDeliverBody {
     pub code: String,
     pub state: String,
+    /// RFC 9207 issuer from the redirect, when the catcher forwarded it.
+    /// Optional so an older shell that omits it still deserializes.
+    #[serde(default)]
+    pub iss: Option<String>,
 }
 
 /// `PATCH /v1/manage/settings`: partial update, absent fields unchanged.

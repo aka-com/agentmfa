@@ -1021,12 +1021,12 @@ async fn an_external_redirect_sign_in_completes_via_code_delivery() {
         catcher.wait_for_redirect(),
     );
     assert!(landing.expect("authorize hop").status().is_success());
-    let (code, state) = redirect.expect("redirect reaches the catcher");
+    let (code, state, iss) = redirect.expect("redirect reaches the catcher");
     // A wrong state is refused without consuming the session's waiter...
     // (the sender is one-shot, so verify only the happy path here.)
-    assert!(broker.ui_mcp_auth_deliver_code(&session_id, code, state));
+    assert!(broker.ui_mcp_auth_deliver_code(&session_id, code, state, iss));
     // A second delivery has nothing to fulfill.
-    assert!(!broker.ui_mcp_auth_deliver_code(&session_id, "again".into(), "x".into()));
+    assert!(!broker.ui_mcp_auth_deliver_code(&session_id, "again".into(), "x".into(), None));
 
     let done = wait_for(&broker, &session_id, "completion", |state| {
         state.phase.is_terminal()

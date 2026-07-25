@@ -167,6 +167,24 @@ impl Bridge {
         if let Some(label) = &self.label {
             request = request.header("x-agentmfa-client", label.clone());
         }
+        // SEP-2243: surface the JSON-RPC method (and named tool/prompt) as
+        // routing headers so the host and any load balancer between it and
+        // us can route without parsing the body. A batch or non-JSON line
+        // carries none — the body stays authoritative either way.
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(message) {
+            if let Some(method) = value.get("method").and_then(|m| m.as_str()) {
+                request = request.header("mcp-method", method);
+                if let Some(name) = value
+                    .get("params")
+                    .and_then(|params| params.get("name"))
+                    .and_then(|name| name.as_str())
+                {
+                    if let Ok(header) = reqwest::header::HeaderValue::from_str(name) {
+                        request = request.header("mcp-name", header);
+                    }
+                }
+            }
+        }
         let response = match request.send().await {
             Ok(response) => response,
             Err(error) if error.is_connect() => return Ok(Relay::Unreachable),
@@ -376,6 +394,9 @@ mod tests {
                 "tools/call" => {
                     assert_eq!(headers.get("mcp-session-id").unwrap(), "sess-1");
                     assert_eq!(headers.get("x-agentmfa-client").unwrap(), "test-client");
+                    // SEP-2243 routing headers, derived from the body.
+                    assert_eq!(headers.get("mcp-method").unwrap(), "tools/call");
+                    assert_eq!(headers.get("mcp-name").unwrap(), "search");
                     (
                         [("content-type", "text/event-stream")],
                         "event: message\ndata: {\"jsonrpc\":\"2.0\",\n\
@@ -422,7 +443,7 @@ mod tests {
         assert!(none.is_empty(), "202 carries no reply");
 
         let Relay::Messages(called) = bridge
-            .post(r#"{"jsonrpc":"2.0","id":2,"method":"tools/call"}"#)
+            .post(r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search"}}"#)
             .await
             .unwrap()
         else {

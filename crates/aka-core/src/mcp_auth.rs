@@ -215,8 +215,10 @@ struct SessionSlot {
     state: McpAuthState,
     task: Option<tokio::task::JoinHandle<()>>,
     /// External-redirect sessions: fulfilled by the remote shell's code
-    /// delivery; the flow task is waiting on the paired receiver.
-    code_tx: Option<tokio::sync::oneshot::Sender<(String, String)>>,
+    /// delivery; the flow task is waiting on the paired receiver. The tuple
+    /// is `(code, state, iss)` — the RFC 9207 issuer, when the catcher
+    /// forwarded it.
+    code_tx: Option<tokio::sync::oneshot::Sender<(String, String, Option<String>)>>,
 }
 
 /// Live and recently finished auth sessions, owned by the broker.
@@ -255,13 +257,20 @@ impl McpAuthSessions {
         }
     }
 
-    fn attach_code_tx(&self, id: &Uuid, tx: tokio::sync::oneshot::Sender<(String, String)>) {
+    fn attach_code_tx(
+        &self,
+        id: &Uuid,
+        tx: tokio::sync::oneshot::Sender<(String, String, Option<String>)>,
+    ) {
         if let Some(slot) = self.slots.lock().unwrap().get_mut(id) {
             slot.code_tx = Some(tx);
         }
     }
 
-    fn take_code_tx(&self, id: &Uuid) -> Option<tokio::sync::oneshot::Sender<(String, String)>> {
+    fn take_code_tx(
+        &self,
+        id: &Uuid,
+    ) -> Option<tokio::sync::oneshot::Sender<(String, String, Option<String>)>> {
         self.slots
             .lock()
             .unwrap()
@@ -317,7 +326,7 @@ enum RedirectMode {
     Loopback,
     External {
         redirect_uri: String,
-        code_rx: tokio::sync::oneshot::Receiver<(String, String)>,
+        code_rx: tokio::sync::oneshot::Receiver<(String, String, Option<String>)>,
     },
 }
 
@@ -364,11 +373,18 @@ impl Broker {
         Ok(state)
     }
 
-    /// Deliver the authorization code a remote shell's catcher received.
-    /// Returns false when the session is unknown or not waiting.
-    pub fn ui_mcp_auth_deliver_code(&self, id: &Uuid, code: String, state: String) -> bool {
+    /// Deliver the authorization code a remote shell's catcher received,
+    /// with the RFC 9207 `iss` if the catcher forwarded it. Returns false
+    /// when the session is unknown or not waiting.
+    pub fn ui_mcp_auth_deliver_code(
+        &self,
+        id: &Uuid,
+        code: String,
+        state: String,
+        iss: Option<String>,
+    ) -> bool {
         match self.mcp_auth.take_code_tx(id) {
-            Some(tx) => tx.send((code, state)).is_ok(),
+            Some(tx) => tx.send((code, state, iss)).is_ok(),
             None => false,
         }
     }
@@ -590,6 +606,30 @@ fn require_secure(url: &Url, what: &str) -> std::result::Result<(), FlowFailure>
     )))
 }
 
+/// RFC 9207 mix-up defence: the authorization response's `iss` must name the
+/// server we discovered. A present `iss` is always checked; an absent one is
+/// only fatal when the server declared it would send one — today's servers
+/// mostly do not, and the spec asks clients to validate now and reject
+/// unconditionally later.
+fn validate_iss(
+    returned: Option<&str>,
+    expected: &str,
+    iss_supported: bool,
+) -> std::result::Result<(), FlowFailure> {
+    match returned {
+        Some(iss) if iss.trim_end_matches('/') == expected.trim_end_matches('/') => Ok(()),
+        Some(iss) => Err(FlowFailure::hinted(
+            format!("the authorization response came from an unexpected issuer ({iss})"),
+            "Run the sign-in again.",
+        )),
+        None if iss_supported => Err(FlowFailure::hinted(
+            "the authorization response omitted its issuer identity",
+            "Run the sign-in again.",
+        )),
+        None => Ok(()),
+    }
+}
+
 /* ------------------------------ flow driver ------------------------------- */
 
 struct FlowFailure {
@@ -674,7 +714,7 @@ async fn run_flow(
     broadcast(broker, &session_id, McpAuthPhase::Registering);
     enum CodeSource {
         Listener(TcpListener),
-        Delivery(tokio::sync::oneshot::Receiver<(String, String)>),
+        Delivery(tokio::sync::oneshot::Receiver<(String, String, Option<String>)>),
     }
     let (redirect_uri, code_source) = match mode {
         RedirectMode::Loopback => {
@@ -790,7 +830,7 @@ async fn run_flow(
         match code_source {
             CodeSource::Listener(listener) => wait_for_callback(listener, &state_nonce).await,
             CodeSource::Delivery(code_rx) => {
-                let (code, state) = code_rx.await.map_err(|_| {
+                let (code, state, iss) = code_rx.await.map_err(|_| {
                     FlowFailure::plain("the sign-in was cancelled before the browser returned")
                 })?;
                 // The remote shell's catcher forwards whatever state came
@@ -801,11 +841,11 @@ async fn run_flow(
                         "Run the sign-in again.",
                     ));
                 }
-                Ok(code)
+                Ok((code, iss))
             }
         }
     };
-    let code = match tokio::time::timeout(BROWSER_TIMEOUT, wait_for_code).await {
+    let (code, returned_iss) = match tokio::time::timeout(BROWSER_TIMEOUT, wait_for_code).await {
         Ok(result) => result?,
         Err(_) => {
             return Err(FlowFailure::hinted(
@@ -814,6 +854,13 @@ async fn run_flow(
             ))
         }
     };
+    // RFC 9207: confirm the redirect came from the issuer we discovered
+    // before the code is spent, closing the mix-up attack.
+    validate_iss(
+        returned_iss.as_deref(),
+        &discovered.issuer,
+        discovered.iss_supported,
+    )?;
 
     /* 5 — exchange */
     broadcast(broker, &session_id, McpAuthPhase::Exchanging);
@@ -993,6 +1040,12 @@ struct Discovered {
     /// RFC 8707 resource indicator carried through authorize + exchange.
     resource: String,
     scope: Option<String>,
+    /// The authorization server's issuer identifier (RFC 8414 `issuer`),
+    /// used to validate the `iss` on the redirect (RFC 9207).
+    issuer: String,
+    /// The server advertised `authorization_response_iss_parameter_supported`:
+    /// an `iss`-less redirect must then be rejected, not tolerated.
+    iss_supported: bool,
 }
 
 async fn discover(
@@ -1118,12 +1171,25 @@ async fn discover(
         if let Some(registration) = &registration_endpoint {
             require_secure(registration, "the registration endpoint")?;
         }
+        // The issuer we validate the redirect against (RFC 9207). Prefer the
+        // metadata's own `issuer`; fall back to the URL we discovered it at.
+        let issuer_id = metadata
+            .get("issuer")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| issuer.as_str().trim_end_matches('/').to_string());
+        let iss_supported = metadata
+            .get("authorization_response_iss_parameter_supported")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         return Ok(Discovered {
             authorization_endpoint,
             token_endpoint,
             registration_endpoint,
             resource,
             scope,
+            issuer: issuer_id,
+            iss_supported,
         });
     }
     Err(FlowFailure::hinted(
@@ -1154,6 +1220,10 @@ async fn register(
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
         "token_endpoint_auth_method": "none",
+        // SEP-837: a desktop app catching the redirect on a loopback socket
+        // is an OIDC native client. Declaring it lets an OpenID-Connect
+        // authorization server apply the right redirect-URI rules.
+        "application_type": "native",
     });
     if let Some(scope) = &discovered.scope {
         body["scope"] = json!(scope);
@@ -1200,7 +1270,7 @@ async fn register(
 async fn wait_for_callback(
     listener: TcpListener,
     expected_state: &str,
-) -> std::result::Result<String, FlowFailure> {
+) -> std::result::Result<(String, Option<String>), FlowFailure> {
     for _ in 0..64 {
         let Ok((mut stream, _)) = listener.accept().await else {
             continue;
@@ -1242,12 +1312,14 @@ async fn wait_for_callback(
         }
         let mut code = None;
         let mut state = None;
+        let mut iss = None;
         let mut error = None;
         let mut error_description = None;
         for (key, value) in url.query_pairs() {
             match key.as_ref() {
                 "code" => code = Some(value.to_string()),
                 "state" => state = Some(value.to_string()),
+                "iss" => iss = Some(value.to_string()),
                 "error" => error = Some(value.to_string()),
                 "error_description" => error_description = Some(value.to_string()),
                 _ => {}
@@ -1285,7 +1357,7 @@ async fn wait_for_callback(
             "You’re connected. You can close this tab and return to AgentMFA.",
         )
         .await;
-        return Ok(code);
+        return Ok((code, iss));
     }
     Err(FlowFailure::plain(
         "too many unrelated requests hit the sign-in listener",
@@ -1523,6 +1595,19 @@ mod tests {
             Some(23)
         );
         assert_eq!(find_header_end(b"GET / HTTP/1.1\r\n"), None);
+    }
+
+    #[test]
+    fn iss_is_validated_per_rfc_9207() {
+        let expected = "https://auth.example.com";
+        // A matching issuer passes, trailing slash and all.
+        assert!(validate_iss(Some("https://auth.example.com"), expected, true).is_ok());
+        assert!(validate_iss(Some("https://auth.example.com/"), expected, true).is_ok());
+        // A different issuer is a mix-up attempt.
+        assert!(validate_iss(Some("https://evil.example.com"), expected, true).is_err());
+        // Absent iss: fatal only when the server said it would send one.
+        assert!(validate_iss(None, expected, true).is_err());
+        assert!(validate_iss(None, expected, false).is_ok());
     }
 
     #[test]

@@ -697,14 +697,14 @@ impl ManagementBackend for RemoteBackend {
         tokio::spawn(async move {
             let redirect =
                 tokio::time::timeout(MCP_SIGNIN_TIMEOUT, catcher.wait_for_redirect()).await;
-            let Ok(Ok((code, state))) = redirect else {
+            let Ok(Ok((code, state, iss))) = redirect else {
                 return;
             };
             let _ = transport
                 .raw(
                     reqwest::Method::POST,
                     &deliver_path,
-                    serde_json::to_string(&McpAuthDeliverBody { code, state }).ok(),
+                    serde_json::to_string(&McpAuthDeliverBody { code, state, iss }).ok(),
                 )
                 .await;
         });

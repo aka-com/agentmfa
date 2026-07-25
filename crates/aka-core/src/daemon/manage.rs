@@ -689,7 +689,7 @@ async fn mcp_auth_deliver(
     ok(json!({
         "delivered": state
             .broker
-            .ui_mcp_auth_deliver_code(&id, body.code, body.state)
+            .ui_mcp_auth_deliver_code(&id, body.code, body.state, body.iss)
     }))
 }
 

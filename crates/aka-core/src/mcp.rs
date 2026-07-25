@@ -202,6 +202,24 @@ impl McpSession {
         if self.protocol_sent {
             request = request.header("MCP-Protocol-Version", PROTOCOL_VERSION);
         }
+        // SEP-2243: mirror the JSON-RPC method (and, for a named call, the
+        // tool/prompt name) into headers so a load balancer can route
+        // without reading the body, and a server that rejects headers
+        // disagreeing with the body sees them agree.
+        if let Some(method) = body.get("method").and_then(Value::as_str) {
+            request = request.header("Mcp-Method", method);
+            if let Some(name) = body
+                .get("params")
+                .and_then(|params| params.get("name"))
+                .and_then(Value::as_str)
+            {
+                // A name that is not header-safe is dropped, not fatal: the
+                // header is a routing hint and the body stays authoritative.
+                if let Ok(value) = HeaderValue::from_str(name) {
+                    request = request.header("Mcp-Name", value);
+                }
+            }
+        }
         let response = request
             .send()
             .await

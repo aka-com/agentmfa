@@ -67,6 +67,27 @@ function headerValue(headers: Record<string, string> | undefined, name: string):
 }
 
 /**
+ * SEP-2243 routing headers for one JSON-RPC message: `mcp-method` mirrors
+ * the body's method, and `mcp-name` the tool/prompt name when the call
+ * names one. A load balancer can then route without parsing the body, and a
+ * 2026-07-28 server that rejects headers disagreeing with the body sees them
+ * agree. A name that is not header-safe is dropped rather than risking a
+ * rejected request — the header is a routing hint and the body still carries
+ * the authoritative value.
+ */
+function routingHeaders(payload: unknown): Record<string, string> {
+  if (!payload || typeof payload !== 'object') return {};
+  const message = payload as { method?: unknown; params?: { name?: unknown } };
+  if (typeof message.method !== 'string') return {};
+  const headers: Record<string, string> = { 'mcp-method': message.method };
+  const name = message.params?.name;
+  if (typeof name === 'string' && /^[\x20-\x7e]+$/.test(name)) {
+    headers['mcp-name'] = name;
+  }
+  return headers;
+}
+
+/**
  * The upstream body as a list of JSON-RPC messages.
  *
  * A plain JSON server answers with one document; a streamable-HTTP server
@@ -126,6 +147,7 @@ class UpstreamClient {
         ...(this.sessionId ? { 'mcp-session-id': this.sessionId } : {}),
         // Required on every request after `initialize` completes.
         ...(this.initialized ? { 'mcp-protocol-version': this.protocolVersion } : {}),
+        ...routingHeaders(payload),
       },
       ...(payload === undefined ? {} : { body: payload }),
     })) as UpstreamResponse;
