@@ -993,8 +993,8 @@ const editFix = (c: ConnectionSummary): string => fixBtn('edit-conn', c.id, 'Fix
  * one. */
 function connectionIssues(
   c: ConnectionSummary,
-): Array<{ text: string; detail?: string; fix?: string }> {
-  const issues: Array<{ text: string; detail?: string; fix?: string }> = [];
+): Array<{ text: string; detail?: string; fix?: string; tone?: 'info' }> {
+  const issues: Array<{ text: string; detail?: string; fix?: string; tone?: 'info' }> = [];
   if (c.type === 'pg' && c.sslmode && c.sslmode !== 'verify-full' && !isLoopbackHost(c.host)) {
     issues.push({
       text: c.sslmode === 'disable'
@@ -1004,7 +1004,10 @@ function connectionIssues(
     });
   }
   if (c.type === 'ssh' && !c.host_key_fingerprint) {
-    issues.push({ text: 'Host key not pinned yet — pins on the first connection.' });
+    issues.push({
+      text: 'Host key not pinned yet — pins on the first connection.',
+      tone: 'info',
+    });
   }
   if (c.last_status === 'needs_reconnect') {
     issues.push({
@@ -1120,7 +1123,8 @@ function connDetailHTML(c: ConnectionSummary): string {
   const issues = connectionIssues(c);
   const issuesBlock = enabled && issues.length
     ? `<div class="cc-issues">${issues.map((issue) =>
-        `<div class="cc-issue">${ICONS.triangleAlert}<div class="cc-issue-body">
+        `<div class="cc-issue ${issue.tone ?? ''}">${
+          issue.tone === 'info' ? ICONS.info : ICONS.triangleAlert}<div class="cc-issue-body">
           <span class="cc-issue-headline">${esc(issue.text)}</span>${
           issue.detail ? `<span class="cc-issue-detail">${esc(issue.detail)}</span>` : ''}${
           issue.fix
@@ -1349,7 +1353,7 @@ function flatHealthHTML(c: ConnectionSummary): string {
   if (!c.agent_access.enabled) {
     return '<span class="cc-dot off" role="img" title="Off" aria-label="Off — agents may not use this tool"></span>';
   }
-  const issues = connectionIssues(c);
+  const issues = connectionIssues(c).filter((issue) => issue.tone !== 'info');
   if (!issues.length) return '<span class="cc-dot ok" role="img" title="Ready" aria-label="Ready"></span>';
   // A dot, not a badge: the count and the issues themselves are read in
   // the detail panel the row opens.
@@ -1365,7 +1369,8 @@ function selectedConnection(): ConnectionSummary | null {
   const chosen = state.connections.find((c) => c.id === state.selectedConn);
   if (chosen) return chosen;
   const attn = state.connections.find(
-    (c) => c.agent_access.enabled && connectionIssues(c).length,
+    (c) => c.agent_access.enabled
+      && connectionIssues(c).some((issue) => issue.tone !== 'info'),
   );
   return attn ?? state.connections[0];
 }
@@ -2272,11 +2277,14 @@ function endpointIssuedSheet(): string {
     </div>`;
   const secretField = info.secret
     ? field('Secret', info.secret, 'secret')
-    : '<div class="ep-note">SSH addresses present no secret — the socket path is the whole capability.</div>';
+    : '';
+  const sheetSubtitle = info.type === 'ssh'
+    ? "Paste this into your tool's config. Note: SSH addresses have no separate secret; the socket path is the whole capability. You can copy it again anytime from the tool's details."
+    : "Paste this into your tool's config. You can copy it again anytime from the tool's details.";
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
     <div class="sheet endpoint-issued-sheet" role="dialog" aria-modal="true" aria-labelledby="ep-title">
       <h3 id="ep-title">Your connection address</h3>
-      <p class="sheet-sub">Paste this into your tool's config. You can copy it again anytime from the tool's details.</p>
+      <p class="sheet-sub">${sheetSubtitle}</p>
       ${field(addressLabel, info.dsn, 'dsn')}
       ${secretField}
       ${field('Example', info.example, 'example')}

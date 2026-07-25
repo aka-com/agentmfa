@@ -1183,6 +1183,12 @@
   font-size: 12px; color: var(--amber-ink); line-height: 1.35;
 }
 .cc-issue > svg { flex: 0 0 auto; margin-top: 2px; color: var(--amber-strong); }
+.cc-issue.info {
+  background: var(--accent-wash);
+  border-left-color: var(--accent);
+  color: var(--accent-ink);
+}
+.cc-issue.info > svg { color: var(--accent); }
 /* Issue text is the same quoted machine speech as a verdict (see .cc-test),
    so it breaks mid-token rather than overflowing the attention card. */
 .cc-issue-body {
