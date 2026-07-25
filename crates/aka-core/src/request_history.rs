@@ -16,14 +16,14 @@ use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
 
 use crate::approvals::{ApprovalUnit, PendingApproval};
+use crate::elicitations::PendingElicitation;
 use crate::types::ConnectionKind;
 
 const TERMINAL_RETENTION: Duration = Duration::days(7);
 const TERMINAL_CAP: usize = 500;
 
-/// The protocol-level family of a request. Only approvals are produced today;
-/// elicitation is reserved so a real upstream elicitation path can share this
-/// lifecycle rather than minting a second history protocol.
+/// The protocol-level family of a request. Approvals and upstream MCP
+/// elicitations share this lifecycle and the same bounded history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestKind {
     Approval,
@@ -160,6 +160,32 @@ impl From<&PendingApproval> for RequestRecord {
     }
 }
 
+impl From<&PendingElicitation> for RequestRecord {
+    fn from(pending: &PendingElicitation) -> Self {
+        Self {
+            id: pending.id,
+            kind: RequestKind::Elicitation,
+            status: RequestStatus::Pending,
+            connection_id: Some(pending.connection_id),
+            connection: pending.connection.clone(),
+            // An elicitation is scoped to its tool call, not a connection
+            // transport unit, so the approval-shaped fields stay empty.
+            connection_kind: None,
+            unit: None,
+            target: None,
+            agent: pending.agent.clone(),
+            summary: pending.tool.clone(),
+            detail: Some(pending.message.clone()),
+            waiting: 1,
+            requested_at: pending.requested_at,
+            expires_at: Some(pending.expires_at),
+            resolved_at: None,
+            resolution: None,
+            window_secs: None,
+        }
+    }
+}
+
 /// Thread-safe request history shared by every clone of the approval registry.
 #[derive(Default)]
 pub struct RequestHistory {
@@ -180,6 +206,11 @@ impl RequestHistory {
 
     /// Insert a new approval before publishing its change event.
     pub fn record_approval(&self, pending: &PendingApproval) {
+        self.record(RequestRecord::from(pending));
+    }
+
+    /// Insert a new elicitation before publishing its change event.
+    pub fn record_elicitation(&self, pending: &PendingElicitation) {
         self.record(RequestRecord::from(pending));
     }
 

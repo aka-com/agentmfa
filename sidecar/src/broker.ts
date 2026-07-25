@@ -162,4 +162,30 @@ export class BrokerClient {
   async invoke(path: string, auth: AgentAuth, body: unknown): Promise<unknown> {
     return this.json<unknown>('POST', path, auth, body);
   }
+
+  /**
+   * Park one upstream elicitation on the user and wait for the answer.
+   *
+   * An upstream MCP server that needs interactive input mid tool call
+   * (SEP-2322) cannot be answered by the sidecar or the agent — the user
+   * answers it in the AgentMFA app. This call blocks until they do (or it
+   * lapses), and returns the answer as an MCP `ElicitResult`. The wiring
+   * check is the broker's, like every other call here.
+   */
+  async elicit(
+    auth: AgentAuth,
+    request: { connection: string; tool: string; message: string; requestedSchema: unknown },
+  ): Promise<{ action: string; content?: Record<string, unknown> }> {
+    return this.json<{ action: string; content?: Record<string, unknown> }>(
+      'POST',
+      '/v1/elicit',
+      auth,
+      {
+        connection: request.connection,
+        tool: request.tool,
+        message: request.message,
+        requested_schema: request.requestedSchema,
+      },
+    );
+  }
 }

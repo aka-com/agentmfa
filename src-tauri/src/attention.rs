@@ -123,6 +123,17 @@ struct AttentionInner {
     /// Authoritative remote reads can complete out of order. Only the latest
     /// event-triggered read may replace the active snapshot.
     remote_refresh_generation: u64,
+    /// Parked upstream elicitations, tracked only for the tray/inbox count.
+    /// They notify on their own path (a single distinct question, not folded
+    /// into the approval coalescing tracker) but still contribute to the badge.
+    elicitations: std::collections::HashSet<uuid::Uuid>,
+}
+
+impl AttentionInner {
+    /// The badge total: approvals waiting plus elicitations parked.
+    fn total(&self) -> usize {
+        self.tracker.active.len() + self.elicitations.len()
+    }
 }
 
 /// Managed Tauri state shared by local broker callbacks and the remote SSE
@@ -140,6 +151,7 @@ impl RequestAttention {
                 flush_generation: 0,
                 flush_scheduled: false,
                 remote_refresh_generation: 0,
+                elicitations: std::collections::HashSet::new(),
             }),
         }
     }
@@ -147,7 +159,9 @@ impl RequestAttention {
     fn upsert(&self, app: &AppHandle, request: RequestSummary, announce_if_new: bool) {
         let (change, generation) = {
             let mut inner = self.inner.lock().unwrap();
-            let change = inner.tracker.upsert(request, announce_if_new);
+            let mut change = inner.tracker.upsert(request, announce_if_new);
+            // The badge counts elicitations too, so the pushed total is both.
+            change.count = inner.total();
             let generation = schedule_generation(&mut inner, change.notification_added);
             (change, generation)
         };
@@ -155,8 +169,36 @@ impl RequestAttention {
     }
 
     fn resolve(&self, app: &AppHandle, id: &str) {
-        let change = self.inner.lock().unwrap().tracker.resolve(id);
+        let change = {
+            let mut inner = self.inner.lock().unwrap();
+            let mut change = inner.tracker.resolve(id);
+            change.count = inner.total();
+            change
+        };
         apply_change(app, change, None);
+    }
+
+    /// Track a parked elicitation for the badge and push the new total. The
+    /// notification itself is raised separately.
+    fn add_elicitation(&self, app: &AppHandle, id: uuid::Uuid) {
+        let total = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.elicitations.insert(id);
+            inner.total()
+        };
+        crate::windows::update_request_count(app, total);
+    }
+
+    /// Drop a resolved elicitation from the badge and push the new total.
+    fn remove_elicitation(&self, app: &AppHandle, id: uuid::Uuid) {
+        let (total, changed) = {
+            let mut inner = self.inner.lock().unwrap();
+            let changed = inner.elicitations.remove(&id);
+            (inner.total(), changed)
+        };
+        if changed {
+            crate::windows::update_request_count(app, total);
+        }
     }
 
     fn set_scope(&self, app: &AppHandle, scope: String) {
@@ -181,7 +223,7 @@ impl RequestAttention {
     }
 
     pub fn count(&self) -> usize {
-        self.inner.lock().unwrap().tracker.active.len()
+        self.inner.lock().unwrap().total()
     }
 
     fn begin_remote_refresh(&self) -> u64 {
@@ -196,7 +238,8 @@ impl RequestAttention {
             if generation != inner.remote_refresh_generation {
                 return;
             }
-            let change = inner.tracker.reconcile(approvals);
+            let mut change = inner.tracker.reconcile(approvals);
+            change.count = inner.total();
             let flush_generation = schedule_generation(&mut inner, change.notification_added);
             (change, flush_generation)
         };
@@ -286,10 +329,17 @@ fn show_notification(
         format!("Open the Request Inbox to review {total} waiting requests.")
     };
 
+    deliver_notification(app, &title, &body)
+}
+
+/// Show one native notification whose activation opens the Request Inbox, and
+/// observe that activation off the main/async threads. Shared by the approval
+/// batch and the single-elicitation paths.
+fn deliver_notification(app: &AppHandle, title: &str, body: &str) -> Result<(), String> {
     let mut notification = notify_rust::Notification::new();
     notification
-        .summary(&title)
-        .body(&body)
+        .summary(title)
+        .body(body)
         .action(OPEN_INBOX_ACTION, "Open Inbox")
         .auto_icon();
     // XDG servers only emit body activation when the special default action
@@ -446,6 +496,53 @@ pub fn approval_updated(app: &AppHandle, pending: &aka_core::approvals::PendingA
 pub fn approval_resolved(app: &AppHandle, id: &uuid::Uuid) {
     if let Some(attention) = app.try_state::<RequestAttention>() {
         attention.resolve(app, &id.to_string());
+    }
+}
+
+/// A paused tool call is waiting on the user for input. Unlike approvals this
+/// is not folded into the coalescing tracker or the tray count — an upstream
+/// elicitation is a single, distinct question — so it raises one notification
+/// directly, honoring the same notification-mode setting.
+pub fn elicitation_requested(
+    app: &AppHandle,
+    pending: &aka_core::elicitations::PendingElicitation,
+) {
+    let Some(attention) = app.try_state::<RequestAttention>() else {
+        return;
+    };
+    // Count it toward the tray/inbox badge (idempotent on repeat events).
+    attention.add_elicitation(app, pending.id);
+    let (mode, show_context) = {
+        let inner = attention.inner.lock().unwrap();
+        (inner.settings.mode, inner.settings.show_context)
+    };
+    match mode {
+        NotificationMode::Off => {
+            crate::windows::surface_for_approval(app);
+            return;
+        }
+        NotificationMode::WhenHidden if crate::windows::request_surface_focused(app) => return,
+        NotificationMode::WhenHidden | NotificationMode::Always => {}
+    }
+    let title = "AgentMFA needs your input".to_string();
+    let body = if show_context {
+        let agent = notification_label(&pending.agent, "An agent");
+        let connection = notification_label(&pending.connection, "a tool");
+        format!("{connection} asked {agent} for input. Open the Request Inbox to respond.")
+    } else {
+        "An upstream asked for input. Open the Request Inbox to respond.".to_string()
+    };
+    if let Err(error) = deliver_notification(app, &title, &body) {
+        tracing::warn!(%error, "could not deliver an elicitation notification");
+        crate::windows::surface_for_approval(app);
+    }
+}
+
+/// A parked elicitation left the queue (answered, cancelled, or lapsed): drop
+/// it from the tray/inbox badge.
+pub fn elicitation_resolved(app: &AppHandle, id: &uuid::Uuid) {
+    if let Some(attention) = app.try_state::<RequestAttention>() {
+        attention.remove_elicitation(app, *id);
     }
 }
 

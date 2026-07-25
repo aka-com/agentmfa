@@ -203,7 +203,12 @@ class UpstreamClient {
       method: 'initialize',
       params: {
         protocolVersion: SUPPORTED_PROTOCOL_VERSION,
-        capabilities: {},
+        // We advertise elicitation so a 2026-spec upstream may request user
+        // input mid-call (SEP-2322), which we surface through the AgentMFA
+        // app. We do NOT advertise sampling or roots: we cannot answer them,
+        // they are deprecated, and per the spec a server must not request an
+        // input kind the client did not declare.
+        capabilities: { elicitation: {} },
         clientInfo: { name: 'agentmfa', version: '0.1.0' },
       },
     });
@@ -359,6 +364,103 @@ export async function discoverUpstream(
   }
 }
 
+/** How many input-required round trips a single call may take before we give
+ * up rather than let a misbehaving upstream loop us forever. */
+export const MAX_MRTR_ROUNDS = 8;
+
+/** One entry of an upstream's `inputRequests` map (SEP-2322). */
+interface InputRequest {
+  method?: string;
+  params?: { message?: string; requestedSchema?: unknown };
+}
+
+/** An upstream result that may be an interim `input_required` (SEP-2322). */
+interface MrtrResult {
+  resultType?: string;
+  inputRequests?: Record<string, InputRequest>;
+  requestState?: unknown;
+}
+
+/**
+ * Drive a request that the upstream may answer with `input_required`
+ * (SEP-2322 multi round-trip). Each round is a fresh short-lived session —
+ * the spec terminates the initial request and expects an independent retry,
+ * so nothing is held open across the user's think-time. When the upstream
+ * asks for input, each `elicitation/create` is surfaced to the AgentMFA user
+ * through the broker; the answers ride the retry as `inputResponses`
+ * (keyed to match) alongside the echoed opaque `requestState`.
+ *
+ * We only advertise the elicitation capability, so a conforming upstream
+ * sends nothing else; any other input kind is declined defensively.
+ *
+ * Note: the draft schema does not pin where `inputResponses`/`requestState`
+ * travel on the retry. We place them in the request `params`; this is the one
+ * spot to adjust if the finalized wire format differs.
+ */
+async function runWithMrtr(
+  broker: BrokerClient,
+  auth: AgentAuth,
+  connection: BrokerConnection,
+  method: 'tools/call' | 'resources/read',
+  baseParams: Record<string, unknown>,
+  toolLabel: string,
+): Promise<unknown> {
+  let inputResponses: Record<string, unknown> | undefined;
+  let requestState: unknown;
+
+  for (let round = 0; round < MAX_MRTR_ROUNDS; round++) {
+    const client = new UpstreamClient(broker, auth, connection);
+    await client.initialize();
+    let result: MrtrResult | undefined;
+    try {
+      const params = {
+        ...baseParams,
+        ...(inputResponses ? { inputResponses } : {}),
+        ...(requestState !== undefined ? { requestState } : {}),
+      };
+      result = (await client.request(method, params)) as MrtrResult | undefined;
+    } finally {
+      await client.close();
+    }
+
+    // A pre-2026 server omits `resultType`; that (and an explicit "complete")
+    // is the final answer, returned as it stands.
+    if (!result || result.resultType !== 'input_required') {
+      return result;
+    }
+
+    const requests = result.inputRequests ?? {};
+    const responses: Record<string, unknown> = {};
+    for (const [key, request] of Object.entries(requests)) {
+      if (request?.method !== 'elicitation/create') {
+        // We never advertised sampling or roots; decline anything else so
+        // the upstream can decide how to proceed without them.
+        responses[key] = { action: 'decline' };
+        continue;
+      }
+      const answer = await broker.elicit(auth, {
+        connection: connection.name,
+        tool: toolLabel,
+        message: request.params?.message ?? '',
+        requestedSchema: request.params?.requestedSchema ?? {},
+      });
+      responses[key] = answer;
+    }
+
+    // Nothing actionable and no state to carry forward: returning avoids an
+    // infinite loop against a server that keeps asking for nothing.
+    if (Object.keys(requests).length === 0 && result.requestState === undefined) {
+      return result;
+    }
+    inputResponses = responses;
+    requestState = result.requestState;
+  }
+
+  throw new Error(
+    `the MCP server kept requesting input after ${MAX_MRTR_ROUNDS} rounds`,
+  );
+}
+
 /** Read one of an upstream's resources by its (concrete) URI. */
 export async function readUpstreamResource(
   broker: BrokerClient,
@@ -366,13 +468,7 @@ export async function readUpstreamResource(
   connection: BrokerConnection,
   uri: string,
 ): Promise<unknown> {
-  const client = new UpstreamClient(broker, auth, connection);
-  await client.initialize();
-  try {
-    return await client.request('resources/read', { uri });
-  } finally {
-    await client.close();
-  }
+  return runWithMrtr(broker, auth, connection, 'resources/read', { uri }, uri);
 }
 
 /** Argument-completion context, forwarded verbatim to the upstream. */
@@ -408,7 +504,7 @@ export async function completeUpstream(
   }
 }
 
-/** Call one of the upstream's tools. */
+/** Call one of the upstream's tools, resolving any elicitation it requests. */
 export async function callUpstreamTool(
   broker: BrokerClient,
   auth: AgentAuth,
@@ -416,11 +512,12 @@ export async function callUpstreamTool(
   tool: string,
   args: Record<string, unknown>,
 ): Promise<unknown> {
-  const client = new UpstreamClient(broker, auth, connection);
-  await client.initialize();
-  try {
-    return await client.request('tools/call', { name: tool, arguments: args });
-  } finally {
-    await client.close();
-  }
+  return runWithMrtr(
+    broker,
+    auth,
+    connection,
+    'tools/call',
+    { name: tool, arguments: args },
+    tool,
+  );
 }

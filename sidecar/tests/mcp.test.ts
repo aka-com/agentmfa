@@ -64,11 +64,14 @@ const upstream = {
   sessions: new Map<string, { initialized: boolean }>(),
   counter: 0,
   deleted: [] as string[],
+  /** The params of the most recent input_required retry, for assertions. */
+  lastRetry: undefined as { inputResponses?: Record<string, unknown>; requestState?: unknown } | undefined,
 };
 
 function resetUpstream(): void {
   upstream.sessions.clear();
   upstream.deleted = [];
+  upstream.lastRetry = undefined;
 }
 
 interface UpstreamReply {
@@ -150,11 +153,54 @@ function upstreamHttp(call: {
         nextCursor: 'page-2',
       });
     }
-    return reply({ tools: [{ name: 'create_page', description: 'Create a page' }] });
+    return reply({
+      tools: [
+        { name: 'create_page', description: 'Create a page' },
+        { name: 'needs_input', description: 'A tool that elicits input' },
+      ],
+    });
   }
 
   if (request.method === 'tools/call') {
-    const params = request.params as { name: string; arguments: Record<string, unknown> };
+    const params = request.params as {
+      name: string;
+      arguments: Record<string, unknown>;
+      inputResponses?: Record<string, unknown>;
+      requestState?: unknown;
+    };
+    // A tool that needs interactive input: on the first call it asks for it
+    // (SEP-2322 input_required); on the retry — recognised by the echoed
+    // requestState — it completes, echoing what the user supplied.
+    if (params.name === 'needs_input') {
+      if (params.requestState === undefined) {
+        return reply({
+          resultType: 'input_required',
+          inputRequests: {
+            github_login: {
+              method: 'elicitation/create',
+              params: {
+                message: 'Provide your GitHub username',
+                requestedSchema: {
+                  type: 'object',
+                  properties: { name: { type: 'string', title: 'Username' } },
+                  required: ['name'],
+                },
+              },
+            },
+          },
+          requestState: 'opaque-state-1',
+        });
+      }
+      upstream.lastRetry = { inputResponses: params.inputResponses, requestState: params.requestState };
+      const login = (params.inputResponses?.github_login ?? {}) as {
+        action?: string;
+        content?: { name?: string };
+      };
+      return reply({
+        resultType: 'complete',
+        content: [{ type: 'text', text: `hello ${login.content?.name ?? '?'}` }],
+      });
+    }
     // A notification frame ahead of the response, so a client that grabs
     // the first parseable frame instead of matching its request id fails.
     const notification = JSON.stringify({
@@ -295,6 +341,12 @@ function fakeBroker(socketPath: string): Promise<Server> {
             body: relayed.body,
             body_encoding: 'utf8',
           });
+          return;
+        }
+        // The blocking elicitation call: the real broker parks it on the
+        // user; here the "user" always accepts with a fixed answer.
+        if (req.url === '/v1/elicit') {
+          send(200, { action: 'accept', content: { name: 'octocat' } });
           return;
         }
         // An MCP upstream that answers, but with an error status — the shape
@@ -446,6 +498,7 @@ test("an MCP upstream's own tools are re-exposed, credential-side untouched", as
     assert.deepEqual(tools.map((tool) => tool.name).sort(), [
       'agentmfa_connect',
       'agentmfa_notion_create_page',
+      'agentmfa_notion_needs_input',
       'agentmfa_notion_search',
       'agentmfa_status',
     ]);
@@ -563,7 +616,7 @@ test('status reports an MCP upstream by its real tool names', async () => {
     ) as { tools: Array<{ tool: string; name: string }> };
     assert.deepEqual(
       status.tools.map((entry) => entry.tool).sort(),
-      ['agentmfa_notion_create_page', 'agentmfa_notion_search'],
+      ['agentmfa_notion_create_page', 'agentmfa_notion_needs_input', 'agentmfa_notion_search'],
     );
     assert.ok(status.tools.every((entry) => entry.name === 'notion'));
     // The advertised names are exactly the tools the agent can actually call.
@@ -738,7 +791,8 @@ test('over-budget upstream tools are searchable and callable, not lost', async (
     const status = payload(
       await client.callTool({ name: 'agentmfa_status', arguments: {} }),
     ) as { search_only_tools?: number };
-    assert.equal(status.search_only_tools, 1);
+    // `create_page` and `needs_input` are both over the budget of one.
+    assert.equal(status.search_only_tools, 2);
 
     // Search finds the withheld tool and says how to call it.
     const found = payload(
@@ -862,6 +916,31 @@ test('an upstream without resources advertises none', async () => {
     // `prod-db` is a plain (non-MCP) connection: no resources capability.
     const client = await app.connect('token-wired');
     await assert.rejects(() => client.listResources());
+  } finally {
+    await app.close();
+  }
+});
+
+test('an upstream elicitation is resolved via the broker and the call completes', async () => {
+  const app = await harness();
+  try {
+    const client = await app.connect('token-mcp');
+    const result = await client.callTool({
+      name: 'agentmfa_notion_needs_input',
+      arguments: {},
+    });
+    // The tool asked for input, the broker "user" accepted, and the retry
+    // completed with the supplied value.
+    assert.deepEqual((result as { content: Array<{ text: string }> }).content, [
+      { type: 'text', text: 'hello octocat' },
+    ]);
+    // The retry echoed the opaque requestState and carried the answer keyed
+    // to match the upstream's inputRequests entry.
+    assert.equal(upstream.lastRetry?.requestState, 'opaque-state-1');
+    assert.deepEqual(upstream.lastRetry?.inputResponses?.github_login, {
+      action: 'accept',
+      content: { name: 'octocat' },
+    });
   } finally {
     await app.close();
   }

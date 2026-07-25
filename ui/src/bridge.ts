@@ -327,9 +327,8 @@ function seedFixtures() {
   ];
   fixtures.forEach(([kind, text, detail, minutes, agent]) =>
     db.activity.push({ ...MOCK_ACTIVITY_META[kind], text, detail, agent, at: t(minutes) }));
-  // DESIGN MOCK (SEP-2322, see ELICITATION.md): a tool call paused on user
-  // input. The broker does not produce these yet; this fixture exists so the
-  // trusted-UI answering flow is designable and reviewable standalone.
+  // Mock fixture for a real SEP-2322 tool call paused on user input. It keeps
+  // the trusted-UI answering flow usable in standalone browser development.
   const elicitation: ElicitationRequest = {
     id: uid(),
     agent: 'claude-code',

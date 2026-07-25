@@ -1161,6 +1161,39 @@ pub async fn respond_approval(
         .map_err(|e| e.to_string())
 }
 
+/// Upstream MCP tool calls parked on the user for input, oldest first. The
+/// agent whose call is paused never sees these.
+#[tauri::command]
+pub async fn list_elicitations(
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<aka_api::ElicitationDto>> {
+    state
+        .brokers
+        .backend()
+        .elicitations()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Answer one elicitation. `approved` with `values` accepts and sends them
+/// upstream; otherwise it declines. `false` means it was already answered,
+/// cancelled, or lapsed.
+#[tauri::command]
+pub async fn respond_elicitation(
+    state: State<'_, AppState>,
+    id: String,
+    approved: bool,
+    values: Option<std::collections::HashMap<String, String>>,
+) -> CmdResult<bool> {
+    let id = parse_id(&id)?;
+    state
+        .brokers
+        .backend()
+        .respond_elicitation(id, approved, values.unwrap_or_default())
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Curate which upstream MCP tools agents may call on a connection. `null`
 /// restores the default (all tools). Enforced broker-side on every
 /// `tools/call`; the sidecar's tool listing mirrors it.
@@ -1393,6 +1426,8 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         list_approvals,
         list_requests,
         respond_approval,
+        list_elicitations,
+        respond_elicitation,
         set_allowed_tools,
         list_mcp_tools,
         issue_endpoint,

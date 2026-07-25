@@ -489,6 +489,7 @@ pub fn router_for(broker: Arc<Broker>, transport: Transport) -> Router {
         .route("/v1/connections", get(get_connections))
         .route("/v1/whoami", get(get_whoami))
         .route("/v1/http", post(post_http))
+        .route("/v1/elicit", post(post_elicit))
         .route("/v1/connect-requests", post(post_connect_request))
         .route("/v1/ws/open", post(post_ws_open))
         .route("/v1/pg/open", post(post_pg_open))
@@ -1106,6 +1107,67 @@ async fn post_http(
         },
     )
     .await
+}
+
+/// The sidecar's blocking elicitation call: an upstream MCP server asked for
+/// user input mid tool call (SEP-2322), and the sidecar parks here until the
+/// user answers in the app. The answer is shaped as an MCP `ElicitResult`.
+#[derive(Deserialize)]
+struct ElicitBody {
+    connection: String,
+    tool: String,
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    requested_schema: serde_json::Value,
+}
+
+/// `POST /v1/elicit`: park an upstream elicitation on the user. Authenticated
+/// and wiring-checked exactly like `/v1/http` — an agent can only raise a
+/// prompt on a connection it is wired to.
+async fn post_elicit(
+    State(state): State<AppState>,
+    authed: Authed,
+    ApiJson(body): ApiJson<ElicitBody>,
+) -> Response {
+    let broker = &state.broker;
+    let client = authed.client;
+    let Some(conn) = broker.store.connection_by_name(&body.connection) else {
+        return err_unknown_connection(broker);
+    };
+    if !broker.access.allows(&conn.id) {
+        broker.audit.append(
+            AuditEntry::new(
+                AuditKind::Denied,
+                format!("Refused elicitation (not wired): {client} → {}", conn.name),
+            )
+            .agent(client.clone())
+            .connection(conn.name.clone())
+            .outcome("denied_by_policy"),
+        );
+        return err_detail(
+            StatusCode::FORBIDDEN,
+            ErrorReason::DeniedByPolicy,
+            format!(
+                "{} is not enabled for agents; the user can enable it in AgentMFA",
+                conn.name
+            ),
+        );
+    }
+    let outcome = broker
+        .elicit(crate::elicitations::ElicitationRequest {
+            connection: conn,
+            agent: client,
+            tool: body.tool,
+            message: body.message,
+            requested_schema: body.requested_schema,
+        })
+        .await;
+    let mut answer = json!({ "action": outcome.action.as_str() });
+    if let Some(content) = outcome.content {
+        answer["content"] = serde_json::Value::Object(content);
+    }
+    Json(answer).into_response()
 }
 
 /// `POST /v1/connect-requests`: an agent asks for a service that is not

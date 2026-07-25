@@ -15,9 +15,9 @@
 use std::sync::Arc;
 
 use aka_api::{
-    AccessDto, ActivityDto, ApprovalDecisionDto, ApprovalDto, ConnectionDto, EndpointChip,
-    IdentityDto, IssuedEndpointDto, ManageError, OAuthDto, RequestDto, SecretDto, SessionDto,
-    SettingsDto,
+    AccessDto, ActivityDto, ApprovalDecisionDto, ApprovalDto, ConnectionDto, ElicitationDto,
+    EndpointChip, IdentityDto, IssuedEndpointDto, ManageError, OAuthDto, RequestDto, SecretDto,
+    SessionDto, SettingsDto,
 };
 use async_trait::async_trait;
 use uuid::Uuid;
@@ -295,6 +295,29 @@ pub fn request_dto(record: &crate::request_history::RequestRecord) -> RequestDto
             .resolution
             .map(|resolution| resolution.as_str().to_string()),
         window_secs: record.window_secs,
+    }
+}
+
+pub fn elicitation_dto(pending: &crate::elicitations::PendingElicitation) -> ElicitationDto {
+    ElicitationDto {
+        id: pending.id.to_string(),
+        agent: pending.agent.clone(),
+        connection: pending.connection.clone(),
+        tool: pending.tool.clone(),
+        prompt: pending.message.clone(),
+        fields: pending
+            .fields
+            .iter()
+            .map(|field| aka_api::ElicitationFieldDto {
+                name: field.name.clone(),
+                label: field.label.clone(),
+                secret: field.secret,
+                boolean: field.boolean,
+                options: field.options.clone(),
+            })
+            .collect(),
+        requested_at: pending.requested_at.to_rfc3339(),
+        expires_at: pending.expires_at.to_rfc3339(),
     }
 }
 
@@ -694,6 +717,28 @@ impl crate::events::BrokerEvents for FanoutEvents {
         self.inner.approval_resolved(id);
         self.bus.emit(aka_api::ManageEvent::ApprovalsChanged);
     }
+
+    fn elicitation_requested(
+        &self,
+        pending: &crate::elicitations::PendingElicitation,
+    ) -> crate::events::ElicitationHandling {
+        // Same lease gate as approvals: a passive SSE observer still gets the
+        // event, but only a stream that leased the request-inbox capability
+        // can make an upstream call wait for a form it can render.
+        let remote_surface = self.bus.has_approval_surface();
+        self.bus.emit(aka_api::ManageEvent::ElicitationsChanged);
+        match self.inner.elicitation_requested(pending) {
+            crate::events::ElicitationHandling::Unavailable if remote_surface => {
+                crate::events::ElicitationHandling::Taken
+            }
+            handling => handling,
+        }
+    }
+
+    fn elicitation_resolved(&self, id: &Uuid) {
+        self.inner.elicitation_resolved(id);
+        self.bus.emit(aka_api::ManageEvent::ElicitationsChanged);
+    }
 }
 
 /* ---------------------------- request bodies ------------------------------ */
@@ -763,6 +808,16 @@ pub struct ConfirmBody {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ApprovalResponseBody {
     pub decision: ApprovalDecisionDto,
+}
+
+/// `POST /v1/manage/elicitations/{id}`: answer a waiting elicitation.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct ElicitationResponseBody {
+    /// True to accept with `values`; false declines.
+    pub approved: bool,
+    /// The user's field answers (name → value). Empty on decline.
+    #[serde(default)]
+    pub values: std::collections::HashMap<String, String>,
 }
 
 /// `POST /v1/manage/connections/{id}/allowed-tools`. `tools: null` restores
@@ -942,6 +997,18 @@ pub trait ManagementBackend: Send + Sync {
     /// refused authentication leaves the traffic parked.
     async fn respond_approval(&self, id: Uuid, decision: ApprovalDecisionDto)
         -> ManageResult<bool>;
+
+    /* upstream elicitation */
+    /// Upstream tool calls parked on the user for input, oldest first.
+    async fn elicitations(&self) -> ManageResult<Vec<ElicitationDto>>;
+    /// Answer one. `approved` with `values` accepts; otherwise it declines.
+    /// `false` means it was already answered, cancelled, or has lapsed.
+    async fn respond_elicitation(
+        &self,
+        id: Uuid,
+        approved: bool,
+        values: std::collections::HashMap<String, String>,
+    ) -> ManageResult<bool>;
 
     /* sessions + activity */
     async fn sessions(&self) -> ManageResult<Vec<SessionDto>>;
@@ -1181,6 +1248,28 @@ impl ManagementBackend for LocalBackend {
         // "Approve all" turns the switch off, which runs the native
         // confirmation — never on the async runtime.
         self.blocking(move |broker| broker.ui_respond_approval(&id, approval_decision(decision)))
+            .await
+    }
+
+    async fn elicitations(&self) -> ManageResult<Vec<ElicitationDto>> {
+        Ok(self
+            .broker
+            .pending_elicitations()
+            .iter()
+            .map(elicitation_dto)
+            .collect())
+    }
+
+    async fn respond_elicitation(
+        &self,
+        id: Uuid,
+        approved: bool,
+        values: std::collections::HashMap<String, String>,
+    ) -> ManageResult<bool> {
+        // The values ride down as strings; the registry coerces each to its
+        // field's JSON type (a boolean field becomes a real true/false) where
+        // it has the schema to do so.
+        self.blocking(move |broker| broker.ui_respond_elicitation(&id, approved, values))
             .await
     }
 

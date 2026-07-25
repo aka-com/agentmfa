@@ -23,9 +23,10 @@ use aka_api::{
 use aka_core::broker::ConnectionTestReport;
 use aka_core::manage::{
     AccessBody, AllowedToolsBody, ApprovalResponseBody, BackendProfile, ConfirmBody,
-    ConnectionAddBody, ConnectionUpdateBody, ConnectionsReorderBody, DraftTestBody, ManageResult,
-    ManagementBackend, McpAuthDeliverBody, McpAuthStartBody, OAuthCompleteBody, OAuthReconnectBody,
-    OAuthStartBody, SecretAddBody, SecretEditBody, SettingsPatchBody,
+    ConnectionAddBody, ConnectionUpdateBody, ConnectionsReorderBody, DraftTestBody,
+    ElicitationResponseBody, ManageResult, ManagementBackend, McpAuthDeliverBody, McpAuthStartBody,
+    OAuthCompleteBody, OAuthReconnectBody, OAuthStartBody, SecretAddBody, SecretEditBody,
+    SettingsPatchBody,
 };
 use aka_core::store::ConnectionSpec;
 use aka_core::types::SecretValue;
@@ -827,6 +828,33 @@ impl ManagementBackend for RemoteBackend {
         self.post::<AnsweredBody, _>(
             &format!("/v1/manage/approvals/{id}"),
             &ApprovalResponseBody { decision },
+        )
+        .await
+        .map(|body| body.answered)
+    }
+
+    async fn elicitations(&self) -> ManageResult<Vec<aka_api::ElicitationDto>> {
+        match self.get("/v1/manage/elicitations").await {
+            // Additive, like the request history: a new shell can still
+            // manage an older broker that has no elicitation endpoint.
+            Err(ManageError::Internal { message })
+                if message.starts_with("broker answered 404:") =>
+            {
+                Ok(Vec::new())
+            }
+            result => result,
+        }
+    }
+
+    async fn respond_elicitation(
+        &self,
+        id: Uuid,
+        approved: bool,
+        values: std::collections::HashMap<String, String>,
+    ) -> ManageResult<bool> {
+        self.post::<AnsweredBody, _>(
+            &format!("/v1/manage/elicitations/{id}"),
+            &ElicitationResponseBody { approved, values },
         )
         .await
         .map(|body| body.answered)

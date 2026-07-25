@@ -28,9 +28,9 @@ use zeroize::Zeroizing;
 use super::{bearer_token, err_missing_token, ApiJson, AppState};
 use crate::manage::{
     AccessBody, AllowedToolsBody, ApprovalResponseBody, ConfirmBody, ConnectionAddBody,
-    ConnectionUpdateBody, ConnectionsReorderBody, DraftTestBody, ManagementBackend,
-    McpAuthDeliverBody, McpAuthStartBody, OAuthCompleteBody, OAuthReconnectBody, OAuthStartBody,
-    SecretAddBody, SecretEditBody, SettingsPatchBody,
+    ConnectionUpdateBody, ConnectionsReorderBody, DraftTestBody, ElicitationResponseBody,
+    ManagementBackend, McpAuthDeliverBody, McpAuthStartBody, OAuthCompleteBody, OAuthReconnectBody,
+    OAuthStartBody, SecretAddBody, SecretEditBody, SettingsPatchBody,
 };
 
 /// Bearer authentication against the management token.
@@ -161,6 +161,8 @@ pub fn router() -> Router<AppState> {
         .route("/identity/rotate", post(rotate_key))
         .route("/approvals", get(approvals))
         .route("/approvals/{id}", post(respond_approval))
+        .route("/elicitations", get(elicitations))
+        .route("/elicitations/{id}", post(respond_elicitation))
         .route("/requests", get(requests))
         .route("/sessions", get(sessions))
         .route("/sessions/{id}", delete(close_session))
@@ -564,6 +566,25 @@ async fn set_confirm_mode(
 
 async fn approvals(State(state): State<AppState>, _authed: ManageAuthed) -> Response {
     respond(state.manage.approvals().await)
+}
+
+async fn elicitations(State(state): State<AppState>, _authed: ManageAuthed) -> Response {
+    respond(state.manage.elicitations().await)
+}
+
+async fn respond_elicitation(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+    Path(id): Path<Uuid>,
+    ApiJson(body): ApiJson<ElicitationResponseBody>,
+) -> Response {
+    respond(
+        state
+            .manage
+            .respond_elicitation(id, body.approved, body.values)
+            .await
+            .map(|answered| json!({ "answered": answered })),
+    )
 }
 
 async fn requests(State(state): State<AppState>, _authed: ManageAuthed) -> Response {

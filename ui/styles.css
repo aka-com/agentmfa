@@ -557,7 +557,7 @@
     }
     .request-when{ white-space: normal; }
   }
-  /* ---- elicitation (SEP-2322 design mock, see ELICITATION.md) ---------- */
+  /* ---- elicitation (SEP-2322 request queue and dialog) ----------------- */
   /* The queue carries only a one-line notification; clicking it opens the
      dialog. The row is a real button so it is keyboard-reachable. */
   .elicit-note{ display: flex; align-items: center; gap: 9px; width: 100%; margin: 4px 0 8px;

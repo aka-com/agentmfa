@@ -2949,7 +2949,7 @@ function Sheets(): ReactNode {
 }
 
 /**
- * The elicitation dialog (SEP-2322 design mock, see ELICITATION.md).
+ * The elicitation dialog for an upstream SEP-2322 input request.
  *
  * Shaped like a native macOS alert: symbol on top, a bold one-line message
  * naming who is asking, then the upstream's own question as the quiet
@@ -2983,13 +2983,33 @@ function ElicitationSheet(): ReactNode {
         {/* Third-party text: rendered verbatim and inert. */}
         <div className="elicit-dlg-question">{request.prompt}</div>
         <div className="elicit-dlg-fields">
-          {request.fields.map((field) => (
+          {request.fields.map((field, index) => (
             <label className="elicit-field" key={field.name}>
               <span>{field.label}</span>
-              <input id={`elicit-${request.id}-${field.name}`}
-                type={field.secret ? 'password' : 'text'} autoComplete="off" spellCheck={false}
-                value={state.elicitValues[field.name] ?? ''}
-                onChange={(e) => { state.elicitValues[field.name] = e.currentTarget.value; render(); }} />
+              {field.boolean ? (
+                // A yes/no field: a checkbox whose value is stored as the
+                // string 'true'/'false' (the broker coerces it to a real JSON
+                // boolean before it rides upstream).
+                <input id={`elicit-${request.id}-${field.name}`} type="checkbox"
+                  className="elicit-toggle"
+                  checked={state.elicitValues[field.name] === 'true'}
+                  onChange={(e) => {
+                    state.elicitValues[field.name] = e.currentTarget.checked ? 'true' : 'false';
+                    render();
+                  }} />
+              ) : field.options?.length ? (
+                // A fixed choice set: the shared form dropdown, keyed by the
+                // field's index so an arbitrary upstream field name cannot
+                // produce an invalid DOM id. select-pick writes elicitValues.
+                <CustomSelect id={`elicit-sel-${index}`}
+                  options={field.options.map((opt) => [opt, opt])}
+                  selectedValue={state.elicitValues[field.name] ?? field.options[0]} />
+              ) : (
+                <input id={`elicit-${request.id}-${field.name}`}
+                  type={field.secret ? 'password' : 'text'} autoComplete="off" spellCheck={false}
+                  value={state.elicitValues[field.name] ?? ''}
+                  onChange={(e) => { state.elicitValues[field.name] = e.currentTarget.value; render(); }} />
+              )}
             </label>
           ))}
         </div>
@@ -5466,6 +5486,17 @@ document.addEventListener('click', async (e) => {
     case 'select-pick': {
       const menuId = btn.dataset.menu ?? '';
       state.formMenuOpen = null;
+      // An elicitation enum dropdown, keyed `elicit-sel-<index>`: write the
+      // picked value into the field's elicit value rather than the draft.
+      if (menuId.startsWith('elicit-sel-')) {
+        const index = Number(menuId.slice('elicit-sel-'.length));
+        const request = state.elicitations.find((r) => r.id === state.sheet?.id);
+        const field = request?.fields[index];
+        if (field) state.elicitValues[field.name] = id;
+        render();
+        focusField(menuId);
+        break;
+      }
       const errKey = ERR_KEY_BY_INPUT[menuId as keyof typeof ERR_KEY_BY_INPUT];
       if (errKey) delete state.sheetErrors[errKey];
       if (menuId === 'c-auth-mode') state.draft.authMode = id;
@@ -5709,18 +5740,27 @@ document.addEventListener('click', async (e) => {
       break;
     case 'confirm-cancel': state.confirm = null; render(); break;
 
-    // SEP-2322 elicitation (DESIGN MOCK, see ELICITATION.md): the queue row
-    // opens the dialog; answering or refusing there resumes the paused
-    // upstream call broker-side. The dialog's fields are controlled, held in
+    // SEP-2322 elicitation: the queue row opens the dialog; answering or
+    // refusing there resumes the paused upstream call broker-side. The
+    // dialog's fields are controlled, held in
     // state.elicitValues for the dialog's lifetime only — seeded empty here,
     // cleared again by closeSheet so answers (possibly secrets) don't
     // outlive the dialog.
     case 'elicit-open': {
       state.elicitValues = {};
+      const request = state.elicitations.find((r) => r.id === id);
+      // A dropdown shows its first choice selected; seed that as the value so
+      // an untouched enum still sends what the user sees, and validation on
+      // send treats it as answered.
+      for (const field of request?.fields ?? []) {
+        if (field.boolean) state.elicitValues[field.name] = 'false';
+        else if (field.options?.length) state.elicitValues[field.name] = field.options[0];
+      }
       setSheet({ kind: 'elicitation', id });
       render();
-      const request = state.elicitations.find((r) => r.id === id);
-      if (request?.fields[0]) focusField(`elicit-${id}-${request.fields[0].name}`);
+      if (request?.fields[0] && !request.fields[0].options?.length) {
+        focusField(`elicit-${id}-${request.fields[0].name}`);
+      }
       break;
     }
     case 'elicit-send': {

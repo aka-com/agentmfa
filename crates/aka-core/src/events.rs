@@ -8,6 +8,7 @@
 use std::time::Duration;
 
 use crate::approvals::PendingApproval;
+use crate::elicitations::PendingElicitation;
 use crate::types::{ConfirmationMethod, SecretMeta};
 
 /// What an observer did with a traffic-confirmation prompt.
@@ -21,6 +22,17 @@ pub enum ApprovalHandling {
     /// The observer stands in for the user and waives the prompt (tests and
     /// dev harnesses only — never a product shell).
     Waived,
+}
+
+/// What an observer did with an upstream elicitation. Unlike an approval it
+/// cannot be waived — there is a real answer only a user can give.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ElicitationHandling {
+    /// A surface is showing the form and will answer through
+    /// [`Elicitations::respond`](crate::elicitations::Elicitations::respond).
+    Taken,
+    /// Nothing here can ask the user. The upstream call is cancelled.
+    Unavailable,
 }
 
 pub trait BrokerEvents: Send + Sync {
@@ -104,6 +116,18 @@ pub trait BrokerEvents: Send + Sync {
     /// A prompt left the queue — answered, revoked, or lapsed. Shells close
     /// whatever they raised for it.
     fn approval_resolved(&self, _id: &uuid::Uuid) {}
+
+    /// An upstream MCP server asked the user for input mid tool call, and the
+    /// call is parked until the user answers through
+    /// [`Elicitations::respond`](crate::elicitations::Elicitations::respond).
+    /// Like [`Self::approval_requested`] this never blocks and fails closed —
+    /// a shell that cannot render the form must cancel, not carry the call.
+    fn elicitation_requested(&self, _pending: &PendingElicitation) -> ElicitationHandling {
+        ElicitationHandling::Unavailable
+    }
+
+    /// An elicitation left the queue — answered, revoked, or lapsed.
+    fn elicitation_resolved(&self, _id: &uuid::Uuid) {}
 }
 
 /// Default observer: nothing to notify. Confirmation gates are explicitly

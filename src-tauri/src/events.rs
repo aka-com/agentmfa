@@ -21,6 +21,7 @@ pub const EVT_ACTIVITY_CHANGED: &str = "aka://activity-changed";
 pub const EVT_MCP_AUTH: &str = "aka://mcp-auth-changed";
 pub const EVT_CONNECT_REQUESTED: &str = "aka://connect-requested";
 pub const EVT_APPROVALS: &str = "aka://approvals-changed";
+pub const EVT_ELICITATIONS: &str = "aka://elicitations-changed";
 
 fn copy_authorization_reason(duration: Duration) -> String {
     let seconds = duration.as_secs();
@@ -121,6 +122,22 @@ impl BrokerEvents for TauriEvents {
         crate::attention::approval_resolved(&self.app, id);
         let _ = self.app.emit(EVT_APPROVALS, ());
     }
+
+    /// An upstream MCP server asked the user for input. The webview renders
+    /// the form and answers through `respond_elicitation`.
+    fn elicitation_requested(
+        &self,
+        pending: &aka_core::elicitations::PendingElicitation,
+    ) -> aka_core::events::ElicitationHandling {
+        crate::attention::elicitation_requested(&self.app, pending);
+        let _ = self.app.emit(EVT_ELICITATIONS, ());
+        aka_core::events::ElicitationHandling::Taken
+    }
+
+    fn elicitation_resolved(&self, id: &uuid::Uuid) {
+        crate::attention::elicitation_resolved(&self.app, id);
+        let _ = self.app.emit(EVT_ELICITATIONS, ());
+    }
 }
 
 /// Open an OAuth consent page in the default browser. Only web URLs, ever:
@@ -173,6 +190,9 @@ pub fn emit_manage_event(app: &AppHandle, event: aka_api::ManageEvent) {
         ManageEvent::ApprovalsChanged => {
             let _ = app.emit(EVT_APPROVALS, ());
         }
+        ManageEvent::ElicitationsChanged => {
+            let _ = app.emit(EVT_ELICITATIONS, ());
+        }
         ManageEvent::ConnectRequested { agent, service } => {
             let _ = app.emit(
                 EVT_CONNECT_REQUESTED,
@@ -189,6 +209,7 @@ pub fn emit_manage_event(app: &AppHandle, event: aka_api::ManageEvent) {
                 EVT_AGENTS,
                 EVT_ACTIVITY_CHANGED,
                 EVT_APPROVALS,
+                EVT_ELICITATIONS,
             ] {
                 let _ = app.emit(topic, ());
             }

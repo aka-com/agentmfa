@@ -133,14 +133,17 @@ export interface ActivityEntry {
 /**
  * One input the upstream asked for (SEP-2322 `InputRequiredResult`).
  *
- * DESIGN MOCK — the broker does not produce these yet. The shape mirrors
- * what `/v1/elicitations` is proposed to return; see ELICITATION.md.
+ * Mirrors `ElicitationFieldDto` returned by `/v1/manage/elicitations`.
  */
 export interface ElicitationField {
   name: string;
   label: string;
   /** Render as a password field; the value is sent upstream, never shown again. */
   secret?: boolean;
+  /** A JSON Schema `boolean`: render a toggle; the answer is sent as a real boolean. */
+  boolean?: boolean;
+  /** A fixed set of choices (a JSON Schema `enum`): render a dropdown. */
+  options?: string[];
 }
 
 /** A paused upstream MCP tool call waiting on the user (SEP-2322). */

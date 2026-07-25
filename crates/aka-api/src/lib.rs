@@ -446,8 +446,8 @@ pub struct ApprovalDto {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestDto {
     pub id: String,
-    /// Request family (`approval` today; `elicitation` is reserved for the
-    /// future upstream-input path).
+    /// Request family: `approval` for traffic confirmation or `elicitation`
+    /// for an upstream MCP input request.
     pub kind: String,
     /// `pending`, `approved`, `denied`, `expired`, `revoked`, `unavailable`,
     /// or `abandoned`.
@@ -477,6 +477,44 @@ pub struct RequestDto {
     pub resolution: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_secs: Option<u64>,
+}
+
+/// One input an upstream MCP server asked for, as the app renders it.
+/// Mirrors the UI's `ElicitationField`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ElicitationFieldDto {
+    pub name: String,
+    pub label: String,
+    /// Render as a password field; the value rides upstream, never shown again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub secret: bool,
+    /// A JSON Schema `boolean`: render a toggle; the answer rides upstream as a
+    /// real JSON boolean rather than a string.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub boolean: bool,
+    /// A fixed set of choices (a JSON Schema `enum`): render a dropdown rather
+    /// than a text field. Absent for free-text fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<Vec<String>>,
+}
+
+/// A paused upstream MCP tool call waiting on the user (SEP-2322). The agent
+/// whose call is parked never sees this prompt or its answer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ElicitationDto {
+    pub id: String,
+    /// Agent whose tool call is paused.
+    pub agent: String,
+    /// Connection (upstream MCP server) that asked.
+    pub connection: String,
+    /// The MCP tool name the agent called.
+    pub tool: String,
+    /// The upstream's own prompt, shown verbatim but never interpreted.
+    pub prompt: String,
+    pub fields: Vec<ElicitationFieldDto>,
+    pub requested_at: String,
+    /// The request disappears on its own at this time.
+    pub expires_at: String,
 }
 
 /// What the user chose on a prompt.
@@ -511,6 +549,8 @@ pub enum ManageEvent {
     AgentsChanged,
     /// A prompt was raised, updated, answered, or lapsed: refetch the queue.
     ApprovalsChanged,
+    /// An elicitation was raised, answered, or lapsed: refetch the queue.
+    ElicitationsChanged,
     WiringsChanged,
     ConnectionsChanged,
     ActivityAppended {

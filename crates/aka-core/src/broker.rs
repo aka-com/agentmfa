@@ -130,8 +130,10 @@ pub struct Broker {
     /// Traffic parked on the user: prompts, approval windows, and the
     /// cooldown a refusal leaves behind.
     pub approvals: crate::approvals::Approvals,
-    /// Unified lifecycle history for human-decision requests. Approvals write
-    /// it today; future upstream elicitations share the same store.
+    /// Upstream MCP tool calls parked on the user for interactive input.
+    pub elicitations: crate::elicitations::Elicitations,
+    /// Unified lifecycle history for human-decision requests. Approvals and
+    /// elicitations both write it, so both land in one Recent Inbox.
     pub request_history: Arc<crate::request_history::RequestHistory>,
     /// The URL remote clients reach this broker at (`serve --public-url`),
     /// when one is configured. Drives remote-flavored agent-setup text.
@@ -286,6 +288,11 @@ impl Broker {
             events.clone(),
             request_history.clone(),
         );
+        let elicitations = crate::elicitations::Elicitations::with_history(
+            audit.clone(),
+            events.clone(),
+            request_history.clone(),
+        );
         let health = Arc::new(crate::health::HealthRegistry::open(
             paths.health_file(),
             events.clone(),
@@ -295,6 +302,7 @@ impl Broker {
         let broker = Arc::new(Self {
             data_plane,
             approvals,
+            elicitations,
             request_history,
             mcp_auth: crate::mcp_auth::McpAuthSessions::default(),
             manage_oauth: Mutex::new(HashMap::new()),
@@ -729,6 +737,9 @@ impl Broker {
             // An open approval window was permission for traffic to the old
             // destination; the new one has never been shown to the user.
             self.approvals.revoke(id);
+            // A parked elicitation asked about the old destination; its answer
+            // no longer maps to anything, so cancel it too.
+            self.elicitations.revoke(id);
             // A health result for the old destination says nothing about
             // the new one.
             self.health.forget(id);
@@ -785,6 +796,7 @@ impl Broker {
         self.health.forget(id);
         self.forget_mcp_tools_cache(id);
         self.approvals.revoke(id);
+        self.elicitations.revoke(id);
         let dropped = self.access.remove_for_connection(id)?;
         let endpoints = self.endpoints.remove_for_connection(id)?;
         self.teardown_endpoints(&endpoints);
@@ -1800,8 +1812,10 @@ impl Broker {
         }
         if !enabled {
             // Nothing is authorized here any more, so an open window and a
-            // prompt already on screen both have to go.
+            // prompt already on screen both have to go — along with any
+            // upstream elicitation parked on this connection.
             self.approvals.revoke(connection_id);
+            self.elicitations.revoke(connection_id);
         }
         Ok(changed)
     }
@@ -1940,6 +1954,35 @@ impl Broker {
             return Ok(true);
         }
         Ok(self.approvals.respond(id, decision))
+    }
+
+    /* ---------------------------- elicitation ----------------------------- */
+
+    /// Elicitations waiting on the user right now.
+    pub fn pending_elicitations(&self) -> Vec<crate::elicitations::PendingElicitation> {
+        self.elicitations.pending()
+    }
+
+    /// Answer one elicitation from the app: `approved` with the user's field
+    /// values accepts, otherwise it declines. `false` means it was already
+    /// answered, cancelled, or has lapsed.
+    pub fn ui_respond_elicitation(
+        &self,
+        id: &Uuid,
+        approved: bool,
+        values: std::collections::HashMap<String, String>,
+    ) -> Result<bool> {
+        Ok(self.elicitations.respond(id, approved, values))
+    }
+
+    /// Park an upstream elicitation on the user and wait for the answer. The
+    /// sidecar drives this on the agent's behalf mid tool call; the answer is
+    /// shaped as an MCP `ElicitResult`.
+    pub async fn elicit(
+        &self,
+        request: crate::elicitations::ElicitationRequest,
+    ) -> crate::elicitations::ElicitationOutcome {
+        self.elicitations.elicit(request).await
     }
 
     /// Curate which upstream MCP tools agents may call on a connection.
