@@ -120,7 +120,12 @@ function upstreamHttp(call: {
       body: JSON.stringify({
         jsonrpc: '2.0',
         id: request.id,
-        result: { protocolVersion: '2025-06-18', capabilities: {}, serverInfo: { name: 'notion' } },
+        result: {
+          protocolVersion: '2025-06-18',
+          // Advertise resources + completions so discovery lists and wires them.
+          capabilities: { tools: {}, resources: {}, completions: {} },
+          serverInfo: { name: 'notion' },
+        },
       }),
     };
   }
@@ -169,6 +174,53 @@ function upstreamHttp(call: {
       headers: { 'content-type': 'text/event-stream' },
       body: `event: message\ndata: ${notification}\n\nevent: message\ndata: ${response}\n\n`,
     };
+  }
+
+  if (request.method === 'resources/list') {
+    return reply({
+      resources: [
+        {
+          uri: 'notion://page/home',
+          name: 'Home',
+          description: 'The workspace home page',
+          mimeType: 'text/markdown',
+        },
+      ],
+    });
+  }
+
+  if (request.method === 'resources/templates/list') {
+    return reply({
+      resourceTemplates: [
+        {
+          uriTemplate: 'notion://page/{pageId}',
+          name: 'page',
+          description: 'A page by id',
+        },
+      ],
+    });
+  }
+
+  if (request.method === 'resources/read') {
+    const uri = (request.params as { uri: string }).uri;
+    return reply({
+      contents: [{ uri, mimeType: 'text/markdown', text: `# contents of ${uri}` }],
+    });
+  }
+
+  if (request.method === 'completion/complete') {
+    const params = request.params as {
+      ref: { type: string; uri?: string };
+      argument: { name: string; value: string };
+    };
+    // Echo the request back through the suggestion so the test can prove the
+    // ref, argument, and value all reached this upstream unchanged.
+    return reply({
+      completion: {
+        values: [`${params.ref.uri}:${params.argument.name}=${params.argument.value}`],
+        hasMore: false,
+      },
+    });
   }
   return failure('Method not found');
 }
@@ -736,6 +788,80 @@ test('agentmfa_connect files a request with the broker and reports back', async 
       arguments: { service: 'linear' },
     }));
     assert.match(again, /already requested/i);
+  } finally {
+    await app.close();
+  }
+});
+
+test("an MCP upstream's resources and templates are re-exposed", async () => {
+  const app = await harness();
+  try {
+    const client = await app.connect('token-mcp');
+
+    const { resources } = await client.listResources();
+    assert.deepEqual(
+      resources.map((resource) => ({ uri: resource.uri, name: resource.name })),
+      [{ uri: 'notion://page/home', name: 'Home' }],
+    );
+
+    const { resourceTemplates } = await client.listResourceTemplates();
+    assert.deepEqual(
+      resourceTemplates.map((template) => template.uriTemplate),
+      ['notion://page/{pageId}'],
+    );
+  } finally {
+    await app.close();
+  }
+});
+
+test('reading a static resource proxies to the upstream through the broker', async () => {
+  const app = await harness();
+  try {
+    const client = await app.connect('token-mcp');
+    const result = await client.readResource({ uri: 'notion://page/home' });
+    assert.deepEqual(result.contents, [
+      { uri: 'notion://page/home', mimeType: 'text/markdown', text: '# contents of notion://page/home' },
+    ]);
+  } finally {
+    await app.close();
+  }
+});
+
+test('reading a templated URI routes to the owning connection', async () => {
+  const app = await harness();
+  try {
+    const client = await app.connect('token-mcp');
+    // A concrete URI matching the template is read via the template's callback.
+    const result = await client.readResource({ uri: 'notion://page/abc123' });
+    assert.deepEqual(result.contents, [
+      { uri: 'notion://page/abc123', mimeType: 'text/markdown', text: '# contents of notion://page/abc123' },
+    ]);
+  } finally {
+    await app.close();
+  }
+});
+
+test('template argument completion proxies to the upstream', async () => {
+  const app = await harness();
+  try {
+    const client = await app.connect('token-mcp');
+    const result = await client.complete({
+      ref: { type: 'ref/resource', uri: 'notion://page/{pageId}' },
+      argument: { name: 'pageId', value: 'ho' },
+    });
+    // The mock echoes ref+argument+value, proving they reached it unchanged.
+    assert.deepEqual(result.completion.values, ['notion://page/{pageId}:pageId=ho']);
+  } finally {
+    await app.close();
+  }
+});
+
+test('an upstream without resources advertises none', async () => {
+  const app = await harness();
+  try {
+    // `prod-db` is a plain (non-MCP) connection: no resources capability.
+    const client = await app.connect('token-wired');
+    await assert.rejects(() => client.listResources());
   } finally {
     await app.close();
   }

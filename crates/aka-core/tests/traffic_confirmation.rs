@@ -588,6 +588,50 @@ async fn mcp_plumbing_passes_but_tool_calls_are_confirmed() {
 }
 
 #[tokio::test]
+async fn resource_metadata_passes_but_reads_are_confirmed() {
+    let user = ScriptedUser::new(Some(ApprovalDecision::ApproveWindow));
+    let h = harness(user.clone()).await;
+    let up = upstream().await;
+    api_connection(&h, "notion", up.port, Some("/mcp"));
+    h.confirm("notion");
+
+    let rpc = |body: Value| {
+        h.http(json!({
+            "connection": "notion",
+            "method": "POST",
+            "path": "/mcp",
+            "body": body,
+        }))
+    };
+
+    // Listing templates and completing an argument are metadata the host
+    // fires as the user browses or types; prompting on them would be unusable.
+    let (status, _) =
+        rpc(json!({"jsonrpc": "2.0", "id": 1, "method": "resources/templates/list"})).await;
+    assert_eq!(status, 200);
+    let (status, _) = rpc(json!({
+        "jsonrpc": "2.0", "id": 2, "method": "completion/complete",
+        "params": {
+            "ref": {"type": "ref/resource", "uri": "notion://page/{id}"},
+            "argument": {"name": "id", "value": "h"},
+        },
+    }))
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(user.prompts(), 0, "resource metadata must not raise prompts");
+
+    // Reading a resource is real data access: it is confirmed like a call.
+    let (status, _) = rpc(json!({
+        "jsonrpc": "2.0", "id": 3, "method": "resources/read",
+        "params": {"uri": "notion://page/home"},
+    }))
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(user.prompts(), 1, "a resource read is confirmed");
+    assert_eq!(user.last_prompt().summary, "resources/read");
+}
+
+#[tokio::test]
 async fn an_empty_mutating_request_on_the_mcp_path_is_still_confirmed() {
     let user = ScriptedUser::new(Some(ApprovalDecision::Deny));
     let h = harness(user.clone()).await;

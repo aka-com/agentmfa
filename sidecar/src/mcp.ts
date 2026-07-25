@@ -16,8 +16,9 @@
 
 import { randomUUID } from 'node:crypto';
 
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 
 import { BrokerClient, BrokerError, type BrokerConnection, type BrokerIdentity } from './broker';
 import { z } from 'zod';
@@ -26,8 +27,14 @@ import { log } from './log';
 import { describe, invoke, schemaFor, toolNameFor } from './tools';
 import {
   callUpstreamTool,
-  listUpstreamTools,
+  completeUpstream,
+  discoverUpstream,
+  namespaceFor,
+  readUpstreamResource,
   upstreamToolName,
+  type CompletionContext,
+  type UpstreamResource,
+  type UpstreamResourceTemplate,
   type UpstreamTool,
 } from './upstream-mcp';
 
@@ -45,6 +52,30 @@ function upstreamToolBudget(): number {
   // adjust it without a restart.
   const raw = Number(process.env.AGENTMFA_TOOL_BUDGET ?? 40);
   return Number.isFinite(raw) && raw >= 0 ? raw : 40;
+}
+
+/**
+ * How many upstream resources and templates a session registers before the
+ * rest are dropped. Resources live in their own list rather than the tool
+ * surface, but a runaway catalog should still not balloon a session.
+ */
+function resourceBudget(): number {
+  const raw = Number(process.env.AGENTMFA_RESOURCE_BUDGET ?? 100);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 100;
+}
+
+/**
+ * The resource surface shared across a session's connections: the URIs and
+ * template names already claimed (so two upstreams cannot collide), and the
+ * running budget count. Registered as one flat namespace, the way the SDK
+ * keys resources by URI and templates by name.
+ */
+interface ResourceSurface {
+  takenUris: Set<string>;
+  takenTemplateNames: Set<string>;
+  takenTemplateUris: Set<string>;
+  registered: number;
+  withheld: number;
 }
 
 /** One upstream tool in the session's search index. */
@@ -190,6 +221,8 @@ interface Registration {
   tools: string[];
   /** Upstream tool names indexed but not registered (over the tool budget). */
   withheld?: string[];
+  /** How many resources + templates this upstream contributed. */
+  resources?: number;
   /** Set when an MCP upstream could not be reached at session open. */
   error?: string;
 }
@@ -300,6 +333,10 @@ export async function createToolServer(
         .filter((registration) => liveNames.has(registration.connection.name))
         .reduce((sum, registration) => sum + (registration.withheld?.length ?? 0), 0);
 
+      const resources = registrations
+        .filter((registration) => liveNames.has(registration.connection.name))
+        .reduce((sum, registration) => sum + (registration.resources ?? 0), 0);
+
       // One hint, chosen by what is most actionable. Reconnecting re-runs this
       // whole build, so it resolves both pending wirings and dead upstreams.
       let hint: string | undefined;
@@ -328,6 +365,13 @@ export async function createToolServer(
               {
                 agent: principal.agent,
                 tools,
+                ...(resources
+                  ? {
+                      resources,
+                      resource_hint:
+                        'list them with resources/list and resources/templates/list',
+                    }
+                  : {}),
                 ...(searchOnly
                   ? {
                       search_only_tools: searchOnly,
@@ -358,16 +402,29 @@ export async function createToolServer(
   // Every upstream tool this session knows about, registered or not; the
   // search and generic-call meta-tools work over it.
   const upstreamIndex: IndexedTool[] = [];
+  // Resources and templates share one flat namespace across connections,
+  // keyed by URI (resources) and name (templates), with a shared budget.
+  const resourceSurface: ResourceSurface = {
+    takenUris: new Set<string>(),
+    takenTemplateNames: new Set<string>(),
+    takenTemplateUris: new Set<string>(),
+    registered: 0,
+    withheld: 0,
+  };
   for (const connection of wired) {
     // An MCP upstream contributes its own tools rather than one request
     // tool. Its traffic still rides the broker's HTTP plane, so the
     // credential stays where it belongs.
     if (connection.mcp_path) {
       const outcome = await registerUpstream(
-        server, broker, principal, connection, taken, upstreamIndex,
+        server, broker, principal, connection, taken, upstreamIndex, resourceSurface,
       );
       registrations.push({
-        connection, tools: outcome.tools, withheld: outcome.withheld, error: outcome.error,
+        connection,
+        tools: outcome.tools,
+        withheld: outcome.withheld,
+        resources: outcome.resources,
+        error: outcome.error,
       });
       continue;
     }
@@ -573,11 +630,14 @@ interface UpstreamRegistration {
   tools: string[];
   /** Upstream tools indexed but not registered (over the tool budget). */
   withheld: string[];
+  /** How many resources + templates this upstream contributed. */
+  resources: number;
   error?: string;
 }
 
 /**
- * Re-expose an upstream MCP server's tools under this connection's name.
+ * Re-expose an upstream MCP server's tools and resources under this
+ * connection.
  *
  * A server that cannot be reached costs its own tools and nothing else: the
  * session still opens, and `agentmfa_status` reports the failure (via the
@@ -591,18 +651,25 @@ async function registerUpstream(
   connection: BrokerConnection,
   taken: Set<string>,
   index: IndexedTool[],
+  resourceSurface: ResourceSurface,
 ): Promise<UpstreamRegistration> {
-  let tools: Awaited<ReturnType<typeof listUpstreamTools>> = [];
+  let discovery: Awaited<ReturnType<typeof discoverUpstream>>;
   try {
-    tools = await listUpstreamTools(broker, principal, connection);
+    discovery = await discoverUpstream(broker, principal, connection);
   } catch (error) {
-    log('warn', 'could not list tools from an MCP upstream', {
+    log('warn', 'could not discover an MCP upstream', {
       connection: connection.name,
       error: String(error),
     });
-    return { tools: [], withheld: [], error: `could not reach the MCP server: ${String(error)}` };
+    return {
+      tools: [],
+      withheld: [],
+      resources: 0,
+      error: `could not reach the MCP server: ${String(error)}`,
+    };
   }
 
+  let tools = discovery.tools;
   // A curated wiring lists only its allowed subset. This mirrors what the
   // broker enforces on tools/call; hiding the rest keeps the agent's tool
   // budget honest and its failures unconfusing.
@@ -682,7 +749,171 @@ async function registerUpstream(
       withheld: withheld.length,
     });
   }
-  return { tools: registered, withheld };
+
+  const resources = registerUpstreamResources(
+    server,
+    broker,
+    principal,
+    connection,
+    discovery,
+    resourceSurface,
+  );
+
+  return { tools: registered, withheld, resources };
+}
+
+/** The description an agent sees for a re-exposed resource or template. */
+function describeResource(
+  connection: BrokerConnection,
+  item: UpstreamResource | UpstreamResourceTemplate,
+): string {
+  const base = item.description ?? item.name ?? ('uri' in item ? item.uri : item.uriTemplate);
+  return `${base} (via ${connection.name})`;
+}
+
+/**
+ * Re-expose an upstream's static resources and resource templates.
+ *
+ * Resources keep their real upstream URI so the agent addresses them exactly
+ * as the upstream named them; the read routes back to this connection through
+ * the closure, over the broker's HTTP plane, credential injected upstream.
+ * Templates additionally proxy argument completion to the upstream — but only
+ * when it advertised the completions capability, so the SDK does not offer an
+ * autocomplete the upstream cannot answer.
+ *
+ * Collisions across connections are dropped rather than fatal (the SDK keys
+ * resources by URI and templates by name), and a shared budget bounds how
+ * many a single session registers. Returns the count actually registered.
+ */
+function registerUpstreamResources(
+  server: McpServer,
+  broker: BrokerClient,
+  principal: Principal,
+  connection: BrokerConnection,
+  discovery: { resources: UpstreamResource[]; resourceTemplates: UpstreamResourceTemplate[]; capabilities: { completions?: unknown } },
+  surface: ResourceSurface,
+): number {
+  let count = 0;
+
+  for (const resource of discovery.resources) {
+    if (!resource.uri) continue;
+    if (surface.registered >= resourceBudget()) {
+      surface.withheld++;
+      continue;
+    }
+    if (surface.takenUris.has(resource.uri)) {
+      log('warn', 'skipping an upstream resource whose URI collides', {
+        connection: connection.name,
+        uri: resource.uri,
+      });
+      continue;
+    }
+    try {
+      server.registerResource(
+        resource.name ?? resource.uri,
+        resource.uri,
+        {
+          description: describeResource(connection, resource),
+          ...(resource.title ? { title: resource.title } : {}),
+          ...(resource.mimeType ? { mimeType: resource.mimeType } : {}),
+        },
+        async (uri: URL) =>
+          (await readUpstreamResource(broker, principal, connection, uri.toString())) as ReadResourceResult,
+      );
+      surface.takenUris.add(resource.uri);
+      surface.registered++;
+      count++;
+    } catch (error) {
+      log('warn', 'could not register an upstream resource', {
+        connection: connection.name,
+        uri: resource.uri,
+        error: String(error),
+      });
+    }
+  }
+
+  const supportsCompletions = !!discovery.capabilities.completions;
+  for (const template of discovery.resourceTemplates) {
+    if (!template.uriTemplate) continue;
+    if (surface.registered >= resourceBudget()) {
+      surface.withheld++;
+      continue;
+    }
+    if (surface.takenTemplateUris.has(template.uriTemplate)) {
+      log('warn', 'skipping an upstream template whose URI pattern collides', {
+        connection: connection.name,
+        uriTemplate: template.uriTemplate,
+      });
+      continue;
+    }
+    const name = `${namespaceFor(connection)}/${template.name ?? template.uriTemplate}`;
+    if (surface.takenTemplateNames.has(name)) {
+      log('warn', 'skipping an upstream template whose name collides', {
+        connection: connection.name,
+        name,
+      });
+      continue;
+    }
+    // Proxy each template variable's completion to the upstream. A JS Proxy
+    // answers for any variable the SDK asks about, so we need not parse the
+    // URI template ourselves; an upstream without completions gets no proxy,
+    // so the SDK never advertises an autocomplete it cannot serve.
+    const complete = supportsCompletions
+      ? (new Proxy(
+          {},
+          {
+            get: (_target, variable) => {
+              if (typeof variable !== 'string') return undefined;
+              return async (value: string, context?: CompletionContext) => {
+                try {
+                  return await completeUpstream(
+                    broker,
+                    principal,
+                    connection,
+                    { type: 'ref/resource', uri: template.uriTemplate },
+                    { name: variable, value },
+                    context,
+                  );
+                } catch {
+                  return [];
+                }
+              };
+            },
+          },
+        ) as Record<string, (value: string, context?: CompletionContext) => Promise<string[]>>)
+      : undefined;
+    try {
+      server.registerResource(
+        name,
+        new ResourceTemplate(template.uriTemplate, { list: undefined, complete }),
+        {
+          description: describeResource(connection, template),
+          ...(template.title ? { title: template.title } : {}),
+          ...(template.mimeType ? { mimeType: template.mimeType } : {}),
+        },
+        async (uri: URL) =>
+          (await readUpstreamResource(broker, principal, connection, uri.toString())) as ReadResourceResult,
+      );
+      surface.takenTemplateUris.add(template.uriTemplate);
+      surface.takenTemplateNames.add(name);
+      surface.registered++;
+      count++;
+    } catch (error) {
+      log('warn', 'could not register an upstream resource template', {
+        connection: connection.name,
+        uriTemplate: template.uriTemplate,
+        error: String(error),
+      });
+    }
+  }
+
+  if (surface.withheld) {
+    log('info', 'some upstream resources were over the registration budget', {
+      connection: connection.name,
+      withheld: surface.withheld,
+    });
+  }
+  return count;
 }
 
 /** Mint a transport + server pair for a new session. */

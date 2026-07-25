@@ -1240,7 +1240,13 @@ fn is_mcp_envelope(method: &str) -> bool {
             | "ping"
             | "tools/list"
             | "resources/list"
+            | "resources/templates/list"
             | "prompts/list"
+            // Argument autocompletion is metadata the host fires as the user
+            // types; prompting on each keystroke would be unusable, and it
+            // reads nothing a list call does not. `resources/read` is left
+            // out on purpose — that one is real data access and is confirmed.
+            | "completion/complete"
             | "notifications/initialized"
             | "notifications/cancelled"
             | "notifications/progress"

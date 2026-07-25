@@ -32,11 +32,48 @@ export interface UpstreamTool {
   inputSchema?: Record<string, unknown>;
 }
 
+/** One static resource as the upstream describes it. */
+export interface UpstreamResource {
+  uri: string;
+  name?: string;
+  title?: string;
+  description?: string;
+  mimeType?: string;
+}
+
+/** One resource template (an RFC 6570 URI with variables) the upstream offers. */
+export interface UpstreamResourceTemplate {
+  uriTemplate: string;
+  name?: string;
+  title?: string;
+  description?: string;
+  mimeType?: string;
+}
+
+/** The subset of the upstream's advertised capabilities we act on. */
+export interface UpstreamCapabilities {
+  tools?: unknown;
+  resources?: unknown;
+  completions?: unknown;
+  prompts?: unknown;
+}
+
+/** One session's worth of what an upstream offers, fetched at session open. */
+export interface UpstreamDiscovery {
+  capabilities: UpstreamCapabilities;
+  tools: UpstreamTool[];
+  resources: UpstreamResource[];
+  resourceTemplates: UpstreamResourceTemplate[];
+}
+
 /** The version we offer; the server's `initialize` answer overrides it. */
 export const SUPPORTED_PROTOCOL_VERSION = '2025-06-18';
 
 /** A hostile or looping `nextCursor` must not page forever. */
 export const MAX_TOOL_PAGES = 32;
+
+/** Resources and templates page too; keep the same guard, a little tighter. */
+export const MAX_RESOURCE_PAGES = 16;
 
 /** The namespace an upstream's tools are grouped under. */
 export function namespaceFor(connection: BrokerConnection): string {
@@ -129,6 +166,8 @@ class UpstreamClient {
   private nextId = 1;
   private sessionId: string | null = null;
   private protocolVersion = SUPPORTED_PROTOCOL_VERSION;
+  /** What the server said it offers; empty until `initialize` returns. */
+  capabilities: UpstreamCapabilities = {};
 
   constructor(
     private readonly broker: BrokerClient,
@@ -168,7 +207,9 @@ class UpstreamClient {
         clientInfo: { name: 'agentmfa', version: '0.1.0' },
       },
     });
-    const result = this.result(response, id) as { protocolVersion?: string } | undefined;
+    const result = this.result(response, id) as
+      | { protocolVersion?: string; capabilities?: UpstreamCapabilities }
+      | undefined;
 
     // A stateful server issues its session id here and requires it on
     // every request that follows; a stateless server issues none and we
@@ -176,6 +217,9 @@ class UpstreamClient {
     this.sessionId = headerValue(response.headers, 'mcp-session-id');
     if (typeof result?.protocolVersion === 'string') {
       this.protocolVersion = result.protocolVersion;
+    }
+    if (result?.capabilities && typeof result.capabilities === 'object') {
+      this.capabilities = result.capabilities;
     }
     this.initialized = true;
 
@@ -196,6 +240,31 @@ class UpstreamClient {
     const id = this.nextId++;
     const response = await this.send('POST', { jsonrpc: '2.0', id, method, params });
     return this.result(response, id);
+  }
+
+  /**
+   * Drain a paginated list method (`tools/list`, `resources/list`, …) into
+   * a flat array, following `nextCursor` up to `maxPages` so a looping or
+   * hostile server cannot page us forever.
+   */
+  async listPaged<T>(method: string, key: string, maxPages: number): Promise<T[]> {
+    const items: T[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < maxPages; page++) {
+      const result = (await this.request(method, cursor ? { cursor } : {})) as
+        | (Record<string, unknown> & { nextCursor?: string })
+        | undefined;
+      const list = result?.[key];
+      if (Array.isArray(list)) items.push(...(list as T[]));
+      if (!result?.nextCursor) return items;
+      cursor = result.nextCursor;
+    }
+    log('warn', 'a paginated list was truncated: the upstream kept paginating', {
+      connection: this.connection.name,
+      method,
+      pages: maxPages,
+    });
+    return items;
   }
 
   /**
@@ -234,36 +303,106 @@ class UpstreamClient {
 }
 
 /**
- * Ask an upstream MCP server what it offers.
+ * Ask an upstream MCP server what it offers — tools, resources, and resource
+ * templates — in one short-lived session.
  *
  * MCP requires `initialize` before anything else. We do not hold a session
  * across operations: each is independent, which costs round trips and buys
- * us statelessness across sidecar restarts.
+ * us statelessness across sidecar restarts. Tool discovery is load-bearing
+ * (a failure here means the upstream is unreachable this session); resource
+ * discovery is best-effort, so a server that advertises resources but stumbles
+ * listing them still contributes its tools.
  */
-export async function listUpstreamTools(
+export async function discoverUpstream(
   broker: BrokerClient,
   auth: AgentAuth,
   connection: BrokerConnection,
-): Promise<UpstreamTool[]> {
+): Promise<UpstreamDiscovery> {
   const client = new UpstreamClient(broker, auth, connection);
   await client.initialize();
   try {
-    const tools: UpstreamTool[] = [];
-    let cursor: string | undefined;
-    for (let page = 0; page < MAX_TOOL_PAGES; page++) {
-      const result = (await client.request('tools/list', cursor ? { cursor } : {})) as {
-        tools?: UpstreamTool[];
-        nextCursor?: string;
-      };
-      tools.push(...(result?.tools ?? []));
-      if (!result?.nextCursor) return tools;
-      cursor = result.nextCursor;
+    const capabilities = client.capabilities;
+    const tools = capabilities.tools
+      ? await client.listPaged<UpstreamTool>('tools/list', 'tools', MAX_TOOL_PAGES)
+      : [];
+
+    let resources: UpstreamResource[] = [];
+    let resourceTemplates: UpstreamResourceTemplate[] = [];
+    if (capabilities.resources) {
+      try {
+        resources = await client.listPaged<UpstreamResource>(
+          'resources/list',
+          'resources',
+          MAX_RESOURCE_PAGES,
+        );
+      } catch (error) {
+        log('warn', 'an upstream advertised resources but failed to list them', {
+          connection: connection.name,
+          error: String(error),
+        });
+      }
+      try {
+        // Many servers expose resources without any templates and answer
+        // this with "method not found"; that is not an error worth surfacing.
+        resourceTemplates = await client.listPaged<UpstreamResourceTemplate>(
+          'resources/templates/list',
+          'resourceTemplates',
+          MAX_RESOURCE_PAGES,
+        );
+      } catch {
+        resourceTemplates = [];
+      }
     }
-    log('warn', 'tool list truncated: the upstream kept paginating', {
-      connection: connection.name,
-      pages: MAX_TOOL_PAGES,
-    });
-    return tools;
+    return { capabilities, tools, resources, resourceTemplates };
+  } finally {
+    await client.close();
+  }
+}
+
+/** Read one of an upstream's resources by its (concrete) URI. */
+export async function readUpstreamResource(
+  broker: BrokerClient,
+  auth: AgentAuth,
+  connection: BrokerConnection,
+  uri: string,
+): Promise<unknown> {
+  const client = new UpstreamClient(broker, auth, connection);
+  await client.initialize();
+  try {
+    return await client.request('resources/read', { uri });
+  } finally {
+    await client.close();
+  }
+}
+
+/** Argument-completion context, forwarded verbatim to the upstream. */
+export interface CompletionContext {
+  arguments?: Record<string, string>;
+}
+
+/**
+ * Ask an upstream to complete one argument of a prompt or resource template.
+ * Returns just the suggestion strings (the SDK rebuilds the envelope); an
+ * upstream that does not support completion yields none rather than an error.
+ */
+export async function completeUpstream(
+  broker: BrokerClient,
+  auth: AgentAuth,
+  connection: BrokerConnection,
+  ref: { type: 'ref/resource'; uri: string } | { type: 'ref/prompt'; name: string },
+  argument: { name: string; value: string },
+  context?: CompletionContext,
+): Promise<string[]> {
+  const client = new UpstreamClient(broker, auth, connection);
+  await client.initialize();
+  try {
+    const result = (await client.request('completion/complete', {
+      ref,
+      argument,
+      ...(context ? { context } : {}),
+    })) as { completion?: { values?: unknown } } | undefined;
+    const values = result?.completion?.values;
+    return Array.isArray(values) ? values.filter((value): value is string => typeof value === 'string') : [];
   } finally {
     await client.close();
   }
