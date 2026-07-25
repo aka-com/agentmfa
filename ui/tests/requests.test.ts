@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { activeRequestCount, activeRequests } from '../src/requests';
-import type { Approval, ElicitationRequest } from '../src/types';
+import { activeRequestCount, activeRequests, recentRequests } from '../src/requests';
+import type { Approval, ElicitationRequest, RequestRecord } from '../src/types';
 
 function approval(id: string, expiresAt: string): Approval {
   return {
@@ -58,4 +58,38 @@ test('active request sorting does not mutate broker snapshots', () => {
     'later',
   ]);
   assert.deepEqual(approvals.map((request) => request.id), ['later', 'sooner']);
+});
+
+function history(
+  id: string,
+  status: RequestRecord['status'],
+  resolvedAt?: string,
+): RequestRecord {
+  return {
+    id,
+    kind: 'approval',
+    status,
+    connection: 'github',
+    agent: 'codex',
+    summary: 'GET /user',
+    waiting: 1,
+    requested_at: '2026-07-24T12:00:00Z',
+    resolved_at: resolvedAt,
+  };
+}
+
+test('recent requests contain terminal records newest first', () => {
+  const records = [
+    history('older', 'denied', '2026-07-24T12:01:00Z'),
+    history('pending', 'pending'),
+    history('newer', 'approved', '2026-07-24T12:02:00Z'),
+  ];
+
+  assert.deepEqual(recentRequests(records).map((request) => request.id), ['newer', 'older']);
+  assert.deepEqual(records.map((request) => request.id), ['older', 'pending', 'newer']);
+});
+
+test('recent requests exclude ids still present in an active snapshot', () => {
+  const records = [history('raced', 'denied', '2026-07-24T12:01:00Z')];
+  assert.deepEqual(recentRequests(records, new Set(['raced'])), []);
 });

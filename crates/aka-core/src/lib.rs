@@ -33,6 +33,7 @@ pub mod oauth;
 pub mod paths;
 pub mod policy;
 pub mod ratelimit;
+pub mod request_history;
 pub mod sessions;
 pub mod sidecar;
 pub mod store;

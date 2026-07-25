@@ -22,6 +22,7 @@ import type {
   McpAuthState,
   McpStatusReport,
   NotificationSettings,
+  RequestRecord,
   SessionSummary,
   Settings,
   Unlisten,
@@ -177,6 +178,7 @@ interface MockDatabase {
   activity: ActivityEntry[];
   elicitations: ElicitationRequest[];
   approvals: Approval[];
+  requests: RequestRecord[];
   settings: Settings;
 }
 
@@ -233,6 +235,7 @@ const db: MockDatabase = {
   activity: [],
   elicitations: [],
   approvals: [],
+  requests: [],
   settings: {
     reauth_on_read: true,
     show_websockets: false,
@@ -327,7 +330,7 @@ function seedFixtures() {
   // DESIGN MOCK (SEP-2322, see ELICITATION.md): a tool call paused on user
   // input. The broker does not produce these yet; this fixture exists so the
   // trusted-UI answering flow is designable and reviewable standalone.
-  db.elicitations.push({
+  const elicitation: ElicitationRequest = {
     id: uid(),
     agent: 'claude-code',
     connection: 'notion',
@@ -336,13 +339,26 @@ function seedFixtures() {
     fields: [{ name: 'workspace', label: 'Workspace' }],
     requested_at: t(1),
     expires_at: new Date(Date.now() + 9 * 60000).toISOString(),
+  };
+  db.elicitations.push(elicitation);
+  db.requests.push({
+    id: elicitation.id,
+    kind: 'elicitation',
+    status: 'pending',
+    connection: elicitation.connection,
+    agent: elicitation.agent,
+    summary: elicitation.prompt,
+    detail: elicitation.tool,
+    waiting: 1,
+    requested_at: elicitation.requested_at,
+    expires_at: elicitation.expires_at,
   });
   // One tool with traffic confirmation on, and a call parked on it, so the
   // switch and the prompt are both designable standalone.
   const github = db.connections.find((c) => c.name === 'github');
   if (github) {
     db.access.push({ connection_id: github.id, enabled: true, confirm: true });
-    db.approvals.push({
+    const approval: Approval = {
       id: uid(),
       connection_id: github.id,
       connection: github.name,
@@ -355,8 +371,73 @@ function seedFixtures() {
       requested_at: new Date(Date.now() - 8000).toISOString(),
       expires_at: new Date(Date.now() + 82 * 1000).toISOString(),
       window_secs: 15 * 60,
+    };
+    db.approvals.push(approval);
+    db.requests.push({
+      id: approval.id,
+      kind: 'approval',
+      status: 'pending',
+      connection_id: approval.connection_id,
+      connection: approval.connection,
+      connection_type: approval.type,
+      unit: approval.unit,
+      target: approval.target,
+      agent: approval.agent,
+      summary: approval.summary,
+      detail: approval.detail,
+      waiting: approval.waiting,
+      requested_at: approval.requested_at,
+      expires_at: approval.expires_at,
+      window_secs: approval.window_secs,
     });
   }
+  db.requests.push(
+    {
+      id: uid(),
+      kind: 'approval',
+      status: 'approved',
+      connection: 'prod-db',
+      connection_type: 'pg',
+      unit: 'session',
+      target: 'app@db.internal.aka.com:5432/app_production',
+      agent: 'deploy-script',
+      summary: 'New Postgres session',
+      waiting: 1,
+      requested_at: t(18),
+      resolved_at: t(17),
+      resolution: 'approved_for_window',
+      window_secs: 15 * 60,
+    },
+    {
+      id: uid(),
+      kind: 'approval',
+      status: 'denied',
+      connection: 'github',
+      connection_type: 'api',
+      unit: 'request',
+      target: 'https://api.github.com',
+      agent: 'codex',
+      summary: 'DELETE /repos/aka/obsolete',
+      waiting: 1,
+      requested_at: t(43),
+      resolved_at: t(42),
+      resolution: 'denied',
+      window_secs: 15 * 60,
+    },
+    {
+      id: uid(),
+      kind: 'elicitation',
+      status: 'expired',
+      connection: 'notion',
+      agent: 'claude-code',
+      summary: 'Which workspace should this query use?',
+      detail: 'agentmfa_notion_search',
+      waiting: 1,
+      requested_at: t(91),
+      resolved_at: t(81),
+      resolution: 'timed_out',
+    },
+  );
 }
 function audit(
   kind: keyof typeof MOCK_ACTIVITY_META,
@@ -370,6 +451,18 @@ function audit(
   db.activity.unshift(entry);
   db.activity.length = Math.min(db.activity.length, MOCK_ACTIVITY_LIMIT);
   return entry;
+}
+
+function resolveMockRequest(
+  id: string,
+  status: RequestRecord['status'],
+  resolution: string,
+): void {
+  const request = db.requests.find((candidate) => candidate.id === id);
+  if (!request || request.status !== 'pending') return;
+  request.status = status;
+  request.resolution = resolution;
+  request.resolved_at = now();
 }
 function connDto(c: MockConnection): ConnectionSummary {
   return {
@@ -983,6 +1076,9 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         // broker does the same, rather than refusing traffic the user just
         // said needs no asking.
         record.confirm_window_until = null;
+        const released = db.approvals.filter((a) => a.connection_id === connection.id);
+        released.forEach((approval) =>
+          resolveMockRequest(approval.id, 'approved', 'confirmation_disabled'));
         db.approvals = db.approvals.filter((a) => a.connection_id !== connection.id);
         emit('aka://approvals-changed', {});
       }
@@ -993,6 +1089,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       return true;
     }
     case 'list_approvals': return db.approvals.slice();
+    case 'list_requests': return db.requests.slice();
     case 'respond_approval': {
       const approval = db.approvals.find((a) => a.id === args.id);
       if (!approval) return false;
@@ -1006,6 +1103,12 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         record.confirm = false;
         record.confirm_window_until = null;
       }
+      resolveMockRequest(
+        approval.id,
+        args.decision === 'deny' ? 'denied' : 'approved',
+        args.decision === 'deny' ? 'denied'
+          : args.decision === 'approve_all' ? 'approved_all' : 'approved_for_window',
+      );
       const entry = args.decision === 'deny'
         ? audit('denied', `Refused by the user: ${approval.agent} → ${approval.connection}`,
             approval.summary, { connection: approval.connection, agent: approval.agent })
@@ -1021,6 +1124,11 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       const request = db.elicitations.find((r) => r.id === args.id);
       if (!request) throw new Error('no such elicitation (answered elsewhere or expired)');
       db.elicitations = db.elicitations.filter((r) => r.id !== args.id);
+      resolveMockRequest(
+        request.id,
+        args.approved ? 'approved' : 'denied',
+        args.approved ? 'input_provided' : 'input_refused',
+      );
       // The values themselves are deliberately NOT audited — like a secret,
       // an answer may be sensitive; the record is that it was provided.
       const entry = args.approved

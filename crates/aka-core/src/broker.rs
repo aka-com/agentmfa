@@ -130,6 +130,9 @@ pub struct Broker {
     /// Traffic parked on the user: prompts, approval windows, and the
     /// cooldown a refusal leaves behind.
     pub approvals: crate::approvals::Approvals,
+    /// Unified lifecycle history for human-decision requests. Approvals write
+    /// it today; future upstream elicitations share the same store.
+    pub request_history: Arc<crate::request_history::RequestHistory>,
     /// The URL remote clients reach this broker at (`serve --public-url`),
     /// when one is configured. Drives remote-flavored agent-setup text.
     public_url: Mutex<Option<String>>,
@@ -276,8 +279,13 @@ impl Broker {
             audit.clone(),
             events.clone(),
         );
-        let approvals =
-            crate::approvals::Approvals::new(config.approvals(), audit.clone(), events.clone());
+        let request_history = Arc::new(crate::request_history::RequestHistory::default());
+        let approvals = crate::approvals::Approvals::with_history(
+            config.approvals(),
+            audit.clone(),
+            events.clone(),
+            request_history.clone(),
+        );
         let health = Arc::new(crate::health::HealthRegistry::open(
             paths.health_file(),
             events.clone(),
@@ -287,6 +295,7 @@ impl Broker {
         let broker = Arc::new(Self {
             data_plane,
             approvals,
+            request_history,
             mcp_auth: crate::mcp_auth::McpAuthSessions::default(),
             manage_oauth: Mutex::new(HashMap::new()),
             connect_request_debounce: Mutex::new(std::collections::HashMap::new()),
@@ -1806,6 +1815,19 @@ impl Broker {
     /// cover it. That is also what the prompt's "Approve all" button
     /// routes through, so "stop asking" can never be one stray click.
     pub fn ui_set_confirm_mode(&self, connection_id: &Uuid, confirm: ConfirmMode) -> Result<bool> {
+        self.ui_set_confirm_mode_with_resolution(
+            connection_id,
+            confirm,
+            crate::request_history::RequestResolution::ConfirmationDisabled,
+        )
+    }
+
+    fn ui_set_confirm_mode_with_resolution(
+        &self,
+        connection_id: &Uuid,
+        confirm: ConfirmMode,
+        release_resolution: crate::request_history::RequestResolution,
+    ) -> Result<bool> {
         let connection = self.store.connection_by_id(connection_id)?;
         let old_mode = self.access.confirm_mode(connection_id);
         if confirm.is_on() && !crate::types::confirmable(&connection) {
@@ -1843,7 +1865,7 @@ impl Broker {
             if !confirm.is_on() {
                 // The user just said this traffic needs no asking: release
                 // whatever is parked on it instead of refusing it.
-                self.approvals.release(connection_id);
+                self.approvals.release_as(connection_id, release_resolution);
             }
             let mut entry = AuditEntry::new(
                 AuditKind::Wired,
@@ -1875,6 +1897,14 @@ impl Broker {
         self.approvals.pending()
     }
 
+    /// Request decision lifecycles for management clients' Recent Inbox.
+    pub fn request_records(&self) -> Vec<crate::request_history::RequestRecord> {
+        // Keep deadline retirement and waiter counts authoritative before
+        // reading the shared lifecycle store.
+        let _ = self.approvals.pending();
+        self.request_history.records()
+    }
+
     /// Answer a prompt. "Approve all" persists the switch going off first —
     /// through [`Self::ui_set_confirm_mode`] and its authentication — so a
     /// refused authentication leaves the traffic parked and the prompt up,
@@ -1897,8 +1927,15 @@ impl Broker {
             // connection, this prompt included — so there is nothing left
             // to answer afterwards. A no-op change (the switch was already
             // off, raced by another window) still has to release it.
-            if !self.ui_set_confirm_mode(&pending.connection_id, ConfirmMode::Off)? {
-                self.approvals.release(&pending.connection_id);
+            if !self.ui_set_confirm_mode_with_resolution(
+                &pending.connection_id,
+                ConfirmMode::Off,
+                crate::request_history::RequestResolution::ApprovedAll,
+            )? {
+                self.approvals.release_as(
+                    &pending.connection_id,
+                    crate::request_history::RequestResolution::ApprovedAll,
+                );
             }
             return Ok(true);
         }

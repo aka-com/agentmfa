@@ -16,7 +16,8 @@ use std::sync::Arc;
 
 use aka_api::{
     AccessDto, ActivityDto, ApprovalDecisionDto, ApprovalDto, ConnectionDto, EndpointChip,
-    IdentityDto, IssuedEndpointDto, ManageError, OAuthDto, SecretDto, SessionDto, SettingsDto,
+    IdentityDto, IssuedEndpointDto, ManageError, OAuthDto, RequestDto, SecretDto, SessionDto,
+    SettingsDto,
 };
 use async_trait::async_trait;
 use uuid::Uuid;
@@ -270,6 +271,30 @@ pub fn approval_dto(pending: &crate::approvals::PendingApproval) -> ApprovalDto 
         requested_at: pending.requested_at.to_rfc3339(),
         expires_at: pending.expires_at.to_rfc3339(),
         window_secs: pending.window_secs,
+    }
+}
+
+pub fn request_dto(record: &crate::request_history::RequestRecord) -> RequestDto {
+    RequestDto {
+        id: record.id.to_string(),
+        kind: record.kind.as_str().to_string(),
+        status: record.status.as_str().to_string(),
+        connection_id: record.connection_id.map(|id| id.to_string()),
+        connection: record.connection.clone(),
+        connection_type: record.connection_kind.map(|kind| kind.as_str().to_string()),
+        unit: record.unit.map(|unit| unit.as_str().to_string()),
+        target: record.target.clone(),
+        agent: record.agent.clone(),
+        summary: record.summary.clone(),
+        detail: record.detail.clone(),
+        waiting: record.waiting,
+        requested_at: record.requested_at.to_rfc3339(),
+        expires_at: record.expires_at.map(|at| at.to_rfc3339()),
+        resolved_at: record.resolved_at.map(|at| at.to_rfc3339()),
+        resolution: record
+            .resolution
+            .map(|resolution| resolution.as_str().to_string()),
+        window_secs: record.window_secs,
     }
 }
 
@@ -819,6 +844,8 @@ pub trait ManagementBackend: Send + Sync {
     /* traffic confirmation */
     /// Prompts waiting on the user, oldest first.
     async fn approvals(&self) -> ManageResult<Vec<ApprovalDto>>;
+    /// Requests that entered a decision flow, including terminal history.
+    async fn requests(&self) -> ManageResult<Vec<RequestDto>>;
     /// Answer one. `false` means it was already answered, revoked, or has
     /// lapsed. `ApproveAll` turns the connection's switch off first, so a
     /// refused authentication leaves the traffic parked.
@@ -1043,6 +1070,15 @@ impl ManagementBackend for LocalBackend {
             .pending_approvals()
             .iter()
             .map(approval_dto)
+            .collect())
+    }
+
+    async fn requests(&self) -> ManageResult<Vec<RequestDto>> {
+        Ok(self
+            .broker
+            .request_records()
+            .iter()
+            .map(request_dto)
             .collect())
     }
 

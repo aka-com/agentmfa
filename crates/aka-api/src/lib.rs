@@ -418,6 +418,45 @@ pub struct ApprovalDto {
     pub window_secs: u64,
 }
 
+/// A request's decision lifecycle. Unlike [`ApprovalDto`], terminal records
+/// remain available for the bounded Recent Inbox after traffic has resumed or
+/// been refused.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestDto {
+    pub id: String,
+    /// Request family (`approval` today; `elicitation` is reserved for the
+    /// future upstream-input path).
+    pub kind: String,
+    /// `pending`, `approved`, `denied`, `expired`, `revoked`, `unavailable`,
+    /// or `abandoned`.
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
+    pub connection: String,
+    /// The connection transport (`api`, `pg`, …), distinct from request kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    pub agent: String,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub waiting: usize,
+    pub requested_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_at: Option<String>,
+    /// Machine-readable terminal cause, absent while pending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_secs: Option<u64>,
+}
+
 /// What the user chose on a prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -50,7 +50,7 @@ import {
 } from '/src/broker';
 import { sameBrokerScope } from '/src/broker-scope';
 import { activityIdentity } from '/src/activity';
-import { activeRequestCount, activeRequests } from '/src/requests';
+import { activeRequestCount, activeRequests, recentRequests } from '/src/requests';
 import { APP_VERSION } from '/src/version';
 import { virtualListWindow } from '/src/virtual-list';
 import type { HostKeyCandidate } from '/src/connection-input';
@@ -71,6 +71,7 @@ import type {
   McpStatusReport,
   McpToolInfo,
   NotificationSettings,
+  RequestRecord,
   IssuedEndpoint,
   SecretSummary,
   SessionSummary,
@@ -208,6 +209,8 @@ interface AppState {
   elicitValues: Record<string, string>;
   /** Agent traffic parked on a decision: it moves only once answered. */
   approvals: Approval[];
+  /** Broker-owned request decision lifecycle history. */
+  requests: RequestRecord[];
   /** One approval response in flight; prevents duplicate native prompts/actions. */
   approvalAnswering: string | null;
   agentSetupInstructions: string;
@@ -332,6 +335,7 @@ const initialState: AppState = {
   elicitations: [],      // paused upstream tool calls awaiting the user (SEP-2322)
   elicitValues: {},      // open elicitation dialog's field values (transient)
   approvals: [],         // agent traffic parked on the user's confirmation
+  requests: [],          // bounded request history, including terminal records
   approvalAnswering: null,
   agentSetupInstructions: '', // short paste-ready setup message (lazy-loaded)
   settings: { ...DEFAULT_SETTINGS },
@@ -417,6 +421,7 @@ function clearBrokerOwnedState(): void {
   state.elicitations = [];
   state.elicitValues = {};
   state.approvals = [];
+  state.requests = [];
   state.approvalAnswering = null;
   state.agentSetupInstructions = '';
   state.settings = { ...DEFAULT_SETTINGS };
@@ -540,9 +545,9 @@ const overlays = (): HTMLElement => {
 };
 /* ------------------------------ data loading ----------------------------- */
 type RefreshTarget = 'all' | 'secrets' | 'connections' | 'identity' | 'sessions' |
-  'activity' | 'settings' | 'elicitations' | 'approvals';
+  'activity' | 'settings' | 'elicitations' | 'approvals' | 'requests';
 type LoadKey = 'secrets' | 'connections' | 'sessions' | 'activity' |
-  'elicitations' | 'approvals';
+  'elicitations' | 'approvals' | 'requests';
 
 async function refresh(which: RefreshTarget = 'all'): Promise<void> {
   const jobs: Promise<void>[] = [];
@@ -552,6 +557,7 @@ async function refresh(which: RefreshTarget = 'all'): Promise<void> {
   if (which === 'all' || which === 'sessions') jobs.push(load('sessions', 'list_sessions'));
   if (which === 'all' || which === 'elicitations') jobs.push(load('elicitations', 'list_elicitations'));
   if (which === 'all' || which === 'approvals') jobs.push(load('approvals', 'list_approvals'));
+  if (which === 'all' || which === 'requests') jobs.push(load('requests', 'list_requests'));
   if (which === 'all' || which === 'activity') {
     jobs.push(load('activity', 'list_activity', { limit: ACTIVITY_RENDER_LIMIT }));
   }
@@ -576,6 +582,7 @@ async function load<K extends CommandName>(
       case 'activity': state.activity = result as ActivityEntry[]; break;
       case 'elicitations': state.elicitations = result as ElicitationRequest[]; break;
       case 'approvals': state.approvals = result as Approval[]; break;
+      case 'requests': state.requests = result as RequestRecord[]; break;
     }
   } catch (error) {
     console.error(cmd, error);
@@ -691,6 +698,106 @@ function approvalUnit(approval: Approval): string {
   return 'wants to send a request';
 }
 
+function requestOutcome(record: RequestRecord): {
+  label: string;
+  detail: string;
+  icon: string;
+  tone: string;
+} {
+  const minutes = Math.max(1, Math.round((record.window_secs ?? 900) / 60));
+  switch (record.resolution) {
+    case 'approved_for_window':
+      return {
+        label: 'Approved',
+        detail: `Allowed for ${minutes} minute${minutes === 1 ? '' : 's'}`,
+        icon: ICONS.circleCheck,
+        tone: 'success',
+      };
+    case 'approved_all':
+    case 'confirmation_disabled':
+      return {
+        label: 'Approved',
+        detail: 'Allowed and traffic confirmation turned off',
+        icon: ICONS.circleCheck,
+        tone: 'success',
+      };
+    case 'denied':
+      return {
+        label: 'Denied',
+        detail: 'Refused by the user',
+        icon: ICONS.circleX,
+        tone: 'danger',
+      };
+    case 'timed_out':
+      return {
+        label: 'Expired',
+        detail: 'No answer before the deadline',
+        icon: ICONS.clockAlert,
+        tone: 'muted',
+      };
+    case 'policy_changed':
+      return {
+        label: 'Revoked',
+        detail: 'Access, destination, or broker authority changed',
+        icon: ICONS.circleX,
+        tone: 'danger',
+      };
+    case 'no_surface':
+      return {
+        label: 'Unavailable',
+        detail: 'No connected surface could ask',
+        icon: ICONS.clockAlert,
+        tone: 'muted',
+      };
+    case 'waived':
+      return {
+        label: 'Approved',
+        detail: 'Allowed by the attached confirmation surface',
+        icon: ICONS.circleCheck,
+        tone: 'success',
+      };
+    case 'caller_disconnected':
+      return {
+        label: 'Abandoned',
+        detail: 'The caller disconnected before an answer',
+        icon: ICONS.clockAlert,
+        tone: 'muted',
+      };
+    case 'input_provided':
+      return {
+        label: 'Provided',
+        detail: 'Input provided; the paused call resumed',
+        icon: ICONS.circleCheck,
+        tone: 'success',
+      };
+    case 'input_refused':
+      return {
+        label: 'Refused',
+        detail: 'Input refused; the paused call was told no',
+        icon: ICONS.circleX,
+        tone: 'danger',
+      };
+    default: {
+      const fallback = ({
+        approved: ['Approved', ICONS.circleCheck, 'success'],
+        denied: ['Denied', ICONS.circleX, 'danger'],
+        expired: ['Expired', ICONS.clockAlert, 'muted'],
+        revoked: ['Revoked', ICONS.circleX, 'danger'],
+        unavailable: ['Unavailable', ICONS.clockAlert, 'muted'],
+        abandoned: ['Abandoned', ICONS.clockAlert, 'muted'],
+        pending: ['Pending', ICONS.clockAlert, 'muted'],
+      } as Record<string, [string, string, string]>)[record.status]
+        ?? ['Completed', ICONS.circleCheck, 'muted'];
+      return {
+        label: fallback[0],
+        detail: fallback[0],
+        icon: fallback[1],
+        tone: fallback[2],
+      };
+    }
+  }
+}
+
 function liveSessionsHTML(extraClass = ''): string {
   const sessions = state.sessions.map((session) => {
     const type = TYPES[session.type];
@@ -766,72 +873,134 @@ function globalSectionsHTML(embeddedInStart = false) {
 }
 
 function RequestInbox(): ReactNode {
-  const requests = activeRequests(state.approvals, state.elicitations);
-  const count = requests.length;
+  const active = activeRequests(state.approvals, state.elicitations);
+  const activeIds = new Set(active.map((request) => request.id));
+  const recent = recentRequests(state.requests, activeIds);
+  const count = active.length;
+  const empty = count === 0 && recent.length === 0;
   return (
     <div className="request-inbox">
-      {count === 0
+      {empty
         ? <div className="empty request-empty">
             <div className="empty-ico"><Icon markup={ICONS.bell} /></div>
-            <h3>No requests waiting</h3>
-            <p>When an agent needs approval or a tool asks for input, it will appear here.</p>
+            <h3>No requests yet</h3>
+            <p>Requests that need attention and their recent outcomes will appear here.</p>
           </div>
-        : <div className="request-list">
-            {requests.map((item) => {
-              if (item.kind === 'approval') {
-                const approval = item.approval;
-                const riders = approval.waiting > 1
-                  ? `${approval.waiting} calls are waiting on this answer`
-                  : '1 call is waiting on this answer';
-                return (
-                  <button key={`approval:${approval.id}`}
-                    className="request-card request-card-approval"
-                    data-act="approval-open" data-id={approval.id}
-                    aria-label={`Review approval from ${approval.agent} for ${approval.connection}`}>
-                    <span className="request-card-ico"><Icon markup={ICONS.shieldAlert} /></span>
-                    <span className="request-card-body">
-                      <span className="request-card-top">
-                        <span className="request-kind">Approval</span>
-                      </span>
-                      <b>{approval.agent} {approvalUnit(approval)}</b>
-                      <span className="request-context">{approval.connection} · {approval.target}</span>
-                      <code className="request-summary">{approval.summary}</code>
-                      <span className="request-foot">{riders}</span>
-                    </span>
-                    <span className="request-card-side">
-                      <span className="request-when" title={absTime(approval.requested_at)}>
-                        {relTime(approval.requested_at)} · expires in {timeLeft(approval.expires_at)}
-                      </span>
-                      <span className="request-card-action">Review</span>
-                    </span>
-                  </button>
-                );
-              }
-              const request = item.elicitation;
-              return (
-                <button key={`elicitation:${request.id}`}
-                  className="request-card request-card-elicitation"
-                  data-act="elicit-open" data-id={request.id}
-                  aria-label={`Answer input request from ${request.connection}`}>
-                  <span className="request-card-ico"><Icon markup={ICONS.bell} /></span>
-                  <span className="request-card-body">
-                    <span className="request-card-top">
-                      <span className="request-kind">Input request</span>
-                    </span>
-                    <b>{request.connection} asked for input</b>
-                    <span className="request-context">{request.agent} is paused · {request.tool}</span>
-                    <span className="request-prompt">{request.prompt}</span>
-                  </span>
-                  <span className="request-card-side">
-                    <span className="request-when" title={absTime(request.requested_at)}>
-                      {relTime(request.requested_at)} · expires in {timeLeft(request.expires_at)}
-                    </span>
-                    <span className="request-card-action">Answer</span>
-                  </span>
-                </button>
-              );
-            })}
-          </div>}
+        : <>
+            <section className="request-section" aria-labelledby="request-active-title">
+              <div className="request-section-head">
+                <h3 id="request-active-title">Needs attention</h3>
+                <span className={`request-total ${count ? 'has-requests' : ''}`}>{count}</span>
+              </div>
+              {count === 0
+                ? <div className="request-section-empty">Nothing is waiting on you.</div>
+                : <div className="request-list">
+                    {active.map((item) => {
+                      if (item.kind === 'approval') {
+                        const approval = item.approval;
+                        const riders = approval.waiting > 1
+                          ? `${approval.waiting} calls are waiting on this answer`
+                          : '1 call is waiting on this answer';
+                        return (
+                          <button key={`approval:${approval.id}`}
+                            className="request-card request-card-approval"
+                            data-act="approval-open" data-id={approval.id}
+                            aria-label={`Review approval from ${approval.agent} for ${approval.connection}`}>
+                            <span className="request-card-ico"><Icon markup={ICONS.shieldAlert} /></span>
+                            <span className="request-card-body">
+                              <span className="request-card-top">
+                                <span className="request-kind">Approval</span>
+                              </span>
+                              <b>{approval.agent} {approvalUnit(approval)}</b>
+                              <span className="request-context">
+                                {approval.connection} · {approval.target}
+                              </span>
+                              <code className="request-summary">{approval.summary}</code>
+                              <span className="request-foot">{riders}</span>
+                            </span>
+                            <span className="request-card-side">
+                              <span className="request-when" title={absTime(approval.requested_at)}>
+                                {relTime(approval.requested_at)} · expires in {timeLeft(approval.expires_at)}
+                              </span>
+                              <span className="request-card-action">Review</span>
+                            </span>
+                          </button>
+                        );
+                      }
+                      const request = item.elicitation;
+                      return (
+                        <button key={`elicitation:${request.id}`}
+                          className="request-card request-card-elicitation"
+                          data-act="elicit-open" data-id={request.id}
+                          aria-label={`Answer input request from ${request.connection}`}>
+                          <span className="request-card-ico"><Icon markup={ICONS.bell} /></span>
+                          <span className="request-card-body">
+                            <span className="request-card-top">
+                              <span className="request-kind">Input request</span>
+                            </span>
+                            <b>{request.connection} asked for input</b>
+                            <span className="request-context">
+                              {request.agent} is paused · {request.tool}
+                            </span>
+                            <span className="request-prompt">{request.prompt}</span>
+                          </span>
+                          <span className="request-card-side">
+                            <span className="request-when" title={absTime(request.requested_at)}>
+                              {relTime(request.requested_at)} · expires in {timeLeft(request.expires_at)}
+                            </span>
+                            <span className="request-card-action">Answer</span>
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>}
+            </section>
+            <section className="request-section" aria-labelledby="request-recent-title">
+              <div className="request-section-head">
+                <h3 id="request-recent-title">Recent</h3>
+                <span className="request-total">{recent.length}</span>
+              </div>
+              {recent.length === 0
+                ? <div className="request-section-empty">Resolved requests will appear here.</div>
+                : <div className="request-list request-history-list">
+                    {recent.map((record) => {
+                      const outcome = requestOutcome(record);
+                      const at = record.resolved_at ?? record.requested_at;
+                      const context = [
+                        record.agent,
+                        record.connection,
+                        record.target,
+                      ].filter(Boolean).join(' · ');
+                      return (
+                        <article key={`${record.kind}:${record.id}`}
+                          className={`request-card request-card-history ${outcome.tone}`}>
+                          <span className="request-card-ico"><Icon markup={outcome.icon} /></span>
+                          <span className="request-card-body">
+                            <span className="request-card-top">
+                              <span className="request-kind">
+                                {record.kind === 'elicitation' ? 'Input request'
+                                  : record.kind === 'approval' ? 'Approval' : 'Request'}
+                              </span>
+                              <span className="request-outcome">{outcome.label}</span>
+                            </span>
+                            <b>{outcome.detail}</b>
+                            <span className="request-context">{context}</span>
+                            <code className="request-summary">{record.summary}</code>
+                            {record.waiting > 1
+                              ? <span className="request-foot">
+                                  {record.waiting} calls shared this decision
+                                </span>
+                              : null}
+                          </span>
+                          <span className="request-card-side">
+                            <span className="request-when" title={absTime(at)}>{relTime(at)}</span>
+                          </span>
+                        </article>
+                      );
+                    })}
+                  </div>}
+            </section>
+          </>}
     </div>
   );
 }
@@ -4174,8 +4343,12 @@ async function answerApproval(
   }
   toast(answered ? success : '⏳ That request is gone — it lapsed or was answered elsewhere');
   closeSheet();
-  await refresh('approvals');
-  await refresh('connections');
+  await Promise.all([
+    load('approvals', 'list_approvals'),
+    load('requests', 'list_requests'),
+    load('connections', 'list_connections'),
+  ]);
+  render();
 }
 
 function isProtectedFormSheet(sheet: SheetState | null = state.sheet): boolean {
@@ -5564,7 +5737,11 @@ document.addEventListener('click', async (e) => {
       if (await run(() => invoke('respond_elicitation', { id, approved: true, values }))) {
         toast(`📨 Sent to ${request.connection} — ${request.agent} resumes`);
         closeSheet();
-        await refresh('elicitations');
+        await Promise.all([
+          load('elicitations', 'list_elicitations'),
+          load('requests', 'list_requests'),
+        ]);
+        render();
       }
       break;
     }
@@ -5607,7 +5784,11 @@ document.addEventListener('click', async (e) => {
       if (await run(() => invoke('respond_elicitation', { id, approved: false }))) {
         toast(`🚫 Refused — ${request?.agent ?? 'the agent'} is told no, without your reasons`);
         closeSheet();
-        await refresh('elicitations');
+        await Promise.all([
+          load('elicitations', 'list_elicitations'),
+          load('requests', 'list_requests'),
+        ]);
+        render();
       }
       break;
     }
@@ -6026,7 +6207,11 @@ async function boot() {
   }
   await listen('aka://sessions-changed', () => refresh('sessions'));
   await listen('aka://elicitations-changed', async () => {
-    await refresh('elicitations');
+    await Promise.all([
+      load('elicitations', 'list_elicitations'),
+      load('requests', 'list_requests'),
+    ]);
+    render();
     // The open dialog's request may have been answered elsewhere or
     // expired; the sheet re-renders as "gone" via ElicitationSheet, which
     // is correct — nothing to close here, the user dismisses it informed.
@@ -6038,6 +6223,7 @@ async function boot() {
     // window never leaves its status card stale.
     await Promise.all([
       load('approvals', 'list_approvals'),
+      load('requests', 'list_requests'),
       load('connections', 'list_connections'),
     ]);
     render();

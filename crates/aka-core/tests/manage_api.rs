@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use aka_core::approvals::{ApprovalRequest, Verdict};
 use aka_core::broker::Broker;
 use aka_core::config::BrokerConfig;
 use aka_core::daemon;
@@ -349,6 +350,80 @@ async fn secrets_and_connections_round_trip_over_the_manage_api() {
         .manage("DELETE", &format!("/v1/manage/secrets/{secret_id}"), None)
         .await;
     assert_eq!(status, 200);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn request_history_round_trips_pending_and_terminal_lifecycles() {
+    let h = harness().await;
+    let (status, body) = h
+        .manage(
+            "POST",
+            "/v1/manage/secrets",
+            Some(json!({ "name": "GITHUB_KEY", "value": "ghp_test" })),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = h
+        .manage(
+            "POST",
+            "/v1/manage/connections",
+            Some(json!({
+                "spec": api_spec("github", "Authorization: Bearer {{GITHUB_KEY}}"),
+            })),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+
+    // A connected remote manager is a valid prompt surface. Keep its bus
+    // receiver alive while the direct gate parks.
+    let _events = h.broker.manage_bus().subscribe();
+    let connection = h.broker.store.connection_by_name("github").unwrap();
+    let broker = h.broker.clone();
+    let call = tokio::spawn(async move {
+        broker
+            .approvals
+            .gate(ApprovalRequest::new(&connection, "codex", "GET /user"))
+            .await
+    });
+
+    let approval = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let (status, approvals) = h.manage("GET", "/v1/manage/approvals", None).await;
+            assert_eq!(status, 200, "{approvals}");
+            if let Some(approval) = approvals.as_array().and_then(|items| items.first()) {
+                break approval.clone();
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the approval should enter the management queue");
+    let id = approval["id"].as_str().unwrap();
+
+    let (status, requests) = h.manage("GET", "/v1/manage/requests", None).await;
+    assert_eq!(status, 200, "{requests}");
+    assert_eq!(requests[0]["id"], id);
+    assert_eq!(requests[0]["kind"], "approval");
+    assert_eq!(requests[0]["status"], "pending");
+    assert_eq!(requests[0]["summary"], "GET /user");
+
+    let (status, answer) = h
+        .manage(
+            "POST",
+            &format!("/v1/manage/approvals/{id}"),
+            Some(json!({ "decision": "deny" })),
+        )
+        .await;
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["answered"], true);
+    assert_eq!(call.await.unwrap(), Verdict::Denied);
+
+    let (status, requests) = h.manage("GET", "/v1/manage/requests", None).await;
+    assert_eq!(status, 200, "{requests}");
+    assert_eq!(requests[0]["id"], id);
+    assert_eq!(requests[0]["status"], "denied");
+    assert_eq!(requests[0]["resolution"], "denied");
+    assert!(requests[0]["resolved_at"].as_str().is_some());
 }
 
 #[tokio::test(flavor = "multi_thread")]

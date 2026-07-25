@@ -1,4 +1,4 @@
-import type { Approval, ElicitationRequest } from './types';
+import type { Approval, ElicitationRequest, RequestRecord } from './types';
 
 export type ActiveRequest =
   | {
@@ -52,4 +52,25 @@ export function activeRequestCount(
   elicitations: readonly ElicitationRequest[],
 ): number {
   return approvals.length + elicitations.length;
+}
+
+/** Terminal request history, newest resolution first. Active ids are excluded
+ * defensively so independently refreshed active/history snapshots never show
+ * the same lifecycle in both sections. */
+export function recentRequests(
+  records: readonly RequestRecord[],
+  activeIds: ReadonlySet<string> = new Set(),
+): RequestRecord[] {
+  return records
+    .filter((record) => record.status !== 'pending' && !activeIds.has(record.id))
+    .slice()
+    .sort((left, right) => {
+      const leftAt = Date.parse(left.resolved_at ?? left.requested_at);
+      const rightAt = Date.parse(right.resolved_at ?? right.requested_at);
+      const safeLeft = Number.isFinite(leftAt) ? leftAt : Number.NEGATIVE_INFINITY;
+      const safeRight = Number.isFinite(rightAt) ? rightAt : Number.NEGATIVE_INFINITY;
+      return safeRight - safeLeft
+        || right.requested_at.localeCompare(left.requested_at)
+        || right.id.localeCompare(left.id);
+    });
 }

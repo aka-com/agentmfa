@@ -18,7 +18,7 @@ pub mod events;
 
 use aka_api::{
     ActivityDto, ApprovalDecisionDto, ApprovalDto, ConnectionDto, IdentityDto, IssuedEndpointDto,
-    ManageError, SecretDto, SessionDto, SettingsDto,
+    ManageError, RequestDto, SecretDto, SessionDto, SettingsDto,
 };
 use aka_core::broker::ConnectionTestReport;
 use aka_core::manage::{
@@ -804,6 +804,19 @@ impl ManagementBackend for RemoteBackend {
 
     async fn approvals(&self) -> ManageResult<Vec<ApprovalDto>> {
         self.get("/v1/manage/approvals").await
+    }
+
+    async fn requests(&self) -> ManageResult<Vec<RequestDto>> {
+        match self.get("/v1/manage/requests").await {
+            // Request history is additive. A new shell can still manage an
+            // older broker; it simply has no Recent section to fetch.
+            Err(ManageError::Internal { message })
+                if message.starts_with("broker answered 404:") =>
+            {
+                Ok(Vec::new())
+            }
+            result => result,
+        }
     }
 
     async fn respond_approval(

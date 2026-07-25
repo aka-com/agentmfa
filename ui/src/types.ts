@@ -193,6 +193,29 @@ export interface Approval {
   window_secs: number;
 }
 
+/** One request decision lifecycle through its terminal disposition. */
+export interface RequestRecord {
+  id: string;
+  /** Extensible request family; approvals are the broker producer today. */
+  kind: 'approval' | 'elicitation';
+  status: 'pending' | 'approved' | 'denied' | 'expired' | 'revoked'
+    | 'unavailable' | 'abandoned';
+  connection_id?: string | null;
+  connection: string;
+  connection_type?: ConnectionType | null;
+  unit?: 'request' | 'tool' | 'session' | null;
+  target?: string | null;
+  agent: string;
+  summary: string;
+  detail?: string | null;
+  waiting: number;
+  requested_at: string;
+  expires_at?: string | null;
+  resolved_at?: string | null;
+  resolution?: string | null;
+  window_secs?: number | null;
+}
+
 /** What the user chose on a prompt. */
 export type ApprovalDecision = 'approve_window' | 'approve_all' | 'deny';
 
@@ -425,6 +448,7 @@ export interface CommandMap {
   set_tool_access: CommandSpec<{ connectionId: string; enabled: boolean }, boolean>;
   set_confirm_mode: CommandSpec<{ connectionId: string; on: boolean }, boolean>;
   list_approvals: CommandSpec<undefined, Approval[]>;
+  list_requests: CommandSpec<undefined, RequestRecord[]>;
   respond_approval: CommandSpec<{ id: string; decision: ApprovalDecision }, boolean>;
   issue_endpoint: CommandSpec<{ connectionId: string }, IssuedEndpoint>;
   get_endpoint: CommandSpec<{ connectionId: string }, IssuedEndpoint | null>;

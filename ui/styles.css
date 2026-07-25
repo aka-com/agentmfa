@@ -460,6 +460,18 @@
 
   /* ---- Request Inbox --------------------------------------------------- */
   .request-inbox{ padding: 4px 0 24px; }
+  .request-section + .request-section{ margin-top: 20px; }
+  .request-section-head{
+  display: flex; align-items: center; justify-content: space-between;
+  min-height: 28px; padding: 0 2px 6px;
+}
+  .request-section-head h3{
+  margin: 0; color: var(--muted); font-size: 12.5px; font-weight: 650;
+}
+  .request-section-empty{
+  padding: 13px 12px; border: 1px dashed var(--line); border-radius: 10px;
+  color: var(--muted); font-size: 12.5px; text-align: center;
+}
   .request-total{
   flex: 0 0 auto; padding: 3px 8px; border-radius: 999px;
   background: var(--chip-bg); color: var(--muted); font-size: 11.5px; font-weight: 650;
@@ -491,6 +503,10 @@
   color: var(--amber-strong); font-size: 10.5px; font-weight: 750;
   letter-spacing: .06em; text-transform: uppercase;
 }
+  .request-outcome{
+  padding: 1px 6px; border-radius: 999px; background: var(--chip-bg);
+  color: var(--muted); font-size: 10.5px; font-weight: 650;
+}
   .request-when{ color: var(--muted); font-size: 11px; white-space: nowrap; }
   .request-card-body > b{ font-size: 13.5px; font-weight: 650; overflow-wrap: anywhere; }
   .request-context{ color: var(--muted); font-size: 11.5px; overflow: hidden;
@@ -511,6 +527,24 @@
   .request-card-action{
   flex: 0 0 auto; color: var(--accent-text); font-size: 12px; font-weight: 650;
 }
+  .request-card-history{ cursor: default; }
+  .request-card-history:hover{ background: transparent; }
+  .request-card-history.success .request-card-ico{
+  color: var(--ok-ink); background: var(--ok-wash); border-color: var(--ok-border);
+}
+  .request-card-history.success .request-outcome{
+  color: var(--ok-ink); background: var(--ok-wash);
+}
+  .request-card-history.danger .request-card-ico{
+  color: var(--danger-ink); background: var(--danger-wash); border-color: var(--danger-border);
+}
+  .request-card-history.danger .request-outcome{
+  color: var(--danger-ink); background: var(--danger-wash);
+}
+  .request-card-history.muted .request-card-ico{
+  color: var(--muted-2); background: var(--chip-bg); border-color: var(--line);
+}
+  .request-card-history.muted .request-outcome{ color: var(--muted); }
   .request-empty{ padding-block: 48px; border: 1px dashed var(--line); border-radius: 11px; }
   .dropdown-surface .request-inbox{ padding-top: 0; }
   .dropdown-surface .request-card{ padding: 10px; gap: 9px; }

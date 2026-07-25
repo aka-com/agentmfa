@@ -1128,6 +1128,17 @@ pub async fn list_approvals(state: State<'_, AppState>) -> CmdResult<Vec<aka_api
         .map_err(|e| e.to_string())
 }
 
+/// Request decision lifecycles, including the bounded terminal history.
+#[tauri::command]
+pub async fn list_requests(state: State<'_, AppState>) -> CmdResult<Vec<aka_api::RequestDto>> {
+    state
+        .brokers
+        .backend()
+        .requests()
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Answer one prompt. `false` means it was already answered, revoked, or
 /// lapsed while the window was open — the UI drops it either way.
 ///
@@ -1380,6 +1391,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         set_tool_access,
         set_confirm_mode,
         list_approvals,
+        list_requests,
         respond_approval,
         set_allowed_tools,
         list_mcp_tools,

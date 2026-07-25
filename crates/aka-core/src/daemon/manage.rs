@@ -161,6 +161,7 @@ pub fn router() -> Router<AppState> {
         .route("/identity/rotate", post(rotate_key))
         .route("/approvals", get(approvals))
         .route("/approvals/{id}", post(respond_approval))
+        .route("/requests", get(requests))
         .route("/sessions", get(sessions))
         .route("/sessions/{id}", delete(close_session))
         .route("/activity", get(activity).delete(clear_activity))
@@ -498,6 +499,10 @@ async fn set_confirm_mode(
 
 async fn approvals(State(state): State<AppState>, _authed: ManageAuthed) -> Response {
     respond(state.manage.approvals().await)
+}
+
+async fn requests(State(state): State<AppState>, _authed: ManageAuthed) -> Response {
+    respond(state.manage.requests().await)
 }
 
 async fn respond_approval(

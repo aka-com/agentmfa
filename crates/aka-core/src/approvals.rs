@@ -43,6 +43,7 @@ use uuid::Uuid;
 
 use crate::audit::{AuditEntry, AuditKind, AuditLog};
 use crate::events::{ApprovalHandling, BrokerEvents};
+use crate::request_history::{RequestHistory, RequestRecord, RequestResolution};
 use crate::types::{Connection, ConnectionKind};
 use crate::wire::ErrorReason;
 
@@ -287,6 +288,11 @@ struct Pending {
     deadline: Instant,
 }
 
+struct Lapsed {
+    info: PendingApproval,
+    resolution: RequestResolution,
+}
+
 /// An open approval window, closed by whichever bound passes first. The
 /// monotonic bound caps it at the window of *running* time and cannot be
 /// stretched by setting the wall clock back; the wall bound keeps it from
@@ -314,6 +320,7 @@ struct Inner {
     config: ApprovalConfig,
     audit: Arc<AuditLog>,
     events: Arc<dyn BrokerEvents>,
+    history: Arc<RequestHistory>,
     state: Mutex<State>,
 }
 
@@ -329,11 +336,23 @@ impl Approvals {
         audit: Arc<AuditLog>,
         events: Arc<dyn BrokerEvents>,
     ) -> Self {
+        Self::with_history(config, audit, events, Arc::new(RequestHistory::default()))
+    }
+
+    /// Build against the broker-owned request history so future request kinds
+    /// can publish into the same lifecycle store.
+    pub fn with_history(
+        config: ApprovalConfig,
+        audit: Arc<AuditLog>,
+        events: Arc<dyn BrokerEvents>,
+        history: Arc<RequestHistory>,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 config,
                 audit,
                 events,
+                history,
                 state: Mutex::new(State::default()),
             }),
         }
@@ -398,6 +417,7 @@ impl Approvals {
                     let info = pending.info.clone();
                     let deadline = pending.deadline;
                     drop(state);
+                    inner.history.update_approval(&info);
                     inner.events.approval_updated(&info);
                     (rx, id, deadline)
                 }
@@ -441,6 +461,7 @@ impl Approvals {
                     // holds the verdict either way.
                     drop(state);
 
+                    inner.history.record_approval(&info);
                     self.inner.audit.append(
                         AuditEntry::new(
                             AuditKind::Requested,
@@ -466,21 +487,25 @@ impl Approvals {
                             tokio::spawn(async move {
                                 tokio::time::sleep_until(tokio::time::Instant::from_std(deadline))
                                     .await;
-                                approvals.resolve(&id, Verdict::TimedOut);
+                                approvals.resolve(
+                                    &id,
+                                    Verdict::TimedOut,
+                                    RequestResolution::TimedOut,
+                                );
                             });
                             (rx, id, deadline)
                         }
                         ApprovalHandling::Unavailable => {
                             // Nothing can ask. Refuse now rather than leave
                             // the agent hanging until the deadline.
-                            self.resolve(&id, Verdict::Unavailable);
+                            self.resolve(&id, Verdict::Unavailable, RequestResolution::NoSurface);
                             self.audit_decision(&request, Verdict::Unavailable, Some("no_surface"));
                             return Verdict::Unavailable;
                         }
                         ApprovalHandling::Waived => {
                             // A harness that stands in for the user: let it
                             // through without opening a window.
-                            self.resolve(&id, Verdict::Allowed);
+                            self.resolve(&id, Verdict::Allowed, RequestResolution::Waived);
                             self.audit_decision(&request, Verdict::Allowed, Some("waived"));
                             return Verdict::Allowed;
                         }
@@ -498,7 +523,7 @@ impl Approvals {
                 Err(_) => {
                     // Retire by id: by now the connection may be being asked
                     // about again, and that newer prompt is not ours to refuse.
-                    self.resolve(&prompt, Verdict::TimedOut);
+                    self.resolve(&prompt, Verdict::TimedOut, RequestResolution::TimedOut);
                     Verdict::TimedOut
                 }
             };
@@ -557,6 +582,15 @@ impl Approvals {
             ApprovalDecision::Deny => Verdict::Denied,
             _ => Verdict::Allowed,
         };
+        self.inner.history.update_approval(&pending.info);
+        self.inner.history.resolve(
+            id,
+            match decision {
+                ApprovalDecision::ApproveWindow => RequestResolution::ApprovedForWindow,
+                ApprovalDecision::ApproveAll => RequestResolution::ApprovedAll,
+                ApprovalDecision::Deny => RequestResolution::Denied,
+            },
+        );
         for waiter in pending.waiters {
             let _ = waiter.send(verdict);
         }
@@ -574,8 +608,20 @@ impl Approvals {
             (pending, lapsed)
         };
         self.announce_lapsed(&lapsed);
+        for info in &pending {
+            self.inner.history.update_approval(info);
+        }
         pending.sort_by_key(|p| p.requested_at);
         pending
+    }
+
+    /// Surfaced requests, newest state change first. Terminal entries are
+    /// retained in memory for seven days, up to the bounded history cap.
+    pub fn requests(&self) -> Vec<RequestRecord> {
+        // `pending` also retires deadlines and refreshes coalesced waiter
+        // counts before the history snapshot is taken.
+        let _ = self.pending();
+        self.inner.history.records()
     }
 
     /// Whether an open window currently covers this connection (the UI
@@ -602,9 +648,11 @@ impl Approvals {
     /// still left the queue, so the shell has to hear about it. Deadline
     /// waiters were answered inside the sweep, where there is no observer
     /// to call.
-    fn announce_lapsed(&self, lapsed: &[Uuid]) {
-        for id in lapsed {
-            self.inner.events.approval_resolved(id);
+    fn announce_lapsed(&self, lapsed: &[Lapsed]) {
+        for item in lapsed {
+            self.inner.history.update_approval(&item.info);
+            self.inner.history.resolve(&item.info.id, item.resolution);
+            self.inner.events.approval_resolved(&item.info.id);
         }
     }
 
@@ -625,7 +673,7 @@ impl Approvals {
                 .collect()
         };
         for id in waiting {
-            self.resolve(&id, Verdict::Revoked);
+            self.resolve(&id, Verdict::Revoked, RequestResolution::PolicyChanged);
         }
     }
 
@@ -636,6 +684,12 @@ impl Approvals {
     /// the prompt would be a strange way to honour that. Contrast
     /// [`Self::revoke`], where the authority itself went away.
     pub fn release(&self, connection_id: &Uuid) {
+        self.release_as(connection_id, RequestResolution::ConfirmationDisabled);
+    }
+
+    /// Release a connection while preserving the user action that disabled
+    /// confirmation (`Approve all` versus a separate settings change).
+    pub(crate) fn release_as(&self, connection_id: &Uuid, resolution: RequestResolution) {
         let waiting: Vec<Uuid> = {
             let mut state = self.inner.state.lock().unwrap();
             state.grants.remove(connection_id);
@@ -648,7 +702,7 @@ impl Approvals {
                 .collect()
         };
         for id in waiting {
-            self.resolve(&id, Verdict::Allowed);
+            self.resolve(&id, Verdict::Allowed, resolution);
         }
     }
 
@@ -662,12 +716,12 @@ impl Approvals {
             state.pending.keys().copied().collect()
         };
         for id in waiting {
-            self.resolve(&id, Verdict::Revoked);
+            self.resolve(&id, Verdict::Revoked, RequestResolution::PolicyChanged);
         }
     }
 
     /// Hand `verdict` to everyone riding the prompt and retire it.
-    fn resolve(&self, id: &Uuid, verdict: Verdict) {
+    fn resolve(&self, id: &Uuid, verdict: Verdict, resolution: RequestResolution) {
         let pending = {
             let mut state = self.inner.state.lock().unwrap();
             let Some(pending) = state.pending.remove(id) else {
@@ -676,6 +730,8 @@ impl Approvals {
             state.inflight.remove(&pending.info.connection_id);
             pending
         };
+        self.inner.history.update_approval(&pending.info);
+        self.inner.history.resolve(id, resolution);
         for waiter in pending.waiters {
             let _ = waiter.send(verdict);
         }
@@ -747,7 +803,7 @@ impl Approvals {
     /// before the lid closed would still be admitting traffic the next
     /// morning, long past the end time the user was shown.
     #[must_use]
-    fn sweep(state: &mut State, now: Instant, wall_now: DateTime<Utc>) -> Vec<Uuid> {
+    fn sweep(state: &mut State, now: Instant, wall_now: DateTime<Utc>) -> Vec<Lapsed> {
         state
             .grants
             .retain(|_, grant| grant.until > now && grant.wall_until > wall_now);
@@ -758,29 +814,39 @@ impl Approvals {
         }
         let expired =
             |pending: &Pending| pending.deadline <= now || pending.info.expires_at <= wall_now;
-        let retired: Vec<Uuid> = state
+        let retired: Vec<(Uuid, bool)> = state
             .pending
             .iter()
             .filter(|(_, pending)| expired(pending) || pending.waiters.is_empty())
-            .map(|(id, _)| *id)
+            .map(|(id, pending)| (*id, expired(pending)))
             .collect();
-        for id in &retired {
-            if let Some(pending) = state.pending.remove(id) {
+        let mut lapsed = Vec::with_capacity(retired.len());
+        for (id, timed_out) in retired {
+            if let Some(pending) = state.pending.remove(&id) {
                 state.inflight.remove(&pending.info.connection_id);
-                if expired(&pending) {
+                if timed_out {
                     for waiter in pending.waiters {
                         let _ = waiter.send(Verdict::TimedOut);
                     }
                 }
+                lapsed.push(Lapsed {
+                    info: pending.info,
+                    resolution: if timed_out {
+                        RequestResolution::TimedOut
+                    } else {
+                        RequestResolution::CallerDisconnected
+                    },
+                });
             }
         }
-        retired
+        lapsed
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::request_history::RequestStatus;
     use crate::types::ConnectionConfig;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -889,11 +955,15 @@ mod tests {
     #[tokio::test]
     async fn approve_all_lets_the_call_through_without_opening_a_window() {
         // "Stop asking" is persisted by the caller as the switch going off,
-        // so the registry deliberately remembers nothing.
+        // so the gate remembers no traffic grant. Lifecycle history still
+        // records what answered this prompt.
         let (approvals, _events, _dir) = auto(ApprovalDecision::ApproveAll);
         let conn = connection();
         assert_eq!(approvals.gate(request(&conn)).await, Verdict::Allowed);
         assert_eq!(approvals.window_remaining(&conn.id), None);
+        let history = approvals.requests();
+        assert_eq!(history[0].status, RequestStatus::Approved);
+        assert_eq!(history[0].resolution, Some(RequestResolution::ApprovedAll));
     }
 
     #[tokio::test]
@@ -947,6 +1017,15 @@ mod tests {
             assert_eq!(call.await.unwrap(), Verdict::Allowed);
         }
         assert_eq!(events.seen.load(Ordering::SeqCst), 1);
+        let history = approvals.requests();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, pending[0].id);
+        assert_eq!(history[0].waiting, 10);
+        assert_eq!(history[0].status, RequestStatus::Approved);
+        assert_eq!(
+            history[0].resolution,
+            Some(RequestResolution::ApprovedForWindow)
+        );
     }
 
     #[tokio::test]
@@ -958,8 +1037,12 @@ mod tests {
             approvals.pending().is_empty(),
             "a lapsed prompt does not linger in the queue"
         );
-        // Timing out is not a decision: nothing is remembered either way.
+        // Timing out opens no grant and starts no denial cooldown.
         assert_eq!(approvals.window_remaining(&conn.id), None);
+        let history = approvals.requests();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].status, RequestStatus::Expired);
+        assert_eq!(history[0].resolution, Some(RequestResolution::TimedOut));
     }
 
     #[tokio::test]
@@ -968,6 +1051,10 @@ mod tests {
         let conn = connection();
         assert_eq!(approvals.gate(request(&conn)).await, Verdict::Unavailable);
         assert!(approvals.pending().is_empty());
+        let history = approvals.requests();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].status, RequestStatus::Unavailable);
+        assert_eq!(history[0].resolution, Some(RequestResolution::NoSurface));
     }
 
     #[tokio::test]

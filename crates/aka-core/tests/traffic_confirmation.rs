@@ -16,6 +16,7 @@ use aka_core::config::BrokerConfig;
 use aka_core::daemon;
 use aka_core::events::{ApprovalHandling, BrokerEvents};
 use aka_core::paths::Paths;
+use aka_core::request_history::RequestResolution;
 use aka_core::store::ConnectionSpec;
 use aka_core::types::{ConfirmMode, ConfirmationMethod, ConnectionConfig, SecretMeta};
 use aka_core::vault::MemoryVault;
@@ -793,6 +794,10 @@ async fn approving_all_turns_the_switch_off() {
         h.broker.access.confirm_mode(&conn.id),
         ConfirmMode::Off,
         "\"approve all\" is the switch going off, persisted"
+    );
+    assert_eq!(
+        h.broker.request_records()[0].resolution,
+        Some(RequestResolution::ApprovedAll)
     );
 
     let (status, _) = h.get_repos("github").await;
