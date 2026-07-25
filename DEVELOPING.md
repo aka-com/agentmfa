@@ -60,12 +60,18 @@ same API and the choice decides whether reads are silent:
 - The **login keychain** grants access by per-item ACL, which is what puts
   that dialog up, once per item per signature.
 
-`crates/aka-core/src/keychain/` probes at startup — a lookup of an item that
-cannot exist, where `errSecItemNotFound` means "allowed" and
-`errSecMissingEntitlement` means "not" — and uses the data-protection keychain
-whenever the running binary can. Everything except the Security.framework
-binding in `keychain/darwin.rs` is platform-independent and tested on Linux
-through the `KeychainApi` seam.
+`crates/aka-core/src/keychain/` probes at startup and uses the
+data-protection keychain whenever the running binary can. The probe stores a
+throwaway item and removes it: it has to be a *write*, because an unentitled
+process is handed an empty data-protection keychain rather than being refused
+by it, so every read comes back `errSecItemNotFound` whether or not the
+entitlement is there. Only `SecItemAdd` has to name an access group, and only
+it reports `errSecMissingEntitlement`.
+
+Everything except the Security.framework binding in `keychain/darwin.rs` is
+platform-independent and tested on Linux through the `KeychainApi` seam; the
+fake in those tests reproduces the empty-not-refused behaviour, since a fake
+that refused reads would let a read-based probe look correct.
 
 What that means while developing:
 

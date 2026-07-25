@@ -16,8 +16,16 @@
 //!   and a process may open the group only if its code signature carries the
 //!   matching `keychain-access-groups` entitlement. There is no per-item ACL,
 //!   so there is no dialog and no "Always Allow" — a correctly signed
-//!   AgentMFA reads its own items silently, forever, and anything else is
-//!   refused outright rather than prompting the user to approve it.
+//!   AgentMFA reads its own items silently, forever, and a process without
+//!   the entitlement is not prompted to approve anything; it simply sees a
+//!   keychain with nothing in it.
+//!
+//! That last detail is load-bearing and easy to get wrong. An unentitled
+//! process is not *refused* by the data-protection keychain, it is handed an
+//! **empty** one: reads succeed and find nothing, and only writes fail
+//! (`errSecMissingEntitlement`), because only a write has to name the group
+//! it is storing into. Anything asking "can I use this keychain?" has to ask
+//! with a write — see [`KeychainApi::data_protection_available`].
 //!
 //! AgentMFA uses the data-protection keychain wherever the running binary can
 //! (see [`Keychain`] and [`resolve`]), and keeps the login keychain as the
@@ -49,12 +57,14 @@ use crate::vault::{SecretVault, VaultAttrs};
 /// `data-protection`, or `login`.
 pub const KEYCHAIN_ENV: &str = "AKA_KEYCHAIN";
 
-/// A service/account pair that cannot exist, used to ask the OS whether this
-/// process may talk to the data-protection keychain at all. A lookup that
-/// comes back "no such item" proves the call was allowed; one that comes back
-/// `errSecMissingEntitlement` proves it was not. Nothing is written.
+/// The throwaway item [`KeychainApi::data_protection_available`] stores and
+/// removes to find out whether this process may write to the data-protection
+/// keychain at all. One fixed name, so a crash between the two leaves at most
+/// one item, holding nothing.
 const PROBE_SERVICE: &str = "com.aka.desktop.entitlement-probe";
 const PROBE_ACCOUNT: &str = "probe";
+const PROBE_LABEL: &str = "AgentMFA (keychain probe)";
+const PROBE_VALUE: &[u8] = b"entitlement probe";
 
 /// Which of the two macOS keychains an item lives in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -122,11 +132,14 @@ impl std::fmt::Display for OsError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeychainError {
     /// `errSecItemNotFound`. Not an error for `get`: it is how "no such
-    /// secret" arrives, and how the entitlement probe reports success.
+    /// secret" arrives. Note that an unentitled process gets this from
+    /// *every* data-protection read, so it does not distinguish "no such
+    /// item" from "no keychain to look in".
     NotFound,
     /// `errSecMissingEntitlement`. The process is not signed with a
     /// `keychain-access-groups` (or application-identifier) entitlement, so
-    /// the data-protection keychain is closed to it entirely.
+    /// it has no access group to store into. Reads do not report this —
+    /// they report [`Self::NotFound`] — which is why the probe writes.
     MissingEntitlement,
     /// The user dismissed the login keychain's ACL dialog, or it could not be
     /// shown (`errSecUserCanceled`, `errSecAuthFailed`,
@@ -205,13 +218,31 @@ pub trait KeychainApi: Send + Sync + 'static {
         -> Result<(), KeychainError>;
 
     /// Whether this process may use the data-protection keychain, asked by
-    /// looking up an item that does not exist: `NotFound` means the call was
-    /// allowed, `MissingEntitlement` means it was not.
+    /// storing a throwaway item and removing it again.
+    ///
+    /// It has to be a *write*. An unentitled process has no keychain access
+    /// group, so a data-protection **read** searches an empty set of groups
+    /// and comes back `errSecItemNotFound` — indistinguishable from an
+    /// entitled process that simply has no such item. Only `SecItemAdd` has
+    /// to name a group to put the item in, and that is where an unentitled
+    /// process gets `errSecMissingEntitlement`. Probing with a read reports
+    /// the keychain as available on builds that cannot write a single value
+    /// to it.
     fn data_protection_available(&self) -> Result<(), KeychainError> {
-        match self.read(Keychain::DataProtection, PROBE_SERVICE, PROBE_ACCOUNT) {
-            Ok(_) | Err(KeychainError::NotFound) => Ok(()),
-            Err(other) => Err(other),
+        self.write(
+            Keychain::DataProtection,
+            PROBE_SERVICE,
+            PROBE_ACCOUNT,
+            PROBE_LABEL,
+            PROBE_VALUE,
+        )?;
+        // Racing copies of the probe can delete each other's item; the
+        // permission question was answered by the write.
+        match self.remove(Keychain::DataProtection, PROBE_SERVICE, PROBE_ACCOUNT) {
+            Ok(()) | Err(KeychainError::NotFound) => {}
+            Err(error) => tracing::warn!("could not clean up the keychain probe item: {error}"),
         }
+        Ok(())
     }
 }
 
@@ -309,6 +340,14 @@ pub fn best_effort<A: KeychainApi + ?Sized>(api: &A) -> Keychain {
 
 /* ------------------------------ the marker -------------------------------- */
 
+/// Marker generation. Version 1 was written by a build whose entitlement
+/// probe was a read, which an unentitled process passes (see
+/// [`KeychainApi::data_protection_available`]) — so a v1 file claiming
+/// `data-protection` may well describe a store whose values never left the
+/// login keychain. Acting on that claim is exactly the case that refuses to
+/// open, so those files are read as absent rather than believed.
+const MARKER_VERSION: u32 = 2;
+
 /// Which keychain a store's secret values were last written to.
 ///
 /// Deliberately *not* sealed by [`crate::integrity`]: the integrity key is
@@ -318,17 +357,19 @@ pub fn best_effort<A: KeychainApi + ?Sized>(api: &A) -> Keychain {
 /// vault, which is what would have happened without the file at all.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct KeychainRecord {
+    #[serde(default)]
+    v: u32,
     keychain: Keychain,
     updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// Read the marker. A missing or unreadable file is `None` — this is advisory
-/// state, and refusing to open the vault over it would be worse than the
-/// ambiguity it resolves.
+/// Read the marker. A missing, unreadable, or outdated file is `None` — this
+/// is advisory state, and refusing to open the vault over it would be worse
+/// than the ambiguity it resolves.
 pub fn read_record(path: &Path) -> Option<Keychain> {
     let bytes = std::fs::read(path).ok()?;
     let record: KeychainRecord = serde_json::from_slice(&bytes).ok()?;
-    Some(record.keychain)
+    (record.v == MARKER_VERSION).then_some(record.keychain)
 }
 
 /// Record the keychain in use, if it is not already what the file says.
@@ -339,6 +380,7 @@ pub fn write_record(path: &Path, keychain: Keychain) {
         return;
     }
     let record = KeychainRecord {
+        v: MARKER_VERSION,
         keychain,
         updated_at: chrono::Utc::now(),
     };
@@ -550,10 +592,18 @@ pub(crate) mod tests {
     /// Label + value, everything an item carries.
     type Item = (String, Vec<u8>);
 
+    /// The macOS keychain, as observed rather than as assumed.
+    ///
+    /// The subtlety this exists to reproduce: an unentitled process is not
+    /// refused by the data-protection keychain, it is given an *empty* one.
+    /// Reads succeed and find nothing; only writes are refused, because only
+    /// a write has to name an access group. A fake that refused reads too
+    /// would let a read-based entitlement probe look correct.
     #[derive(Default)]
     pub(crate) struct FakeKeychain {
         items: Mutex<HashMap<ItemKey, Item>>,
-        available: Option<KeychainError>,
+        /// Set when this process holds no keychain access group.
+        unentitled: bool,
         /// Makes every write fail, for the paths that have to survive one.
         write_error: Option<KeychainError>,
     }
@@ -565,7 +615,7 @@ pub(crate) mod tests {
 
         fn unentitled() -> Self {
             Self {
-                available: Some(KeychainError::MissingEntitlement),
+                unentitled: true,
                 ..Self::default()
             }
         }
@@ -605,10 +655,9 @@ pub(crate) mod tests {
             service: &str,
             account: &str,
         ) -> Result<Zeroizing<Vec<u8>>, KeychainError> {
-            if keychain == Keychain::DataProtection {
-                if let Some(error) = &self.available {
-                    return Err(error.clone());
-                }
+            // No access group means an empty search, not a refused one.
+            if keychain == Keychain::DataProtection && self.unentitled {
+                return Err(KeychainError::NotFound);
             }
             self.items
                 .lock()
@@ -626,6 +675,11 @@ pub(crate) mod tests {
             label: &str,
             value: &[u8],
         ) -> Result<(), KeychainError> {
+            // A write has to name a group to put the item in, and there is
+            // none — this is the call that reports the missing entitlement.
+            if keychain == Keychain::DataProtection && self.unentitled {
+                return Err(KeychainError::MissingEntitlement);
+            }
             if let Some(error) = &self.write_error {
                 return Err(error.clone());
             }
@@ -676,14 +730,44 @@ pub(crate) mod tests {
     const SERVICE: &str = "com.aka.desktop";
 
     #[test]
-    fn the_probe_reads_success_out_of_a_missing_item() {
+    fn the_probe_answers_the_question_writes_will_be_asked() {
         let entitled = Arc::new(FakeKeychain::entitled());
         assert_eq!(entitled.data_protection_available(), Ok(()));
+        assert_eq!(
+            entitled.peek(Keychain::DataProtection, PROBE_SERVICE, PROBE_ACCOUNT),
+            None,
+            "the probe item is cleaned up"
+        );
 
         let unentitled = Arc::new(FakeKeychain::unentitled());
         assert_eq!(
             unentitled.data_protection_available(),
             Err(KeychainError::MissingEntitlement)
+        );
+    }
+
+    #[test]
+    fn a_read_probe_would_have_passed_a_build_that_cannot_write() {
+        // The regression this module was shipped with: an unentitled process
+        // is handed an *empty* data-protection keychain rather than being
+        // refused, so a read comes back "no such item" — the same answer an
+        // entitled process with no probe item gives. Every read below is
+        // indistinguishable between the two; only the write tells them apart.
+        let unentitled = Arc::new(FakeKeychain::unentitled());
+        assert_eq!(
+            unentitled.read(Keychain::DataProtection, PROBE_SERVICE, PROBE_ACCOUNT),
+            Err(KeychainError::NotFound),
+        );
+        assert_eq!(
+            unentitled.read(Keychain::DataProtection, SERVICE, "anything"),
+            Err(KeychainError::NotFound),
+        );
+
+        // So the choice has to come out Login, or every write fails and every
+        // read falls back to the login keychain with a warning per secret.
+        assert_eq!(
+            resolve(None, None, unentitled.data_protection_available()).unwrap(),
+            Keychain::Login
         );
     }
 
@@ -793,6 +877,41 @@ pub(crate) mod tests {
 
         std::fs::write(&path, b"not json").unwrap();
         assert_eq!(read_record(&path), None);
+    }
+
+    #[test]
+    fn a_marker_from_the_broken_probe_is_not_believed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keychain.json");
+        // What the read-probe build wrote: it claims the data-protection
+        // keychain on a store whose values never got there. Believing it
+        // would refuse to open a vault that is in fact perfectly readable.
+        std::fs::write(
+            &path,
+            br#"{"keychain":"data-protection","updated_at":"2026-07-24T23:40:31Z"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(read_record(&path), None);
+        assert_eq!(
+            resolve(
+                None,
+                read_record(&path),
+                Err(KeychainError::MissingEntitlement)
+            )
+            .unwrap(),
+            Keychain::Login
+        );
+
+        // A marker this build wrote is believed, and still refuses.
+        write_record(&path, Keychain::DataProtection);
+        assert_eq!(read_record(&path), Some(Keychain::DataProtection));
+        assert!(resolve(
+            None,
+            read_record(&path),
+            Err(KeychainError::MissingEntitlement)
+        )
+        .is_err());
     }
 
     #[test]
