@@ -1232,7 +1232,7 @@ function mcpStatusHTML(c: ConnectionSummary): string {
   if (report.resources_supported) {
     const shown = report.resources.slice(0, 8);
     const rows = shown.map((resource) =>
-      `<div class="mcp-res"><b>${esc(resource.name)}</b><code title="${escAttr(resource.uri)}">${esc(resource.uri)}</code></div>`).join('');
+      `<div class="mcp-res"><b title="${escAttr(resource.name)}">${esc(resource.name)}</b><code title="${escAttr(resource.uri)}">${esc(resource.uri)}</code></div>`).join('');
     const more = report.resources.length > shown.length
       ? `<div class="mcp-res-more">+ ${report.resources.length - shown.length} more</div>` : '';
     resources = `<div class="mcp-res-head">Resources (${report.resources.length})</div>

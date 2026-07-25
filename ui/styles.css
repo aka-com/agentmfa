@@ -576,7 +576,9 @@
   display: flex; align-items: center; gap: 8px; margin: 3px 0 9px; padding: 8px 9px 8px 11px;
   border: 1px solid var(--ok-border); border-radius: 10px; background: var(--ok-wash);
 }
-  .connection-ready b{ flex: 1; min-width: 0; font-size: 13.5px; }
+  /* The tool is named by whoever added it; a long unbroken name wraps
+     inside the banner rather than sliding under the dismiss button. */
+  .connection-ready b{ flex: 1; min-width: 0; font-size: 13.5px; overflow-wrap: anywhere; }
 .tile-menu-wrap{ position: relative; flex: 0 0 auto; }
   /* Tool and endpoint menus use the same strong horizontal-ellipsis trigger. */
 .tile-menu-btn{
@@ -1173,9 +1175,11 @@
   font-size: 12px; color: var(--amber-ink); line-height: 1.35;
 }
 .cc-issue > svg { flex: 0 0 auto; margin-top: 2px; color: var(--amber-strong); }
+/* Issue text is the same quoted machine speech as a verdict (see .cc-test),
+   so it breaks mid-token rather than overflowing the attention card. */
 .cc-issue-body {
   display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
-  min-width: 0;
+  min-width: 0; overflow-wrap: anywhere;
 }
 /* When an issue carries a detail line, the first line reads as its
    headline; single-line issues keep the plain weight they had. */
@@ -1227,6 +1231,11 @@
   font-size: 11.5px; color: var(--muted);
 }
 .cc-test svg { flex: 0 0 auto; }
+/* A verdict quotes what the far side said — a pinned host-key fingerprint,
+   a URL, a token fragment — strings with no space or hyphen to break at.
+   The text column gives up its content-based minimum and breaks mid-token
+   so a fingerprint wraps inside the panel instead of running off its edge. */
+.cc-test > span { min-width: 0; overflow-wrap: anywhere; }
 .cc-test.ok { color: var(--ok-ink); }
 .cc-test.err { color: var(--danger-ink); }
 .cc-test.warn { color: var(--amber-ink); }
@@ -1238,7 +1247,15 @@
   letter-spacing: .04em; text-transform: uppercase;
 }
 .mcp-res { display: flex; align-items: baseline; gap: 8px; margin-top: 3px; min-width: 0; }
-.mcp-res b { flex: 0 0 auto; font-size: 11.5px; font-weight: 600; }
+/* The server names its own resources, at whatever length it likes. The name
+   keeps its natural width up to 60% of the row and truncates past that,
+   so a long one gives the URI beside it something to live in instead of
+   pushing the row off the panel. Both carry a title with the full text. */
+.mcp-res b {
+  flex: 0 0 auto; max-width: 60%; overflow: hidden;
+  font-size: 11.5px; font-weight: 600;
+  text-overflow: ellipsis; white-space: nowrap;
+}
 .mcp-res code {
   display: block; margin-top: 0; overflow: hidden; color: var(--muted-2);
   font-size: 11px; text-overflow: ellipsis; white-space: nowrap;
@@ -1274,6 +1291,9 @@
 .auth-done, .auth-failed { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; }
 .auth-done svg { color: var(--ok-ink); flex: 0 0 auto; margin-top: 2px; }
 .auth-failed svg { color: var(--danger-ink); flex: 0 0 auto; margin-top: 2px; }
+/* The outcome names an account or quotes the server's rejection, neither of
+   which is bounded in length — break mid-token rather than leave the sheet. */
+.auth-done > div, .auth-failed > div { min-width: 0; overflow-wrap: anywhere; }
 .auth-sub { margin-top: 3px; color: var(--muted); font-size: 12px; font-weight: 400; }
 .auth-warning { margin-top: 3px; color: var(--amber-strong); font-size: 12px; font-weight: 400; }
 .oauth-note { margin: -2px 0 4px; }
@@ -1399,6 +1419,8 @@
 .draft-test.err{ color: var(--danger-ink); }
 .draft-test.err b{ font-weight: 600; }
 .draft-test svg{ flex: 0 0 auto; margin-top: 1px; }
+/* Same quoted machine speech as .cc-test, in the sheet's narrower column. */
+.draft-test > div{ min-width: 0; overflow-wrap: anywhere; }
 .draft-test .draft-test-fix{ margin-top: 8px; }
 .draft-test .draft-test-hint{ margin-top: 6px; color: var(--muted); }
 /* Direct-endpoint lifecycle strip. Absent: just the issue button. Issued:
