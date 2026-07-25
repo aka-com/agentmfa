@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aka_core::audit::AuditEntry;
-use aka_core::events::BrokerEvents;
+use aka_core::events::{ApprovalHandling, BrokerEvents};
 use aka_core::manage::activity_dto;
 use aka_core::types::{ConfirmationMethod, SecretMeta};
 use tauri::{AppHandle, Emitter};
@@ -20,6 +20,7 @@ pub const EVT_ACTIVITY: &str = "aka://activity-appended";
 pub const EVT_ACTIVITY_CHANGED: &str = "aka://activity-changed";
 pub const EVT_MCP_AUTH: &str = "aka://mcp-auth-changed";
 pub const EVT_CONNECT_REQUESTED: &str = "aka://connect-requested";
+pub const EVT_APPROVALS: &str = "aka://approvals-changed";
 
 fn copy_authorization_reason(duration: Duration) -> String {
     let seconds = duration.as_secs();
@@ -95,6 +96,28 @@ impl BrokerEvents for TauriEvents {
     fn open_external_url(&self, url: &str) -> bool {
         open_consent_url(url)
     }
+
+    /// Agent traffic is parked on the user. Unlike the gates above, this one
+    /// does not block: the webview renders the queue and answers through
+    /// `respond_approval`, which releases the call.
+    fn approval_requested(
+        &self,
+        _pending: &aka_core::approvals::PendingApproval,
+    ) -> ApprovalHandling {
+        let _ = self.app.emit(EVT_APPROVALS, ());
+        // A prompt nobody can see is a prompt nobody answers: bring a window
+        // forward when the app is tucked away in the menu bar.
+        crate::windows::surface_for_approval(&self.app);
+        ApprovalHandling::Taken
+    }
+
+    fn approval_updated(&self, _pending: &aka_core::approvals::PendingApproval) {
+        let _ = self.app.emit(EVT_APPROVALS, ());
+    }
+
+    fn approval_resolved(&self, _id: &uuid::Uuid) {
+        let _ = self.app.emit(EVT_APPROVALS, ());
+    }
 }
 
 /// Open an OAuth consent page in the default browser. Only web URLs, ever:
@@ -144,6 +167,9 @@ pub fn emit_manage_event(app: &AppHandle, event: aka_api::ManageEvent) {
         ManageEvent::McpAuthChanged { state } => {
             let _ = app.emit(EVT_MCP_AUTH, state);
         }
+        ManageEvent::ApprovalsChanged => {
+            let _ = app.emit(EVT_APPROVALS, ());
+        }
         ManageEvent::ConnectRequested { agent, service } => {
             let _ = app.emit(
                 EVT_CONNECT_REQUESTED,
@@ -159,6 +185,7 @@ pub fn emit_manage_event(app: &AppHandle, event: aka_api::ManageEvent) {
                 EVT_WIRINGS,
                 EVT_AGENTS,
                 EVT_ACTIVITY_CHANGED,
+                EVT_APPROVALS,
             ] {
                 let _ = app.emit(topic, ());
             }

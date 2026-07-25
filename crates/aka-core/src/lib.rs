@@ -10,6 +10,7 @@
 //! documented dev fallbacks, so the security-relevant logic is exercised by
 //! tests everywhere.
 
+pub mod approvals;
 pub mod audit;
 mod authorization;
 pub mod broker;

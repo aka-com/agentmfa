@@ -7,8 +7,8 @@ pub struct BrokerConfig {
     /// Broker version advertised in the discovery manifest.
     pub version: String,
 
-    /// Advertised, machine-actionable client timeout: upstream timeout +
-    /// margin.
+    /// Advertised, machine-actionable client timeout: confirmation + direct
+    /// upload + the complete upstream operation + transport margin.
     pub recommended_client_timeout: Duration,
     /// Completed idempotency keys are retained this long. Their outcomes are
     /// replayed when the byte-bounded response cache still has them. A
@@ -23,7 +23,8 @@ pub struct BrokerConfig {
     /// larger than this keeps only its compact idempotency tombstone.
     pub outcome_retention_max_bytes: usize,
 
-    /// Upstream HTTP call timeout.
+    /// Deadline for the complete upstream HTTP operation, including OAuth
+    /// refresh, redirects, and response-body receipt.
     pub upstream_timeout: Duration,
     /// Response body cap (default 10 MB).
     pub response_cap: usize,
@@ -71,13 +72,57 @@ pub struct BrokerConfig {
     /// Global cap on issued per-connection direct endpoints (each owns a
     /// persistent listener + socket, so the count is bounded).
     pub max_endpoints: usize,
+
+    /// How long a traffic-confirmation prompt waits for an answer before
+    /// the parked call is refused. Deliberately below
+    /// `recommended_client_timeout`, so an unanswered prompt surfaces as a
+    /// broker refusal the agent can read rather than as its own timeout.
+    pub approval_timeout: Duration,
+    /// How long one approval covers a connection's traffic ("Approve 15m").
+    pub approval_window: Duration,
+    /// How long a refusal keeps refusing without asking again, so a
+    /// retrying agent cannot turn one denial into a prompt loop.
+    pub approval_deny_cooldown: Duration,
+    /// Backstop on prompts waiting at once. Coalescing already bounds these
+    /// to one per connection; this bounds a broker with many connections.
+    pub max_pending_approvals: usize,
+    /// Backstop on all calls parked behind those prompts. Direct endpoints
+    /// are gated before upload admission, so this separately bounds their
+    /// sockets/tasks and the prompt's waiter channels.
+    pub max_approval_waiters: usize,
+}
+
+impl BrokerConfig {
+    /// Never advertise a recommendation shorter than the longest direct
+    /// confirmed call the same configuration permits.
+    pub fn effective_client_timeout(&self) -> Duration {
+        let minimum = self
+            .approval_timeout
+            .saturating_add(self.endpoint_upload_timeout)
+            .saturating_add(self.upstream_timeout)
+            .saturating_add(Duration::from_secs(30));
+        self.recommended_client_timeout.max(minimum)
+    }
+
+    pub fn approvals(&self) -> crate::approvals::ApprovalConfig {
+        crate::approvals::ApprovalConfig {
+            timeout: self.approval_timeout,
+            window: self.approval_window,
+            deny_cooldown: self.approval_deny_cooldown,
+            max_pending: self.max_pending_approvals,
+            max_waiters: self.max_approval_waiters,
+        }
+    }
 }
 
 impl Default for BrokerConfig {
     fn default() -> Self {
         Self {
             version: env!("CARGO_PKG_VERSION").to_string(),
-            recommended_client_timeout: Duration::from_secs(2 * 60),
+            // A confirmed direct HTTP call may spend the full approval,
+            // body-upload, and upstream budgets; leave another 30 seconds
+            // for broker and transport overhead.
+            recommended_client_timeout: Duration::from_secs(4 * 60),
             outcome_retention: Duration::from_secs(600),
             outcome_retention_max_entries: 1024,
             outcome_retention_max_bytes: 64 * 1024 * 1024,
@@ -101,6 +146,11 @@ impl Default for BrokerConfig {
             per_ticket_sessions: 60,
             global_sessions: 300,
             max_endpoints: 64,
+            approval_timeout: Duration::from_secs(90),
+            approval_window: Duration::from_secs(15 * 60),
+            approval_deny_cooldown: Duration::from_secs(60),
+            max_pending_approvals: 32,
+            max_approval_waiters: 256,
         }
     }
 }

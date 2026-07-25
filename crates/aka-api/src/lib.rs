@@ -228,6 +228,17 @@ pub struct OAuthDto {
 pub struct AccessDto {
     /// Whether agents may use the connection (default true).
     pub enabled: bool,
+    /// Whether traffic asks the user when no approval window is open
+    /// (default false). What one decision gates depends on the kind: one
+    /// request for an API tool, one `tools/call` for an MCP tool, one
+    /// session for Postgres.
+    #[serde(default)]
+    pub confirm: bool,
+    /// While an approval window is open, the RFC 3339 time it lapses — so
+    /// the app can say why nothing is being asked. Absent when no window is
+    /// open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_window_until: Option<String>,
     /// Curated upstream MCP tool subset; absent means all tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_tools: Option<Vec<String>>,
@@ -371,6 +382,53 @@ pub struct ActivityDto {
     pub at: String,
 }
 
+/// One prompt waiting on the user: agent traffic parked until it is
+/// answered. Carries what was summarized for the decision — never a
+/// credential, never the request body itself.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalDto {
+    pub id: String,
+    pub connection_id: String,
+    pub connection: String,
+    /// Connection kind (`api`, `pg`), so the prompt can speak the right
+    /// language: a request, a tool call, a session.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// What this decision authorizes (`request`, `tool`, or `session`).
+    /// Optional so a new app can still manage an older broker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    /// The pinned destination the traffic would reach.
+    pub target: String,
+    /// Self-reported agent label. Attribution, never authorization.
+    pub agent: String,
+    /// The headline: `GET /user/repos`, `search_issues`, `New Postgres session`.
+    pub summary: String,
+    /// A second line when there is one: a body preview, a tool's arguments,
+    /// the client's application name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// How many calls are riding this one prompt.
+    pub waiting: usize,
+    /// RFC 3339 timestamps: when it was raised, and when it gives up on its
+    /// own and the parked traffic is refused.
+    pub requested_at: String,
+    pub expires_at: String,
+    /// How long "approve for now" would last, so the button can name it.
+    pub window_secs: u64,
+}
+
+/// What the user chose on a prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDecisionDto {
+    /// Allow this and everything else on the connection for the window.
+    ApproveWindow,
+    /// Allow this and turn the connection's confirmation off.
+    ApproveAll,
+    Deny,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettingsDto {
     pub reauth_on_read: bool,
@@ -390,6 +448,8 @@ pub struct SettingsDto {
 pub enum ManageEvent {
     SessionsChanged,
     AgentsChanged,
+    /// A prompt was raised, updated, answered, or lapsed: refetch the queue.
+    ApprovalsChanged,
     WiringsChanged,
     ConnectionsChanged,
     ActivityAppended {
@@ -453,6 +513,8 @@ mod tests {
             oauth: false,
             agent_access: AccessDto {
                 enabled: true,
+                confirm: false,
+                confirm_window_until: None,
                 allowed_tools: None,
                 endpoint: None,
             },

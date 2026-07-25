@@ -11,6 +11,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use axum::body::HttpBody as _;
 use http::{HeaderMap, HeaderName, HeaderValue, Method};
 use http_body_util::BodyExt as _;
 use percent_encoding::percent_decode_str;
@@ -82,6 +83,58 @@ const DENYLIST: &[&str] = &[
 
 pub fn is_mutating(method: &Method) -> bool {
     !matches!(*method, Method::GET | Method::HEAD)
+}
+
+/// Whether an empty request is an identifiable Streamable HTTP transport
+/// leg on this connection's pinned MCP path. Generic bodyless methods are
+/// still traffic: opening the event stream requires an accepted exact
+/// `text/event-stream` media type, and teardown requires a named session.
+pub(crate) fn is_mcp_transport_leg(
+    connection: &Connection,
+    method: &Method,
+    path: &str,
+    headers: &HeaderMap,
+    body_is_definitely_empty: bool,
+) -> bool {
+    if !body_is_definitely_empty {
+        return false;
+    }
+    let ConnectionConfig::Api {
+        mcp_path: Some(mcp_path),
+        ..
+    } = &connection.config
+    else {
+        return false;
+    };
+    if path.split('?').next().unwrap_or("") != mcp_path.split('?').next().unwrap_or("") {
+        return false;
+    }
+
+    match *method {
+        Method::GET => headers
+            .get_all(http::header::ACCEPT)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .any(|value| {
+                let mut parts = value.trim().split(';');
+                let event_stream = parts.next().is_some_and(|media_type| {
+                    media_type.trim().eq_ignore_ascii_case("text/event-stream")
+                });
+                let quality = parts.find_map(|parameter| {
+                    let (name, value) = parameter.trim().split_once('=')?;
+                    name.trim()
+                        .eq_ignore_ascii_case("q")
+                        .then(|| value.trim().parse::<f32>().ok())
+                });
+                event_stream && quality.unwrap_or(Some(1.0)).is_some_and(|q| q > 0.0)
+            }),
+        Method::DELETE => headers
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| !value.trim().is_empty()),
+        _ => false,
+    }
 }
 
 pub fn parse_method(method: &str) -> Result<Method, HttpValidationError> {
@@ -375,7 +428,19 @@ impl HttpExecution {
     /// per approval.
     pub async fn run(self) -> ExecOutcome {
         let started = Instant::now();
-        let outcome = self.run_inner().await;
+        // `RequestBuilder::timeout` below applies to one redirect hop. Keep
+        // a second, outer deadline around the whole upstream operation so a
+        // redirect chain, OAuth refresh, or slow response body cannot
+        // multiply the advertised timeout.
+        let outcome =
+            match tokio::time::timeout(self.config.upstream_timeout, self.run_inner()).await {
+                Ok(outcome) => outcome,
+                Err(_) => broker_error(
+                    504,
+                    ErrorReason::UpstreamTimeout,
+                    "the complete upstream operation exceeded its timeout",
+                ),
+            };
         let upstream_status = outcome
             .body
             .get("status")
@@ -961,6 +1026,10 @@ async fn proxy_handler(
     use axum::http::StatusCode;
     let broker = &state.broker;
     let (parts, body) = req.into_parts();
+    // An incoming body's exact zero size hint is authoritative. Unknown-size
+    // bodies (including chunked/HTTP2 uploads without Content-Length) must
+    // not inherit an empty MCP transport-leg exemption.
+    let body_is_definitely_empty = body.size_hint().exact() == Some(0);
 
     // Authenticate the per-wiring secret (Authorization: Bearer …) to THIS
     // endpoint; a secret for another endpoint (or none) is refused.
@@ -1029,6 +1098,28 @@ async fn proxy_handler(
         );
     }
 
+    // Curated MCP subsets are enforced by `/v1/http` while its JSON body is
+    // in memory. A direct endpoint deliberately gates before body upload and
+    // spools large bodies to disk, so it cannot safely inspect a tool call
+    // without defeating that memory boundary. Fail closed on the pinned MCP
+    // path; callers that need curation use the broker/sidecar path. Generic
+    // API paths on the same connection remain available.
+    let on_mcp_path = match &connection.config {
+        ConnectionConfig::Api {
+            mcp_path: Some(mcp_path),
+            ..
+        } => path.split('?').next().unwrap_or("") == mcp_path.split('?').next().unwrap_or(""),
+        _ => false,
+    };
+    let allowed_tools_snapshot = broker.access.allowed_tools(&endpoint.connection_id);
+    if on_mcp_path && allowed_tools_snapshot.is_some() {
+        return endpoint_error(
+            StatusCode::FORBIDDEN,
+            "denied_by_policy",
+            "curated MCP tools must be called through the broker or MCP sidecar, not the direct HTTP endpoint",
+        );
+    }
+
     // The endpoint Authorization value authenticates only this listener. The
     // configured upstream credential header is broker-controlled as well,
     // including custom header templates such as X-Api-Key.
@@ -1046,6 +1137,73 @@ async fn proxy_handler(
             return endpoint_error(StatusCode::BAD_REQUEST, reason, &error.detail());
         }
     };
+
+    // Confirm traffic before admitting the upload, except for exact empty
+    // MCP transport setup/teardown legs. Parking here rather than after the
+    // body means a prompt the user leaves sitting cannot hold this listener's
+    // upload budget hostage — at the cost of a preview in the prompt, which
+    // is the right trade for a stable endpoint that any tool may be pointed at.
+    let confirmation_enabled = broker.access.confirm_mode(&endpoint.connection_id).is_on();
+    let mcp_transport_leg = is_mcp_transport_leg(
+        &connection,
+        &method,
+        &path,
+        &parts.headers,
+        body_is_definitely_empty,
+    );
+    let policy_version = confirmation_enabled.then_some(connection.updated_at);
+    let confirmed_version = if confirmation_enabled && !mcp_transport_leg {
+        let version = connection.updated_at;
+        let verdict = broker
+            .approvals
+            .gate(crate::approvals::ApprovalRequest::new(
+                &connection,
+                "endpoint",
+                format!("{method} {}", crate::approvals::capped_text(&path)),
+            ))
+            .await;
+        if !verdict.is_allowed() {
+            let status = match verdict {
+                crate::approvals::Verdict::TimedOut => StatusCode::REQUEST_TIMEOUT,
+                _ => StatusCode::FORBIDDEN,
+            };
+            let reason = verdict
+                .reason()
+                .unwrap_or(crate::wire::ErrorReason::ApprovalDenied);
+            return endpoint_error(status, reason.as_str(), verdict.detail());
+        }
+        Some(version)
+    } else {
+        None
+    };
+
+    // A revoke, disable, or connection edit can race with either prompt
+    // insertion or the transport exemption check. Revalidate immediately,
+    // and close any window a stale prompt might just have opened.
+    if let Some(expected_version) = policy_version.as_ref() {
+        let endpoint_still_valid = broker
+            .endpoints
+            .resolve_secret(presented)
+            .is_some_and(|current| current.id == endpoint.id);
+        let connection_is_current = broker
+            .store
+            .connection_by_id(&endpoint.connection_id)
+            .is_ok_and(|current| current.updated_at == *expected_version);
+        if !endpoint_still_valid
+            || !broker.access.allows(&endpoint.connection_id)
+            || !connection_is_current
+            || broker.access.allowed_tools(&endpoint.connection_id) != allowed_tools_snapshot
+        {
+            if confirmed_version.is_some() {
+                broker.approvals.revoke(&endpoint.connection_id);
+            }
+            return endpoint_error(
+                StatusCode::FORBIDDEN,
+                "denied_by_policy",
+                "the endpoint or connection changed while the request was being admitted",
+            );
+        }
+    }
 
     // Admit the upload before reading even its first body frame. A malicious
     // holder of a valid endpoint secret can therefore occupy only the fixed
@@ -1093,6 +1251,9 @@ async fn proxy_handler(
         .resolve_secret(presented)
         .is_some_and(|current| current.id == endpoint.id);
     if !endpoint_still_valid || !broker.access.allows(&endpoint.connection_id) {
+        if confirmed_version.is_some() {
+            broker.approvals.revoke(&endpoint.connection_id);
+        }
         session.finish("access_revoked");
         return endpoint_error(
             StatusCode::FORBIDDEN,
@@ -1159,6 +1320,9 @@ async fn proxy_handler(
         .resolve_secret(presented)
         .filter(|endpoint| endpoint.id == state.endpoint_id)
     else {
+        if confirmed_version.is_some() {
+            broker.approvals.revoke(&connection.id);
+        }
         session.finish("access_revoked");
         return endpoint_error(
             StatusCode::UNAUTHORIZED,
@@ -1167,6 +1331,9 @@ async fn proxy_handler(
         );
     };
     if !broker.access.allows(&endpoint.connection_id) {
+        if confirmed_version.is_some() {
+            broker.approvals.revoke(&endpoint.connection_id);
+        }
         session.finish("access_revoked");
         return endpoint_error(
             StatusCode::FORBIDDEN,
@@ -1175,6 +1342,9 @@ async fn proxy_handler(
         );
     }
     let Ok(connection) = broker.store.connection_by_id(&endpoint.connection_id) else {
+        if confirmed_version.is_some() {
+            broker.approvals.revoke(&endpoint.connection_id);
+        }
         session.finish("connection_removed");
         return endpoint_error(
             StatusCode::BAD_GATEWAY,
@@ -1183,11 +1353,51 @@ async fn proxy_handler(
         );
     };
     if connection.kind() != ConnectionKind::Api {
+        if confirmed_version.is_some() {
+            broker.approvals.revoke(&endpoint.connection_id);
+        }
         session.finish("connection_changed");
         return endpoint_error(
             StatusCode::BAD_GATEWAY,
             "wrong_connection_type",
             "the connection is no longer an HTTP tool",
+        );
+    }
+    let current_on_mcp_path = match &connection.config {
+        ConnectionConfig::Api {
+            mcp_path: Some(mcp_path),
+            ..
+        } => path.split('?').next().unwrap_or("") == mcp_path.split('?').next().unwrap_or(""),
+        _ => false,
+    };
+    if current_on_mcp_path
+        && broker
+            .access
+            .allowed_tools(&endpoint.connection_id)
+            .is_some()
+    {
+        if confirmed_version.is_some() {
+            broker.approvals.revoke(&endpoint.connection_id);
+        }
+        session.finish("denied_by_policy");
+        return endpoint_error(
+            StatusCode::FORBIDDEN,
+            "denied_by_policy",
+            "curated MCP tools must be called through the broker or MCP sidecar, not the direct HTTP endpoint",
+        );
+    }
+    if policy_version
+        .as_ref()
+        .is_some_and(|expected| connection.updated_at != *expected)
+    {
+        if confirmed_version.is_some() {
+            broker.approvals.revoke(&endpoint.connection_id);
+        }
+        session.finish("connection_changed");
+        return endpoint_error(
+            StatusCode::FORBIDDEN,
+            "denied_by_policy",
+            "the connection changed after request policy was checked",
         );
     }
 
@@ -1198,6 +1408,9 @@ async fn proxy_handler(
         .resolve_secret(presented)
         .is_some_and(|current| current.id == endpoint.id);
     if !endpoint_still_valid || !broker.access.allows(&endpoint.connection_id) {
+        if confirmed_version.is_some() {
+            broker.approvals.revoke(&endpoint.connection_id);
+        }
         session.finish("access_revoked");
         return endpoint_error(
             StatusCode::FORBIDDEN,

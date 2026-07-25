@@ -31,11 +31,17 @@ pub fn manifest(
         // vocabulary (wire.rs); new schemes appear here before any client
         // is expected to use them.
         "auth_schemes": AuthScheme::ALL,
-        // upstream timeout + margin: machine-actionable, so agents set a
-        // concrete client timeout instead of parsing prose.
-        "recommended_client_timeout_seconds": config.recommended_client_timeout.as_secs(),
+        // Confirmation + direct upload + complete upstream operation +
+        // margin: machine-actionable, so agents set a concrete timeout
+        // instead of parsing prose.
+        "recommended_client_timeout_seconds": config.effective_client_timeout().as_secs(),
         "token_ttl_days": config.token_ttl.as_secs() / 86400,
         "ticket_ttl_seconds": config.ticket_ttl.as_secs(),
+        // How long a call may be parked while the user is asked to confirm
+        // it. Only tools the user switched confirmation on for ever park;
+        // the value is advertised unconditionally so a client can size its
+        // own timeout without first discovering which tools those are.
+        "approval_timeout_seconds": config.approval_timeout.as_secs(),
         "request_id_max_bytes": REQUEST_ID_MAX_BYTES,
         "endpoints": {
             "pair": "/v1/pair",
@@ -77,9 +83,14 @@ pub fn manifest_remote(
         "transport": "http",
         "capabilities": ["http", "websocket", "postgres", "ssh"],
         "auth_schemes": AuthScheme::ALL,
-        "recommended_client_timeout_seconds": config.recommended_client_timeout.as_secs(),
+        "recommended_client_timeout_seconds": config.effective_client_timeout().as_secs(),
         "token_ttl_days": config.token_ttl.as_secs() / 86400,
         "ticket_ttl_seconds": config.ticket_ttl.as_secs(),
+        // How long a call may be parked while the user is asked to confirm
+        // it. Only tools the user switched confirmation on for ever park;
+        // the value is advertised unconditionally so a client can size its
+        // own timeout without first discovering which tools those are.
+        "approval_timeout_seconds": config.approval_timeout.as_secs(),
         "request_id_max_bytes": REQUEST_ID_MAX_BYTES,
         "endpoints": {
             "whoami": "/v1/whoami",
@@ -139,7 +150,8 @@ pub fn remote_instructions_banner(
 /// The `/instructions` markdown. The pair-or-reuse walkthrough, one worked
 /// example per capability, token-storage guidance, and error semantics.
 pub fn instructions(config: &BrokerConfig, paths: &Paths) -> String {
-    let client_timeout = config.recommended_client_timeout.as_secs();
+    let client_timeout = config.effective_client_timeout().as_secs();
+    let approval_timeout = config.approval_timeout.as_secs();
     let ticket = config.ticket_ttl.as_secs();
     let token_days = config.token_ttl.as_secs() / 86400;
     format!(
@@ -151,8 +163,10 @@ names; you ask the broker to *use a named connection* (make an HTTP request
 through `github`, connect to `prod-db`) and the broker injects the credential
 on the upstream leg. Authorization is per **tool**: the user enables or
 disables each connection for agents in the AgentMFA app. An enabled call
-executes immediately, with no prompt; a disabled call is refused with
-`403 denied_by_policy` — ask your user to enable the tool in the app.
+executes immediately; a disabled call is refused with
+`403 denied_by_policy` — ask your user to enable the tool in the app. A
+tool may additionally be set to **confirm its traffic**, which holds each
+call while the user answers (see §3).
 Relayed HTTP responses are scrubbed for recognized credential material, but
 arbitrary transformed upstream output cannot be guaranteed secret-free.
 
@@ -219,18 +233,37 @@ executes immediately, a disabled call is refused with
 in the AgentMFA app — if you need a connection that is disabled, ask
 your user rather than retrying.
 
-## 3. Retries and timeouts
+## 3. Confirmation, retries, and timeouts
 
-Calls execute immediately; there is no approval wait. Set your HTTP client
-timeout to **at least {client_timeout} seconds** (upstream timeout +
-margin).
+Most calls execute immediately. A connection the user switched
+confirmation on for is different: the call is **held** while AgentMFA asks
+them about it, for up to {approval_timeout} seconds. Approving it also
+covers that connection's next calls for a while, so a confirmed tool does
+not ask again on every request. Three answers are possible, and you see
+only the outcome:
+
+- approved — the call proceeds normally;
+- refused — `403 {{"reason": "approval_denied"}}`. The refusal also stands
+  for calls made shortly after it, so **do not retry**: ask your user;
+- unanswered — `408 {{"reason": "approval_timeout"}}`. A retry is
+  reasonable here; it asks again.
+
+`403 {{"reason": "approval_unavailable"}}` means the connection asks for
+confirmation but no answering surface is attached, or the bounded prompt
+queue is full. Retrying will not help until AgentMFA is attached or capacity
+is available.
+
+Set your HTTP client timeout to **at least {client_timeout} seconds**
+(confirmation wait + direct-endpoint upload + upstream timeout + margin).
 
 **Always send a unique `request_id` no longer than
 {request_id_max_bytes} UTF-8 bytes (a UUID is recommended) on mutating calls.**
 A retry that re-sends the same
 `request_id` joins the in-flight execution: exactly one upstream
 execution, the same response replayed while its body remains cached, and a
-non-reexecute tombstone retained for 10 minutes.
+non-reexecute tombstone retained for 10 minutes. Confirmation timeout and
+unavailability happen before execution and are not retained, so retry those
+with the same `request_id`.
 Reusing a `request_id` with a *different* payload is rejected with
 `409 {{"reason": "request_id_mismatch"}}`. GET/HEAD are never coalesced.
 The broker reserves bounded idempotency capacity before accepting a keyed
@@ -395,6 +428,7 @@ host-key-mismatched signing requests.
         socket = paths.socket_display(),
         token_file = paths.token_display(),
         client_timeout = client_timeout,
+        approval_timeout = approval_timeout,
         ticket = ticket,
         token_days = token_days,
         request_id_max_bytes = REQUEST_ID_MAX_BYTES,
@@ -441,9 +475,18 @@ mod tests {
         assert_eq!(m["auth_schemes"], serde_json::json!(["bearer"]));
         assert_eq!(m["transport"], "http-over-unix-socket");
         assert!(m.get("approval_modes").is_none());
-        assert!(m.get("approval_timeout_seconds").is_none());
         assert!(m.get("access_grant_ttl_seconds").is_none());
-        assert_eq!(m["recommended_client_timeout_seconds"], 120);
+        // A call on a confirm-on tool parks for at most this long, and the
+        // advertised client timeout has to cover it.
+        assert_eq!(m["approval_timeout_seconds"], 90);
+        assert_eq!(m["recommended_client_timeout_seconds"], 240);
+        assert!(
+            m["approval_timeout_seconds"].as_u64().unwrap()
+                + BrokerConfig::default().endpoint_upload_timeout.as_secs()
+                + BrokerConfig::default().upstream_timeout.as_secs()
+                <= m["recommended_client_timeout_seconds"].as_u64().unwrap(),
+            "the client timeout must cover confirmation, upload, and upstream work"
+        );
         assert_eq!(m["token_ttl_days"], 30);
         assert_eq!(m["ticket_ttl_seconds"], 60);
         assert_eq!(m["request_id_max_bytes"], REQUEST_ID_MAX_BYTES);
@@ -456,6 +499,19 @@ mod tests {
             m["capabilities"],
             serde_json::json!(["http", "websocket", "postgres", "ssh"])
         );
+    }
+
+    #[test]
+    fn a_custom_configuration_cannot_advertise_too_short_a_timeout() {
+        let config = BrokerConfig {
+            recommended_client_timeout: std::time::Duration::from_secs(1),
+            approval_timeout: std::time::Duration::from_secs(120),
+            endpoint_upload_timeout: std::time::Duration::from_secs(70),
+            upstream_timeout: std::time::Duration::from_secs(80),
+            ..BrokerConfig::default()
+        };
+        let m = manifest(&config, &paths(), None);
+        assert_eq!(m["recommended_client_timeout_seconds"], 300);
     }
 
     #[test]
@@ -511,7 +567,7 @@ mod tests {
             "256 UTF-8 bytes",
             "PGPASSWORD",
             "expires_in_seconds",
-            "at least 120 seconds",
+            "at least 240 seconds",
             "denied_by_policy",
             "\"wired\": true",
             "request_id_mismatch",

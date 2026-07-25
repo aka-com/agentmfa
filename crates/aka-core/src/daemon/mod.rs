@@ -984,6 +984,14 @@ async fn post_http(
     // subset is refused here, at the same trust boundary as the wiring
     // check itself — the sidecar's filtered listing is a mirror, not the
     // enforcement.
+    let on_mcp_path = match &conn.config {
+        ConnectionConfig::Api {
+            mcp_path: Some(mcp_path),
+            ..
+        } => call.path.split('?').next().unwrap_or("") == mcp_path.split('?').next().unwrap_or(""),
+        _ => false,
+    };
+    let allowed_tools_snapshot = broker.access.allowed_tools(&conn.id);
     if let ConnectionConfig::Api {
         mcp_path: Some(mcp_path),
         ..
@@ -992,9 +1000,8 @@ async fn post_http(
         let call_path = call.path.split('?').next().unwrap_or("");
         let pinned_path = mcp_path.split('?').next().unwrap_or("");
         if call_path == pinned_path {
-            let allowed = broker.access.allowed_tools(&conn.id);
-            if let (Some(allowed), Some(tool)) = (allowed, mcp_tool_call_name(&body_bytes)) {
-                if !allowed.iter().any(|name| name == &tool) {
+            if let Some(allowed) = allowed_tools_snapshot.as_ref() {
+                if let Some(tool) = disallowed_mcp_tool_call(&body_bytes, allowed) {
                     broker.audit.append(
                         AuditEntry::new(
                             AuditKind::Denied,
@@ -1019,6 +1026,24 @@ async fn post_http(
             }
         }
     }
+    // Parse and describe MCP traffic only when this request arrived with the
+    // switch on. The historical/default off path should not pay an extra
+    // full-body JSON parse for a feature it is not using.
+    let approval = broker
+        .access
+        .confirm_mode(&conn.id)
+        .is_on()
+        .then(|| {
+            approval_for_call(
+                &conn,
+                &client,
+                &method,
+                &call.path,
+                &header_map,
+                &body_bytes,
+            )
+        })
+        .flatten();
     let hash = payload_hash(&conn.id, &method, &call.path, &wire_headers, &body_bytes);
     let body = match SpooledBody::from_bytes(body_bytes, broker.config.spool_threshold) {
         Ok(b) => Arc::new(b),
@@ -1055,11 +1080,25 @@ async fn post_http(
         health: Some(broker.health.clone()),
     };
     let executor: crate::executions::Executor = Box::pin(executor.run());
+    let access = broker.access.clone();
+    let approvals = broker.approvals.clone();
+    let connection_id = conn.id;
+    let executor: crate::executions::Executor = Box::pin(async move {
+        if on_mcp_path && access.allowed_tools(&connection_id) != allowed_tools_snapshot {
+            // A subset change that raced just ahead of prompt insertion may
+            // have found no pending prompt to revoke. Refuse this snapshot
+            // and close any window its stale answer opened.
+            approvals.revoke(&connection_id);
+            return ExecOutcome::refusal(ErrorReason::DeniedByPolicy);
+        }
+        executor.await
+    });
 
     run_allowed(
         broker,
         &client,
         &conn,
+        approval,
         ExecRequest {
             coalesce_key,
             payload_hash,
@@ -1103,26 +1142,264 @@ async fn post_connect_request(
     }
 }
 
-/// The tool a JSON-RPC `tools/call` body names, if that is what it is.
-fn mcp_tool_call_name(body: &[u8]) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
-    if value.get("method").and_then(|m| m.as_str()) != Some("tools/call") {
+/// The first JSON-RPC `tools/call` outside a curated subset, including calls
+/// in a batch. Compare while the parsed value is alive so a malicious
+/// request cannot make us clone a request-sized tool name just to reject it.
+fn disallowed_mcp_tool_call(body: &[u8], allowed: &[String]) -> Option<String> {
+    fn from_request(value: &serde_json::Value, allowed: &[String]) -> Option<String> {
+        if value.get("method").and_then(|method| method.as_str()) != Some("tools/call") {
+            return None;
+        }
+        let tool = value.pointer("/params/name").and_then(|name| name.as_str());
+        if tool.is_some_and(|tool| allowed.iter().any(|name| name == tool)) {
+            return None;
+        }
+        Some(crate::approvals::capped_text(
+            tool.unwrap_or("(unnamed tool)"),
+        ))
+    }
+
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return None;
+    };
+    match value {
+        serde_json::Value::Array(requests) => requests
+            .iter()
+            .find_map(|request| from_request(request, allowed)),
+        request => from_request(&request, allowed),
+    }
+}
+
+/// How much of a body or an argument list the prompt shows. Enough to
+/// recognize the call, far short of a payload dump.
+const APPROVAL_PREVIEW_CAP: usize = 400;
+const APPROVAL_PREVIEW_SCAN_CAP: usize = APPROVAL_PREVIEW_CAP * 4 + 4;
+/// Parsing a large MCP body solely to label an approval prompt would create
+/// a second full JSON tree beside the already-decoded HTTP call. Large calls
+/// receive the same bounded generic request description instead.
+const APPROVAL_RPC_PARSE_CAP: usize = 1024 * 1024;
+
+fn preview_bytes(bytes: &[u8]) -> String {
+    preview_bytes_with_tail(bytes, false)
+}
+
+fn preview_bytes_with_tail(bytes: &[u8], has_unscanned_tail: bool) -> String {
+    // Never lossy-convert the full (potentially 150 MiB) request just to show
+    // 400 characters. Four bytes per scalar plus a small boundary cushion is
+    // enough to decide the preview.
+    let scanned = bytes.len().min(APPROVAL_PREVIEW_SCAN_CAP);
+    let text = String::from_utf8_lossy(&bytes[..scanned]);
+    let mut chars = text.chars();
+    let head: String = chars.by_ref().take(APPROVAL_PREVIEW_CAP).collect();
+    if has_unscanned_tail || scanned < bytes.len() || chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
+fn preview_json(value: &serde_json::Value) -> String {
+    struct PrefixWriter {
+        bytes: Vec<u8>,
+        truncated: bool,
+    }
+    impl std::io::Write for PrefixWriter {
+        fn write(&mut self, input: &[u8]) -> std::io::Result<usize> {
+            let remaining = APPROVAL_PREVIEW_SCAN_CAP.saturating_sub(self.bytes.len());
+            if remaining == 0 {
+                self.truncated |= !input.is_empty();
+                return Err(std::io::Error::other("approval preview is full"));
+            }
+            let written = input.len().min(remaining);
+            self.bytes.extend_from_slice(&input[..written]);
+            self.truncated |= written < input.len();
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut writer = PrefixWriter {
+        bytes: Vec::with_capacity(APPROVAL_PREVIEW_SCAN_CAP),
+        truncated: false,
+    };
+    let _ = serde_json::to_writer(&mut writer, value);
+    preview_bytes_with_tail(&writer.bytes, writer.truncated)
+}
+
+/// MCP requests that are session plumbing rather than the agent's actual
+/// work. They reach the upstream for metadata only, and every tool call is
+/// wrapped in a fresh `initialize`/teardown pair, so prompting on them
+/// would ask three times per call and again on every listing.
+fn is_mcp_envelope(method: &str) -> bool {
+    matches!(
+        method,
+        "initialize"
+            | "ping"
+            | "tools/list"
+            | "resources/list"
+            | "prompts/list"
+            | "notifications/initialized"
+            | "notifications/cancelled"
+            | "notifications/progress"
+            | "notifications/roots/list_changed"
+    )
+}
+
+/// What the user is asked about for one `/v1/http` call, or `None` when the
+/// call raises no question.
+///
+/// For a plain API tool that is the request itself. For an MCP tool it is
+/// the `tools/call` — but only calls to the *pinned* MCP path are read as
+/// MCP; a request the agent aims somewhere else on the same host is
+/// ordinary traffic to a credentialed destination, and is asked about as
+/// such rather than waved through for looking like plumbing.
+fn approval_for_call(
+    conn: &crate::types::Connection,
+    client: &str,
+    method: &http::Method,
+    path: &str,
+    headers: &http::HeaderMap,
+    body: &[u8],
+) -> Option<crate::approvals::ApprovalRequest> {
+    use crate::approvals::{capped_text, ApprovalRequest};
+    let mcp_path = match &conn.config {
+        ConnectionConfig::Api { mcp_path, .. } => mcp_path.clone(),
+        _ => None,
+    };
+    let on_mcp_path = mcp_path.as_deref().is_some_and(|pinned| {
+        path.split('?').next().unwrap_or("") == pinned.split('?').next().unwrap_or("")
+    });
+    if !on_mcp_path {
+        let request = ApprovalRequest::new(conn, client, format!("{method} {}", capped_text(path)));
+        return Some(if body.is_empty() {
+            request
+        } else {
+            request.detail(preview_bytes(body))
+        });
+    }
+    if crate::capability::http::is_mcp_transport_leg(conn, method, path, headers, body.is_empty()) {
         return None;
     }
-    value
+    let generic = || {
+        ApprovalRequest::new(conn, client, format!("{method} {}", capped_text(path)))
+            .maybe_detail((!body.is_empty()).then(|| preview_bytes(body)))
+    };
+    if body.len() > APPROVAL_RPC_PARSE_CAP {
+        return Some(generic());
+    }
+    let Ok(rpc) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return Some(generic());
+    };
+    // A batch authorizes one HTTP request carrying several RPC messages.
+    // Name its first methods and the total rather than making the user infer
+    // everything from a raw prefix that a later call could hide behind.
+    if let Some(batch) = rpc.as_array() {
+        let methods: Vec<String> = batch
+            .iter()
+            // A malicious batch with millions of non-request values must
+            // not make prompt construction walk it all looking for a label.
+            .take(16)
+            .filter_map(|request| request.get("method").and_then(|method| method.as_str()))
+            .take(4)
+            .map(|method| {
+                let mut method = capped_text(method);
+                if let Some((cutoff, _)) = method.char_indices().nth(60) {
+                    method.truncate(cutoff);
+                    method.push('…');
+                }
+                method
+            })
+            .collect();
+        let summary = if methods.is_empty() {
+            format!("MCP batch ({} messages)", batch.len())
+        } else {
+            let omitted = if batch.len() > methods.len() {
+                ", …"
+            } else {
+                ""
+            };
+            format!(
+                "MCP batch ({} messages): {}{omitted}",
+                batch.len(),
+                methods.join(", "),
+            )
+        };
+        return Some(
+            ApprovalRequest::new(conn, client, summary)
+                .maybe_detail((!body.is_empty()).then(|| preview_bytes(body))),
+        );
+    }
+    if rpc.get("jsonrpc").and_then(|value| value.as_str()) != Some("2.0") {
+        return Some(generic());
+    }
+    let Some(rpc_method) = rpc.get("method").and_then(|m| m.as_str()) else {
+        return Some(generic());
+    };
+    if is_mcp_envelope(rpc_method) {
+        return None;
+    }
+    if rpc_method == "tools/call" {
+        let tool = capped_text(
+            rpc.get("params")
+                .and_then(|p| p.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or("(unnamed tool)"),
+        );
+        let arguments = rpc
+            .get("params")
+            .and_then(|p| p.get("arguments"))
+            .filter(|args| !matches!(args, serde_json::Value::Null))
+            .map(preview_json);
+        return Some(
+            ApprovalRequest::new(conn, client, tool)
+                .tool()
+                .maybe_detail(arguments),
+        );
+    }
+    let params = rpc
         .get("params")
-        .and_then(|p| p.get("name"))
-        .and_then(|n| n.as_str())
-        .map(String::from)
+        .filter(|params| !matches!(params, serde_json::Value::Null))
+        .map(preview_json);
+    Some(ApprovalRequest::new(conn, client, capped_text(rpc_method)).maybe_detail(params))
+}
+
+/// The response a refused call gets: the machine reason it can branch on,
+/// plus prose naming what to do about it.
+fn approval_refusal(verdict: crate::approvals::Verdict, connection: &str) -> ExecOutcome {
+    let reason = verdict
+        .reason()
+        .unwrap_or(crate::wire::ErrorReason::ApprovalDenied);
+    let status = match verdict {
+        crate::approvals::Verdict::TimedOut => 408,
+        _ => 403,
+    };
+    ExecOutcome {
+        status,
+        body: json!({
+            "reason": reason,
+            "detail": format!("{} on {connection}", verdict.detail()),
+        }),
+    }
 }
 
 /// Shared capability tail: an enabled connection executes immediately
 /// (retries still coalesce under their idempotency key); a disabled one is
 /// refused.
+///
+/// `approval` describes the traffic for the confirmation prompt, and is
+/// `None` for calls that raise no question — MCP session plumbing, and the
+/// data-plane opens, which only mint a capability. Postgres is confirmed
+/// where it actually connects, in the proxy, not at the open that hands out
+/// its ticket: a ticket may be minted and never used, and one ticket can
+/// open many sessions.
 async fn run_allowed(
     broker: &Arc<Broker>,
     client: &str,
     conn: &crate::types::Connection,
+    approval: Option<crate::approvals::ApprovalRequest>,
     exec: ExecRequest,
 ) -> Response {
     if !broker.access.allows(&conn.id) {
@@ -1144,6 +1421,71 @@ async fn run_allowed(
             ),
         );
     }
+
+    // Re-check at the actual execution boundary. Access can change after the
+    // request-level check above, especially while a confirmed call is parked.
+    let access = broker.access.clone();
+    let store = broker.store.clone();
+    let approvals = broker.approvals.clone();
+    let connection_id = conn.id;
+    let expected_version = conn.updated_at;
+    let executor = exec.executor;
+    let exec = ExecRequest {
+        executor: Box::pin(async move {
+            let connection_is_current = store
+                .connection_by_id(&connection_id)
+                .is_ok_and(|current| current.updated_at == expected_version);
+            if !connection_is_current {
+                // A stale prompt may just have opened a window after a
+                // retarget raced ahead of its insertion. Do not let that
+                // grant cover the replacement authority.
+                approvals.revoke(&connection_id);
+                return ExecOutcome::refusal(ErrorReason::DeniedByPolicy);
+            }
+            if !access.allows(&connection_id) {
+                return ExecOutcome::refusal(ErrorReason::DeniedByPolicy);
+            }
+            executor.await
+        }),
+        ..exec
+    };
+
+    // Park on the user's decision *inside* the execution, so a retry
+    // re-sending the same `request_id` joins the wait instead of raising a
+    // second prompt for work that is already being asked about.
+    let exec = match approval {
+        Some(request) if broker.access.confirm_mode(&conn.id).is_on() => {
+            let approvals = broker.approvals.clone();
+            let access = broker.access.clone();
+            let store = broker.store.clone();
+            let connection_id = conn.id;
+            let expected_version = conn.updated_at;
+            let connection = conn.name.clone();
+            let executor = exec.executor;
+            ExecRequest {
+                executor: Box::pin(async move {
+                    // Close the race where disabling the connection happened
+                    // after the outer check, or where the connection was
+                    // changed just before this prompt was inserted (and so
+                    // neither revocation could find it yet).
+                    let connection_is_current = store
+                        .connection_by_id(&connection_id)
+                        .is_ok_and(|current| current.updated_at == expected_version);
+                    if !access.allows(&connection_id) || !connection_is_current {
+                        return ExecOutcome::refusal(ErrorReason::DeniedByPolicy);
+                    }
+                    let verdict = approvals.gate(request).await;
+                    if !verdict.is_allowed() {
+                        return approval_refusal(verdict, &connection);
+                    }
+                    executor.await
+                }),
+                ..exec
+            }
+        }
+        _ => exec,
+    };
+
     match broker.executions.run(exec) {
         Ok(Execution::Wait(handle)) => match handle.wait().await {
             Some(outcome) => outcome_response(outcome),
@@ -1350,6 +1692,7 @@ async fn post_ws_open(
         broker,
         &client,
         &conn,
+        None,
         ExecRequest {
             coalesce_key,
             payload_hash,
@@ -1462,6 +1805,7 @@ async fn post_ssh_open(
         broker,
         &client,
         &conn,
+        None,
         ExecRequest {
             coalesce_key,
             payload_hash,
@@ -1567,6 +1911,7 @@ async fn post_pg_open(
         broker,
         &client,
         &conn,
+        None,
         ExecRequest {
             coalesce_key,
             payload_hash,

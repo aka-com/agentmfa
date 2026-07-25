@@ -22,8 +22,8 @@ use crate::ratelimit::{KeyedLimiter, WindowLimiter};
 use crate::sessions::{DataPlane, SessionInfo};
 use crate::store::{ConnectionSpec, Store};
 use crate::types::{
-    BrokerIdentity, Connection, ConnectionConfig, ConnectionKind, DirectEndpoint, SecretMeta,
-    SecretValue, Settings, ToolAccess,
+    BrokerIdentity, ConfirmMode, Connection, ConnectionConfig, ConnectionKind, DirectEndpoint,
+    SecretMeta, SecretValue, Settings, ToolAccess,
 };
 use crate::Result;
 
@@ -127,6 +127,9 @@ pub struct Broker {
     pub health: Arc<crate::health::HealthRegistry>,
     /// Tickets + live WS/PG sessions.
     pub data_plane: DataPlane,
+    /// Traffic parked on the user: prompts, approval windows, and the
+    /// cooldown a refusal leaves behind.
+    pub approvals: crate::approvals::Approvals,
     /// The URL remote clients reach this broker at (`serve --public-url`),
     /// when one is configured. Drives remote-flavored agent-setup text.
     public_url: Mutex<Option<String>>,
@@ -273,6 +276,8 @@ impl Broker {
             audit.clone(),
             events.clone(),
         );
+        let approvals =
+            crate::approvals::Approvals::new(config.approvals(), audit.clone(), events.clone());
         let health = Arc::new(crate::health::HealthRegistry::open(
             paths.health_file(),
             events.clone(),
@@ -281,6 +286,7 @@ impl Broker {
             Arc::new(tokio::sync::Semaphore::new(config.endpoint_global_uploads));
         let broker = Arc::new(Self {
             data_plane,
+            approvals,
             mcp_auth: crate::mcp_auth::McpAuthSessions::default(),
             manage_oauth: Mutex::new(HashMap::new()),
             connect_request_debounce: Mutex::new(std::collections::HashMap::new()),
@@ -711,6 +717,9 @@ impl Broker {
             if endpoints_revoked {
                 self.events.wirings_changed();
             }
+            // An open approval window was permission for traffic to the old
+            // destination; the new one has never been shown to the user.
+            self.approvals.revoke(id);
             // A health result for the old destination says nothing about
             // the new one.
             self.health.forget(id);
@@ -766,6 +775,7 @@ impl Broker {
         let conn = self.store.delete_connection(id)?;
         self.health.forget(id);
         self.forget_mcp_tools_cache(id);
+        self.approvals.revoke(id);
         let dropped = self.access.remove_for_connection(id)?;
         let endpoints = self.endpoints.remove_for_connection(id)?;
         self.teardown_endpoints(&endpoints);
@@ -1779,7 +1789,120 @@ impl Broker {
             );
             self.events.wirings_changed();
         }
+        if !enabled {
+            // Nothing is authorized here any more, so an open window and a
+            // prompt already on screen both have to go.
+            self.approvals.revoke(connection_id);
+        }
         Ok(changed)
+    }
+
+    /// Ask the user to confirm this connection's traffic — or stop asking.
+    ///
+    /// Turning it **on** only adds friction, so the in-app switch is the
+    /// gate. Turning it **off** removes a gate the user deliberately put
+    /// up, which is the same class of change as disabling the read gate:
+    /// it takes a real authentication, and the presence window does not
+    /// cover it. That is also what the prompt's "Approve all" button
+    /// routes through, so "stop asking" can never be one stray click.
+    pub fn ui_set_confirm_mode(&self, connection_id: &Uuid, confirm: ConfirmMode) -> Result<bool> {
+        let connection = self.store.connection_by_id(connection_id)?;
+        let old_mode = self.access.confirm_mode(connection_id);
+        if confirm.is_on() && !crate::types::confirmable(&connection) {
+            return Err(CoreError::InvalidSetting(format!(
+                "{} connections have no traffic unit to confirm",
+                connection.kind().as_str()
+            )));
+        }
+        let confirmation = if confirm.is_on() {
+            None
+        } else if old_mode.is_on() {
+            Some(self.confirm_action(&format!(
+                "stop confirming traffic on “{}” — agents will use it without asking",
+                connection.name
+            ))?)
+        } else {
+            None
+        };
+        let _gate = self.config_gate.lock().unwrap();
+        let current = self.store.connection_by_id(connection_id)?;
+        if current.updated_at != connection.updated_at {
+            return Err(CoreError::ApprovalConnectionChanged);
+        }
+        let current_mode = self.access.confirm_mode(connection_id);
+        if current_mode == confirm {
+            return Ok(false);
+        }
+        // In particular, an unauthenticated "already off" request must not
+        // turn off a mode another window enabled while this call was waiting.
+        if current_mode != old_mode {
+            return Err(CoreError::ApprovalConnectionChanged);
+        }
+        let changed = self.access.set_confirm_mode(*connection_id, confirm)?;
+        if changed {
+            if !confirm.is_on() {
+                // The user just said this traffic needs no asking: release
+                // whatever is parked on it instead of refusing it.
+                self.approvals.release(connection_id);
+            }
+            let mut entry = AuditEntry::new(
+                AuditKind::Wired,
+                format!(
+                    "Traffic confirmation {} for {}",
+                    if confirm.is_on() {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    },
+                    connection.name
+                ),
+            )
+            .connection(connection.name.clone())
+            .field("confirm", confirm.is_on());
+            if let Some(confirmation) = confirmation {
+                entry = entry.confirmation(confirmation);
+            }
+            self.audit.append(entry);
+            self.events.wirings_changed();
+        }
+        Ok(changed)
+    }
+
+    /* ------------------------- traffic confirmation ----------------------- */
+
+    /// Prompts waiting on the user right now.
+    pub fn pending_approvals(&self) -> Vec<crate::approvals::PendingApproval> {
+        self.approvals.pending()
+    }
+
+    /// Answer a prompt. "Approve all" persists the switch going off first —
+    /// through [`Self::ui_set_confirm_mode`] and its authentication — so a
+    /// refused authentication leaves the traffic parked and the prompt up,
+    /// rather than half-applying the decision.
+    pub fn ui_respond_approval(
+        &self,
+        id: &Uuid,
+        decision: crate::approvals::ApprovalDecision,
+    ) -> Result<bool> {
+        if decision == crate::approvals::ApprovalDecision::ApproveAll {
+            let Some(pending) = self
+                .approvals
+                .pending()
+                .into_iter()
+                .find(|pending| &pending.id == id)
+            else {
+                return Ok(false);
+            };
+            // Turning the switch off releases everything parked on the
+            // connection, this prompt included — so there is nothing left
+            // to answer afterwards. A no-op change (the switch was already
+            // off, raced by another window) still has to release it.
+            if !self.ui_set_confirm_mode(&pending.connection_id, ConfirmMode::Off)? {
+                self.approvals.release(&pending.connection_id);
+            }
+            return Ok(true);
+        }
+        Ok(self.approvals.respond(id, decision))
     }
 
     /// Curate which upstream MCP tools agents may call on a connection.
@@ -1803,6 +1926,10 @@ impl Broker {
         };
         let changed = self.access.set_allowed_tools(*connection_id, tools)?;
         if changed {
+            // A pending prompt or open window was admitted under the old
+            // tool subset. Narrowing must take effect before any parked call
+            // can leave; widening should likewise require a fresh decision.
+            self.approvals.revoke(connection_id);
             self.audit.append(
                 AuditEntry::new(
                     AuditKind::Wired,
@@ -1889,6 +2016,9 @@ impl Broker {
         let _gate = self.config_gate.lock().unwrap();
         self.identity.rotate()?;
         let sessions_closed = self.data_plane.close_all();
+        // An approval window is permission for traffic from the generation
+        // being disconnected; it must not outlive it.
+        self.approvals.revoke_all();
         self.audit.append(
             AuditEntry::new(
                 AuditKind::TokenRevoked,

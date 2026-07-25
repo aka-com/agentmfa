@@ -31,6 +31,13 @@ const REAL_PG_PASSWORD: &str = "s3cr3t-pg-pass-77";
 
 struct TestEvents {
     secret_read_confirmations: Arc<AtomicUsize>,
+    /// How the scripted user answers traffic-confirmation prompts. `None`
+    /// takes the prompt and never answers it, so the deadline decides.
+    approval: Option<aka_core::approvals::ApprovalDecision>,
+    prompts: Arc<AtomicUsize>,
+    /// Set after construction: the registry lives on the broker these
+    /// events are built into.
+    broker: Mutex<Option<Arc<Broker>>>,
 }
 
 impl BrokerEvents for TestEvents {
@@ -42,32 +49,55 @@ impl BrokerEvents for TestEvents {
     fn confirm_action(&self, _description: &str) -> Option<aka_core::types::ConfirmationMethod> {
         Some(aka_core::types::ConfirmationMethod::Waived)
     }
+    fn approval_requested(
+        &self,
+        pending: &aka_core::approvals::PendingApproval,
+    ) -> aka_core::events::ApprovalHandling {
+        self.prompts.fetch_add(1, Ordering::SeqCst);
+        if let (Some(decision), Some(broker)) = (self.approval, self.broker.lock().unwrap().clone())
+        {
+            broker.ui_respond_approval(&pending.id, decision).unwrap();
+        }
+        aka_core::events::ApprovalHandling::Taken
+    }
 }
 
 struct Harness {
     broker: Arc<Broker>,
     daemon: daemon::DaemonHandle,
     secret_read_confirmations: Arc<AtomicUsize>,
+    /// How many traffic-confirmation prompts the scripted user was shown.
+    prompts: Arc<AtomicUsize>,
     _dir: tempfile::TempDir,
 }
 
 async fn harness(config: BrokerConfig) -> Harness {
+    harness_answering(config, None).await
+}
+
+/// A harness whose user answers every traffic prompt with `decision`.
+async fn harness_answering(
+    config: BrokerConfig,
+    decision: Option<aka_core::approvals::ApprovalDecision>,
+) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let paths = Paths::under(dir.path());
     let secret_read_confirmations = Arc::new(AtomicUsize::new(0));
-    let broker = Broker::new(
-        paths,
-        Arc::new(MemoryVault::new()),
-        config,
-        Arc::new(TestEvents {
-            secret_read_confirmations: secret_read_confirmations.clone(),
-        }),
-    )
-    .await
-    .unwrap();
+    let prompts = Arc::new(AtomicUsize::new(0));
+    let events = Arc::new(TestEvents {
+        secret_read_confirmations: secret_read_confirmations.clone(),
+        approval: decision,
+        prompts: prompts.clone(),
+        broker: Mutex::new(None),
+    });
+    let broker = Broker::new(paths, Arc::new(MemoryVault::new()), config, events.clone())
+        .await
+        .unwrap();
+    *events.broker.lock().unwrap() = Some(broker.clone());
     let daemon = daemon::serve(broker.clone()).await.unwrap();
     Harness {
         broker,
+        prompts,
         daemon,
         secret_read_confirmations,
         _dir: dir,
@@ -842,6 +872,111 @@ async fn disabling_access_refuses_the_endpoint_until_reenabled() {
     assert!(tokio_postgres::connect(&h.endpoint_conn_str(&info), NoTls)
         .await
         .is_ok());
+}
+
+/* --------------------- traffic confirmation (per session) ------------------ */
+
+#[tokio::test]
+async fn a_confirmed_connection_asks_before_the_session_opens() {
+    let mut h = harness_answering(
+        BrokerConfig::default(),
+        Some(aka_core::approvals::ApprovalDecision::ApproveWindow),
+    )
+    .await;
+    let fake = fake_pg(FakeAuth::Cleartext).await;
+    add_pg_connection(&h.broker, fake.port);
+    let conn = h.broker.store.connection_by_name("prod-db").unwrap();
+    h.broker
+        .ui_set_confirm_mode(&conn.id, aka_core::types::ConfirmMode::On)
+        .unwrap();
+
+    let token = h.pair().await;
+    // Minting the ticket asks nothing: a ticket may never be redeemed, and
+    // one ticket can open many sessions. The question belongs at the dial.
+    let (_, ticket) = h.open_pg(&token).await;
+    assert_eq!(h.prompts.load(Ordering::SeqCst), 0);
+
+    let (client, connection) = tokio_postgres::connect(&h.pg_conn_str(&ticket), NoTls)
+        .await
+        .unwrap();
+    tokio::spawn(connection);
+    assert!(!client.simple_query("SELECT 1").await.unwrap().is_empty());
+    assert_eq!(h.prompts.load(Ordering::SeqCst), 1);
+
+    // A pool opening more connections rides the window rather than
+    // interrupting the user once per socket.
+    let (second, connection) = tokio_postgres::connect(&h.pg_conn_str(&ticket), NoTls)
+        .await
+        .unwrap();
+    tokio::spawn(connection);
+    assert!(!second.simple_query("SELECT 2").await.unwrap().is_empty());
+    assert_eq!(h.prompts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_refused_session_never_reaches_the_database() {
+    let mut h = harness_answering(
+        BrokerConfig::default(),
+        Some(aka_core::approvals::ApprovalDecision::Deny),
+    )
+    .await;
+    let fake = fake_pg(FakeAuth::Cleartext).await;
+    add_pg_connection(&h.broker, fake.port);
+    let conn = h.broker.store.connection_by_name("prod-db").unwrap();
+    h.broker
+        .ui_set_confirm_mode(&conn.id, aka_core::types::ConfirmMode::On)
+        .unwrap();
+
+    let token = h.pair().await;
+    let (_, ticket) = h.open_pg(&token).await;
+    let error = match tokio_postgres::connect(&h.pg_conn_str(&ticket), NoTls).await {
+        Ok(_) => panic!("a refused session must not connect"),
+        Err(error) => error,
+    };
+    let db = error.as_db_error().expect("expected a database error");
+    assert_eq!(
+        db.code(),
+        &SqlState::INVALID_AUTHORIZATION_SPECIFICATION,
+        "a refusal is an authorization outcome"
+    );
+    assert!(
+        db.message().contains("approval_denied"),
+        "the client is told why: {}",
+        db.message()
+    );
+    assert!(
+        fake.state.startups.lock().unwrap().is_empty(),
+        "the upstream must never be dialed for a refused session"
+    );
+    assert!(h.broker.sessions().is_empty());
+}
+
+#[tokio::test]
+async fn a_confirmed_endpoint_asks_on_every_new_session() {
+    // A direct endpoint is standing authority — a pasted DSN — so the
+    // confirmation is the only thing between it and the database.
+    let mut h = harness_answering(
+        BrokerConfig::default(),
+        Some(aka_core::approvals::ApprovalDecision::Deny),
+    )
+    .await;
+    let fake = fake_pg(FakeAuth::Cleartext).await;
+    add_pg_connection(&h.broker, fake.port);
+    h.pair().await;
+    let info = h.issue_endpoint().await;
+    let conn = h.broker.store.connection_by_name("prod-db").unwrap();
+    h.broker
+        .ui_set_confirm_mode(&conn.id, aka_core::types::ConfirmMode::On)
+        .unwrap();
+
+    let error = match tokio_postgres::connect(&h.endpoint_conn_str(&info), NoTls).await {
+        Ok(_) => panic!("a refused endpoint session must not connect"),
+        Err(error) => error,
+    };
+    let db = error.as_db_error().expect("expected a database error");
+    assert!(db.message().contains("approval_denied"), "{}", db.message());
+    assert_eq!(h.prompts.load(Ordering::SeqCst), 1);
+    assert!(fake.state.startups.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

@@ -12,7 +12,7 @@ use aka_core::events::BrokerEvents;
 use aka_core::paths::Paths;
 use aka_core::store::ConnectionSpec;
 use aka_core::types::{
-    ConfirmationMethod, ConnectionConfig, ConnectionKind, PgSslMode, SecretMeta,
+    ConfirmMode, ConfirmationMethod, ConnectionConfig, ConnectionKind, PgSslMode, SecretMeta,
 };
 use aka_core::vault::MemoryVault;
 use aka_core::wire::REQUEST_ID_MAX_BYTES;
@@ -1473,6 +1473,30 @@ async fn a_curated_wiring_refuses_tools_outside_its_subset() {
     assert_eq!(status, 403, "a tool outside the subset is refused: {body}");
     assert_eq!(body["reason"], "denied_by_policy");
 
+    let (status, body) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(json!({
+            "connection": "docs",
+            "method": "POST",
+            "path": "/echo",
+            "body": [
+                { "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                  "params": { "name": "search", "arguments": {} } },
+                { "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                  "params": { "name": "delete", "arguments": {} } }
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(
+        status, 403,
+        "one disallowed call must fail the whole JSON-RPC batch: {body}"
+    );
+    assert_eq!(body["reason"], "denied_by_policy");
+
     let (status, _) = uds_request(
         &h.socket,
         "POST",
@@ -1688,6 +1712,197 @@ async fn http_direct_endpoint_proxies_with_injected_credential() {
     assert!(
         !body.to_string().contains("ghp_test_secret_value"),
         "the injected credential must be redacted: {body}"
+    );
+}
+
+#[tokio::test]
+async fn http_direct_endpoint_fails_closed_before_reaching_upstream() {
+    let h = harness(BrokerConfig::default()).await;
+    let up = upstream().await;
+    api_connection(&h, "github", up.port);
+    let conn = h.broker.store.connection_by_name("github").unwrap();
+    h.broker
+        .ui_set_confirm_mode(&conn.id, ConfirmMode::On)
+        .unwrap();
+    let (info, port) = issue_http_endpoint(&h).await;
+
+    let auth = format!("Bearer {}", info.secret);
+    let (status, _, body) =
+        loopback_request(port, "POST", "/dispatch", &[("authorization", &auth)], None).await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["reason"], "approval_unavailable");
+    assert_eq!(
+        up.hits.load(Ordering::SeqCst),
+        0,
+        "the direct request must park before upload or upstream dispatch"
+    );
+}
+
+#[tokio::test]
+async fn http_direct_endpoint_only_exempts_identifiable_mcp_transport_legs() {
+    let h = harness(BrokerConfig::default()).await;
+    let up = upstream().await;
+    api_connection(&h, "github", up.port);
+    let conn = h.broker.store.connection_by_name("github").unwrap();
+    let mut config = conn.config.clone();
+    let ConnectionConfig::Api { mcp_path, .. } = &mut config else {
+        unreachable!()
+    };
+    *mcp_path = Some("/dispatch".into());
+    h.broker
+        .ui_update_connection(
+            &conn.id,
+            ConnectionSpec {
+                name: conn.name.clone(),
+                config,
+                secrets: vec![],
+            },
+        )
+        .unwrap();
+    h.broker
+        .ui_set_confirm_mode(&conn.id, ConfirmMode::On)
+        .unwrap();
+    let (info, port) = issue_http_endpoint(&h).await;
+    let auth = format!("Bearer {}", info.secret);
+
+    let (status, _, _) = loopback_request(
+        port,
+        "GET",
+        "/dispatch",
+        &[
+            ("authorization", &auth),
+            ("accept", "application/json, text/event-stream"),
+        ],
+        None,
+    )
+    .await;
+    assert_eq!(
+        status, 405,
+        "an exact event-stream GET should reach the POST-only fixture"
+    );
+
+    let (status, _, _) = loopback_request(
+        port,
+        "DELETE",
+        "/dispatch",
+        &[("authorization", &auth), ("mcp-session-id", "session-1")],
+        None,
+    )
+    .await;
+    assert_eq!(
+        status, 405,
+        "a named session DELETE should reach the POST-only fixture"
+    );
+
+    for (method, path, extra_header, body, case) in [
+        ("GET", "/dispatch", None, None, "plain GET"),
+        (
+            "GET",
+            "/dispatch",
+            Some(("accept", "text/event-streaming")),
+            None,
+            "lookalike media type",
+        ),
+        (
+            "GET",
+            "/dispatch",
+            Some(("accept", "text/event-stream; q=0")),
+            None,
+            "rejected media type",
+        ),
+        (
+            "HEAD",
+            "/dispatch",
+            Some(("accept", "text/event-stream")),
+            None,
+            "HEAD request",
+        ),
+        (
+            "GET",
+            "/dispatch",
+            Some(("accept", "text/event-stream")),
+            Some("not empty"),
+            "event-stream GET with a body",
+        ),
+        ("DELETE", "/dispatch", None, None, "unnamed session DELETE"),
+        (
+            "DELETE",
+            "/dispatch",
+            Some(("mcp-session-id", "session-1")),
+            Some("not empty"),
+            "session DELETE with a body",
+        ),
+        (
+            "GET",
+            "/echo",
+            Some(("accept", "text/event-stream")),
+            None,
+            "event-stream GET off the pinned MCP path",
+        ),
+    ] {
+        let mut headers = vec![("authorization", auth.as_str())];
+        if let Some(header) = extra_header {
+            headers.push(header);
+        }
+        let (status, _, response_body) = loopback_request(port, method, path, &headers, body).await;
+        assert_eq!(status, 403, "{case} bypassed confirmation: {response_body}");
+    }
+    assert_eq!(
+        up.hits.load(Ordering::SeqCst),
+        0,
+        "transport setup/teardown and refused lookalikes never hit the POST route"
+    );
+}
+
+#[tokio::test]
+async fn curated_mcp_tools_cannot_bypass_the_subset_through_a_direct_endpoint() {
+    let h = harness(BrokerConfig::default()).await;
+    let up = upstream().await;
+    api_connection(&h, "docs", up.port);
+    let conn = h.broker.store.connection_by_name("docs").unwrap();
+    let mut config = conn.config.clone();
+    let ConnectionConfig::Api { mcp_path, .. } = &mut config else {
+        unreachable!()
+    };
+    *mcp_path = Some("/dispatch".into());
+    h.broker
+        .ui_update_connection(
+            &conn.id,
+            ConnectionSpec {
+                name: conn.name.clone(),
+                config,
+                secrets: vec![],
+            },
+        )
+        .unwrap();
+    h.broker
+        .ui_set_allowed_tools(&conn.id, Some(vec!["search".into()]))
+        .unwrap();
+    let info = h.broker.ui_issue_endpoint(&conn.id).await.unwrap();
+    let port: u16 = info.dsn.rsplit(':').next().unwrap().parse().unwrap();
+
+    let auth = format!("Bearer {}", info.secret);
+    let call = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "search", "arguments": {}},
+    })
+    .to_string();
+    let (status, _, body) = loopback_request(
+        port,
+        "POST",
+        "/dispatch",
+        &[("authorization", &auth)],
+        Some(&call),
+    )
+    .await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["reason"], "denied_by_policy");
+    assert_eq!(
+        up.hits.load(Ordering::SeqCst),
+        0,
+        "the direct path must not bypass MCP tool curation"
     );
 }
 

@@ -445,6 +445,25 @@
   .elicit-dlg-actions{ margin-top: 16px; }
   .elicit-dlg-spacer{ flex: 1; }
   .elicit-refuse-btn{ color: var(--danger-ink); }
+
+  /* ---- traffic confirmation ------------------------------------------- */
+  /* Same queue row and alert shape as an elicitation — the user is being
+     interrupted the same way — but the call being held is shown verbatim in
+     its own well, because that is what the decision is about. */
+  .approval-note .elicit-note-txt b{ font-weight: 600; }
+  .approval-call{ margin: 12px auto 0; padding: 10px 12px; max-width: 460px;
+    text-align: left; background: var(--field-bg); border: 1px solid var(--line-field);
+    border-radius: 8px; }
+  .approval-summary{ font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    font-size: 12.5px; color: var(--ink); overflow-wrap: anywhere; }
+  .approval-detail{ margin: 7px 0 0; max-height: 132px; overflow: auto;
+    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    font-size: 11.5px; line-height: 1.5; color: var(--muted); white-space: pre-wrap;
+    overflow-wrap: anywhere; }
+  .approval-meta{ margin-top: 10px; }
+  /* Three answers, weighted: refuse on the far left, the two approvals on
+     the right with the time-boxed one as the default. */
+  .approval-actions{ gap: 8px; }
   /* The Get started tab: a centered column so the walkthrough reads as a
      document rather than a dashboard. */
   .start{ max-width: 620px; margin: 0 auto; padding: 20px 0 24px; }
@@ -1128,6 +1147,21 @@
 }
 .cd-lbl-aside .cat-meta-tools { margin-left: auto; justify-content: flex-end; }
 .cd-help { margin-top: 7px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+/* Traffic confirmation: a labelled switch row, so the promise ("Confirm
+   each request") sits beside the control that makes it rather than in a
+   tooltip. The sub-line names the unit, which differs per kind. */
+.cd-confirm-row { display: flex; align-items: flex-start; gap: 12px; }
+.cd-confirm-txt { flex: 1; min-width: 0; }
+.cd-confirm-lbl { font-size: 13px; font-weight: 600; }
+.cd-confirm-sub { margin-top: 2px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.cd-confirm-row .switch { flex: 0 0 auto; margin-top: 2px; }
+.cd-confirm-window {
+  display: flex; align-items: center; gap: 7px; margin-top: 9px;
+  padding: 7px 10px; border-radius: 8px; font-size: 12px;
+  color: var(--ink-2); background: var(--amber-wash); border: 1px solid var(--amber-border);
+}
+.cd-confirm-window svg { flex: 0 0 auto; width: 14px; height: 14px; color: var(--amber-strong); }
+.cd-confirm-note { margin-top: 8px; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .cd-off-note { margin-top: 12px; }
 /* The Details card: the target's parts spelled out as label–value rows.
    Values are mono and wrap; labels stay put. */

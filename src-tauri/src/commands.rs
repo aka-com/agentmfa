@@ -1096,6 +1096,59 @@ pub async fn set_tool_access(
         .map_err(|e| e.to_string())
 }
 
+/// Ask the user to confirm this connection's traffic — or stop asking.
+///
+/// Turning it on only adds friction, so the switch itself is the gate.
+/// Turning it off removes one the user put up, so the broker demands a
+/// native authentication before it applies.
+#[tauri::command]
+pub async fn set_confirm_mode(
+    state: State<'_, AppState>,
+    connection_id: String,
+    on: bool,
+) -> CmdResult<bool> {
+    let connection_id = parse_id(&connection_id)?;
+    state
+        .brokers
+        .backend()
+        .set_confirm_mode(connection_id, on)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Traffic parked on the user right now, oldest first.
+#[tauri::command]
+pub async fn list_approvals(state: State<'_, AppState>) -> CmdResult<Vec<aka_api::ApprovalDto>> {
+    state
+        .brokers
+        .backend()
+        .approvals()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Answer one prompt. `false` means it was already answered, revoked, or
+/// lapsed while the window was open — the UI drops it either way.
+///
+/// The decision is the webview's to *request*: "approve all" turns the
+/// connection's switch off, and the broker runs its own native
+/// authentication before applying that, exactly as it does for every other
+/// gate the user removes.
+#[tauri::command]
+pub async fn respond_approval(
+    state: State<'_, AppState>,
+    id: String,
+    decision: aka_api::ApprovalDecisionDto,
+) -> CmdResult<bool> {
+    let id = parse_id(&id)?;
+    state
+        .brokers
+        .backend()
+        .respond_approval(id, decision)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Curate which upstream MCP tools agents may call on a connection. `null`
 /// restores the default (all tools). Enforced broker-side on every
 /// `tools/call`; the sidecar's tool listing mirrors it.
@@ -1301,6 +1354,9 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         oauth_connect,
         oauth_reconnect,
         set_tool_access,
+        set_confirm_mode,
+        list_approvals,
+        respond_approval,
         set_allowed_tools,
         list_mcp_tools,
         issue_endpoint,

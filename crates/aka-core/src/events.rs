@@ -7,7 +7,21 @@
 
 use std::time::Duration;
 
+use crate::approvals::PendingApproval;
 use crate::types::{ConfirmationMethod, SecretMeta};
+
+/// What an observer did with a traffic-confirmation prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalHandling {
+    /// A surface is showing it and will answer through
+    /// [`Approvals::respond`](crate::approvals::Approvals::respond).
+    Taken,
+    /// Nothing here can ask the user. The call is refused.
+    Unavailable,
+    /// The observer stands in for the user and waives the prompt (tests and
+    /// dev harnesses only — never a product shell).
+    Waived,
+}
 
 pub trait BrokerEvents: Send + Sync {
     /// Live WS/PG session set changed.
@@ -70,6 +84,26 @@ pub trait BrokerEvents: Send + Sync {
     fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
         None
     }
+
+    /// Agent traffic is parked on a connection whose confirmation switch is
+    /// on, waiting for the user to approve or refuse it.
+    ///
+    /// Unlike the gates above this one never blocks: the shell shows the
+    /// prompt and answers later through
+    /// [`Approvals::respond`](crate::approvals::Approvals::respond), which
+    /// releases the parked call. The default is fail-closed — a shell that
+    /// has not implemented the prompt must refuse the traffic, not carry it.
+    fn approval_requested(&self, _pending: &PendingApproval) -> ApprovalHandling {
+        ApprovalHandling::Unavailable
+    }
+
+    /// More calls joined a prompt already on screen (its `waiting` count
+    /// grew). Purely a refresh; the decision is unchanged.
+    fn approval_updated(&self, _pending: &PendingApproval) {}
+
+    /// A prompt left the queue — answered, revoked, or lapsed. Shells close
+    /// whatever they raised for it.
+    fn approval_resolved(&self, _id: &uuid::Uuid) {}
 }
 
 /// Default observer: nothing to notify. Confirmation gates are explicitly
@@ -83,5 +117,9 @@ impl BrokerEvents for NoopEvents {
 
     fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
         Some(ConfirmationMethod::Waived)
+    }
+
+    fn approval_requested(&self, _pending: &PendingApproval) -> ApprovalHandling {
+        ApprovalHandling::Waived
     }
 }

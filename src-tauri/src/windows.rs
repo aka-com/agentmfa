@@ -317,6 +317,31 @@ fn dropdown_origin(
     (x.round() as i32, y.round() as i32)
 }
 
+/// Bring a window forward because traffic is waiting on a decision.
+///
+/// Only when nothing is on screen: with the app already open, the queue
+/// banner is enough, and stealing focus mid-typing would be worse than the
+/// prompt it announces. Runs on the main thread — the broker calls this
+/// from whichever task parked the traffic.
+pub fn surface_for_approval(app: &AppHandle) {
+    let app = app.clone();
+    let _ = app.clone().run_on_main_thread(move || {
+        if window_presented(&app, MAIN) || window_presented(&app, DROPDOWN) {
+            return;
+        }
+        open_main(&app);
+    });
+}
+
+/// Visible and not minimized. Window managers may report a minimized window
+/// as visible; that is not enough for a 90-second approval prompt.
+fn window_presented(app: &AppHandle, label: &str) -> bool {
+    app.get_webview_window(label)
+        .is_some_and(|window| {
+            window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(false)
+        })
+}
+
 fn window_visible(app: &AppHandle, label: &str) -> bool {
     app.get_webview_window(label)
         .and_then(|w| w.is_visible().ok())

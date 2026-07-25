@@ -423,10 +423,52 @@ impl BrokerState {
         let app = app.clone();
         let event_app = app.clone();
         let sse_backend = backend.clone();
+        let event_backend = backend.clone();
         let task = tauri::async_runtime::spawn(async move {
             aka_client::events::subscribe(
                 sse_backend,
-                move |event| crate::events::emit_manage_event(&event_app, event),
+                move |event| {
+                    // A reconnect may replay an old request event, while a
+                    // lag resync may be the only signal for a live one. Check
+                    // the authoritative queue before bringing a hidden window
+                    // forward in either case.
+                    let should_surface = matches!(
+                        &event,
+                        aka_api::ManageEvent::ApprovalsChanged | aka_api::ManageEvent::Resync
+                    );
+                    crate::events::emit_manage_event(&event_app, event);
+                    if should_surface {
+                        let backend = event_backend.clone();
+                        let app = event_app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let should_surface = match tokio::time::timeout(
+                                std::time::Duration::from_secs(5),
+                                backend.approvals(),
+                            )
+                            .await
+                            {
+                                Ok(Ok(approvals)) => !approvals.is_empty(),
+                                Ok(Err(error)) => {
+                                    // The event itself made it through. If
+                                    // the authoritative follow-up fails,
+                                    // prefer one unnecessary window over a
+                                    // real prompt timing out unseen.
+                                    tracing::warn!(%error, "could not check the remote approval queue");
+                                    true
+                                }
+                                Err(_) => {
+                                    tracing::warn!(
+                                        "remote approval queue check timed out; surfacing defensively"
+                                    );
+                                    true
+                                }
+                            };
+                            if should_surface {
+                                crate::windows::surface_for_approval(&app);
+                            }
+                        });
+                    }
+                },
                 move |link| match link {
                     aka_client::events::LinkState::Connected => {
                         state.update_link(&app, true, None);

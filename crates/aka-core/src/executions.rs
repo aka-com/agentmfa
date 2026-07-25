@@ -6,14 +6,15 @@
 //! retry re-sending the same `(agent, request_id)` joins the in-flight
 //! execution — exactly one upstream execution, the same response fanned out
 //! to every waiter and replayed to late retries while its byte-bounded
-//! replay body remains cached. Every completed key keeps a compact
-//! tombstone for the retention window, so evicting a response can never
-//! turn a retry into a second execution. Equality under the key is checked,
-//! not assumed: each key stores a hash of the full normalized request, and
-//! reusing a `request_id` with a different payload is rejected (409).
+//! replay body remains cached. Every completed key keeps a compact tombstone
+//! for the retention window, except confirmation timeout/unavailability
+//! results that happened before execution and are therefore safe to retry.
+//! Equality under the key is checked, not assumed: each key stores a hash of
+//! the full normalized request, and reusing a `request_id` with a different
+//! payload is rejected (409).
 //!
 //! A disconnect never cancels an execution already in flight; completion
-//! always leaves an idempotency tombstone and retains the outcome for
+//! normally leaves an idempotency tombstone and retains the outcome for
 //! replay when it fits.
 
 use std::collections::{HashMap, VecDeque};
@@ -316,7 +317,9 @@ impl Executions {
     /// The execution task is not tied to any waiter, so a disconnect cannot
     /// cancel a side effect already in flight. On completion, the outcome is
     /// fanned out and the reserved idempotency slot becomes a tombstone, with
-    /// a replay body when the byte budget permits.
+    /// a replay body when the byte budget permits. A confirmation that could
+    /// not be answered is a pre-execution result, so its key is released and
+    /// the documented retry can raise a fresh prompt.
     fn spawn_completion(&self, id: Uuid, executor: Executor) {
         let shared = self.shared.clone();
         self.shared.runtime.spawn(async move {
@@ -333,14 +336,16 @@ impl Executions {
                     inner.by_key.remove(key);
                     if entry.retention_reserved {
                         release_retention_reservation(&mut inner, true);
-                        retain_completed_outcome(
-                            &mut inner,
-                            key.clone(),
-                            entry.payload_hash.clone(),
-                            outcome.clone(),
-                            shared.retention,
-                            shared.retention_max_bytes,
-                        );
+                        if !is_retryable_preflight_outcome(&outcome) {
+                            retain_completed_outcome(
+                                &mut inner,
+                                key.clone(),
+                                entry.payload_hash.clone(),
+                                outcome.clone(),
+                                shared.retention,
+                                shared.retention_max_bytes,
+                            );
+                        }
                     }
                 }
                 waiters = entry.waiters;
@@ -350,6 +355,20 @@ impl Executions {
             }
         });
     }
+}
+
+/// These outcomes happen before the executor can reach an upstream. Keeping
+/// their idempotency tombstone would make "attach the app and retry" replay
+/// the old refusal for the full retention window.
+fn is_retryable_preflight_outcome(outcome: &ExecOutcome) -> bool {
+    let reason = outcome
+        .body
+        .get("reason")
+        .and_then(serde_json::Value::as_str);
+    matches!(
+        (outcome.status, reason),
+        (408, Some("approval_timeout")) | (403, Some("approval_unavailable"))
+    )
 }
 
 fn retention_sweep_interval(retention: Duration) -> Duration {
@@ -552,6 +571,39 @@ mod tests {
         .await;
         assert_eq!(count.load(Ordering::SeqCst), 1, "exactly one execution");
         assert_eq!(first.body, replayed.body);
+    }
+
+    #[tokio::test]
+    async fn unanswered_confirmation_can_retry_with_the_same_key() {
+        let e = executions();
+        let first = run_to_completion(
+            &e,
+            key("req-confirm"),
+            Some("payload".into()),
+            Box::pin(async {
+                ExecOutcome {
+                    status: 408,
+                    body: serde_json::json!({"reason": ErrorReason::ApprovalTimeout}),
+                }
+            }),
+        )
+        .await;
+        assert_eq!(first.status, 408);
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let second = run_to_completion(
+            &e,
+            key("req-confirm"),
+            Some("payload".into()),
+            counting_executor(count.clone(), serde_json::json!({"ok": true})),
+        )
+        .await;
+        assert_eq!(second.status, 200);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+
+        assert!(is_retryable_preflight_outcome(&ExecOutcome::refusal(
+            ErrorReason::ApprovalUnavailable
+        )));
     }
 
     #[tokio::test]

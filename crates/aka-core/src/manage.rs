@@ -15,8 +15,8 @@
 use std::sync::Arc;
 
 use aka_api::{
-    AccessDto, ActivityDto, ConnectionDto, EndpointChip, IdentityDto, IssuedEndpointDto,
-    ManageError, OAuthDto, SecretDto, SessionDto, SettingsDto,
+    AccessDto, ActivityDto, ApprovalDecisionDto, ApprovalDto, ConnectionDto, EndpointChip,
+    IdentityDto, IssuedEndpointDto, ManageError, OAuthDto, SecretDto, SessionDto, SettingsDto,
 };
 use async_trait::async_trait;
 use uuid::Uuid;
@@ -97,6 +97,15 @@ pub fn connection_dto(broker: &Broker, conn: &Connection) -> ConnectionDto {
     let entry = broker.access.entry(&conn.id);
     let agent_access = AccessDto {
         enabled: entry.as_ref().map(|e| e.enabled).unwrap_or(true),
+        confirm: entry
+            .as_ref()
+            .map(|e| e.confirm.is_on())
+            .unwrap_or_default(),
+        confirm_window_until: broker.approvals.window_remaining(&conn.id).map(|left| {
+            (chrono::Utc::now()
+                + chrono::Duration::from_std(left).unwrap_or_else(|_| chrono::Duration::zero()))
+            .to_rfc3339()
+        }),
         allowed_tools: entry.and_then(|e| e.allowed_tools),
         endpoint: broker.endpoints.get_for_connection(&conn.id).map(|e| {
             let dsn = match &conn.config {
@@ -242,6 +251,33 @@ pub fn session_dto(session: &crate::sessions::SessionInfo) -> SessionDto {
         connection: session.connection.clone(),
         detail: session.detail.clone(),
         opened_at: session.opened_at.to_rfc3339(),
+    }
+}
+
+/// One waiting prompt, as the app renders it.
+pub fn approval_dto(pending: &crate::approvals::PendingApproval) -> ApprovalDto {
+    ApprovalDto {
+        id: pending.id.to_string(),
+        connection_id: pending.connection_id.to_string(),
+        connection: pending.connection.clone(),
+        kind: pending.kind.as_str().to_string(),
+        unit: Some(pending.unit.as_str().to_string()),
+        target: pending.target.clone(),
+        agent: pending.agent.clone(),
+        summary: pending.summary.clone(),
+        detail: pending.detail.clone(),
+        waiting: pending.waiting,
+        requested_at: pending.requested_at.to_rfc3339(),
+        expires_at: pending.expires_at.to_rfc3339(),
+        window_secs: pending.window_secs,
+    }
+}
+
+fn approval_decision(decision: ApprovalDecisionDto) -> crate::approvals::ApprovalDecision {
+    match decision {
+        ApprovalDecisionDto::ApproveWindow => crate::approvals::ApprovalDecision::ApproveWindow,
+        ApprovalDecisionDto::ApproveAll => crate::approvals::ApprovalDecision::ApproveAll,
+        ApprovalDecisionDto::Deny => crate::approvals::ApprovalDecision::Deny,
     }
 }
 
@@ -401,6 +437,14 @@ impl ManageBus {
         self.tx.subscribe()
     }
 
+    /// Whether a live management client is attached and can receive a prompt.
+    ///
+    /// The event is still retained in the replay ring when nobody is attached,
+    /// but a replay cannot answer a call that must fail closed now.
+    pub fn has_subscribers(&self) -> bool {
+        self.tx.receiver_count() > 0
+    }
+
     /// Decide what to send a (re)connecting client. `last` is the parsed
     /// `Last-Event-ID` (`epoch`, `seq`); `None` (fresh client, or a header
     /// from another broker process) means resync.
@@ -511,6 +555,33 @@ impl crate::events::BrokerEvents for FanoutEvents {
     fn confirm_action(&self, description: &str) -> Option<crate::types::ConfirmationMethod> {
         self.inner.confirm_action(description)
     }
+
+    fn approval_requested(
+        &self,
+        pending: &crate::approvals::PendingApproval,
+    ) -> crate::events::ApprovalHandling {
+        // A live remote management client is itself a surface capable of
+        // answering. Snapshot that before publishing: a receiver that arrives
+        // only after the event cannot have shown this prompt synchronously.
+        let remote_surface = self.bus.has_subscribers();
+        self.bus.emit(aka_api::ManageEvent::ApprovalsChanged);
+        match self.inner.approval_requested(pending) {
+            crate::events::ApprovalHandling::Unavailable if remote_surface => {
+                crate::events::ApprovalHandling::Taken
+            }
+            handling => handling,
+        }
+    }
+
+    fn approval_updated(&self, pending: &crate::approvals::PendingApproval) {
+        self.inner.approval_updated(pending);
+        self.bus.emit(aka_api::ManageEvent::ApprovalsChanged);
+    }
+
+    fn approval_resolved(&self, id: &Uuid) {
+        self.inner.approval_resolved(id);
+        self.bus.emit(aka_api::ManageEvent::ApprovalsChanged);
+    }
 }
 
 /* ---------------------------- request bodies ------------------------------ */
@@ -567,6 +638,19 @@ pub struct DraftTestBody {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct AccessBody {
     pub enabled: bool,
+}
+
+/// `POST /v1/manage/connections/{id}/confirm`: ask (or stop asking) the
+/// user to confirm this connection's traffic.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct ConfirmBody {
+    pub on: bool,
+}
+
+/// `POST /v1/manage/approvals/{id}`: answer a waiting prompt.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct ApprovalResponseBody {
+    pub decision: ApprovalDecisionDto,
 }
 
 /// `POST /v1/manage/connections/{id}/allowed-tools`. `tools: null` restores
@@ -710,6 +794,9 @@ pub trait ManagementBackend: Send + Sync {
 
     /* agent access + endpoints */
     async fn set_tool_access(&self, connection_id: Uuid, enabled: bool) -> ManageResult<bool>;
+    /// Ask the user to confirm this connection's traffic, or stop asking.
+    /// Turning it off weakens a gate and takes its own authentication.
+    async fn set_confirm_mode(&self, connection_id: Uuid, on: bool) -> ManageResult<bool>;
     async fn set_allowed_tools(
         &self,
         connection_id: Uuid,
@@ -728,6 +815,15 @@ pub trait ManagementBackend: Send + Sync {
     /// It must never enter the webview.
     async fn agent_key(&self) -> ManageResult<String>;
     async fn rotate_key(&self) -> ManageResult<()>;
+
+    /* traffic confirmation */
+    /// Prompts waiting on the user, oldest first.
+    async fn approvals(&self) -> ManageResult<Vec<ApprovalDto>>;
+    /// Answer one. `false` means it was already answered, revoked, or has
+    /// lapsed. `ApproveAll` turns the connection's switch off first, so a
+    /// refused authentication leaves the traffic parked.
+    async fn respond_approval(&self, id: Uuid, decision: ApprovalDecisionDto)
+        -> ManageResult<bool>;
 
     /* sessions + activity */
     async fn sessions(&self) -> ManageResult<Vec<SessionDto>>;
@@ -929,6 +1025,36 @@ impl ManagementBackend for LocalBackend {
 
     async fn oauth_reconnect(&self, id: Uuid) -> ManageResult<()> {
         Ok(self.broker.ui_oauth_reconnect(&id).await.map(|_| ())?)
+    }
+
+    async fn set_confirm_mode(&self, connection_id: Uuid, on: bool) -> ManageResult<bool> {
+        let confirm = if on {
+            crate::types::ConfirmMode::On
+        } else {
+            crate::types::ConfirmMode::Off
+        };
+        self.blocking(move |broker| broker.ui_set_confirm_mode(&connection_id, confirm))
+            .await
+    }
+
+    async fn approvals(&self) -> ManageResult<Vec<ApprovalDto>> {
+        Ok(self
+            .broker
+            .pending_approvals()
+            .iter()
+            .map(approval_dto)
+            .collect())
+    }
+
+    async fn respond_approval(
+        &self,
+        id: Uuid,
+        decision: ApprovalDecisionDto,
+    ) -> ManageResult<bool> {
+        // "Approve all" turns the switch off, which runs the native
+        // confirmation — never on the async runtime.
+        self.blocking(move |broker| broker.ui_respond_approval(&id, approval_decision(decision)))
+            .await
     }
 
     async fn set_tool_access(&self, connection_id: Uuid, enabled: bool) -> ManageResult<bool> {

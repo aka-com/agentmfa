@@ -16,6 +16,17 @@ export interface SecretSummary {
 export interface AgentAccess {
   /** Whether agents may use the connection (default true). */
   enabled: boolean;
+  /**
+   * Whether traffic asks the user when no approval window is open (default
+   * false). What one decision gates depends on the kind: one request for an
+   * API tool, one `tools/call` for an MCP tool, one session for Postgres.
+   */
+  confirm?: boolean;
+  /**
+   * While an approval window is open, the RFC 3339 time it lapses — so the
+   * panel can say why nothing is being asked right now.
+   */
+  confirm_window_until?: string | null;
   /** Curated upstream MCP tool subset; absent means all tools. */
   allowed_tools?: string[] | null;
   /**
@@ -148,6 +159,42 @@ export interface ElicitationRequest {
   /** The request disappears on its own at this time. */
   expires_at: string;
 }
+
+/**
+ * Agent traffic parked on the user: it goes nowhere until this is answered
+ * (or until it lapses, when the call is refused).
+ *
+ * Unlike an elicitation — the upstream asking the *agent* something — this
+ * is AgentMFA asking the *user* whether the traffic should happen at all.
+ * It is answered here and never through the agent.
+ */
+export interface Approval {
+  id: string;
+  connection_id: string;
+  connection: string;
+  /** Connection kind, so the prompt can name the unit it is asking about. */
+  type: ConnectionType;
+  /** Exact traffic unit; absent when connected to an older broker. */
+  unit?: 'request' | 'tool' | 'session' | null;
+  /** The pinned destination the traffic would reach. */
+  target: string;
+  /** Self-reported agent label. Attribution, never authorization. */
+  agent: string;
+  /** The headline: `GET /user/repos`, `search_issues`, `New Postgres session`. */
+  summary: string;
+  /** A body preview, a tool's arguments, or the client's application name. */
+  detail?: string | null;
+  /** How many calls are riding this one prompt. */
+  waiting: number;
+  requested_at: string;
+  /** When it gives up on its own and the parked traffic is refused. */
+  expires_at: string;
+  /** How long "approve for now" lasts, so the button can name it. */
+  window_secs: number;
+}
+
+/** What the user chose on a prompt. */
+export type ApprovalDecision = 'approve_window' | 'approve_all' | 'deny';
 
 /**
  * Which broker this app manages and the state of the link to it. Local
@@ -365,6 +412,9 @@ export interface CommandMap {
   oauth_reconnect: CommandSpec<{ id: string }, void>;
   open_url: CommandSpec<{ url: string }, void>;
   set_tool_access: CommandSpec<{ connectionId: string; enabled: boolean }, boolean>;
+  set_confirm_mode: CommandSpec<{ connectionId: string; on: boolean }, boolean>;
+  list_approvals: CommandSpec<undefined, Approval[]>;
+  respond_approval: CommandSpec<{ id: string; decision: ApprovalDecision }, boolean>;
   issue_endpoint: CommandSpec<{ connectionId: string }, IssuedEndpoint>;
   get_endpoint: CommandSpec<{ connectionId: string }, IssuedEndpoint | null>;
   revoke_endpoint: CommandSpec<{ endpointId: string }, boolean>;
@@ -401,6 +451,7 @@ export interface EventMap {
   'aka://wirings-changed': Record<string, never>;
   'aka://sessions-changed': Record<string, never>;
   'aka://elicitations-changed': Record<string, never>;
+  'aka://approvals-changed': Record<string, never>;
   'aka://settings-changed': Record<string, never>;
   'aka://mcp-auth-changed': McpAuthState;
   'aka://connect-requested': { agent: string; service: string };

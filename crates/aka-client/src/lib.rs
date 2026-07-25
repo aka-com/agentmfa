@@ -17,15 +17,15 @@ pub mod credentials;
 pub mod events;
 
 use aka_api::{
-    ActivityDto, ConnectionDto, IdentityDto, IssuedEndpointDto, ManageError, SecretDto, SessionDto,
-    SettingsDto,
+    ActivityDto, ApprovalDecisionDto, ApprovalDto, ConnectionDto, IdentityDto, IssuedEndpointDto,
+    ManageError, SecretDto, SessionDto, SettingsDto,
 };
 use aka_core::broker::ConnectionTestReport;
 use aka_core::manage::{
-    AccessBody, AllowedToolsBody, BackendProfile, ConnectionAddBody, ConnectionUpdateBody,
-    ConnectionsReorderBody, DraftTestBody, ManageResult, ManagementBackend, McpAuthDeliverBody,
-    McpAuthStartBody, OAuthCompleteBody, OAuthReconnectBody, OAuthStartBody, SecretAddBody,
-    SecretEditBody, SettingsPatchBody,
+    AccessBody, AllowedToolsBody, ApprovalResponseBody, BackendProfile, ConfirmBody,
+    ConnectionAddBody, ConnectionUpdateBody, ConnectionsReorderBody, DraftTestBody, ManageResult,
+    ManagementBackend, McpAuthDeliverBody, McpAuthStartBody, OAuthCompleteBody, OAuthReconnectBody,
+    OAuthStartBody, SecretAddBody, SecretEditBody, SettingsPatchBody,
 };
 use aka_core::store::ConnectionSpec;
 use aka_core::types::SecretValue;
@@ -78,6 +78,18 @@ impl RemoteConfig {
         }
         if base.host_str().is_none() {
             return Err("enter a full URL with a host, e.g. https://broker.example.dev".into());
+        }
+        let loopback = match base.host() {
+            Some(url::Host::Ipv4(address)) => address.is_loopback(),
+            Some(url::Host::Ipv6(address)) => address.is_loopback(),
+            Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+            None => false,
+        };
+        if base.scheme() == "http" && !loopback {
+            return Err(
+                "remote brokers must use https; plain http is allowed only on loopback for a local tunnel"
+                    .into(),
+            );
         }
         if !base.username().is_empty() || base.password().is_some() {
             return Err(
@@ -488,6 +500,11 @@ struct ChangedBody {
 }
 
 #[derive(serde::Deserialize)]
+struct AnsweredBody {
+    answered: bool,
+}
+
+#[derive(serde::Deserialize)]
 struct RevokedBody {
     revoked: bool,
 }
@@ -776,6 +793,32 @@ impl ManagementBackend for RemoteBackend {
         .map(|body| body.changed)
     }
 
+    async fn set_confirm_mode(&self, connection_id: Uuid, on: bool) -> ManageResult<bool> {
+        self.post::<ChangedBody, _>(
+            &format!("/v1/manage/connections/{connection_id}/confirm"),
+            &ConfirmBody { on },
+        )
+        .await
+        .map(|body| body.changed)
+    }
+
+    async fn approvals(&self) -> ManageResult<Vec<ApprovalDto>> {
+        self.get("/v1/manage/approvals").await
+    }
+
+    async fn respond_approval(
+        &self,
+        id: Uuid,
+        decision: ApprovalDecisionDto,
+    ) -> ManageResult<bool> {
+        self.post::<AnsweredBody, _>(
+            &format!("/v1/manage/approvals/{id}"),
+            &ApprovalResponseBody { decision },
+        )
+        .await
+        .map(|body| body.answered)
+    }
+
     async fn set_allowed_tools(
         &self,
         connection_id: Uuid,
@@ -905,6 +948,9 @@ mod tests {
         assert!(RemoteConfig::new("ftp://x", "t")
             .unwrap_err()
             .contains("scheme"));
+        assert!(RemoteConfig::new("http://broker.example.dev", "t")
+            .unwrap_err()
+            .contains("must use https"));
         for url in [
             "https://broker.example.dev/manage",
             "https://broker.example.dev?tenant=a",

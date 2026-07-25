@@ -20,7 +20,7 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::integrity::StateIntegrity;
-use crate::types::ToolAccess;
+use crate::types::{ConfirmMode, ToolAccess};
 use crate::Result;
 
 pub struct AccessTable {
@@ -90,6 +90,7 @@ impl AccessTable {
                                 connection_id: *connection_id,
                                 enabled: false,
                                 allowed_tools: None,
+                                confirm: ConfirmMode::Off,
                                 updated_at: Utc::now(),
                             });
                             continue;
@@ -113,6 +114,7 @@ impl AccessTable {
                             connection_id: *connection_id,
                             enabled: true,
                             allowed_tools,
+                            confirm: ConfirmMode::Off,
                             updated_at: Utc::now(),
                         });
                     }
@@ -139,6 +141,7 @@ impl AccessTable {
                                 !rule.client_id.is_nil() && &rule.connection_id == connection_id
                             }),
                             allowed_tools: None,
+                            confirm: ConfirmMode::Off,
                             updated_at: Utc::now(),
                         })
                         .collect();
@@ -182,6 +185,19 @@ impl AccessTable {
             .and_then(|e| e.allowed_tools.clone())
     }
 
+    /// Whether traffic on this connection is confirmed with the user. No
+    /// entry means off, the behaviour every connection had before the
+    /// switch existed.
+    pub fn confirm_mode(&self, connection_id: &Uuid) -> ConfirmMode {
+        self.entries
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|e| &e.connection_id == connection_id)
+            .map(|e| e.confirm)
+            .unwrap_or_default()
+    }
+
     /// The recorded entry for a connection, when one exists (i.e. the
     /// connection has left the default state at least once).
     pub fn entry(&self, connection_id: &Uuid) -> Option<ToolAccess> {
@@ -219,6 +235,7 @@ impl AccessTable {
                 connection_id,
                 enabled,
                 allowed_tools: None,
+                confirm: ConfirmMode::Off,
                 updated_at: Utc::now(),
             }),
         }
@@ -252,6 +269,38 @@ impl AccessTable {
                 connection_id,
                 enabled: true,
                 allowed_tools: tools,
+                confirm: ConfirmMode::Off,
+                updated_at: Utc::now(),
+            }),
+        }
+        self.persist(&next)?;
+        *entries = next;
+        Ok(true)
+    }
+
+    /// Ask for (or stop asking for) confirmation on this connection's
+    /// traffic. Returns whether the effective state changed.
+    pub fn set_confirm_mode(&self, connection_id: Uuid, confirm: ConfirmMode) -> Result<bool> {
+        let mut entries = self.entries.lock().unwrap();
+        let current = entries
+            .iter()
+            .find(|e| e.connection_id == connection_id)
+            .map(|e| e.confirm)
+            .unwrap_or_default();
+        if current == confirm {
+            return Ok(false);
+        }
+        let mut next = entries.clone();
+        match next.iter_mut().find(|e| e.connection_id == connection_id) {
+            Some(entry) => {
+                entry.confirm = confirm;
+                entry.updated_at = Utc::now();
+            }
+            None => next.push(ToolAccess {
+                connection_id,
+                enabled: true,
+                allowed_tools: None,
+                confirm,
                 updated_at: Utc::now(),
             }),
         }
@@ -328,6 +377,25 @@ mod tests {
         );
         assert!(t.set_allowed_tools(conn, None).unwrap());
         assert_eq!(t.allowed_tools(&conn), None);
+    }
+
+    #[test]
+    fn confirmation_defaults_off_and_survives_toggling_access() {
+        let (t, _dir) = table();
+        let conn = Uuid::new_v4();
+        assert_eq!(t.confirm_mode(&conn), ConfirmMode::Off);
+        assert!(t.set_confirm_mode(conn, ConfirmMode::On).unwrap());
+        assert!(!t.set_confirm_mode(conn, ConfirmMode::On).unwrap());
+        assert_eq!(t.confirm_mode(&conn), ConfirmMode::On);
+
+        // Switching agents off and back on is about access, not about how
+        // the traffic that access allows is confirmed.
+        t.set_enabled(conn, false).unwrap();
+        t.set_enabled(conn, true).unwrap();
+        assert_eq!(t.confirm_mode(&conn), ConfirmMode::On);
+
+        assert!(t.set_confirm_mode(conn, ConfirmMode::Off).unwrap());
+        assert_eq!(t.confirm_mode(&conn), ConfirmMode::Off);
     }
 
     #[test]

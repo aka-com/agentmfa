@@ -38,6 +38,30 @@ export function absTime(iso: string): string {
   });
 }
 
+/**
+ * A deadline in the near future, as a phrase. `relTime` deliberately reads
+ * backwards ("5m" ago) and clamps anything future to "just now", which is
+ * wrong for the two forward-looking things the app shows: how long a
+ * confirmation prompt has left, and how long an approval window runs.
+ */
+export function timeLeft(iso: string, now = Date.now()): string {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return '';
+  const secs = Math.round((t - now) / 1000);
+  if (secs <= 0) return 'any moment now';
+  if (secs < 90) return `${secs}s`;
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins}m`;
+  return `${Math.round(mins / 60)}h`;
+}
+
+/** A wall-clock time ("11:42 PM") — enough for a horizon within the day. */
+export function clockTime(iso: string): string {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return '';
+  return new Date(t).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
+
 export const TYPES = {
   api: { label: 'API', cls: 'b-api' },
   pg: { label: 'PG', cls: 'b-pg' },

@@ -28,13 +28,18 @@ use zeroize::Zeroizing;
 
 use super::{bearer_token, err_missing_token, ApiJson, AppState};
 use crate::manage::{
-    AccessBody, AllowedToolsBody, ConnectionAddBody, ConnectionUpdateBody, ConnectionsReorderBody,
-    DraftTestBody, ManagementBackend, McpAuthDeliverBody, McpAuthStartBody, OAuthCompleteBody,
-    OAuthReconnectBody, OAuthStartBody, SecretAddBody, SecretEditBody, SettingsPatchBody,
+    AccessBody, AllowedToolsBody, ApprovalResponseBody, ConfirmBody, ConnectionAddBody,
+    ConnectionUpdateBody, ConnectionsReorderBody, DraftTestBody, ManagementBackend,
+    McpAuthDeliverBody, McpAuthStartBody, OAuthCompleteBody, OAuthReconnectBody, OAuthStartBody,
+    SecretAddBody, SecretEditBody, SettingsPatchBody,
 };
 
 /// Bearer authentication against the management token.
-pub struct ManageAuthed;
+pub struct ManageAuthed {
+    // The SSE handler revalidates long-lived streams. Keep the copied
+    // credential zeroizing so it is not left in freed heap memory.
+    token: Zeroizing<String>,
+}
 
 impl FromRequestParts<AppState> for ManageAuthed {
     type Rejection = Response;
@@ -45,7 +50,9 @@ impl FromRequestParts<AppState> for ManageAuthed {
     ) -> Result<Self, Self::Rejection> {
         let token = bearer_token(&parts.headers).map_err(err_missing_token)?;
         match state.broker.identity.verify_manage(token) {
-            Ok(()) => Ok(ManageAuthed),
+            Ok(()) => Ok(ManageAuthed {
+                token: Zeroizing::new(token.to_string()),
+            }),
             Err(error) => {
                 // Both map to InvalidManageToken client-side (re-enter the
                 // token), but the detail names the cause so a curl user
@@ -131,6 +138,7 @@ pub fn router() -> Router<AppState> {
         )
         .route("/connections/{id}/test", post(test_connection))
         .route("/connections/{id}/access", post(set_tool_access))
+        .route("/connections/{id}/confirm", post(set_confirm_mode))
         .route("/connections/{id}/allowed-tools", post(set_allowed_tools))
         .route("/connections/{id}/mcp-tools", get(list_mcp_tools))
         .route("/connections/{id}/mcp-status", post(mcp_status))
@@ -151,6 +159,8 @@ pub fn router() -> Router<AppState> {
         .route("/identity", get(identity))
         .route("/identity/agent-key", get(agent_key))
         .route("/identity/rotate", post(rotate_key))
+        .route("/approvals", get(approvals))
+        .route("/approvals/{id}", post(respond_approval))
         .route("/sessions", get(sessions))
         .route("/sessions/{id}", delete(close_session))
         .route("/activity", get(activity).delete(clear_activity))
@@ -173,7 +183,7 @@ async fn whoami(State(state): State<AppState>, _authed: ManageAuthed) -> Respons
 /// Live delivery still emits `resync` on broadcast lag.
 async fn events(
     State(state): State<AppState>,
-    _authed: ManageAuthed,
+    authed: ManageAuthed,
     headers: axum::http::HeaderMap,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     use crate::manage::{parse_event_id, ManageReplay, SeqEvent};
@@ -217,6 +227,9 @@ async fn events(
         rx: tokio::sync::broadcast::Receiver<SeqEvent>,
         backlog: std::collections::VecDeque<SeqEvent>,
         epoch: String,
+        identity: std::sync::Arc<crate::identity::IdentityStore>,
+        token: Zeroizing<String>,
+        revalidate: tokio::time::Interval,
         // Highest seq already sent, so a live event the backlog covered is
         // not sent twice.
         delivered_head: u64,
@@ -226,11 +239,21 @@ async fn events(
         rx,
         backlog,
         epoch,
+        identity: state.broker.identity.clone(),
+        token: authed.token,
+        revalidate: tokio::time::interval(std::time::Duration::from_secs(1)),
         delivered_head,
         resync_first,
     };
 
     let stream = futures::stream::unfold(init, |mut st| async move {
+        // Authentication on the initial HTTP request is not enough for a
+        // stream that can live indefinitely. Rotation, revocation, and TTL
+        // expiry must stop both event disclosure and the stream counting as
+        // an approval surface.
+        if st.identity.verify_manage(&st.token).is_err() {
+            return None;
+        }
         // A resync marker leads, carrying the current head id so the client
         // has a baseline to resume from next time.
         if std::mem::take(&mut st.resync_first) {
@@ -251,22 +274,39 @@ async fn events(
             return Some((Ok(sse), st));
         }
         loop {
-            let item = match st.rx.recv().await {
-                Ok(item) => item,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    // Dropped live notifications: force a full refetch.
-                    let id = format!("{}:{}", st.epoch, st.delivered_head);
-                    let sse = Event::default()
-                        .id(id)
-                        .json_data(&ManageEvent::Resync)
-                        .ok()?;
-                    return Some((Ok(sse), st));
+            let item = tokio::select! {
+                biased;
+                _ = st.revalidate.tick() => {
+                    if st.identity.verify_manage(&st.token).is_err() {
+                        return None;
+                    }
+                    continue;
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                result = st.rx.recv() => match result {
+                    Ok(item) => item,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        // Dropped live notifications: force a full refetch,
+                        // but never disclose it after the stream's credential
+                        // has ceased to be valid.
+                        if st.identity.verify_manage(&st.token).is_err() {
+                            return None;
+                        }
+                        let id = format!("{}:{}", st.epoch, st.delivered_head);
+                        let sse = Event::default()
+                            .id(id)
+                            .json_data(&ManageEvent::Resync)
+                            .ok()?;
+                        return Some((Ok(sse), st));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                },
             };
             // Skip anything the replay backlog already covered.
             if item.seq <= st.delivered_head {
                 continue;
+            }
+            if st.identity.verify_manage(&st.token).is_err() {
+                return None;
             }
             st.delivered_head = item.seq;
             let sse = Event::default()
@@ -438,6 +478,40 @@ async fn set_tool_access(
             .set_tool_access(id, body.enabled)
             .await
             .map(|changed| json!({ "changed": changed })),
+    )
+}
+
+async fn set_confirm_mode(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+    Path(id): Path<Uuid>,
+    ApiJson(body): ApiJson<ConfirmBody>,
+) -> Response {
+    respond(
+        state
+            .manage
+            .set_confirm_mode(id, body.on)
+            .await
+            .map(|changed| json!({ "changed": changed })),
+    )
+}
+
+async fn approvals(State(state): State<AppState>, _authed: ManageAuthed) -> Response {
+    respond(state.manage.approvals().await)
+}
+
+async fn respond_approval(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+    Path(id): Path<Uuid>,
+    ApiJson(body): ApiJson<ApprovalResponseBody>,
+) -> Response {
+    respond(
+        state
+            .manage
+            .respond_approval(id, body.decision)
+            .await
+            .map(|answered| json!({ "answered": answered })),
     )
 }
 

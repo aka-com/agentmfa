@@ -6,6 +6,8 @@
 
 import type {
   ActivityEntry,
+  Approval,
+  ApprovalDecision,
   CommandArgs,
   CommandName,
   CommandResult,
@@ -83,6 +85,8 @@ const MOCK_ACTIVITY_META = {
   tokenRevoked: { icon: 'unplug', tone: 'danger' },
   inputProvided: { icon: 'circleCheck', tone: 'success' },
   inputRefused: { icon: 'circleX', tone: 'danger' },
+  approvalRequested: { icon: 'bell', tone: 'warning' },
+  approvalTimeout: { icon: 'clockAlert', tone: 'danger' },
 };
 const MOCK_AGENT_SETUP = [
   'Connect to the local AgentMFA broker. Read its current instructions, then list the available connections:',
@@ -147,6 +151,9 @@ interface MockConnection {
 interface MockAccess {
   connection_id: string;
   enabled: boolean;
+  confirm?: boolean;
+  /** RFC 3339 end of an open approval window, when one is running. */
+  confirm_window_until?: string | null;
   allowed_tools?: string[];
   endpoint?: { endpoint_id: string; type: ConnectionType; dsn?: string | null };
 }
@@ -168,6 +175,7 @@ interface MockDatabase {
   sessions: SessionSummary[];
   activity: ActivityEntry[];
   elicitations: ElicitationRequest[];
+  approvals: Approval[];
   settings: Settings;
 }
 
@@ -186,6 +194,7 @@ interface MockArgs {
   secs: number;
   connectionId: string;
   enabled: boolean;
+  decision?: ApprovalDecision;
   tools?: string[] | null;
   clientSecret?: string | null;
   token?: string | null;
@@ -221,6 +230,7 @@ const db: MockDatabase = {
   sessions: [],
   activity: [],
   elicitations: [],
+  approvals: [],
   settings: {
     reauth_on_read: true,
     show_websockets: false,
@@ -325,6 +335,26 @@ function seedFixtures() {
     requested_at: t(1),
     expires_at: new Date(Date.now() + 9 * 60000).toISOString(),
   });
+  // One tool with traffic confirmation on, and a call parked on it, so the
+  // switch and the prompt are both designable standalone.
+  const github = db.connections.find((c) => c.name === 'github');
+  if (github) {
+    db.access.push({ connection_id: github.id, enabled: true, confirm: true });
+    db.approvals.push({
+      id: uid(),
+      connection_id: github.id,
+      connection: github.name,
+      type: github.type,
+      target: connTarget(github),
+      agent: 'claude-code',
+      summary: 'POST /repos/aka/aka/issues',
+      detail: '{"title":"Flaky test in pg_proxy","labels":["bug"]}',
+      waiting: 1,
+      requested_at: new Date(Date.now() - 8000).toISOString(),
+      expires_at: new Date(Date.now() + 82 * 1000).toISOString(),
+      window_secs: 15 * 60,
+    });
+  }
 }
 function audit(
   kind: keyof typeof MOCK_ACTIVITY_META,
@@ -348,6 +378,8 @@ function connDto(c: MockConnection): ConnectionSummary {
       const record = db.access.find((a) => a.connection_id === c.id);
       return {
         enabled: record?.enabled ?? true,
+        confirm: record?.confirm ?? false,
+        confirm_window_until: record?.confirm_window_until ?? null,
         allowed_tools: record?.allowed_tools ?? null,
         endpoint: record?.endpoint ?? null,
       };
@@ -923,6 +955,56 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       emit('aka://sessions-changed', {});
       return;
     case 'close_session': db.sessions = db.sessions.filter((s) => s.id !== args.id); emit('aka://sessions-changed', {}); return true;
+    case 'set_confirm_mode': {
+      const connection = db.connections.find((c) => c.id === args.connectionId);
+      if (!connection) return false;
+      let record = db.access.find((a) => a.connection_id === connection.id);
+      const current = record?.confirm ?? false;
+      if (current === args.on) return false;
+      if (!record) {
+        record = { connection_id: connection.id, enabled: true, confirm: args.on };
+        db.access.push(record);
+      } else {
+        record.confirm = args.on;
+      }
+      if (!args.on) {
+        // Turning it off releases anything parked on the connection — the
+        // broker does the same, rather than refusing traffic the user just
+        // said needs no asking.
+        record.confirm_window_until = null;
+        db.approvals = db.approvals.filter((a) => a.connection_id !== connection.id);
+        emit('aka://approvals-changed', {});
+      }
+      audit('wired',
+        `Traffic confirmation ${args.on ? 'enabled' : 'disabled'} for ${connection.name}`,
+        null, { connection: connection.name });
+      emit('aka://wirings-changed', {});
+      return true;
+    }
+    case 'list_approvals': return db.approvals.slice();
+    case 'respond_approval': {
+      const approval = db.approvals.find((a) => a.id === args.id);
+      if (!approval) return false;
+      db.approvals = db.approvals.filter((a) => a.id !== approval.id);
+      const record = db.access.find((a) => a.connection_id === approval.connection_id);
+      if (args.decision === 'approve_window' && record) {
+        record.confirm_window_until =
+          new Date(Date.now() + approval.window_secs * 1000).toISOString();
+      }
+      if (args.decision === 'approve_all' && record) {
+        record.confirm = false;
+        record.confirm_window_until = null;
+      }
+      const entry = args.decision === 'deny'
+        ? audit('denied', `Refused by the user: ${approval.agent} → ${approval.connection}`,
+            approval.summary, { connection: approval.connection, agent: approval.agent })
+        : audit('allowedOnce', `Confirmed: ${approval.agent} → ${approval.connection}`,
+            approval.summary, { connection: approval.connection, agent: approval.agent });
+      emit('aka://approvals-changed', {});
+      emit('aka://wirings-changed', {});
+      emit('aka://activity-appended', entry);
+      return true;
+    }
     case 'list_elicitations': return db.elicitations.slice();
     case 'respond_elicitation': {
       const request = db.elicitations.find((r) => r.id === args.id);

@@ -680,3 +680,37 @@ async fn the_event_stream_reports_manage_changes() {
     }
     panic!("SSE stream never carried the change: {collected:?}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn revoking_a_manage_token_closes_its_live_event_stream() {
+    use http_body_util::BodyExt as _;
+
+    let h = harness().await;
+    let stream = tokio::net::UnixStream::connect(&h.socket).await.unwrap();
+    let io = hyper_util::rt::TokioIo::new(stream);
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await.unwrap();
+    tokio::spawn(conn);
+    let request = hyper::Request::builder()
+        .method("GET")
+        .uri("/v1/manage/events")
+        .header("host", "localhost")
+        .header("authorization", format!("Bearer {}", h.manage_token))
+        .body(String::new())
+        .unwrap();
+    let response = sender.send_request(request).await.unwrap();
+    assert_eq!(response.status(), 200);
+    let mut body = response.into_body();
+
+    // Consume the initial resync so the next frame reflects post-revocation
+    // behavior, not replay data queued while the credential was valid.
+    let first = tokio::time::timeout(std::time::Duration::from_secs(2), body.frame())
+        .await
+        .expect("initial event timed out");
+    assert!(first.is_some());
+
+    assert!(h.broker.identity.revoke_manage_token().unwrap());
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(3), body.frame())
+        .await
+        .expect("revoked stream did not close");
+    assert!(ended.is_none(), "revoked stream disclosed another frame");
+}

@@ -459,6 +459,58 @@ async fn handle_endpoint_conn(
             .await?;
         return Ok(());
     };
+    if !matches!(&connection.config, ConnectionConfig::Pg { .. }) {
+        client
+            .write_all(&error_response(
+                "FATAL",
+                "08P01",
+                "AKA: connection is no longer Postgres",
+            ))
+            .await?;
+        return Ok(());
+    }
+
+    let approved_version = connection.updated_at;
+
+    // A direct endpoint is standing authority, so the confirmation is the
+    // only thing standing between a pasted DSN and the database.
+    if let Some(refusal) = confirm_session(&state, &connection, "endpoint", &params).await {
+        client.write_all(&refusal).await?;
+        return Ok(());
+    }
+
+    // Confirmation may wait for a user for up to a minute and a half. Revoke,
+    // retarget, or disable during that wait must be observed before stored
+    // credentials are used against the upstream.
+    let endpoint_still_valid = state
+        .broker
+        .endpoints
+        .resolve_secret(&presented)
+        .is_some_and(|current| current.id == endpoint_id);
+    if !endpoint_still_valid || !state.broker.access.allows(&connection.id) {
+        state.broker.approvals.revoke(&connection.id);
+        client
+            .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
+            .await?;
+        return Ok(());
+    }
+
+    // Use the current credential binding and TLS configuration, not the
+    // snapshot from before the user was asked.
+    let Ok(connection) = state.broker.store.connection_by_id(&endpoint.connection_id) else {
+        state.broker.approvals.revoke(&endpoint.connection_id);
+        client
+            .write_all(&error_response("FATAL", "08006", "AKA: unknown_connection"))
+            .await?;
+        return Ok(());
+    };
+    if connection.updated_at != approved_version {
+        state.broker.approvals.revoke(&connection.id);
+        client
+            .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
+            .await?;
+        return Ok(());
+    }
     let ConnectionConfig::Pg {
         host,
         port,
@@ -564,6 +616,60 @@ async fn handle_endpoint_conn(
 }
 
 /* ------------------------- downstream state machine ----------------------- */
+
+/// Ask the user about a new Postgres session when the connection's
+/// confirmation switch is on.
+///
+/// Postgres is confirmed per **session**, not per statement: once both
+/// handshakes complete the proxy splices raw bytes, so this is the last
+/// point at which a decision can still be taken. A client that opens a pool
+/// raises one prompt for the first connection and rides its window for the
+/// rest.
+///
+/// Returns the FATAL frame to send when the session is refused.
+async fn confirm_session(
+    state: &Arc<ProxyState>,
+    connection: &Connection,
+    agent: &str,
+    params: &[(String, String)],
+) -> Option<Vec<u8>> {
+    if !state.broker.access.confirm_mode(&connection.id).is_on() {
+        return None;
+    }
+    // The startup parameters are the only thing the client tells us about
+    // itself: `psql`, a migration tool, an ORM's pool.
+    let lookup = |key: &str| {
+        params
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.clone())
+    };
+    let detail = [
+        lookup("application_name"),
+        lookup("user").map(|u| format!("user={u}")),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|part| !part.is_empty())
+    .collect::<Vec<_>>()
+    .join(" · ");
+    let request = crate::approvals::ApprovalRequest::new(connection, agent, "New Postgres session")
+        .maybe_detail((!detail.is_empty()).then_some(detail));
+    let verdict = state.broker.approvals.gate(request).await;
+    if verdict.is_allowed() {
+        return None;
+    }
+    let reason = verdict
+        .reason()
+        .unwrap_or(crate::wire::ErrorReason::ApprovalDenied);
+    Some(error_response(
+        "FATAL",
+        // Refusing the session is an authorization outcome, whichever way
+        // the confirmation went; libpq surfaces the message either way.
+        "28000",
+        &format!("AKA: {}: {}", reason.as_str(), verdict.detail()),
+    ))
+}
 
 /// Outcome of the Postgres pre-startup phase, shared by the ticket proxy and
 /// the per-wiring endpoint listeners: either a real `StartupMessage` (with its
@@ -672,14 +778,93 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
         }
     };
 
+    if !matches!(&redemption.connection.config, ConnectionConfig::Pg { .. }) {
+        client
+            .write_all(&error_response(
+                "FATAL",
+                "08P01",
+                "AKA: ticket is not for a Postgres connection",
+            ))
+            .await?;
+        return Ok(());
+    }
+    let approved_version = redemption.connection.updated_at;
+
+    // A ticket holds a short-lived connection snapshot. Make sure it still
+    // names a live, unchanged authority before showing a prompt; otherwise a
+    // delete/retarget that raced just ahead of prompt insertion could not
+    // have found the prompt to revoke.
+    if !state.broker.access.allows(&redemption.connection.id) {
+        state.broker.approvals.revoke(&redemption.connection.id);
+        client
+            .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
+            .await?;
+        return Ok(());
+    }
+    let Ok(connection) = state
+        .broker
+        .store
+        .connection_by_id(&redemption.connection.id)
+    else {
+        state.broker.approvals.revoke(&redemption.connection.id);
+        client
+            .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
+            .await?;
+        return Ok(());
+    };
+    if connection.updated_at != approved_version {
+        state.broker.approvals.revoke(&connection.id);
+        client
+            .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
+            .await?;
+        return Ok(());
+    }
+
+    // Confirm before dialing upstream: nothing has been established yet, so
+    // a refusal costs the destination nothing. Dropping the redemption on
+    // the way out releases its reserved budget slot.
+    if let Some(refusal) = confirm_session(&state, &connection, &redemption.agent, &params).await {
+        client.write_all(&refusal).await?;
+        return Ok(());
+    }
+    if !state.broker.access.allows(&redemption.connection.id) {
+        state.broker.approvals.revoke(&redemption.connection.id);
+        client
+            .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
+            .await?;
+        return Ok(());
+    }
+
+    // Confirmation can wait for 90 seconds. Resolve again after it and use
+    // that fresh record, while requiring the exact authority the prompt
+    // described to still be current.
+    let Ok(connection) = state
+        .broker
+        .store
+        .connection_by_id(&redemption.connection.id)
+    else {
+        state.broker.approvals.revoke(&redemption.connection.id);
+        client
+            .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
+            .await?;
+        return Ok(());
+    };
+    if connection.updated_at != approved_version {
+        state.broker.approvals.revoke(&connection.id);
+        client
+            .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
+            .await?;
+        return Ok(());
+    }
     let ConnectionConfig::Pg {
         host,
         port,
         sslmode,
         trusted_ca_bundle_path,
         ..
-    } = redemption.connection.config.clone()
+    } = connection.config.clone()
     else {
+        state.broker.approvals.revoke(&connection.id);
         client
             .write_all(&error_response(
                 "FATAL",
@@ -695,7 +880,7 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
     // reserved budget slot.
     let upstream = match crate::authorization::scope_existing(
         redemption.secret_read_authorization.clone(),
-        dial_upstream(&state.broker.store, &redemption.connection, &params),
+        dial_upstream(&state.broker.store, &connection, &params),
     )
     .await
     {

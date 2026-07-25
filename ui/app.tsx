@@ -35,7 +35,9 @@ import type {
   StartProgress,
 } from '/src/getting-started';
 import type { CatalogEntry } from '/src/catalog';
-import { ICONS, TYPES, esc, escAttr, toast, relTime, absTime } from '/src/util';
+import {
+  ICONS, TYPES, esc, escAttr, toast, relTime, absTime, timeLeft, clockTime,
+} from '/src/util';
 import {
   apiOriginFromParts, authTemplate, defaultConnectionName, parseApiOrigin, parseConnectionImport,
   isLoopbackHost, parseMcpServerUrl,
@@ -53,6 +55,8 @@ import { virtualListWindow } from '/src/virtual-list';
 import type { HostKeyCandidate } from '/src/connection-input';
 import type {
   ActivityEntry,
+  Approval,
+  ApprovalDecision,
   BrokerProfile,
   CommandArgs,
   CommandName,
@@ -103,7 +107,7 @@ type StartView = typeof START_VIEWS[number];
 
 interface SheetState {
   kind: 'add-secret' | 'edit-secret' | 'add-conn' | 'edit-conn' | 'settings' | 'clear-activity'
-    | 'elicitation' | 'mcp-auth' | 'wiring-tools' | 'endpoint-issued';
+    | 'elicitation' | 'approval' | 'mcp-auth' | 'wiring-tools' | 'endpoint-issued';
   id?: string;
   /** The issue result, for the 'endpoint-issued' sheet. */
   endpoint?: IssuedEndpoint;
@@ -200,6 +204,10 @@ interface AppState {
   elicitations: ElicitationRequest[];
   /** The open elicitation dialog's field values, keyed by field name. */
   elicitValues: Record<string, string>;
+  /** Agent traffic parked on a decision: it moves only once answered. */
+  approvals: Approval[];
+  /** One approval response in flight; prevents duplicate native prompts/actions. */
+  approvalAnswering: string | null;
   agentSetupInstructions: string;
   settings: Settings;
   reveal: Record<string, string>;
@@ -315,6 +323,8 @@ const initialState: AppState = {
   activity: [],
   elicitations: [],      // paused upstream tool calls awaiting the user (SEP-2322)
   elicitValues: {},      // open elicitation dialog's field values (transient)
+  approvals: [],         // agent traffic parked on the user's confirmation
+  approvalAnswering: null,
   agentSetupInstructions: '', // short paste-ready setup message (lazy-loaded)
   settings: { ...DEFAULT_SETTINGS },
   reveal: {},            // secretId -> prefix string (transient)
@@ -393,6 +403,8 @@ function clearBrokerOwnedState(): void {
   state.activity = [];
   state.elicitations = [];
   state.elicitValues = {};
+  state.approvals = [];
+  state.approvalAnswering = null;
   state.agentSetupInstructions = '';
   state.settings = { ...DEFAULT_SETTINGS };
   state.reveal = {};
@@ -493,9 +505,9 @@ const overlays = (): HTMLElement => {
 };
 /* ------------------------------ data loading ----------------------------- */
 type RefreshTarget = 'all' | 'secrets' | 'connections' | 'identity' | 'sessions' |
-  'activity' | 'settings' | 'elicitations';
+  'activity' | 'settings' | 'elicitations' | 'approvals';
 type LoadKey = 'secrets' | 'connections' | 'sessions' | 'activity' |
-  'elicitations';
+  'elicitations' | 'approvals';
 
 async function refresh(which: RefreshTarget = 'all'): Promise<void> {
   const jobs: Promise<void>[] = [];
@@ -504,6 +516,7 @@ async function refresh(which: RefreshTarget = 'all'): Promise<void> {
   if (which === 'all' || which === 'identity') jobs.push(loadIdentity());
   if (which === 'all' || which === 'sessions') jobs.push(load('sessions', 'list_sessions'));
   if (which === 'all' || which === 'elicitations') jobs.push(load('elicitations', 'list_elicitations'));
+  if (which === 'all' || which === 'approvals') jobs.push(load('approvals', 'list_approvals'));
   if (which === 'all' || which === 'activity') {
     jobs.push(load('activity', 'list_activity', { limit: ACTIVITY_RENDER_LIMIT }));
   }
@@ -527,6 +540,7 @@ async function load<K extends CommandName>(
       case 'sessions': state.sessions = result as SessionSummary[]; break;
       case 'activity': state.activity = result as ActivityEntry[]; break;
       case 'elicitations': state.elicitations = result as ElicitationRequest[]; break;
+      case 'approvals': state.approvals = result as Approval[]; break;
     }
   } catch (error) {
     console.error(cmd, error);
@@ -635,13 +649,58 @@ function elicitationNoteHTML(request: ElicitationRequest): string {
   </button>`;
 }
 
+/**
+ * What one prompt is asking about, in the words of the connection's own
+ * plane. Postgres cannot be confirmed per statement — the proxy splices
+ * bytes once connected — so it asks per session, and saying so is what
+ * makes "Approve" mean something specific.
+ */
+function approvalUnit(approval: Approval): string {
+  if (approval.unit === 'session' || approval.type === 'pg') {
+    return 'wants to open a database session';
+  }
+  if (approval.unit === 'tool') return 'wants to call a tool';
+  if (approval.unit === 'request') return 'wants to send a request';
+  // Compatibility with brokers from before the explicit unit was added:
+  // "request" remains true even for a tool call, while guessing from the
+  // connection would mislabel generic HTTP traffic on an MCP connection.
+  return 'wants to send a request';
+}
+
+/**
+ * A call parked on the user, in the queue that shows on every tab.
+ *
+ * It outranks an elicitation: an elicitation pauses an agent mid-task, but
+ * this one is holding traffic that the user asked to be asked about, and it
+ * expires into a refusal if nobody answers.
+ */
+function approvalNoteHTML(approval: Approval): string {
+  const riders = approval.waiting > 1
+    ? ` <span class="elicit-when">+${approval.waiting - 1} more waiting</span>`
+    : '';
+  return `<button class="elicit-note approval-note" data-act="approval-open" data-id="${escAttr(approval.id)}"
+    aria-label="Answer the confirmation request from ${escAttr(approval.agent)} for ${escAttr(approval.connection)}">
+    <span class="elicit-ico">${ICONS.shieldAlert}</span>
+    <span class="elicit-note-txt"><b>${esc(approval.agent)}</b> ${esc(approvalUnit(approval))} on
+      <b>${esc(approval.connection)}</b> — ${esc(approval.summary)}</span>${riders}
+    <span class="elicit-note-cta">Review…</span>
+  </button>`;
+}
+
 function globalSectionsHTML() {
   let out = '';
   const hasOnboarding = false;
+  // Traffic parked on a decision outranks everything, including an
+  // elicitation: it is holding a call the user asked to be asked about, and
+  // an unanswered prompt lapses into a refusal.
+  if (state.approvals.length) {
+    out += '<div class="live-head">Waiting on you</div>'
+      + state.approvals.map(approvalNoteHTML).join('');
+  }
   // Pending input requests outrank everything: an agent is paused on them.
   // They show on every tab, in both the window and the dropdown.
   if (state.elicitations.length) {
-    out += '<div class="live-head">Waiting on you</div>'
+    out += `${state.approvals.length ? '' : '<div class="live-head">Waiting on you</div>'}`
       + state.elicitations.map(elicitationNoteHTML).join('');
   }
   // Live sessions answer "what is my agent doing right now?", so they sit
@@ -1126,6 +1185,72 @@ function connectionMenuItemsHTML(c: ConnectionSummary): string {
     ${endpointItems}`;
 }
 
+/**
+ * Kinds with a traffic unit worth confirming — and a place in their plane
+ * to park it. SSH and WebSocket have neither yet: an SSH agent signs for a
+ * session the client already opened, and a WebSocket is one long-lived
+ * stream, so neither has an honest unit to ask about.
+ */
+function confirmable(c: ConnectionSummary): boolean {
+  return c.type === 'api' || c.type === 'pg';
+}
+
+/** What the switch promises to ask about, in this tool's own terms. */
+function confirmUnitLabel(c: ConnectionSummary): string {
+  if (c.type === 'pg') return 'Ask before database sessions';
+  return c.mcp_path ? 'Ask before tool calls' : 'Ask before requests';
+}
+
+function confirmUnitHint(c: ConnectionSummary): string {
+  if (c.type === 'pg') {
+    return 'When no approval window is open, the next Postgres session is held for your answer. '
+      + 'Approval covers new sessions for the displayed window, never individual queries.';
+  }
+  if (c.mcp_path) {
+    const direct = c.agent_access.endpoint
+      ? Array.isArray(c.agent_access.allowed_tools)
+        ? ' Curated MCP calls must use the MCP address; the direct connection address refuses calls on the MCP path.'
+        : ' Calls through this tool’s connection address are confirmed as HTTP requests before their body is uploaded; opening or closing an MCP transport session is not.'
+      : '';
+    return 'When no approval window is open, the next tools/call is held for your answer. '
+      + 'Approval covers later calls for the displayed window; listing tools and opening a session are not asked about.'
+      + direct;
+  }
+  return 'When no approval window is open, the next request is held for your answer. '
+    + 'Approval covers later requests for the displayed window, including calls through this tool’s connection address.';
+}
+
+/**
+ * The traffic-confirmation switch, in the detail panel under the tool's
+ * connect section. Off by default: turning it on is the user asking to be
+ * interrupted, and it belongs next to the access switch it narrows rather
+ * than in global Settings, because the answer differs per tool.
+ */
+function confirmSectionHTML(c: ConnectionSummary): string {
+  if (!c.agent_access.enabled || !confirmable(c)) return '';
+  const on = Boolean(c.agent_access.confirm);
+  const until = c.agent_access.confirm_window_until;
+  const window = on && until && new Date(until).getTime() > Date.now()
+    ? `<div class="cd-confirm-window">${ICONS.timer}<span>Approved until ${esc(clockTime(until))} —
+        not asking again until then.</span></div>`
+    : '';
+  return `<div class="cd-sec cd-confirm">
+      <div class="cd-confirm-row">
+        <div class="cd-confirm-txt">
+          <div class="cd-confirm-lbl">${esc(confirmUnitLabel(c))}</div>
+          <div class="cd-confirm-sub">${esc(confirmUnitHint(c))}</div>
+        </div>
+        <button class="switch ${on ? 'on' : ''}" role="switch" aria-checked="${on}"
+          title="${on ? 'Traffic is confirmed with you first' : 'Traffic goes without asking'}"
+          aria-label="${on ? 'Stop confirming' : 'Confirm'} traffic on ${escAttr(c.name)}"
+          data-act="${on ? 'confirm-off' : 'confirm-on'}" data-conn="${c.id}"></button>
+      </div>
+      ${window}
+      ${on ? `<div class="cd-confirm-note">With no AgentMFA approval surface attached,
+        this tool’s traffic is refused rather than carried.</div>` : ''}
+    </div>`;
+}
+
 // The Tools tab's detail panel: everything about connecting to the
 // selected tool that the compact rows no longer carry — its connection
 // endpoints, issues with their fixes, and the row's one options menu.
@@ -1204,6 +1329,7 @@ function connDetailHTML(c: ConnectionSummary): string {
     return rows;
   })();
   const live = liveCount(c);
+  const confirmSection = confirmSectionHTML(c);
   const detailsSection = factRows.length
     ? `<div class="cd-sec"><div class="cd-connect-lbl"><span>Details</span></div>
         <div class="cd-facts">${factRows.map(([key, value]) =>
@@ -1230,7 +1356,7 @@ function connDetailHTML(c: ConnectionSummary): string {
     </div>
     ${offNote}${issuesBlock}${connTestResultHTML(c)}${c.mcp_path
       ? mcpSection + endpointSection
-      : endpointSection + mcpSection}${detailsSection}${mcpStatusHTML(c)}`;
+      : endpointSection + mcpSection}${confirmSection}${detailsSection}${mcpStatusHTML(c)}`;
 }
 
 // The status check's result, rendered under the MCP connection it belongs
@@ -2523,6 +2649,7 @@ function Sheets(): ReactNode {
     case 'settings': return <SafeMarkup markup={settingsSheet()} />;
     case 'clear-activity': return <SafeMarkup markup={clearActivitySheet()} />;
     case 'elicitation': return <ElicitationSheet />;
+    case 'approval': return <ApprovalSheet />;
     case 'mcp-auth': return <SafeMarkup markup={mcpAuthSheet()} />;
     case 'endpoint-issued': return <SafeMarkup markup={endpointIssuedSheet()} />;
     default: return null;
@@ -2579,6 +2706,78 @@ function ElicitationSheet(): ReactNode {
           <span className="elicit-dlg-spacer"></span>
           <button className="btn" data-act="sheet-cancel">Cancel</button>
           <button className="btn primary" data-act="elicit-send" data-id={request.id}>Send to {request.connection}</button>
+        </div>
+      </div>
+    </>
+  );
+}
+
+/**
+ * The traffic-confirmation dialog.
+ *
+ * Same alert shape as the elicitation sheet, and deliberately so — but the
+ * question is the opposite one. There, the upstream asks the user for
+ * input; here, AgentMFA asks whether the traffic should happen at all, and
+ * the answer is a decision about access rather than a value to forward.
+ *
+ * The three answers are the whole point of the switch: let this through for
+ * a while, stop asking altogether, or refuse. "Stop asking" turns the
+ * connection's confirmation off, which the broker treats as removing a
+ * gate — it runs its own native authentication before applying it, so a
+ * stray click cannot silently disarm the switch.
+ */
+function ApprovalSheet(): ReactNode {
+  const approval = state.approvals.find((a) => a.id === state.sheet?.id);
+  if (!approval) {
+    return (
+      <>
+        <div className="sheet-backdrop" data-act="sheet-cancel"></div>
+        <div className="sheet elicit-sheet" role="alertdialog" aria-modal="true" aria-labelledby="approval-title">
+          <div className="elicit-dlg-ico"><Icon markup={ICONS.shieldAlert} /></div>
+          <h3 id="approval-title" className="elicit-dlg-title">This request is gone</h3>
+          <div className="elicit-dlg-context">
+            It was answered elsewhere, or nobody answered in time and the call was refused.
+          </div>
+          <div className="sheet-actions elicit-dlg-actions">
+            <button className="btn primary" data-act="sheet-cancel">OK</button>
+          </div>
+        </div>
+      </>
+    );
+  }
+  const minutes = Math.max(1, Math.round(approval.window_secs / 60));
+  const answering = state.approvalAnswering !== null;
+  return (
+    <>
+      <div className="sheet-backdrop" data-act="sheet-cancel"></div>
+      <div className="sheet elicit-sheet" role="alertdialog" aria-modal="true" aria-labelledby="approval-title">
+        <div className="elicit-dlg-ico"><Icon markup={ICONS.shieldAlert} /></div>
+        <h3 id="approval-title" className="elicit-dlg-title">
+          {approval.agent} {approvalUnit(approval)}
+        </h3>
+        <div className="elicit-dlg-context">{approval.connection} · {approval.target}</div>
+        {/* The call itself, verbatim and inert: it is the agent's text. */}
+        <div className="approval-call">
+          <div className="approval-summary">{approval.summary}</div>
+          {approval.detail ? <pre className="approval-detail">{approval.detail}</pre> : null}
+        </div>
+        <div className="elicit-dlg-context approval-meta">
+          {approval.waiting > 1
+            ? `${approval.waiting} calls are waiting on this answer · `
+            : ''}
+          Refused automatically in {timeLeft(approval.expires_at)}
+        </div>
+        <div className="sheet-actions elicit-dlg-actions approval-actions">
+          <button className="btn elicit-refuse-btn" data-act="approval-deny"
+            data-id={approval.id} disabled={answering}>Deny</button>
+          <span className="elicit-dlg-spacer"></span>
+          <button className="btn" data-act="approval-approve-all"
+            data-id={approval.id} disabled={answering}
+            title="Allow this call and turn traffic confirmation off for this tool">Stop asking</button>
+          <button className="btn primary" data-act="approval-approve-window"
+            data-id={approval.id} disabled={answering}>
+            {answering ? 'Answering…' : `Approve ${minutes}m`}
+          </button>
         </div>
       </div>
     </>
@@ -3794,6 +3993,37 @@ async function run(fn: () => Promise<unknown>): Promise<boolean> {
     if (brokerEpochIsCurrent(epoch)) toast('⚠ ' + errorMessage(error));
     return false;
   }
+}
+
+/**
+ * Answer a waiting prompt and close its dialog.
+ *
+ * The broker reports whether a prompt was still there to answer: one that
+ * lapsed (or that another window answered) while this dialog sat open is
+ * gone, and saying "approved" then would be a lie about traffic that was
+ * already refused.
+ */
+async function answerApproval(
+  id: string,
+  decision: ApprovalDecision,
+  success: string,
+): Promise<void> {
+  if (state.approvalAnswering) return;
+  state.approvalAnswering = id;
+  render();
+  let answered = false;
+  const ok = await run(async () => {
+    answered = await invoke('respond_approval', { id, decision });
+  });
+  if (state.approvalAnswering === id) state.approvalAnswering = null;
+  if (!ok) {
+    render();
+    return;
+  }
+  toast(answered ? success : '⏳ That request is gone — it lapsed or was answered elsewhere');
+  closeSheet();
+  await refresh('approvals');
+  await refresh('connections');
 }
 
 function isProtectedFormSheet(sheet: SheetState | null = state.sheet): boolean {
@@ -5114,6 +5344,20 @@ document.addEventListener('click', async (e) => {
       await run(() => invoke('set_tool_access', { connectionId: btn.dataset.conn || '', enabled: false }));
       toast('🔌 Disabled for agents'); await refresh('all');
       break;
+    case 'confirm-on':
+      if (await run(() => invoke('set_confirm_mode', { connectionId: btn.dataset.conn || '', on: true }))) {
+        toast('🛡️ Traffic will be confirmed with you first');
+      }
+      await refresh('connections');
+      break;
+    case 'confirm-off':
+      // Removing a gate the user put up: the broker authenticates before it
+      // applies, so a refused sheet leaves the switch on.
+      if (await run(() => invoke('set_confirm_mode', { connectionId: btn.dataset.conn || '', on: false }))) {
+        toast('🔕 No longer asking about this tool’s traffic');
+      }
+      await refresh('connections');
+      break;
 
     case 'rotate-key-ask': {
       if (state.agentMenuOpen) { state.agentMenuOpen = null; render(); }
@@ -5164,6 +5408,40 @@ document.addEventListener('click', async (e) => {
       }
       break;
     }
+    // Traffic confirmation: the queue row opens the dialog, and the answer
+    // releases (or refuses) the parked call broker-side. "Approve all" runs
+    // the broker's native authentication on the way through, because it
+    // turns the tool's switch off.
+    case 'approval-open': {
+      setSheet({ kind: 'approval', id });
+      render();
+      // The triggering queue row disappears behind a modal. Put keyboard
+      // focus on the safest answer instead of leaving it on a hidden node.
+      setTimeout(() => {
+        document.querySelector<HTMLElement>('[data-act="approval-deny"]')?.focus();
+      }, 0);
+      break;
+    }
+    case 'approval-approve-window': {
+      const approval = state.approvals.find((a) => a.id === id);
+      const minutes = Math.max(1, Math.round((approval?.window_secs ?? 900) / 60));
+      await answerApproval(id, 'approve_window',
+        `✅ Approved — not asking again on ${approval?.connection ?? 'this tool'} for ${minutes}m`);
+      break;
+    }
+    case 'approval-approve-all': {
+      const approval = state.approvals.find((a) => a.id === id);
+      await answerApproval(id, 'approve_all',
+        `✅ Approved — ${approval?.connection ?? 'this tool'} no longer asks`);
+      break;
+    }
+    case 'approval-deny': {
+      const approval = state.approvals.find((a) => a.id === id);
+      await answerApproval(id, 'deny',
+        `🚫 Refused — ${approval?.agent ?? 'the agent'} is told the call was denied`);
+      break;
+    }
+
     case 'elicit-refuse': {
       const request = state.elicitations.find((r) => r.id === id);
       if (await run(() => invoke('respond_elicitation', { id, approved: false }))) {
@@ -5494,11 +5772,17 @@ async function boot() {
       duration: [120, 80],
     });
   }
-  // Relative timestamps drift; re-render the activity view every minute so
-  // "just now" becomes "1m", etc., while that tab is open.
+  // Relative timestamps and approval-window horizons drift; refresh their
+  // rendered state every minute while the relevant tab is open.
   setInterval(() => {
-    if (state.tab === 'activity' && !state.sheet && !state.menuOpen) render();
+    if ((state.tab === 'activity' || state.tab === 'connections')
+        && !state.sheet && !state.menuOpen) render();
   }, 60000);
+  // Approval deadlines are measured in seconds; keep the visible countdown
+  // honest while the dialog is open instead of freezing at its first paint.
+  setInterval(() => {
+    if (state.sheet?.kind === 'approval') render();
+  }, 1000);
   // Live updates from the core.
   await listen('aka://broker-changed', async (ev) => {
     // "Same broker" means mode AND url: a switch from connected remote A to
@@ -5542,6 +5826,17 @@ async function boot() {
     // The open dialog's request may have been answered elsewhere or
     // expired; the sheet re-renders as "gone" via ElicitationSheet, which
     // is correct — nothing to close here, the user dismisses it informed.
+  });
+  await listen('aka://approvals-changed', async () => {
+    // The queue drives a modal, so it must not lag: a prompt that was
+    // answered elsewhere (or lapsed) re-renders the open dialog as gone.
+    // Connection rows ride the same refresh so an opened/closed approval
+    // window never leaves its status card stale.
+    await Promise.all([
+      load('approvals', 'list_approvals'),
+      load('connections', 'list_connections'),
+    ]);
+    render();
   });
   await listen('aka://agents-changed', async () => {
     // Fires when an agent fetches the shared key (compat pair) or the key

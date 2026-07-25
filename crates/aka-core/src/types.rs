@@ -450,11 +450,46 @@ pub struct BrokerIdentity {
     pub manage_token_expires_at: Option<DateTime<Utc>>,
 }
 
+/// Whether agent traffic on a connection is confirmed with the user before
+/// it goes anywhere.
+///
+/// Off is the default and the historical behaviour: an enabled connection
+/// carries traffic without prompting. On parks the next unit of traffic
+/// whenever no approval window is open — one request for an API tool, one
+/// `tools/call` for an MCP tool, one session for Postgres. What a unit is per
+/// kind is fixed by where the plane can be interrupted, not by choice:
+/// the Postgres proxy splices bytes once its handshake is done, so a
+/// session is the last moment a decision can still be taken.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfirmMode {
+    #[default]
+    Off,
+    On,
+}
+
+impl ConfirmMode {
+    pub fn is_on(self) -> bool {
+        matches!(self, ConfirmMode::On)
+    }
+}
+
+/// Kinds whose traffic can be confirmed. Postgres, API, and MCP tools have
+/// a natural unit to ask about and a place in the plane to park it; SSH and
+/// WebSocket do not have one yet, so their connections never carry the
+/// switch (the UI hides it, and the core refuses to set it).
+pub fn confirmable(connection: &Connection) -> bool {
+    match &connection.config {
+        ConnectionConfig::Api { .. } | ConnectionConfig::Pg { .. } => true,
+        ConnectionConfig::Ssh { .. } | ConnectionConfig::Ws { .. } => false,
+    }
+}
+
 /// Per-connection agent access — the whole authorization model. A connection
 /// with no entry is **enabled** (adding a tool in the app is already a
 /// deliberate user action); an entry records the non-default states: agents
-/// switched off, or an MCP tool subset curated. Applies to every local agent
-/// at once — there is one shared identity.
+/// switched off, an MCP tool subset curated, or traffic confirmation asked
+/// for. Applies to every local agent at once — there is one shared identity.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolAccess {
     /// The connection's stable id, never its renamable name.
@@ -467,6 +502,10 @@ pub struct ToolAccess {
     /// by the sidecar's tool listing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_tools: Option<Vec<String>>,
+    /// Whether traffic is confirmed with the user before it leaves. Records
+    /// written before this existed load as `Off`, the behaviour they had.
+    #[serde(default)]
+    pub confirm: ConfirmMode,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -814,5 +853,23 @@ mod tests {
         .unwrap();
         assert!(!entry.enabled);
         assert_eq!(entry.allowed_tools, None);
+        assert_eq!(
+            entry.confirm,
+            ConfirmMode::Off,
+            "a record written before confirmation existed keeps its behaviour"
+        );
+    }
+
+    #[test]
+    fn confirm_mode_is_a_bare_string_on_the_wire() {
+        assert_eq!(
+            serde_json::to_string(&ConfirmMode::On).unwrap(),
+            "\"on\"",
+            "the UI switch and access.json share one spelling"
+        );
+        assert_eq!(
+            serde_json::from_str::<ConfirmMode>("\"off\"").unwrap(),
+            ConfirmMode::Off
+        );
     }
 }

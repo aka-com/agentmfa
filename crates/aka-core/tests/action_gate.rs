@@ -15,7 +15,9 @@ use aka_core::events::BrokerEvents;
 use aka_core::paths::Paths;
 use aka_core::sessions::{RedeemError, TicketPayload};
 use aka_core::store::ConnectionSpec;
-use aka_core::types::{ConfirmationMethod, Connection, ConnectionConfig, ConnectionKind};
+use aka_core::types::{
+    ConfirmMode, ConfirmationMethod, Connection, ConnectionConfig, ConnectionKind,
+};
 use aka_core::vault::MemoryVault;
 use zeroize::Zeroizing;
 
@@ -1106,6 +1108,128 @@ async fn target_changes_keep_the_flag_and_the_tool_subset() {
         broker.access.allowed_tools(&conn.id),
         Some(vec!["search".into()])
     );
+}
+
+#[tokio::test]
+async fn asking_to_be_asked_is_free_but_stopping_takes_an_authentication() {
+    let events = Arc::new(GateEvents {
+        allow: true,
+        confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    let conn = add_github(&broker);
+
+    // Turning confirmation on only adds friction: the switch is the gate.
+    assert!(broker
+        .ui_set_confirm_mode(&conn.id, ConfirmMode::On)
+        .unwrap());
+    assert_eq!(events.confirms.load(Ordering::SeqCst), 0);
+    assert_eq!(broker.access.confirm_mode(&conn.id), ConfirmMode::On);
+    assert!(!broker
+        .ui_set_confirm_mode(&conn.id, ConfirmMode::On)
+        .unwrap());
+
+    // Turning it off removes a gate the user put up — the same class of
+    // change as disabling the read gate, and it authenticates like one.
+    assert!(broker
+        .ui_set_confirm_mode(&conn.id, ConfirmMode::Off)
+        .unwrap());
+    assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
+    assert_eq!(broker.access.confirm_mode(&conn.id), ConfirmMode::Off);
+}
+
+#[tokio::test]
+async fn a_refused_authentication_leaves_the_confirmation_on() {
+    let events = Arc::new(GateEvents {
+        allow: false,
+        confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    let conn = add_github(&broker);
+    // Turning it on needs no authentication, so it works on this shell.
+    broker
+        .ui_set_confirm_mode(&conn.id, ConfirmMode::On)
+        .unwrap();
+
+    assert!(matches!(
+        broker.ui_set_confirm_mode(&conn.id, ConfirmMode::Off),
+        Err(CoreError::NotConfirmed)
+    ));
+    assert_eq!(
+        broker.access.confirm_mode(&conn.id),
+        ConfirmMode::On,
+        "a refused sheet must not half-apply the change"
+    );
+}
+
+#[tokio::test]
+async fn kinds_with_no_traffic_unit_cannot_be_confirmed() {
+    let events = Arc::new(GateEvents {
+        allow: true,
+        confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    let token = broker
+        .store
+        .add_secret("WS_TOKEN", Zeroizing::new("t".into()))
+        .unwrap();
+    let ws = broker
+        .store
+        .add_connection(ConnectionSpec {
+            name: "market-feed".into(),
+            config: ConnectionConfig::Ws {
+                url: "wss://stream.example.com/feed".into(),
+                template: None,
+            },
+            secrets: vec![token.id],
+        })
+        .unwrap();
+
+    // A WebSocket is one long-lived stream and an SSH agent signs for a
+    // session the client already opened: neither has an honest unit to ask
+    // about, so the switch is refused rather than quietly ignored.
+    assert!(matches!(
+        broker.ui_set_confirm_mode(&ws.id, ConfirmMode::On),
+        Err(CoreError::InvalidSetting(_))
+    ));
+    assert_eq!(broker.access.confirm_mode(&ws.id), ConfirmMode::Off);
+}
+
+#[tokio::test]
+async fn retargeting_a_tool_keeps_the_switch_but_drops_its_open_window() {
+    let events = Arc::new(GateEvents {
+        allow: true,
+        confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    let conn = add_github(&broker);
+    broker
+        .ui_set_confirm_mode(&conn.id, ConfirmMode::On)
+        .unwrap();
+
+    broker
+        .ui_update_connection(
+            &conn.id,
+            ConnectionSpec {
+                name: conn.name.clone(),
+                config: ConnectionConfig::Api {
+                    host: "api.enterprise.github.com".into(),
+                    scheme: "https".into(),
+                    port: None,
+                    template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
+                    mcp_path: None,
+                    oauth: None,
+                },
+                secrets: vec![],
+            },
+        )
+        .unwrap();
+
+    // The switch names the tool and survives, like the enabled flag and the
+    // curated tool subset. An approval window was permission for traffic to
+    // the *old* destination, and does not.
+    assert_eq!(broker.access.confirm_mode(&conn.id), ConfirmMode::On);
+    assert_eq!(broker.approvals.window_remaining(&conn.id), None);
 }
 
 #[tokio::test]

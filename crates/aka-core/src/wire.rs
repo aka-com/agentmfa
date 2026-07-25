@@ -87,6 +87,13 @@ pub enum ErrorReason {
     OutcomeNotReplayable,
     // Policy outcomes.
     DeniedByPolicy,
+    /// The user was asked to confirm this call and refused it.
+    ApprovalDenied,
+    /// Nobody answered the confirmation before its deadline.
+    ApprovalTimeout,
+    /// The connection asks for confirmation, but no surface could ask the
+    /// user (no app attached to this broker).
+    ApprovalUnavailable,
     // Rate limits and budgets.
     RateLimited,
     IdempotencyCapacity,
@@ -118,7 +125,7 @@ pub enum ErrorReason {
 
 impl ErrorReason {
     /// Every registered reason, for exhaustiveness checks and docs.
-    pub const ALL: [ErrorReason; 39] = [
+    pub const ALL: [ErrorReason; 42] = [
         ErrorReason::MissingToken,
         ErrorReason::InvalidToken,
         ErrorReason::TokenExpired,
@@ -138,6 +145,9 @@ impl ErrorReason {
         ErrorReason::RequestIdMismatch,
         ErrorReason::OutcomeNotReplayable,
         ErrorReason::DeniedByPolicy,
+        ErrorReason::ApprovalDenied,
+        ErrorReason::ApprovalTimeout,
+        ErrorReason::ApprovalUnavailable,
         ErrorReason::RateLimited,
         ErrorReason::IdempotencyCapacity,
         ErrorReason::TicketSessionLimit,
@@ -181,6 +191,9 @@ impl ErrorReason {
             ErrorReason::RequestIdMismatch => "request_id_mismatch",
             ErrorReason::OutcomeNotReplayable => "outcome_not_replayable",
             ErrorReason::DeniedByPolicy => "denied_by_policy",
+            ErrorReason::ApprovalDenied => "approval_denied",
+            ErrorReason::ApprovalTimeout => "approval_timeout",
+            ErrorReason::ApprovalUnavailable => "approval_unavailable",
             ErrorReason::RateLimited => "rate_limited",
             ErrorReason::IdempotencyCapacity => "idempotency_capacity",
             ErrorReason::TicketSessionLimit => "ticket_session_limit",

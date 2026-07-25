@@ -408,6 +408,25 @@ enum ConnCommand {
         #[arg(long)]
         broker: Option<String>,
     },
+    /// Ask the user to confirm this connection's traffic before it goes
+    /// anywhere, or stop asking. What gets confirmed depends on the kind:
+    /// one request for an API tool, one `tools/call` for an MCP tool, one
+    /// session for Postgres. An attached AgentMFA app answers prompts; a
+    /// broker with no attached approval surface refuses the traffic.
+    Confirm {
+        /// The connection to change.
+        name: String,
+        /// Stop confirming (the default is to start).
+        #[arg(long)]
+        off: bool,
+        /// Operate on a broker rooted here instead of the default layout.
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Manage the broker at this manage-API URL instead of this
+        /// machine's.
+        #[arg(long)]
+        broker: Option<String>,
+    },
     /// Disable agent access for a connection: every agent's calls are
     /// refused with 403 denied_by_policy until re-enabled.
     Disable {
@@ -660,6 +679,12 @@ fn main() {
             ConnCommand::Disable { name, root, broker } => {
                 cmd_conn_access(name, root, broker, false)
             }
+            ConnCommand::Confirm {
+                name,
+                off,
+                root,
+                broker,
+            } => cmd_conn_confirm(name, root, broker, !off),
             ConnCommand::Test { name, root, broker } => cmd_conn_test(name, root, broker),
             ConnCommand::Endpoint {
                 name,
@@ -1465,6 +1490,21 @@ fn cmd_conn_access(name: String, root: Option<PathBuf>, url: Option<String>, ena
         eprintln!("agent access {state} for {name}");
     } else {
         eprintln!("agent access was already {state} for {name}");
+    }
+}
+
+fn cmd_conn_confirm(name: String, root: Option<PathBuf>, url: Option<String>, on: bool) {
+    let managed = management_backend(root, url);
+    let dto = conn_dto(&managed, &name);
+    let state = if on { "on" } else { "off" };
+    let changed = managed.run(managed.backend.set_confirm_mode(dto_id(&dto.id), on));
+    if changed {
+        eprintln!("traffic confirmation {state} for {name}");
+        if on {
+            eprintln!("  prompts are answered in the AgentMFA app; without it, this tool's traffic is refused");
+        }
+    } else {
+        eprintln!("traffic confirmation was already {state} for {name}");
     }
 }
 
@@ -2402,6 +2442,8 @@ mod tests {
             oauth: false,
             agent_access: AccessDto {
                 enabled: true,
+                confirm: false,
+                confirm_window_until: None,
                 allowed_tools: None,
                 endpoint: None,
             },
