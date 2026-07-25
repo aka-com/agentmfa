@@ -163,6 +163,9 @@ async fn manage_routes_require_the_management_token() {
     let (status, body) = h.manage("GET", "/v1/manage/whoami", None).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["version"], "test");
+    assert!(body["capabilities"].as_array().is_some_and(|items| items
+        .iter()
+        .any(|item| { item.as_str() == Some(aka_api::APPROVAL_SURFACE_CAPABILITY) })));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -374,9 +377,10 @@ async fn request_history_round_trips_pending_and_terminal_lifecycles() {
         .await;
     assert_eq!(status, 200, "{body}");
 
-    // A connected remote manager is a valid prompt surface. Keep its bus
-    // receiver alive while the direct gate parks.
-    let _events = h.broker.manage_bus().subscribe();
+    // A connected remote inbox explicitly leases prompt capability. Passive
+    // event observers do not keep confirmed traffic parked.
+    let surface = h.broker.manage_bus().lease_approval_surface();
+    assert!(h.broker.manage_bus().renew_approval_surface(&surface.id()));
     let connection = h.broker.store.connection_by_name("github").unwrap();
     let broker = h.broker.clone();
     let call = tokio::spawn(async move {
@@ -776,12 +780,22 @@ async fn revoking_a_manage_token_closes_its_live_event_stream() {
     assert_eq!(response.status(), 200);
     let mut body = response.into_body();
 
-    // Consume the initial resync so the next frame reflects post-revocation
-    // behavior, not replay data queued while the credential was valid.
-    let first = tokio::time::timeout(std::time::Duration::from_secs(2), body.frame())
-        .await
-        .expect("initial event timed out");
-    assert!(first.is_some());
+    // Consume the readiness comment and initial resync so the next frame
+    // reflects post-revocation behavior, not bytes queued while the
+    // credential was valid.
+    loop {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(2), body.frame())
+            .await
+            .expect("initial event timed out")
+            .expect("stream ended before its resync")
+            .expect("initial event failed");
+        if frame
+            .data_ref()
+            .is_some_and(|data| String::from_utf8_lossy(data).contains("\"event\":\"resync\""))
+        {
+            break;
+        }
+    }
 
     assert!(h.broker.identity.revoke_manage_token().unwrap());
     let ended = tokio::time::timeout(std::time::Duration::from_secs(3), body.frame())

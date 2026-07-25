@@ -478,7 +478,14 @@ fn open_main(app: &AppHandle) {
     }
 }
 
-fn open_request_inbox(app: &AppHandle) {
+pub(crate) fn open_request_inbox(app: &AppHandle) {
+    let app = app.clone();
+    let _ = app
+        .clone()
+        .run_on_main_thread(move || open_request_inbox_on_main(&app));
+}
+
+fn open_request_inbox_on_main(app: &AppHandle) {
     // A protected dropdown form may contain credentials. Keep it open and
     // queue the navigation until the form closes rather than destroying a
     // draft or losing the user's request.

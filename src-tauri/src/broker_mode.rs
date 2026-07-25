@@ -484,7 +484,7 @@ impl BrokerState {
         let sse_backend = backend.clone();
         let event_backend = backend.clone();
         let task = tauri::async_runtime::spawn(async move {
-            aka_client::events::subscribe(
+            aka_client::events::subscribe_request_surface(
                 sse_backend,
                 move |event| {
                     // A reconnect may replay an old request event, while a

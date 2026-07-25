@@ -483,6 +483,8 @@ async fn with_nothing_able_to_ask_confirmed_traffic_is_refused() {
         .unwrap();
 
     let token = broker.identity.token();
+    // Monitoring the feed does not claim a user-facing request inbox.
+    let events = broker.manage_bus().subscribe();
     let (status, body) = uds_request(
         &handle.socket_path,
         "POST",
@@ -499,10 +501,13 @@ async fn with_nothing_able_to_ask_confirmed_traffic_is_refused() {
         "the user asked to be asked; with no way to ask, the call does not go"
     );
 
-    // A hosted broker has no local shell, but its live management stream is
-    // the remote app's approval surface. It must keep the call parked rather
-    // than immediately replaying the local shell's `Unavailable` result.
+    // A hosted broker has no local shell, but an authenticated management
+    // stream can explicitly lease the remote app's request surface. It must
+    // keep the call parked rather than replaying `Unavailable`.
+    drop(events);
     let mut events = broker.manage_bus().subscribe();
+    let surface = broker.manage_bus().lease_approval_surface();
+    assert!(broker.manage_bus().renew_approval_surface(&surface.id()));
     let socket = handle.socket_path.clone();
     let token = token.clone();
     let call = tokio::spawn(async move {

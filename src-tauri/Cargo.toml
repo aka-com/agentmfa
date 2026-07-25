@@ -29,6 +29,10 @@ aka-client = { path = "../crates/aka-client" }
 aka-core = { path = "../crates/aka-core" }
 tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
 tauri-plugin-notification = "2"
+# The plugin's desktop API intentionally discards interaction handles.
+# Request notifications need the underlying handle so a click can open the
+# Inbox; keep the plugin for its webview permissions/API.
+notify-rust = "4.18"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-dialog = "2"

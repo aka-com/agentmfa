@@ -11,11 +11,11 @@ use std::time::Duration;
 
 use aka_api::ApprovalDto;
 use tauri::{AppHandle, Manager as _};
-use tauri_plugin_notification::NotificationExt as _;
 
 use crate::broker_mode::{NotificationMode, NotificationSettings};
 
 const NOTIFICATION_DEBOUNCE: Duration = Duration::from_millis(400);
+const OPEN_INBOX_ACTION: &str = "open_request_inbox";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RequestSummary {
@@ -266,7 +266,7 @@ fn show_notification(
     requests: &[RequestSummary],
     total: usize,
     show_context: bool,
-) -> tauri_plugin_notification::Result<()> {
+) -> Result<(), String> {
     let title = if requests.len() == 1 {
         "AgentMFA needs your approval".to_string()
     } else {
@@ -285,7 +285,97 @@ fn show_notification(
     } else {
         format!("Open the Request Inbox to review {total} waiting requests.")
     };
-    app.notification().builder().title(title).body(body).show()
+
+    let mut notification = notify_rust::Notification::new();
+    notification
+        .summary(&title)
+        .body(&body)
+        .action(OPEN_INBOX_ACTION, "Open Inbox")
+        .auto_icon();
+    // XDG servers only emit body activation when the special default action
+    // is advertised; some desktops hide named buttons entirely.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    notification.action("default", "Open Inbox");
+    configure_notification_identity(app, &mut notification)?;
+    let handle = notification.show().map_err(|error| error.to_string())?;
+
+    // All supported desktop backends deliver activation through a blocking
+    // handle. Keep that wait off Tauri's main and async-runtime threads; the
+    // main run loop remains available for the platform callback itself.
+    let response_app = app.clone();
+    std::thread::Builder::new()
+        .name("aka-notification-action".into())
+        .spawn(move || {
+            let fallback_app = response_app.clone();
+            if let Err(error) =
+                handle.wait_for_response(move |response: &notify_rust::NotificationResponse| {
+                    if notification_opens_inbox(response) {
+                        crate::windows::open_request_inbox(&response_app);
+                    }
+                })
+            {
+                tracing::warn!(%error, "could not observe native notification interaction");
+                crate::windows::surface_for_approval(&fallback_app);
+            }
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn notification_opens_inbox(response: &notify_rust::NotificationResponse) -> bool {
+    matches!(response, notify_rust::NotificationResponse::Default)
+        || matches!(
+            response,
+            notify_rust::NotificationResponse::Action(action)
+                if action == OPEN_INBOX_ACTION
+        )
+}
+
+#[cfg(target_os = "macos")]
+fn configure_notification_identity(
+    _app: &AppHandle,
+    _notification: &mut notify_rust::Notification,
+) -> Result<(), String> {
+    // Match the Tauri plugin's delivery identity. Development binaries are
+    // not installed application bundles, so Notification Center attributes
+    // them to Terminal; packaged builds use AKA's bundle identifier.
+    #[allow(deprecated)]
+    let _ = notify_rust::set_application(if tauri::is_dev() {
+        "com.apple.Terminal"
+    } else {
+        _app.config().identifier.as_str()
+    });
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn configure_notification_identity(
+    app: &AppHandle,
+    notification: &mut notify_rust::Notification,
+) -> Result<(), String> {
+    // Windows accepts the configured AppUserModel ID only for an installed
+    // application. Development builds retain notify-rust's PowerShell ID.
+    let executable = tauri::utils::platform::current_exe().map_err(|error| error.to_string())?;
+    let directory = executable
+        .parent()
+        .ok_or_else(|| "the application executable has no parent directory".to_string())?
+        .display()
+        .to_string();
+    let separator = std::path::MAIN_SEPARATOR;
+    if !(directory.ends_with(format!("{separator}target{separator}debug"))
+        || directory.ends_with(format!("{separator}target{separator}release")))
+    {
+        notification.app_id(&app.config().identifier);
+    }
+    Ok(())
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+fn configure_notification_identity(
+    _app: &AppHandle,
+    _notification: &mut notify_rust::Notification,
+) -> Result<(), String> {
+    Ok(())
 }
 
 fn notification_label(value: &str, fallback: &str) -> String {
@@ -487,5 +577,21 @@ mod tests {
             notification_label("codex\u{202e}gpj.exe\u{202c}", "An agent"),
             "codexgpj.exe"
         );
+    }
+
+    #[test]
+    fn only_notification_activation_routes_to_the_inbox() {
+        assert!(notification_opens_inbox(
+            &notify_rust::NotificationResponse::Default
+        ));
+        assert!(notification_opens_inbox(
+            &notify_rust::NotificationResponse::Action(OPEN_INBOX_ACTION.into())
+        ));
+        assert!(!notification_opens_inbox(
+            &notify_rust::NotificationResponse::Action("something_else".into())
+        ));
+        assert!(!notification_opens_inbox(
+            &notify_rust::NotificationResponse::Closed(notify_rust::CloseReason::Dismissed)
+        ));
     }
 }

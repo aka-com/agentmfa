@@ -276,7 +276,7 @@ async fn the_event_stream_connects_and_carries_changes() {
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
     let (state_tx, mut state_rx) = tokio::sync::mpsc::unbounded_channel();
     let backend = h.backend.clone();
-    let task = tokio::spawn(aka_client::events::subscribe(
+    let task = tokio::spawn(aka_client::events::subscribe_request_surface(
         backend,
         move |event| {
             let _ = event_tx.send(event);
@@ -291,6 +291,10 @@ async fn the_event_stream_connects_and_carries_changes() {
         .unwrap()
         .unwrap();
     assert_eq!(state, LinkState::Connected);
+    assert!(
+        h._broker.manage_bus().has_approval_surface(),
+        "the desktop event stream advertises its request inbox"
+    );
 
     // A fresh client (no Last-Event-ID) gets a server-driven resync first.
     let first = tokio::time::timeout(std::time::Duration::from_secs(5), event_rx.recv())
@@ -317,4 +321,137 @@ async fn the_event_stream_connects_and_carries_changes() {
     }
     assert!(saw_activity);
     task.abort();
+    let _ = task.await;
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while h._broker.manage_bus().has_approval_surface() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("dropping the response stream releases its surface lease");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_passive_event_observer_does_not_claim_an_approval_surface() {
+    let h = harness().await;
+    let (state_tx, mut state_rx) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(aka_client::events::subscribe(
+        h.backend.clone(),
+        |_| {},
+        move |state| {
+            let _ = state_tx.send(state);
+        },
+    ));
+
+    let state = tokio::time::timeout(std::time::Duration::from_secs(5), state_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(state, LinkState::Connected);
+    assert!(
+        !h._broker.manage_bus().has_approval_surface(),
+        "using the generic event API must remain observer-only"
+    );
+
+    task.abort();
+    let _ = task.await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_surface_remains_compatible_with_a_legacy_broker() {
+    async fn legacy_events() -> axum::response::sse::Sse<
+        impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+    > {
+        let event = axum::response::sse::Event::default()
+            .json_data(&ManageEvent::Resync)
+            .unwrap();
+        axum::response::sse::Sse::new(futures::stream::iter([Ok(event)]))
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let app = axum::Router::new()
+        .route("/v1/manage/events", axum::routing::get(legacy_events))
+        .route(
+            "/v1/manage/whoami",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({ "ok": true, "version": "legacy" }))
+            }),
+        );
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let backend = Arc::new(RemoteBackend::new(
+        RemoteConfig::new(&base, "akamgr_legacy").unwrap(),
+    ));
+    let (state_tx, mut state_rx) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(aka_client::events::subscribe_request_surface(
+        backend,
+        |_| {},
+        move |state| {
+            let _ = state_tx.send(state);
+        },
+    ));
+
+    let state = tokio::time::timeout(std::time::Duration::from_secs(5), state_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(state, LinkState::Connected);
+
+    task.abort();
+    let _ = task.await;
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stripped_surface_headers_do_not_silently_degrade_a_modern_broker() {
+    async fn stripped_events() -> axum::response::sse::Sse<
+        impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+    > {
+        axum::response::sse::Sse::new(futures::stream::pending())
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let app = axum::Router::new()
+        .route("/v1/manage/events", axum::routing::get(stripped_events))
+        .route(
+            "/v1/manage/whoami",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({
+                    "ok": true,
+                    "capabilities": [aka_api::APPROVAL_SURFACE_CAPABILITY],
+                }))
+            }),
+        );
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let backend = Arc::new(RemoteBackend::new(
+        RemoteConfig::new(&base, "akamgr_modern").unwrap(),
+    ));
+    let (state_tx, mut state_rx) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(aka_client::events::subscribe_request_surface(
+        backend,
+        |_| {},
+        move |state| {
+            let _ = state_tx.send(state);
+        },
+    ));
+
+    let state = tokio::time::timeout(std::time::Duration::from_secs(5), state_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let LinkState::Disconnected { message } = state else {
+        panic!("a stripped capability negotiation must not report connected");
+    };
+    assert!(message.contains("proxy may have removed"), "{message}");
+
+    task.abort();
+    let _ = task.await;
+    server.abort();
+    let _ = server.await;
 }

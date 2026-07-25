@@ -21,7 +21,6 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
-use futures::Stream;
 use serde_json::json;
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -125,6 +124,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/whoami", get(whoami))
         .route("/events", get(events))
+        .route("/approval-surfaces/{id}", put(heartbeat_approval_surface))
         .route("/secrets", get(list_secrets).post(add_secret))
         .route("/secrets/{id}", patch(edit_secret).delete(delete_secret))
         .route("/secrets/{id}/reveal-prefix", post(reveal_secret_prefix))
@@ -174,7 +174,29 @@ async fn whoami(State(state): State<AppState>, _authed: ManageAuthed) -> Respons
         "ok": true,
         "version": state.broker.config.version,
         "client_id": state.broker.identity.client_id(),
+        "capabilities": [aka_api::APPROVAL_SURFACE_CAPABILITY],
     }))
+}
+
+/// Renew a capability that was minted for a still-attached request-inbox
+/// event stream. Heartbeats cannot create capabilities: an id disappears
+/// when its stream is dropped, and an unknown id fails closed.
+async fn heartbeat_approval_surface(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+    Path(id): Path<Uuid>,
+) -> Response {
+    if state.broker.manage_bus().renew_approval_surface(&id) {
+        ok(json!({
+            "expires_in_ms": aka_api::APPROVAL_SURFACE_TTL_MS,
+        }))
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "reason": "approval_surface_not_attached" })),
+        )
+            .into_response()
+    }
 }
 
 /// The SSE change feed with reconnect resume. Each frame carries an
@@ -186,10 +208,37 @@ async fn events(
     State(state): State<AppState>,
     authed: ManageAuthed,
     headers: axum::http::HeaderMap,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+) -> Response {
     use crate::manage::{parse_event_id, ManageReplay, SeqEvent};
 
     let bus = state.broker.manage_bus().clone();
+    let approval_surface = headers
+        .get(aka_api::APPROVAL_SURFACE_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| *value == aka_api::APPROVAL_SURFACE_V1)
+        .map(|_| bus.lease_approval_surface());
+    let mut response_headers = axum::http::HeaderMap::new();
+    // Nginx otherwise commonly buffers tiny SSE frames, which would leave a
+    // desktop heartbeating a stream whose approval events it cannot see.
+    response_headers.insert(
+        axum::http::HeaderName::from_static("x-accel-buffering"),
+        axum::http::HeaderValue::from_static("no"),
+    );
+    response_headers.insert(
+        aka_api::APPROVAL_SURFACE_STATUS_HEADER,
+        axum::http::HeaderValue::from_static(if approval_surface.is_some() {
+            aka_api::APPROVAL_SURFACE_STATUS_ACTIVE
+        } else {
+            aka_api::APPROVAL_SURFACE_STATUS_OBSERVER
+        }),
+    );
+    if let Some(surface) = &approval_surface {
+        response_headers.insert(
+            aka_api::APPROVAL_SURFACE_ID_HEADER,
+            axum::http::HeaderValue::from_str(&surface.id().to_string())
+                .expect("UUID is a header-safe value"),
+        );
+    }
     // Subscribe *before* asking for replay so nothing slips through the gap
     // between the ring snapshot and going live; live events at or below the
     // replayed head are then deduped by seq.
@@ -230,10 +279,17 @@ async fn events(
         epoch: String,
         identity: std::sync::Arc<crate::identity::IdentityStore>,
         token: Zeroizing<String>,
+        // Present only when the authenticated client explicitly promised a
+        // user-facing request inbox. Its Drop releases capability as soon as
+        // the response stream goes away.
+        _approval_surface: Option<crate::manage::ApprovalSurfaceLease>,
         revalidate: tokio::time::Interval,
         // Highest seq already sent, so a live event the backlog covered is
         // not sent twice.
         delivered_head: u64,
+        // An immediate comment proves the response body is not being
+        // buffered before the desktop activates its capability lease.
+        ready_first: bool,
         resync_first: bool,
     }
     let init = StreamState {
@@ -242,8 +298,10 @@ async fn events(
         epoch,
         identity: state.broker.identity.clone(),
         token: authed.token,
+        _approval_surface: approval_surface,
         revalidate: tokio::time::interval(std::time::Duration::from_secs(1)),
         delivered_head,
+        ready_first: true,
         resync_first,
     };
 
@@ -254,6 +312,9 @@ async fn events(
         // an approval surface.
         if st.identity.verify_manage(&st.token).is_err() {
             return None;
+        }
+        if std::mem::take(&mut st.ready_first) {
+            return Some((Ok::<_, Infallible>(Event::default().comment("ready")), st));
         }
         // A resync marker leads, carrying the current head id so the client
         // has a baseline to resume from next time.
@@ -317,7 +378,11 @@ async fn events(
             return Some((Ok(sse), st));
         }
     });
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    (
+        response_headers,
+        Sse::new(stream).keep_alive(KeepAlive::default()),
+    )
+        .into_response()
 }
 
 /* ------------------------------- secrets ---------------------------------- */

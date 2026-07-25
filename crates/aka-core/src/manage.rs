@@ -404,7 +404,41 @@ pub struct ManageBus {
     tx: tokio::sync::broadcast::Sender<SeqEvent>,
     seq: std::sync::atomic::AtomicU64,
     ring: std::sync::Mutex<std::collections::VecDeque<SeqEvent>>,
+    approval_surfaces: std::sync::Mutex<std::collections::HashMap<Uuid, ApprovalSurfaceExpiry>>,
     epoch: String,
+}
+
+/// A request surface has to heartbeat over a separate authenticated request
+/// to renew this lease. The timeout is deliberately much shorter than an
+/// approval's deadline: a frozen client or black-holed response stream must
+/// stop making new traffic wait for a UI that is no longer responsive.
+const APPROVAL_SURFACE_TTL: std::time::Duration =
+    std::time::Duration::from_millis(aka_api::APPROVAL_SURFACE_TTL_MS);
+
+struct ApprovalSurfaceExpiry {
+    monotonic: std::time::Instant,
+    wall: chrono::DateTime<chrono::Utc>,
+}
+
+/// Capability lease held by an authenticated manage-event stream that
+/// promises it can surface and answer requests. Dropping the stream releases
+/// it immediately; expiration is a backstop for suspended or wedged tasks.
+pub struct ApprovalSurfaceLease {
+    bus: Arc<ManageBus>,
+    id: Uuid,
+}
+
+impl ApprovalSurfaceLease {
+    /// Broker-minted identifier the attached client must heartbeat.
+    pub fn id(&self) -> Uuid {
+        self.id
+    }
+}
+
+impl Drop for ApprovalSurfaceLease {
+    fn drop(&mut self) {
+        self.bus.approval_surfaces.lock().unwrap().remove(&self.id);
+    }
 }
 
 impl Default for ManageBus {
@@ -423,6 +457,7 @@ impl ManageBus {
             tx,
             seq: std::sync::atomic::AtomicU64::new(0),
             ring: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            approval_surfaces: std::sync::Mutex::new(std::collections::HashMap::new()),
             epoch,
         }
     }
@@ -462,12 +497,64 @@ impl ManageBus {
         self.tx.subscribe()
     }
 
-    /// Whether a live management client is attached and can receive a prompt.
-    ///
-    /// The event is still retained in the replay ring when nobody is attached,
-    /// but a replay cannot answer a call that must fail closed now.
-    pub fn has_subscribers(&self) -> bool {
-        self.tx.receiver_count() > 0
+    /// Register an authenticated event stream that explicitly advertised a
+    /// user-facing request inbox. An ordinary SSE receiver is only an
+    /// observer and must not make confirmed traffic wait. Registration alone
+    /// is inactive; the client must complete its first heartbeat.
+    pub fn lease_approval_surface(self: &Arc<Self>) -> ApprovalSurfaceLease {
+        self.lease_approval_surface_for(std::time::Duration::ZERO)
+    }
+
+    fn lease_approval_surface_for(
+        self: &Arc<Self>,
+        ttl: std::time::Duration,
+    ) -> ApprovalSurfaceLease {
+        let id = Uuid::new_v4();
+        self.insert_approval_surface(id, ttl);
+        ApprovalSurfaceLease {
+            bus: self.clone(),
+            id,
+        }
+    }
+
+    fn expiry_after(ttl: std::time::Duration) -> ApprovalSurfaceExpiry {
+        let wall_ttl =
+            chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::seconds(15));
+        ApprovalSurfaceExpiry {
+            monotonic: std::time::Instant::now() + ttl,
+            wall: chrono::Utc::now() + wall_ttl,
+        }
+    }
+
+    fn insert_approval_surface(&self, id: Uuid, ttl: std::time::Duration) {
+        self.approval_surfaces
+            .lock()
+            .unwrap()
+            .insert(id, Self::expiry_after(ttl));
+    }
+
+    /// Renew an attached request surface after a client-originated
+    /// heartbeat. A guessed or stale id cannot create capability by itself.
+    pub fn renew_approval_surface(&self, id: &Uuid) -> bool {
+        let mut surfaces = self.approval_surfaces.lock().unwrap();
+        let Some(expiry) = surfaces.get_mut(id) else {
+            return false;
+        };
+        *expiry = Self::expiry_after(APPROVAL_SURFACE_TTL);
+        true
+    }
+
+    /// Whether a currently leased management client can receive and display
+    /// a prompt. Both clocks must still be live: wall time closes the gap on
+    /// systems whose monotonic clock pauses during suspend.
+    pub fn has_approval_surface(&self) -> bool {
+        let monotonic_now = std::time::Instant::now();
+        let wall_now = chrono::Utc::now();
+        self.approval_surfaces
+            .lock()
+            .unwrap()
+            .values()
+            .any(|expiry| expiry.monotonic > monotonic_now && expiry.wall > wall_now)
     }
 
     /// Decide what to send a (re)connecting client. `last` is the parsed
@@ -585,10 +672,10 @@ impl crate::events::BrokerEvents for FanoutEvents {
         &self,
         pending: &crate::approvals::PendingApproval,
     ) -> crate::events::ApprovalHandling {
-        // A live remote management client is itself a surface capable of
-        // answering. Snapshot that before publishing: a receiver that arrives
-        // only after the event cannot have shown this prompt synchronously.
-        let remote_surface = self.bus.has_subscribers();
+        // Only a management stream that explicitly leased the request-inbox
+        // capability can answer. Passive SSE observers still receive the
+        // event, but cannot make traffic wait for a UI they do not have.
+        let remote_surface = self.bus.has_approval_surface();
         self.bus.emit(aka_api::ManageEvent::ApprovalsChanged);
         match self.inner.approval_requested(pending) {
             crate::events::ApprovalHandling::Unavailable if remote_surface => {
@@ -1222,6 +1309,36 @@ mod tests {
     use crate::types::ConnectionConfig;
     use crate::vault::MemoryVault;
     use zeroize::Zeroizing;
+
+    #[test]
+    fn only_explicit_request_surfaces_hold_approval_capability() {
+        let bus = Arc::new(ManageBus::new());
+        let _observer = bus.subscribe();
+        assert!(
+            !bus.has_approval_surface(),
+            "a passive event observer must not park confirmed traffic"
+        );
+
+        let surface = bus.lease_approval_surface();
+        assert!(
+            !bus.has_approval_surface(),
+            "attachment is inactive until the client heartbeats"
+        );
+        assert!(bus.renew_approval_surface(&surface.id()));
+        assert!(bus.has_approval_surface());
+        drop(surface);
+        assert!(!bus.has_approval_surface());
+    }
+
+    #[test]
+    fn request_surface_leases_expire_without_renewal() {
+        let bus = Arc::new(ManageBus::new());
+        let surface = bus.lease_approval_surface_for(std::time::Duration::from_millis(1));
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        assert!(!bus.has_approval_surface());
+        assert!(bus.renew_approval_surface(&surface.id()));
+        assert!(bus.has_approval_surface());
+    }
 
     async fn backend(dir: &tempfile::TempDir) -> LocalBackend {
         let broker = Broker::new(

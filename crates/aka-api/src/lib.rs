@@ -12,6 +12,28 @@
 
 use serde::{Deserialize, Serialize};
 
+/// An authenticated manage-event stream carrying this header promises that
+/// it has a user-facing request inbox and can bring pending requests to the
+/// user's attention. Passive SSE observers deliberately omit it.
+pub const APPROVAL_SURFACE_HEADER: &str = "x-aka-approval-surface";
+/// Versioned value for [`APPROVAL_SURFACE_HEADER`]. Unknown values are
+/// treated as observers so adding future surface protocols stays fail-closed.
+pub const APPROVAL_SURFACE_V1: &str = "request-inbox-v1";
+/// Entry in `/v1/manage/whoami.capabilities` that distinguishes a legacy
+/// broker from a proxy that removed the surface-negotiation response.
+pub const APPROVAL_SURFACE_CAPABILITY: &str = "request_surface_v1";
+/// Response header acknowledging how a manage-event stream was classified.
+pub const APPROVAL_SURFACE_STATUS_HEADER: &str = "x-aka-approval-surface-status";
+pub const APPROVAL_SURFACE_STATUS_ACTIVE: &str = "active";
+pub const APPROVAL_SURFACE_STATUS_OBSERVER: &str = "observer";
+/// Response header carrying the broker-minted lease identifier that an
+/// active request surface must heartbeat.
+pub const APPROVAL_SURFACE_ID_HEADER: &str = "x-aka-approval-surface-id";
+/// A live surface renews every five seconds; the broker allows three missed
+/// heartbeats before new confirmed traffic fails closed.
+pub const APPROVAL_SURFACE_HEARTBEAT_MS: u64 = 5_000;
+pub const APPROVAL_SURFACE_TTL_MS: u64 = 15_000;
+
 /// A connection field whose authoritative validation failed. Keeping this
 /// structured lets desktop clients attach the error to the relevant input
 /// without parsing human-readable error strings.

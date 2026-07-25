@@ -185,6 +185,17 @@ test('the Activity Log shows live sessions independently of audit filters', asyn
   assert.match(activity, /\{liveSessions\}\s*<div className="act-filters">/);
 });
 
+test('the Inbox ticks its second-level countdowns while requests wait', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+  const secondTicker = app.match(
+    /setInterval\(\(\) => \{\s*if \(state\.sheet\?\.kind === 'approval'([\s\S]*?)\}, 1000\);/,
+  )?.[1];
+
+  assert.ok(secondTicker, 'the one-second countdown interval is present');
+  assert.match(secondTicker, /state\.tab === 'inbox'/);
+  assert.match(secondTicker, /activeRequestCount\(state\.approvals, state\.elicitations\) > 0/);
+});
+
 test('the SSH endpoint field includes the configured ssh invocation', async () => {
   const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
   const endpointStrip = app.match(

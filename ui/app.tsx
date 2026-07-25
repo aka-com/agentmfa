@@ -6165,8 +6165,13 @@ async function boot() {
   }, 60000);
   // Approval deadlines are measured in seconds; keep the visible countdown
   // honest while the dialog is open instead of freezing at its first paint.
+  // The Inbox's active cards render the same countdowns, so it ticks too
+  // while something is waiting; its terminal history only needs the minute
+  // interval above.
   setInterval(() => {
-    if (state.sheet?.kind === 'approval') render();
+    if (state.sheet?.kind === 'approval'
+        || (state.tab === 'inbox' && !state.sheet && !state.menuOpen
+          && activeRequestCount(state.approvals, state.elicitations) > 0)) render();
   }, 1000);
   // Live updates from the core.
   await listen('aka://broker-changed', async (ev) => {
