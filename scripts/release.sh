@@ -64,8 +64,8 @@ env -u APPLE_ID -u APPLE_PASSWORD -u APPLE_TEAM_ID \
     bash "$script_dir/build.sh"
 
 bundle_dir="$repo_root/src-tauri/target/universal-apple-darwin/release/bundle"
-app="$bundle_dir/macos/AKA Desktop.app"
-dmg="$(ls "$bundle_dir"/dmg/AKA_Desktop_*.dmg)"
+app="$bundle_dir/macos/AgentMFA.app"
+dmg="$(ls "$bundle_dir"/dmg/AgentMFA_*.dmg)"
 
 # Notarizing the DMG covers the nested .app; staple both so each artifact
 # passes Gatekeeper offline whether distributed as a DMG or a bare .app.
