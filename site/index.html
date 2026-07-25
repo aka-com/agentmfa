@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="description" content="AgentMFA — secure access for AI agents. Connect your agents to databases, servers, and APIs without exposing secrets.">
-<meta name="theme-color" content="#171512">
+<meta name="theme-color" content="#f6f4ef">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="AgentMFA">
 <meta property="og:title" content="AgentMFA — Secure access for AI agents">
@@ -24,8 +24,8 @@
 <script>
 (function(){
   try {
-    if (localStorage.getItem("mt-theme") === "light")
-      document.documentElement.setAttribute("data-theme", "light");
+    if (localStorage.getItem("mt-theme") === "dark")
+      document.documentElement.removeAttribute("data-theme");
   } catch (e) {}
 })();
 </script>
