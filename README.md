@@ -146,3 +146,7 @@ which discovers the broker and its key automatically.
 
 To build the desktop app, run the test suites, or iterate on the UI
 against a mock broker, see [DEVELOPING.md](DEVELOPING.md).
+
+## License
+
+AgentMFA is available under the [MIT License](LICENSE).
