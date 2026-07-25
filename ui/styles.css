@@ -46,14 +46,25 @@
   --brand-openai-bg: rgba(16, 163, 127, .12);
   --brand-openai-ink: #087a60;
 
-  /* per-kind tints: muted washes that let a mixed tool list sort itself
-     visually (MCP app / database / SSH / plain API) without grouping it */
-  --kind-mcp-ink: #557a18;
-  --kind-mcp-wash: rgba(116, 168, 38, .12);
-  --kind-ssh-ink: #0f8a7a;
-  --kind-ssh-wash: rgba(20, 160, 140, .12);
-  --kind-api-ink: #b05c14;
-  --kind-api-wash: rgba(240, 140, 60, .12);
+  /* per-kind tints: one hue per kind (MCP app / database / SSH /
+     stream / plain API), carried at wash strength so a mixed tool list sorts
+     itself visually without any row shouting. The family is low-chroma jewel
+     tones — indigo, steel, rust, plum — with one deliberate exception: SSH
+     keeps a bright mint, so the kind that hands an agent a shell is the one
+     hue that catches the eye. Five hues have to stay apart from each other at
+     12% alpha and from the semantic colors above (blue accent, red danger,
+     amber warning, green ok); each ink is darkened off its source hue to
+     clear 4.5:1 on its own wash. */
+  --kind-mcp-ink: #4a4ec4;
+  --kind-mcp-wash: rgba(88, 92, 220, .10);
+  --kind-db-ink: #2a6f9e;
+  --kind-db-wash: rgba(50, 130, 180, .12);
+  --kind-ssh-ink: #0e9b78;
+  --kind-ssh-wash: rgba(47, 208, 160, .14);
+  --kind-api-ink: #a8541f;
+  --kind-api-wash: rgba(190, 100, 40, .12);
+  --kind-ws-ink: #8a3f7a;
+  --kind-ws-wash: rgba(170, 80, 150, .12);
 
   /* surfaces */
   --surface: rgba(246, 246, 249, 0.98);
@@ -843,12 +854,16 @@
     --brand-claude-ink: #ef9a7d;
     --brand-openai-bg: rgba(82,207,172,.16);
     --brand-openai-ink: #72d9bb;
-    --kind-mcp-ink: #b8dc78;
-    --kind-mcp-wash: rgba(132,190,54,.14);
-    --kind-ssh-ink: #6fe0cd;
-    --kind-ssh-wash: rgba(45,212,191,.13);
-    --kind-api-ink: #f8b184;
-    --kind-api-wash: rgba(240,136,62,.14);
+    --kind-mcp-ink: #a3a6ff;
+    --kind-mcp-wash: rgba(88,92,220,.20);
+    --kind-db-ink: #8ec4e8;
+    --kind-db-wash: rgba(50,130,180,.18);
+    --kind-ssh-ink: #4fe0b8;
+    --kind-ssh-wash: rgba(47,208,160,.16);
+    --kind-api-ink: #e8a077;
+    --kind-api-wash: rgba(190,100,40,.18);
+    --kind-ws-ink: #dfa0d0;
+    --kind-ws-wash: rgba(170,80,150,.18);
 
     --surface: rgba(30,30,36,.98);
     --main-surface: var(--surface);
@@ -1004,10 +1019,15 @@
 .cc-dot.ok { background: var(--ok-solid); }
 .cc-dot.warn { background: var(--warning-dot); }
 .cc-dot.off { background: var(--muted-2); opacity: .55; }
+/* Databases used to borrow the interactive accent; they now carry their own
+   blue so the accent keeps meaning "you can click this". Streams used to fall
+   through to the default gray chip, which read as switched-off next to a live
+   row — they get cyan. */
 .cat-ico.kind-mcp { color: var(--kind-mcp-ink); background: var(--kind-mcp-wash); }
-.cat-ico.kind-db { color: var(--accent-ink); background: var(--accent-wash); }
+.cat-ico.kind-db { color: var(--kind-db-ink); background: var(--kind-db-wash); }
 .cat-ico.kind-ssh { color: var(--kind-ssh-ink); background: var(--kind-ssh-wash); }
 .cat-ico.kind-api { color: var(--kind-api-ink); background: var(--kind-api-wash); }
+.cat-ico.kind-ws { color: var(--kind-ws-ink); background: var(--kind-ws-wash); }
 
 /* ---- flat tools list (steady state) ----------------------------------- */
 /* One row per connection; the catalog waits behind "+ Add tool". */
