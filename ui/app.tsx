@@ -46,6 +46,7 @@ import {
 } from '/src/broker';
 import { sameBrokerScope } from '/src/broker-scope';
 import { activityIdentity } from '/src/activity';
+import { APP_VERSION } from '/src/version';
 import type { HostKeyCandidate } from '/src/connection-input';
 import type {
   ActivityEntry,
@@ -2050,6 +2051,7 @@ function MainWindow(): ReactNode {
             <div className="dw-settings">
               {!takeover && state.menuOpen && (
                 <div className="settings-menu">
+                  <div className="menu-version">Version {APP_VERSION}</div>
                   <button className="menu-item" data-act="mode-tray">
                     <Icon markup={ICONS.menubar} /> Minimize to menu bar
                   </button>

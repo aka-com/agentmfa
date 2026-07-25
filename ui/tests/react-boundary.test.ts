@@ -184,6 +184,35 @@ test('Custom WebSocket uses the Configure catalog action', async () => {
   assert.match(app, /\['mcp', 'http', 'websocket'\]\.includes\(entry\.id\)/);
 });
 
+test('the settings menu shows the build version above its first item', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+
+  // Plain div, ahead of the first action: a clickable row here would read as
+  // an action and steal a tab stop from the two that are.
+  assert.match(
+    app,
+    /<div className="settings-menu">\s*<div className="menu-version">Version \{APP_VERSION\}<\/div>\s*<button className="menu-item"/,
+  );
+  assert.doesNotMatch(app, /<button[^>]*menu-version/);
+
+  const styles = await readFile(new URL('../styles.css', import.meta.url), 'utf8');
+  const version = styles.match(/\.menu-version\{([^}]*)\}/)?.[1];
+
+  assert.ok(version, 'settings menu version styles are present');
+  assert.match(version, /color: var\(--muted\)/);
+  assert.doesNotMatch(styles, /\.menu-version:hover/);
+});
+
+test('the settings menu overhangs the sidebar rather than matching its width', async () => {
+  const styles = await readFile(new URL('../styles.css', import.meta.url), 'utf8');
+  // The narrow-rail override earlier in the file also selects .settings-menu;
+  // this is the base rule, the one that sizes the popover in the wide layout.
+  const menu = styles.match(/\.settings-menu\{\s*position: absolute;([^}]*)\}/)?.[1];
+
+  assert.ok(menu, 'settings menu styles are present');
+  assert.match(menu, /right: -70px/);
+});
+
 test('connection-string credentials are masked with asterisks', async () => {
   const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
   const masker = app.match(/function maskedEndpoint\(address: string\): string \{([\s\S]*?)\}/)?.[1];

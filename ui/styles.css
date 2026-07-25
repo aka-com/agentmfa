@@ -320,11 +320,19 @@
 /* The sidebar footer pairs the appearance toggle with the settings gear. */
 .dw-settings{ position: relative; display: flex; align-items: center; gap: 2px; }
   .gear-btn, .theme-btn{ justify-content: center; }
+  /* Anchored to the gear's left edge and allowed to overhang the sidebar on
+     the right, so the popover is wider than the 156px rail it hangs off. */
   .settings-menu{
-  position: absolute; left: 0; right: -40px; bottom: calc(100% + 4px); z-index: 12;
+  position: absolute; left: 0; right: -70px; bottom: calc(100% + 4px); z-index: 12;
   display: flex; flex-direction: column; gap: 2px; padding: 4px;
   background: var(--panel); border: 1px solid var(--line-mid); border-radius: 9px;
   box-shadow: 0 10px 28px rgba(10,15,40,.22);
+}
+  /* Build version, above the first action. Deliberately not a .menu-item: it
+     is a hint, so no hover, no pointer, and nothing to click or focus. */
+  .menu-version{
+  padding: 4px 9px 3px; font-size: 11.5px; color: var(--muted);
+  cursor: default; -webkit-user-select: none; user-select: none;
 }
   .menu-item{
   display: flex; align-items: center; gap: 8px;
