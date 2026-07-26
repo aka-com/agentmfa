@@ -187,9 +187,13 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
                             .map(str::to_string);
                         let id = body.0["id"].clone();
                         let result = match body.0["method"].as_str() {
+                            // A conforming server declares every capability it
+                            // offers; the sidecar only calls `tools/list` when
+                            // `tools` is advertised, so omitting it here would
+                            // make this upstream contribute nothing.
                             Some("initialize") => json!({
                                 "protocolVersion": "2025-06-18",
-                                "capabilities": {},
+                                "capabilities": {"tools": {}},
                                 "serverInfo": {"name": "notes", "version": "1.0.0"},
                             }),
                             Some("tools/list") => json!({
