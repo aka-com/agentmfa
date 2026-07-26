@@ -180,7 +180,7 @@ npm run sandbox:reset   # delete containers, volumes, and SSH identities</code><
     <li><b>“cannot reach the Docker daemon”</b> — start Docker Desktop and
         rerun <code>npm run sandbox:up</code>.</li>
     <li><b>Port already in use</b> — export
-        <code>SANDBOX_HTTP_PORT</code>, <code>SANDBOX_WS_PORT</code>,
+        <code>SANDBOX_HTTP_PORT</code>, <code>SANDBOX_ALT_PORT</code>,
         <code>SANDBOX_PG_PORT</code>, or <code>SANDBOX_SSH_PORT</code>
         with a free port, then rerun. Keep the variables exported so
         <code>sandbox:status</code> prints matching values.</li>

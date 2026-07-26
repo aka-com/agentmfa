@@ -618,7 +618,11 @@ async fn resource_metadata_passes_but_reads_are_confirmed() {
     }))
     .await;
     assert_eq!(status, 200);
-    assert_eq!(user.prompts(), 0, "resource metadata must not raise prompts");
+    assert_eq!(
+        user.prompts(),
+        0,
+        "resource metadata must not raise prompts"
+    );
 
     // Reading a resource is real data access: it is confirmed like a call.
     let (status, _) = rpc(json!({

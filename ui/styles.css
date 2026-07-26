@@ -63,8 +63,6 @@
   --kind-ssh-wash: rgba(47, 208, 160, .14);
   --kind-api-ink: #a8541f;
   --kind-api-wash: rgba(190, 100, 40, .12);
-  --kind-ws-ink: #8a3f7a;
-  --kind-ws-wash: rgba(170, 80, 150, .12);
 
   /* surfaces */
   --surface: rgba(246, 246, 249, 0.98);
@@ -101,7 +99,6 @@
   /* connection-type badges */
   --b-api-bg: #dcecff;        --b-api-ink: #0b62d6;
   --b-pg-bg: #dfeef4;         --b-pg-ink: #2b6a8f;
-  --b-ws-bg: #efe4fb;         --b-ws-ink: #7d3fc0;
   --b-ssh-bg: #e2f3e6;        --b-ssh-ink: #2c7a45;
   --b-agent-bg: rgba(0, 0, 0, .07); --b-agent-ink: #555;
 }*{ box-sizing: border-box; margin: 0; padding: 0; }
@@ -686,7 +683,6 @@
   .badge{ display: inline-block; padding: 2px 8px; border-radius: 9px; font-size: 12px; font-weight: 600; white-space: nowrap; }
   .b-api{ background: var(--b-api-bg); color: var(--b-api-ink); }
   .b-pg{ background: var(--b-pg-bg); color: var(--b-pg-ink); }
-  .b-ws{ background: var(--b-ws-bg); color: var(--b-ws-ink); }
   .b-ssh{ background: var(--b-ssh-bg); color: var(--b-ssh-ink); }
   .val{ white-space: nowrap; text-align: right; }
   .val code{ font-size: 12px; letter-spacing: .04em; color: var(--ink-3); }
@@ -1045,8 +1041,6 @@
     --kind-ssh-wash: rgba(47,208,160,.16);
     --kind-api-ink: #e8a077;
     --kind-api-wash: rgba(190,100,40,.18);
-    --kind-ws-ink: #dfa0d0;
-    --kind-ws-wash: rgba(170,80,150,.18);
 
     --surface: rgba(30,30,36,.98);
     --main-surface: var(--surface);
@@ -1080,7 +1074,6 @@
 
     --b-api-bg: rgba(70,145,255,.20);   --b-api-ink: #8ec2ff;
     --b-pg-bg: rgba(90,170,210,.18);    --b-pg-ink: #93d2ee;
-    --b-ws-bg: rgba(165,105,240,.20);   --b-ws-ink: #cfadf7;
     --b-ssh-bg: rgba(80,190,120,.18);   --b-ssh-ink: #96dcae;
     --b-agent-bg: rgba(255,255,255,.10); --b-agent-ink: #b8b8c0;
 }
@@ -1214,7 +1207,6 @@
 .cat-ico.kind-db { color: var(--kind-db-ink); background: var(--kind-db-wash); }
 .cat-ico.kind-ssh { color: var(--kind-ssh-ink); background: var(--kind-ssh-wash); }
 .cat-ico.kind-api { color: var(--kind-api-ink); background: var(--kind-api-wash); }
-.cat-ico.kind-ws { color: var(--kind-ws-ink); background: var(--kind-ws-wash); }
 
 /* ---- flat tools list (steady state) ----------------------------------- */
 /* One row per connection; the catalog waits behind "+ Add tool". */

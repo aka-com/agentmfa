@@ -36,7 +36,7 @@ pub enum ElicitationHandling {
 }
 
 pub trait BrokerEvents: Send + Sync {
-    /// Live WS/PG session set changed.
+    /// Live session set changed.
     fn sessions_changed(&self) {}
 
     /// Registered agents changed (pair/revoke).

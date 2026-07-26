@@ -35,7 +35,7 @@ pub struct LocalRuntime {
     // stops restarting it. `None` when no sidecar script is installed.
     // Declared before the runtime it spawned its supervisor on.
     pub _sidecar: Option<aka_core::sidecar::Sidecar>,
-    // Keeps the daemon (control plane + WS/PG data planes) alive; dropping
+    // Keeps the daemon (control plane + PG data plane) alive; dropping
     // it aborts the listeners.
     pub _daemon: aka_core::daemon::DaemonHandle,
     // Keeps the broker's tokio runtime (daemon + executions) alive for the

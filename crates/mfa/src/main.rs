@@ -4,7 +4,7 @@
 //!   skill file, the same content the daemon serves, so the convention
 //!   layer can't drift from the daemon.
 //! - `mfa serve` runs the broker headless, so the whole control plane +
-//!   WS/PG data planes can be exercised without the desktop UI (useful for
+//!   the PG data plane can be exercised without the desktop UI (useful for
 //!   agent integration and CI).
 //! - `mfa secret add|list|rename|replace|rm` and
 //!   `mfa conn add|list|update|rename|rm|enable|disable|test` manage the
@@ -109,13 +109,13 @@ enum Command {
         /// tunnel address); advertised in discovery served over TCP.
         #[arg(long)]
         public_url: Option<String>,
-        /// Bind the WS/PG data planes and API direct endpoints to this
+        /// Bind the PG data plane and API direct endpoints to this
         /// address (e.g. 0.0.0.0 or a LAN IP) for remote agents, instead of
         /// loopback. These legs are plaintext — keep them on a trusted
         /// network behind your TLS/tunnel.
         #[arg(long)]
         data_plane_listen: Option<std::net::IpAddr>,
-        /// The host to put in returned DSNs / ws:// URLs — what a remote
+        /// The host to put in returned DSNs and endpoint URLs — what a remote
         /// agent dials (defaults to 127.0.0.1). Usually your broker host's
         /// LAN name or the tunnel address.
         #[arg(long)]
@@ -495,7 +495,7 @@ struct ConnAdd {
     #[arg(long)]
     port: Option<u16>,
     /// api: injection template, e.g. 'Authorization: Bearer {{KEY}}' — its
-    /// {{refs}} name the secrets. ws: optional header-line template
+    /// {{refs}} name the secrets.
     /// referencing exactly one secret (default: Authorization Bearer).
     #[arg(long)]
     template: Option<String>,
@@ -510,7 +510,7 @@ struct ConnAdd {
     /// first agent connection is pinned automatically.
     #[arg(long)]
     host_key_fingerprint: Option<String>,
-    /// pg/ws/ssh: name of the one bound secret (api connections derive
+    /// pg/ssh: name of the one bound secret (api connections derive
     /// theirs from the template).
     #[arg(long)]
     secret: Option<String>,
@@ -559,7 +559,6 @@ struct ConnUpdate {
     #[arg(long)]
     port: Option<u16>,
     /// api: injection template, e.g. 'Authorization: Bearer {{KEY}}'.
-    /// ws: header-line template referencing exactly one secret.
     #[arg(long)]
     template: Option<String>,
     /// pg: database name.
@@ -573,7 +572,7 @@ struct ConnUpdate {
     /// agent connection is pinned again.
     #[arg(long)]
     host_key_fingerprint: Option<String>,
-    /// pg/ws/ssh: rebind to this secret (api connections derive theirs
+    /// pg/ssh: rebind to this secret (api connections derive theirs
     /// from the template).
     #[arg(long)]
     secret: Option<String>,
@@ -1054,7 +1053,7 @@ fn cmd_conn_add(args: ConnAdd) {
         Err(e) => die(e),
     };
     let managed = management_backend(args.root.clone(), args.broker.clone());
-    // pg/ws/ssh bind exactly one secret by name; api derives its secrets
+    // pg/ssh bind at most one secret by name; api derives its secrets
     // from the template's refs inside add_connection.
     let secrets = match (&args.secret, args.kind) {
         (_, ConnKind::Api) => Vec::new(),
@@ -1353,7 +1352,7 @@ fn cmd_conn_update(args: ConnUpdate) {
         Ok(config) => config,
         Err(e) => die(e),
     };
-    // api derives its secrets from the template; pg/ws/ssh rebind when
+    // api derives its secrets from the template; pg/ssh rebind when
     // --secret is given and keep the current binding otherwise.
     let secrets = match (&args.secret, dto.kind.as_str()) {
         (_, "api") => Vec::new(),
@@ -2147,7 +2146,7 @@ fn cmd_serve(args: ServeArgs) {
     if let Some(addr) = daemon.tcp_addr {
         eprintln!("  TCP control plane on {addr} (put TLS in front; /v1/pair is not served there)");
         if let Some(host) = &advertise_host {
-            eprintln!("  data planes advertised to agents as {host} (WS/PG legs are plaintext)");
+            eprintln!("  data planes advertised to agents as {host} (the PG leg is plaintext)");
         }
         match &public_url {
             Some(url) => eprintln!("  advertised to remote clients as {url}"),

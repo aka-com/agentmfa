@@ -16,7 +16,7 @@ use aka_core::paths::Paths;
 use aka_core::sessions::RedeemError;
 use aka_core::store::ConnectionSpec;
 use aka_core::types::{
-    ConfirmMode, ConfirmationMethod, Connection, ConnectionConfig, ConnectionKind,
+    ConfirmMode, ConfirmationMethod, Connection, ConnectionConfig, ConnectionKind, PgSslMode,
 };
 use aka_core::vault::MemoryVault;
 use zeroize::Zeroizing;
@@ -178,9 +178,7 @@ async fn key_rotation_is_confirmed_and_closes_live_sessions() {
     let (broker, _dir) = broker_with(events.clone()).await;
     let old_token = broker.identity.token();
     let conn = add_github(&broker);
-    let ticket = broker
-        .data_plane
-        .issue("claude-code", &conn);
+    let ticket = broker.data_plane.issue("claude-code", &conn);
     let session = broker
         .data_plane
         .redeem(&ticket)
@@ -1174,9 +1172,9 @@ async fn kinds_with_no_traffic_unit_cannot_be_confirmed() {
     let (broker, _dir) = broker_with(events.clone()).await;
     let token = broker
         .store
-        .add_secret("WS_TOKEN", Zeroizing::new("t".into()))
+        .add_secret("SSH_TOKEN", Zeroizing::new("t".into()))
         .unwrap();
-    let ws = broker
+    let ssh = broker
         .store
         .add_connection(ConnectionSpec {
             name: "prod-ssh".into(),
@@ -1195,10 +1193,10 @@ async fn kinds_with_no_traffic_unit_cannot_be_confirmed() {
     // no honest unit to ask about: the switch is refused rather than quietly
     // ignored.
     assert!(matches!(
-        broker.ui_set_confirm_mode(&ws.id, ConfirmMode::On),
+        broker.ui_set_confirm_mode(&ssh.id, ConfirmMode::On),
         Err(CoreError::InvalidSetting(_))
     ));
-    assert_eq!(broker.access.confirm_mode(&ws.id), ConfirmMode::Off);
+    assert_eq!(broker.access.confirm_mode(&ssh.id), ConfirmMode::Off);
 }
 
 #[tokio::test]
@@ -1236,6 +1234,119 @@ async fn retargeting_a_tool_keeps_the_switch_but_drops_its_open_window() {
     // the *old* destination, and does not.
     assert_eq!(broker.access.confirm_mode(&conn.id), ConfirmMode::On);
     assert_eq!(broker.approvals.window_remaining(&conn.id), None);
+}
+
+/// Retargeting is the loud capability change, but not the only one. Rebinding
+/// a tool to a different secret leaves its target alone and still invalidates
+/// every session running on the old credential.
+#[tokio::test]
+async fn rebinding_a_tools_secret_closes_its_live_sessions() {
+    let events = Arc::new(GateEvents {
+        allow: true,
+        confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    let first = broker
+        .store
+        .add_secret("PG_ONE", Zeroizing::new("one".into()))
+        .unwrap();
+    let second = broker
+        .store
+        .add_secret("PG_TWO", Zeroizing::new("two".into()))
+        .unwrap();
+    let pg_config = |secret| ConnectionSpec {
+        name: "warehouse".into(),
+        config: ConnectionConfig::Pg {
+            host: "db.example.com".into(),
+            port: 5432,
+            user: "reader".into(),
+            dbname: "analytics".into(),
+            sslmode: PgSslMode::VerifyFull,
+            trusted_ca_bundle_path: None,
+        },
+        secrets: vec![secret],
+    };
+    let conn = broker.store.add_connection(pg_config(first.id)).unwrap();
+
+    let ticket = broker.data_plane.issue("claude-code", &conn);
+    let session = broker
+        .data_plane
+        .redeem(&ticket)
+        .expect("redeem")
+        .start(ConnectionKind::Pg);
+    let closed = session.close_signal.clone();
+
+    broker
+        .ui_update_connection(&conn.id, pg_config(second.id))
+        .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), closed.notified())
+        .await
+        .expect("the session on the old credential must be closed");
+    // And the ticket it came from stops redeeming, so the agent cannot simply
+    // reopen inside the window it was already granted.
+    assert_eq!(
+        broker.data_plane.redeem(&ticket).err(),
+        Some(RedeemError::Expired)
+    );
+    session.finish("connection_changed");
+}
+
+/// Rotating a secret's *value* is the point at which the old one stops being
+/// trusted. A session already authenticated with it has to go too, or the
+/// rotation only takes effect for traffic that had not started yet.
+#[tokio::test]
+async fn rotating_a_secret_closes_the_sessions_of_every_tool_bound_to_it() {
+    let events = Arc::new(GateEvents {
+        allow: true,
+        confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    let secret = broker
+        .store
+        .add_secret("PG_PASSWORD", Zeroizing::new("before".into()))
+        .unwrap();
+    let conn = broker
+        .store
+        .add_connection(ConnectionSpec {
+            name: "warehouse".into(),
+            config: ConnectionConfig::Pg {
+                host: "db.example.com".into(),
+                port: 5432,
+                user: "reader".into(),
+                dbname: "analytics".into(),
+                sslmode: PgSslMode::VerifyFull,
+                trusted_ca_bundle_path: None,
+            },
+            secrets: vec![secret.id],
+        })
+        .unwrap();
+
+    let ticket = broker.data_plane.issue("claude-code", &conn);
+    let session = broker
+        .data_plane
+        .redeem(&ticket)
+        .expect("redeem")
+        .start(ConnectionKind::Pg);
+    let closed = session.close_signal.clone();
+
+    // A rename leaves the value alone, so it leaves the traffic alone.
+    broker
+        .ui_edit_secret(&secret.id, Some("PG_SECRET"), None)
+        .unwrap();
+    assert_eq!(broker.data_plane.sessions().len(), 1);
+
+    broker
+        .ui_edit_secret(&secret.id, None, Some(Zeroizing::new("after".into())))
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(1), closed.notified())
+        .await
+        .expect("the session on the rotated credential must be closed");
+    assert_eq!(
+        broker.data_plane.redeem(&ticket).err(),
+        Some(RedeemError::Expired)
+    );
+    session.finish("connection_changed");
 }
 
 #[tokio::test]

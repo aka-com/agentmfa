@@ -2,7 +2,7 @@
 //!
 //! Everything sensitive lives here: the secret store, the
 //! injection-template engine, the wiring table, the audit log, and the
-//! agent-facing daemon (control plane over a Unix domain socket; WS/PG data
+//! agent-facing daemon (control plane over a Unix domain socket; PG data
 //! planes on ephemeral loopback TCP).
 //!
 //! The crate is deliberately portable: everything builds and tests on any

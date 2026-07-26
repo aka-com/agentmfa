@@ -26,7 +26,7 @@ export interface AgentAuth {
 
 export interface BrokerConnection {
   name: string;
-  /** `http` | `pg` | `ssh` | `ws` — the broker's own type names. */
+  /** `http` | `pg` | `ssh` — the broker's own type names. */
   type: string;
   target: string;
   /** Control-plane path a call against this connection goes to. */

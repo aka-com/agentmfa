@@ -9,7 +9,7 @@
 //!   atomically with the rename;
 //! - deleting a secret still referenced by a connection is refused;
 //! - API connections' secret list is derived from their template's refs;
-//!   pg/ssh connections bind at most one secret; ws binds exactly one;
+//!   pg/ssh connections bind at most one secret;
 //! - a connection's type is fixed after creation.
 
 use std::sync::Arc;
@@ -91,15 +91,27 @@ struct IndexState {
 /// version may name one that has since been removed.
 const SUPPORTED_CONNECTION_KINDS: [&str; 3] = ["api", "pg", "ssh"];
 
+thread_local! {
+    /// What the last load dropped, as `name (kind)` per row.
+    ///
+    /// A `deserialize_with` hook cannot reach a sibling field, and losing a
+    /// user's configured tool is not a log-only event — it has to reach the
+    /// audit trail and, through it, the user. `Store::open_with_events`
+    /// deserializes and drains this on the same thread, in the same call.
+    static RETIRED_CONNECTIONS_DROPPED: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// Load connections, dropping any whose kind this build no longer supports.
 ///
 /// WebSocket support was removed, and an upgrading user's `index.json` may
 /// still list `"kind": "ws"` rows. Failing the whole deserialization would
 /// report the store as corrupt and refuse to open the vault — losing access to
 /// every *other* connection and secret over a feature that is simply gone. So
-/// a retired kind is dropped with a warning, while a record that is genuinely
-/// malformed still fails loudly: the two are told apart by whether the kind
-/// itself is one this build knows.
+/// a retired kind is dropped, while a record that is genuinely malformed still
+/// fails loudly: the two are told apart by whether the kind itself is one this
+/// build knows. What was dropped is left in [`RETIRED_CONNECTIONS_DROPPED`] for
+/// the caller to audit.
 fn connections_dropping_retired_kinds<'de, D>(deserializer: D) -> Result<Vec<Connection>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -113,6 +125,11 @@ where
             .and_then(|config| config.get("kind"))
             .and_then(serde_json::Value::as_str)
             .map(str::to_string);
+        let name = row
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unnamed")
+            .to_string();
         match serde_json::from_value::<Connection>(row) {
             Ok(connection) => connections.push(connection),
             Err(error) => {
@@ -122,10 +139,13 @@ where
                 if !retired {
                     return Err(D::Error::custom(error));
                 }
+                let kind = kind.as_deref().unwrap_or("unknown").to_string();
                 tracing::warn!(
-                    "dropping a {} connection: that connection type is no longer supported",
-                    kind.as_deref().unwrap_or("unknown")
+                    "dropping the {kind} connection {name:?}: that connection type is no \
+                     longer supported"
                 );
+                RETIRED_CONNECTIONS_DROPPED
+                    .with(|dropped| dropped.borrow_mut().push(format!("{name} ({kind})")));
             }
         }
     }
@@ -154,7 +174,7 @@ pub enum PinOutcome {
 pub struct ConnectionSpec {
     pub name: String,
     pub config: ConnectionConfig,
-    /// For pg/ssh: the optional single bound secret; ws binds one. Ignored for
+    /// For pg/ssh: the optional single bound secret. Ignored for
     /// api connections, whose secret list is derived from the template's refs.
     pub secrets: Vec<Uuid>,
 }
@@ -172,6 +192,9 @@ pub struct Store {
     /// grant can slide beyond its original 12-hour absolute lifetime. Never
     /// persisted.
     presence: Arc<PresenceCoordinator>,
+    /// Tools this build could not load because their kind was retired, as
+    /// `name (kind)`. Captured at open so the broker can audit the loss.
+    retired_connections_dropped: Vec<String>,
 }
 
 impl Store {
@@ -187,13 +210,19 @@ impl Store {
         integrity: Arc<StateIntegrity>,
     ) -> Result<Self> {
         paths.ensure()?;
+        RETIRED_CONNECTIONS_DROPPED.with(|dropped| dropped.borrow_mut().clear());
         // index.json is sealed: a file that fails verification
         // refuses to load rather than silently serving repointed bindings.
         let mut state: IndexState = match integrity.read_verified(&paths.index_file())? {
             Some(bytes) => serde_json::from_slice(&bytes)?,
             None => IndexState::default(),
         };
-        if migrate_legacy_pg_ca_bundle(&mut state) {
+        let retired_connections_dropped =
+            RETIRED_CONNECTIONS_DROPPED.with(|dropped| std::mem::take(&mut *dropped.borrow_mut()));
+        // Rewrite once when a retired row was dropped, so the record on disk
+        // matches what the broker is serving and the next open is a clean
+        // load rather than a repeat of the same warning.
+        if migrate_legacy_pg_ca_bundle(&mut state) || !retired_connections_dropped.is_empty() {
             integrity.write(&paths.index_file(), &serde_json::to_vec_pretty(&state)?)?;
         }
         Ok(Self {
@@ -203,7 +232,16 @@ impl Store {
             integrity,
             state: Mutex::new(state),
             presence: Arc::new(PresenceCoordinator::default()),
+            retired_connections_dropped,
         })
+    }
+
+    /// Tools discarded at load because this build no longer supports their
+    /// kind, as `name (kind)`. The broker audits these once at startup: a
+    /// configured tool vanishing from the list is the user's business, and a
+    /// `tracing` warning is not somewhere they will ever look.
+    pub fn retired_connections_dropped(&self) -> &[String] {
+        &self.retired_connections_dropped
     }
 
     /* ----------------------------- presence ------------------------------- */
@@ -1194,7 +1232,7 @@ fn validate_connection_name(name: &str) -> Result<()> {
 
 /// Validate the type-specific config and resolve the connection's bound
 /// secrets: API secret lists are derived from the template's refs; pg/ssh
-/// bind at most one secret, while ws binds exactly one.
+/// bind at most one secret.
 fn validate_config_and_bind_secrets(
     state: &IndexState,
     spec: &ConnectionSpec,
@@ -1369,7 +1407,6 @@ fn bind_optional_secret(state: &IndexState, spec: &ConnectionSpec) -> Result<Vec
     }
     Ok(spec.secrets.clone())
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -2257,6 +2294,11 @@ mod tests {
         .expect("a retired kind must not fail the whole load");
         assert_eq!(state.connections.len(), 1);
         assert_eq!(state.connections[0].name, "analytics");
+        // What was dropped is left for the caller, so the loss reaches the
+        // audit trail instead of only a `tracing` warning nobody reads.
+        let dropped =
+            RETIRED_CONNECTIONS_DROPPED.with(|dropped| std::mem::take(&mut *dropped.borrow_mut()));
+        assert_eq!(dropped, vec!["market-feed (ws)".to_string()]);
     }
 
     /// A record that is malformed for a kind this build *does* support is a

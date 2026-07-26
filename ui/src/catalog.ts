@@ -1,6 +1,6 @@
 // The tool catalog: the static registry behind the "Add tools" screen.
 //
-// Connections are stored by protocol (api/pg/ws/ssh); the catalog presents
+// Connections are stored by protocol (api/pg/ssh); the catalog presents
 // them as tools grouped into sections. Each entry either maps to a
 // connection type the broker serves today (`via: 'connection'`) or fronts
 // a built-in store (`via: 'builtin'` — the Keychain-backed saved

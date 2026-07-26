@@ -70,7 +70,7 @@ pub struct AuditEntry {
     pub confirmation: Option<ConfirmationMethod>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
-    /// Session byte counts for WS/PG sessions.
+    /// Session byte counts for data-plane sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bytes_up: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -65,7 +65,6 @@ export function clockTime(iso: string): string {
 export const TYPES = {
   api: { label: 'API', cls: 'b-api' },
   pg: { label: 'PG', cls: 'b-pg' },
-  ws: { label: 'WS', cls: 'b-ws' },
   ssh: { label: 'SSH', cls: 'b-ssh' },
 };
 

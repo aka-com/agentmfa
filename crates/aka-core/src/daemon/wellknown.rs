@@ -116,7 +116,7 @@ pub fn manifest_remote(
 /// The banner prepended to `/instructions` when served over TCP: the
 /// document below is written for same-machine use, and a network client
 /// needs its transport and auth guidance overridden up front.
-/// `data_plane_host` is the advertised WS/PG host when the operator serves
+/// `data_plane_host` is the advertised PG host when the operator serves
 /// the data planes beyond loopback (`--advertise-host`); `None` means the
 /// opens hand back broker-host-local addresses.
 pub fn remote_instructions_banner(
@@ -271,7 +271,7 @@ evicted, its key remains tombstoned and a retry returns
 `409 {{"reason": "outcome_not_replayable"}}` without executing again. Do not
 mint a new ID and repeat that operation automatically; reconcile its upstream
 effect or ask the user first.
-For WS/PG/SSH opens, replay returns the originally issued capability and does
+For PG/SSH opens, replay returns the originally issued capability and does
 not extend its lifetime. Retry the same `request_id` only during the returned
 `expires_in_seconds` window; after that, mint a fresh ID and submit a new open.
 
@@ -496,12 +496,12 @@ mod tests {
 
     #[test]
     fn remote_banner_reflects_the_data_plane_configuration() {
-        // Default: WS/PG/SSH opens are host-local and the banner says so.
+        // Default: PG/SSH opens are host-local and the banner says so.
         let text = remote_instructions_banner(Some("https://b.example.dev"), None);
         assert!(text.contains("broker-host-local addresses"));
         assert!(!text.contains("broker.lan"));
 
-        // With an advertised host, WS/PG are reachable and only SSH stays
+        // With an advertised host, PG is reachable and only SSH stays
         // host-local.
         let text = remote_instructions_banner(Some("https://b.example.dev"), Some("broker.lan"));
         assert!(text.contains("`broker.lan`"), "{text}");

@@ -4,7 +4,7 @@
 //!   unauthenticated discovery, globally rate limited;
 //! - `POST /v1/pair`, unauthenticated, globally rate limited, registered
 //!   immediately (no approval);
-//! - `GET /v1/connections`, `GET /v1/whoami`, `POST /v1/http` (+ the WS/PG
+//! - `GET /v1/connections`, `GET /v1/whoami`, `POST /v1/http` (+ the PG
 //!   opens added by later phases), authenticated with the shared broker
 //!   key, rate limited per client label.
 
@@ -292,14 +292,12 @@ impl FromRequestParts<AppState> for Authed {
 
 /* ------------------------------- server ---------------------------------- */
 
-/// A running daemon (control plane + WS bridge and PG proxy data planes);
-/// dropping the handle stops all of them.
+/// A running daemon (control plane plus the PG proxy data plane); dropping
+/// the handle stops both.
 pub struct DaemonHandle {
     pub socket_path: PathBuf,
     /// The bound TCP control-plane address, when `--listen` asked for one.
     pub tcp_addr: Option<std::net::SocketAddr>,
-    /// The WS bridge's ephemeral loopback port (tests need it; agents only
-    /// ever see it inside open responses).
     /// The PG proxy's ephemeral loopback port (tests need it; agents only
     /// ever see it inside open responses' DSNs).
     pub pg_proxy_port: u16,
@@ -331,7 +329,7 @@ pub struct ServeOptions {
     /// The URL remote clients reach the TCP listener at; advertised in
     /// TCP-served discovery documents.
     pub public_url: Option<String>,
-    /// Bind the WS/PG data-plane proxies and API direct endpoints to this
+    /// Bind the PG data-plane proxy and API direct endpoints to this
     /// address instead of loopback (for remote agents on the LAN). The
     /// credential legs on these are plaintext, so a non-loopback value must
     /// sit behind a trusted network.
@@ -520,7 +518,7 @@ pub async fn serve_with(broker: Arc<Broker>, options: ServeOptions) -> crate::Re
         if !bind.is_loopback() {
             tracing::warn!(
                 %bind,
-                "data planes bound to a non-loopback address; the WS/PG \
+                "data planes bound to a non-loopback address; the PG \
                  credential legs are plaintext — keep this on a trusted \
                  network behind TLS/tunnel"
             );
@@ -1668,8 +1666,6 @@ async fn proxy_mcp(State(state): State<AppState>, request: axum::extract::Reques
     }
 }
 
-/* ------------------------------ WS open ----------------------------------- */
-
 #[derive(Deserialize)]
 struct OpenBody {
     connection: String,
@@ -1678,7 +1674,6 @@ struct OpenBody {
     #[serde(default)]
     request_id: Option<String>,
 }
-
 
 /* ------------------------------ SSH open ---------------------------------- */
 
@@ -1852,7 +1847,7 @@ async fn post_pg_open(
     });
 
     // Executor: issue the ticket and hand back the password-less DSN.
-    // Unlike WS, nothing is dialed here, the proxy dials upstream at
+    // Nothing is dialed here; the proxy dials upstream at
     // redemption time. The ticket is NOT embedded in the DSN: returning
     // the two separately lets callers keep it out of ps-visible argv via
     // PGPASSWORD, while callers that accept the exposure for the ticket's
@@ -1862,10 +1857,7 @@ async fn post_pg_open(
         let conn = conn.clone();
         let client_label = client.clone();
         Box::pin(async move {
-            let ticket =
-                broker
-                    .data_plane
-                    .issue(&client_label, &conn);
+            let ticket = broker.data_plane.issue(&client_label, &conn);
             let dsn = format!(
                 "postgres://ticket@{}:{proxy_port}/{dbname}?sslmode=disable",
                 broker.advertise_host()

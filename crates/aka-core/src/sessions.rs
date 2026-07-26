@@ -335,11 +335,6 @@ impl DataPlane {
         count
     }
 
-    /// Close every live session a per-wiring direct endpoint is serving.
-    /// Unlike a ticket (short-lived; the next open is simply refused), an
-    /// endpoint grants standing access, so revoking its wiring must chase down
-    /// established sessions rather than wait them out. Returns how many were
-    /// signalled.
     /// Withdraw a connection from the data plane: invalidate every ticket
     /// issued against it and close every live session it is serving.
     ///
@@ -373,6 +368,11 @@ impl DataPlane {
         count
     }
 
+    /// Close every live session a per-wiring direct endpoint is serving.
+    /// Unlike a ticket (short-lived; the next open is simply refused), an
+    /// endpoint grants standing access, so revoking its wiring must chase down
+    /// established sessions rather than wait them out. Returns how many were
+    /// signalled.
     pub fn close_endpoint_sessions(&self, endpoint_id: &Uuid) -> usize {
         let state = self.inner.state.lock().unwrap();
         let sessions: Vec<_> = state
@@ -777,7 +777,10 @@ mod tests {
         assert_eq!(plane.close_connection_sessions(&withdrawn.id), 0);
         assert_eq!(plane.sessions().len(), 1, "the other session must survive");
         // And its ticket must still redeem.
-        let second = plane.redeem(&other).expect("redeem").start(ConnectionKind::Ssh);
+        let second = plane
+            .redeem(&other)
+            .expect("redeem")
+            .start(ConnectionKind::Ssh);
         second.finish("done");
         other_session.finish("done");
     }

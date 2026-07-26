@@ -156,7 +156,7 @@ connecting again.
 - **“cannot reach the Docker daemon”** — start Docker Desktop (or the
   `docker` service) and rerun `npm run sandbox:up`.
 - **A port is already in use** — export any of `SANDBOX_HTTP_PORT`,
-  `SANDBOX_WS_PORT`, `SANDBOX_PG_PORT`, `SANDBOX_SSH_PORT` before
+  `SANDBOX_ALT_PORT`, `SANDBOX_PG_PORT`, `SANDBOX_SSH_PORT` before
   `sandbox:up`; `sandbox:status` reads the same variables, so export
   them for the whole shell session. Defaults: 18080, 18081, 15432,
   12222.

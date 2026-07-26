@@ -118,14 +118,13 @@ pub enum ErrorReason {
     BadConnectionConfig,
     BodyUnavailable,
     SpoolFailed,
-    BridgeNotRunning,
     ProxyNotRunning,
     BrokerShutdown,
 }
 
 impl ErrorReason {
     /// Every registered reason, for exhaustiveness checks and docs.
-    pub const ALL: [ErrorReason; 42] = [
+    pub const ALL: [ErrorReason; 41] = [
         ErrorReason::MissingToken,
         ErrorReason::InvalidToken,
         ErrorReason::TokenExpired,
@@ -165,7 +164,6 @@ impl ErrorReason {
         ErrorReason::BadConnectionConfig,
         ErrorReason::BodyUnavailable,
         ErrorReason::SpoolFailed,
-        ErrorReason::BridgeNotRunning,
         ErrorReason::ProxyNotRunning,
         ErrorReason::BrokerShutdown,
     ];
@@ -211,7 +209,6 @@ impl ErrorReason {
             ErrorReason::BadConnectionConfig => "bad_connection_config",
             ErrorReason::BodyUnavailable => "body_unavailable",
             ErrorReason::SpoolFailed => "spool_failed",
-            ErrorReason::BridgeNotRunning => "bridge_not_running",
             ErrorReason::ProxyNotRunning => "proxy_not_running",
             ErrorReason::BrokerShutdown => "broker_shutdown",
         }

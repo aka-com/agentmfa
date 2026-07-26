@@ -210,7 +210,7 @@ async fn mcp_is_reverse_proxied_to_the_sidecar() {
 #[tokio::test(flavor = "multi_thread")]
 async fn data_plane_opens_advertise_the_configured_host() {
     // A broker serving remote agents advertises a reachable host in its
-    // WS/PG open responses instead of loopback, while still binding
+    // PG open responses instead of loopback, while still binding
     // loopback here (the bind address and the advertised host are separate
     // knobs; the test keeps the bind on loopback so it stays hermetic).
     let config = BrokerConfig {

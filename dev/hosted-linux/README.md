@@ -96,7 +96,7 @@ systemctl daemon-reload && systemctl enable --now aka-broker
 
 Same as the Mac runbook (`dev/hosted-mac/`): put TLS in front of the TCP
 port (reverse proxy or tunnel), `--data-plane-listen`/`--advertise-host`
-for WS/PG agents on other machines (plaintext legs → trusted network only),
+for PG agents on other machines (the plaintext leg → trusted network only),
 and SSH stays same-machine. `--ttl-days` on `mfa manage token` bounds a
 leaked token.
 

@@ -9,7 +9,7 @@
 //! `SSH_AUTH_SOCK` at it and runs any unmodified SSH client — the key never
 //! leaves the broker.
 //!
-//! Unlike the WS bridge and PG proxy (one shared loopback-TCP listener bound
+//! Unlike the PG proxy (one shared loopback-TCP listener bound
 //! at daemon start), each SSH open binds its **own** Unix-domain socket:
 //! the ssh-agent wire protocol carries no ticket field, so the socket path
 //! *is* the capability. The socket lives under `~/.aka/ssh/`, created
@@ -1013,7 +1013,7 @@ async fn run_listener(
 async fn handle_conn(state: Arc<AgentState>, mut stream: UnixStream) -> std::io::Result<()> {
     // The socket path is the capability; every accepted connection redeems
     // the ticket, so per-ticket and global session budgets bound how much
-    // one approval can spawn — exactly as the WS/PG data planes do.
+    // one approval can spawn — exactly as the PG data plane does.
     let redemption = match state.broker.data_plane.redeem(&state.ticket) {
         Ok(r) => r,
         Err(e) => {

@@ -20,7 +20,7 @@ pub struct SecretMeta {
     pub updated_at: DateTime<Utc>,
 }
 
-/// The wire vocabulary is `api` / `pg` / `ws` / `ssh`, the same taxonomy the
+/// The wire vocabulary is `api` / `pg` / `ssh`, the same taxonomy the
 /// UI type badges and `GET /v1/connections` share.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -162,7 +162,7 @@ impl ConnectionConfig {
 
     /// The human-readable pinned destination, what `GET /v1/connections`
     /// returns and what the approval window shows:
-    /// api → origin, pg → `user@host:port/dbname`, ws → URL,
+    /// api → origin, pg → `user@host:port/dbname`,
     /// ssh → `user@host[:port]` (port shown only when non-default).
     pub fn target(&self) -> String {
         match self {
@@ -365,7 +365,7 @@ pub struct Connection {
     pub name: String,
     pub config: ConnectionConfig,
     /// Referenced secret ids. API connections may compose several (derived
-    /// from the template's refs); pg/ssh bind zero or one, and ws binds one.
+    /// from the template's refs); pg/ssh bind zero or one.
     pub secrets: Vec<Uuid>,
     /// The upstream account this connection's credential was last verified
     /// as (an MCP server's whoami answer). Display metadata, never

@@ -106,7 +106,7 @@ pub(crate) fn is_mcp_transport_leg(
     else {
         return false;
     };
-    if path.split('?').next().unwrap_or("") != mcp_path.split('?').next().unwrap_or("") {
+    if !resolves_to_mcp_path(path, mcp_path) {
         return false;
     }
 
@@ -411,10 +411,13 @@ fn pinned_base(config: &ConnectionConfig) -> Option<(String, String, Option<u16>
 /// Comparing the raw strings is not enough. The upstream URL is built with
 /// `Url::join`, which applies WHATWG dot-segment removal, so `/./mcp`,
 /// `/a/../mcp`, and `/%2e/mcp` all reach `/mcp` upstream while failing a
-/// string compare. Anything deciding "is this the MCP leg?" — the curated
-/// tool-subset check and the approval classifier both do — has to ask the
-/// question the same way the dial will answer it, or a normalizing variant
-/// walks straight past the gate.
+/// string compare. Trailing slashes are the same story from the other side:
+/// the common HTTP routers serve `/mcp/` and `/mcp` off one handler, so a
+/// caller that appends a slash reaches the same upstream MCP endpoint. Every
+/// gate asking "is this the MCP leg?" — the curated tool-subset checks on both
+/// the broker and direct-endpoint paths, the approval classifier, and the
+/// transport-leg probe — has to ask it the way the dial will answer, or a
+/// normalizing variant walks straight past.
 ///
 /// Resolution is relative to a fixed opaque base: only the path matters here,
 /// and the real dial separately re-checks that the joined URL never left the
@@ -427,7 +430,7 @@ pub fn resolves_to_mcp_path(path: &str, mcp_path: &str) -> bool {
         let base = Url::parse("http://mcp-path-compare.invalid").ok()?;
         let joined = base.join(path).ok()?;
         (joined.authority() == base.authority() && joined.scheme() == base.scheme())
-            .then(|| joined.path().to_string())
+            .then(|| joined.path().trim_end_matches('/').to_string())
     }
     match (resolved(path), resolved(mcp_path)) {
         (Some(call), Some(pinned)) => call == pinned,
@@ -961,7 +964,7 @@ struct HttpEndpointState {
 /// The 256-bit secret is the capability. A loopback port is reachable by any
 /// local process (even another user), so — unlike the PG/SSH sockets, which
 /// filesystem permissions restrict to the owner — the secret is the *only*
-/// boundary here, exactly as the WS/PG ticket data planes rely on an
+/// boundary here, exactly as the PG ticket data plane relies on an
 /// unguessable ticket over loopback. Returns the handle and the bound port
 /// (persisted so a pasted base URL survives a restart).
 pub async fn bind_endpoint(
@@ -1141,7 +1144,7 @@ async fn proxy_handler(
         ConnectionConfig::Api {
             mcp_path: Some(mcp_path),
             ..
-        } => path.split('?').next().unwrap_or("") == mcp_path.split('?').next().unwrap_or(""),
+        } => resolves_to_mcp_path(&path, mcp_path),
         _ => false,
     };
     let allowed_tools_snapshot = broker.access.allowed_tools(&endpoint.connection_id);
@@ -1400,7 +1403,7 @@ async fn proxy_handler(
         ConnectionConfig::Api {
             mcp_path: Some(mcp_path),
             ..
-        } => path.split('?').next().unwrap_or("") == mcp_path.split('?').next().unwrap_or(""),
+        } => resolves_to_mcp_path(&path, mcp_path),
         _ => false,
     };
     if current_on_mcp_path
@@ -1879,5 +1882,27 @@ mod tests {
     fn the_pinned_path_is_normalized_too() {
         assert!(resolves_to_mcp_path("/mcp", "/./mcp"));
         assert!(resolves_to_mcp_path("/api/mcp", "/api/./mcp"));
+    }
+
+    /// The common HTTP routers serve `/mcp/` and `/mcp` off one handler, so a
+    /// trailing slash reaches the same upstream endpoint. Treating the two as
+    /// different paths would leave a one-character bypass of the curated gate.
+    #[test]
+    fn a_trailing_slash_is_still_the_mcp_leg() {
+        for (path, pinned) in [
+            ("/mcp/", "/mcp"),
+            ("/mcp", "/mcp/"),
+            ("/mcp///", "/mcp"),
+            ("/./mcp/", "/mcp"),
+            ("/api/mcp/", "/api/mcp"),
+        ] {
+            assert!(
+                resolves_to_mcp_path(path, pinned),
+                "{path} reaches {pinned} upstream and must be treated as the MCP leg"
+            );
+        }
+        // Normalizing the slash must not start collapsing distinct paths.
+        assert!(!resolves_to_mcp_path("/mcp/extra/", "/mcp"));
+        assert!(!resolves_to_mcp_path("/mcpx/", "/mcp"));
     }
 }

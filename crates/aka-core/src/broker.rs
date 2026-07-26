@@ -125,7 +125,7 @@ pub struct Broker {
     manage_bus: Arc<crate::manage::ManageBus>,
     /// Last-known per-connection health (tests + brokered-call outcomes).
     pub health: Arc<crate::health::HealthRegistry>,
-    /// Tickets + live WS/PG sessions.
+    /// Tickets + live data-plane sessions.
     pub data_plane: DataPlane,
     /// Traffic parked on the user: prompts, approval windows, and the
     /// cooldown a refusal leaves behind.
@@ -138,7 +138,7 @@ pub struct Broker {
     /// The URL remote clients reach this broker at (`serve --public-url`),
     /// when one is configured. Drives remote-flavored agent-setup text.
     public_url: Mutex<Option<String>>,
-    /// The address the WS/PG data-plane proxies and API direct endpoints
+    /// The address the PG data-plane proxy and API direct endpoints
     /// bind to (`serve --data-plane-listen`); loopback by default. A
     /// non-loopback value exposes plaintext credential legs to the network.
     data_plane_bind: std::sync::OnceLock<std::net::IpAddr>,
@@ -150,8 +150,6 @@ pub struct Broker {
     /// Advertised in the discovery manifest so `mfa mcp` and other bridges
     /// can find the MCP endpoint without a config file.
     sidecar_mcp_port: Mutex<Option<u16>>,
-    /// The WS bridge's ephemeral loopback port, set when the daemon starts;
-    /// surfaced only in open responses.
     /// The PG proxy's ephemeral loopback port, set when the daemon starts;
     /// surfaced only in open responses' DSNs.
     pub(crate) pg_proxy_port: std::sync::OnceLock<u16>,
@@ -339,6 +337,23 @@ impl Broker {
             mcp_tools_cache: Mutex::new(HashMap::new()),
             _instance_lock: instance_lock,
         });
+        // A tool disappearing from the list because its kind was retired is a
+        // change to what the user configured, so it is recorded where they can
+        // see it rather than left in the process log.
+        for dropped in broker.store.retired_connections_dropped() {
+            broker.audit.append(
+                AuditEntry::new(
+                    AuditKind::ConnectionDeleted,
+                    format!("Tool removed on upgrade: {dropped}"),
+                )
+                .detail(
+                    "This build no longer supports that connection type. Its secrets are \
+                     untouched and still in the vault."
+                        .to_string(),
+                )
+                .field("reason", "connection_kind_retired"),
+            );
+        }
         if start_background_tasks {
             // Keeps OAuth-minted MCP access tokens fresh in the background;
             // the task holds only a weak reference and exits when the broker
@@ -385,7 +400,7 @@ impl Broker {
         }
     }
 
-    /// The address WS/PG proxies and API endpoints bind to (loopback by
+    /// The address the PG proxy and API endpoints bind to (loopback by
     /// default).
     pub fn data_plane_bind(&self) -> std::net::IpAddr {
         *self
@@ -411,7 +426,7 @@ impl Broker {
     }
 
     /// The advertised data-plane host when it points beyond this machine —
-    /// `None` while WS/PG opens hand back loopback addresses.
+    /// `None` while PG opens hand back loopback addresses.
     pub fn data_plane_advertised(&self) -> Option<String> {
         let host = self.advertise_host();
         match host.trim_start_matches('[').trim_end_matches(']') {
@@ -496,9 +511,21 @@ impl Broker {
             }
         }
         let value_replaced = new_value.is_some();
+        let mut closed_sessions = 0;
         if let Some(value) = new_value {
             meta = self.store.replace_secret_value(id, value)?;
             changes.push("value replaced".into());
+            // Rotating a credential has to reach the traffic already using it.
+            // A live session authenticated with the old value keeps working
+            // until it idles out, which is exactly the window a rotation is
+            // meant to close — so drop the sessions of every tool bound to
+            // this secret and make the next call redial with the new value.
+            // A rename leaves the value alone and needs none of this.
+            for connection in self.store.list_connections() {
+                if connection.secrets.contains(id) {
+                    closed_sessions += self.data_plane.close_connection_sessions(&connection.id);
+                }
+            }
         }
         if !changes.is_empty() {
             let mut entry = AuditEntry::new(
@@ -506,7 +533,8 @@ impl Broker {
                 format!("Secret updated: {}", meta.name),
             )
             .detail(changes.join(" · "))
-            .field("value_replaced", value_replaced);
+            .field("value_replaced", value_replaced)
+            .field("closed_sessions", closed_sessions);
             if let Some((from, to, rewritten)) = rename {
                 entry = entry
                     .field("renamed_from", from)
@@ -693,9 +721,11 @@ impl Broker {
 
     /// Update a connection. Name-only edits are metadata and do not require
     /// native authentication; changes to configuration, secret bindings, or
-    /// authentication do. When the pinned target changes, its direct
-    /// endpoints are revoked: a pasted address granted for one destination
-    /// must not silently cover another.
+    /// authentication do. Any capability change closes the tool's live
+    /// sessions, so in-flight traffic cannot outlive the settings it was
+    /// authorized under. When the pinned target changes, its direct endpoints
+    /// are revoked as well: a pasted address granted for one destination must
+    /// not silently cover another.
     pub fn ui_update_connection(&self, id: &Uuid, spec: ConnectionSpec) -> Result<Connection> {
         let old = self.store.connection_by_id(id)?;
         let explicit_secrets_changed =
@@ -718,6 +748,17 @@ impl Broker {
         } else {
             (self.store.rename_connection(id, spec.name)?, false)
         };
+        // A live session was authenticated with the *old* configuration and
+        // the *old* credential, and it keeps carrying traffic after the user
+        // has changed both. Retargeting is only the loudest case: rebinding a
+        // Postgres tool to a different secret leaves the target untouched, and
+        // repinning an MCP path changes what the session may reach without
+        // changing where it dials. Close on any capability change — the
+        // agent's next call redials under the settings the user just chose.
+        let mut closed_sessions = 0;
+        if capability_changed {
+            closed_sessions = self.data_plane.close_connection_sessions(id);
+        }
         let mut endpoints_revoked = false;
         if target_changed {
             // Direct endpoints grant standing access to the old destination —
@@ -731,11 +772,6 @@ impl Broker {
             if endpoints_revoked {
                 self.events.wirings_changed();
             }
-            // A live session is authenticated against the *old* destination
-            // with the old credential, so it outlives the decision the user
-            // just changed. Invalidate the tickets and close the sessions for
-            // the same reason the endpoints are revoked.
-            self.data_plane.close_connection_sessions(id);
             // An open approval window was permission for traffic to the old
             // destination; the new one has never been shown to the user.
             self.approvals.revoke(id);
@@ -772,7 +808,8 @@ impl Broker {
         .field("target", conn.target())
         .field("target_changed", target_changed)
         .field("capability_changed", capability_changed)
-        .field("endpoints_revoked", endpoints_revoked);
+        .field("endpoints_revoked", endpoints_revoked)
+        .field("closed_sessions", closed_sessions);
         if let Some(confirmation) = confirmation {
             entry = entry.confirmation(confirmation);
         }

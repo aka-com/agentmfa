@@ -60,9 +60,6 @@ impl From<CoreError> for ManageError {
             CoreError::EndpointNotFound => Self::EndpointNotFound,
             CoreError::EndpointLimit(max) => Self::EndpointLimit { max },
             CoreError::EndpointRequiresWiring => Self::EndpointRequiresWiring,
-            CoreError::EndpointUnsupportedKind(kind) => {
-                Self::EndpointUnsupportedKind { kind: kind.into() }
-            }
             CoreError::SecretReadNotAuthenticated => Self::SecretReadNotAuthenticated,
             CoreError::NotConfirmed => Self::NotConfirmed,
             CoreError::OAuth(message) => Self::OAuth { message },

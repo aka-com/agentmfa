@@ -11,12 +11,12 @@ services:
       # The MCP server shares this container and the HTTP port; an MCP
       # connection is an API connection carrying an mcp_path (/mcp).
       SANDBOX_MCP_TOKEN: aka-mcp-test-token
-      SANDBOX_CROSS_ORIGIN_URL: http://127.0.0.1:${SANDBOX_WS_PORT:-18081}/credential-sink
+      SANDBOX_CROSS_ORIGIN_URL: http://127.0.0.1:${SANDBOX_ALT_PORT:-18081}/credential-sink
     ports:
       # Override any occupied port with SANDBOX_*_PORT environment variables;
       # scripts/sandbox-status.sh reads the same variables and defaults.
       - "127.0.0.1:${SANDBOX_HTTP_PORT:-18080}:8080"
-      - "127.0.0.1:${SANDBOX_WS_PORT:-18081}:8080"
+      - "127.0.0.1:${SANDBOX_ALT_PORT:-18081}:8080"
 
   postgres:
     image: postgres:18@sha256:22c89fe0d0f507606260237fd55e51f6137f58b2d5bcf6152242b96d9fe8f9a4

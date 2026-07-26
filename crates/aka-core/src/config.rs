@@ -66,7 +66,7 @@ pub struct BrokerConfig {
     pub ticket_ttl: Duration,
     /// Bridged/proxied session max TTL.
     pub session_max_ttl: Duration,
-    /// Idle teardown (no traffic either direction; WS ping/pong counts as
+    /// Idle teardown (no traffic either direction; protocol keepalives count as
     /// activity).
     pub session_idle_timeout: Duration,
     /// Per-approval (per-ticket) concurrent session cap.

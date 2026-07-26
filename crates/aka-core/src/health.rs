@@ -66,6 +66,22 @@ impl HealthRegistry {
         }
     }
 
+    /// Record a failure only when it says something new. An unreachable
+    /// upstream fails on every retry with the same message, and each write
+    /// costs a file rewrite and a UI refresh; the same restraint the success
+    /// path already shows applies to the loud side too. Status and detail are
+    /// both compared, so a connection that starts failing differently — auth
+    /// rejected rather than unreachable — still surfaces.
+    pub fn record_if_changed(&self, id: &Uuid, status: HealthStatus, detail: impl Into<String>) {
+        let detail = detail.into();
+        let unchanged = self
+            .get(id)
+            .is_some_and(|h| h.status == status && h.detail == detail);
+        if !unchanged {
+            self.record(id, status, detail);
+        }
+    }
+
     /// Drop a connection's entry (deleted, or repointed at a new target —
     /// a result for the old destination must not describe the new one).
     pub fn forget(&self, id: &Uuid) {

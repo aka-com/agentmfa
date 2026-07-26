@@ -71,9 +71,6 @@ pub enum CoreError {
     #[error("enable this tool for agents before issuing a direct endpoint")]
     EndpointRequiresWiring,
 
-    #[error("direct endpoints are not available for {0} tools")]
-    EndpointUnsupportedKind(&'static str),
-
     #[error("Secret read was not authenticated")]
     SecretReadNotAuthenticated,
 

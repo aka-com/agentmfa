@@ -132,7 +132,16 @@ async fn the_remote_backend_manages_a_tcp_broker_end_to_end() {
     let key = backend.agent_key().await.unwrap();
     assert!(key.starts_with("aka_"));
 
+    // Settings round-trip: read, patch, and read back over the wire, so a
+    // broken `patch_settings` cannot pass on the read path alone.
     assert!(backend.settings().await.unwrap().reauth_on_read);
+    backend.set_reauth_on_read(false).await.unwrap();
+    assert!(!backend.settings().await.unwrap().reauth_on_read);
+    backend.set_menu_bar_hides_dock(true).await.unwrap();
+    let settings = backend.settings().await.unwrap();
+    assert!(settings.menu_bar_hides_dock);
+    // One patch must not disturb the fields it did not name.
+    assert!(!settings.reauth_on_read);
 
     assert!(!backend.activity(50).await.unwrap().is_empty());
 

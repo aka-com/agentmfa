@@ -275,14 +275,20 @@ fn audit_refusal(broker: &Broker, connection: Option<&str>, reason: &str, detail
 /// belongs in the same place — otherwise a connection whose password was
 /// rotated at the database keeps showing a stale green badge while every
 /// agent session fails.
-fn record_dial_health(broker: &Broker, connection_id: &uuid::Uuid, outcome: &Result<(), TestError>) {
+fn record_dial_health(
+    broker: &Broker,
+    connection_id: &uuid::Uuid,
+    outcome: &Result<(), TestError>,
+) {
     match outcome {
         Ok(()) => broker
             .health
             .record_ok_if_changed(connection_id, "A brokered session reached the database"),
-        Err(e) => broker
-            .health
-            .record(connection_id, e.kind.health_status(), e.detail.clone()),
+        Err(e) => {
+            broker
+                .health
+                .record_if_changed(connection_id, e.kind.health_status(), e.detail.clone())
+        }
     }
 }
 
@@ -474,10 +480,12 @@ async fn handle_endpoint_conn(
         .resolve_secret(&presented)
         .filter(|e| e.id == endpoint_id)
     else {
+        // Same condition, same name as the HTTP endpoint's rejection: one
+        // reason string so a filter on it catches both data planes.
         audit_refusal(
             &state.broker,
             None,
-            "invalid_endpoint_secret",
+            "invalid_secret",
             "the presented password is not this endpoint's secret",
         );
         client
@@ -493,7 +501,20 @@ async fn handle_endpoint_conn(
     // Re-check access at connect time: a disabled tool must be refused
     // even if a stale listener briefly outlived its teardown.
     if !state.broker.access.allows(&endpoint.connection_id) {
-        audit_refusal(&state.broker, None, "denied_by_policy", "agent access is disabled for this tool");
+        // The endpoint resolved, so the tool has a name — an entry that
+        // carries it lands on the right row in Activity.
+        let name = state
+            .broker
+            .store
+            .connection_by_id(&endpoint.connection_id)
+            .ok()
+            .map(|c| c.name);
+        audit_refusal(
+            &state.broker,
+            name.as_deref(),
+            "denied_by_policy",
+            "agent access is disabled for this tool",
+        );
         client
             .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
             .await?;
@@ -541,7 +562,12 @@ async fn handle_endpoint_conn(
         .is_some_and(|current| current.id == endpoint_id);
     if !endpoint_still_valid || !state.broker.access.allows(&connection.id) {
         state.broker.approvals.revoke(&connection.id);
-        audit_refusal(&state.broker, Some(&connection.name), "denied_by_policy", "the endpoint or the tool's access was revoked while the session was being established");
+        audit_refusal(
+            &state.broker,
+            Some(&connection.name),
+            "denied_by_policy",
+            "the endpoint or the tool's access was revoked while the session was being established",
+        );
         client
             .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
             .await?;
@@ -559,7 +585,12 @@ async fn handle_endpoint_conn(
     };
     if connection.updated_at != approved_version {
         state.broker.approvals.revoke(&connection.id);
-        audit_refusal(&state.broker, Some(&connection.name), "denied_by_policy", "the tool was retargeted after the approval");
+        audit_refusal(
+            &state.broker,
+            Some(&connection.name),
+            "denied_by_policy",
+            "the tool was retargeted after the approval",
+        );
         client
             .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
             .await?;
@@ -650,7 +681,12 @@ async fn handle_endpoint_conn(
         .is_some_and(|current| current.id == endpoint_id);
     if !endpoint_still_valid || !state.broker.access.allows(&connection.id) {
         session.finish("access_revoked");
-        audit_refusal(&state.broker, Some(&connection.name), "denied_by_policy", "the endpoint or the tool's access was revoked while the session was being established");
+        audit_refusal(
+            &state.broker,
+            Some(&connection.name),
+            "denied_by_policy",
+            "the endpoint or the tool's access was revoked while the session was being established",
+        );
         client
             .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
             .await?;
@@ -911,7 +947,12 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
     // have found the prompt to revoke.
     if !state.broker.access.allows(&redemption.connection.id) {
         state.broker.approvals.revoke(&redemption.connection.id);
-        audit_refusal(&state.broker, Some(&redemption.connection.name), "denied_by_policy", "agent access is disabled for this tool");
+        audit_refusal(
+            &state.broker,
+            Some(&redemption.connection.name),
+            "denied_by_policy",
+            "agent access is disabled for this tool",
+        );
         client
             .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
             .await?;
@@ -923,7 +964,12 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
         .connection_by_id(&redemption.connection.id)
     else {
         state.broker.approvals.revoke(&redemption.connection.id);
-        audit_refusal(&state.broker, Some(&redemption.connection.name), "denied_by_policy", "the tool no longer exists");
+        audit_refusal(
+            &state.broker,
+            Some(&redemption.connection.name),
+            "denied_by_policy",
+            "the tool no longer exists",
+        );
         client
             .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
             .await?;
@@ -931,7 +977,12 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
     };
     if connection.updated_at != approved_version {
         state.broker.approvals.revoke(&connection.id);
-        audit_refusal(&state.broker, Some(&connection.name), "denied_by_policy", "the tool was retargeted after the approval");
+        audit_refusal(
+            &state.broker,
+            Some(&connection.name),
+            "denied_by_policy",
+            "the tool was retargeted after the approval",
+        );
         client
             .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
             .await?;
@@ -951,7 +1002,12 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
     }
     if !state.broker.access.allows(&redemption.connection.id) {
         state.broker.approvals.revoke(&redemption.connection.id);
-        audit_refusal(&state.broker, Some(&redemption.connection.name), "denied_by_policy", "agent access is disabled for this tool");
+        audit_refusal(
+            &state.broker,
+            Some(&redemption.connection.name),
+            "denied_by_policy",
+            "agent access is disabled for this tool",
+        );
         client
             .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
             .await?;
@@ -967,7 +1023,12 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
         .connection_by_id(&redemption.connection.id)
     else {
         state.broker.approvals.revoke(&redemption.connection.id);
-        audit_refusal(&state.broker, Some(&redemption.connection.name), "denied_by_policy", "the tool no longer exists");
+        audit_refusal(
+            &state.broker,
+            Some(&redemption.connection.name),
+            "denied_by_policy",
+            "the tool no longer exists",
+        );
         client
             .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
             .await?;
@@ -975,7 +1036,12 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
     };
     if connection.updated_at != approved_version {
         state.broker.approvals.revoke(&connection.id);
-        audit_refusal(&state.broker, Some(&connection.name), "denied_by_policy", "the tool was retargeted after the approval");
+        audit_refusal(
+            &state.broker,
+            Some(&connection.name),
+            "denied_by_policy",
+            "the tool was retargeted after the approval",
+        );
         client
             .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
             .await?;

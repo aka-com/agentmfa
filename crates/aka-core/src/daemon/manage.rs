@@ -85,8 +85,7 @@ fn manage_error_response(error: ManageError) -> Response {
         | ManageError::SecretInUse { .. }
         | ManageError::KindChange
         | ManageError::EndpointLimit { .. }
-        | ManageError::EndpointRequiresWiring
-        | ManageError::EndpointUnsupportedKind { .. } => StatusCode::CONFLICT,
+        | ManageError::EndpointRequiresWiring => StatusCode::CONFLICT,
         ManageError::InvalidSecretName { .. }
         | ManageError::InvalidConnectionName { .. }
         | ManageError::Template { .. }

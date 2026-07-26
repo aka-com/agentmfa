@@ -105,9 +105,6 @@ pub enum ManageError {
         max: usize,
     },
     EndpointRequiresWiring,
-    EndpointUnsupportedKind {
-        kind: String,
-    },
     SecretReadNotAuthenticated,
     NotConfirmed,
     OAuth {
@@ -188,9 +185,6 @@ impl std::fmt::Display for ManageError {
                 f,
                 "enable this tool for agents before issuing a direct endpoint"
             ),
-            Self::EndpointUnsupportedKind { kind } => {
-                write!(f, "direct endpoints are not available for {kind} tools")
-            }
             Self::SecretReadNotAuthenticated => write!(f, "Secret read was not authenticated"),
             Self::NotConfirmed => write!(
                 f,

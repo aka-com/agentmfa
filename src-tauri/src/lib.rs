@@ -3,7 +3,7 @@
 //! The webview is the discovery/ergonomics surface; the Rust core
 //! owns everything sensitive. This shell wires the two together: it
 //! constructs the [`Broker`], starts the agent-facing daemon (control
-//! plane over the Unix socket + WS/PG data planes), installs the tray
+//! plane over the Unix socket + PG data plane), installs the tray
 //! and windows, and exposes the minimal, OS-confirmation-gated
 //! command surface.
 
@@ -49,7 +49,7 @@ pub(crate) fn start_local_runtime(handle: &AppHandle) -> Result<LocalRuntime, Co
 
     let broker: Arc<Broker> = runtime.block_on(Broker::new(paths, vault, config, events))?;
 
-    // Start the agent-facing daemon (UDS control plane + WS/PG data
+    // Start the agent-facing daemon (UDS control plane + PG data
     // planes). Kept in state; dropping the handle stops it.
     let daemon = runtime.block_on(daemon::serve(broker.clone()))?;
     tracing::info!(

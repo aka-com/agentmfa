@@ -170,13 +170,21 @@ fn cap_text(text: &str, cap: usize) -> String {
 /// asking for one is refused outright rather than rendered as plain text,
 /// which would merely relabel the same prompt.
 ///
-/// Covers `format: "password"`, `writeOnly: true`, and the conventional
-/// `format` spellings servers use for secret material.
+/// Covers the declared shape — `format: "password"`, `writeOnly: true`, and
+/// the conventional `format` spellings for secret material — and the words the
+/// field uses to describe itself. The declared shape alone is a one-line
+/// bypass: `{"type": "string", "title": "Password"}` is the same prompt with
+/// the marker left off, and nothing obliges an upstream to set it.
+///
+/// The word scan is deliberately eager. A refusal costs a tool call that could
+/// have been answered in plain text and leaves an audit entry saying exactly
+/// why; a miss hands a credential to whoever asked. Where the choice is
+/// unclear this errs toward refusing.
 fn schema_requests_secret(schema: &Value) -> bool {
     let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
         return false;
     };
-    properties.values().any(|spec| {
+    properties.iter().any(|(name, spec)| {
         let masked_format = spec
             .get("format")
             .and_then(Value::as_str)
@@ -186,8 +194,112 @@ fn schema_requests_secret(schema: &Value) -> bool {
                     "password" | "secret" | "token" | "credential" | "private-key" | "privatekey"
                 )
             });
-        masked_format || spec.get("writeOnly").and_then(Value::as_bool) == Some(true)
+        if masked_format || spec.get("writeOnly").and_then(Value::as_bool) == Some(true) {
+            return true;
+        }
+        let prose = ["title", "description"]
+            .iter()
+            .filter_map(|key| spec.get(*key).and_then(Value::as_str));
+        std::iter::once(name.as_str())
+            .chain(prose)
+            .any(names_a_secret)
     })
+}
+
+/// Whether a field name or label is asking for secret material.
+///
+/// Matching is on whole words, not substrings: `tokenize`, `secretary`, and
+/// `keyboard` are not credentials. Splitting on case boundaries as well as
+/// punctuation makes `apiKey`, `api_key`, and `API-KEY` the same two words.
+fn names_a_secret(text: &str) -> bool {
+    /// Words that mean "credential" on their own. `token` is singular by
+    /// design — `max_tokens` and `token_count` are measurements, and the
+    /// plural is how servers spell them.
+    const SECRET_WORDS: &[&str] = &[
+        "password",
+        "passwd",
+        "pwd",
+        "passphrase",
+        "secret",
+        "credential",
+        "credentials",
+        "token",
+        "apikey",
+        "accesskey",
+        "secretkey",
+        "privatekey",
+        "signingkey",
+        "otp",
+        "totp",
+        "cvv",
+        "cvc",
+        "mnemonic",
+        "seedphrase",
+    ];
+    /// `token` followed by one of these is a quantity, not a credential:
+    /// `token_count` and `token_limit` are budgets an agent may legitimately
+    /// be asked about. `access_token` and a bare `token` still count.
+    const MEASUREMENTS: &[&str] = &[
+        "count", "limit", "budget", "usage", "size", "length", "max", "min", "total", "window",
+        "per", "cost", "price",
+    ];
+    /// `key` is a credential only in company — `sort_key`, `primary_key`, and
+    /// `key_name` are not — so it counts when one of these precedes it.
+    const KEY_QUALIFIERS: &[&str] = &[
+        "api",
+        "access",
+        "private",
+        "secret",
+        "signing",
+        "encryption",
+        "session",
+        "client",
+        "ssh",
+        "gpg",
+        "pgp",
+        "master",
+        "auth",
+        "license",
+    ];
+
+    let mut words: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut previous: Option<char> = None;
+    for character in text.chars() {
+        if !character.is_ascii_alphanumeric() {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            previous = None;
+            continue;
+        }
+        // A lower-to-upper transition is a word boundary in `apiKey`; a
+        // run of capitals is one word, so `APIKey` splits only at `Key`.
+        let boundary = character.is_ascii_uppercase()
+            && previous.is_some_and(|p| p.is_ascii_lowercase() || p.is_ascii_digit());
+        if boundary && !current.is_empty() {
+            words.push(std::mem::take(&mut current));
+        }
+        current.push(character.to_ascii_lowercase());
+        previous = Some(character);
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+
+    let follows = |index: usize, set: &[&str]| {
+        words
+            .get(index + 1)
+            .is_some_and(|next| set.contains(&next.as_str()))
+    };
+    words
+        .iter()
+        .enumerate()
+        .any(|(index, word)| match word.as_str() {
+            "token" => !follows(index, MEASUREMENTS),
+            "key" => index > 0 && KEY_QUALIFIERS.contains(&words[index - 1].as_str()),
+            other => SECRET_WORDS.contains(&other),
+        })
 }
 
 fn fields_from_schema(schema: &Value) -> Vec<ElicitationField> {
@@ -235,7 +347,10 @@ fn fields_from_schema(schema: &Value) -> Vec<ElicitationField> {
 /// match the fields the upstream asked for. Boolean fields become real JSON
 /// booleans; everything else rides upstream as the string the user entered.
 /// Unknown keys (values with no matching field) pass through as strings.
-fn coerce_content(fields: &[ElicitationField], values: HashMap<String, String>) -> Map<String, Value> {
+fn coerce_content(
+    fields: &[ElicitationField],
+    values: HashMap<String, String>,
+) -> Map<String, Value> {
     let booleans: std::collections::HashSet<&str> = fields
         .iter()
         .filter(|field| field.boolean)
@@ -657,16 +772,14 @@ mod tests {
         }
     }
 
-    fn registry(events: Arc<dyn BrokerEvents>) -> (Elicitations, Arc<RequestHistory>, tempfile::TempDir) {
+    fn registry(
+        events: Arc<dyn BrokerEvents>,
+    ) -> (Elicitations, Arc<RequestHistory>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let audit = Arc::new(AuditLog::open(dir.path().join("audit.jsonl")).unwrap());
         let history = Arc::new(RequestHistory::default());
-        let elicitations = Elicitations::with_timeout(
-            audit,
-            events,
-            history.clone(),
-            Duration::from_millis(200),
-        );
+        let elicitations =
+            Elicitations::with_timeout(audit, events, history.clone(), Duration::from_millis(200));
         (elicitations, history, dir)
     }
 
@@ -699,6 +812,47 @@ mod tests {
         }
     }
 
+    /// Nothing obliges an upstream to mark the field. A schema that only says
+    /// what it wants in words is the same prompt and is refused the same way.
+    #[test]
+    fn unmarked_fields_that_name_a_secret_are_recognized() {
+        for name in [
+            "password",
+            "user_password",
+            "userPassword",
+            "passphrase",
+            "api_key",
+            "apiKey",
+            "APIKey",
+            "access-token",
+            "refreshToken",
+            "client_secret",
+            "privateKey",
+            "otp",
+            "pwd",
+        ] {
+            let schema = json!({
+                "type": "object",
+                "properties": { name: { "type": "string" } },
+            });
+            assert!(
+                schema_requests_secret(&schema),
+                "a field named {name} is asking for a credential"
+            );
+        }
+        for prose in [
+            json!({ "type": "string", "title": "Password" }),
+            json!({ "type": "string", "title": "GitHub personal access token" }),
+            json!({ "type": "string", "description": "Paste your API key here" }),
+        ] {
+            let schema = json!({ "type": "object", "properties": { "value": prose } });
+            assert!(
+                schema_requests_secret(&schema),
+                "a field labelled for a credential is asking for one: {schema}"
+            );
+        }
+    }
+
     #[test]
     fn ordinary_schemas_are_not_secret_shaped() {
         let schema = json!({
@@ -710,6 +864,33 @@ mod tests {
             },
         });
         assert!(!schema_requests_secret(&schema));
+    }
+
+    /// Whole-word matching, so ordinary fields that merely contain the letters
+    /// keep working — the refusal is eager, not indiscriminate.
+    #[test]
+    fn secret_lookalike_names_still_prompt() {
+        for name in [
+            "sort_key",
+            "primary_key",
+            "key_name",
+            "keyboard",
+            "max_tokens",
+            "token_count",
+            "tokenize",
+            "secretary",
+            "pinned_version",
+            "authors",
+        ] {
+            let schema = json!({
+                "type": "object",
+                "properties": { name: { "type": "string" } },
+            });
+            assert!(
+                !schema_requests_secret(&schema),
+                "{name} is not a credential and must still be promptable"
+            );
+        }
     }
 
     /// A prompt rendered in the app's own chrome and attributed to a
@@ -770,7 +951,10 @@ mod tests {
         let records = history.records();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].status, RequestStatus::Approved);
-        assert_eq!(records[0].resolution, Some(RequestResolution::InputProvided));
+        assert_eq!(
+            records[0].resolution,
+            Some(RequestResolution::InputProvided)
+        );
     }
 
     #[tokio::test]
@@ -779,7 +963,10 @@ mod tests {
         let outcome = elicitations.elicit(request()).await;
         assert_eq!(outcome.action, ElicitAction::Decline);
         assert!(outcome.content.is_none());
-        assert_eq!(history.records()[0].resolution, Some(RequestResolution::InputRefused));
+        assert_eq!(
+            history.records()[0].resolution,
+            Some(RequestResolution::InputRefused)
+        );
     }
 
     #[tokio::test]
@@ -798,7 +985,10 @@ mod tests {
         assert_eq!(outcome.action, ElicitAction::Cancel);
         assert!(elicitations.pending().is_empty());
         assert_eq!(history.records()[0].status, RequestStatus::Unavailable);
-        assert_eq!(history.records()[0].resolution, Some(RequestResolution::NoSurface));
+        assert_eq!(
+            history.records()[0].resolution,
+            Some(RequestResolution::NoSurface)
+        );
     }
 
     #[tokio::test]
