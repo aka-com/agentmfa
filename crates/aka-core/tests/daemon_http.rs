@@ -524,10 +524,6 @@ async fn request_ids_are_bounded_before_connection_lookup() {
             }),
         ),
         (
-            "/v1/ws/open",
-            json!({"connection": "missing", "request_id": oversized.clone()}),
-        ),
-        (
             "/v1/pg/open",
             json!({"connection": "missing", "request_id": oversized.clone()}),
         ),

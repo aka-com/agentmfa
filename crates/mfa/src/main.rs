@@ -42,7 +42,6 @@ use aka_core::events::BrokerEvents;
 use aka_core::manage::{LocalBackend, ManageResult, ManagementBackend};
 use aka_core::paths::{BrokerInstanceLock, Paths};
 use aka_core::store::ConnectionSpec;
-use aka_core::template::Template;
 use aka_core::types::{
     ConfirmationMethod, ConnectionConfig, OAuthSpec, PgSslMode, SecretMeta, SecretValue,
 };
@@ -500,9 +499,6 @@ struct ConnAdd {
     /// referencing exactly one secret (default: Authorization Bearer).
     #[arg(long)]
     template: Option<String>,
-    /// ws: full upstream URL (ws:// or wss://).
-    #[arg(long)]
-    url: Option<String>,
     /// pg: database name.
     #[arg(long)]
     dbname: Option<String>,
@@ -543,7 +539,6 @@ struct ConnAdd {
 enum ConnKind {
     Api,
     Pg,
-    Ws,
     Ssh,
 }
 
@@ -567,9 +562,6 @@ struct ConnUpdate {
     /// ws: header-line template referencing exactly one secret.
     #[arg(long)]
     template: Option<String>,
-    /// ws: full upstream URL (ws:// or wss://).
-    #[arg(long)]
-    url: Option<String>,
     /// pg: database name.
     #[arg(long)]
     dbname: Option<String>,
@@ -1100,7 +1092,6 @@ fn conn_config(args: &ConnAdd) -> Result<ConnectionConfig, String> {
     match args.kind {
         ConnKind::Api => {
             forbid(&[
-                ("url", args.url.is_some()),
                 ("dbname", args.dbname.is_some()),
                 ("user", args.user.is_some()),
                 ("secret", args.secret.is_some()),
@@ -1122,7 +1113,6 @@ fn conn_config(args: &ConnAdd) -> Result<ConnectionConfig, String> {
             forbid(&[
                 ("scheme", args.scheme.is_some()),
                 ("template", args.template.is_some()),
-                ("url", args.url.is_some()),
                 ("host-key-fingerprint", args.host_key_fingerprint.is_some()),
                 ("mcp-path", args.mcp_path.is_some()),
             ])?;
@@ -1136,31 +1126,10 @@ fn conn_config(args: &ConnAdd) -> Result<ConnectionConfig, String> {
                 trusted_ca_bundle_path: args.ca_bundle.clone(),
             })
         }
-        ConnKind::Ws => {
-            forbid(&[
-                ("host", args.host.is_some()),
-                ("scheme", args.scheme.is_some()),
-                ("port", args.port.is_some()),
-                ("dbname", args.dbname.is_some()),
-                ("user", args.user.is_some()),
-                ("sslmode", args.sslmode.is_some()),
-                ("ca-bundle", args.ca_bundle.is_some()),
-                ("host-key-fingerprint", args.host_key_fingerprint.is_some()),
-                ("mcp-path", args.mcp_path.is_some()),
-            ])?;
-            if args.secret.is_none() && args.template.is_none() {
-                return Err("--secret (or --template) is required for this kind".into());
-            }
-            Ok(ConnectionConfig::Ws {
-                url: require("url", &args.url)?,
-                template: args.template.clone(),
-            })
-        }
         ConnKind::Ssh => {
             forbid(&[
                 ("scheme", args.scheme.is_some()),
                 ("template", args.template.is_some()),
-                ("url", args.url.is_some()),
                 ("dbname", args.dbname.is_some()),
                 ("sslmode", args.sslmode.is_some()),
                 ("ca-bundle", args.ca_bundle.is_some()),
@@ -1251,10 +1220,6 @@ fn config_from_dto(dto: &ConnectionDto) -> Result<ConnectionConfig, String> {
             sslmode: parse_sslmode(dto.sslmode.as_deref())?,
             trusted_ca_bundle_path: dto.trusted_ca_bundle_path.clone(),
         }),
-        "ws" => Ok(ConnectionConfig::Ws {
-            url: need("url", &dto.url)?,
-            template: dto.template.clone(),
-        }),
         "ssh" => Ok(ConnectionConfig::Ssh {
             destination: dto.destination.clone(),
             host: need("host", &dto.host)?,
@@ -1304,7 +1269,6 @@ fn merged_config(
             oauth,
         } => {
             forbid(&[
-                ("url", args.url.is_some()),
                 ("dbname", args.dbname.is_some()),
                 ("user", args.user.is_some()),
                 ("secret", args.secret.is_some()),
@@ -1332,7 +1296,6 @@ fn merged_config(
             forbid(&[
                 ("scheme", args.scheme.is_some()),
                 ("template", args.template.is_some()),
-                ("url", args.url.is_some()),
                 ("host-key-fingerprint", args.host_key_fingerprint.is_some()),
             ])?;
             Ok(ConnectionConfig::Pg {
@@ -1351,41 +1314,6 @@ fn merged_config(
                 },
             })
         }
-        ConnectionConfig::Ws { url, template } => {
-            forbid(&[
-                ("host", args.host.is_some()),
-                ("scheme", args.scheme.is_some()),
-                ("port", args.port.is_some()),
-                ("dbname", args.dbname.is_some()),
-                ("user", args.user.is_some()),
-                ("sslmode", args.sslmode.is_some()),
-                ("ca-bundle", args.ca_bundle.is_some()),
-                ("host-key-fingerprint", args.host_key_fingerprint.is_some()),
-            ])?;
-            let mut template = args.template.clone().or_else(|| template.clone());
-            if let (Some(source), Some(new_secret)) = (&template, args.secret.as_deref()) {
-                let parsed = Template::parse(source)
-                    .map_err(|error| format!("invalid --template: {error}"))?;
-                let refs = parsed.refs();
-                if refs.len() != 1 {
-                    return Err("WebSocket --template must reference exactly one secret".into());
-                }
-                let old_secret = refs.iter().next().expect("checked one ref");
-                if old_secret != new_secret {
-                    if args.template.is_some() {
-                        return Err(format!(
-                            "--template references {old_secret:?}, but --secret names \
-                             {new_secret:?}"
-                        ));
-                    }
-                    template = Some(parsed.rename_ref(old_secret, new_secret));
-                }
-            }
-            Ok(ConnectionConfig::Ws {
-                url: keep(&args.url, url),
-                template,
-            })
-        }
         ConnectionConfig::Ssh {
             destination,
             host,
@@ -1396,7 +1324,6 @@ fn merged_config(
             forbid(&[
                 ("scheme", args.scheme.is_some()),
                 ("template", args.template.is_some()),
-                ("url", args.url.is_some()),
                 ("dbname", args.dbname.is_some()),
                 ("sslmode", args.sslmode.is_some()),
                 ("ca-bundle", args.ca_bundle.is_some()),
@@ -2302,7 +2229,6 @@ mod tests {
             scheme: None,
             port: None,
             template: None,
-            url: None,
             dbname: None,
             user: None,
             host_key_fingerprint: None,
@@ -2376,20 +2302,6 @@ mod tests {
     }
 
     #[test]
-    fn ws_needs_url_and_a_credential_source() {
-        let mut a = args(ConnKind::Ws);
-        a.url = Some("wss://stream.example.com/feed".into());
-        assert!(conn_config(&a).unwrap_err().contains("--secret"));
-        a.secret = Some("FEED_TOKEN".into());
-        assert!(matches!(
-            conn_config(&a).unwrap(),
-            ConnectionConfig::Ws { .. }
-        ));
-        a.host = Some("stray".into());
-        assert!(conn_config(&a).unwrap_err().contains("--host"));
-    }
-
-    #[test]
     fn audit_lines_format_with_optional_fields() {
         let entry = serde_json::json!({
             "ts": "2026-07-24T12:00:00.123456Z",
@@ -2417,7 +2329,6 @@ mod tests {
             scheme: None,
             port: None,
             template: None,
-            url: None,
             dbname: None,
             user: None,
             host_key_fingerprint: None,
@@ -2458,7 +2369,6 @@ mod tests {
             destination: None,
             sslmode: None,
             trusted_ca_bundle_path: None,
-            url: None,
             mcp_path: None,
             account: Some("operator@example.com".into()),
             oauth_spec: Some(OAuthDto {
@@ -2517,34 +2427,6 @@ mod tests {
         assert!(merged_config(&existing, &a)
             .unwrap_err()
             .contains("--dbname"));
-    }
-
-    #[test]
-    fn update_rewrites_a_websocket_template_when_rebinding_its_secret() {
-        let existing = ConnectionConfig::Ws {
-            url: "wss://stream.example.com/feed".into(),
-            template: Some("Authorization: Basic {{base64(OLD_KEY \":\" OLD_KEY)}}".into()),
-        };
-        let mut a = update_args();
-        a.secret = Some("NEW_KEY".into());
-        match merged_config(&existing, &a).unwrap() {
-            ConnectionConfig::Ws { template, .. } => {
-                assert_eq!(
-                    template.as_deref(),
-                    Some("Authorization: Basic {{base64(NEW_KEY \":\" NEW_KEY)}}"),
-                    "every reference must follow the explicit rebind"
-                );
-            }
-            other => panic!("wrong config: {other:?}"),
-        }
-
-        a.template = Some("Authorization: Bearer {{OTHER_KEY}}".into());
-        assert!(
-            merged_config(&existing, &a)
-                .unwrap_err()
-                .contains("--template references"),
-            "contradictory explicit flags must not silently choose one credential"
-        );
     }
 
     #[test]

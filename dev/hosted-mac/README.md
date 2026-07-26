@@ -91,17 +91,17 @@ Browser OAuth sign-ins (BYO-app and MCP) are relayed — the consent page
 opens in *your* browser, the token stays on the broker. Direct endpoints
 issue remotely too.
 
-For agents on other machines to use the **WebSocket/Postgres** data
-planes, serve them on a reachable address:
+For agents on other machines to use the **Postgres** data plane, serve it
+on a reachable address:
 
 ```sh
 mfa serve --listen 127.0.0.1:4780 --public-url https://broker.example.dev \
     --data-plane-listen 0.0.0.0 --advertise-host broker.lan
 ```
 
-`--data-plane-listen` binds the WS/PG proxies (and the HTTP direct
-endpoint) to that address; `--advertise-host` is the host put in the
-`ws://…`/`postgres://…` addresses agents receive. **These legs are
+`--data-plane-listen` binds the PG proxy (and the HTTP direct endpoint) to
+that address; `--advertise-host` is the host put in the `postgres://…`
+addresses agents receive. **These legs are
 plaintext** (the loopback contract), so keep them on a trusted LAN or
 tunnel — never the open internet.
 

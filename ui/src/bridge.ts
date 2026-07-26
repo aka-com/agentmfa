@@ -240,7 +240,6 @@ const db: MockDatabase = {
   requests: [],
   settings: {
     reauth_on_read: true,
-    show_websockets: false,
     menu_bar_hides_dock: false,
     presence_window_secs: 15 * 60,
   },
@@ -272,7 +271,6 @@ function seedConnections() {
       oauth: true,
     }),
     mkConn('prod-db', 'pg', ['DATABASE_PASSWORD'], { host: 'db.internal.aka.com', port: 5432, dbname: 'app_production', user: 'app', sslmode: 'verify-full', trusted_ca_bundle_path: null }),
-    mkConn('market-feed', 'ws', ['STREAM_TOKEN'], { url: 'wss://stream.example.com/feed' }),
     mkConn('internal-api', 'api', ['SERVICE_USER', 'SERVICE_PASSWORD'], { host: 'internal.aka.com', scheme: 'https', template: 'Authorization: Basic {{base64(SERVICE_USER ":" SERVICE_PASSWORD)}}' }),
     mkConn('prod-ssh', 'ssh', ['DEPLOY_SSH_KEY'], {
       destination: 'prod', host: 'prod.example.com', port: 22, user: 'deploy',
@@ -307,10 +305,10 @@ function seedFixtures() {
   disable(4); // internal-api
   db.sessions.push({
     id: 1,
-    type: 'ws',
+    type: 'pg',
     agent: 'claude-code',
-    connection: 'market-feed',
-    detail: 'wss://stream.example.com/feed',
+    connection: 'prod-db',
+    detail: 'app@db.internal.aka.com:5432/app_production',
     opened_at: now(),
   });
   // Spread across a day so the relative/absolute timestamp split is visible.
@@ -318,8 +316,8 @@ function seedFixtures() {
   const fixtures: Array<[keyof typeof MOCK_ACTIVITY_META, string, string | null, number, string | null]> = [
     ['denied', 'Denied: claude-code', 'POST api.github.com/repos/aka/aka/dispatches', 2, 'claude-code'],
     ['secretCopied', 'Secret copied: GITHUB_API_KEY', null, 6, null],
-    ['sessionClosed', 'WebSocket session closed', 'market-feed', 14, 'claude-code'],
-    ['sessionOpened', 'WebSocket session opened', 'market-feed', 35, 'claude-code'],
+    ['sessionClosed', 'SSH session closed', 'prod-ssh', 14, 'claude-code'],
+    ['sessionOpened', 'SSH session opened', 'prod-ssh', 35, 'claude-code'],
     ['autoAllowed', 'Used without asking: claude-code → github', null, 90, 'claude-code'],
     ['requested', 'codex requested github', 'GET api.github.com/user/repos', 180, 'codex'],
     ['sessionClosed', 'Postgres session closed', 'Ticket window elapsed', 400, 'deploy-script'],
@@ -485,7 +483,7 @@ function connDto(c: MockConnection): ConnectionSummary {
     mcp_path: c.mcp_path || null, account: c.account || null, oauth_spec: c.oauth_spec || null,
     dbname: c.dbname || null, user: c.user || null, host_key_fingerprint: c.host_key_fingerprint || null,
     destination: c.destination || null,
-    sslmode: c.sslmode || null, url: c.url || null,
+    sslmode: c.sslmode || null,
     trusted_ca_bundle_path: c.trusted_ca_bundle_path || null,
   };
 }
@@ -849,7 +847,6 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       }
       const detail = c.type === 'pg' ? `Signed in to ${c.dbname} as ${c.user}`
         : c.type === 'ssh' ? `Signed in to ${c.host}:${c.port || 22} as ${c.user} with the saved key.`
-        : c.type === 'ws' ? 'WebSocket handshake succeeded'
         : `GET https://${c.host}/ answered HTTP 200 OK`;
       return { ok, detail };
     }
@@ -993,12 +990,11 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       if (!connection) throw new Error('no such tool');
       let record = db.access.find((a) => a.connection_id === connection.id);
       if (record && !record.enabled) throw new Error('enable this tool for agents before issuing a direct endpoint');
-      const kind = connection.type;
-      if (kind === 'ws') throw new Error(`direct endpoints are not available for ${kind} tools`);
       if (!record) {
         record = { connection_id: connection.id, enabled: true };
         db.access.push(record);
       }
+      const kind = connection.type;
       const endpointId = record.endpoint?.endpoint_id ?? `mock-endpoint-${connection.id}`;
       const secret = MOCK_ENDPOINT_SECRET;
       const dir = `~/.aka/endpoints/${endpointId}`;
@@ -1149,7 +1145,6 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       return;
     }
     case 'set_reauth_on_read': db.settings.reauth_on_read = args.on; return;
-    case 'set_show_websockets': db.settings.show_websockets = args.on; return;
     case 'set_menu_bar_hides_dock':
       db.settings.menu_bar_hides_dock = args.on;
       return;

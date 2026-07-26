@@ -164,7 +164,6 @@ where
 fn endpoint_for(kind: ConnectionKind) -> &'static str {
     match kind {
         ConnectionKind::Api => "/v1/http",
-        ConnectionKind::Ws => "/v1/ws/open",
         ConnectionKind::Pg => "/v1/pg/open",
         ConnectionKind::Ssh => "/v1/ssh/open",
     }
@@ -301,13 +300,11 @@ pub struct DaemonHandle {
     pub tcp_addr: Option<std::net::SocketAddr>,
     /// The WS bridge's ephemeral loopback port (tests need it; agents only
     /// ever see it inside open responses).
-    pub ws_bridge_port: u16,
     /// The PG proxy's ephemeral loopback port (tests need it; agents only
     /// ever see it inside open responses' DSNs).
     pub pg_proxy_port: u16,
     task: tokio::task::JoinHandle<()>,
     tcp_task: Option<tokio::task::JoinHandle<()>>,
-    bridge_task: tokio::task::JoinHandle<()>,
     proxy_task: tokio::task::JoinHandle<()>,
     // Declared last so serving tasks are aborted/dropped before the
     // rendezvous point is unlinked.
@@ -320,7 +317,6 @@ impl Drop for DaemonHandle {
         if let Some(task) = &self.tcp_task {
             task.abort();
         }
-        self.bridge_task.abort();
         self.proxy_task.abort();
     }
 }
@@ -491,7 +487,6 @@ pub fn router_for(broker: Arc<Broker>, transport: Transport) -> Router {
         .route("/v1/http", post(post_http))
         .route("/v1/elicit", post(post_elicit))
         .route("/v1/connect-requests", post(post_connect_request))
-        .route("/v1/ws/open", post(post_ws_open))
         .route("/v1/pg/open", post(post_pg_open))
         .route("/v1/ssh/open", post(post_ssh_open))
         // The sidecar's MCP endpoint, reverse-proxied so one address (and
@@ -575,20 +570,10 @@ pub async fn serve_with(broker: Arc<Broker>, options: ServeOptions) -> crate::Re
         }
         None => None,
     };
-    // The WS bridge data plane: loopback-only, OS-assigned port.
-    let (ws_bridge_port, bridge_task) = crate::capability::ws::start_bridge(broker.clone()).await?;
-    let _ = broker.ws_bridge_port.set(ws_bridge_port);
     // The PG proxy data plane: loopback-only, OS-assigned port.
-    let (pg_proxy_port, proxy_task) = match crate::capability::pg::start_proxy(broker.clone()).await
-    {
-        Ok(started) => started,
-        Err(error) => {
-            // A dropped JoinHandle detaches its task. Abort explicitly so
-            // a partial startup cannot leave a loopback bridge behind.
-            bridge_task.abort();
-            return Err(CoreError::Io(error));
-        }
-    };
+    let (pg_proxy_port, proxy_task) = crate::capability::pg::start_proxy(broker.clone())
+        .await
+        .map_err(CoreError::Io)?;
     let _ = broker.pg_proxy_port.set(pg_proxy_port);
     // Re-establish per-wiring direct-endpoint listeners persisted from a prior
     // run, so a stable DSN survives a broker restart with no agent lifecycle.
@@ -624,11 +609,9 @@ pub async fn serve_with(broker: Arc<Broker>, options: ServeOptions) -> crate::Re
     Ok(DaemonHandle {
         socket_path,
         tcp_addr,
-        ws_bridge_port,
         pg_proxy_port,
         task,
         tcp_task,
-        bridge_task,
         proxy_task,
         _socket_guard: socket_guard,
     })
@@ -1696,110 +1679,6 @@ struct OpenBody {
     request_id: Option<String>,
 }
 
-async fn post_ws_open(
-    State(state): State<AppState>,
-    authed: Authed,
-    ApiJson(body): ApiJson<OpenBody>,
-) -> Response {
-    let broker = &state.broker;
-    let limiter_key = authed.client_id.to_string();
-    let client = authed.client;
-    if let Err(wait) = broker.token_limiter.check(&limiter_key) {
-        return err_rate_limited(ErrorReason::RateLimited, wait);
-    }
-    if let Some(response) = request_id_error(body.request_id.as_deref()) {
-        return response;
-    }
-    let Some(conn) = broker.store.connection_by_name(&body.connection) else {
-        return err_unknown_connection(broker);
-    };
-    if conn.kind() != ConnectionKind::Ws {
-        return err_detail(
-            StatusCode::BAD_REQUEST,
-            ErrorReason::WrongConnectionType,
-            format!(
-                "{} is a {} connection; use POST {}",
-                conn.name,
-                conn.kind().as_str(),
-                endpoint_for(conn.kind())
-            ),
-        );
-    }
-    let Some(&bridge_port) = broker.ws_bridge_port.get() else {
-        return err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ErrorReason::BridgeNotRunning,
-        );
-    };
-
-    // The idempotency payload is the open itself: same key + same
-    // connection = a genuine retry.
-    let coalesce_key = body
-        .request_id
-        .as_ref()
-        .map(|rid| (client.clone(), rid.clone()));
-    let payload_hash = coalesce_key.as_ref().map(|_| {
-        use sha2::{Digest as _, Sha256};
-        let digest = Sha256::digest(format!("ws/open\0{}", conn.name).as_bytes());
-        digest
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>()
-    });
-
-    // Executor: dial the configured upstream with the credential injected
-    // (validating reachability and auth), issue the ticket, hand back the
-    // bridge URL.
-    let executor: crate::executions::Executor = {
-        let broker = broker.clone();
-        let conn = conn.clone();
-        let client_label = client.clone();
-        Box::pin(async move {
-            match crate::capability::ws::dial_upstream(&broker.store, &conn).await {
-                Ok(upstream) => {
-                    let ticket = broker.data_plane.issue(
-                        &client_label,
-                        &conn,
-                        crate::sessions::TicketPayload::Ws {
-                            pending_upstream: Some(upstream),
-                        },
-                    );
-                    ExecOutcome {
-                        status: 200,
-                        body: json!({
-                            "ws_url":
-                                format!(
-                                    "ws://{}:{bridge_port}/v1/ws/bridge/{ticket}",
-                                    broker.advertise_host()
-                                ),
-                            // The redemption deadline, machine-actionable
-                            // instead of prose-only.
-                            "expires_in_seconds": broker.config.ticket_ttl.as_secs(),
-                        }),
-                    }
-                }
-                Err(e) => ExecOutcome {
-                    status: 502,
-                    body: json!({ "reason": ErrorReason::UpstreamConnectFailed, "detail": e.detail }),
-                },
-            }
-        })
-    };
-
-    run_allowed(
-        broker,
-        &client,
-        &conn,
-        None,
-        ExecRequest {
-            coalesce_key,
-            payload_hash,
-            executor,
-            abandon: None,
-        },
-    )
-    .await
-}
 
 /* ------------------------------ SSH open ---------------------------------- */
 
@@ -1986,7 +1865,7 @@ async fn post_pg_open(
             let ticket =
                 broker
                     .data_plane
-                    .issue(&client_label, &conn, crate::sessions::TicketPayload::Pg);
+                    .issue(&client_label, &conn);
             let dsn = format!(
                 "postgres://ticket@{}:{proxy_port}/{dbname}?sslmode=disable",
                 broker.advertise_host()

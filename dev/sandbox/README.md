@@ -10,8 +10,8 @@
 ```
 
 The sandbox is a disposable Docker Compose stack with one upstream for
-every AKA connection type — an authenticated HTTP API, a WebSocket
-echo, an MCP server, Postgres, and SSH — so you can try the whole app in
+every AKA connection type — an authenticated HTTP API, an MCP server,
+Postgres, and SSH — so you can try the whole app in
 minutes without touching a real service. Every port binds to `127.0.0.1`
 and every credential is a fake, fixed test value that must never be
 reused outside the sandbox. AKA Desktop runs natively so it keeps using
@@ -41,7 +41,7 @@ From the repository root:
 npm run sandbox:up
 ```
 
-The first start compiles the HTTP/WebSocket/MCP fixture inside Docker and
+The first start compiles the HTTP/MCP fixture inside Docker and
 can take several minutes; later starts take seconds. The command
 generates a sandbox-only SSH key under the ignored `dev/sandbox/state/`
 directory, waits until all five services answer, and prints the exact
@@ -65,7 +65,7 @@ isn't shown, re-enable it from the **Walkthroughs** menu — the ?
 button in the Services header — or use **＋ Add service** to fill the
 form by hand.)
 
-For HTTP API, WebSocket, and MCP, use **＋ Add service** and enter the
+For HTTP API and MCP, use **＋ Add service** and enter the
 printed fields manually (MCP is the generic **MCP server** row). For
 Postgres and SSH, paste the **Quick setup** line from the `sandbox:up`
 output into the card and press **Continue** — the service type is
@@ -78,7 +78,6 @@ default ports:
 | Service | Setup | Then |
 | --- | --- | --- |
 | HTTP API | Enter manually: API root `http://127.0.0.1:18080` | Name `sandbox-http`, authentication type **Bearer token**, credential value `aka-test-token` |
-| WebSocket | Enter manually: URL `ws://127.0.0.1:18081/ws` | Name `sandbox-websocket`, authentication type **Bearer token**, credential value `aka-ws-test-token` |
 | MCP server | **MCP server** row: server URL `http://127.0.0.1:18080/mcp` | Name `sandbox-mcp`, custom authentication `Authorization: Bearer {{SANDBOX_MCP_TOKEN}}`, credential value `aka-mcp-test-token` |
 | Postgres | Quick setup: `postgres://aka:aka-test-password@127.0.0.1:15432/aka_sandbox?sslmode=disable` | Name `sandbox-postgres`; host, database, TLS mode **Disable** (under **Advanced**), and password all pre-fill |
 | SSH | Quick setup: `ssh -i <printed key path> -p 12222 sandbox@127.0.0.1` | Name `sandbox-ssh`; AKA Desktop reads the key file itself — never paste key contents |
@@ -91,7 +90,6 @@ agent connection and pin it then.
 Press **Test** on each service's card and expect:
 
 - **sandbox-http** — an authenticated `HTTP 200 OK` from the API root.
-- **sandbox-websocket** — `WebSocket handshake succeeded`.
 - **sandbox-mcp** — the MCP handshake succeeds and the two tools
   `sandbox_echo` and `sandbox_ping` are listed.
 - **sandbox-postgres** — `Signed in to aka_sandbox as aka`.
@@ -110,16 +108,13 @@ command), then ask it to use the services in plain language, e.g.:
 - “Using my AKA service `sandbox-postgres`, run
   `SELECT current_user, current_database();`.”
 - “Using my AKA service `sandbox-ssh`, run `uname -a`.”
-- “Using my AKA service `sandbox-websocket`, connect and echo a
-  message.”
 - “Using my AKA MCP service `sandbox-mcp`, call the `sandbox_echo` tool
   with `hello`.” (The MCP tools appear as
   `agentmfa_sandbox-mcp_sandbox_echo` and `…_sandbox_ping` once the
   sidecar is built — `npm run sidecar:build`.)
 
 Approve the prompts AKA Desktop raises. GET/HEAD requests fit a read-scoped
-access session; POST, Postgres, SSH, and WebSocket opens require full
-access. The fixture serves deterministic routes for deeper checks:
+access session; POST, Postgres, and SSH opens require full access. The fixture serves deterministic routes for deeper checks:
 
 ```text
 GET  /authenticated            {"authenticated":true} with the token; 401 without

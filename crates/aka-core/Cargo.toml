@@ -33,7 +33,6 @@ tower = { workspace = true }
 url = { workspace = true }
 reqwest = { workspace = true }
 futures = { workspace = true }
-tokio-tungstenite = { workspace = true }
 
 postgres-protocol = { workspace = true }
 rustls = { workspace = true }

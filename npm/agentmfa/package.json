@@ -14,7 +14,6 @@
     "security",
     "ssh",
     "postgres",
-    "websocket",
     "proxy"
   ],
   "homepage": "https://github.com/aka-com/agentmfa",

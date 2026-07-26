@@ -26,7 +26,7 @@ function conn(type: ConnectionType, host: string | null, name = 'x'): Connection
   return {
     id: name, name, type, target: host || '', secret_names: [], oauth: false, agent_access: { enabled: true },
     host, scheme: null, port: null, template: null, dbname: null, user: null,
-    host_key_fingerprint: null, destination: null, sslmode: null, url: null,
+    host_key_fingerprint: null, destination: null, sslmode: null,
     trusted_ca_bundle_path: null,
   };
 }
@@ -47,11 +47,8 @@ test('infrastructure precedes MCP Apps and generic endpoints live under Custom A
   assert.ok(CATALOG_SECTIONS.indexOf('API Apps') < CATALOG_SECTIONS.indexOf('Custom Apps'));
   assert.deepEqual(
     CATALOG.filter((entry) => entry.section === 'Custom Apps').map((entry) => entry.id),
-    ['mcp', 'http', 'websocket'],
+    ['mcp', 'http'],
   );
-  const custom = CATALOG.filter((entry) => entry.section === 'Custom Apps');
-  assert.equal(custom.findIndex((entry) => entry.id === 'websocket'),
-    custom.findIndex((entry) => entry.id === 'http') + 1);
 });
 
 test('setup-required apps lead the disconnected MCP app rows', () => {
@@ -238,7 +235,6 @@ test('each protocol maps to exactly one generic catalog row', () => {
   assert.equal(entryForConnection(conn('api', 'internal.example.com'))?.id, 'http');
   assert.equal(entryForConnection(conn('pg', 'db.internal'))?.id, 'postgres');
   assert.equal(entryForConnection(conn('ssh', 'prod.example.com'))?.id, 'ssh');
-  assert.equal(entryForConnection(conn('ws', null))?.id, 'websocket');
 });
 
 test('every connection is counted by exactly one row', () => {
@@ -247,7 +243,6 @@ test('every connection is counted by exactly one row', () => {
     conn('api', 'internal.example.com', 'internal'),
     conn('pg', 'db.internal', 'db'),
     conn('ssh', 'prod', 'prod-ssh'),
-    conn('ws', null, 'feed'),
   ];
   const counted = CATALOG.flatMap((entry) => connectionsForEntry(entry, connections));
   assert.equal(counted.length, connections.length);
@@ -291,14 +286,8 @@ test('search filters by name and description, empty query returns all', () => {
   assert.equal(filterCatalog('').length, CATALOG.length);
   assert.deepEqual(filterCatalog('git').map((entry) => entry.id), ['github']);
   assert.ok(filterCatalog('database').some((entry) => entry.id === 'postgres'));
-  assert.ok(filterCatalog('custom').some((entry) => entry.id === 'websocket'));
+  assert.ok(filterCatalog('custom').some((entry) => entry.id === 'http'));
   assert.equal(filterCatalog('zzz-nothing').length, 0);
-});
-
-test('Custom WebSocket is always available to add', () => {
-  const all = visibleCatalog('');
-  assert.ok(all.some((entry) => entry.id === 'websocket'));
-  assert.deepEqual(visibleCatalog('websocket').map((entry) => entry.id), ['websocket']);
 });
 
 test('the registry tail follows the curated MCP app rows and is searchable', () => {

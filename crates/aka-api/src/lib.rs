@@ -336,8 +336,6 @@ pub struct ConnectionDto {
     pub sslmode: Option<String>,
     #[serde(default)]
     pub trusted_ca_bundle_path: Option<String>,
-    #[serde(default)]
-    pub url: Option<String>,
     /// Set when an API upstream speaks MCP at that path; the sidecar
     /// re-exposes its tools under this connection's name.
     #[serde(default)]
@@ -547,7 +545,6 @@ pub enum ApprovalDecisionDto {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettingsDto {
     pub reauth_on_read: bool,
-    pub show_websockets: bool,
     pub menu_bar_hides_dock: bool,
     pub presence_window_secs: u64,
 }
@@ -600,10 +597,10 @@ mod tests {
         );
         assert_eq!(
             ManageError::WrongSecretCount {
-                kind: "websocket".into()
+                kind: "postgres".into()
             }
             .to_string(),
-            "websocket tools bind exactly one secret"
+            "postgres tools bind exactly one secret"
         );
     }
 
@@ -646,7 +643,6 @@ mod tests {
             destination: None,
             sslmode: None,
             trusted_ca_bundle_path: None,
-            url: None,
             mcp_path: None,
             account: None,
             oauth_spec: None,

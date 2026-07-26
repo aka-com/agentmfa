@@ -17,7 +17,6 @@ skill-file generator that teaches agents how to use the broker.
 - **Postgres**: the agent gets a password-less DSN plus a short-lived ticket
 - **SSH**: the agent gets an `SSH_AUTH_SOCK` that signs only for the
   connection's pinned user and server host key
-- **WebSocket**: the agent gets a short-lived `ws://127.0.0.1:…` bridge URL
 
 ## Install
 

@@ -81,10 +81,55 @@ struct PresenceCoordinator {
 struct IndexState {
     #[serde(default)]
     secrets: Vec<SecretMeta>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "connections_dropping_retired_kinds")]
     connections: Vec<Connection>,
     #[serde(default)]
     settings: Option<Settings>,
+}
+
+/// Connection kinds this build still understands. A store written by an older
+/// version may name one that has since been removed.
+const SUPPORTED_CONNECTION_KINDS: [&str; 3] = ["api", "pg", "ssh"];
+
+/// Load connections, dropping any whose kind this build no longer supports.
+///
+/// WebSocket support was removed, and an upgrading user's `index.json` may
+/// still list `"kind": "ws"` rows. Failing the whole deserialization would
+/// report the store as corrupt and refuse to open the vault — losing access to
+/// every *other* connection and secret over a feature that is simply gone. So
+/// a retired kind is dropped with a warning, while a record that is genuinely
+/// malformed still fails loudly: the two are told apart by whether the kind
+/// itself is one this build knows.
+fn connections_dropping_retired_kinds<'de, D>(deserializer: D) -> Result<Vec<Connection>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    let rows = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    let mut connections = Vec::with_capacity(rows.len());
+    for row in rows {
+        let kind = row
+            .get("config")
+            .and_then(|config| config.get("kind"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        match serde_json::from_value::<Connection>(row) {
+            Ok(connection) => connections.push(connection),
+            Err(error) => {
+                let retired = kind
+                    .as_deref()
+                    .is_some_and(|kind| !SUPPORTED_CONNECTION_KINDS.contains(&kind));
+                if !retired {
+                    return Err(D::Error::custom(error));
+                }
+                tracing::warn!(
+                    "dropping a {} connection: that connection type is no longer supported",
+                    kind.as_deref().unwrap_or("unknown")
+                );
+            }
+        }
+    }
+    Ok(connections)
 }
 
 impl IndexState {
@@ -403,7 +448,6 @@ impl Store {
         for conn in next.connections.iter_mut() {
             let template = match &mut conn.config {
                 ConnectionConfig::Api { template, .. } => Some(template),
-                ConnectionConfig::Ws { template, .. } => template.as_mut(),
                 ConnectionConfig::Pg { .. } | ConnectionConfig::Ssh { .. } => None,
             };
             if let Some(template) = template {
@@ -1016,15 +1060,6 @@ impl Store {
         self.commit(&mut state, next)
     }
 
-    pub fn set_show_websockets(&self, on: bool) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
-        let mut settings = state.settings();
-        settings.show_websockets = on;
-        let mut next = state.clone();
-        next.settings = Some(settings);
-        self.commit(&mut state, next)
-    }
-
     pub fn set_menu_bar_hides_dock(&self, on: bool) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         let mut settings = state.settings();
@@ -1267,31 +1302,6 @@ fn validate_config_and_bind_secrets(
             }
             bind_optional_secret(state, spec)
         }
-        ConnectionConfig::Ws { url, template } => {
-            let parsed_url =
-                url::Url::parse(url).map_err(|_| CoreError::InvalidConnectionField {
-                    field: ConnectionField::Url,
-                    message: "Enter a complete ws:// or wss:// URL".into(),
-                })?;
-            match parsed_url.scheme() {
-                "ws" | "wss" => {}
-                other => {
-                    return Err(CoreError::InvalidConnectionField {
-                        field: ConnectionField::Url,
-                        message: format!("Use ws:// or wss://, not {other}://"),
-                    })
-                }
-            }
-            if let Some(template) = template {
-                let parsed = Template::parse(template)?;
-                let refs = parsed.refs();
-                if refs.len() != 1 {
-                    return Err(CoreError::WrongSecretCount { kind: "websocket" });
-                }
-                return Ok(vec![find_by_name(refs.iter().next().unwrap())?]);
-            }
-            bind_single_secret(state, spec)
-        }
         ConnectionConfig::Ssh {
             destination,
             host,
@@ -1346,7 +1356,6 @@ fn validate_config_and_bind_secrets(
 fn bind_optional_secret(state: &IndexState, spec: &ConnectionSpec) -> Result<Vec<Uuid>> {
     let kind = match spec.config.kind() {
         ConnectionKind::Pg => "postgres",
-        ConnectionKind::Ws => "websocket",
         ConnectionKind::Ssh => "ssh",
         ConnectionKind::Api => unreachable!(),
     };
@@ -1361,18 +1370,6 @@ fn bind_optional_secret(state: &IndexState, spec: &ConnectionSpec) -> Result<Vec
     Ok(spec.secrets.clone())
 }
 
-fn bind_single_secret(state: &IndexState, spec: &ConnectionSpec) -> Result<Vec<Uuid>> {
-    if spec.secrets.len() != 1 {
-        let kind = match spec.config.kind() {
-            ConnectionKind::Ws => "websocket",
-            ConnectionKind::Pg => "postgres",
-            ConnectionKind::Ssh => "ssh",
-            ConnectionKind::Api => unreachable!(),
-        };
-        return Err(CoreError::WrongSecretCount { kind });
-    }
-    bind_optional_secret(state, spec)
-}
 
 #[cfg(test)]
 mod tests {
@@ -1632,9 +1629,13 @@ mod tests {
         let connection = store
             .add_connection(ConnectionSpec {
                 name: "Market Feed".into(),
-                config: ConnectionConfig::Ws {
-                    url: "wss://stream.example.com/feed".into(),
-                    template: None,
+                config: ConnectionConfig::Api {
+                    host: "stream.example.com".into(),
+                    scheme: "https".into(),
+                    port: None,
+                    template: "Authorization: Bearer {{STREAM_TOKEN}}".into(),
+                    mcp_path: None,
+                    oauth: None,
                 },
                 secrets: vec![token.id],
             })
@@ -2233,6 +2234,45 @@ mod tests {
         ));
     }
 
+    /// A store written before WebSocket support was removed still lists
+    /// `"kind": "ws"` rows. Refusing to deserialize would report the whole
+    /// store as corrupt and lock the user out of every other connection and
+    /// secret, so the retired rows are dropped and the rest loads.
+    #[test]
+    fn a_store_with_retired_connection_kinds_still_loads() {
+        let state: IndexState = serde_json::from_str(
+            r#"{
+              "secrets": [],
+              "connections": [
+                {"id":"00000000-0000-0000-0000-000000000001","name":"market-feed",
+                 "config":{"kind":"ws","url":"wss://example.com/feed"},"secrets":[],
+                 "created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},
+                {"id":"00000000-0000-0000-0000-000000000002","name":"analytics",
+                 "config":{"kind":"pg","host":"db.internal","dbname":"app","user":"app"},
+                 "secrets":[],
+                 "created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}
+              ]
+            }"#,
+        )
+        .expect("a retired kind must not fail the whole load");
+        assert_eq!(state.connections.len(), 1);
+        assert_eq!(state.connections[0].name, "analytics");
+    }
+
+    /// A record that is malformed for a kind this build *does* support is a
+    /// real integrity problem and must still fail loudly.
+    #[test]
+    fn a_malformed_supported_connection_still_fails() {
+        let parsed = serde_json::from_str::<IndexState>(
+            r#"{"secrets": [], "connections": [
+                {"id":"00000000-0000-0000-0000-000000000003","name":"broken",
+                 "config":{"kind":"pg"},"secrets":[],
+                 "created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}
+              ]}"#,
+        );
+        assert!(parsed.is_err());
+    }
+
     #[tokio::test]
     async fn connection_names_unique_and_kind_fixed() {
         let (store, _, _dir) = store().await;
@@ -2240,9 +2280,13 @@ mod tests {
         let ws = store
             .add_connection(ConnectionSpec {
                 name: "market-feed".into(),
-                config: ConnectionConfig::Ws {
-                    url: "wss://stream.example.com/feed".into(),
-                    template: None,
+                config: ConnectionConfig::Api {
+                    host: "stream.example.com".into(),
+                    scheme: "https".into(),
+                    port: None,
+                    template: "Authorization: Bearer {{STREAM_TOKEN}}".into(),
+                    mcp_path: None,
+                    oauth: None,
                 },
                 secrets: vec![tok.id],
             })
@@ -2251,9 +2295,13 @@ mod tests {
             store
                 .add_connection(ConnectionSpec {
                     name: "market-feed".into(),
-                    config: ConnectionConfig::Ws {
-                        url: "wss://other.example.com".into(),
-                        template: None,
+                    config: ConnectionConfig::Api {
+                        host: "other.example.com".into(),
+                        scheme: "https".into(),
+                        port: None,
+                        template: "Authorization: Bearer {{STREAM_TOKEN}}".into(),
+                        mcp_path: None,
+                        oauth: None,
                     },
                     secrets: vec![tok.id],
                 })
@@ -2261,12 +2309,22 @@ mod tests {
             CoreError::ConnectionNameTaken(_)
         ));
         // Kind is fixed after creation.
-        store.add_secret("GITHUB_API_KEY", val("g")).unwrap();
         assert!(matches!(
             store
                 .update_connection(
                     &ws.id,
-                    api_spec("market-feed", "x.example.com", "Bearer {{GITHUB_API_KEY}}")
+                    ConnectionSpec {
+                        name: "market-feed".into(),
+                        config: ConnectionConfig::Pg {
+                            host: "db.internal".into(),
+                            port: 5432,
+                            dbname: "app".into(),
+                            user: "app".into(),
+                            sslmode: Default::default(),
+                            trusted_ca_bundle_path: None,
+                        },
+                        secrets: vec![tok.id],
+                    }
                 )
                 .unwrap_err(),
             CoreError::KindChange

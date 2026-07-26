@@ -152,7 +152,6 @@ pub struct Broker {
     sidecar_mcp_port: Mutex<Option<u16>>,
     /// The WS bridge's ephemeral loopback port, set when the daemon starts;
     /// surfaced only in open responses.
-    pub(crate) ws_bridge_port: std::sync::OnceLock<u16>,
     /// The PG proxy's ephemeral loopback port, set when the daemon starts;
     /// surfaced only in open responses' DSNs.
     pub(crate) pg_proxy_port: std::sync::OnceLock<u16>,
@@ -311,7 +310,6 @@ impl Broker {
             data_plane_bind: std::sync::OnceLock::new(),
             advertise_host: std::sync::OnceLock::new(),
             sidecar_mcp_port: Mutex::new(None),
-            ws_bridge_port: std::sync::OnceLock::new(),
             pg_proxy_port: std::sync::OnceLock::new(),
             token_limiter: KeyedLimiter::new(
                 config.per_identity_per_min,
@@ -590,7 +588,6 @@ impl Broker {
         let mut attached: Vec<Uuid> = spec.secrets.clone();
         let template = match &spec.config {
             crate::types::ConnectionConfig::Api { template, .. } => Some(template.as_str()),
-            crate::types::ConnectionConfig::Ws { template, .. } => template.as_deref(),
             _ => None,
         };
         if let Some(template) = template {
@@ -937,9 +934,6 @@ impl Broker {
                 }
                 ConnectionKind::Pg => {
                     crate::capability::pg::test_upstream(&self.store, &connection).await
-                }
-                ConnectionKind::Ws => {
-                    crate::capability::ws::test_upstream(&self.store, &connection).await
                 }
                 ConnectionKind::Ssh => crate::capability::ssh::test_login(self, &connection).await,
             }
@@ -1457,11 +1451,6 @@ impl Broker {
         connection_id: &Uuid,
     ) -> Result<IssuedEndpointInfo> {
         let connection = self.store.connection_by_id(connection_id)?;
-        // Direct endpoints exist for Postgres, SSH, and HTTP; WebSocket later.
-        match connection.kind() {
-            ConnectionKind::Pg | ConnectionKind::Ssh | ConnectionKind::Api => {}
-            other => return Err(CoreError::EndpointUnsupportedKind(other.label())),
-        }
         if !self.access.allows(connection_id) {
             return Err(CoreError::EndpointRequiresWiring);
         }
@@ -1618,11 +1607,6 @@ impl Broker {
                     example: format!("curl -H \"Authorization: Bearer {secret}\" {base}/"),
                 }
             }
-            ConnectionConfig::Ws { .. } => {
-                return Err(CoreError::EndpointUnsupportedKind(
-                    connection.kind().label(),
-                ))
-            }
         };
         Ok(info)
     }
@@ -1742,12 +1726,6 @@ impl Broker {
                     let _ = self.endpoints.set_port(&endpoint.id, port);
                 }
                 handle
-            }
-            other => {
-                return Err(std::io::Error::other(format!(
-                    "direct endpoints are not supported for {} tools",
-                    other.as_str()
-                )))
             }
         };
         if let Some(old) = self
@@ -2161,10 +2139,6 @@ impl Broker {
         // effect now instead of at the old deadline.
         self.store.reanchor_presence();
         Ok(())
-    }
-
-    pub fn ui_set_show_websockets(&self, on: bool) -> Result<()> {
-        self.store.set_show_websockets(on)
     }
 
     pub fn ui_set_menu_bar_hides_dock(&self, on: bool) -> Result<()> {

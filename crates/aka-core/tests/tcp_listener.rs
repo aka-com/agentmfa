@@ -241,41 +241,8 @@ async fn data_plane_opens_advertise_the_configured_host() {
         "bind stays loopback"
     );
 
-    // Add a WS connection and open it: the bridge URL names the advertised
-    // host, not 127.0.0.1.
-    broker
-        .ui_add_secret("FEED", zeroize::Zeroizing::new("wss-tok".into()))
-        .unwrap();
-    let secret_id = broker.store.list_secrets()[0].id;
-    broker
-        .ui_add_connection(aka_core::store::ConnectionSpec {
-            name: "feed".into(),
-            config: aka_core::types::ConnectionConfig::Ws {
-                url: "wss://stream.example.com/feed".into(),
-                template: None,
-            },
-            secrets: vec![secret_id],
-        })
-        .unwrap();
-
     let agent_key = broker.identity.token();
     let socket = _daemon.socket_path.clone();
-    let (status, body) = uds_json(
-        &socket,
-        "POST",
-        "/v1/ws/open",
-        &agent_key,
-        json!({ "connection": "feed" }),
-    )
-    .await;
-    // The upstream dial fails (stream.example.com is unreachable in the
-    // test), but reachability is a per-open concern; when it does succeed
-    // the URL is what we assert. Accept either and only check the host when
-    // a URL came back.
-    if status == 200 {
-        let url = body["ws_url"].as_str().unwrap();
-        assert!(url.starts_with("ws://broker.lan:"), "{url}");
-    }
 
     // PG advertises the host in its DSN unconditionally (no upstream dial
     // at open time).

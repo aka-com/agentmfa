@@ -135,7 +135,6 @@ pub fn connection_dto(broker: &Broker, conn: &Connection) -> ConnectionDto {
                 Api { .. } => e
                     .port
                     .map(|port| format!("http://{}:{port}", broker.advertise_host())),
-                _ => None,
             };
             EndpointChip {
                 endpoint_id: e.id.to_string(),
@@ -163,7 +162,6 @@ pub fn connection_dto(broker: &Broker, conn: &Connection) -> ConnectionDto {
         destination: None,
         sslmode: None,
         trusted_ca_bundle_path: None,
-        url: None,
         mcp_path: None,
         account: conn.account.clone(),
         oauth_spec: None,
@@ -212,10 +210,6 @@ pub fn connection_dto(broker: &Broker, conn: &Connection) -> ConnectionDto {
                     .unwrap_or_else(|| "prefer".into()),
             );
             dto.trusted_ca_bundle_path = trusted_ca_bundle_path.clone();
-        }
-        Ws { url, template } => {
-            dto.url = Some(url.clone());
-            dto.template = template.clone();
         }
         Ssh {
             destination,
@@ -369,7 +363,6 @@ pub fn settings_dto(broker: &Broker) -> SettingsDto {
     let settings = broker.settings();
     SettingsDto {
         reauth_on_read: settings.reauth_on_read,
-        show_websockets: settings.show_websockets,
         menu_bar_hides_dock: settings.menu_bar_hides_dock,
         presence_window_secs: settings.presence_window_secs,
     }
@@ -921,8 +914,6 @@ pub struct SettingsPatchBody {
     #[serde(default)]
     pub reauth_on_read: Option<bool>,
     #[serde(default)]
-    pub show_websockets: Option<bool>,
-    #[serde(default)]
     pub menu_bar_hides_dock: Option<bool>,
     #[serde(default)]
     pub presence_window_secs: Option<u64>,
@@ -1064,7 +1055,6 @@ pub trait ManagementBackend: Send + Sync {
     /* settings */
     async fn settings(&self) -> ManageResult<SettingsDto>;
     async fn set_reauth_on_read(&self, on: bool) -> ManageResult<()>;
-    async fn set_show_websockets(&self, on: bool) -> ManageResult<()>;
     async fn set_menu_bar_hides_dock(&self, on: bool) -> ManageResult<()>;
     async fn set_presence_window(&self, secs: u64) -> ManageResult<()>;
 
@@ -1409,11 +1399,6 @@ impl ManagementBackend for LocalBackend {
             .await
     }
 
-    async fn set_show_websockets(&self, on: bool) -> ManageResult<()> {
-        self.blocking(move |broker| broker.ui_set_show_websockets(on))
-            .await
-    }
-
     async fn set_menu_bar_hides_dock(&self, on: bool) -> ManageResult<()> {
         self.blocking(move |broker| broker.ui_set_menu_bar_hides_dock(on))
             .await
@@ -1627,8 +1612,6 @@ mod tests {
 
         let settings = backend.settings().await.unwrap();
         assert!(settings.reauth_on_read);
-        backend.set_show_websockets(true).await.unwrap();
-        assert!(backend.settings().await.unwrap().show_websockets);
 
         let setup = backend.agent_setup().await.unwrap();
         assert!(setup.contains("--unix-socket"));

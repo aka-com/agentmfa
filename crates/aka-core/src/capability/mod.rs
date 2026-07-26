@@ -5,7 +5,6 @@
 pub mod http;
 pub mod pg;
 pub mod ssh;
-pub mod ws;
 
 use std::io::{Read as _, Seek as _, Write as _};
 use std::sync::Mutex;

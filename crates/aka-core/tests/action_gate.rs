@@ -13,7 +13,7 @@ use aka_core::config::BrokerConfig;
 use aka_core::error::CoreError;
 use aka_core::events::BrokerEvents;
 use aka_core::paths::Paths;
-use aka_core::sessions::{RedeemError, TicketPayload};
+use aka_core::sessions::RedeemError;
 use aka_core::store::ConnectionSpec;
 use aka_core::types::{
     ConfirmMode, ConfirmationMethod, Connection, ConnectionConfig, ConnectionKind,
@@ -180,7 +180,7 @@ async fn key_rotation_is_confirmed_and_closes_live_sessions() {
     let conn = add_github(&broker);
     let ticket = broker
         .data_plane
-        .issue("claude-code", &conn, TicketPayload::Pg);
+        .issue("claude-code", &conn);
     let session = broker
         .data_plane
         .redeem(&ticket)
@@ -880,9 +880,12 @@ async fn secret_binding_changes_confirm_but_noop_updates_do_not() {
         .store
         .add_connection(ConnectionSpec {
             name: "events".into(),
-            config: ConnectionConfig::Ws {
-                url: "wss://events.example.com".into(),
-                template: None,
+            config: ConnectionConfig::Ssh {
+                destination: None,
+                host: "events.example.com".into(),
+                port: 22,
+                user: "deploy".into(),
+                host_key_fingerprint: String::new(),
             },
             secrets: vec![first.id],
         })
@@ -1176,18 +1179,21 @@ async fn kinds_with_no_traffic_unit_cannot_be_confirmed() {
     let ws = broker
         .store
         .add_connection(ConnectionSpec {
-            name: "market-feed".into(),
-            config: ConnectionConfig::Ws {
-                url: "wss://stream.example.com/feed".into(),
-                template: None,
+            name: "prod-ssh".into(),
+            config: ConnectionConfig::Ssh {
+                destination: None,
+                host: "prod.example.com".into(),
+                port: 22,
+                user: "deploy".into(),
+                host_key_fingerprint: String::new(),
             },
             secrets: vec![token.id],
         })
         .unwrap();
 
-    // A WebSocket is one long-lived stream and an SSH agent signs for a
-    // session the client already opened: neither has an honest unit to ask
-    // about, so the switch is refused rather than quietly ignored.
+    // An SSH agent signs for a session the client already opened, so there is
+    // no honest unit to ask about: the switch is refused rather than quietly
+    // ignored.
     assert!(matches!(
         broker.ui_set_confirm_mode(&ws.id, ConfirmMode::On),
         Err(CoreError::InvalidSetting(_))

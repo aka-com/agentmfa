@@ -1,4 +1,4 @@
-export type ConnectionType = 'api' | 'pg' | 'ws' | 'ssh';
+export type ConnectionType = 'api' | 'pg' | 'ssh';
 
 export interface SecretSummary {
   id: string;
@@ -83,7 +83,6 @@ export interface ConnectionSummary {
   host_key_fingerprint: string | null;
   destination: string | null;
   sslmode: string | null;
-  url: string | null;
   trusted_ca_bundle_path: string | null;
   /** Set when the credential is a BYO-app OAuth token set (never tokens). */
   oauth_spec?: { auth_url: string; token_url: string; client_id: string; scopes: string[] } | null;
@@ -249,7 +248,6 @@ export interface BrokerProfile {
 
 export interface Settings {
   reauth_on_read: boolean;
-  show_websockets: boolean;
   menu_bar_hides_dock: boolean;
   /** Seconds one OS authentication keeps user-plane actions from re-prompting. */
   presence_window_secs: number;
@@ -478,7 +476,6 @@ export interface CommandMap {
     values?: Record<string, string>;
   }, void>;
   set_reauth_on_read: CommandSpec<{ on: boolean }, void>;
-  set_show_websockets: CommandSpec<{ on: boolean }, void>;
   set_menu_bar_hides_dock: CommandSpec<{ on: boolean }, void>;
   set_presence_window: CommandSpec<{ secs: number }, void>;
   ui_set_mode: CommandSpec<{ mode: string }, void>;

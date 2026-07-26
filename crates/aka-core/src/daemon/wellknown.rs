@@ -26,7 +26,7 @@ pub fn manifest(
         // The shared key's plaintext home; the pair response repeats it in
         // `store_at`.
         "token_file": paths.token_display(),
-        "capabilities": ["http", "websocket", "postgres", "ssh"],
+        "capabilities": ["http", "postgres", "ssh"],
         // Capability flags: how a client may authenticate. Closed
         // vocabulary (wire.rs); new schemes appear here before any client
         // is expected to use them.
@@ -48,7 +48,6 @@ pub fn manifest(
             "whoami": "/v1/whoami",
             "connections": "/v1/connections",
             "http": "/v1/http",
-            "ws_open": "/v1/ws/open",
             "pg_open": "/v1/pg/open",
             "ssh_open": "/v1/ssh/open",
             "instructions": "/instructions",
@@ -81,7 +80,7 @@ pub fn manifest_remote(
         // What this listener itself speaks. TLS is the operator's proxy or
         // tunnel in front of it; the advertised base_url reflects that.
         "transport": "http",
-        "capabilities": ["http", "websocket", "postgres", "ssh"],
+        "capabilities": ["http", "postgres", "ssh"],
         "auth_schemes": AuthScheme::ALL,
         "recommended_client_timeout_seconds": config.effective_client_timeout().as_secs(),
         "token_ttl_days": config.token_ttl.as_secs() / 86400,
@@ -96,7 +95,6 @@ pub fn manifest_remote(
             "whoami": "/v1/whoami",
             "connections": "/v1/connections",
             "http": "/v1/http",
-            "ws_open": "/v1/ws/open",
             "pg_open": "/v1/pg/open",
             "ssh_open": "/v1/ssh/open",
             "instructions": "/instructions",
@@ -128,11 +126,11 @@ pub fn remote_instructions_banner(
     let base = public_url.unwrap_or("<this broker's URL>");
     let data_planes = match data_plane_host {
         Some(host) => format!(
-            "> not served remotely. WebSocket and Postgres opens hand back\n\
-             > addresses on `{host}`, reachable if you can route to it; SSH opens\n\
-             > name a Unix socket that exists only on the broker's machine"
+            "> not served remotely. Postgres opens hand back an address on\n\
+             > `{host}`, reachable if you can route to it; SSH opens name a Unix\n\
+             > socket that exists only on the broker's machine"
         ),
-        None => "> not served remotely. WebSocket, Postgres, and SSH opens currently hand\n\
+        None => "> not served remotely. Postgres and SSH opens currently hand\n\
                  > back broker-host-local addresses and are usable only by agents on that\n\
                  > machine"
             .to_string(),
@@ -211,8 +209,8 @@ identities. It lives in plaintext at `{token_file}` (mode 0600).
 The key lasts {token_days} days, refreshed on use; the broker rewrites
 `{token_file}` whenever it re-mints, so re-reading the file is always the
 first recovery step. Rotating the key (user-initiated) invalidates
-outstanding data-plane capabilities and closes live WebSocket, Postgres,
-and SSH connections for every agent at once.
+outstanding data-plane capabilities and closes live Postgres and SSH
+connections for every agent at once.
 
 **Label yourself.** Optionally send `X-AgentMFA-Client: <your-name>`
 (1-64 chars of `[A-Za-z0-9._-]`) on every call. It names you in the user's
@@ -307,24 +305,7 @@ ABP/0 represents headers as JSON objects with string values. Repeated upstream
 response fields are combined with `, `, which is lossy for fields such as
 `Set-Cookie`; do not assume distinct repeated fields are preserved.
 
-## 5. WebSocket: POST /v1/ws/open
-
-    POST /v1/ws/open
-    {{"connection": "market-feed", "request_id": "req-<uuid>"}}
-
-    → 200 {{"ws_url": "ws://127.0.0.1:<port>/v1/ws/bridge/<ticket>",
-            "expires_in_seconds": {ticket}}}
-
-Authorization is checked once, at open time. Connect any stock WebSocket
-client to `ws_url`; the broker dials the connection's configured upstream
-with the credential injected and pipes frames verbatim. The ticket expires
-`expires_in_seconds` after issue and may be redeemed any number of times
-within that window, all
-under the authorization that issued it. Sessions carry a configured max TTL
-(1 h) and an idle timeout (5 min; protocol ping/pong counts as activity). A
-reconnect after the ticket window needs a fresh open.
-
-## 6. Postgres: POST /v1/pg/open
+## 5. Postgres: POST /v1/pg/open
 
     POST /v1/pg/open
     {{"connection": "prod-db", "request_id": "req-<uuid>"}}
@@ -343,13 +324,12 @@ tradeoff for the ticket's short window:
 
 The broker's local proxy speaks real Postgres on the loopback leg and
 opens the upstream Postgres leg itself; you never see the real password or
-host. Ticket lifetime and reconnect semantics are the same as WebSocket.
-`sslmode=disable` applies only to the loopback leg; the upstream
+host. `sslmode=disable` applies only to the loopback leg; the upstream
 leg uses the connection's configured TLS. The default upstream
 `sslmode=verify-full` validates the certificate chain and hostname. A
 per-connection private CA bundle can extend the trusted roots.
 
-## 7. SSH: POST /v1/ssh/open
+## 6. SSH: POST /v1/ssh/open
 
     POST /v1/ssh/open
     {{"connection": "prod-ssh", "request_id": "req-<uuid>"}}
@@ -380,7 +360,7 @@ later connection is verified against it, and a server that presents a
 different key is refused.
 
 Ticket lifetime and reconnect semantics
-match WebSocket and Postgres: the socket accepts as many connections as needed for the
+match Postgres: the socket accepts as many connections as needed for the
 {ticket} s window, so multiple SSH
 invocations as you need under the authorization that issued it. Live SSH
 connections are also capped by the remaining lifetime of an access grant.
@@ -390,7 +370,7 @@ explicit `-o PubkeyAuthentication=host-bound` is optional. Clients without
 those OpenSSH extensions fail closed because the broker refuses unbound or
 host-key-mismatched signing requests.
 
-## 8. Other errors
+## 7. Other errors
 
 - `400 {{"reason": "invalid_json"}}`: the request body was not valid JSON
   for the endpoint (wrong/missing Content-Type, malformed JSON, or a
@@ -443,9 +423,9 @@ pub fn skill_file(config: &BrokerConfig, paths: &Paths) -> String {
         r#"---
 name: mfa
 description: >-
-  Broker credentialed HTTP, WebSocket, Postgres and SSH access through the
-  local AgentMFA daemon. Use when a task needs an API key, database, stream,
-  or SSH key the developer has configured. The broker does not directly expose
+  Broker credentialed HTTP, Postgres and SSH access through the local
+  AgentMFA daemon. Use when a task needs an API key, database, or SSH key
+  the developer has configured. The broker does not directly expose
   the stored secret; access is authorization-gated. Start by reading the live
   instructions over the broker socket.
 ---
@@ -497,7 +477,7 @@ mod tests {
         assert_eq!(m["token_file"], "~/.aka/token");
         assert_eq!(
             m["capabilities"],
-            serde_json::json!(["http", "websocket", "postgres", "ssh"])
+            serde_json::json!(["http", "postgres", "ssh"])
         );
     }
 
@@ -576,7 +556,6 @@ mod tests {
             "retry_after_seconds",
             "invalid_json",
             "\"endpoint\": \"/v1/http\"",
-            "/v1/ws/open",
             "/v1/pg/open",
             "/v1/ssh/open",
             "SSH_AUTH_SOCK",

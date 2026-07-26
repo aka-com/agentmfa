@@ -247,7 +247,7 @@ export async function createToolServer(
       // meet `Method not found` on `tools/list` instead of an empty list.
       capabilities: { tools: {} },
       instructions:
-        'AgentMFA brokers database, SSH, API and WebSocket access. Tools appear ' +
+        'AgentMFA brokers database, SSH and API access. Tools appear ' +
         'here only when the user has wired this agent to them in the AgentMFA ' +
         'app. Credentials are injected by the broker and never visible to you.',
     },

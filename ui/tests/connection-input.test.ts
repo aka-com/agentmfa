@@ -79,12 +79,14 @@ test('Postgres imports default to verified TLS and keep a private CA path', () =
   assert.equal(imported.fields.pgCaBundlePath, '/etc/company-ca.pem');
 });
 
-test('imports API and WebSocket URLs', () => {
+test('imports API URLs', () => {
   const api = parseConnectionImport('https://api.example.com/v1/items?limit=1');
   assert.deepEqual(api.fields, { origin: 'https://api.example.com' });
   assert.match(api.warnings[0], /Only the API root/);
-  const ws = parseConnectionImport('wss://stream.example.com/feed');
-  assert.deepEqual(ws.fields, { url: 'wss://stream.example.com/feed' });
+});
+
+test('rejects a WebSocket URL now that the kind is gone', () => {
+  assert.throws(() => parseConnectionImport('wss://stream.example.com/feed'));
 });
 
 test('does not suggest connection names for IPv4 or IPv6 targets', () => {

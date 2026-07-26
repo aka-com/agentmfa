@@ -203,14 +203,9 @@ impl FormError {
                 format!("{name} is not a saved credential"),
             ),
             ManageError::WrongSecretCount { kind } => {
-                let field = if kind == "websocket" {
-                    "template"
-                } else {
-                    "secret"
-                };
                 Self::validation(
                     "wrong_credential_count",
-                    field,
+                    "secret",
                     format!("{kind} tools require exactly one saved credential"),
                 )
             }
@@ -574,8 +569,7 @@ pub struct ConnectionInput {
     pub sslmode: Option<String>,
     pub trusted_ca_bundle_path: Option<String>,
     // WS
-    pub url: Option<String>,
-    // pg/ws/ssh single-secret binding (by id)
+    // pg/ssh single-secret binding (by id)
     pub secret_id: Option<String>,
     // Add-only connection-first setup. Both fields must be present together;
     // the core writes the vault item and connection atomically.
@@ -648,10 +642,6 @@ impl ConnectionInput {
                     let path = path.trim().to_string();
                     (!path.is_empty()).then_some(path)
                 }),
-            },
-            "ws" => ConnectionConfig::Ws {
-                url: self.url.unwrap_or_default(),
-                template: self.template.filter(|t| !t.is_empty()),
             },
             "ssh" => ConnectionConfig::Ssh {
                 destination: self.destination.filter(|value| !value.is_empty()),
@@ -1332,16 +1322,6 @@ pub async fn set_reauth_on_read(state: State<'_, AppState>, on: bool) -> CmdResu
 }
 
 #[tauri::command]
-pub async fn set_show_websockets(state: State<'_, AppState>, on: bool) -> CmdResult<()> {
-    state
-        .brokers
-        .backend()
-        .set_show_websockets(on)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
 pub async fn set_menu_bar_hides_dock(state: State<'_, AppState>, on: bool) -> CmdResult<()> {
     state
         .brokers
@@ -1437,7 +1417,6 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         copy_key,
         close_session,
         set_reauth_on_read,
-        set_show_websockets,
         set_menu_bar_hides_dock,
         set_presence_window,
         get_notification_settings,
@@ -1494,7 +1473,6 @@ mod tests {
             destination: None,
             sslmode: None,
             trusted_ca_bundle_path: None,
-            url: None,
             secret_id: None,
             new_secret_name: None,
             new_secret_value: None,
@@ -1549,7 +1527,6 @@ mod tests {
             destination: None,
             sslmode: None,
             trusted_ca_bundle_path: None,
-            url: None,
             secret_id: None,
             new_secret_name: None,
             new_secret_value: None,
@@ -1564,40 +1541,6 @@ mod tests {
                 if host == "localhost" && scheme == "http"
         ));
 
-        let secret_id = Uuid::new_v4();
-        let ws = ConnectionInput {
-            mcp_path: None,
-            name: "stream".into(),
-            kind: "ws".into(),
-            host: None,
-            scheme: None,
-            port: None,
-            template: Some("X-Stream-Key: {{STREAM_TOKEN}}".into()),
-            oauth_auth_url: None,
-            oauth_token_url: None,
-            oauth_client_id: None,
-            oauth_scopes: None,
-            oauth_extra_params: None,
-            dbname: None,
-            user: None,
-            host_key_fingerprint: None,
-            destination: None,
-            sslmode: None,
-            trusted_ca_bundle_path: None,
-            url: Some("wss://stream.example.com/feed".into()),
-            secret_id: Some(secret_id.to_string()),
-            new_secret_name: None,
-            new_secret_value: None,
-            ssh_import_id: None,
-            identity_file: None,
-        }
-        .into_spec()
-        .unwrap();
-        assert!(matches!(
-            ws.config,
-            ConnectionConfig::Ws { ref template, .. }
-                if template.as_deref() == Some("X-Stream-Key: {{STREAM_TOKEN}}")
-        ));
     }
 
     #[test]

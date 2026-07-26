@@ -30,7 +30,7 @@ support limited audit logging, and team management is coming soon.
 ## How it works
 
 1. **Create a connection.** Select a destination to connect to: an API
-   host, Postgres database, SSH server, WebSocket URL, or MCP server.
+   host, Postgres database, SSH server, or MCP server.
 
 2. **Create a secret.** Pin an API token, database password, or SSH key
    inside the application, using the desktop app or `mfa secret add`.
@@ -88,19 +88,6 @@ injects the credential on the upstream.
   ```sh
   curl -H "Authorization: Bearer $ENDPOINT_SECRET" \
     http://127.0.0.1:52000/user/repos
-  ```
-
-- **WebSocket** — opening a connection returns a local bridge URL. Auth
-  is checked at open, and the credential is injected on the upstream dial:
-
-  ```sh
-  curl -s --unix-socket ~/.aka/broker.sock \
-    -H "Authorization: Bearer $(cat ~/.aka/token)" \
-    -H "Content-Type: application/json" \
-    -d '{"connection": "market-feed"}' \
-    http://localhost/v1/ws/open
-  # → {"ws_url": "ws://127.0.0.1:<port>/v1/ws/bridge/<ticket>", ...}
-  websocat "ws://127.0.0.1:<port>/v1/ws/bridge/<ticket>"
   ```
 
 ### AgentMFA MCP setup

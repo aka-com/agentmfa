@@ -8,10 +8,9 @@
 //   * `api` connections are *called* — the agent supplies method/path and
 //     the broker injects the credential on the upstream leg. One round
 //     trip, one result.
-//   * `pg` / `ssh` / `ws` connections are *opened* — the broker hands back
-//     a password-less DSN and ticket, an `SSH_AUTH_SOCK` path, or a bridge
-//     URL, which the agent then uses with stock tools. Nothing sensitive
-//     crosses into the agent.
+//   * `pg` / `ssh` connections are *opened* — the broker hands back a
+//     password-less DSN and ticket, or an `SSH_AUTH_SOCK` path, which the
+//     agent then uses with stock tools.
 //
 // No authorization happens here. An unwired connection never becomes a
 // tool, and if one slipped through, the broker would still refuse it.
@@ -44,11 +43,6 @@ export function describe(connection: BrokerConnection): string {
       return (
         `Open an SSH session to ${connection.target}. Returns an SSH_AUTH_SOCK ` +
         'path that ssh, git and rsync can use; the private key stays in the broker.'
-      );
-    case 'ws':
-      return (
-        `Open a WebSocket bridge to ${connection.target}. Returns a short-lived ` +
-        'ws://127.0.0.1 URL usable by any standard client.'
       );
     default:
       return `Use the AgentMFA connection "${connection.name}" (${connection.target}).`;

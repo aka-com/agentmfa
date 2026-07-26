@@ -459,11 +459,11 @@ async fn identity_settings_and_activity_surface_over_the_manage_api() {
         .manage(
             "PATCH",
             "/v1/manage/settings",
-            Some(json!({ "show_websockets": true })),
+            Some(json!({ "menu_bar_hides_dock": true })),
         )
         .await;
     assert_eq!(status, 200, "{body}");
-    assert_eq!(body["show_websockets"], true);
+    assert_eq!(body["menu_bar_hides_dock"], true);
     assert_eq!(body["reauth_on_read"], true, "untouched fields stay");
 
     // Rotating the agent key works over the manage API and leaves the

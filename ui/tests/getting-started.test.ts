@@ -33,7 +33,7 @@ function conn(
     id: name, name, type, target: name, secret_names: [], oauth: false,
     agent_access: { enabled },
     host: null, scheme: null, port: null, template: null, dbname: null, user: null,
-    host_key_fingerprint: null, destination: null, sslmode: null, url: null,
+    host_key_fingerprint: null, destination: null, sslmode: null,
     trusted_ca_bundle_path: null,
   };
 }

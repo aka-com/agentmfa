@@ -27,7 +27,6 @@ pub struct SecretMeta {
 pub enum ConnectionKind {
     Api,
     Pg,
-    Ws,
     Ssh,
 }
 
@@ -36,7 +35,6 @@ impl ConnectionKind {
         match self {
             ConnectionKind::Api => "api",
             ConnectionKind::Pg => "pg",
-            ConnectionKind::Ws => "ws",
             ConnectionKind::Ssh => "ssh",
         }
     }
@@ -45,7 +43,6 @@ impl ConnectionKind {
         match self {
             ConnectionKind::Api => "API",
             ConnectionKind::Pg => "PG",
-            ConnectionKind::Ws => "WS",
             ConnectionKind::Ssh => "SSH",
         }
     }
@@ -119,14 +116,6 @@ pub enum ConnectionConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         trusted_ca_bundle_path: Option<String>,
     },
-    Ws {
-        /// Full upstream URL, e.g. "wss://stream.example.com/feed".
-        url: String,
-        /// Header-line injection template. When absent the referenced
-        /// secret is injected as `Authorization: Bearer {{SECRET}}`.
-        #[serde(default)]
-        template: Option<String>,
-    },
     Ssh {
         /// Original OpenSSH destination (usually an alias) to invoke. The
         /// resolved host below remains the displayed and pinned identity.
@@ -167,7 +156,6 @@ impl ConnectionConfig {
         match self {
             ConnectionConfig::Api { .. } => ConnectionKind::Api,
             ConnectionConfig::Pg { .. } => ConnectionKind::Pg,
-            ConnectionConfig::Ws { .. } => ConnectionKind::Ws,
             ConnectionConfig::Ssh { .. } => ConnectionKind::Ssh,
         }
     }
@@ -198,7 +186,6 @@ impl ConnectionConfig {
                 user,
                 ..
             } => format!("{user}@{host}:{port}/{dbname}"),
-            ConnectionConfig::Ws { url, .. } => url.clone(),
             ConnectionConfig::Ssh {
                 host, port, user, ..
             } => {
@@ -263,12 +250,6 @@ impl ConnectionConfig {
                     && a_port == b_port
                     && a_dbname == b_dbname
                     && a_user == b_user
-            }
-            (Self::Ws { url: a, .. }, Self::Ws { url: b, .. }) => {
-                match (url::Url::parse(a), url::Url::parse(b)) {
-                    (Ok(a), Ok(b)) => a == b,
-                    _ => a == b,
-                }
             }
             (
                 Self::Ssh {
@@ -475,13 +456,13 @@ impl ConfirmMode {
 }
 
 /// Kinds whose traffic can be confirmed. Postgres, API, and MCP tools have
-/// a natural unit to ask about and a place in the plane to park it; SSH and
-/// WebSocket do not have one yet, so their connections never carry the
-/// switch (the UI hides it, and the core refuses to set it).
+/// a natural unit to ask about and a place in the plane to park it; SSH does
+/// not have one yet, so its connections never carry the switch (the UI hides
+/// it, and the core refuses to set it).
 pub fn confirmable(connection: &Connection) -> bool {
     match &connection.config {
         ConnectionConfig::Api { .. } | ConnectionConfig::Pg { .. } => true,
-        ConnectionConfig::Ssh { .. } | ConnectionConfig::Ws { .. } => false,
+        ConnectionConfig::Ssh { .. } => false,
     }
 }
 
@@ -613,11 +594,6 @@ pub struct Settings {
         skip_serializing_if = "Option::is_none"
     )]
     pub(crate) legacy_pg_trusted_ca_bundle_path: Option<String>,
-    /// "Show WebSockets" in the tool catalog, default off: the capability
-    /// works, but most setups never need it, so it stays out of the way
-    /// until asked for.
-    #[serde(default)]
-    pub show_websockets: bool,
     /// "Hide the Dock icon when minimized to the menu bar", default off.
     /// The app is a regular windowed app by default (Dock + app switcher);
     /// with this on, explicitly minimizing to the menu bar also drops the
@@ -641,7 +617,6 @@ impl Default for Settings {
         Self {
             reauth_on_read: true,
             legacy_pg_trusted_ca_bundle_path: None,
-            show_websockets: false,
             menu_bar_hides_dock: false,
             presence_window_secs: default_presence_window_secs(),
         }
@@ -676,7 +651,6 @@ mod tests {
         .unwrap();
         assert!(settings.reauth_on_read);
         assert!(!settings.menu_bar_hides_dock);
-        assert!(!settings.show_websockets, "a new opt-in defaults off");
         assert_eq!(
             settings.presence_window_secs,
             15 * 60,
@@ -715,11 +689,6 @@ mod tests {
             trusted_ca_bundle_path: None,
         };
         assert_eq!(pg.target(), "app@db.internal.aka.com:5432/app_production");
-        let ws = ConnectionConfig::Ws {
-            url: "wss://stream.example.com/feed".into(),
-            template: None,
-        };
-        assert_eq!(ws.target(), "wss://stream.example.com/feed");
         let ssh = ConnectionConfig::Ssh {
             destination: None,
             host: "prod.example.com".into(),
@@ -793,22 +762,11 @@ mod tests {
         };
         assert!(api_a.has_equivalent_target(&api_b));
 
-        let ws_a = ConnectionConfig::Ws {
-            url: "wss://EXAMPLE.com".into(),
-            template: None,
-        };
-        let ws_b = ConnectionConfig::Ws {
-            url: "wss://example.com/".into(),
-            template: Some("Authorization: Bearer {{TOKEN}}".into()),
-        };
-        assert!(ws_a.has_equivalent_target(&ws_b));
-
         let mut different_port = api_b.clone();
         if let ConnectionConfig::Api { port, .. } = &mut different_port {
             *port = Some(444);
         }
         assert!(!api_a.has_equivalent_target(&different_port));
-        assert!(!api_a.has_equivalent_target(&ws_a));
     }
 
     #[test]
@@ -816,8 +774,8 @@ mod tests {
         let connection: Connection = serde_json::from_str(
             r#"{
               "id":"00000000-0000-0000-0000-000000000001",
-              "name":"market-feed",
-              "config":{"kind":"ws","url":"wss://example.com/feed"},
+              "name":"analytics",
+              "config":{"kind":"pg","host":"db.internal","dbname":"app","user":"app"},
               "secrets":[],
               "multi_connect":false,
               "created_at":"2026-01-01T00:00:00Z",
@@ -825,7 +783,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        assert_eq!(connection.name, "market-feed");
+        assert_eq!(connection.name, "analytics");
     }
 
     #[test]

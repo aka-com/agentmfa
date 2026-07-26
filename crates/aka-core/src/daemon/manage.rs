@@ -844,11 +844,6 @@ async fn patch_settings(
             return manage_error_response(error);
         }
     }
-    if let Some(on) = body.show_websockets {
-        if let Err(error) = state.manage.set_show_websockets(on).await {
-            return manage_error_response(error);
-        }
-    }
     if let Some(on) = body.menu_bar_hides_dock {
         if let Err(error) = state.manage.set_menu_bar_hides_dock(on).await {
             return manage_error_response(error);

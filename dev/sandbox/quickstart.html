@@ -65,9 +65,8 @@
   <p class="subtitle">Try every AKA connection type against disposable
   local containers — no real credentials involved.</p>
 
-  <p>The sandbox starts five upstreams on <code>127.0.0.1</code>: an
-  authenticated HTTP API, a WebSocket echo, an MCP server, Postgres, and
-  SSH. All credentials are fixed, fake test values; never reuse them
+  <p>The sandbox starts four upstreams on <code>127.0.0.1</code>: an
+  authenticated HTTP API, an MCP server, Postgres, and SSH. All credentials are fixed, fake test values; never reuse them
   anywhere else. AKA Desktop runs natively on your machine. The MCP
   server shares the HTTP fixture on one port — an MCP connection is an
   API connection carrying an <code>mcp_path</code> (<code>/mcp</code>).</p>
@@ -85,8 +84,7 @@ cd agentmfa
 npm run sandbox:up</code></pre>
   <p>The first start compiles the test fixture inside Docker and can take
   several minutes; later starts take seconds. When everything is ready it
-  prints <span class="ok">ready</span> for HTTP, WebSocket, MCP, Postgres,
-  and SSH, followed by the exact values to enter in AKA Desktop. Re-print
+  prints <span class="ok">ready</span> for HTTP, MCP, Postgres, and SSH, followed by the exact values to enter in AKA Desktop. Re-print
   them any time with <code>npm run sandbox:status</code>.</p>
 
   <h2><span class="step">3</span>Add the services in AKA</h2>
@@ -97,7 +95,7 @@ npm run sandbox:up</code></pre>
   the card isn't shown, re-enable it from the <b>Walkthroughs</b> menu —
   the ? button in the Services header — or use <b>＋ Add service</b> to
   fill the form by hand.)</p>
-  <p>For HTTP API, WebSocket, and MCP, use <b>＋ Add service</b> and enter
+  <p>For HTTP API and MCP, use <b>＋ Add service</b> and enter
   the printed fields manually (MCP is the generic <b>MCP server</b> row).
   For Postgres and SSH, paste the <b>Quick setup</b> line into the card
   and press <b>Continue</b> — the service type is detected automatically
@@ -113,12 +111,6 @@ npm run sandbox:up</code></pre>
       <td>Enter API root <code>http://127.0.0.1:18080</code> manually</td>
       <td>Name <code>sandbox-http</code> · Bearer token
           <code>aka-test-token</code></td>
-    </tr>
-    <tr>
-      <td>WebSocket</td>
-      <td>Enter URL <code>ws://127.0.0.1:18081/ws</code> manually</td>
-      <td>Name <code>sandbox-websocket</code> · Bearer token
-          <code>aka-ws-test-token</code></td>
     </tr>
     <tr>
       <td>MCP&nbsp;server</td>
@@ -149,7 +141,6 @@ npm run sandbox:up</code></pre>
   <p>Press <b>Test</b> on each service's card and expect:</p>
   <div class="card">
     <b>sandbox-http</b> — an authenticated HTTP 200<br>
-    <b>sandbox-websocket</b> — <code>WebSocket handshake succeeded</code><br>
     <b>sandbox-mcp</b> — the handshake succeeds; tools
     <code>sandbox_echo</code> and <code>sandbox_ping</code> are listed<br>
     <b>sandbox-postgres</b> — <code>Signed in to aka_sandbox as aka</code><br>
@@ -167,12 +158,10 @@ npm run sandbox:up</code></pre>
         <code>SELECT current_user, current_database();</code>”</li>
     <li>“Using my AKA service <code>sandbox-ssh</code>, run
         <code>uname -a</code> on the server.”</li>
-    <li>“Using my AKA service <code>sandbox-websocket</code>, connect
-        and echo a message.”</li>
   </ul>
   <p>Approve the prompts AKA Desktop raises — reads (GET/HEAD) can get a
-  read-scoped session, while POST, Postgres, SSH, and WebSocket opens
-  need full access. The agent never sees the tokens, password, or key:
+  read-scoped session, while POST, Postgres, and SSH opens need full
+  access. The agent never sees the tokens, password, or key:
   check the <b>Activity</b> tab afterwards to watch every brokered call,
   with no secret values anywhere.</p>
   <p class="muted">The API fixture also serves deterministic routes for

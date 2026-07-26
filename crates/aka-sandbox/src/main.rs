@@ -8,10 +8,7 @@ use std::{env, time::Duration};
 
 use axum::{
     body::Bytes,
-    extract::{
-        ws::{Message, WebSocket},
-        DefaultBodyLimit, Path, State, WebSocketUpgrade,
-    },
+    extract::{DefaultBodyLimit, Path, State},
     http::{
         header::{AUTHORIZATION, CONTENT_TYPE, LOCATION, WWW_AUTHENTICATE},
         HeaderMap, HeaderName, HeaderValue, StatusCode,
@@ -23,7 +20,6 @@ use axum::{
 use serde_json::json;
 
 const DEFAULT_HTTP_TOKEN: &str = "aka-test-token";
-const DEFAULT_WEBSOCKET_TOKEN: &str = "aka-ws-test-token";
 const DEFAULT_MCP_TOKEN: &str = "aka-mcp-test-token";
 const DEFAULT_CROSS_ORIGIN: &str = "http://127.0.0.1:18081/credential-sink";
 const MAX_DELAY_SECONDS: u64 = 20;
@@ -35,7 +31,6 @@ const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 #[derive(Clone)]
 struct AppState {
     http_authorization: HeaderValue,
-    websocket_authorization: HeaderValue,
     mcp_authorization: HeaderValue,
     cross_origin: HeaderValue,
 }
@@ -44,15 +39,12 @@ impl AppState {
     fn from_env() -> Self {
         let http_token =
             env::var("SANDBOX_HTTP_TOKEN").unwrap_or_else(|_| DEFAULT_HTTP_TOKEN.to_string());
-        let websocket_token = env::var("SANDBOX_WEBSOCKET_TOKEN")
-            .unwrap_or_else(|_| DEFAULT_WEBSOCKET_TOKEN.to_string());
         let mcp_token =
             env::var("SANDBOX_MCP_TOKEN").unwrap_or_else(|_| DEFAULT_MCP_TOKEN.to_string());
         let cross_origin = env::var("SANDBOX_CROSS_ORIGIN_URL")
             .unwrap_or_else(|_| DEFAULT_CROSS_ORIGIN.to_string());
         Self {
             http_authorization: bearer_value(&http_token),
-            websocket_authorization: bearer_value(&websocket_token),
             mcp_authorization: bearer_value(&mcp_token),
             cross_origin: HeaderValue::from_str(&cross_origin)
                 .expect("SANDBOX_CROSS_ORIGIN_URL must be a valid header value"),
@@ -304,36 +296,6 @@ fn mcp_response(payload: serde_json::Value) -> Response {
     response
 }
 
-async fn websocket(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    upgrade: WebSocketUpgrade,
-) -> Response {
-    if let Some(response) = require_authorization(&headers, &state.websocket_authorization) {
-        return response;
-    }
-    upgrade.on_upgrade(echo_websocket)
-}
-
-async fn echo_websocket(mut socket: WebSocket) {
-    while let Some(Ok(message)) = socket.recv().await {
-        match message {
-            message @ (Message::Text(_) | Message::Binary(_)) => {
-                if socket.send(message).await.is_err() {
-                    break;
-                }
-            }
-            Message::Ping(payload) => {
-                if socket.send(Message::Pong(payload)).await.is_err() {
-                    break;
-                }
-            }
-            Message::Close(_) => break,
-            Message::Pong(_) => {}
-        }
-    }
-}
-
 #[tokio::main]
 async fn main() {
     let state = AppState::from_env();
@@ -350,7 +312,6 @@ async fn main() {
         .route("/large/{bytes}", get(generated_body))
         .route("/credential-sink", get(credential_sink))
         .route("/mcp", post(mcp))
-        .route("/ws", get(websocket))
         .layer(DefaultBodyLimit::max(MAX_ECHO_BODY))
         .with_state(state);
 

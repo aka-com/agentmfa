@@ -197,7 +197,6 @@ export const ENDPOINT_FORMATS: Record<ConnectionType, EndpointFormat[]> = {
         `API_BASE_URL=${base}\nAPI_TOKEN=${secret || SECRET_PLACEHOLDER}`,
     },
   ],
-  ws: [],
 };
 
 export function endpointFormatByKey(type: ConnectionType, key: string): EndpointFormat | null {

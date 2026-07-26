@@ -312,7 +312,6 @@ interface ConnectionTestState {
 /* ------------------------------ local state ------------------------------ */
 const DEFAULT_SETTINGS: Settings = {
   reauth_on_read: true,
-  show_websockets: false,
   menu_bar_hides_dock: false,
   presence_window_secs: 15 * 60,
 };
@@ -1067,8 +1066,8 @@ function secretsTableHTML(query = '') {
 // disabled = refused.
 
 // Kinds that can be issued a stable direct endpoint (a pasteable
-// DSN/socket/URL an unmodified tool uses). WebSocket lands later.
-const ENDPOINTABLE: Record<ConnectionType, boolean> = { pg: true, ssh: true, api: true, ws: false };
+// DSN/socket an unmodified tool uses).
+const ENDPOINTABLE: Record<ConnectionType, boolean> = { pg: true, ssh: true, api: true };
 
 // Below this width the Tools tab's detail panel is a slide-over rather
 // than a second column. Must match the styles.css breakpoint.
@@ -1329,12 +1328,11 @@ const connTestResultHTML = (c: ConnectionSummary): string => {
 /** The coarse kind a connection belongs to. Drives the muted per-kind
  * icon tint so a mixed list sorts itself visually without being
  * grouped. */
-type ConnKind = 'mcp' | 'db' | 'ssh' | 'ws' | 'api';
+type ConnKind = 'mcp' | 'db' | 'ssh' | 'api';
 
 function connectionKind(c: ConnectionSummary): ConnKind {
   if (c.type === 'pg') return 'db';
   if (c.type === 'ssh') return 'ssh';
-  if (c.type === 'ws') return 'ws';
   return c.mcp_path ? 'mcp' : 'api';
 }
 
@@ -1481,9 +1479,8 @@ function connectionMenuItemsHTML(c: ConnectionSummary): string {
 
 /**
  * Kinds with a traffic unit worth confirming — and a place in their plane
- * to park it. SSH and WebSocket have neither yet: an SSH agent signs for a
- * session the client already opened, and a WebSocket is one long-lived
- * stream, so neither has an honest unit to ask about.
+ * to park it. SSH has neither yet: its agent signs for a session the client
+ * already opened, so there is no honest unit to ask about.
  */
 function confirmable(c: ConnectionSummary): boolean {
   return c.type === 'api' || c.type === 'pg';
@@ -1603,8 +1600,6 @@ function connDetailHTML(c: ConnectionSummary): string {
       if (c.port != null) rows.push(['Port', String(c.port)]);
       if (c.user) rows.push(['User', c.user]);
       rows.push(['Host key', c.host_key_fingerprint ? 'Pinned' : 'Not pinned yet']);
-    } else if (c.url) {
-      rows.push(['URL', c.url]);
     } else if (c.host) {
       rows.push(['Server', `${c.scheme ? `${c.scheme}://` : ''}${c.host}`]);
     }
@@ -1708,7 +1703,7 @@ function catalogRowHTML(entry: CatalogEntry): string {
   // the connection can be made.
   const addLabel = entry.requiresSetup
     ? 'Configure'
-    : ['mcp', 'http', 'websocket'].includes(entry.id)
+    : ['mcp', 'http'].includes(entry.id)
     ? 'Configure'
     : entry.preset
     ? 'Configure'
@@ -3755,16 +3750,6 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
           onChange={(e) => setDraftField('pgCaBundlePath', 'pgCaBundlePath', e.currentTarget.value)} />
       </div>
     );
-  } else {
-    fields.push(
-      <div className="f-row" key="url">
-        <label htmlFor="f-url">URL</label>
-        <input id="f-url" className={fieldCls('url')} placeholder="wss://stream.example.com/feed"
-          value={d.url ?? ''}
-          onChange={(e) => setDraftField('url', 'url', e.currentTarget.value)} />
-        <FieldError k="url" />
-      </div>,
-    );
   }
   const templateField = (placeholder?: string, note?: ReactNode): ReactNode => (
     <div className="f-row">
@@ -3809,18 +3794,8 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
       </details>,
     );
   } else if (editing) {
-    if (t !== 'ws' || !d.template) {
-      fields.push(<CredentialChooser type={t} allowNew={false} key="chooser" />);
-    }
-    if (t === 'ws' && d.template) {
-      fields.push(
-        <details className="set-collapse" open={Boolean(d.template)} key="auth-template">
-          <summary>Custom authentication header</summary>
-          <div className="set-panel">{templateField('Authorization: Bearer {{TOKEN_NAME}}')}</div>
-        </details>,
-      );
-    }
-  } else if (t === 'api' || t === 'ws') {
+    fields.push(<CredentialChooser type={t} allowNew={false} key="chooser" />);
+  } else if (t === 'api') {
     const mcpAdd = t === 'api' && isMcpDraft(d);
     const oauthPreset = !mcpAdd && t === 'api' && d.entryId
       ? catalogEntryById(d.entryId)?.oauthPreset : undefined;
@@ -4630,11 +4605,6 @@ async function saveConn(): Promise<void> {
     // The SSH host key fingerprint is optional: empty saves the service
     // unpinned, and the key is confirmed at the first agent connection.
   }
-  if (t === 'ws') {
-    const url = (d.url || '').trim();
-    if (!url) errs.url = 'URL is required';
-    else if (!/^wss?:\/\//i.test(url)) errs.url = 'Must start with ws:// or wss://';
-  }
   let apiOrigin: { scheme: string; host: string; port: number | null } | null = null;
   let mcpPath: string | null = null;
   if (t === 'api' && isMcpDraft(d)) {
@@ -4661,10 +4631,10 @@ async function saveConn(): Promise<void> {
       if (!/^https:\/\//.test((value || '').trim())) errs[key] = 'Must be a complete https:// URL';
     }
   }
-  const usesRecipe = adding && (t === 'api' || t === 'ws')
+  const usesRecipe = adding && t === 'api'
     && authMode !== 'advanced' && !usesOauth && !byoOauth;
   const needsCredentialChoice = !usesOauth && !byoOauth && (
-    (adding && !((t === 'api' || t === 'ws') && authMode === 'advanced')) ||
+    (adding && !(t === 'api' && authMode === 'advanced')) ||
     (!adding && t !== 'api'));
   const secretSource = adding
     ? defaultSecretSource(t, d, true)
@@ -4690,7 +4660,7 @@ async function saveConn(): Promise<void> {
   if (usesRecipe && secretSource !== 'none') {
     try { injectionTemplate = authTemplate(t, authMode, templateSecretName || '', (d.authDetail || '').trim()); }
     catch (error) { errs.authDetail = errorMessage(error); }
-  } else if ((t === 'api' || (adding && t === 'ws')) && authMode === 'advanced' && !injectionTemplate) {
+  } else if (t === 'api' && authMode === 'advanced' && !injectionTemplate) {
     errs.template = 'Credential template is required';
   } else if (!adding && t === 'api' && !injectionTemplate) {
     errs.template = 'Credential template is required';
@@ -5478,7 +5448,7 @@ document.addEventListener('click', async (e) => {
         entryId: entry?.id,
         mcpPath: c.mcp_path ?? null,
         port: c.port ? String(c.port) : (c.type === 'ssh' ? '22' : '5432'),
-        dbname: c.dbname, user: c.user, url: c.url, template: c.template,
+        dbname: c.dbname, user: c.user, template: c.template,
         destination: c.destination,
         hostKeyFingerprint: c.host_key_fingerprint,
         sslmode: c.sslmode || 'verify-full', pgCaBundlePath: c.trusted_ca_bundle_path,

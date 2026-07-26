@@ -1,8 +1,8 @@
 //! Data-plane tickets and live sessions.
 //!
-//! WS bridge tickets and PG DSN tickets are 128-bit random values that
+//! PG DSN tickets and SSH agent-socket tickets are 128-bit random values that
 //! expire 60 s after issue. A ticket may be redeemed any number of times
-//! within that window, each redemption opening its own bridged session, all
+//! within that window, each redemption opening its own proxied session, all
 //! under the single approval. Concurrent sessions are
 //! bounded at two levels, a per-ticket cap (default 60) inside a global
 //! backstop (default 300), with distinct reasons naming the budget hit.
@@ -22,22 +22,9 @@ use crate::events::BrokerEvents;
 use crate::types::{Connection, ConnectionKind};
 use crate::wire::ErrorReason;
 
-/// Kind-specific state carried by a ticket.
-#[allow(clippy::large_enum_variant)] // one live WS stream per ticket, boxedness buys nothing
-pub enum TicketPayload {
-    Ws {
-        /// The upstream connection dialed (and authenticated) at open time,
-        /// claimed by the first redemption.
-        pending_upstream: Option<crate::capability::ws::WsUpstream>,
-    },
-    Pg,
-    Ssh,
-}
-
 /// User-facing audit label for a data-plane connection.
 fn kind_label(kind: ConnectionKind) -> &'static str {
     match kind {
-        ConnectionKind::Ws => "WebSocket",
         ConnectionKind::Pg => "Postgres",
         ConnectionKind::Ssh => "SSH",
         ConnectionKind::Api => "API",
@@ -49,7 +36,6 @@ struct TicketEntry {
     connection: Connection,
     issued: Instant,
     active_sessions: usize,
-    payload: TicketPayload,
     secret_read_authorization: Option<crate::authorization::SecretReadAuthorization>,
     invalidated: bool,
 }
@@ -61,7 +47,7 @@ pub struct SessionInfo {
     pub kind: ConnectionKind,
     pub agent: String,
     pub connection: String,
-    /// Pinned target, e.g. the WS URL or `user@host:port/db`.
+    /// Pinned target, e.g. `user@host:port/db`.
     pub detail: String,
     pub opened_at: DateTime<Utc>,
 }
@@ -121,7 +107,6 @@ pub struct Redemption {
     ticket: String,
     pub agent: String,
     pub connection: Connection,
-    pub payload_ws_upstream: Option<crate::capability::ws::WsUpstream>,
     pub(crate) secret_read_authorization: Option<crate::authorization::SecretReadAuthorization>,
     started: bool,
 }
@@ -187,7 +172,7 @@ impl DataPlane {
     }
 
     /// Issue a ticket under one approval.
-    pub fn issue(&self, agent: &str, connection: &Connection, payload: TicketPayload) -> String {
+    pub fn issue(&self, agent: &str, connection: &Connection) -> String {
         let value = mint_ticket();
         let mut state = self.inner.state.lock().unwrap();
         Self::sweep(&self.inner, &mut state);
@@ -198,7 +183,6 @@ impl DataPlane {
                 connection: connection.clone(),
                 issued: Instant::now(),
                 active_sessions: 0,
-                payload,
                 secret_read_authorization: crate::authorization::current(),
                 invalidated: false,
             },
@@ -227,16 +211,11 @@ impl DataPlane {
             return Err(RedeemError::BrokerSessionLimit);
         }
         entry.active_sessions += 1;
-        let pending = match &mut entry.payload {
-            TicketPayload::Ws { pending_upstream } => pending_upstream.take(),
-            TicketPayload::Pg | TicketPayload::Ssh => None,
-        };
         Ok(Redemption {
             plane: self.inner.clone(),
             ticket: value.to_string(),
             agent: entry.agent.clone(),
             connection: entry.connection.clone(),
-            payload_ws_upstream: pending,
             secret_read_authorization: entry.secret_read_authorization.clone(),
             started: false,
         })
@@ -340,9 +319,6 @@ impl DataPlane {
         let mut state = self.inner.state.lock().unwrap();
         for ticket in state.tickets.values_mut() {
             ticket.invalidated = true;
-            if let TicketPayload::Ws { pending_upstream } = &mut ticket.payload {
-                *pending_upstream = None;
-            }
         }
         let sessions: Vec<_> = state
             .sessions
@@ -380,12 +356,6 @@ impl DataPlane {
                 continue;
             }
             ticket.invalidated = true;
-            // Drop any unclaimed pre-dialed upstream with the ticket, the way
-            // `close_all` does: it is an authenticated socket nobody can
-            // legitimately claim any more.
-            if let TicketPayload::Ws { pending_upstream } = &mut ticket.payload {
-                *pending_upstream = None;
-            }
         }
         let sessions: Vec<_> = state
             .sessions
@@ -567,13 +537,17 @@ mod tests {
         }
     }
 
-    fn ws_connection() -> Connection {
+    fn pg_connection() -> Connection {
         Connection {
             id: Uuid::new_v4(),
-            name: "market-feed".into(),
-            config: ConnectionConfig::Ws {
-                url: "wss://stream.example.com/feed".into(),
-                template: None,
+            name: "analytics".into(),
+            config: ConnectionConfig::Pg {
+                host: "db.internal".into(),
+                port: 5432,
+                dbname: "analytics".into(),
+                user: "app".into(),
+                sslmode: Default::default(),
+                trusted_ca_bundle_path: None,
             },
             secrets: vec![],
             account: None,
@@ -614,9 +588,9 @@ mod tests {
     #[test]
     fn one_ticket_can_open_multiple_sessions() {
         let (plane, _dir) = plane(Duration::from_secs(60), 60, 300);
-        let ticket = plane.issue("claude-code", &ws_connection(), TicketPayload::Pg);
-        let s1 = plane.redeem(&ticket).unwrap().start(ConnectionKind::Ws);
-        let s2 = plane.redeem(&ticket).unwrap().start(ConnectionKind::Ws);
+        let ticket = plane.issue("claude-code", &pg_connection());
+        let s1 = plane.redeem(&ticket).unwrap().start(ConnectionKind::Pg);
+        let s2 = plane.redeem(&ticket).unwrap().start(ConnectionKind::Pg);
         assert_eq!(plane.sessions().len(), 2);
         s1.finish("test");
         s2.finish("test");
@@ -643,7 +617,7 @@ mod tests {
     #[test]
     fn ssh_ticket_supports_multiple_client_connections() {
         let (plane, _dir) = plane(Duration::from_secs(60), 60, 300);
-        let ticket = plane.issue("claude-code", &ssh_connection(), TicketPayload::Ssh);
+        let ticket = plane.issue("claude-code", &ssh_connection());
         let s1 = plane.redeem(&ticket).unwrap().start(ConnectionKind::Ssh);
         let s2 = plane.redeem(&ticket).unwrap().start(ConnectionKind::Ssh);
         assert_eq!(plane.sessions().len(), 2);
@@ -654,7 +628,7 @@ mod tests {
     #[test]
     fn tickets_expire() {
         let (plane, _dir) = plane(Duration::from_millis(10), 60, 300);
-        let t = plane.issue("a", &ws_connection(), TicketPayload::Pg);
+        let t = plane.issue("a", &pg_connection());
         std::thread::sleep(Duration::from_millis(30));
         assert_eq!(expect_err(plane.redeem(&t)), RedeemError::Expired);
         assert_eq!(expect_err(plane.redeem("tkt_nope")), RedeemError::Unknown);
@@ -663,16 +637,16 @@ mod tests {
     #[test]
     fn budgets_fail_fast_with_the_right_reason() {
         let (plane, _dir) = plane(Duration::from_secs(60), 1, 300);
-        let t = plane.issue("a", &ws_connection(), TicketPayload::Pg);
-        let _s = plane.redeem(&t).unwrap().start(ConnectionKind::Ws);
+        let t = plane.issue("a", &pg_connection());
+        let _s = plane.redeem(&t).unwrap().start(ConnectionKind::Pg);
         assert_eq!(
             expect_err(plane.redeem(&t)),
             RedeemError::TicketSessionLimit
         );
 
         let (plane, _dir2) = plane_global_one();
-        let t1 = plane.issue("a", &ws_connection(), TicketPayload::Pg);
-        let t2 = plane.issue("a", &ws_connection(), TicketPayload::Pg);
+        let t1 = plane.issue("a", &pg_connection());
+        let t2 = plane.issue("a", &pg_connection());
         let _s1 = plane.redeem(&t1).unwrap().start(ConnectionKind::Pg);
         assert_eq!(
             expect_err(plane.redeem(&t2)),
@@ -687,21 +661,21 @@ mod tests {
     #[test]
     fn failed_establishment_releases_budget() {
         let (plane, _dir) = plane(Duration::from_secs(60), 1, 300);
-        let t = plane.issue("a", &ws_connection(), TicketPayload::Pg);
+        let t = plane.issue("a", &pg_connection());
         {
             let redemption = plane.redeem(&t).unwrap();
             drop(redemption); // dial failed
         }
         // Slot released: redeem works again.
-        let s = plane.redeem(&t).unwrap().start(ConnectionKind::Ws);
+        let s = plane.redeem(&t).unwrap().start(ConnectionKind::Pg);
         s.finish("test");
     }
 
     #[test]
     fn active_sessions_keep_ticket_accounting_alive_past_ttl() {
         let (plane, _dir) = plane(Duration::from_millis(20), 60, 300);
-        let t = plane.issue("a", &ws_connection(), TicketPayload::Pg);
-        let s = plane.redeem(&t).unwrap().start(ConnectionKind::Ws);
+        let t = plane.issue("a", &pg_connection());
+        let s = plane.redeem(&t).unwrap().start(ConnectionKind::Pg);
         std::thread::sleep(Duration::from_millis(40));
         // New redemptions fail (window elapsed) …
         assert_eq!(expect_err(plane.redeem(&t)), RedeemError::Expired);
@@ -713,8 +687,8 @@ mod tests {
     #[tokio::test]
     async fn key_rotation_blocks_all_tickets_and_signals_live_sessions() {
         let (plane, _dir) = plane(Duration::from_secs(60), 60, 300);
-        let ticket = plane.issue("codex", &ws_connection(), TicketPayload::Pg);
-        let other_ticket = plane.issue("claude", &ws_connection(), TicketPayload::Pg);
+        let ticket = plane.issue("codex", &pg_connection());
+        let other_ticket = plane.issue("claude", &pg_connection());
         let session = plane.redeem(&ticket).unwrap().start(ConnectionKind::Pg);
         let closed = session.close_signal.clone();
         let notified = closed.notified();
@@ -761,7 +735,7 @@ mod tests {
     async fn withdrawing_a_connection_closes_its_live_ticket_session() {
         let (plane, _dir) = plane(Duration::from_secs(60), 60, 300);
         let connection = ssh_connection();
-        let ticket = plane.issue("claude-code", &connection, TicketPayload::Ssh);
+        let ticket = plane.issue("claude-code", &connection);
         let session = plane
             .redeem(&ticket)
             .expect("redeem")
@@ -782,7 +756,7 @@ mod tests {
     async fn withdrawing_a_connection_invalidates_its_outstanding_tickets() {
         let (plane, _dir) = plane(Duration::from_secs(60), 60, 300);
         let connection = ssh_connection();
-        let ticket = plane.issue("claude-code", &connection, TicketPayload::Ssh);
+        let ticket = plane.issue("claude-code", &connection);
 
         assert_eq!(plane.close_connection_sessions(&connection.id), 0);
         assert_eq!(expect_err(plane.redeem(&ticket)), RedeemError::Expired);
@@ -793,8 +767,8 @@ mod tests {
     async fn withdrawing_a_connection_leaves_other_connections_alone() {
         let (plane, _dir) = plane(Duration::from_secs(60), 60, 300);
         let withdrawn = ssh_connection();
-        let untouched = ws_connection();
-        let other = plane.issue("claude-code", &untouched, TicketPayload::Ssh);
+        let untouched = pg_connection();
+        let other = plane.issue("claude-code", &untouched);
         let other_session = plane
             .redeem(&other)
             .expect("redeem")

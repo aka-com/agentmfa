@@ -934,14 +934,6 @@ impl ManagementBackend for RemoteBackend {
         .await
     }
 
-    async fn set_show_websockets(&self, on: bool) -> ManageResult<()> {
-        self.patch_settings(SettingsPatchBody {
-            show_websockets: Some(on),
-            ..Default::default()
-        })
-        .await
-    }
-
     async fn set_menu_bar_hides_dock(&self, on: bool) -> ManageResult<()> {
         self.patch_settings(SettingsPatchBody {
             menu_bar_hides_dock: Some(on),

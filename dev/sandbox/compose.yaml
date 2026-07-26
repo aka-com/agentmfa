@@ -8,7 +8,6 @@ services:
       dockerfile: dev/sandbox/fixture/Dockerfile
     environment:
       SANDBOX_HTTP_TOKEN: aka-test-token
-      SANDBOX_WEBSOCKET_TOKEN: aka-ws-test-token
       # The MCP server shares this container and the HTTP port; an MCP
       # connection is an API connection carrying an mcp_path (/mcp).
       SANDBOX_MCP_TOKEN: aka-mcp-test-token

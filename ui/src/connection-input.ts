@@ -1,13 +1,12 @@
 // Pure connection-form helpers. Kept separate from app.tsx so the security-
 // relevant normalization rules can be exercised without a browser/Tauri.
 
-export type ConnectionType = 'api' | 'pg' | 'ws' | 'ssh';
+export type ConnectionType = 'api' | 'pg' | 'ssh';
 
 const QUICK_SETUP_PLACEHOLDERS: Record<ConnectionType, string> = {
   pg: 'postgresql://app@db.example.com/production',
   ssh: 'ssh deploy@prod.example.com',
   api: 'https://api.github.com',
-  ws: 'wss://stream.example.com/feed',
 };
 
 export function quickSetupPlaceholder(type: ConnectionType): string {
@@ -75,7 +74,6 @@ interface ImportBase<T extends ConnectionType, F> {
 
 export type ConnectionImport =
   | ImportBase<'api', { origin: string }>
-  | ImportBase<'ws', { url: string }>
   | ImportBase<'pg', {
       host: string;
       port: number;
@@ -289,13 +287,6 @@ export function parseConnectionImport(value: unknown): ConnectionImport {
     return {
       type: 'api', name: suggestedName(parsed.hostname, 'api'), credential: null, warnings,
       fields: { origin: parsed.origin },
-    };
-  }
-  if (scheme === 'ws' || scheme === 'wss') {
-    if (parsed.username || parsed.password) throw new Error('WebSocket URLs with embedded credentials are not supported');
-    return {
-      type: 'ws', name: suggestedName(parsed.hostname, 'stream'), credential: null, warnings: [],
-      fields: { url: parsed.href },
     };
   }
   if (scheme === 'postgres' || scheme === 'postgresql') {

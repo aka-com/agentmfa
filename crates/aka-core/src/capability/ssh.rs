@@ -936,11 +936,7 @@ pub async fn open_agent(
         .await?
         .map(Arc::new);
 
-    let ticket = broker.data_plane.issue(
-        &agent_name,
-        &connection,
-        crate::sessions::TicketPayload::Ssh,
-    );
+    let ticket = broker.data_plane.issue(&agent_name, &connection);
     let dir = broker.paths.ssh_agent_dir();
     crate::paths::create_private_dir(&dir).map_err(|e| format!("ssh socket dir: {e}"))?;
     // The name only needs uniqueness — the 0700 dir is the access control —

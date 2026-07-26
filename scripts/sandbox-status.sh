@@ -8,7 +8,6 @@ client_key="$repo_root/dev/sandbox/state/ssh/client_key"
 # same SANDBOX_*_PORT variables. Export an override for both commands, e.g.
 #   SANDBOX_HTTP_PORT=28080 npm run sandbox:up
 http_port="${SANDBOX_HTTP_PORT:-18080}"
-ws_port="${SANDBOX_WS_PORT:-18081}"
 pg_port="${SANDBOX_PG_PORT:-15432}"
 ssh_port="${SANDBOX_SSH_PORT:-12222}"
 wait_for_services=false
@@ -34,20 +33,6 @@ fi
 
 check_http() {
   curl --fail --silent --max-time 2 "http://127.0.0.1:$http_port/health" >/dev/null 2>&1
-}
-
-check_websocket_server() {
-  local response
-  response="$(
-    curl --silent --include --no-buffer --max-time 2 --http1.1 \
-      --header 'Connection: Upgrade' \
-      --header 'Upgrade: websocket' \
-      --header 'Sec-WebSocket-Version: 13' \
-      --header 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
-      --header 'Authorization: Bearer aka-ws-test-token' \
-      "http://127.0.0.1:$ws_port/ws" 2>/dev/null || true
-  )"
-  [[ "$response" == "HTTP/1.1 101 "* ]]
 }
 
 check_mcp() {
@@ -93,7 +78,6 @@ wait_for() {
 if $wait_for_services; then
   echo "Waiting for sandbox services..."
   wait_for HTTP check_http
-  wait_for WebSocket check_websocket_server
   wait_for MCP check_mcp
   wait_for Postgres check_postgres
   wait_for SSH check_ssh
@@ -130,14 +114,6 @@ HTTP API
   Credential name:  SANDBOX_HTTP_TOKEN
   Credential value: aka-test-token
   Test → expect:    an authenticated HTTP 200 OK
-
-WebSocket
-  Name:             sandbox-websocket
-  URL:              ws://127.0.0.1:$ws_port/ws
-  Authentication type: Bearer token
-  Credential name:  SANDBOX_WEBSOCKET_TOKEN
-  Credential value: aka-ws-test-token
-  Test → expect:    WebSocket handshake succeeded
 
 MCP server
   Name:             sandbox-mcp

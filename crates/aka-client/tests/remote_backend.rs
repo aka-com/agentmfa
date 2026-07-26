@@ -132,10 +132,7 @@ async fn the_remote_backend_manages_a_tcp_broker_end_to_end() {
     let key = backend.agent_key().await.unwrap();
     assert!(key.starts_with("aka_"));
 
-    let settings = backend.settings().await.unwrap();
-    assert!(!settings.show_websockets);
-    backend.set_show_websockets(true).await.unwrap();
-    assert!(backend.settings().await.unwrap().show_websockets);
+    assert!(backend.settings().await.unwrap().reauth_on_read);
 
     assert!(!backend.activity(50).await.unwrap().is_empty());
 

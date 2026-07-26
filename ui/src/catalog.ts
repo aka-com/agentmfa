@@ -411,16 +411,6 @@ export const CATALOG: CatalogEntry[] = [
     keywords: ['rest', 'http', 'endpoint'],
   },
   {
-    id: 'websocket',
-    name: 'Custom WebSocket',
-    icon: 'radioTower',
-    description: 'Streaming connections',
-    section: 'Custom Apps',
-    via: 'connection',
-    connType: 'ws',
-    keywords: ['stream', 'realtime', 'socket'],
-  },
-  {
     id: 'postgres',
     name: 'Postgres',
     icon: 'postgres',
