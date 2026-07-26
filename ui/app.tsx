@@ -693,6 +693,9 @@ function approvalUnit(approval: Approval): string {
   if (approval.unit === 'session' || approval.type === 'pg') {
     return 'wants to open a database session';
   }
+  if (approval.unit === 'login' || approval.type === 'ssh') {
+    return 'wants to log in over SSH';
+  }
   if (approval.unit === 'tool') return 'wants to call a tool';
   if (approval.unit === 'request') return 'wants to send a request';
   // Compatibility with brokers from before the explicit unit was added:
@@ -1477,19 +1480,29 @@ function connectionMenuItemsHTML(c: ConnectionSummary): string {
     ${endpointItems}`;
 }
 
-/**
- * Kinds with a traffic unit worth confirming — and a place in their plane
- * to park it. SSH has neither yet: its agent signs for a session the client
- * already opened, so there is no honest unit to ask about.
- */
-function confirmable(c: ConnectionSummary): boolean {
-  return c.type === 'api' || c.type === 'pg';
-}
-
 /** What the switch promises to ask about, in this tool's own terms. */
 function confirmUnitLabel(c: ConnectionSummary): string {
   if (c.type === 'pg') return 'Ask before database sessions';
+  if (c.type === 'ssh') return 'Ask before SSH logins';
   return c.mcp_path ? 'Ask before tool calls' : 'Ask before requests';
+}
+
+/**
+ * The limit of what a kind's switch can promise, where that differs from
+ * what the label implies. Both planes confirm something coarser than a
+ * single operation, and the row says which — a switch that quietly means
+ * less than it reads is worse than no switch.
+ */
+function confirmScopeNote(c: ConnectionSummary): string {
+  if (c.type === 'ssh') {
+    return 'Each login is confirmed. Commands in the session that follows are not — '
+      + 'AgentMFA signs the login and is then out of the connection.';
+  }
+  if (c.type === 'pg') {
+    return 'Each session is confirmed. Statements within it are not: one approval covers '
+      + 'every query the client sends.';
+  }
+  return '';
 }
 
 /**
@@ -1499,7 +1512,7 @@ function confirmUnitLabel(c: ConnectionSummary): string {
  * than in global Settings, because the answer differs per tool.
  */
 function confirmSectionHTML(c: ConnectionSummary): string {
-  if (!c.agent_access.enabled || !confirmable(c)) return '';
+  if (!c.agent_access.enabled) return '';
   const on = Boolean(c.agent_access.confirm);
   const until = c.agent_access.confirm_window_until;
   // An approval covers the agent the prompt named, not the connection, so
@@ -1525,10 +1538,14 @@ function confirmSectionHTML(c: ConnectionSummary): string {
         retries are refused without asking for ${esc(timeLeft(cooldownUntil))}. Turning
         confirmation off and back on clears it.</span></div>`
     : '';
+  // Shown whether the switch is on or off: what it can promise is part of
+  // deciding whether to turn it on at all.
+  const scope = confirmScopeNote(c);
   return `<div class="cd-sec cd-confirm">
       <div class="cd-confirm-row">
         <div class="cd-confirm-txt">
           <div class="cd-confirm-lbl">${esc(confirmUnitLabel(c))}</div>
+          ${scope ? `<div class="cd-confirm-sub">${esc(scope)}</div>` : ''}
         </div>
         <button class="switch ${on ? 'on' : ''}" role="switch" aria-checked="${on}"
           title="${on ? 'Traffic is confirmed with you first' : 'Traffic goes without asking'}"

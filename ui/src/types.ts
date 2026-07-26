@@ -19,7 +19,8 @@ export interface AgentAccess {
   /**
    * Whether traffic asks the user when no approval window is open (default
    * false). What one decision gates depends on the kind: one request for an
-   * API tool, one `tools/call` for an MCP tool, one session for Postgres.
+   * API tool, one `tools/call` for an MCP tool, one session for Postgres,
+   * one login for SSH.
    */
   confirm?: boolean;
   /**
@@ -194,7 +195,7 @@ export interface Approval {
   /** Connection kind, so the prompt can name the unit it is asking about. */
   type: ConnectionType;
   /** Exact traffic unit; absent when connected to an older broker. */
-  unit?: 'request' | 'tool' | 'session' | null;
+  unit?: 'request' | 'tool' | 'session' | 'login' | null;
   /** The pinned destination the traffic would reach. */
   target: string;
   /** Self-reported agent label. Attribution, never authorization. */
@@ -232,7 +233,7 @@ export interface RequestRecord {
   connection_id?: string | null;
   connection: string;
   connection_type?: ConnectionType | null;
-  unit?: 'request' | 'tool' | 'session' | null;
+  unit?: 'request' | 'tool' | 'session' | 'login' | null;
   target?: string | null;
   agent: string;
   summary: string;

@@ -23,7 +23,28 @@
 //!   host key for this SSH transport.
 //! - **SIGN_REQUEST** is honored only for host-bound public-key userauth that
 //!   names the configured user, pinned authentication key, verified session
-//!   id, and configured host key. Every signature and refusal is audited.
+//!   id, and configured host key. Every signature and refusal is audited,
+//!   attributed to the agent the socket was opened for.
+//!
+//! # What the switch confirms
+//!
+//! With traffic confirmation on, each **login** is confirmed: the gate sits in
+//! `SIGN_REQUEST`, after the userauth blob has been checked against the pinned
+//! key, user, and session-bound host key, so the prompt names a destination
+//! that has been verified rather than merely configured. Listing identities
+//! and session-bind are not gated — neither authenticates anything.
+//!
+//! A login is the narrowest unit this plane has, and it is worth being plain
+//! about the gap between it and a command. The agent signs the handshake and
+//! is then out of the connection: `ssh` talks to the host directly, so nothing
+//! here can see the commands that follow, bound the session's length, or close
+//! it. Confirming a login means confirming everything that login goes on to
+//! do. The prompt says so ([`LOGIN_CONSEQUENCE`]) rather than implying a
+//! per-command gate that does not exist; getting one would take a full SSH
+//! transport proxy in place of agent forwarding.
+//!
+//! Repeated logins ride the approval window like any other plane, so a `git`
+//! loop against one host asks once rather than once per fetch.
 //!
 //! v1 signs **ed25519** and **RSA** (`rsa-sha2-256` / `rsa-sha2-512`,
 //! selected by the client's SIGN_REQUEST flags) keys.
@@ -38,7 +59,7 @@ use sha2::{Sha256, Sha512};
 use signature::{SignatureEncoding as _, Signer as _, Verifier as _};
 use ssh_key::private::KeypairData;
 use ssh_key::{Algorithm, Fingerprint, HashAlg, PrivateKey, PublicKey, Signature};
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Notify;
 
@@ -134,7 +155,9 @@ fn frame(kind: u8, body: &[u8]) -> Vec<u8> {
 }
 
 /// Read one length-prefixed agent message; returns `(type, payload)`.
-async fn read_message(stream: &mut UnixStream) -> std::io::Result<(u8, Vec<u8>)> {
+async fn read_message<R: tokio::io::AsyncRead + Unpin>(
+    stream: &mut R,
+) -> std::io::Result<(u8, Vec<u8>)> {
     let mut len = [0u8; 4];
     stream.read_exact(&mut len).await?;
     let len = u32::from_be_bytes(len) as usize;
@@ -426,6 +449,10 @@ struct AgentState {
     bind_gate: tokio::sync::Mutex<()>,
     connection_id: Uuid,
     connection_name: String,
+    /// Self-reported label of the agent this socket was opened for, or
+    /// `"endpoint"` for a standing one. Attribution for the prompt and the
+    /// signature log, never authorization — the socket path is the capability.
+    agent: String,
     comment: String,
     signer: Option<Arc<SshSigner>>,
 }
@@ -965,6 +992,7 @@ pub async fn open_agent(
         bind_gate: tokio::sync::Mutex::new(()),
         connection_id: connection.id,
         connection_name: connection.name.clone(),
+        agent: agent_name,
         comment: format!("aka:{}", connection.name),
         signer,
     });
@@ -1125,6 +1153,9 @@ pub async fn bind_endpoint(
         bind_gate: tokio::sync::Mutex::new(()),
         connection_id: connection.id,
         connection_name: connection.name.clone(),
+        // A standing socket is not opened by any one agent; the same label
+        // the endpoint's sessions are registered under.
+        agent: "endpoint".to_string(),
         comment: format!("aka:{}", connection.name),
         signer,
     });
@@ -1225,12 +1256,18 @@ async fn serve(
     let close_signal = session.close_signal.clone();
     let mut binding = None;
 
+    // Buffered read half: answering a request can park on the user, and
+    // watching the client for departure while it does must not consume the
+    // bytes a pipelining client already sent.
+    let (read_half, mut writer) = stream.split();
+    let mut reader = BufReader::new(read_half);
+
     loop {
         tokio::select! {
             _ = close_signal.notified() => return "closed_by_user",
             _ = tokio::time::sleep_until(ttl_deadline) => return "session_ttl",
             _ = tokio::time::sleep_until(idle_deadline) => return "idle_timeout",
-            msg = read_message(stream) => {
+            msg = read_message(&mut reader) => {
                 let (kind, payload) = match msg {
                     Ok(m) => m,
                     Err(_) => return "client_closed",
@@ -1239,15 +1276,40 @@ async fn serve(
                 session
                     .bytes_up
                     .fetch_add(payload.len() as u64 + 1, Ordering::Relaxed);
-                let response = handle_request(state, &mut binding, kind, &payload).await;
+                // A confirmed SIGN_REQUEST parks here until the user answers,
+                // so every bound has to keep running underneath it: closing
+                // the session from the app, or its TTL lapsing, must not wait
+                // behind a prompt nobody is going to answer. Dropping the
+                // request future also drops its approval waiter, which is how
+                // the registry learns the prompt has nobody left on it.
+                let response = tokio::select! {
+                    _ = close_signal.notified() => return "closed_by_user",
+                    _ = tokio::time::sleep_until(ttl_deadline) => return "session_ttl",
+                    _ = client_gone(&mut reader) => return "client_closed",
+                    response = handle_request(state, &mut binding, kind, &payload) => response,
+                };
                 session
                     .bytes_down
                     .fetch_add(response.len() as u64, Ordering::Relaxed);
-                if stream.write_all(&response).await.is_err() {
+                if writer.write_all(&response).await.is_err() {
                     return "client_closed";
                 }
             }
         }
+    }
+}
+
+/// Resolves when the client hangs up while its request is being answered.
+///
+/// `ssh` waits for the signature and sends nothing meanwhile, so readable
+/// bytes mean a pipelining client rather than a departing one: stop watching
+/// and leave them buffered for the next read. Mirrors the PG proxy's watch on
+/// a parked session.
+async fn client_gone<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) {
+    match reader.fill_buf().await {
+        Ok([]) => {}
+        Ok(_) => std::future::pending().await,
+        Err(_) => {}
     }
 }
 
@@ -1395,16 +1457,83 @@ async fn tofu_session_bind(
 }
 
 fn refuse(state: &AgentState, reason: &str) -> Vec<u8> {
+    refuse_with(state, reason, "refused")
+}
+
+fn refuse_with(state: &AgentState, reason: &str, outcome: &str) -> Vec<u8> {
     state.broker.audit.append(
         AuditEntry::new(
             AuditKind::SshSigned,
             format!("SSH signature refused: {}", state.connection_name),
         )
+        .agent(state.agent.clone())
         .connection(state.connection_name.clone())
         .detail(reason.to_string())
-        .outcome("refused"),
+        .outcome(outcome.to_string()),
     );
     frame(SSH_AGENT_FAILURE, &[])
+}
+
+/// What approving one SSH login hands over.
+///
+/// The honest limit of this gate, stated up front. The agent signs the
+/// *authentication*; once the handshake completes the client talks to the
+/// host directly and the broker is not in that connection at all. It cannot
+/// see the commands, cap the session's length, or close it — the socket's
+/// TTL bounds further *logins*, not this one's lifetime.
+const LOGIN_CONSEQUENCE: &str =
+    "Approving signs one SSH login. What runs afterwards is between the client and the host: \
+     AgentMFA is not in that connection, so it cannot see the commands, time the session out, \
+     or close it.";
+
+/// Ask the user about one login, if this connection's switch is on.
+///
+/// Gated here rather than at `open` because this is the first point where
+/// the destination is *verified* rather than merely configured: the userauth
+/// blob has been checked against the pinned key, the pinned login, and the
+/// session-bound host key, so the prompt names what the client will actually
+/// authenticate to. It also means a refused or malformed signature never
+/// raises a prompt — only one that would otherwise succeed.
+///
+/// Identity listing and session-bind are deliberately not gated: neither
+/// authenticates anything, and prompting on them would ask about `ssh`
+/// merely considering the key.
+async fn confirm_login(state: &Arc<AgentState>, user: &str) -> Option<Vec<u8>> {
+    if !state.broker.access.confirm_mode(&state.connection_id).is_on() {
+        return None;
+    }
+    let Ok(connection) = state.broker.store.connection_by_id(&state.connection_id) else {
+        return Some(refuse(state, "the connection has been removed"));
+    };
+    let summary = format!("SSH login as {user}@{}", connection.target());
+    let verdict = state
+        .broker
+        .approvals
+        .gate(
+            crate::approvals::ApprovalRequest::new(&connection, state.agent.clone(), summary)
+                .maybe_detail(
+                    state
+                        .host_key_fingerprint
+                        .lock()
+                        .await
+                        .map(|fingerprint| format!("host key {fingerprint}")),
+                )
+                .consequence(LOGIN_CONSEQUENCE),
+        )
+        .await;
+    if verdict.is_allowed() {
+        return None;
+    }
+    // The agent wire protocol has one refusal, so the reason lives in the
+    // audit entry; `ssh` reports it as the agent declining the key.
+    Some(refuse_with(
+        state,
+        verdict.detail(),
+        verdict
+            .reason()
+            .map(|reason| reason.as_str())
+            .unwrap_or("refused"),
+    ))
 }
 
 async fn sign_response(
@@ -1452,6 +1581,12 @@ async fn sign_response(
     let user = auth.user.to_string();
     let data = data.to_vec();
 
+    // Everything the prompt would name is verified by this point, and
+    // nothing has been signed yet.
+    if let Some(refusal) = confirm_login(state, &user).await {
+        return refusal;
+    }
+
     // A bound connection always cached the pinned fingerprint at bind time.
     let pinned = state
         .host_key_fingerprint
@@ -1467,6 +1602,7 @@ async fn sign_response(
                     AuditKind::SshSigned,
                     format!("SSH authentication signed: {}", state.connection_name),
                 )
+                .agent(state.agent.clone())
                 .connection(state.connection_name.clone())
                 .detail(format!("host-bound userauth as {user} · {pinned}"))
                 .outcome("signed"),

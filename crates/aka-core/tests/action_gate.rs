@@ -1189,14 +1189,10 @@ async fn kinds_with_no_traffic_unit_cannot_be_confirmed() {
         })
         .unwrap();
 
-    // An SSH agent signs for a session the client already opened, so there is
-    // no honest unit to ask about: the switch is refused rather than quietly
-    // ignored.
-    assert!(matches!(
-        broker.ui_set_confirm_mode(&ssh.id, ConfirmMode::On),
-        Err(CoreError::InvalidSetting(_))
-    ));
-    assert_eq!(broker.access.confirm_mode(&ssh.id), ConfirmMode::Off);
+    // SSH confirms per login: the gate sits in the agent's SIGN_REQUEST, so
+    // the switch is real here like everywhere else.
+    assert!(broker.ui_set_confirm_mode(&ssh.id, ConfirmMode::On).unwrap());
+    assert_eq!(broker.access.confirm_mode(&ssh.id), ConfirmMode::On);
 }
 
 #[tokio::test]

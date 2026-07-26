@@ -1906,12 +1906,6 @@ impl Broker {
     ) -> Result<bool> {
         let connection = self.store.connection_by_id(connection_id)?;
         let old_mode = self.access.confirm_mode(connection_id);
-        if confirm.is_on() && !crate::types::confirmable(&connection) {
-            return Err(CoreError::InvalidSetting(format!(
-                "{} connections have no traffic unit to confirm",
-                connection.kind().as_str()
-            )));
-        }
         let confirmation = if confirm.is_on() {
             None
         } else if old_mode.is_on() {

@@ -455,17 +455,6 @@ impl ConfirmMode {
     }
 }
 
-/// Kinds whose traffic can be confirmed. Postgres, API, and MCP tools have
-/// a natural unit to ask about and a place in the plane to park it; SSH does
-/// not have one yet, so its connections never carry the switch (the UI hides
-/// it, and the core refuses to set it).
-pub fn confirmable(connection: &Connection) -> bool {
-    match &connection.config {
-        ConnectionConfig::Api { .. } | ConnectionConfig::Pg { .. } => true,
-        ConnectionConfig::Ssh { .. } => false,
-    }
-}
-
 /// Per-connection agent access — the whole authorization model. A connection
 /// with no entry is **enabled** (adding a tool in the app is already a
 /// deliberate user action); an entry records the non-default states: agents

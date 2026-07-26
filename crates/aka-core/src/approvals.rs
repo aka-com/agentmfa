@@ -55,6 +55,10 @@ pub enum ApprovalUnit {
     Request,
     Tool,
     Session,
+    /// One SSH authentication. The narrowest unit the agent protocol offers:
+    /// the broker signs a login and is then out of the connection entirely,
+    /// so this authorizes a session it cannot afterwards see or stop.
+    Login,
 }
 
 impl ApprovalUnit {
@@ -63,6 +67,7 @@ impl ApprovalUnit {
             Self::Request => "request",
             Self::Tool => "tool",
             Self::Session => "session",
+            Self::Login => "login",
         }
     }
 }
@@ -153,6 +158,7 @@ impl ApprovalRequest {
     ) -> Self {
         let unit = match connection.kind() {
             ConnectionKind::Pg => ApprovalUnit::Session,
+            ConnectionKind::Ssh => ApprovalUnit::Login,
             _ => ApprovalUnit::Request,
         };
         Self {

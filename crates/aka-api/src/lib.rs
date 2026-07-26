@@ -247,7 +247,7 @@ pub struct AccessDto {
     /// Whether traffic asks the user when no approval window is open
     /// (default false). What one decision gates depends on the kind: one
     /// request for an API tool, one `tools/call` for an MCP tool, one
-    /// session for Postgres.
+    /// session for Postgres, one login for SSH.
     #[serde(default)]
     pub confirm: bool,
     /// While an approval window is open, the RFC 3339 time the last of them

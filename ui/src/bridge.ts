@@ -432,6 +432,31 @@ function seedFixtures() {
     };
     db.approvals.push(approval);
   }
+  // And an SSH one. Its consequence line is the blunt case: the gate is per
+  // login, and everything the login goes on to do is out of reach.
+  const prodSsh = db.connections.find((c) => c.name === 'prod-ssh');
+  if (prodSsh) {
+    db.access.push({ connection_id: prodSsh.id, enabled: true, confirm: true });
+    db.approvals.push({
+      id: uid(),
+      connection_id: prodSsh.id,
+      connection: prodSsh.name,
+      type: prodSsh.type,
+      unit: 'login',
+      target: connTarget(prodSsh),
+      agent: 'claude-code',
+      summary: `SSH login as ${connTarget(prodSsh)}`,
+      detail: 'host key SHA256:t3kZ0h1Qm7pXvB2nR8sLdY4wJcF6aGuE9oNbT5iKxWs',
+      consequence:
+        'Approving signs one SSH login. What runs afterwards is between the client and the '
+        + 'host: AgentMFA is not in that connection, so it cannot see the commands, time the '
+        + 'session out, or close it.',
+      waiting: 1,
+      requested_at: new Date(Date.now() - 2000).toISOString(),
+      expires_at: new Date(Date.now() + 88 * 1000).toISOString(),
+      window_secs: 15 * 60,
+    });
+  }
   db.requests.push(
     {
       id: uid(),

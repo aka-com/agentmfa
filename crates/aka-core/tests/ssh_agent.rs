@@ -21,7 +21,8 @@ use signature::{Signer as _, Verifier as _};
 use ssh_key::public::KeyData as PublicKeyData;
 use ssh_key::rand_core::OsRng;
 use ssh_key::{Algorithm, HashAlg, LineEnding, PrivateKey, PublicKey, Signature};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::UnixStream;
 use zeroize::Zeroizing;
@@ -88,7 +89,17 @@ fn userauth_blob(user: &str, alg: &str, key_blob: &[u8], host_key: &[u8]) -> Vec
 
 /* -------------------------------- harness --------------------------------- */
 
-struct TestEvents;
+struct TestEvents {
+    /// How the scripted user answers login prompts. `None` takes the prompt
+    /// and never answers it, so the deadline decides.
+    approval: Option<aka_core::approvals::ApprovalDecision>,
+    prompts: Arc<AtomicUsize>,
+    /// The most recent prompt as the app would render it.
+    last_prompt: Arc<Mutex<Option<aka_core::approvals::PendingApproval>>>,
+    /// Set after construction: the registry lives on the broker these events
+    /// are built into.
+    broker: Mutex<Option<Arc<Broker>>>,
+}
 
 impl BrokerEvents for TestEvents {
     fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
@@ -97,29 +108,58 @@ impl BrokerEvents for TestEvents {
     fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
         Some(ConfirmationMethod::Waived)
     }
+    fn approval_requested(
+        &self,
+        pending: &aka_core::approvals::PendingApproval,
+    ) -> aka_core::events::ApprovalHandling {
+        self.prompts.fetch_add(1, Ordering::SeqCst);
+        *self.last_prompt.lock().unwrap() = Some(pending.clone());
+        if let (Some(decision), Some(broker)) = (self.approval, self.broker.lock().unwrap().clone())
+        {
+            broker.ui_respond_approval(&pending.id, decision).unwrap();
+        }
+        aka_core::events::ApprovalHandling::Taken
+    }
 }
 
 struct Harness {
     broker: Arc<Broker>,
     daemon: daemon::DaemonHandle,
+    /// How many login prompts the scripted user was shown.
+    prompts: Arc<AtomicUsize>,
+    /// The last of those prompts, for asserting on its content.
+    last_prompt: Arc<Mutex<Option<aka_core::approvals::PendingApproval>>>,
     _dir: tempfile::TempDir,
 }
 
 async fn harness(config: BrokerConfig) -> Harness {
+    harness_answering(config, None).await
+}
+
+async fn harness_answering(
+    config: BrokerConfig,
+    decision: Option<aka_core::approvals::ApprovalDecision>,
+) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let paths = Paths::under(dir.path());
-    let broker = Broker::new(
-        paths,
-        Arc::new(MemoryVault::new()),
-        config,
-        Arc::new(TestEvents),
-    )
-    .await
-    .unwrap();
+    let prompts = Arc::new(AtomicUsize::new(0));
+    let last_prompt = Arc::new(Mutex::new(None));
+    let events = Arc::new(TestEvents {
+        approval: decision,
+        prompts: prompts.clone(),
+        last_prompt: last_prompt.clone(),
+        broker: Mutex::new(None),
+    });
+    let broker = Broker::new(paths, Arc::new(MemoryVault::new()), config, events.clone())
+        .await
+        .unwrap();
+    *events.broker.lock().unwrap() = Some(broker.clone());
     let daemon = daemon::serve(broker.clone()).await.unwrap();
     Harness {
         broker,
         daemon,
+        prompts,
+        last_prompt,
         _dir: dir,
     }
 }
@@ -804,4 +844,211 @@ async fn disabling_access_refuses_the_ssh_endpoint_and_revoke_tears_it_down() {
         UnixStream::connect(&info.dsn).await.is_err(),
         "the socket must be gone after teardown"
     );
+}
+
+/* ------------------------- per-login confirmation ------------------------- */
+
+/// Turn the switch on for `prod-ssh`.
+fn confirm_logins(broker: &Broker) {
+    let conn = broker.store.connection_by_name("prod-ssh").unwrap();
+    broker
+        .ui_set_confirm_mode(&conn.id, aka_core::types::ConfirmMode::On)
+        .unwrap();
+}
+
+/// The gate is in SIGN_REQUEST, so it fires per authentication — and only for
+/// a request that would otherwise succeed.
+#[tokio::test]
+async fn a_confirmed_connection_asks_before_each_login() {
+    let mut h = harness_answering(
+        BrokerConfig::default(),
+        Some(aka_core::approvals::ApprovalDecision::ApproveWindow),
+    )
+    .await;
+    let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let host_key = add_ssh_connection(&h.broker, &key, "deploy");
+    confirm_logins(&h.broker);
+
+    let token = h.pair().await;
+    let (auth_sock, _) = h.open_ssh(&token).await;
+    let key_blob = key.public_key().to_bytes().unwrap();
+    let host_blob = host_key.public_key().to_bytes().unwrap();
+
+    // Opening the socket and binding the host key ask nothing: neither
+    // authenticates, and prompting there would ask about `ssh` merely
+    // considering the key.
+    let mut s = bound_stream(&auth_sock, &host_key).await;
+    assert_lists_identity(&mut s, &key).await;
+    assert_eq!(h.prompts.load(Ordering::SeqCst), 0);
+
+    let data = userauth_blob("deploy", "ssh-ed25519", &key_blob, &host_blob);
+    let (kind, body) = sign(&mut s, &key_blob, &data, 0).await;
+    assert_eq!(kind, SSH_AGENT_SIGN_RESPONSE);
+    verify_signature(key.public_key(), &body, &data);
+    assert_eq!(h.prompts.load(Ordering::SeqCst), 1, "the login was asked about");
+
+    // The prompt names the verified destination and is honest about the gap
+    // between confirming a login and confirming what the login goes on to do.
+    let prompt = h.last_prompt.lock().unwrap().clone().expect("a prompt");
+    assert_eq!(prompt.unit, aka_core::approvals::ApprovalUnit::Login);
+    assert!(
+        prompt.summary.contains("deploy@") && prompt.summary.contains("prod.example.com"),
+        "the prompt names the login: {}",
+        prompt.summary
+    );
+    let consequence = prompt.consequence.expect("the prompt states what it grants");
+    assert!(
+        consequence.contains("cannot see the commands"),
+        "the prompt does not imply a per-command gate: {consequence}"
+    );
+
+    // A second login on the same connection rides the window, so a `git`
+    // loop asks once rather than once per fetch.
+    let (kind, _) = sign(&mut s, &key_blob, &data, 0).await;
+    assert_eq!(kind, SSH_AGENT_SIGN_RESPONSE);
+    assert_eq!(h.prompts.load(Ordering::SeqCst), 1);
+}
+
+/// Denying must actually withhold the signature — the whole point of the
+/// gate is that `ssh` cannot authenticate without one.
+#[tokio::test]
+async fn a_refused_login_is_not_signed() {
+    let mut h = harness_answering(
+        BrokerConfig::default(),
+        Some(aka_core::approvals::ApprovalDecision::Deny),
+    )
+    .await;
+    let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let host_key = add_ssh_connection(&h.broker, &key, "deploy");
+    confirm_logins(&h.broker);
+
+    let token = h.pair().await;
+    let (auth_sock, _) = h.open_ssh(&token).await;
+    let key_blob = key.public_key().to_bytes().unwrap();
+    let host_blob = host_key.public_key().to_bytes().unwrap();
+    let mut s = bound_stream(&auth_sock, &host_key).await;
+
+    let data = userauth_blob("deploy", "ssh-ed25519", &key_blob, &host_blob);
+    let (kind, _) = sign(&mut s, &key_blob, &data, 0).await;
+    assert_eq!(kind, SSH_AGENT_FAILURE, "a refused login must not be signed");
+    assert_eq!(h.prompts.load(Ordering::SeqCst), 1);
+
+    // The refusal cools down, so a client retrying in a loop does not
+    // re-prompt on every attempt.
+    let (kind, _) = sign(&mut s, &key_blob, &data, 0).await;
+    assert_eq!(kind, SSH_AGENT_FAILURE);
+    assert_eq!(h.prompts.load(Ordering::SeqCst), 1);
+
+    // Refusing an authentication is a decision about it, not a reason to
+    // drop the socket: the agent stays usable.
+    assert_lists_identity(&mut s, &key).await;
+}
+
+/// A request that fails validation is refused on its own terms. Prompting
+/// first would ask the user about a login that was never going to happen.
+#[tokio::test]
+async fn an_invalid_sign_request_is_refused_without_asking() {
+    let mut h = harness_answering(
+        BrokerConfig::default(),
+        Some(aka_core::approvals::ApprovalDecision::ApproveWindow),
+    )
+    .await;
+    let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let host_key = add_ssh_connection(&h.broker, &key, "deploy");
+    confirm_logins(&h.broker);
+
+    let token = h.pair().await;
+    let (auth_sock, _) = h.open_ssh(&token).await;
+    let key_blob = key.public_key().to_bytes().unwrap();
+    let host_blob = host_key.public_key().to_bytes().unwrap();
+    let mut s = bound_stream(&auth_sock, &host_key).await;
+
+    let wrong_user = userauth_blob("root", "ssh-ed25519", &key_blob, &host_blob);
+    let (kind, _) = sign(&mut s, &key_blob, &wrong_user, 0).await;
+    assert_eq!(kind, SSH_AGENT_FAILURE);
+
+    let (kind, _) = sign(&mut s, &key_blob, b"arbitrary bytes to sign", 0).await;
+    assert_eq!(kind, SSH_AGENT_FAILURE);
+
+    assert_eq!(
+        h.prompts.load(Ordering::SeqCst),
+        0,
+        "only a login that would otherwise succeed reaches the user"
+    );
+}
+
+/// The switch is off by default, so an existing setup keeps working exactly
+/// as it did before per-login confirmation existed.
+#[tokio::test]
+async fn logins_are_not_confirmed_unless_the_switch_is_on() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let host_key = add_ssh_connection(&h.broker, &key, "deploy");
+
+    let token = h.pair().await;
+    let (auth_sock, _) = h.open_ssh(&token).await;
+    let key_blob = key.public_key().to_bytes().unwrap();
+    let host_blob = host_key.public_key().to_bytes().unwrap();
+    let mut s = bound_stream(&auth_sock, &host_key).await;
+
+    let data = userauth_blob("deploy", "ssh-ed25519", &key_blob, &host_blob);
+    let (kind, _) = sign(&mut s, &key_blob, &data, 0).await;
+    assert_eq!(kind, SSH_AGENT_SIGN_RESPONSE);
+    assert_eq!(h.prompts.load(Ordering::SeqCst), 0);
+}
+
+/// Closing the session from the app must not wait behind a prompt nobody is
+/// answering: the lifetime bounds keep running underneath a parked login.
+#[tokio::test]
+async fn closing_the_session_interrupts_a_parked_login() {
+    // `None` takes every prompt and never answers it.
+    let mut h = harness_answering(BrokerConfig::default(), None).await;
+    let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let host_key = add_ssh_connection(&h.broker, &key, "deploy");
+    confirm_logins(&h.broker);
+
+    let token = h.pair().await;
+    let (auth_sock, _) = h.open_ssh(&token).await;
+    let key_blob = key.public_key().to_bytes().unwrap();
+    let host_blob = host_key.public_key().to_bytes().unwrap();
+    let mut s = bound_stream(&auth_sock, &host_key).await;
+
+    let data = userauth_blob("deploy", "ssh-ed25519", &key_blob, &host_blob);
+    let mut body = Vec::new();
+    put_string(&mut body, &key_blob);
+    put_string(&mut body, &data);
+    body.extend_from_slice(&0u32.to_be_bytes());
+    write_message(&mut s, SSH_AGENTC_SIGN_REQUEST, &body).await;
+
+    // Wait for the login to park on the user.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while h.prompts.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the login should reach the user");
+    assert_eq!(h.broker.sessions().len(), 1);
+
+    // Closing it from the app takes effect immediately rather than after the
+    // prompt's own deadline.
+    let session = h.broker.sessions()[0].id;
+    h.broker.ui_close_session(session).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !h.broker.sessions().is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("a parked login must not hold the session open");
+
+    // And the prompt it was riding goes with it: nothing is left on screen
+    // asking about a socket that is gone.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !h.broker.pending_approvals().is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the abandoned prompt should retire");
 }
