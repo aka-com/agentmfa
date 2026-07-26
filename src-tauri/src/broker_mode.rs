@@ -438,7 +438,11 @@ impl BrokerState {
                     let started = runtime.take().expect("freshly started runtime");
                     let backend: Arc<dyn ManagementBackend> =
                         Arc::new(aka_core::manage::LocalBackend::new(started.broker.clone()));
-                    crate::attention::set_scope(app, "local", None);
+                    // The stack has been running since before this commit, so
+                    // adopt its queues rather than only flipping the scope: a
+                    // prompt raised while it was starting was tracked under
+                    // the outgoing broker and would be lost with it.
+                    crate::attention::adopt_local(app, &started.broker);
                     *self.local.lock().unwrap() = Some(started);
                     *self.backend.write().unwrap() = backend;
                     let remote_url = self.profile().url;

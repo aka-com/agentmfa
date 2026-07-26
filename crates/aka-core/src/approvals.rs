@@ -255,7 +255,11 @@ impl Verdict {
             }
             Verdict::TimedOut => "the confirmation request was not answered in time",
             Verdict::Unavailable => {
-                "traffic confirmation is unavailable; attach AgentMFA or retry when capacity is available"
+                // An attached app that predates request surfaces is an
+                // observer here, not a surface: name the update path or the
+                // refusal reads as the app being ignored.
+                "traffic confirmation is unavailable; attach AgentMFA (updating it if one is \
+                 already attached), or retry when capacity is available"
             }
         }
     }

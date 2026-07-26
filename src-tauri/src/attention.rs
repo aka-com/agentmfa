@@ -90,6 +90,26 @@ impl AttentionTracker {
         }
     }
 
+    /// Take an authoritative snapshot as the active set *without* queueing
+    /// notifications. Used when the shell adopts a broker that was already
+    /// running: anything parked on it has had its notification attempt
+    /// already, so this restores tracking without alerting twice.
+    fn adopt(&mut self, approvals: Vec<ApprovalDto>) -> TrackerChange {
+        let old_count = self.active.len();
+        self.active = approvals
+            .into_iter()
+            .map(RequestSummary::from)
+            .map(|request| (request.id.clone(), request))
+            .collect();
+        self.pending_notification
+            .retain(|id| self.active.contains_key(id));
+        TrackerChange {
+            count: self.active.len(),
+            count_changed: old_count != self.active.len(),
+            notification_added: false,
+        }
+    }
+
     fn resolve(&mut self, id: &str) -> TrackerChange {
         let old_count = self.active.len();
         self.active.remove(id);
@@ -216,6 +236,17 @@ impl RequestAttention {
         if changed {
             crate::windows::update_request_count(app, 0);
         }
+    }
+
+    /// Adopt a just-attached broker's authoritative queues as the active set.
+    fn reseed(&self, app: &AppHandle, approvals: Vec<ApprovalDto>, elicitations: Vec<uuid::Uuid>) {
+        let total = {
+            let mut inner = self.inner.lock().unwrap();
+            let _ = inner.tracker.adopt(approvals);
+            inner.elicitations = elicitations.into_iter().collect();
+            inner.total()
+        };
+        crate::windows::update_request_count(app, total);
     }
 
     pub fn set_settings(&self, settings: NotificationSettings) {
@@ -489,6 +520,34 @@ pub fn set_scope(app: &AppHandle, mode: &str, url: Option<&str>) {
     if let Some(attention) = app.try_state::<RequestAttention>() {
         attention.set_scope(app, scope_key(mode, url));
     }
+}
+
+/// Point attention at a local broker that is already running, and adopt
+/// whatever is parked on it.
+///
+/// The local stack starts *before* the shell commits to it, so a prompt
+/// raised during that window is tracked under the outgoing broker's scope
+/// and cleared by the scope change. The remote path self-heals through its
+/// event stream's authoritative refetch; local mode has no such stream, so
+/// it reseeds explicitly here.
+pub fn adopt_local(app: &AppHandle, broker: &aka_core::broker::Broker) {
+    let Some(attention) = app.try_state::<RequestAttention>() else {
+        return;
+    };
+    attention.set_scope(app, scope_key("local", None));
+    attention.reseed(
+        app,
+        broker
+            .pending_approvals()
+            .iter()
+            .map(aka_core::manage::approval_dto)
+            .collect(),
+        broker
+            .pending_elicitations()
+            .iter()
+            .map(|pending| pending.id)
+            .collect(),
+    );
 }
 
 pub fn approval_requested(app: &AppHandle, pending: &aka_core::approvals::PendingApproval) {

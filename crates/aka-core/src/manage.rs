@@ -541,10 +541,13 @@ impl ManageBus {
 
     /// Register an authenticated event stream that explicitly advertised a
     /// user-facing request inbox. An ordinary SSE receiver is only an
-    /// observer and must not make confirmed traffic wait. Registration alone
-    /// is inactive; the client must complete its first heartbeat.
+    /// observer and must not make confirmed traffic wait. Minting grants one
+    /// TTL of grace so a reconnect or broker restart does not refuse
+    /// confirmed traffic during the ready-comment/first-heartbeat round
+    /// trip; a surface that never heartbeats (a proxy black-holing the
+    /// response body, say) lapses at that TTL and stays inactive.
     pub fn lease_approval_surface(self: &Arc<Self>) -> ApprovalSurfaceLease {
-        self.lease_approval_surface_for(std::time::Duration::ZERO)
+        self.lease_approval_surface_for(APPROVAL_SURFACE_TTL)
     }
 
     fn lease_approval_surface_for(
@@ -597,6 +600,14 @@ impl ManageBus {
             .unwrap()
             .values()
             .any(|expiry| expiry.monotonic > monotonic_now && expiry.wall > wall_now)
+    }
+
+    /// Whether anything at all is reading the event stream. Only meaningful
+    /// as a diagnostic: an attached client that holds no surface lease is
+    /// either a passive observer or a shell too old to negotiate one, and
+    /// telling those apart in a log beats a mystery refusal.
+    pub fn has_event_observers(&self) -> bool {
+        self.tx.receiver_count() > 0
     }
 
     /// Decide what to send a (re)connecting client. `last` is the parsed
@@ -722,6 +733,21 @@ impl crate::events::BrokerEvents for FanoutEvents {
         match self.inner.approval_requested(pending) {
             crate::events::ApprovalHandling::Unavailable if remote_surface => {
                 crate::events::ApprovalHandling::Taken
+            }
+            crate::events::ApprovalHandling::Unavailable => {
+                if self.bus.has_event_observers() {
+                    // Something is attached but holds no request-inbox lease:
+                    // a passive observer, or a desktop app predating surface
+                    // negotiation. Either way the refusal is not "nothing is
+                    // attached", and saying so saves the operator a hunt.
+                    tracing::warn!(
+                        connection = %pending.connection,
+                        "refusing confirmed traffic: a management client is attached but holds no \
+                         request-inbox lease (a passive observer, or an app too old to negotiate \
+                         one — update it)"
+                    );
+                }
+                crate::events::ApprovalHandling::Unavailable
             }
             handling => handling,
         }
@@ -1433,8 +1459,8 @@ mod tests {
 
         let surface = bus.lease_approval_surface();
         assert!(
-            !bus.has_approval_surface(),
-            "attachment is inactive until the client heartbeats"
+            bus.has_approval_surface(),
+            "a fresh lease covers the handshake round trip"
         );
         assert!(bus.renew_approval_surface(&surface.id()));
         assert!(bus.has_approval_surface());
@@ -1450,6 +1476,33 @@ mod tests {
         assert!(!bus.has_approval_surface());
         assert!(bus.renew_approval_surface(&surface.id()));
         assert!(bus.has_approval_surface());
+    }
+
+    #[test]
+    fn a_fresh_lease_carries_confirmed_traffic_through_the_handshake() {
+        // A reconnect or broker restart costs one ready-comment plus
+        // heartbeat round trip. Refusing confirmed traffic during it would
+        // fail closed against a desktop that is right there, so minting
+        // grants exactly one TTL of grace — and no more.
+        let bus = Arc::new(ManageBus::new());
+        let surface = bus.lease_approval_surface();
+        assert!(bus.has_approval_surface());
+        assert_eq!(
+            APPROVAL_SURFACE_TTL,
+            std::time::Duration::from_millis(aka_api::APPROVAL_SURFACE_TTL_MS),
+            "the grace period is one advertised TTL"
+        );
+
+        // A surface that never heartbeats lapses at that TTL: expire the
+        // grace by hand rather than sleeping it out.
+        bus.approval_surfaces.lock().unwrap().insert(
+            surface.id(),
+            ManageBus::expiry_after(std::time::Duration::ZERO),
+        );
+        assert!(
+            !bus.has_approval_surface(),
+            "grace is not a standing capability"
+        );
     }
 
     async fn backend(dir: &tempfile::TempDir) -> LocalBackend {
