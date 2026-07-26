@@ -143,8 +143,6 @@ export interface ActivityEntry {
 export interface ElicitationField {
   name: string;
   label: string;
-  /** Render as a password field; the value is sent upstream, never shown again. */
-  secret?: boolean;
   /** A JSON Schema `boolean`: render a toggle; the answer is sent as a real boolean. */
   boolean?: boolean;
   /** A fixed set of choices (a JSON Schema `enum`): render a dropdown. */

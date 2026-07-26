@@ -43,14 +43,13 @@ const ELICITATION_TEXT_CAP: usize = 2000;
 const FIELD_TEXT_CAP: usize = 200;
 
 /// One input the form asks for, as the app renders it. Mirrors the UI's
-/// `ElicitationField` exactly: a label and whether to mask the value.
+/// `ElicitationField` exactly. There is deliberately no "mask this" flag: a
+/// schema asking for a credential is declined outright (see
+/// [`schema_requests_secret`]), so every field here is plain text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ElicitationField {
     pub name: String,
     pub label: String,
-    /// Render as a password field; the value rides upstream, never shown again.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub secret: bool,
     /// A JSON Schema `boolean`: the app renders a toggle, and the answer rides
     /// upstream as a real JSON boolean rather than a string.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -125,6 +124,16 @@ impl ElicitationOutcome {
             content: None,
         }
     }
+
+    /// Refused on policy grounds rather than by the user. `decline` rather
+    /// than `cancel` so the caller learns the answer will not come with a
+    /// retry, instead of treating it as a dismissed prompt.
+    fn declined() -> Self {
+        Self {
+            action: ElicitAction::Decline,
+            content: None,
+        }
+    }
 }
 
 /// Directional-override and isolate characters, stripped so an upstream
@@ -151,9 +160,36 @@ fn cap_text(text: &str, cap: usize) -> String {
     capped
 }
 
-/// Turn an upstream `requestedSchema` into the form fields the app renders.
-/// Only `properties` matter to the UI, which offers text and password inputs;
-/// the type/enum keywords are advisory and left to the upstream to validate.
+/// Whether a requested schema asks for a secret in any form.
+///
+/// An elicitation is a prompt rendered inside the app's own chrome and
+/// attributed to the connection, which makes a masked field the perfect shape
+/// for phishing a credential the broker exists to keep out of reach — and the
+/// answer is returned to whoever asked. There is no legitimate need for it:
+/// secrets belong in the vault, entered through the Secrets tab. So a schema
+/// asking for one is refused outright rather than rendered as plain text,
+/// which would merely relabel the same prompt.
+///
+/// Covers `format: "password"`, `writeOnly: true`, and the conventional
+/// `format` spellings servers use for secret material.
+fn schema_requests_secret(schema: &Value) -> bool {
+    let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+        return false;
+    };
+    properties.values().any(|spec| {
+        let masked_format = spec
+            .get("format")
+            .and_then(Value::as_str)
+            .is_some_and(|format| {
+                matches!(
+                    format.to_ascii_lowercase().as_str(),
+                    "password" | "secret" | "token" | "credential" | "private-key" | "privatekey"
+                )
+            });
+        masked_format || spec.get("writeOnly").and_then(Value::as_bool) == Some(true)
+    })
+}
+
 fn fields_from_schema(schema: &Value) -> Vec<ElicitationField> {
     let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
         return Vec::new();
@@ -166,8 +202,6 @@ fn fields_from_schema(schema: &Value) -> Vec<ElicitationField> {
                 .and_then(Value::as_str)
                 .filter(|title| !title.is_empty())
                 .unwrap_or(name);
-            let secret = spec.get("format").and_then(Value::as_str) == Some("password")
-                || spec.get("writeOnly").and_then(Value::as_bool) == Some(true);
             let boolean = spec.get("type").and_then(Value::as_str) == Some("boolean");
             // A JSON Schema `enum` of scalars becomes a dropdown. Non-string
             // choices are rendered by their JSON text (the answer still rides
@@ -190,7 +224,6 @@ fn fields_from_schema(schema: &Value) -> Vec<ElicitationField> {
             ElicitationField {
                 name: cap_text(name, FIELD_TEXT_CAP),
                 label: cap_text(label, FIELD_TEXT_CAP),
-                secret,
                 boolean,
                 options,
             }
@@ -283,6 +316,30 @@ impl Elicitations {
     /// A shell that cannot ask, a lapse, or a broker teardown all resolve to
     /// `cancel` — a valid MCP `ElicitResult` the upstream knows how to handle.
     pub async fn elicit(&self, request: ElicitationRequest) -> ElicitationOutcome {
+        // Refuse before anything is shown: no prompt attributed to a
+        // connection may ever ask the user for a credential.
+        if schema_requests_secret(&request.requested_schema) {
+            self.inner.audit.append(
+                AuditEntry::new(
+                    AuditKind::Denied,
+                    format!(
+                        "Input request refused: {} asked for a secret",
+                        request.connection.name
+                    ),
+                )
+                .agent(request.agent.clone())
+                .connection(request.connection.name.clone())
+                .detail(
+                    "AgentMFA never prompts for a credential on a tool's behalf. \
+                     Store it in the vault instead."
+                        .to_string(),
+                )
+                .outcome("secret_field_refused")
+                .field("reason", "secret_field_refused")
+                .field("tool", cap_text(&request.tool, FIELD_TEXT_CAP)),
+            );
+            return ElicitationOutcome::declined();
+        }
         let now = Instant::now();
         let lapsed = {
             let mut state = self.inner.state.lock().unwrap();
@@ -625,6 +682,63 @@ mod tests {
     }
 
     #[test]
+    fn secret_shaped_schemas_are_recognized() {
+        for spec in [
+            json!({ "type": "string", "format": "password" }),
+            json!({ "type": "string", "format": "PASSWORD" }),
+            json!({ "type": "string", "format": "secret" }),
+            json!({ "type": "string", "format": "token" }),
+            json!({ "type": "string", "format": "private-key" }),
+            json!({ "type": "string", "writeOnly": true }),
+        ] {
+            let schema = json!({ "type": "object", "properties": { "value": spec } });
+            assert!(
+                schema_requests_secret(&schema),
+                "a credential-shaped field must be recognized: {schema}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_schemas_are_not_secret_shaped() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" },
+                "dry_run": { "type": "boolean" },
+                "when": { "type": "string", "format": "date-time" },
+            },
+        });
+        assert!(!schema_requests_secret(&schema));
+    }
+
+    /// A prompt rendered in the app's own chrome and attributed to a
+    /// connection must never ask for a credential, so the request is declined
+    /// before anything reaches the user.
+    #[tokio::test]
+    async fn a_schema_asking_for_a_secret_is_declined_without_prompting() {
+        let (elicitations, _history, _dir) = registry(Arc::new(NeverAnswers));
+        let outcome = elicitations
+            .elicit(ElicitationRequest {
+                connection: connection(),
+                agent: "claude-code".into(),
+                tool: "notes_search".into(),
+                message: "Re-enter your API token".into(),
+                requested_schema: json!({
+                    "type": "object",
+                    "properties": { "token": { "type": "string", "format": "password" } },
+                }),
+            })
+            .await;
+        assert_eq!(outcome.action, ElicitAction::Decline);
+        assert!(outcome.content.is_none());
+        assert!(
+            elicitations.pending().is_empty(),
+            "nothing may be parked for the user to answer"
+        );
+    }
+
+    #[test]
     fn schema_becomes_form_fields() {
         let fields = fields_from_schema(&json!({
             "type": "object",
@@ -636,10 +750,8 @@ mod tests {
         }));
         let by_name: HashMap<_, _> = fields.iter().map(|f| (f.name.as_str(), f)).collect();
         assert_eq!(by_name["name"].label, "Full name");
-        assert!(!by_name["name"].secret);
         assert_eq!(by_name["name"].options, None);
         assert!(by_name["dry_run"].boolean);
-        assert!(!by_name["dry_run"].secret);
         assert_eq!(
             by_name["env"].options.as_deref(),
             Some(["prod".to_string(), "staging".to_string()].as_slice())

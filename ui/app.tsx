@@ -3030,8 +3030,11 @@ function ElicitationSheet(): ReactNode {
                   options={field.options.map((opt) => [opt, opt])}
                   selectedValue={state.elicitValues[field.name] ?? field.options[0]} />
               ) : (
+                // Always plain text: the broker refuses any schema asking for a
+                // secret, so a masked field here could only ever misrepresent
+                // an ordinary answer as a credential worth typing.
                 <input id={`elicit-${request.id}-${field.name}`}
-                  type={field.secret ? 'password' : 'text'} autoComplete="off" spellCheck={false}
+                  type="text" autoComplete="off" spellCheck={false}
                   value={state.elicitValues[field.name] ?? ''}
                   onChange={(e) => { state.elicitValues[field.name] = e.currentTarget.value; render(); }} />
               )}

@@ -329,7 +329,6 @@ pub fn elicitation_dto(pending: &crate::elicitations::PendingElicitation) -> Eli
             .map(|field| aka_api::ElicitationFieldDto {
                 name: field.name.clone(),
                 label: field.label.clone(),
-                secret: field.secret,
                 boolean: field.boolean,
                 options: field.options.clone(),
             })

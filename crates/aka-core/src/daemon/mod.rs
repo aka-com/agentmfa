@@ -989,7 +989,7 @@ async fn post_http(
         ConnectionConfig::Api {
             mcp_path: Some(mcp_path),
             ..
-        } => call.path.split('?').next().unwrap_or("") == mcp_path.split('?').next().unwrap_or(""),
+        } => crate::capability::http::resolves_to_mcp_path(&call.path, mcp_path),
         _ => false,
     };
     let allowed_tools_snapshot = broker.access.allowed_tools(&conn.id);
@@ -998,9 +998,7 @@ async fn post_http(
         ..
     } = &conn.config
     {
-        let call_path = call.path.split('?').next().unwrap_or("");
-        let pinned_path = mcp_path.split('?').next().unwrap_or("");
-        if call_path == pinned_path {
+        if crate::capability::http::resolves_to_mcp_path(&call.path, mcp_path) {
             if let Some(allowed) = allowed_tools_snapshot.as_ref() {
                 if let Some(tool) = disallowed_mcp_tool_call(&body_bytes, allowed) {
                     broker.audit.append(
@@ -1338,9 +1336,9 @@ fn approval_for_call(
         ConnectionConfig::Api { mcp_path, .. } => mcp_path.clone(),
         _ => None,
     };
-    let on_mcp_path = mcp_path.as_deref().is_some_and(|pinned| {
-        path.split('?').next().unwrap_or("") == pinned.split('?').next().unwrap_or("")
-    });
+    let on_mcp_path = mcp_path
+        .as_deref()
+        .is_some_and(|pinned| crate::capability::http::resolves_to_mcp_path(path, pinned));
     if !on_mcp_path {
         let request = ApprovalRequest::new(conn, client, format!("{method} {}", capped_text(path)));
         return Some(if body.is_empty() {

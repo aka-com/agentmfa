@@ -405,6 +405,36 @@ fn pinned_base(config: &ConnectionConfig) -> Option<(String, String, Option<u16>
     }
 }
 
+/// Whether an agent-supplied path resolves to the connection's pinned
+/// `mcp_path`.
+///
+/// Comparing the raw strings is not enough. The upstream URL is built with
+/// `Url::join`, which applies WHATWG dot-segment removal, so `/./mcp`,
+/// `/a/../mcp`, and `/%2e/mcp` all reach `/mcp` upstream while failing a
+/// string compare. Anything deciding "is this the MCP leg?" — the curated
+/// tool-subset check and the approval classifier both do — has to ask the
+/// question the same way the dial will answer it, or a normalizing variant
+/// walks straight past the gate.
+///
+/// Resolution is relative to a fixed opaque base: only the path matters here,
+/// and the real dial separately re-checks that the joined URL never left the
+/// pinned authority.
+pub fn resolves_to_mcp_path(path: &str, mcp_path: &str) -> bool {
+    fn resolved(path: &str) -> Option<String> {
+        // A path that escapes to another authority (or another scheme) is not
+        // the MCP leg whatever it normalizes to; `validate_path` rejects those
+        // separately, and returning `None` keeps them out of this comparison.
+        let base = Url::parse("http://mcp-path-compare.invalid").ok()?;
+        let joined = base.join(path).ok()?;
+        (joined.authority() == base.authority() && joined.scheme() == base.scheme())
+            .then(|| joined.path().to_string())
+    }
+    match (resolved(path), resolved(mcp_path)) {
+        (Some(call), Some(pinned)) => call == pinned,
+        _ => false,
+    }
+}
+
 fn same_pinned_authority(url: &Url, scheme: &str, host: &str, port: Option<u16>) -> bool {
     let pinned_port = port.unwrap_or(match scheme {
         "https" => 443,
@@ -1805,5 +1835,49 @@ mod tests {
         assert_ne!(a, c);
         let d = payload_hash(&Uuid::new_v4(), &Method::POST, "/x", &[], b"other");
         assert_ne!(c, d);
+    }
+
+    /// The upstream URL is built with `Url::join`, so a normalizing variant
+    /// reaches the pinned MCP path even though it is a different string. The
+    /// curated-subset gate must see those as the MCP leg or it is bypassable.
+    #[test]
+    fn dot_segment_variants_resolve_to_the_pinned_mcp_path() {
+        for path in [
+            "/mcp",
+            "/./mcp",
+            "/a/../mcp",
+            "/%2e/mcp",
+            "/a/b/../../mcp",
+            "/mcp?session=1",
+        ] {
+            assert!(
+                resolves_to_mcp_path(path, "/mcp"),
+                "{path} reaches /mcp upstream and must be treated as the MCP leg"
+            );
+        }
+    }
+
+    #[test]
+    fn unrelated_or_escaping_paths_are_not_the_mcp_leg() {
+        for path in [
+            "/mcpx",
+            "/mcp/extra",
+            "/other",
+            "/",
+            "//evil.example.com/mcp",
+            "http://evil.example.com/mcp",
+        ] {
+            assert!(
+                !resolves_to_mcp_path(path, "/mcp"),
+                "{path} must not be treated as the MCP leg"
+            );
+        }
+    }
+
+    /// A pinned path that itself needs normalizing still matches.
+    #[test]
+    fn the_pinned_path_is_normalized_too() {
+        assert!(resolves_to_mcp_path("/mcp", "/./mcp"));
+        assert!(resolves_to_mcp_path("/api/mcp", "/api/./mcp"));
     }
 }

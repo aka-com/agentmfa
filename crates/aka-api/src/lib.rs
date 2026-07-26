@@ -500,9 +500,6 @@ pub struct RequestDto {
 pub struct ElicitationFieldDto {
     pub name: String,
     pub label: String,
-    /// Render as a password field; the value rides upstream, never shown again.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub secret: bool,
     /// A JSON Schema `boolean`: render a toggle; the answer rides upstream as a
     /// real JSON boolean rather than a string.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
