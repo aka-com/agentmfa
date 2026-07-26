@@ -27,6 +27,7 @@ use tokio_tungstenite::tungstenite::Message as TMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use super::{TestError, TestErrorKind};
+use crate::audit::{AuditEntry, AuditKind};
 use crate::broker::Broker;
 use crate::capability::http::{injection_form, InjectionForm};
 use crate::sessions::SessionHandle;
@@ -184,6 +185,16 @@ async fn bridge_handler(
     let mut redemption = match broker.data_plane.redeem(&ticket) {
         Ok(r) => r,
         Err(e) => {
+            broker.audit.append(
+                AuditEntry::new(
+                    AuditKind::Denied,
+                    format!("WebSocket bridge refused: {}", e.reason()),
+                )
+                .detail("the presented ticket could not be redeemed".to_string())
+                .outcome(e.reason().as_str().to_string())
+                .field("kind", "ws")
+                .field("reason", e.reason().as_str()),
+            );
             let status = axum::http::StatusCode::from_u16(e.status())
                 .unwrap_or(axum::http::StatusCode::GONE);
             return (status, Json(json!({ "reason": e.reason() }))).into_response();
@@ -200,8 +211,35 @@ async fn bridge_handler(
         )
         .await
         {
-            Ok(upstream) => upstream,
+            Ok(upstream) => {
+                broker.health.record_ok_if_changed(
+                    &redemption.connection.id,
+                    "A brokered bridge reached the destination",
+                );
+                upstream
+            }
             Err(e) => {
+                // A dial is as conclusive about the destination as the Test
+                // button's is, so it grades health the same way.
+                broker.health.record(
+                    &redemption.connection.id,
+                    e.kind.health_status(),
+                    e.detail.clone(),
+                );
+                broker.audit.append(
+                    AuditEntry::new(
+                        AuditKind::Denied,
+                        format!(
+                            "WebSocket bridge refused: upstream_connect_failed ({})",
+                            redemption.connection.name
+                        ),
+                    )
+                    .connection(redemption.connection.name.clone())
+                    .detail(e.detail.clone())
+                    .outcome("upstream_connect_failed")
+                    .field("kind", "ws")
+                    .field("reason", "upstream_connect_failed"),
+                );
                 // Redemption drops → budget slot released.
                 return (
                     axum::http::StatusCode::BAD_GATEWAY,

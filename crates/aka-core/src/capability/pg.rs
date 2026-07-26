@@ -44,6 +44,7 @@ use tokio::net::{TcpStream, UnixListener, UnixStream};
 use tokio::sync::Notify;
 
 use super::{TestError, TestErrorKind};
+use crate::audit::{AuditEntry, AuditKind};
 use crate::broker::Broker;
 use crate::endpoints::EndpointListenerHandle;
 use crate::sessions::{RedeemError, SessionHandle};
@@ -248,6 +249,43 @@ struct ProxyState {
     cancels: Mutex<HashMap<(i32, i32), CancelTarget>>,
 }
 
+/// Record a refused data-plane connection.
+///
+/// The client learns the reason in its own protocol, but without this the
+/// broker's own log shows nothing — so a burst of guessed endpoint secrets, a
+/// stale DSN retrying against a revoked connection, or an agent hitting a
+/// disabled tool were all invisible in Activity.
+fn audit_refusal(broker: &Broker, connection: Option<&str>, reason: &str, detail: &str) {
+    let mut entry = AuditEntry::new(
+        AuditKind::Denied,
+        format!("Postgres connection refused: {reason}"),
+    )
+    .detail(detail.to_string())
+    .outcome(reason.to_string())
+    .field("kind", "pg")
+    .field("reason", reason);
+    if let Some(name) = connection {
+        entry = entry.connection(name.to_string());
+    }
+    broker.audit.append(entry);
+}
+
+/// Grade a connection's health from a data-plane dial. A dial is as
+/// conclusive about the destination as the Test button's is, so its outcome
+/// belongs in the same place — otherwise a connection whose password was
+/// rotated at the database keeps showing a stale green badge while every
+/// agent session fails.
+fn record_dial_health(broker: &Broker, connection_id: &uuid::Uuid, outcome: &Result<(), TestError>) {
+    match outcome {
+        Ok(()) => broker
+            .health
+            .record_ok_if_changed(connection_id, "A brokered session reached the database"),
+        Err(e) => broker
+            .health
+            .record(connection_id, e.kind.health_status(), e.detail.clone()),
+    }
+}
+
 impl ProxyState {
     /// Mint a fresh random (pid, key) pair and register the mapping.
     fn register_cancel(self: &Arc<Self>, target: CancelTarget) -> CancelRegistration {
@@ -436,6 +474,12 @@ async fn handle_endpoint_conn(
         .resolve_secret(&presented)
         .filter(|e| e.id == endpoint_id)
     else {
+        audit_refusal(
+            &state.broker,
+            None,
+            "invalid_endpoint_secret",
+            "the presented password is not this endpoint's secret",
+        );
         client
             .write_all(&error_response(
                 "FATAL",
@@ -449,6 +493,7 @@ async fn handle_endpoint_conn(
     // Re-check access at connect time: a disabled tool must be refused
     // even if a stale listener briefly outlived its teardown.
     if !state.broker.access.allows(&endpoint.connection_id) {
+        audit_refusal(&state.broker, None, "denied_by_policy", "agent access is disabled for this tool");
         client
             .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
             .await?;
@@ -496,6 +541,7 @@ async fn handle_endpoint_conn(
         .is_some_and(|current| current.id == endpoint_id);
     if !endpoint_still_valid || !state.broker.access.allows(&connection.id) {
         state.broker.approvals.revoke(&connection.id);
+        audit_refusal(&state.broker, Some(&connection.name), "denied_by_policy", "the endpoint or the tool's access was revoked while the session was being established");
         client
             .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
             .await?;
@@ -513,6 +559,7 @@ async fn handle_endpoint_conn(
     };
     if connection.updated_at != approved_version {
         state.broker.approvals.revoke(&connection.id);
+        audit_refusal(&state.broker, Some(&connection.name), "denied_by_policy", "the tool was retargeted after the approval");
         client
             .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
             .await?;
@@ -544,13 +591,23 @@ async fn handle_endpoint_conn(
     )
     .await
     {
-        Ok(upstream) => upstream,
-        Err(detail) => {
+        Ok(upstream) => {
+            record_dial_health(&state.broker, &connection.id, &Ok(()));
+            upstream
+        }
+        Err(e) => {
+            record_dial_health(&state.broker, &connection.id, &Err(e.clone()));
+            audit_refusal(
+                &state.broker,
+                Some(&connection.name),
+                "upstream_connect_failed",
+                &e.detail,
+            );
             client
                 .write_all(&error_response(
                     "FATAL",
                     "08001",
-                    &format!("AKA: upstream_connect_failed: {detail}"),
+                    &format!("AKA: upstream_connect_failed: {e}"),
                 ))
                 .await?;
             return Ok(());
@@ -567,6 +624,12 @@ async fn handle_endpoint_conn(
     ) {
         Ok(session) => session,
         Err(_) => {
+            audit_refusal(
+                &state.broker,
+                Some(&connection.name),
+                "broker_session_limit",
+                "the broker-wide live-session backstop is exhausted",
+            );
             client
                 .write_all(&error_response(
                     "FATAL",
@@ -587,6 +650,7 @@ async fn handle_endpoint_conn(
         .is_some_and(|current| current.id == endpoint_id);
     if !endpoint_still_valid || !state.broker.access.allows(&connection.id) {
         session.finish("access_revoked");
+        audit_refusal(&state.broker, Some(&connection.name), "denied_by_policy", "the endpoint or the tool's access was revoked while the session was being established");
         client
             .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
             .await?;
@@ -812,6 +876,12 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
                     "53300" // too_many_connections
                 }
             };
+            audit_refusal(
+                &state.broker,
+                None,
+                e.reason().as_str(),
+                "the presented ticket could not be redeemed",
+            );
             client
                 .write_all(&error_response(
                     "FATAL",
@@ -841,6 +911,7 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
     // have found the prompt to revoke.
     if !state.broker.access.allows(&redemption.connection.id) {
         state.broker.approvals.revoke(&redemption.connection.id);
+        audit_refusal(&state.broker, Some(&redemption.connection.name), "denied_by_policy", "agent access is disabled for this tool");
         client
             .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
             .await?;
@@ -852,6 +923,7 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
         .connection_by_id(&redemption.connection.id)
     else {
         state.broker.approvals.revoke(&redemption.connection.id);
+        audit_refusal(&state.broker, Some(&redemption.connection.name), "denied_by_policy", "the tool no longer exists");
         client
             .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
             .await?;
@@ -859,6 +931,7 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
     };
     if connection.updated_at != approved_version {
         state.broker.approvals.revoke(&connection.id);
+        audit_refusal(&state.broker, Some(&connection.name), "denied_by_policy", "the tool was retargeted after the approval");
         client
             .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
             .await?;
@@ -878,6 +951,7 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
     }
     if !state.broker.access.allows(&redemption.connection.id) {
         state.broker.approvals.revoke(&redemption.connection.id);
+        audit_refusal(&state.broker, Some(&redemption.connection.name), "denied_by_policy", "agent access is disabled for this tool");
         client
             .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
             .await?;
@@ -893,6 +967,7 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
         .connection_by_id(&redemption.connection.id)
     else {
         state.broker.approvals.revoke(&redemption.connection.id);
+        audit_refusal(&state.broker, Some(&redemption.connection.name), "denied_by_policy", "the tool no longer exists");
         client
             .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
             .await?;
@@ -900,6 +975,7 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
     };
     if connection.updated_at != approved_version {
         state.broker.approvals.revoke(&connection.id);
+        audit_refusal(&state.broker, Some(&connection.name), "denied_by_policy", "the tool was retargeted after the approval");
         client
             .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
             .await?;
@@ -933,13 +1009,23 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
     )
     .await
     {
-        Ok(upstream) => upstream,
-        Err(detail) => {
+        Ok(upstream) => {
+            record_dial_health(&state.broker, &connection.id, &Ok(()));
+            upstream
+        }
+        Err(e) => {
+            record_dial_health(&state.broker, &connection.id, &Err(e.clone()));
+            audit_refusal(
+                &state.broker,
+                Some(&connection.name),
+                "upstream_connect_failed",
+                &e.detail,
+            );
             client
                 .write_all(&error_response(
                     "FATAL",
                     "08001", // sqlclient_unable_to_establish_sqlconnection
-                    &format!("AKA: upstream_connect_failed: {detail}"),
+                    &format!("AKA: upstream_connect_failed: {e}"),
                 ))
                 .await?;
             return Ok(());

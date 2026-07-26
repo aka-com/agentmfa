@@ -45,6 +45,22 @@ pub struct TestError {
     pub detail: String,
 }
 
+impl TestErrorKind {
+    /// The connection health a failure of this kind implies. A credential the
+    /// destination actively rejected reads as "reconnect" — retrying will not
+    /// help — while everything else is a plain failure worth retrying.
+    ///
+    /// Shared so a brokered call and the Test button grade the same failure
+    /// the same way; a data-plane dial is as conclusive about the destination
+    /// as an explicit test is.
+    pub fn health_status(&self) -> crate::types::HealthStatus {
+        match self {
+            TestErrorKind::AuthRejected => crate::types::HealthStatus::NeedsReconnect,
+            _ => crate::types::HealthStatus::Failed,
+        }
+    }
+}
+
 impl TestError {
     pub fn new(kind: TestErrorKind, detail: impl Into<String>) -> Self {
         Self {

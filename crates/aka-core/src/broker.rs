@@ -968,14 +968,11 @@ impl Broker {
                 kind: Some(e.kind),
             },
         };
-        // The test result is the connection's new last-known health. A
-        // credential rejection reads as "reconnect", not "retry".
-        let status = if report.ok {
-            crate::types::HealthStatus::Ok
-        } else if report.kind == Some(crate::capability::TestErrorKind::AuthRejected) {
-            crate::types::HealthStatus::NeedsReconnect
-        } else {
-            crate::types::HealthStatus::Failed
+        // The test result is the connection's new last-known health, graded by
+        // the same mapping the data planes use.
+        let status = match report.kind {
+            None => crate::types::HealthStatus::Ok,
+            Some(kind) => kind.health_status(),
         };
         self.health.record(id, status, report.detail.clone());
         Ok(report)

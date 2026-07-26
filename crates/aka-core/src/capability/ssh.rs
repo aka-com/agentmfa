@@ -1022,9 +1022,21 @@ async fn handle_conn(state: Arc<AgentState>, mut stream: UnixStream) -> std::io:
         Ok(r) => r,
         Err(e) => {
             tracing::debug!("ssh agent redeem refused: {}", e.reason());
-            // The agent wire protocol has no "expired" reply; a closed
-            // connection reads to the client as "agent refused". A
-            // budget/expiry hit here is expected, not an error.
+            // The agent wire protocol has no "expired" reply, so a closed
+            // connection is all the client gets — it reads as "agent refused",
+            // indistinguishable from a wrong key or a revoked authorized_keys
+            // entry. Record it so the reason is at least recoverable from
+            // Activity.
+            state.broker.audit.append(
+                AuditEntry::new(
+                    AuditKind::Denied,
+                    format!("SSH agent connection refused: {}", e.reason()),
+                )
+                .detail("the socket's ticket could not be redeemed".to_string())
+                .outcome(e.reason().as_str().to_string())
+                .field("kind", "ssh")
+                .field("reason", e.reason().as_str()),
+            );
             let _ = stream.shutdown().await;
             return Ok(());
         }
