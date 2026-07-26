@@ -74,6 +74,11 @@ struct SessionEntry {
     /// The direct endpoint that opened this session, when one did. Lets a
     /// wiring revocation close exactly the endpoint's live sessions.
     endpoint_id: Option<Uuid>,
+    /// The connection this session was opened against. Endpoint sessions are
+    /// reachable through `endpoint_id`, but a ticket session is not — and it
+    /// outlives its ticket by up to `session_max_ttl`, so disabling or
+    /// deleting the connection needs this to reach it.
+    connection_id: Uuid,
     close: Arc<Notify>,
 }
 
@@ -275,6 +280,7 @@ impl DataPlane {
                 info: info.clone(),
                 ticket: None,
                 endpoint_id: Some(endpoint_id),
+                connection_id: connection.id,
                 close: close.clone(),
             },
         );
@@ -358,6 +364,45 @@ impl DataPlane {
     /// endpoint grants standing access, so revoking its wiring must chase down
     /// established sessions rather than wait them out. Returns how many were
     /// signalled.
+    /// Withdraw a connection from the data plane: invalidate every ticket
+    /// issued against it and close every live session it is serving.
+    ///
+    /// Refusing the *next* open is not enough for pg/ssh, whose sessions run
+    /// to `session_max_ttl` (an hour) once established, nor for an
+    /// already-issued ticket still inside its redemption window. Disabling or
+    /// deleting a connection has to reach both, or "turn it off" leaves an
+    /// authenticated upstream connection running against the credential the
+    /// user just revoked.
+    pub fn close_connection_sessions(&self, connection_id: &Uuid) -> usize {
+        let mut state = self.inner.state.lock().unwrap();
+        for ticket in state.tickets.values_mut() {
+            if ticket.connection.id != *connection_id {
+                continue;
+            }
+            ticket.invalidated = true;
+            // Drop any unclaimed pre-dialed upstream with the ticket, the way
+            // `close_all` does: it is an authenticated socket nobody can
+            // legitimately claim any more.
+            if let TicketPayload::Ws { pending_upstream } = &mut ticket.payload {
+                *pending_upstream = None;
+            }
+        }
+        let sessions: Vec<_> = state
+            .sessions
+            .values()
+            .filter(|session| session.connection_id == *connection_id)
+            .map(|session| session.close.clone())
+            .collect();
+        let count = sessions.len();
+        drop(state);
+        for close in sessions {
+            // One transport waits on each session. Preserve a permit in case
+            // revocation races the transport beginning its close wait.
+            close.notify_one();
+        }
+        count
+    }
+
     pub fn close_endpoint_sessions(&self, endpoint_id: &Uuid) -> usize {
         let state = self.inner.state.lock().unwrap();
         let sessions: Vec<_> = state
@@ -413,6 +458,7 @@ impl Redemption {
                 info: info.clone(),
                 ticket: Some(self.ticket.clone()),
                 endpoint_id: None,
+                connection_id: self.connection.id,
                 close: close.clone(),
             },
         );
@@ -706,5 +752,59 @@ mod tests {
             .await
             .expect("the close permit must survive a late waiter");
         session.finish("access_revoked");
+    }
+
+    /// A ticket session outlives its ticket by up to `session_max_ttl`, so
+    /// withdrawing the connection has to reach the established session, not
+    /// just refuse the next open.
+    #[tokio::test]
+    async fn withdrawing_a_connection_closes_its_live_ticket_session() {
+        let (plane, _dir) = plane(Duration::from_secs(60), 60, 300);
+        let connection = ssh_connection();
+        let ticket = plane.issue("claude-code", &connection, TicketPayload::Ssh);
+        let session = plane
+            .redeem(&ticket)
+            .expect("redeem")
+            .start(ConnectionKind::Ssh);
+        let closed = session.close_signal.clone();
+
+        assert_eq!(plane.close_connection_sessions(&connection.id), 1);
+        tokio::time::timeout(Duration::from_secs(1), closed.notified())
+            .await
+            .expect("the live session must be signalled to close");
+        session.finish("access_revoked");
+    }
+
+    /// An already-issued ticket is still inside its redemption window when the
+    /// user disables the connection, so it must stop redeeming too — otherwise
+    /// revocation is bypassable for the ticket's remaining lifetime.
+    #[tokio::test]
+    async fn withdrawing_a_connection_invalidates_its_outstanding_tickets() {
+        let (plane, _dir) = plane(Duration::from_secs(60), 60, 300);
+        let connection = ssh_connection();
+        let ticket = plane.issue("claude-code", &connection, TicketPayload::Ssh);
+
+        assert_eq!(plane.close_connection_sessions(&connection.id), 0);
+        assert_eq!(expect_err(plane.redeem(&ticket)), RedeemError::Expired);
+    }
+
+    /// Withdrawing one connection must not disturb another's traffic.
+    #[tokio::test]
+    async fn withdrawing_a_connection_leaves_other_connections_alone() {
+        let (plane, _dir) = plane(Duration::from_secs(60), 60, 300);
+        let withdrawn = ssh_connection();
+        let untouched = ws_connection();
+        let other = plane.issue("claude-code", &untouched, TicketPayload::Ssh);
+        let other_session = plane
+            .redeem(&other)
+            .expect("redeem")
+            .start(ConnectionKind::Ssh);
+
+        assert_eq!(plane.close_connection_sessions(&withdrawn.id), 0);
+        assert_eq!(plane.sessions().len(), 1, "the other session must survive");
+        // And its ticket must still redeem.
+        let second = plane.redeem(&other).expect("redeem").start(ConnectionKind::Ssh);
+        second.finish("done");
+        other_session.finish("done");
     }
 }

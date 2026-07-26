@@ -734,6 +734,11 @@ impl Broker {
             if endpoints_revoked {
                 self.events.wirings_changed();
             }
+            // A live session is authenticated against the *old* destination
+            // with the old credential, so it outlives the decision the user
+            // just changed. Invalidate the tickets and close the sessions for
+            // the same reason the endpoints are revoked.
+            self.data_plane.close_connection_sessions(id);
             // An open approval window was permission for traffic to the old
             // destination; the new one has never been shown to the user.
             self.approvals.revoke(id);
@@ -800,6 +805,10 @@ impl Broker {
         let dropped = self.access.remove_for_connection(id)?;
         let endpoints = self.endpoints.remove_for_connection(id)?;
         self.teardown_endpoints(&endpoints);
+        // The connection is gone, so nothing it authorized may keep running:
+        // invalidate its tickets and close its live sessions, ticket-served
+        // ones included.
+        let closed_sessions = self.data_plane.close_connection_sessions(id);
         if dropped || !endpoints.is_empty() {
             self.events.wirings_changed();
         }
@@ -808,7 +817,8 @@ impl Broker {
                 AuditKind::ConnectionDeleted,
                 format!("Tool deleted: {}", conn.name),
             )
-            .connection(conn.name.clone()),
+            .connection(conn.name.clone())
+            .field("closed_sessions", closed_sessions),
         );
         Ok(conn)
     }
@@ -1775,10 +1785,13 @@ impl Broker {
     }
 
     /// Enable or disable agent access for a connection from the app.
-    /// Disabling does not chase down live ticket transports — tickets are
-    /// short-lived, and the next open is refused. Direct endpoints are
-    /// standing authority, so their established sessions are closed at once;
-    /// the issued endpoint itself remains available for later re-enabling.
+    /// Disabling withdraws the connection from the data plane outright: every
+    /// ticket issued against it is invalidated and every live session it
+    /// serves is closed, whether a ticket or a direct endpoint opened it. A
+    /// pg or ssh session runs to `session_max_ttl` once established, so
+    /// refusing the next open would otherwise leave an authenticated upstream
+    /// connection alive for an hour after the user revoked it. The issued
+    /// endpoint itself remains available for later re-enabling.
     pub fn ui_set_tool_access(&self, connection_id: &Uuid, enabled: bool) -> Result<bool> {
         let _gate = self.config_gate.lock().unwrap();
         let connection = self.store.connection_by_id(connection_id)?;
@@ -1787,10 +1800,7 @@ impl Broker {
             let closed_sessions = if enabled {
                 0
             } else {
-                self.endpoints
-                    .get_for_connection(connection_id)
-                    .map(|endpoint| self.data_plane.close_endpoint_sessions(&endpoint.id))
-                    .unwrap_or(0)
+                self.data_plane.close_connection_sessions(connection_id)
             };
             self.audit.append(
                 AuditEntry::new(
@@ -1806,7 +1816,7 @@ impl Broker {
                     ),
                 )
                 .connection(connection.name.clone())
-                .field("closed_endpoint_sessions", closed_sessions),
+                .field("closed_sessions", closed_sessions),
             );
             self.events.wirings_changed();
         }
