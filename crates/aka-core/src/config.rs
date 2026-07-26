@@ -23,9 +23,14 @@ pub struct BrokerConfig {
     /// larger than this keeps only its compact idempotency tombstone.
     pub outcome_retention_max_bytes: usize,
 
-    /// Deadline for the complete upstream HTTP operation, including OAuth
-    /// refresh, redirects, and response-body receipt.
+    /// Deadline for one upstream HTTP hop (a single redirect leg's request
+    /// and response).
     pub upstream_timeout: Duration,
+    /// Deadline for the complete upstream operation — OAuth refresh, the
+    /// full redirect chain, and response-body receipt together. Kept larger
+    /// than a single hop so one slow leg (a sluggish token refresh, say)
+    /// does not consume the entire budget the rest of the operation needs.
+    pub upstream_operation_timeout: Duration,
     /// Response body cap (default 10 MB).
     pub response_cap: usize,
     /// Request body cap (default 150 MB).
@@ -99,7 +104,7 @@ impl BrokerConfig {
         let minimum = self
             .approval_timeout
             .saturating_add(self.endpoint_upload_timeout)
-            .saturating_add(self.upstream_timeout)
+            .saturating_add(self.upstream_operation_timeout)
             .saturating_add(Duration::from_secs(30));
         self.recommended_client_timeout.max(minimum)
     }
@@ -120,13 +125,17 @@ impl Default for BrokerConfig {
         Self {
             version: env!("CARGO_PKG_VERSION").to_string(),
             // A confirmed direct HTTP call may spend the full approval,
-            // body-upload, and upstream budgets; leave another 30 seconds
-            // for broker and transport overhead.
-            recommended_client_timeout: Duration::from_secs(4 * 60),
+            // body-upload, and upstream-operation budgets; leave another 30
+            // seconds for broker and transport overhead (90 + 60 + 120 + 30).
+            recommended_client_timeout: Duration::from_secs(5 * 60),
             outcome_retention: Duration::from_secs(600),
             outcome_retention_max_entries: 1024,
             outcome_retention_max_bytes: 64 * 1024 * 1024,
             upstream_timeout: Duration::from_secs(60),
+            // Two full hops' worth: an OAuth refresh or a redirect hop that
+            // eats its whole per-hop budget still leaves the operation room
+            // to finish instead of turning into a 504.
+            upstream_operation_timeout: Duration::from_secs(120),
             response_cap: 10 * 1024 * 1024,
             request_cap: 150 * 1024 * 1024,
             spool_threshold: 2 * 1024 * 1024,

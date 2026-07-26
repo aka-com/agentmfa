@@ -317,7 +317,7 @@ fn show_notification(
     };
     let body = if show_context && requests.len() == 1 {
         let request = &requests[0];
-        let agent = notification_label(&request.agent, "An agent");
+        let agent = agent_display(&request.agent, "An agent");
         let connection = notification_label(&request.connection, "a tool");
         format!(
             "{} is waiting to use {}. Open the Request Inbox to review.",
@@ -426,6 +426,18 @@ fn configure_notification_identity(
     _notification: &mut notify_rust::Notification,
 ) -> Result<(), String> {
     Ok(())
+}
+
+/// The broker's direct-endpoint planes attribute their traffic to the
+/// literal agent label `endpoint` — an audit-stable wire value, not prose.
+/// Spell that one out for the humans reading a notification; every other
+/// label is untrusted agent text and goes through [`notification_label`].
+fn agent_display(agent: &str, fallback: &str) -> String {
+    if agent == "endpoint" {
+        "A direct endpoint client".into()
+    } else {
+        notification_label(agent, fallback)
+    }
 }
 
 fn notification_label(value: &str, fallback: &str) -> String {
@@ -588,6 +600,7 @@ mod tests {
             waiting: 1,
             requested_at: "2026-07-24T12:00:00Z".into(),
             expires_at: "2026-07-24T12:01:30Z".into(),
+            expires_in_secs: Some(90),
             window_secs: 900,
         }
     }

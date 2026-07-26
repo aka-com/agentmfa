@@ -1104,6 +1104,7 @@ async fn post_http(
             coalesce_key,
             payload_hash,
             executor,
+            abandon: None,
         },
     )
     .await
@@ -1529,6 +1530,18 @@ async fn run_allowed(
             let connection_id = conn.id;
             let expected_version = conn.updated_at;
             let connection = conn.name.clone();
+            // An unkeyed call has no `request_id` a retry could return
+            // under: once its one caller disconnects, nobody can ever read
+            // the answer, so the parked wait may stop. Keyed calls keep
+            // waiting — that is what makes "attach the app and retry"
+            // replay instead of re-asking.
+            let (abandon_tx, abandon_rx) = match exec.coalesce_key.is_none() {
+                true => {
+                    let (tx, rx) = tokio::sync::watch::channel(false);
+                    (Some(tx), Some(rx))
+                }
+                false => (None, None),
+            };
             let executor = exec.executor;
             ExecRequest {
                 executor: Box::pin(async move {
@@ -1542,12 +1555,31 @@ async fn run_allowed(
                     if !access.allows(&connection_id) || !connection_is_current {
                         return ExecOutcome::refusal(ErrorReason::DeniedByPolicy);
                     }
-                    let verdict = approvals.gate(request).await;
+                    let verdict = match abandon_rx {
+                        Some(mut abandoned) => tokio::select! {
+                            verdict = approvals.gate(request) => verdict,
+                            _ = async {
+                                // A closed channel is not abandonment; only
+                                // an explicit last-waiter signal is.
+                                if abandoned.wait_for(|gone| *gone).await.is_err() {
+                                    std::future::pending::<()>().await;
+                                }
+                            } => {
+                                // Retire the dropped gate's prompt now (the
+                                // sweep inside `pending` sees its closed
+                                // waiter) instead of executing for nobody.
+                                let _ = approvals.pending();
+                                return ExecOutcome::refusal(ErrorReason::ApprovalUnavailable);
+                            }
+                        },
+                        None => approvals.gate(request).await,
+                    };
                     if !verdict.is_allowed() {
                         return approval_refusal(verdict, &connection);
                     }
                     executor.await
                 }),
+                abandon: abandon_tx,
                 ..exec
             }
         }
@@ -1765,6 +1797,7 @@ async fn post_ws_open(
             coalesce_key,
             payload_hash,
             executor,
+            abandon: None,
         },
     )
     .await
@@ -1878,6 +1911,7 @@ async fn post_ssh_open(
             coalesce_key,
             payload_hash,
             executor,
+            abandon: None,
         },
     )
     .await
@@ -1984,6 +2018,7 @@ async fn post_pg_open(
             coalesce_key,
             payload_hash,
             executor,
+            abandon: None,
         },
     )
     .await

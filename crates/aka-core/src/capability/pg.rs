@@ -36,7 +36,10 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use postgres_protocol::authentication::sasl::{
     ChannelBinding, ScramSha256, SCRAM_SHA_256, SCRAM_SHA_256_PLUS,
 };
-use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, BufReader, ReadBuf};
+use tokio::io::{
+    AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, BufReader,
+    ReadBuf,
+};
 use tokio::net::{TcpStream, UnixListener, UnixStream};
 use tokio::sync::Notify;
 
@@ -474,9 +477,13 @@ async fn handle_endpoint_conn(
 
     // A direct endpoint is standing authority, so the confirmation is the
     // only thing standing between a pasted DSN and the database.
-    if let Some(refusal) = confirm_session(&state, &connection, "endpoint", &params).await {
-        client.write_all(&refusal).await?;
-        return Ok(());
+    match confirm_session(&state, &mut client, &connection, "endpoint", &params).await {
+        SessionConfirmation::Proceed => {}
+        SessionConfirmation::Refused(refusal) => {
+            client.write_all(&refusal).await?;
+            return Ok(());
+        }
+        SessionConfirmation::Abandoned => return Ok(()),
     }
 
     // Confirmation may wait for a user for up to a minute and a half. Revoke,
@@ -617,6 +624,17 @@ async fn handle_endpoint_conn(
 
 /* ------------------------- downstream state machine ----------------------- */
 
+/// How a parked session confirmation came out.
+enum SessionConfirmation {
+    /// Approved (or the switch is off): open the session.
+    Proceed,
+    /// Refused: the FATAL frame to send downstream.
+    Refused(Vec<u8>),
+    /// The downstream client hung up while the prompt was parked. There is
+    /// nobody to answer, and the session must not be dialed for nobody.
+    Abandoned,
+}
+
 /// Ask the user about a new Postgres session when the connection's
 /// confirmation switch is on.
 ///
@@ -626,15 +644,21 @@ async fn handle_endpoint_conn(
 /// raises one prompt for the first connection and rides its window for the
 /// rest.
 ///
-/// Returns the FATAL frame to send when the session is refused.
-async fn confirm_session(
+/// While parked, the downstream socket is watched: a client that gives up
+/// (Ctrl-C on `psql`, a pool timeout) retires its prompt instead of leaving
+/// a dead question on the user that could open a session nobody is reading.
+async fn confirm_session<S>(
     state: &Arc<ProxyState>,
+    client: &mut BufReader<S>,
     connection: &Connection,
     agent: &str,
     params: &[(String, String)],
-) -> Option<Vec<u8>> {
+) -> SessionConfirmation
+where
+    S: AsyncRead + Unpin,
+{
     if !state.broker.access.confirm_mode(&connection.id).is_on() {
-        return None;
+        return SessionConfirmation::Proceed;
     }
     // The startup parameters are the only thing the client tells us about
     // itself: `psql`, a migration tool, an ORM's pool.
@@ -655,20 +679,41 @@ async fn confirm_session(
     .join(" · ");
     let request = crate::approvals::ApprovalRequest::new(connection, agent, "New Postgres session")
         .maybe_detail((!detail.is_empty()).then_some(detail));
-    let verdict = state.broker.approvals.gate(request).await;
+    let verdict = tokio::select! {
+        verdict = state.broker.approvals.gate(request) => verdict,
+        _ = downstream_gone(client) => {
+            // Dropping the gate closed this session's waiter; retire its
+            // prompt now (the sweep inside `pending` sees the closed
+            // waiter) rather than leaving it to the deadline.
+            let _ = state.broker.approvals.pending();
+            return SessionConfirmation::Abandoned;
+        }
+    };
     if verdict.is_allowed() {
-        return None;
+        return SessionConfirmation::Proceed;
     }
     let reason = verdict
         .reason()
         .unwrap_or(crate::wire::ErrorReason::ApprovalDenied);
-    Some(error_response(
+    SessionConfirmation::Refused(error_response(
         "FATAL",
         // Refusing the session is an authorization outcome, whichever way
         // the confirmation went; libpq surfaces the message either way.
         "28000",
         &format!("AKA: {}: {}", reason.as_str(), verdict.detail()),
     ))
+}
+
+/// Resolves when the downstream hangs up. A client is not expected to send
+/// anything while its session is parked on confirmation; if bytes do arrive
+/// (an eagerly pipelining driver), they stay buffered untouched and the
+/// watch simply stops — the prompt's outcome decides what happens to them.
+async fn downstream_gone<S: AsyncRead + Unpin>(client: &mut BufReader<S>) {
+    match client.fill_buf().await {
+        Ok([]) => {}
+        Ok(_) => std::future::pending().await,
+        Err(_) => {}
+    }
 }
 
 /// Outcome of the Postgres pre-startup phase, shared by the ticket proxy and
@@ -823,9 +868,13 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
     // Confirm before dialing upstream: nothing has been established yet, so
     // a refusal costs the destination nothing. Dropping the redemption on
     // the way out releases its reserved budget slot.
-    if let Some(refusal) = confirm_session(&state, &connection, &redemption.agent, &params).await {
-        client.write_all(&refusal).await?;
-        return Ok(());
+    match confirm_session(&state, &mut client, &connection, &redemption.agent, &params).await {
+        SessionConfirmation::Proceed => {}
+        SessionConfirmation::Refused(refusal) => {
+            client.write_all(&refusal).await?;
+            return Ok(());
+        }
+        SessionConfirmation::Abandoned => return Ok(()),
     }
     if !state.broker.access.allows(&redemption.connection.id) {
         state.broker.approvals.revoke(&redemption.connection.id);

@@ -50,7 +50,7 @@ import {
 } from '/src/broker';
 import { sameBrokerScope } from '/src/broker-scope';
 import { activityIdentity } from '/src/activity';
-import { activeRequestCount, activeRequests, recentRequests } from '/src/requests';
+import { activeRequestCount, activeRequests, anchorExpiry, recentRequests } from '/src/requests';
 import { APP_VERSION } from '/src/version';
 import { virtualListWindow } from '/src/virtual-list';
 import type { HostKeyCandidate } from '/src/connection-input';
@@ -580,9 +580,13 @@ async function load<K extends CommandName>(
       case 'connections': state.connections = result as ConnectionSummary[]; break;
       case 'sessions': state.sessions = result as SessionSummary[]; break;
       case 'activity': state.activity = result as ActivityEntry[]; break;
-      case 'elicitations': state.elicitations = result as ElicitationRequest[]; break;
-      case 'approvals': state.approvals = result as Approval[]; break;
-      case 'requests': state.requests = result as RequestRecord[]; break;
+      // Deadlines are re-anchored to this machine's clock at receipt, so a
+      // remote broker's clock offset cannot distort the countdowns.
+      case 'elicitations':
+        state.elicitations = anchorExpiry(result as ElicitationRequest[]);
+        break;
+      case 'approvals': state.approvals = anchorExpiry(result as Approval[]); break;
+      case 'requests': state.requests = anchorExpiry(result as RequestRecord[]); break;
     }
   } catch (error) {
     console.error(cmd, error);
@@ -696,6 +700,17 @@ function approvalUnit(approval: Approval): string {
   // "request" remains true even for a tool call, while guessing from the
   // connection would mislabel generic HTTP traffic on an MCP connection.
   return 'wants to send a request';
+}
+
+/**
+ * Attribution for a prompt or history row. The broker's direct-endpoint
+ * planes report the literal agent label `endpoint` — an audit-stable wire
+ * value, not prose — so spell that one out instead of rendering
+ * "endpoint wants to send a request". Every other label is the agent's
+ * self-reported name, shown as sent.
+ */
+function agentLabel(agent: string): string {
+  return agent === 'endpoint' ? 'A direct endpoint client' : agent;
 }
 
 function requestOutcome(record: RequestRecord): {
@@ -905,13 +920,13 @@ function RequestInbox(): ReactNode {
                           <button key={`approval:${approval.id}`}
                             className="request-card request-card-approval"
                             data-act="approval-open" data-id={approval.id}
-                            aria-label={`Review approval from ${approval.agent} for ${approval.connection}`}>
+                            aria-label={`Review approval from ${agentLabel(approval.agent)} for ${approval.connection}`}>
                             <span className="request-card-ico"><Icon markup={ICONS.shieldAlert} /></span>
                             <span className="request-card-body">
                               <span className="request-card-top">
                                 <span className="request-kind">Approval</span>
                               </span>
-                              <b>{approval.agent} {approvalUnit(approval)}</b>
+                              <b>{agentLabel(approval.agent)} {approvalUnit(approval)}</b>
                               <span className="request-context">
                                 {approval.connection} · {approval.target}
                               </span>
@@ -967,7 +982,7 @@ function RequestInbox(): ReactNode {
                       const outcome = requestOutcome(record);
                       const at = record.resolved_at ?? record.requested_at;
                       const context = [
-                        record.agent,
+                        agentLabel(record.agent),
                         record.connection,
                         record.target,
                       ].filter(Boolean).join(' · ');
@@ -1494,6 +1509,15 @@ function confirmSectionHTML(c: ConnectionSummary): string {
     ? `<div class="cd-confirm-window">${ICONS.timer}<span>Approved until ${esc(clockTime(until))} —
         not asking again until then.</span></div>`
     : '';
+  // The mirror image of the window: after a Deny, retries are refused
+  // without a fresh prompt for a short cooldown. Without this line that
+  // refusal is invisible, and a mis-clicked Deny reads as a broken tool.
+  const cooldownUntil = c.agent_access.confirm_cooldown_until;
+  const cooldown = on && cooldownUntil && new Date(cooldownUntil).getTime() > Date.now()
+    ? `<div class="cd-confirm-window cd-confirm-cooldown">${ICONS.clockAlert}<span>Denied —
+        retries are refused without asking for ${esc(timeLeft(cooldownUntil))}. Turning
+        confirmation off and back on clears it.</span></div>`
+    : '';
   return `<div class="cd-sec cd-confirm">
       <div class="cd-confirm-row">
         <div class="cd-confirm-txt">
@@ -1505,6 +1529,7 @@ function confirmSectionHTML(c: ConnectionSummary): string {
           data-act="${on ? 'confirm-off' : 'confirm-on'}" data-conn="${c.id}"></button>
       </div>
       ${window}
+      ${cooldown}
       ${on ? `<div class="cd-confirm-note">With no AgentMFA approval surface attached,
         this tool’s traffic is refused rather than carried.</div>` : ''}
     </div>`;
@@ -3065,7 +3090,7 @@ function ApprovalSheet(): ReactNode {
       <div className="sheet elicit-sheet" role="alertdialog" aria-modal="true" aria-labelledby="approval-title">
         <div className="elicit-dlg-ico"><Icon markup={ICONS.shieldAlert} /></div>
         <h3 id="approval-title" className="elicit-dlg-title">
-          {approval.agent} {approvalUnit(approval)}
+          {agentLabel(approval.agent)} {approvalUnit(approval)}
         </h3>
         <div className="elicit-dlg-context">{approval.connection} · {approval.target}</div>
         {/* The call itself, verbatim and inert: it is the agent's text. */}

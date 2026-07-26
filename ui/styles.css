@@ -1329,6 +1329,9 @@
   color: var(--ink-2); background: var(--amber-wash); border: 1px solid var(--amber-border);
 }
 .cd-confirm-window svg { flex: 0 0 auto; width: 14px; height: 14px; color: var(--amber-strong); }
+/* A denial's cooldown is a refusal state, not an approval one. */
+.cd-confirm-cooldown { background: var(--danger-wash); border-color: var(--danger-border); }
+.cd-confirm-cooldown svg { color: var(--danger-ink); }
 .cd-confirm-note { margin-top: 8px; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .cd-off-note { margin-top: 12px; }
 /* The Details card: the target's parts spelled out as label–value rows.

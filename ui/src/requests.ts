@@ -1,5 +1,27 @@
 import type { Approval, ElicitationRequest, RequestRecord } from './types';
 
+/**
+ * Re-anchor broker-relative deadlines to this machine's clock at receipt.
+ *
+ * `expires_at` is written by the broker's wall clock; rendering a countdown
+ * from it trusts the broker's and this machine's clocks to agree, and a
+ * remote broker's offset would show "any moment now" immediately or a
+ * too-long fuse. Brokers therefore also send `expires_in_secs`, measured on
+ * their clock as the snapshot was built; when present it wins, and
+ * `expires_at` is rewritten as local-now plus that remainder. Snapshots from
+ * older brokers (no relative field) pass through unchanged.
+ */
+export function anchorExpiry<T extends { expires_in_secs?: number | null }>(
+  items: T[],
+  now = Date.now(),
+): T[] {
+  return items.map((item) => (
+    typeof item.expires_in_secs === 'number'
+      ? { ...item, expires_at: new Date(now + item.expires_in_secs * 1000).toISOString() }
+      : item
+  ));
+}
+
 export type ActiveRequest =
   | {
       kind: 'approval';

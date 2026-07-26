@@ -27,6 +27,11 @@ export interface AgentAccess {
    * panel can say why nothing is being asked right now.
    */
   confirm_window_until?: string | null;
+  /**
+   * While a denial's cooldown runs, the RFC 3339 time it lifts. Retries
+   * during it are refused without a fresh prompt, and the panel says so.
+   */
+  confirm_cooldown_until?: string | null;
   /** Curated upstream MCP tool subset; absent means all tools. */
   allowed_tools?: string[] | null;
   /**
@@ -161,6 +166,9 @@ export interface ElicitationRequest {
   requested_at: string;
   /** The request disappears on its own at this time. */
   expires_at: string;
+  /** Seconds left on the broker's clock when this snapshot was built; the
+   * bridge re-anchors `expires_at` from it so countdowns survive skew. */
+  expires_in_secs?: number | null;
 }
 
 /**
@@ -192,6 +200,9 @@ export interface Approval {
   requested_at: string;
   /** When it gives up on its own and the parked traffic is refused. */
   expires_at: string;
+  /** Seconds left on the broker's clock when this snapshot was built; the
+   * bridge re-anchors `expires_at` from it so countdowns survive skew. */
+  expires_in_secs?: number | null;
   /** How long "approve for now" lasts, so the button can name it. */
   window_secs: number;
 }
@@ -214,6 +225,8 @@ export interface RequestRecord {
   waiting: number;
   requested_at: string;
   expires_at?: string | null;
+  /** Seconds left on the broker's clock, present only while pending. */
+  expires_in_secs?: number | null;
   resolved_at?: string | null;
   resolution?: string | null;
   window_secs?: number | null;

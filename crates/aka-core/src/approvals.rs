@@ -69,6 +69,13 @@ impl ApprovalUnit {
 
 const APPROVAL_TEXT_CAP: usize = 400;
 
+/// How often a live prompt re-checks that someone is still waiting on it.
+/// Retirement happens inside [`Approvals::sweep`], and sweeping takes a
+/// caller — which a vanished caller by definition stops being. Without this
+/// poll, a prompt every one of whose waiters disconnected would sit in the
+/// queue (and the user's Inbox) until its deadline.
+const WAITER_LIVENESS_PERIOD: Duration = Duration::from_secs(3);
+
 /// Directional-override and isolate characters. In text an agent controls
 /// they can visually reorder the very string the user is deciding on
 /// (`DELETE /prod` dressed up as something harmless), so a prompt never
@@ -482,16 +489,34 @@ impl Approvals {
                             // The request future can disappear (a direct
                             // client disconnects) while the UI still holds
                             // this prompt. Keep deadline retirement owned by
-                            // the registry, not solely by that future.
+                            // the registry, not solely by that future — and
+                            // poll waiter liveness on the way, so a prompt
+                            // nobody is waiting on anymore leaves the queue
+                            // in seconds rather than at its deadline.
                             let approvals = self.clone();
                             tokio::spawn(async move {
-                                tokio::time::sleep_until(tokio::time::Instant::from_std(deadline))
+                                let deadline = tokio::time::Instant::from_std(deadline);
+                                loop {
+                                    let now = tokio::time::Instant::now();
+                                    if now >= deadline {
+                                        approvals.resolve(
+                                            &id,
+                                            Verdict::TimedOut,
+                                            RequestResolution::TimedOut,
+                                        );
+                                        return;
+                                    }
+                                    tokio::time::sleep_until(
+                                        deadline.min(now + WAITER_LIVENESS_PERIOD),
+                                    )
                                     .await;
-                                approvals.resolve(
-                                    &id,
-                                    Verdict::TimedOut,
-                                    RequestResolution::TimedOut,
-                                );
+                                    // `pending` sweeps: a passed deadline and
+                                    // a fully disconnected waiter list both
+                                    // retire the prompt inside it.
+                                    if !approvals.pending().iter().any(|prompt| prompt.id == id) {
+                                        return;
+                                    }
+                                }
                             });
                             (rx, id, deadline)
                         }
@@ -638,6 +663,23 @@ impl Approvals {
                     .saturating_duration_since(now)
                     .min((grant.wall_until - wall_now).to_std().unwrap_or_default())
             });
+            (remaining, lapsed)
+        };
+        self.announce_lapsed(&lapsed);
+        remaining
+    }
+
+    /// Whether a denial's cooldown still covers this connection (the UI
+    /// shows it, so the user knows retries are being refused unasked).
+    pub fn cooldown_remaining(&self, connection_id: &Uuid) -> Option<Duration> {
+        let now = Instant::now();
+        let (remaining, lapsed) = {
+            let mut state = self.inner.state.lock().unwrap();
+            let lapsed = Self::sweep(&mut state, now, Utc::now());
+            let remaining = state
+                .cooldowns
+                .get(connection_id)
+                .map(|until| until.saturating_duration_since(now));
             (remaining, lapsed)
         };
         self.announce_lapsed(&lapsed);
@@ -1243,6 +1285,54 @@ mod tests {
         assert!(!approvals.respond(&prompt.id, ApprovalDecision::ApproveWindow));
         assert_eq!(call.await.unwrap(), Verdict::TimedOut);
         assert_eq!(approvals.window_remaining(&conn.id), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_prompt_all_of_whose_callers_vanished_retires_before_its_deadline() {
+        // Sweeping needs a caller, and a vanished caller stops calling. The
+        // liveness poll is what retires the prompt then — well before the
+        // deadline that would otherwise keep a dead question on the user.
+        let dir = tempfile::tempdir().unwrap();
+        let audit = Arc::new(AuditLog::open(dir.path().join("audit.jsonl")).unwrap());
+        let approvals = Approvals::new(
+            ApprovalConfig {
+                timeout: Duration::from_secs(90),
+                ..config()
+            },
+            audit,
+            Arc::new(NeverAnswers),
+        );
+        let conn = connection();
+        let call = {
+            let approvals = approvals.clone();
+            let conn = conn.clone();
+            tokio::spawn(async move { approvals.gate(request(&conn)).await })
+        };
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while approvals.inner.state.lock().unwrap().pending.is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the call should raise a prompt");
+        call.abort();
+        let _ = call.await;
+
+        // Watch the raw state so the assertion itself cannot run the sweep.
+        tokio::time::timeout(WAITER_LIVENESS_PERIOD * 2, async {
+            while !approvals.inner.state.lock().unwrap().pending.is_empty() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the abandoned prompt should retire within one liveness period");
+        let history = approvals.inner.history.records();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].status, RequestStatus::Abandoned);
+        assert_eq!(
+            history[0].resolution,
+            Some(RequestResolution::CallerDisconnected)
+        );
     }
 
     #[tokio::test]

@@ -64,6 +64,11 @@ struct Pending {
     /// completion it becomes a tombstone.
     retention_reserved: bool,
     waiters: Vec<(u64, oneshot::Sender<ExecOutcome>)>,
+    /// Fired when the last waiter deregisters. Only unkeyed executions set
+    /// this: with no idempotency key, no retry can ever reattach or replay,
+    /// so a still-parked execution may stop waiting for a caller that no
+    /// longer exists. A keyed execution keeps running for the retry.
+    abandon: Option<tokio::sync::watch::Sender<bool>>,
 }
 
 struct Retained {
@@ -113,6 +118,12 @@ pub struct ExecRequest {
     pub payload_hash: Option<String>,
     /// The one upstream execution.
     pub executor: Executor,
+    /// Set `true` when the last waiter deregisters from an *unkeyed*
+    /// execution (ignored when `coalesce_key` is set — a keyed retry can
+    /// reattach). The executor holds the matching receiver and may use it
+    /// to stop pre-execution waits, such as a parked confirmation, whose
+    /// answer nobody can ever observe.
+    pub abandon: Option<tokio::sync::watch::Sender<bool>>,
 }
 
 pub enum Execution {
@@ -163,6 +174,11 @@ impl Drop for WaiterGuard {
         let mut inner = self.shared.inner.lock().unwrap();
         if let Some(entry) = inner.pending.get_mut(&self.pending_id) {
             entry.waiters.retain(|(id, _)| *id != self.waiter_id);
+            if entry.waiters.is_empty() {
+                if let Some(abandon) = &entry.abandon {
+                    let _ = abandon.send(true);
+                }
+            }
         }
     }
 }
@@ -277,6 +293,7 @@ impl Executions {
             coalesce_key,
             payload_hash,
             executor,
+            abandon,
         } = request;
         let (handle, id) = {
             let mut inner = self.shared.inner.lock().unwrap();
@@ -294,6 +311,10 @@ impl Executions {
                     payload_hash,
                     retention_reserved,
                     waiters: vec![(waiter_id, tx)],
+                    // A keyed execution must keep running for the retry
+                    // that can reattach to it; drop its sender so a waiter
+                    // exodus never signals it.
+                    abandon: coalesce_key.is_none().then_some(abandon).flatten(),
                 },
             );
             if let Some(key) = coalesce_key {
@@ -534,6 +555,7 @@ mod tests {
                 coalesce_key,
                 payload_hash,
                 executor,
+                abandon: None,
             })
             .unwrap()
         {
@@ -664,6 +686,7 @@ mod tests {
             coalesce_key: key("req-1"),
             payload_hash: Some("payload-b".into()),
             executor: counting_executor(count.clone(), serde_json::json!({})),
+            abandon: None,
         }));
         assert!(matches!(err, ExecError::RequestIdMismatch));
         assert_eq!(count.load(Ordering::SeqCst), 1);
@@ -691,6 +714,7 @@ mod tests {
                 coalesce_key: key("req-1"),
                 payload_hash: Some("payload".into()),
                 executor: slow,
+                abandon: None,
             })
             .unwrap();
         let second = e
@@ -698,6 +722,7 @@ mod tests {
                 coalesce_key: key("req-1"),
                 payload_hash: Some("payload".into()),
                 executor: counting_executor(count.clone(), serde_json::json!({"other": true})),
+                abandon: None,
             })
             .unwrap();
         gate.notify_one();
@@ -724,6 +749,7 @@ mod tests {
             coalesce_key: key("req-2"),
             payload_hash: Some("payload".into()),
             executor: counting_executor(count.clone(), serde_json::json!({})),
+            abandon: None,
         }));
         assert!(matches!(err, ExecError::IdempotencyCapacity));
         assert_eq!(count.load(Ordering::SeqCst), 1);
@@ -738,6 +764,7 @@ mod tests {
                 coalesce_key: key("req-1"),
                 payload_hash: Some("payload".into()),
                 executor: counting_executor(count.clone(), serde_json::json!({})),
+                abandon: None,
             })),
             ExecError::IdempotencyCapacity
         ));
@@ -769,9 +796,81 @@ mod tests {
             coalesce_key: key("req-1"),
             payload_hash: Some("payload".into()),
             executor: counting_executor(count.clone(), serde_json::json!({})),
+            abandon: None,
         }));
         assert!(matches!(err, ExecError::OutcomeNotReplayable));
         assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn dropping_the_last_unkeyed_waiter_signals_abandonment() {
+        // No idempotency key means no retry can ever reattach: once the one
+        // caller hangs up, the executor's abandon receiver must learn it so
+        // a pre-execution wait (a parked confirmation) can stop.
+        let e = executions();
+        let (abandon_tx, mut abandon_rx) = tokio::sync::watch::channel(false);
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let executor_gate = gate.clone();
+        let handle = match e
+            .run(ExecRequest {
+                coalesce_key: None,
+                payload_hash: None,
+                executor: Box::pin(async move {
+                    executor_gate.notified().await;
+                    ExecOutcome {
+                        status: 200,
+                        body: serde_json::json!({}),
+                    }
+                }),
+                abandon: Some(abandon_tx),
+            })
+            .unwrap()
+        {
+            Execution::Wait(handle) => handle,
+            Execution::Replay(_) => panic!("nothing to replay"),
+        };
+        assert!(!*abandon_rx.borrow());
+        drop(handle);
+        tokio::time::timeout(Duration::from_secs(1), abandon_rx.wait_for(|gone| *gone))
+            .await
+            .expect("abandonment should be signalled")
+            .expect("the pending entry outlives its waiters");
+        gate.notify_one();
+    }
+
+    #[tokio::test]
+    async fn a_keyed_execution_ignores_a_waiter_exodus() {
+        // A keyed retry can reattach or replay, so losing every waiter must
+        // not signal abandonment even when a sender was supplied.
+        let e = executions();
+        let (abandon_tx, abandon_rx) = tokio::sync::watch::channel(false);
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let executor_gate = gate.clone();
+        let handle = match e
+            .run(ExecRequest {
+                coalesce_key: key("req-abandon"),
+                payload_hash: Some("payload".into()),
+                executor: Box::pin(async move {
+                    executor_gate.notified().await;
+                    ExecOutcome {
+                        status: 200,
+                        body: serde_json::json!({}),
+                    }
+                }),
+                abandon: Some(abandon_tx),
+            })
+            .unwrap()
+        {
+            Execution::Wait(handle) => handle,
+            Execution::Replay(_) => panic!("nothing to replay"),
+        };
+        drop(handle);
+        tokio::task::yield_now().await;
+        assert!(
+            !*abandon_rx.borrow(),
+            "a keyed execution keeps running for the retry that can reattach"
+        );
+        gate.notify_one();
     }
 
     #[tokio::test]

@@ -107,6 +107,11 @@ pub fn connection_dto(broker: &Broker, conn: &Connection) -> ConnectionDto {
                 + chrono::Duration::from_std(left).unwrap_or_else(|_| chrono::Duration::zero()))
             .to_rfc3339()
         }),
+        confirm_cooldown_until: broker.approvals.cooldown_remaining(&conn.id).map(|left| {
+            (chrono::Utc::now()
+                + chrono::Duration::from_std(left).unwrap_or_else(|_| chrono::Duration::zero()))
+            .to_rfc3339()
+        }),
         allowed_tools: entry.and_then(|e| e.allowed_tools),
         endpoint: broker.endpoints.get_for_connection(&conn.id).map(|e| {
             let dsn = match &conn.config {
@@ -255,6 +260,13 @@ pub fn session_dto(session: &crate::sessions::SessionInfo) -> SessionDto {
     }
 }
 
+/// Seconds until a deadline, on this broker's clock right now. Rides beside
+/// the absolute RFC 3339 form so a client can anchor the countdown to its
+/// own clock instead of trusting the two clocks to agree.
+fn secs_until(deadline: chrono::DateTime<chrono::Utc>) -> u64 {
+    (deadline - chrono::Utc::now()).num_seconds().max(0) as u64
+}
+
 /// One waiting prompt, as the app renders it.
 pub fn approval_dto(pending: &crate::approvals::PendingApproval) -> ApprovalDto {
     ApprovalDto {
@@ -270,6 +282,7 @@ pub fn approval_dto(pending: &crate::approvals::PendingApproval) -> ApprovalDto 
         waiting: pending.waiting,
         requested_at: pending.requested_at.to_rfc3339(),
         expires_at: pending.expires_at.to_rfc3339(),
+        expires_in_secs: Some(secs_until(pending.expires_at)),
         window_secs: pending.window_secs,
     }
 }
@@ -290,6 +303,11 @@ pub fn request_dto(record: &crate::request_history::RequestRecord) -> RequestDto
         waiting: record.waiting,
         requested_at: record.requested_at.to_rfc3339(),
         expires_at: record.expires_at.map(|at| at.to_rfc3339()),
+        // Only a pending record still counts down; a terminal one shows its
+        // resolution time instead.
+        expires_in_secs: (record.status == crate::request_history::RequestStatus::Pending)
+            .then(|| record.expires_at.map(secs_until))
+            .flatten(),
         resolved_at: record.resolved_at.map(|at| at.to_rfc3339()),
         resolution: record
             .resolution
@@ -318,6 +336,7 @@ pub fn elicitation_dto(pending: &crate::elicitations::PendingElicitation) -> Eli
             .collect(),
         requested_at: pending.requested_at.to_rfc3339(),
         expires_at: pending.expires_at.to_rfc3339(),
+        expires_in_secs: Some(secs_until(pending.expires_at)),
     }
 }
 

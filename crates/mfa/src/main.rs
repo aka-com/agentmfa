@@ -2444,6 +2444,7 @@ mod tests {
                 enabled: true,
                 confirm: false,
                 confirm_window_until: None,
+                confirm_cooldown_until: None,
                 allowed_tools: None,
                 endpoint: None,
             },

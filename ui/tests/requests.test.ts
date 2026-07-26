@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { activeRequestCount, activeRequests, recentRequests } from '../src/requests';
+import { activeRequestCount, activeRequests, anchorExpiry, recentRequests } from '../src/requests';
 import type { Approval, ElicitationRequest, RequestRecord } from '../src/types';
 
 function approval(id: string, expiresAt: string): Approval {
@@ -33,6 +33,22 @@ function elicitation(id: string, expiresAt: string): ElicitationRequest {
     expires_at: expiresAt,
   };
 }
+
+test('a broker-relative deadline is re-anchored to the local clock', () => {
+  // The broker's wall clock is an hour ahead; its absolute expires_at would
+  // render a 90-second prompt as an hour-long fuse. The relative form wins.
+  const now = Date.parse('2026-07-24T12:00:00Z');
+  const skewed = approval('one', '2026-07-24T13:01:30Z');
+  const [anchored] = anchorExpiry([{ ...skewed, expires_in_secs: 90 }], now);
+
+  assert.equal(Date.parse(anchored.expires_at) - now, 90_000);
+  assert.equal(skewed.expires_at, '2026-07-24T13:01:30Z', 'inputs are not mutated');
+});
+
+test('snapshots from brokers without relative deadlines pass through unchanged', () => {
+  const legacy = approval('one', '2026-07-24T12:01:30Z');
+  assert.deepEqual(anchorExpiry([legacy], Date.parse('2026-07-24T12:00:00Z')), [legacy]);
+});
 
 test('active requests are unified and ordered by the soonest deadline', () => {
   const requests = activeRequests(

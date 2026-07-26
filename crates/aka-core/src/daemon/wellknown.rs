@@ -479,13 +479,13 @@ mod tests {
         // A call on a confirm-on tool parks for at most this long, and the
         // advertised client timeout has to cover it.
         assert_eq!(m["approval_timeout_seconds"], 90);
-        assert_eq!(m["recommended_client_timeout_seconds"], 240);
+        assert_eq!(m["recommended_client_timeout_seconds"], 300);
         assert!(
             m["approval_timeout_seconds"].as_u64().unwrap()
                 + BrokerConfig::default().endpoint_upload_timeout.as_secs()
-                + BrokerConfig::default().upstream_timeout.as_secs()
+                + BrokerConfig::default().upstream_operation_timeout.as_secs()
                 <= m["recommended_client_timeout_seconds"].as_u64().unwrap(),
-            "the client timeout must cover confirmation, upload, and upstream work"
+            "the client timeout must cover confirmation, upload, and the whole upstream operation"
         );
         assert_eq!(m["token_ttl_days"], 30);
         assert_eq!(m["ticket_ttl_seconds"], 60);
@@ -507,7 +507,7 @@ mod tests {
             recommended_client_timeout: std::time::Duration::from_secs(1),
             approval_timeout: std::time::Duration::from_secs(120),
             endpoint_upload_timeout: std::time::Duration::from_secs(70),
-            upstream_timeout: std::time::Duration::from_secs(80),
+            upstream_operation_timeout: std::time::Duration::from_secs(80),
             ..BrokerConfig::default()
         };
         let m = manifest(&config, &paths(), None);
@@ -567,7 +567,7 @@ mod tests {
             "256 UTF-8 bytes",
             "PGPASSWORD",
             "expires_in_seconds",
-            "at least 240 seconds",
+            "at least 300 seconds",
             "denied_by_policy",
             "\"wired\": true",
             "request_id_mismatch",

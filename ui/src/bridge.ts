@@ -156,6 +156,8 @@ interface MockAccess {
   confirm?: boolean;
   /** RFC 3339 end of an open approval window, when one is running. */
   confirm_window_until?: string | null;
+  /** RFC 3339 end of a denial's cooldown, while retries are auto-refused. */
+  confirm_cooldown_until?: string | null;
   allowed_tools?: string[];
   endpoint?: { endpoint_id: string; type: ConnectionType; dsn?: string | null };
 }
@@ -474,6 +476,7 @@ function connDto(c: MockConnection): ConnectionSummary {
         enabled: record?.enabled ?? true,
         confirm: record?.confirm ?? false,
         confirm_window_until: record?.confirm_window_until ?? null,
+        confirm_cooldown_until: record?.confirm_cooldown_until ?? null,
         allowed_tools: record?.allowed_tools ?? null,
         endpoint: record?.endpoint ?? null,
       };
@@ -1073,8 +1076,9 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       if (!args.on) {
         // Turning it off releases anything parked on the connection — the
         // broker does the same, rather than refusing traffic the user just
-        // said needs no asking.
+        // said needs no asking. A running denial cooldown lifts with it.
         record.confirm_window_until = null;
+        record.confirm_cooldown_until = null;
         const released = db.approvals.filter((a) => a.connection_id === connection.id);
         released.forEach((approval) =>
           resolveMockRequest(approval.id, 'approved', 'confirmation_disabled'));
@@ -1101,6 +1105,11 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       if (args.decision === 'approve_all' && record) {
         record.confirm = false;
         record.confirm_window_until = null;
+      }
+      if (args.decision === 'deny' && record) {
+        // Mirror the broker's 60-second post-denial cooldown so the panel's
+        // "retries are refused" line is designable in the mock.
+        record.confirm_cooldown_until = new Date(Date.now() + 60_000).toISOString();
       }
       resolveMockRequest(
         approval.id,

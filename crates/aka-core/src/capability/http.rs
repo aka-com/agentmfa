@@ -431,9 +431,12 @@ impl HttpExecution {
         // `RequestBuilder::timeout` below applies to one redirect hop. Keep
         // a second, outer deadline around the whole upstream operation so a
         // redirect chain, OAuth refresh, or slow response body cannot
-        // multiply the advertised timeout.
+        // multiply the advertised timeout. The operation budget exceeds the
+        // per-hop budget, so one slow leg cannot starve the rest.
         let outcome =
-            match tokio::time::timeout(self.config.upstream_timeout, self.run_inner()).await {
+            match tokio::time::timeout(self.config.upstream_operation_timeout, self.run_inner())
+                .await
+            {
                 Ok(outcome) => outcome,
                 Err(_) => broker_error(
                     504,

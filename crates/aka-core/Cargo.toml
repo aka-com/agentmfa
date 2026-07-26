@@ -60,6 +60,8 @@ security-framework-sys = { version = "2.17", features = ["OSX_10_15"] }
 tempfile = { workspace = true }
 libc = { workspace = true }
 tokio-postgres = { workspace = true }
+# Paused-clock tests for deadline/liveness timers.
+tokio = { workspace = true, features = ["test-util"] }
 # Test-only key generation for the SSH agent tests (OsRng via ssh-key's
 # re-exported rand_core).
 ssh-key = { workspace = true, features = ["getrandom"] }

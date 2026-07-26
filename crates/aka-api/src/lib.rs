@@ -261,6 +261,11 @@ pub struct AccessDto {
     /// open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_window_until: Option<String>,
+    /// While a denial's cooldown is running, the RFC 3339 time it lifts —
+    /// retries during it are refused without a fresh prompt, and the app
+    /// has to be able to say so. Absent when no cooldown is running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_cooldown_until: Option<String>,
     /// Curated upstream MCP tool subset; absent means all tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_tools: Option<Vec<String>>,
@@ -436,6 +441,12 @@ pub struct ApprovalDto {
     /// own and the parked traffic is refused.
     pub requested_at: String,
     pub expires_at: String,
+    /// Seconds until `expires_at`, measured on the broker's clock as this
+    /// DTO was built. Clients render the countdown from this — anchored to
+    /// their own clock at receipt — so a remote broker's clock offset cannot
+    /// distort it. Optional so a new app can still manage an older broker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in_secs: Option<u64>,
     /// How long "approve for now" would last, so the button can name it.
     pub window_secs: u64,
 }
@@ -470,6 +481,10 @@ pub struct RequestDto {
     pub requested_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
+    /// Seconds until `expires_at` on the broker's clock, present only while
+    /// pending — see [`ApprovalDto::expires_in_secs`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_at: Option<String>,
     /// Machine-readable terminal cause, absent while pending.
@@ -515,6 +530,10 @@ pub struct ElicitationDto {
     pub requested_at: String,
     /// The request disappears on its own at this time.
     pub expires_at: String,
+    /// Seconds until `expires_at` on the broker's clock — see
+    /// [`ApprovalDto::expires_in_secs`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in_secs: Option<u64>,
 }
 
 /// What the user chose on a prompt.
@@ -616,6 +635,7 @@ mod tests {
                 enabled: true,
                 confirm: false,
                 confirm_window_until: None,
+                confirm_cooldown_until: None,
                 allowed_tools: None,
                 endpoint: None,
             },
