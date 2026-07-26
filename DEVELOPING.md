@@ -11,6 +11,25 @@ npm start          # start Vite and launch the desktop app
 npm run build      # build .app and .dmg bundles
 ```
 
+### Testing against the sandbox
+
+`npm test` is hermetic — it never reaches a network service. The broker's
+end-to-end behaviour is covered separately, against the disposable Docker
+stack in `dev/sandbox`:
+
+```sh
+npm run sandbox:up     # start the four upstreams (Docker required)
+npm run sandbox:test   # drive real brokers against them
+```
+
+Each test file in `dev/sandbox/tests/` starts its own headless `mfa serve`
+on a throwaway root and speaks the real wire planes — control socket,
+manage plane, Postgres proxy, SSH agent socket, MCP host — against the
+sandbox's HTTP, MCP, Postgres, and SSH services. It is not part of
+`npm test` because it needs Docker; run it when changing the broker,
+the data planes, or the approval path. See
+[dev/sandbox/README.md](dev/sandbox/README.md) §5.
+
 ### Frontend-only mode
 
 You can run the UI standalone in a browser, against a self-contained dev

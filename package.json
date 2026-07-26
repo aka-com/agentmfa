@@ -15,6 +15,7 @@
     "sandbox:status": "bash scripts/sandbox-status.sh",
     "sandbox:down": "bash scripts/sandbox-down.sh",
     "sandbox:reset": "bash scripts/sandbox-reset.sh",
+    "sandbox:test": "bash scripts/sandbox-test.sh",
     "npm:sync": "node scripts/npm/sync-versions.mjs",
     "npm:check": "node scripts/npm/sync-versions.mjs --check",
     "npm:dist": "bash scripts/npm-dist.sh --all --pack",

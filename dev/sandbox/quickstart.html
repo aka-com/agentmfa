@@ -159,9 +159,9 @@ npm run sandbox:up</code></pre>
     <li>“Using my AKA service <code>sandbox-ssh</code>, run
         <code>uname -a</code> on the server.”</li>
   </ul>
-  <p>Approve the prompts AKA Desktop raises — reads (GET/HEAD) can get a
-  read-scoped session, while POST, Postgres, and SSH opens need full
-  access. The agent never sees the tokens, password, or key:
+  <p>Approve the prompts AKA Desktop raises — one per API request, one per
+  MCP tool call, one per whole Postgres session; SSH logins are signed
+  without a prompt. The agent never sees the tokens, password, or key:
   check the <b>Activity</b> tab afterwards to watch every brokered call,
   with no secret values anywhere.</p>
   <p class="muted">The API fixture also serves deterministic routes for

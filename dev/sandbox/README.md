@@ -113,8 +113,11 @@ command), then ask it to use the services in plain language, e.g.:
   `agentmfa_sandbox-mcp_sandbox_echo` and `…_sandbox_ping` once the
   sidecar is built — `npm run sidecar:build`.)
 
-Approve the prompts AKA Desktop raises. GET/HEAD requests fit a read-scoped
-access session; POST, Postgres, and SSH opens require full access. The fixture serves deterministic routes for deeper checks:
+Approve the prompts AKA Desktop raises. What one decision covers depends
+on the service: one request for an API service, one `tools/call` for an
+MCP service, one whole session for Postgres. SSH is not confirmed at all —
+the broker signs the login and never sees the commands. The fixture serves
+deterministic routes for deeper checks:
 
 ```text
 GET  /authenticated            {"authenticated":true} with the token; 401 without
@@ -139,7 +142,52 @@ The fixture checks the documented fake tokens but never returns or logs
 them. Afterwards, check the **Activity** tab: every call appears under
 the right agent and service, and no secret value is ever shown.
 
-## 5. Stop or reset
+## 5. Run the broker test suite
+
+The same sandbox backs an automated suite that drives the broker the way
+an agent and the app do — headless, so it runs on Linux as well as macOS:
+
+```sh
+npm run sandbox:test                                  # the whole suite
+npm run sandbox:test -- dev/sandbox/tests/ssh.test.ts  # one file
+AKA_SANDBOX_SLOW=1 npm run sandbox:test               # + the minute-scale cases
+```
+
+The command checks that all four services are up, builds `mfa` and the
+MCP sidecar, and runs the tests in `dev/sandbox/tests/`. Each test file
+starts its own `mfa serve` on a throwaway root, seeds the sandbox
+services as connections, and then speaks the real wire planes: the
+control plane over the broker's Unix socket, the manage plane the desktop
+app uses (including an attached request inbox that answers confirmation
+prompts), the Postgres proxy, the SSH agent socket, and the broker's MCP
+host. Nothing in the suite is mocked, and nothing outside
+`dev/sandbox/state/` and a temporary directory is written.
+
+The files are a matrix of connection type × what can happen during a
+connection:
+
+| File | Covers |
+| --- | --- |
+| `discovery.test.ts` | the unauthenticated surface: manifest, instructions, rate limits |
+| `pairing-auth.test.ts` | pairing, the shared key, every way a credential can be wrong, rotation |
+| `api-requests.test.ts` | API traffic: injection, status/redirect/binary/large responses, idempotency |
+| `api-refusals.test.ts` | everything refused before an upstream is reached |
+| `approvals.test.ts` | traffic confirmation: no surface, approve, window, deny, cooldown, coalescing |
+| `postgres.test.ts` | tickets, the wire proxy, sessions, withdrawal, retargeting |
+| `ssh.test.ts` | the signing agent, host-key pinning, a real `ssh` login |
+| `mcp.test.ts` | MCP over the HTTP plane, tool subsets, elicitations, the broker's MCP host |
+| `endpoints.test.ts` | direct endpoints for all three types: issue, use, rotate, revoke |
+| `manage-plane.test.ts` | the app's configuration surface and its validation |
+| `lifecycle.test.ts` | restart, key rotation, and the `mfa` commands this walkthrough names |
+| `unsupported.test.ts` | the matrix's empty cells — behaviour AKA does not implement |
+
+Cases for behaviour that does not exist yet (per-statement Postgres
+approval, per-command SSH approval, approval levels that differ for
+writes) are kept as passing stubs that print a `NOT IMPLEMENTED` line, so
+the gaps stay visible and implementing one starts from a test that is
+already written. See `dev/sandbox/tests/lib/pending.ts`.
+
+## 6. Stop or reset
 
 ```sh
 npm run sandbox:down          # stop; keeps both generated SSH identities
