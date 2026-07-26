@@ -23,10 +23,15 @@ export interface AgentAccess {
    */
   confirm?: boolean;
   /**
-   * While an approval window is open, the RFC 3339 time it lapses — so the
-   * panel can say why nothing is being asked right now.
+   * While an approval window is open, the RFC 3339 time the last of them
+   * lapses — so the panel can say why nothing is being asked right now.
    */
   confirm_window_until?: string | null;
+  /**
+   * Which agents those windows cover. An approval is scoped to the agent the
+   * prompt named, so the panel names them: other agents are still asked.
+   */
+  confirm_window_agents?: string[] | null;
   /**
    * While a denial's cooldown runs, the RFC 3339 time it lifts. Retries
    * during it are refused without a fresh prompt, and the panel says so.
@@ -160,6 +165,12 @@ export interface ElicitationRequest {
   /** The upstream's own prompt, shown verbatim but never interpreted. */
   prompt: string;
   fields: ElicitationField[];
+  /**
+   * The schema asked for something credential-shaped. Fields are plain text
+   * either way — nothing an upstream declares produces a masked input — so
+   * this drives a warning, never the rendering.
+   */
+  credential_warning?: boolean;
   requested_at: string;
   /** The request disappears on its own at this time. */
   expires_at: string;
@@ -192,6 +203,13 @@ export interface Approval {
   summary: string;
   /** A body preview, a tool's arguments, or the client's application name. */
   detail?: string | null;
+  /**
+   * What approving hands over, written by the broker rather than derived from
+   * the request. Render it in the broker's own voice, outside the block that
+   * shows the agent's text — a Postgres session carries every statement the
+   * client sends, not just the one that raised the prompt.
+   */
+  consequence?: string | null;
   /** How many calls are riding this one prompt. */
   waiting: number;
   requested_at: string;

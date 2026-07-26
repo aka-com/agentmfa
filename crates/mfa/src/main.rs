@@ -2354,6 +2354,7 @@ mod tests {
                 enabled: true,
                 confirm: false,
                 confirm_window_until: None,
+                confirm_window_agents: vec![],
                 confirm_cooldown_until: None,
                 allowed_tools: None,
                 endpoint: None,

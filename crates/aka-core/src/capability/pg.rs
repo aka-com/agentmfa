@@ -744,9 +744,23 @@ enum SessionConfirmation {
 /// raises one prompt for the first connection and rides its window for the
 /// rest.
 ///
+/// Which means the prompt has to say what a session *is*. Naming the client
+/// and calling it a session is true but incomplete: one approved session
+/// carries every statement the client cares to send, and a user reading
+/// "New Postgres session · psql" can reasonably picture a query rather than
+/// `DROP TABLE` or `COPY … TO PROGRAM`. [`SESSION_CONSEQUENCE`] closes that
+/// gap until there is a per-statement gate to replace it with.
+///
 /// While parked, the downstream socket is watched: a client that gives up
 /// (Ctrl-C on `psql`, a pool timeout) retires its prompt instead of leaving
 /// a dead question on the user that could open a session nobody is reading.
+/// What approving a Postgres session actually hands over. Broker-authored and
+/// `'static`, so nothing an agent or its client sends can reword or displace
+/// it — the client-supplied `application_name` rides in `detail` instead.
+pub(crate) const SESSION_CONSEQUENCE: &str =
+    "Grants full SQL access for the whole session — reads, writes, schema changes, and \
+     anything else the role may do. Postgres is confirmed once per session, not per statement.";
+
 async fn confirm_session<S>(
     state: &Arc<ProxyState>,
     client: &mut BufReader<S>,
@@ -778,7 +792,8 @@ where
     .collect::<Vec<_>>()
     .join(" · ");
     let request = crate::approvals::ApprovalRequest::new(connection, agent, "New Postgres session")
-        .maybe_detail((!detail.is_empty()).then_some(detail));
+        .maybe_detail((!detail.is_empty()).then_some(detail))
+        .consequence(SESSION_CONSEQUENCE);
     let verdict = tokio::select! {
         verdict = state.broker.approvals.gate(request) => verdict,
         _ = downstream_gone(client) => {

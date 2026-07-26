@@ -582,6 +582,17 @@
   .elicit-dlg-context{ font-size: 12.5px; color: var(--muted); max-width: 440px; margin: 0 auto; }
   .elicit-dlg-question{ font-size: 13.5px; color: var(--ink-2); line-height: 1.45;
     max-width: 460px; margin: 6px auto 0; }
+  /* Sits between the upstream's question and the fields, because that is
+     where the user decides what to type. Danger, not amber: unlike an
+     approval's consequence line this is not describing what they are about
+     to allow, it is telling them not to do the thing being asked. */
+  .elicit-credential-warn{ display: flex; align-items: flex-start; gap: 8px;
+    margin: 12px auto 0; padding: 9px 11px; max-width: 460px; text-align: left;
+    border-radius: 8px; font-size: 12px; line-height: 1.5; color: var(--ink-2);
+    background: var(--danger-wash); border: 1px solid var(--danger-border); }
+  .elicit-credential-warn svg{ flex: 0 0 auto; width: 14px; height: 14px; margin-top: 2px;
+    color: var(--danger-ink); }
+  .elicit-credential-warn strong{ font-weight: 600; color: var(--ink); }
   .elicit-dlg-fields{ margin-top: 14px; text-align: left; }
   .elicit-field{ display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px;
     font-size: 12.5px; font-weight: 600; color: var(--muted); }
@@ -607,6 +618,15 @@
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
     font-size: 11.5px; line-height: 1.5; color: var(--muted); white-space: pre-wrap;
     overflow-wrap: anywhere; }
+  /* What Approve hands over, in the app's voice. Deliberately outside
+     .approval-call's field chrome: that block is the agent's text, and the
+     two must not be able to read as one. */
+  .approval-consequence{ display: flex; align-items: flex-start; gap: 8px;
+    margin: 10px auto 0; padding: 8px 11px; max-width: 460px; text-align: left;
+    border-radius: 8px; font-size: 12px; line-height: 1.5; color: var(--ink-2);
+    background: var(--amber-wash); border: 1px solid var(--amber-border); }
+  .approval-consequence svg{ flex: 0 0 auto; width: 14px; height: 14px; margin-top: 2px;
+    color: var(--amber-strong); }
   .approval-meta{ margin-top: 10px; }
   /* Three answers, weighted: refuse on the far left, the two approvals on
      the right with the time-boxed one as the default. */

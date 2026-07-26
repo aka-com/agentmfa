@@ -656,6 +656,7 @@ mod tests {
             agent: agent.into(),
             summary: "GET /user".into(),
             detail: None,
+            consequence: None,
             waiting: 1,
             requested_at: "2026-07-24T12:00:00Z".into(),
             expires_at: "2026-07-24T12:01:30Z".into(),

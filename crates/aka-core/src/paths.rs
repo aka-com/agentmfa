@@ -114,7 +114,13 @@ impl Paths {
     pub fn audit_file(&self) -> PathBuf {
         self.data_dir.join("audit.jsonl")
     }
-    /// Last-known connection health. Advisory display state, not sealed.
+    /// The activity log's sealed chain head. Separate from the log itself
+    /// because the log is append-only and this is rewritten in place; see
+    /// [`crate::audit::AuditLog`].
+    pub fn audit_seal_file(&self) -> PathBuf {
+        self.data_dir.join("audit-seal.json")
+    }
+    /// Last-known connection health.
     pub fn health_file(&self) -> PathBuf {
         self.data_dir.join("health.json")
     }

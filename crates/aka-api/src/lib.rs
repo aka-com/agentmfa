@@ -250,11 +250,16 @@ pub struct AccessDto {
     /// session for Postgres.
     #[serde(default)]
     pub confirm: bool,
-    /// While an approval window is open, the RFC 3339 time it lapses — so
-    /// the app can say why nothing is being asked. Absent when no window is
-    /// open.
+    /// While an approval window is open, the RFC 3339 time the last of them
+    /// lapses — so the app can say why nothing is being asked. Absent when no
+    /// window is open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_window_until: Option<String>,
+    /// Which agents those windows cover. An approval is scoped to the agent
+    /// the prompt named, so the app has to name them rather than imply the
+    /// whole connection is open; other agents are still asked about.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub confirm_window_agents: Vec<String>,
     /// While a denial's cooldown is running, the RFC 3339 time it lifts —
     /// retries during it are refused without a fresh prompt, and the app
     /// has to be able to say so. Absent when no cooldown is running.
@@ -427,6 +432,12 @@ pub struct ApprovalDto {
     /// the client's application name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// What approving hands over, written by the broker rather than derived
+    /// from the request — a Postgres session, for instance, carries every
+    /// statement the client sends, not the one that raised the prompt.
+    /// Render it as the broker's own voice, never as part of `detail`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consequence: Option<String>,
     /// How many calls are riding this one prompt.
     pub waiting: usize,
     /// RFC 3339 timestamps: when it was raised, and when it gives up on its
@@ -516,6 +527,11 @@ pub struct ElicitationDto {
     /// The upstream's own prompt, shown verbatim but never interpreted.
     pub prompt: String,
     pub fields: Vec<ElicitationFieldDto>,
+    /// The schema asked for something credential-shaped. Fields are plain
+    /// text regardless — no `format` an upstream sends changes that — so this
+    /// is a cue to warn the user, never a rendering instruction.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub credential_warning: bool,
     pub requested_at: String,
     /// The request disappears on its own at this time.
     pub expires_at: String,
@@ -623,6 +639,7 @@ mod tests {
                 enabled: true,
                 confirm: false,
                 confirm_window_until: None,
+                confirm_window_agents: vec![],
                 confirm_cooldown_until: None,
                 allowed_tools: None,
                 endpoint: None,

@@ -43,9 +43,14 @@ const ELICITATION_TEXT_CAP: usize = 2000;
 const FIELD_TEXT_CAP: usize = 200;
 
 /// One input the form asks for, as the app renders it. Mirrors the UI's
-/// `ElicitationField` exactly. There is deliberately no "mask this" flag: a
-/// schema asking for a credential is declined outright (see
-/// [`schema_requests_secret`]), so every field here is plain text.
+/// `ElicitationField` exactly.
+///
+/// There is deliberately no "mask this" flag, and no way for an upstream to
+/// ask for one. A masked field is the affordance that says *this is a
+/// credential, type it here* — the exact claim the broker exists to refuse —
+/// so `format: password` and `writeOnly` are read as a signal to warn
+/// ([`schema_requests_secret`]) and never as a rendering instruction. Every
+/// field is plain text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ElicitationField {
     pub name: String,
@@ -74,6 +79,12 @@ pub struct PendingElicitation {
     /// The upstream's own prompt, shown verbatim but never interpreted.
     pub message: String,
     pub fields: Vec<ElicitationField>,
+    /// The schema asked for something credential-shaped, so the form carries
+    /// a warning telling the user not to type one. See
+    /// [`schema_requests_secret`] for what counts and why this warns rather
+    /// than refuses.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub credential_warning: bool,
     pub requested_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
 }
@@ -125,15 +136,6 @@ impl ElicitationOutcome {
         }
     }
 
-    /// Refused on policy grounds rather than by the user. `decline` rather
-    /// than `cancel` so the caller learns the answer will not come with a
-    /// retry, instead of treating it as a dismissed prompt.
-    fn declined() -> Self {
-        Self {
-            action: ElicitAction::Decline,
-            content: None,
-        }
-    }
 }
 
 /// Directional-override and isolate characters, stripped so an upstream
@@ -166,9 +168,7 @@ fn cap_text(text: &str, cap: usize) -> String {
 /// attributed to the connection, which makes a masked field the perfect shape
 /// for phishing a credential the broker exists to keep out of reach — and the
 /// answer is returned to whoever asked. There is no legitimate need for it:
-/// secrets belong in the vault, entered through the Secrets tab. So a schema
-/// asking for one is refused outright rather than rendered as plain text,
-/// which would merely relabel the same prompt.
+/// secrets belong in the vault, entered through the Secrets tab.
 ///
 /// Covers the declared shape — `format: "password"`, `writeOnly: true`, and
 /// the conventional `format` spellings for secret material — and the words the
@@ -176,10 +176,21 @@ fn cap_text(text: &str, cap: usize) -> String {
 /// bypass: `{"type": "string", "title": "Password"}` is the same prompt with
 /// the marker left off, and nothing obliges an upstream to set it.
 ///
-/// The word scan is deliberately eager. A refusal costs a tool call that could
-/// have been answered in plain text and leaves an audit entry saying exactly
-/// why; a miss hands a credential to whoever asked. Where the choice is
-/// unclear this errs toward refusing.
+/// # Why this warns instead of refusing
+///
+/// The scan is a *heuristic over prose*, and the thing it gates is an ordinary
+/// form. Refusing on a match made every false positive unanswerable: a field
+/// legitimately named `client_secret_name` or `token_count_label` is a label,
+/// not a credential, and no override existed — the tool call simply failed
+/// with no way for the user to say "that one is fine". That traded a real,
+/// silent loss of function for a warning the same user could have read.
+///
+/// What actually protects the credential does not depend on this scan at all:
+/// no field is ever rendered masked, no `format` an upstream sends changes
+/// that, and the vault is never reachable from a form. The scan's job is to
+/// notice the shape and *tell the user*, which is a job a heuristic can do
+/// badly without breaking anything. So it stays eager, and a false positive
+/// now costs one line of caution on a form that still works.
 fn schema_requests_secret(schema: &Value) -> bool {
     let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
         return false;
@@ -431,29 +442,33 @@ impl Elicitations {
     /// A shell that cannot ask, a lapse, or a broker teardown all resolve to
     /// `cancel` — a valid MCP `ElicitResult` the upstream knows how to handle.
     pub async fn elicit(&self, request: ElicitationRequest) -> ElicitationOutcome {
-        // Refuse before anything is shown: no prompt attributed to a
-        // connection may ever ask the user for a credential.
-        if schema_requests_secret(&request.requested_schema) {
+        // A credential-shaped schema does not stop the form — it is a
+        // heuristic, and refusing on it broke legitimate fields with no way
+        // to allow them. It marks the form instead, so the user is told not
+        // to type a credential into a channel that cannot protect one. The
+        // protection itself is structural and unconditional: no field is ever
+        // rendered masked, whatever the schema asked for.
+        let credential_warning = schema_requests_secret(&request.requested_schema);
+        if credential_warning {
             self.inner.audit.append(
                 AuditEntry::new(
-                    AuditKind::Denied,
+                    AuditKind::Requested,
                     format!(
-                        "Input request refused: {} asked for a secret",
+                        "Input request asked for something credential-shaped: {}",
                         request.connection.name
                     ),
                 )
                 .agent(request.agent.clone())
                 .connection(request.connection.name.clone())
                 .detail(
-                    "AgentMFA never prompts for a credential on a tool's behalf. \
-                     Store it in the vault instead."
+                    "Shown as plain text with a warning. AgentMFA never prompts for a \
+                     credential on a tool's behalf — store it in the vault instead."
                         .to_string(),
                 )
-                .outcome("secret_field_refused")
-                .field("reason", "secret_field_refused")
+                .outcome("credential_shaped")
+                .field("reason", "credential_shaped_field")
                 .field("tool", cap_text(&request.tool, FIELD_TEXT_CAP)),
             );
-            return ElicitationOutcome::declined();
         }
         let now = Instant::now();
         let lapsed = {
@@ -482,6 +497,7 @@ impl Elicitations {
                 tool: cap_text(&request.tool, FIELD_TEXT_CAP),
                 message: cap_text(&request.message, ELICITATION_TEXT_CAP),
                 fields: fields_from_schema(&request.requested_schema),
+                credential_warning,
                 requested_at,
                 expires_at,
             };
@@ -783,6 +799,18 @@ mod tests {
         (elicitations, history, dir)
     }
 
+    /// Spin until the form under test has parked, so a test can inspect it
+    /// before answering.
+    async fn wait_for_pending(elicitations: &Elicitations) -> PendingElicitation {
+        for _ in 0..100 {
+            if let Some(pending) = elicitations.pending().into_iter().next() {
+                return pending;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        panic!("the elicitation never reached the user");
+    }
+
     fn auto(approved: bool) -> (Elicitations, Arc<RequestHistory>, tempfile::TempDir) {
         let events = Arc::new(AutoAnswer {
             approved,
@@ -867,7 +895,7 @@ mod tests {
     }
 
     /// Whole-word matching, so ordinary fields that merely contain the letters
-    /// keep working — the refusal is eager, not indiscriminate.
+    /// are not even warned about — the scan is eager, not indiscriminate.
     #[test]
     fn secret_lookalike_names_still_prompt() {
         for name in [
@@ -893,30 +921,95 @@ mod tests {
         }
     }
 
-    /// A prompt rendered in the app's own chrome and attributed to a
-    /// connection must never ask for a credential, so the request is declined
-    /// before anything reaches the user.
+    /// A credential-shaped schema still reaches the user — it is only a
+    /// heuristic — but it arrives carrying the warning, and nothing an
+    /// upstream declares can turn a field into a masked one.
     #[tokio::test]
-    async fn a_schema_asking_for_a_secret_is_declined_without_prompting() {
+    async fn a_schema_asking_for_a_secret_is_warned_about_not_refused() {
         let (elicitations, _history, _dir) = registry(Arc::new(NeverAnswers));
-        let outcome = elicitations
-            .elicit(ElicitationRequest {
-                connection: connection(),
-                agent: "claude-code".into(),
-                tool: "notes_search".into(),
-                message: "Re-enter your API token".into(),
-                requested_schema: json!({
-                    "type": "object",
-                    "properties": { "token": { "type": "string", "format": "password" } },
-                }),
-            })
-            .await;
+        let pending = tokio::spawn({
+            let elicitations = elicitations.clone();
+            async move {
+                elicitations
+                    .elicit(ElicitationRequest {
+                        connection: connection(),
+                        agent: "claude-code".into(),
+                        tool: "notes_search".into(),
+                        message: "Re-enter your API token".into(),
+                        requested_schema: json!({
+                            "type": "object",
+                            "properties": {
+                                "token": { "type": "string", "format": "password" },
+                            },
+                        }),
+                    })
+                    .await
+            }
+        });
+        let parked = wait_for_pending(&elicitations).await;
+        assert!(parked.credential_warning, "the form warns the user");
+        assert_eq!(parked.fields.len(), 1, "and still asks the question");
+
+        elicitations.respond(&parked.id, false, HashMap::new());
+        let outcome = pending.await.unwrap();
         assert_eq!(outcome.action, ElicitAction::Decline);
-        assert!(outcome.content.is_none());
-        assert!(
-            elicitations.pending().is_empty(),
-            "nothing may be parked for the user to answer"
+    }
+
+    /// The false positive that made refusing untenable: a label whose *name*
+    /// contains a credential word but which asks for no credential at all.
+    /// It is warned about — the scan cannot tell — and remains answerable.
+    #[tokio::test]
+    async fn a_credential_shaped_label_is_still_answerable() {
+        let (elicitations, _history, _dir) = registry(Arc::new(NeverAnswers));
+        let pending = tokio::spawn({
+            let elicitations = elicitations.clone();
+            async move {
+                elicitations
+                    .elicit(ElicitationRequest {
+                        connection: connection(),
+                        agent: "claude-code".into(),
+                        tool: "vault_list".into(),
+                        message: "Which credential should this workflow reference?".into(),
+                        requested_schema: json!({
+                            "type": "object",
+                            "properties": { "client_secret_name": { "type": "string" } },
+                        }),
+                    })
+                    .await
+            }
+        });
+        let parked = wait_for_pending(&elicitations).await;
+        assert!(parked.credential_warning);
+
+        let mut values = HashMap::new();
+        values.insert("client_secret_name".to_string(), "staging-oauth".to_string());
+        elicitations.respond(&parked.id, true, values);
+
+        let outcome = pending.await.unwrap();
+        assert_eq!(outcome.action, ElicitAction::Accept);
+        assert_eq!(
+            outcome.content.unwrap().get("client_secret_name"),
+            Some(&json!("staging-oauth")),
+            "the answer rides upstream instead of the call simply failing"
         );
+    }
+
+    /// The structural half of the protection, which does not depend on the
+    /// scan: an upstream cannot ask for a masked field, so there is no
+    /// affordance saying "type a credential here" even when the scan misses.
+    #[test]
+    fn no_declared_format_can_produce_a_masked_field() {
+        let fields = fields_from_schema(&json!({
+            "type": "object",
+            "properties": {
+                "pin": { "type": "string", "format": "password" },
+                "note": { "type": "string", "writeOnly": true },
+            },
+        }));
+        assert_eq!(fields.len(), 2);
+        // `ElicitationField` carries no mask flag at all — the affordance is
+        // absent from the type, not merely defaulted off.
+        assert!(fields.iter().all(|field| field.options.is_none()));
     }
 
     #[test]

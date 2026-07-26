@@ -156,6 +156,8 @@ interface MockAccess {
   confirm?: boolean;
   /** RFC 3339 end of an open approval window, when one is running. */
   confirm_window_until?: string | null;
+  /** The agents those windows cover; approvals are scoped per agent. */
+  confirm_window_agents?: string[];
   /** RFC 3339 end of a denial's cooldown, while retries are auto-refused. */
   confirm_cooldown_until?: string | null;
   allowed_tools?: string[];
@@ -352,6 +354,20 @@ function seedFixtures() {
     requested_at: elicitation.requested_at,
     expires_at: elicitation.expires_at,
   });
+  // A second form whose schema reads as credential-shaped, so the warning
+  // banner is designable. The field is a *label* — the exact false positive
+  // the scan cannot rule out — which is why the form still works.
+  db.elicitations.push({
+    id: uid(),
+    agent: 'claude-code',
+    connection: 'notion',
+    tool: 'agentmfa_notion_connect',
+    prompt: 'Which stored credential should this integration use?',
+    fields: [{ name: 'client_secret_name', label: 'Credential name' }],
+    credential_warning: true,
+    requested_at: t(1),
+    expires_at: new Date(Date.now() + 8 * 60000).toISOString(),
+  });
   // One tool with traffic confirmation on, and a call parked on it, so the
   // switch and the prompt are both designable standalone.
   const github = db.connections.find((c) => c.name === 'github');
@@ -389,6 +405,32 @@ function seedFixtures() {
       expires_at: approval.expires_at,
       window_secs: approval.window_secs,
     });
+  }
+  // And a Postgres one, because its prompt is the shape with a consequence
+  // line: one approval carries the whole session, so the sheet has to say
+  // so and the amber block has to be designable without a live broker.
+  const prodDb = db.connections.find((c) => c.name === 'prod-db');
+  if (prodDb) {
+    db.access.push({ connection_id: prodDb.id, enabled: true, confirm: true });
+    const approval: Approval = {
+      id: uid(),
+      connection_id: prodDb.id,
+      connection: prodDb.name,
+      type: prodDb.type,
+      unit: 'session',
+      target: connTarget(prodDb),
+      agent: 'deploy-script',
+      summary: 'New Postgres session',
+      detail: 'psql · user=app',
+      consequence:
+        'Grants full SQL access for the whole session — reads, writes, schema changes, and '
+        + 'anything else the role may do. Postgres is confirmed once per session, not per statement.',
+      waiting: 1,
+      requested_at: new Date(Date.now() - 4000).toISOString(),
+      expires_at: new Date(Date.now() + 86 * 1000).toISOString(),
+      window_secs: 15 * 60,
+    };
+    db.approvals.push(approval);
   }
   db.requests.push(
     {
@@ -474,6 +516,7 @@ function connDto(c: MockConnection): ConnectionSummary {
         enabled: record?.enabled ?? true,
         confirm: record?.confirm ?? false,
         confirm_window_until: record?.confirm_window_until ?? null,
+        confirm_window_agents: record?.confirm_window_agents ?? [],
         confirm_cooldown_until: record?.confirm_cooldown_until ?? null,
         allowed_tools: record?.allowed_tools ?? null,
         endpoint: record?.endpoint ?? null,
@@ -1074,6 +1117,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         // broker does the same, rather than refusing traffic the user just
         // said needs no asking. A running denial cooldown lifts with it.
         record.confirm_window_until = null;
+        record.confirm_window_agents = [];
         record.confirm_cooldown_until = null;
         const released = db.approvals.filter((a) => a.connection_id === connection.id);
         released.forEach((approval) =>
@@ -1097,10 +1141,16 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       if (args.decision === 'approve_window' && record) {
         record.confirm_window_until =
           new Date(Date.now() + approval.window_secs * 1000).toISOString();
+        // Scoped to the agent the prompt named, like the broker: another
+        // agent on the same connection is still asked about.
+        record.confirm_window_agents = Array.from(
+          new Set([...(record.confirm_window_agents ?? []), approval.agent]),
+        ).sort();
       }
       if (args.decision === 'approve_all' && record) {
         record.confirm = false;
         record.confirm_window_until = null;
+        record.confirm_window_agents = [];
       }
       if (args.decision === 'deny' && record) {
         // Mirror the broker's 60-second post-denial cooldown so the panel's

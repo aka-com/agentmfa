@@ -104,6 +104,7 @@ pub fn connection_dto(broker: &Broker, conn: &Connection) -> ConnectionDto {
                 + chrono::Duration::from_std(left).unwrap_or_else(|_| chrono::Duration::zero()))
             .to_rfc3339()
         }),
+        confirm_window_agents: broker.approvals.window_agents(&conn.id),
         confirm_cooldown_until: broker.approvals.cooldown_remaining(&conn.id).map(|left| {
             (chrono::Utc::now()
                 + chrono::Duration::from_std(left).unwrap_or_else(|_| chrono::Duration::zero()))
@@ -270,6 +271,7 @@ pub fn approval_dto(pending: &crate::approvals::PendingApproval) -> ApprovalDto 
         agent: pending.agent.clone(),
         summary: pending.summary.clone(),
         detail: pending.detail.clone(),
+        consequence: pending.consequence.map(str::to_string),
         waiting: pending.waiting,
         requested_at: pending.requested_at.to_rfc3339(),
         expires_at: pending.expires_at.to_rfc3339(),
@@ -324,6 +326,7 @@ pub fn elicitation_dto(pending: &crate::elicitations::PendingElicitation) -> Eli
                 options: field.options.clone(),
             })
             .collect(),
+        credential_warning: pending.credential_warning,
         requested_at: pending.requested_at.to_rfc3339(),
         expires_at: pending.expires_at.to_rfc3339(),
         expires_in_secs: Some(secs_until(pending.expires_at)),

@@ -135,6 +135,14 @@ pub struct ApprovalRequest {
     /// The second line, when there is more worth showing: a body preview,
     /// the tool's arguments, the client's application name.
     pub detail: Option<String>,
+    /// What approving actually hands over, in the broker's own words.
+    ///
+    /// Deliberately a separate field from `summary`/`detail`, which are
+    /// derived from what the agent and its client sent: a warning that shared
+    /// a field with attacker-influenced text could be crowded out or
+    /// contradicted by it. Nothing outside this crate's capability modules
+    /// sets it, and no agent input reaches it.
+    pub consequence: Option<&'static str>,
 }
 
 impl ApprovalRequest {
@@ -153,11 +161,19 @@ impl ApprovalRequest {
             agent: agent.into(),
             summary: cap_approval_text(summary.into()),
             detail: None,
+            consequence: None,
         }
     }
 
     pub fn detail(mut self, detail: impl Into<String>) -> Self {
         self.detail = Some(cap_approval_text(detail.into()));
+        self
+    }
+
+    /// State what approving hands over. Takes a `&'static str` so the text
+    /// can only come from the binary, never from a request.
+    pub fn consequence(mut self, consequence: &'static str) -> Self {
+        self.consequence = Some(consequence);
         self
     }
 
@@ -189,6 +205,10 @@ pub struct PendingApproval {
     pub summary: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// What approving hands over, in the broker's words rather than the
+    /// agent's — see [`ApprovalRequest::consequence`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consequence: Option<&'static str>,
     /// How many calls are riding this one prompt, itself included.
     pub waiting: usize,
     pub requested_at: DateTime<Utc>,
@@ -295,6 +315,9 @@ pub struct ApprovalConfig {
 
 struct Pending {
     info: PendingApproval,
+    /// The coalescing/grant key this prompt was raised under, so retiring it
+    /// clears exactly its own index entry and never another agent's.
+    key: GrantKey,
     waiters: Vec<oneshot::Sender<Verdict>>,
     deadline: Instant,
 }
@@ -315,15 +338,34 @@ struct Grant {
     wall_until: DateTime<Utc>,
 }
 
+/// What an approval covers: one connection, for one agent.
+///
+/// The agent label is self-reported, which is why it scopes a grant but never
+/// grants one. Keying the window on it can only *narrow* what an approval
+/// admits — a second agent that does not claim the first one's label gets
+/// asked in its own name instead of riding an answer the user gave about
+/// somebody else. An agent that does claim it is no better off than under a
+/// connection-wide window, which is what this replaces.
+type GrantKey = (Uuid, String);
+
 #[derive(Default)]
 struct State {
     /// Prompt id → the prompt and everyone riding it.
     pending: HashMap<Uuid, Pending>,
-    /// Connection id → its in-flight prompt, the coalescing index.
-    inflight: HashMap<Uuid, Uuid>,
-    /// Connection id → its open approval window.
-    grants: HashMap<Uuid, Grant>,
+    /// (Connection, agent) → its in-flight prompt, the coalescing index.
+    /// Scoped the same way as the grant it can produce: a pool opening ten
+    /// sessions still raises one prompt, but two agents are two questions.
+    inflight: HashMap<GrantKey, Uuid>,
+    /// (Connection, agent) → its open approval window.
+    grants: HashMap<GrantKey, Grant>,
     /// Connection id → when its post-denial cooldown lifts.
+    ///
+    /// Deliberately *not* per-agent, unlike the grant above. A cooldown is
+    /// the refusal being honoured for what follows it, so it has to bind
+    /// what the user was protecting — the connection — and a self-reported
+    /// label would otherwise be a one-line way around it: rotate the name,
+    /// get asked again. Narrow what an approval covers, keep broad what a
+    /// denial covers; both directions fail closed.
     cooldowns: HashMap<Uuid, Instant>,
 }
 
@@ -375,6 +417,7 @@ impl Approvals {
     /// window or a running cooldown answers without raising anything.
     pub async fn gate(&self, request: ApprovalRequest) -> Verdict {
         let connection_id = request.connection.id;
+        let key: GrantKey = (connection_id, request.agent.clone());
         let now = Instant::now();
 
         // Retire whatever lapsed while nobody was looking, and tell the
@@ -392,7 +435,9 @@ impl Approvals {
             let inner = &self.inner;
             let mut state = inner.state.lock().unwrap();
 
-            if state.grants.contains_key(&connection_id) {
+            // An open window covers this agent on this connection — not the
+            // connection at large, and not an agent the user never saw.
+            if state.grants.contains_key(&key) {
                 return Verdict::Allowed;
             }
             if state.cooldowns.contains_key(&connection_id) {
@@ -415,9 +460,9 @@ impl Approvals {
             }
 
             let (tx, rx) = oneshot::channel();
-            match state.inflight.get(&connection_id).copied() {
-                // Someone is already being asked about this connection:
-                // ride their answer instead of stacking a second prompt.
+            match state.inflight.get(&key).copied() {
+                // This agent is already being asked about this connection:
+                // ride that answer instead of stacking a second prompt.
                 Some(id) => {
                     let pending = state
                         .pending
@@ -451,6 +496,7 @@ impl Approvals {
                         agent: request.agent.clone(),
                         summary: request.summary.clone(),
                         detail: request.detail.clone(),
+                        consequence: request.consequence,
                         waiting: 1,
                         requested_at,
                         expires_at: requested_at
@@ -462,11 +508,12 @@ impl Approvals {
                         id,
                         Pending {
                             info: info.clone(),
+                            key: key.clone(),
                             waiters: vec![tx],
                             deadline,
                         },
                     );
-                    state.inflight.insert(connection_id, id);
+                    state.inflight.insert(key.clone(), id);
                     // The hook runs outside the lock: a shell may answer
                     // re-entrantly (the dev harness does), and the oneshot
                     // holds the verdict either way.
@@ -579,13 +626,17 @@ impl Approvals {
                 return false;
             };
             let connection_id = pending.info.connection_id;
-            if state.inflight.get(&connection_id) == Some(id) {
-                state.inflight.remove(&connection_id);
+            let key = pending.key.clone();
+            if state.inflight.get(&key) == Some(id) {
+                state.inflight.remove(&key);
             }
             match decision {
                 ApprovalDecision::ApproveWindow => {
+                    // Scoped to the agent the prompt named. Another agent on
+                    // the same connection is a question the user has not been
+                    // asked yet, and gets asked in its own name.
                     state.grants.insert(
-                        connection_id,
+                        key,
                         Grant {
                             until: now + self.inner.config.window,
                             wall_until: wall_now
@@ -596,7 +647,7 @@ impl Approvals {
                 }
                 ApprovalDecision::ApproveAll => {
                     // The switch is going off; nothing to remember here.
-                    state.grants.remove(&connection_id);
+                    state.grants.remove(&key);
                 }
                 ApprovalDecision::Deny => {
                     state
@@ -653,24 +704,53 @@ impl Approvals {
         self.inner.history.records()
     }
 
-    /// Whether an open window currently covers this connection (the UI
-    /// shows it, so the user knows why nothing is asking).
+    /// How long the longest-running window on this connection has left (the
+    /// UI shows it, so the user knows why nothing is asking).
+    ///
+    /// Windows are per agent, so this is the outer bound across them —
+    /// enough for a countdown, but not the whole truth on its own. Pair it
+    /// with [`Self::window_agents`] so the app can name who is covered
+    /// rather than implying the connection is open to everyone.
     pub fn window_remaining(&self, connection_id: &Uuid) -> Option<Duration> {
         let now = Instant::now();
         let wall_now = Utc::now();
         let (remaining, lapsed) = {
             let mut state = self.inner.state.lock().unwrap();
             let lapsed = Self::sweep(&mut state, now, wall_now);
-            let remaining = state.grants.get(connection_id).map(|grant| {
-                grant
-                    .until
-                    .saturating_duration_since(now)
-                    .min((grant.wall_until - wall_now).to_std().unwrap_or_default())
-            });
+            let remaining = state
+                .grants
+                .iter()
+                .filter(|((id, _), _)| id == connection_id)
+                .map(|(_, grant)| {
+                    grant
+                        .until
+                        .saturating_duration_since(now)
+                        .min((grant.wall_until - wall_now).to_std().unwrap_or_default())
+                })
+                .max();
             (remaining, lapsed)
         };
         self.announce_lapsed(&lapsed);
         remaining
+    }
+
+    /// The agents an open window currently covers on this connection, sorted.
+    /// Empty when nothing is open.
+    pub fn window_agents(&self, connection_id: &Uuid) -> Vec<String> {
+        let (mut agents, lapsed) = {
+            let mut state = self.inner.state.lock().unwrap();
+            let lapsed = Self::sweep(&mut state, Instant::now(), Utc::now());
+            let agents: Vec<String> = state
+                .grants
+                .keys()
+                .filter(|(id, _)| id == connection_id)
+                .map(|(_, agent)| agent.clone())
+                .collect();
+            (agents, lapsed)
+        };
+        self.announce_lapsed(&lapsed);
+        agents.sort();
+        agents
     }
 
     /// Whether a denial's cooldown still covers this connection (the UI
@@ -707,20 +787,31 @@ impl Approvals {
     /// changes, or it is deleted — an approval covers the traffic the user
     /// was shown, and none of those are it any more.
     pub fn revoke(&self, connection_id: &Uuid) {
-        let waiting: Vec<Uuid> = {
+        let waiting = {
             let mut state = self.inner.state.lock().unwrap();
-            state.grants.remove(connection_id);
-            state.cooldowns.remove(connection_id);
-            state
-                .inflight
-                .get(connection_id)
-                .copied()
-                .into_iter()
-                .collect()
+            Self::drop_connection(&mut state, connection_id)
         };
         for id in waiting {
             self.resolve(&id, Verdict::Revoked, RequestResolution::PolicyChanged);
         }
+    }
+
+    /// Forget every agent's window and prompt on one connection, returning
+    /// the prompts left to answer. Grants and prompts are keyed per agent, so
+    /// a connection-scoped change has to sweep all of them — leaving one
+    /// behind would let a policy change that closed one agent's window quietly
+    /// spare another's.
+    fn drop_connection(state: &mut State, connection_id: &Uuid) -> Vec<Uuid> {
+        state.grants.retain(|(id, _), _| id != connection_id);
+        state.cooldowns.remove(connection_id);
+        let waiting: Vec<Uuid> = state
+            .inflight
+            .iter()
+            .filter(|((id, _), _)| id == connection_id)
+            .map(|(_, prompt)| *prompt)
+            .collect();
+        state.inflight.retain(|(id, _), _| id != connection_id);
+        waiting
     }
 
     /// Stop gating this connection: whatever is parked on it goes through.
@@ -736,16 +827,9 @@ impl Approvals {
     /// Release a connection while preserving the user action that disabled
     /// confirmation (`Approve all` versus a separate settings change).
     pub(crate) fn release_as(&self, connection_id: &Uuid, resolution: RequestResolution) {
-        let waiting: Vec<Uuid> = {
+        let waiting = {
             let mut state = self.inner.state.lock().unwrap();
-            state.grants.remove(connection_id);
-            state.cooldowns.remove(connection_id);
-            state
-                .inflight
-                .get(connection_id)
-                .copied()
-                .into_iter()
-                .collect()
+            Self::drop_connection(&mut state, connection_id)
         };
         for id in waiting {
             self.resolve(&id, Verdict::Allowed, resolution);
@@ -773,7 +857,7 @@ impl Approvals {
             let Some(pending) = state.pending.remove(id) else {
                 return;
             };
-            state.inflight.remove(&pending.info.connection_id);
+            state.inflight.remove(&pending.key);
             pending
         };
         self.inner.history.update_approval(&pending.info);
@@ -869,7 +953,7 @@ impl Approvals {
         let mut lapsed = Vec::with_capacity(retired.len());
         for (id, timed_out) in retired {
             if let Some(pending) = state.pending.remove(&id) {
-                state.inflight.remove(&pending.info.connection_id);
+                state.inflight.remove(&pending.key);
                 if timed_out {
                     for waiter in pending.waiters {
                         let _ = waiter.send(Verdict::TimedOut);
@@ -976,6 +1060,122 @@ mod tests {
 
     fn request(connection: &Connection) -> ApprovalRequest {
         ApprovalRequest::new(connection, "claude-code", "GET /user/repos")
+    }
+
+    fn request_from(connection: &Connection, agent: &str) -> ApprovalRequest {
+        ApprovalRequest::new(connection, agent, "GET /user/repos")
+    }
+
+    /* ------------------------- per-agent scoping -------------------------- */
+
+    /// The prompt names one agent, so its answer covers that one. A second
+    /// agent on the same connection is a question the user was never asked.
+    #[tokio::test]
+    async fn one_agents_window_does_not_cover_another() {
+        let (approvals, events, _dir) = auto(ApprovalDecision::ApproveWindow);
+        let conn = connection();
+
+        assert_eq!(
+            approvals.gate(request_from(&conn, "claude-code")).await,
+            Verdict::Allowed
+        );
+        assert_eq!(
+            approvals.gate(request_from(&conn, "claude-code")).await,
+            Verdict::Allowed
+        );
+        assert_eq!(
+            events.seen.load(Ordering::SeqCst),
+            1,
+            "the same agent rides its own window"
+        );
+
+        assert_eq!(
+            approvals.gate(request_from(&conn, "some-other-agent")).await,
+            Verdict::Allowed
+        );
+        assert_eq!(
+            events.seen.load(Ordering::SeqCst),
+            2,
+            "a different agent is asked about in its own name"
+        );
+        assert_eq!(
+            approvals.window_agents(&conn.id),
+            vec!["claude-code".to_string(), "some-other-agent".to_string()],
+        );
+    }
+
+    /// Coalescing collapses one agent's burst, not two agents' questions —
+    /// otherwise approving a prompt that names A silently releases B's
+    /// parked call in the same click.
+    #[tokio::test]
+    async fn two_agents_do_not_ride_one_prompt() {
+        let (approvals, _dir) = registry(Arc::new(NeverAnswers));
+        let conn = connection();
+
+        let first = approvals.clone();
+        let a = conn.clone();
+        let one = tokio::spawn(async move { first.gate(request_from(&a, "agent-a")).await });
+        let second = approvals.clone();
+        let b = conn.clone();
+        let two = tokio::spawn(async move { second.gate(request_from(&b, "agent-b")).await });
+
+        // Let both park.
+        for _ in 0..50 {
+            if approvals.pending().len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        let pending = approvals.pending();
+        assert_eq!(pending.len(), 2, "one prompt each, not one shared");
+        assert!(pending.iter().all(|p| p.waiting == 1));
+
+        // Answering one leaves the other still waiting on the user.
+        let a_prompt = pending.iter().find(|p| p.agent == "agent-a").unwrap();
+        approvals.respond(&a_prompt.id, ApprovalDecision::ApproveWindow);
+        assert_eq!(one.await.unwrap(), Verdict::Allowed);
+        assert_eq!(
+            approvals.pending().len(),
+            1,
+            "agent-b is still being asked about"
+        );
+        assert_eq!(two.await.unwrap(), Verdict::TimedOut);
+    }
+
+    /// The asymmetry that keeps the label from becoming an authorization
+    /// bypass: an approval narrows to the agent, a denial does not. A
+    /// per-agent cooldown would be evadable by renaming.
+    #[tokio::test]
+    async fn a_denial_cools_down_the_connection_not_just_the_agent() {
+        let (approvals, events, _dir) = auto(ApprovalDecision::Deny);
+        let conn = connection();
+
+        assert_eq!(
+            approvals.gate(request_from(&conn, "agent-a")).await,
+            Verdict::Denied
+        );
+        assert_eq!(
+            approvals.gate(request_from(&conn, "agent-b")).await,
+            Verdict::Denied
+        );
+        assert_eq!(
+            events.seen.load(Ordering::SeqCst),
+            1,
+            "a rename does not buy a fresh prompt during the cooldown"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoking_drops_every_agents_window() {
+        let (approvals, _events, _dir) = auto(ApprovalDecision::ApproveWindow);
+        let conn = connection();
+        approvals.gate(request_from(&conn, "agent-a")).await;
+        approvals.gate(request_from(&conn, "agent-b")).await;
+        assert_eq!(approvals.window_agents(&conn.id).len(), 2);
+
+        approvals.revoke(&conn.id);
+        assert_eq!(approvals.window_remaining(&conn.id), None);
+        assert!(approvals.window_agents(&conn.id).is_empty());
     }
 
     #[tokio::test]
@@ -1240,7 +1440,7 @@ mod tests {
             .lock()
             .unwrap()
             .grants
-            .get_mut(&conn.id)
+            .get_mut(&(conn.id, "claude-code".to_string()))
             .unwrap()
             .wall_until = Utc::now() - chrono::Duration::seconds(1);
 

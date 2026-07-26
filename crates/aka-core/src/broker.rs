@@ -223,14 +223,20 @@ impl Broker {
         let manage_bus = Arc::new(crate::manage::ManageBus::new());
         let events: Arc<dyn BrokerEvents> =
             Arc::new(crate::manage::FanoutEvents::new(events, manage_bus.clone()));
-        let audit = Arc::new(AuditLog::open(paths.audit_file())?);
+        // One integrity key seals every state file: index.json,
+        // access.json, and identity.json refuse to load if tampered with.
+        // It is established before the activity log so the log's own entries
+        // are chained from the first one this process writes.
+        let integrity = Arc::new(crate::integrity::StateIntegrity::open(&*vault).await?);
+        let audit = Arc::new(AuditLog::open_sealed(
+            paths.audit_file(),
+            paths.audit_seal_file(),
+            integrity.clone(),
+        )?);
         {
             let events = events.clone();
             audit.subscribe(move |entry| events.audit_appended(entry));
         }
-        // One integrity key seals every state file: index.json,
-        // access.json, and identity.json refuse to load if tampered with.
-        let integrity = Arc::new(crate::integrity::StateIntegrity::open(&*vault).await?);
         let store = Arc::new(Store::open_with_events(
             paths.clone(),
             vault,
@@ -259,7 +265,7 @@ impl Broker {
             Some(&paths.wirings_file()),
             Some(&paths.rules_file()),
             &known_connections,
-            integrity,
+            integrity.clone(),
         )?);
         let executions = Executions::new(
             config.outcome_retention,
@@ -293,6 +299,7 @@ impl Broker {
         let health = Arc::new(crate::health::HealthRegistry::open(
             paths.health_file(),
             events.clone(),
+            integrity.clone(),
         ));
         let endpoint_uploads =
             Arc::new(tokio::sync::Semaphore::new(config.endpoint_global_uploads));
@@ -337,6 +344,39 @@ impl Broker {
             mcp_tools_cache: Mutex::new(HashMap::new()),
             _instance_lock: instance_lock,
         });
+        // Check the state that carries its own tamper evidence, and record
+        // what the check found. A log that was edited or shortened is exactly
+        // what the user needs told, and telling them in the log is fine: the
+        // alert is chained onto whatever survived, so hiding it means breaking
+        // the chain again.
+        let audit_integrity = broker.audit.verify();
+        if !audit_integrity.is_verified() {
+            tracing::error!("{}", audit_integrity.summary());
+            broker.audit.append(
+                AuditEntry::new(
+                    AuditKind::IntegrityAlert,
+                    "Activity log integrity check failed".to_string(),
+                )
+                .detail(audit_integrity.summary())
+                .outcome("integrity_failed")
+                .field("file", "audit.jsonl"),
+            );
+        }
+        if broker.health.was_discarded() {
+            broker.audit.append(
+                AuditEntry::new(
+                    AuditKind::IntegrityAlert,
+                    "Connection health was rewritten on disk and has been discarded".to_string(),
+                )
+                .detail(
+                    "Health badges are advisory and re-learn themselves on the next check, so \
+                     the file was dropped rather than trusted."
+                        .to_string(),
+                )
+                .outcome("integrity_failed")
+                .field("file", "health.json"),
+            );
+        }
         // A tool disappearing from the list because its kind was retired is a
         // change to what the user configured, so it is recorded where they can
         // see it rather than left in the process log.

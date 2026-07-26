@@ -313,6 +313,7 @@ mod tests {
             agent: "codex".into(),
             summary: "GET /user".into(),
             detail: None,
+            consequence: None,
             waiting: 1,
             requested_at,
             expires_at: requested_at + Duration::seconds(90),

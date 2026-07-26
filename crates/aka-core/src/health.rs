@@ -2,9 +2,16 @@
 //!
 //! A small persisted map of connection id → the outcome of the most recent
 //! check: an explicit UI-initiated test, or a brokered call that proved
-//! (or disproved) the credential in passing. Advisory display state only —
-//! it never participates in authorization — so it lives in its own
-//! best-effort file rather than the integrity-sealed index.
+//! (or disproved) the credential in passing. Advisory display state: it never
+//! participates in authorization, so it lives in its own file rather than in
+//! the index.
+//!
+//! It is sealed all the same. A green badge is what the user reads to decide
+//! a tool is fine, and a local process that could paint one — or hide a
+//! `NeedsReconnect` behind it — would be lying to them in the one place they
+//! look. Being advisory changes the *response*, not the protection: a file
+//! that fails verification is discarded and reported rather than refusing to
+//! start, because health is re-learnable and no authorization rests on it.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -14,27 +21,51 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::events::BrokerEvents;
+use crate::integrity::StateIntegrity;
 use crate::types::{ConnectionHealth, HealthStatus};
 
 pub struct HealthRegistry {
     path: PathBuf,
     map: Mutex<HashMap<Uuid, ConnectionHealth>>,
     events: Arc<dyn BrokerEvents>,
+    integrity: Arc<StateIntegrity>,
+    /// Set when the stored file failed verification and was discarded, so
+    /// the broker can say so in the activity log once it is constructed.
+    discarded: bool,
 }
 
 impl HealthRegistry {
-    /// Load whatever the file holds; a missing or unreadable file is an
-    /// empty registry (health is re-learnable, never worth failing startup).
-    pub fn open(path: PathBuf, events: Arc<dyn BrokerEvents>) -> Self {
-        let map = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
+    /// Load whatever the file holds. A missing file is an empty registry, and
+    /// so is one that fails its seal — health is re-learnable, and refusing to
+    /// start would turn a tampered advisory file into an outage.
+    pub fn open(
+        path: PathBuf,
+        events: Arc<dyn BrokerEvents>,
+        integrity: Arc<StateIntegrity>,
+    ) -> Self {
+        let (map, discarded) = match integrity.read_verified(&path) {
+            Ok(Some(bytes)) => (
+                serde_json::from_slice(&bytes).unwrap_or_default(),
+                false,
+            ),
+            Ok(None) => (HashMap::new(), false),
+            Err(error) => {
+                tracing::error!("connection health did not verify, discarding: {error}");
+                (HashMap::new(), true)
+            }
+        };
         Self {
             path,
             map: Mutex::new(map),
             events,
+            integrity,
+            discarded,
         }
+    }
+
+    /// Whether the stored health file was discarded as unverifiable on open.
+    pub fn was_discarded(&self) -> bool {
+        self.discarded
     }
 
     pub fn get(&self, id: &Uuid) -> Option<ConnectionHealth> {
@@ -94,7 +125,7 @@ impl HealthRegistry {
     fn persist(&self, map: &HashMap<Uuid, ConnectionHealth>) {
         match serde_json::to_vec_pretty(map) {
             Ok(bytes) => {
-                if let Err(error) = std::fs::write(&self.path, bytes) {
+                if let Err(error) = self.integrity.write(&self.path, &bytes) {
                     tracing::warn!("could not persist connection health: {error}");
                 }
             }
@@ -107,31 +138,37 @@ impl HealthRegistry {
 mod tests {
     use super::*;
     use crate::events::NoopEvents;
+    use crate::vault::MemoryVault;
 
-    #[test]
-    fn records_survive_reopen_and_forget_removes() {
+    async fn integrity() -> Arc<StateIntegrity> {
+        Arc::new(StateIntegrity::open(&MemoryVault::new()).await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn records_survive_reopen_and_forget_removes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("health.json");
+        let seal = integrity().await;
         let id = Uuid::new_v4();
         {
-            let registry = HealthRegistry::open(path.clone(), Arc::new(NoopEvents));
+            let registry = HealthRegistry::open(path.clone(), Arc::new(NoopEvents), seal.clone());
             registry.record(&id, HealthStatus::NeedsReconnect, "HTTP 401");
         }
-        let registry = HealthRegistry::open(path.clone(), Arc::new(NoopEvents));
+        let registry = HealthRegistry::open(path.clone(), Arc::new(NoopEvents), seal.clone());
         let health = registry.get(&id).unwrap();
         assert_eq!(health.status, HealthStatus::NeedsReconnect);
         assert_eq!(health.detail, "HTTP 401");
 
         registry.forget(&id);
-        let registry = HealthRegistry::open(path, Arc::new(NoopEvents));
+        let registry = HealthRegistry::open(path, Arc::new(NoopEvents), seal);
         assert!(registry.get(&id).is_none());
     }
 
-    #[test]
-    fn ok_upgrade_only_writes_on_change() {
+    #[tokio::test]
+    async fn ok_upgrade_only_writes_on_change() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("health.json");
-        let registry = HealthRegistry::open(path, Arc::new(NoopEvents));
+        let registry = HealthRegistry::open(path, Arc::new(NoopEvents), integrity().await);
         let id = Uuid::new_v4();
         registry.record_ok_if_changed(&id, "answered");
         let first = registry.get(&id).unwrap();
@@ -142,5 +179,28 @@ mod tests {
         registry.record(&id, HealthStatus::Failed, "timeout");
         registry.record_ok_if_changed(&id, "recovered");
         assert_eq!(registry.get(&id).unwrap().status, HealthStatus::Ok);
+    }
+
+    /// Painting a badge green is the whole point of rewriting this file, so
+    /// an edited one must not load — and must not take the broker down with
+    /// it either, since nothing is authorized on the strength of it.
+    #[tokio::test]
+    async fn a_rewritten_file_is_discarded_not_trusted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("health.json");
+        let seal = integrity().await;
+        let id = Uuid::new_v4();
+        let registry = HealthRegistry::open(path.clone(), Arc::new(NoopEvents), seal.clone());
+        registry.record(&id, HealthStatus::NeedsReconnect, "HTTP 401");
+
+        let sealed = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, sealed.replace("needs_reconnect", "ok")).unwrap();
+
+        let reopened = HealthRegistry::open(path, Arc::new(NoopEvents), seal);
+        assert!(reopened.was_discarded(), "the edit was noticed");
+        assert!(
+            reopened.get(&id).is_none(),
+            "and the forged status did not survive it"
+        );
     }
 }

@@ -35,6 +35,9 @@ struct TestEvents {
     /// takes the prompt and never answers it, so the deadline decides.
     approval: Option<aka_core::approvals::ApprovalDecision>,
     prompts: Arc<AtomicUsize>,
+    /// The most recent prompt exactly as the app would render it, so a test
+    /// can assert on what the user was actually shown.
+    last_prompt: Arc<Mutex<Option<aka_core::approvals::PendingApproval>>>,
     /// Set after construction: the registry lives on the broker these
     /// events are built into.
     broker: Mutex<Option<Arc<Broker>>>,
@@ -54,6 +57,7 @@ impl BrokerEvents for TestEvents {
         pending: &aka_core::approvals::PendingApproval,
     ) -> aka_core::events::ApprovalHandling {
         self.prompts.fetch_add(1, Ordering::SeqCst);
+        *self.last_prompt.lock().unwrap() = Some(pending.clone());
         if let (Some(decision), Some(broker)) = (self.approval, self.broker.lock().unwrap().clone())
         {
             broker.ui_respond_approval(&pending.id, decision).unwrap();
@@ -68,6 +72,8 @@ struct Harness {
     secret_read_confirmations: Arc<AtomicUsize>,
     /// How many traffic-confirmation prompts the scripted user was shown.
     prompts: Arc<AtomicUsize>,
+    /// The last of those prompts, for asserting on its content.
+    last_prompt: Arc<Mutex<Option<aka_core::approvals::PendingApproval>>>,
     _dir: tempfile::TempDir,
 }
 
@@ -84,10 +90,12 @@ async fn harness_answering(
     let paths = Paths::under(dir.path());
     let secret_read_confirmations = Arc::new(AtomicUsize::new(0));
     let prompts = Arc::new(AtomicUsize::new(0));
+    let last_prompt = Arc::new(Mutex::new(None));
     let events = Arc::new(TestEvents {
         secret_read_confirmations: secret_read_confirmations.clone(),
         approval: decision,
         prompts: prompts.clone(),
+        last_prompt: last_prompt.clone(),
         broker: Mutex::new(None),
     });
     let broker = Broker::new(paths, Arc::new(MemoryVault::new()), config, events.clone())
@@ -98,6 +106,7 @@ async fn harness_answering(
     Harness {
         broker,
         prompts,
+        last_prompt,
         daemon,
         secret_read_confirmations,
         _dir: dir,
@@ -911,6 +920,52 @@ async fn a_confirmed_connection_asks_before_the_session_opens() {
     tokio::spawn(connection);
     assert!(!second.simple_query("SELECT 2").await.unwrap().is_empty());
     assert_eq!(h.prompts.load(Ordering::SeqCst), 1);
+}
+
+/// One approval carries every statement the client goes on to send, so the
+/// prompt has to say so. "New Postgres session · psql" alone reads like a
+/// query is being authorized, and the thing being authorized is `DROP TABLE`
+/// just as much.
+#[tokio::test]
+async fn the_session_prompt_says_it_grants_full_sql_access() {
+    let mut h = harness_answering(
+        BrokerConfig::default(),
+        Some(aka_core::approvals::ApprovalDecision::ApproveWindow),
+    )
+    .await;
+    let fake = fake_pg(FakeAuth::Cleartext).await;
+    add_pg_connection(&h.broker, fake.port);
+    let conn = h.broker.store.connection_by_name("prod-db").unwrap();
+    h.broker
+        .ui_set_confirm_mode(&conn.id, aka_core::types::ConfirmMode::On)
+        .unwrap();
+
+    let token = h.pair().await;
+    let (_, ticket) = h.open_pg(&token).await;
+    let (client, connection) = tokio_postgres::connect(&h.pg_conn_str(&ticket), NoTls)
+        .await
+        .unwrap();
+    tokio::spawn(connection);
+    assert!(!client.simple_query("SELECT 1").await.unwrap().is_empty());
+
+    let prompt = h.last_prompt.lock().unwrap().clone().expect("a prompt");
+    assert_eq!(prompt.unit, aka_core::approvals::ApprovalUnit::Session);
+    let consequence = prompt.consequence.expect("the prompt states what it grants");
+    assert!(
+        consequence.contains("full SQL access"),
+        "the user is told what a session covers: {consequence}"
+    );
+    assert!(
+        consequence.contains("per session, not per statement"),
+        "and that no later statement will be asked about: {consequence}"
+    );
+    // It is the broker's sentence, kept out of the fields the client can
+    // influence — an `application_name` must not be able to reword it.
+    assert!(
+        !prompt.summary.contains("full SQL access")
+            && !prompt.detail.unwrap_or_default().contains("full SQL access"),
+        "the warning does not share a field with client-supplied text"
+    );
 }
 
 #[tokio::test]

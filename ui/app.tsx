@@ -1502,9 +1502,19 @@ function confirmSectionHTML(c: ConnectionSummary): string {
   if (!c.agent_access.enabled || !confirmable(c)) return '';
   const on = Boolean(c.agent_access.confirm);
   const until = c.agent_access.confirm_window_until;
+  // An approval covers the agent the prompt named, not the connection, so
+  // the line names it. "Approved until 14:32" on its own would read as the
+  // tool being open to everything, which is the opposite of what it means.
+  const windowAgents = c.agent_access.confirm_window_agents ?? [];
+  const covered = windowAgents.length === 1
+    ? `for ${esc(windowAgents[0])}`
+    : windowAgents.length > 1
+      ? `for ${windowAgents.length} agents`
+      : '';
   const window = on && until && new Date(until).getTime() > Date.now()
-    ? `<div class="cd-confirm-window">${ICONS.timer}<span>Approved until ${esc(clockTime(until))} —
-        not asking again until then.</span></div>`
+    ? `<div class="cd-confirm-window">${ICONS.timer}<span>Approved ${covered} until
+        ${esc(clockTime(until))} — not asking ${windowAgents.length === 1 ? 'again' : 'them again'}
+        until then. Other agents are still asked.</span></div>`
     : '';
   // The mirror image of the window: after a Deny, retries are refused
   // without a fresh prompt for a short cooldown. Without this line that
@@ -3002,6 +3012,24 @@ function ElicitationSheet(): ReactNode {
         <h3 id="elicit-title" className="elicit-dlg-title">{request.connection} asked for input</h3>
         {/* Third-party text: rendered verbatim and inert. */}
         <div className="elicit-dlg-question">{request.prompt}</div>
+        {/* The upstream asked for something credential-shaped. It still gets
+            its form — the match is a guess about prose, and refusing on it
+            broke ordinary fields whose names merely read like secrets — but
+            the user gets told, in our voice, what this channel is not for. */}
+        {request.credential_warning
+          ? (
+            <div className="elicit-credential-warn">
+              <Icon markup={ICONS.shieldAlert} />
+              <span>
+                Don’t enter a password, API key, or other credential here.
+                This form is a round trip to {request.connection} over MCP: whatever you type is
+                sent back to it as ordinary text, and AgentMFA neither masks nor stores it.
+                Credentials belong in <strong>Secrets</strong>, where they stay in the Keychain and
+                are attached to traffic without passing through a prompt.
+              </span>
+            </div>
+          )
+          : null}
         <div className="elicit-dlg-fields">
           {request.fields.map((field, index) => (
             <label className="elicit-field" key={field.name}>
@@ -3025,11 +3053,17 @@ function ElicitationSheet(): ReactNode {
                   options={field.options.map((opt) => [opt, opt])}
                   selectedValue={state.elicitValues[field.name] ?? field.options[0]} />
               ) : (
-                // Always plain text: the broker refuses any schema asking for a
-                // secret, so a masked field here could only ever misrepresent
-                // an ordinary answer as a credential worth typing.
+                // Always plain text, whatever the schema declared. A masked
+                // field is the affordance that says "this is a credential,
+                // type it here", which is the one claim this prompt must
+                // never make. The password-manager opt-outs are part of the
+                // same point: an autofill offer is that affordance too, just
+                // drawn by the browser instead of by us.
                 <input id={`elicit-${request.id}-${field.name}`}
                   type="text" autoComplete="off" spellCheck={false}
+                  autoCapitalize="off" autoCorrect="off"
+                  data-1p-ignore="true" data-lpignore="true" data-bwignore="true"
+                  data-form-type="other"
                   value={state.elicitValues[field.name] ?? ''}
                   onChange={(e) => { state.elicitValues[field.name] = e.currentTarget.value; render(); }} />
               )}
@@ -3096,6 +3130,17 @@ function ApprovalSheet(): ReactNode {
           <div className="approval-summary">{approval.summary}</div>
           {approval.detail ? <pre className="approval-detail">{approval.detail}</pre> : null}
         </div>
+        {/* What Approve actually hands over. Outside the block above on
+            purpose: that is the agent's text, this is ours, and the whole
+            point is that it cannot be reworded by the thing being approved. */}
+        {approval.consequence
+          ? (
+            <div className="approval-consequence">
+              <Icon markup={ICONS.shieldAlert} />
+              <span>{approval.consequence}</span>
+            </div>
+          )
+          : null}
         <div className="elicit-dlg-context approval-meta">
           {approval.waiting > 1
             ? `${approval.waiting} calls are waiting on this answer · `

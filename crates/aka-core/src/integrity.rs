@@ -17,6 +17,12 @@
 //! sealed only while the integrity key is being created for the first
 //! time. Once the key exists, a bare file is a downgrade — exactly what a
 //! tamperer who cannot forge the MAC would produce — and is refused.
+//!
+//! Two files do not fit that whole-file shape and take the variants below:
+//! `audit.jsonl` is append-only and would pay an O(n) re-seal per entry, so
+//! it chains a per-line MAC ([`StateIntegrity::chain`]) and seals only the
+//! chain head; `health.json` is advisory, so a failed verification discards
+//! it loudly rather than refusing to start.
 
 use std::path::Path;
 
@@ -154,6 +160,45 @@ impl StateIntegrity {
         };
         write_private_atomic(path, &serde_json::to_vec(&sealed)?)?;
         Ok(())
+    }
+
+    /// Chain one record onto a running MAC head, returning the new head.
+    ///
+    /// [`Self::write`] seals a file whole, which costs a re-MAC of everything
+    /// on every change — fine for a settings file rewritten by hand, wrong for
+    /// an append-only log written on every brokered call. Chaining instead
+    /// MACs `basename \0 previous-head \0 record`, so each record costs one
+    /// HMAC over itself while still depending on every record before it:
+    /// editing or inserting one line invalidates that line and every line
+    /// after it.
+    ///
+    /// A chain cannot see a *truncation* on its own — a shortened chain is
+    /// still internally consistent — so the head belongs in a sealed file the
+    /// tamperer cannot rewrite. [`crate::audit::AuditLog`] does exactly that.
+    pub fn chain(&self, basename: &str, previous: &str, record: &[u8]) -> String {
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(&self.key).expect("hmac accepts any key length");
+        mac.update(basename.as_bytes());
+        mac.update(&[0]);
+        mac.update(previous.as_bytes());
+        mac.update(&[0]);
+        mac.update(record);
+        encode_hex(&mac.finalize().into_bytes())
+    }
+
+    /// Constant-time comparison of two hex MACs of the same length.
+    pub fn chain_matches(&self, expected: &str, found: &str) -> bool {
+        let (Some(expected), Some(found)) = (decode_hex(expected), decode_hex(found)) else {
+            return false;
+        };
+        if expected.len() != found.len() {
+            return false;
+        }
+        expected
+            .iter()
+            .zip(found.iter())
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+            == 0
     }
 
     fn mac(&self, basename: &str, payload: &[u8]) -> Hmac<Sha256> {
