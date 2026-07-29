@@ -69,6 +69,25 @@ pub struct BrokerConfig {
     /// Idle teardown (no traffic either direction; protocol keepalives count as
     /// activity).
     pub session_idle_timeout: Duration,
+    /// Deadline on the *unauthenticated* part of a Postgres downstream
+    /// handshake: the pre-startup probes, the StartupMessage, and the
+    /// PasswordMessage carrying the ticket. Without it a client that connects
+    /// and sends nothing pins a task, an fd, and a read buffer indefinitely,
+    /// which takes no ticket at all. Everything after authentication — notably
+    /// a parked confirmation prompt — has its own, much longer budget.
+    pub pg_handshake_timeout: Duration,
+    /// Concurrent Postgres handshakes admitted before new connections wait.
+    /// Bounds the unauthenticated pre-auth phase the same way the endpoint
+    /// upload semaphores bound HTTP.
+    pub max_pending_pg_handshakes: usize,
+    /// Record the SQL of each statement seen on a brokered Postgres session in
+    /// the activity log, not just how many there were.
+    ///
+    /// Off by default, and deliberately an operator decision: statement text
+    /// can carry credentials (`ALTER USER … PASSWORD '…'`) and personal data
+    /// into a durable log, which is a retention choice rather than something
+    /// to switch on for someone.
+    pub audit_pg_statements: bool,
     /// Per-approval (per-ticket) concurrent session cap.
     pub per_ticket_sessions: usize,
     /// Global concurrent session backstop.
@@ -152,6 +171,9 @@ impl Default for BrokerConfig {
             ticket_ttl: Duration::from_secs(60),
             session_max_ttl: Duration::from_secs(60 * 60),
             session_idle_timeout: Duration::from_secs(5 * 60),
+            pg_handshake_timeout: Duration::from_secs(10),
+            max_pending_pg_handshakes: 64,
+            audit_pg_statements: false,
             per_ticket_sessions: 60,
             global_sessions: 300,
             max_endpoints: 64,

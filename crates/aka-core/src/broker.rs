@@ -1845,8 +1845,27 @@ impl Broker {
     /// connection alive for an hour after the user revoked it. The issued
     /// endpoint itself remains available for later re-enabling.
     pub fn ui_set_tool_access(&self, connection_id: &Uuid, enabled: bool) -> Result<bool> {
-        let _gate = self.config_gate.lock().unwrap();
         let connection = self.store.connection_by_id(connection_id)?;
+        // Turning access **on** hands every agent on this machine standing use
+        // of the credential — the same grant `ui_issue_endpoint` takes the
+        // native gate for, and strictly more than it (an endpoint covers one
+        // pasted address; this covers every agent). Turning it **off** only
+        // narrows, so it stays free: revocation must never wait on
+        // authentication.
+        //
+        // Only a real off→on transition prompts. A no-op call, or the
+        // enabled-by-default state a new connection already has, is not a
+        // change in authority and must not put a sheet in front of the user.
+        let confirmation = if enabled && !self.access.allows(connection_id) {
+            Some(self.confirm_action(&format!(
+                "Let agents use “{}” — every agent on this computer can use its \
+                 saved credential until you turn this off",
+                connection.name
+            ))?)
+        } else {
+            None
+        };
+        let _gate = self.config_gate.lock().unwrap();
         let changed = self.access.set_enabled(*connection_id, enabled)?;
         if changed {
             let closed_sessions = if enabled {
@@ -1868,7 +1887,8 @@ impl Broker {
                     ),
                 )
                 .connection(connection.name.clone())
-                .field("closed_sessions", closed_sessions),
+                .field("closed_sessions", closed_sessions)
+                .maybe_confirmation(confirmation),
             );
             self.events.wirings_changed();
         }

@@ -337,6 +337,12 @@ pub struct ServeOptions {
     /// The host put into returned data-plane URLs/DSNs — what a remote
     /// agent dials. Defaults to loopback.
     pub advertise_host: Option<String>,
+    /// Acknowledge that a non-loopback `data_plane_listen` exposes plaintext
+    /// credential legs. Without it such a bind is refused rather than warned
+    /// about: the Postgres proxy answers every `SSLRequest` with `N`, so the
+    /// ticket, every statement, and every result cross the network in clear
+    /// text, and a warning in the log is not consent.
+    pub data_plane_insecure: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -516,11 +522,26 @@ pub async fn serve_with(broker: Arc<Broker>, options: ServeOptions) -> crate::Re
     broker.set_data_plane_address(options.data_plane_listen, options.advertise_host.clone());
     if let Some(bind) = options.data_plane_listen {
         if !bind.is_loopback() {
+            // The Postgres leg is unconditionally plaintext: the proxy declines
+            // every SSLRequest and the DSN pins `sslmode=disable`. Off loopback
+            // that puts the ticket, the SQL, and the results on the wire in
+            // clear text, so it takes an explicit acknowledgement rather than a
+            // log line nobody reads.
+            if !options.data_plane_insecure {
+                return Err(CoreError::Io(std::io::Error::other(format!(
+                    "--data-plane-listen {bind} is not a loopback address, and the \
+                     Postgres data plane is plaintext: the ticket, every statement, \
+                     and every result would cross the network unencrypted. Re-run \
+                     with --data-plane-insecure to accept that (put it behind a \
+                     trusted network, TLS proxy, or tunnel), or leave the data \
+                     plane on loopback."
+                ))));
+            }
             tracing::warn!(
                 %bind,
-                "data planes bound to a non-loopback address; the PG \
-                 credential legs are plaintext — keep this on a trusted \
-                 network behind TLS/tunnel"
+                "data planes bound to a non-loopback address with \
+                 --data-plane-insecure; the PG credential legs are plaintext — \
+                 keep this on a trusted network behind TLS/tunnel"
             );
         }
     }

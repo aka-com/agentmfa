@@ -120,6 +120,26 @@ enum Command {
         /// LAN name or the tunnel address.
         #[arg(long)]
         advertise_host: Option<String>,
+        /// Accept that a non-loopback --data-plane-listen puts the Postgres
+        /// ticket, statements, and results on the network in clear text. The
+        /// bind is refused without this.
+        #[arg(long)]
+        data_plane_insecure: bool,
+        /// Tear a brokered session down after this many seconds with the
+        /// backend idle and the client silent (default 300). Raise it for
+        /// LISTEN/NOTIFY workloads, which are protocol-idle while waiting.
+        #[arg(long, value_name = "SECS")]
+        session_idle_timeout: Option<u64>,
+        /// Hard ceiling on one brokered session, in seconds (default 3600).
+        /// Raise it for long COPY/pg_dump runs, which are severed mid-stream
+        /// when it expires.
+        #[arg(long, value_name = "SECS")]
+        session_max_ttl: Option<u64>,
+        /// Record the SQL of each statement on a brokered Postgres session in
+        /// the activity log. Off by default: statement text can carry
+        /// credentials and personal data into a durable log.
+        #[arg(long)]
+        audit_pg_statements: bool,
         /// Do not start the MCP sidecar even when its script is found.
         #[arg(long)]
         no_sidecar: bool,
@@ -613,6 +633,10 @@ fn main() {
             public_url,
             data_plane_listen,
             advertise_host,
+            data_plane_insecure,
+            session_idle_timeout,
+            session_max_ttl,
+            audit_pg_statements,
             no_sidecar,
         } => cmd_serve(ServeArgs {
             root,
@@ -620,6 +644,10 @@ fn main() {
             public_url,
             data_plane_listen,
             advertise_host,
+            data_plane_insecure,
+            session_idle_timeout,
+            session_max_ttl,
+            audit_pg_statements,
             no_sidecar,
         }),
         Command::Mcp { root, client } => cmd_mcp(root, client),
@@ -2061,6 +2089,10 @@ struct ServeArgs {
     public_url: Option<String>,
     data_plane_listen: Option<std::net::IpAddr>,
     advertise_host: Option<String>,
+    data_plane_insecure: bool,
+    session_idle_timeout: Option<u64>,
+    session_max_ttl: Option<u64>,
+    audit_pg_statements: bool,
     no_sidecar: bool,
 }
 
@@ -2071,6 +2103,10 @@ fn cmd_serve(args: ServeArgs) {
         public_url,
         data_plane_listen,
         advertise_host,
+        data_plane_insecure,
+        session_idle_timeout,
+        session_max_ttl,
+        audit_pg_statements,
         no_sidecar,
     } = args;
     tracing_subscriber::fmt()
@@ -2099,16 +2135,28 @@ fn cmd_serve(args: ServeArgs) {
     };
 
     let events: Arc<dyn BrokerEvents> = Arc::new(CliEvents);
-    let broker: Arc<Broker> =
-        match runtime.block_on(Broker::new(paths, vault, BrokerConfig::default(), events)) {
-            Ok(broker) => broker,
-            Err(e) => fail("could not start the broker", &e),
-        };
+    // Session lifetimes are deployment-shaped: the defaults suit an
+    // interactive desktop, while a nightly `pg_dump` or a LISTEN/NOTIFY worker
+    // needs longer ones. They were compile-time constants before, which left
+    // those workloads with no way to run at all.
+    let mut config = BrokerConfig::default();
+    if let Some(secs) = session_idle_timeout {
+        config.session_idle_timeout = std::time::Duration::from_secs(secs);
+    }
+    if let Some(secs) = session_max_ttl {
+        config.session_max_ttl = std::time::Duration::from_secs(secs);
+    }
+    config.audit_pg_statements = audit_pg_statements;
+    let broker: Arc<Broker> = match runtime.block_on(Broker::new(paths, vault, config, events)) {
+        Ok(broker) => broker,
+        Err(e) => fail("could not start the broker", &e),
+    };
     let options = daemon::ServeOptions {
         listen,
         public_url: public_url.clone(),
         data_plane_listen,
         advertise_host: advertise_host.clone(),
+        data_plane_insecure,
     };
     let daemon = match runtime.block_on(daemon::serve_with(broker.clone(), options)) {
         Ok(daemon) => daemon,

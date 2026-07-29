@@ -59,6 +59,13 @@ security-framework-sys = { version = "2.17", features = ["OSX_10_15"] }
 tempfile = { workspace = true }
 libc = { workspace = true }
 tokio-postgres = { workspace = true }
+# The Postgres TLS tests need a private CA, a leaf it signed, and a leaf it
+# did not, so they can assert what each `sslmode` accepts and refuses. The
+# rustls pair is already a normal dependency; integration tests link their own.
+rcgen = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
 # Paused-clock tests for deadline/liveness timers.
 tokio = { workspace = true, features = ["test-util"] }
 # Test-only key generation for the SSH agent tests (OsRng via ssh-key's

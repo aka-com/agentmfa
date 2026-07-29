@@ -1017,6 +1017,104 @@ async fn service_tests_are_not_added_to_the_activity_log() {
 
 /* ----------------------------- agent access -------------------------------- */
 
+/// PG-22 / SEC-9. Turning agent access **on** hands every agent on the machine
+/// standing use of the credential — strictly more than issuing one endpoint,
+/// which already takes the native gate. Turning it **off** only narrows, so it
+/// stays free: revocation must never wait on authentication.
+#[tokio::test]
+async fn enabling_agent_access_takes_the_native_gate_and_disabling_does_not() {
+    let events = Arc::new(GateEvents {
+        allow: true,
+        confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    let conn = add_github(&broker);
+    let confirms_after_add = events.confirms.load(Ordering::SeqCst);
+
+    // Off: no gate.
+    assert!(broker.ui_set_tool_access(&conn.id, false).unwrap());
+    assert_eq!(
+        events.confirms.load(Ordering::SeqCst),
+        confirms_after_add,
+        "revoking access must not require authentication"
+    );
+
+    // Back on: one gate.
+    assert!(broker.ui_set_tool_access(&conn.id, true).unwrap());
+    assert_eq!(
+        events.confirms.load(Ordering::SeqCst),
+        confirms_after_add + 1,
+        "restoring standing authority must be authenticated"
+    );
+    assert!(broker.access.allows(&conn.id));
+
+    // A no-op call is not a change in authority and must not prompt — nor is
+    // the enabled-by-default state a new connection already has.
+    assert!(!broker.ui_set_tool_access(&conn.id, true).unwrap());
+    assert_eq!(
+        events.confirms.load(Ordering::SeqCst),
+        confirms_after_add + 1,
+        "an unchanged setting must not put a sheet in front of the user"
+    );
+
+    // The grant records how it was authorized.
+    let wired = broker
+        .audit
+        .recent(20)
+        .into_iter()
+        .find(|e| e.kind == aka_core::audit::AuditKind::Wired)
+        .expect("enabling access is recorded");
+    assert!(
+        wired.confirmation.is_some(),
+        "the confirmation method belongs in the record: {wired:?}"
+    );
+}
+
+/// A refused gate leaves the setting alone: access must not be granted by a
+/// prompt the user declined.
+#[tokio::test]
+async fn a_declined_gate_does_not_enable_agent_access() {
+    /// Allows the setup actions, then refuses, so one broker can be built and
+    /// then have its gate closed.
+    struct FlippingGate {
+        allow: std::sync::atomic::AtomicBool,
+    }
+    impl BrokerEvents for FlippingGate {
+        fn confirm_secret_read(&self, _secret: &aka_core::types::SecretMeta) -> bool {
+            true
+        }
+        fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
+            self.allow
+                .load(Ordering::SeqCst)
+                .then_some(ConfirmationMethod::Waived)
+        }
+    }
+
+    let events = Arc::new(FlippingGate {
+        allow: std::sync::atomic::AtomicBool::new(true),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    let conn = add_github(&broker);
+    assert!(broker.ui_set_tool_access(&conn.id, false).unwrap());
+
+    // From here the user declines everything.
+    events.allow.store(false, Ordering::SeqCst);
+    assert!(matches!(
+        broker.ui_set_tool_access(&conn.id, true),
+        Err(aka_core::error::CoreError::NotConfirmed)
+    ));
+    assert!(
+        !broker.access.allows(&conn.id),
+        "a declined gate must not grant access"
+    );
+
+    // Revoking still works with the gate closed: remediation cannot be blocked
+    // by an authentication the user is refusing.
+    broker.access.set_enabled(conn.id, true).unwrap();
+    assert!(broker.ui_set_tool_access(&conn.id, false).unwrap());
+    assert!(!broker.access.allows(&conn.id));
+}
+
 #[tokio::test]
 async fn access_survives_key_rotation() {
     let events = Arc::new(GateEvents {

@@ -103,7 +103,11 @@ fn approval_text_char(c: char) -> char {
 
 /// Every string a prompt shows funnels through here: bounded, and stripped
 /// of characters that could visually rewrite the question.
-fn cap_approval_text(text: String) -> String {
+///
+/// Also used for untrusted text bound for the activity log (Postgres
+/// statement previews), so the bidi/control policy has one definition rather
+/// than a copy per call site that can drift from it.
+pub(crate) fn cap_approval_text(text: String) -> String {
     let mut capped: String = text
         .chars()
         .take(APPROVAL_TEXT_CAP)

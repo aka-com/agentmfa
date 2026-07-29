@@ -165,6 +165,13 @@ pub enum AuditKind {
     /// An SSH host key pinned trust-on-first-use at the first agent
     /// session-bind (outcome `pinned`), or that trust denied (`denied`).
     SshHostKeyPinned,
+    /// A Postgres session asked for TLS under `sslmode=prefer`, the server
+    /// refused, and the session continued in clear text with the stored
+    /// credential.
+    TlsDowngraded,
+    /// Statements observed on a brokered Postgres session, recorded when
+    /// statement auditing is enabled for the broker.
+    PgStatements,
     // Vault + config actions from the UI
     SecretAdded,
     SecretUpdated,
@@ -228,6 +235,8 @@ impl AuditKind {
             AuditKind::SessionClosed => "logOut",
             AuditKind::SshSigned => "keyRound",
             AuditKind::SshHostKeyPinned => "lock",
+            AuditKind::TlsDowngraded => "shieldAlert",
+            AuditKind::PgStatements => "database",
             AuditKind::SecretAdded => "fileKey",
             AuditKind::SecretUpdated => "pencil",
             AuditKind::SecretDeleted => "trash",
@@ -270,6 +279,9 @@ impl AuditKind {
             | AuditKind::McpTokenRefreshFailed
             | AuditKind::RateLimited
             | AuditKind::IntegrityAlert => "danger",
+            // A downgrade is not a refusal — the session worked — but it is
+            // the one outcome here the user would want to notice.
+            AuditKind::TlsDowngraded => "warning",
             _ => "neutral",
         }
     }
@@ -310,6 +322,13 @@ impl AuditEntry {
     }
     pub fn confirmation(mut self, method: ConfirmationMethod) -> Self {
         self.confirmation = Some(method);
+        self
+    }
+    /// For actions gated in only one direction: records how the change was
+    /// authorized when it took a gate, and leaves the field absent when the
+    /// same call in the other direction did not need one.
+    pub fn maybe_confirmation(mut self, method: Option<ConfirmationMethod>) -> Self {
+        self.confirmation = method;
         self
     }
     pub fn detail(mut self, d: impl Into<String>) -> Self {

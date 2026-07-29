@@ -16,7 +16,11 @@
 
 import { randomUUID } from 'node:crypto';
 
-import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
+import {
+  McpServer,
+  ResourceTemplate,
+  type RegisteredTool,
+} from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 
@@ -235,6 +239,32 @@ interface Registration {
  * session — a wiring changed in the app takes effect when the agent
  * reconnects, and the broker refuses anything stale in the meantime.
  */
+/// How often a session re-reads the wiring so its tool list can follow it.
+/// Short enough that a user who switches a tool off sees the agent lose it
+/// while they are still looking, long enough to be nothing on a local socket.
+const WIRING_REFRESH_MS = 10_000;
+
+/// Register one connection's `_request`/`_open` tool and hand back its handle,
+/// so the surface can be reconciled later rather than only built once.
+function registerNative(
+  server: McpServer,
+  broker: BrokerClient,
+  principal: Principal,
+  connection: BrokerConnection,
+  toolName: string,
+): RegisteredTool {
+  return server.registerTool(
+    toolName,
+    {
+      title: connection.name,
+      description: describe(connection),
+      inputSchema: schemaFor(connection),
+    },
+    async (args: Record<string, unknown>) =>
+      invoke(broker, principal, connection, args ?? {}),
+  );
+}
+
 export async function createToolServer(
   broker: BrokerClient,
   principal: Principal,
@@ -245,10 +275,15 @@ export async function createToolServer(
       // Declared up front rather than implied by the first `registerTool`.
       // An agent wired to nothing has zero tools, and without this it would
       // meet `Method not found` on `tools/list` instead of an empty list.
-      capabilities: { tools: {} },
+      //
+      // `listChanged` is real: the per-connection tools below track the user's
+      // wiring for the life of the session (see `refreshWiring`), so a tool
+      // that has been renamed away or switched off stops being offered instead
+      // of sitting there answering 404 or 403 until the agent reconnects.
+      capabilities: { tools: { listChanged: true } },
       instructions:
         'AgentMFA brokers database, SSH and API access. Tools appear ' +
-        'here only when the user has wired this agent to them in the AgentMFA ' +
+        'here only when the user has enabled them for agents in the AgentMFA ' +
         'app. Credentials are injected by the broker and never visible to you.',
     },
   );
@@ -271,6 +306,11 @@ export async function createToolServer(
   // registered, not what a naming convention would guess them to be.
   const registrations: Registration[] = [];
 
+  // Live handles for the per-connection native tools, keyed by tool name so a
+  // rename reads as one name leaving and another arriving — which is exactly
+  // what it is, since the tool name is derived from the connection's name.
+  const native = new Map<string, RegisteredTool>();
+
   // Always registered, for two reasons. It is what installs the MCP tool
   // handlers at all — a server with no tools answers `tools/list` with
   // "Method not found", which is a baffling thing for an agent wired to
@@ -288,7 +328,10 @@ export async function createToolServer(
     async () => {
       // Deliberately re-queried rather than reported from the list captured
       // at session open: the user may have wired something since, and the
-      // whole point of this tool is to answer "why can't I see it?".
+      // whole point of this tool is to answer "why can't I see it?". Asking
+      // also reconciles the tool list, so an agent that noticed something was
+      // wrong does not have to wait for the next tick to have it fixed.
+      if (await refreshWiring()) server.sendToolListChanged();
       const live = (await broker.connections(principal)).filter(
         (candidate) => candidate.wired,
       );
@@ -441,21 +484,86 @@ export async function createToolServer(
       continue;
     }
     taken.add(toolName);
-
-    server.registerTool(
+    native.set(
       toolName,
-      {
-        title: connection.name,
-        description: describe(connection),
-        inputSchema: schemaFor(connection),
-      },
-      async (args: Record<string, unknown>) =>
-        invoke(broker, principal, connection, args ?? {}),
+      registerNative(server, broker, principal, connection, toolName),
     );
     registrations.push({ connection, tools: [toolName] });
   }
 
   registerMetaTools(server, broker, principal, upstreamIndex);
+
+  /**
+   * Bring the per-connection tools back in line with the user's wiring.
+   *
+   * The surface used to be a snapshot taken at session open, so renaming a
+   * connection left a tool whose calls 404 and switching one off left a tool
+   * whose calls 403 — with nothing telling the agent why, and no way to find
+   * out short of reconnecting. Only the native `_request`/`_open` tools are
+   * reconciled: re-running MCP upstream discovery would cost several round
+   * trips per connection per tick, and its tools are keyed on the upstream's
+   * own catalogue rather than on the wiring.
+   *
+   * Returns whether anything changed, so callers can decide about notifying.
+   */
+  async function refreshWiring(): Promise<boolean> {
+    let live: BrokerConnection[];
+    try {
+      live = await broker.connections(principal);
+    } catch (error) {
+      // A failed listing is not evidence that the user unwired everything.
+      // Leave the surface alone and try again on the next tick.
+      log('warn', 'could not refresh the wiring', { error: String(error) });
+      return false;
+    }
+    const desired = new Map<string, BrokerConnection>();
+    for (const candidate of live) {
+      if (!candidate.wired || candidate.mcp_path) continue;
+      const name = toolNameFor(candidate);
+      // First writer wins, matching the collision rule at session open.
+      if (!desired.has(name)) desired.set(name, candidate);
+    }
+
+    let changed = false;
+    for (const [toolName, handle] of [...native]) {
+      if (desired.has(toolName)) continue;
+      handle.remove();
+      native.delete(toolName);
+      taken.delete(toolName);
+      changed = true;
+    }
+    for (const [toolName, connection] of desired) {
+      if (native.has(toolName) || taken.has(toolName)) continue;
+      taken.add(toolName);
+      native.set(
+        toolName,
+        registerNative(server, broker, principal, connection, toolName),
+      );
+      changed = true;
+    }
+    if (changed) {
+      // Keep `agentmfa_status` honest about what is registered now: replace the
+      // native rows wholesale, leaving the MCP upstream rows as discovered.
+      for (let i = registrations.length - 1; i >= 0; i -= 1) {
+        if (!registrations[i].connection.mcp_path) registrations.splice(i, 1);
+      }
+      for (const [toolName, connection] of desired) {
+        registrations.push({ connection, tools: [toolName] });
+      }
+    }
+    return changed;
+  }
+
+  // Poll rather than subscribe: the broker has no agent-facing change stream
+  // yet, and `/v1/connections` over the local socket is cheap. `unref` keeps
+  // the timer from holding the process open.
+  const ticker = setInterval(() => {
+    void refreshWiring().then((changed) => {
+      if (changed) server.sendToolListChanged();
+    });
+  }, WIRING_REFRESH_MS);
+  ticker.unref?.();
+  server.server.onclose = () => clearInterval(ticker);
 
   return server;
 }

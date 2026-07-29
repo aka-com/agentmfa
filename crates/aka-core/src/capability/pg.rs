@@ -60,8 +60,12 @@ const GSSENC_REQUEST_CODE: i32 = 80877104;
 
 /// Matches PG's MAX_STARTUP_PACKET_LENGTH.
 const MAX_STARTUP_PACKET: usize = 10_000;
-/// Sanity cap on handshake-phase typed messages (the data path never parses).
+/// Sanity cap on handshake-phase typed messages.
 const MAX_HANDSHAKE_MESSAGE: usize = 1024 * 1024;
+/// Protocol ceiling on a message's self-inclusive length field. The data path
+/// forwards bytes without parsing them; the observational scanner uses this
+/// only to notice that it has lost the message boundary.
+const MAX_SPLICE_MESSAGE: usize = 0x3fff_ffff;
 
 /* ---------------------------- framing helpers ----------------------------- */
 
@@ -247,6 +251,22 @@ struct ProxyState {
     broker: Arc<Broker>,
     /// synthesized (pid, key) → upstream cancel target; removed at session end.
     cancels: Mutex<HashMap<(i32, i32), CancelTarget>>,
+    /// Admission control over the *unauthenticated* handshake phase. Accepting
+    /// without a bound let anything that can reach the port spawn tasks and
+    /// buffers without presenting a ticket; the permit is released as soon as
+    /// the ticket is redeemed, so an authorized session never holds one.
+    handshakes: tokio::sync::Semaphore,
+}
+
+impl ProxyState {
+    fn new(broker: Arc<Broker>) -> Self {
+        let permits = broker.config.max_pending_pg_handshakes;
+        Self {
+            broker,
+            cancels: Mutex::new(HashMap::new()),
+            handshakes: tokio::sync::Semaphore::new(permits),
+        }
+    }
 }
 
 /// Record a refused data-plane connection.
@@ -268,6 +288,67 @@ fn audit_refusal(broker: &Broker, connection: Option<&str>, reason: &str, detail
         entry = entry.connection(name.to_string());
     }
     broker.audit.append(entry);
+}
+
+/// Record that `sslmode=prefer` asked for TLS, the server refused, and the
+/// session proceeded in clear text anyway.
+///
+/// libpq behaves the same way, but AgentMFA is the custodian of the credential
+/// that just crossed the network unprotected: an on-path attacker who answers
+/// `N` and then requests `AuthenticationCleartextPassword` harvests the vault's
+/// password, and without this the user has no record that TLS was ever lost.
+/// Health carries it too, so the state is visible in the app and not only in
+/// the log.
+fn audit_tls_downgrade(broker: &Broker, connection: &Connection) {
+    broker.audit.append(
+        AuditEntry::new(
+            AuditKind::TlsDowngraded,
+            format!(
+                "TLS unavailable, continued in clear text: {}",
+                connection.name
+            ),
+        )
+        .detail(
+            "The server refused TLS and this connection's mode is \"prefer\", so the \
+             credential and every statement crossed the network unencrypted. Set the \
+             connection to \"require\" or stronger to refuse instead."
+                .to_string(),
+        )
+        .connection(connection.name.clone())
+        .outcome("tls_downgraded")
+        .field("kind", "pg")
+        .field("sslmode", "prefer"),
+    );
+    // The connection *works*, so the status stays `Ok` and the detail carries
+    // the caveat: a downgrade is not a failure to fix by reconnecting, and
+    // there is no third status between "fine" and "broken" to put it in.
+    broker.health.record(
+        &connection.id,
+        crate::types::HealthStatus::Ok,
+        "Reached the database, but the server refused TLS — traffic is in clear text",
+    );
+}
+
+/// Run an upstream dial under the broker's upstream deadline.
+///
+/// The Test button has always been wrapped; the data path was not, so a host
+/// that accepts nothing left the client waiting on the OS TCP timeout while a
+/// redemption slot stayed reserved, and expiry surfaced as a hang rather than
+/// as the `Timeout` kind that already existed for it.
+async fn dial_with_timeout<F>(broker: &Broker, dial: F) -> Result<UpstreamSession, TestError>
+where
+    F: std::future::Future<Output = Result<UpstreamSession, TestError>>,
+{
+    match tokio::time::timeout(broker.config.upstream_timeout, dial).await {
+        Ok(result) => result,
+        Err(_) => Err(TestError::new(
+            TestErrorKind::Timeout,
+            format!(
+                "The database did not answer within {}s",
+                broker.config.upstream_timeout.as_secs()
+            ),
+        )),
+    }
 }
 
 /// Grade a connection's health from a data-plane dial. A dial is as
@@ -330,10 +411,7 @@ impl Drop for CancelRegistration {
 pub async fn start_proxy(broker: Arc<Broker>) -> io::Result<(u16, tokio::task::JoinHandle<()>)> {
     let listener = tokio::net::TcpListener::bind((broker.data_plane_bind(), 0)).await?;
     let port = listener.local_addr()?.port();
-    let state = Arc::new(ProxyState {
-        broker,
-        cancels: Mutex::new(HashMap::new()),
-    });
+    let state = Arc::new(ProxyState::new(broker));
     let task = tokio::spawn(async move {
         loop {
             match listener.accept().await {
@@ -409,10 +487,7 @@ pub async fn bind_endpoint(
     let listener = UnixListener::bind(&sock_path)?;
     std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600))?;
 
-    let state = Arc::new(ProxyState {
-        broker,
-        cancels: Mutex::new(HashMap::new()),
-    });
+    let state = Arc::new(ProxyState::new(broker));
     let endpoint_id = endpoint.id;
     let shutdown = Arc::new(Notify::new());
     let sd = shutdown.clone();
@@ -616,14 +691,21 @@ async fn handle_endpoint_conn(
 
     // Dial upstream with the stored password secret. The wiring is the
     // authorization, so the secret read is pre-authorized (scope confirmed).
-    let upstream = match crate::authorization::scope(
-        true,
-        dial_upstream(&state.broker.store, &connection, &params),
+    let upstream = match dial_with_timeout(
+        &state.broker,
+        crate::authorization::scope(
+            true,
+            dial_upstream(&state.broker.store, &connection, &params),
+        ),
     )
     .await
     {
         Ok(upstream) => {
-            record_dial_health(&state.broker, &connection.id, &Ok(()));
+            if upstream.tls_downgraded {
+                audit_tls_downgrade(&state.broker, &connection);
+            } else {
+                record_dial_health(&state.broker, &connection.id, &Ok(()));
+            }
             upstream
         }
         Err(e) => {
@@ -717,7 +799,13 @@ async fn handle_endpoint_conn(
 
     let max_ttl = state.broker.config.session_max_ttl;
     let idle = state.broker.config.session_idle_timeout;
-    splice(client, upstream.stream, session, max_ttl, idle).await;
+    let audit = SpliceAudit {
+        broker: state.broker.clone(),
+        connection: connection.name.clone(),
+        agent: "endpoint".to_string(),
+        record_statements: state.broker.config.audit_pg_statements,
+    };
+    splice(client, upstream.stream, session, max_ttl, idle, audit).await;
     drop(registration);
     Ok(())
 }
@@ -873,6 +961,50 @@ where
             }
             PROTOCOL_V3 => return Ok(StartupPhase::Startup(parse_startup_params(&payload[4..])?)),
             other => {
+                let major = (other >> 16) & 0xffff;
+                let minor = other & 0xffff;
+                // A 3.x minor this proxy does not implement gets the message
+                // the protocol defines for exactly this case — PostgreSQL 18
+                // opens with 3.2 — naming 3.0 as the highest supported minor
+                // and listing the `_pq_.*` options that go unhonoured. The
+                // client then continues as 3.0 rather than meeting a socket
+                // that simply closed.
+                if major == 3 && minor > 0 {
+                    let params = parse_startup_params(&payload[4..])?;
+                    let unsupported: Vec<&str> = params
+                        .iter()
+                        .map(|(name, _)| name.as_str())
+                        .filter(|name| name.starts_with("_pq_."))
+                        .collect();
+                    let mut body = Vec::with_capacity(8);
+                    put_i32(&mut body, 0);
+                    put_i32(&mut body, unsupported.len() as i32);
+                    for name in &unsupported {
+                        put_cstr(&mut body, name);
+                    }
+                    client.write_all(&frame(b'v', &body)).await?;
+                    // Protocol options were declined, so they are not passed
+                    // upstream either.
+                    return Ok(StartupPhase::Startup(
+                        params
+                            .into_iter()
+                            .filter(|(name, _)| !name.starts_with("_pq_."))
+                            .collect(),
+                    ));
+                }
+                // Not a 3.x client at all. Say so with a SQLSTATE the driver
+                // reports instead of dropping the socket, which reads to the
+                // user as "the server went away".
+                let _ = client
+                    .write_all(&error_response(
+                        "FATAL",
+                        "0A000", // feature_not_supported
+                        &format!(
+                            "AKA: unsupported frontend protocol {major}.{minor}; \
+                             this proxy speaks 3.0"
+                        ),
+                    ))
+                    .await;
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("unsupported protocol code {other}"),
@@ -888,19 +1020,34 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
     let _ = stream.set_nodelay(true);
     let mut client = BufReader::new(stream);
 
+    // Everything up to a redeemed ticket is unauthenticated, so it runs under
+    // one admission permit and one deadline. A client that connects and then
+    // says nothing — or dribbles a startup packet a byte at a time — gets
+    // dropped instead of holding a task and an fd for as long as it likes.
+    let admission = state
+        .handshakes
+        .try_acquire()
+        .map_err(|_| io::Error::other("pg handshake admission exhausted"))?;
+    let deadline = tokio::time::Instant::now() + state.broker.config.pg_handshake_timeout;
+
     // Pre-startup phase: a client may probe SSLRequest and GSSENCRequest in
     // sequence before the StartupMessage; each is declined with a single 'N'
     // (the loopback leg is plaintext by contract, the DSN pins
     // `sslmode=disable`). A CancelRequest connection carries no
     // StartupMessage at all.
-    let params = match read_startup_phase(&mut client, &state).await? {
+    let params = match tokio::time::timeout_at(deadline, read_startup_phase(&mut client, &state))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "pg startup phase timed out"))??
+    {
         StartupPhase::Startup(params) => params,
         StartupPhase::Cancelled => return Ok(()),
     };
 
     // The presented password IS the ticket.
     client.write_all(&frame(b'R', &3i32.to_be_bytes())).await?;
-    let (tag, payload) = read_message(&mut client).await?;
+    let (tag, payload) = tokio::time::timeout_at(deadline, read_message(&mut client))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "pg password message timed out"))??;
     if tag != b'p' {
         client
             .write_all(&error_response(
@@ -943,6 +1090,11 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
             return Ok(());
         }
     };
+
+    // Authenticated: the pre-auth deadline and admission permit have done
+    // their job, and what follows (a confirmation prompt, an upstream dial)
+    // has budgets of its own.
+    drop(admission);
 
     if !matches!(&redemption.connection.config, ConnectionConfig::Pg { .. }) {
         client
@@ -1084,14 +1236,24 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
     // Upstream handshake: own TCP + TLS + auth with the configured user and
     // the stored password secret. Failure drops the redemption, releasing the
     // reserved budget slot.
-    let upstream = match crate::authorization::scope_existing(
-        redemption.secret_read_authorization.clone(),
-        dial_upstream(&state.broker.store, &connection, &params),
+    // Bound the dial. A black-holed host would otherwise leave the client
+    // waiting on the OS TCP timeout — minutes — while holding a redemption
+    // slot, and `TestErrorKind::Timeout` was unreachable from the data path.
+    let upstream = match dial_with_timeout(
+        &state.broker,
+        crate::authorization::scope_existing(
+            redemption.secret_read_authorization.clone(),
+            dial_upstream(&state.broker.store, &connection, &params),
+        ),
     )
     .await
     {
         Ok(upstream) => {
-            record_dial_health(&state.broker, &connection.id, &Ok(()));
+            if upstream.tls_downgraded {
+                audit_tls_downgrade(&state.broker, &connection);
+            } else {
+                record_dial_health(&state.broker, &connection.id, &Ok(()));
+            }
             upstream
         }
         Err(e) => {
@@ -1125,6 +1287,37 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
         backend_key: upstream.backend_key,
     });
     let (synth_pid, synth_key) = registration.key;
+
+    // Register the live session *before* ReadyForQuery goes out, then close the
+    // establishment race the way the endpoint path does: either a teardown
+    // sweep sees this registered session, or this check sees the new policy
+    // state and retires it. The dial above can take the whole upstream budget,
+    // and without this a disable, delete, or retarget landing inside that
+    // window was seen by neither — leaving a session running for up to
+    // `session_max_ttl` against authority that had just been withdrawn.
+    let agent = redemption.agent.clone();
+    let session = redemption.start(ConnectionKind::Pg);
+    let still_current = state.broker.access.allows(&connection.id)
+        && state
+            .broker
+            .store
+            .connection_by_id(&connection.id)
+            .is_ok_and(|current| current.updated_at == approved_version);
+    if !still_current {
+        session.finish("access_revoked");
+        state.broker.approvals.revoke(&connection.id);
+        audit_refusal(
+            &state.broker,
+            Some(&connection.name),
+            "denied_by_policy",
+            "the tool's access was revoked while the session was being established",
+        );
+        client
+            .write_all(&error_response("FATAL", "28000", "AKA: denied_by_policy"))
+            .await?;
+        return Ok(());
+    }
+
     let mut completion = frame(b'R', &0i32.to_be_bytes());
     completion.extend_from_slice(&upstream.forward);
     let mut keydata = Vec::with_capacity(8);
@@ -1132,13 +1325,21 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
     put_i32(&mut keydata, synth_key);
     completion.extend_from_slice(&frame(b'K', &keydata));
     completion.extend_from_slice(&frame(b'Z', &[upstream.ready_status]));
-    client.write_all(&completion).await?;
+    if client.write_all(&completion).await.is_err() {
+        // The client vanished after auth: retire the session just opened.
+        session.finish("client_closed");
+        return Ok(());
+    }
 
-    // Both handshakes done: register the live session and splice.
     let max_ttl = state.broker.config.session_max_ttl;
-    let session = redemption.start(ConnectionKind::Pg);
     let idle = state.broker.config.session_idle_timeout;
-    splice(client, upstream.stream, session, max_ttl, idle).await;
+    let audit = SpliceAudit {
+        broker: state.broker.clone(),
+        connection: connection.name.clone(),
+        agent,
+        record_statements: state.broker.config.audit_pg_statements,
+    };
+    splice(client, upstream.stream, session, max_ttl, idle, audit).await;
     drop(registration);
     Ok(())
 }
@@ -1153,13 +1354,14 @@ async fn handle_cancel(state: &Arc<ProxyState>, pid: i32, key: i32) {
         return;
     };
     let send = async {
-        let (mut stream, _) = tls_connect(
+        let mut stream = tls_connect(
             &target.host,
             target.port,
             target.sslmode,
             target.trusted_ca_bundle_path.as_deref(),
         )
-        .await?;
+        .await?
+        .stream;
         let mut msg = Vec::with_capacity(16);
         put_i32(&mut msg, 16);
         put_i32(&mut msg, CANCEL_REQUEST_CODE);
@@ -1381,13 +1583,114 @@ fn add_ca_bundle_roots(roots: &mut rustls::RootCertStore, path: &str) -> Result<
     Ok(added)
 }
 
+/// The trust anchors for a verifying `sslmode`.
+///
+/// A configured bundle **replaces** the public roots rather than joining them,
+/// which is what libpq's `sslrootcert` does. Appending would leave every
+/// public CA able to satisfy a `verify-full` pin the user set precisely to
+/// exclude them: an attacker holding any of ~150 public CAs' signature for the
+/// same hostname would still verify, and the pin would be decorative.
 fn root_cert_store(ca_bundle_path: Option<&str>) -> Result<rustls::RootCertStore, String> {
-    let mut roots =
-        rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    if let Some(path) = ca_bundle_path.filter(|path| !path.trim().is_empty()) {
-        add_ca_bundle_roots(&mut roots, path)?;
+    match ca_bundle_path.filter(|path| !path.trim().is_empty()) {
+        Some(path) => {
+            let mut roots = rustls::RootCertStore::empty();
+            add_ca_bundle_roots(&mut roots, path)?;
+            Ok(roots)
+        }
+        None => Ok(rustls::RootCertStore::from_iter(
+            webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
+        )),
     }
-    Ok(roots)
+}
+
+/* ----------------------- channel-binding hash (RFC 5929) ------------------ */
+
+/// Read one DER TLV, returning `(tag, value, rest)`.
+///
+/// Deliberately minimal: the only structure this file needs to walk is the
+/// outer `Certificate` SEQUENCE, so a full X.509 parser would be dependency
+/// weight for two field reads. Every length is bounds-checked and any
+/// malformed input returns `None`, which the caller treats as "unknown
+/// algorithm" rather than an error.
+fn der_tlv(bytes: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+    let (&tag, rest) = bytes.split_first()?;
+    let (&first, rest) = rest.split_first()?;
+    let (len, rest) = if first < 0x80 {
+        (first as usize, rest)
+    } else {
+        let count = (first & 0x7f) as usize;
+        // Indefinite length (0x80) is not valid DER; more than 4 length bytes
+        // is far past any certificate this proxy will meet.
+        if count == 0 || count > 4 || rest.len() < count {
+            return None;
+        }
+        let len = rest[..count]
+            .iter()
+            .fold(0usize, |acc, &b| (acc << 8) | b as usize);
+        (len, &rest[count..])
+    };
+    (rest.len() >= len).then(|| (tag, &rest[..len], &rest[len..]))
+}
+
+/// The OID of `Certificate.signatureAlgorithm.algorithm`.
+///
+/// ```text
+/// Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, signatureValue }
+/// AlgorithmIdentifier ::= SEQUENCE { algorithm OBJECT IDENTIFIER, parameters ANY OPTIONAL }
+/// ```
+fn signature_algorithm_oid(cert_der: &[u8]) -> Option<&[u8]> {
+    const SEQUENCE: u8 = 0x30;
+    const OID: u8 = 0x06;
+    let (tag, certificate, _) = der_tlv(cert_der)?;
+    if tag != SEQUENCE {
+        return None;
+    }
+    // Skip tbsCertificate; signatureAlgorithm is the next element.
+    let (_, _, after_tbs) = der_tlv(certificate)?;
+    let (tag, algorithm_identifier, _) = der_tlv(after_tbs)?;
+    if tag != SEQUENCE {
+        return None;
+    }
+    let (tag, oid, _) = der_tlv(algorithm_identifier)?;
+    (tag == OID).then_some(oid)
+}
+
+/// The `tls-server-end-point` channel binding for a server certificate.
+///
+/// RFC 5929 §4.1 derives the hash from the certificate's own **signature**
+/// algorithm, not from SHA-256 unconditionally, and upgrades MD5 and SHA-1 to
+/// SHA-256. PostgreSQL's `be_tls_get_certificate_hash` does exactly this, so a
+/// server presenting a SHA-384-signed certificate computes a SHA-384 binding
+/// and a hard-coded SHA-256 here would fail `SCRAM-SHA-256-PLUS` with an
+/// opaque authentication error rather than a diagnosable one.
+///
+/// An algorithm this does not recognize falls back to SHA-256: it is by far
+/// the most common signature hash, and a wrong guess costs the same failed
+/// SCRAM exchange as refusing to guess.
+fn channel_binding_hash(cert_der: &[u8]) -> Vec<u8> {
+    use sha2::{Digest as _, Sha256, Sha384, Sha512};
+
+    // DER-encoded OID bodies (tag and length already stripped).
+    // sha384WithRSAEncryption 1.2.840.113549.1.1.12, ecdsa-with-SHA384 1.2.840.10045.4.3.3
+    const SHA384_OIDS: [&[u8]; 2] = [
+        &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0c],
+        &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x03],
+    ];
+    // sha512WithRSAEncryption 1.2.840.113549.1.1.13, ecdsa-with-SHA512 1.2.840.10045.4.3.4,
+    // Ed25519 1.3.101.112 (SHA-512 internally), Ed448 1.3.101.113 (SHAKE256; SHA-512 is
+    // the closest available and no better guess exists).
+    const SHA512_OIDS: [&[u8]; 4] = [
+        &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0d],
+        &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x04],
+        &[0x2b, 0x65, 0x70],
+        &[0x2b, 0x65, 0x71],
+    ];
+
+    match signature_algorithm_oid(cert_der) {
+        Some(oid) if SHA384_OIDS.contains(&oid) => Sha384::digest(cert_der).to_vec(),
+        Some(oid) if SHA512_OIDS.contains(&oid) => Sha512::digest(cert_der).to_vec(),
+        _ => Sha256::digest(cert_der).to_vec(),
+    }
 }
 
 fn tls_config(
@@ -1491,10 +1794,7 @@ async fn wrap_tls(
         .1
         .peer_certificates()
         .and_then(|certs| certs.first())
-        .map(|cert| {
-            use sha2::{Digest as _, Sha256};
-            Sha256::digest(cert.as_ref()).to_vec()
-        });
+        .map(|cert| channel_binding_hash(cert.as_ref()));
     Ok((PgStream::Tls(Box::new(tls)), digest))
 }
 
@@ -1512,7 +1812,7 @@ async fn tls_connect(
     port: u16,
     sslmode: PgSslMode,
     ca_bundle_path: Option<&str>,
-) -> Result<(PgStream, Option<Vec<u8>>), TestError> {
+) -> Result<UpstreamTransport, TestError> {
     if sslmode == PgSslMode::Disable {
         let tcp = TcpStream::connect((host, port)).await.map_err(|e| {
             TestError::new(
@@ -1521,12 +1821,25 @@ async fn tls_connect(
             )
         })?;
         let _ = tcp.set_nodelay(true);
-        return Ok((PgStream::Plain(tcp), None));
+        // Asked for plaintext and got it: nothing was downgraded.
+        return Ok(UpstreamTransport::plain(PgStream::Plain(tcp), false));
     }
     let (tcp, answer) = connect_and_probe_tls(host, port).await?;
     match answer {
-        b'S' => wrap_tls(host, tcp, sslmode, ca_bundle_path).await,
-        b'N' if sslmode == PgSslMode::Prefer => Ok((PgStream::Plain(tcp), None)),
+        b'S' => wrap_tls(host, tcp, sslmode, ca_bundle_path)
+            .await
+            .map(|(stream, cert_hash)| UpstreamTransport {
+                stream,
+                cert_hash,
+                tls_downgraded: false,
+            }),
+        // `prefer` asked for TLS and the server declined. libpq continues in
+        // clear text here and so does this, but the broker is the custodian of
+        // the credential that is about to cross the wire unprotected, so the
+        // fallback is reported rather than silent (audited by the caller).
+        b'N' if sslmode == PgSslMode::Prefer => {
+            Ok(UpstreamTransport::plain(PgStream::Plain(tcp), true))
+        }
         b'N' => Err(TestError::new(
             TestErrorKind::TlsDeclined,
             format!(
@@ -1546,9 +1859,32 @@ async fn tls_connect(
     }
 }
 
+/// The negotiated upstream transport, before the startup exchange.
+struct UpstreamTransport {
+    stream: PgStream,
+    /// The `tls-server-end-point` channel-binding input, when TLS was
+    /// negotiated.
+    cert_hash: Option<Vec<u8>>,
+    /// `prefer` asked for TLS and the server refused, so the stored password
+    /// and every statement on this session travel in clear text.
+    tls_downgraded: bool,
+}
+
+impl UpstreamTransport {
+    fn plain(stream: PgStream, tls_downgraded: bool) -> Self {
+        Self {
+            stream,
+            cert_hash: None,
+            tls_downgraded,
+        }
+    }
+}
+
 /// A completed upstream handshake, ready to splice.
 struct UpstreamSession {
     stream: BufReader<PgStream>,
+    /// Whether `prefer` fell back to plaintext establishing this session.
+    tls_downgraded: bool,
     /// Raw ParameterStatus/NoticeResponse frames to relay downstream.
     forward: Vec<u8>,
     /// The upstream's real BackendKeyData, mapped, never forwarded.
@@ -1610,8 +1946,11 @@ async fn dial_upstream_with_password(
     else {
         return Err("not a postgres connection".into());
     };
-    let (stream, cert_digest) =
-        tls_connect(host, *port, *sslmode, trusted_ca_bundle_path.as_deref()).await?;
+    let UpstreamTransport {
+        stream,
+        cert_hash: cert_digest,
+        tls_downgraded,
+    } = tls_connect(host, *port, *sslmode, trusted_ca_bundle_path.as_deref()).await?;
     let mut stream = BufReader::new(stream);
 
     // StartupMessage with the CONFIGURED user + dbname; forward the client's
@@ -1645,6 +1984,12 @@ async fn dial_upstream_with_password(
             .map_err(|e| format!("auth read failed: {e}"))?;
         match tag {
             b'E' => return Err(upstream_error(&payload)),
+            // NegotiateProtocolVersion. This proxy asks for exactly 3.0, so a
+            // conforming server has nothing to negotiate — but a server that
+            // sends it anyway is answering the version we asked for, not
+            // failing, and it is not forwarded because the downstream leg
+            // settled its own version already.
+            b'v' => continue,
             b'R' if payload.len() < 4 => return Err("short auth request".into()),
             b'R' => match be_i32(&payload[..4]) {
                 0 => break, // AuthenticationOk
@@ -1722,6 +2067,8 @@ async fn dial_upstream_with_password(
             }
             b'Z' => break *payload.first().unwrap_or(&b'I'),
             b'E' => return Err(upstream_error(&payload)),
+            // See the auth loop: swallowed rather than relayed.
+            b'v' => {}
             other => {
                 return Err(format!(
                     "unexpected message '{}' during upstream startup",
@@ -1734,6 +2081,7 @@ async fn dial_upstream_with_password(
 
     Ok(UpstreamSession {
         stream,
+        tls_downgraded,
         forward,
         backend_pid,
         backend_key,
@@ -1888,6 +2236,177 @@ async fn sasl_auth(
     Ok(())
 }
 
+/* ------------------------------ frame scanner ----------------------------- */
+
+/// Payload prefix the scanner retains. Enough for a statement preview without
+/// buffering a multi-megabyte `COPY` frame; the scanner still tracks the
+/// message boundary exactly past this.
+const SCAN_PEEK_CAP: usize = 1024;
+/// Statements recorded for one session before the audit entry starts counting
+/// rather than listing.
+const STATEMENT_AUDIT_MAX: usize = 100;
+
+/// One in-progress message payload.
+struct ScanBody {
+    tag: u8,
+    /// Payload bytes still to arrive.
+    remaining: usize,
+    /// Retained prefix, capped at [`SCAN_PEEK_CAP`].
+    peek: Vec<u8>,
+}
+
+/// An observational Postgres message-boundary scanner.
+///
+/// The splice forwards every byte verbatim and this only *watches* the copy, so
+/// it can neither corrupt nor stall a session. If it ever loses the message
+/// boundary it stops reporting instead of guessing — a scanner that
+/// mis-frames would silently mis-attribute statements and mis-track backend
+/// state, which is worse than reporting nothing.
+///
+/// Both directions start aligned: each leg's handshake reader stops exactly at
+/// a message boundary, and the residual bytes it buffered are fed in here
+/// before anything else.
+struct FrameScanner {
+    /// Partial 5-byte header carried across reads.
+    header: Vec<u8>,
+    body: Option<ScanBody>,
+    aligned: bool,
+}
+
+impl FrameScanner {
+    fn new() -> Self {
+        Self {
+            header: Vec::with_capacity(5),
+            body: None,
+            aligned: true,
+        }
+    }
+
+    /// Feed forwarded bytes, calling `on_message(tag, peek)` once per complete
+    /// message, where `peek` is the payload truncated to [`SCAN_PEEK_CAP`].
+    fn feed(&mut self, mut bytes: &[u8], mut on_message: impl FnMut(u8, &[u8])) {
+        if !self.aligned {
+            return;
+        }
+        while !bytes.is_empty() {
+            if let Some(body) = &mut self.body {
+                let take = body.remaining.min(bytes.len());
+                let room = SCAN_PEEK_CAP.saturating_sub(body.peek.len());
+                if room > 0 {
+                    body.peek.extend_from_slice(&bytes[..take.min(room)]);
+                }
+                body.remaining -= take;
+                bytes = &bytes[take..];
+                if body.remaining == 0 {
+                    let done = self.body.take().expect("body checked present");
+                    on_message(done.tag, &done.peek);
+                }
+                continue;
+            }
+            let take = (5 - self.header.len()).min(bytes.len());
+            self.header.extend_from_slice(&bytes[..take]);
+            bytes = &bytes[take..];
+            if self.header.len() < 5 {
+                return;
+            }
+            let tag = self.header[0];
+            // The length is self-inclusive and excludes the tag byte.
+            let len = be_i32(&self.header[1..5]);
+            self.header.clear();
+            if len < 4 || len as usize > MAX_SPLICE_MESSAGE {
+                self.aligned = false;
+                return;
+            }
+            match len as usize - 4 {
+                0 => on_message(tag, &[]),
+                payload => {
+                    self.body = Some(ScanBody {
+                        tag,
+                        remaining: payload,
+                        peek: Vec::new(),
+                    })
+                }
+            }
+        }
+    }
+}
+
+/// Text up to the NUL terminator, or all of it when the scanner's peek was
+/// truncated before the terminator arrived.
+fn cstr_prefix(bytes: &[u8]) -> &[u8] {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    &bytes[..end]
+}
+
+/// The SQL a client message carries, if it carries any.
+///
+/// `Query` ('Q') is one NUL-terminated statement; `Parse` ('P') is a statement
+/// name followed by the SQL. Bind, Execute, Describe and the COPY data stream
+/// introduce no new statement text and are deliberately not reported — the
+/// audit records what was *asked*, not every frame of the protocol.
+fn statement_text(tag: u8, peek: &[u8]) -> Option<String> {
+    let sql = match tag {
+        b'Q' => cstr_prefix(peek),
+        b'P' => {
+            let name_end = peek.iter().position(|&b| b == 0)?;
+            cstr_prefix(peek.get(name_end + 1..)?)
+        }
+        _ => return None,
+    };
+    let sql = String::from_utf8_lossy(sql);
+    let sql = sql.trim();
+    // Statement text is client-controlled and lands in a durable log the user
+    // reads: bound it and strip anything that could reorder or hide what it
+    // says, with the same policy the approval prompts use.
+    (!sql.is_empty()).then(|| crate::approvals::cap_approval_text(sql.to_string()))
+}
+
+/// What the splice needs in order to report on the session it is forwarding.
+struct SpliceAudit {
+    broker: Arc<Broker>,
+    connection: String,
+    agent: String,
+    /// Record statement text, not only the count. Off unless the operator
+    /// turned it on: SQL literals can carry passwords (`ALTER USER … PASSWORD`)
+    /// and personal data, and that is a retention decision rather than a
+    /// default.
+    record_statements: bool,
+}
+
+impl SpliceAudit {
+    /// Write the session's statement record. One entry per session rather than
+    /// one per statement, so a busy session cannot flood the log.
+    fn finish(&self, statements: Vec<String>, total: u64) {
+        if total == 0 {
+            return;
+        }
+        let mut entry = AuditEntry::new(
+            AuditKind::PgStatements,
+            format!("{total} statement{} on {}", plural(total), self.connection),
+        )
+        .agent(self.agent.clone())
+        .connection(self.connection.clone())
+        .field("kind", "pg")
+        .field("statements", total);
+        if self.record_statements {
+            let listed = statements.len() as u64;
+            entry = entry.detail(statements.join("\n")).field("listed", listed);
+            if listed < total {
+                entry = entry.field("truncated", true);
+            }
+        }
+        self.broker.audit.append(entry);
+    }
+}
+
+fn plural(n: u64) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
 /* --------------------------------- splice --------------------------------- */
 
 /// Byte-forward the established session in both directions with the session
@@ -1902,6 +2421,7 @@ async fn splice<C>(
     session: SessionHandle,
     max_ttl: Duration,
     idle: Duration,
+    audit: SpliceAudit,
 ) where
     C: AsyncRead + AsyncWrite + Unpin,
 {
@@ -1914,14 +2434,59 @@ async fn splice<C>(
     let (mut upstream_rx, mut upstream_tx) = tokio::io::split(upstream);
 
     let ttl_deadline = tokio::time::Instant::now() + max_ttl;
-    let mut idle_deadline = tokio::time::Instant::now() + idle;
     let close_signal = session.close_signal.clone();
+
+    // The idle timer measures a client that has stopped asking, not a backend
+    // that is taking its time. `SELECT pg_sleep(400)`, a large `COPY`, and a
+    // long `CREATE INDEX` all send nothing for minutes while real work is in
+    // flight, and timing those out was indistinguishable from an abandoned
+    // session. The backend is idle exactly when it has sent ReadyForQuery and
+    // the client has not asked for anything since, so the deadline is armed
+    // only then.
+    //
+    // A `LISTEN`er waiting for a notification *is* protocol-idle by this
+    // definition and can still be reaped: raise `--session-idle-timeout` for
+    // that workload. Detecting it would mean reading the SQL and guessing.
+    let mut backend_idle = true;
+    let mut idle_deadline = tokio::time::Instant::now() + idle;
+    let mut client_scan = FrameScanner::new();
+    let mut upstream_scan = FrameScanner::new();
+    let mut statements: Vec<String> = Vec::new();
+    let mut statement_count = 0u64;
+
+    // Observe the client's messages: what it asked, and that it is now owed a
+    // reply. `record` is captured by the closure, so the text is only built
+    // when the operator asked for it.
+    let record = audit.record_statements;
+    let watch_client = |bytes: &[u8],
+                        scan: &mut FrameScanner,
+                        busy: &mut bool,
+                        statements: &mut Vec<String>,
+                        count: &mut u64| {
+        scan.feed(bytes, |tag, peek| {
+            *busy = true;
+            if let Some(sql) = statement_text(tag, peek) {
+                *count += 1;
+                if record && statements.len() < STATEMENT_AUDIT_MAX {
+                    statements.push(sql);
+                }
+            }
+        });
+    };
 
     let mut early: Option<&'static str> = None;
     if !client_residual.is_empty() {
         session
             .bytes_up
             .fetch_add(client_residual.len() as u64, Ordering::Relaxed);
+        watch_client(
+            &client_residual,
+            &mut client_scan,
+            &mut backend_idle,
+            &mut statements,
+            &mut statement_count,
+        );
+        backend_idle = false;
         if upstream_tx.write_all(&client_residual).await.is_err() {
             early = Some("upstream_closed");
         }
@@ -1930,6 +2495,11 @@ async fn splice<C>(
         session
             .bytes_down
             .fetch_add(upstream_residual.len() as u64, Ordering::Relaxed);
+        upstream_scan.feed(&upstream_residual, |tag, _| {
+            if tag == b'Z' {
+                backend_idle = true;
+            }
+        });
         if client_tx.write_all(&upstream_residual).await.is_err() {
             early = Some("client_closed");
         }
@@ -1940,14 +2510,31 @@ async fn splice<C>(
     let reason = match early {
         Some(reason) => reason,
         None => loop {
+            // A busy backend has no idle deadline. Pushing it past the TTL
+            // (rather than parking on a borrowed `pending()`) keeps the branch
+            // a plain deadline and makes the TTL win that race deterministically.
+            let idle_at = if backend_idle {
+                idle_deadline
+            } else {
+                ttl_deadline + Duration::from_secs(1)
+            };
             tokio::select! {
                 _ = close_signal.notified() => break "closed_by_user",
                 _ = tokio::time::sleep_until(ttl_deadline) => break "session_ttl",
-                _ = tokio::time::sleep_until(idle_deadline) => break "idle_timeout",
+                _ = tokio::time::sleep_until(idle_at) => break "idle_timeout",
                 read = client_rx.read(&mut client_buf) => match read {
                     Ok(n) if n > 0 => {
-                        idle_deadline = tokio::time::Instant::now() + idle;
                         session.bytes_up.fetch_add(n as u64, Ordering::Relaxed);
+                        watch_client(
+                            &client_buf[..n],
+                            &mut client_scan,
+                            &mut backend_idle,
+                            &mut statements,
+                            &mut statement_count,
+                        );
+                        // Whatever it sent, the client is now waiting on the
+                        // backend even if the scanner could not classify it.
+                        backend_idle = false;
                         if upstream_tx.write_all(&client_buf[..n]).await.is_err() {
                             break "upstream_closed";
                         }
@@ -1956,8 +2543,15 @@ async fn splice<C>(
                 },
                 read = upstream_rx.read(&mut upstream_buf) => match read {
                     Ok(n) if n > 0 => {
-                        idle_deadline = tokio::time::Instant::now() + idle;
                         session.bytes_down.fetch_add(n as u64, Ordering::Relaxed);
+                        upstream_scan.feed(&upstream_buf[..n], |tag, _| {
+                            if tag == b'Z' {
+                                backend_idle = true;
+                            }
+                        });
+                        if backend_idle {
+                            idle_deadline = tokio::time::Instant::now() + idle;
+                        }
                         if client_tx.write_all(&upstream_buf[..n]).await.is_err() {
                             break "client_closed";
                         }
@@ -1968,9 +2562,19 @@ async fn splice<C>(
         },
     };
 
+    // A broker-initiated teardown is not a crashed database, and a bare EOF
+    // cannot say which it was. 57P01 (admin_shutdown) is what libpq and every
+    // driver already recognize, so the reason arrives as a real error rather
+    // than only in the activity log the client cannot read.
+    if matches!(reason, "closed_by_user" | "session_ttl" | "idle_timeout") {
+        let _ = client_tx
+            .write_all(&error_response("FATAL", "57P01", &format!("AKA: {reason}")))
+            .await;
+    }
     // Tear down both legs whatever the reason.
     let _ = client_tx.shutdown().await;
     let _ = upstream_tx.shutdown().await;
+    audit.finish(statements, statement_count);
     session.finish(reason);
 }
 
@@ -2015,6 +2619,174 @@ mod tests {
         assert_eq!(out.len(), 35);
         // Deterministic.
         assert_eq!(out, md5_password("app", b"secret", &[1, 2, 3, 4]));
+    }
+
+    /// PG-3: a configured bundle is the *whole* trust store. Appending it to
+    /// the public roots would leave any of ~150 public CAs able to satisfy a
+    /// `verify-full` pin set precisely to exclude them.
+    #[test]
+    fn a_configured_ca_bundle_replaces_the_public_roots() {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(vec!["ca.example".to_string()]).unwrap();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca = params.self_signed(&key).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = dir.path().join("ca.pem");
+        std::fs::write(&bundle, ca.pem()).unwrap();
+
+        let public = root_cert_store(None).unwrap();
+        assert_eq!(public.roots.len(), webpki_roots::TLS_SERVER_ROOTS.len());
+        assert!(public.roots.len() > 1, "sanity: the webpki set is not tiny");
+
+        let pinned = root_cert_store(Some(bundle.to_str().unwrap())).unwrap();
+        assert_eq!(
+            pinned.roots.len(),
+            1,
+            "the bundle is the entire trust store, not an addition to it"
+        );
+        for anchor in &public.roots {
+            assert!(
+                !pinned.roots.contains(anchor),
+                "a public root survived into a pinned store"
+            );
+        }
+
+        // An empty or whitespace path is "not configured", not "trust nothing".
+        assert_eq!(
+            root_cert_store(Some("   ")).unwrap().roots.len(),
+            webpki_roots::TLS_SERVER_ROOTS.len()
+        );
+    }
+
+    /// PG-6: RFC 5929 takes the binding hash from the certificate's own
+    /// signature algorithm. A SHA-384-signed certificate binds with SHA-384,
+    /// and hard-coding SHA-256 fails `SCRAM-SHA-256-PLUS` against a server
+    /// that computed it correctly.
+    #[test]
+    fn channel_binding_follows_the_certificate_signature_algorithm() {
+        let cases: [(&rcgen::SignatureAlgorithm, usize); 3] = [
+            (&rcgen::PKCS_ECDSA_P256_SHA256, 32),
+            (&rcgen::PKCS_ECDSA_P384_SHA384, 48),
+            (&rcgen::PKCS_ED25519, 64),
+        ];
+        for (algorithm, expected) in cases {
+            let key = rcgen::KeyPair::generate_for(algorithm).unwrap();
+            let params = rcgen::CertificateParams::new(vec!["db.example".to_string()]).unwrap();
+            let cert = params.self_signed(&key).unwrap();
+            assert_eq!(
+                channel_binding_hash(cert.der()).len(),
+                expected,
+                "wrong digest width for {algorithm:?}"
+            );
+        }
+    }
+
+    /// The DER walk must fail closed: garbage yields "unknown algorithm" (and
+    /// so SHA-256), never a panic or an out-of-bounds read.
+    #[test]
+    fn signature_algorithm_parsing_refuses_malformed_der() {
+        for bytes in [
+            &b""[..],
+            &[0x30][..],
+            &[0x30, 0x82][..],
+            &[0x30, 0x03, 0x02, 0x01, 0x00][..],
+            &[0x02, 0x01, 0x00][..],
+            &[0x30, 0x7f, 0xff, 0xff][..],
+        ] {
+            assert!(signature_algorithm_oid(bytes).is_none(), "{bytes:02x?}");
+            assert_eq!(channel_binding_hash(bytes).len(), 32);
+        }
+    }
+
+    /// The scanner is the input to both the idle-timeout decision and the
+    /// statement audit, so its framing has to survive arbitrary chunking.
+    #[test]
+    fn the_frame_scanner_tracks_boundaries_across_split_reads() {
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&frame(b'Q', b"SELECT 1\x00"));
+        stream.extend_from_slice(&frame(b'Z', b"I"));
+        stream.extend_from_slice(&frame(b'P', b"stmt\x00SELECT 2\x00\x00\x00"));
+
+        // Every split point must yield the same messages.
+        for chunk in 1..=stream.len() {
+            let mut scanner = FrameScanner::new();
+            let mut seen = Vec::new();
+            for piece in stream.chunks(chunk) {
+                scanner.feed(piece, |tag, peek| seen.push((tag, peek.to_vec())));
+            }
+            assert!(scanner.aligned, "chunk size {chunk} lost alignment");
+            let tags: Vec<u8> = seen.iter().map(|(tag, _)| *tag).collect();
+            assert_eq!(tags, vec![b'Q', b'Z', b'P'], "chunk size {chunk}");
+            assert_eq!(
+                statement_text(seen[0].0, &seen[0].1).as_deref(),
+                Some("SELECT 1")
+            );
+            assert_eq!(statement_text(seen[1].0, &seen[1].1), None, "Z is not SQL");
+            assert_eq!(
+                statement_text(seen[2].0, &seen[2].1).as_deref(),
+                Some("SELECT 2")
+            );
+        }
+    }
+
+    /// A payload larger than the peek cap must still be framed exactly — the
+    /// scanner tracks the boundary past what it retains, so a multi-megabyte
+    /// COPY frame cannot desynchronize it or be buffered whole.
+    #[test]
+    fn the_frame_scanner_bounds_what_it_retains_without_losing_the_boundary() {
+        let big = vec![b'x'; SCAN_PEEK_CAP * 3];
+        let mut stream = frame(b'd', &big);
+        stream.extend_from_slice(&frame(b'Z', b"I"));
+
+        let mut scanner = FrameScanner::new();
+        let mut seen = Vec::new();
+        for piece in stream.chunks(7) {
+            scanner.feed(piece, |tag, peek| seen.push((tag, peek.len())));
+        }
+        assert!(scanner.aligned);
+        assert_eq!(seen, vec![(b'd', SCAN_PEEK_CAP), (b'Z', 1)]);
+    }
+
+    /// A length field the protocol cannot produce means the scanner is not
+    /// where it thinks it is. It must stop observing rather than report
+    /// garbage — and the splice keeps forwarding bytes either way.
+    #[test]
+    fn the_frame_scanner_stops_when_it_loses_alignment() {
+        let mut scanner = FrameScanner::new();
+        let mut seen = 0usize;
+        // A self-inclusive length below 4 is impossible.
+        scanner.feed(&[b'Q', 0, 0, 0, 1], |_, _| seen += 1);
+        assert!(!scanner.aligned);
+        scanner.feed(&frame(b'Q', b"SELECT 1\x00"), |_, _| seen += 1);
+        assert_eq!(seen, 0, "a desynced scanner must stay quiet");
+    }
+
+    /// Statement text reaches a durable log the user reads, so it is bounded
+    /// and stripped of characters that could rewrite what it appears to say.
+    #[test]
+    fn statement_text_is_bounded_and_scrubbed() {
+        let long = format!("SELECT '{}'\x00", "a".repeat(5_000));
+        let text = statement_text(b'Q', long.as_bytes()).unwrap();
+        assert!(text.chars().count() <= 401, "{}", text.chars().count());
+        assert!(text.ends_with('…'));
+
+        let sneaky = "SELECT 1\u{202E}DROP TABLE t\x00";
+        let text = statement_text(b'Q', sneaky.as_bytes()).unwrap();
+        assert!(
+            !text.contains('\u{202E}'),
+            "bidi override survived: {text:?}"
+        );
+
+        // A Parse whose SQL was cut off by the peek cap still reports what it
+        // saw rather than dropping the statement entirely.
+        assert_eq!(
+            statement_text(b'P', b"stmt\x00SELECT unterminated").as_deref(),
+            Some("SELECT unterminated")
+        );
+        // Nothing to say about a statement-less frame.
+        assert_eq!(statement_text(b'B', b"whatever"), None);
+        assert_eq!(statement_text(b'Q', b"   \x00"), None);
     }
 
     #[test]
