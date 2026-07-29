@@ -382,6 +382,45 @@ pub(crate) fn spawn_refresh_sweeper(broker: &Arc<Broker>) {
             let Some(broker) = weak.upgrade() else { return };
             let now = Utc::now();
             for connection in broker.store.list_connections() {
+                // BYO-OAuth (`Api { oauth: Some(_) }`) keeps its token set in a
+                // secret rather than in `connection.oauth`, so `wants_refresh`
+                // cannot see it and these connections refreshed only when an
+                // agent happened to call them. Providers that expire a refresh
+                // token after N idle days therefore killed the connection
+                // silently. `fresh_bearer` checks staleness itself and returns
+                // the cached token untouched when there is nothing to do.
+                if matches!(
+                    &connection.config,
+                    crate::types::ConnectionConfig::Api { oauth: Some(_), .. }
+                ) {
+                    if parked.contains(&(connection.id, None)) {
+                        continue;
+                    }
+                    if retry_after.get(&connection.id).is_some_and(|at| now < *at) {
+                        continue;
+                    }
+                    // Pre-authorized: the broker is renewing a grant it already
+                    // holds, on a timer, and discards the value. A background
+                    // sweep must never put a native sheet on screen.
+                    let outcome = crate::authorization::scope(
+                        true,
+                        crate::oauth::fresh_bearer(&broker.store, &broker.http_client, &connection),
+                    )
+                    .await;
+                    match outcome {
+                        Ok(_) => {
+                            retry_after.remove(&connection.id);
+                        }
+                        Err(failure) if failure.needs_reconnect() => {
+                            // Only a new sign-in helps; stop asking.
+                            parked.insert((connection.id, None));
+                        }
+                        Err(_) => {
+                            retry_after.insert(connection.id, now + RETRY_BACKOFF);
+                        }
+                    }
+                    continue;
+                }
                 if !wants_refresh(&connection) {
                     continue;
                 }

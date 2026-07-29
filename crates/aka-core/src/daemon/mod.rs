@@ -481,6 +481,7 @@ pub fn router(broker: Arc<Broker>) -> Router {
 
 pub fn router_for(broker: Arc<Broker>, transport: Transport) -> Router {
     let body_cap = broker.config.request_cap;
+    let control_cap = broker.config.control_plane_request_cap;
     Router::new()
         .nest("/v1/manage", manage::router())
         .route("/.well-known/agent-broker.json", get(get_manifest))
@@ -488,7 +489,14 @@ pub fn router_for(broker: Arc<Broker>, transport: Transport) -> Router {
         .route("/v1/pair", post(post_pair))
         .route("/v1/connections", get(get_connections))
         .route("/v1/whoami", get(get_whoami))
-        .route("/v1/http", post(post_http))
+        // The JSON-envelope plane is buffered end to end, so it gets its own,
+        // much smaller transport limit rather than riding the endpoint plane's.
+        .route(
+            "/v1/http",
+            post(post_http).layer(DefaultBodyLimit::max(
+                control_cap + control_cap / 2 + 64 * 1024,
+            )),
+        )
         .route("/v1/elicit", post(post_elicit))
         .route("/v1/connect-requests", post(post_connect_request))
         .route("/v1/pg/open", post(post_pg_open))
@@ -975,11 +983,15 @@ async fn post_http(
             }
         }
     };
-    if body_bytes.len() > broker.config.request_cap {
+    if body_bytes.len() > broker.config.control_plane_request_cap {
         return err_detail(
             StatusCode::PAYLOAD_TOO_LARGE,
             ErrorReason::RequestTooLarge,
-            format!("request body cap is {} bytes", broker.config.request_cap),
+            format!(
+                "request body cap on /v1/http is {} bytes; larger uploads go \
+                 through this connection's direct endpoint, which streams",
+                broker.config.control_plane_request_cap
+            ),
         );
     }
 

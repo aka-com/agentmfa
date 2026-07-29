@@ -192,7 +192,9 @@ pub async fn exchange_code(
     if let Some(secret) = client_secret.as_deref() {
         form.push(("client_secret", secret));
     }
-    let response = token_request(http, &spec.token_url, &form).await?;
+    let response = token_request(http, &spec.token_url, &form)
+        .await
+        .map_err(|e| e.message().to_string())?;
     parse_token_response(
         &response,
         client_secret.as_deref().map(String::as_str),
@@ -386,7 +388,7 @@ async fn token_request(
     http: &reqwest::Client,
     token_url: &str,
     form: &[(&str, &str)],
-) -> Result<String, String> {
+) -> Result<String, RefreshFailure> {
     let url = Url::parse(token_url).map_err(|_| "the token URL is not a valid URL".to_string())?;
     require_https_or_loopback(&url, "token")?;
     let response = http
@@ -410,16 +412,68 @@ async fn token_request(
             .ok()
             .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
             .unwrap_or_default();
-        return Err(format!(
+        let message = format!(
             "the token endpoint answered HTTP {status}{}",
             if code.is_empty() {
                 String::new()
             } else {
                 format!(" ({code})")
             }
-        ));
+        );
+        // A 4xx is the grant itself being refused — `invalid_grant`, a revoked
+        // client — and replaying it cannot succeed. Anything else may be a
+        // passing outage. The distinction is the whole point: without it a 30
+        // second blip told the user to re-consent, and a spent token was left in
+        // the vault so every later call fired another doomed token request.
+        return Err(if status.is_client_error() {
+            RefreshFailure::Rejected(message)
+        } else {
+            RefreshFailure::Transient(message)
+        });
     }
     Ok(body)
+}
+
+/// Why a BYO-OAuth bearer could not be produced.
+///
+/// The same three-way split `mcp_refresh` uses for broker-managed grants, for
+/// the same reasons: only `Rejected` should steer the user to reconnect, and
+/// only `Rejected` retires the stored refresh token.
+#[derive(Debug, Clone)]
+pub enum RefreshFailure {
+    /// Nothing to refresh with, or an unreadable record: only a new sign-in
+    /// helps.
+    NotRefreshable(String),
+    /// The provider refused the refresh token. It is retired on the way out.
+    Rejected(String),
+    /// Network or server trouble; the credential is probably still good.
+    Transient(String),
+}
+
+impl RefreshFailure {
+    pub fn message(&self) -> &str {
+        match self {
+            Self::NotRefreshable(m) | Self::Rejected(m) | Self::Transient(m) => m,
+        }
+    }
+
+    /// Whether this is conclusive about the connection, rather than about the
+    /// network on one attempt.
+    pub fn needs_reconnect(&self) -> bool {
+        matches!(self, Self::NotRefreshable(_) | Self::Rejected(_))
+    }
+}
+
+impl std::fmt::Display for RefreshFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+impl From<String> for RefreshFailure {
+    fn from(message: String) -> Self {
+        Self::Transient(message)
+    }
 }
 
 /// Parse a token endpoint response (JSON or form-encoded), folding in the
@@ -508,25 +562,25 @@ pub async fn fresh_bearer(
     store: &Arc<Store>,
     http: &reqwest::Client,
     connection: &Connection,
-) -> Result<SecretValue, String> {
-    let (spec, secret_id) = oauth_parts(connection)?;
+) -> Result<SecretValue, RefreshFailure> {
+    let (spec, secret_id) = oauth_parts(connection).map_err(RefreshFailure::NotRefreshable)?;
     let lock = crate::mcp_refresh::connection_lock(&connection.id);
     let _guard = lock.lock().await;
     let stored = store
         .secret_value(&secret_id)
         .await
-        .map_err(|e| e.to_string())?;
-    let tokens = TokenSet::from_secret_value(&stored)?;
+        .map_err(|e| RefreshFailure::Transient(e.to_string()))?;
+    let tokens = TokenSet::from_secret_value(&stored).map_err(RefreshFailure::NotRefreshable)?;
     if !tokens.needs_refresh() {
         return Ok(Zeroizing::new(tokens.access_token));
     }
     let Some(refresh_token) = tokens.refresh_token.as_deref() else {
-        // Expired with nothing to refresh with: surface reconnect language,
-        // the caller records NeedsReconnect health.
-        return Err(
-            "the OAuth access token expired and no refresh token was granted; reconnect this tool"
+        // Expired with nothing to refresh with: only a new sign-in helps.
+        return Err(RefreshFailure::NotRefreshable(
+            "the OAuth access token expired and no refresh token was granted; \
+             reconnect this tool"
                 .into(),
-        );
+        ));
     };
     let mut form: Vec<(&str, &str)> = vec![
         ("grant_type", "refresh_token"),
@@ -536,16 +590,43 @@ pub async fn fresh_bearer(
     if let Some(secret) = tokens.client_secret.as_deref() {
         form.push(("client_secret", secret));
     }
-    let body = token_request(http, &spec.token_url, &form).await?;
+    let body = match token_request(http, &spec.token_url, &form).await {
+        Ok(body) => body,
+        Err(failure) => {
+            if matches!(failure, RefreshFailure::Rejected(_)) {
+                // The provider refused this refresh token, so it is spent.
+                // Leaving it in the vault made every subsequent call fire
+                // another token request with the same dead grant — a
+                // self-inflicted hot loop against the provider that can get the
+                // client id throttled or blocked. Drop it and keep the (now
+                // unusable) access token, so the next call fails fast with
+                // reconnect language instead.
+                let retired = TokenSet {
+                    refresh_token: None,
+                    ..tokens.clone()
+                };
+                if let Err(e) = store.replace_secret_value(&secret_id, retired.to_secret_value()) {
+                    tracing::warn!(
+                        "could not retire the rejected refresh token for {}: {e}",
+                        connection.name
+                    );
+                }
+            }
+            return Err(failure);
+        }
+    };
     let refreshed = parse_token_response(
         &body,
         tokens.client_secret.as_deref(),
         tokens.refresh_token.as_deref(),
-    )?;
+    )
+    .map_err(RefreshFailure::Rejected)?;
     let access = refreshed.access_token.clone();
     store
         .replace_secret_value(&secret_id, refreshed.to_secret_value())
-        .map_err(|e| format!("could not persist the refreshed token: {e}"))?;
+        .map_err(|e| {
+            RefreshFailure::Transient(format!("could not persist the refreshed token: {e}"))
+        })?;
     Ok(Zeroizing::new(access))
 }
 

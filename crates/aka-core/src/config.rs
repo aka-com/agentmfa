@@ -33,8 +33,18 @@ pub struct BrokerConfig {
     pub upstream_operation_timeout: Duration,
     /// Response body cap (default 10 MB).
     pub response_cap: usize,
-    /// Request body cap (default 150 MB).
+    /// Request body cap on the *direct endpoint* plane, which streams the body
+    /// to a spool file (default 150 MB).
     pub request_cap: usize,
+    /// Request body cap on `POST /v1/http` (default 8 MB).
+    ///
+    /// Deliberately far below `request_cap`: that plane takes the body inside a
+    /// JSON envelope, so axum buffers the whole thing, `serde` materializes it
+    /// again as a `Value`, and the decoded copy is a third — roughly three times
+    /// the wire size resident before the spool threshold is even consulted, with
+    /// no bound on how many calls do it at once. Large uploads belong on the
+    /// direct endpoint, which streams.
+    pub control_plane_request_cap: usize,
     /// Request bodies past this are spooled to a temp file rather than held
     /// in memory while parked.
     pub spool_threshold: usize,
@@ -157,6 +167,7 @@ impl Default for BrokerConfig {
             upstream_operation_timeout: Duration::from_secs(120),
             response_cap: 10 * 1024 * 1024,
             request_cap: 150 * 1024 * 1024,
+            control_plane_request_cap: 8 * 1024 * 1024,
             spool_threshold: 2 * 1024 * 1024,
             endpoint_global_uploads: 16,
             endpoint_uploads_per_listener: 4,

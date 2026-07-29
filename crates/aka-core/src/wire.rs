@@ -108,6 +108,11 @@ pub enum ErrorReason {
     UpstreamConnectFailed,
     ResponseTooLarge,
     CredentialRenderFailed,
+    /// The credential exists but could not be renewed *right now* — the token
+    /// endpoint was unreachable or answered 5xx. Distinct from
+    /// `credential_render_failed`, which is conclusive about the connection:
+    /// this one says retry, not reconnect.
+    CredentialRefreshUnavailable,
     SshAgentOpenFailed,
     /// The endpoint exists on another transport but is not served on the
     /// one the request arrived on (pairing over TCP).
@@ -124,7 +129,7 @@ pub enum ErrorReason {
 
 impl ErrorReason {
     /// Every registered reason, for exhaustiveness checks and docs.
-    pub const ALL: [ErrorReason; 41] = [
+    pub const ALL: [ErrorReason; 42] = [
         ErrorReason::MissingToken,
         ErrorReason::InvalidToken,
         ErrorReason::TokenExpired,
@@ -158,6 +163,7 @@ impl ErrorReason {
         ErrorReason::UpstreamConnectFailed,
         ErrorReason::ResponseTooLarge,
         ErrorReason::CredentialRenderFailed,
+        ErrorReason::CredentialRefreshUnavailable,
         ErrorReason::SshAgentOpenFailed,
         ErrorReason::NotServedRemotely,
         ErrorReason::McpUnavailable,
@@ -203,6 +209,7 @@ impl ErrorReason {
             ErrorReason::UpstreamConnectFailed => "upstream_connect_failed",
             ErrorReason::ResponseTooLarge => "response_too_large",
             ErrorReason::CredentialRenderFailed => "credential_render_failed",
+            ErrorReason::CredentialRefreshUnavailable => "credential_refresh_unavailable",
             ErrorReason::SshAgentOpenFailed => "ssh_agent_open_failed",
             ErrorReason::NotServedRemotely => "not_served_remotely",
             ErrorReason::McpUnavailable => "mcp_unavailable",

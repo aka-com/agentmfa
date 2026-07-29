@@ -79,6 +79,12 @@ const DENYLIST: &[&str] = &[
     "te",
     "trailer",
     "expect",
+    // Nothing here can decompress: reqwest is built without `gzip`/`brotli`,
+    // so a compressed body would be relayed as opaque base64 the agent cannot
+    // read and `apply_to_bytes` cannot scrub a reflected credential out of.
+    // The direct endpoint plane already strips both; this is the same rule.
+    "accept-encoding",
+    "content-encoding",
 ];
 
 pub fn is_mutating(method: &Method) -> bool {
@@ -172,6 +178,17 @@ pub fn validate_path(path: &str) -> Result<(), HttpValidationError> {
 /// Validate agent-supplied headers against grammar + denylist. The injected
 /// credential header name (if the template is a header form) joins the
 /// denylist. Returns the parsed header map.
+/// Headers an agent may never set on an API call, whatever the connection's
+/// injection form.
+///
+/// `authorization` is here rather than derived from the template because it was
+/// only reserved when the template *happened* to inject it: a query-form or
+/// credential-less connection let the agent's own `Authorization` through to be
+/// attached upstream, which is both a credential the broker did not choose and
+/// (for an agent sending its broker token) a leak of the pairing key to a third
+/// party. The endpoint plane strips it unconditionally; this is the same rule.
+const ALWAYS_RESERVED: &[&str] = &["authorization"];
+
 pub fn validate_headers(
     headers: &[(String, String)],
     credential_header: Option<&str>,
@@ -180,6 +197,7 @@ pub fn validate_headers(
     for (name, value) in headers {
         let lower = name.to_ascii_lowercase();
         if DENYLIST.contains(&lower.as_str())
+            || ALWAYS_RESERVED.contains(&lower.as_str())
             || credential_header.is_some_and(|c| c.eq_ignore_ascii_case(&lower))
         {
             return Err(HttpValidationError::ReservedHeader(name.clone()));
@@ -304,9 +322,20 @@ impl Redactions {
                 if let Ok(value) = value.to_str() {
                     redactions.add(value);
                     redactions.add(format!("{}: {value}", name.as_str()));
-                    for part in value.split(|c: char| c.is_ascii_whitespace()) {
-                        redactions.add_component(part);
-                    }
+                    // Only the credential, never the auth-scheme word in front
+                    // of it. Splitting `Bearer <token>` into components and
+                    // adding both made the literal `Bearer` a needle, so every
+                    // occurrence in every relayed body and header was rewritten
+                    // to `[REDACTED]` — corrupting OpenAPI documents, MCP tool
+                    // descriptions, and `WWW-Authenticate: Bearer realm=…`,
+                    // none of which contain the secret. The credential is
+                    // everything after the scheme word; a value with no space
+                    // is itself the credential.
+                    let credential = value
+                        .split_once(|c: char| c.is_ascii_whitespace())
+                        .map(|(_scheme, rest)| rest.trim_start())
+                        .unwrap_or(value);
+                    redactions.add_component(credential);
                 }
             }
             RenderedInjection::Query(fragment) => {
@@ -513,21 +542,47 @@ impl HttpExecution {
             ),
             Some(_) => health.record_ok_if_changed(&id, "A brokered call reached the destination"),
             None => {
-                let oauth = matches!(
-                    &self.connection.config,
-                    ConnectionConfig::Api { oauth: Some(_), .. }
-                );
-                let render_failed = outcome
-                    .body
-                    .get("reason")
-                    .and_then(|r| r.as_str())
-                    .is_some_and(|r| r == "credential_render_failed");
-                if oauth && render_failed {
+                // A credential that cannot be rendered is conclusive about the
+                // connection whatever kind it is: a malformed template, a
+                // missing secret, or a failed vault read fails every call, not
+                // just this one. Gating this on `oauth` left a plain API
+                // connection returning 502 forever while the app showed `Ok`.
+                let reason = outcome.body.get("reason").and_then(|r| r.as_str());
+                // A refresh the *network* prevented is not conclusive: the
+                // credential is probably still good, so this reports a failure
+                // to reach the destination rather than telling the user to
+                // re-consent a working connection.
+                if reason == Some("credential_refresh_unavailable") {
                     let detail = outcome
                         .body
                         .get("detail")
                         .and_then(|d| d.as_str())
-                        .unwrap_or("The OAuth token could not be refreshed");
+                        .unwrap_or("The OAuth token could not be renewed just now");
+                    health.record_if_changed(
+                        &id,
+                        crate::types::HealthStatus::Failed,
+                        detail.to_string(),
+                    );
+                    return;
+                }
+                let render_failed = reason.is_some_and(|r| {
+                    r == "credential_render_failed" || r == "bad_connection_config"
+                });
+                if render_failed {
+                    let oauth = matches!(
+                        &self.connection.config,
+                        ConnectionConfig::Api { oauth: Some(_), .. }
+                    );
+                    let fallback = if oauth {
+                        "The OAuth token could not be refreshed"
+                    } else {
+                        "The saved credential could not be prepared for this call"
+                    };
+                    let detail = outcome
+                        .body
+                        .get("detail")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or(fallback);
                     health.record(
                         &id,
                         crate::types::HealthStatus::NeedsReconnect,
@@ -566,7 +621,7 @@ impl HttpExecution {
         let injection =
             match render_connection_injection(&self.store, &self.client, &self.connection).await {
                 Ok(i) => i,
-                Err(e) => return broker_error(502, ErrorReason::CredentialRenderFailed, e),
+                Err(e) => return broker_error(502, e.reason, e.message),
             };
         let redactions = Redactions::from_injection(&injection);
 
@@ -728,7 +783,9 @@ pub async fn test_upstream(
         return Err("not an api connection".into());
     }
     let (scheme, host, port) = pinned_base(&connection.config).expect("api config");
-    let injection = render_connection_injection(store, client, connection).await?;
+    let injection = render_connection_injection(store, client, connection)
+        .await
+        .map_err(|e| TestError::from(e.message))?;
     let mut url =
         Url::parse(&format!("{scheme}://{host}/")).map_err(|e| format!("bad origin: {e}"))?;
     if url.set_port(port).is_err() {
@@ -774,19 +831,56 @@ pub async fn test_upstream(
 /// The credential for a connection's upstream leg: a fresh OAuth bearer
 /// for BYO-app OAuth connections (refreshing on expiry), the rendered
 /// injection template otherwise.
+/// Why a call's credential could not be produced, carrying the reason the
+/// caller should report.
+///
+/// The distinction matters because health is graded from it: a template that
+/// will not render, or a grant the provider has refused, is conclusive about the
+/// connection and should show "reconnect". A token endpoint that timed out is
+/// not — it used to be reported identically, so a 30-second outage told the user
+/// to re-consent a perfectly good connection.
+pub(crate) struct CredentialFailure {
+    pub message: String,
+    pub reason: ErrorReason,
+}
+
+impl From<String> for CredentialFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            reason: ErrorReason::CredentialRenderFailed,
+        }
+    }
+}
+
+impl std::fmt::Display for CredentialFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 pub(crate) async fn render_connection_injection(
     store: &Arc<Store>,
     client: &reqwest::Client,
     connection: &Connection,
-) -> Result<RenderedInjection, String> {
+) -> Result<RenderedInjection, CredentialFailure> {
     let ConnectionConfig::Api {
         template, oauth, ..
     } = &connection.config
     else {
-        return Err("not an api connection".into());
+        return Err("not an api connection".to_string().into());
     };
     if oauth.is_some() {
-        let token = crate::oauth::fresh_bearer(store, client, connection).await?;
+        let token = crate::oauth::fresh_bearer(store, client, connection)
+            .await
+            .map_err(|failure| CredentialFailure {
+                message: failure.message().to_string(),
+                reason: if failure.needs_reconnect() {
+                    ErrorReason::CredentialRenderFailed
+                } else {
+                    ErrorReason::CredentialRefreshUnavailable
+                },
+            })?;
         let mut value = HeaderValue::from_str(&format!("Bearer {}", &*token))
             .map_err(|_| "the stored access token is not a valid header value".to_string())?;
         value.set_sensitive(true);
@@ -795,7 +889,9 @@ pub(crate) async fn render_connection_injection(
             value,
         ));
     }
-    render_injection(store, template).await
+    // A template that will not render is conclusive about the connection, which
+    // is the `From<String>` default.
+    render_injection(store, template).await.map_err(Into::into)
 }
 
 pub(crate) async fn render_injection(
@@ -948,6 +1044,12 @@ struct HttpEndpointState {
     broker: Arc<Broker>,
     endpoint_id: Uuid,
     uploads: Arc<tokio::sync::Semaphore>,
+    /// Per-endpoint request budget. `/v1/http` charges `token_limiter` on every
+    /// call; this plane charged nothing, so its only bound was the upload
+    /// semaphores — a *concurrency* limit, which a fast serial client never
+    /// touches. Same budget as the control plane, so choosing the endpoint is
+    /// not a way to escape the rate limit.
+    requests: Arc<crate::ratelimit::KeyedLimiter>,
 }
 
 /// Bind a per-wiring HTTP reverse proxy on a loopback TCP port. An unmodified
@@ -979,6 +1081,10 @@ pub async fn bind_endpoint(
     let state = Arc::new(HttpEndpointState {
         uploads: Arc::new(tokio::sync::Semaphore::new(
             broker.config.endpoint_uploads_per_listener,
+        )),
+        requests: Arc::new(crate::ratelimit::KeyedLimiter::new(
+            broker.config.per_identity_per_min,
+            std::time::Duration::from_secs(60),
         )),
         broker,
         endpoint_id: endpoint.id,
@@ -1097,6 +1203,26 @@ async fn proxy_handler(
         );
     };
 
+    // Charged after authentication, so an unauthenticated prober cannot spend a
+    // legitimate holder's budget, and keyed on the endpoint so one endpoint
+    // cannot starve another.
+    if let Err(retry_after) = state.requests.check(&endpoint.id.to_string()) {
+        let mut response = endpoint_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            &format!(
+                "this endpoint's budget is {} requests per minute",
+                broker.config.per_identity_per_min
+            ),
+        );
+        // Machine-actionable in the header as well as the body, matching the
+        // control plane's contract.
+        if let Ok(value) = http::HeaderValue::from_str(&retry_after.as_secs().max(1).to_string()) {
+            response.headers_mut().insert("retry-after", value);
+        }
+        return response;
+    }
+
     // Authorization is enforced here, on every request, at connect time.
     if !broker.access.allows(&endpoint.connection_id) {
         return endpoint_error(
@@ -1120,7 +1246,41 @@ async fn proxy_handler(
         );
     }
 
-    let method = parts.method.clone();
+    // The endpoint is a base URL, not a forward proxy. A proxy-style request
+    // line carries the authority the client wants, and reading only the path
+    // out of it silently rewrote the request onto the pinned host — so setting
+    // `HTTP_PROXY` to this endpoint sent *every* host's traffic here with the
+    // real credential injected. `CONNECT host:443` has no path at all and
+    // would have been serviced as `/`.
+    if parts.method == Method::CONNECT {
+        return endpoint_error(
+            StatusCode::BAD_REQUEST,
+            "wrong_connection_type",
+            "this endpoint is a base URL for one pinned host, not a forward \
+             proxy; CONNECT is not served. Point your client's base URL at it \
+             instead of its proxy setting.",
+        );
+    }
+    if parts.uri.authority().is_some() {
+        return endpoint_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_path",
+            "this endpoint is a base URL for one pinned host, not a forward \
+             proxy; send an origin-form request (a path) rather than an \
+             absolute URL.",
+        );
+    }
+    // One allow-list for both planes: the control plane already refused
+    // anything outside it, while the endpoint forwarded TRACE, PROPFIND and
+    // PURGE to the pinned upstream with the credential attached.
+    let Ok(method) = parse_method(parts.method.as_str()) else {
+        return endpoint_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_method",
+            "unsupported method: use GET, HEAD, POST, PUT, PATCH, DELETE or \
+             OPTIONS",
+        );
+    };
     let path = parts
         .uri
         .path_and_query()

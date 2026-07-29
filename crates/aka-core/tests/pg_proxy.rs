@@ -767,12 +767,13 @@ async fn get_endpoint_reads_back_the_issued_address_without_rotating() {
     let conn = h.broker.store.connection_by_name("prod-db").unwrap();
 
     // No endpoint issued yet: the read is a clean absence, not an error.
-    assert!(h.broker.ui_get_endpoint(&conn.id).unwrap().is_none());
+    assert!(h.broker.ui_get_endpoint(&conn.id).await.unwrap().is_none());
 
     let issued = h.issue_endpoint().await;
     let read = h
         .broker
         .ui_get_endpoint(&conn.id)
+        .await
         .unwrap()
         .expect("endpoint should read back after issue");
 
@@ -784,7 +785,7 @@ async fn get_endpoint_reads_back_the_issued_address_without_rotating() {
     assert_eq!(read.example, issued.example);
 
     // A second read is stable: reading never rotates the secret.
-    let again = h.broker.ui_get_endpoint(&conn.id).unwrap().unwrap();
+    let again = h.broker.ui_get_endpoint(&conn.id).await.unwrap().unwrap();
     assert_eq!(again.secret, issued.secret);
 }
 
@@ -1427,6 +1428,7 @@ async fn the_tcp_endpoint_port_is_pinned_across_a_rebind() {
     let after = h
         .broker
         .ui_get_endpoint(&conn.id)
+        .await
         .unwrap()
         .expect("endpoint still issued")
         .tcp_dsn

@@ -506,10 +506,17 @@ pub struct DirectEndpoint {
     /// SHA-256 of the endpoint secret, hex-encoded; what presented secrets
     /// are matched against.
     pub secret_hash: String,
-    /// The plaintext endpoint secret, retained so the issued DSN stays
-    /// copyable with the credential in place. Empty on records persisted
-    /// before retention existed — reissuing populates it.
-    #[serde(default)]
+    /// The plaintext endpoint secret, kept in memory so the issuing call can
+    /// hand back a complete DSN.
+    ///
+    /// Never serialized: it lives in the vault under this endpoint's id, so
+    /// `endpoints.json` carries only `secret_hash`. It used to be written here
+    /// in the clear, which made the state file a second credential store that
+    /// any process running as the user — including the agents the broker exists
+    /// to keep secrets from — could read, and that survived uninstall. Legacy
+    /// records still *load* their plaintext (so a copy-back keeps working) and
+    /// shed it on the next write.
+    #[serde(default, skip_serializing)]
     pub secret: String,
     /// The loopback port an HTTP reverse-proxy endpoint is pinned to, so a
     /// pasted `http://…:<port>/…` base URL survives a broker restart. `None`

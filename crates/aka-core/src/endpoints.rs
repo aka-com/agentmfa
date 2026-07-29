@@ -12,7 +12,8 @@
 //! - **The secret is the capability.** A loopback port is reachable by any
 //!   local process, so the endpoint carries its own secret the caller presents
 //!   — deliberately not the shared broker key, so one pasted config can be
-//!   revoked alone. It is persisted only as a SHA-256 hash;
+//!   revoked alone. This file persists only a SHA-256 hash of it; the plaintext
+//!   lives in the vault under the endpoint's id, put there by the broker.
 //!   [`EndpointRegistry::resolve_secret`] is how a listener authenticates a
 //!   presented secret back to its endpoint.
 //! - **Revocation must be prompt and total.** Endpoints die with their
@@ -37,9 +38,11 @@ use crate::integrity::StateIntegrity;
 use crate::types::{ConnectionKind, DirectEndpoint};
 use crate::{CoreError, Result};
 
-/// A minted endpoint plus its plaintext secret. The secret is retained on
-/// the record, so a lost paste is recovered by copying the address again;
-/// reissuing rotates it.
+/// A minted endpoint plus its plaintext secret.
+///
+/// The caller parks the plaintext in the vault (keyed by the endpoint id) so a
+/// lost paste is recovered by copying the address again; reissuing rotates it.
+/// The registry itself persists only the hash.
 pub struct IssuedEndpoint {
     pub endpoint: DirectEndpoint,
     /// `end_` + 64 hex, embedded in the pasteable DSN/URL by the caller.
@@ -269,7 +272,7 @@ mod tests {
     }
 
     #[test]
-    fn issue_mints_a_prefixed_secret_retained_on_the_record() {
+    fn issue_mints_a_prefixed_secret_and_persists_only_its_hash() {
         let (r, dir) = registry();
         let conn = Uuid::new_v4();
         let issued = r.issue(conn, ConnectionKind::Pg).unwrap();
@@ -277,12 +280,42 @@ mod tests {
         assert_eq!(issued.secret.len(), 4 + 64);
         assert_eq!(issued.endpoint.secret_hash, hash_secret(&issued.secret));
 
-        // The plaintext is retained (deliberately — the copyable DSN carries
-        // it), alongside the hash the auth path matches against.
+        // In memory for the caller that has to build a pasteable address…
         assert_eq!(issued.endpoint.secret, issued.secret);
+        // …and never on disk. The state file is not a second credential store:
+        // anything running as this user could read it, it is not covered by the
+        // vault's protection, and it outlived uninstall.
         let on_disk = std::fs::read_to_string(dir.path().join("endpoints.json")).unwrap();
-        assert!(on_disk.contains(&issued.secret));
+        assert!(
+            !on_disk.contains(&issued.secret),
+            "the plaintext endpoint secret must not be persisted"
+        );
         assert!(on_disk.contains(&issued.endpoint.secret_hash));
+    }
+
+    /// A record written before the secret moved to the vault still loads its
+    /// plaintext, so a copy-back keeps working until the broker migrates it.
+    #[test]
+    fn a_legacy_record_still_loads_its_retained_plaintext() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("endpoints.json");
+        let integrity = integrity();
+        let secret = "end_legacy";
+        {
+            let r = EndpointRegistry::open(path.clone(), 64, integrity.clone()).unwrap();
+            let issued = r.issue(Uuid::new_v4(), ConnectionKind::Pg).unwrap();
+            // Rewrite the sealed file with the plaintext present, as the old
+            // format did.
+            let mut record = issued.endpoint.clone();
+            record.secret = secret.to_string();
+            let mut value = serde_json::to_value(vec![record]).unwrap();
+            value[0]["secret"] = serde_json::Value::String(secret.to_string());
+            integrity
+                .write(&path, serde_json::to_vec(&value).unwrap().as_slice())
+                .unwrap();
+        }
+        let reopened = EndpointRegistry::open(path, 64, integrity).unwrap();
+        assert_eq!(reopened.list()[0].secret, secret);
     }
 
     #[test]

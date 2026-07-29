@@ -103,6 +103,10 @@ pub struct Broker {
     pub config: BrokerConfig,
     pub paths: Paths,
     pub store: Arc<Store>,
+    /// The vault, retained beyond the store so endpoint secrets can live in it
+    /// rather than in plaintext on disk. They are not `Secret` records: they
+    /// have no index entry and never appear in the Secrets tab.
+    vault: Arc<dyn crate::vault::SecretVault>,
     /// Per-connection agent access: the whole authorization model.
     pub access: Arc<AccessTable>,
     /// Per-connection direct endpoints (stable DSN/URL issuance). Bounds and
@@ -245,7 +249,7 @@ impl Broker {
         }
         let store = Arc::new(Store::open_with_events(
             paths.clone(),
-            vault,
+            vault.clone(),
             events.clone(),
             integrity.clone(),
         )?);
@@ -310,6 +314,7 @@ impl Broker {
         let endpoint_uploads =
             Arc::new(tokio::sync::Semaphore::new(config.endpoint_global_uploads));
         let broker = Arc::new(Self {
+            vault,
             data_plane,
             approvals,
             elicitations,
@@ -1592,13 +1597,19 @@ impl Broker {
             }
         }
 
+        // Park the plaintext in the vault, keyed by the endpoint id. The state
+        // file keeps only the hash, so a copy-back still works after a restart
+        // without `endpoints.json` being a second credential store.
+        self.store_endpoint_secret(&issued.endpoint.id, &issued.secret);
+
         // Read back the just-persisted record so the API loopback port
-        // (assigned during bind) is present; the retained secret rides it too.
-        let record = self
+        // (assigned during bind) is present.
+        let mut record = self
             .endpoints
             .get(&issued.endpoint.id)
             .unwrap_or_else(|| issued.endpoint.clone());
-        let info = self.endpoint_info(&connection, &record)?;
+        record.secret = issued.secret.clone();
+        let info = self.endpoint_info(&connection, &record).await?;
         let mut entry = AuditEntry::new(
             AuditKind::Wired,
             format!("Direct endpoint issued: {}", connection.name),
@@ -1618,13 +1629,14 @@ impl Broker {
     /// retained secret, and a copy-ready example for an existing endpoint
     /// record. Shared by issuance and read-back so both present the identical
     /// address; performs no minting, gating, or listener work.
-    fn endpoint_info(
+    async fn endpoint_info(
         &self,
         connection: &Connection,
         endpoint: &DirectEndpoint,
     ) -> Result<IssuedEndpointInfo> {
         let dir = self.paths.endpoint_dir(&endpoint.id);
-        let secret = endpoint.secret.as_str();
+        let recovered = self.endpoint_secret(endpoint).await;
+        let secret = recovered.as_str();
         let info = match &connection.config {
             ConnectionConfig::Pg { user, dbname, .. } => {
                 // A pre-retention record (empty secret) prints the
@@ -1657,7 +1669,7 @@ impl Broker {
                     kind: ConnectionKind::Pg,
                     dsn,
                     tcp_dsn,
-                    secret: endpoint.secret.clone(),
+                    secret: recovered.clone(),
                     example,
                 }
             }
@@ -1698,7 +1710,7 @@ impl Broker {
                     dsn: base.clone(),
                     // The HTTP endpoint is already TCP; `dsn` is that address.
                     tcp_dsn: None,
-                    secret: endpoint.secret.clone(),
+                    secret: recovered.clone(),
                     // The secret rides an Authorization header, not the URL, so
                     // it stays out of argv and shell history; the proxy strips
                     // it and injects the real credential upstream.
@@ -1716,12 +1728,50 @@ impl Broker {
     /// secret without minting or rotating; `None` when none is issued for the
     /// connection. Unlike issuance this is a read of already-surfaced state,
     /// so it takes no native gate — it grants nothing the issue did not.
-    pub fn ui_get_endpoint(&self, connection_id: &Uuid) -> Result<Option<IssuedEndpointInfo>> {
+    pub async fn ui_get_endpoint(
+        &self,
+        connection_id: &Uuid,
+    ) -> Result<Option<IssuedEndpointInfo>> {
         let connection = self.store.connection_by_id(connection_id)?;
         let Some(endpoint) = self.endpoints.get_for_connection(connection_id) else {
             return Ok(None);
         };
-        self.endpoint_info(&connection, &endpoint).map(Some)
+        self.endpoint_info(&connection, &endpoint).await.map(Some)
+    }
+
+    /// The vault item holding one endpoint's plaintext secret.
+    ///
+    /// Keyed by the endpoint's own id: there is no `Secret` index entry, so it
+    /// never appears in the Secrets tab, and revoking the endpoint removes it.
+    fn store_endpoint_secret(&self, endpoint_id: &Uuid, secret: &str) {
+        let attrs = crate::vault::VaultAttrs {
+            name: format!("endpoint:{endpoint_id}"),
+            created_at: chrono::Utc::now(),
+        };
+        if let Err(error) = self.vault.set(
+            endpoint_id,
+            &attrs,
+            &zeroize::Zeroizing::new(secret.to_string()),
+        ) {
+            // Not fatal: the endpoint works (its hash is what authenticates),
+            // only the copy-back affordance is lost.
+            tracing::warn!("could not store the endpoint secret in the vault: {error}");
+        }
+    }
+
+    /// The plaintext for an endpoint, for rebuilding a pasteable address.
+    /// Empty when it cannot be recovered, which renders a password-less form.
+    async fn endpoint_secret(&self, endpoint: &DirectEndpoint) -> String {
+        // A legacy record still carrying its plaintext is used as-is and
+        // migrated into the vault, so the next read comes from there.
+        if !endpoint.secret.is_empty() {
+            self.store_endpoint_secret(&endpoint.id, &endpoint.secret);
+            return endpoint.secret.clone();
+        }
+        match self.vault.get(&endpoint.id).await {
+            Ok(value) => value.to_string(),
+            Err(_) => String::new(),
+        }
     }
 
     /// Revoke one direct endpoint: drop the record, stop its listener, and
@@ -1731,6 +1781,7 @@ impl Broker {
         let Some(endpoint) = self.endpoints.revoke(endpoint_id)? else {
             return Ok(false);
         };
+        let _ = self.vault.delete(&endpoint.id);
         self.teardown_endpoints(std::slice::from_ref(&endpoint));
         let connection = self
             .store

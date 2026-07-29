@@ -1333,7 +1333,8 @@ impl ManagementBackend for LocalBackend {
     async fn get_endpoint(&self, connection_id: Uuid) -> ManageResult<Option<IssuedEndpointDto>> {
         Ok(self
             .broker
-            .ui_get_endpoint(&connection_id)?
+            .ui_get_endpoint(&connection_id)
+            .await?
             .map(issued_endpoint_dto))
     }
 
