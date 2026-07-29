@@ -270,12 +270,13 @@ impl Broker {
         // rather than inheriting the new enabled-by-default.
         let known_connections: Vec<Uuid> =
             store.list_connections().into_iter().map(|c| c.id).collect();
-        let access = Arc::new(AccessTable::open_with_legacy_policy(
+        let access = Arc::new(AccessTable::open_with_legacy_policy_and_generation(
             paths.access_file(),
             Some(&paths.wirings_file()),
             Some(&paths.rules_file()),
             &known_connections,
             integrity.clone(),
+            Some(store.clone()),
         )?);
         let executions = Executions::new(
             config.outcome_retention,
@@ -2240,17 +2241,26 @@ impl Broker {
 
     /// Rotate this computer's key: mint a fresh one, rewrite the token
     /// file, clear the migration aliases, and close every outstanding
-    /// data-plane capability. This is the "disconnect everything" action —
-    /// agents that read the token file reconnect on their own; anything
-    /// holding a pasted copy stops working. The single native sheet is both
-    /// the warning and the gate: its reason text carries the consequences,
-    /// so no separate dialog precedes it.
+    /// data-plane capability, including standing direct endpoints. This is
+    /// the "disconnect everything" action — agents that read the token file
+    /// reconnect on their own; pasted endpoint addresses must be reissued.
+    /// The single native sheet is both the warning and the gate: its reason
+    /// text carries the consequences, so no separate dialog precedes it.
     pub fn ui_rotate_key(&self) -> Result<()> {
         let confirmation = self.confirm_action(
             "rotate this computer's key — every live agent session closes now, \
              and agents reconnect on their own from the key file",
         )?;
         let _gate = self.config_gate.lock().unwrap();
+        // Revoke standing capabilities before rotating the shared identity.
+        // If a persistence error interrupts the operation, failing with fewer
+        // live capabilities is safer than leaving an endpoint usable after a
+        // successful identity rotation.
+        let endpoints = self.endpoints.revoke_all()?;
+        for endpoint in &endpoints {
+            let _ = self.vault.delete(&endpoint.id);
+        }
+        self.teardown_endpoints(&endpoints);
         self.identity.rotate()?;
         let sessions_closed = self.data_plane.close_all();
         // An approval window is permission for traffic from the generation
@@ -2262,7 +2272,8 @@ impl Broker {
                 "Key rotated; all agents disconnected".to_string(),
             )
             .confirmation(confirmation)
-            .field("sessions_closed", sessions_closed),
+            .field("sessions_closed", sessions_closed)
+            .field("endpoints_revoked", endpoints.len()),
         );
         self.events.agents_changed();
         Ok(())
@@ -2280,6 +2291,22 @@ impl Broker {
         Ok(self.data_plane.close_session(id))
     }
 
+    /// Clear the audit log only after a fresh full-authority confirmation,
+    /// then leave a tombstone as the first entry in the new chain.
+    pub fn ui_clear_activity(&self) -> Result<()> {
+        let confirmation =
+            self.confirm_action("Clear AgentMFA activity history and restart its audit chain")?;
+        let removed = self.audit.recent(usize::MAX).len();
+        self.audit.clear()?;
+        self.audit.append(
+            AuditEntry::new(AuditKind::ActivityCleared, "Activity history cleared")
+                .confirmation(confirmation)
+                .field("entries_removed", removed)
+                .field("surface", "management"),
+        );
+        Ok(())
+    }
+
     /* ----------------------------- settings ------------------------------- */
 
     pub fn settings(&self) -> Settings {
@@ -2287,13 +2314,29 @@ impl Broker {
     }
 
     pub fn ui_change_reauth_on_read(&self, on: bool) -> Result<()> {
-        if !on {
+        let old = self.store.settings().reauth_on_read;
+        if old == on {
+            return Ok(());
+        }
+        let confirmation = if !on {
             // Weakening the read gate always re-prompts; the presence window
             // does not cover it.
-            self.confirm_action("Disable OS authentication requirement for reading secrets")?;
-        }
+            Some(self.confirm_action("Disable OS authentication requirement for reading secrets")?)
+        } else {
+            None
+        };
         self.store.set_reauth_on_read(on)?;
         self.store.clear_user_presence();
+        self.audit.append(
+            AuditEntry::new(
+                AuditKind::SettingsChanged,
+                "Setting changed: require authentication to read secrets",
+            )
+            .field("setting", "reauth_on_read")
+            .field("old", old)
+            .field("new", on)
+            .maybe_confirmation(confirmation),
+        );
         Ok(())
     }
 
@@ -2305,16 +2348,44 @@ impl Broker {
                 "presence window must be 900, 3600, or 7200 seconds, got {secs}"
             )));
         }
-        self.confirm_user_action("Change how long AgentMFA stays unlocked")?;
+        let old = self.store.settings().presence_window_secs;
+        if old == secs {
+            return Ok(());
+        }
+        let confirmation = self.confirm_user_action("Change how long AgentMFA stays unlocked")?;
         self.store.set_presence_window_secs(secs)?;
         // Re-anchor the just-confirmed window so a shortened length takes
         // effect now instead of at the old deadline.
         self.store.reanchor_presence();
+        self.audit.append(
+            AuditEntry::new(
+                AuditKind::SettingsChanged,
+                "Setting changed: presence window",
+            )
+            .field("setting", "presence_window_secs")
+            .field("old", old)
+            .field("new", secs)
+            .confirmation(confirmation),
+        );
         Ok(())
     }
 
     pub fn ui_set_menu_bar_hides_dock(&self, on: bool) -> Result<()> {
-        self.store.set_menu_bar_hides_dock(on)
+        let old = self.store.settings().menu_bar_hides_dock;
+        if old == on {
+            return Ok(());
+        }
+        self.store.set_menu_bar_hides_dock(on)?;
+        self.audit.append(
+            AuditEntry::new(
+                AuditKind::SettingsChanged,
+                "Setting changed: hide Dock icon in menu-bar mode",
+            )
+            .field("setting", "menu_bar_hides_dock")
+            .field("old", old)
+            .field("new", on),
+        );
+        Ok(())
     }
 }
 

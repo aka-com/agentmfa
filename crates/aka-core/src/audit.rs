@@ -198,6 +198,9 @@ pub enum AuditKind {
     /// An agent asked for a tool that is not configured. A request only:
     /// nothing exists until the user adds and wires it in the app.
     ConnectRequested,
+    /// The user deliberately cleared the preceding activity. This is written
+    /// as the first entry of the fresh log so a clear never erases itself.
+    ActivityCleared,
     SettingsChanged,
     // Rate limiting / budgets
     RateLimited,
@@ -251,6 +254,7 @@ impl AuditKind {
             AuditKind::McpTokenRefreshed => "refresh",
             AuditKind::ConnectRequested => "botMessageSquare",
             AuditKind::McpTokenRefreshFailed => "circleX",
+            AuditKind::ActivityCleared => "trash",
             AuditKind::SettingsChanged => "gear",
             AuditKind::RateLimited => "gauge",
             AuditKind::IntegrityAlert => "shieldAlert",

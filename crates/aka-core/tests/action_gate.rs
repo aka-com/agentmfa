@@ -8,6 +8,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use aka_core::audit::{AuditEntry, AuditKind};
 use aka_core::broker::Broker;
 use aka_core::config::BrokerConfig;
 use aka_core::error::CoreError;
@@ -186,6 +187,11 @@ async fn key_rotation_is_confirmed_and_closes_live_sessions() {
         .start(ConnectionKind::Pg);
     let close = session.close_signal.clone();
     let notified = close.notified();
+    let endpoint = broker
+        .endpoints
+        .issue(conn.id, ConnectionKind::Api)
+        .unwrap();
+    assert!(broker.endpoints.resolve_secret(&endpoint.secret).is_some());
 
     // Rotation touches the credential, so it always re-prompts.
     broker.ui_rotate_key().unwrap();
@@ -199,6 +205,8 @@ async fn key_rotation_is_confirmed_and_closes_live_sessions() {
     ));
     session.finish("key_rotated");
     assert_ne!(broker.identity.token(), old_token);
+    assert!(broker.endpoints.list().is_empty());
+    assert!(broker.endpoints.resolve_secret(&endpoint.secret).is_none());
     let revoked = broker
         .audit
         .recent(10)
@@ -206,6 +214,10 @@ async fn key_rotation_is_confirmed_and_closes_live_sessions() {
         .find(|entry| entry.kind == aka_core::audit::AuditKind::TokenRevoked)
         .expect("rotation should be audited");
     assert!(revoked.confirmation.is_some());
+    assert_eq!(
+        revoked.fields.get("endpoints_revoked"),
+        Some(&serde_json::json!(1))
+    );
 }
 
 #[tokio::test]
@@ -939,7 +951,7 @@ async fn sensitive_settings_fail_closed_before_mutating() {
 }
 
 #[tokio::test]
-async fn settings_changes_are_not_added_to_the_activity_log() {
+async fn settings_changes_are_audited_with_old_and_new_values() {
     let events = Arc::new(GateEvents {
         allow: true,
         confirms: AtomicUsize::new(0),
@@ -949,13 +961,62 @@ async fn settings_changes_are_not_added_to_the_activity_log() {
     broker.ui_change_reauth_on_read(false).unwrap();
     broker.ui_set_menu_bar_hides_dock(true).unwrap();
     assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
+    let mut settings: Vec<_> = broker
+        .audit
+        .recent(10)
+        .into_iter()
+        .filter(|entry| entry.kind == aka_core::audit::AuditKind::SettingsChanged)
+        .collect();
+    settings.sort_by(|a, b| {
+        a.fields["setting"]
+            .as_str()
+            .cmp(&b.fields["setting"].as_str())
+    });
+    assert_eq!(settings.len(), 2);
+    assert_eq!(settings[0].fields["setting"], "menu_bar_hides_dock");
+    assert_eq!(settings[0].fields["old"], false);
+    assert_eq!(settings[0].fields["new"], true);
+    assert_eq!(settings[1].fields["setting"], "reauth_on_read");
+    assert_eq!(settings[1].fields["old"], true);
+    assert_eq!(settings[1].fields["new"], false);
+    assert!(settings[1].confirmation.is_some());
+}
+
+#[tokio::test]
+async fn clearing_activity_requires_confirmation_and_leaves_a_tombstone() {
+    let denied_events = Arc::new(GateEvents {
+        allow: false,
+        confirms: AtomicUsize::new(0),
+    });
+    let (denied, _dir) = broker_with(denied_events.clone()).await;
+    denied
+        .audit
+        .append(AuditEntry::new(AuditKind::Listed, "keep me"));
+    assert!(matches!(
+        denied.ui_clear_activity(),
+        Err(CoreError::NotConfirmed)
+    ));
+    assert_eq!(denied.audit.recent(10).len(), 1);
+
+    let events = Arc::new(GateEvents {
+        allow: true,
+        confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    broker
+        .audit
+        .append(AuditEntry::new(AuditKind::Listed, "old activity"));
+    broker
+        .audit
+        .append(AuditEntry::new(AuditKind::Denied, "older activity"));
+    broker.ui_clear_activity().unwrap();
+
     let recent = broker.audit.recent(10);
-    assert!(
-        recent
-            .iter()
-            .all(|entry| entry.kind != aka_core::audit::AuditKind::SettingsChanged),
-        "{recent:?}"
-    );
+    assert_eq!(recent.len(), 1);
+    assert_eq!(recent[0].kind, AuditKind::ActivityCleared);
+    assert_eq!(recent[0].fields["entries_removed"], 2);
+    assert!(recent[0].confirmation.is_some());
+    assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

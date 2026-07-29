@@ -36,28 +36,74 @@ const PRESENCE_ABSOLUTE_MAX: std::time::Duration = std::time::Duration::from_sec
 struct PresenceGrant {
     idle_until: std::time::Instant,
     absolute_until: std::time::Instant,
+    idle_wall_until: chrono::DateTime<Utc>,
+    absolute_wall_until: chrono::DateTime<Utc>,
 }
 
 impl PresenceGrant {
-    fn new(now: std::time::Instant, window: std::time::Duration) -> Self {
+    fn new(
+        now: std::time::Instant,
+        wall_now: chrono::DateTime<Utc>,
+        window: std::time::Duration,
+    ) -> Self {
         let absolute_until = now + PRESENCE_ABSOLUTE_MAX;
+        let absolute_wall_until = wall_now
+            + chrono::Duration::from_std(PRESENCE_ABSOLUTE_MAX)
+                .expect("the presence maximum fits chrono");
         Self {
             idle_until: std::cmp::min(now + window, absolute_until),
             absolute_until,
+            idle_wall_until: std::cmp::min(
+                wall_now
+                    + chrono::Duration::from_std(window)
+                        .expect("the configured presence window fits chrono"),
+                absolute_wall_until,
+            ),
+            absolute_wall_until,
         }
     }
 
-    fn ride(&mut self, now: std::time::Instant, window: std::time::Duration) -> bool {
-        if now >= self.idle_until || now >= self.absolute_until {
+    fn ride(
+        &mut self,
+        now: std::time::Instant,
+        wall_now: chrono::DateTime<Utc>,
+        window: std::time::Duration,
+    ) -> bool {
+        if now >= self.idle_until
+            || now >= self.absolute_until
+            || wall_now >= self.idle_wall_until
+            || wall_now >= self.absolute_wall_until
+        {
             return false;
         }
         self.idle_until = std::cmp::min(now + window, self.absolute_until);
+        self.idle_wall_until = std::cmp::min(
+            wall_now
+                + chrono::Duration::from_std(window)
+                    .expect("the configured presence window fits chrono"),
+            self.absolute_wall_until,
+        );
         true
     }
 
-    fn reanchor(&mut self, now: std::time::Instant, window: std::time::Duration) {
-        if now < self.idle_until && now < self.absolute_until {
+    fn reanchor(
+        &mut self,
+        now: std::time::Instant,
+        wall_now: chrono::DateTime<Utc>,
+        window: std::time::Duration,
+    ) {
+        if now < self.idle_until
+            && now < self.absolute_until
+            && wall_now < self.idle_wall_until
+            && wall_now < self.absolute_wall_until
+        {
             self.idle_until = std::cmp::min(now + window, self.absolute_until);
+            self.idle_wall_until = std::cmp::min(
+                wall_now
+                    + chrono::Duration::from_std(window)
+                        .expect("the configured presence window fits chrono"),
+                self.absolute_wall_until,
+            );
         }
     }
 }
@@ -85,6 +131,11 @@ struct IndexState {
     connections: Vec<Connection>,
     #[serde(default)]
     settings: Option<Settings>,
+    /// Monotonic generation of the separately sealed access table. A
+    /// non-zero value makes a missing or rolled-back `access.json` a hard
+    /// integrity failure instead of silently restoring default access.
+    #[serde(default)]
+    access_generation: u64,
 }
 
 /// Connection kinds this build still understands. A store written by an older
@@ -259,7 +310,7 @@ impl Store {
     /// an existing read grant establishes nothing new.
     fn note_configuration_presence(&self) {
         let now = std::time::Instant::now();
-        let grant = PresenceGrant::new(now, self.presence_window());
+        let grant = PresenceGrant::new(now, Utc::now(), self.presence_window());
         let mut presence = self.presence.state.lock().unwrap();
         presence.configuration = Some(grant);
         presence.secret_read = Some(grant);
@@ -269,15 +320,16 @@ impl Store {
     /// cannot create one unless a native configuration authentication did.
     fn use_configuration_presence(&self) -> bool {
         let now = std::time::Instant::now();
+        let wall_now = Utc::now();
         let window = self.presence_window();
         let mut presence = self.presence.state.lock().unwrap();
         let fresh = presence
             .configuration
             .as_mut()
-            .is_some_and(|grant| grant.ride(now, window));
+            .is_some_and(|grant| grant.ride(now, wall_now, window));
         if fresh {
             if let Some(grant) = presence.secret_read.as_mut() {
-                grant.ride(now, window);
+                grant.ride(now, wall_now, window);
             }
         }
         fresh
@@ -288,13 +340,14 @@ impl Store {
     pub fn reanchor_presence(&self) {
         let _confirmation = self.presence.confirmation.lock().unwrap();
         let now = std::time::Instant::now();
+        let wall_now = Utc::now();
         let window = self.presence_window();
         let mut presence = self.presence.state.lock().unwrap();
         if let Some(grant) = presence.secret_read.as_mut() {
-            grant.reanchor(now, window);
+            grant.reanchor(now, wall_now, window);
         }
         if let Some(grant) = presence.configuration.as_mut() {
-            grant.reanchor(now, window);
+            grant.reanchor(now, wall_now, window);
         }
     }
 
@@ -355,20 +408,21 @@ impl Store {
         tokio::task::spawn_blocking(move || {
             let _confirmation = presence.confirmation.lock().unwrap();
             let now = std::time::Instant::now();
+            let wall_now = Utc::now();
             if presence
                 .state
                 .lock()
                 .unwrap()
                 .secret_read
                 .as_mut()
-                .is_some_and(|grant| grant.ride(now, window))
+                .is_some_and(|grant| grant.ride(now, wall_now, window))
             {
                 return Ok(());
             }
             if !events.confirm_secret_copy(&meta, window) {
                 return Err(CoreError::SecretReadNotAuthenticated);
             }
-            let grant = PresenceGrant::new(std::time::Instant::now(), window);
+            let grant = PresenceGrant::new(std::time::Instant::now(), Utc::now(), window);
             let mut state = presence.state.lock().unwrap();
             state.secret_read = Some(grant);
             state.configuration = Some(grant);
@@ -665,21 +719,25 @@ impl Store {
                 // may have established a suitable grant while this read was
                 // waiting. Pre-authorized agent executions never reach here.
                 let now = std::time::Instant::now();
+                let wall_now = Utc::now();
                 if presence
                     .state
                     .lock()
                     .unwrap()
                     .secret_read
                     .as_mut()
-                    .is_some_and(|grant| grant.ride(now, window))
+                    .is_some_and(|grant| grant.ride(now, wall_now, window))
                 {
                     return Ok(());
                 }
                 if !events.confirm_secret_read(&meta) {
                     return Err(CoreError::SecretReadNotAuthenticated);
                 }
-                presence.state.lock().unwrap().secret_read =
-                    Some(PresenceGrant::new(std::time::Instant::now(), window));
+                presence.state.lock().unwrap().secret_read = Some(PresenceGrant::new(
+                    std::time::Instant::now(),
+                    Utc::now(),
+                    window,
+                ));
                 Ok(())
             })
             .await
@@ -1125,6 +1183,24 @@ impl Store {
     }
 }
 
+impl crate::policy::AccessGenerationStore for Store {
+    fn access_generation(&self) -> u64 {
+        self.state.lock().unwrap().access_generation
+    }
+
+    fn advance_access_generation(&self) -> Result<u64> {
+        let mut state = self.state.lock().unwrap();
+        let mut next = state.clone();
+        next.access_generation = state
+            .access_generation
+            .checked_add(1)
+            .ok_or_else(|| CoreError::InvalidSetting("access generation overflow".into()))?;
+        let generation = next.access_generation;
+        self.commit(&mut state, next)?;
+        Ok(generation)
+    }
+}
+
 fn migrate_legacy_pg_ca_bundle(state: &mut IndexState) -> bool {
     let Some(path) = state
         .settings
@@ -1428,30 +1504,47 @@ mod tests {
     #[test]
     fn presence_grant_cannot_slide_past_twelve_hours() {
         let start = std::time::Instant::now();
+        let wall_start = Utc::now();
         let window = std::time::Duration::from_secs(2 * 60 * 60);
-        let mut grant = PresenceGrant::new(start, window);
+        let mut grant = PresenceGrant::new(start, wall_start, window);
 
         for hour in 1..12 {
             assert!(grant.ride(
                 start + std::time::Duration::from_secs(hour * 60 * 60),
+                wall_start + chrono::Duration::hours(hour as i64),
                 window,
             ));
         }
         assert_eq!(grant.absolute_until, start + PRESENCE_ABSOLUTE_MAX);
         assert_eq!(grant.idle_until, grant.absolute_until);
-        assert!(!grant.ride(grant.absolute_until, window));
+        assert!(!grant.ride(grant.absolute_until, grant.absolute_wall_until, window));
     }
 
     #[test]
     fn reanchoring_never_resets_the_absolute_deadline() {
         let start = std::time::Instant::now();
-        let mut grant = PresenceGrant::new(start, std::time::Duration::from_secs(60 * 60));
+        let wall_start = Utc::now();
+        let mut grant =
+            PresenceGrant::new(start, wall_start, std::time::Duration::from_secs(60 * 60));
         let absolute = grant.absolute_until;
+        let wall_absolute = grant.absolute_wall_until;
         grant.reanchor(
             start + std::time::Duration::from_secs(30 * 60),
+            wall_start + chrono::Duration::minutes(30),
             std::time::Duration::from_secs(2 * 60 * 60),
         );
         assert_eq!(grant.absolute_until, absolute);
+        assert_eq!(grant.absolute_wall_until, wall_absolute);
+    }
+
+    #[test]
+    fn presence_grant_expires_when_wall_clock_advances_during_suspend() {
+        let start = std::time::Instant::now();
+        let wall_start = Utc::now();
+        let window = std::time::Duration::from_secs(15 * 60);
+        let mut grant = PresenceGrant::new(start, wall_start, window);
+
+        assert!(!grant.ride(start, wall_start + chrono::Duration::days(1), window));
     }
 
     struct ReadGate {

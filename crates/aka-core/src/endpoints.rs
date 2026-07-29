@@ -179,6 +179,20 @@ impl EndpointRegistry {
         Ok(Some(removed))
     }
 
+    /// Revoke every standing endpoint capability in one persisted update.
+    /// The caller tears down listeners, sessions, and vault-held plaintexts
+    /// after the registry no longer authenticates any of the old secrets.
+    pub fn revoke_all(&self) -> Result<Vec<DirectEndpoint>> {
+        let mut endpoints = self.endpoints.lock().unwrap();
+        if endpoints.is_empty() {
+            return Ok(Vec::new());
+        }
+        let removed = endpoints.clone();
+        self.persist(&[])?;
+        endpoints.clear();
+        Ok(removed)
+    }
+
     pub fn list(&self) -> Vec<DirectEndpoint> {
         self.endpoints.lock().unwrap().clone()
     }
@@ -342,6 +356,20 @@ mod tests {
         // … but the old secret no longer resolves.
         assert!(r.resolve_secret(&first.secret).is_none());
         assert!(r.resolve_secret(&second.secret).is_some());
+    }
+
+    #[test]
+    fn revoke_all_invalidates_every_endpoint_secret() {
+        let (r, _dir) = registry();
+        let first = r.issue(Uuid::new_v4(), ConnectionKind::Pg).unwrap();
+        let second = r.issue(Uuid::new_v4(), ConnectionKind::Api).unwrap();
+
+        let removed = r.revoke_all().unwrap();
+        assert_eq!(removed.len(), 2);
+        assert!(r.list().is_empty());
+        assert!(r.resolve_secret(&first.secret).is_none());
+        assert!(r.resolve_secret(&second.secret).is_none());
+        assert!(r.revoke_all().unwrap().is_empty());
     }
 
     #[test]

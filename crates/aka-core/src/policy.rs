@@ -23,10 +23,30 @@ use crate::integrity::StateIntegrity;
 use crate::types::{ConfirmMode, ToolAccess};
 use crate::Result;
 
+pub(crate) trait AccessGenerationStore: Send + Sync {
+    fn access_generation(&self) -> u64;
+    fn advance_access_generation(&self) -> Result<u64>;
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AccessState {
+    generation: u64,
+    entries: Vec<ToolAccess>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum AccessStateRead {
+    Current(AccessState),
+    Legacy(Vec<ToolAccess>),
+}
+
 pub struct AccessTable {
     path: PathBuf,
     integrity: Arc<StateIntegrity>,
     entries: std::sync::Mutex<Vec<ToolAccess>>,
+    generation: std::sync::atomic::AtomicU64,
+    generation_store: Option<Arc<dyn AccessGenerationStore>>,
 }
 
 impl AccessTable {
@@ -65,13 +85,62 @@ impl AccessTable {
         known_connections: &[Uuid],
         integrity: Arc<StateIntegrity>,
     ) -> Result<Self> {
-        let mut entries: Option<Vec<ToolAccess>> = integrity
+        Self::open_with_legacy_policy_and_generation(
+            path,
+            legacy_wirings_path,
+            legacy_rules_path,
+            known_connections,
+            integrity,
+            None,
+        )
+    }
+
+    pub(crate) fn open_with_legacy_policy_and_generation(
+        path: PathBuf,
+        legacy_wirings_path: Option<&std::path::Path>,
+        legacy_rules_path: Option<&std::path::Path>,
+        known_connections: &[Uuid],
+        integrity: Arc<StateIntegrity>,
+        generation_store: Option<Arc<dyn AccessGenerationStore>>,
+    ) -> Result<Self> {
+        let expected_generation = generation_store
+            .as_ref()
+            .map_or(0, |store| store.access_generation());
+        let loaded = integrity
             .read_verified(&path)?
-            .map(|bytes| serde_json::from_slice(&bytes))
+            .map(|bytes| serde_json::from_slice::<AccessStateRead>(&bytes))
             .transpose()?;
+        let (mut entries, generation, migrate_legacy_access) = match loaded {
+            Some(AccessStateRead::Current(state)) => {
+                if generation_store.is_some() && state.generation != expected_generation {
+                    return Err(crate::CoreError::StateTampered(path.display().to_string()));
+                }
+                (Some(state.entries), state.generation, false)
+            }
+            Some(AccessStateRead::Legacy(entries)) => {
+                if expected_generation != 0 {
+                    return Err(crate::CoreError::StateTampered(path.display().to_string()));
+                }
+                (Some(entries), 0, true)
+            }
+            None => {
+                if expected_generation != 0 {
+                    return Err(crate::CoreError::StateTampered(path.display().to_string()));
+                }
+                (None, 0, false)
+            }
+        };
+        let table = Self {
+            path,
+            integrity,
+            entries: std::sync::Mutex::new(Vec::new()),
+            generation: std::sync::atomic::AtomicU64::new(generation),
+            generation_store,
+        };
+        let mut migrated_policy = false;
         if entries.is_none() {
             if let Some(wirings_path) = legacy_wirings_path {
-                if let Some(bytes) = integrity.read_verified(wirings_path)? {
+                if let Some(bytes) = table.integrity.read_verified(wirings_path)? {
                     #[derive(serde::Deserialize)]
                     struct LegacyWiring {
                         connection_id: Uuid,
@@ -118,14 +187,14 @@ impl AccessTable {
                             updated_at: Utc::now(),
                         });
                     }
-                    integrity.write(&path, &serde_json::to_vec_pretty(&migrated)?)?;
                     entries = Some(migrated);
+                    migrated_policy = true;
                 }
             }
         }
         if entries.is_none() {
             if let Some(rules_path) = legacy_rules_path {
-                if let Some(bytes) = integrity.read_verified(rules_path)? {
+                if let Some(bytes) = table.integrity.read_verified(rules_path)? {
                     #[derive(serde::Deserialize)]
                     struct LegacyRule {
                         #[serde(default)]
@@ -145,21 +214,38 @@ impl AccessTable {
                             updated_at: Utc::now(),
                         })
                         .collect();
-                    integrity.write(&path, &serde_json::to_vec_pretty(&migrated)?)?;
                     entries = Some(migrated);
+                    migrated_policy = true;
                 }
             }
         }
-        Ok(Self {
-            path,
-            integrity,
-            entries: std::sync::Mutex::new(entries.unwrap_or_default()),
-        })
+        let entries = entries.unwrap_or_default();
+        if migrate_legacy_access || migrated_policy {
+            table.persist(&entries)?;
+        }
+        *table.entries.lock().unwrap() = entries;
+        Ok(table)
     }
 
     fn persist(&self, entries: &[ToolAccess]) -> Result<()> {
+        let generation = match &self.generation_store {
+            Some(store) => store.advance_access_generation()?,
+            None => self
+                .generation
+                .load(std::sync::atomic::Ordering::SeqCst)
+                .checked_add(1)
+                .ok_or_else(|| {
+                    crate::CoreError::InvalidSetting("access generation overflow".into())
+                })?,
+        };
+        let state = AccessState {
+            generation,
+            entries: entries.to_vec(),
+        };
         self.integrity
-            .write(&self.path, &serde_json::to_vec_pretty(entries)?)?;
+            .write(&self.path, &serde_json::to_vec_pretty(&state)?)?;
+        self.generation
+            .store(generation, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 
@@ -327,6 +413,7 @@ impl AccessTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn integrity() -> Arc<StateIntegrity> {
         Arc::new(
@@ -339,6 +426,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let t = AccessTable::open(dir.path().join("access.json"), integrity()).unwrap();
         (t, dir)
+    }
+
+    #[derive(Default)]
+    struct TestGeneration(AtomicU64);
+
+    impl AccessGenerationStore for TestGeneration {
+        fn access_generation(&self) -> u64 {
+            self.0.load(Ordering::SeqCst)
+        }
+
+        fn advance_access_generation(&self) -> Result<u64> {
+            Ok(self.0.fetch_add(1, Ordering::SeqCst) + 1)
+        }
     }
 
     #[test]
@@ -436,6 +536,57 @@ mod tests {
         assert!(!t.allows(&conn));
         assert!(t.set_enabled(conn, true).is_err());
         assert!(!t.allows(&conn));
+    }
+
+    #[test]
+    fn a_missing_or_rolled_back_access_table_fails_closed_once_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("access.json");
+        let backup = dir.path().join("access-old.json");
+        let integrity = integrity();
+        let generation = Arc::new(TestGeneration::default());
+        let conn = Uuid::new_v4();
+        let table = AccessTable::open_with_legacy_policy_and_generation(
+            path.clone(),
+            None,
+            None,
+            &[conn],
+            integrity.clone(),
+            Some(generation.clone()),
+        )
+        .unwrap();
+        table.set_enabled(conn, false).unwrap();
+        std::fs::copy(&path, &backup).unwrap();
+        table
+            .set_allowed_tools(conn, Some(vec!["read".into()]))
+            .unwrap();
+
+        // A validly sealed older generation is still a rollback.
+        std::fs::copy(&backup, &path).unwrap();
+        assert!(matches!(
+            AccessTable::open_with_legacy_policy_and_generation(
+                path.clone(),
+                None,
+                None,
+                &[conn],
+                integrity.clone(),
+                Some(generation.clone()),
+            ),
+            Err(crate::CoreError::StateTampered(_))
+        ));
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(matches!(
+            AccessTable::open_with_legacy_policy_and_generation(
+                path,
+                None,
+                None,
+                &[conn],
+                integrity,
+                Some(generation),
+            ),
+            Err(crate::CoreError::StateTampered(_))
+        ));
     }
 
     #[test]

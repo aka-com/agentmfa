@@ -1382,7 +1382,8 @@ impl ManagementBackend for LocalBackend {
     }
 
     async fn clear_activity(&self) -> ManageResult<()> {
-        self.broker.audit.clear()?;
+        self.blocking(move |broker| broker.ui_clear_activity())
+            .await?;
         // A clear has no `BrokerEvents` counterpart; publish the manage
         // event here so every caller — the manage route and an in-process
         // shell alike — refreshes SSE subscribers' activity views.
