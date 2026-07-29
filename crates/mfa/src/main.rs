@@ -1499,9 +1499,12 @@ fn cmd_conn_endpoint(
         )),
     };
     // Selectors print exactly one field with no decoration, so a `$(...)`
-    // capture carries only the value.
+    // capture carries only the value. `--url` prefers the TCP form when the
+    // endpoint has one: it is the address that works from another machine and
+    // in drivers with no Unix-socket support, which is what a script capturing
+    // this almost always wants.
     if url {
-        println!("{}", info.dsn);
+        println!("{}", info.tcp_dsn.as_deref().unwrap_or(&info.dsn));
         return;
     }
     if secret {
@@ -1512,6 +1515,10 @@ fn cmd_conn_endpoint(
     // stdout (the pasteable value), and the secret when the kind has one.
     eprintln!("{}", info.example);
     println!("{}", info.dsn);
+    if let Some(tcp) = &info.tcp_dsn {
+        eprintln!("tcp (drivers without unix-socket support, and remote clients):");
+        eprintln!("{tcp}");
+    }
     if !info.secret.is_empty() {
         eprintln!("endpoint secret: {}", info.secret);
     }

@@ -1164,7 +1164,10 @@ function endpointStripHTML(c: ConnectionSummary, runnableSsh = false, withFormat
 // none of these put a secret in more DOM attributes than the field does.
 function endpointFormatRowHTML(c: ConnectionSummary, address: string): string {
   const buttons = ENDPOINT_FORMATS[c.type]
-    .filter((format) => format.needsSecret || format.build(c, address) != null)
+    .filter(
+      (format) =>
+        format.needsSecret || format.needsAltAddress || format.build(c, address) != null,
+    )
     .map((format) => {
       const copied = state.copied === `epf:${c.id}:${format.key}`;
       return `<button class="btn sm ep-fmt ${copied ? 'is-copied' : ''}" title="${escAttr(format.title)}"
@@ -5260,12 +5263,24 @@ document.addEventListener('click', async (e) => {
       // never carry — read it back from the broker (no gate: it re-reads
       // already-surfaced state). A failed read copies the placeholder form.
       let secret: string | null = null;
-      if (format.needsSecret) {
+      let built = address;
+      if (format.needsSecret || format.needsAltAddress) {
+        let issued: Awaited<ReturnType<typeof invoke<'get_endpoint'>>> = null;
         try {
-          secret = (await invoke('get_endpoint', { connectionId: conn.id }))?.secret || null;
+          issued = await invoke('get_endpoint', { connectionId: conn.id });
         } catch { /* placeholder */ }
+        secret = issued?.secret || null;
+        if (format.needsAltAddress) {
+          // No second address means nothing to copy; the button is only shown
+          // when the broker reported one.
+          if (!issued?.tcp_dsn) {
+            toast('⚠ This endpoint has no TCP address');
+            break;
+          }
+          built = issued.tcp_dsn;
+        }
       }
-      const text = format.build(conn, address, secret);
+      const text = format.build(conn, built, secret);
       if (!text) break;
       try {
         await navigator.clipboard.writeText(text);

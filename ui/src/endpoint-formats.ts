@@ -18,6 +18,14 @@ export interface EndpointFormat {
    * the broker before building.
    */
   needsSecret?: boolean;
+  /**
+   * True when this format copies the endpoint's *second* address rather than
+   * the one the field shows — the Postgres TCP DSN, which only the broker
+   * knows (it carries the pinned port). The handler reads it back and passes
+   * it as `address`; the button is skipped when the endpoint has no second
+   * address.
+   */
+  needsAltAddress?: boolean;
   /** The copyable string, or null when the summary lacks the parts. */
   build: (c: ConnectionSummary, address: string, secret?: string | null) => string | null;
 }
@@ -148,6 +156,16 @@ export const ENDPOINT_FORMATS: Record<ConnectionType, EndpointFormat[]> = {
       label: '.env snippet',
       title: 'Copy a DATABASE_URL line for a .env file',
       build: (_c, dsn) => `DATABASE_URL="${dsn}"`,
+    },
+    {
+      // The Unix-socket DSN above is libpq-only and same-machine-only. JDBC,
+      // Node `pg`, Npgsql and several ORMs need this form, and so does any
+      // client reaching a hosted broker.
+      key: 'tcp',
+      label: 'TCP URL',
+      title: 'Copy the TCP connection URL — JDBC, Node pg, Npgsql, and remote clients',
+      needsAltAddress: true,
+      build: (_c, tcpDsn) => tcpDsn,
     },
   ],
   ssh: [

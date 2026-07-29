@@ -1352,3 +1352,94 @@ async fn draft_test_signs_in_with_a_typed_credential_and_defers_stored_ones() {
         .unwrap();
     assert!(!report.ok);
 }
+
+/// PG-18 / PG-26. The Unix-socket DSN is libpq-only and same-machine-only, so
+/// hosted brokers had no working direct endpoint at all and non-libpq drivers
+/// (JDBC, Node `pg`, Npgsql) could not parse the one address on offer. The same
+/// endpoint now also answers on TCP, with the same secret and the same handler.
+#[tokio::test]
+async fn a_pg_endpoint_also_serves_an_ordinary_tcp_dsn() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let fake = fake_pg(FakeAuth::Cleartext).await;
+    add_pg_connection(&h.broker, fake.port);
+    h.pair().await;
+    let info = h.issue_endpoint().await;
+
+    let tcp = info.tcp_dsn.clone().expect("a pg endpoint has a TCP address");
+    // An ordinary URL every driver already parses: no `host=<dir>` convention,
+    // and the endpoint secret in the password slot so it works standalone.
+    assert!(tcp.starts_with("postgresql://"), "{tcp}");
+    assert!(!tcp.contains("host="), "{tcp}");
+    assert!(tcp.contains(&format!(":{}@", info.secret)), "{tcp}");
+    assert!(tcp.contains("/app_production"), "{tcp}");
+
+    let (client, connection) = tokio_postgres::connect(&tcp, NoTls).await.unwrap();
+    let conn_task = tokio::spawn(connection);
+    let rows = client.simple_query("SELECT 1").await.unwrap();
+    assert_eq!(row_value(&rows).as_deref(), Some("1"));
+
+    // Same authorization, same credential swap: the upstream saw the configured
+    // user and the real password, never the endpoint secret.
+    let startups = fake.state.startups.lock().unwrap().clone();
+    assert!(startups[0].iter().any(|(k, v)| k == "user" && v == "app"));
+    assert_eq!(
+        fake.state.passwords.lock().unwrap().clone(),
+        vec![REAL_PG_PASSWORD.to_string()]
+    );
+
+    drop(client);
+    let _ = tokio::time::timeout(Duration::from_secs(3), conn_task).await;
+}
+
+/// A wrong secret is refused on the TCP address exactly as on the socket: the
+/// second listener must not be a second authorization path.
+#[tokio::test]
+async fn the_tcp_endpoint_refuses_a_wrong_secret() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let fake = fake_pg(FakeAuth::Cleartext).await;
+    add_pg_connection(&h.broker, fake.port);
+    h.pair().await;
+    let info = h.issue_endpoint().await;
+    let tcp = info.tcp_dsn.clone().unwrap();
+
+    let wrong = tcp.replace(&info.secret, "end_not_the_secret");
+    let result = tokio_postgres::connect(&wrong, NoTls).await;
+    assert!(result.is_err(), "a wrong endpoint secret must be refused");
+    assert!(
+        fake.state.startups.lock().unwrap().is_empty(),
+        "the refused connection must never have reached the database"
+    );
+}
+
+/// The pinned port survives a rebind, so a pasted TCP DSN keeps working across
+/// a broker restart — the property the socket path had for free.
+#[tokio::test]
+async fn the_tcp_endpoint_port_is_pinned_across_a_rebind() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let fake = fake_pg(FakeAuth::Cleartext).await;
+    add_pg_connection(&h.broker, fake.port);
+    h.pair().await;
+    let before = h.issue_endpoint().await.tcp_dsn.unwrap();
+
+    h.broker.rebind_endpoints().await;
+
+    let conn = h.broker.store.connection_by_name("prod-db").unwrap();
+    let after = h
+        .broker
+        .ui_get_endpoint(&conn.id)
+        .unwrap()
+        .expect("endpoint still issued")
+        .tcp_dsn
+        .unwrap();
+    assert_eq!(before, after, "the pinned port must not move on rebind");
+
+    // And it is still live at that address.
+    let (client, connection) = tokio_postgres::connect(&after, NoTls).await.unwrap();
+    let conn_task = tokio::spawn(connection);
+    assert_eq!(
+        row_value(&client.simple_query("SELECT 1").await.unwrap()).as_deref(),
+        Some("1")
+    );
+    drop(client);
+    let _ = tokio::time::timeout(Duration::from_secs(3), conn_task).await;
+}

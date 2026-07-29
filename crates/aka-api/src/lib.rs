@@ -295,6 +295,11 @@ pub struct IssuedEndpointDto {
     #[serde(rename = "type")]
     pub kind: String,
     pub dsn: String,
+    /// A second address for the same endpoint where one exists: for Postgres
+    /// the TCP form, which non-libpq drivers can parse and a remote client can
+    /// actually reach. Absent for kinds with only one address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp_dsn: Option<String>,
     pub secret: String,
     pub example: String,
 }

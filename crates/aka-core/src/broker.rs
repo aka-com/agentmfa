@@ -51,8 +51,14 @@ pub struct ConnectionTestReport {
 pub struct IssuedEndpointInfo {
     pub endpoint_id: Uuid,
     pub kind: ConnectionKind,
-    /// Pasteable connection string (a Postgres DSN today).
+    /// Pasteable connection string (a Postgres DSN today). For Postgres this
+    /// is the Unix-socket form: the tighter surface, and libpq-only.
     pub dsn: String,
+    /// The TCP form of the same endpoint, for drivers that cannot speak Unix
+    /// sockets and for any client reaching a broker on another machine.
+    /// `None` for kinds that have no second address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tcp_dsn: Option<String>,
     /// The endpoint secret, also embedded in the DSN's password slot.
     pub secret: String,
     /// Ready-to-adapt usage line. For Postgres this is `.env`-shaped
@@ -1633,10 +1639,24 @@ impl Broker {
                 // DSN is a config file, not a shell command — argv would
                 // leave the embedded secret in history and `ps` output.
                 let example = format!("DATABASE_URL=\"{dsn}\"");
+                // The TCP form for drivers with no Unix-socket support, and the
+                // only form that works at all when the broker is not on the
+                // caller's machine. `advertise_host` is what a remote client
+                // should dial, which is not necessarily what we bound.
+                let tcp_dsn = endpoint.port.map(|port| {
+                    crate::capability::pg::endpoint_tcp_dsn(
+                        &self.advertise_host(),
+                        port,
+                        user,
+                        dbname,
+                        (!secret.is_empty()).then_some(secret),
+                    )
+                });
                 IssuedEndpointInfo {
                     endpoint_id: endpoint.id,
                     kind: ConnectionKind::Pg,
                     dsn,
+                    tcp_dsn,
                     secret: endpoint.secret.clone(),
                     example,
                 }
@@ -1660,6 +1680,8 @@ impl Broker {
                     endpoint_id: endpoint.id,
                     kind: ConnectionKind::Ssh,
                     dsn: sock.clone(),
+                    // The socket path is the only address an ssh-agent has.
+                    tcp_dsn: None,
                     secret: String::new(),
                     example: format!("SSH_AUTH_SOCK=\"{sock}\" {target}"),
                 }
@@ -1674,6 +1696,8 @@ impl Broker {
                     endpoint_id: endpoint.id,
                     kind: ConnectionKind::Api,
                     dsn: base.clone(),
+                    // The HTTP endpoint is already TCP; `dsn` is that address.
+                    tcp_dsn: None,
                     secret: endpoint.secret.clone(),
                     // The secret rides an Authorization header, not the URL, so
                     // it stays out of argv and shell history; the proxy strips
@@ -1789,7 +1813,14 @@ impl Broker {
     ) -> std::io::Result<()> {
         let handle = match connection.kind() {
             ConnectionKind::Pg => {
-                crate::capability::pg::bind_endpoint(self.clone(), endpoint).await?
+                let (handle, port) =
+                    crate::capability::pg::bind_endpoint(self.clone(), endpoint).await?;
+                // Pin the TCP port so a pasted DSN survives a restart, exactly
+                // as the HTTP endpoint's base URL does.
+                if endpoint.port != Some(port) {
+                    let _ = self.endpoints.set_port(&endpoint.id, port);
+                }
+                handle
             }
             ConnectionKind::Ssh => {
                 crate::capability::ssh::bind_endpoint(self.clone(), endpoint).await?

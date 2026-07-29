@@ -34,7 +34,7 @@ const PG_SOCKET_DSN =
 test('button order and labels match the agreed set per kind', () => {
   assert.deepEqual(
     ENDPOINT_FORMATS.pg.map((f) => f.label),
-    ['psql', 'libpq', '.env snippet'],
+    ['psql', 'libpq', '.env snippet', 'TCP URL'],
   );
   assert.deepEqual(
     ENDPOINT_FORMATS.ssh.map((f) => f.label),
@@ -165,4 +165,14 @@ test('api formats embed the fetched secret, or a placeholder without one', () =>
 
 test('unknown format keys resolve to null', () => {
   assert.equal(endpointFormatByKey('pg', 'nope'), null);
+});
+
+test('the pg TCP format copies the broker-supplied second address verbatim', () => {
+  const c = conn('pg', 'prod-db');
+  const tcp = endpointFormatByKey('pg', 'tcp');
+  // Marked so the click handler reads the address back from the broker: the
+  // pinned port lives there, not in the connection summary.
+  assert.equal(tcp?.needsAltAddress, true);
+  const url = 'postgresql://app:end_abc@127.0.0.1:54329/app_production?sslmode=disable';
+  assert.equal(tcp?.build(c, url), url);
 });

@@ -373,6 +373,7 @@ fn issued_endpoint_dto(info: IssuedEndpointInfo) -> IssuedEndpointDto {
         endpoint_id: info.endpoint_id.to_string(),
         kind: info.kind.as_str().to_string(),
         dsn: info.dsn,
+        tcp_dsn: info.tcp_dsn,
         secret: info.secret,
         example: info.example,
     }

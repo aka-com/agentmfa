@@ -59,6 +59,8 @@ export interface IssuedEndpoint {
   endpoint_id: string;
   type: ConnectionType;
   dsn: string;
+  /** Second address for the same endpoint (Postgres: the TCP form). */
+  tcp_dsn?: string | null;
   secret: string;
   example: string;
 }

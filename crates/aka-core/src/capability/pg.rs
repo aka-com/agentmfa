@@ -40,7 +40,7 @@ use tokio::io::{
     AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, BufReader,
     ReadBuf,
 };
-use tokio::net::{TcpStream, UnixListener, UnixStream};
+use tokio::net::{TcpStream, UnixListener};
 use tokio::sync::Notify;
 
 use super::{TestError, TestErrorKind};
@@ -464,15 +464,43 @@ pub fn endpoint_dsn(
     )
 }
 
+/// The pasteable connection string for a Postgres endpoint's TCP listener.
+///
+/// The Unix-socket form above is the tighter surface — filesystem permissions
+/// keep other users out — but it is also libpq-only: JDBC has no Unix-socket
+/// support, and Node `pg`, Npgsql and several ORMs do not read `host=` as a
+/// socket directory. It is useless off-box as well, so a hosted broker had no
+/// working direct endpoint at all. This is the ordinary
+/// `postgresql://user:pass@host:port/db` every driver already parses.
+pub fn endpoint_tcp_dsn(
+    host: &str,
+    port: u16,
+    user: &str,
+    dbname: &str,
+    secret: Option<&str>,
+) -> String {
+    let auth = match secret {
+        Some(secret) => format!("{user}:{secret}"),
+        None => user.to_string(),
+    };
+    format!("postgresql://{auth}@{host}:{port}/{dbname}?sslmode=disable")
+}
+
 /// Bind a direct Postgres endpoint: a private Unix-domain listener at
 /// `<endpoint-dir>/.s.PGSQL.5432` that an unmodified `psql`/driver reaches
 /// with `host=<endpoint-dir>`. Attribution is the endpoint secret presented
 /// as the password; filesystem permissions keep other users out. Returns the
 /// running listener handle for the broker to hold and later stop.
+/// Two listeners, one endpoint: the Unix socket for libpq clients on the same
+/// machine, and a TCP listener on the data-plane address for everything else —
+/// drivers with no Unix-socket support, and any client at all when the broker
+/// is hosted. Both present the same endpoint secret as the password and run
+/// the same handler, so neither is a second authorization path. Returns the
+/// bound TCP port so the caller can pin it across restarts.
 pub async fn bind_endpoint(
     broker: Arc<Broker>,
     endpoint: &DirectEndpoint,
-) -> io::Result<EndpointListenerHandle> {
+) -> io::Result<(EndpointListenerHandle, u16)> {
     use std::os::unix::fs::PermissionsExt as _;
 
     let dir = broker.paths.endpoint_dir(&endpoint.id);
@@ -486,6 +514,26 @@ pub async fn bind_endpoint(
     }
     let listener = UnixListener::bind(&sock_path)?;
     std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600))?;
+
+    // Reuse the pinned port when there is one, so a pasted TCP DSN survives a
+    // restart the way the HTTP endpoint's base URL does. A port another process
+    // has taken since falls back to a fresh one rather than failing the rebind
+    // and revoking a working endpoint.
+    let bind_addr = broker.data_plane_bind();
+    let tcp = match endpoint.port {
+        Some(pinned) => match tokio::net::TcpListener::bind((bind_addr, pinned)).await {
+            Ok(listener) => listener,
+            Err(e) => {
+                tracing::warn!(
+                    port = pinned,
+                    "pinned pg endpoint port unavailable ({e}); taking a fresh one"
+                );
+                tokio::net::TcpListener::bind((bind_addr, 0)).await?
+            }
+        },
+        None => tokio::net::TcpListener::bind((bind_addr, 0)).await?,
+    };
+    let port = tcp.local_addr()?.port();
 
     let state = Arc::new(ProxyState::new(broker));
     let endpoint_id = endpoint.id;
@@ -508,11 +556,26 @@ pub async fn bind_endpoint(
                         tracing::error!("pg endpoint accept failed: {e}");
                         break;
                     }
+                },
+                accepted = tcp.accept() => match accepted {
+                    Ok((stream, _)) => {
+                        let _ = stream.set_nodelay(true);
+                        let state = state.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = handle_endpoint_conn(state, stream, endpoint_id).await {
+                                tracing::debug!("pg endpoint connection ended: {e}");
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        tracing::error!("pg endpoint tcp accept failed: {e}");
+                        break;
+                    }
                 }
             }
         }
     });
-    Ok(EndpointListenerHandle { shutdown, task })
+    Ok((EndpointListenerHandle { shutdown, task }, port))
 }
 
 /// One accepted endpoint connection: probes → startup (or cancel) → endpoint
@@ -520,11 +583,14 @@ pub async fn bind_endpoint(
 /// Mirrors `handle_conn`, but the presented password is the per-wiring secret
 /// rather than a ticket, and authorization is re-verified here at connect time
 /// rather than at a control-plane open.
-async fn handle_endpoint_conn(
+async fn handle_endpoint_conn<S>(
     state: Arc<ProxyState>,
-    stream: UnixStream,
+    stream: S,
     endpoint_id: uuid::Uuid,
-) -> io::Result<()> {
+) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let mut client = BufReader::new(stream);
 
     let params = match read_startup_phase(&mut client, &state).await? {
