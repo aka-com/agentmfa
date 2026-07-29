@@ -1422,3 +1422,155 @@ async fn the_stale_socket_sweep_does_not_spend_a_redemption() {
         "the sweep must not register a use nobody made"
     );
 }
+
+/// SSH-28. A server with a CA-signed host key sends the **certificate** blob in
+/// `session-bind`. It parses (ssh-key maps the unrecognized algorithm to an
+/// opaque key) and then fails verification with a bare "unsupported", which
+/// reached the activity log as "SSH signature refused" — a correctly configured
+/// server reading as a host-key attack. Verifying certificates is a separate,
+/// unbuilt feature; the refusal must at least say what happened.
+#[tokio::test]
+async fn a_certificate_host_key_is_refused_by_name_not_as_a_bad_signature() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let host_key = add_ssh_connection(&h.broker, &key, "deploy");
+    let token = h.pair().await;
+    let (auth_sock, _) = h.open_ssh(&token).await;
+
+    // A certificate blob: the algorithm name OpenSSH uses, then the plain key's
+    // remaining fields. Enough for the algorithm check, which is what runs
+    // before any verification is attempted.
+    let plain = host_key.public_key().to_bytes().unwrap();
+    let (_, rest) = take_string(&plain);
+    let mut cert = Vec::new();
+    put_string(&mut cert, b"ssh-ed25519-cert-v01@openssh.com");
+    cert.extend_from_slice(rest);
+
+    let mut s = UnixStream::connect(&auth_sock).await.unwrap();
+    let mut body = Vec::new();
+    put_string(&mut body, b"session-bind@openssh.com");
+    put_string(&mut body, &cert);
+    put_string(&mut body, b"test-session-id");
+    // A syntactically valid signature over the session id, made with the real
+    // host key: the point is that the certificate is rejected *before* the
+    // signature is even looked at, so a valid one must not rescue it.
+    let sig = host_key.key_data().sign(b"test-session-id" as &[u8]);
+    put_string(&mut body, sig.as_bytes());
+    body.push(0);
+    write_message(&mut s, SSH_AGENTC_EXTENSION, &body).await;
+    let (kind, _) = read_message(&mut s).await;
+    assert_eq!(
+        kind, SSH_AGENT_FAILURE,
+        "a certificate bind must not succeed"
+    );
+
+    let refusal = h
+        .broker
+        .audit
+        .recent(20)
+        .into_iter()
+        .find(|e| e.outcome.as_deref() == Some("refused"))
+        .expect("the refusal is recorded");
+    let detail = refusal.detail.unwrap_or_default();
+    assert!(
+        detail.contains("certificate host key"),
+        "the reason must name the certificate: {detail}"
+    );
+    assert!(
+        detail.contains("ssh-ed25519-cert-v01@openssh.com"),
+        "and the algorithm: {detail}"
+    );
+    assert!(
+        !detail.contains("host signature failed"),
+        "and must not read as a bad signature: {detail}"
+    );
+}
+
+/// SSH-28. `ssh-add -D`, `ssh-add <key>` and the other agent-management requests
+/// are not implemented. The protocol's answer for an unimplemented request is a
+/// bare `SSH_AGENT_FAILURE`; routing them anywhere near `refuse()` would file a
+/// key-management no-op as a refused signature.
+#[tokio::test]
+async fn unimplemented_agent_requests_fail_without_being_audited() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let _host_key = add_ssh_connection(&h.broker, &key, "deploy");
+    let token = h.pair().await;
+    let (auth_sock, _) = h.open_ssh(&token).await;
+
+    let mut s = UnixStream::connect(&auth_sock).await.unwrap();
+    // ADD_IDENTITY (17), REMOVE_IDENTITY (18), REMOVE_ALL_IDENTITIES (19,
+    // `ssh-add -D`), LOCK (22), UNLOCK (23).
+    for kind in [17u8, 18, 19, 22, 23] {
+        write_message(&mut s, kind, &[]).await;
+        let (answer, body) = read_message(&mut s).await;
+        assert_eq!(answer, SSH_AGENT_FAILURE, "request {kind}");
+        assert!(body.is_empty(), "request {kind} answered with a body");
+    }
+    // `ssh-add -l` is REQUEST_IDENTITIES, which *is* implemented — included so
+    // the loop above cannot pass by the agent simply having died.
+    assert_lists_identity(&mut s, &key).await;
+
+    assert!(
+        h.broker
+            .audit
+            .recent(20)
+            .iter()
+            .all(|e| e.kind != aka_core::audit::AuditKind::SshSigned),
+        "key-management no-ops are not signature events"
+    );
+}
+
+/// SSH-28 and the fact behind SSH-22: OpenSSH closes its agent fd as soon as
+/// userauth completes, so the live-session row a per-open agent connection
+/// registers is gone seconds after it appears while the real SSH session runs
+/// on. Pinned here because the existing tests only ever hold the stream open,
+/// which is not what a real client does.
+#[tokio::test]
+async fn the_session_ends_when_the_client_closes_its_agent_fd_after_signing() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let host_key = add_ssh_connection(&h.broker, &key, "deploy");
+    let token = h.pair().await;
+    let (auth_sock, _) = h.open_ssh(&token).await;
+
+    let mut s = bound_stream(&auth_sock, &host_key).await;
+    let blob = key.public_key().to_bytes().unwrap();
+    let data = userauth_blob(
+        "deploy",
+        "ssh-ed25519",
+        &blob,
+        &host_key.public_key().to_bytes().unwrap(),
+    );
+    let (kind, _) = sign(&mut s, &blob, &data, 0).await;
+    assert_eq!(kind, SSH_AGENT_SIGN_RESPONSE, "the login must be signed");
+    assert_eq!(
+        h.broker.sessions().len(),
+        1,
+        "signing runs inside a session"
+    );
+
+    // What `ssh` does next: it has its signature, so the agent is done with.
+    drop(s);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !h.broker.sessions().is_empty() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        h.broker.sessions().is_empty(),
+        "the row outlives the client's fd: {:?}",
+        h.broker.sessions()
+    );
+    // The signature is what remains in the record — the authority that was
+    // granted, rather than a connection that lasted moments.
+    assert!(
+        h.broker
+            .audit
+            .recent(20)
+            .iter()
+            .any(|e| e.kind == aka_core::audit::AuditKind::SshSigned
+                && e.outcome.as_deref() == Some("signed")),
+        "the signature must be recorded"
+    );
+}

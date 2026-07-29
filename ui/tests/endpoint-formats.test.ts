@@ -112,6 +112,10 @@ test('every emitted ssh invocation suppresses on-disk keys, forwarding, and muxi
     assert.match(built, /-o CertificateFile=none\b/, built);
     assert.match(built, /-o ForwardAgent=no\b/, built);
     assert.match(built, /-o ControlMaster=no\b/, built);
+    // SSH-5: the jump hop is a separate login against the jump host, which the
+    // broker cannot authenticate — a tool pins one host key. Refusing the jump
+    // fails at connect instead of as a host-key mismatch.
+    assert.match(built, /-o ProxyJump=none\b/, built);
     assert.doesNotMatch(built, /IdentitiesOnly/, built);
   }
 });
@@ -148,6 +152,7 @@ test('SSH config block names the tool, pins the agent, and skips port 22', () =>
       '  CertificateFile none',
       '  ForwardAgent no',
       '  ControlMaster no',
+      '  ProxyJump none',
     ].join('\n'),
   );
   const plain = conn('ssh', 'Box', { user: 'deploy', host: 'box.example', port: 22 });
@@ -162,6 +167,7 @@ test('SSH config block names the tool, pins the agent, and skips port 22', () =>
       '  CertificateFile none',
       '  ForwardAgent no',
       '  ControlMaster no',
+      '  ProxyJump none',
     ].join('\n'),
   );
 });

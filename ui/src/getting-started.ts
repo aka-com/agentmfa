@@ -454,12 +454,20 @@ export function sshAuthSockCommand(socket: string): string {
  * `ControlMaster=no` because a multiplexed connection is authorized once and
  * then reused by later invocations that never contact the agent again — no
  * audit entry, no expiry, nothing to revoke.
+ *
+ * `ProxyJump=none` because the broker cannot authenticate a jump hop: `-J`
+ * spawns a child `ssh -W` that inherits `IdentityAgent` and logs in to the
+ * *jump* host, so the agent is asked to bind that host's key — and a tool pins
+ * one. Leaving the jump enabled turned that into a refusal reading like a
+ * host-key attack; refusing it fails at connect, where the message is about
+ * routing. Kept in step with `capability::ssh::SSH_BROKER_OPTIONS` by a test.
  */
 export const SSH_BROKER_OPTIONS = [
   'IdentityFile=none',
   'CertificateFile=none',
   'ForwardAgent=no',
   'ControlMaster=no',
+  'ProxyJump=none',
 ] as const;
 
 /** Those flags as a command-line fragment, one `-o` each. */
@@ -470,9 +478,10 @@ export function sshBrokerFlags(): string {
 /**
  * The configured SSH invocation, preserving imported aliases and ports.
  *
- * An imported alias keeps its name so ~/.ssh/config still supplies ProxyJump
- * and friends, but a non-default port is spelled out rather than left to the
- * alias. The port is the one resolved at import: re-point the alias at a new
+ * An imported alias keeps its name so ~/.ssh/config still supplies the rest of
+ * its settings — ProxyJump excepted, which the flags below disable because the
+ * broker cannot authenticate a jump hop — but a non-default port is spelled out
+ * rather than left to the alias. The port is the one resolved at import: re-point the alias at a new
  * port and this command keeps overriding it with the old one until the tool
  * is re-imported. That is the lesser surprise — deferring to the alias sends
  * the command to a port the tool was never configured for.

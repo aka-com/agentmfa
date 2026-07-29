@@ -508,9 +508,19 @@ fn resolved_from_output(destination: String, output: &str) -> Result<ResolvedSsh
         _ => warnings
             .push("OpenSSH resolved multiple identity files; choose the one to import.".into()),
     }
+    // A hard rejection, not a warning. The broker cannot authenticate a jump
+    // hop: `-J` spawns a child `ssh -W` that inherits `IdentityAgent` and logs
+    // in to the *jump* host, so the agent is asked to bind that host's key —
+    // and a tool pins one host key, so the bind is refused. Importing anyway
+    // produced a tool that could never connect, and whose failure read as a
+    // host-key attack. Every emitted invocation now sets `ProxyJump=none`, so
+    // there is no configuration under which this destination would work.
     if let Some(jump) = &proxy_jump {
-        warnings.push(format!(
-            "This destination connects through ProxyJump {jump}."
+        return Err(format!(
+            "{destination} connects through ProxyJump {jump}, which AgentMFA cannot broker: \
+             the jump hop is a separate SSH login against {jump}, and a tool pins one host \
+             key. Import {jump} as its own tool and connect in two hops, or add this host by \
+             address if it is reachable directly."
         ));
     }
     Ok(ResolvedSshImport {
@@ -680,14 +690,34 @@ mod tests {
 
     #[test]
     fn parses_effective_configuration() {
-        let output = "host prod\nuser deploy\nhostname prod.example.com\nport 2222\nidentityfile ~/.ssh/missing\nproxyjump jump\nhostkeyalias prod-key\nuserknownhostsfile ~/.ssh/known_hosts\n";
+        let output = "host prod\nuser deploy\nhostname prod.example.com\nport 2222\nidentityfile ~/.ssh/missing\nhostkeyalias prod-key\nuserknownhostsfile ~/.ssh/known_hosts\n";
         let resolved = resolved_from_output("prod".into(), output).unwrap();
         assert_eq!(resolved.destination, "prod");
         assert_eq!(resolved.host, "prod.example.com");
         assert_eq!(resolved.port, 2222);
         assert_eq!(resolved.user, "deploy");
-        assert_eq!(resolved.proxy_jump.as_deref(), Some("jump"));
+        assert_eq!(resolved.proxy_jump, None);
         assert_eq!(resolved.host_key_alias.as_deref(), Some("prod-key"));
+    }
+
+    /// SSH-5. A ProxyJump destination used to import with an informational
+    /// warning, producing a tool that could never connect: `-J` spawns a child
+    /// `ssh -W` that inherits the brokered agent and logs in to the *jump* host,
+    /// so the agent is asked to bind that host's key, and a tool pins one. The
+    /// bind is refused — and on an unpinned tool, trust-on-first-use would have
+    /// pinned the jump host's key as this connection's. Refuse at import, where
+    /// the message can say what to do instead.
+    #[test]
+    fn refuses_a_proxyjump_destination_rather_than_warning_about_it() {
+        let output =
+            "host prod\nuser deploy\nhostname prod.example.com\nport 22\nproxyjump bastion\n";
+        let error = resolved_from_output("prod".into(), output).unwrap_err();
+        assert!(error.contains("ProxyJump bastion"), "{error}");
+        assert!(error.contains("pins one host key"), "{error}");
+        assert!(error.contains("Import bastion as its own tool"), "{error}");
+        // `proxyjump none` is OpenSSH's own "no jump", not a jump host.
+        let none = "host prod\nuser deploy\nhostname prod.example.com\nport 22\nproxyjump none\n";
+        assert!(resolved_from_output("prod".into(), none).is_ok());
     }
 
     #[test]
@@ -864,7 +894,7 @@ mod tests {
         fs::write(
             includes.join("prod.conf"),
             format!(
-                "Host prod\n  HostName prod.example.com\n  Port 2222\n  User deploy\n  IdentityFile {}\n  UserKnownHostsFile {}\n  ProxyJump bastion\n",
+                "Host prod\n  HostName prod.example.com\n  Port 2222\n  User deploy\n  IdentityFile {}\n  UserKnownHostsFile {}\n",
                 identity_path.display(),
                 known_hosts.display()
             ),
@@ -878,7 +908,7 @@ mod tests {
         assert_eq!(resolved.host, "prod.example.com");
         assert_eq!(resolved.port, 2222);
         assert_eq!(resolved.user, "deploy");
-        assert_eq!(resolved.proxy_jump.as_deref(), Some("bastion"));
+        assert_eq!(resolved.proxy_jump, None);
         assert_eq!(resolved.identity_files.len(), 1);
         assert_eq!(resolved.host_key_candidates.len(), 1);
         assert_eq!(

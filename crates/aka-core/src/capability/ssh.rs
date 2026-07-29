@@ -502,6 +502,19 @@ struct ObservedBinding {
     public: PublicKey,
 }
 
+/// The certificate algorithm name in an SSH public-key blob, if it is one.
+///
+/// The blob's first field is its algorithm name, and OpenSSH spells every host
+/// certificate `<base>-cert-v01@openssh.com`. Read straight off the wire rather
+/// than through `PublicKey`, because the whole point is that `PublicKey` accepts
+/// these as opaque and only fails later, at verification.
+fn certificate_algorithm(host_key: &[u8]) -> Option<String> {
+    let name = Reader::new(host_key).string()?;
+    let name = std::str::from_utf8(name).ok()?;
+    name.ends_with("-cert-v01@openssh.com")
+        .then(|| name.to_string())
+}
+
 fn parse_and_verify_session_bind(payload: &[u8]) -> Result<ObservedBinding, String> {
     let mut r = Reader::new(payload);
     if r.string() != Some(SESSION_BIND_EXTENSION) {
@@ -520,6 +533,19 @@ fn parse_and_verify_session_bind(payload: &[u8]) -> Result<ObservedBinding, Stri
 
     let public = PublicKey::from_bytes(host_key)
         .map_err(|e| format!("invalid session-bind host key: {e}"))?;
+    // A `*-cert-v01@openssh.com` blob parses — ssh-key maps an unrecognized
+    // algorithm to an opaque key — and then fails verification with a bare
+    // "unsupported", which reached the audit log as "SSH signature refused":
+    // a server with a CA-signed host key looked exactly like a host-key attack.
+    // Say what it is instead. Verifying the certificate (and matching the pin
+    // against either the CA or the embedded host key) is the actual feature and
+    // is not implemented; this is only about not lying in the meantime.
+    if let Some(algorithm) = certificate_algorithm(host_key) {
+        return Err(format!(
+            "the server presented a certificate host key ({algorithm}), which is not yet \
+             supported; configure this server to also offer a plain host key"
+        ));
+    }
     let signature = Signature::try_from(signature)
         .map_err(|e| format!("invalid session-bind signature: {e}"))?;
     public
@@ -657,11 +683,20 @@ const SIGNATURE_WINDOW: Duration = Duration::from_secs(60);
 /// client and not a hostile one. `ControlMaster=no` because a multiplexed
 /// connection is authorized once and then reused by invocations that never
 /// reach the agent again: no audit entry, no expiry, nothing to revoke.
+///
+/// `ProxyJump=none` because the broker cannot authenticate a jump hop. `-J`
+/// spawns a child `ssh -W` that inherits `IdentityAgent` and logs in to the
+/// *jump* host, so the agent is asked to bind the jump host's key — and a
+/// connection pins one host key, so `verify_session_bind` refuses it. Leaving
+/// the jump enabled turned that into an audit line reading like a host-key
+/// attack on a destination the user had configured correctly. Refusing the jump
+/// outright fails at connect, where the message is about routing.
 pub const SSH_BROKER_OPTIONS: &[&str] = &[
     "IdentityFile=none",
     "CertificateFile=none",
     "ForwardAgent=no",
     "ControlMaster=no",
+    "ProxyJump=none",
 ];
 
 /// UI-initiated reachability test: load a stored key when configured
@@ -769,10 +804,17 @@ pub async fn test_login(broker: &Broker, connection: &Connection) -> Result<Stri
         }
     }));
 
-    // Use the original alias when one was imported so ProxyJump and other
-    // routing from ~/.ssh/config still apply. User/port and all credential
-    // sources are pinned on the command line; an existing control socket
-    // cannot make the test pass without a fresh authentication.
+    // Use the original alias when one was imported so routing from
+    // ~/.ssh/config still applies. User/port and all credential sources are
+    // pinned on the command line; an existing control socket cannot make the
+    // test pass without a fresh authentication.
+    //
+    // `ProxyJump=none` below is deliberate, and matches what the emitted
+    // invocations do: the broker cannot authenticate a jump hop, so testing
+    // through one would either fail as a host-key mismatch or — on an unpinned
+    // connection — pin the *jump host's* key as this connection's. A
+    // destination only reachable through a jump host fails here as unreachable,
+    // which is the truth about what the broker can authorize.
     let target = destination.as_deref().unwrap_or(host);
     let mut command = tokio::process::Command::new("ssh");
     command
@@ -810,6 +852,8 @@ pub async fn test_login(broker: &Broker, connection: &Connection) -> Result<Stri
         .arg("ControlMaster=no")
         .arg("-o")
         .arg("ControlPath=none")
+        .arg("-o")
+        .arg("ProxyJump=none")
         .arg("-o")
         .arg("ClearAllForwardings=yes")
         .arg("-o")
@@ -851,7 +895,11 @@ fn grade_login(
     log: &str,
 ) -> Result<String, TestError> {
     let ConnectionConfig::Ssh {
-        host, port, user, ..
+        host,
+        port,
+        user,
+        destination,
+        ..
     } = &connection.config
     else {
         return Err("not an ssh connection".into());
@@ -946,9 +994,17 @@ fn grade_login(
         || log_lower.contains("operation timed out")
         || log_lower.contains("no route to host")
     {
+        // Named here because it is the one unreachable case the broker causes
+        // rather than observes: the test (and every emitted invocation) sets
+        // `ProxyJump=none`, since the agent cannot authenticate a jump hop.
+        let jump_hint = if destination.is_some() {
+            " If this destination is only reachable through a ProxyJump host,              AgentMFA cannot broker it: the jump hop is a separate SSH login              against the jump host, and a tool pins one host key. Import the              jump host as its own tool and connect in two hops."
+        } else {
+            ""
+        };
         return Err(TestError::new(
             TestErrorKind::Unreachable,
-            format!("Could not reach {host}:{port}"),
+            format!("Could not reach {host}:{port}.{jump_hint}"),
         ));
     }
     Err(TestError::new(

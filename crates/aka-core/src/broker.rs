@@ -2406,9 +2406,11 @@ mod tests {
 
     #[test]
     fn ssh_endpoint_invocation_preserves_imported_non_default_ports() {
-        let flags = "-o IdentityFile=none -o CertificateFile=none \
-                     -o ForwardAgent=no -o ControlMaster=no"
-            .split_whitespace()
+        // Derived, not spelled out: the list is the core's, and a copy here
+        // would just be a second thing to forget to update.
+        let flags = crate::capability::ssh::SSH_BROKER_OPTIONS
+            .iter()
+            .map(|option| format!("-o {option}"))
             .collect::<Vec<_>>()
             .join(" ");
         assert_eq!(
