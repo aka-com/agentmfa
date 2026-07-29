@@ -797,3 +797,82 @@ async fn the_endpoint_secret_is_not_written_to_the_state_file() {
     let read = h.broker.ui_get_endpoint(&id).await.unwrap().unwrap();
     assert_eq!(read.secret, secret);
 }
+
+/// API-29, the half that matters. The previous test passes even if nothing was
+/// ever written to the vault, because the issuing process still holds the
+/// plaintext on its own in-memory record. What has to be true for a copy-again
+/// to work after a restart is: the secret is *in the vault* under the endpoint
+/// id, and the record reloaded from disk carries no plaintext — which is what
+/// sends `endpoint_secret` down its vault branch.
+#[tokio::test]
+async fn the_endpoint_secret_is_recoverable_from_the_vault_after_a_reload() {
+    use aka_core::vault::SecretVault as _;
+
+    let up = upstream().await;
+    let dir = tempfile::tempdir().unwrap();
+    let vault: Arc<MemoryVault> = Arc::new(MemoryVault::new());
+    let broker = Broker::new(
+        Paths::under(dir.path()),
+        vault.clone(),
+        BrokerConfig::default(),
+        Arc::new(TestEvents),
+    )
+    .await
+    .unwrap();
+    broker
+        .store
+        .add_secret("GITHUB_API_KEY", Zeroizing::new(API_KEY.into()))
+        .unwrap();
+    broker
+        .store
+        .add_connection(ConnectionSpec {
+            name: "github".into(),
+            config: ConnectionConfig::Api {
+                host: "127.0.0.1".into(),
+                scheme: "http".into(),
+                port: Some(up.port),
+                template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
+                mcp_path: None,
+                oauth: None,
+            },
+            secrets: vec![],
+        })
+        .unwrap();
+    let id = broker.store.connection_by_name("github").unwrap().id;
+    let issued = broker.ui_issue_endpoint(&id).await.unwrap();
+    let endpoint_id = broker.endpoints.get_for_connection(&id).expect("issued").id;
+
+    // 1. The plaintext really is in the vault, under the endpoint's id.
+    let stored = vault.get(&endpoint_id).await.expect("vault holds it");
+    assert_eq!(&*stored, &issued.secret);
+
+    // 2. A registry reloaded from the same sealed file — what a restart does —
+    //    carries only the hash, so the read-back has to consult the vault.
+    // The seal key is a vault item, so a reader with the same vault can open the
+    // same sealed file — exactly what a restarted broker does.
+    let integrity = Arc::new(
+        aka_core::integrity::StateIntegrity::open(&*vault.clone())
+            .await
+            .unwrap(),
+    );
+    let reloaded = aka_core::endpoints::EndpointRegistry::open(
+        Paths::under(dir.path()).endpoints_file(),
+        64,
+        integrity,
+    )
+    .unwrap();
+    let record = reloaded
+        .get_for_connection(&id)
+        .expect("the endpoint persisted");
+    assert_eq!(record.secret_hash, {
+        use sha2::{Digest as _, Sha256};
+        Sha256::digest(issued.secret.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    });
+    assert!(
+        record.secret.is_empty(),
+        "a reloaded record must carry no plaintext, or nothing changed"
+    );
+}
