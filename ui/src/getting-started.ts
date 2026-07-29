@@ -436,6 +436,38 @@ export function sshAuthSockCommand(socket: string): string {
 }
 
 /**
+ * The `-o` flags every emitted `ssh` invocation carries.
+ *
+ * `SSH_AUTH_SOCK` alone points the agent at the broker but leaves the default
+ * `IdentityFile` list in place, so a working `~/.ssh/id_ed25519` can complete
+ * the login with no broker involvement and no activity-log entry — a success
+ * that looks brokered and is not. `IdentityFile=none` and `CertificateFile=none`
+ * remove that path; the broker's agent identity is still offered, because
+ * OpenSSH only filters agent keys against `IdentityFile` under
+ * `IdentitiesOnly=yes` — which is why that flag is deliberately absent here
+ * despite being the intuitive one to reach for.
+ *
+ * `ForwardAgent=no` because forwarding is unsupported: the broker refuses a
+ * session-bind that admits to being forwarded, but the flag is asserted by the
+ * client, so it stops an honest one and not a hostile one.
+ *
+ * `ControlMaster=no` because a multiplexed connection is authorized once and
+ * then reused by later invocations that never contact the agent again — no
+ * audit entry, no expiry, nothing to revoke.
+ */
+export const SSH_BROKER_OPTIONS = [
+  'IdentityFile=none',
+  'CertificateFile=none',
+  'ForwardAgent=no',
+  'ControlMaster=no',
+] as const;
+
+/** Those flags as a command-line fragment, one `-o` each. */
+export function sshBrokerFlags(): string {
+  return SSH_BROKER_OPTIONS.map((option) => `-o ${option}`).join(' ');
+}
+
+/**
  * The configured SSH invocation, preserving imported aliases and ports.
  *
  * An imported alias keeps its name so ~/.ssh/config still supplies ProxyJump
@@ -460,7 +492,7 @@ export function sshInvocationCommand(
   const port = connection.port && connection.port !== 22
     ? ` -p ${connection.port}`
     : '';
-  return `ssh${port} ${destination}`;
+  return `ssh${port} ${sshBrokerFlags()} ${destination}`;
 }
 
 /** One command that uses the issued signing socket to reach its SSH target. */
@@ -472,21 +504,25 @@ export function sshDirectCommand(
 }
 
 /**
- * Resolve an issued endpoint's address. Older brokers omitted SSH's socket
- * path from connection summaries, but its stable location is derivable from
- * the broker socket directory and endpoint id.
+ * Resolve an issued endpoint's address from the connection summary.
+ *
+ * SSH resolves through `sshSocket` instead: the agent socket's filename is
+ * derived from the endpoint secret, so that the path cannot be found by
+ * listing the endpoints directory — the ssh-agent protocol has nowhere to
+ * present a credential, so whoever opens the socket gets signatures. Only the
+ * broker can name it, and a summary is built without touching the vault. The
+ * caller reads it back with `get_endpoint` and passes it here; there is
+ * deliberately no fallback that reconstructs a path from the endpoint id,
+ * because such a path is exactly what must not be guessable.
  */
 export function directEndpointAddress(
   type: ConnectionType,
   endpoint: { endpoint_id: string; dsn?: string | null } | null | undefined,
-  brokerSocket: string,
+  sshSocket?: string | null,
 ): string | null {
   if (!endpoint) return null;
   if (endpoint.dsn) return endpoint.dsn;
-  if (type !== 'ssh') return null;
-  const slash = brokerSocket.lastIndexOf('/');
-  const socketDir = slash >= 0 ? brokerSocket.slice(0, slash) : '.';
-  return `${socketDir}/endpoints/${endpoint.endpoint_id}/agent.sock`;
+  return type === 'ssh' ? (sshSocket ?? null) : null;
 }
 
 /**

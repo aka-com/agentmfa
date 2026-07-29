@@ -161,7 +161,18 @@ interface MockAccess {
   /** RFC 3339 end of a denial's cooldown, while retries are auto-refused. */
   confirm_cooldown_until?: string | null;
   allowed_tools?: string[];
-  endpoint?: { endpoint_id: string; type: ConnectionType; dsn?: string | null };
+  endpoint?: {
+    endpoint_id: string;
+    type: ConnectionType;
+    dsn?: string | null;
+    /**
+     * An SSH endpoint's agent socket, held back from the chip the way the real
+     * broker holds it back from `connection_dto`: its filename comes from the
+     * endpoint secret, so naming it requires the vault. `get_endpoint` returns
+     * it; the connection list does not.
+     */
+    sshDsn?: string;
+  };
 }
 
 interface MockIdentity {
@@ -544,7 +555,15 @@ function connDto(c: MockConnection): ConnectionSummary {
         confirm_window_agents: record?.confirm_window_agents ?? [],
         confirm_cooldown_until: record?.confirm_cooldown_until ?? null,
         allowed_tools: record?.allowed_tools ?? null,
-        endpoint: record?.endpoint ?? null,
+        // `sshDsn` is deliberately dropped: the chip is what a connection
+        // listing carries, and an SSH endpoint's socket path is not in it.
+        endpoint: record?.endpoint
+          ? {
+              endpoint_id: record.endpoint.endpoint_id,
+              type: record.endpoint.type,
+              dsn: record.endpoint.dsn ?? null,
+            }
+          : null,
       };
     })(),
     host: c.host || null, scheme: c.scheme || null, port: c.port || null, template: c.template || null,
@@ -1073,7 +1092,10 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         dsn = `postgresql://${connection.user ?? 'app'}:${secret}@/${connection.dbname ?? 'app'}?host=${dir}&port=5432&sslmode=disable`;
         example = `DATABASE_URL="${dsn}"`;
       } else if (kind === 'ssh') {
-        dsn = `${dir}/agent.sock`;
+        // The real broker derives this filename from the endpoint secret, so
+        // the socket cannot be found by listing the directory; the demo mirrors
+        // the shape so the read-back path is exercised here too.
+        dsn = `${dir}/agent-3f1c9a2b04d7e685.sock`;
         const invocation = sshInvocationCommand({ ...connection, target: connTarget(connection) });
         example = `SSH_AUTH_SOCK="${dsn}" ${invocation}`;
         shownSecret = ''; // ssh-agent has no presented secret
@@ -1081,9 +1103,13 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         dsn = 'http://127.0.0.1:52000';
         example = `curl -H "Authorization: Bearer ${secret}" ${dsn}/`;
       }
-      // Postgres retains its credential in the DSN; SSH retains the stable
-      // socket path so the setup command remains copyable after issue.
-      record.endpoint = { endpoint_id: endpointId, type: kind, dsn };
+      // Postgres retains its credential in the DSN. SSH does not retain its
+      // socket path on the chip: the filename is derived from the endpoint
+      // secret precisely so it is not enumerable, which means only a
+      // vault-backed read can name it. `sshDsn` stands in for the vault here.
+      record.endpoint = kind === 'ssh'
+        ? { endpoint_id: endpointId, type: kind, sshDsn: dsn }
+        : { endpoint_id: endpointId, type: kind, dsn };
       audit('wired', `Direct endpoint issued: ${connection.name}`);
       emit('aka://wirings-changed', {});
       return { endpoint_id: endpointId, type: kind, dsn, secret: shownSecret, example };
@@ -1094,7 +1120,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       const connection = db.connections.find((c) => c.id === args.connectionId);
       const endpoint = db.access.find((a) => a.connection_id === args.connectionId)?.endpoint;
       if (!connection || !endpoint) return null;
-      const dsn = endpoint.dsn ?? '';
+      const dsn = endpoint.dsn ?? endpoint.sshDsn ?? '';
       const secret = connection.type === 'ssh' ? '' : MOCK_ENDPOINT_SECRET;
       const example = connection.type === 'pg' ? `DATABASE_URL="${dsn}"`
         : connection.type === 'ssh'

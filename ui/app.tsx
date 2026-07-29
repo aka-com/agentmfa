@@ -220,6 +220,16 @@ interface AppState {
   reveal: Record<string, string>;
   /** Direct-endpoint fields expanded from their masked one-liner, by connection id. */
   epExpanded: Record<string, boolean>;
+  /**
+   * An issued SSH endpoint's agent socket path, by connection id.
+   *
+   * Connection summaries do not carry it. The filename is derived from the
+   * endpoint secret precisely so the socket cannot be found by listing a
+   * directory — the ssh-agent protocol has nowhere to present a credential, so
+   * whoever opens the socket gets signatures — which means only the broker,
+   * holding the vault, can name it. Read back per connection and cached here.
+   */
+  sshSockets: Record<string, string>;
   sheet: SheetState | null;
   draft: ConnectionDraft;
   sheetErrors: Record<string, string>;
@@ -341,6 +351,7 @@ const initialState: AppState = {
   notificationSettings: { ...DEFAULT_NOTIFICATION_SETTINGS },
   reveal: {},            // secretId -> prefix string (transient)
   epExpanded: {},        // connId -> endpoint field expanded (transient)
+  sshSockets: {},        // connId -> issued SSH agent socket path (read back)
   // sheet / confirm state
   sheet: null,           // {kind:'add-secret'|'edit-secret'|'add-conn'|'edit-conn'|'settings', ...}
   draft: {},
@@ -426,6 +437,7 @@ function clearBrokerOwnedState(): void {
   state.settings = { ...DEFAULT_SETTINGS };
   state.reveal = {};
   state.epExpanded = {};
+  state.sshSockets = {};
   setSheet(null);
   state.draft = {};
   state.sheetErrors = {};
@@ -576,7 +588,12 @@ async function load<K extends CommandName>(
     if (!brokerEpochIsCurrent(epoch)) return;
     switch (key) {
       case 'secrets': state.secrets = result as SecretSummary[]; break;
-      case 'connections': state.connections = result as ConnectionSummary[]; break;
+      case 'connections':
+        state.connections = result as ConnectionSummary[];
+        // Not awaited: the list paints immediately and the SSH addresses fill
+        // in behind it. Each is a vault read, so this must not gate a refresh.
+        void resolveSshEndpointSockets(broker, epoch);
+        break;
       case 'sessions': state.sessions = result as SessionSummary[]; break;
       case 'activity': state.activity = result as ActivityEntry[]; break;
       // Deadlines are re-anchored to this machine's clock at receipt, so a
@@ -589,6 +606,63 @@ async function load<K extends CommandName>(
     }
   } catch (error) {
     console.error(cmd, error);
+  }
+}
+/**
+ * Fill `state.sshSockets` for every SSH connection with an issued endpoint.
+ *
+ * The socket's filename is derived from the endpoint secret so that the path
+ * cannot be found by listing `~/.aka/endpoints`, which means the connection
+ * list — built without touching the vault — cannot carry it. `get_endpoint`
+ * can: it is the same read the Copy buttons already make for a Postgres TCP
+ * address or an API secret. Cached because the path is stable until the
+ * endpoint is reissued, and re-read on every list refresh so a reissue lands.
+ */
+async function resolveSshEndpointSockets(broker: BrokerProfile, epoch: number): Promise<void> {
+  const wanted = state.connections.filter((c) => c.type === 'ssh' && c.agent_access.endpoint);
+  if (!wanted.length) {
+    if (Object.keys(state.sshSockets).length) {
+      state.sshSockets = {};
+      render();
+    }
+    return;
+  }
+  const resolved: Record<string, string> = {};
+  for (const conn of wanted) {
+    try {
+      const issued = await refetchBrokerQuery(broker, 'get_endpoint', { connectionId: conn.id });
+      if (!brokerEpochIsCurrent(epoch)) return;
+      if (issued?.dsn) resolved[conn.id] = issued.dsn;
+    } catch (error) {
+      console.error('get_endpoint', error);
+    }
+  }
+  if (!brokerEpochIsCurrent(epoch)) return;
+  const changed = Object.keys(resolved).length !== Object.keys(state.sshSockets).length
+    || Object.entries(resolved).some(([id, sock]) => state.sshSockets[id] !== sock);
+  if (!changed) return;
+  state.sshSockets = resolved;
+  render();
+}
+/**
+ * The issued SSH agent socket for `conn`, reading it back if the cache is cold.
+ *
+ * The cached copy arrives a beat after the connection list, so a click that
+ * lands in that window would otherwise find nothing to copy. The read is the
+ * same one `resolveSshEndpointSockets` makes; it populates the cache too.
+ */
+async function sshEndpointSocket(conn: ConnectionSummary): Promise<string | null> {
+  const cached = state.sshSockets[conn.id];
+  if (cached) return cached;
+  if (!conn.agent_access.endpoint) return null;
+  try {
+    const issued = await invoke('get_endpoint', { connectionId: conn.id });
+    if (!issued?.dsn) return null;
+    state.sshSockets = { ...state.sshSockets, [conn.id]: issued.dsn };
+    return issued.dsn;
+  } catch (error) {
+    console.error('get_endpoint', error);
+    return null;
   }
 }
 async function loadSettings(): Promise<void> {
@@ -1115,11 +1189,7 @@ function endpointStripHTML(c: ConnectionSummary, runnableSsh = false, withFormat
   // there it is the deliverable being read, not shoulder-surfable chrome.
   const copied = state.copied === `ep:${c.id}`;
   const expanded = runnableSsh || Boolean(state.epExpanded[c.id]);
-  const endpointAddress = directEndpointAddress(
-    c.type,
-    endpoint,
-    state.identity?.socket_path ?? '~/.aka/broker.sock',
-  );
+  const endpointAddress = directEndpointAddress(c.type, endpoint, state.sshSockets[c.id]);
   const endpointText = endpointAddress
     ? c.type === 'ssh'
       ? sshDirectCommand(endpointAddress, c)
@@ -2423,11 +2493,7 @@ function startWalkthroughHTML(): string {
     : null;
   const directEndpoint = directConn?.agent_access.endpoint ?? null;
   const directAddress = directConn && directEndpoint
-    ? directEndpointAddress(
-        directConn.type,
-        directEndpoint,
-        state.identity?.socket_path ?? '~/.aka/broker.sock',
-      )
+    ? directEndpointAddress(directConn.type, directEndpoint, state.sshSockets[directConn.id])
     : null;
   const task = connectMode === 'direct'
     ? directStartTask(
@@ -5228,12 +5294,9 @@ document.addEventListener('click', async (e) => {
     }
     case 'copy-endpoint-dsn': {
       const conn = state.connections.find((candidate) => candidate.id === btn.dataset.conn);
+      const sock = conn?.type === 'ssh' ? await sshEndpointSocket(conn) : null;
       const address = conn
-        ? directEndpointAddress(
-            conn.type,
-            conn.agent_access.endpoint,
-            state.identity?.socket_path ?? '~/.aka/broker.sock',
-          )
+        ? directEndpointAddress(conn.type, conn.agent_access.endpoint, sock)
         : null;
       if (conn && address) {
         try {
@@ -5251,12 +5314,9 @@ document.addEventListener('click', async (e) => {
     case 'copy-endpoint-format': {
       const conn = state.connections.find((candidate) => candidate.id === btn.dataset.conn);
       const format = conn ? endpointFormatByKey(conn.type, btn.dataset.format ?? '') : null;
+      const sock = conn?.type === 'ssh' ? await sshEndpointSocket(conn) : null;
       const address = conn
-        ? directEndpointAddress(
-            conn.type,
-            conn.agent_access.endpoint,
-            state.identity?.socket_path ?? '~/.aka/broker.sock',
-          )
+        ? directEndpointAddress(conn.type, conn.agent_access.endpoint, sock)
         : null;
       if (!conn || !format || !address) break;
       // HTTP formats embed the retained endpoint secret, which summaries

@@ -176,7 +176,10 @@ enum Command {
     /// Open an SSH session on a running broker and print the agent socket
     /// path: `export SSH_AUTH_SOCK="$(mfa ssh production)"` — then stock
     /// `ssh`/`git`/`scp`/`rsync` work while the broker signs only for the
-    /// connection's pinned user and server host key.
+    /// connection's pinned user and server host key. The command prints the
+    /// destination, the pinned fingerprint, the absolute deadline, and the
+    /// `-o` flags to pass; add those flags, or a working on-disk key can
+    /// authenticate the login instead with no broker involvement.
     Ssh {
         /// The ssh connection's name.
         connection: String,
@@ -1758,17 +1761,75 @@ fn cmd_dsn(connection: String, root: Option<PathBuf>, client: Option<String>) {
     println!("{dsn}");
 }
 
+/// The `-o` flags every brokered `ssh` invocation should carry; see the core's
+/// definition for why each is present and why `IdentitiesOnly` is not.
+use aka_core::capability::ssh::SSH_BROKER_OPTIONS;
+
+/// The stderr lines accompanying `mfa ssh`'s socket path.
+///
+/// Everything here was already in the broker's response and thrown away: the
+/// destination to actually type (an imported alias is not `user@host`), the
+/// fingerprint the broker enforces (the pinned *host* is not what authorizes
+/// anything), the absolute deadline, and the flags without which a local
+/// on-disk key can quietly win the login instead. Built separately from
+/// printing so the shape is testable.
+fn ssh_open_hints(
+    body: &serde_json::Value,
+    auth_sock: &str,
+    now: chrono::DateTime<chrono::Local>,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let (Some(user), Some(host)) = (body["user"].as_str(), body["host"].as_str()) {
+        lines.push(format!("signs only for {user}@{host}"));
+    }
+    if let Some(secs) = body["expires_in_seconds"].as_u64() {
+        // Relative alone leaves nothing to compare a later failure against. The
+        // agent protocol has no error channel, so a 61-second-old export reads
+        // as "Permission denied (publickey)" and nothing else.
+        let deadline = now + chrono::Duration::seconds(secs as i64);
+        lines.push(format!(
+            "connect within {secs}s — by {} (a later connection needs a fresh open)",
+            deadline.format("%H:%M:%S %Z")
+        ));
+    }
+    lines.push(match body["host_key_fingerprint"].as_str() {
+        Some(fingerprint) if !fingerprint.is_empty() => {
+            format!("server host key pinned to {fingerprint}")
+        }
+        _ => "server host key not pinned — the first server key seen will be trusted and pinned"
+            .to_string(),
+    });
+    let destination = body["destination"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            let (user, host) = (body["user"].as_str()?, body["host"].as_str()?);
+            Some(format!("{user}@{host}"))
+        });
+    if let Some(destination) = destination {
+        let port = match body["port"].as_u64() {
+            Some(port) if port != 22 => format!(" -p {port}"),
+            _ => String::new(),
+        };
+        let flags = SSH_BROKER_OPTIONS
+            .iter()
+            .map(|option| format!("-o {option}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        lines.push(format!("export SSH_AUTH_SOCK=\"{auth_sock}\""));
+        lines.push(format!("ssh{port} {flags} {destination}"));
+    }
+    lines
+}
+
 fn cmd_ssh(connection: String, root: Option<PathBuf>, client: Option<String>) {
     let body = open_session("/v1/ssh/open", &connection, root, client);
     let Some(auth_sock) = body["auth_sock"].as_str() else {
         die("the broker's response carried no agent socket path");
     };
-    if let (Some(user), Some(host)) = (body["user"].as_str(), body["host"].as_str()) {
-        let expiry = body["expires_in_seconds"]
-            .as_u64()
-            .map(|secs| format!("; connect within {secs}s"))
-            .unwrap_or_default();
-        eprintln!("  signs only for {user}@{host}{expiry}");
+    for line in ssh_open_hints(&body, auth_sock, chrono::Local::now()) {
+        eprintln!("  {line}");
     }
     println!("{auth_sock}");
 }
@@ -2235,6 +2296,76 @@ mod tests {
     use super::*;
     use aka_core::events::NoopEvents;
     use aka_core::vault::MemoryVault;
+    use chrono::TimeZone as _;
+
+    /// SSH-24 and SSH-9. Everything printed here was already in the response
+    /// and discarded: the destination an alias-imported tool is reached by, the
+    /// fingerprint the broker actually enforces, an absolute deadline (the agent
+    /// protocol has no error channel, so an expired socket reads only as
+    /// "Permission denied (publickey)"), and the flags without which a local
+    /// on-disk key can win the login with no broker involvement.
+    #[test]
+    fn ssh_open_hints_name_what_the_socket_honors() {
+        let now = chrono::Local
+            .with_ymd_and_hms(2026, 7, 29, 9, 30, 0)
+            .single()
+            .expect("an unambiguous local time");
+        let body = serde_json::json!({
+            "auth_sock": "/tmp/agent-3f1c9a2b04d7e685.sock",
+            "destination": "production",
+            "host": "prod.example.com",
+            "port": 2222,
+            "user": "deploy",
+            "host_key_fingerprint": "SHA256:abc123",
+            "expires_in_seconds": 60,
+        });
+        let lines = ssh_open_hints(&body, "/tmp/agent-3f1c9a2b04d7e685.sock", now);
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("signs only for deploy@prod.example.com"),
+            "{joined}"
+        );
+        assert!(joined.contains("SHA256:abc123"), "{joined}");
+        assert!(joined.contains("connect within 60s"), "{joined}");
+        assert!(
+            joined.contains("09:31:00"),
+            "an absolute deadline: {joined}"
+        );
+        // The imported alias, not user@host: ~/.ssh/config is what supplies the
+        // rest of the routing, and the pinned host may not even be typeable.
+        assert!(joined.contains("ssh -p 2222 "), "{joined}");
+        assert!(joined.ends_with(" production"), "{joined}");
+        for option in SSH_BROKER_OPTIONS {
+            assert!(
+                joined.contains(&format!("-o {option}")),
+                "{option} missing: {joined}"
+            );
+        }
+        assert!(
+            !joined.contains("IdentitiesOnly"),
+            "that flag breaks the agent: {joined}"
+        );
+    }
+
+    /// An unpinned connection says so rather than staying silent: the next
+    /// server key seen becomes the permanent anchor.
+    #[test]
+    fn ssh_open_hints_say_when_no_host_key_is_pinned() {
+        let now = chrono::Local
+            .with_ymd_and_hms(2026, 7, 29, 9, 30, 0)
+            .single()
+            .expect("an unambiguous local time");
+        let body = serde_json::json!({
+            "host": "prod.example.com",
+            "user": "deploy",
+            "host_key_fingerprint": serde_json::Value::Null,
+        });
+        let joined = ssh_open_hints(&body, "/tmp/a.sock", now).join("\n");
+        assert!(joined.contains("not pinned"), "{joined}");
+        assert!(joined.contains("will be trusted and pinned"), "{joined}");
+        // No port key at all: port 22 is left implicit rather than spelled out.
+        assert!(joined.contains("ssh -o IdentityFile=none"), "{joined}");
+    }
 
     #[test]
     fn offline_store_writer_respects_the_broker_lease() {

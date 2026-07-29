@@ -344,14 +344,34 @@ Authorization is checked once, at open time. Point `SSH_AUTH_SOCK` at
 `auth_sock` and run any unmodified SSH client (`ssh`, `git`, `scp`, `rsync`,
 `ssh -L`):
 
-    SSH_AUTH_SOCK=<auth_sock> ssh -o IdentitiesOnly=yes <destination>
+    ssh -o IdentityAgent=<auth_sock> -o IdentityFile=none \
+        -o CertificateFile=none -o ForwardAgent=no \
+        -o ControlMaster=no <destination>
     SSH_AUTH_SOCK=<auth_sock> git -C repo push
+
+Prefer `-o IdentityAgent` to `SSH_AUTH_SOCK` wherever the client accepts
+`-o`: setting `SSH_AUTH_SOCK` alone leaves the default `IdentityFile` list
+in place, so a working `~/.ssh/id_ed25519` can authenticate the login with
+no broker involvement and no activity-log entry — a success that looks
+brokered and is not. `IdentityFile=none` and `CertificateFile=none` are
+what suppress that; `SSH_AUTH_SOCK` is for tools that cannot take `-o`.
+Do **not** add `-o IdentitiesOnly=yes`: OpenSSH drops agent identities
+that match no configured `IdentityFile`, and the broker's key has no
+on-disk `.pub`, so the identity is discarded and the login fails.
 
 The broker serves the ssh-agent protocol on that socket: it offers the one
 configured key and signs your authentication with it, and the private key
 never leaves the broker. It verifies OpenSSH's session binding against the
 pinned host-key fingerprint and will **only** sign host-bound public-key
 login as the pinned `user`; it signs nothing else.
+
+Agent forwarding (`ssh -A`, `ForwardAgent yes`) is not supported and the
+snippets disable it. The broker refuses a session-bind that admits to being
+forwarded, but that flag is asserted by whichever client wrote the message,
+so it stops an honest client and not a hostile one: anything reaching the
+forwarded channel on the remote host can present a genuine binding it
+obtained by connecting to the pinned host itself. Treat the socket as
+same-machine-only.
 
 When `host_key_fingerprint` is `null`, the server's key is not pinned yet:
 the broker trusts it on first use. The key the server presents at your first
@@ -362,8 +382,25 @@ different key is refused.
 Ticket lifetime and reconnect semantics
 match Postgres: the socket accepts as many connections as needed for the
 {ticket} s window, so multiple SSH
-invocations as you need under the authorization that issued it. Live SSH
-connections are also capped by the remaining lifetime of an access grant.
+invocations as you need under the authorization that issued it.
+
+What expiry does and does not reach. The broker participates only in
+authentication: it is asked to sign once per login, and that signature is
+where authorization is checked. An SSH session that has authenticated is
+owned by your client and the server, and the broker is not in its path —
+so ticket expiry, turning the connection off, deleting it, and shutting the
+broker down all prevent **new** logins and end nothing already running.
+Two consequences worth planning around:
+
+- `ControlMaster`/`ControlPersist` multiplexing reuses one authenticated
+  connection for later `ssh` invocations, which never contact the agent
+  again. The emitted snippets set `ControlMaster=no` so each invocation is
+  separately authorized and separately logged; if you override that, later
+  invocations are outside the broker's view entirely.
+- A backgrounded tunnel (`ssh -N -L …`) survives for as long as its client
+  runs, with no live-session row and nothing to revoke. Bound its lifetime
+  yourself.
+
 Compatible OpenSSH clients
 negotiate session binding and host-bound authentication automatically, so an
 explicit `-o PubkeyAuthentication=host-bound` is optional. Clients without
@@ -570,6 +607,54 @@ mod tests {
         assert!(!text.contains("Any `401` means"));
         // Config-derived numbers are rendered, not hard-coded prose.
         assert!(text.contains("30 days"));
+    }
+
+    /// SSH-13 and SSH-14. The recommended incantation was
+    /// `-o IdentitiesOnly=yes`, which *breaks* the brokered agent: OpenSSH's
+    /// `pubkey_prepare` drops agent identities matching no configured
+    /// `IdentityFile`, and the broker's key has no on-disk `.pub`. And with
+    /// only `SSH_AUTH_SOCK` set, a user who already has a working
+    /// `~/.ssh/id_ed25519` gets a successful login with no broker involvement
+    /// and no audit entry — a false success, worse than a failure.
+    #[test]
+    fn the_ssh_incantation_suppresses_local_keys_without_discarding_the_brokered_one() {
+        let text = instructions(&BrokerConfig::default(), &paths());
+        for needle in [
+            "-o IdentityAgent=<auth_sock>",
+            "IdentityFile=none",
+            "CertificateFile=none",
+            "ForwardAgent=no",
+            "ControlMaster=no",
+        ] {
+            assert!(text.contains(needle), "instructions missing {needle:?}");
+        }
+        assert!(
+            text.contains("Do **not** add `-o IdentitiesOnly=yes`"),
+            "the flag that looks right and breaks the agent must be called out"
+        );
+    }
+
+    /// SSH-12. The docs claimed "Live SSH connections are also capped by the
+    /// remaining lifetime of an access grant." Only the *agent socket
+    /// connection* is; the SSH transport is client-owned and unaffected by
+    /// ticket expiry, disable, delete, or broker shutdown. SSH-11 is the same
+    /// statement from the client's side: `ControlPersist` and `-N` tunnels turn
+    /// a 60-second capability into an indefinite, invisible one.
+    #[test]
+    fn the_ssh_docs_do_not_claim_revocation_reaches_established_sessions() {
+        let text = instructions(&BrokerConfig::default(), &paths());
+        assert!(
+            !text.contains("Live SSH connections are also capped"),
+            "that claim is false: the broker is not in an authenticated session's path"
+        );
+        for needle in [
+            "prevent **new** logins and end nothing already running",
+            "ControlPersist",
+            "ssh -N -L",
+            "Agent forwarding (`ssh -A`",
+        ] {
+            assert!(text.contains(needle), "instructions missing {needle:?}");
+        }
     }
 
     #[test]

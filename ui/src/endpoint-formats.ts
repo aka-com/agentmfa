@@ -3,7 +3,7 @@
 // Pure string factories over the connection summary and the resolved
 // endpoint address, in the vein of getting-started's SNIPPETS table.
 
-import { sshDirectCommand } from './getting-started';
+import { SSH_BROKER_OPTIONS, sshBrokerFlags, sshDirectCommand } from './getting-started';
 import type { ConnectionSummary, ConnectionType } from './types';
 
 export interface EndpointFormat {
@@ -107,22 +107,19 @@ export function scpCommand(socket: string, c: ConnectionSummary): string {
   const destination = importedDestination
     || (c.user && c.host ? `${c.user}@${c.host}` : c.target);
   const port = c.port && c.port !== 22 ? ` -P ${c.port}` : '';
-  return `SSH_AUTH_SOCK=${shellQuoted(socket)} scp${port} <file> ${destination}:`;
-}
-
-/** An sftp:// URL for GUI file-transfer clients (Cyberduck, FileZilla). */
-export function sftpUrl(c: ConnectionSummary): string | null {
-  const parts = sshParts(c);
-  if (!parts) return null;
-  const user = parts.user ? `${parts.user}@` : '';
-  const port = parts.port && parts.port !== 22 ? `:${parts.port}` : '';
-  return `sftp://${user}${parts.host}${port}`;
+  return `SSH_AUTH_SOCK=${shellQuoted(socket)} scp${port} ${sshBrokerFlags()} <file> ${destination}:`;
 }
 
 /**
  * A ~/.ssh/config block pointing IdentityAgent at the issued socket — makes
  * plain `ssh <alias>`, VS Code Remote-SSH, and anything ssh-config-aware
  * reach the server by name.
+ *
+ * The four options after `IdentityAgent` are the config-file spelling of
+ * `SSH_BROKER_OPTIONS`; see there for why each is present and why
+ * `IdentitiesOnly` is not. Without `IdentityFile none` a user who already has
+ * a working `~/.ssh/id_ed25519` gets a successful login with no broker
+ * involvement and no activity-log entry, which is worse than a failure.
  */
 export function sshConfigBlock(socket: string, c: ConnectionSummary): string | null {
   const parts = sshParts(c);
@@ -132,6 +129,10 @@ export function sshConfigBlock(socket: string, c: ConnectionSummary): string | n
   if (parts.port && parts.port !== 22) lines.push(`  Port ${parts.port}`);
   if (parts.user) lines.push(`  User ${parts.user}`);
   lines.push(`  IdentityAgent ${shellQuoted(socket)}`);
+  for (const option of SSH_BROKER_OPTIONS) {
+    const [key, value] = option.split('=');
+    lines.push(`  ${key} ${value}`);
+  }
   return lines.join('\n');
 }
 
@@ -181,16 +182,16 @@ export const ENDPOINT_FORMATS: Record<ConnectionType, EndpointFormat[]> = {
       title: 'Copy an scp file-copy command over the issued signing socket',
       build: (c, socket) => scpCommand(socket, c),
     },
-    {
-      key: 'sftp',
-      label: 'sftp',
-      title: 'Copy an sftp:// URL — Cyberduck, FileZilla, Transmit',
-      build: (c) => sftpUrl(c),
-    },
+    // No `sftp://` button. The URL named a host and a user and referenced no
+    // issued socket, and the GUI clients it was offered for (Cyberduck,
+    // FileZilla, Transmit) inherit no environment when launched from Finder or
+    // the Dock — so the copied value carried no capability and could not work.
+    // Those clients do read `~/.ssh/config`, which is the button below.
     {
       key: 'ssh-config',
       label: 'SSH config',
-      title: 'Copy a ~/.ssh/config block — plain ssh by name, VS Code Remote-SSH',
+      title: 'Copy a ~/.ssh/config block — plain ssh by name, VS Code Remote-SSH, '
+        + 'and GUI clients such as Cyberduck or FileZilla',
       build: (c, socket) => sshConfigBlock(socket, c),
     },
   ],

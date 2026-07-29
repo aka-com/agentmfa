@@ -13,6 +13,7 @@ import {
   directStartTask,
   resolveConnectMode,
   sshAuthSockCommand,
+  sshBrokerFlags,
   sshDirectCommand,
   sshInvocationCommand,
   startKindLabel,
@@ -134,7 +135,7 @@ test('direct SSH commands combine the socket with the configured destination', (
       port: 2222,
       target: 'deploy@prod.example.com:2222',
     }),
-    'ssh -p 2222 deploy@prod.example.com',
+    `ssh -p 2222 ${sshBrokerFlags()} deploy@prod.example.com`,
   );
   assert.equal(
     sshDirectCommand('/tmp/agent.sock', {
@@ -144,7 +145,7 @@ test('direct SSH commands combine the socket with the configured destination', (
       port: 2222,
       target: 'deploy@prod.example.com:2222',
     }),
-    'SSH_AUTH_SOCK="/tmp/agent.sock" ssh -p 2222 production',
+    `SSH_AUTH_SOCK="/tmp/agent.sock" ssh -p 2222 ${sshBrokerFlags()} production`,
   );
   assert.equal(
     sshDirectCommand('/tmp/agent.sock', {
@@ -154,23 +155,22 @@ test('direct SSH commands combine the socket with the configured destination', (
       port: 2222,
       target: 'deploy@prod.example.com:2222',
     }),
-    'SSH_AUTH_SOCK="/tmp/agent.sock" ssh -p 2222 deploy@prod.example.com',
+    `SSH_AUTH_SOCK="/tmp/agent.sock" ssh -p 2222 ${sshBrokerFlags()} deploy@prod.example.com`,
   );
 });
 
-test('older SSH endpoint summaries derive their stable agent socket', () => {
-  assert.equal(
-    directEndpointAddress(
-      'ssh',
-      { endpoint_id: 'endpoint-1', dsn: null },
-      '/Users/test/.aka/broker.sock',
-    ),
-    '/Users/test/.aka/endpoints/endpoint-1/agent.sock',
-  );
-  assert.equal(
-    directEndpointAddress('pg', { endpoint_id: 'endpoint-1', dsn: null }, '~/.aka/broker.sock'),
-    null,
-  );
+// SSH-1: the agent socket's filename is derived from the endpoint secret, so
+// the path cannot be found by listing the endpoints directory. Reconstructing
+// one from the endpoint id — which this used to do — is exactly the guessable
+// path the derivation exists to prevent, so there is no fallback: an SSH
+// address resolves only from what the broker hands back.
+test('an SSH endpoint address comes from the broker, never from the endpoint id', () => {
+  const sock = '/Users/test/.aka/endpoints/endpoint-1/agent-3f1c9a2b04d7e685.sock';
+  assert.equal(directEndpointAddress('ssh', { endpoint_id: 'endpoint-1', dsn: null }, sock), sock);
+  // Nothing read back yet, so there is nothing to copy — and emphatically not
+  // a path built from the id.
+  assert.equal(directEndpointAddress('ssh', { endpoint_id: 'endpoint-1', dsn: null }), null);
+  assert.equal(directEndpointAddress('pg', { endpoint_id: 'endpoint-1', dsn: null }), null);
 });
 
 test('the task reads sensibly before any tool exists', () => {

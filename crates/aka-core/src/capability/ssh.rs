@@ -540,6 +540,33 @@ struct AgentState {
 /// How many signatures one agent socket may issue per minute.
 const SIGNATURE_WINDOW: Duration = Duration::from_secs(60);
 
+/// The `-o` options every emitted `ssh` invocation carries — the single source
+/// of truth for the CLI hint, the endpoint example, and the UI's snippets.
+///
+/// `SSH_AUTH_SOCK` (or `IdentityAgent`) points the agent at the broker but
+/// leaves the default `IdentityFile` list in place, so a user who already has a
+/// working `~/.ssh/id_ed25519` gets a successful login with **no** broker
+/// involvement and no activity-log entry — a false success, which is worse than
+/// a failure because it comes with the belief the broker mediated it.
+/// `IdentityFile=none` and `CertificateFile=none` close that path.
+///
+/// `IdentitiesOnly=yes` is the flag that looks right and is wrong: OpenSSH's
+/// `pubkey_prepare` drops agent identities matching no configured
+/// `IdentityFile`, and the brokered key has no on-disk `.pub`, so the identity
+/// is discarded and the login fails.
+///
+/// `ForwardAgent=no` because forwarding is unsupported — `session-bind`'s
+/// forwarding flag is asserted by the client, so refusing it stops an honest
+/// client and not a hostile one. `ControlMaster=no` because a multiplexed
+/// connection is authorized once and then reused by invocations that never
+/// reach the agent again: no audit entry, no expiry, nothing to revoke.
+pub const SSH_BROKER_OPTIONS: &[&str] = &[
+    "IdentityFile=none",
+    "CertificateFile=none",
+    "ForwardAgent=no",
+    "ControlMaster=no",
+];
+
 /// UI-initiated reachability test: load a stored key when configured
 /// (validating that it parses) and read the server's version banner.
 /// No key exchange is performed, so login and the host key stay unverified.

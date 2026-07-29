@@ -42,7 +42,10 @@ export function describe(connection: BrokerConnection): string {
     case 'ssh':
       return (
         `Open an SSH session to ${connection.target}. Returns an SSH_AUTH_SOCK ` +
-        'path that ssh, git and rsync can use; the private key stays in the broker.'
+        'path that ssh, git and rsync can use; the private key stays in the broker. ' +
+        'Pass -o IdentityFile=none -o CertificateFile=none so an on-disk key ' +
+        'cannot authenticate instead, and -o ForwardAgent=no -o ControlMaster=no; ' +
+        'do not pass -o IdentitiesOnly=yes, which discards the brokered identity.'
       );
     default:
       return `Use the AgentMFA connection "${connection.name}" (${connection.target}).`;

@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -6,9 +7,9 @@ import {
   endpointFormatByKey,
   libpqKeywords,
   scpCommand,
-  sftpUrl,
   sshConfigBlock,
 } from '../src/endpoint-formats';
+import { SSH_BROKER_OPTIONS, sshBrokerFlags } from '../src/getting-started';
 import type { ConnectionSummary, ConnectionType } from '../src/types';
 
 function conn(
@@ -38,7 +39,9 @@ test('button order and labels match the agreed set per kind', () => {
   );
   assert.deepEqual(
     ENDPOINT_FORMATS.ssh.map((f) => f.label),
-    ['ssh', 'scp', 'sftp', 'SSH config'],
+    // No sftp button: the URL referenced no issued socket, so it could not
+    // work, and the GUI clients it targeted read ~/.ssh/config instead.
+    ['ssh', 'scp', 'SSH config'],
   );
   assert.deepEqual(
     ENDPOINT_FORMATS.api.map((f) => f.label),
@@ -81,48 +84,54 @@ test('libpq quotes values with spaces and rejects non-DSN strings', () => {
   assert.equal(libpqKeywords('not-a-dsn'), null);
 });
 
-const SOCK = '/Users/me/.aka/endpoints/ep2/agent.sock';
+// The filename is derived from the endpoint secret (SSH-1), so it is not
+// `agent.sock` and not reconstructible from the endpoint id.
+const SOCK = '/Users/me/.aka/endpoints/ep2/agent-3f1c9a2b04d7e685.sock';
+const FLAGS = sshBrokerFlags();
 
 test('ssh format reuses the runnable command over the issued socket', () => {
   const c = conn('ssh', 'Sandbox', { user: 'sandbox', host: '127.0.0.1', port: 12222 });
   assert.equal(
     endpointFormatByKey('ssh', 'ssh')?.build(c, SOCK),
-    `SSH_AUTH_SOCK="${SOCK}" ssh -p 12222 sandbox@127.0.0.1`,
+    `SSH_AUTH_SOCK="${SOCK}" ssh -p 12222 ${FLAGS} sandbox@127.0.0.1`,
   );
+});
+
+// SSH-14: SSH_AUTH_SOCK alone leaves the default IdentityFile list in place, so
+// a working ~/.ssh/id_ed25519 completes the login with no broker involvement
+// and no audit entry. IdentitiesOnly is the flag that looks right and is wrong:
+// OpenSSH drops agent identities matching no IdentityFile, and the broker's key
+// has no on-disk .pub.
+test('every emitted ssh invocation suppresses on-disk keys, forwarding, and muxing', () => {
+  const c = conn('ssh', 'Sandbox', { user: 'sandbox', host: '127.0.0.1', port: 12222 });
+  for (const built of [
+    endpointFormatByKey('ssh', 'ssh')?.build(c, SOCK) ?? '',
+    scpCommand(SOCK, c),
+  ]) {
+    assert.match(built, /-o IdentityFile=none\b/, built);
+    assert.match(built, /-o CertificateFile=none\b/, built);
+    assert.match(built, /-o ForwardAgent=no\b/, built);
+    assert.match(built, /-o ControlMaster=no\b/, built);
+    assert.doesNotMatch(built, /IdentitiesOnly/, built);
+  }
 });
 
 test('scp mirrors the ssh destination logic with the -P flag', () => {
   const explicit = conn('ssh', 'Sandbox', { user: 'sandbox', host: '127.0.0.1', port: 12222 });
   assert.equal(
     scpCommand(SOCK, explicit),
-    `SSH_AUTH_SOCK="${SOCK}" scp -P 12222 <file> sandbox@127.0.0.1:`,
+    `SSH_AUTH_SOCK="${SOCK}" scp -P 12222 ${FLAGS} <file> sandbox@127.0.0.1:`,
   );
   const defaultPort = conn('ssh', 'Box', { user: 'deploy', host: 'box.example', port: 22 });
   assert.equal(
     scpCommand(SOCK, defaultPort),
-    `SSH_AUTH_SOCK="${SOCK}" scp <file> deploy@box.example:`,
+    `SSH_AUTH_SOCK="${SOCK}" scp ${FLAGS} <file> deploy@box.example:`,
   );
   const imported = conn('ssh', 'Alias', { destination: 'myserver', port: 2200 });
   assert.equal(
     scpCommand(SOCK, imported),
-    `SSH_AUTH_SOCK="${SOCK}" scp -P 2200 <file> myserver:`,
+    `SSH_AUTH_SOCK="${SOCK}" scp -P 2200 ${FLAGS} <file> myserver:`,
   );
-});
-
-test('sftp URL carries user and non-default port, omitting port 22', () => {
-  assert.equal(
-    sftpUrl(conn('ssh', 'Sandbox', { user: 'sandbox', host: '127.0.0.1', port: 12222 })),
-    'sftp://sandbox@127.0.0.1:12222',
-  );
-  assert.equal(
-    sftpUrl(conn('ssh', 'Box', { user: 'deploy', host: 'box.example', port: 22 })),
-    'sftp://deploy@box.example',
-  );
-  assert.equal(
-    sftpUrl(conn('ssh', 'Split', { destination: 'deploy@box.example' })),
-    'sftp://deploy@box.example',
-  );
-  assert.equal(sftpUrl(conn('ssh', 'Bare', {})), null);
 });
 
 test('SSH config block names the tool, pins the agent, and skips port 22', () => {
@@ -135,12 +144,25 @@ test('SSH config block names the tool, pins the agent, and skips port 22', () =>
       '  Port 12222',
       '  User sandbox',
       `  IdentityAgent "${SOCK}"`,
+      '  IdentityFile none',
+      '  CertificateFile none',
+      '  ForwardAgent no',
+      '  ControlMaster no',
     ].join('\n'),
   );
   const plain = conn('ssh', 'Box', { user: 'deploy', host: 'box.example', port: 22 });
   assert.equal(
     sshConfigBlock(SOCK, plain),
-    ['Host Box', '  HostName box.example', '  User deploy', `  IdentityAgent "${SOCK}"`].join('\n'),
+    [
+      'Host Box',
+      '  HostName box.example',
+      '  User deploy',
+      `  IdentityAgent "${SOCK}"`,
+      '  IdentityFile none',
+      '  CertificateFile none',
+      '  ForwardAgent no',
+      '  ControlMaster no',
+    ].join('\n'),
   );
 });
 
@@ -175,4 +197,21 @@ test('the pg TCP format copies the broker-supplied second address verbatim', () 
   assert.equal(tcp?.needsAltAddress, true);
   const url = 'postgresql://app:end_abc@127.0.0.1:54329/app_production?sslmode=disable';
   assert.equal(tcp?.build(c, url), url);
+});
+
+// The same flag list exists in Rust (`capability::ssh::SSH_BROKER_OPTIONS`),
+// which the CLI hint and the endpoint example both read. Two lists in two
+// languages drift, and the failure mode is silent: a user pasting the UI's
+// snippet gets a login the broker never mediated. Compare them.
+test('the emitted ssh options match the broker\'s list', async () => {
+  const source = await readFile(
+    new URL('../../crates/aka-core/src/capability/ssh.rs', import.meta.url),
+    'utf8',
+  );
+  const block = source.match(
+    /pub const SSH_BROKER_OPTIONS: &\[&str\] = &\[([\s\S]*?)\];/,
+  );
+  assert.ok(block, 'SSH_BROKER_OPTIONS not found in capability/ssh.rs');
+  const fromRust = [...block[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  assert.deepEqual([...SSH_BROKER_OPTIONS], fromRust);
 });

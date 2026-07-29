@@ -2328,12 +2328,20 @@ impl Broker {
 /// tool's own port is the lesser surprise — the alternative silently sends
 /// the endpoint somewhere the tool was never configured to reach.
 fn ssh_endpoint_invocation(destination: Option<&str>, user: &str, host: &str, port: u16) -> String {
-    match destination {
-        Some(dest) if port == 22 => format!("ssh {dest}"),
-        Some(dest) => format!("ssh -p {port} {dest}"),
-        None if port == 22 => format!("ssh {user}@{host}"),
-        None => format!("ssh -p {port} {user}@{host}"),
-    }
+    let flags = crate::capability::ssh::SSH_BROKER_OPTIONS
+        .iter()
+        .map(|option| format!("-o {option}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let port = if port == 22 {
+        String::new()
+    } else {
+        format!(" -p {port}")
+    };
+    let target = destination
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{user}@{host}"));
+    format!("ssh{port} {flags} {target}")
 }
 
 /// A broker from before the advisory-lock protocol can still own the socket
@@ -2398,17 +2406,41 @@ mod tests {
 
     #[test]
     fn ssh_endpoint_invocation_preserves_imported_non_default_ports() {
+        let flags = "-o IdentityFile=none -o CertificateFile=none \
+                     -o ForwardAgent=no -o ControlMaster=no"
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         assert_eq!(
             ssh_endpoint_invocation(Some("sandbox@127.0.0.1"), "sandbox", "127.0.0.1", 12222),
-            "ssh -p 12222 sandbox@127.0.0.1"
+            format!("ssh -p 12222 {flags} sandbox@127.0.0.1")
         );
         assert_eq!(
             ssh_endpoint_invocation(Some("production"), "deploy", "prod.example.com", 2200),
-            "ssh -p 2200 production"
+            format!("ssh -p 2200 {flags} production")
         );
         assert_eq!(
             ssh_endpoint_invocation(Some("production"), "deploy", "prod.example.com", 22),
-            "ssh production"
+            format!("ssh {flags} production")
         );
+        assert_eq!(
+            ssh_endpoint_invocation(None, "deploy", "prod.example.com", 22),
+            format!("ssh {flags} deploy@prod.example.com")
+        );
+    }
+
+    /// SSH-14. `SSH_AUTH_SOCK` alone leaves the default `IdentityFile` list in
+    /// place, so a user with a working `~/.ssh/id_ed25519` gets a successful
+    /// login with no broker involvement and no audit entry. `IdentitiesOnly=yes`
+    /// is the flag that looks right and is wrong: OpenSSH drops agent
+    /// identities matching no configured `IdentityFile`, and the broker's key
+    /// has no on-disk `.pub`.
+    #[test]
+    fn the_endpoint_example_suppresses_on_disk_keys_forwarding_and_muxing() {
+        let example = ssh_endpoint_invocation(Some("production"), "deploy", "prod.example.com", 22);
+        for option in crate::capability::ssh::SSH_BROKER_OPTIONS {
+            assert!(example.contains(&format!("-o {option}")), "{example}");
+        }
+        assert!(!example.contains("IdentitiesOnly"), "{example}");
     }
 }

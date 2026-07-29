@@ -13,6 +13,7 @@ path = "src/main.rs"
 aka-api = { workspace = true }
 aka-client = { workspace = true }
 aka-core = { workspace = true }
+chrono = { workspace = true }
 clap = { workspace = true }
 uuid = { workspace = true }
 dirs = { workspace = true }
