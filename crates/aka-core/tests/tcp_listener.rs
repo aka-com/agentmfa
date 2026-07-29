@@ -335,3 +335,87 @@ async fn uds_discovery_is_unchanged_by_the_tcp_listener() {
     assert!(manifest.get("socket").is_some());
     assert_eq!(manifest["endpoints"]["pair"], "/v1/pair");
 }
+
+/// PG-4. The Postgres data plane declines every `SSLRequest`, so off loopback
+/// the ticket, every statement, and every result cross the network in clear
+/// text. That takes an explicit acknowledgement rather than a warning in a log
+/// nobody reads — and the refusal has to name the flag that accepts it.
+#[tokio::test]
+async fn a_non_loopback_data_plane_is_refused_without_the_acknowledgement() {
+    let dir = tempfile::tempdir().unwrap();
+    let broker = Broker::new(
+        Paths::under(dir.path()),
+        Arc::new(MemoryVault::new()),
+        BrokerConfig::default(),
+        Arc::new(TestEvents),
+    )
+    .await
+    .unwrap();
+
+    let started = daemon::serve_with(
+        broker.clone(),
+        ServeOptions {
+            data_plane_listen: Some("0.0.0.0".parse().unwrap()),
+            ..Default::default()
+        },
+    )
+    .await;
+    let message = match started {
+        Ok(_) => panic!("a plaintext data plane off loopback must not start silently"),
+        Err(error) => error.to_string(),
+    };
+    assert!(message.contains("--data-plane-insecure"), "{message}");
+    assert!(message.contains("plaintext"), "{message}");
+}
+
+/// With the acknowledgement it starts, because the operator has said they
+/// understand what they are exposing.
+#[tokio::test]
+async fn the_acknowledgement_allows_a_non_loopback_data_plane() {
+    let dir = tempfile::tempdir().unwrap();
+    let broker = Broker::new(
+        Paths::under(dir.path()),
+        Arc::new(MemoryVault::new()),
+        BrokerConfig::default(),
+        Arc::new(TestEvents),
+    )
+    .await
+    .unwrap();
+
+    let handle = daemon::serve_with(
+        broker.clone(),
+        ServeOptions {
+            data_plane_listen: Some("0.0.0.0".parse().unwrap()),
+            data_plane_insecure: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("the acknowledged bind starts");
+    drop(handle);
+}
+
+/// Loopback is the default and needs no flag.
+#[tokio::test]
+async fn a_loopback_data_plane_needs_no_acknowledgement() {
+    let dir = tempfile::tempdir().unwrap();
+    let broker = Broker::new(
+        Paths::under(dir.path()),
+        Arc::new(MemoryVault::new()),
+        BrokerConfig::default(),
+        Arc::new(TestEvents),
+    )
+    .await
+    .unwrap();
+
+    let handle = daemon::serve_with(
+        broker.clone(),
+        ServeOptions {
+            data_plane_listen: Some("127.0.0.1".parse().unwrap()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("loopback is fine");
+    drop(handle);
+}

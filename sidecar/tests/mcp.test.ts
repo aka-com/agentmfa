@@ -469,21 +469,58 @@ test('a colliding tool name costs one tool, not the whole session', async () => 
   }
 });
 
-test('status reports tools wired after the session opened', async () => {
+test('a tool enabled after the session opened becomes usable without reconnecting', async () => {
   const app = await harness();
   try {
     const client = await app.connect('token-bare');
-    // The user wires something while the agent is already connected.
+    assert.deepEqual(
+      (await client.listTools()).tools.map((tool) => tool.name).sort(),
+      ['agentmfa_connect', 'agentmfa_status'],
+    );
+
+    // The user enables something while the agent is already connected.
     WIRED['client-bare'] = ['deploy-host'];
     try {
+      // Asking status reconciles the surface, so the agent does not have to
+      // know to restart itself to see a tool the user just switched on.
       const status = payload(
         await client.callTool({ name: 'agentmfa_status', arguments: {} }),
-      ) as { pending?: string[]; hint?: string };
-      assert.deepEqual(status.pending, ['deploy-host']);
-      assert.match(status.hint ?? '', /reconnect/i);
+      ) as { pending?: string[]; hint?: string; tools?: unknown };
+      assert.equal(status.pending, undefined, 'nothing should be stranded');
+      assert.doesNotMatch(status.hint ?? '', /reconnect/i);
+
+      assert.deepEqual(
+        (await client.listTools()).tools.map((tool) => tool.name).sort(),
+        ['agentmfa_connect', 'agentmfa_deploy-host_open', 'agentmfa_status'],
+      );
     } finally {
       WIRED['client-bare'] = [];
     }
+  } finally {
+    await app.close();
+  }
+});
+
+test('a tool switched off mid-session stops being offered', async () => {
+  const app = await harness();
+  try {
+    WIRED['client-bare'] = ['deploy-host'];
+    const client = await app.connect('token-bare');
+    assert.ok(
+      (await client.listTools()).tools.some(
+        (tool) => tool.name === 'agentmfa_deploy-host_open',
+      ),
+      'the tool starts out registered',
+    );
+
+    // The user turns it off. Leaving it registered meant its calls answered
+    // 403 with nothing telling the agent why.
+    WIRED['client-bare'] = [];
+    await client.callTool({ name: 'agentmfa_status', arguments: {} });
+    assert.deepEqual(
+      (await client.listTools()).tools.map((tool) => tool.name).sort(),
+      ['agentmfa_connect', 'agentmfa_status'],
+    );
   } finally {
     await app.close();
   }

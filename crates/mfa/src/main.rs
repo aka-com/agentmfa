@@ -111,8 +111,9 @@ enum Command {
         public_url: Option<String>,
         /// Bind the PG data plane and API direct endpoints to this
         /// address (e.g. 0.0.0.0 or a LAN IP) for remote agents, instead of
-        /// loopback. These legs are plaintext — keep them on a trusted
-        /// network behind your TLS/tunnel.
+        /// loopback. These legs are plaintext, so a non-loopback value is
+        /// refused unless --data-plane-insecure says you accept that; keep it
+        /// on a trusted network behind your TLS/tunnel.
         #[arg(long)]
         data_plane_listen: Option<std::net::IpAddr>,
         /// The host to put in returned DSNs and endpoint URLs — what a remote

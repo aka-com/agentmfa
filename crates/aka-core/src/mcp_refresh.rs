@@ -454,3 +454,119 @@ pub(crate) fn spawn_refresh_sweeper(broker: &Arc<Broker>) {
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::ConnectionSpec;
+    use crate::types::{ConnectionConfig, OAuthSpec};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Events;
+    impl crate::events::BrokerEvents for Events {
+        fn confirm_secret_read(&self, _secret: &crate::types::SecretMeta) -> bool {
+            // A background sweep must never need this: if it is reached, the
+            // read was not pre-authorized and a real shell would show a sheet.
+            panic!("a background refresh must not prompt for a secret read");
+        }
+        fn confirm_action(&self, _description: &str) -> Option<crate::types::ConfirmationMethod> {
+            Some(crate::types::ConfirmationMethod::Waived)
+        }
+    }
+
+    /// API-19. A BYO-OAuth connection keeps its token set in a secret rather
+    /// than in `connection.oauth`, so `wants_refresh` cannot see it and the
+    /// sweeper skipped it entirely — these connections refreshed only when an
+    /// agent happened to call one. A provider that expires refresh tokens after
+    /// N idle days therefore killed the connection while the app sat open.
+    #[tokio::test]
+    async fn the_sweeper_renews_a_byo_oauth_connection() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        let app = axum::Router::new().route(
+            "/token",
+            axum::routing::post(move || {
+                let counter = counter.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(serde_json::json!({
+                        "access_token": "renewed_by_the_sweeper",
+                        "refresh_token": "rt-2",
+                        "expires_in": 3600,
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let dir = tempfile::tempdir().unwrap();
+        let broker = Broker::new(
+            crate::paths::Paths::under(dir.path()),
+            Arc::new(crate::vault::MemoryVault::new()),
+            crate::config::BrokerConfig::default(),
+            Arc::new(Events),
+        )
+        .await
+        .unwrap();
+
+        // An access token that expired an hour ago, with a live refresh token.
+        let expired = Utc::now() - chrono::Duration::hours(1);
+        let tokens = serde_json::json!({
+            "access_token": "stale",
+            "refresh_token": "rt-1",
+            "expires_at": expired.to_rfc3339(),
+        });
+        broker
+            .store
+            .add_secret("OAUTH_TOKENS", Zeroizing::new(tokens.to_string()))
+            .unwrap();
+        let secret = broker.store.secret_by_name("OAUTH_TOKENS").unwrap();
+        broker
+            .store
+            .add_connection(ConnectionSpec {
+                name: "slack".into(),
+                config: ConnectionConfig::Api {
+                    host: "127.0.0.1".into(),
+                    scheme: "http".into(),
+                    port: Some(port),
+                    template: "Authorization: Bearer {{OAUTH_TOKENS}}".into(),
+                    mcp_path: None,
+                    oauth: Some(OAuthSpec {
+                        auth_url: "http://127.0.0.1/authorize".into(),
+                        token_url: format!("http://127.0.0.1:{port}/token"),
+                        client_id: "client-abc".into(),
+                        scopes: Vec::new(),
+                        extra_auth_params: Vec::new(),
+                    }),
+                },
+                secrets: vec![secret.id],
+            })
+            .unwrap();
+
+        // The sweeper's first pass is immediate.
+        spawn_refresh_sweeper(&broker);
+        for _ in 0..50 {
+            if hits.load(Ordering::SeqCst) > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "the sweeper must renew BYO-OAuth grants, not only MCP ones"
+        );
+
+        // And the renewed token is what a later call would present.
+        let stored = crate::authorization::scope(true, broker.store.secret_value(&secret.id))
+            .await
+            .unwrap();
+        assert!(
+            stored.contains("renewed_by_the_sweeper"),
+            "the renewed token must be persisted: {}",
+            &*stored
+        );
+    }
+}
