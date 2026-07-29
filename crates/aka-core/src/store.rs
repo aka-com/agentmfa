@@ -1023,7 +1023,13 @@ impl Store {
             unreachable!("kind checked above");
         };
         *host_key_fingerprint = observed.to_string();
-        conn.updated_at = Utc::now();
+        // Deliberately *not* touching `updated_at`. That field is the
+        // "was this connection retargeted?" version every execution re-checks
+        // at its boundary, and bumping it here made a first-connection pin
+        // look like a retarget: an open racing the pin was refused with
+        // `denied_by_policy`, as though the user had repointed the tool.
+        // Learning the host key is the connection converging on what it
+        // already described, not a change of destination or credential.
         self.commit(&mut state, next)?;
         Ok(PinOutcome::Pinned(*observed))
     }
@@ -2236,7 +2242,14 @@ mod tests {
             PinOutcome::Pinned(observed)
         );
         let pinned = store.connection_by_id(&conn.id).unwrap();
-        assert!(pinned.updated_at > conn.updated_at);
+        // A host-key pin is the connection learning what it already described,
+        // not a retarget. Bumping `updated_at` made it look like one to the
+        // version check every execution runs at its boundary, so an open racing
+        // a first-connection pin was refused as `denied_by_policy`.
+        assert_eq!(
+            pinned.updated_at, conn.updated_at,
+            "pinning must not look like a retarget"
+        );
         match &pinned.config {
             ConnectionConfig::Ssh {
                 host_key_fingerprint,

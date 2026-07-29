@@ -202,6 +202,13 @@ pub struct SshSigner {
     /// SSH wire encoding of the public key — the identity we advertise and
     /// the blob a SIGN_REQUEST must match.
     public_blob: Vec<u8>,
+    /// The assembled RSA key, built once at load.
+    ///
+    /// `from_components` validates the key and precomputes CRT values, and
+    /// doing that per signature meant every login rebuilt it — leaving fresh
+    /// un-zeroized `BigUint` copies of `d`, `p` and `q` on the heap each time.
+    /// `None` for ed25519, which needs no assembly.
+    rsa: Option<rsa::RsaPrivateKey>,
 }
 
 /// Validate an SSH private key before it is saved by a trusted onboarding
@@ -254,7 +261,15 @@ impl SshSigner {
             .public_key()
             .to_bytes()
             .map_err(|e| format!("public key encode failed: {e}"))?;
-        Ok(Self { key, public_blob })
+        let rsa = match key.key_data() {
+            KeypairData::Rsa(keypair) => Some(rsa_private_key(keypair)?),
+            _ => None,
+        };
+        Ok(Self {
+            key,
+            public_blob,
+            rsa,
+        })
     }
 
     /// Sign `data` honoring the SIGN_REQUEST `flags` (they select the RSA
@@ -269,18 +284,30 @@ impl SshSigner {
                 .key
                 .try_sign(data)
                 .map_err(|e| format!("ed25519 sign failed: {e}"))?,
-            KeypairData::Rsa(keypair) => {
+            KeypairData::Rsa(_) => {
                 let hash = if flags & SSH_AGENT_RSA_SHA2_256 != 0 {
                     HashAlg::Sha256
                 } else if flags & SSH_AGENT_RSA_SHA2_512 != 0 {
                     HashAlg::Sha512
                 } else {
-                    // No hash flag → the client asked for legacy SHA-1
-                    // `ssh-rsa`, which modern servers reject; sign SHA-512
-                    // rather than produce a signature nothing will accept.
-                    HashAlg::Sha512
+                    // No hash flag means the client asked for legacy SHA-1
+                    // `ssh-rsa`. Signing SHA-512 anyway does not help: the
+                    // client's own userauth blob says `ssh-rsa`, and OpenSSH's
+                    // `sshkey_check_sigtype` rejects a `rsa-sha2-512` signature
+                    // against it — so the old fallback produced a signature
+                    // *and* a failed login, with the key having signed for
+                    // nothing. Refusing lets the client fall back to an
+                    // algorithm it actually asked for.
+                    return Err(
+                        "client requested legacy ssh-rsa (SHA-1); ask for rsa-sha2-256 or \
+                         rsa-sha2-512"
+                            .into(),
+                    );
                 };
-                let private = rsa_private_key(keypair)?;
+                let private = self
+                    .rsa
+                    .clone()
+                    .ok_or_else(|| "rsa key was not assembled at load".to_string())?;
                 let raw = match hash {
                     HashAlg::Sha256 => pkcs1v15::SigningKey::<Sha256>::new(private)
                         .try_sign(data)
@@ -425,6 +452,35 @@ fn verify_session_bind(payload: &[u8], expected: Fingerprint) -> Result<SessionB
 
 /* -------------------------------- listener -------------------------------- */
 
+/// Bind a Unix socket that is never observable with looser permissions than
+/// 0600.
+///
+/// `bind` creates the node with the process umask applied and the caller
+/// chmod-ed it afterwards, which leaves a window where the socket exists and is
+/// connectable at whatever the umask allowed. The enclosing 0700 directory
+/// closes that window in practice, but for a signing oracle the guarantee
+/// should not rest on the ordering of two syscalls: bind under a staging name,
+/// tighten it, then rename into place — a rename moves the name, and the
+/// listener keeps its own fd.
+fn bind_private_socket(path: &Path) -> std::io::Result<UnixListener> {
+    use std::os::unix::fs::PermissionsExt;
+    let staging = path.with_extension("binding");
+    // A crash could have left either name behind; bind fails on an existing
+    // path even when nothing is listening.
+    let _ = std::fs::remove_file(&staging);
+    let _ = std::fs::remove_file(path);
+    let listener = UnixListener::bind(&staging)?;
+    if let Err(e) = std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o600)) {
+        let _ = std::fs::remove_file(&staging);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::rename(&staging, path) {
+        let _ = std::fs::remove_file(&staging);
+        return Err(e);
+    }
+    Ok(listener)
+}
+
 /// Removes the socket file when the accept loop ends, however it ends.
 struct SocketGuard(PathBuf);
 impl Drop for SocketGuard {
@@ -449,13 +505,40 @@ struct AgentState {
     bind_gate: tokio::sync::Mutex<()>,
     connection_id: Uuid,
     connection_name: String,
+    /// The connection's `updated_at` when the socket was opened. A retarget
+    /// after that point invalidates the socket: the user repointed the tool at
+    /// something other than what they approved.
+    approved_version: chrono::DateTime<chrono::Utc>,
+    /// When this socket stops signing, whatever a client still holds.
+    ///
+    /// A per-open socket is bounded by its own redemption window, not by
+    /// `session_max_ttl`: a client sending one agent message every few minutes
+    /// used to keep an hour of unlimited signatures alive, long after the socket
+    /// file was gone and regardless of disable or delete. `None` for a standing
+    /// endpoint, which is bounded by its own existence.
+    expires_at: Option<tokio::time::Instant>,
     /// Self-reported label of the agent this socket was opened for, or
     /// `"endpoint"` for a standing one. Attribution for the prompt and the
     /// signature log, never authorization — the socket path is the capability.
     agent: String,
     comment: String,
+    /// Per-socket signature budget.
+    ///
+    /// Signing is both the expensive operation here (RSA runs on a blocking
+    /// thread) and the authority-granting one, and it was unbounded: the token
+    /// limiter covers `POST /v1/ssh/open`, never the socket it hands back. One
+    /// socket could be driven as fast as a client cared to ask.
+    signatures: crate::ratelimit::WindowLimiter,
+    /// The signer, for a socket that loads it once.
+    ///
+    /// `Some` on the per-open path: its ticket lives 60 seconds, and the read is
+    /// authorized by the open that captured the scope. `None` for a standing
+    /// endpoint, which loads per connection instead (see `bind_endpoint`).
     signer: Option<Arc<SshSigner>>,
 }
+
+/// How many signatures one agent socket may issue per minute.
+const SIGNATURE_WINDOW: Duration = Duration::from_secs(60);
 
 /// UI-initiated reachability test: load a stored key when configured
 /// (validating that it parses) and read the server's version banner.
@@ -973,16 +1056,8 @@ pub async fn open_agent(
     getrandom::fill(&mut suffix).map_err(|e| format!("ssh socket name: {e}"))?;
     let suffix: String = suffix.iter().map(|b| format!("{b:02x}")).collect();
     let socket_path = dir.join(format!("agent-{suffix}.sock"));
-    // A crash could have left a same-named file (the ticket is random, so
-    // this is belt-and-suspenders); bind fails on a live socket otherwise.
-    let _ = std::fs::remove_file(&socket_path);
     let listener =
-        UnixListener::bind(&socket_path).map_err(|e| format!("ssh socket bind failed: {e}"))?;
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("ssh socket perms: {e}"))?;
-    }
+        bind_private_socket(&socket_path).map_err(|e| format!("ssh socket bind failed: {e}"))?;
 
     let state = Arc::new(AgentState {
         broker: broker.clone(),
@@ -992,8 +1067,16 @@ pub async fn open_agent(
         bind_gate: tokio::sync::Mutex::new(()),
         connection_id: connection.id,
         connection_name: connection.name.clone(),
+        approved_version: connection.updated_at,
+        // The socket stops accepting at `ticket_ttl + SOCKET_GRACE`; a
+        // connection accepted just before that must not outlive it either.
+        expires_at: Some(tokio::time::Instant::now() + broker.config.ticket_ttl + SOCKET_GRACE),
         agent: agent_name,
         comment: format!("aka:{}", connection.name),
+        signatures: crate::ratelimit::WindowLimiter::new(
+            broker.config.per_identity_per_min,
+            SIGNATURE_WINDOW,
+        ),
         signer,
     });
     let socket_display = socket_path.to_string_lossy().into_owned();
@@ -1051,27 +1134,51 @@ async fn handle_conn(state: Arc<AgentState>, mut stream: UnixStream) -> std::io:
             // indistinguishable from a wrong key or a revoked authorized_keys
             // entry. Record it so the reason is at least recoverable from
             // Activity.
-            state.broker.audit.append(
-                AuditEntry::new(
-                    AuditKind::Denied,
-                    format!("SSH agent connection refused: {}", e.reason()),
-                )
-                .detail("the socket's ticket could not be redeemed".to_string())
-                .outcome(e.reason().as_str().to_string())
-                .field("kind", "ssh")
-                .field("reason", e.reason().as_str()),
+            audit_refused_connection(
+                &state,
+                e.reason().as_str(),
+                "the socket's ticket could not be redeemed",
             );
             let _ = stream.shutdown().await;
             return Ok(());
         }
     };
 
+    // `redeem` checks expiry, invalidation and budget — never whether the tool
+    // is still enabled or still points where it did. So a socket opened before
+    // the user switched the connection off went on signing, and a retarget was
+    // invisible to it. The endpoint path has always re-checked both; this is the
+    // same check, on the path that hands out a signing oracle from a ticket.
+    if !state.broker.access.allows(&state.connection_id) {
+        audit_refused_connection(&state, "denied_by_policy", "agent access is disabled");
+        let _ = stream.shutdown().await;
+        return Ok(());
+    }
+    match state.broker.store.connection_by_id(&state.connection_id) {
+        Ok(current) if current.updated_at == state.approved_version => {}
+        Ok(_) => {
+            audit_refused_connection(
+                &state,
+                "denied_by_policy",
+                "the tool was retargeted after this socket was opened",
+            );
+            let _ = stream.shutdown().await;
+            return Ok(());
+        }
+        Err(_) => {
+            audit_refused_connection(&state, "denied_by_policy", "the tool no longer exists");
+            let _ = stream.shutdown().await;
+            return Ok(());
+        }
+    }
+
     // Establishment succeeded: register the live session (dropping the
     // redemption without `start` would release the reserved budget slot).
     let max_ttl = state.broker.config.session_max_ttl;
     let session = redemption.start(ConnectionKind::Ssh);
     let idle = state.broker.config.session_idle_timeout;
-    let reason = serve(&state, &mut stream, &session, max_ttl, idle).await;
+    let signer = state.signer.clone();
+    let reason = serve(&state, signer, &mut stream, &session, max_ttl, idle).await;
     let _ = stream.shutdown().await;
     session.finish(reason);
     Ok(())
@@ -1079,10 +1186,52 @@ async fn handle_conn(state: Arc<AgentState>, mut stream: UnixStream) -> std::io:
 
 /* ------------------------- per-connection endpoint ------------------------ */
 
-/// The filename of a direct SSH endpoint's agent socket, under the
-/// endpoint's private directory. Stable across restarts so the user can point
-/// `~/.ssh/config`'s `IdentityAgent` at it once.
-pub const ENDPOINT_SOCK: &str = "agent.sock";
+/// The filename a pre-secret endpoint's socket was bound at.
+///
+/// Retained only so an endpoint issued before the name was derived keeps
+/// working until it is reissued; nothing new binds here.
+pub const LEGACY_ENDPOINT_SOCK: &str = "agent.sock";
+
+/// The filename of a direct SSH endpoint's agent socket, derived from the
+/// endpoint secret.
+///
+/// The ssh-agent protocol has no place to present a credential: whoever can
+/// open the socket gets signatures. With a fixed name under a deterministic
+/// directory the path was *enumerable* — `ls ~/.aka/endpoints/*/agent.sock`
+/// found every issued endpoint — so any process running as this user could log
+/// into the pinned host as the pinned user, including an agent deliberately not
+/// enabled for that connection. Deriving the name from the secret makes finding
+/// the socket require the secret, which lives in the vault and not in any file
+/// the attacker can read.
+///
+/// Domain-separated on purpose: `secret_hash` in `endpoints.json` is the plain
+/// SHA-256 of the same secret and is readable by that attacker, so the name
+/// must not be computable from it. Sixteen hex characters keep the whole path
+/// inside `sun_path`'s ~104-byte limit.
+///
+/// This is unguessability, not authentication — a same-user process that can
+/// read the vault still wins. It raises the bar from "list a directory" to
+/// "defeat the Keychain", and the real fix remains an agent-extension
+/// handshake carrying the secret.
+pub fn endpoint_sock_name(secret: &str) -> String {
+    use sha2::{Digest as _, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"agentmfa/ssh-endpoint-socket/v1\0");
+    hasher.update(secret.as_bytes());
+    let digest = hasher.finalize();
+    let name: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+    format!("agent-{name}.sock")
+}
+
+/// Where an endpoint's socket lives: the derived name when its secret can be
+/// recovered, else the legacy fixed name.
+pub fn endpoint_sock_path(dir: &Path, secret: &str) -> PathBuf {
+    if secret.is_empty() {
+        dir.join(LEGACY_ENDPOINT_SOCK)
+    } else {
+        dir.join(endpoint_sock_name(secret))
+    }
+}
 
 /// Direct SSH endpoint context: which connection this persistent socket
 /// serves, re-checked on every connection.
@@ -1126,22 +1275,37 @@ pub async fn bind_endpoint(
                 .map_err(|e| std::io::Error::other(format!("bad host key fingerprint: {e}")))?,
         )
     };
-    // Parse the key up front so a broken key fails issuance, not every later
-    // signature.
-    let signer = SshSigner::load_optional(&broker.store, &connection)
-        .await
-        .map_err(std::io::Error::other)?
-        .map(Arc::new);
-
+    // The private key is deliberately *not* read here.
+    //
+    // Reading it at bind time did two bad things. It happened outside any
+    // authorization scope, so with `reauth_on_read` on (the default) a native
+    // sheet appeared during daemon startup — and a decline or failure made
+    // `rebind_endpoints` revoke the endpoint and delete its directory, silently
+    // breaking a working `IdentityAgent` line. And it froze one signer for the
+    // listener's whole life, so rotating a *compromised* key left the
+    // compromised key signing until the broker restarted. Each accepted
+    // connection loads it instead, inside a scope, which is also where the
+    // access re-check already lives.
     let dir = broker.paths.endpoint_dir(&endpoint.id);
     crate::paths::create_private_dir(&dir)?;
-    let socket_path = dir.join(ENDPOINT_SOCK);
-    let _ = std::fs::remove_file(&socket_path);
-    let listener = UnixListener::bind(&socket_path)?;
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
+    // Needs the plaintext secret, which lives in the vault; an endpoint whose
+    // secret cannot be recovered keeps the legacy fixed name so it goes on
+    // working until reissued.
+    let secret = broker.endpoint_secret_for(endpoint).await;
+    if secret.is_empty() {
+        tracing::warn!(
+            endpoint = %endpoint.id,
+            "SSH endpoint secret unavailable; binding the legacy guessable socket \
+             name — reissue this endpoint to get an unguessable one"
+        );
     }
+    let socket_path = endpoint_sock_path(&dir, &secret);
+    // A rebind may find the previous run's name; only ours is removed by the
+    // guard, so clear any legacy sibling too.
+    if socket_path.file_name().and_then(|n| n.to_str()) != Some(LEGACY_ENDPOINT_SOCK) {
+        let _ = std::fs::remove_file(dir.join(LEGACY_ENDPOINT_SOCK));
+    }
+    let listener = bind_private_socket(&socket_path)?;
 
     let state = Arc::new(AgentState {
         broker: broker.clone(),
@@ -1153,11 +1317,20 @@ pub async fn bind_endpoint(
         bind_gate: tokio::sync::Mutex::new(()),
         connection_id: connection.id,
         connection_name: connection.name.clone(),
+        approved_version: connection.updated_at,
+        // Standing by design: bounded by the endpoint existing, and re-checked
+        // on every accepted connection.
+        expires_at: None,
         // A standing socket is not opened by any one agent; the same label
         // the endpoint's sessions are registered under.
         agent: "endpoint".to_string(),
         comment: format!("aka:{}", connection.name),
-        signer,
+        signatures: crate::ratelimit::WindowLimiter::new(
+            broker.config.per_identity_per_min,
+            SIGNATURE_WINDOW,
+        ),
+        // Loaded per accepted connection, not held here.
+        signer: None,
     });
     let ctx = SshEndpointCtx {
         endpoint_id: endpoint.id,
@@ -1236,9 +1409,40 @@ async fn handle_endpoint_conn(
         let _ = stream.shutdown().await;
         return Ok(());
     }
+    // Load the key now, for this connection only, inside an authorization
+    // scope. Per connection so rotating a compromised key takes effect at the
+    // next login instead of at the next broker restart; inside a scope because
+    // the endpoint's own issuance is the authorization, and an unscoped read
+    // here would raise a native sheet on a path no user is watching.
+    let signer = match crate::authorization::scope(
+        true,
+        SshSigner::load_optional(&state.broker.store, &connection),
+    )
+    .await
+    {
+        Ok(signer) => signer.map(Arc::new),
+        Err(e) => {
+            // A key that cannot be read is not a signature the client should
+            // wait for. Record it: the client only sees "agent refused".
+            state.broker.audit.append(
+                AuditEntry::new(
+                    AuditKind::Denied,
+                    format!("SSH endpoint could not read its key: {}", connection.name),
+                )
+                .connection(connection.name.clone())
+                .detail(e)
+                .outcome("credential_unavailable")
+                .field("kind", "ssh"),
+            );
+            session.finish("credential_unavailable");
+            let _ = stream.shutdown().await;
+            return Ok(());
+        }
+    };
+
     let max_ttl = state.broker.config.session_max_ttl;
     let idle = state.broker.config.session_idle_timeout;
-    let reason = serve(&state, &mut stream, &session, max_ttl, idle).await;
+    let reason = serve(&state, signer, &mut stream, &session, max_ttl, idle).await;
     let _ = stream.shutdown().await;
     session.finish(reason);
     Ok(())
@@ -1246,12 +1450,19 @@ async fn handle_endpoint_conn(
 
 async fn serve(
     state: &Arc<AgentState>,
+    signer: Option<Arc<SshSigner>>,
     stream: &mut UnixStream,
     session: &SessionHandle,
     max_ttl: Duration,
     idle: Duration,
 ) -> &'static str {
-    let ttl_deadline = tokio::time::Instant::now() + max_ttl;
+    // Whichever comes first: the session TTL, or the socket's own window. A
+    // per-open socket sets the latter, so a client holding the fd cannot keep
+    // signing for an hour after the socket is gone.
+    let ttl_deadline = match state.expires_at {
+        Some(expiry) => expiry.min(tokio::time::Instant::now() + max_ttl),
+        None => tokio::time::Instant::now() + max_ttl,
+    };
     let mut idle_deadline = tokio::time::Instant::now() + idle;
     let close_signal = session.close_signal.clone();
     let mut binding = None;
@@ -1286,7 +1497,7 @@ async fn serve(
                     _ = close_signal.notified() => return "closed_by_user",
                     _ = tokio::time::sleep_until(ttl_deadline) => return "session_ttl",
                     _ = client_gone(&mut reader) => return "client_closed",
-                    response = handle_request(state, &mut binding, kind, &payload) => response,
+                    response = handle_request(state, signer.as_ref(), &mut binding, kind, &payload) => response,
                 };
                 session
                     .bytes_down
@@ -1317,26 +1528,39 @@ async fn client_gone<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) {
 /// return SSH_AGENT_FAILURE — the ssh client's cue to move on.
 async fn handle_request(
     state: &Arc<AgentState>,
+    signer: Option<&Arc<SshSigner>>,
     binding: &mut Option<SessionBinding>,
     kind: u8,
     payload: &[u8],
 ) -> Vec<u8> {
     match kind {
         SSH_AGENTC_REQUEST_IDENTITIES => {
-            let body = state
-                .signer
-                .as_ref()
+            let body = signer
                 .map(|signer| signer.identities_answer(&state.comment))
                 .unwrap_or_else(|| 0u32.to_be_bytes().to_vec());
             frame(SSH_AGENT_IDENTITIES_ANSWER, &body)
         }
         SSH_AGENTC_EXTENSION => {
+            // Route on the extension name. Every EXTENSION used to fall into
+            // `session_bind`, so a routine client probe (`query`,
+            // `restrict-destination-v00`) reached "unsupported agent extension"
+            // and then `refuse()` — which writes an `SshSigned` /
+            // "SSH signature refused" entry. Ordinary capability discovery
+            // therefore looked like a security event in the activity log.
+            // An unknown extension gets the bare failure the protocol defines
+            // for it and no record at all.
+            let name = Reader::new(payload).string().unwrap_or_default();
+            if name != SESSION_BIND_EXTENSION {
+                return frame(SSH_AGENT_FAILURE, &[]);
+            }
             if binding.is_some() {
+                // A second bind on one connection *is* worth recording: it is
+                // not something a conforming client does.
                 return refuse(state, "agent connection is already session-bound");
             }
             session_bind(state, binding, payload).await
         }
-        SSH_AGENTC_SIGN_REQUEST => sign_response(state, binding.as_ref(), payload).await,
+        SSH_AGENTC_SIGN_REQUEST => sign_response(state, signer, binding.as_ref(), payload).await,
         _ => frame(SSH_AGENT_FAILURE, &[]),
     }
 }
@@ -1456,6 +1680,26 @@ async fn tofu_session_bind(
     frame(SSH_AGENT_SUCCESS, &[])
 }
 
+/// Record an agent *connection* refused before the protocol was served.
+///
+/// Deliberately not `refuse()`: that writes an `SshSigned` entry, and nothing
+/// was ever asked to sign here. The client sees only a closed socket, so without
+/// this the reason existed nowhere.
+fn audit_refused_connection(state: &AgentState, outcome: &str, detail: &str) {
+    state.broker.audit.append(
+        AuditEntry::new(
+            AuditKind::Denied,
+            format!("SSH agent connection refused: {}", state.connection_name),
+        )
+        .agent(state.agent.clone())
+        .connection(state.connection_name.clone())
+        .detail(detail.to_string())
+        .outcome(outcome.to_string())
+        .field("kind", "ssh")
+        .field("reason", outcome),
+    );
+}
+
 fn refuse(state: &AgentState, reason: &str) -> Vec<u8> {
     refuse_with(state, reason, "refused")
 }
@@ -1538,12 +1782,25 @@ async fn confirm_login(state: &Arc<AgentState>, user: &str) -> Option<Vec<u8>> {
 
 async fn sign_response(
     state: &Arc<AgentState>,
+    signer: Option<&Arc<SshSigner>>,
     binding: Option<&SessionBinding>,
     payload: &[u8],
 ) -> Vec<u8> {
-    let Some(signer) = state.signer.as_ref() else {
+    let Some(signer) = signer else {
         return refuse(state, "connection has no SSH private key");
     };
+    // Charged before any parsing, so a client cannot spend CPU on malformed
+    // requests either. Refusals are cheap and are not charged.
+    if let Err(retry_after) = state.signatures.check() {
+        return refuse_with(
+            state,
+            &format!(
+                "signature budget exhausted; {}s until the next slot",
+                retry_after.as_secs().max(1)
+            ),
+            "rate_limited",
+        );
+    }
     let Some(binding) = binding else {
         return refuse(state, "SSH client did not bind the configured host key");
     };
@@ -1627,16 +1884,13 @@ pub fn sweep_stale_sockets(dir: &Path) {
         if path.extension().and_then(|e| e.to_str()) != Some("sock") {
             continue;
         }
-        // This probe opens an agent connection, which would consume one
-        // redemption in its owning broker. Today this runs only after the
-        // control socket is known dead, so any live listener here belongs to
-        // another active broker and should be left alone.
-        match std::os::unix::net::UnixStream::connect(&path) {
-            Ok(_) => {} // a live listener owns it; leave it
-            Err(_) => {
-                let _ = std::fs::remove_file(&path);
-            }
-        }
+        // No liveness probe. Connecting to an agent socket *is* a redemption:
+        // the old check spent one of the owning ticket's budget slots on every
+        // swept file, and on a live socket it counted as a use nobody made.
+        // It is also unnecessary — this runs from daemon startup, which already
+        // holds the broker instance lease for this root, so no other broker can
+        // own a socket in this directory. Anything here is from a dead run.
+        let _ = std::fs::remove_file(&path);
     }
 }
 
@@ -1796,6 +2050,8 @@ mod tests {
         let signer = Arc::new(SshSigner {
             key: auth_key,
             public_blob: public_blob.clone(),
+            // Ed25519 needs no RSA assembly.
+            rsa: None,
         });
         let host_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
         let host_blob = host_key.public_key().to_bytes().unwrap();
@@ -1863,6 +2119,8 @@ mod tests {
             signer: Arc::new(SshSigner {
                 key: auth_key,
                 public_blob: public_blob.clone(),
+                // Ed25519 needs no RSA assembly.
+                rsa: None,
             }),
             signed: AtomicBool::new(false),
             refusal: std::sync::Mutex::new(None),

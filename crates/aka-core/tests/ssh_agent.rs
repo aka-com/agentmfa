@@ -733,20 +733,49 @@ async fn direct_endpoint_serves_the_ssh_agent_protocol() {
     let info = h.issue_ssh_endpoint().await;
 
     assert_eq!(info.kind, aka_core::types::ConnectionKind::Ssh);
-    assert!(
-        info.dsn.ends_with("agent.sock"),
-        "dsn is the auth-sock path"
-    );
     assert!(info.example.contains("SSH_AUTH_SOCK"));
-    // The ssh-agent protocol has no password, so an SSH endpoint carries no
-    // presented secret: the socket path is the whole capability.
+    // SSH-1. The ssh-agent protocol has no password, so the socket path *is*
+    // the capability — which is why the name is derived from the endpoint
+    // secret rather than fixed. A fixed `agent.sock` under a deterministic
+    // directory was enumerable: `ls ~/.aka/endpoints/*/agent.sock` found every
+    // issued endpoint, so any process running as this user could log in as the
+    // pinned user, including an agent deliberately not enabled for it.
+    let name = std::path::Path::new(&info.dsn)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("a socket filename");
+    assert!(
+        name.starts_with("agent-") && name.ends_with(".sock"),
+        "{name}"
+    );
+    assert_ne!(name, "agent.sock", "the socket name must not be guessable");
+    // Not derivable from `endpoints.json` either: that file holds the plain
+    // SHA-256 of the secret, and the name is a *domain-separated* hash of it.
+    let endpoint = h
+        .broker
+        .endpoints
+        .get_for_connection(&h.broker.store.connection_by_name("prod-ssh").unwrap().id)
+        .expect("issued");
+    assert!(
+        !name.contains(&endpoint.secret_hash[..16]),
+        "the name must not be computable from the persisted hash"
+    );
+    // The presented secret stays empty: no client sends one.
     assert!(info.secret.is_empty());
+
+    // SSH-1's other half: the path is not in the ordinary connection listing,
+    // which every manage caller receives. Only an explicit endpoint read-back
+    // hands out a working signing oracle.
     let conn = h.broker.store.connection_by_name("prod-ssh").unwrap();
     let chip = aka_core::manage::connection_dto(&h.broker, &conn)
         .agent_access
         .endpoint
-        .expect("issued SSH endpoint appears in connection summary");
-    assert_eq!(chip.dsn.as_deref(), Some(info.dsn.as_str()));
+        .expect("the endpoint is still reported as issued");
+    assert_eq!(chip.kind, "ssh");
+    assert_eq!(
+        chip.dsn, None,
+        "the agent socket path must not ride the connection listing"
+    );
 
     let key_blob = key.public_key().to_bytes().unwrap();
     let host_blob = host_key.public_key().to_bytes().unwrap();
@@ -1051,4 +1080,345 @@ async fn closing_the_session_interrupts_a_parked_login() {
     })
     .await
     .expect("the abandoned prompt should retire");
+}
+
+/* ------------------- per-open authorization and lifetime ------------------ */
+
+/// SSH-2. `redeem` checks expiry, invalidation and budget — never whether the
+/// tool is still enabled. So a socket opened before the user switched the
+/// connection off went on signing, and the endpoint path's re-check had no
+/// counterpart here.
+///
+/// The user-facing switch now trips two independent gates: `ui_set_tool_access`
+/// invalidates the connection's tickets (SSH-3), and `handle_conn` re-checks the
+/// access table (SSH-2). Whichever fires first, the guarantee is the same —
+/// nothing is served, and the reason is recoverable from Activity, because a
+/// closed socket is all the client is told. `the_access_table_is_rechecked_...`
+/// below pins the second gate on its own.
+#[tokio::test]
+async fn disabling_access_refuses_a_live_per_open_socket() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let host_key = add_ssh_connection(&h.broker, &key, "deploy");
+    let token = h.pair().await;
+    let (auth_sock, _) = h.open_ssh(&token).await;
+
+    // Works while enabled.
+    let mut before = bound_stream(&auth_sock, &host_key).await;
+    assert_lists_identity(&mut before, &key).await;
+    drop(before);
+
+    let conn = h.broker.store.connection_by_name("prod-ssh").unwrap();
+    assert!(h.broker.ui_set_tool_access(&conn.id, false).unwrap());
+
+    // The socket file is still there — the listener's window has not lapsed —
+    // but a fresh connection is refused before the protocol is served.
+    let mut after = UnixStream::connect(&auth_sock).await.unwrap();
+    let mut probe = [0u8; 1];
+    let read = tokio::time::timeout(Duration::from_secs(5), after.read(&mut probe))
+        .await
+        .expect("the refusal must not hang");
+    assert!(
+        matches!(read, Ok(0) | Err(_)),
+        "a disabled tool must not serve the agent protocol"
+    );
+
+    let refusal = h
+        .broker
+        .audit
+        .recent(20)
+        .into_iter()
+        .find(|e| {
+            e.kind == aka_core::audit::AuditKind::Denied
+                && e.fields.get("kind").and_then(|v| v.as_str()) == Some("ssh")
+        })
+        .expect("the refusal is recorded — the client only sees a closed socket");
+    assert_eq!(refusal.connection.as_deref(), Some("prod-ssh"));
+}
+
+/// SSH-2 on its own. Flipping the access table without going through
+/// `ui_set_tool_access` leaves the socket's ticket valid, so `redeem` succeeds
+/// and only `handle_conn`'s re-check stands between the caller and a signing
+/// oracle. Any path that narrows access — a reload of the wiring state, a future
+/// caller that forgets to invalidate — lands here.
+#[tokio::test]
+async fn the_access_table_is_rechecked_when_a_socket_connection_arrives() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let host_key = add_ssh_connection(&h.broker, &key, "deploy");
+    let token = h.pair().await;
+    let (auth_sock, _) = h.open_ssh(&token).await;
+
+    let mut before = bound_stream(&auth_sock, &host_key).await;
+    assert_lists_identity(&mut before, &key).await;
+    drop(before);
+
+    let conn = h.broker.store.connection_by_name("prod-ssh").unwrap();
+    assert!(h.broker.access.set_enabled(conn.id, false).unwrap());
+
+    let mut after = UnixStream::connect(&auth_sock).await.unwrap();
+    let mut probe = [0u8; 1];
+    let read = tokio::time::timeout(Duration::from_secs(5), after.read(&mut probe))
+        .await
+        .expect("the refusal must not hang");
+    assert!(
+        matches!(read, Ok(0) | Err(_)),
+        "a disabled tool must not serve the agent protocol"
+    );
+
+    let refusal = h
+        .broker
+        .audit
+        .recent(20)
+        .into_iter()
+        .find(|e| {
+            e.kind == aka_core::audit::AuditKind::Denied
+                && e.outcome.as_deref() == Some("denied_by_policy")
+        })
+        .expect("the access re-check records its refusal");
+    assert_eq!(refusal.connection.as_deref(), Some("prod-ssh"));
+    assert_eq!(
+        refusal.detail.as_deref(),
+        Some("agent access is disabled"),
+        "the entry must say which gate refused"
+    );
+}
+
+/// Retargeting the connection invalidates a socket opened against the old
+/// target: the user repointed the tool at something other than what they
+/// approved.
+#[tokio::test]
+async fn retargeting_refuses_a_live_per_open_socket() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let _host_key = add_ssh_connection(&h.broker, &key, "deploy");
+    let token = h.pair().await;
+    let (auth_sock, _) = h.open_ssh(&token).await;
+
+    let conn = h.broker.store.connection_by_name("prod-ssh").unwrap();
+    let ConnectionConfig::Ssh {
+        host,
+        port,
+        user,
+        host_key_fingerprint,
+        ..
+    } = conn.config.clone()
+    else {
+        unreachable!()
+    };
+    h.broker
+        .store
+        .update_connection(
+            &conn.id,
+            aka_core::store::ConnectionSpec {
+                name: conn.name.clone(),
+                config: ConnectionConfig::Ssh {
+                    // A different host entirely.
+                    host: format!("other-{host}"),
+                    port,
+                    destination: None,
+                    user,
+                    host_key_fingerprint,
+                },
+                secrets: conn.secrets.clone(),
+            },
+        )
+        .unwrap();
+
+    let mut after = UnixStream::connect(&auth_sock).await.unwrap();
+    let mut probe = [0u8; 1];
+    let read = tokio::time::timeout(Duration::from_secs(5), after.read(&mut probe))
+        .await
+        .expect("must not hang");
+    assert!(
+        matches!(read, Ok(0) | Err(_)),
+        "a retargeted tool must refuse"
+    );
+}
+
+/// SSH-3. A connection accepted just before the socket's window closes must not
+/// outlive it. It used to run to `session_max_ttl` — an hour of unlimited
+/// signatures, after the socket file was gone, regardless of disable or delete.
+#[tokio::test]
+async fn an_agent_connection_dies_with_its_socket_window() {
+    let config = BrokerConfig {
+        // The socket accepts for `ticket_ttl + 30s`; make the whole window
+        // short. `session_max_ttl` stays long, so only the socket bound can
+        // end this.
+        ticket_ttl: Duration::from_millis(200),
+        session_max_ttl: Duration::from_secs(3600),
+        session_idle_timeout: Duration::from_secs(3600),
+        ..Default::default()
+    };
+    let mut h = harness(config).await;
+    let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let host_key = add_ssh_connection(&h.broker, &key, "deploy");
+    let token = h.pair().await;
+    let (auth_sock, _) = h.open_ssh(&token).await;
+
+    // Hold a bound connection open and idle.
+    let mut s = bound_stream(&auth_sock, &host_key).await;
+    assert_lists_identity(&mut s, &key).await;
+
+    // SOCKET_GRACE is 30s, so allow for it: the point is that this ends at all
+    // rather than at the hour `session_max_ttl` would allow.
+    let mut probe = [0u8; 1];
+    let read = tokio::time::timeout(Duration::from_secs(45), s.read(&mut probe))
+        .await
+        .expect("the socket window must end the connection");
+    assert!(matches!(read, Ok(0) | Err(_)));
+    assert!(
+        h.broker.sessions().is_empty(),
+        "the session must be retired: {:?}",
+        h.broker.sessions()
+    );
+}
+
+/// SSH-3's other half: a withdrawn connection closes established agent
+/// connections, not only future ones.
+#[tokio::test]
+async fn withdrawing_a_connection_closes_a_live_agent_connection() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let host_key = add_ssh_connection(&h.broker, &key, "deploy");
+    let token = h.pair().await;
+    let (auth_sock, _) = h.open_ssh(&token).await;
+
+    let mut s = bound_stream(&auth_sock, &host_key).await;
+    assert_lists_identity(&mut s, &key).await;
+    assert_eq!(h.broker.sessions().len(), 1);
+
+    let conn = h.broker.store.connection_by_name("prod-ssh").unwrap();
+    assert!(h.broker.ui_set_tool_access(&conn.id, false).unwrap());
+
+    let mut probe = [0u8; 1];
+    let read = tokio::time::timeout(Duration::from_secs(5), s.read(&mut probe))
+        .await
+        .expect("close_connection_sessions must reach an established connection");
+    assert!(matches!(read, Ok(0) | Err(_)));
+}
+
+/* ------------------------- protocol-level refusals ------------------------ */
+
+/// SSH-16. Routine capability probes are not security events. Every EXTENSION
+/// used to fall into the session-bind parser, reach "unsupported agent
+/// extension", and be recorded as `SSH signature refused` — so `ssh`'s own
+/// `query` probe looked like an attack in the activity log.
+#[tokio::test]
+async fn an_unknown_extension_fails_without_being_audited() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let _host_key = add_ssh_connection(&h.broker, &key, "deploy");
+    let token = h.pair().await;
+    let (auth_sock, _) = h.open_ssh(&token).await;
+
+    let mut s = UnixStream::connect(&auth_sock).await.unwrap();
+    let mut body = Vec::new();
+    put_string(&mut body, b"query");
+    write_message(&mut s, SSH_AGENTC_EXTENSION, &body).await;
+    let (kind, _) = read_message(&mut s).await;
+    assert_eq!(kind, SSH_AGENT_FAILURE, "an unknown extension just fails");
+
+    assert!(
+        h.broker
+            .audit
+            .recent(20)
+            .iter()
+            .all(|e| e.kind != aka_core::audit::AuditKind::SshSigned),
+        "a capability probe must not be recorded as a refused signature"
+    );
+}
+
+/// SSH-17. `flags == 0` asks for legacy SHA-1 `ssh-rsa`. Signing SHA-512 anyway
+/// produced a signature the client rejects (`sshkey_check_sigtype` compares it
+/// against the `ssh-rsa` in its own userauth blob), so the key signed for a
+/// login that then failed. Refusing lets the client ask again properly.
+#[tokio::test]
+async fn legacy_ssh_rsa_is_refused_rather_than_signed_with_the_wrong_algorithm() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let key = PrivateKey::random(&mut OsRng, Algorithm::Rsa { hash: None }).unwrap();
+    let host_key = add_ssh_connection(&h.broker, &key, "deploy");
+    let token = h.pair().await;
+    let (auth_sock, _) = h.open_ssh(&token).await;
+
+    let key_blob = key.public_key().to_bytes().unwrap();
+    let host_blob = host_key.public_key().to_bytes().unwrap();
+    let data = userauth_blob("deploy", "ssh-rsa", &key_blob, &host_blob);
+    let mut s = bound_stream(&auth_sock, &host_key).await;
+
+    let (kind, _) = sign(&mut s, &key_blob, &data, 0).await;
+    assert_eq!(kind, SSH_AGENT_FAILURE, "flags==0 must be refused for RSA");
+
+    // Asking for a real algorithm works, so this is not a blanket RSA refusal.
+    let (kind, body) = sign(&mut s, &key_blob, &data, SSH_AGENT_RSA_SHA2_512).await;
+    assert_eq!(kind, SSH_AGENT_SIGN_RESPONSE);
+    verify_signature(key.public_key(), &body, &data);
+}
+
+/// SSH-20. Signing is the authority-granting operation and it was unbounded:
+/// the token limiter covers `POST /v1/ssh/open`, never the socket it returns.
+#[tokio::test]
+async fn signatures_are_rate_limited_per_socket() {
+    let config = BrokerConfig {
+        per_identity_per_min: 2,
+        ..Default::default()
+    };
+    let mut h = harness(config).await;
+    let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let host_key = add_ssh_connection(&h.broker, &key, "deploy");
+    let token = h.pair().await;
+    let (auth_sock, _) = h.open_ssh(&token).await;
+
+    let key_blob = key.public_key().to_bytes().unwrap();
+    let host_blob = host_key.public_key().to_bytes().unwrap();
+    let data = userauth_blob("deploy", "ssh-ed25519", &key_blob, &host_blob);
+    let mut s = bound_stream(&auth_sock, &host_key).await;
+
+    for i in 0..2 {
+        let (kind, _) = sign(&mut s, &key_blob, &data, 0).await;
+        assert_eq!(kind, SSH_AGENT_SIGN_RESPONSE, "signature {i} is in budget");
+    }
+    let (kind, _) = sign(&mut s, &key_blob, &data, 0).await;
+    assert_eq!(kind, SSH_AGENT_FAILURE, "over budget must be refused");
+
+    let limited = h
+        .broker
+        .audit
+        .recent(20)
+        .into_iter()
+        .find(|e| e.outcome.as_deref() == Some("rate_limited"))
+        .expect("the refusal names its reason");
+    assert_eq!(limited.connection.as_deref(), Some("prod-ssh"));
+}
+
+/// SSH-26. The sweep used to probe each socket by connecting, which *is* a
+/// redemption: it spent one of the owning ticket's budget slots per swept file.
+#[tokio::test]
+async fn the_stale_socket_sweep_does_not_spend_a_redemption() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let _host_key = add_ssh_connection(&h.broker, &key, "deploy");
+    let token = h.pair().await;
+    let (auth_sock, _) = h.open_ssh(&token).await;
+    let dir = std::path::Path::new(&auth_sock)
+        .parent()
+        .unwrap()
+        .to_owned();
+
+    aka_core::capability::ssh::sweep_stale_sockets(&dir);
+
+    // No session was opened by the sweep itself.
+    assert!(
+        h.broker.sessions().is_empty(),
+        "the sweep must not open sessions: {:?}",
+        h.broker.sessions()
+    );
+    assert!(
+        h.broker
+            .audit
+            .recent(20)
+            .iter()
+            .all(|e| e.kind != aka_core::audit::AuditKind::SessionOpened),
+        "the sweep must not register a use nobody made"
+    );
 }

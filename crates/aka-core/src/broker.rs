@@ -1635,7 +1635,7 @@ impl Broker {
         endpoint: &DirectEndpoint,
     ) -> Result<IssuedEndpointInfo> {
         let dir = self.paths.endpoint_dir(&endpoint.id);
-        let recovered = self.endpoint_secret(endpoint).await;
+        let recovered = self.endpoint_secret_for(endpoint).await;
         let secret = recovered.as_str();
         let info = match &connection.config {
             ConnectionConfig::Pg { user, dbname, .. } => {
@@ -1680,8 +1680,7 @@ impl Broker {
                 destination,
                 ..
             } => {
-                let sock = dir
-                    .join(crate::capability::ssh::ENDPOINT_SOCK)
+                let sock = crate::capability::ssh::endpoint_sock_path(dir.as_path(), secret)
                     .display()
                     .to_string();
                 let target = ssh_endpoint_invocation(destination.as_deref(), user, host, *port);
@@ -1761,7 +1760,7 @@ impl Broker {
 
     /// The plaintext for an endpoint, for rebuilding a pasteable address.
     /// Empty when it cannot be recovered, which renders a password-less form.
-    async fn endpoint_secret(&self, endpoint: &DirectEndpoint) -> String {
+    pub(crate) async fn endpoint_secret_for(&self, endpoint: &DirectEndpoint) -> String {
         // A legacy record still carrying its plaintext is used as-is and
         // migrated into the vault, so the next read comes from there.
         if !endpoint.secret.is_empty() {

@@ -122,14 +122,13 @@ pub fn connection_dto(broker: &Broker, conn: &Connection) -> ConnectionDto {
                     dbname,
                     (!e.secret.is_empty()).then_some(e.secret.as_str()),
                 )),
-                Ssh { .. } => Some(
-                    broker
-                        .paths
-                        .endpoint_dir(&e.id)
-                        .join(crate::capability::ssh::ENDPOINT_SOCK)
-                        .display()
-                        .to_string(),
-                ),
+                // Deliberately omitted for SSH. The socket path *is* the
+                // capability — the ssh-agent protocol offers no place to
+                // present a secret — so putting it in the ordinary connection
+                // listing handed a working signing oracle to every manage
+                // caller that asked for the list, not only to one that asked
+                // for the endpoint. `GET .../endpoint` still returns it.
+                Ssh { .. } => None,
                 Api { .. } => e
                     .port
                     .map(|port| format!("http://{}:{port}", broker.advertise_host())),
