@@ -154,6 +154,13 @@ interface ConnectionDraft {
   newSecretValue?: string;
   importedCredential?: string | null;
   identityFile?: string;
+  /**
+   * Passphrase for an encrypted SSH private key. Revealed only once the backend
+   * says the offered key needs one, spent on the save that follows, and never
+   * kept in the draft afterwards — it decrypts the key at import and has no
+   * further role, because the vault is what protects a stored key.
+   */
+  keyPassphrase?: string;
   identityFiles?: string[];
   sshImportId?: string;
   destination?: string | null;
@@ -3602,6 +3609,26 @@ function CredentialChooser({ type, allowNew = true, valueHint }: {
         hidden={!nameTaken}>Name used by an existing credential</div>
     </div>
   );
+  // Shown only after the backend reports the key is encrypted: a passphrase
+  // field on every SSH form would imply one is expected, and most are not. The
+  // passphrase decrypts the key once, here; what the vault seals is the
+  // cleartext OpenSSH form, and the vault is the protection boundary for it.
+  const passphraseRow = type === 'ssh' && state.sheetErrors.keyPassphrase !== undefined
+    ? (
+      <div className="f-row" key="key-passphrase">
+        <label htmlFor="c-key-passphrase">Key passphrase</label>
+        <input id="c-key-passphrase" className={fieldCls('keyPassphrase')} type="password"
+          placeholder="Passphrase for this private key"
+          value={draft.keyPassphrase ?? ''}
+          onChange={(e) => setDraftField('keyPassphrase', 'keyPassphrase', e.currentTarget.value)} />
+        <FieldError k="keyPassphrase" />
+        <div className="rule-note">
+          Used once, to unlock the key. AgentMFA stores the unlocked key in the
+          system keychain and never keeps the passphrase.
+        </div>
+      </div>
+    )
+    : null;
   if (type === 'ssh' && draft.sshImportId && draft.identityFiles && draft.identityFiles.length) {
     const identityOptions = draft.identityFiles.map((path): [string, string] => [path, path]);
     return (
@@ -3613,6 +3640,7 @@ function CredentialChooser({ type, allowNew = true, valueHint }: {
           <FieldError k="newSecretValue" />
           <div className="rule-note">Saved directly to macOS Keychain</div>
         </div>
+        {passphraseRow}
       </div>
     );
   }
@@ -3631,6 +3659,7 @@ function CredentialChooser({ type, allowNew = true, valueHint }: {
           onChange={(e) => setDraftField('newSecretValue', 'newSecretValue', e.currentTarget.value)} />
         <FieldError k="newSecretValue" />
       </div>
+      {passphraseRow}
     </div>
   );
 }
@@ -4419,6 +4448,7 @@ const INPUT_BY_ERROR_FIELD = {
   dbname: 'f-db', user: 'f-user', hostKeyFingerprint: 'f-host-key', sslmode: 'f-sslmode',
   url: 'f-url', template: 'c-template', secret: 'c-secret',
   newSecretName: 'c-new-secret-name', newSecretValue: 'c-new-secret-value',
+  keyPassphrase: 'c-key-passphrase',
 };
 
 function showFormError(error: unknown): void {
@@ -4860,6 +4890,9 @@ async function saveConn(): Promise<void> {
     } else {
       input.new_secret_value = d.newSecretValue ?? d.importedCredential;
     }
+    // Sent only when the user filled it, and never retained: the backend
+    // decrypts the key with it and stores the unlocked form.
+    if (t === 'ssh' && (d.keyPassphrase || '').length) input.key_passphrase = d.keyPassphrase;
   }
   if (t === 'api') {
     input.host = apiOrigin!.host;

@@ -64,6 +64,9 @@ const listeners: Record<string, MockListener[]> = {};
 // Mirrors the broker's ACTIVITY_VIEW_LIMIT so the mock caps a view read where
 // the real command surface does.
 const MOCK_ACTIVITY_LIMIT = 500;
+/** The demo's answer for a passphrase-protected key import. */
+const MOCK_KEY_PASSPHRASE = 'correct horse';
+
 // The demo endpoint credential: fixed so a get_endpoint read-back
 // reproduces exactly what issuance showed.
 const MOCK_ENDPOINT_SECRET = 'end_' + 'demo0'.repeat(12) + '0000';
@@ -861,6 +864,20 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       if (i.new_secret_name && (i.new_secret_value || (i.ssh_import_id && i.identity_file))) {
         if (db.secrets.some((s) => s.name === i.new_secret_name)) {
           throw formError('conflict', 'secret_name_taken', 'newSecretName', 'That credential name is already in use');
+        }
+        // A passphrase-protected key is decrypted at import, so the demo models
+        // both halves of that exchange: the ask, and the wrong answer. The real
+        // backend detects encryption from the key itself; the mock uses the
+        // OpenSSH header, which is the only marker a fixture can carry.
+        if (i.type === 'ssh' && /ENCRYPTED PRIVATE KEY|aes256-ctr/.test(i.new_secret_value ?? '')) {
+          if (!i.key_passphrase) {
+            throw formError('validation', 'ssh_key_passphrase_required', 'keyPassphrase',
+              'this private key is passphrase-protected; enter its passphrase');
+          }
+          if (i.key_passphrase !== MOCK_KEY_PASSPHRASE) {
+            throw formError('validation', 'ssh_key_passphrase_wrong', 'keyPassphrase',
+              'that passphrase did not decrypt the private key');
+          }
         }
         const secret = mkSecret(i.new_secret_name, i.new_secret_value || '-----BEGIN OPENSSH PRIVATE KEY-----mock');
         db.secrets.push(secret);

@@ -211,6 +211,48 @@ pub struct SshSigner {
     rsa: Option<rsa::RsaPrivateKey>,
 }
 
+/// Why an offered private key cannot be stored.
+///
+/// `NeedsPassphrase` and `WrongPassphrase` are separate because the form has to
+/// react differently: reveal a passphrase field, or say the one given is wrong.
+/// Collapsing them into a string — as the old "store the decrypted OpenSSH key"
+/// message did — is what dead-ended the common case with advice to weaken the
+/// credential before handing it over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyImportError {
+    /// The key is encrypted and no passphrase was offered.
+    NeedsPassphrase,
+    /// A passphrase was offered and did not decrypt the key.
+    WrongPassphrase,
+    /// Malformed, or an algorithm the signer cannot use.
+    Unusable(String),
+}
+
+impl KeyImportError {
+    pub fn message(&self) -> String {
+        match self {
+            Self::NeedsPassphrase => {
+                "this private key is passphrase-protected; enter its passphrase".to_string()
+            }
+            Self::WrongPassphrase => {
+                "that passphrase did not decrypt the private key".to_string()
+            }
+            Self::Unusable(message) => message.clone(),
+        }
+    }
+
+    /// Whether the surface should ask for (or re-ask for) a passphrase.
+    pub fn wants_passphrase(&self) -> bool {
+        matches!(self, Self::NeedsPassphrase | Self::WrongPassphrase)
+    }
+}
+
+impl std::fmt::Display for KeyImportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message())
+    }
+}
+
 /// Validate an SSH private key before it is saved by a trusted onboarding
 /// surface. This deliberately enforces the same format and algorithm rules as
 /// the runtime signer so an imported credential cannot fail only at first use.
@@ -218,21 +260,70 @@ pub fn validate_private_key(pem: &[u8]) -> Result<(), String> {
     parse_supported_private_key(pem).map(|_| ())
 }
 
+/// The OpenSSH-form private key to seal in the vault, decrypting first when the
+/// offered key is passphrase-protected.
+///
+/// The passphrase is used here and discarded: the vault is the protection
+/// boundary for a stored key — Keychain on macOS, XChaCha20-Poly1305 elsewhere —
+/// so a second layer inside it would only mean prompting the user on every
+/// signature. Refusing encrypted keys outright, which is what happened before,
+/// dead-ended the common case with instructions to `ssh-keygen -p` the
+/// passphrase off first: strictly worse, because the stripped key then sits on
+/// disk unprotected while the user finds the import button.
+///
+/// Runs in the trusted onboarding surface only. The plaintext never leaves this
+/// function except into the caller's `Zeroizing` buffer.
+pub fn private_key_for_vault(
+    pem: &[u8],
+    passphrase: Option<&str>,
+) -> std::result::Result<zeroize::Zeroizing<String>, KeyImportError> {
+    let key = PrivateKey::from_openssh(pem)
+        .map_err(|e| KeyImportError::Unusable(format!("private key parse failed: {e}")))?;
+    let key = if key.is_encrypted() {
+        let passphrase = passphrase
+            .map(str::as_bytes)
+            .filter(|bytes| !bytes.is_empty())
+            .ok_or(KeyImportError::NeedsPassphrase)?;
+        // `decrypt` reports a MAC failure for a wrong passphrase, which is
+        // indistinguishable from corruption here — and "wrong passphrase" is
+        // overwhelmingly the likelier of the two, so say that.
+        key.decrypt(passphrase)
+            .map_err(|_| KeyImportError::WrongPassphrase)?
+    } else {
+        key
+    };
+    check_supported(&key).map_err(KeyImportError::Unusable)?;
+    let encoded = key
+        .to_openssh(ssh_key::LineEnding::LF)
+        .map_err(|e| KeyImportError::Unusable(format!("private key re-encode failed: {e}")))?;
+    // `to_openssh` yields a zeroizing string already; rewrap so the signature
+    // does not depend on that being true.
+    Ok(zeroize::Zeroizing::new(encoded.to_string()))
+}
+
+fn check_supported(key: &PrivateKey) -> Result<(), String> {
+    match key.key_data() {
+        KeypairData::Ed25519(_) | KeypairData::Rsa(_) => Ok(()),
+        other => Err(format!(
+            "unsupported key type {:?} (v1 signs ed25519 and rsa)",
+            other.algorithm().map(|a| a.as_str().to_string())
+        )),
+    }
+}
+
 fn parse_supported_private_key(pem: &[u8]) -> Result<PrivateKey, String> {
     let key =
         PrivateKey::from_openssh(pem).map_err(|e| format!("private key parse failed: {e}"))?;
     if key.is_encrypted() {
-        return Err("private key is passphrase-encrypted; store the decrypted OpenSSH key".into());
+        // Reached only for a key that was stored encrypted by an older build:
+        // import decrypts before sealing, so the vault holds cleartext OpenSSH.
+        return Err(
+            "the stored private key is passphrase-encrypted; re-import it to have the \
+             passphrase removed once, at import"
+                .into(),
+        );
     }
-    match key.key_data() {
-        KeypairData::Ed25519(_) | KeypairData::Rsa(_) => {}
-        other => {
-            return Err(format!(
-                "unsupported key type {:?} (v1 signs ed25519 and rsa)",
-                other.algorithm().map(|a| a.as_str().to_string())
-            ))
-        }
-    }
+    check_supported(&key)?;
     Ok(key)
 }
 
@@ -256,7 +347,13 @@ impl SshSigner {
             .secret_value(secret_id)
             .await
             .map_err(|e| format!("The saved credential could not be read: {e}"))?;
-        let key = parse_supported_private_key(pem.as_bytes())?;
+        Self::from_pem(pem.as_bytes())
+    }
+
+    /// Build a signer from OpenSSH-form key material — the shape the vault
+    /// holds after import decrypts anything encrypted.
+    fn from_pem(pem: &[u8]) -> Result<Self, String> {
+        let key = parse_supported_private_key(pem)?;
         let public_blob = key
             .public_key()
             .to_bytes()
@@ -1925,6 +2022,75 @@ pub fn sweep_stale_sockets(dir: &Path) {
 mod tests {
     use super::*;
     use ssh_key::rand_core::OsRng;
+
+    /// SSH-23. A passphrase-protected key was refused with instructions to
+    /// "store the decrypted OpenSSH key" — advice to run `ssh-keygen -p` and
+    /// leave the stripped key sitting on disk before importing it. The vault is
+    /// the protection boundary for a stored key, so the passphrase is spent once
+    /// here and discarded.
+    #[test]
+    fn an_encrypted_key_is_decrypted_at_import_with_its_passphrase() {
+        let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let expected = key.public_key().fingerprint(HashAlg::Sha256);
+        let encrypted = key
+            .encrypt(&mut OsRng, b"correct horse")
+            .unwrap()
+            .to_openssh(ssh_key::LineEnding::LF)
+            .unwrap();
+
+        // No passphrase: say so, distinctly, so the form can reveal a field.
+        let error = private_key_for_vault(encrypted.as_bytes(), None).unwrap_err();
+        assert_eq!(error, KeyImportError::NeedsPassphrase);
+        assert!(error.wants_passphrase());
+        // An empty string is "not offered", not "the passphrase is empty".
+        assert_eq!(
+            private_key_for_vault(encrypted.as_bytes(), Some("")).unwrap_err(),
+            KeyImportError::NeedsPassphrase
+        );
+
+        // Wrong passphrase is its own answer: the field is already on screen.
+        let error = private_key_for_vault(encrypted.as_bytes(), Some("battery")).unwrap_err();
+        assert_eq!(error, KeyImportError::WrongPassphrase);
+        assert!(error.wants_passphrase());
+
+        // Right passphrase yields cleartext OpenSSH for the same key, which the
+        // runtime signer accepts — the point of decrypting at import rather
+        // than failing at first use.
+        let stored = private_key_for_vault(encrypted.as_bytes(), Some("correct horse")).unwrap();
+        validate_private_key(stored.as_bytes()).expect("the stored form must load at runtime");
+        let reloaded = PrivateKey::from_openssh(stored.as_bytes()).unwrap();
+        assert!(!reloaded.is_encrypted());
+        assert_eq!(reloaded.public_key().fingerprint(HashAlg::Sha256), expected);
+        let signer = SshSigner::from_pem(stored.as_bytes()).expect("a usable signer");
+        assert_eq!(signer.public_blob, key.public_key().to_bytes().unwrap());
+    }
+
+    /// A cleartext key passes through unchanged in substance, and a passphrase
+    /// offered for one is ignored rather than treated as an error.
+    #[test]
+    fn a_cleartext_key_needs_no_passphrase_and_tolerates_a_stray_one() {
+        let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let pem = key.to_openssh(ssh_key::LineEnding::LF).unwrap();
+        for passphrase in [None, Some("ignored")] {
+            let stored = private_key_for_vault(pem.as_bytes(), passphrase).unwrap();
+            let reloaded = PrivateKey::from_openssh(stored.as_bytes()).unwrap();
+            assert_eq!(
+                reloaded.public_key().fingerprint(HashAlg::Sha256),
+                key.public_key().fingerprint(HashAlg::Sha256)
+            );
+        }
+    }
+
+    /// Decryption does not widen the algorithm set: an ECDSA key the signer
+    /// cannot use is refused as unusable whether or not it was encrypted, and
+    /// the surface must not offer a passphrase field for it.
+    #[test]
+    fn an_unusable_key_is_refused_without_asking_for_a_passphrase() {
+        let error = private_key_for_vault(b"not a key at all", None).unwrap_err();
+        assert!(matches!(error, KeyImportError::Unusable(_)), "{error:?}");
+        assert!(!error.wants_passphrase());
+        assert!(error.message().contains("parse failed"), "{error}");
+    }
 
     fn userauth_blob(
         user: &str,

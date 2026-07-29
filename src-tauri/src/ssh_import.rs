@@ -121,26 +121,38 @@ impl ImportCache {
 pub fn load_identity(
     resolved: &ResolvedSshImport,
     selected_path: &str,
-) -> Result<zeroize::Zeroizing<String>, String> {
+    passphrase: Option<&str>,
+) -> Result<zeroize::Zeroizing<String>, aka_core::capability::ssh::KeyImportError> {
+    use aka_core::capability::ssh::KeyImportError::Unusable;
     let selected = Path::new(selected_path)
         .canonicalize()
-        .map_err(|error| format!("could not open selected identity file: {error}"))?;
+        .map_err(|error| Unusable(format!("could not open selected identity file: {error}")))?;
     if !resolved.identity_files.iter().any(|path| path == &selected) {
-        return Err("selected identity file was not part of this SSH import preview".into());
+        return Err(Unusable(
+            "selected identity file was not part of this SSH import preview".into(),
+        ));
     }
     let metadata = fs::metadata(&selected)
-        .map_err(|error| format!("could not inspect selected identity file: {error}"))?;
+        .map_err(|error| Unusable(format!("could not inspect selected identity file: {error}")))?;
     if !metadata.is_file() || metadata.len() > MAX_IDENTITY_BYTES {
-        return Err("selected identity must be a regular file smaller than 1 MiB".into());
+        return Err(Unusable(
+            "selected identity must be a regular file smaller than 1 MiB".into(),
+        ));
     }
     #[cfg(unix)]
     if metadata.permissions().mode() & 0o077 != 0 {
-        return Err("selected identity file must not be accessible by group or other users".into());
+        return Err(Unusable(
+            "selected identity file must not be accessible by group or other users".into(),
+        ));
     }
-    let value = fs::read_to_string(&selected)
-        .map_err(|error| format!("could not read selected identity file: {error}"))?;
-    aka_core::capability::ssh::validate_private_key(value.as_bytes())?;
-    Ok(zeroize::Zeroizing::new(value))
+    let value =
+        zeroize::Zeroizing::new(fs::read_to_string(&selected).map_err(|error| {
+            Unusable(format!("could not read selected identity file: {error}"))
+        })?);
+    // A passphrase-protected `~/.ssh/id_*` is the ordinary case, not an error:
+    // decrypt it here, in the trusted onboarding surface, and hand the vault the
+    // cleartext OpenSSH form it seals.
+    aka_core::capability::ssh::private_key_for_vault(value.as_bytes(), passphrase)
 }
 
 pub fn resolve(source: &str) -> Result<ResolvedSshImport, String> {
@@ -721,10 +733,68 @@ mod tests {
             host_key_candidates: vec![],
             warnings: vec![],
         };
-        assert!(load_identity(&resolved, canonical.to_str().unwrap()).is_ok());
-        assert!(load_identity(&resolved, "/etc/hosts")
+        assert!(load_identity(&resolved, canonical.to_str().unwrap(), None).is_ok());
+        assert!(load_identity(&resolved, "/etc/hosts", None)
             .unwrap_err()
+            .message()
             .contains("not part of this SSH import preview"));
+    }
+
+    /// SSH-23. A passphrase-protected `~/.ssh/id_*` is the ordinary case. It was
+    /// refused with advice to strip the passphrase first — leaving the stripped
+    /// key on disk unprotected — so it is decrypted here instead, and the vault
+    /// (Keychain / XChaCha20) is the protection boundary for what is stored.
+    #[cfg(unix)]
+    #[test]
+    fn loads_a_passphrase_protected_identity_and_stores_it_decrypted() {
+        use aka_core::capability::ssh::KeyImportError;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deploy");
+        let mut rng = ssh_key::rand_core::OsRng;
+        let key = PrivateKey::random(&mut rng, Algorithm::Ed25519).unwrap();
+        let expected = key.public_key().fingerprint(ssh_key::HashAlg::Sha256);
+        fs::write(
+            &path,
+            key.encrypt(&mut rng, b"correct horse")
+                .unwrap()
+                .to_openssh(LineEnding::LF)
+                .unwrap(),
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let canonical = path.canonicalize().unwrap();
+        let resolved = ResolvedSshImport {
+            destination: "prod".into(),
+            host: "prod.example.com".into(),
+            port: 22,
+            user: "deploy".into(),
+            identity_files: vec![canonical.clone()],
+            proxy_jump: None,
+            host_key_alias: None,
+            known_hosts_files: vec![],
+            host_key_candidates: vec![],
+            warnings: vec![],
+        };
+        let selected = canonical.to_str().unwrap();
+        assert_eq!(
+            load_identity(&resolved, selected, None).unwrap_err(),
+            KeyImportError::NeedsPassphrase
+        );
+        assert_eq!(
+            load_identity(&resolved, selected, Some("battery")).unwrap_err(),
+            KeyImportError::WrongPassphrase
+        );
+        let stored = load_identity(&resolved, selected, Some("correct horse")).unwrap();
+        let reloaded = PrivateKey::from_openssh(stored.as_bytes()).unwrap();
+        assert!(
+            !reloaded.is_encrypted(),
+            "the vault stores cleartext OpenSSH"
+        );
+        assert_eq!(
+            reloaded.public_key().fingerprint(ssh_key::HashAlg::Sha256),
+            expected
+        );
     }
 
     #[cfg(unix)]

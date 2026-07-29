@@ -130,10 +130,16 @@ pub enum ConnectionConfig {
         /// an authentication request naming any other user.
         user: String,
         /// OpenSSH SHA-256/SHA-512 fingerprint of the destination host key.
-        /// Empty means unpinned: the key is trusted on first use — the broker
-        /// observes it at the first agent `session-bind`, raises a dedicated
-        /// approval prompt, and pins it on approval. Once set, a mismatching
-        /// server key is refused.
+        ///
+        /// Empty means unpinned: the broker observes the key at the first agent
+        /// `session-bind` and pins it *without asking* — a dedicated approval
+        /// prompt is not built, and this comment used to claim one was. The pin
+        /// is recorded in the activity log, which is where the user learns of
+        /// it. Once set, a mismatching server key is refused.
+        ///
+        /// Import pre-fills this from the user's own `known_hosts` when exactly
+        /// one key is on file there, so the common case does not rely on
+        /// trust-on-first-use at all.
         #[serde(default)]
         host_key_fingerprint: String,
     },

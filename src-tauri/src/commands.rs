@@ -579,6 +579,34 @@ pub struct ConnectionInput {
     // that preview. The backend verifies the binding before reading the file.
     pub ssh_import_id: Option<String>,
     pub identity_file: Option<String>,
+    /// Passphrase for an encrypted SSH private key, whether typed in or read
+    /// from an identity file. Used once, here, to decrypt before the vault
+    /// seals the cleartext OpenSSH form — the vault is the protection boundary
+    /// for a stored key, and re-prompting per signature is not on offer. Never
+    /// stored, never echoed back.
+    pub key_passphrase: Option<String>,
+}
+
+/// A key-import failure as a form error.
+///
+/// "Needs a passphrase" and "wrong passphrase" carry their own codes and point
+/// at the passphrase field, so the form reveals it (or says the one given is
+/// wrong) instead of showing a dead end on the credential field — which is what
+/// "store the decrypted OpenSSH key" used to do.
+fn ssh_identity_error(error: aka_core::capability::ssh::KeyImportError) -> FormError {
+    use aka_core::capability::ssh::KeyImportError;
+    let message = error.message();
+    match error {
+        KeyImportError::NeedsPassphrase => {
+            FormError::validation("ssh_key_passphrase_required", "keyPassphrase", message)
+        }
+        KeyImportError::WrongPassphrase => {
+            FormError::validation("ssh_key_passphrase_wrong", "keyPassphrase", message)
+        }
+        KeyImportError::Unusable(_) => {
+            FormError::validation("invalid_ssh_identity", "newSecretValue", message)
+        }
+    }
 }
 
 fn parse_pg_sslmode(value: Option<&str>) -> CmdResult<PgSslMode> {
@@ -690,12 +718,18 @@ pub async fn add_connection(
     let new_secret_name = input.new_secret_name.take();
     // Wrap the user-entered value before any fallible parsing below so every
     // error path zeroizes it rather than dropping an ordinary String.
-    let new_secret_value = input.new_secret_value.take().map(Zeroizing::new);
+    let mut new_secret_value = input.new_secret_value.take().map(Zeroizing::new);
+    let key_passphrase = input.key_passphrase.take().map(Zeroizing::new);
     if kind == "ssh" {
         if let Some(value) = &new_secret_value {
-            aka_core::capability::ssh::validate_private_key(value.as_bytes()).map_err(
-                |message| FormError::validation("invalid_ssh_identity", "newSecretValue", message),
-            )?;
+            // Decrypt now rather than refusing: what the vault seals is the
+            // cleartext OpenSSH form, so an encrypted key must not reach it.
+            let stored = aka_core::capability::ssh::private_key_for_vault(
+                value.as_bytes(),
+                key_passphrase.as_ref().map(|p| p.as_str()),
+            )
+            .map_err(ssh_identity_error)?;
+            new_secret_value = Some(stored);
         }
     }
     let ssh_import_id = input.ssh_import_id.take();
@@ -722,9 +756,12 @@ pub async fn add_connection(
                 ));
             }
             Some(
-                crate::ssh_import::load_identity(&resolved, path).map_err(|message| {
-                    FormError::validation("invalid_ssh_identity", "newSecretValue", message)
-                })?,
+                crate::ssh_import::load_identity(
+                    &resolved,
+                    path,
+                    key_passphrase.as_ref().map(|p| p.as_str()),
+                )
+                .map_err(ssh_identity_error)?,
             )
         }
         (None, None) => None,
@@ -1478,6 +1515,7 @@ mod tests {
             new_secret_value: None,
             ssh_import_id: None,
             identity_file: None,
+            key_passphrase: None,
         }
     }
 
@@ -1532,6 +1570,7 @@ mod tests {
             new_secret_value: None,
             ssh_import_id: None,
             identity_file: None,
+            key_passphrase: None,
         }
         .into_spec()
         .unwrap();

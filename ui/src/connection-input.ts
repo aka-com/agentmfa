@@ -245,22 +245,56 @@ export function shouldResolveSshImport(value: unknown): boolean {
   return /^[A-Za-z0-9._+%-]+(?:@[A-Za-z0-9._+%-]+)?$/.test(text);
 }
 
+/**
+ * The fingerprint to pre-fill, and what to say about it.
+ *
+ * Leaving this blank meant trust-on-first-use: the first key the broker sees
+ * becomes the permanent anchor, silently. The user's own `known_hosts` is a
+ * better anchor — it was established by their own earlier connections rather
+ * than by whatever answers next — and the resolver already collected it. So a
+ * single candidate is pre-filled, with the file it came from named, and it sits
+ * in an editable field the user can clear.
+ *
+ * Several candidates are *not* guessed between. The pin is one fingerprint and
+ * the client presents whichever host key algorithm it negotiates, so picking
+ * the wrong one of two turns every login into a host-key refusal. They are
+ * listed instead, for the user to paste one.
+ */
+function hostKeyPrefill(
+  candidates: HostKeyCandidate[],
+): { fingerprint: string; warnings: string[] } {
+  if (candidates.length === 1) {
+    const [only] = candidates;
+    return {
+      fingerprint: only.fingerprint,
+      warnings: [`Host key pinned from ${only.source} (${only.algorithm}). Clear it to trust the first key seen instead.`],
+    };
+  }
+  if (candidates.length > 1) {
+    const listed = candidates.map((c) => `${c.algorithm} ${c.fingerprint}`).join(', ');
+    return {
+      fingerprint: '',
+      warnings: [`known_hosts holds more than one key for this destination (${listed}); paste the one to pin, or leave it blank to trust the first key seen.`],
+    };
+  }
+  return { fingerprint: '', warnings: [] };
+}
+
 export function sshImportFromPreview(preview: SshImportPreview): ConnectionImport {
   const identityFiles = preview.identityFiles || [];
   const destinationHost = String(preview.destination || preview.host || '').split('@').pop();
+  const hostKey = hostKeyPrefill(preview.hostKeyCandidates || []);
   return {
     type: 'ssh',
     name: suggestedName(destinationHost, 'ssh'),
     credential: null,
-    warnings: preview.warnings || [],
+    warnings: [...(preview.warnings || []), ...hostKey.warnings],
     fields: {
       destination: preview.destination,
       host: preview.host,
       port: preview.port,
       user: preview.user,
-      // Never prefilled from known_hosts: the key is confirmed with the
-      // user at the first agent connection instead.
-      hostKeyFingerprint: '',
+      hostKeyFingerprint: hostKey.fingerprint,
       identityFiles,
       identityFile: identityFiles.length === 1 ? identityFiles[0] : '',
       sshImportId: preview.importId,

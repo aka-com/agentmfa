@@ -123,24 +123,67 @@ test('SSH URL imports leave the host key to first-connection trust', () => {
   assert.deepEqual(ssh.warnings, []);
 });
 
-test('maps trusted SSH previews without auto-filling the host key', () => {
+// SSH-8. Leaving the field blank meant trust-on-first-use: the first key the
+// broker saw became the permanent anchor, and it is pinned without a prompt (no
+// such prompt is built). The user's own known_hosts is a better anchor and the
+// resolver already collected it.
+test('a single known_hosts key pre-fills the pin and says where it came from', () => {
   assert.equal(shouldResolveSshImport('ssh prod'), true);
   assert.equal(shouldResolveSshImport('deploy@prod'), true);
   assert.equal(shouldResolveSshImport('https://api.example.com'), false);
   const imported = sshImportFromPreview({
     importId: 'preview-1', destination: 'prod', host: 'prod.example.com', port: 2222,
     user: 'deploy', proxyJump: 'bastion', identityFiles: ['/Users/me/.ssh/deploy'],
-    hostKeyCandidates: [{ fingerprint: 'SHA256:abc', algorithm: 'ssh-ed25519', source: 'known_hosts' }],
+    hostKeyCandidates: [
+      { fingerprint: 'SHA256:abc', algorithm: 'ssh-ed25519', source: '/Users/me/.ssh/known_hosts' },
+    ],
     warnings: ['This destination connects through ProxyJump bastion.'],
   });
   if (imported.type !== 'ssh') assert.fail('expected an SSH import');
   assert.equal(imported.fields.destination, 'prod');
   assert.equal(imported.fields.identityFile, '/Users/me/.ssh/deploy');
-  // known_hosts candidates never prefill the form; the key is trusted (and
-  // shown with provenance) at the first agent connection instead.
-  assert.equal(imported.fields.hostKeyFingerprint, '');
+  assert.equal(imported.fields.hostKeyFingerprint, 'SHA256:abc');
+  // Provenance, and the way back to first-use trust — the field is editable.
+  const warnings = imported.warnings.join(' ');
+  assert.match(warnings, /\/Users\/me\/\.ssh\/known_hosts/);
+  assert.match(warnings, /ssh-ed25519/);
+  assert.match(warnings, /Clear it/);
+  // The resolver's own warnings survive alongside it.
+  assert.match(warnings, /ProxyJump bastion/);
   assert.equal('hostKeyCandidates' in imported.fields, false);
   assert.equal(JSON.stringify(imported).includes('PRIVATE KEY'), false);
+});
+
+// Two entries are not guessed between: the pin is one fingerprint and the client
+// presents whichever algorithm it negotiates, so choosing wrong turns every
+// login into a host-key refusal.
+test('several known_hosts keys are listed rather than picked between', () => {
+  const imported = sshImportFromPreview({
+    importId: 'preview-2', destination: 'prod', host: 'prod.example.com', port: 22,
+    user: 'deploy',
+    hostKeyCandidates: [
+      { fingerprint: 'SHA256:abc', algorithm: 'ssh-ed25519', source: '~/.ssh/known_hosts' },
+      { fingerprint: 'SHA256:def', algorithm: 'ssh-rsa', source: '~/.ssh/known_hosts' },
+    ],
+  });
+  if (imported.type !== 'ssh') assert.fail('expected an SSH import');
+  assert.equal(imported.fields.hostKeyFingerprint, '');
+  const warnings = imported.warnings.join(' ');
+  assert.match(warnings, /more than one key/);
+  assert.match(warnings, /ssh-ed25519 SHA256:abc/);
+  assert.match(warnings, /ssh-rsa SHA256:def/);
+});
+
+// No known_hosts entry: nothing to pre-fill and nothing to say about it, so the
+// form is silent and the first key seen is trusted.
+test('no known_hosts key leaves the pin blank without a warning', () => {
+  const imported = sshImportFromPreview({
+    importId: 'preview-3', destination: 'prod', host: 'prod.example.com', port: 22,
+    user: 'deploy', hostKeyCandidates: [],
+  });
+  if (imported.type !== 'ssh') assert.fail('expected an SSH import');
+  assert.equal(imported.fields.hostKeyFingerprint, '');
+  assert.deepEqual(imported.warnings, []);
 });
 
 test('builds transparent templates for common authentication recipes', () => {

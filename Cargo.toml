@@ -58,7 +58,11 @@ chacha20poly1305 = "0.10"
 tokio-postgres = "0.7"
 
 # SSH agent adapter
-ssh-key = { version = "0.6", default-features = false, features = ["std", "ed25519", "rsa"] }
+# "encryption" is for *import*: a passphrase-protected key is decrypted once,
+# in the trusted onboarding surface, and the decrypted OpenSSH form is what the
+# vault seals. It brings in bcrypt-pbkdf and the AES/ChaCha ciphers OpenSSH uses
+# for `-o KDF=bcrypt`.
+ssh-key = { version = "0.6", default-features = false, features = ["std", "ed25519", "rsa", "encryption"] }
 rsa = { version = "0.9", default-features = false, features = ["std", "sha2"] }
 signature = "2"
 

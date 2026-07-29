@@ -307,6 +307,12 @@ export interface ConnectionInput {
   new_secret_value?: string | null;
   ssh_import_id?: string | null;
   identity_file?: string | null;
+  /**
+   * Passphrase for an encrypted SSH private key. Spent by the backend to
+   * decrypt the key at import; the vault stores the unlocked OpenSSH form, and
+   * the passphrase is neither stored nor echoed back.
+   */
+  key_passphrase?: string | null;
   destination?: string | null;
   host?: string | null;
   scheme?: string | null;
