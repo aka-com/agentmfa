@@ -1516,7 +1516,13 @@ fn pg_libpq_keywords(dsn: &str) -> Option<String> {
 }
 
 fn decode_url_component(value: &str) -> String {
-    let encoded = format!("value={value}");
+    // `form_urlencoded` applies HTML-form semantics, where `+` decodes to a
+    // space — wrong for a URI userinfo/path component, where `+` is a literal
+    // (a PG role or database named `report+ro` would become `report ro` and
+    // fail to authenticate). Protect `+` as its escape before decoding so only
+    // true percent-escapes are expanded.
+    let protected = value.replace('+', "%2B");
+    let encoded = format!("value={protected}");
     url::form_urlencoded::parse(encoded.as_bytes())
         .next()
         .map(|(_, value)| value.into_owned())
