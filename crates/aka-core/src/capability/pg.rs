@@ -1039,14 +1039,9 @@ where
         return Ok(());
     };
 
-    // Dial upstream with the stored password secret. The wiring is the
-    // authorization, so the secret read is pre-authorized (scope confirmed).
     let upstream = match dial_with_timeout(
         &state.broker,
-        crate::authorization::scope(
-            true,
-            dial_upstream(&state.broker.store, &connection, &params),
-        ),
+        dial_upstream(&state.broker.store, &connection, &params),
     )
     .await
     {
@@ -1645,10 +1640,7 @@ async fn handle_conn(
     // slot, and `TestErrorKind::Timeout` was unreachable from the data path.
     let upstream = match dial_with_timeout(
         &state.broker,
-        crate::authorization::scope_existing(
-            redemption.secret_read_authorization.clone(),
-            dial_upstream(&state.broker.store, &connection, &params),
-        ),
+        dial_upstream(&state.broker.store, &connection, &params),
     )
     .await
     {

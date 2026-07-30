@@ -36,7 +36,6 @@ struct TicketEntry {
     connection: Connection,
     issued: Instant,
     active_sessions: usize,
-    secret_read_authorization: Option<crate::authorization::SecretReadAuthorization>,
     invalidated: bool,
 }
 
@@ -107,7 +106,6 @@ pub struct Redemption {
     ticket: String,
     pub agent: String,
     pub connection: Connection,
-    pub(crate) secret_read_authorization: Option<crate::authorization::SecretReadAuthorization>,
     started: bool,
 }
 
@@ -204,7 +202,6 @@ impl DataPlane {
                 connection: connection.clone(),
                 issued: Instant::now(),
                 active_sessions: 0,
-                secret_read_authorization: crate::authorization::current(),
                 invalidated: false,
             },
         );
@@ -237,7 +234,6 @@ impl DataPlane {
             ticket: value.to_string(),
             agent: entry.agent.clone(),
             connection: entry.connection.clone(),
-            secret_read_authorization: entry.secret_read_authorization.clone(),
             started: false,
         })
     }

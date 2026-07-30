@@ -205,11 +205,7 @@ const MAC_KEYCHAIN_SERVICE: &str = "com.aka.desktop";
 ///
 /// Which of the two macOS keychains those items live in — and therefore
 /// whether reads put an OS dialog in front of the user — is decided at open
-/// time by [`crate::keychain`]. AKA additionally gates user-plane reveals and
-/// copies with the shell's LocalAuthentication hook before calling `get`;
-/// agent-plane injection instead rides the connection access decision. For
-/// user-plane reads, that hook—not the Keychain—enforces human presence and
-/// its window.
+/// time by [`crate::keychain`].
 #[cfg(target_os = "macos")]
 pub type MacKeychainVault =
     crate::keychain::KeychainVault<crate::keychain::darwin::SecurityFramework>;

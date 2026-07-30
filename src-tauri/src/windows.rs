@@ -604,8 +604,8 @@ fn window_visible(app: &AppHandle, label: &str) -> bool {
 
 /// Hide the compact dropdown and ask its webview to clear transient secret
 /// prefixes and unfinished modal state before the next open. An active form
-/// blocks hiding so focus transfers to native authentication cannot destroy
-/// the draft before a command reports its outcome.
+/// blocks hiding so ordinary focus transfers cannot destroy the draft before
+/// a command reports its outcome.
 pub fn hide_dropdown(app: &AppHandle) -> bool {
     if !dropdown_hide_allowed() {
         return false;

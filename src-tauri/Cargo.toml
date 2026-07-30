@@ -62,7 +62,6 @@ objc2-core-foundation = { version = "0.3", features = ["CFDictionary", "CFNumber
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGSession"] }
 objc2-foundation = { version = "0.3", features = ["NSString"] }
 objc2-app-kit = { version = "0.3", features = ["NSAlert", "NSApplication", "NSButton", "NSCell", "NSControl", "NSPasteboard", "NSPasteboardItem", "NSResponder", "NSView", "NSWindow"] }
-objc2-local-authentication = { version = "0.3", features = ["LAContext", "LAError"] }
 block2 = "0.6"
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", rev = "a3122e894383aa068ec5365a42994e3ac94ba1b6" }
 

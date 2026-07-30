@@ -1550,14 +1550,9 @@ pub async fn bind_endpoint(
     };
     // The private key is deliberately *not* read here.
     //
-    // Reading it at bind time did two bad things. It happened outside any
-    // authorization scope, so with `reauth_on_read` on (the default) a native
-    // sheet appeared during daemon startup — and a decline or failure made
-    // `rebind_endpoints` revoke the endpoint and delete its directory, silently
-    // breaking a working `IdentityAgent` line. And it froze one signer for the
-    // listener's whole life, so rotating a *compromised* key left the
-    // compromised key signing until the broker restarted. Each accepted
-    // connection loads it instead, inside a scope, which is also where the
+    // Reading it at bind time froze one signer for the listener's whole life,
+    // so rotating a *compromised* key left the compromised key signing until
+    // the broker restarted. Each accepted connection loads it instead, where
     // access re-check already lives.
     let dir = broker.paths.endpoint_dir(&endpoint.id);
     crate::paths::create_private_dir(&dir)?;
@@ -1718,17 +1713,9 @@ async fn handle_endpoint_conn(
         let _ = stream.shutdown().await;
         return Ok(());
     }
-    // Load the key now, for this connection only, inside an authorization
-    // scope. Per connection so rotating a compromised key takes effect at the
-    // next login instead of at the next broker restart; inside a scope because
-    // the endpoint's own issuance is the authorization, and an unscoped read
-    // here would raise a native sheet on a path no user is watching.
-    let signer = match crate::authorization::scope(
-        true,
-        SshSigner::load_optional(&state.broker.store, &connection),
-    )
-    .await
-    {
+    // Load the key for this connection at each login so rotating a
+    // compromised key takes effect without restarting the broker.
+    let signer = match SshSigner::load_optional(&state.broker.store, &connection).await {
         Ok(signer) => signer.map(Arc::new),
         Err(e) => {
             // A key that cannot be read is not a signature the client should

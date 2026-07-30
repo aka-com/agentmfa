@@ -353,12 +353,11 @@ fn visibility_commands_project_sessions_requests_settings_and_connection_detail(
                 method: "GET",
                 path: "/v1/manage/settings",
                 body: json!({
-                    "reauth_on_read": true,
                     "menu_bar_hides_dock": false,
-                    "presence_window_secs": 900
+                    "confirm_ssh_host_keys": false
                 }),
             },
-            "presence_window_secs",
+            "confirm_ssh_host_keys",
         ),
         (
             vec!["--json", "conn", "show", "github"],
@@ -409,30 +408,34 @@ fn session_close_and_setting_updates_use_the_existing_management_contracts() {
             method: "PATCH",
             path: "/v1/manage/settings",
             body: json!({
-                "reauth_on_read": false,
                 "menu_bar_hides_dock": false,
-                "presence_window_secs": 900
+                "confirm_ssh_host_keys": false
             }),
         },
         Reply {
             method: "GET",
             path: "/v1/manage/settings",
             body: json!({
-                "reauth_on_read": false,
                 "menu_bar_hides_dock": false,
-                "presence_window_secs": 900
+                "confirm_ssh_host_keys": false
             }),
         },
     ]);
     let output = run(
-        &["--json", "settings", "set", "--reauth-on-read", "false"],
+        &[
+            "--json",
+            "settings",
+            "set",
+            "--menu-bar-hides-dock",
+            "false",
+        ],
         root.path(),
         Some(&url),
         None,
     );
     assert_success(&output);
     handle.join().unwrap();
-    assert!(requests.lock().unwrap()[1].contains(r#""reauth_on_read":false"#));
+    assert!(requests.lock().unwrap()[1].contains(r#""menu_bar_hides_dock":false"#));
 }
 
 #[test]

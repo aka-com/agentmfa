@@ -418,19 +418,12 @@ pub(crate) fn spawn_refresh_sweeper(broker: &Arc<Broker>) {
                     if retry_after.get(&connection.id).is_some_and(|at| now < *at) {
                         continue;
                     }
-                    // Pre-authorized: the broker is renewing a grant it already
-                    // holds, on a timer, and discards the value. A background
-                    // sweep must never put a native sheet on screen.
                     let outcome = match crate::capability::http::client_for_connection(
                         &broker.http_client,
                         &connection,
                     ) {
                         Ok(http) => {
-                            crate::authorization::scope(
-                                true,
-                                crate::oauth::fresh_bearer(&broker.store, &http, &connection),
-                            )
-                            .await
+                            crate::oauth::fresh_bearer(&broker.store, &http, &connection).await
                         }
                         Err(error) => Err(crate::oauth::RefreshFailure::Transient(format!(
                             "trusted CA: {error}"
@@ -496,16 +489,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct Events;
-    impl crate::events::BrokerEvents for Events {
-        fn confirm_secret_read(&self, _secret: &crate::types::SecretMeta) -> bool {
-            // A background sweep must never need this: if it is reached, the
-            // read was not pre-authorized and a real shell would show a sheet.
-            panic!("a background refresh must not prompt for a secret read");
-        }
-        fn confirm_action(&self, _description: &str) -> Option<crate::types::ConfirmationMethod> {
-            Some(crate::types::ConfirmationMethod::Waived)
-        }
-    }
+    impl crate::events::BrokerEvents for Events {}
 
     #[derive(Clone)]
     struct TokenState {
@@ -613,22 +597,20 @@ mod tests {
     }
 
     async fn force_refresh(broker: Arc<Broker>, connection_id: Uuid) -> Result<(), RefreshError> {
-        crate::authorization::scope(true, async move {
-            refresh_connection_token(
-                &broker.refresh_context(),
-                &connection_id,
-                RefreshMode::Force,
-            )
-            .await
-        })
+        refresh_connection_token(
+            &broker.refresh_context(),
+            &connection_id,
+            RefreshMode::Force,
+        )
         .await
     }
 
     async fn stored_grant(broker: &Broker, connection_id: Uuid) -> McpOAuthGrant {
-        let raw =
-            crate::authorization::scope(true, broker.store.connection_oauth_grant(&connection_id))
-                .await
-                .unwrap();
+        let raw = broker
+            .store
+            .connection_oauth_grant(&connection_id)
+            .await
+            .unwrap();
         McpOAuthGrant::from_secret_value(&raw).unwrap()
     }
 
@@ -816,9 +798,7 @@ mod tests {
         );
 
         // And the renewed token is what a later call would present.
-        let stored = crate::authorization::scope(true, broker.store.secret_value(&secret.id))
-            .await
-            .unwrap();
+        let stored = broker.store.secret_value(&secret.id).await.unwrap();
         assert!(
             stored.contains("renewed_by_the_sweeper"),
             "the renewed token must be persisted: {}",

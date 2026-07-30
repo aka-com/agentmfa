@@ -952,12 +952,9 @@ async fn run_flow(
                 blocking_broker.ui_add_connection_with_secret(&secret_name, value, spec)
             })
             .await
-            .map_err(|e| FlowFailure::plain(format!("confirmation task failed: {e}")))?
-            .map_err(|error| match error {
-                CoreError::NotConfirmed => FlowFailure::plain(format!(
-                    "you declined the confirmation for “{name_for_error}”; nothing was saved"
-                )),
-                other => FlowFailure::plain(other.to_string()),
+            .map_err(|e| FlowFailure::plain(format!("save task failed: {e}")))?
+            .map_err(|error| {
+                FlowFailure::plain(format!("could not save “{name_for_error}”: {error}"))
             })?;
             // This creation happened outside a UI command round-trip, so
             // push the refresh to every window.

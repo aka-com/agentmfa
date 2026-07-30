@@ -18,7 +18,7 @@ use aka_core::events::{ApprovalHandling, BrokerEvents};
 use aka_core::paths::Paths;
 use aka_core::request_history::RequestResolution;
 use aka_core::store::ConnectionSpec;
-use aka_core::types::{ConfirmMode, ConfirmationMethod, ConnectionConfig, SecretMeta};
+use aka_core::types::{ConfirmMode, ConnectionConfig};
 use aka_core::vault::MemoryVault;
 use axum::routing::{any, get, post};
 use axum::Router;
@@ -64,14 +64,6 @@ impl ScriptedUser {
 }
 
 impl BrokerEvents for ScriptedUser {
-    fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
-        true
-    }
-
-    fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
-        Some(ConfirmationMethod::Waived)
-    }
-
     fn approval_requested(&self, pending: &PendingApproval) -> ApprovalHandling {
         self.prompts.fetch_add(1, Ordering::SeqCst);
         self.seen.lock().unwrap().push(pending.clone());
@@ -456,12 +448,6 @@ async fn an_unanswered_prompt_lapses_into_a_refusal_the_agent_can_read() {
 async fn with_nothing_able_to_ask_confirmed_traffic_is_refused() {
     struct NoSurface;
     impl BrokerEvents for NoSurface {
-        fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
-            true
-        }
-        fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
-            Some(ConfirmationMethod::Waived)
-        }
         // `approval_requested` is left at its fail-closed default.
     }
 

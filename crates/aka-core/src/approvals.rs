@@ -8,11 +8,9 @@
 //! This is the only gate in the broker that runs on *agent*-initiated work,
 //! and that shapes it:
 //!
-//! - It is asynchronous. The user-plane gates
-//!   ([`BrokerEvents::confirm_action`](crate::events::BrokerEvents::confirm_action))
-//!   block a thread on a native sheet; a parked request instead awaits a
-//!   channel, so a request body already spooled to disk stays parked
-//!   without pinning a runtime thread.
+//! - It is asynchronous. A parked request awaits a channel, so a request
+//!   body already spooled to disk stays parked without pinning a runtime
+//!   thread.
 //! - It **coalesces**. A connection pool opening ten Postgres sessions, or
 //!   an agent firing concurrent requests, raises one prompt that every
 //!   waiter rides. Otherwise the first honest use of the switch would bury

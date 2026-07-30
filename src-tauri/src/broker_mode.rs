@@ -33,9 +33,6 @@ pub struct BrokerProfileInfo {
     /// A saved management token exists for `url`, so the connect form can
     /// offer to reuse it.
     pub has_saved_token: bool,
-    /// The managed broker advertises a shell capable of native
-    /// operating-system authentication. Never inferred from this client's OS.
-    pub native_authentication: bool,
 }
 
 impl BrokerProfileInfo {
@@ -46,7 +43,6 @@ impl BrokerProfileInfo {
             connected: true,
             error: None,
             has_saved_token: false,
-            native_authentication: cfg!(target_os = "macos"),
         }
     }
 }
@@ -258,7 +254,6 @@ impl BrokerState {
                 connected: false,
                 error: None,
                 has_saved_token,
-                native_authentication: false,
             }),
             tokens,
             data_dir,
@@ -372,16 +367,10 @@ impl BrokerState {
             RemoteBackend::new(config).with_opener(Arc::new(crate::events::open_consent_url)),
         );
         let epoch = self.begin_transition();
-        let whoami = backend.whoami().await.map_err(|error| error.to_string())?;
-        let native_authentication = whoami
-            .get("capabilities")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|capabilities| {
-                capabilities.iter().any(|capability| {
-                    capability.as_str() == Some(aka_api::NATIVE_AUTHENTICATION_CAPABILITY)
-                })
-            });
-
+        backend
+            .whoami()
+            .await
+            .map_err(|error| error.to_string())?;
         // The probe succeeded: persist, swap, and (re)arm the link — unless
         // another transition began while the probe was in flight (the user
         // switched to this Mac, retried, or connected elsewhere); the later
@@ -413,7 +402,6 @@ impl BrokerState {
                 connected: true,
                 error: None,
                 has_saved_token: true,
-                native_authentication,
             };
             self.set_profile(app, profile.clone());
             (profile, stale_local)

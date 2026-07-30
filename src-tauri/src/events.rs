@@ -4,13 +4,11 @@
 //! them into Tauri events the webview re-renders from.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use aka_core::audit::AuditEntry;
 use aka_core::events::{ApprovalHandling, BrokerEvents};
 use aka_core::manage::activity_dto;
 use aka_core::request_history::RequestResolution;
-use aka_core::types::{ConfirmationMethod, SecretMeta};
 use tauri::{AppHandle, Emitter};
 
 pub const EVT_SESSIONS: &str = "aka://sessions-changed";
@@ -25,17 +23,6 @@ pub const EVT_CONNECT_REQUESTED: &str = "aka://connect-requested";
 pub const EVT_APPROVALS: &str = "aka://approvals-changed";
 pub const EVT_ELICITATIONS: &str = "aka://elicitations-changed";
 
-fn copy_authorization_reason(duration: Duration) -> String {
-    let seconds = duration.as_secs();
-    let window = if seconds.is_multiple_of(60) {
-        let minutes = seconds / 60;
-        format!("{minutes} minute{}", if minutes == 1 { "" } else { "s" })
-    } else {
-        format!("{seconds} second{}", if seconds == 1 { "" } else { "s" })
-    };
-    format!("allow copying saved secrets for the next {window}")
-}
-
 pub struct TauriEvents {
     app: AppHandle,
 }
@@ -49,10 +36,6 @@ impl TauriEvents {
 impl BrokerEvents for TauriEvents {
     fn has_approval_surface(&self) -> bool {
         true
-    }
-
-    fn native_authentication_available(&self) -> bool {
-        cfg!(target_os = "macos")
     }
 
     fn sessions_changed(&self) {
@@ -90,30 +73,13 @@ impl BrokerEvents for TauriEvents {
         );
     }
 
-    fn confirm_secret_read(&self, secret: &SecretMeta) -> bool {
-        let reason = format!("read the secret \"{}\"", secret.name);
-        crate::auth::confirm(&reason).is_ok()
-    }
-
-    fn confirm_secret_copy(&self, _secret: &SecretMeta, duration: Duration) -> bool {
-        let reason = copy_authorization_reason(duration);
-        crate::auth::confirm(&reason).is_ok()
-    }
-
-    /// The core-demanded gate on high-consequence configuration actions.
-    fn confirm_action(&self, description: &str) -> Option<ConfirmationMethod> {
-        crate::auth::confirm(description)
-            .ok()
-            .map(|_| ConfirmationMethod::OsAuthentication)
-    }
-
     /// Open the OAuth authorize page in the user's default browser.
     fn open_external_url(&self, url: &str) -> bool {
         open_consent_url(url)
     }
 
-    /// Agent traffic is parked on the user. Unlike the gates above, this one
-    /// does not block: the webview renders the queue and answers through
+    /// Agent traffic is parked on the user. This does not block: the webview
+    /// renders the queue and answers through
     /// `respond_approval`, which releases the call.
     fn approval_requested(
         &self,
@@ -264,14 +230,6 @@ pub fn emit_manage_event(app: &AppHandle, event: aka_api::ManageEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn copy_authorization_reason_describes_the_timed_window() {
-        assert_eq!(
-            copy_authorization_reason(Duration::from_secs(5 * 60)),
-            "allow copying saved secrets for the next 5 minutes"
-        );
-    }
 
     #[test]
     fn browser_urls_require_https_off_machine() {

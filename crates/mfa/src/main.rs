@@ -35,18 +35,18 @@ use std::sync::Arc;
 use aka_api::{ActivityDto, ConnectionDto, ManageError, SecretDto};
 use aka_client::credentials::TokenStore;
 use aka_client::{RemoteBackend, RemoteConfig};
-use aka_core::broker::{Broker, PRESENCE_WINDOW_CHOICES};
+use aka_core::broker::Broker;
 use aka_core::config::BrokerConfig;
 use aka_core::daemon;
 use aka_core::daemon::wellknown;
 use aka_core::error::CoreError;
-use aka_core::events::{BrokerEvents, PresenceAuthority};
+use aka_core::events::BrokerEvents;
 use aka_core::manage::{
     activity_dto, ConnectionConfigPatch, LocalBackend, ManageResult, ManagementBackend,
 };
 use aka_core::paths::{BrokerInstanceLock, BrokerLockAttempt, BrokerLockRole, Paths};
 use aka_core::store::ConnectionSpec;
-use aka_core::types::{ConfirmationMethod, ConnectionConfig, PgSslMode, SecretMeta, SecretValue};
+use aka_core::types::{ConnectionConfig, PgSslMode, SecretValue};
 use aka_core::vault::{
     platform_vault, platform_vault_for_root, recorded_platform_vault_backend,
     selected_platform_vault_backend, PlatformVaultBackend, SecretVault,
@@ -80,17 +80,6 @@ fn parse_manage_ttl_days(value: &str) -> Result<u64, String> {
         Ok(days)
     } else {
         Err("must be between 1 and 3650 days".to_string())
-    }
-}
-
-fn parse_presence_window_secs(value: &str) -> Result<u64, String> {
-    let secs: u64 = value
-        .parse()
-        .map_err(|_| "must be a whole number of seconds".to_string())?;
-    if PRESENCE_WINDOW_CHOICES.contains(&secs) {
-        Ok(secs)
-    } else {
-        Err("must be 900, 3600, or 7200 seconds".to_string())
     }
 }
 
@@ -543,16 +532,9 @@ enum SettingsCommand {
     },
     /// Change one or more broker settings.
     Set {
-        /// Require OS authentication before revealing or copying saved
-        /// secrets (off by default; disabling it again takes a confirmation).
-        #[arg(long)]
-        reauth_on_read: Option<bool>,
         /// Hide the Dock icon while the menu-bar window is active.
         #[arg(long)]
         menu_bar_hides_dock: Option<bool>,
-        /// Keep one successful presence check valid for this many seconds.
-        #[arg(long, value_parser = parse_presence_window_secs)]
-        presence_window_secs: Option<u64>,
         /// Ask before trusting an SSH server's host key the first time it is
         /// seen, instead of pinning it silently. Needs an attached approval
         /// surface: with none, the first login to an unpinned server is
@@ -1162,16 +1144,12 @@ fn run_cli() {
         Command::Settings { command } => match command {
             SettingsCommand::Get { root, broker } => cmd_settings_get(root, broker, json),
             SettingsCommand::Set {
-                reauth_on_read,
                 menu_bar_hides_dock,
-                presence_window_secs,
                 confirm_ssh_host_keys,
                 root,
                 broker,
             } => cmd_settings_set(
-                reauth_on_read,
                 menu_bar_hides_dock,
-                presence_window_secs,
                 confirm_ssh_host_keys,
                 root,
                 broker,
@@ -1270,9 +1248,7 @@ fn manage_error_exit_code(error: &ManageError) -> ExitCode {
         | ManageError::KindChange
         | ManageError::EndpointExpired
         | ManageError::EndpointRequiresWiring => ExitCode::Usage,
-        ManageError::SecretReadNotAuthenticated
-        | ManageError::NotConfirmed
-        | ManageError::InvalidManageToken { .. } => ExitCode::Authentication,
+        ManageError::InvalidManageToken { .. } => ExitCode::Authentication,
         ManageError::SecretNotFound
         | ManageError::ConnectionNotFound
         | ManageError::EndpointNotFound => ExitCode::NotFound,
@@ -1698,29 +1674,8 @@ fn management_backend_with_create(
     }
 }
 
-/// Events for offline lifecycle edits: the operator typed the command on
-/// the broker host, and local file access is what the platform gates — the
-/// typed command is the deliberate act a confirmation would otherwise ask
-/// for.
 struct OfflineEvents;
-
-impl BrokerEvents for OfflineEvents {
-    fn confirm_secret_read(&self, secret: &SecretMeta) -> bool {
-        eprintln!(
-            "  secret read authorized for {} (offline edit)",
-            secret.name
-        );
-        true
-    }
-
-    fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
-        Some(ConfirmationMethod::Terminal)
-    }
-
-    fn secret_read_authority(&self) -> PresenceAuthority {
-        PresenceAuthority::Substituted
-    }
-}
+impl BrokerEvents for OfflineEvents {}
 
 /// Parse an id the broker handed out; it minted it, so failure is a wire
 /// bug worth naming, not a user error.
@@ -2121,41 +2076,27 @@ fn cmd_settings_get(root: Option<PathBuf>, url: Option<String>, json: bool) {
     if json {
         print_json(&settings);
     } else {
-        println!("reauth on read: {}", settings.reauth_on_read);
         println!("menu bar hides Dock: {}", settings.menu_bar_hides_dock);
-        println!("presence window: {} seconds", settings.presence_window_secs);
         println!("confirm new SSH host keys: {}", settings.confirm_ssh_host_keys);
     }
 }
 
 fn cmd_settings_set(
-    reauth_on_read: Option<bool>,
     menu_bar_hides_dock: Option<bool>,
-    presence_window_secs: Option<u64>,
     confirm_ssh_host_keys: Option<bool>,
     root: Option<PathBuf>,
     url: Option<String>,
     json: bool,
 ) {
-    if reauth_on_read.is_none()
-        && menu_bar_hides_dock.is_none()
-        && presence_window_secs.is_none()
-        && confirm_ssh_host_keys.is_none()
-    {
+    if menu_bar_hides_dock.is_none() && confirm_ssh_host_keys.is_none() {
         die_with(
             ExitCode::Usage,
             "settings set requires at least one setting flag",
         );
     }
     let managed = management_backend(root, url);
-    if let Some(on) = reauth_on_read {
-        managed.run_gated(managed.backend.set_reauth_on_read(on));
-    }
     if let Some(on) = menu_bar_hides_dock {
         managed.run_gated(managed.backend.set_menu_bar_hides_dock(on));
-    }
-    if let Some(secs) = presence_window_secs {
-        managed.run_gated(managed.backend.set_presence_window(secs));
     }
     if let Some(on) = confirm_ssh_host_keys {
         if on {
@@ -2168,9 +2109,7 @@ fn cmd_settings_set(
         print_json(&settings);
     } else {
         eprintln!("settings updated");
-        println!("reauth on read: {}", settings.reauth_on_read);
         println!("menu bar hides Dock: {}", settings.menu_bar_hides_dock);
-        println!("presence window: {} seconds", settings.presence_window_secs);
         println!("confirm new SSH host keys: {}", settings.confirm_ssh_host_keys);
     }
 }
@@ -2719,30 +2658,8 @@ fn cmd_skill(write: bool, path: Option<PathBuf>, user: bool, force: bool, root: 
     eprintln!("wrote {}", path.display());
 }
 
-/// Headless events: under `serve` no user is at the machine, and gated
-/// configuration actions can only arrive through the manage API — so
-/// possession of the management token is what authorizes them, and the
-/// audit trail records exactly that.
 struct CliEvents;
-
-impl BrokerEvents for CliEvents {
-    fn confirm_secret_read(&self, secret: &SecretMeta) -> bool {
-        eprintln!(
-            "  secret read authorized for {} (headless broker; the manage \
-             token is the gate)",
-            secret.name
-        );
-        true
-    }
-
-    fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
-        Some(ConfirmationMethod::ManagementToken)
-    }
-
-    fn secret_read_authority(&self) -> PresenceAuthority {
-        PresenceAuthority::Substituted
-    }
-}
+impl BrokerEvents for CliEvents {}
 
 /// Store a management token for later online edits: keyed by the hosted
 /// broker's manage URL, or by the local socket path. Verified against the
@@ -4163,14 +4080,7 @@ mod tests {
     use chrono::TimeZone as _;
 
     struct TestEvents;
-    impl BrokerEvents for TestEvents {
-        fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
-            true
-        }
-        fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
-            Some(ConfirmationMethod::Waived)
-        }
-    }
+    impl BrokerEvents for TestEvents {}
 
     #[test]
     fn cli_exit_codes_are_stable_and_documented() {
@@ -4263,21 +4173,6 @@ mod tests {
         assert_eq!(ttl_days, Some(30));
         assert!(parse_manage_ttl_days("0").is_err());
         assert!(parse_manage_ttl_days("3651").is_err());
-    }
-
-    #[test]
-    fn settings_reject_unsupported_presence_windows_during_parsing() {
-        let error =
-            match Cli::try_parse_from(["mfa", "settings", "set", "--presence-window-secs", "1"]) {
-                Ok(_) => panic!("an unsupported presence window reached broker mutation"),
-                Err(error) => error,
-            };
-        assert!(error.to_string().contains("900, 3600, or 7200"));
-
-        assert!(
-            Cli::try_parse_from(["mfa", "settings", "set", "--presence-window-secs", "3600",])
-                .is_ok()
-        );
     }
 
     #[test]

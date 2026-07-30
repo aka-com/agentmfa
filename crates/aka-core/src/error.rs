@@ -77,12 +77,6 @@ pub enum CoreError {
     #[error("enable this tool for agents before issuing a direct endpoint")]
     EndpointRequiresWiring,
 
-    #[error("Secret read was not authenticated")]
-    SecretReadNotAuthenticated,
-
-    #[error("the native confirmation did not complete; nothing was applied")]
-    NotConfirmed,
-
     #[error("{0}")]
     ProposalCredential(String),
 

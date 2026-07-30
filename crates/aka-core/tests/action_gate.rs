@@ -5,7 +5,6 @@
 //! that matter for a broker: traffic confirmation, capability revocation,
 //! session teardown, and auditable destructive actions.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use aka_core::approvals::{ApprovalDecision, ApprovalRequest, Verdict};
@@ -16,30 +15,13 @@ use aka_core::events::{ApprovalHandling, BrokerEvents};
 use aka_core::paths::Paths;
 use aka_core::sessions::RedeemError;
 use aka_core::store::ConnectionSpec;
-use aka_core::types::{
-    ConfirmMode, ConfirmationMethod, Connection, ConnectionConfig, ConnectionKind,
-};
+use aka_core::types::{ConfirmMode, Connection, ConnectionConfig, ConnectionKind};
 use aka_core::vault::MemoryVault;
 use zeroize::Zeroizing;
 
-/// Compatibility hooks still exist for downstream shells during the staged
-/// refactor. Core management actions must never consult them.
-struct RetiredAuthenticationEvents {
-    action_calls: AtomicUsize,
-    read_calls: AtomicUsize,
-}
+struct AppEvents;
 
-impl BrokerEvents for RetiredAuthenticationEvents {
-    fn confirm_secret_read(&self, _secret: &aka_core::types::SecretMeta) -> bool {
-        self.read_calls.fetch_add(1, Ordering::SeqCst);
-        false
-    }
-
-    fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
-        self.action_calls.fetch_add(1, Ordering::SeqCst);
-        None
-    }
-
+impl BrokerEvents for AppEvents {
     fn approval_requested(
         &self,
         _pending: &aka_core::approvals::PendingApproval,
@@ -87,17 +69,10 @@ fn add_github(broker: &Broker) -> Connection {
 
 #[tokio::test]
 async fn explicit_management_actions_do_not_consult_native_authentication() {
-    let events = Arc::new(RetiredAuthenticationEvents {
-        action_calls: AtomicUsize::new(0),
-        read_calls: AtomicUsize::new(0),
-    });
-    let (broker, _dir) = broker_with(events.clone()).await;
+    let (broker, _dir) = broker_with(Arc::new(AppEvents)).await;
     let conn = add_github(&broker);
     let secret = broker.store.secret_by_name("GITHUB_API_KEY").unwrap();
 
-    // Retain the old setting for compatibility during this staged change. It
-    // no longer changes read behavior.
-    broker.ui_change_reauth_on_read(true).unwrap();
     assert_eq!(
         &*broker.ui_secret_value_for_copy(&secret.id).await.unwrap(),
         "ghp_x"
@@ -143,17 +118,11 @@ async fn explicit_management_actions_do_not_consult_native_authentication() {
     broker.ui_rotate_key().unwrap();
     broker.ui_clear_activity().unwrap();
 
-    assert_eq!(events.action_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(events.read_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
 async fn key_rotation_closes_sessions_and_revokes_standing_endpoints() {
-    let (broker, _dir) = broker_with(Arc::new(RetiredAuthenticationEvents {
-        action_calls: AtomicUsize::new(0),
-        read_calls: AtomicUsize::new(0),
-    }))
-    .await;
+    let (broker, _dir) = broker_with(Arc::new(AppEvents)).await;
     let old_token = broker.identity.token();
     let conn = add_github(&broker);
     let ticket = broker.data_plane.issue("claude-code", &conn);
@@ -200,11 +169,7 @@ async fn key_rotation_closes_sessions_and_revokes_standing_endpoints() {
 
 #[tokio::test]
 async fn secret_rotation_closes_bound_sessions_and_approval_windows() {
-    let (broker, _dir) = broker_with(Arc::new(RetiredAuthenticationEvents {
-        action_calls: AtomicUsize::new(0),
-        read_calls: AtomicUsize::new(0),
-    }))
-    .await;
+    let (broker, _dir) = broker_with(Arc::new(AppEvents)).await;
     let secret = broker
         .store
         .add_secret("PG_PASSWORD", Zeroizing::new("before".into()))
@@ -281,11 +246,7 @@ async fn secret_rotation_closes_bound_sessions_and_approval_windows() {
 
 #[tokio::test]
 async fn approve_all_remains_a_traffic_decision_and_disables_future_prompts() {
-    let (broker, _dir) = broker_with(Arc::new(RetiredAuthenticationEvents {
-        action_calls: AtomicUsize::new(0),
-        read_calls: AtomicUsize::new(0),
-    }))
-    .await;
+    let (broker, _dir) = broker_with(Arc::new(AppEvents)).await;
     let conn = add_github(&broker);
     broker
         .ui_set_confirm_mode(&conn.id, ConfirmMode::On)
@@ -322,11 +283,7 @@ async fn approve_all_remains_a_traffic_decision_and_disables_future_prompts() {
 
 #[tokio::test]
 async fn clearing_activity_leaves_an_audited_tombstone() {
-    let (broker, _dir) = broker_with(Arc::new(RetiredAuthenticationEvents {
-        action_calls: AtomicUsize::new(0),
-        read_calls: AtomicUsize::new(0),
-    }))
-    .await;
+    let (broker, _dir) = broker_with(Arc::new(AppEvents)).await;
     broker
         .audit
         .append(AuditEntry::new(AuditKind::Listed, "old activity"));

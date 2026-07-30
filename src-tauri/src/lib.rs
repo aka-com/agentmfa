@@ -4,11 +4,9 @@
 //! owns everything sensitive. This shell wires the two together: it
 //! constructs the [`Broker`], starts the agent-facing daemon (control
 //! plane over the Unix socket + PG data plane), installs the tray
-//! and windows, and exposes the minimal, OS-confirmation-gated
-//! command surface.
+//! and windows, and exposes the management command surface.
 
 mod attention;
-mod auth;
 mod broker_mode;
 mod clipboard;
 mod commands;

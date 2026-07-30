@@ -13,7 +13,7 @@ use aka_core::daemon;
 use aka_core::events::BrokerEvents;
 use aka_core::paths::Paths;
 use aka_core::store::ConnectionSpec;
-use aka_core::types::{ConfirmationMethod, ConnectionConfig, SecretMeta};
+use aka_core::types::ConnectionConfig;
 use aka_core::vault::MemoryVault;
 use http_body_util::BodyExt as _;
 use serde_json::{json, Value};
@@ -102,12 +102,6 @@ struct TestEvents {
 }
 
 impl BrokerEvents for TestEvents {
-    fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
-        true
-    }
-    fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
-        Some(ConfirmationMethod::Waived)
-    }
     fn approval_requested(
         &self,
         pending: &aka_core::approvals::PendingApproval,

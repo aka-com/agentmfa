@@ -2204,11 +2204,7 @@ async fn run_allowed(
     // gate — has already been applied to the same executor.
     if let Some((sink, rx)) = stream {
         tokio::spawn(async move {
-            // The same authorization scope `executions` puts around a buffered
-            // executor. Without it the credential read inside would raise a
-            // native confirmation of its own, on a call the wiring already
-            // authorized.
-            let outcome = crate::authorization::scope(true, exec.executor).await;
+            let outcome = exec.executor.await;
             sink.finish(outcome).await;
         });
         return sse_response(crate::capability::http::stream_events_body(rx));

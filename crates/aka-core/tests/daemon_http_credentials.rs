@@ -16,9 +16,9 @@ use aka_core::config::BrokerConfig;
 use aka_core::events::BrokerEvents;
 use aka_core::paths::Paths;
 use aka_core::store::ConnectionSpec;
-use aka_core::types::{ConnectionConfig, ConnectionHealth, HealthStatus, OAuthSpec, SecretMeta};
+use aka_core::types::{ConnectionConfig, ConnectionHealth, HealthStatus, OAuthSpec};
 use aka_core::vault::MemoryVault;
-use aka_core::{daemon, types::ConfirmationMethod};
+use aka_core::daemon;
 use axum::routing::{any, get, post};
 use axum::Router;
 use rustls_pki_types::PrivateKeyDer;
@@ -32,14 +32,7 @@ const API_KEY: &str = "ghp_the_real_secret_value";
 
 struct TestEvents;
 
-impl BrokerEvents for TestEvents {
-    fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
-        true
-    }
-    fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
-        Some(ConfirmationMethod::Waived)
-    }
-}
+impl BrokerEvents for TestEvents {}
 
 struct Harness {
     broker: Arc<Broker>,

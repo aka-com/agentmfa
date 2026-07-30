@@ -64,8 +64,6 @@ impl From<CoreError> for ManageError {
             CoreError::EndpointExpired => Self::EndpointExpired,
             CoreError::EndpointLimit(max) => Self::EndpointLimit { max },
             CoreError::EndpointRequiresWiring => Self::EndpointRequiresWiring,
-            CoreError::SecretReadNotAuthenticated => Self::SecretReadNotAuthenticated,
-            CoreError::NotConfirmed => Self::NotConfirmed,
             CoreError::OAuth(message) => Self::OAuth { message },
             CoreError::Vault(message) => Self::Vault { message },
             other => Self::Internal {
@@ -406,10 +404,8 @@ pub fn activity_dto(entry: &AuditEntry) -> ActivityDto {
 pub fn settings_dto(broker: &Broker) -> SettingsDto {
     let settings = broker.settings();
     SettingsDto {
-        reauth_on_read: settings.reauth_on_read,
         menu_bar_hides_dock: settings.menu_bar_hides_dock,
         confirm_ssh_host_keys: settings.confirm_ssh_host_keys,
-        presence_window_secs: settings.presence_window_secs,
     }
 }
 
@@ -688,8 +684,7 @@ pub fn parse_event_id(id: &str) -> Option<(&str, u64)> {
 
 /// Wraps a shell's `BrokerEvents` observer so every state-change
 /// notification also lands on the broker's manage-event bus (the SSE stream
-/// remote shells subscribe to). Confirmation gates and the browser hook
-/// delegate untouched — fanout observes, it never authorizes.
+/// remote shells subscribe to). The browser hook delegates untouched.
 pub struct FanoutEvents {
     inner: Arc<dyn crate::events::BrokerEvents>,
     bus: Arc<ManageBus>,
@@ -704,10 +699,6 @@ impl FanoutEvents {
 impl crate::events::BrokerEvents for FanoutEvents {
     fn has_approval_surface(&self) -> bool {
         self.inner.has_approval_surface() || self.bus.has_approval_surface()
-    }
-
-    fn native_authentication_available(&self) -> bool {
-        self.inner.native_authentication_available()
     }
 
     fn sessions_changed(&self) {
@@ -758,35 +749,8 @@ impl crate::events::BrokerEvents for FanoutEvents {
         });
     }
 
-    fn confirm_secret_read(&self, secret: &SecretMeta) -> bool {
-        self.inner.confirm_secret_read(secret)
-    }
-
-    fn secret_read_authority(&self) -> crate::events::PresenceAuthority {
-        self.inner.secret_read_authority()
-    }
-
-    fn confirm_secret_copy(&self, secret: &SecretMeta, duration: std::time::Duration) -> bool {
-        self.inner.confirm_secret_copy(secret, duration)
-    }
-
-    fn secret_copy_authority(&self) -> crate::events::PresenceAuthority {
-        self.inner.secret_copy_authority()
-    }
-
     fn open_external_url(&self, url: &str) -> bool {
         self.inner.open_external_url(url)
-    }
-
-    fn confirm_action(&self, description: &str) -> Option<crate::types::ConfirmationMethod> {
-        self.inner.confirm_action(description)
-    }
-
-    fn action_authority(
-        &self,
-        method: crate::types::ConfirmationMethod,
-    ) -> crate::events::PresenceAuthority {
-        self.inner.action_authority(method)
     }
 
     fn approval_requested(
@@ -1217,13 +1181,9 @@ pub struct McpAuthDeliverBody {
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct SettingsPatchBody {
     #[serde(default)]
-    pub reauth_on_read: Option<bool>,
-    #[serde(default)]
     pub menu_bar_hides_dock: Option<bool>,
     #[serde(default)]
     pub confirm_ssh_host_keys: Option<bool>,
-    #[serde(default)]
-    pub presence_window_secs: Option<u64>,
 }
 
 /* -------------------------------- backend --------------------------------- */
@@ -1412,19 +1372,15 @@ pub trait ManagementBackend: Send + Sync {
 
     /* settings */
     async fn settings(&self) -> ManageResult<SettingsDto>;
-    async fn set_reauth_on_read(&self, on: bool) -> ManageResult<()>;
     async fn set_menu_bar_hides_dock(&self, on: bool) -> ManageResult<()>;
-    /// Ask before trusting a first-seen SSH host key. Turning it off weakens a
-    /// gate and takes its own authentication.
+    /// Ask before trusting a first-seen SSH host key.
     async fn set_confirm_ssh_host_keys(&self, on: bool) -> ManageResult<()>;
-    async fn set_presence_window(&self, secs: u64) -> ManageResult<()>;
 
     /* discovery */
     async fn agent_setup(&self) -> ManageResult<String>;
 }
 
-/// The in-process backend: the broker lives in this process and the shell's
-/// native confirmation gates fire directly.
+/// The in-process backend: the broker lives in this process.
 pub struct LocalBackend {
     broker: Arc<Broker>,
 }
@@ -1880,11 +1836,6 @@ impl ManagementBackend for LocalBackend {
         Ok(settings_dto(&self.broker))
     }
 
-    async fn set_reauth_on_read(&self, on: bool) -> ManageResult<()> {
-        self.blocking(move |broker| broker.ui_change_reauth_on_read(on))
-            .await
-    }
-
     async fn set_confirm_ssh_host_keys(&self, on: bool) -> ManageResult<()> {
         self.blocking(move |broker| broker.ui_set_confirm_ssh_host_keys(on))
             .await
@@ -1892,11 +1843,6 @@ impl ManagementBackend for LocalBackend {
 
     async fn set_menu_bar_hides_dock(&self, on: bool) -> ManageResult<()> {
         self.blocking(move |broker| broker.ui_set_menu_bar_hides_dock(on))
-            .await
-    }
-
-    async fn set_presence_window(&self, secs: u64) -> ManageResult<()> {
-        self.blocking(move |broker| broker.ui_set_presence_window(secs))
             .await
     }
 
@@ -1952,24 +1898,6 @@ mod tests {
         assert!(!bus.has_approval_surface());
         assert!(bus.renew_approval_surface(&surface.id()));
         assert!(bus.has_approval_surface());
-    }
-
-    /// `whoami` consults the broker's events handle, which is always the
-    /// fanout wrapper — it must answer with the wrapped shell's capability,
-    /// not the trait default.
-    #[test]
-    fn fanout_forwards_native_authentication_to_the_shell() {
-        struct NativeShell;
-        impl crate::events::BrokerEvents for NativeShell {
-            fn native_authentication_available(&self) -> bool {
-                true
-            }
-        }
-        let bus = Arc::new(ManageBus::new());
-        let native = FanoutEvents::new(Arc::new(NativeShell), bus.clone());
-        assert!(crate::events::BrokerEvents::native_authentication_available(&native));
-        let headless = FanoutEvents::new(Arc::new(NoopEvents), bus);
-        assert!(!crate::events::BrokerEvents::native_authentication_available(&headless));
     }
 
     #[test]
@@ -2215,7 +2143,7 @@ mod tests {
         );
 
         let settings = backend.settings().await.unwrap();
-        assert!(!settings.reauth_on_read, "the read gate defaults to off");
+        assert!(!settings.menu_bar_hides_dock);
 
         let setup = backend.agent_setup().await.unwrap();
         assert!(setup.contains("--unix-socket"));

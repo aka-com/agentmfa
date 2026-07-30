@@ -2,14 +2,8 @@
 //!
 //! - there is **no** command that returns a stored secret value; reveal
 //!   returns only the short prefix, copy writes core-side to the clipboard;
-//! - confirmation-gated commands (attaching an already-stored secret to a
-//!   new destination, changing a connection's capability, issuing a first
-//!   direct endpoint, rotating the key) are gated by the **core itself**:
-//!   the broker demands the native OS confirmation through the
-//!   `BrokerEvents` hooks (implemented over [`crate::auth::confirm`] in
-//!   this shell) before any effect happens — this command layer cannot
-//!   apply a gated action without passing through it, so the webview cannot
-//!   forge or skip the gate.
+//! - destructive actions that need an ordinary application confirmation are
+//!   confirmed in the webview before reaching this layer;
 //!
 //! Every command reaches the broker through the [`ManagementBackend`]
 //! seam: in local mode that is the in-process broker, in remote mode an
@@ -265,9 +259,6 @@ impl FormError {
                     Some(field) => Self::validation("invalid_connection", field, message),
                     None => Self::global("validation", "invalid_connection", message, None),
                 }
-            }
-            ManageError::NotConfirmed => {
-                Self::global("cancelled", "not_confirmed", "Nothing was saved", None)
             }
             ManageError::KindChange => Self::global(
                 "validation",
@@ -1163,9 +1154,7 @@ pub async fn set_tool_access(
 
 /// Ask the user to confirm this connection's traffic — or stop asking.
 ///
-/// Turning it on only adds friction, so the switch itself is the gate.
-/// Turning it off removes one the user put up, so the broker demands a
-/// native authentication before it applies.
+/// The explicit switch action authorizes either direction.
 #[tauri::command]
 pub async fn set_confirm_mode(
     state: State<'_, AppState>,
@@ -1351,10 +1340,9 @@ pub async fn list_mcp_tools(
         .map_err(|e| e.to_string())
 }
 
-/// Issue (or rotate) a direct endpoint for a connection. The broker gates
-/// this behind the configuration gate (a fresh native authentication is
-/// reused, otherwise the OS prompt appears); the returned secret is retained
-/// on the endpoint record, so the row's copyable DSN keeps carrying it.
+/// Issue (or rotate) a direct endpoint for a connection. The returned secret
+/// is retained on the endpoint record, so the row's copyable DSN keeps
+/// carrying it.
 #[tauri::command]
 pub async fn issue_endpoint(
     state: State<'_, AppState>,
@@ -1752,22 +1740,6 @@ pub async fn close_session(state: State<'_, AppState>, id: u64) -> CmdResult<boo
 /* ------------------------------ settings --------------------------------- */
 
 #[tauri::command]
-pub async fn set_reauth_on_read(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    on: bool,
-) -> CmdResult<()> {
-    state
-        .brokers
-        .backend()
-        .set_reauth_on_read(on)
-        .await
-        .map_err(|e| e.to_string())?;
-    let _ = app.emit(EVT_SETTINGS, ());
-    Ok(())
-}
-
-#[tauri::command]
 pub async fn set_menu_bar_hides_dock(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -1783,8 +1755,7 @@ pub async fn set_menu_bar_hides_dock(
     Ok(())
 }
 
-/// Ask before trusting a first-seen SSH host key. Turning it off weakens a
-/// gate the user put up, so the core authenticates before it applies.
+/// Ask before trusting a first-seen SSH host key.
 #[tauri::command]
 pub async fn set_confirm_ssh_host_keys(
     app: AppHandle,
@@ -1795,22 +1766,6 @@ pub async fn set_confirm_ssh_host_keys(
         .brokers
         .backend()
         .set_confirm_ssh_host_keys(on)
-        .await
-        .map_err(|e| e.to_string())?;
-    let _ = app.emit(EVT_SETTINGS, ());
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn set_presence_window(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    secs: u64,
-) -> CmdResult<()> {
-    state
-        .brokers
-        .backend()
-        .set_presence_window(secs)
         .await
         .map_err(|e| e.to_string())?;
     let _ = app.emit(EVT_SETTINGS, ());
@@ -1969,10 +1924,8 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         rotate_key,
         copy_key,
         close_session,
-        set_reauth_on_read,
         set_menu_bar_hides_dock,
         set_confirm_ssh_host_keys,
-        set_presence_window,
         get_notification_settings,
         set_notification_settings,
         request_notification_permission,

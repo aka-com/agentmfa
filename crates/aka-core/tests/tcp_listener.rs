@@ -10,20 +10,13 @@ use aka_core::config::BrokerConfig;
 use aka_core::daemon::{self, ServeOptions};
 use aka_core::events::BrokerEvents;
 use aka_core::paths::Paths;
-use aka_core::types::{ConfirmationMethod, DecisionSurface, SecretMeta};
+use aka_core::types::DecisionSurface;
 use aka_core::vault::MemoryVault;
 use serde_json::{json, Value};
 
 struct TestEvents;
 
-impl BrokerEvents for TestEvents {
-    fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
-        true
-    }
-    fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
-        Some(ConfirmationMethod::ManagementToken)
-    }
-}
+impl BrokerEvents for TestEvents {}
 
 struct Harness {
     broker: Arc<Broker>,

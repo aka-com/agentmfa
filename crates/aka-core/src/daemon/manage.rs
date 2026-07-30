@@ -116,9 +116,6 @@ fn manage_error_response(error: ManageError) -> Response {
         | ManageError::InvalidConnectionConfig { .. }
         | ManageError::InvalidSetting { .. }
         | ManageError::InvalidConnectionField { .. } => StatusCode::UNPROCESSABLE_ENTITY,
-        ManageError::NotConfirmed | ManageError::SecretReadNotAuthenticated => {
-            StatusCode::FORBIDDEN
-        }
         ManageError::RemoteUnsupported { .. } => StatusCode::NOT_IMPLEMENTED,
         ManageError::InvalidManageToken { .. } => StatusCode::UNAUTHORIZED,
         ManageError::Unreachable { .. } => StatusCode::BAD_GATEWAY,
@@ -230,15 +227,11 @@ async fn remote_decision_context(request: axum::extract::Request, next: Next) ->
 }
 
 async fn whoami(State(state): State<AppState>, _authed: ManageAuthed) -> Response {
-    let mut capabilities = vec![aka_api::APPROVAL_SURFACE_CAPABILITY];
-    if state.broker.events.native_authentication_available() {
-        capabilities.push(aka_api::NATIVE_AUTHENTICATION_CAPABILITY);
-    }
     ok(json!({
         "ok": true,
         "version": state.broker.config.version,
         "client_id": state.broker.identity.client_id(),
-        "capabilities": capabilities,
+        "capabilities": [aka_api::APPROVAL_SURFACE_CAPABILITY],
         "approval_surface_attached": state.broker.events.has_approval_surface(),
     }))
 }
@@ -1042,18 +1035,8 @@ async fn patch_settings(
     _authed: ManageAuthed,
     ApiJson(body): ApiJson<SettingsPatchBody>,
 ) -> Response {
-    if let Some(on) = body.reauth_on_read {
-        if let Err(error) = state.manage.set_reauth_on_read(on).await {
-            return manage_error_response(error);
-        }
-    }
     if let Some(on) = body.menu_bar_hides_dock {
         if let Err(error) = state.manage.set_menu_bar_hides_dock(on).await {
-            return manage_error_response(error);
-        }
-    }
-    if let Some(secs) = body.presence_window_secs {
-        if let Err(error) = state.manage.set_presence_window(secs).await {
             return manage_error_response(error);
         }
     }

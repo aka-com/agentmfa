@@ -1070,14 +1070,6 @@ impl ManagementBackend for RemoteBackend {
         self.get("/v1/manage/settings").await
     }
 
-    async fn set_reauth_on_read(&self, on: bool) -> ManageResult<()> {
-        self.patch_settings(SettingsPatchBody {
-            reauth_on_read: Some(on),
-            ..Default::default()
-        })
-        .await
-    }
-
     async fn set_menu_bar_hides_dock(&self, on: bool) -> ManageResult<()> {
         self.patch_settings(SettingsPatchBody {
             menu_bar_hides_dock: Some(on),
@@ -1089,14 +1081,6 @@ impl ManagementBackend for RemoteBackend {
     async fn set_confirm_ssh_host_keys(&self, on: bool) -> ManageResult<()> {
         self.patch_settings(SettingsPatchBody {
             confirm_ssh_host_keys: Some(on),
-            ..Default::default()
-        })
-        .await
-    }
-
-    async fn set_presence_window(&self, secs: u64) -> ManageResult<()> {
-        self.patch_settings(SettingsPatchBody {
-            presence_window_secs: Some(secs),
             ..Default::default()
         })
         .await

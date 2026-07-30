@@ -21,17 +21,13 @@ use aka_core::events::BrokerEvents;
 use aka_core::paths::Paths;
 use aka_core::sidecar::{Sidecar, SidecarConfig, SidecarEndpoint};
 use aka_core::store::ConnectionSpec;
-use aka_core::types::{ConfirmationMethod, ConnectionConfig};
+use aka_core::types::ConnectionConfig;
 use aka_core::vault::MemoryVault;
 use serde_json::{json, Value};
 use zeroize::Zeroizing;
 
 struct NoopEvents;
-impl BrokerEvents for NoopEvents {
-    fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
-        Some(ConfirmationMethod::Waived)
-    }
-}
+impl BrokerEvents for NoopEvents {}
 
 fn bundle() -> Option<PathBuf> {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

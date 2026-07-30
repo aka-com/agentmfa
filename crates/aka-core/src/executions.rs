@@ -352,9 +352,7 @@ impl Executions {
     fn spawn_completion(&self, id: Uuid, executor: Executor) {
         let shared = self.shared.clone();
         self.shared.runtime.spawn(async move {
-            // The wiring authorized this execution; its vault reads never
-            // demand a separate native confirmation.
-            let outcome = crate::authorization::scope(true, executor).await;
+            let outcome = executor.await;
             let mut waiters;
             {
                 let mut inner = shared.inner.lock().unwrap();

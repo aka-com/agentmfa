@@ -7,7 +7,6 @@
 //! server with certificates generated per test: one CA, a leaf it signed, and
 //! a leaf it did not.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use aka_core::audit::AuditKind;
@@ -17,7 +16,7 @@ use aka_core::config::BrokerConfig;
 use aka_core::events::BrokerEvents;
 use aka_core::paths::Paths;
 use aka_core::store::ConnectionSpec;
-use aka_core::types::{ConnectionConfig, PgSslMode, SecretMeta};
+use aka_core::types::{ConnectionConfig, PgSslMode};
 use aka_core::vault::MemoryVault;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -28,19 +27,9 @@ const PG_PASSWORD: &str = "s3cret-upstream";
 
 /* -------------------------------- harness --------------------------------- */
 
-struct TestEvents {
-    confirms: AtomicUsize,
-}
+struct TestEvents;
 
-impl BrokerEvents for TestEvents {
-    fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
-        true
-    }
-    fn confirm_action(&self, _description: &str) -> Option<aka_core::types::ConfirmationMethod> {
-        self.confirms.fetch_add(1, Ordering::SeqCst);
-        Some(aka_core::types::ConfirmationMethod::Waived)
-    }
-}
+impl BrokerEvents for TestEvents {}
 
 struct Harness {
     broker: Arc<Broker>,
@@ -53,9 +42,7 @@ async fn harness(config: BrokerConfig) -> Harness {
         Paths::under(dir.path()),
         Arc::new(MemoryVault::new()),
         config,
-        Arc::new(TestEvents {
-            confirms: AtomicUsize::new(0),
-        }),
+        Arc::new(TestEvents),
     )
     .await
     .unwrap();

@@ -12,7 +12,7 @@ use aka_core::daemon;
 use aka_core::events::BrokerEvents;
 use aka_core::paths::Paths;
 use aka_core::store::ConnectionSpec;
-use aka_core::types::{ConnectionConfig, ConnectionKind, PgSslMode, SecretMeta};
+use aka_core::types::{ConnectionConfig, ConnectionKind, PgSslMode};
 use aka_core::vault::MemoryVault;
 use base64::Engine as _;
 use hmac::{Hmac, Mac as _};
@@ -30,7 +30,6 @@ const REAL_PG_PASSWORD: &str = "s3cr3t-pg-pass-77";
 /* -------------------------------- harness --------------------------------- */
 
 struct TestEvents {
-    secret_read_confirmations: Arc<AtomicUsize>,
     /// How the scripted user answers traffic-confirmation prompts. `None`
     /// takes the prompt and never answers it, so the deadline decides.
     approval: Option<aka_core::approvals::ApprovalDecision>,
@@ -44,14 +43,6 @@ struct TestEvents {
 }
 
 impl BrokerEvents for TestEvents {
-    fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
-        self.secret_read_confirmations
-            .fetch_add(1, Ordering::SeqCst);
-        true
-    }
-    fn confirm_action(&self, _description: &str) -> Option<aka_core::types::ConfirmationMethod> {
-        Some(aka_core::types::ConfirmationMethod::Waived)
-    }
     fn approval_requested(
         &self,
         pending: &aka_core::approvals::PendingApproval,
@@ -69,7 +60,6 @@ impl BrokerEvents for TestEvents {
 struct Harness {
     broker: Arc<Broker>,
     daemon: daemon::DaemonHandle,
-    secret_read_confirmations: Arc<AtomicUsize>,
     /// How many traffic-confirmation prompts the scripted user was shown.
     prompts: Arc<AtomicUsize>,
     /// The last of those prompts, for asserting on its content.
@@ -88,11 +78,9 @@ async fn harness_answering(
 ) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let paths = Paths::under(dir.path());
-    let secret_read_confirmations = Arc::new(AtomicUsize::new(0));
     let prompts = Arc::new(AtomicUsize::new(0));
     let last_prompt = Arc::new(Mutex::new(None));
     let events = Arc::new(TestEvents {
-        secret_read_confirmations: secret_read_confirmations.clone(),
         approval: decision,
         prompts: prompts.clone(),
         last_prompt: last_prompt.clone(),
@@ -108,7 +96,6 @@ async fn harness_answering(
         prompts,
         last_prompt,
         daemon,
-        secret_read_confirmations,
         _dir: dir,
     }
 }
@@ -640,7 +627,6 @@ async fn passwordless_connection_uses_postgres_trust_auth() {
     let rows = client.simple_query("SELECT 1").await.unwrap();
     assert_eq!(row_value(&rows).as_deref(), Some("1"));
     assert!(fake.state.passwords.lock().unwrap().is_empty());
-    assert_eq!(h.secret_read_confirmations.load(Ordering::SeqCst), 0);
 
     drop(client);
     let _ = tokio::time::timeout(Duration::from_secs(3), conn_task).await;
@@ -1246,11 +1232,6 @@ async fn one_ticket_allows_concurrent_clients() {
     tokio::spawn(conn2);
 
     assert_eq!(h.broker.sessions().len(), 2);
-    assert_eq!(
-        h.secret_read_confirmations.load(Ordering::SeqCst),
-        0,
-        "wired agent-plane reads are pre-authorized and never re-confirm"
-    );
     // Each session has its own authenticated upstream connection.
     assert_eq!(fake.state.startups.lock().unwrap().len(), 2);
     for c in [&c1, &c2] {

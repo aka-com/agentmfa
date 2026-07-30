@@ -10,21 +10,13 @@ use aka_core::config::BrokerConfig;
 use aka_core::daemon;
 use aka_core::events::BrokerEvents;
 use aka_core::paths::Paths;
-use aka_core::types::{ConfirmationMethod, SecretMeta};
 use aka_core::vault::MemoryVault;
 use http_body_util::BodyExt as _;
 use serde_json::{json, Value};
 
 struct TestEvents;
 
-impl BrokerEvents for TestEvents {
-    fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
-        true
-    }
-    fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
-        Some(ConfirmationMethod::ManagementToken)
-    }
-}
+impl BrokerEvents for TestEvents {}
 
 struct Harness {
     broker: Arc<Broker>,
@@ -166,9 +158,6 @@ async fn manage_routes_require_the_management_token() {
     assert!(body["capabilities"].as_array().is_some_and(|items| items
         .iter()
         .any(|item| { item.as_str() == Some(aka_api::APPROVAL_SURFACE_CAPABILITY) })));
-    assert!(body["capabilities"].as_array().is_some_and(|items| items
-        .iter()
-        .all(|item| { item.as_str() != Some(aka_api::NATIVE_AUTHENTICATION_CAPABILITY) })));
     let auth_failures: Vec<_> = h
         .broker
         .audit
@@ -634,7 +623,7 @@ async fn identity_settings_and_activity_surface_over_the_manage_api() {
         .await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["menu_bar_hides_dock"], true);
-    assert_eq!(body["reauth_on_read"], false, "untouched fields stay");
+    assert_eq!(body["confirm_ssh_host_keys"], false, "untouched fields stay");
 
     // Rotating the agent key works over the manage API and leaves the
     // manage token itself valid (they are independent credentials).

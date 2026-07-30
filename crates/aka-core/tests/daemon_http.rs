@@ -11,9 +11,7 @@ use aka_core::daemon;
 use aka_core::events::BrokerEvents;
 use aka_core::paths::Paths;
 use aka_core::store::ConnectionSpec;
-use aka_core::types::{
-    ConfirmMode, ConfirmationMethod, ConnectionConfig, ConnectionKind, PgSslMode, SecretMeta,
-};
+use aka_core::types::{ConfirmMode, ConnectionConfig, ConnectionKind, PgSslMode};
 use aka_core::vault::MemoryVault;
 use aka_core::wire::REQUEST_ID_MAX_BYTES;
 use axum::routing::{any, get, post};
@@ -26,27 +24,13 @@ use zeroize::Zeroizing;
 
 struct TestEvents;
 
-impl BrokerEvents for TestEvents {
-    fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
-        true
-    }
-    fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
-        Some(ConfirmationMethod::Waived)
-    }
-}
+impl BrokerEvents for TestEvents {}
 
 /// A shell whose user declines every native confirmation. Used to exercise
 /// the key-rotation confirmation's cancel path.
 struct DecliningEvents;
 
-impl BrokerEvents for DecliningEvents {
-    fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
-        true
-    }
-    fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
-        None
-    }
-}
+impl BrokerEvents for DecliningEvents {}
 
 struct Harness {
     broker: Arc<Broker>,

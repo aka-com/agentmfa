@@ -719,16 +719,6 @@ impl DecisionContext {
 /// User settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Settings {
-    /// "Require OS authentication to read secrets", default **off**. Opt-in:
-    /// when enabled it gates user-plane reveals and copies in the macOS app.
-    /// The default matches the product's posture — a credential stored here
-    /// would otherwise have been pasted into an agent's environment in
-    /// plaintext, so routine use of one's own vault should not prompt.
-    /// Agent-plane injection is authorized by the connection's access policy
-    /// and deliberately does not put LocalAuthentication in every request
-    /// path. Stores written while the default was "on" are flipped once at
-    /// open (see `store::migrate_read_gate_default`) and the flip is audited.
-    pub reauth_on_read: bool,
     /// Read-only migration source for pre-connection-scoped CA settings.
     #[serde(
         default,
@@ -742,14 +732,6 @@ pub struct Settings {
     /// Dock icon (accessory activation) until the window is reopened.
     #[serde(default)]
     pub menu_bar_hides_dock: bool,
-    /// How long one successful OS authentication keeps AgentMFA unlocked for
-    /// user-plane reads, copies, and configuration edits, in seconds; each
-    /// such action slides the window forward. Operations classified as
-    /// full-authority use a fresh gate instead. New tools are enabled by
-    /// default and creating one prompts only when it extends an already-stored
-    /// secret to a new target. Default 15 minutes.
-    #[serde(default = "default_presence_window_secs")]
-    pub presence_window_secs: u64,
     /// Ask before trusting an SSH server's host key the first time it is seen,
     /// instead of pinning it silently.
     ///
@@ -767,17 +749,11 @@ pub struct Settings {
     pub confirm_ssh_host_keys: bool,
 }
 
-fn default_presence_window_secs() -> u64 {
-    15 * 60
-}
-
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            reauth_on_read: false,
             legacy_pg_trusted_ca_bundle_path: None,
             menu_bar_hides_dock: false,
-            presence_window_secs: default_presence_window_secs(),
             confirm_ssh_host_keys: false,
         }
     }
@@ -809,13 +785,8 @@ mod tests {
                 "show_service_walkthrough":true,"show_agent_walkthrough":false}"#,
         )
         .unwrap();
-        assert!(settings.reauth_on_read);
         assert!(!settings.menu_bar_hides_dock);
-        assert_eq!(
-            settings.presence_window_secs,
-            15 * 60,
-            "the presence window defaults to 15 minutes"
-        );
+        assert!(!settings.confirm_ssh_host_keys);
     }
 
     #[test]

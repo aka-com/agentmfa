@@ -38,14 +38,6 @@ const AUTH_CODE: &str = "test-code-1";
 
 struct NoopEvents;
 impl BrokerEvents for NoopEvents {
-    fn confirm_secret_read(&self, _secret: &aka_core::types::SecretMeta) -> bool {
-        true
-    }
-
-    fn confirm_action(&self, _description: &str) -> Option<aka_core::types::ConfirmationMethod> {
-        Some(aka_core::types::ConfirmationMethod::Waived)
-    }
-
     fn approval_requested(
         &self,
         _pending: &aka_core::approvals::PendingApproval,

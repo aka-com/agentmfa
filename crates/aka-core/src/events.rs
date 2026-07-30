@@ -4,12 +4,9 @@
 //! or the headless dev harness) observes them through this trait to refresh
 //! views and surface agent traffic that needs a human decision.
 
-use std::time::Duration;
-
 use crate::approvals::PendingApproval;
 use crate::elicitations::PendingElicitation;
 use crate::request_history::RequestResolution;
-use crate::types::{ConfirmationMethod, SecretMeta};
 
 /// What an observer did with a traffic-confirmation prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,31 +32,11 @@ pub enum ElicitationHandling {
     Unavailable,
 }
 
-/// Compatibility classification for shells that still implement the retired
-/// native-authentication hooks. The broker no longer consults it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PresenceAuthority {
-    Authenticated,
-    Substituted,
-}
-
-impl PresenceAuthority {
-    pub fn establishes_presence(self) -> bool {
-        self == Self::Authenticated
-    }
-}
-
 pub trait BrokerEvents: Send + Sync {
     /// Whether this shell can currently surface and answer traffic approval
     /// prompts. The default is deliberately false: shells must opt in rather
     /// than making confirmed traffic wait for a UI that is not there.
     fn has_approval_surface(&self) -> bool {
-        false
-    }
-
-    /// Compatibility hook for older management clients. Native
-    /// authentication is no longer part of broker policy.
-    fn native_authentication_available(&self) -> bool {
         false
     }
 
@@ -88,26 +65,6 @@ pub trait BrokerEvents: Send + Sync {
     /// live auth-progress view.
     fn mcp_auth_changed(&self, _state: &crate::mcp_auth::McpAuthState) {}
 
-    /// Retired compatibility hook. Secret reads no longer call it.
-    fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
-        true
-    }
-
-    /// Retired compatibility hook.
-    fn secret_read_authority(&self) -> PresenceAuthority {
-        PresenceAuthority::Substituted
-    }
-
-    /// Retired compatibility hook. Secret copies no longer call it.
-    fn confirm_secret_copy(&self, secret: &SecretMeta, _duration: Duration) -> bool {
-        self.confirm_secret_read(secret)
-    }
-
-    /// Retired compatibility hook.
-    fn secret_copy_authority(&self) -> PresenceAuthority {
-        self.secret_read_authority()
-    }
-
     /// An agent asked (via the sidecar's `agentmfa_connect` tool) for a
     /// service that is not configured. Purely advisory: shells surface it
     /// so the user can add the tool; nothing is granted by the request.
@@ -122,20 +79,10 @@ pub trait BrokerEvents: Send + Sync {
         false
     }
 
-    /// Retired compatibility hook. Configuration actions no longer call it.
-    fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
-        Some(ConfirmationMethod::Waived)
-    }
-
-    /// Retired compatibility hook.
-    fn action_authority(&self, _method: ConfirmationMethod) -> PresenceAuthority {
-        PresenceAuthority::Substituted
-    }
-
     /// Agent traffic is parked on a connection whose confirmation switch is
     /// on, waiting for the user to approve or refuse it.
     ///
-    /// Unlike the gates above this one never blocks: the shell shows the
+    /// This hook never blocks: the shell shows the
     /// prompt and answers later through
     /// [`Approvals::respond`](crate::approvals::Approvals::respond), which
     /// releases the parked call. The default is fail-closed — a shell that

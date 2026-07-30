@@ -29,7 +29,6 @@ use crate::Result;
 
 /// Presence-window lengths the Settings sheet offers: 15 minutes, 1 hour,
 /// 2 hours.
-pub const PRESENCE_WINDOW_CHOICES: &[u64] = &[15 * 60, 60 * 60, 2 * 60 * 60];
 const CONNECT_REQUEST_DEBOUNCE: Duration = Duration::from_secs(60);
 const MAX_CONNECT_REQUEST_DEBOUNCE_KEYS: usize = 256;
 
@@ -451,29 +450,6 @@ impl Broker {
                         .to_string(),
                 )
                 .field("reason", "connection_kind_retired"),
-            );
-        }
-        // The read gate's default flipped from on to off. A store that
-        // predates the flip loses a prompt the user may have been relying
-        // on, so the change is recorded where they will see it, along with
-        // the way back.
-        if broker.store.read_gate_default_migrated() {
-            broker.audit.append(
-                AuditEntry::new(
-                    AuditKind::SettingsChanged,
-                    "Setting changed on upgrade: OS authentication is no longer required to \
-                     read secrets",
-                )
-                .detail(
-                    "AgentMFA no longer asks for Touch ID or your password before revealing \
-                     or copying a saved secret. Turn “Confirm before using saved secrets” \
-                     back on in Settings to keep the prompt."
-                        .to_string(),
-                )
-                .field("setting", "reauth_on_read")
-                .field("old", true)
-                .field("new", false)
-                .field("reason", "default_changed_on_upgrade"),
             );
         }
         if start_background_tasks {
@@ -1183,11 +1159,6 @@ impl Broker {
                     .map(|detail| (detail, crate::types::HealthStatus::Ok)),
             }
         };
-        // Testing rides the same pre-authorization as the agent plane: any
-        // enabled agent can already open this connection with no prompt, so
-        // the user's own Test button reading the secret it is about to send
-        // to the pinned destination must not re-authenticate either.
-        let test = crate::authorization::scope(true, test);
         let outcome = match tokio::time::timeout(TEST_TIMEOUT, test).await {
             Ok(result) => result,
             Err(_) => Err(crate::capability::TestError::new(
@@ -1600,14 +1571,9 @@ impl Broker {
             connection = self.store.connection_by_id(id)?;
             refreshed = true;
         }
-        // Same pre-authorization as tests: the check reads the connection's
-        // own credential to talk to its own pinned upstream.
         let mut report = match tokio::time::timeout(
             CHECK_TIMEOUT,
-            crate::authorization::scope(
-                true,
-                crate::mcp::check_connection(&self.store, &self.http_client, &connection, &options),
-            ),
+            crate::mcp::check_connection(&self.store, &self.http_client, &connection, &options),
         )
         .await
         {
@@ -2650,13 +2616,8 @@ impl Broker {
             .await;
         }
         let connection = self.store.connection_by_id(id)?;
-        // Same pre-authorization as tests: this reads the connection's own
-        // credential to talk to its own pinned upstream.
-        let live = crate::authorization::scope(
-            true,
-            crate::mcp::list_tools(&self.store, &self.http_client, &connection),
-        )
-        .await;
+        let live =
+            crate::mcp::list_tools(&self.store, &self.http_client, &connection).await;
         match live {
             Ok(listing) => {
                 // Remember the last good listing so a later open can still
@@ -2792,7 +2753,7 @@ impl Broker {
     }
 
     /// Close a live session immediately. This is a remediation action: ending
-    /// an agent's access must not be delayed by native authentication.
+    /// an agent's access must take effect immediately.
     pub fn ui_close_session(&self, id: u64) -> Result<bool> {
         Ok(self.data_plane.close_session(id))
     }
@@ -2814,48 +2775,6 @@ impl Broker {
 
     pub fn settings(&self) -> Settings {
         self.store.settings()
-    }
-
-    pub fn ui_change_reauth_on_read(&self, on: bool) -> Result<()> {
-        let old = self.store.settings().reauth_on_read;
-        if old == on {
-            return Ok(());
-        }
-        self.store.set_reauth_on_read(on)?;
-        self.audit.append(
-            AuditEntry::new(
-                AuditKind::SettingsChanged,
-                "Setting changed: require authentication to read secrets",
-            )
-            .field("setting", "reauth_on_read")
-            .field("old", old)
-            .field("new", on),
-        );
-        Ok(())
-    }
-
-    /// Compatibility setter for the retired presence-window setting.
-    pub fn ui_set_presence_window(&self, secs: u64) -> Result<()> {
-        if !PRESENCE_WINDOW_CHOICES.contains(&secs) {
-            return Err(CoreError::InvalidSetting(format!(
-                "presence window must be 900, 3600, or 7200 seconds, got {secs}"
-            )));
-        }
-        let old = self.store.settings().presence_window_secs;
-        if old == secs {
-            return Ok(());
-        }
-        self.store.set_presence_window_secs(secs)?;
-        self.audit.append(
-            AuditEntry::new(
-                AuditKind::SettingsChanged,
-                "Setting changed: presence window",
-            )
-            .field("setting", "presence_window_secs")
-            .field("old", old)
-            .field("new", secs),
-        );
-        Ok(())
     }
 
     /// Ask before trusting a first-seen SSH host key, or stop asking.

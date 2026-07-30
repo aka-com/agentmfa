@@ -2767,7 +2767,7 @@ async fn proxy_handler(
                 "the endpoint was revoked or agent access was disabled",
             );
         }
-        dialed = crate::authorization::scope(true, execution.dial_for_streaming()) => dialed,
+        dialed = execution.dial_for_streaming() => dialed,
     };
     let relay = StreamAudit {
         audit: broker.audit.clone(),
@@ -2949,7 +2949,7 @@ async fn run_coalesced(
     let request = ExecRequest {
         coalesce_key: Some((endpoint.id, connection.id, request_id)),
         payload_hash: Some(hash),
-        executor: Box::pin(crate::authorization::scope(true, execution.run())),
+        executor: Box::pin(execution.run()),
         abandon: None,
     };
     match broker.executions.run(request) {

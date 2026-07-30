@@ -12,20 +12,13 @@ use aka_core::events::BrokerEvents;
 use aka_core::manage::ManagementBackend as _;
 use aka_core::paths::Paths;
 use aka_core::store::ConnectionSpec;
-use aka_core::types::{ConfirmationMethod, ConnectionConfig, SecretMeta};
+use aka_core::types::ConnectionConfig;
 use aka_core::vault::MemoryVault;
 use zeroize::Zeroizing;
 
 struct TestEvents;
 
-impl BrokerEvents for TestEvents {
-    fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
-        true
-    }
-    fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
-        Some(ConfirmationMethod::ManagementToken)
-    }
-}
+impl BrokerEvents for TestEvents {}
 
 struct Harness {
     _broker: Arc<Broker>,
@@ -136,17 +129,11 @@ async fn the_remote_backend_manages_a_tcp_broker_end_to_end() {
 
     // Settings round-trip: read, patch, and read back over the wire, so a
     // broken `patch_settings` cannot pass on the read path alone.
-    assert!(
-        !backend.settings().await.unwrap().reauth_on_read,
-        "the read gate defaults to off"
-    );
-    backend.set_reauth_on_read(true).await.unwrap();
-    assert!(backend.settings().await.unwrap().reauth_on_read);
     backend.set_menu_bar_hides_dock(true).await.unwrap();
     let settings = backend.settings().await.unwrap();
     assert!(settings.menu_bar_hides_dock);
     // One patch must not disturb the fields it did not name.
-    assert!(settings.reauth_on_read);
+    assert!(!settings.confirm_ssh_host_keys);
 
     let snapshot = backend.approval_snapshot().await.unwrap();
     assert!(snapshot.approvals.is_empty());

@@ -22,11 +22,6 @@ pub const APPROVAL_SURFACE_V1: &str = "request-inbox-v1";
 /// Entry in `/v1/manage/whoami.capabilities` that distinguishes a legacy
 /// broker from a proxy that removed the surface-negotiation response.
 pub const APPROVAL_SURFACE_CAPABILITY: &str = "request_surface_v1";
-/// Entry in `/v1/manage/whoami.capabilities` when the managing shell can
-/// prove fresh user presence with a native operating-system authentication
-/// prompt. Remote clients use this instead of assuming the broker host has
-/// the same authentication facilities as the client.
-pub const NATIVE_AUTHENTICATION_CAPABILITY: &str = "native_authentication_v1";
 /// Response header acknowledging how a manage-event stream was classified.
 pub const APPROVAL_SURFACE_STATUS_HEADER: &str = "x-aka-approval-surface-status";
 pub const APPROVAL_SURFACE_STATUS_ACTIVE: &str = "active";
@@ -112,8 +107,6 @@ pub enum ManageError {
         max: usize,
     },
     EndpointRequiresWiring,
-    SecretReadNotAuthenticated,
-    NotConfirmed,
     OAuth {
         message: String,
     },
@@ -204,11 +197,6 @@ impl std::fmt::Display for ManageError {
             Self::EndpointRequiresWiring => write!(
                 f,
                 "enable this tool for agents before issuing a direct endpoint"
-            ),
-            Self::SecretReadNotAuthenticated => write!(f, "Secret read was not authenticated"),
-            Self::NotConfirmed => write!(
-                f,
-                "the native confirmation did not complete; nothing was applied"
             ),
             Self::OAuth { message } => write!(f, "OAuth: {message}"),
             Self::Vault { message } => write!(f, "keychain: {message}"),
@@ -689,12 +677,10 @@ pub enum ApprovalDecisionDto {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettingsDto {
-    pub reauth_on_read: bool,
     pub menu_bar_hides_dock: bool,
     /// Ask before trusting an SSH server's host key the first time it is seen.
     #[serde(default)]
     pub confirm_ssh_host_keys: bool,
-    pub presence_window_secs: u64,
 }
 
 /* -------------------------------- events ---------------------------------- */
