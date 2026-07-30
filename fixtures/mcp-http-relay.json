@@ -1,0 +1,10 @@
+{
+  "status": 200,
+  "headers": {
+    "content-type": "application/json",
+    "mcp-session-id": "golden-session"
+  },
+  "set_cookie_headers": [],
+  "body": "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"tools\":[{\"name\":\"search\",\"inputSchema\":{\"type\":\"object\"}}]}}",
+  "body_encoding": "utf8"
+}

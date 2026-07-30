@@ -3,8 +3,8 @@
 //! The unit tests in `sidecar.rs` use a shell stub so they run anywhere.
 //! This one runs the actual Node bundle, which is the only way to catch a
 //! drift between the ready-line contract and what the sidecar prints. It
-//! skips when the bundle or Node is absent, so `cargo test` still passes on
-//! a checkout that has not run `npm run sidecar:build`.
+//! skips when the bundle or Node is absent for an ordinary local run. CI sets
+//! `AGENTMFA_REQUIRE_SIDECAR=1`, making missing prerequisites a hard failure.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -26,13 +26,25 @@ fn have_node() -> bool {
         .is_ok_and(|out| out.status.success())
 }
 
+fn sidecar_required() -> bool {
+    std::env::var("AGENTMFA_REQUIRE_SIDECAR").as_deref() == Ok("1")
+}
+
 #[tokio::test]
 async fn the_real_sidecar_announces_a_port_and_serves_health() {
     let Some(script) = bundle() else {
+        assert!(
+            !sidecar_required(),
+            "AGENTMFA_REQUIRE_SIDECAR=1 but dist/sidecar/main.mjs is missing; run `npm run sidecar:build`"
+        );
         eprintln!("skipping: no dist/sidecar/main.mjs (run `npm run sidecar:build`)");
         return;
     };
     if !have_node() {
+        assert!(
+            !sidecar_required(),
+            "AGENTMFA_REQUIRE_SIDECAR=1 but node is not on PATH"
+        );
         eprintln!("skipping: no node on PATH");
         return;
     }

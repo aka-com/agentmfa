@@ -6,8 +6,9 @@
 //! loopback. It is the test that would catch the broker and the sidecar
 //! disagreeing about what a wiring means.
 //!
-//! Skips when the sidecar bundle or Node is missing, like
-//! `sidecar_process.rs`.
+//! Skips when the sidecar bundle or Node is missing during an ordinary local
+//! run. CI sets `AGENTMFA_REQUIRE_SIDECAR=1`, turning either prerequisite into
+//! a hard failure so this cross-language contract cannot disappear silently.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -45,6 +46,10 @@ fn have_node() -> bool {
         .arg("--version")
         .output()
         .is_ok_and(|out| out.status.success())
+}
+
+fn sidecar_required() -> bool {
+    std::env::var("AGENTMFA_REQUIRE_SIDECAR").as_deref() == Ok("1")
 }
 
 /// A minimal MCP client: initialize, then call tools over one session.
@@ -154,12 +159,102 @@ fn tool_payload(result: &Value) -> Value {
 }
 
 #[tokio::test]
+async fn broker_http_relay_matches_the_shared_sidecar_fixture() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("../../../fixtures/mcp-http-relay.json"))
+            .expect("golden relay fixture");
+    let upstream_body = fixture["body"].as_str().unwrap().to_string();
+    let session = fixture["headers"]["mcp-session-id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind upstream");
+    let port = listener.local_addr().unwrap().port();
+    let app = axum::Router::new().route(
+        "/mcp",
+        axum::routing::post(move || {
+            let body = upstream_body.clone();
+            let session = session.clone();
+            async move {
+                axum::http::Response::builder()
+                    .status(200)
+                    .header("content-type", "application/json")
+                    .header("mcp-session-id", session)
+                    .body(axum::body::Body::from(body))
+                    .unwrap()
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let broker = Broker::new(
+        Paths::under(dir.path()),
+        Arc::new(MemoryVault::new()),
+        BrokerConfig::default(),
+        Arc::new(NoopEvents),
+    )
+    .await
+    .unwrap();
+    broker
+        .store
+        .add_connection(ConnectionSpec {
+            name: "golden-mcp".into(),
+            config: ConnectionConfig::Api {
+                host: "127.0.0.1".into(),
+                scheme: "http".into(),
+                port: Some(port),
+                trusted_ca_bundle_path: None,
+                template: String::new(),
+                mcp_path: Some("/mcp".into()),
+                oauth: None,
+            },
+            secrets: vec![],
+        })
+        .unwrap();
+    let daemon = daemon::serve(broker).await.unwrap();
+    let token = pair(&daemon.socket_path, "golden-test").await;
+    let relayed = uds_post_auth(
+        &daemon.socket_path,
+        "/v1/http",
+        &token,
+        &json!({
+            "connection": "golden-mcp",
+            "method": "POST",
+            "path": "/mcp",
+            "headers": {"content-type": "application/json"},
+            "body": {"jsonrpc": "2.0", "id": 7, "method": "tools/list", "params": {}},
+        }),
+    )
+    .await;
+
+    for field in ["status", "body", "body_encoding", "set_cookie_headers"] {
+        assert_eq!(relayed[field], fixture[field], "relay field {field}");
+    }
+    for (name, value) in fixture["headers"].as_object().unwrap() {
+        assert_eq!(&relayed["headers"][name], value, "relay header {name}");
+    }
+}
+
+#[tokio::test]
 async fn the_broker_decides_what_an_agent_sees_over_mcp() {
     let Some(script) = bundle() else {
+        assert!(
+            !sidecar_required(),
+            "AGENTMFA_REQUIRE_SIDECAR=1 but dist/sidecar/main.mjs is missing; run `npm run sidecar:build`"
+        );
         eprintln!("skipping: no dist/sidecar/main.mjs (run `npm run sidecar:build`)");
         return;
     };
     if !have_node() {
+        assert!(
+            !sidecar_required(),
+            "AGENTMFA_REQUIRE_SIDECAR=1 but node is not on PATH"
+        );
         eprintln!("skipping: no node on PATH");
         return;
     }
@@ -429,14 +524,30 @@ async fn pair(socket: &std::path::Path, name: &str) -> String {
 
 /// Minimal HTTP/1.1 POST over a Unix socket.
 async fn uds_post(socket: &std::path::Path, path: &str, body: &Value) -> Value {
+    uds_post_inner(socket, path, None, body).await
+}
+
+async fn uds_post_auth(socket: &std::path::Path, path: &str, token: &str, body: &Value) -> Value {
+    uds_post_inner(socket, path, Some(token), body).await
+}
+
+async fn uds_post_inner(
+    socket: &std::path::Path,
+    path: &str,
+    token: Option<&str>,
+    body: &Value,
+) -> Value {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     let mut stream = tokio::net::UnixStream::connect(socket)
         .await
         .expect("connect");
     let payload = serde_json::to_vec(body).expect("serialize");
+    let auth = token
+        .map(|token| format!("Authorization: Bearer {token}\r\n"))
+        .unwrap_or_default();
     let request = format!(
-        "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\n{auth}Content-Type: application/json\r\n\
          Content-Length: {}\r\nConnection: close\r\n\r\n",
         payload.len()
     );

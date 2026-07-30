@@ -95,10 +95,14 @@ interface UpstreamResponse {
 }
 
 /** Response header names arrive in whatever case the broker preserved. */
-function headerValue(headers: Record<string, string> | undefined, name: string): string | null {
+export function relayHeaderValue(
+  headers: Record<string, string> | undefined,
+  name: string,
+): string | null {
   if (!headers) return null;
+  const normalizedName = name.toLowerCase();
   for (const [key, value] of Object.entries(headers)) {
-    if (key.toLowerCase() === name) return value;
+    if (key.toLowerCase() === normalizedName) return value;
   }
   return null;
 }
@@ -132,7 +136,7 @@ function routingHeaders(payload: unknown): Record<string, string> {
  * the response we asked for. Every parseable frame is returned, and the
  * caller picks the one bearing its request id.
  */
-function messages(response: UpstreamResponse): unknown[] {
+export function relayMessages(response: UpstreamResponse): unknown[] {
   const raw =
     response.body_encoding === 'base64' && typeof response.body === 'string'
       ? Buffer.from(response.body, 'base64').toString('utf8')
@@ -219,7 +223,7 @@ class UpstreamClient {
     // A stateful server issues its session id here and requires it on
     // every request that follows; a stateless server issues none and we
     // send none.
-    this.sessionId = headerValue(response.headers, 'mcp-session-id');
+    this.sessionId = relayHeaderValue(response.headers, 'mcp-session-id');
     if (typeof result?.protocolVersion === 'string') {
       this.protocolVersion = result.protocolVersion;
     }
@@ -283,7 +287,7 @@ class UpstreamClient {
     if (response.status && (response.status < 200 || response.status >= 300)) {
       throw new Error(`the MCP server answered ${response.status}`);
     }
-    const answer = messages(response).find(
+    const answer = relayMessages(response).find(
       (frame) => !!frame && typeof frame === 'object' && (frame as { id?: unknown }).id === id,
     ) as { error?: { message?: string }; result?: unknown } | undefined;
     if (!answer) {
