@@ -94,6 +94,12 @@ async fn tcp_discovery_is_remote_flavored_and_pair_is_refused() {
     assert!(manifest.get("socket").is_none(), "no host-local paths");
     assert!(manifest.get("token_file").is_none());
     assert!(manifest["endpoints"].get("pair").is_none());
+    assert!(manifest["endpoints"].get("ssh_open").is_none());
+    assert!(!manifest["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "ssh"));
     assert!(
         manifest.get("mcp_url").is_none(),
         "no MCP host is running yet"
@@ -104,6 +110,22 @@ async fn tcp_discovery_is_remote_flavored_and_pair_is_refused() {
     let response = client
         .post(format!("{}/v1/pair", h.base))
         .json(&json!({ "agent_name": "remote" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 404);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["reason"], "not_served_remotely");
+
+    // SSH agent sockets are broker-host-local capabilities. Even an
+    // authenticated remote caller must not cause one to be created.
+    let response = client
+        .post(format!("{}/v1/ssh/open", h.base))
+        .header(
+            "authorization",
+            format!("Bearer {}", h.broker.identity.token()),
+        )
+        .json(&json!({ "connection": "missing" }))
         .send()
         .await
         .unwrap();

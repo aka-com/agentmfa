@@ -735,7 +735,7 @@ pub async fn test_reachability(
 /// an empty identity list is a supported configuration here, not a fault.
 pub async fn test_login(broker: &Broker, connection: &Connection) -> Result<String, TestError> {
     let ConnectionConfig::Ssh {
-        destination,
+        destination: _,
         host,
         port,
         user,
@@ -804,18 +804,36 @@ pub async fn test_login(broker: &Broker, connection: &Connection) -> Result<Stri
         }
     }));
 
-    // Use the original alias when one was imported so routing from
-    // ~/.ssh/config still applies. User/port and all credential sources are
-    // pinned on the command line; an existing control socket cannot make the
-    // test pass without a fresh authentication.
-    //
-    // `ProxyJump=none` below is deliberate, and matches what the emitted
-    // invocations do: the broker cannot authenticate a jump hop, so testing
-    // through one would either fail as a host-key mismatch or — on an unpinned
-    // connection — pin the *jump host's* key as this connection's. A
-    // destination only reachable through a jump host fails here as unreachable,
-    // which is the truth about what the broker can authorize.
-    let target = destination.as_deref().unwrap_or(host);
+    let mut command = test_login_command(&log_path, &socket_path, host, user, *port);
+    let output = command.output().await.map_err(|e| {
+        TestError::new(
+            TestErrorKind::Other,
+            format!("Could not start the system SSH client: {e}"),
+        )
+    });
+    let output = output?;
+    // Only ssh's own log is evidence. Anything the peer chose — the banner,
+    // a jump host's inherited stderr — is read for nothing.
+    let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+
+    let graded = grade_login(broker, connection, &state, output.status, &log);
+    audit_login_attempt(broker, connection, &state, &graded);
+    graded
+}
+
+/// Build the stock-client probe without consulting user or system SSH config.
+///
+/// OpenSSH evaluates `Match exec` while loading configuration and may execute
+/// `ProxyCommand` when connecting. The broker already persisted the resolved
+/// host/user/port, so testing those explicit fields under an empty config is
+/// deterministic and prevents a UI "Test" click from running local commands.
+fn test_login_command(
+    log_path: &Path,
+    socket_path: &Path,
+    host: &str,
+    user: &str,
+    port: u16,
+) -> tokio::process::Command {
     let mut command = tokio::process::Command::new("ssh");
     command
         .kill_on_drop(true)
@@ -826,6 +844,8 @@ pub async fn test_login(broker: &Broker, connection: &Connection) -> Result<Stri
         // an arbitrary amount of remote text.
         .stderr(std::process::Stdio::null())
         .arg("-v")
+        .arg("-F")
+        .arg("/dev/null")
         .arg("-E")
         .arg(&log_path)
         .arg("-o")
@@ -855,6 +875,8 @@ pub async fn test_login(broker: &Broker, connection: &Connection) -> Result<Stri
         .arg("-o")
         .arg("ProxyJump=none")
         .arg("-o")
+        .arg("ProxyCommand=none")
+        .arg("-o")
         .arg("ClearAllForwardings=yes")
         .arg("-o")
         .arg("PermitLocalCommand=no")
@@ -865,23 +887,10 @@ pub async fn test_login(broker: &Broker, connection: &Connection) -> Result<Stri
         .arg("-p")
         .arg(port.to_string())
         .arg("--")
-        .arg(target)
+        .arg(host)
         .arg("true")
         .env_remove("SSH_AUTH_SOCK");
-    let output = command.output().await.map_err(|e| {
-        TestError::new(
-            TestErrorKind::Other,
-            format!("Could not start the system SSH client: {e}"),
-        )
-    });
-    let output = output?;
-    // Only ssh's own log is evidence. Anything the peer chose — the banner,
-    // a jump host's inherited stderr — is read for nothing.
-    let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-
-    let graded = grade_login(broker, connection, &state, output.status, &log);
-    audit_login_attempt(broker, connection, &state, &graded);
-    graded
+    command
 }
 
 /// Grade the finished `ssh` run. Split out of `test_login` so the attempt
@@ -2078,6 +2087,28 @@ pub fn sweep_stale_sockets(dir: &Path) {
 mod tests {
     use super::*;
     use ssh_key::rand_core::OsRng;
+
+    #[test]
+    fn login_test_ignores_executable_ssh_configuration() {
+        let command = test_login_command(
+            Path::new("/tmp/ssh.log"),
+            Path::new("/tmp/agent.sock"),
+            "resolved.example",
+            "deploy",
+            2222,
+        );
+        let args: Vec<String> = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert!(args.windows(2).any(|pair| pair == ["-F", "/dev/null"]));
+        assert!(args.iter().any(|arg| arg == "ProxyCommand=none"));
+        assert!(args.iter().any(|arg| arg == "ProxyJump=none"));
+        assert_eq!(args.iter().filter(|arg| *arg == "-p").count(), 1);
+        assert!(args.windows(2).any(|pair| pair == ["--", "resolved.example"]));
+    }
 
     /// SSH-23. A passphrase-protected key was refused with instructions to
     /// "store the decrypted OpenSSH key" — advice to run `ssh-keygen -p` and

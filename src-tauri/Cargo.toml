@@ -48,7 +48,7 @@ shell-words = "1"
 url = "2"
 # "encryption" so a passphrase-protected identity file can be decrypted once,
 # at import, instead of being refused (the vault seals the cleartext form).
-ssh-key = { version = "0.6", features = ["encryption"] }
+ssh-key = { version = "0.6", default-features = false, features = ["std", "ed25519", "rsa", "ecdsa", "encryption"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
@@ -63,4 +63,4 @@ dev-verbose = []
 
 [dev-dependencies]
 tempfile = "3"
-ssh-key = { version = "0.6", features = ["getrandom", "encryption"] }
+ssh-key = { version = "0.6", default-features = false, features = ["std", "ed25519", "rsa", "ecdsa", "encryption", "getrandom"] }

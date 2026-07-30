@@ -1964,6 +1964,13 @@ async fn post_ssh_open(
     authed: Authed,
     ApiJson(body): ApiJson<OpenBody>,
 ) -> Response {
+    if state.transport.is_tcp() {
+        return err_detail(
+            StatusCode::NOT_FOUND,
+            ErrorReason::NotServedRemotely,
+            "SSH opens are same-machine only because they return a broker-local agent socket",
+        );
+    }
     let broker = &state.broker;
     let limiter_key = authed.client_id.to_string();
     let client = authed.client;

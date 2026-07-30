@@ -62,7 +62,7 @@ tokio-postgres = "0.7"
 # in the trusted onboarding surface, and the decrypted OpenSSH form is what the
 # vault seals. It brings in bcrypt-pbkdf and the AES/ChaCha ciphers OpenSSH uses
 # for `-o KDF=bcrypt`.
-ssh-key = { version = "0.6", default-features = false, features = ["std", "ed25519", "rsa", "encryption"] }
+ssh-key = { version = "0.6", default-features = false, features = ["std", "ed25519", "rsa", "ecdsa", "encryption"] }
 rsa = { version = "0.9", default-features = false, features = ["std", "sha2"] }
 signature = "2"
 

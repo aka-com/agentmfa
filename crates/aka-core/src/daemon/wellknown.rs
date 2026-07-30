@@ -85,7 +85,7 @@ pub fn manifest_remote(
         // What this listener itself speaks. TLS is the operator's proxy or
         // tunnel in front of it; the advertised base_url reflects that.
         "transport": "http",
-        "capabilities": ["http", "postgres", "ssh"],
+        "capabilities": ["http", "postgres"],
         "auth_schemes": AuthScheme::ALL,
         "recommended_client_timeout_seconds": config.effective_client_timeout().as_secs(),
         "token_ttl_days": config.token_ttl.as_secs() / 86400,
@@ -106,7 +106,6 @@ pub fn manifest_remote(
             "connections": "/v1/connections",
             "http": "/v1/http",
             "pg_open": "/v1/pg/open",
-            "ssh_open": "/v1/ssh/open",
             "instructions": "/instructions",
         },
         "pairing": "Not served remotely: every client of this broker uses its one shared key, obtained from the broker's operator (on the broker host it lives in the token file). Send it as your Bearer token, and optionally X-AgentMFA-Client: <your-name> to label your activity.",
@@ -137,12 +136,12 @@ pub fn remote_instructions_banner(
     let data_planes = match data_plane_host {
         Some(host) => format!(
             "> not served remotely. Postgres opens hand back an address on\n\
-             > `{host}`, reachable if you can route to it; SSH opens name a Unix\n\
-             > socket that exists only on the broker's machine"
+             > `{host}`, reachable if you can route to it; SSH opens are not served\n\
+             > remotely because their agent socket exists only on the broker's machine"
         ),
-        None => "> not served remotely. Postgres and SSH opens currently hand\n\
-                 > back broker-host-local addresses and are usable only by agents on that\n\
-                 > machine"
+        None => "> not served remotely. Postgres opens currently hand back a\n\
+                 > broker-host-local address usable only by agents on that machine; SSH\n\
+                 > opens are not served remotely"
             .to_string(),
     };
     format!(
@@ -565,17 +564,32 @@ mod tests {
 
     #[test]
     fn remote_banner_reflects_the_data_plane_configuration() {
-        // Default: PG/SSH opens are host-local and the banner says so.
+        // Default: PG opens are host-local and SSH is unavailable remotely.
         let text = remote_instructions_banner(Some("https://b.example.dev"), None);
-        assert!(text.contains("broker-host-local addresses"));
+        assert!(text.contains("broker-host-local address"));
+        assert!(text.contains("opens are not served remotely"), "{text}");
         assert!(!text.contains("broker.lan"));
 
-        // With an advertised host, PG is reachable and only SSH stays
-        // host-local.
+        // With an advertised host, PG is reachable and SSH remains refused.
         let text = remote_instructions_banner(Some("https://b.example.dev"), Some("broker.lan"));
         assert!(text.contains("`broker.lan`"), "{text}");
         assert!(!text.contains("broker-host-local addresses"));
-        assert!(text.contains("SSH opens"), "{text}");
+        assert!(text.contains("SSH opens are not served"), "{text}");
+    }
+
+    #[test]
+    fn remote_manifest_omits_same_machine_ssh() {
+        let m = manifest_remote(
+            &BrokerConfig::default(),
+            Some("https://b.example.dev"),
+            false,
+        );
+        assert!(m["endpoints"].get("ssh_open").is_none());
+        assert!(!m["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|capability| capability == "ssh"));
     }
 
     #[test]
