@@ -5,28 +5,17 @@
 // the `mfa` commands the sandbox walkthrough tells people to run.
 
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
 import { readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import test, { after, before } from 'node:test';
 
-import { Broker, connectionNames } from './lib/broker';
+import { Broker, connectionNames, mfaBinary } from './lib/broker';
 import { waitFor } from './lib/http';
 import { parseDsn, PgConnection } from './lib/pgwire';
 import { run } from './lib/proc';
-import { repoRoot, requireFixture, sandbox } from './lib/sandbox';
+import { requireFixture, sandbox } from './lib/sandbox';
 
 let broker: Broker;
-
-function mfaBinary(): string {
-  return (
-    process.env.AKA_MFA_BIN ??
-    ['target/debug/mfa', 'target/release/mfa']
-      .map((candidate) => join(repoRoot, candidate))
-      .find((path) => existsSync(path)) ??
-    'mfa'
-  );
-}
 
 before(async () => {
   await requireFixture();
@@ -78,23 +67,26 @@ test('`mfa activity` reads the audit trail while the broker runs', async () => {
   assert.ok(!result.stdout.includes(sandbox.httpToken));
 });
 
-test('`mfa dsn` prints a ready-to-run connection string', async () => {
+test('default `mfa dsn` exports eval into a working psql session', async () => {
   const result = await run(
-    mfaBinary(),
-    ['dsn', connectionNames.pg, '--root', broker.root, '--client', 'cli-tests'],
-    { timeoutMs: 30_000 },
+    'sh',
+    [
+      '-c',
+      'eval "$("$AKA_TEST_MFA" dsn "$AKA_TEST_CONNECTION" --root "$AKA_TEST_ROOT" ' +
+        '--client cli-tests)" && psql -X -A -t -c "SELECT 1"',
+    ],
+    {
+      env: {
+        ...process.env,
+        AKA_TEST_MFA: mfaBinary(),
+        AKA_TEST_CONNECTION: connectionNames.pg,
+        AKA_TEST_ROOT: broker.root,
+      },
+      timeoutMs: 30_000,
+    },
   );
   assert.equal(result.code, 0, result.stderr);
-  const dsn = result.stdout.trim();
-  assert.match(dsn, /^postgres:\/\/ticket:tkt_[0-9a-f]{32}@127\.0\.0\.1:\d+\//);
-
-  // It is a real capability, not just a formatted string.
-  const connection = await PgConnection.open(parseDsn(dsn));
-  try {
-    assert.equal((await connection.query('SELECT 1')).rows[0][0], '1');
-  } finally {
-    connection.close();
-  }
+  assert.equal(result.stdout.trim(), '1');
 
   const session = (await broker.activity()).some((entry) => entry.agent === 'cli-tests');
   assert.ok(session, 'the CLI labels its own activity');

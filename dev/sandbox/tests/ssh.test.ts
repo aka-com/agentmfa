@@ -14,8 +14,13 @@ import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import test, { after, before } from 'node:test';
 
-import { Broker, connectionNames } from './lib/broker';
-import { pending } from './lib/pending';
+import {
+  Broker,
+  connectionNames,
+  mfaBinary,
+  type ApprovalSurface,
+  type AutoAnswer,
+} from './lib/broker';
 import { run } from './lib/proc';
 import {
   hasSshClient,
@@ -149,6 +154,28 @@ test('a stock ssh client logs in through the socket', async (t) => {
   );
 });
 
+test('the `mfa ssh` binary opens a socket a stock client can use', async (t) => {
+  if (!sshClient) return t.skip('no ssh client on PATH');
+  const opened = await run(
+    mfaBinary(),
+    ['ssh', ssh, '--root', broker.root, '--client', 'cli-spawn'],
+    { timeoutMs: 30_000 },
+  );
+  assert.equal(opened.code, 0, opened.stderr);
+  const authSock = opened.stdout.trim();
+  assert.ok(existsSync(authSock), `mfa returned a live socket: ${authSock}`);
+
+  const result = await sshCommand(authSock, 'echo cli-spawn-ok');
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /cli-spawn-ok/);
+  assert.ok(
+    (await broker.activity()).some(
+      (entry) => entry.connection === ssh && entry.agent === 'cli-spawn',
+    ),
+    'the spawned CLI preserves its client attribution',
+  );
+});
+
 test('the host key is pinned on first use', async (t) => {
   if (!sshClient) return t.skip('no ssh client on PATH');
   // This file's connection starts unpinned; the login above pinned it.
@@ -221,61 +248,59 @@ test('the broker signs only for the pinned login user', async (t) => {
   assert.notEqual(result.code, 0, 'a login as another user is not signed for');
 });
 
-// ---------------------------------------------------------------------------
-// SSH policy AKA does not have.
-// ---------------------------------------------------------------------------
+test('SSH login confirmation approves, denies, and fails closed when the app is away', async (t) => {
+  if (!sshClient) return t.skip('no ssh client on PATH');
 
-test('SSH traffic cannot be put under confirmation at all', async (t) => {
-  // `/v1/ssh/open` passes `None` where the HTTP and Postgres planes pass an
-  // approval request (crates/aka-core/src/daemon/mod.rs), and the agent
-  // socket never gates a signature on the user — so the manage plane
-  // refuses the switch outright rather than accepting a setting that would
-  // do nothing. Asserted here so that the day SSH grows a traffic unit,
-  // this test fails and gets rewritten.
-  const response = await broker.manageRaw('POST', `/connections/${broker.conn(ssh).id}/confirm`, {
-    body: { on: true },
-  });
-  assert.equal(response.status, 422);
-  assert.equal(response.json<{ code: string }>().code, 'invalid_setting');
-  assert.match(response.json<{ message: string }>().message, /no traffic unit to confirm/);
+  for (const scenario of ['approve', 'deny', 'away'] as const) {
+    await t.test(scenario, async () => {
+      const confirming = await Broker.start({
+        label: `ssh-confirm-${scenario}`,
+        seed: ['ssh'],
+      });
+      try {
+        let answering: AutoAnswer | undefined;
+        let surface: ApprovalSurface | undefined;
+        if (scenario !== 'away') {
+          surface = await confirming.attachApprovalSurface();
+          answering = surface.autoAnswer(() =>
+            scenario === 'approve' ? 'approve_window' : 'deny',
+          );
+        }
+        await confirming.setConfirm(confirming.conn(ssh).id, true);
 
-  // …and an open still runs with nothing asked.
-  const opened = await broker.sshOpen(ssh);
-  assert.equal(opened.status, 200);
-  assert.deepEqual(await broker.approvals(), []);
+        const response = await confirming.sshOpen(ssh);
+        assert.equal(response.status, 200, response.text);
+        const opened = response.json<OpenedAgent>();
+        const result = await sshCommand(opened.auth_sock, `echo ssh-${scenario}`);
 
-  pending(
-    t,
-    'confirming SSH traffic with the user (a prompt per session, as Postgres gets)',
-    'the manage plane refuses the switch: an ssh connection has no traffic unit to ask about',
-  );
-});
+        if (scenario === 'approve') {
+          assert.equal(result.code, 0, result.stderr);
+          assert.match(result.stdout, /ssh-approve/);
+          assert.equal(answering?.answered.length, 1);
+          assert.equal(answering?.answered[0].unit, 'login');
+          assert.match(answering?.answered[0].summary ?? '', /SSH login as sandbox@/);
+          assert.match(answering?.answered[0].consequence ?? '', /signs one SSH login/i);
+        } else {
+          assert.notEqual(result.code, 0, 'the broker declined the authentication signature');
+          assert.ok(!result.stdout.includes(`ssh-${scenario}`));
+          if (scenario === 'deny') assert.equal(answering?.answered.length, 1);
+          const expected = scenario === 'deny' ? 'approval_denied' : 'approval_unavailable';
+          assert.ok(
+            (await confirming.activity()).some(
+              (entry) =>
+                entry.connection === ssh &&
+                entry.text.includes('SSH signature refused') &&
+                entry.outcome === expected,
+            ),
+            `the ${scenario} refusal is attributable as ${expected}`,
+          );
+        }
 
-test('commands are not inspected, approved, or recorded', (t) => {
-  // The broker signs an authentication request; the session that follows is
-  // between the client and the server. `ssh host rm -rf /` and `ssh host
-  // uptime` are the same event to AKA.
-  pending(
-    t,
-    'per-command approval or command-level audit for SSH (ask about `rm -rf`, record what ran)',
-    'the broker is a signing oracle: it sees the login, never the command or its output',
-  );
-});
-
-test('a session cannot be restricted to a directory or a command set', (t) => {
-  pending(
-    t,
-    'scoping an SSH connection to particular paths, commands, or a forced command',
-    'a connection pins user@host:port and the host key; everything the account may do is in scope',
-  );
-});
-
-test('port forwarding and file transfer are not distinguished', (t) => {
-  // A signed session can carry scp/rsync/sftp or a tunnel just as easily as
-  // an interactive shell; the broker cannot tell them apart, or refuse one.
-  pending(
-    t,
-    'treating file transfer or port forwarding as a separate capability from an interactive session',
-    'one signature authorizes whatever channels the client opens on that session',
-  );
+        answering?.stop();
+        surface?.detach();
+      } finally {
+        await confirming.stop();
+      }
+    });
+  }
 });

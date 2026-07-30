@@ -15,9 +15,10 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import test, { after, before } from 'node:test';
 
-import { Broker, connectionNames } from './lib/broker';
+import { Broker, connectionNames, mfaBinary } from './lib/broker';
 import { waitFor } from './lib/http';
 import { McpClient } from './lib/mcpclient';
+import { run } from './lib/proc';
 import { repoRoot, requireFixture, sandbox } from './lib/sandbox';
 
 let broker: Broker;
@@ -351,6 +352,37 @@ test('the MCP host exposes every wired connection as a tool', async (t) => {
   assert.ok(
     tools.some((name) => name.includes('sandbox_echo')),
     tools.join(', '),
+  );
+});
+
+test('the `mfa mcp` binary bridges a real stdio initialize', async (t) => {
+  if (!host) return t.skip('run `npm run sidecar:build` to exercise the MCP host');
+  const initialize = {
+    jsonrpc: '2.0',
+    id: 41,
+    method: 'initialize',
+    params: {
+      protocolVersion: '2025-06-18',
+      capabilities: {},
+      clientInfo: { name: 'sandbox-cli-spawn', version: '0.0.0' },
+    },
+  };
+  const result = await run(
+    mfaBinary(),
+    ['mcp', '--root', broker.root, '--client', 'cli-spawn'],
+    { input: `${JSON.stringify(initialize)}\n`, timeoutMs: 30_000 },
+  );
+  assert.equal(result.code, 0, result.stderr);
+  const messages = result.stdout
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  const response = messages.find((message) => message.id === 41);
+  assert.ok(response?.result, `initialize response missing from ${result.stdout}`);
+  assert.equal(
+    ((response.result as Record<string, unknown>).serverInfo as Record<string, unknown>).name,
+    'agentmfa',
   );
 });
 

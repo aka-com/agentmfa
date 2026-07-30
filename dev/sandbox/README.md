@@ -29,7 +29,7 @@ A copy of this walkthrough formatted for the browser is in
 - Docker with Compose v2, **running** (start Docker Desktop first)
 - Node.js with `npm` (only to run the `npm run sandbox:*` scripts —
   `bash scripts/sandbox-up.sh` works without it)
-- `curl`, `ssh-keygen`, and `ssh-keyscan` (preinstalled on macOS)
+- `curl`, `ssh-keygen`, `ssh-keyscan`, and the Postgres `psql` client
 - AKA Desktop: the desktop app, or the headless broker
   (`cargo run -p mfa -- serve`) on any platform
 
@@ -115,9 +115,10 @@ command), then ask it to use the services in plain language, e.g.:
 
 Approve the prompts AKA Desktop raises. What one decision covers depends
 on the service: one request for an API service, one `tools/call` for an
-MCP service, one whole session for Postgres. SSH is not confirmed at all —
-the broker signs the login and never sees the commands. The fixture serves
-deterministic routes for deeper checks:
+MCP service, one whole session for Postgres, or one verified SSH login.
+After SSH authentication the broker never sees the commands or channels
+that run over that connection. The fixture serves deterministic routes for
+deeper checks:
 
 ```text
 GET  /authenticated            {"authenticated":true} with the token; 401 without

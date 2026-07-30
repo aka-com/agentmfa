@@ -167,7 +167,7 @@ export interface StartOptions {
 
 /* -------------------------------- harness --------------------------------- */
 
-function mfaBinary(): string {
+export function mfaBinary(): string {
   const configured = process.env.AKA_MFA_BIN;
   if (configured) return configured;
   for (const candidate of ['target/debug/mfa', 'target/release/mfa']) {

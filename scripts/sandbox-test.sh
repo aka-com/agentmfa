@@ -20,7 +20,7 @@ pg_port="${SANDBOX_PG_PORT:-15432}"
 ssh_port="${SANDBOX_SSH_PORT:-12222}"
 client_key="$repo_root/dev/sandbox/state/ssh/client_key"
 
-for command in curl node; do
+for command in curl node psql; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "sandbox: $command is required" >&2
     exit 1

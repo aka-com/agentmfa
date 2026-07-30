@@ -1,0 +1,44 @@
+name: Docker sandbox
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 8 * * 2'
+
+permissions:
+  contents: read
+
+jobs:
+  sandbox:
+    name: Real Postgres, SSH, HTTP, and MCP
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install test clients
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes openssh-client postgresql-client
+
+      - run: npm ci
+
+      - name: Start sandbox
+        run: npm run sandbox:up
+
+      - name: Run sandbox suite
+        run: npm run sandbox:test
+
+      - name: Stop sandbox
+        if: always()
+        run: npm run sandbox:down
