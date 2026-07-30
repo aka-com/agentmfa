@@ -7,12 +7,15 @@
 //!   the PG data plane can be exercised without the desktop UI (useful for
 //!   agent integration and CI).
 //! - `mfa secret add|list|rename|replace|rm` and
-//!   `mfa conn add|list|update|rename|rm|enable|disable|test` manage the
+//!   `mfa conn add|list|show|update|rename|rm|enable|disable|test` manage the
 //!   store from the terminal — the dev/headless counterpart of the app's
 //!   Secrets and Tools tabs — with the same validation, so a `serve --root`
 //!   harness never hand-writes (sealed) store files. Mutations beyond
 //!   seeding run through the broker's own `ui_*` layer, so audit entries
 //!   and access/endpoint side effects cannot drift from the app.
+//! - `mfa sessions`, `mfa requests`, and `mfa settings` expose the remaining
+//!   day-to-day broker visibility and lifecycle controls without requiring
+//!   the desktop UI.
 //! - `mfa dsn` / `mfa ssh` open data-plane sessions on a running broker.
 //!   Postgres prints shell-safe `PG*` exports by default so the ticket stays
 //!   out of argv; SSH prints the `SSH_AUTH_SOCK` path.
@@ -33,18 +36,18 @@ use aka_api::{ActivityDto, ConnectionDto, ManageError, SecretDto};
 use aka_client::credentials::TokenStore;
 use aka_client::{RemoteBackend, RemoteConfig};
 use aka_core::audit::AuditEntry;
-use aka_core::broker::Broker;
+use aka_core::broker::{Broker, PRESENCE_WINDOW_CHOICES};
 use aka_core::config::BrokerConfig;
 use aka_core::daemon;
 use aka_core::daemon::wellknown;
 use aka_core::error::CoreError;
 use aka_core::events::{BrokerEvents, PresenceAuthority};
-use aka_core::manage::{activity_dto, LocalBackend, ManageResult, ManagementBackend};
+use aka_core::manage::{
+    activity_dto, ConnectionConfigPatch, LocalBackend, ManageResult, ManagementBackend,
+};
 use aka_core::paths::{BrokerInstanceLock, BrokerLockAttempt, BrokerLockRole, Paths};
 use aka_core::store::ConnectionSpec;
-use aka_core::types::{
-    ConfirmationMethod, ConnectionConfig, OAuthSpec, PgSslMode, SecretMeta, SecretValue,
-};
+use aka_core::types::{ConfirmationMethod, ConnectionConfig, PgSslMode, SecretMeta, SecretValue};
 use aka_core::vault::{
     platform_vault, platform_vault_for_root, recorded_platform_vault_backend,
     selected_platform_vault_backend, PlatformVaultBackend, SecretVault,
@@ -77,6 +80,17 @@ fn parse_manage_ttl_days(value: &str) -> Result<u64, String> {
         Ok(days)
     } else {
         Err("must be between 1 and 3650 days".to_string())
+    }
+}
+
+fn parse_presence_window_secs(value: &str) -> Result<u64, String> {
+    let secs: u64 = value
+        .parse()
+        .map_err(|_| "must be a whole number of seconds".to_string())?;
+    if PRESENCE_WINDOW_CHOICES.contains(&secs) {
+        Ok(secs)
+    } else {
+        Err("must be 900, 3600, or 7200 seconds".to_string())
     }
 }
 
@@ -253,6 +267,32 @@ enum Command {
         #[command(subcommand)]
         command: ConnCommand,
     },
+    /// List live data-plane sessions, or close one by id.
+    Sessions {
+        /// Close this session instead of listing sessions.
+        #[arg(long)]
+        close: Option<u64>,
+        /// Operate on a broker rooted here instead of the default layout.
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Manage the broker at this manage-API URL instead of this machine's.
+        #[arg(long)]
+        broker: Option<String>,
+    },
+    /// List pending and recent approval/elicitation decision records.
+    Requests {
+        /// Operate on a broker rooted here instead of the default layout.
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Manage the broker at this manage-API URL instead of this machine's.
+        #[arg(long)]
+        broker: Option<String>,
+    },
+    /// Read or update broker settings.
+    Settings {
+        #[command(subcommand)]
+        command: SettingsCommand,
+    },
     /// Print this computer's shared agent key — what agents send as their
     /// Bearer token, and what remote agents need from the operator.
     Key {
@@ -427,6 +467,33 @@ enum ManageCommand {
 }
 
 #[derive(Subcommand)]
+enum SettingsCommand {
+    /// Print the broker's effective settings.
+    Get {
+        #[arg(long)]
+        root: Option<PathBuf>,
+        #[arg(long)]
+        broker: Option<String>,
+    },
+    /// Change one or more broker settings.
+    Set {
+        /// Require authentication before revealing or copying saved secrets.
+        #[arg(long)]
+        reauth_on_read: Option<bool>,
+        /// Hide the Dock icon while the menu-bar window is active.
+        #[arg(long)]
+        menu_bar_hides_dock: Option<bool>,
+        /// Keep one successful presence check valid for this many seconds.
+        #[arg(long, value_parser = parse_presence_window_secs)]
+        presence_window_secs: Option<u64>,
+        #[arg(long)]
+        root: Option<PathBuf>,
+        #[arg(long)]
+        broker: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)] // one short-lived instance per invocation
 enum ConnCommand {
     /// Add a connection agents can name on capability calls.
@@ -438,6 +505,14 @@ enum ConnCommand {
         root: Option<PathBuf>,
         /// Manage the broker at this manage-API URL instead of this
         /// machine's.
+        #[arg(long)]
+        broker: Option<String>,
+    },
+    /// Show one connection's policy, endpoint, health, and capability fields.
+    Show {
+        name: String,
+        #[arg(long)]
+        root: Option<PathBuf>,
         #[arg(long)]
         broker: Option<String>,
     },
@@ -806,6 +881,7 @@ fn run_cli() {
         Command::Conn { command } => match command {
             ConnCommand::Add(args) => cmd_conn_add(args),
             ConnCommand::List { root, broker } => cmd_conn_list(root, broker, json),
+            ConnCommand::Show { name, root, broker } => cmd_conn_show(name, root, broker, json),
             ConnCommand::Update(args) => cmd_conn_update(args),
             ConnCommand::Rename {
                 name,
@@ -834,6 +910,29 @@ fn run_cli() {
                 root,
                 broker,
             } => cmd_conn_endpoint(name, issue, revoke, url, secret, root, broker, json),
+        },
+        Command::Sessions {
+            close,
+            root,
+            broker,
+        } => cmd_sessions(close, root, broker, json),
+        Command::Requests { root, broker } => cmd_requests(root, broker, json),
+        Command::Settings { command } => match command {
+            SettingsCommand::Get { root, broker } => cmd_settings_get(root, broker, json),
+            SettingsCommand::Set {
+                reauth_on_read,
+                menu_bar_hides_dock,
+                presence_window_secs,
+                root,
+                broker,
+            } => cmd_settings_set(
+                reauth_on_read,
+                menu_bar_hides_dock,
+                presence_window_secs,
+                root,
+                broker,
+                json,
+            ),
         },
         Command::Manage { command } => match command {
             ManageCommand::Login {
@@ -1360,22 +1459,6 @@ fn conn_dto(managed: &Managed, name: &str) -> ConnectionDto {
     }
 }
 
-/// Resolve secret names to ids in one listing round trip (keeping a
-/// connection's existing bindings across an update).
-fn secret_ids_by_names(managed: &Managed, names: &[String]) -> Vec<Uuid> {
-    let secrets = managed.run(managed.backend.list_secrets());
-    names
-        .iter()
-        .map(|name| match secrets.iter().find(|s| &s.name == name) {
-            Some(dto) => dto_id(&dto.id),
-            None => die_with(
-                ExitCode::NotFound,
-                format!("no secret named {name:?} (see `mfa secret list`)"),
-            ),
-        })
-        .collect()
-}
-
 fn cmd_secret_rename(name: String, new_name: String, root: Option<PathBuf>, url: Option<String>) {
     let managed = management_backend(root, url);
     let dto = secret_dto(&managed, &name);
@@ -1569,58 +1652,199 @@ fn cmd_conn_list(root: Option<PathBuf>, url: Option<String>, json: bool) {
     }
 }
 
-/// Rebuild a connection's `ConnectionConfig` from its listing DTO, so
-/// `conn update` can merge flags over it in any mode. The DTO carries every
-/// field the CLI manages; OAuth-managed connections are refused before this
-/// runs (their credential config cannot be reconstructed client-side).
-fn config_from_dto(dto: &ConnectionDto) -> Result<ConnectionConfig, String> {
-    let need = |field: &str, value: &Option<String>| -> Result<String, String> {
-        value
-            .clone()
-            .ok_or_else(|| format!("the broker's listing omitted {field} for {}", dto.name))
-    };
-    let need_port = || -> Result<u16, String> {
-        dto.port
-            .ok_or_else(|| format!("the broker's listing omitted port for {}", dto.name))
-    };
-    match dto.kind.as_str() {
-        "api" => Ok(ConnectionConfig::Api {
-            host: need("host", &dto.host)?,
-            scheme: need("scheme", &dto.scheme)?,
-            port: dto.port,
-            trusted_ca_bundle_path: dto.trusted_ca_bundle_path.clone(),
-            template: need("template", &dto.template)?,
-            mcp_path: dto.mcp_path.clone(),
-            oauth: dto.oauth_spec.as_ref().map(|oauth| OAuthSpec {
-                auth_url: oauth.auth_url.clone(),
-                token_url: oauth.token_url.clone(),
-                client_id: oauth.client_id.clone(),
-                scopes: oauth.scopes.clone(),
-                extra_auth_params: oauth.extra_auth_params.clone(),
-                token_secret_id: None,
-            }),
-        }),
-        "pg" => Ok(ConnectionConfig::Pg {
-            host: need("host", &dto.host)?,
-            port: need_port()?,
-            dbname: need("dbname", &dto.dbname)?,
-            user: need("user", &dto.user)?,
-            sslmode: parse_sslmode(dto.sslmode.as_deref())?,
-            trusted_ca_bundle_path: dto.trusted_ca_bundle_path.clone(),
-        }),
-        "ssh" => Ok(ConnectionConfig::Ssh {
-            destination: dto.destination.clone(),
-            host: need("host", &dto.host)?,
-            port: need_port()?,
-            user: need("user", &dto.user)?,
-            host_key_fingerprint: dto.host_key_fingerprint.clone().unwrap_or_default(),
-        }),
-        other => Err(format!("unknown connection kind {other:?}")),
+fn cmd_conn_show(name: String, root: Option<PathBuf>, url: Option<String>, json: bool) {
+    require_existing_root_for_read(root.as_deref(), url.is_some());
+    let managed = management_backend(root, url);
+    let dto = conn_dto(&managed, &name);
+    if json {
+        print_json(&dto);
+        return;
+    }
+    println!("name: {}", dto.name);
+    println!("type: {}", dto.kind);
+    println!("target: {}", dto.target);
+    println!(
+        "credentials: {}",
+        if dto.secret_names.is_empty() {
+            "none".into()
+        } else {
+            dto.secret_names.join(", ")
+        }
+    );
+    println!(
+        "agent access: {}",
+        if dto.agent_access.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    println!(
+        "confirmation: {}",
+        if dto.agent_access.confirm {
+            "on"
+        } else {
+            "off"
+        }
+    );
+    if let Some(until) = &dto.agent_access.confirm_window_until {
+        let agents = if dto.agent_access.confirm_window_agents.is_empty() {
+            "unknown agent".into()
+        } else {
+            dto.agent_access.confirm_window_agents.join(", ")
+        };
+        println!("confirmation window: until {until} for {agents}");
+    }
+    if let Some(until) = &dto.agent_access.confirm_cooldown_until {
+        println!("denial cooldown: until {until}");
+    }
+    println!(
+        "allowed MCP tools: {}",
+        dto.agent_access
+            .allowed_tools
+            .as_ref()
+            .map(|tools| {
+                if tools.is_empty() {
+                    "none".into()
+                } else {
+                    tools.join(", ")
+                }
+            })
+            .unwrap_or_else(|| "all".into())
+    );
+    match &dto.agent_access.endpoint {
+        Some(endpoint) => println!(
+            "direct endpoint: {} ({})",
+            endpoint
+                .dsn
+                .as_deref()
+                .unwrap_or("issued; use `mfa conn endpoint` to copy"),
+            endpoint.kind
+        ),
+        None => println!("direct endpoint: none"),
+    }
+    match (&dto.last_status, &dto.last_detail, &dto.last_checked_at) {
+        (Some(status), detail, checked) => {
+            println!("health: {status}");
+            if let Some(detail) = detail {
+                println!("health detail: {detail}");
+            }
+            if let Some(checked) = checked {
+                println!("last checked: {checked}");
+            }
+        }
+        _ => println!("health: untested"),
     }
 }
 
-/// The CLI edits capability fields; a broker-managed OAuth grant is not
-/// reconstructible client-side, so those connections are app-managed.
+fn cmd_sessions(close: Option<u64>, root: Option<PathBuf>, url: Option<String>, json: bool) {
+    require_existing_root_for_read(root.as_deref(), url.is_some());
+    let managed = management_backend(root, url);
+    if let Some(id) = close {
+        let closed = managed.run(managed.backend.close_session(id));
+        if !closed {
+            die_with(ExitCode::NotFound, format!("no live session with id {id}"));
+        }
+        if json {
+            print_json(&serde_json::json!({ "closed": true, "id": id }));
+        } else {
+            eprintln!("closed session {id}");
+        }
+        return;
+    }
+    let sessions = managed.run(managed.backend.sessions());
+    if json {
+        print_json(&sessions);
+    } else if sessions.is_empty() {
+        eprintln!("no live sessions");
+    } else {
+        for session in sessions {
+            println!(
+                "{}  {}  {}  {}  {}",
+                session.id, session.kind, session.connection, session.agent, session.detail
+            );
+        }
+    }
+}
+
+fn cmd_requests(root: Option<PathBuf>, url: Option<String>, json: bool) {
+    require_existing_root_for_read(root.as_deref(), url.is_some());
+    let managed = management_backend(root, url);
+    let requests = managed.run(managed.backend.requests());
+    if json {
+        print_json(&requests);
+    } else if requests.is_empty() {
+        eprintln!("no pending or recent requests");
+    } else {
+        for request in requests {
+            let at = request
+                .resolved_at
+                .as_deref()
+                .unwrap_or(&request.requested_at);
+            println!(
+                "{}  {}  {}  {}  {}  {}",
+                at,
+                request.status,
+                request.kind,
+                request.connection,
+                request.agent,
+                request.summary
+            );
+        }
+    }
+}
+
+fn cmd_settings_get(root: Option<PathBuf>, url: Option<String>, json: bool) {
+    require_existing_root_for_read(root.as_deref(), url.is_some());
+    let managed = management_backend(root, url);
+    let settings = managed.run(managed.backend.settings());
+    if json {
+        print_json(&settings);
+    } else {
+        println!("reauth on read: {}", settings.reauth_on_read);
+        println!("menu bar hides Dock: {}", settings.menu_bar_hides_dock);
+        println!("presence window: {} seconds", settings.presence_window_secs);
+    }
+}
+
+fn cmd_settings_set(
+    reauth_on_read: Option<bool>,
+    menu_bar_hides_dock: Option<bool>,
+    presence_window_secs: Option<u64>,
+    root: Option<PathBuf>,
+    url: Option<String>,
+    json: bool,
+) {
+    if reauth_on_read.is_none() && menu_bar_hides_dock.is_none() && presence_window_secs.is_none() {
+        die_with(
+            ExitCode::Usage,
+            "settings set requires at least one setting flag",
+        );
+    }
+    let managed = management_backend(root, url);
+    if let Some(on) = reauth_on_read {
+        managed.run_gated(managed.backend.set_reauth_on_read(on));
+    }
+    if let Some(on) = menu_bar_hides_dock {
+        managed.run_gated(managed.backend.set_menu_bar_hides_dock(on));
+    }
+    if let Some(secs) = presence_window_secs {
+        managed.run_gated(managed.backend.set_presence_window(secs));
+    }
+    let settings = managed.run(managed.backend.settings());
+    if json {
+        print_json(&settings);
+    } else {
+        eprintln!("settings updated");
+        println!("reauth on read: {}", settings.reauth_on_read);
+        println!("menu bar hides Dock: {}", settings.menu_bar_hides_dock);
+        println!("presence window: {} seconds", settings.presence_window_secs);
+    }
+}
+
+/// The CLI deliberately leaves OAuth-managed capability coordinates to the
+/// broker/app flow. Ordinary updates below are field patches, never a
+/// reconstruction of the complete config.
 fn refuse_oauth_managed(dto: &ConnectionDto) {
     if dto.oauth || dto.oauth_spec.is_some() {
         die(format!(
@@ -1630,33 +1854,59 @@ fn refuse_oauth_managed(dto: &ConnectionDto) {
     }
 }
 
-/// Build `conn update`'s new config: the existing config with the given
-/// flags overlaid, naming any flag stray for the kind. Fields the CLI does
-/// not manage (api `mcp_path`/`oauth`, ssh `destination`) carry over
-/// untouched; the deep validation stays in the store, one place.
-fn merged_config(
-    existing: &ConnectionConfig,
+/// Build a patch containing only flags the caller supplied. The broker merges
+/// it into authoritative state after checking `updated_at`, so fields unknown
+/// to this CLI version cannot be reset.
+fn connection_config_patch(
+    dto: &ConnectionDto,
     args: &ConnUpdate,
-) -> Result<ConnectionConfig, String> {
+    secret_id: Option<Uuid>,
+) -> Result<ConnectionConfigPatch, String> {
     let forbid = |present: &[(&str, bool)]| -> Result<(), String> {
         match present.iter().find(|(_, given)| *given) {
             Some((flag, _)) => Err(format!("--{flag} does not apply to this connection's kind")),
             None => Ok(()),
         }
     };
-    let keep = |new: &Option<String>, current: &str| -> String {
-        new.clone().unwrap_or_else(|| current.to_string())
+    if args.host.is_none()
+        && args.scheme.is_none()
+        && args.port.is_none()
+        && args.template.is_none()
+        && args.dbname.is_none()
+        && args.user.is_none()
+        && args.host_key_fingerprint.is_none()
+        && args.secret.is_none()
+        && args.sslmode.is_none()
+        && args.ca_bundle.is_none()
+    {
+        return Err("conn update requires at least one field flag".into());
+    }
+    if args.port == Some(0) {
+        return Err("--port must be 1–65535".into());
+    }
+    let (trusted_ca_bundle_path, clear_trusted_ca_bundle) = match &args.ca_bundle {
+        Some(path) if path.is_empty() => (None, true),
+        Some(path) => (Some(path.clone()), false),
+        None => (None, false),
     };
-    match existing {
-        ConnectionConfig::Api {
-            host,
-            scheme,
-            port,
-            trusted_ca_bundle_path,
-            template,
-            mcp_path,
-            oauth,
-        } => {
+    let patch = ConnectionConfigPatch {
+        host: args.host.clone(),
+        scheme: args.scheme.clone(),
+        port: args.port,
+        template: args.template.clone(),
+        dbname: args.dbname.clone(),
+        user: args.user.clone(),
+        sslmode: match args.sslmode.as_deref() {
+            Some(value) => Some(parse_sslmode(Some(value))?),
+            None => None,
+        },
+        trusted_ca_bundle_path,
+        clear_trusted_ca_bundle,
+        host_key_fingerprint: args.host_key_fingerprint.clone(),
+        secret_id,
+    };
+    match dto.kind.as_str() {
+        "api" => {
             forbid(&[
                 ("dbname", args.dbname.is_some()),
                 ("user", args.user.is_some()),
@@ -1664,56 +1914,17 @@ fn merged_config(
                 ("sslmode", args.sslmode.is_some()),
                 ("host-key-fingerprint", args.host_key_fingerprint.is_some()),
             ])?;
-            Ok(ConnectionConfig::Api {
-                host: keep(&args.host, host),
-                scheme: keep(&args.scheme, scheme),
-                port: args.port.or(*port),
-                trusted_ca_bundle_path: match &args.ca_bundle {
-                    Some(path) if path.is_empty() => None,
-                    Some(path) => Some(path.clone()),
-                    None => trusted_ca_bundle_path.clone(),
-                },
-                template: keep(&args.template, template),
-                mcp_path: mcp_path.clone(),
-                oauth: oauth.clone(),
-            })
+            Ok(patch)
         }
-        ConnectionConfig::Pg {
-            host,
-            port,
-            dbname,
-            user,
-            sslmode,
-            trusted_ca_bundle_path,
-        } => {
+        "pg" => {
             forbid(&[
                 ("scheme", args.scheme.is_some()),
                 ("template", args.template.is_some()),
                 ("host-key-fingerprint", args.host_key_fingerprint.is_some()),
             ])?;
-            Ok(ConnectionConfig::Pg {
-                host: keep(&args.host, host),
-                port: args.port.unwrap_or(*port),
-                dbname: keep(&args.dbname, dbname),
-                user: keep(&args.user, user),
-                sslmode: match args.sslmode.as_deref() {
-                    Some(value) => parse_sslmode(Some(value))?,
-                    None => *sslmode,
-                },
-                trusted_ca_bundle_path: match &args.ca_bundle {
-                    Some(path) if path.is_empty() => None,
-                    Some(path) => Some(path.clone()),
-                    None => trusted_ca_bundle_path.clone(),
-                },
-            })
+            Ok(patch)
         }
-        ConnectionConfig::Ssh {
-            destination,
-            host,
-            port,
-            user,
-            host_key_fingerprint,
-        } => {
+        "ssh" => {
             forbid(&[
                 ("scheme", args.scheme.is_some()),
                 ("template", args.template.is_some()),
@@ -1721,16 +1932,9 @@ fn merged_config(
                 ("sslmode", args.sslmode.is_some()),
                 ("ca-bundle", args.ca_bundle.is_some()),
             ])?;
-            Ok(ConnectionConfig::Ssh {
-                destination: destination.clone(),
-                host: keep(&args.host, host),
-                port: args.port.unwrap_or(*port),
-                user: keep(&args.user, user),
-                // '' clears the pin: the next agent connection re-pins the
-                // observed key.
-                host_key_fingerprint: keep(&args.host_key_fingerprint, host_key_fingerprint),
-            })
+            Ok(patch)
         }
+        other => Err(format!("unknown connection kind {other:?}")),
     }
 }
 
@@ -1738,29 +1942,18 @@ fn cmd_conn_update(args: ConnUpdate) {
     let managed = management_backend(args.root.clone(), args.broker.clone());
     let dto = conn_dto(&managed, &args.name);
     refuse_oauth_managed(&dto);
-    let existing = match config_from_dto(&dto) {
-        Ok(config) => config,
+    let secret_id = match (&args.secret, dto.kind.as_str()) {
+        (Some(name), "pg" | "ssh") => Some(dto_id(&secret_dto(&managed, name).id)),
+        _ => None,
+    };
+    let patch = match connection_config_patch(&dto, &args, secret_id) {
+        Ok(patch) => patch,
         Err(e) => die_with(ExitCode::Usage, e),
     };
-    let config = match merged_config(&existing, &args) {
-        Ok(config) => config,
-        Err(e) => die_with(ExitCode::Usage, e),
-    };
-    // api derives its secrets from the template; pg/ssh rebind when
-    // --secret is given and keep the current binding otherwise.
-    let secrets = match (&args.secret, dto.kind.as_str()) {
-        (_, "api") => Vec::new(),
-        (Some(name), _) => vec![dto_id(&secret_dto(&managed, name).id)],
-        (None, _) => secret_ids_by_names(&managed, &dto.secret_names),
-    };
-    managed.run_gated(managed.backend.update_connection(
+    managed.run_gated(managed.backend.patch_connection(
         dto_id(&dto.id),
         dto.updated_at.clone(),
-        ConnectionSpec {
-            name: dto.name.clone(),
-            config,
-            secrets,
-        },
+        patch,
     ));
     let updated = conn_dto(&managed, &dto.name);
     eprintln!(
@@ -3238,6 +3431,21 @@ mod tests {
         assert!(parse_manage_ttl_days("3651").is_err());
     }
 
+    #[test]
+    fn settings_reject_unsupported_presence_windows_during_parsing() {
+        let error =
+            match Cli::try_parse_from(["mfa", "settings", "set", "--presence-window-secs", "1"]) {
+                Ok(_) => panic!("an unsupported presence window reached broker mutation"),
+                Err(error) => error,
+            };
+        assert!(error.to_string().contains("900, 3600, or 7200"));
+
+        assert!(
+            Cli::try_parse_from(["mfa", "settings", "set", "--presence-window-secs", "3600",])
+                .is_ok()
+        );
+    }
+
     /// SSH-24 and SSH-9. Everything printed here was already in the response
     /// and discarded: the destination an alias-imported tool is reached by, the
     /// fingerprint the broker actually enforces, an absolute deadline (the agent
@@ -3676,17 +3884,15 @@ mod tests {
         }
     }
 
-    #[test]
-    fn dto_reconstruction_preserves_byo_oauth_coordinates_for_full_updates() {
-        use aka_api::{AccessDto, OAuthDto};
-
-        let dto = ConnectionDto {
+    fn update_dto(kind: &str) -> ConnectionDto {
+        use aka_api::AccessDto;
+        ConnectionDto {
             id: Uuid::new_v4().to_string(),
-            name: "calendar".into(),
+            name: "test".into(),
             updated_at: "2026-07-29T12:00:00.000000000Z".into(),
-            kind: "api".into(),
-            target: "https://api.example.com".into(),
-            secret_names: vec!["CALENDAR_OAUTH".into()],
+            kind: kind.into(),
+            target: "example.com".into(),
+            secret_names: vec![],
             oauth: false,
             agent_access: AccessDto {
                 enabled: true,
@@ -3697,10 +3903,10 @@ mod tests {
                 allowed_tools: None,
                 endpoint: None,
             },
-            host: Some("api.example.com".into()),
-            scheme: Some("https".into()),
+            host: None,
+            scheme: None,
             port: None,
-            template: Some("Authorization: Bearer {{CALENDAR_OAUTH}}".into()),
+            template: None,
             dbname: None,
             user: None,
             host_key_fingerprint: None,
@@ -3709,119 +3915,47 @@ mod tests {
             trusted_ca_bundle_path: None,
             mcp_path: None,
             account: Some("operator@example.com".into()),
-            oauth_spec: Some(OAuthDto {
-                auth_url: "https://accounts.example.com/authorize".into(),
-                token_url: "https://accounts.example.com/token".into(),
-                client_id: "client-id".into(),
-                scopes: vec!["calendar.read".into()],
-                extra_auth_params: vec![("access_type".into(), "offline".into())],
-            }),
+            oauth_spec: None,
             last_status: None,
             last_detail: None,
             last_checked_at: None,
-        };
-
-        let ConnectionConfig::Api { oauth, .. } = config_from_dto(&dto).unwrap() else {
-            panic!("expected API config");
-        };
-        let oauth = oauth.expect("BYO OAuth coordinates survive full-update reconstruction");
-        assert_eq!(oauth.client_id, "client-id");
-        assert_eq!(oauth.scopes, vec!["calendar.read"]);
-        assert_eq!(
-            oauth.extra_auth_params,
-            vec![("access_type".into(), "offline".into())]
-        );
+        }
     }
 
     #[test]
-    fn update_merges_over_existing_and_preserves_unmanaged_fields() {
-        let existing = ConnectionConfig::Api {
-            host: "api.github.com".into(),
-            scheme: "https".into(),
-            port: None,
-            trusted_ca_bundle_path: Some("/etc/api-ca.pem".into()),
-            template: "Authorization: Bearer {{KEY}}".into(),
-            mcp_path: Some("/mcp".into()),
-            oauth: None,
-        };
+    fn update_sends_only_supplied_fields_and_names_stray_flags() {
+        let dto = update_dto("api");
         let mut a = update_args();
+        assert!(connection_config_patch(&dto, &a, None)
+            .unwrap_err()
+            .contains("at least one field flag"));
+
         a.host = Some("api.example.com".into());
-        match merged_config(&existing, &a).unwrap() {
-            ConnectionConfig::Api {
-                host,
-                scheme,
-                trusted_ca_bundle_path,
-                template,
-                mcp_path,
-                ..
-            } => {
-                assert_eq!(host, "api.example.com");
-                assert_eq!(scheme, "https", "unspecified flags keep their values");
-                assert_eq!(
-                    trusted_ca_bundle_path.as_deref(),
-                    Some("/etc/api-ca.pem"),
-                    "unspecified --ca-bundle keeps its value"
-                );
-                assert_eq!(template, "Authorization: Bearer {{KEY}}");
-                assert_eq!(mcp_path.as_deref(), Some("/mcp"), "mcp_path carries over");
-            }
-            other => panic!("wrong config: {other:?}"),
-        }
-        // A stray flag for the kind is named, same as `conn add`.
+        let patch = connection_config_patch(&dto, &a, None).unwrap();
+        assert_eq!(patch.host.as_deref(), Some("api.example.com"));
+        assert_eq!(patch.scheme, None);
+        assert_eq!(patch.template, None);
+        assert_eq!(patch.trusted_ca_bundle_path, None);
+        assert!(!patch.clear_trusted_ca_bundle);
+
         a.dbname = Some("stray".into());
-        assert!(merged_config(&existing, &a)
+        assert!(connection_config_patch(&dto, &a, None)
             .unwrap_err()
             .contains("--dbname"));
     }
 
     #[test]
-    fn update_clears_pg_ca_bundle_and_ssh_pin_with_empty_strings() {
-        let pg = ConnectionConfig::Pg {
-            host: "db.internal".into(),
-            port: 5432,
-            dbname: "app".into(),
-            user: "app".into(),
-            sslmode: PgSslMode::VerifyCa,
-            trusted_ca_bundle_path: Some("/etc/ca.pem".into()),
-        };
+    fn update_represents_explicit_clears_without_rebuilding_config() {
         let mut a = update_args();
         a.ca_bundle = Some(String::new());
-        match merged_config(&pg, &a).unwrap() {
-            ConnectionConfig::Pg {
-                sslmode,
-                trusted_ca_bundle_path,
-                ..
-            } => {
-                assert_eq!(trusted_ca_bundle_path, None, "'' clears the bundle");
-                assert_eq!(sslmode, PgSslMode::VerifyCa, "sslmode kept");
-            }
-            other => panic!("wrong config: {other:?}"),
-        }
+        let patch = connection_config_patch(&update_dto("pg"), &a, None).unwrap();
+        assert!(patch.clear_trusted_ca_bundle);
+        assert_eq!(patch.trusted_ca_bundle_path, None);
 
-        let ssh = ConnectionConfig::Ssh {
-            destination: Some("prod".into()),
-            host: "prod.example.com".into(),
-            port: 22,
-            user: "deploy".into(),
-            host_key_fingerprint: "SHA256:AAAA".into(),
-        };
         let mut a = update_args();
         a.host_key_fingerprint = Some(String::new());
-        match merged_config(&ssh, &a).unwrap() {
-            ConnectionConfig::Ssh {
-                destination,
-                host_key_fingerprint,
-                ..
-            } => {
-                assert_eq!(host_key_fingerprint, "", "'' clears the pin for re-TOFU");
-                assert_eq!(
-                    destination.as_deref(),
-                    Some("prod"),
-                    "destination carries over"
-                );
-            }
-            other => panic!("wrong config: {other:?}"),
-        }
+        let patch = connection_config_patch(&update_dto("ssh"), &a, None).unwrap();
+        assert_eq!(patch.host_key_fingerprint.as_deref(), Some(""));
     }
 
     #[test]

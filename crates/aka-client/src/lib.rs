@@ -24,10 +24,10 @@ use aka_api::{
 use aka_core::broker::ConnectionTestReport;
 use aka_core::manage::{
     AccessBody, AllowedToolsBody, ApprovalResponseBody, BackendProfile, ConfirmBody,
-    ConnectionAddBody, ConnectionRenameBody, ConnectionUpdateBody, ConnectionsReorderBody,
-    DraftTestBody, ElicitationResponseBody, ManageResult, ManagementBackend, McpAuthDeliverBody,
-    McpAuthStartBody, OAuthCompleteBody, OAuthReconnectBody, OAuthStartBody, SecretAddBody,
-    SecretEditBody, SettingsPatchBody,
+    ConnectionAddBody, ConnectionConfigPatch, ConnectionConfigPatchBody, ConnectionRenameBody,
+    ConnectionUpdateBody, ConnectionsReorderBody, DraftTestBody, ElicitationResponseBody,
+    ManageResult, ManagementBackend, McpAuthDeliverBody, McpAuthStartBody, OAuthCompleteBody,
+    OAuthReconnectBody, OAuthStartBody, SecretAddBody, SecretEditBody, SettingsPatchBody,
 };
 use aka_core::store::ConnectionSpec;
 use aka_core::types::SecretValue;
@@ -693,6 +693,22 @@ impl ManagementBackend for RemoteBackend {
             &ConnectionRenameBody {
                 expected_updated_at,
                 name,
+            },
+        )
+        .await
+    }
+
+    async fn patch_connection(
+        &self,
+        id: Uuid,
+        expected_updated_at: String,
+        patch: ConnectionConfigPatch,
+    ) -> ManageResult<()> {
+        self.patch(
+            &format!("/v1/manage/connections/{id}/config"),
+            &ConnectionConfigPatchBody {
+                expected_updated_at,
+                patch,
             },
         )
         .await

@@ -26,7 +26,9 @@ use crate::audit::AuditEntry;
 use crate::broker::{Broker, ConnectionTestReport, IssuedEndpointInfo};
 use crate::error::CoreError;
 use crate::store::ConnectionSpec;
-use crate::types::{Connection, DecisionSurface, SecretMeta, SecretValue};
+use crate::types::{
+    Connection, ConnectionConfig, DecisionSurface, PgSslMode, SecretMeta, SecretValue,
+};
 
 /// A management call's result: the value, or the wire-shaped error the
 /// shell maps onto form fields.
@@ -863,6 +865,171 @@ pub struct ConnectionRenameBody {
     pub name: String,
 }
 
+/// Capability-field changes for `PATCH /v1/manage/connections/{id}/config`.
+///
+/// The broker applies these fields to its authoritative connection under an
+/// optimistic version check. Management clients therefore never reconstruct
+/// a complete `ConnectionConfig` merely to change one field.
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ConnectionConfigPatch {
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub scheme: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub template: Option<String>,
+    #[serde(default)]
+    pub dbname: Option<String>,
+    #[serde(default)]
+    pub user: Option<String>,
+    #[serde(default)]
+    pub sslmode: Option<PgSslMode>,
+    #[serde(default)]
+    pub trusted_ca_bundle_path: Option<String>,
+    #[serde(default)]
+    pub clear_trusted_ca_bundle: bool,
+    #[serde(default)]
+    pub host_key_fingerprint: Option<String>,
+    /// Rebind the one credential used by Postgres or SSH. Absence preserves
+    /// the current binding.
+    #[serde(default)]
+    pub secret_id: Option<Uuid>,
+}
+
+/// `PATCH /v1/manage/connections/{id}/config`.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct ConnectionConfigPatchBody {
+    pub expected_updated_at: String,
+    pub patch: ConnectionConfigPatch,
+}
+
+fn invalid_patch(field: &str, kind: &str) -> ManageError {
+    ManageError::InvalidConnectionConfig {
+        message: format!("{field} does not apply to a {kind} connection"),
+    }
+}
+
+fn patched_connection_spec(
+    connection: &Connection,
+    patch: ConnectionConfigPatch,
+) -> ManageResult<ConnectionSpec> {
+    if patch.clear_trusted_ca_bundle && patch.trusted_ca_bundle_path.is_some() {
+        return Err(ManageError::InvalidConnectionConfig {
+            message: "cannot set and clear the CA bundle in one update".into(),
+        });
+    }
+    let ca_bundle = |current: &Option<String>| {
+        if patch.clear_trusted_ca_bundle {
+            None
+        } else {
+            patch
+                .trusted_ca_bundle_path
+                .clone()
+                .or_else(|| current.clone())
+        }
+    };
+    let config = match &connection.config {
+        ConnectionConfig::Api {
+            host,
+            scheme,
+            port,
+            trusted_ca_bundle_path,
+            template,
+            mcp_path,
+            oauth,
+        } => {
+            for (field, present) in [
+                ("dbname", patch.dbname.is_some()),
+                ("user", patch.user.is_some()),
+                ("sslmode", patch.sslmode.is_some()),
+                ("host_key_fingerprint", patch.host_key_fingerprint.is_some()),
+                ("secret_id", patch.secret_id.is_some()),
+            ] {
+                if present {
+                    return Err(invalid_patch(field, "API"));
+                }
+            }
+            ConnectionConfig::Api {
+                host: patch.host.unwrap_or_else(|| host.clone()),
+                scheme: patch.scheme.unwrap_or_else(|| scheme.clone()),
+                port: patch.port.or(*port),
+                trusted_ca_bundle_path: ca_bundle(trusted_ca_bundle_path),
+                template: patch.template.unwrap_or_else(|| template.clone()),
+                mcp_path: mcp_path.clone(),
+                oauth: oauth.clone(),
+            }
+        }
+        ConnectionConfig::Pg {
+            host,
+            port,
+            dbname,
+            user,
+            sslmode,
+            trusted_ca_bundle_path,
+        } => {
+            for (field, present) in [
+                ("scheme", patch.scheme.is_some()),
+                ("template", patch.template.is_some()),
+                ("host_key_fingerprint", patch.host_key_fingerprint.is_some()),
+            ] {
+                if present {
+                    return Err(invalid_patch(field, "Postgres"));
+                }
+            }
+            ConnectionConfig::Pg {
+                host: patch.host.unwrap_or_else(|| host.clone()),
+                port: patch.port.unwrap_or(*port),
+                dbname: patch.dbname.unwrap_or_else(|| dbname.clone()),
+                user: patch.user.unwrap_or_else(|| user.clone()),
+                sslmode: patch.sslmode.unwrap_or(*sslmode),
+                trusted_ca_bundle_path: ca_bundle(trusted_ca_bundle_path),
+            }
+        }
+        ConnectionConfig::Ssh {
+            destination,
+            host,
+            port,
+            user,
+            host_key_fingerprint,
+        } => {
+            for (field, present) in [
+                ("scheme", patch.scheme.is_some()),
+                ("template", patch.template.is_some()),
+                ("dbname", patch.dbname.is_some()),
+                ("sslmode", patch.sslmode.is_some()),
+                (
+                    "trusted_ca_bundle_path",
+                    patch.trusted_ca_bundle_path.is_some() || patch.clear_trusted_ca_bundle,
+                ),
+            ] {
+                if present {
+                    return Err(invalid_patch(field, "SSH"));
+                }
+            }
+            ConnectionConfig::Ssh {
+                destination: destination.clone(),
+                host: patch.host.unwrap_or_else(|| host.clone()),
+                port: patch.port.unwrap_or(*port),
+                user: patch.user.unwrap_or_else(|| user.clone()),
+                host_key_fingerprint: patch
+                    .host_key_fingerprint
+                    .unwrap_or_else(|| host_key_fingerprint.clone()),
+            }
+        }
+    };
+    let secrets = patch
+        .secret_id
+        .map(|id| vec![id])
+        .unwrap_or_else(|| connection.secrets.clone());
+    Ok(ConnectionSpec {
+        name: connection.name.clone(),
+        config,
+        secrets,
+    })
+}
+
 /// `POST /v1/manage/connections/reorder`: the full desired front-to-back
 /// order of connection ids.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -1024,6 +1191,12 @@ pub trait ManagementBackend: Send + Sync {
         id: Uuid,
         expected_updated_at: String,
         name: String,
+    ) -> ManageResult<()>;
+    async fn patch_connection(
+        &self,
+        id: Uuid,
+        expected_updated_at: String,
+        patch: ConnectionConfigPatch,
     ) -> ManageResult<()>;
     async fn delete_connection(&self, id: Uuid) -> ManageResult<()>;
     /// Persist a user-chosen order for the Tools list. `ordered_ids` is the
@@ -1286,6 +1459,30 @@ impl ManagementBackend for LocalBackend {
         self.blocking(move |broker| {
             broker
                 .ui_rename_connection_if_current(&id, &expected_updated_at, name)
+                .map(|_| ())
+        })
+        .await
+    }
+
+    async fn patch_connection(
+        &self,
+        id: Uuid,
+        expected_updated_at: String,
+        patch: ConnectionConfigPatch,
+    ) -> ManageResult<()> {
+        let current = self.broker.store.connection_by_id(&id)?;
+        if current.version() != expected_updated_at {
+            return Err(ManageError::ConnectionChanged);
+        }
+        let spec = patched_connection_spec(&current, patch)?;
+        if current.config != spec.config || current.secrets != spec.secrets {
+            self.broker
+                .validate_ssh_connection_credential(&spec, None)
+                .await?;
+        }
+        self.blocking(move |broker| {
+            broker
+                .ui_update_connection_if_current(&id, &expected_updated_at, spec)
                 .map(|_| ())
         })
         .await
@@ -1838,5 +2035,58 @@ mod tests {
 
         let setup = backend.agent_setup().await.unwrap();
         assert!(setup.contains("--unix-socket"));
+    }
+
+    #[test]
+    fn config_patch_preserves_broker_authoritative_fields() {
+        let now = chrono::Utc::now();
+        let secret = Uuid::new_v4();
+        let connection = Connection {
+            id: Uuid::new_v4(),
+            name: "calendar".into(),
+            config: ConnectionConfig::Api {
+                host: "api.example.com".into(),
+                scheme: "https".into(),
+                port: None,
+                trusted_ca_bundle_path: Some("/etc/company-ca.pem".into()),
+                template: "Authorization: Bearer {{CALENDAR}}".into(),
+                mcp_path: Some("/mcp".into()),
+                oauth: None,
+            },
+            secrets: vec![secret],
+            account: Some("operator@example.com".into()),
+            oauth: None,
+            created_at: now,
+            updated_at: now,
+        };
+
+        let spec = patched_connection_spec(
+            &connection,
+            ConnectionConfigPatch {
+                host: Some("api2.example.com".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let ConnectionConfig::Api {
+            host,
+            scheme,
+            trusted_ca_bundle_path,
+            template,
+            mcp_path,
+            ..
+        } = spec.config
+        else {
+            panic!("expected API config");
+        };
+        assert_eq!(host, "api2.example.com");
+        assert_eq!(scheme, "https");
+        assert_eq!(
+            trusted_ca_bundle_path.as_deref(),
+            Some("/etc/company-ca.pem")
+        );
+        assert_eq!(template, "Authorization: Bearer {{CALENDAR}}");
+        assert_eq!(mcp_path.as_deref(), Some("/mcp"));
+        assert_eq!(spec.secrets, vec![secret]);
     }
 }
