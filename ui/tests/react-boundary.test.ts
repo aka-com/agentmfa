@@ -264,6 +264,16 @@ test('the settings menu overhangs the sidebar rather than matching its width', a
   assert.match(menu, /right: -70px/);
 });
 
+test('typography and narrow form columns follow the user text scale', async () => {
+  const styles = await readFile(new URL('../styles.css', import.meta.url), 'utf8');
+
+  assert.doesNotMatch(styles, /font-size:\s*[^;}]*\bpx\b/);
+  assert.match(styles, /--content-max:\s*47\.5rem/);
+  assert.match(styles, /\.dw-side\{[^}]*flex:\s*0 0 9\.75rem/);
+  assert.match(styles, /\.f-2col\{[^}]*flex-wrap:\s*wrap/);
+  assert.match(styles, /\.f-2col \.f-row\{[^}]*flex:\s*1 1 16ch/);
+});
+
 test('connection-string credentials are masked with asterisks', async () => {
   const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
   const masker = app.match(/function maskedEndpoint\(address: string\): string \{([\s\S]*?)\}/)?.[1];

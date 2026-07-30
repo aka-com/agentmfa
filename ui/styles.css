@@ -10,7 +10,7 @@
   color-scheme: light dark;
 
   /* layout */
-  --content-max: 760px;    /* main-window column cap (head + listing share it) */
+  --content-max: 47.5rem;  /* main-window column cap (head + listing share it) */
   --traffic-lights: 54px;  /* width of the macOS traffic-light cluster */
 
   /* text */
@@ -105,7 +105,7 @@
   html, body{ height: 100%; }
   body{
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 15px;
+  font-size: 0.9375rem;
   color: var(--ink);
   background: transparent;
   -webkit-font-smoothing: antialiased;
@@ -116,7 +116,7 @@
   overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
 }
   button{ font-family: inherit; }
-  code{ font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace; font-size: calc(1em - 1px); }
+  code{ font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace; font-size: calc(1em - .0625rem); }
   input::placeholder, textarea::placeholder{ color: var(--muted); opacity: .7; }
   #root{ height: 100%; }
   /* ---- initial load placeholder ----------------------------------------- */
@@ -162,8 +162,8 @@
   display: flex; align-items: center; justify-content: center;
 }
 .dd-appicon svg{ width: 18px; height: 18px; stroke-width: 1.9; }
-  .dd-title{ font-size: 15.5px; font-weight: 700; }
-  .dd-sub{ font-size: 13px; color: var(--muted); margin-top: 1px; display: flex; align-items: center; gap: 5px; }
+  .dd-title{ font-size: 0.96875rem; font-weight: 700; }
+  .dd-sub{ font-size: 0.8125rem; color: var(--muted); margin-top: 1px; display: flex; align-items: center; gap: 5px; }
   .dd-sub .dot{ width: 7px; height: 7px; border-radius: 50%; background: #30c94e; box-shadow: 0 0 4px rgba(48,201,78,.7); display: inline-block; }
   .ready-status{ gap: 6px; }
   .ready-state{ display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
@@ -185,23 +185,23 @@
   /* ---- main window layout ---------------------------------------------- */
 .dw-body{ flex: 1; display: flex; min-height: 0; }
 .dw-side{
-  flex: 0 0 156px; display: flex; flex-direction: column;
+  flex: 0 0 9.75rem; display: flex; flex-direction: column;
   padding: 14px 10px 10px;
   border-right: 1px solid var(--line);
   background: var(--wash);
   -webkit-user-select: none; user-select: none;
 }
 @media (max-width: 800px) {
-  .dw-side { flex-basis: 116px; }
+  .dw-side { flex-basis: 7.25rem; }
 }
   .dw-brand{ display: flex; align-items: center; gap: 9px; padding: 2px 4px 14px; }
-  .dw-brand .dd-title{ font-size: 14.5px; }
+  .dw-brand .dd-title{ font-size: 0.90625rem; }
   .dw-nav{ display: flex; flex-direction: column; gap: 2px; flex: 1; }
   .nav-item{
   display: flex; align-items: center; gap: 7px;
   border: none; background: transparent; cursor: pointer;
   text-align: left; padding: 7px 9px; border-radius: 7px;
-  font-size: 14px; color: var(--ink-3);
+  font-size: 0.875rem; color: var(--ink-3);
 }
   .nav-item:hover{ background: var(--hover); }
   .nav-item.on{ background: var(--accent-wash-2); color: var(--accent-ink); font-weight: 600; }
@@ -210,7 +210,7 @@
   flex: 0 0 auto; min-width: 19px; height: 19px; padding: 0 5px;
   display: inline-flex; align-items: center; justify-content: center;
   border-radius: 999px; background: var(--amber-wash); color: var(--amber-strong);
-  font-size: 11px; font-weight: 700; line-height: 1;
+  font-size: 0.6875rem; font-weight: 700; line-height: 1;
 }
   /* Keep the history destination beside the sidebar controls it relates to,
      while the primary setup/navigation destinations stay grouped at the top.
@@ -223,7 +223,7 @@
      option rotates 90° to read down the bar. The order is unchanged — "Get
      started" stays on top, the rest follow below it. */
   @media (max-width: 720px) {
-    .dw-side{ flex: 0 0 52px; padding: 12px 6px 10px; align-items: center; }
+    .dw-side{ flex: 0 0 3.25rem; padding: 12px 6px 10px; align-items: center; }
     .dw-brand{ flex-direction: column; gap: 6px; padding: 2px 0 12px; }
     .dw-brand > div:not(.dd-appicon){ display: none; }
     .dw-nav{ align-items: center; gap: 6px; }
@@ -243,11 +243,11 @@
   .dw-head{
   flex: 0 0 auto;
   display: flex; align-items: center; justify-content: space-between;
-  width: 100%; max-width: calc(var(--content-max) + 8px); margin: 0 auto;
+  width: 100%; max-width: calc(var(--content-max) + .5rem); margin: 0 auto;
   padding: 12px 16px 12px 24px;
 }
   .dw-head-title{ min-width: 0; display: flex; align-items: center; gap: 8px; }
-  .dw-head h2{ font-size: 17px; }/* ---- custom title bar (main window) ---------------------------------- */
+  .dw-head h2{ font-size: 1.0625rem; }/* ---- custom title bar (main window) ---------------------------------- */
 /* The window uses titleBarStyle "Overlay": the native macOS traffic lights
    float over the top-left of this bar, so the app owns its own chrome and the
    title sits centered across the full width. */
@@ -260,7 +260,7 @@
   user-select: none;
 }
   .dw-titlebar .dw-title{
-  font-size: 13px; font-weight: 600; color: var(--ink-3);
+  font-size: 0.8125rem; font-weight: 600; color: var(--ink-3);
   -webkit-user-select: none; user-select: none;
 }
   /* The title sits in the true middle of the window (not nudged by the
@@ -276,7 +276,7 @@
   .broker-btn{
   display: inline-flex; align-items: center; gap: 6px;
   height: 24px; padding: 0 8px;
-  font-size: 12px; font-weight: 500; color: var(--ink-2);
+  font-size: 0.75rem; font-weight: 500; color: var(--ink-2);
   background: transparent; border: 1px solid var(--line); border-radius: 8px;
   cursor: default;
 }
@@ -311,12 +311,12 @@
   padding: 26px 28px;
   background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
 }
-  .broker-pane h2{ margin: 0; font-size: 16px; }
-  .broker-pane .bp-lead{ margin: 0; font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+  .broker-pane h2{ margin: 0; font-size: 1rem; }
+  .broker-pane .bp-lead{ margin: 0; font-size: 0.78125rem; color: var(--muted); line-height: 1.5; }
   .broker-pane[role="form"] h2 + .bp-lead{ margin-top: -4px; }
-  .broker-pane .bp-lead code, .broker-pane > p code{ font-size: 11.5px; }
+  .broker-pane .bp-lead code, .broker-pane > p code{ font-size: 0.71875rem; }
   .broker-pane .bp-detail{
-  margin: 0; font-size: 12px; color: var(--danger-text);
+  margin: 0; font-size: 0.75rem; color: var(--danger-text);
   background: rgba(255,59,48,.07); border: 1px solid rgba(255,59,48,.2);
   border-radius: 7px; padding: 8px 10px; word-break: break-word;
 }
@@ -324,9 +324,9 @@
   .broker-pane .bp-icon svg{ width: 30px; height: 30px; }
   .broker-pane .bp-icon-error{ color: var(--danger); }
   .broker-pane .f-row{ margin-bottom: 5px; }
-  .broker-pane .f-row label{ font-size: 12px; }
+  .broker-pane .f-row label{ font-size: 0.75rem; }
   .broker-pane .inline-error{
-  font-size: 12px; color: var(--danger-ink); word-break: break-word;
+  font-size: 0.75rem; color: var(--danger-ink); word-break: break-word;
 }
   .broker-pane .adv-collapse{ margin: -7px 0 6px; }
   .broker-pane .bp-setup-code{ margin-top: 8px; }
@@ -348,7 +348,7 @@
     margin: 10px 18px 0; padding: 9px 11px;
     border: 1px solid var(--danger-border); border-radius: 8px;
     background: var(--danger-wash); color: var(--danger-ink);
-    font-size: 12.5px; line-height: 1.4;
+    font-size: 0.78125rem; line-height: 1.4;
   }
   .load-failure > div{ display: flex; flex-direction: column; min-width: 0; }
   .load-failure span{ color: var(--ink-2); overflow-wrap: anywhere; }
@@ -368,14 +368,14 @@
   /* Build version, above the first action. Deliberately not a .menu-item: it
      is a hint, so no hover, no pointer, and nothing to click or focus. */
   .menu-version{
-  padding: 4px 9px 3px; font-size: 11.5px; color: var(--muted);
+  padding: 4px 9px 3px; font-size: 0.71875rem; color: var(--muted);
   cursor: default; -webkit-user-select: none; user-select: none;
 }
   .menu-item{
   display: flex; align-items: center; gap: 8px;
   border: none; background: transparent; cursor: pointer;
   text-align: left; padding: 7px 9px; border-radius: 6px;
-  font-size: 13.5px; color: var(--ink-2);
+  font-size: 0.84375rem; color: var(--ink-2);
 }
   .menu-item:hover{ background: var(--hover); }
   /* Icons come in mixed intrinsic sizes; a fixed square keeps every row's
@@ -386,7 +386,7 @@
   .seg-btn{
   flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 5px;
   border: none; background: transparent;
-  padding: 5px 0; font-size: 13.5px; color: var(--ink-3);
+  padding: 5px 0; font-size: 0.84375rem; color: var(--ink-3);
   border-radius: 6px; cursor: pointer;
 }
   .seg-btn.on{ background: var(--seg-on-bg); color: var(--seg-on-ink); box-shadow: 0 1px 3px rgba(0,0,0,.15); font-weight: 600; }
@@ -394,7 +394,7 @@
   min-width: 17px; height: 17px; padding: 0 4px; display: inline-flex;
   align-items: center; justify-content: center; border-radius: 999px;
   background: var(--amber-wash); color: var(--amber-strong);
-  font-size: 10.5px; font-weight: 700; line-height: 1;
+  font-size: 0.65625rem; font-weight: 700; line-height: 1;
 }
   .seg.in-form{ margin: 0; }
   /* ---- content ---------------------------------------------------------- */
@@ -419,7 +419,7 @@
   padding: 0 8px 0 24px;
 }
   .dw-main .content > *{
-  width: min(100%, calc(var(--content-max) - 32px));
+  width: min(100%, calc(var(--content-max) - 2rem));
   margin-left: auto; margin-right: auto;
 }
   .content::-webkit-scrollbar, .dd-global::-webkit-scrollbar{ width: 8px; }
@@ -443,11 +443,11 @@
      Its child then has exactly the same containing width as page content. */
   .dw-main .dd-global.request-route-only{ padding-right: 16px; }
   .dw-main .dd-global > *{
-  width: min(100%, calc(var(--content-max) - 32px));
+  width: min(100%, calc(var(--content-max) - 2rem));
   margin-left: auto; margin-right: auto;
 }
   .live-sessions{ margin-top: 8px; }
-  .live-head{ font-size: 12.5px; font-weight: 600; color: var(--muted); padding: 0 2px 6px; }
+  .live-head{ font-size: 0.78125rem; font-weight: 600; color: var(--muted); padding: 0 2px 6px; }
   .live-list{ display: flex; flex-direction: column; gap: 8px; }
   .live-row{
   display: flex; align-items: center; gap: 9px; padding: 9px 10px;
@@ -469,17 +469,17 @@
   .request-banner:focus-visible{ outline: 2px solid var(--accent); outline-offset: 1px; }
   .request-banner-ico{ flex: 0 0 auto; display: inline-flex; color: var(--amber-strong); }
   .request-banner-copy{ flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-  .request-banner-copy b{ font-size: 13.5px; font-weight: 650; }
-  .request-banner-copy span{ color: var(--muted); font-size: 11.5px; overflow: hidden;
+  .request-banner-copy b{ font-size: 0.84375rem; font-weight: 650; }
+  .request-banner-copy span{ color: var(--muted); font-size: 0.71875rem; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }
-  .request-banner-cta{ flex: 0 0 auto; color: var(--accent-text); font-size: 12px; font-weight: 650; }
+  .request-banner-cta{ flex: 0 0 auto; color: var(--accent-text); font-size: 0.75rem; font-weight: 650; }
 
   /* ---- Request Inbox --------------------------------------------------- */
   .request-inbox{ padding: 4px 0 24px; }
   .request-surface-warning{
   display: flex; flex-direction: column; gap: 2px; margin: 0 0 14px; padding: 10px 12px;
   border: 1px solid var(--danger-border); border-radius: 10px;
-  background: var(--danger-wash); color: var(--danger-text); font-size: 12.5px;
+  background: var(--danger-wash); color: var(--danger-text); font-size: 0.78125rem;
 }
   .request-surface-warning span{ color: var(--muted); }
   .request-section + .request-section{ margin-top: 20px; }
@@ -488,15 +488,15 @@
   min-height: 28px; padding: 0 2px 6px;
 }
   .request-section-head h3{
-  margin: 0; color: var(--muted); font-size: 12.5px; font-weight: 650;
+  margin: 0; color: var(--muted); font-size: 0.78125rem; font-weight: 650;
 }
   .request-section-empty{
   padding: 13px 12px; border: 1px dashed var(--line); border-radius: 10px;
-  color: var(--muted); font-size: 12.5px; text-align: center;
+  color: var(--muted); font-size: 0.78125rem; text-align: center;
 }
   .request-total{
   flex: 0 0 auto; padding: 3px 8px; border-radius: 999px;
-  background: var(--chip-bg); color: var(--muted); font-size: 11.5px; font-weight: 650;
+  background: var(--chip-bg); color: var(--muted); font-size: 0.71875rem; font-weight: 650;
 }
   .request-total.has-requests{ background: var(--amber-wash); color: var(--amber-strong); }
   .request-list{
@@ -522,32 +522,32 @@
   .request-card-body{ flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
   .request-card-top{ display: flex; align-items: center; gap: 10px; }
   .request-kind{
-  color: var(--amber-strong); font-size: 10.5px; font-weight: 750;
+  color: var(--amber-strong); font-size: 0.65625rem; font-weight: 750;
   letter-spacing: .06em; text-transform: uppercase;
 }
   .request-outcome{
   padding: 1px 6px; border-radius: 999px; background: var(--chip-bg);
-  color: var(--muted); font-size: 10.5px; font-weight: 650;
+  color: var(--muted); font-size: 0.65625rem; font-weight: 650;
 }
-  .request-when{ color: var(--muted); font-size: 11px; white-space: nowrap; }
-  .request-card-body > b{ font-size: 13.5px; font-weight: 650; overflow-wrap: anywhere; }
-  .request-context{ color: var(--muted); font-size: 11.5px; overflow: hidden;
+  .request-when{ color: var(--muted); font-size: 0.6875rem; white-space: nowrap; }
+  .request-card-body > b{ font-size: 0.84375rem; font-weight: 650; overflow-wrap: anywhere; }
+  .request-context{ color: var(--muted); font-size: 0.71875rem; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }
   .request-summary{
   align-self: flex-start; max-width: 100%; margin-top: 2px; color: var(--ink-2);
-  font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 0.71875rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
   .request-prompt{
-  margin-top: 2px; color: var(--ink-2); font-size: 12px; line-height: 1.4;
+  margin-top: 2px; color: var(--ink-2); font-size: 0.75rem; line-height: 1.4;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
-  .request-foot{ margin-top: 1px; color: var(--faint); font-size: 11px; }
+  .request-foot{ margin-top: 1px; color: var(--faint); font-size: 0.6875rem; }
   .request-card-side{
   flex: 0 0 auto; min-width: max-content; display: flex; flex-direction: column;
   align-items: flex-end; justify-content: space-between; gap: 8px; padding: 1px 0;
 }
   .request-card-action{
-  flex: 0 0 auto; color: var(--accent-text); font-size: 12px; font-weight: 650;
+  flex: 0 0 auto; color: var(--accent-text); font-size: 0.75rem; font-weight: 650;
 }
   .request-card-history{ display: block; padding: 0; cursor: default; }
   .request-card-history:hover{ background: transparent; }
@@ -604,15 +604,15 @@
   /* The queue carries only a one-line notification; clicking it opens the
      dialog. The row is a real button so it is keyboard-reachable. */
   .elicit-note{ display: flex; align-items: center; gap: 9px; width: 100%; margin: 4px 0 8px;
-    padding: 9px 12px; font: inherit; font-size: 13.5px; color: var(--ink); text-align: left;
+    padding: 9px 12px; font: inherit; font-size: 0.84375rem; color: var(--ink); text-align: left;
     background: var(--amber-wash); border: 1px solid var(--amber-border); border-radius: 9px;
     cursor: pointer; }
   .elicit-note:hover{ background: var(--amber-wash); filter: brightness(.985); }
   .elicit-ico{ display: inline-flex; color: var(--amber-strong); }
   .elicit-ico svg{ width: 15px; height: 15px; }
   .elicit-note-txt{ flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .elicit-when{ font-size: 12px; color: var(--muted); }
-  .elicit-note-cta{ font-size: 12.5px; font-weight: 600; color: var(--accent-text); }
+  .elicit-when{ font-size: 0.75rem; color: var(--muted); }
+  .elicit-note-cta{ font-size: 0.78125rem; font-weight: 600; color: var(--accent-text); }
 
   /* The dialog: a native-alert shape — centered over the whole app, fixed
      medium-large width, symbol on top, message, quiet context, then the
@@ -623,10 +623,10 @@
     width: 44px; height: 44px; margin-bottom: 10px; border-radius: 12px;
     color: var(--amber-strong); background: var(--amber-wash); border: 1px solid var(--amber-border); }
   .elicit-dlg-ico svg{ width: 22px; height: 22px; }
-  .elicit-dlg-title{ font-size: 15.5px; margin-bottom: 4px; }
+  .elicit-dlg-title{ font-size: 0.96875rem; margin-bottom: 4px; }
   .sheet .elicit-dlg-title{ margin-bottom: 4px; }
-  .elicit-dlg-context{ font-size: 12.5px; color: var(--muted); max-width: 440px; margin: 0 auto; }
-  .elicit-dlg-question{ font-size: 13.5px; color: var(--ink-2); line-height: 1.45;
+  .elicit-dlg-context{ font-size: 0.78125rem; color: var(--muted); max-width: 440px; margin: 0 auto; }
+  .elicit-dlg-question{ font-size: 0.84375rem; color: var(--ink-2); line-height: 1.45;
     max-width: 460px; margin: 6px auto 0; }
   /* Sits between the upstream's question and the fields, because that is
      where the user decides what to type. Danger, not amber: unlike an
@@ -634,15 +634,15 @@
      to allow, it is telling them not to do the thing being asked. */
   .elicit-credential-warn{ display: flex; align-items: flex-start; gap: 8px;
     margin: 12px auto 0; padding: 9px 11px; max-width: 460px; text-align: left;
-    border-radius: 8px; font-size: 12px; line-height: 1.5; color: var(--ink-2);
+    border-radius: 8px; font-size: 0.75rem; line-height: 1.5; color: var(--ink-2);
     background: var(--danger-wash); border: 1px solid var(--danger-border); }
   .elicit-credential-warn svg{ flex: 0 0 auto; width: 14px; height: 14px; margin-top: 2px;
     color: var(--danger-ink); }
   .elicit-credential-warn strong{ font-weight: 600; color: var(--ink); }
   .elicit-dlg-fields{ margin-top: 14px; text-align: left; }
   .elicit-field{ display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px;
-    font-size: 12.5px; font-weight: 600; color: var(--muted); }
-  .elicit-field input{ width: 100%; min-height: 32px; padding: 6px 9px; font-size: 14px;
+    font-size: 0.78125rem; font-weight: 600; color: var(--muted); }
+  .elicit-field input{ width: 100%; min-height: 32px; padding: 6px 9px; font-size: 0.875rem;
     font-family: inherit; color: var(--ink); background: var(--field-bg);
     border: 1px solid var(--line-field); border-radius: 7px; }
   .elicit-field input:focus{ outline: 2px solid rgba(10,124,255,.45); border-color: var(--accent); }
@@ -659,10 +659,10 @@
     text-align: left; background: var(--field-bg); border: 1px solid var(--line-field);
     border-radius: 8px; }
   .approval-summary{ font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 12.5px; color: var(--ink); overflow-wrap: anywhere; }
+    font-size: 0.78125rem; color: var(--ink); overflow-wrap: anywhere; }
   .approval-detail{ margin: 7px 0 0; max-height: 132px; overflow: auto;
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 11.5px; line-height: 1.5; color: var(--muted); white-space: pre-wrap;
+    font-size: 0.71875rem; line-height: 1.5; color: var(--muted); white-space: pre-wrap;
     overflow-wrap: anywhere; }
   /* Agent-, upstream-, and target-controlled text is isolated from
      surrounding punctuation so bidi controls cannot reorder the dialog. */
@@ -672,7 +672,7 @@
      two must not be able to read as one. */
   .approval-consequence{ display: flex; align-items: flex-start; gap: 8px;
     margin: 10px auto 0; padding: 8px 11px; max-width: 460px; text-align: left;
-    border-radius: 8px; font-size: 12px; line-height: 1.5; color: var(--ink-2);
+    border-radius: 8px; font-size: 0.75rem; line-height: 1.5; color: var(--ink-2);
     background: var(--amber-wash); border: 1px solid var(--amber-border); }
   .approval-consequence svg{ flex: 0 0 auto; width: 14px; height: 14px; margin-top: 2px;
     color: var(--amber-strong); }
@@ -684,7 +684,7 @@
      document rather than a dashboard. */
   .start{ max-width: 620px; margin: 0 auto; padding: 20px 0 24px; }
   .start-hero{ text-align: center; }
-  .start-hero h3{ font-size: 19px; }
+  .start-hero h3{ font-size: 1.1875rem; }
   /* The view switch follows the shared heading; both views begin on the
      same content line below it. */
   .start-view-toggle{ display: flex; justify-content: center; margin-top: 14px; }
@@ -710,14 +710,14 @@
     display: inline-flex; align-items: center; justify-content: center; gap: 6px;
     min-width: 32px; height: 32px; padding: 5px 7px; border: 1px solid var(--line); border-radius: 8px;
     background: var(--btn-bg); color: var(--ink-3);
-    font-size: 12.5px; font-weight: 600; cursor: pointer;
+    font-size: 0.78125rem; font-weight: 600; cursor: pointer;
   }
   .start-pick.has-label{ padding-inline: 10px; }
   .start-pick-icon{ display: inline-flex; align-items: center; justify-content: center; line-height: 0; }
   .start-pick-icon svg{ width: 16px; height: 16px; }
   .start-pick-limited{
   padding: 1px 4px; border-radius: 4px; background: var(--amber-wash);
-  color: var(--amber-ink); font-size: 9px; font-weight: 700;
+  color: var(--amber-ink); font-size: 0.5625rem; font-weight: 700;
 }
   .start-pick:hover{ background: var(--btn-hover); }
   .start-pick.on{ border-color: var(--accent); background: var(--accent-wash); color: var(--accent-ink); }
@@ -726,11 +726,11 @@
   .start-num{
     display: flex; align-items: center; justify-content: center; flex: 0 0 auto;
     width: 24px; height: 24px; margin-top: 1px; border-radius: 50%;
-    background: var(--chip-bg); color: var(--ink-2); font-size: 12.5px; font-weight: 700;
+    background: var(--chip-bg); color: var(--ink-2); font-size: 0.78125rem; font-weight: 700;
   }
   .start-body{ flex: 1; min-width: 0; }
-  .start-body > b:first-child{ display: block; font-size: 14px; }
-  .start-body p{ margin-top: 4px; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+  .start-body > b:first-child{ display: block; font-size: 0.875rem; }
+  .start-body p{ margin-top: 4px; color: var(--muted); font-size: 0.78125rem; line-height: 1.5; }
   .start-body > b:first-child + p{ margin-top: 3px; }
   .start-body > .start-picker + p{ margin-top: 10px; }
   .start-actions{ display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 9px; }
@@ -743,25 +743,25 @@
   border: 1px solid var(--line); border-radius: 7px;
   background: var(--code-block-bg); color: var(--ink-2);
   font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12.5px; line-height: 1.45;
+  font-size: 0.78125rem; line-height: 1.45;
 }
   .setup-instructions code{ font: inherit; }
   
   /* ---- tables ----------------------------------------------------------- */
-.sec-table{ width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.sec-table{ width: 100%; border-collapse: collapse; font-size: 0.84375rem; }
   .sec-table th{ padding: 6px; color: var(--muted); border-bottom: 1px solid var(--line);
-    font-size: 11px; font-weight: 650; text-align: left; }
+    font-size: 0.6875rem; font-weight: 650; text-align: left; }
   .sec-table th:nth-last-child(-n+2){ text-align: right; }
   .sec-table td{ padding: 8px 6px; border-bottom: 1px solid var(--line-soft); vertical-align: middle; }
-  .s-name{ font-weight: 600; font-size: 13px; font-family: ui-monospace, Menlo, Consolas, monospace; }
-  .s-sub{ font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; color: var(--muted); margin-top: 2px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .c-name{ font-weight: 600; font-size: 14.5px; }
-  .badge{ display: inline-block; padding: 2px 8px; border-radius: 9px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+  .s-name{ font-weight: 600; font-size: 0.8125rem; font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .s-sub{ font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.6875rem; color: var(--muted); margin-top: 2px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .c-name{ font-weight: 600; font-size: 0.90625rem; }
+  .badge{ display: inline-block; padding: 2px 8px; border-radius: 9px; font-size: 0.75rem; font-weight: 600; white-space: nowrap; }
   .b-api{ background: var(--b-api-bg); color: var(--b-api-ink); }
   .b-pg{ background: var(--b-pg-bg); color: var(--b-pg-ink); }
   .b-ssh{ background: var(--b-ssh-bg); color: var(--b-ssh-ink); }
   .val{ white-space: nowrap; text-align: right; }
-  .val code{ font-size: 12px; letter-spacing: .04em; color: var(--ink-3); }
+  .val code{ font-size: 0.75rem; letter-spacing: .04em; color: var(--ink-3); }
   .val-wrap{ display: inline-flex; align-items: center; gap: 6px; vertical-align: middle; }
   /* The value slot is the positioning context: the masked value is the base
    layer, and the copy button / "Copied" status overlay it centered. */
@@ -776,14 +776,14 @@
   opacity: 0; transition: opacity .14s ease;
   border: 1px solid var(--line-strong); background: var(--btn-bg);
   color: var(--ink-3); border-radius: 6px; padding: 2px 7px;
-  font-size: 12px; line-height: 1; cursor: pointer;
+  font-size: 0.75rem; line-height: 1; cursor: pointer;
   box-shadow: 0 1px 1px rgba(0,0,0,.04);
 }
   .ghost-copy svg{ width: 12px; height: 12px; }
   .val-wrap:hover .ghost-copy, .ghost-copy:focus-visible{ opacity: 1; }
   .copied-badge{
   display: inline-flex; align-items: center; gap: 4px;
-  color: var(--ok-ink); font-weight: 600; font-size: 12.5px; line-height: 1;
+  color: var(--ok-ink); font-weight: 600; font-size: 0.78125rem; line-height: 1;
   letter-spacing: normal; animation: copied-pop .22s ease;
 }
   @keyframes copied-pop{ from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }
@@ -796,10 +796,10 @@
   .rowdel{ text-align: right; white-space: nowrap; }
   .used-by-links{ display: flex; align-items: flex-start; flex-direction: column; gap: 2px; }
   .used-by-link{ max-width: 180px; padding: 0; border: 0; background: none;
-    color: var(--accent-text); font: inherit; font-size: 12px; text-align: left;
+    color: var(--accent-text); font: inherit; font-size: 0.75rem; text-align: left;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
   .used-by-link:hover{ text-decoration: underline; }
-  .confirm-row td{ height: 48px; padding: 0 6px; background: var(--danger-wash); border-radius: 0; font-size: 13px; }
+  .confirm-row td{ height: 48px; padding: 0 6px; background: var(--danger-wash); border-radius: 0; font-size: 0.8125rem; }
   .confirm-inline{ min-height: 48px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .confirm-inline span{ flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* ---- empty state ------------------------------------------------------ */
@@ -810,12 +810,12 @@
     background: var(--wash-2); border: 1px dashed var(--line-strong); color: var(--muted-2);
   }
   .empty-ico svg{ width: 26px; height: 26px; stroke-width: 1.6; }
-  .empty h3{ font-size: 16px; margin-bottom: 6px; }
-  .empty p{ font-size: 13.5px; color: var(--muted); line-height: 1.5; margin-bottom: 16px; }
-  .empty p.empty-tip{ font-size: 12.5px; margin-top: -8px; }
-  .muted-note{ font-size: 13.5px; color: var(--muted); text-align: center; padding: 30px 20px; line-height: 1.5; }
+  .empty h3{ font-size: 1rem; margin-bottom: 6px; }
+  .empty p{ font-size: 0.84375rem; color: var(--muted); line-height: 1.5; margin-bottom: 16px; }
+  .empty p.empty-tip{ font-size: 0.78125rem; margin-top: -8px; }
+  .muted-note{ font-size: 0.84375rem; color: var(--muted); text-align: center; padding: 30px 20px; line-height: 1.5; }
   /* ---- buttons ---------------------------------------------------------- */
-.btn{ border: 1px solid var(--line-strong); background: var(--btn-bg); color: var(--ink); border-radius: 7px; padding: 5px 13px; font-size: 13.5px; cursor: pointer; box-shadow: 0 1px 1px rgba(0,0,0,.05); }
+.btn{ border: 1px solid var(--line-strong); background: var(--btn-bg); color: var(--ink); border-radius: 7px; padding: 5px 13px; font-size: 0.84375rem; cursor: pointer; box-shadow: 0 1px 1px rgba(0,0,0,.05); }
   .btn:hover{ background: var(--btn-hover); }
   .btn:disabled{ opacity: .45; cursor: default; }
   .btn:disabled:hover{ background: var(--btn-bg); }
@@ -824,7 +824,7 @@
   .btn.danger{ background: var(--danger); border-color: var(--danger); color: #fff; font-weight: 600; }
   .btn.danger:hover{ background: #e0281e; }.btn.ghost{ border-color: transparent; background: transparent; box-shadow: none; color: var(--accent-text); }
   .btn.ghost:hover{ background: var(--accent-wash); }
-  .btn.sm{ padding: 3px 9px; font-size: 12.5px; }
+  .btn.sm{ padding: 3px 9px; font-size: 0.78125rem; }
   /* Outline: a visible button without a fill — quieter than default, more
      button-like than ghost. Row-level actions (reissue/revoke/add another). */
   .btn.outline{ background: transparent; box-shadow: none; }
@@ -838,11 +838,11 @@
   /* Stand-ins for the rows the window leaves unmounted. flex: none so the
      column cannot shrink them and shorten the scroll range. */
   .act-pad{ flex: 0 0 auto; }
-  .act-row{ display: flex; gap: 9px; align-items: flex-start; padding: 8px 2px; font-size: 13px; }
-  .act-gutter{ flex: 0 0 56px; font-size: 12px; line-height: 18px; color: var(--muted-2); }
+  .act-row{ display: flex; gap: 9px; align-items: flex-start; padding: 8px 2px; font-size: 0.8125rem; }
+  .act-gutter{ flex: 0 0 7ch; font-size: 0.75rem; line-height: 1.125rem; color: var(--muted-2); }
   .act-time{ display: inline-block; }
   /* Tooltips speak in the app's caption size, not Tippy's 14px default. */
-  .tippy-box{ font-size: 12px; line-height: 1.3; }
+  .tippy-box{ font-size: 0.75rem; line-height: 1.3; }
   .tippy-box[data-theme~='activity-time'] .tippy-content{ padding: 3px 6px; }
   .act-ico{ flex: 0 0 18px; width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center; color: var(--muted-2); }
   .act-ico svg{ width: 15px; height: 15px; stroke-width: 1.8; }
@@ -850,7 +850,7 @@
   .act-ico.tone-warning{ color: var(--amber-ink); }
   .act-ico.tone-danger{ color: var(--danger-ink); }
   .act-txt{ flex: 1; min-width: 0; line-height: 18px; color: var(--ink-2); word-break: break-word; }
-  .act-detail{ font-size: 12px; color: var(--faint); line-height: 1.4; margin-top: 2px; }
+  .act-detail{ font-size: 0.75rem; color: var(--faint); line-height: 1.4; margin-top: 2px; }
   /* ---- compact success message shown after the first tool ---- */
   .connection-ready{
   display: flex; align-items: center; gap: 8px; margin: 3px 0 9px; padding: 8px 9px 8px 11px;
@@ -858,7 +858,7 @@
 }
   /* The tool is named by whoever added it; a long unbroken name wraps
      inside the banner rather than sliding under the dismiss button. */
-  .connection-ready b{ flex: 1; min-width: 0; font-size: 13.5px; overflow-wrap: anywhere; }
+  .connection-ready b{ flex: 1; min-width: 0; font-size: 0.84375rem; overflow-wrap: anywhere; }
 .tile-menu-wrap{ position: relative; flex: 0 0 auto; }
   /* Tool and endpoint menus use the same strong horizontal-ellipsis trigger. */
 .tile-menu-btn{
@@ -916,18 +916,18 @@
   padding: 8px 12px; border-bottom: 1px solid var(--line-soft);
 }
   .acc-row:last-child{ border-bottom: 0; }
-  .acc-svc{ flex: 1 1 140px; min-width: 0; }
-  .acc-name{ font-weight: 600; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .acc-svc{ flex: 1 1 18ch; min-width: 0; }
+  .acc-name{ font-weight: 600; font-size: 0.84375rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .acc-name .cc-live{ font-weight: 600; }
   .acc-target{
   margin-top: 1px; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  font-size: 11px; color: var(--muted-2);
+  font-size: 0.6875rem; color: var(--muted-2);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
   .acc-pill{
   flex: 0 0 auto; padding: 3px 10px; border-radius: 999px;
   background: var(--chip-bg); color: var(--chip-ink);
-  font-size: 12px; font-weight: 600; white-space: nowrap;
+  font-size: 0.75rem; font-weight: 600; white-space: nowrap;
 }
   .acc-pill.granted{ background: var(--ok-wash); border: 1px solid var(--ok-border); color: var(--ok-ink); }
   .acc-pill.rule{ background: var(--amber-wash); border: 1px solid var(--amber-border); color: var(--amber-ink); }
@@ -936,29 +936,29 @@
   /* Issued-endpoint sheet: pasteable address / secret / example, each with a
      copy button. A shared three-column grid keeps labels, values, and actions
      aligned while the code wraps independently in the flexible middle. */
-  .endpoint-issued-sheet h3{ font-size: 18px; margin-bottom: 6px; }
+  .endpoint-issued-sheet h3{ font-size: 1.125rem; margin-bottom: 6px; }
   .endpoint-issued-sheet .sheet-sub{ margin-bottom: 12px; }
   .issued-ep-field{
-    display: grid; grid-template-columns: 84px minmax(0, 1fr) 64px;
+    display: grid; grid-template-columns: minmax(7ch, auto) minmax(0, 1fr) minmax(6ch, auto);
     align-items: center; gap: 12px; margin: 4px 0; padding: 6px 10px;
     background: var(--field-bg); border: 1px solid var(--line); border-radius: 9px;
   }
   .issued-ep-field .ep-label{
-    margin: 0; color: var(--ink); font-size: 12px; font-weight: 600;
+    margin: 0; color: var(--ink); font-size: 0.75rem; font-weight: 600;
   }
   .ep-note{ font-weight: 500; color: var(--amber-ink); }
   .ep-code{
     min-width: 0; width: 100%; padding: 8px 10px; border-radius: 8px;
     background: var(--chip-bg); border: 1px solid var(--hair);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.75rem;
     overflow-wrap: anywhere; white-space: pre-wrap; user-select: all;
   }
-  .issued-ep-field .btn{ width: 64px; text-align: center; }
+  .issued-ep-field .btn{ min-width: 6ch; text-align: center; }
   .menu-check{ flex: 0 0 14px; width: 14px; line-height: 0; padding-top: 1px; }
   .menu-check svg{ color: var(--ok-ink); }
   .menu-lbl{ display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-  .menu-sub{ font-size: 11px; font-weight: 400; color: var(--muted-2); white-space: normal; }
-  .acc-none{ padding: 13px 12px; color: var(--muted); font-size: 13px; }
+  .menu-sub{ font-size: 0.6875rem; font-weight: 400; color: var(--muted-2); white-space: normal; }
+  .acc-none{ padding: 13px 12px; color: var(--muted); font-size: 0.8125rem; }
   /* ---- sheets ----------------------------------------------------------- */
 .sheet-backdrop{ position: fixed; inset: 0; z-index: 8; background: var(--backdrop); }
   .sheet-backdrop.over-sheet{ z-index: 10; }
@@ -972,31 +972,31 @@
   .sheet.wide{ left: 50%; right: auto; transform: translateX(-50%); width: 460px; max-width: calc(100% - 28px); }
   .sheet.confirm-sheet{ width: 360px; }
   .sheet.confirm-sheet:not(.discard-confirm){ top: 64px; max-height: calc(100% - 78px); }
-  .sheet h3{ font-size: 15px; margin-bottom: 12px; }
+  .sheet h3{ font-size: 0.9375rem; margin-bottom: 12px; }
   .f-row{ margin-bottom: 10px; }
-  .f-row label{ display: block; font-size: 12.5px; color: var(--muted); font-weight: 600; margin-bottom: 4px; }
-  .f-row input{ width: 100%; min-height: 32px; padding: 6px 8px; border: 1px solid var(--line-field); border-radius: 7px; font-size: 14px; font-family: inherit; background-color: var(--field-bg); color: var(--ink); }
+  .f-row label{ display: block; font-size: 0.78125rem; color: var(--muted); font-weight: 600; margin-bottom: 4px; }
+  .f-row input{ width: 100%; min-height: 32px; padding: 6px 8px; border: 1px solid var(--line-field); border-radius: 7px; font-size: 0.875rem; font-family: inherit; background-color: var(--field-bg); color: var(--ink); }
   .f-row input[readonly]{ background-color: var(--chip-bg); color: var(--muted-ink); cursor: default; }
   .f-row input:focus{ outline: 2px solid rgba(10,124,255,.45); border-color: var(--accent); }
   .f-row input.err{ border-color: var(--danger); outline: none; }
-  .field-error{ margin-top: 4px; color: var(--danger-ink); font-size: 12.5px; font-weight: 400; }
+  .field-error{ margin-top: 4px; color: var(--danger-ink); font-size: 0.78125rem; font-weight: 400; }
   .f-row input.name-conflict-warning, .f-row input.name-conflict-warning:focus{
   border-color: var(--amber-strong); outline: none;
   box-shadow: 0 0 0 3px var(--amber-wash);
 }
-  .field-warning{ margin-top: 4px; color: var(--amber-ink); font-size: 12.5px; font-weight: 400; }
+  .field-warning{ margin-top: 4px; color: var(--amber-ink); font-size: 0.78125rem; font-weight: 400; }
   .form-global-error{
     display: flex; flex-direction: column; gap: 2px; margin-top: 10px;
     padding: 9px 11px; border: 1px solid var(--danger-border);
     border-radius: 8px; background: var(--danger-wash); color: var(--danger);
-    font-size: 12.5px; line-height: 1.4;
+    font-size: 0.78125rem; line-height: 1.4;
   }
   .form-global-error span{ color: var(--ink-2); overflow-wrap: anywhere; }
   .adv-collapse{ margin: 2px 0 8px; }
   .adv-toggle{
   display: inline-flex; align-items: center; gap: 3px;
   padding: 2px 1px; border: 0; background: transparent;
-  color: var(--muted); font-size: 12px; line-height: normal; cursor: pointer;
+  color: var(--muted); font-size: 0.75rem; line-height: normal; cursor: pointer;
 }
   .adv-toggle:hover{ color: var(--ink); }
   .adv-toggle:focus-visible{ outline: 2px solid var(--ink); outline-offset: 2px; border-radius: 3px; }
@@ -1004,9 +1004,9 @@
   .adv-toggle-icon svg{ width: 11px; height: 11px; }
   .adv-toggle[aria-expanded="true"] .adv-toggle-icon{ transform: rotate(0); }
   .adv-collapse .f-row:first-of-type{ margin-top: 8px; }
-  .f-2col{ display: flex; gap: 10px; }
+  .f-2col{ display: flex; flex-wrap: wrap; gap: 10px; }
   .f-2col.compact-field-row{ gap: 8px; }
-  .f-2col .f-row{ flex: 1; }
+  .f-2col .f-row{ flex: 1 1 16ch; min-width: min(16ch, 100%); }
   .credential-group{ margin: 2px 0 10px; }
   .credential-group .f-row{ margin-bottom: 8px; }
   /* Saved-credential listbox: a custom select whose rows present credentials
@@ -1033,7 +1033,7 @@
 }
   .cred-badge.plus{ background: var(--seg-bg); color: var(--muted); }
   .cred-badge.none{ background: var(--seg-bg); color: var(--muted); }
-  .cred-name{ font-size: 13.5px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cred-name{ font-size: 0.84375rem; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .cred-placeholder{ color: var(--muted); font-weight: 400; }
   .cred-menu{
   /* app.tsx portals this under #overlays so the scrolling sheet cannot clip
@@ -1055,8 +1055,8 @@
   .cred-opt-col .cred-name{ display: block; }
   .cred-opt-check{ display: inline-flex; color: var(--accent-text); }
   .cred-menu-divider{ height: 1px; margin: 4px 6px; background: var(--line-soft); }.sheet-actions{ display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 14px; }
-  .confirm-sheet p{ margin-top: 8px; color: var(--muted); font-size: 13.5px; line-height: 1.45; }
-  .rule-note{ font-size: 12.5px; color: var(--muted); margin: 4px 0 8px; line-height: 1.4; }
+  .confirm-sheet p{ margin-top: 8px; color: var(--muted); font-size: 0.84375rem; line-height: 1.45; }
+  .rule-note{ font-size: 0.78125rem; color: var(--muted); margin: 4px 0 8px; line-height: 1.4; }
   .external-doc-link {
     color: inherit; text-decoration: underline; text-decoration-color: currentColor;
     text-underline-offset: 2px;
@@ -1065,24 +1065,24 @@
   /* ---- settings --------------------------------------------------------- */
   .set-row{ display: flex; align-items: flex-start; gap: 12px; padding: 10px 2px; border-bottom: 1px solid var(--line-soft); }
   .set-txt{ flex: 1; }
-  .set-txt .st-title{ font-size: 14px; font-weight: 600; }
-  .set-txt .st-sub{ font-size: 12.5px; color: var(--muted); line-height: 1.45; margin-top: 2px; }
+  .set-txt .st-title{ font-size: 0.875rem; font-weight: 600; }
+  .set-txt .st-sub{ font-size: 0.78125rem; color: var(--muted); line-height: 1.45; margin-top: 2px; }
   .notification-setting{ flex-direction: column; gap: 9px; }
   .notification-modes{ align-self: stretch; width: 100%; }
   .notification-warning{
     display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
     margin: 8px 0 2px; padding: 9px 11px; border: 1px solid var(--amber-border);
     border-radius: 8px; background: var(--amber-wash); color: var(--amber-ink);
-    font-size: 12.5px; line-height: 1.4;
+    font-size: 0.78125rem; line-height: 1.4;
   }
   .switch{ position: relative; flex: 0 0 auto; margin-top: 2px; width: 36px; height: 22px; border-radius: 11px; background: var(--switch-off); border: none; cursor: pointer; transition: background .18s ease; }
   .switch.on{ background: #34c759; }
   .switch::after{ content: ''; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.25); transition: left .18s ease; }
   .switch.on::after{ left: 16px; }
   .set-collapse{ border-bottom: 1px solid var(--line-soft); padding: 8px 2px; }
-  .set-collapse summary{ cursor: pointer; font-size: 14px; font-weight: 600; list-style-position: inside; }
+  .set-collapse summary{ cursor: pointer; font-size: 0.875rem; font-weight: 600; list-style-position: inside; }
   .set-panel{ padding: 9px 0 2px; }
-  .pair-identity-warning{ margin: 0 0 12px; padding: 9px 11px; border-radius: 8px; font-size: 12.5px; line-height: 1.4; }
+  .pair-identity-warning{ margin: 0 0 12px; padding: 9px 11px; border-radius: 8px; font-size: 0.78125rem; line-height: 1.4; }
   .pair-identity-warning{ background: var(--amber-wash); border: 1px solid var(--amber-border); color: var(--amber-ink); }
   .f-row > .pair-identity-warning{ margin: 4px 0 0; }
   .import-warning b{ display: block; }
@@ -1092,7 +1092,7 @@
   .import-warning li + li{ margin-top: 3px; }
   .rd-k{ color: var(--accent-ink); }/* ---- toasts ----------------------------------------------------------- */
 .toasts{ position: fixed; bottom: 16px; left: 0; right: 0; z-index: 40; display: flex; flex-direction: column; align-items: center; gap: 8px; pointer-events: none; }
-  .toast{ background: rgba(30,30,36,.94); color: #f2f2f5; border-radius: 9px; padding: 8px 16px; font-size: 13px; box-shadow: 0 8px 22px rgba(10,15,40,.35); opacity: 0; transform: translateY(10px); transition: opacity .25s, transform .25s; }
+  .toast{ background: rgba(30,30,36,.94); color: #f2f2f5; border-radius: 9px; padding: 8px 16px; font-size: 0.8125rem; box-shadow: 0 8px 22px rgba(10,15,40,.35); opacity: 0; transform: translateY(10px); transition: opacity .25s, transform .25s; }
   .toast.show{ opacity: 1; transform: none; }
   /* ---- dark mode: token overrides only. theme.js stamps data-theme on
      <html> before first paint — the stored appearance choice, else the live
@@ -1184,16 +1184,16 @@
    expands the row into what is configured. */
 .catalog {
   display: flex; flex-direction: column; gap: 18px;
-  max-width: calc(var(--content-max) - 32px);
+  max-width: calc(var(--content-max) - 2rem);
 }
 .cat-search {
   width: 260px; max-width: 100%; padding: 8px 12px;
   border: 1px solid var(--line); border-radius: 10px;
-  background: var(--field-bg); color: var(--ink); font-size: 13px;
+  background: var(--field-bg); color: var(--ink); font-size: 0.8125rem;
 }
 .cat-search:focus { outline: 2px solid var(--accent-wash-2); border-color: var(--accent); }
 .cat-section-h {
-  margin-bottom: 8px; color: var(--muted); font-size: 11.5px; font-weight: 700;
+  margin-bottom: 8px; color: var(--muted); font-size: 0.71875rem; font-weight: 700;
   letter-spacing: .08em;
 }
 .cat-rows {
@@ -1214,10 +1214,10 @@
 }
 .cat-ico svg { width: 17px; height: 17px; }
 .cat-tx { flex: 1; min-width: 0; }
-.cat-tx b { display: block; font-size: 14px; }
+.cat-tx b { display: block; font-size: 0.875rem; }
 .cat-tx span {
   display: block; margin-top: 1px; overflow: hidden; color: var(--muted);
-  font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 0.78125rem; text-overflow: ellipsis; white-space: nowrap;
 }
 .cat-add { flex: 0 0 auto; border-radius: 999px; padding: 5px 16px; }
 .cat-connect-wrap { position: relative; flex: 0 0 auto; }
@@ -1244,7 +1244,7 @@
 .cat-more {
   display: flex; align-items: center; justify-content: center; gap: 5px; width: 100%;
   padding: 9px 14px; border: 0; border-top: 1px solid var(--line);
-  background: transparent; color: var(--muted); font: inherit; font-size: 12.5px;
+  background: transparent; color: var(--muted); font: inherit; font-size: 0.78125rem;
   font-weight: 600; cursor: pointer;
 }
 .cat-more:hover { background: var(--hover); color: var(--ink-3); }
@@ -1253,18 +1253,18 @@
 .cat-more-chev.open { transform: rotate(180deg); }
 .cat-soon {
   flex: 0 0 auto; padding: 4px 12px; border: 1px dashed var(--line);
-  border-radius: 999px; color: var(--muted); font-size: 12px; font-weight: 600;
+  border-radius: 999px; color: var(--muted); font-size: 0.75rem; font-weight: 600;
 }
 .cat-limited {
   flex: 0 0 auto; padding: 4px 10px; border: 1px solid var(--line);
   border-radius: 999px; background: var(--wash); color: var(--muted);
-  font-size: 11.5px; font-weight: 600; white-space: nowrap; opacity: .8;
+  font-size: 0.71875rem; font-weight: 600; white-space: nowrap; opacity: .8;
 }
 .cat-count {
   display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto;
   padding: 5px 11px 5px 13px; border: 1px solid transparent; border-radius: 999px;
   background: var(--ink); color: var(--panel);
-  font-size: 12.5px; font-weight: 700; cursor: pointer;
+  font-size: 0.78125rem; font-weight: 700; cursor: pointer;
 }
 .cat-count svg { width: 13px; height: 13px; }
 .cat-count:hover { opacity: .85; }
@@ -1286,7 +1286,7 @@
   flex: 0 0 auto; margin-top: 2px; min-height: 18px;
 }
 .cc-live {
-  flex: 0 0 auto; color: var(--muted); font-size: 11.5px;
+  flex: 0 0 auto; color: var(--muted); font-size: 0.71875rem;
   font-weight: 600; line-height: 1.2; white-space: nowrap;
 }
 .cc-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; }
@@ -1321,10 +1321,10 @@
 .flat-conn-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .flat-conn-row .cat-meta-tools { flex: 0 0 auto; }
 .flat-tx { flex: 1; min-width: 0; }
-.flat-tx b { display: block; font-size: 13.5px; font-weight: 600; }
+.flat-tx b { display: block; font-size: 0.84375rem; font-weight: 600; }
 .flat-tx > span {
   display: block; margin-top: 1px; overflow: hidden; color: var(--muted-2);
-  font-size: 12px; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 0.75rem; text-overflow: ellipsis; white-space: nowrap;
 }
 .flat-conn-row .cat-conn-status { margin-top: 0; }
 /* Selection stays visible without adding a rail along the list edge. */
@@ -1353,7 +1353,7 @@
 .tools-list { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 18px; }
 .conn-detail-pane {
   --cd-gutter-x: 16px;
-  flex: 0 0 clamp(320px, calc(38% + 40px), 420px);
+  flex: 0 1 clamp(20rem, calc(38% + 2.5rem), 26.25rem);
   position: sticky; top: 0;
   height: fit-content; max-height: calc(100vh - 130px); overflow-y: auto;
   height: calc(100cqh - 14px); max-height: calc(100cqh - 14px);
@@ -1371,10 +1371,10 @@
 }
 .cd-actions .icon-btn svg { width: 15px; height: 15px; }
 .cd-title { flex: 1; min-width: 0; }
-.cd-title b { display: block; font-size: 14px; }
+.cd-title b { display: block; font-size: 0.875rem; }
 .cd-title span {
   display: block; margin-top: 1px; overflow: hidden; color: var(--muted);
-  font-size: 12px; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 0.75rem; text-overflow: ellipsis; white-space: nowrap;
 }
 .cd-sec {
   position: relative;
@@ -1390,7 +1390,7 @@
    "Details" — one register, no tracked-caps machinery labels. */
 .cd-connect-lbl {
   display: flex; align-items: center; gap: 7px; margin-bottom: 3px;
-  font-size: 13px; font-weight: 600;
+  font-size: 0.8125rem; font-weight: 600;
 }
 .cd-connect-lbl svg { flex: 0 0 auto; color: var(--muted); }
 /* The tool-filter chip rides the headline's right edge — a control, not
@@ -1400,25 +1400,25 @@
   min-width: 0; margin-left: 8px; font-weight: 400; text-align: right;
 }
 .cd-lbl-aside .cat-meta-tools { margin-left: auto; justify-content: flex-end; }
-.cd-help { margin-top: 7px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.cd-help { margin-top: 7px; color: var(--muted); font-size: 0.75rem; line-height: 1.5; }
 /* Traffic confirmation: a labelled switch row, so the promise ("Confirm
    each request") sits beside the control that makes it rather than in a
    tooltip. The sub-line names the unit, which differs per kind. */
 .cd-confirm-row { display: flex; align-items: flex-start; gap: 12px; }
 .cd-confirm-txt { flex: 1; min-width: 0; }
-.cd-confirm-lbl { font-size: 13px; font-weight: 600; }
-.cd-confirm-sub { margin-top: 2px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.cd-confirm-lbl { font-size: 0.8125rem; font-weight: 600; }
+.cd-confirm-sub { margin-top: 2px; color: var(--muted); font-size: 0.75rem; line-height: 1.5; }
 .cd-confirm-row .switch { flex: 0 0 auto; margin-top: 2px; }
 .cd-confirm-window {
   display: flex; align-items: center; gap: 7px; margin-top: 9px;
-  padding: 7px 10px; border-radius: 8px; font-size: 12px;
+  padding: 7px 10px; border-radius: 8px; font-size: 0.75rem;
   color: var(--ink-2); background: var(--amber-wash); border: 1px solid var(--amber-border);
 }
 .cd-confirm-window svg { flex: 0 0 auto; width: 14px; height: 14px; color: var(--amber-strong); }
 /* A denial's cooldown is a refusal state, not an approval one. */
 .cd-confirm-cooldown { background: var(--danger-wash); border-color: var(--danger-border); }
 .cd-confirm-cooldown svg { color: var(--danger-ink); }
-.cd-confirm-note { margin-top: 8px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.cd-confirm-note { margin-top: 8px; color: var(--muted); font-size: 0.75rem; line-height: 1.5; }
 .cd-off-note { margin-top: 12px; }
 /* The Details card: the target's parts spelled out as label–value rows.
    Values are mono and wrap; labels stay put. */
@@ -1426,15 +1426,15 @@
   margin-top: 8px; padding: 2px 12px;
   background: var(--wash); border: 1px solid var(--line-soft); border-radius: 9px;
 }
-.cd-fact { display: flex; justify-content: space-between; gap: 14px; padding: 6px 0; font-size: 12px; }
+.cd-fact { display: flex; justify-content: space-between; gap: 14px; padding: 6px 0; font-size: 0.75rem; }
 .cd-fact + .cd-fact { border-top: 1px solid var(--line-soft); }
 .cd-fact-k { flex: 0 0 auto; color: var(--muted); }
 .cd-fact-v {
   min-width: 0; text-align: right; overflow-wrap: anywhere;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11.5px; color: var(--ink-2);
+  font-size: 0.71875rem; color: var(--ink-2);
 }
-.cd-live { margin-top: 8px; color: var(--muted); font-size: 11.5px; }
+.cd-live { margin-top: 8px; color: var(--muted); font-size: 0.71875rem; }
 .cd-live-link {
   border: 0; padding: 0; background: none; color: var(--accent-text);
   font: inherit; cursor: pointer;
@@ -1494,7 +1494,7 @@
   background: var(--amber-wash);
   border-left: 3px solid var(--amber-strong);
   border-radius: 9px;
-  font-size: 12px; color: var(--amber-ink); line-height: 1.35;
+  font-size: 0.75rem; color: var(--amber-ink); line-height: 1.35;
 }
 .cc-issue > svg { flex: 0 0 auto; margin-top: 2px; color: var(--amber-strong); }
 .cc-issue.info {
@@ -1546,7 +1546,7 @@
 .sheet-import-row .btn[disabled] { opacity: .45; cursor: default; }
 .sheet-import-divider {
   display: flex; align-items: center; gap: 10px; margin: 3px 0 14px;
-  color: var(--muted); font-size: 11.5px;
+  color: var(--muted); font-size: 0.71875rem;
 }
 .sheet-import-divider::before,
 .sheet-import-divider::after { content: ''; flex: 1; border-top: 1px solid var(--line); }
@@ -1556,7 +1556,7 @@
    the expanded connection row under its meta facts. */
 .cc-test {
   display: flex; align-items: flex-start; gap: 5px; margin-top: 5px;
-  font-size: 11.5px; color: var(--muted);
+  font-size: 0.71875rem; color: var(--muted);
 }
 .cc-test svg { flex: 0 0 auto; }
 /* A verdict quotes what the far side said — a pinned host-key fingerprint,
@@ -1571,7 +1571,7 @@
 /* Resources the server advertises, listed under the connection the same
    way credentials and wirings are. */
 .mcp-res-head {
-  margin-top: 7px; color: var(--muted); font-size: 10.5px; font-weight: 700;
+  margin-top: 7px; color: var(--muted); font-size: 0.65625rem; font-weight: 700;
   letter-spacing: .04em; text-transform: uppercase;
 }
 .mcp-res { display: flex; align-items: baseline; gap: 8px; margin-top: 3px; min-width: 0; }
@@ -1581,22 +1581,22 @@
    pushing the row off the panel. Both carry a title with the full text. */
 .mcp-res b {
   flex: 0 0 auto; max-width: 60%; overflow: hidden;
-  font-size: 11.5px; font-weight: 600;
+  font-size: 0.71875rem; font-weight: 600;
   text-overflow: ellipsis; white-space: nowrap;
 }
 .mcp-res code {
   display: block; margin-top: 0; overflow: hidden; color: var(--muted-2);
-  font-size: 11px; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 0.6875rem; text-overflow: ellipsis; white-space: nowrap;
 }
-.mcp-res-more { margin-top: 3px; color: var(--muted); font-size: 11px; }
+.mcp-res-more { margin-top: 3px; color: var(--muted); font-size: 0.6875rem; }
 
 /* ----------------------------- MCP sign-in sheet -------------------------- */
 .auth-sheet .auth-target { margin: -6px 0 10px; }
 .auth-sheet .auth-target code {
-  font-size: 11.5px; color: var(--muted-2); overflow-wrap: anywhere;
+  font-size: 0.71875rem; color: var(--muted-2); overflow-wrap: anywhere;
 }
 .auth-steps { list-style: none; margin: 0 0 12px; padding: 0; display: flex; flex-direction: column; gap: 7px; }
-.auth-step { display: flex; align-items: center; gap: 9px; font-size: 13px; color: var(--muted); }
+.auth-step { display: flex; align-items: center; gap: 9px; font-size: 0.8125rem; color: var(--muted); }
 .auth-step.done { color: var(--ink-3); }
 .auth-step.current { color: var(--ink-2); font-weight: 600; }
 .auth-step-mark {
@@ -1611,38 +1611,38 @@
   animation: auth-pulse 1s ease-in-out infinite;
 }
 @keyframes auth-pulse { 50% { opacity: .25; } }
-.auth-note { color: var(--muted); font-size: 12.5px; margin-bottom: 8px; }
+.auth-note { color: var(--muted); font-size: 0.78125rem; margin-bottom: 8px; }
 .auth-url code {
   display: block; padding: 7px 9px; border: 1px solid var(--line-soft); border-radius: 7px;
-  background: var(--wash); color: var(--muted-2); font-size: 11px; overflow-wrap: anywhere;
+  background: var(--wash); color: var(--muted-2); font-size: 0.6875rem; overflow-wrap: anywhere;
 }
-.auth-done, .auth-failed { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; }
+.auth-done, .auth-failed { display: flex; align-items: flex-start; gap: 8px; font-size: 0.8125rem; }
 .auth-done svg { color: var(--ok-ink); flex: 0 0 auto; margin-top: 2px; }
 .auth-failed svg { color: var(--danger-ink); flex: 0 0 auto; margin-top: 2px; }
 /* The outcome names an account or quotes the server's rejection, neither of
    which is bounded in length — break mid-token rather than leave the sheet. */
 .auth-done > div, .auth-failed > div { min-width: 0; overflow-wrap: anywhere; }
-.auth-sub { margin-top: 3px; color: var(--muted); font-size: 12px; font-weight: 400; }
-.auth-warning { margin-top: 3px; color: var(--amber-strong); font-size: 12px; font-weight: 400; }
+.auth-sub { margin-top: 3px; color: var(--muted); font-size: 0.75rem; font-weight: 400; }
+.auth-warning { margin-top: 3px; color: var(--amber-strong); font-size: 0.75rem; font-weight: 400; }
 .oauth-note { margin: -2px 0 4px; }
 
 /* ----------------------- per-wiring tool picker --------------------------- */
-.wt-sub { margin: 2px 0 12px; font-size: 12.5px; color: var(--muted); }
+.wt-sub { margin: 2px 0 12px; font-size: 0.78125rem; color: var(--muted); }
 .wt-row {
   display: flex; align-items: flex-start; gap: 9px;
-  padding: 6px 2px; font-size: 13px; cursor: pointer;
+  padding: 6px 2px; font-size: 0.8125rem; cursor: pointer;
 }
 .wt-row input { margin-top: 2px; flex: 0 0 auto; accent-color: var(--accent); }
 .wt-name { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.wt-name code { font-size: 12.5px; color: var(--ink-2); overflow-wrap: anywhere; }
-.wt-desc { font-size: 12px; color: var(--muted); }
+.wt-name code { font-size: 0.78125rem; color: var(--ink-2); overflow-wrap: anywhere; }
+.wt-desc { font-size: 0.75rem; color: var(--muted); }
 .wt-all { border-bottom: 1px solid var(--line); padding-bottom: 9px; margin-bottom: 4px; }
 .wt-list { max-height: 300px; overflow-y: auto; }
 .wt-list.wt-dim { opacity: .55; }
 .wt-stale .wt-desc { color: var(--amber-strong); }
 
 /* Inline fix action beside the needs-reconnect badge. */
-.cat-meta-fix { padding: 1px 8px; font-size: 12px; }
+.cat-meta-fix { padding: 1px 8px; font-size: 0.75rem; }
 
 /* --------------------------- activity filters ----------------------------- */
 .act-filters {
@@ -1650,11 +1650,11 @@
   padding: 2px 2px 10px;
 }
 .activity-live-sessions { margin: 0 0 14px; }
-.act-search { flex: 1 1 160px; min-width: 140px; }
-.act-filter { flex: 0 0 auto; padding: 3px 10px; font-size: 12px; }
+.act-search { flex: 1 1 20ch; min-width: min(18ch, 100%); }
+.act-filter { flex: 0 0 auto; padding: 3px 10px; font-size: 0.75rem; }
 .activity-page-footer {
   display: flex; align-items: center; justify-content: center; gap: 9px; flex-wrap: wrap;
-  padding: 14px 8px 4px; color: var(--muted); font-size: 12px; text-align: center;
+  padding: 14px 8px 4px; color: var(--muted); font-size: 0.75rem; text-align: center;
 }
 .activity-page-error { color: var(--danger); }
 .request-filters { padding-top: 2px; }
@@ -1664,7 +1664,7 @@
 .host-key-candidates .btn { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .act-chips { display: flex; gap: 5px; margin-top: 3px; flex-wrap: wrap; }
 .act-chip {
-  font-size: 11px; color: var(--muted); border: 1px solid var(--line);
+  font-size: 0.6875rem; color: var(--muted); border: 1px solid var(--line);
   border-radius: 999px; padding: 0 7px; line-height: 16px;
 }
 .act-tool {
@@ -1677,9 +1677,9 @@
 /* The Agents tab reborn: a key card, one guide card per agent family with
    copyable setup snippets, and the cosmetic recently-seen list. Cards reuse
    .agent-block; everything below is the guide anatomy. */
-.connect-keynote{ font-size: 12.5px; color: var(--muted); border-top: 1px solid var(--line);
+.connect-keynote{ font-size: 0.78125rem; color: var(--muted); border-top: 1px solid var(--line);
   padding: 10px 16px 11px; line-height: 1.55; }
-.connect-sec-lbl{ font-size: 11px; letter-spacing: .11em; text-transform: uppercase;
+.connect-sec-lbl{ font-size: 0.6875rem; letter-spacing: .11em; text-transform: uppercase;
   font-weight: 700; color: var(--muted); margin: 18px 2px 8px; }
 .connect-card{ margin-bottom: 10px; }
 .connect-row{ display: flex; align-items: center; gap: 12px; width: 100%;
@@ -1688,7 +1688,7 @@
 .connect-row:hover{ background: var(--hover); }
 .connect-card.open .connect-row{ border-radius: 11px 11px 0 0; }
 .connect-mark{ width: 30px; height: 30px; border-radius: 8px; display: flex;
-  align-items: center; justify-content: center; font-weight: 700; font-size: 13px;
+  align-items: center; justify-content: center; font-weight: 700; font-size: 0.8125rem;
   flex: 0 0 auto; background: var(--b-agent-bg); color: var(--b-agent-ink); }
 .connect-mark svg{ width: 16px; height: 16px; }
 .connect-mark.claude-code, .connect-mark.claude-desktop{
@@ -1696,33 +1696,33 @@
 .connect-mark.codex{ background: var(--brand-openai-bg); color: var(--brand-openai-ink); }
 .connect-mark.cli{ background: var(--b-ssh-bg); color: var(--b-ssh-ink); }
 .connect-tx{ display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
-.connect-tx b{ font-size: 13.5px; font-weight: 650; }
-.connect-tx span{ font-size: 12px; color: var(--muted); }
-.connect-seen{ display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px;
+.connect-tx b{ font-size: 0.84375rem; font-weight: 650; }
+.connect-tx span{ font-size: 0.75rem; color: var(--muted); }
+.connect-seen{ display: inline-flex; align-items: center; gap: 6px; font-size: 0.71875rem;
   font-weight: 600; color: var(--ok-ink); background: var(--ok-wash);
   border: 1px solid var(--ok-border); border-radius: 999px; padding: 2.5px 9px;
   white-space: nowrap; }
 .connect-steps{ border-top: 1px solid var(--line); padding: 4px 16px 14px 20px; }
 .connect-step{ display: flex; gap: 12px; margin-top: 12px; }
 .connect-step-n{ width: 20px; height: 20px; border-radius: 50%; background: var(--chip-bg);
-  color: var(--ink-3); font-size: 11px; font-weight: 700; display: flex;
+  color: var(--ink-3); font-size: 0.6875rem; font-weight: 700; display: flex;
   align-items: center; justify-content: center; flex: 0 0 auto; margin-top: 1px; }
 .connect-step-bd{ flex: 1; min-width: 0; }
-.connect-step-bd b{ font-size: 13px; font-weight: 600; }
-.connect-step-d{ font-size: 12.5px; color: var(--muted); margin-top: 1px; line-height: 1.5; }
+.connect-step-bd b{ font-size: 0.8125rem; font-weight: 600; }
+.connect-step-d{ font-size: 0.78125rem; color: var(--muted); margin-top: 1px; line-height: 1.5; }
 .connect-step-followup{ margin-top: 8px; }
 .connect-snip{ position: relative; margin-top: 8px; background: var(--code-block-bg);
   border: 1px solid var(--line); border-radius: 7px; padding: 9px 12px; overflow-x: auto; }
 .connect-snip pre{ box-sizing: border-box; margin: 0; padding-right: 52px; }
-.connect-snip code{ font-size: 12px; line-height: 1.6; white-space: pre-wrap;
+.connect-snip code{ font-size: 0.75rem; line-height: 1.6; white-space: pre-wrap;
   overflow-wrap: anywhere; color: var(--ink-2); }
 .connect-copy{ position: absolute; top: 6px; right: 6px; }
-.connect-note{ font-size: 12px; color: var(--muted); margin-top: 12px; }
+.connect-note{ font-size: 0.75rem; color: var(--muted); margin-top: 12px; }
 .connect-recent{ display: flex; flex-direction: column; }
 .connect-recent-row{ display: flex; align-items: center; gap: 10px; padding: 10px 16px;
-  border-bottom: 1px solid var(--line); font-size: 13px; }
+  border-bottom: 1px solid var(--line); font-size: 0.8125rem; }
 .connect-recent-row:last-child{ border-bottom: none; }
-.connect-recent-row code{ font-size: 12.5px; font-weight: 600; }
+.connect-recent-row code{ font-size: 0.78125rem; font-weight: 600; }
 .connect-recent-row .grow{ flex: 1; }
 
 /* Connection state at a glance: green = agents on, grey = off, amber = needs attention. */
@@ -1743,7 +1743,7 @@
    indistinguishable from its neighbors; hover reveals the link. */
 .cat-meta-tools{
   display: inline-flex; align-items: center; gap: 5px; padding: 0; border: none;
-  background: transparent; color: var(--muted); font: inherit; font-size: 11.5px;
+  background: transparent; color: var(--muted); font: inherit; font-size: 0.71875rem;
   cursor: pointer;
 }
 .cat-meta-tools:hover{ color: var(--ink); text-decoration: underline; }
@@ -1753,7 +1753,7 @@
    sized for the sheet. */
 .draft-test{
   display: flex; align-items: flex-start; gap: 6px; margin-top: 14px;
-  font-size: 12px; color: var(--muted);
+  font-size: 0.75rem; color: var(--muted);
 }
 .draft-test.err{ color: var(--danger-ink); }
 .draft-test.err b{ font-weight: 600; }
@@ -1779,7 +1779,7 @@
    only fires mid-identifier when a single segment outgrows the line. */
 .ep-strip .ep-field .ep-addr{
   flex: 1; min-width: 0; overflow-wrap: break-word;
-  color: var(--ink-2); font-size: 12px; line-height: 1.35;
+  color: var(--ink-2); font-size: 0.75rem; line-height: 1.35;
 }
 /* Copy sits below the DSN so the address gets the field's full width.
    Reserve the wider feedback label so Copy → Copied keeps a steady size. */
@@ -1795,17 +1795,17 @@
   flex: 1; min-width: 0; overflow: hidden; padding: 0; border: none;
   background: none; cursor: pointer; text-align: left;
   color: var(--ink-2); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px; line-height: 1.35;
+  font-size: 0.75rem; line-height: 1.35;
   white-space: nowrap; text-overflow: ellipsis;
 }
 .ep-strip .ep-field .ep-addr-masked:hover{ color: var(--ink); }
 .ep-strip .ep-field.collapsed .ep-copy{ align-self: center; }
-.ep-strip .ep-addr-hidden{ color: var(--muted); font-size: 12px; }
+.ep-strip .ep-addr-hidden{ color: var(--muted); font-size: 0.75rem; }
 /* Per-application copy row under the detail pane's endpoint field: each
    button copies the same endpoint rendered for one common client (psql,
    libpq keywords, .env, ssh config, …). */
 .ep-formats{ display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
-.ep-formats .ep-formats-lbl{ color: var(--muted); font-size: 12px; margin-right: 2px; }
+.ep-formats .ep-formats-lbl{ color: var(--muted); font-size: 0.75rem; margin-right: 2px; }
 .ep-formats .ep-fmt{
   position: relative; display: inline-flex; align-items: center; justify-content: center;
   white-space: nowrap;
