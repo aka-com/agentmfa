@@ -3,10 +3,10 @@
 //! When an upstream MCP server needs interactive input mid-call (the
 //! [multi round-trip requests](https://modelcontextprotocol.io/specification/draft/basic/patterns/mrtr)
 //! pattern — the upstream returns an `input_required` result carrying an
-//! `elicitation/create` request), the sidecar cannot answer for the user and
+//! `elicitation/create` request), the MCP host cannot answer for the user and
 //! the agent must not: the agent never sees the prompt or its answer. So the
 //! request parks here, the app raises a form, and the user's answer is handed
-//! back to the sidecar to complete the upstream round trip.
+//! back to the MCP host to complete the upstream round trip.
 //!
 //! This is the sibling of [`crate::approvals`], and shares its shape: an
 //! async park on a `oneshot`, a fail-closed "nobody can ask" path, a deadline,
@@ -64,7 +64,7 @@ pub(crate) struct AuthorizedElicitation {
 /// Capability tokens minted only from an upstream `input_required` response.
 ///
 /// An ordinary agent bearer cannot originate an elicitation. The broker
-/// records the exact prompt while relaying the upstream response; the sidecar
+/// records the exact prompt while relaying the upstream response; the MCP host
 /// can redeem its opaque token once, but cannot replace the prompt text or
 /// schema with agent-authored content.
 #[derive(Default)]
@@ -194,7 +194,7 @@ pub struct PendingElicitation {
     pub expires_at: DateTime<Utc>,
 }
 
-/// What the sidecar asks about: one upstream `elicitation/create`, in the
+/// What the MCP host asks about: one upstream `elicitation/create`, in the
 /// terms the broker needs to render and route it.
 #[derive(Debug, Clone)]
 pub struct ElicitationRequest {
@@ -227,7 +227,7 @@ impl ElicitAction {
     }
 }
 
-/// The answer handed back to the sidecar, shaped as an MCP `ElicitResult`.
+/// The answer handed back to the MCP host, shaped as an MCP `ElicitResult`.
 #[derive(Debug, Clone)]
 pub struct ElicitationOutcome {
     pub action: ElicitAction,

@@ -8,7 +8,6 @@
 // network access here: a credential broker's install should be inert.
 
 const { spawnSync } = require("child_process");
-const path = require("path");
 
 const PLATFORM_PACKAGES = {
   "darwin arm64": "agentmfa-darwin-arm64",
@@ -63,27 +62,8 @@ function resolveBinary() {
   return binPath;
 }
 
-// The npm package carries the self-contained JavaScript MCP host, while the
-// Node process already running this launcher supplies its runtime. Point the
-// Rust supervisor at both exact paths so `mfa serve` works from any cwd and
-// does not accidentally select a different `node` from PATH. Explicit
-// overrides remain useful for development and diagnostics.
-const childEnv = { ...process.env };
-if (!childEnv.AKA_SIDECAR_NODE) {
-  childEnv.AKA_SIDECAR_NODE = process.execPath;
-}
-if (!childEnv.AKA_SIDECAR_SCRIPT) {
-  childEnv.AKA_SIDECAR_SCRIPT = path.join(
-    __dirname,
-    "..",
-    "sidecar",
-    "main.mjs"
-  );
-}
-
 const result = spawnSync(resolveBinary(), process.argv.slice(2), {
   stdio: "inherit",
-  env: childEnv,
 });
 if (result.error) {
   fail(result.error.message);

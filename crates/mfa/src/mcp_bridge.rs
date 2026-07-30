@@ -4,14 +4,14 @@
 //! Desktop, Codex, custom harnesses — can be pointed at `mfa mcp` and needs
 //! no token pasting and no port discovery: the bridge reads this computer's
 //! shared key from the broker's token file and finds the MCP host through
-//! the broker's discovery manifest (the sidecar's loopback port is dynamic,
+//! the broker's discovery manifest (the MCP host's loopback port is dynamic,
 //! so it is advertised, not pinned).
 //!
 //! The bridge is a translator, not a gate: each newline-delimited JSON-RPC
 //! message from stdin is POSTed to the MCP endpoint with the shared key,
 //! and the response — a single JSON body or a text/event-stream — comes
 //! back out as newline-delimited JSON on stdout. Authorization stays where
-//! it was: the sidecar resolves the key against the broker on every call.
+//! it was: the MCP host resolves the key against the broker on every call.
 
 use std::path::Path;
 use std::time::Duration;
@@ -173,7 +173,7 @@ struct SessionState {
     /// The streamable-HTTP session, captured from the initialize response's
     /// `Mcp-Session-Id` header and echoed on every later request.
     session: Option<String>,
-    /// The client's handshake, retained so a sidecar restart or idle session
+    /// The client's handshake, retained so a host restart or idle session
     /// eviction can be recovered without restarting the stdio MCP process.
     initialize_message: Option<String>,
     initialized_notification: Option<String>,
@@ -181,7 +181,7 @@ struct SessionState {
     /// so a server that checks the header there accepts the stream.
     protocol_version: Option<String>,
     /// Where the MCP host is, and the key to present. Both are re-read on
-    /// recovery — a rotated key, a restarted sidecar on a new port.
+    /// recovery — a rotated key, a restarted host on a new port.
     mcp_url: String,
     token: String,
 }
@@ -343,7 +343,7 @@ impl Bridge {
         Ok(())
     }
 
-    /// Re-discover the MCP host (a sidecar restart moves the port).
+    /// Re-discover the MCP host (a broker restart moves the port).
     async fn rediscover(&self) -> Result<(), String> {
         let url = discover_mcp_url(&self.paths.socket_file()).await?;
         self.state.lock().unwrap().mcp_url = url;
@@ -788,7 +788,7 @@ pub async fn run(paths: Paths, label: Option<String>) -> Result<(), String> {
         }
     });
 
-    // The notification leg is bound to one session; a re-initialize (a sidecar
+    // The notification leg is bound to one session; a re-initialize (an MCP
     // restart, an evicted session) mints a new one and this follows it there.
     // Watched rather than checked inline, because with requests running
     // concurrently there is no single point where "the session just changed"
@@ -1308,7 +1308,7 @@ mod tests {
             .relay_message(&initialized.to_string(), &initialized, &out)
             .await;
 
-        // Simulate an idle eviction or a sidecar restart on the same port.
+        // Simulate an idle eviction or an MCP host restart on the same port.
         bridge.state.lock().unwrap().session = Some("stale-session".into());
         let call = serde_json::json!({
             "jsonrpc": "2.0",

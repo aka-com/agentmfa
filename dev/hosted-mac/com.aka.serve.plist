@@ -17,15 +17,6 @@
     <string>--public-url</string>
     <string>https://broker.example.dev</string>
   </array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <!-- Where the MCP sidecar's bundle lives, when you want MCP served
-         (see dev/hosted-mac/README.md). Remove both to run without MCP. -->
-    <key>AKA_SIDECAR_SCRIPT</key>
-    <string>/usr/local/share/aka/sidecar/main.mjs</string>
-    <key>AKA_SIDECAR_NODE</key>
-    <string>/usr/local/bin/node</string>
-  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>

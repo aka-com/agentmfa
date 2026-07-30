@@ -162,21 +162,6 @@ function verifyMainPackage(expectedVersion) {
   } catch {
     fail("agentmfa is missing bin/agentmfa.js");
   }
-  const sidecar = path.join(packageDir, "sidecar", "main.mjs");
-  try {
-    accessSync(sidecar, constants.R_OK);
-  } catch {
-    fail(
-      "agentmfa is missing sidecar/main.mjs; run npm run sidecar:build " +
-        "and stage the bundle with scripts/npm-dist.sh"
-    );
-  }
-  if (!statSync(sidecar).isFile()) {
-    fail("agentmfa/sidecar/main.mjs is not a regular file");
-  }
-  if (!manifest.files?.includes("sidecar/main.mjs")) {
-    fail("agentmfa must include sidecar/main.mjs in its published files");
-  }
   for (const directory of Object.keys(PLATFORM_PACKAGES)) {
     const name = publishedName(directory);
     if (manifest.optionalDependencies?.[name] !== expectedVersion) {

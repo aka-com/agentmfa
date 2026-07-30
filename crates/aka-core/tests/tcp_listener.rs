@@ -1,7 +1,7 @@
 //! TCP control-plane tests: the same daemon serving a network listener the
 //! way a hosted broker does — remote-flavored discovery, no pairing, agent
 //! and manage planes authenticated, and `/mcp` reverse-proxied to the
-//! sidecar's loopback endpoint.
+//! in-process host's loopback endpoint.
 
 use std::sync::Arc;
 
@@ -263,10 +263,10 @@ async fn both_planes_authenticate_over_tcp() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn mcp_is_reverse_proxied_to_the_sidecar() {
+async fn mcp_is_reverse_proxied_to_the_loopback_host() {
     let h = harness(Some("https://broker.example.dev")).await;
 
-    // Without a sidecar, /mcp answers 503 with a distinct reason.
+    // Without an MCP host, /mcp answers 503 with a distinct reason.
     let client = reqwest::Client::new();
     let response = client
         .post(format!("{}/mcp", h.base))
@@ -278,7 +278,7 @@ async fn mcp_is_reverse_proxied_to_the_sidecar() {
     let body: Value = response.json().await.unwrap();
     assert_eq!(body["reason"], "mcp_unavailable");
 
-    // Stand in a stub "sidecar" that echoes what it received.
+    // Stand in a stub MCP host that echoes what it received.
     let stub = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = stub.local_addr().unwrap().port();
     let app = axum::Router::new().route(
@@ -299,7 +299,7 @@ async fn mcp_is_reverse_proxied_to_the_sidecar() {
     tokio::spawn(async move {
         axum::serve(stub, app).await.unwrap();
     });
-    h.broker.set_sidecar_mcp_port(Some(port));
+    h.broker.set_mcp_host_port(Some(port));
 
     // The manifest now advertises the proxied endpoint.
     let (_, manifest) = get_json(&format!("{}/.well-known/agent-broker.json", h.base), None).await;
@@ -319,6 +319,33 @@ async fn mcp_is_reverse_proxied_to_the_sidecar() {
     assert_eq!(body["method"], "POST");
     assert_eq!(body["authorization"], "Bearer aka_agent_key");
     assert_eq!(body["body"], r#"{"jsonrpc":"2.0","method":"tools/list"}"#);
+
+    // The production Rust host also completes its authenticated handshake
+    // through the public proxy (whose Host header differs from loopback).
+    let host = aka_core::mcp_host::serve(h.broker.clone()).await.unwrap();
+    h.broker.set_mcp_host_port(Some(host.addr().port()));
+    let response = client
+        .post(format!("{}/mcp", h.base))
+        .bearer_auth(h.broker.identity.token())
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "proxy-test", "version": "1"},
+            },
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    assert!(response.headers().get("mcp-session-id").is_some());
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["result"]["serverInfo"]["name"], "agentmfa");
 }
 
 #[tokio::test(flavor = "multi_thread")]

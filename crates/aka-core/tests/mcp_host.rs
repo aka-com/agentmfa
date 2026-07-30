@@ -1,16 +1,9 @@
 //! The MCP host against a real broker.
 //!
-//! The sidecar's own tests use a fake broker, which proves the translation
-//! but not the contract. This one runs the real thing end to end: a real
-//! broker on a real Unix socket, the real Node sidecar, and MCP spoken over
-//! loopback. It is the test that would catch the broker and the sidecar
-//! disagreeing about what a wiring means.
-//!
-//! Skips when the sidecar bundle or Node is missing during an ordinary local
-//! run. CI sets `AGENTMFA_REQUIRE_SIDECAR=1`, turning either prerequisite into
-//! a hard failure so this cross-language contract cannot disappear silently.
+//! This runs the real thing end to end: a real broker on a real Unix socket,
+//! the production Rust host, and MCP spoken over loopback. It catches the
+//! broker and host disagreeing about what a wiring means.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,8 +11,8 @@ use aka_core::broker::Broker;
 use aka_core::config::BrokerConfig;
 use aka_core::daemon;
 use aka_core::events::BrokerEvents;
+use aka_core::mcp::SUPPORTED_PROTOCOL_VERSIONS;
 use aka_core::paths::Paths;
-use aka_core::sidecar::{Sidecar, SidecarConfig, SidecarEndpoint};
 use aka_core::store::ConnectionSpec;
 use aka_core::types::ConnectionConfig;
 use aka_core::vault::MemoryVault;
@@ -29,23 +22,42 @@ use zeroize::Zeroizing;
 struct NoopEvents;
 impl BrokerEvents for NoopEvents {}
 
-fn bundle() -> Option<PathBuf> {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../dist/sidecar/main.mjs")
-        .canonicalize()
-        .ok()
-        .filter(|path| path.is_file())
+struct RunningMcpHost {
+    base_url: String,
+    _host: aka_core::mcp_host::McpHostHandle,
 }
 
-fn have_node() -> bool {
-    std::process::Command::new("node")
-        .arg("--version")
-        .output()
-        .is_ok_and(|out| out.status.success())
+async fn start_mcp_host(broker: Arc<Broker>) -> RunningMcpHost {
+    let host = aka_core::mcp_host::serve(broker)
+        .await
+        .expect("start Rust MCP host");
+    RunningMcpHost {
+        base_url: host.base_url(),
+        _host: host,
+    }
 }
 
-fn sidecar_required() -> bool {
-    std::env::var("AGENTMFA_REQUIRE_SIDECAR").as_deref() == Ok("1")
+fn host_contract() -> Value {
+    serde_json::from_str(include_str!("../../../fixtures/mcp-host-contract.json"))
+        .expect("golden MCP host fixture")
+}
+
+fn contract_strings(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .expect("contract string array")
+        .iter()
+        .map(|value| value.as_str().expect("contract string").to_string())
+        .collect()
+}
+
+#[test]
+fn mcp_host_contract_freezes_the_supported_protocol_revisions() {
+    let contract = host_contract();
+    assert_eq!(
+        contract_strings(&contract["protocol"]["supported_upstream_versions"]),
+        SUPPORTED_PROTOCOL_VERSIONS
+    );
 }
 
 /// A minimal MCP client: initialize, then call tools over one session.
@@ -53,16 +65,18 @@ struct McpClient {
     base: String,
     token: String,
     session: Option<String>,
+    last_content_type: Option<String>,
     next_id: u64,
     http: reqwest::Client,
 }
 
 impl McpClient {
-    fn new(endpoint: &SidecarEndpoint, token: &str) -> Self {
+    fn new(base_url: &str, path: &str, token: &str) -> Self {
         Self {
-            base: format!("{}/mcp", endpoint.base_url()),
+            base: format!("{}{}", base_url.trim_end_matches('/'), path),
             token: token.to_string(),
             session: None,
+            last_content_type: None,
             next_id: 0,
             http: reqwest::Client::new(),
         }
@@ -92,6 +106,11 @@ impl McpClient {
         if let Some(session) = response.headers().get("mcp-session-id") {
             self.session = Some(session.to_str().expect("session id").to_string());
         }
+        self.last_content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
         let body = response.text().await.expect("body");
         (status, parse_body(&body))
     }
@@ -110,18 +129,16 @@ impl McpClient {
         names
     }
 
-    async fn initialize(&mut self) -> u16 {
-        let (status, _) = self
-            .send(
-                "initialize",
-                json!({
-                    "protocolVersion": "2025-06-18",
-                    "capabilities": {},
-                    "clientInfo": {"name": "aka-test", "version": "1.0.0"},
-                }),
-            )
-            .await;
-        status
+    async fn initialize(&mut self, protocol_version: &str) -> (u16, Value) {
+        self.send(
+            "initialize",
+            json!({
+                "protocolVersion": protocol_version,
+                "capabilities": {},
+                "clientInfo": {"name": "aka-test", "version": "1.0.0"},
+            }),
+        )
+        .await
     }
 
     /// The parsed JSON payload of a tool result's first text block.
@@ -155,7 +172,7 @@ fn tool_payload(result: &Value) -> Value {
 }
 
 #[tokio::test]
-async fn broker_http_relay_matches_the_shared_sidecar_fixture() {
+async fn broker_http_relay_matches_the_shared_mcp_fixture() {
     let fixture: Value =
         serde_json::from_str(include_str!("../../../fixtures/mcp-http-relay.json"))
             .expect("golden relay fixture");
@@ -320,22 +337,10 @@ async fn broker_mcp_relay_returns_when_the_matching_sse_frame_arrives() {
 
 #[tokio::test]
 async fn the_broker_decides_what_an_agent_sees_over_mcp() {
-    let Some(script) = bundle() else {
-        assert!(
-            !sidecar_required(),
-            "AGENTMFA_REQUIRE_SIDECAR=1 but dist/sidecar/main.mjs is missing; run `npm run sidecar:build`"
-        );
-        eprintln!("skipping: no dist/sidecar/main.mjs (run `npm run sidecar:build`)");
-        return;
-    };
-    if !have_node() {
-        assert!(
-            !sidecar_required(),
-            "AGENTMFA_REQUIRE_SIDECAR=1 but node is not on PATH"
-        );
-        eprintln!("skipping: no node on PATH");
-        return;
-    }
+    let contract = host_contract();
+    let transport = &contract["transport"];
+    let protocol = &contract["protocol"];
+    let expected = &contract["real_broker"];
 
     // A real upstream, so the credential injection is observable rather
     // than assumed.
@@ -361,7 +366,7 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
                         let id = body.0["id"].clone();
                         let result = match body.0["method"].as_str() {
                             // A conforming server declares every capability it
-                            // offers; the sidecar only calls `tools/list` when
+                            // offers; the MCP host only calls `tools/list` when
                             // `tools` is advertised, so omitting it here would
                             // make this upstream contribute nothing.
                             Some("initialize") => json!({
@@ -481,30 +486,44 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
         .ui_set_tool_access(&deploy.id, false)
         .expect("disable");
 
-    let sidecar = Sidecar::spawn(SidecarConfig {
-        node: PathBuf::from("node"),
-        script,
-        broker_socket: daemon.socket_path.clone(),
-    });
-    let endpoint = sidecar
-        .wait_ready(Duration::from_secs(20))
-        .await
-        .expect("sidecar ready");
+    let host = start_mcp_host(broker.clone()).await;
+    let mcp_path = transport["path"].as_str().expect("MCP path");
+    let protocol_version = protocol["initialize_version"]
+        .as_str()
+        .expect("initialize protocol version");
+    let initialize_status = transport["initialize_status"]
+        .as_u64()
+        .expect("initialize status") as u16;
 
     // A paired agent gets a session.
-    let mut wired = McpClient::new(&endpoint, &first);
-    assert_eq!(wired.initialize().await, 200);
+    let mut wired = McpClient::new(&host.base_url, mcp_path, &first);
+    let (status, initialized) = wired.initialize(protocol_version).await;
+    assert_eq!(status, initialize_status);
+    assert_eq!(
+        initialized["result"]["protocolVersion"], protocol["initialize_version"],
+        "the host negotiated a different protocol revision"
+    );
+    assert!(
+        wired.session.is_some(),
+        "initialize must return an mcp-session-id"
+    );
+    let content_type = wired
+        .last_content_type
+        .as_deref()
+        .and_then(|value| value.split(';').next())
+        .expect("initialize content-type");
+    assert!(
+        contract_strings(&transport["response_content_types"])
+            .iter()
+            .any(|expected| expected == content_type),
+        "unexpected MCP content-type {content_type:?}"
+    );
 
     // …whose tool list is exactly what the broker says it is wired to.
     let tools = wired.list_tools().await;
     assert_eq!(
         tools,
-        vec![
-            "agentmfa_connect",
-            "agentmfa_notes_search",
-            "agentmfa_prod-db_request",
-            "agentmfa_status"
-        ],
+        contract_strings(&expected["wired_tools"]),
         "an MCP upstream contributes its own tools; disabled ones contribute none"
     );
 
@@ -512,38 +531,50 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
     // credential injected by the broker and never seen by the agent.
     let result = wired
         .call_tool(
-            "agentmfa_prod-db_request",
-            json!({"method": "GET", "path": "/whoami"}),
+            expected["http_call"]["tool"].as_str().expect("HTTP tool"),
+            expected["http_call"]["arguments"].clone(),
         )
         .await;
     let response = tool_payload(&result);
-    assert_eq!(response["status"], 200, "upstream call failed: {response}");
+    assert_eq!(
+        response["status"], expected["http_call"]["response_status"],
+        "upstream call failed: {response}"
+    );
     let seen = upstream_auth.lock().expect("lock").clone();
     assert_eq!(
         seen.as_deref(),
-        Some("Bearer secret-value"),
+        expected["http_call"]["upstream_authorization"].as_str(),
         "the broker must inject the credential on the upstream leg"
     );
+    let forbidden_response_text = expected["http_call"]["forbidden_response_text"]
+        .as_str()
+        .expect("forbidden response text");
     assert!(
         !serde_json::to_string(&result)
             .expect("json")
-            .contains("secret-value"),
+            .contains(forbidden_response_text),
         "the secret must not come back to the agent: {result}"
     );
 
     // The MCP upstream is reached *through* the broker, so its credential
     // is injected on the upstream leg exactly like any other API call.
     let searched = wired
-        .call_tool("agentmfa_notes_search", json!({"query": "roadmap"}))
+        .call_tool(
+            expected["mcp_call"]["tool"].as_str().expect("MCP tool"),
+            expected["mcp_call"]["arguments"].clone(),
+        )
         .await;
     let text = searched["content"][0]["text"].as_str().unwrap_or_default();
+    let response_contains = expected["mcp_call"]["response_contains"]
+        .as_str()
+        .expect("MCP response substring");
     assert!(
-        text.contains("roadmap"),
+        text.contains(response_contains),
         "the upstream tool should have run: {searched}"
     );
     assert_eq!(
         mcp_auth.lock().expect("lock").as_deref(),
-        Some("Bearer secret-value"),
+        expected["mcp_call"]["upstream_authorization"].as_str(),
         "the broker must inject the credential for MCP traffic too"
     );
     assert!(
@@ -555,18 +586,28 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
         .recent(50)
         .into_iter()
         .find(|entry| {
-            entry.connection.as_deref() == Some("notes")
-                && entry.fields.get("mcp_method") == Some(&json!("tools/call"))
-                && entry.fields.get("mcp_name") == Some(&json!("search"))
+            entry.connection.as_deref() == expected["mcp_call"]["audit"]["connection"].as_str()
+                && entry.fields.get("mcp_method") == Some(&expected["mcp_call"]["audit"]["method"])
+                && entry.fields.get("mcp_name") == Some(&expected["mcp_call"]["audit"]["name"])
         })
         .expect("the proxied MCP tool call must carry method and name audit fields");
-    assert_eq!(mcp_audit.fields["path"], json!("/mcp"));
+    assert_eq!(
+        mcp_audit.fields["path"],
+        expected["mcp_call"]["audit"]["path"]
+    );
 
     // `agentmfa_status` — the tool an agent is told to trust when confused —
     // names the upstream by its real tool names, not the request-tool naming
     // convention. Regression: it used to advertise `agentmfa_notes_request`,
     // a tool that does not exist.
-    let status = tool_payload(&wired.call_tool("agentmfa_status", json!({})).await);
+    let status = tool_payload(
+        &wired
+            .call_tool(
+                expected["status"]["tool"].as_str().expect("status tool"),
+                json!({}),
+            )
+            .await,
+    );
     let named: Vec<&str> = status["tools"]
         .as_array()
         .expect("status tools array")
@@ -574,11 +615,20 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
         .map(|entry| entry["tool"].as_str().expect("tool name"))
         .collect();
     assert!(
-        named.contains(&"agentmfa_notes_search"),
+        named.contains(
+            &expected["status"]["contains_tool"]
+                .as_str()
+                .expect("status tool name")
+        ),
         "status must report the upstream by its real tool name: {status}"
     );
+    let excluded_status_fragment = expected["status"]["excludes_tool_fragment"]
+        .as_str()
+        .expect("excluded status fragment");
     assert!(
-        !named.iter().any(|name| name.contains("notes_request")),
+        !named
+            .iter()
+            .any(|name| name.contains(excluded_status_fragment)),
         "status must not advertise a phantom request tool for an MCP upstream: {status}"
     );
 
@@ -590,22 +640,35 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
             .ui_set_tool_access(&connection.id, false)
             .expect("disable");
     }
-    let mut bare = McpClient::new(&endpoint, &first);
-    assert_eq!(bare.initialize().await, 200);
+    let mut bare = McpClient::new(&host.base_url, mcp_path, &first);
+    let (status, _) = bare.initialize(protocol_version).await;
+    assert_eq!(status, initialize_status);
     assert_eq!(
         bare.list_tools().await,
-        vec!["agentmfa_connect", "agentmfa_status"]
+        contract_strings(&expected["bare_tools"])
     );
-    let status = tool_payload(&bare.call_tool("agentmfa_status", json!({})).await);
+    let status = tool_payload(
+        &bare
+            .call_tool(
+                expected["status"]["tool"].as_str().expect("status tool"),
+                json!({}),
+            )
+            .await,
+    );
     assert_eq!(
-        status["tools"],
-        json!([]),
+        status["tools"], expected["status"]["bare_tools"],
         "every tool disabled ⇒ nothing to report"
     );
 
     // An unpaired token cannot open a session at all.
-    let mut stranger = McpClient::new(&endpoint, "not-a-real-token");
-    assert_eq!(stranger.initialize().await, 401);
+    let mut stranger = McpClient::new(&host.base_url, mcp_path, "not-a-real-token");
+    let (status, _) = stranger.initialize(protocol_version).await;
+    assert_eq!(
+        status,
+        transport["unauthorized_initialize_status"]
+            .as_u64()
+            .expect("unauthorized initialize status") as u16
+    );
 }
 
 async fn pair(socket: &std::path::Path, name: &str) -> String {

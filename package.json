@@ -8,8 +8,6 @@
     "start": "tauri dev",
     "frontend:dev": "vite",
     "frontend:build": "vite build",
-    "sidecar:build": "vite build --config sidecar/vite.config.ts",
-    "sidecar:vendor": "bash scripts/vendor-node.sh",
     "typecheck": "tsc --noEmit",
     "sandbox:up": "bash scripts/sandbox-up.sh",
     "sandbox:status": "bash scripts/sandbox-status.sh",
@@ -20,9 +18,8 @@
     "npm:check": "node scripts/npm/sync-versions.mjs --check",
     "npm:dist": "bash scripts/npm-dist.sh --all --pack",
     "npm:publish": "bash scripts/npm-publish.sh",
-    "test": "npm run npm:check && npm run test:npm-launcher && npm run typecheck && npm run sidecar:build && AGENTMFA_REQUIRE_SIDECAR=1 cargo test --workspace && cargo test --manifest-path src-tauri/Cargo.toml && npm run test:ui && npm run test:sidecar",
+    "test": "npm run npm:check && npm run test:npm-launcher && npm run typecheck && cargo test --workspace && cargo test --manifest-path src-tauri/Cargo.toml && npm run test:ui",
     "test:npm-launcher": "node --test scripts/npm/launcher.test.mjs",
-    "test:sidecar": "tsx --test sidecar/tests/*.test.ts",
     "test:ui": "tsx --test ui/tests/*.test.ts ui/tests/*.test.tsx"
   },
   "devDependencies": {
@@ -39,14 +36,9 @@
     "vite": "^8.1.4"
   },
   "dependencies": {
-    "@executor-js/plugin-mcp": "^1.5.35",
-    "@executor-js/sdk": "^1.5.35",
-    "@modelcontextprotocol/sdk": "^1.29.0",
     "@tanstack/react-query": "^5.101.4",
-    "effect": "^4.0.0-beta.59",
     "lucide": "^1.23.0",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8",
-    "zod": "^4.4.3"
+    "react-dom": "^19.2.8"
   }
 }

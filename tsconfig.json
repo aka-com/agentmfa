@@ -17,7 +17,6 @@
   "include": [
     "ui/**/*.ts",
     "ui/**/*.tsx",
-    "sidecar/**/*.ts",
     "scripts/**/*.ts",
     "dev/sandbox/tests/**/*.ts",
     "vite.config.ts"

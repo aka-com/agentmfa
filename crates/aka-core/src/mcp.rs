@@ -1,6 +1,6 @@
 //! Broker-side MCP client for UI-initiated checks.
 //!
-//! The sidecar owns the *agent-facing* MCP surface; this module is the
+//! [`crate::mcp_host`] owns the *agent-facing* MCP surface; this module is the
 //! broker's own, much smaller client, used for two trusted-UI jobs:
 //!
 //! - the **status check** on an MCP connection ("is the server reachable,
@@ -39,7 +39,7 @@ pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &[PROTOCOL_VERSION, PROTOCOL_VE
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const RESPONSE_CAP: usize = 4 * 1024 * 1024;
-// Keep these catalog bounds aligned with the agent-facing sidecar. The two
+// Keep these catalog bounds aligned with the agent-facing MCP host. The two
 // clients cannot share a compiled constant across Rust/TypeScript, so tests
 // assert the behavior at both boundaries.
 const MAX_TOOL_PAGES: usize = 32;

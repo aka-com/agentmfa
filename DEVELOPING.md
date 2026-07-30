@@ -2,7 +2,7 @@
 
 ```sh
 npm install        # Install the pinned Tauri and TypeScript toolchain
-npm test           # Type-check, then test the core, CLI, desktop commands, UI helpers, and sidecar
+npm test           # Type-check, then test the core, CLI, desktop commands, and UI helpers
 npm run test:ui    # Run only the TypeScript UI helper tests
 npm run lint       # Lint the workspace and the separate Tauri app crate
 npm run typecheck  # Type-check the frontend without emitting files

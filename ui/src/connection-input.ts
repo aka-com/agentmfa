@@ -169,7 +169,7 @@ export function parseApiOrigin(value: unknown): {
  * Split an MCP server URL into the parts a connection stores.
  *
  * An MCP server is an API connection whose path matters, so unlike
- * `parseApiOrigin` this keeps the path — that is the `mcp_path` the sidecar
+ * `parseApiOrigin` this keeps the path — that is the `mcp_path` the MCP host
  * posts JSON-RPC to. A bare origin means `/mcp`, the conventional default.
  */
 export function parseMcpServerUrl(value: unknown): {

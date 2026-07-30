@@ -207,9 +207,9 @@ enum Command {
         /// credentials and personal data into a durable log.
         #[arg(long)]
         audit_pg_statements: bool,
-        /// Do not start the MCP sidecar even when its script is found.
-        #[arg(long)]
-        no_sidecar: bool,
+        /// Do not start the MCP host.
+        #[arg(long, alias = "no-sidecar")]
+        no_mcp: bool,
     },
     /// Bridge stdio MCP to the local AgentMFA broker's MCP host. Point any
     /// MCP client at `mfa mcp` — it reads this computer's shared key and
@@ -795,7 +795,7 @@ struct ConnAdd {
     #[arg(long)]
     ca_bundle: Option<String>,
     /// api: expose this connection as an MCP server by giving the upstream's
-    /// JSON-RPC path (e.g. `/mcp`). The sidecar then re-exposes its tools;
+    /// JSON-RPC path (e.g. `/mcp`). The MCP host then re-exposes its tools;
     /// the credential still rides the pinned host's `/v1/http` plane.
     #[arg(long)]
     mcp_path: Option<String>,
@@ -974,7 +974,7 @@ fn run_cli() {
             session_idle_timeout,
             session_max_ttl,
             audit_pg_statements,
-            no_sidecar,
+            no_mcp,
         } => cmd_serve(ServeArgs {
             root,
             listen,
@@ -985,7 +985,7 @@ fn run_cli() {
             session_idle_timeout,
             session_max_ttl,
             audit_pg_statements,
-            no_sidecar,
+            no_mcp,
         }),
         Command::Mcp { root, client } => cmd_mcp(root, client),
         Command::Dsn {
@@ -3866,43 +3866,6 @@ fn cmd_mcp(root: Option<PathBuf>, client: Option<String>) {
     }
 }
 
-/// Where the MCP sidecar's pieces are, when a checkout or install carries
-/// them. `AKA_SIDECAR_SCRIPT`/`AKA_SIDECAR_NODE` override; otherwise the
-/// bundled `dist/sidecar/main.mjs` of the working directory is used and
-/// `node` resolves through PATH at spawn time.
-fn resolve_sidecar(broker_socket: PathBuf) -> Option<aka_core::sidecar::SidecarConfig> {
-    let script = match std::env::var_os("AKA_SIDECAR_SCRIPT") {
-        Some(script) => {
-            let script = PathBuf::from(script);
-            if !script.exists() {
-                // Warn once here instead of letting the supervisor loop on
-                // spawn failures with backoff noise.
-                eprintln!(
-                    "  MCP host not started: AKA_SIDECAR_SCRIPT={} does not exist",
-                    script.display()
-                );
-                return None;
-            }
-            script
-        }
-        None => {
-            let bundled = PathBuf::from("dist/sidecar/main.mjs");
-            if !bundled.exists() {
-                return None;
-            }
-            bundled
-        }
-    };
-    let node = std::env::var_os("AKA_SIDECAR_NODE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("node"));
-    Some(aka_core::sidecar::SidecarConfig {
-        node,
-        script,
-        broker_socket,
-    })
-}
-
 /// Everything `mfa serve` accepts, bundled so the call site stays legible.
 struct ServeArgs {
     root: Option<PathBuf>,
@@ -3914,7 +3877,7 @@ struct ServeArgs {
     session_idle_timeout: Option<u64>,
     session_max_ttl: Option<u64>,
     audit_pg_statements: bool,
-    no_sidecar: bool,
+    no_mcp: bool,
 }
 
 fn cmd_serve(args: ServeArgs) {
@@ -3928,7 +3891,7 @@ fn cmd_serve(args: ServeArgs) {
         session_idle_timeout,
         session_max_ttl,
         audit_pg_statements,
-        no_sidecar,
+        no_mcp,
     } = args;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -3976,38 +3939,19 @@ fn cmd_serve(args: ServeArgs) {
         Err(e) => fail("could not serve the control plane", &e),
     };
 
-    // Supervise the MCP sidecar when its script is available, and keep the
-    // discovery manifest told where its endpoint is (restarts move the
-    // port). Without a script the broker still serves everything but MCP.
-    let sidecar = if no_sidecar {
+    // The agent-facing MCP listener is another task on the broker runtime.
+    // Keep its loopback port in discovery so local bridges and the public
+    // daemon proxy can reach it without a second process or runtime.
+    let mcp_host = if no_mcp {
         None
     } else {
-        match resolve_sidecar(daemon.socket_path.clone()) {
-            Some(config) => {
-                let sidecar = runtime.block_on(async { aka_core::sidecar::Sidecar::spawn(config) });
-                let watch = sidecar.watch();
-                let broker_for_watch = broker.clone();
-                runtime.spawn(watch.follow(move |endpoint| {
-                    if let Some(endpoint) =
-                        endpoint.as_ref().filter(|endpoint| endpoint.version_skew)
-                    {
-                        eprintln!(
-                            "  warning: MCP sidecar version {} does not match broker {}; \
-                             rebuild or reinstall the sidecar",
-                            endpoint.sidecar_version.as_deref().unwrap_or("unknown"),
-                            endpoint.broker_version,
-                        );
-                    }
-                    broker_for_watch.set_sidecar_mcp_port(endpoint.map(|e| e.port));
-                }));
-                Some(sidecar)
+        match runtime.block_on(aka_core::mcp_host::serve(broker.clone())) {
+            Ok(host) => {
+                broker.set_mcp_host_port(Some(host.addr().port()));
+                Some(host)
             }
-            None => {
-                eprintln!(
-                    "  MCP host not started: no sidecar script found (set \
-                     AKA_SIDECAR_SCRIPT or run from a checkout with \
-                     dist/sidecar/main.mjs built)"
-                );
+            Err(error) => {
+                eprintln!("  MCP host not started: {error}");
                 None
             }
         }
@@ -4056,7 +4000,7 @@ fn cmd_serve(args: ServeArgs) {
     } else if sessions > 0 {
         eprintln!("  drained {sessions} active data-plane session(s)");
     }
-    drop(sidecar);
+    drop(mcp_host);
     drop(daemon);
 }
 
@@ -4205,6 +4149,8 @@ mod tests {
             assert!(Cli::try_parse_from(["mfa", "serve", flag, "0"]).is_err());
             assert!(Cli::try_parse_from(["mfa", "serve", flag, "1"]).is_ok());
         }
+        assert!(Cli::try_parse_from(["mfa", "serve", "--no-mcp"]).is_ok());
+        assert!(Cli::try_parse_from(["mfa", "serve", "--no-sidecar"]).is_ok());
         assert!(Cli::try_parse_from([
             "mfa",
             "serve",

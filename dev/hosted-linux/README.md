@@ -46,9 +46,9 @@ docker run -d --name aka-broker \
     aka-broker --public-url https://broker.example.dev --advertise-host broker.lan
 ```
 
-The image builds the `mfa` CLI (glibc/Debian — no musl needed) and the
-Node MCP sidecar, and `mfa serve` supervises the sidecar so `<public-url>/mcp`
-works. Args after the image name are appended to the entrypoint's
+The image builds the self-contained `mfa` CLI (glibc/Debian — no musl
+needed); its in-process Rust MCP host serves `<public-url>/mcp`. Args after
+the image name are appended to the entrypoint's
 `mfa serve --root /var/lib/aka --listen 0.0.0.0:4780`.
 
 Issue the management token once (offline; the broker holds identity state
@@ -77,15 +77,13 @@ mfa activity --broker https://broker.example.dev
 
 ## Run it (systemd, no container)
 
-Build `mfa` (`cargo build --release -p mfa`) and the sidecar
-(`npm run sidecar:build`), install them, create the `aka` user and
-`/var/lib/aka`, drop the key in `/etc/aka/vault.env`
+Build `mfa` (`cargo build --release -p mfa`), install it, create the `aka`
+user and `/var/lib/aka`, and drop the key in `/etc/aka/vault.env`
 (`AKA_VAULT_KEY=…`, mode 0400), then use
 [`aka-broker.service`](aka-broker.service):
 
 ```sh
 install -Dm755 target/release/mfa /usr/local/bin/mfa
-install -Dm644 dist/sidecar/main.mjs /usr/local/share/aka/sidecar/main.mjs
 useradd --system --home /var/lib/aka --create-home aka
 install -Dm644 dev/hosted-linux/aka-broker.service /etc/systemd/system/aka-broker.service
 # edit the unit's --public-url; put the key in /etc/aka/vault.env

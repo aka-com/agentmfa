@@ -1477,7 +1477,7 @@ async fn whoami_probes_a_stored_token() {
 
 #[tokio::test]
 async fn whoami_is_exempt_from_the_per_token_limit() {
-    // The MCP sidecar resolves the token via whoami on *every* request it
+    // The MCP host resolves the token via whoami on *every* request it
     // serves (no caching, so a revoked token stops working at once). Charging
     // whoami against the capability budget would halve an agent's real
     // tool-call rate and surface as a mystifying rate limit, so whoami is

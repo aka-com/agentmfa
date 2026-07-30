@@ -18,24 +18,15 @@ const launcher = path.join(
   "bin",
   "agentmfa.js"
 );
-const packagedSidecar = path.join(
-  repoRoot,
-  "npm",
-  "agentmfa",
-  "sidecar",
-  "main.mjs"
-);
-
-function runLauncher(overrides = {}) {
+function runLauncher() {
   const dir = mkdtempSync(path.join(os.tmpdir(), "agentmfa-launcher-"));
   const stub = path.join(dir, "mfa-stub");
   const capture = path.join(dir, "capture.json");
   writeFileSync(
     stub,
     `#!/bin/sh
-printf '{"node":"%s","script":"%s","args":"%s"}' \
-  "$AKA_SIDECAR_NODE" "$AKA_SIDECAR_SCRIPT" "$*" > "$AGENTMFA_CAPTURE"
-`
+printf '{"args":"%s"}' "$*" > "$AGENTMFA_CAPTURE"
+`,
   );
   chmodSync(stub, 0o755);
 
@@ -43,14 +34,7 @@ printf '{"node":"%s","script":"%s","args":"%s"}' \
     ...process.env,
     AGENTMFA_BIN: stub,
     AGENTMFA_CAPTURE: capture,
-    ...overrides,
   };
-  if (!Object.hasOwn(overrides, "AKA_SIDECAR_NODE")) {
-    delete env.AKA_SIDECAR_NODE;
-  }
-  if (!Object.hasOwn(overrides, "AKA_SIDECAR_SCRIPT")) {
-    delete env.AKA_SIDECAR_SCRIPT;
-  }
 
   const result = spawnSync(
     process.execPath,
@@ -61,18 +45,7 @@ printf '{"node":"%s","script":"%s","args":"%s"}' \
   return JSON.parse(readFileSync(capture, "utf8"));
 }
 
-test("launcher gives the broker its Node runtime and packaged MCP host", () => {
+test("launcher hands arguments to the platform binary", () => {
   const captured = runLauncher();
-  assert.equal(captured.node, process.execPath);
-  assert.equal(captured.script, packagedSidecar);
   assert.equal(captured.args, "serve --root /tmp/aka-test");
-});
-
-test("launcher preserves explicit sidecar overrides", () => {
-  const captured = runLauncher({
-    AKA_SIDECAR_NODE: "/custom/node",
-    AKA_SIDECAR_SCRIPT: "/custom/main.mjs",
-  });
-  assert.equal(captured.node, "/custom/node");
-  assert.equal(captured.script, "/custom/main.mjs");
 });

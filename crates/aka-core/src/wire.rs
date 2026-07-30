@@ -123,7 +123,7 @@ pub enum ErrorReason {
     /// The endpoint exists on another transport but is not served on the
     /// one the request arrived on (pairing over TCP).
     NotServedRemotely,
-    /// The MCP host is not running (no sidecar to proxy to).
+    /// The MCP host is not running.
     McpUnavailable,
     // Broker-side faults.
     BadConnectionConfig,

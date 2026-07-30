@@ -22,7 +22,5 @@ src-tauri/tauri.build.conf.json
 # Generated credentials and runtime state for the local service sandbox.
 /dev/sandbox/state/
 
-# Staged CLI binaries and MCP bundle for the npm distribution
-# (scripts/npm-dist.sh)
+# Staged CLI binaries for the npm distribution (scripts/npm-dist.sh)
 /npm/agentmfa-*/bin/
-/npm/agentmfa/sidecar/

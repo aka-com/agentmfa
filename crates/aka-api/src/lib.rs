@@ -386,7 +386,7 @@ pub struct ConnectionDto {
     pub sslmode: Option<String>,
     #[serde(default)]
     pub trusted_ca_bundle_path: Option<String>,
-    /// Set when an API upstream speaks MCP at that path; the sidecar
+    /// Set when an API upstream speaks MCP at that path; the MCP host
     /// re-exposes its tools under this connection's name.
     #[serde(default)]
     pub mcp_path: Option<String>,

@@ -2372,7 +2372,7 @@ async fn proxy_handler(
     // in memory. A direct endpoint deliberately gates before body upload and
     // spools large bodies to disk, so it cannot safely inspect a tool call
     // without defeating that memory boundary. Fail closed on the pinned MCP
-    // path; callers that need curation use the broker/sidecar path. Generic
+    // path; callers that need curation use the broker/MCP-host path. Generic
     // API paths on the same connection remain available.
     let on_mcp_path = match &connection.config {
         ConnectionConfig::Api {
@@ -2386,7 +2386,7 @@ async fn proxy_handler(
         return endpoint_error(
             StatusCode::FORBIDDEN,
             ErrorReason::DeniedByPolicy,
-            "curated MCP tools must be called through the broker or MCP sidecar, not the direct HTTP endpoint",
+            "curated MCP tools must be called through the broker's MCP host, not the direct HTTP endpoint",
         );
     }
 
@@ -2671,7 +2671,7 @@ async fn proxy_handler(
         return endpoint_error(
             StatusCode::FORBIDDEN,
             ErrorReason::DeniedByPolicy,
-            "curated MCP tools must be called through the broker or MCP sidecar, not the direct HTTP endpoint",
+            "curated MCP tools must be called through the broker's MCP host, not the direct HTTP endpoint",
         );
     }
     if connection.updated_at != policy_version {

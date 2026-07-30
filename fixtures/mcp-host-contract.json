@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "transport": {
+    "path": "/mcp",
+    "initialize_status": 200,
+    "unauthorized_initialize_status": 401,
+    "response_content_types": [
+      "application/json",
+      "text/event-stream"
+    ]
+  },
+  "protocol": {
+    "initialize_version": "2025-06-18",
+    "supported_upstream_versions": [
+      "2025-06-18",
+      "2025-03-26"
+    ]
+  },
+  "fake_broker": {
+    "wired_tools": [
+      "agentmfa_connect",
+      "agentmfa_prod-db_open",
+      "agentmfa_status"
+    ],
+    "bare_tools": [
+      "agentmfa_connect",
+      "agentmfa_status"
+    ],
+    "open_call": {
+      "tool": "agentmfa_prod-db_open",
+      "result": {
+        "endpoint": "/v1/pg/open",
+        "body": {
+          "connection": "prod-db"
+        }
+      }
+    }
+  },
+  "real_broker": {
+    "wired_tools": [
+      "agentmfa_connect",
+      "agentmfa_notes_search",
+      "agentmfa_prod-db_request",
+      "agentmfa_status"
+    ],
+    "bare_tools": [
+      "agentmfa_connect",
+      "agentmfa_status"
+    ],
+    "http_call": {
+      "tool": "agentmfa_prod-db_request",
+      "arguments": {
+        "method": "GET",
+        "path": "/whoami"
+      },
+      "response_status": 200,
+      "upstream_authorization": "Bearer secret-value",
+      "forbidden_response_text": "secret-value"
+    },
+    "mcp_call": {
+      "tool": "agentmfa_notes_search",
+      "arguments": {
+        "query": "roadmap"
+      },
+      "response_contains": "roadmap",
+      "upstream_authorization": "Bearer secret-value",
+      "audit": {
+        "connection": "notes",
+        "method": "tools/call",
+        "name": "search",
+        "path": "/mcp"
+      }
+    },
+    "status": {
+      "tool": "agentmfa_status",
+      "contains_tool": "agentmfa_notes_search",
+      "excludes_tool_fragment": "notes_request",
+      "bare_tools": []
+    }
+  }
+}

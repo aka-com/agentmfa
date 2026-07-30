@@ -475,7 +475,7 @@ host-key-mismatched signing requests.
 
 `mfa mcp` is a stdio adapter for MCP clients. It discovers the broker's
 Streamable HTTP MCP endpoint and authenticates every request with this
-machine's shared key. The manifest advertises `mcp_url` while the sidecar is
+machine's shared key. The manifest advertises `mcp_url` while the MCP host is
 running (or `mcp_path` on a remotely served broker). Upstream MCP connections
 must themselves speak Streamable HTTP at their configured `mcp_path`;
 upstream stdio servers are not supported.

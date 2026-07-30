@@ -90,14 +90,14 @@ pub enum ConnectionConfig {
         /// e.g. `Authorization: Bearer {{GITHUB_API_KEY}}`.
         template: String,
         /// When set, this upstream speaks MCP at that path (e.g. `/mcp`),
-        /// and the sidecar re-exposes its tools under this connection's
+        /// and the MCP host re-exposes its tools under this connection's
         /// name.
         ///
         /// An MCP server reached over HTTP is an API connection in every
         /// way that matters here — same pinned host, same credential
         /// injected on the upstream leg — so it is a field rather than a
         /// separate kind. That is also what keeps the secret out of the
-        /// sidecar: the MCP traffic rides the existing HTTP plane.
+        /// MCP host: the MCP traffic rides the existing HTTP plane.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mcp_path: Option<String>,
         /// The path the Test button fetches, when the origin root is not a
@@ -541,7 +541,7 @@ pub struct ToolAccess {
     pub enabled: bool,
     /// Curated subset of the upstream MCP tools agents may call; `None`
     /// means every tool. Enforced broker-side on `tools/call` and mirrored
-    /// by the sidecar's tool listing.
+    /// by the MCP host's tool listing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_tools: Option<Vec<String>>,
     /// Whether traffic is confirmed with the user before it leaves. Records

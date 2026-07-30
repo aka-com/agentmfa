@@ -114,14 +114,6 @@ fi
 
 node scripts/npm/sync-versions.mjs --check
 
-# The npm launcher reuses its own Node 22 runtime, but it still needs the
-# self-contained MCP host script. Build and stage that one-file bundle beside
-# the launcher so `mfa serve` can host MCP from any working directory.
-npm run sidecar:build
-install -d "npm/agentmfa/sidecar"
-install -m 0644 "dist/sidecar/main.mjs" "npm/agentmfa/sidecar/main.mjs"
-echo "staged dist/sidecar/main.mjs -> npm/agentmfa/sidecar/main.mjs"
-
 host="$(rustc -vV | sed -n 's/^host: //p')"
 if [[ "$all" -eq 1 ]]; then
   targets=(

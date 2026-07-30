@@ -51,10 +51,8 @@ Notes:
   the signed desktop app against the same store, see the note in
   `crates/aka-core/src/keychain/mod.rs`: the app moves values somewhere `mfa`
   cannot follow, and `mfa` will say so rather than show an empty vault.
-- **MCP host**: `mfa serve` starts the Node sidecar when it finds
-  `dist/sidecar/main.mjs` (a checkout after `npm run sidecar:build`) or
-  `AKA_SIDECAR_SCRIPT` points at one; `node` must be on PATH (or set
-  `AKA_SIDECAR_NODE`). Remote MCP clients then use `<public-url>/mcp`.
+- **MCP host**: `mfa serve` starts the in-process Rust host automatically.
+  Remote MCP clients use `<public-url>/mcp`.
 - `/v1/pair` is not served on the TCP listener: remote clients get the
   shared agent key from you (`mfa key` prints it; it lives in
   `~/.aka/token` on this Mac), and the desktop app manages the broker

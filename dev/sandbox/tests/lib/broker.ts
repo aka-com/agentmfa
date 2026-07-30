@@ -159,8 +159,8 @@ export interface StartOptions {
   label: string;
   /** Which sandbox services to add as connections. */
   seed?: SeedName[];
-  /** Run the MCP sidecar (needs `npm run sidecar:build`). Off by default. */
-  sidecar?: boolean;
+  /** Disable the in-process MCP host for an unavailable-host test. */
+  mcp?: boolean;
   /** Pin the SSH connection to this host-key fingerprint (default: TOFU). */
   sshHostKeyFingerprint?: string;
 }
@@ -178,13 +178,6 @@ export function mfaBinary(): string {
     'no `mfa` binary found — run `cargo build -p mfa` or set AKA_MFA_BIN ' +
       '(`npm run sandbox:test` does this for you)',
   );
-}
-
-function sidecarScript(): string | undefined {
-  const configured = process.env.AKA_SIDECAR_SCRIPT;
-  if (configured) return existsSync(configured) ? configured : undefined;
-  const bundled = join(repoRoot, 'dist/sidecar/main.mjs');
-  return existsSync(bundled) ? bundled : undefined;
 }
 
 export class Broker {
@@ -221,8 +214,8 @@ export class Broker {
    * Serve an existing root again — the restart case. The management token
    * and the agent key belong to the state on disk, so both survive.
    */
-  static async reopen(root: string, manageToken: string, sidecar = false): Promise<Broker> {
-    const broker = await Broker.launch(root, manageToken, { sidecar });
+  static async reopen(root: string, manageToken: string): Promise<Broker> {
+    const broker = await Broker.launch(root, manageToken, {});
     for (const connection of await broker.manage<ConnectionDto[]>('GET', '/connections')) {
       broker.connections.set(connection.name, connection);
     }
@@ -232,19 +225,17 @@ export class Broker {
   private static async launch(
     root: string,
     manageToken: string,
-    options: Pick<StartOptions, 'sidecar'>,
+    options: Pick<StartOptions, 'mcp'>,
   ): Promise<Broker> {
     const binary = mfaBinary();
     const socketPath = join(root, 'sock/broker.sock');
-    const script = options.sidecar ? sidecarScript() : undefined;
     const args = ['serve', '--root', root];
-    if (!script) args.push('--no-sidecar');
+    if (options.mcp === false) args.push('--no-mcp');
     const child = spawn(binary, args, {
       cwd: repoRoot,
       env: {
         ...process.env,
         RUST_LOG: process.env.RUST_LOG ?? 'aka_core=warn',
-        ...(script ? { AKA_SIDECAR_SCRIPT: script, AKA_SIDECAR_NODE: process.execPath } : {}),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });

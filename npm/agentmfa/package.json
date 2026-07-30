@@ -22,8 +22,7 @@
     "mfa": "bin/agentmfa.js"
   },
   "files": [
-    "bin/agentmfa.js",
-    "sidecar/main.mjs"
+    "bin/agentmfa.js"
   ],
   "engines": {
     "node": ">=22"

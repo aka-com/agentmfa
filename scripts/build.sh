@@ -63,17 +63,6 @@ fi
 # release.sh owns submission and stapling.
 unset APPLE_ID APPLE_PASSWORD APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_PATH
 
-# The sidecar bundle rides along as a Tauri resource, and the pinned Node it
-# runs on is an externalBin. Both must exist before the bundler looks for
-# them, or the build fails late with a missing-file error.
-#
-# The externalBin declaration lives in a separate config merged in here,
-# not in tauri.conf.json: Tauri validates external binaries on *every*
-# build of the shell crate, so declaring it in the base config would make
-# `cargo test` require the vendored Node download.
-npm run sidecar:build
-npm run sidecar:vendor
-
 target_args=()
 bundle_config="src-tauri/tauri.bundle.conf.json"
 if [[ "$(uname)" == "Darwin" ]]; then

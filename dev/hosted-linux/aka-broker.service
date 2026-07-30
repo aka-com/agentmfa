@@ -13,7 +13,6 @@ User=aka
 Group=aka
 # State (encrypted vault, socket, token, audit log) lives here.
 Environment=HOME=/var/lib/aka
-Environment=AKA_SIDECAR_SCRIPT=/usr/local/share/aka/sidecar/main.mjs
 # The vault master key. Point this at a root-owned 0400 file that systemd
 # reads (EnvironmentFile), or inject AKA_VAULT_KEY from your secret manager.
 # NEVER put the key literal in this unit file.

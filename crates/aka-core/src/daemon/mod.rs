@@ -571,8 +571,8 @@ pub fn router_for(broker: Arc<Broker>, transport: Transport) -> Router {
         .route("/v1/connect-requests", post(post_connect_request))
         .route("/v1/pg/open", post(post_pg_open))
         .route("/v1/ssh/open", post(post_ssh_open))
-        // The sidecar's MCP endpoint, reverse-proxied so one address (and
-        // one operator proxy rule) covers the whole broker. The sidecar
+        // The in-process MCP endpoint, reverse-proxied so one address (and
+        // one operator proxy rule) covers the whole broker. The MCP host
         // authorizes every request against the broker itself, so this
         // proxy adds reach, not authority.
         .route("/mcp", axum::routing::any(proxy_mcp))
@@ -753,14 +753,14 @@ async fn get_manifest(State(state): State<AppState>) -> Response {
         return Json(wellknown::manifest_remote(
             &state.broker.config,
             state.transport.public_url(),
-            state.broker.sidecar_mcp_url().is_some(),
+            state.broker.mcp_host_url().is_some(),
         ))
         .into_response();
     }
     Json(wellknown::manifest(
         &state.broker.config,
         &state.broker.paths,
-        state.broker.sidecar_mcp_url(),
+        state.broker.mcp_host_url(),
     ))
     .into_response()
 }
@@ -917,7 +917,7 @@ async fn get_connections(State(state): State<AppState>, authed: Authed) -> Respo
             {
                 row["mcp_path"] = json!(path);
                 // The curated tool subset, when one is set; the broker
-                // enforces it on tools/call, this field lets the sidecar
+                // enforces it on tools/call, this field lets the MCP host
                 // list only what is callable.
                 if let Some(tools) = broker.access.allowed_tools(&c.id) {
                     row["allowed_tools"] = json!(tools);
@@ -938,7 +938,7 @@ async fn get_connections(State(state): State<AppState>, authed: Authed) -> Respo
 /// not audited on success (failures are audited by the extractor like any
 /// other call).
 ///
-/// Deliberately exempt from the per-client capability limiter. The MCP sidecar
+/// Deliberately exempt from the per-client capability limiter. The MCP host
 /// resolves the agent's token here on *every* request it serves (no caching,
 /// so a revoked token stops working at once), so charging whoami against the
 /// 60/min budget would halve an agent's real tool-call rate and surface as a
@@ -1174,7 +1174,7 @@ async fn post_http(
 
     // A curated MCP wiring: `tools/call` for a tool outside the allowed
     // subset is refused here, at the same trust boundary as the wiring
-    // check itself — the sidecar's filtered listing is a mirror, not the
+    // check itself — the MCP host's filtered listing is a mirror, not the
     // enforcement.
     let on_mcp_path = match &conn.config {
         ConnectionConfig::Api {
@@ -1359,8 +1359,8 @@ async fn post_http(
     .await
 }
 
-/// The sidecar's blocking elicitation call: an upstream MCP server asked for
-/// user input mid tool call (SEP-2322), and the sidecar parks here until the
+/// The MCP host's blocking elicitation call: an upstream MCP server asked for
+/// user input mid tool call (SEP-2322), and the host parks here until the
 /// user answers in the app. The answer is shaped as an MCP `ElicitResult`.
 #[derive(Deserialize)]
 struct ElicitBody {
@@ -1548,7 +1548,7 @@ fn mcp_elicitation_tool(body: &[u8]) -> Option<String> {
 }
 
 /// Parse every `data:` frame of an SSE body into JSON, skipping frames that
-/// are comments, empty, or not JSON. Mirrors the sidecar's `relayMessages`
+/// are comments, empty, or not JSON. Mirrors the MCP host's relay parser
 /// and the broker's `find_sse_response`, but returns all frames rather than
 /// matching one id.
 fn sse_data_frames(body: &str) -> Vec<serde_json::Value> {
@@ -1589,7 +1589,7 @@ fn attach_elicitation_permits(
         return;
     };
     // A streamable-HTTP upstream answers over SSE, relayed here verbatim as
-    // utf8, so a plain JSON parse fails — the sidecar's own consumer scans SSE
+    // utf8, so a plain JSON parse fails — the MCP host's consumer scans SSE
     // frames, and this must too, or every interactive tool call against such a
     // server mints no permit and the elicitation is refused as uncorrelated.
     let Some(requests) = serde_json::from_str::<serde_json::Value>(body)
@@ -2261,14 +2261,14 @@ fn hop_by_hop(name: &str) -> bool {
     )
 }
 
-/// Reverse-proxy `/mcp` to the sidecar's loopback MCP endpoint, so one
+/// Reverse-proxy `/mcp` to the in-process host's loopback MCP endpoint, so one
 /// address (and one operator proxy rule) covers the whole broker for
-/// remote agents. The sidecar authorizes every request against the broker
+/// remote agents. The MCP host authorizes every request against the broker
 /// itself (the bearer rides through untouched), so this adds reach, not
 /// authority. Streaming both ways: MCP's streamable-HTTP GET leg is a
 /// long-lived event stream.
 async fn proxy_mcp(State(state): State<AppState>, request: axum::extract::Request) -> Response {
-    let Some(target) = state.broker.sidecar_mcp_url() else {
+    let Some(target) = state.broker.mcp_host_url() else {
         return err_detail(
             StatusCode::SERVICE_UNAVAILABLE,
             ErrorReason::McpUnavailable,

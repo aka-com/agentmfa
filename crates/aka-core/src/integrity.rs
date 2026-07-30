@@ -4,7 +4,7 @@
 //! *binding*: a local process that can rewrite them can repoint a pinned
 //! target or a pinned identity and ride an existing standing rule with no
 //! prompt. Each file is therefore sealed in a single-file envelope
-//! `{"v", "alg", "mac", "payload"}` — one atomic rename, no sidecar to
+//! `{"v", "alg", "mac", "payload"}` — one atomic rename, no companion file to
 //! desynchronize — where `mac` is HMAC-SHA256 over
 //! `basename \0 payload-bytes` (the basename binds the seal to its file,
 //! so a whole envelope cannot be transplanted between state files), keyed

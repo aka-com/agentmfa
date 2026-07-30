@@ -63,15 +63,6 @@ fi
   exit 1
 }
 
-# The MCP host is a Node sidecar built from source. Without it the MCP-host
-# tests skip themselves, so build it here rather than leaving a hole.
-sidecar="${AKA_SIDECAR_SCRIPT:-$repo_root/dist/sidecar/main.mjs}"
-if [[ ! -f "$sidecar" ]]; then
-  echo "Building the MCP sidecar..."
-  npm run --silent sidecar:build
-fi
-export AKA_SIDECAR_SCRIPT="$sidecar"
-
 # One broker per test file, so files are independent; keep the number that
 # run at once modest, since each is a process with its own listeners.
 concurrency="${AKA_SANDBOX_CONCURRENCY:-4}"

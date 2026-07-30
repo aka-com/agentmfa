@@ -65,7 +65,7 @@ pub trait BrokerEvents: Send + Sync {
     /// live auth-progress view.
     fn mcp_auth_changed(&self, _state: &crate::mcp_auth::McpAuthState) {}
 
-    /// An agent asked (via the sidecar's `agentmfa_connect` tool) for a
+    /// An agent asked (via the MCP host's `agentmfa_connect` tool) for a
     /// service that is not configured. Purely advisory: shells surface it
     /// so the user can add the tool; nothing is granted by the request.
     fn connect_requested(&self, _agent: &str, _service: &str) {}

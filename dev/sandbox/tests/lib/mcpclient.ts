@@ -1,4 +1,4 @@
-// An MCP client for the broker's own MCP host (the sidecar, reverse-proxied
+// An MCP client for the broker's own MCP host (in-process, reverse-proxied
 // at /mcp on the control socket).
 //
 // This is the surface `claude mcp add agentmfa -- mfa mcp` ends up talking

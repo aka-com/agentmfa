@@ -198,7 +198,7 @@ async fn credential_sink() -> Response {
 /// and is guarded by its own fake bearer token. It answers the handshake the
 /// broker's own MCP client drives — `initialize`, `tools/list`, `tools/call`
 /// — with JSON (not SSE) responses; that is all the broker's status check and
-/// the sidecar's tool re-exposure need. Deterministic tools only.
+/// the MCP host's tool re-exposure needs. Deterministic tools only.
 async fn mcp(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
     if let Some(response) = require_authorization(&headers, &state.mcp_authorization) {
         return response;

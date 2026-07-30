@@ -3388,7 +3388,7 @@ function ApprovalSheet(): ReactNode {
 /**
  * Per-wiring tool picker: which of an MCP server's tools one agent may
  * call. "All tools" is the default and the reset; a curated subset is
- * enforced broker-side on every tools/call, and the sidecar lists only
+ * enforced broker-side on every tools/call, and the MCP host lists only
  * what is callable.
  */
 function WiringToolsSheet(): ReactNode {

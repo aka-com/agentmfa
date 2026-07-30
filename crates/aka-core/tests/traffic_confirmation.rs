@@ -563,7 +563,7 @@ async fn mcp_plumbing_passes_but_tool_calls_are_confirmed() {
     };
 
     // Initialising a session and listing tools happen on every single tool
-    // call the sidecar makes; prompting on them would ask three times per
+    // call the MCP host makes; prompting on them would ask three times per
     // call and again on every listing.
     let (status, _) = rpc(json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"})).await;
     assert_eq!(status, 200);

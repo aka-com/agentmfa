@@ -69,7 +69,6 @@
       "entitlements": "entitlements.plist"
     },
     "resources": {
-      "../dist/sidecar/main.mjs": "sidecar/main.mjs",
       "icons/icon.png": "icons/icon.png"
     }
   }

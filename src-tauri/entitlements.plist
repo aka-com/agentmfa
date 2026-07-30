@@ -11,22 +11,6 @@
     repository. `tauri dev` and any build that does not go through build.sh
     use this file as-is, get no keychain group, and fall back to the login
     keychain — see `aka_core::keychain`.
-
-    The bundled Node runs the sidecar, and V8 cannot allocate executable
-    memory for its JIT under the hardened runtime without these. Without
-    them a signed `node` dies with SIGTRAP the moment it starts.
-
-    Tauri applies one entitlements file to every binary it signs in the
-    bundle, so the main executable receives these too. That is broader than
-    ideal — only `node` needs them, and with the keychain group added at
-    sign time the bundled `node` is also nominally in the group that can
-    read vault items. Narrowing it means re-signing `node` separately after
-    Tauri's pass and then re-sealing the bundle, which is worth doing if the
-    app is ever audited against a stricter baseline.
   -->
-  <key>com.apple.security.cs.allow-jit</key>
-  <true/>
-  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
-  <true/>
 </dict>
 </plist>

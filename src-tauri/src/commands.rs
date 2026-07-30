@@ -22,13 +22,12 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 /// The in-process broker stack backing local mode. Dropping it stops the
-/// sidecar, the daemon listeners, and finally the runtime, in that order.
+/// MCP host, the daemon listeners, and finally the runtime, in that order.
 pub struct LocalRuntime {
     pub broker: Arc<aka_core::broker::Broker>,
-    // Keeps the Node sidecar supervised; dropping it kills the process and
-    // stops restarting it. `None` when no sidecar script is installed.
-    // Declared before the runtime it spawned its supervisor on.
-    pub _sidecar: Option<aka_core::sidecar::Sidecar>,
+    // Keeps the in-process MCP listener alive. Declared before the runtime
+    // that owns its task so the handle can abort it first.
+    pub _mcp_host: aka_core::mcp_host::McpHostHandle,
     // Keeps the daemon (control plane + PG data plane) alive; dropping
     // it aborts the listeners.
     pub _daemon: aka_core::daemon::DaemonHandle,
@@ -655,7 +654,7 @@ impl ConnectionInput {
                 }),
                 template: self.template.unwrap_or_default(),
                 // Blank is treated as absent: an empty string here would
-                // make the sidecar post JSON-RPC to the upstream's root.
+                // make the MCP host post JSON-RPC to the upstream's root.
                 mcp_path: self
                     .mcp_path
                     .map(|path| path.trim().to_string())
@@ -1266,7 +1265,7 @@ pub async fn respond_elicitation(
 
 /// Curate which upstream MCP tools agents may call on a connection. `null`
 /// restores the default (all tools). Enforced broker-side on every
-/// `tools/call`; the sidecar's tool listing mirrors it.
+/// `tools/call`; the MCP host's tool listing mirrors it.
 #[tauri::command]
 pub async fn set_allowed_tools(
     state: State<'_, AppState>,
@@ -2007,7 +2006,7 @@ mod tests {
         ));
 
         // A blank field is absent, not an empty path: an empty string would
-        // make the sidecar post JSON-RPC to the upstream's root.
+        // make the MCP host post JSON-RPC to the upstream's root.
         for blank in ["", "   "] {
             let input = ConnectionInput {
                 mcp_path: Some(blank.into()),

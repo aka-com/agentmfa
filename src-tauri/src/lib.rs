@@ -11,7 +11,6 @@ mod broker_mode;
 mod clipboard;
 mod commands;
 mod events;
-mod sidecar;
 mod ssh_import;
 mod windows;
 
@@ -29,7 +28,7 @@ use tauri_plugin_dialog::{DialogExt as _, MessageDialogKind};
 use broker_mode::BrokerState;
 use commands::{AppState, LocalRuntime};
 
-/// Start the in-process broker stack: runtime, broker, daemon, sidecar.
+/// Start the in-process broker stack: runtime, broker, daemon, and MCP host.
 /// Callable from the setup hook and from a blocking thread when the user
 /// switches back to local mode.
 pub(crate) fn start_local_runtime(handle: &AppHandle) -> Result<LocalRuntime, CoreError> {
@@ -55,24 +54,13 @@ pub(crate) fn start_local_runtime(handle: &AppHandle) -> Result<LocalRuntime, Co
         daemon.socket_path.display()
     );
 
-    // Supervised on the broker's runtime, so it is torn down with
-    // everything else it depends on. `block_on` is only for the spawn
-    // context — starting the sidecar does not block.
-    let sidecar = runtime.block_on(async { sidecar::start(handle, daemon.socket_path.clone()) });
-    // Keep the broker told where the MCP endpoint is listening (restarts
-    // move the port), so the discovery manifest can advertise it to
-    // `mfa mcp` and other bridges.
-    if let Some(sidecar) = &sidecar {
-        let watch = sidecar.watch();
-        let broker = broker.clone();
-        runtime.spawn(watch.follow(move |endpoint| {
-            broker.set_sidecar_mcp_port(endpoint.map(|e| e.port));
-        }));
-    }
+    let mcp_host = runtime.block_on(aka_core::mcp_host::serve(broker.clone()))?;
+    broker.set_mcp_host_port(Some(mcp_host.addr().port()));
+    tracing::info!(port = mcp_host.addr().port(), "Rust MCP host listening");
 
     Ok(LocalRuntime {
         broker,
-        _sidecar: sidecar,
+        _mcp_host: mcp_host,
         _daemon: daemon,
         _runtime: runtime,
     })

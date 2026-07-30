@@ -6,26 +6,22 @@
 // (handshake, listing, tool call), the curated tool subset, and the
 // confirmation that treats a `tools/call` differently from plumbing.
 //
-// The second path is the broker's own MCP host: the sidecar, reverse-
-// proxied at /mcp, which re-exposes every wired connection as a tool. Those
-// tests need `npm run sidecar:build` and skip themselves without it.
+// The second path is the broker's own in-process MCP host, reverse-proxied
+// at /mcp, which re-exposes every wired connection as a tool.
 
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
 import test, { after, before } from 'node:test';
 
 import { Broker, connectionNames, mfaBinary } from './lib/broker';
 import { waitFor } from './lib/http';
 import { McpClient } from './lib/mcpclient';
 import { run } from './lib/proc';
-import { repoRoot, requireFixture, sandbox } from './lib/sandbox';
+import { requireFixture, sandbox } from './lib/sandbox';
 
 let broker: Broker;
-let host: McpClient | undefined;
+let host: McpClient;
 
 const mcp = connectionNames.mcp;
-const sidecarBuilt = existsSync(join(repoRoot, 'dist/sidecar/main.mjs'));
 
 /** One JSON-RPC message to the upstream MCP server, through the broker. */
 async function rpc(method: string, params?: unknown, id: number | string = 1) {
@@ -45,19 +41,14 @@ before(async () => {
   broker = await Broker.start({
     label: 'mcp',
     seed: ['http', 'mcp', 'pg'],
-    sidecar: sidecarBuilt,
   });
-  if (sidecarBuilt) {
-    host = new McpClient(broker.socketPath, broker.agentToken);
-    // The supervisor spawns the sidecar and publishes its port; until then
-    // /mcp answers 503.
-    await waitFor(
-      'the broker MCP host to start',
-      async () => ((await host!.send('ping', {}, 1)).status === 503 ? undefined : true),
-      30_000,
-      250,
-    );
-  }
+  host = new McpClient(broker.socketPath, broker.agentToken);
+  await waitFor(
+    'the broker MCP host to start',
+    async () => ((await host.send('ping', {}, 1)).status === 503 ? undefined : true),
+    30_000,
+    250,
+  );
 });
 
 after(async () => {
@@ -338,8 +329,7 @@ test('an input request on a disabled connection is refused before the user sees 
 
 /* --------------------- the broker’s own MCP host -------------------------- */
 
-test('the MCP host exposes every wired connection as a tool', async (t) => {
-  if (!host) return t.skip('run `npm run sidecar:build` to exercise the MCP host');
+test('the MCP host exposes every wired connection as a tool', async () => {
   const initialized = await host.initialize();
   assert.equal((initialized.serverInfo as { name: string }).name, 'agentmfa');
   assert.match(host.session ?? '', /^[0-9a-f-]{36}$/);
@@ -355,8 +345,7 @@ test('the MCP host exposes every wired connection as a tool', async (t) => {
   );
 });
 
-test('the `mfa mcp` binary bridges a real stdio initialize', async (t) => {
-  if (!host) return t.skip('run `npm run sidecar:build` to exercise the MCP host');
+test('the `mfa mcp` binary bridges a real stdio initialize', async () => {
   const initialize = {
     jsonrpc: '2.0',
     id: 41,
@@ -386,8 +375,7 @@ test('the `mfa mcp` binary bridges a real stdio initialize', async (t) => {
   );
 });
 
-test('a tool call through the host reaches the upstream', async (t) => {
-  if (!host) return t.skip('run `npm run sidecar:build` to exercise the MCP host');
+test('a tool call through the host reaches the upstream', async () => {
   const result = await host.callTool('agentmfa_sandbox-http_request', {
     method: 'GET',
     path: '/authenticated',
@@ -398,8 +386,7 @@ test('a tool call through the host reaches the upstream', async (t) => {
   assert.ok(!text.includes(sandbox.httpToken), 'the credential stays on the upstream leg');
 });
 
-test('an upstream MCP tool is callable through the host', async (t) => {
-  if (!host) return t.skip('run `npm run sidecar:build` to exercise the MCP host');
+test('an upstream MCP tool is callable through the host', async () => {
   const name = (await host.tools()).map((tool) => tool.name).find((n) => n.endsWith('sandbox_echo'));
   assert.ok(name, 'the upstream tool is exposed');
   const result = await host.callTool(name, { text: 'through the host' });
@@ -407,8 +394,7 @@ test('an upstream MCP tool is callable through the host', async (t) => {
   assert.match(result.content.map((part) => part.text ?? '').join(''), /through the host/);
 });
 
-test('a disabled connection is refused by the broker and gone from a fresh session', async (t) => {
-  if (!host) return t.skip('run `npm run sidecar:build` to exercise the MCP host');
+test('a disabled connection is refused by the broker and gone from a fresh session', async () => {
   const connection = broker.conn(connectionNames.http);
   await broker.setAccess(connection.id, false);
   try {
@@ -434,14 +420,13 @@ test('a disabled connection is refused by the broker and gone from a fresh sessi
   }
 });
 
-test('the MCP host refuses a caller with no broker key', async (t) => {
-  if (!host) return t.skip('run `npm run sidecar:build` to exercise the MCP host');
+test('the MCP host refuses a caller with no broker key', async () => {
   const anonymous = new McpClient(broker.socketPath, 'aka_not-a-real-key');
   await assert.rejects(anonymous.initialize(), /40[13]/);
 });
 
-test('without a sidecar, the MCP endpoint says so instead of hanging', async () => {
-  const headless = await Broker.start({ label: 'mcp-nosidecar', seed: ['http'] });
+test('without the MCP host, its endpoint says so instead of hanging', async () => {
+  const headless = await Broker.start({ label: 'mcp-disabled', seed: ['http'], mcp: false });
   try {
     const client = new McpClient(headless.socketPath, headless.agentToken);
     const response = await client.send('initialize', { protocolVersion: '2025-06-18' });

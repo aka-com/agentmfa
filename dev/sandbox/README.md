@@ -110,8 +110,7 @@ command), then ask it to use the services in plain language, e.g.:
 - “Using my AKA service `sandbox-ssh`, run `uname -a`.”
 - “Using my AKA MCP service `sandbox-mcp`, call the `sandbox_echo` tool
   with `hello`.” (The MCP tools appear as
-  `agentmfa_sandbox-mcp_sandbox_echo` and `…_sandbox_ping` once the
-  sidecar is built — `npm run sidecar:build`.)
+  `agentmfa_sandbox-mcp_sandbox_echo` and `…_sandbox_ping`.)
 
 Approve the prompts AKA Desktop raises. What one decision covers depends
 on the service: one request for an API service, one `tools/call` for an
@@ -154,8 +153,8 @@ npm run sandbox:test -- dev/sandbox/tests/ssh.test.ts  # one file
 AKA_SANDBOX_SLOW=1 npm run sandbox:test               # + the minute-scale cases
 ```
 
-The command checks that all four services are up, builds `mfa` and the
-MCP sidecar, and runs the tests in `dev/sandbox/tests/`. Each test file
+The command checks that all four services are up, builds `mfa`, and runs the
+tests in `dev/sandbox/tests/`. Each test file
 starts its own `mfa serve` on a throwaway root, seeds the sandbox
 services as connections, and then speaks the real wire planes: the
 control plane over the broker's Unix socket, the manage plane the desktop

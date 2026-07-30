@@ -168,11 +168,11 @@ pub struct Broker {
     /// The host put into returned data-plane URLs/DSNs (`serve
     /// --advertise-host`); loopback by default. What a remote agent dials.
     advertise_host: std::sync::OnceLock<String>,
-    /// The sidecar's loopback MCP port, reported by the shell that
-    /// supervises it (restarts move it; `None` while it is not running).
+    /// The in-process MCP host's loopback port (`None` while it is not
+    /// running).
     /// Advertised in the discovery manifest so `mfa mcp` and other bridges
     /// can find the MCP endpoint without a config file.
-    sidecar_mcp_port: Mutex<Option<u16>>,
+    mcp_host_port: Mutex<Option<u16>>,
     /// The PG proxy's ephemeral loopback port, set when the daemon starts;
     /// surfaced only in open responses' DSNs.
     pub(crate) pg_proxy_port: std::sync::OnceLock<u16>,
@@ -370,7 +370,7 @@ impl Broker {
             public_url: Mutex::new(None),
             data_plane_bind: std::sync::OnceLock::new(),
             advertise_host: std::sync::OnceLock::new(),
-            sidecar_mcp_port: Mutex::new(None),
+            mcp_host_port: Mutex::new(None),
             pg_proxy_port: std::sync::OnceLock::new(),
             pg_cancels: Arc::new(crate::capability::pg::CancelRegistry::default()),
             token_limiter: KeyedLimiter::new(
@@ -466,11 +466,10 @@ impl Broker {
         self.task_runtime.clone()
     }
 
-    /// Report where the sidecar's MCP endpoint is listening (`None` when it
-    /// stopped). Called by the shell supervising the sidecar; the discovery
-    /// manifest advertises it.
-    pub fn set_sidecar_mcp_port(&self, port: Option<u16>) {
-        *self.sidecar_mcp_port.lock().unwrap() = port;
+    /// Report where the in-process MCP endpoint is listening (`None` when it
+    /// is stopped). The discovery manifest advertises it.
+    pub fn set_mcp_host_port(&self, port: Option<u16>) {
+        *self.mcp_host_port.lock().unwrap() = port;
     }
 
     /// Record the URL remote clients reach this broker at.
@@ -552,9 +551,9 @@ impl Broker {
         self.manage_bus.emit(event);
     }
 
-    /// The sidecar's MCP URL, when one is running.
-    pub fn sidecar_mcp_url(&self) -> Option<String> {
-        self.sidecar_mcp_port
+    /// The in-process MCP host's URL, when it is running.
+    pub fn mcp_host_url(&self) -> Option<String> {
+        self.mcp_host_port
             .lock()
             .unwrap()
             .map(|port| format!("http://127.0.0.1:{port}/mcp"))
@@ -1638,7 +1637,7 @@ impl Broker {
 
     /* ------------------------ agent connect requests ----------------------- */
 
-    /// An agent asked for a service that is not configured (the sidecar's
+    /// An agent asked for a service that is not configured (the MCP host's
     /// `agentmfa_connect` tool). This records the ask and pokes the shell
     /// so the user can add the tool — nothing is created or granted here,
     /// and the same client label asking for the same service within a minute
@@ -2468,7 +2467,7 @@ impl Broker {
     }
 
     /// Park an upstream elicitation on the user and wait for the answer. The
-    /// sidecar drives this on the agent's behalf mid tool call; the answer is
+    /// MCP host drives this on the agent's behalf mid tool call; the answer is
     /// shaped as an MCP `ElicitResult`.
     pub async fn elicit(
         &self,
@@ -2569,7 +2568,7 @@ impl Broker {
 
     /// Curate which upstream MCP tools agents may call on a connection.
     /// `None` restores the default (all tools); `Some` is enforced by the
-    /// broker on every `tools/call` and mirrored by the sidecar's tool
+    /// broker on every `tools/call` and mirrored by the MCP host's tool
     /// listing.
     pub fn ui_set_allowed_tools(
         &self,
