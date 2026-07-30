@@ -405,7 +405,10 @@
      8px scrollbar track matches the header's 16px right inset. */
   .dw-main .content{
   container-type: size;
-  padding: 0 8px 0 24px;
+  /* The bottom inset is the page's own breathing room: the last card on a
+     scrolled-to-the-end page (the 1Password row on Secrets) would otherwise
+     sit flush against the window edge. */
+  padding: 0 8px 24px 24px;
 }
   .dw-main .content > *{
   width: min(100%, calc(var(--content-max) - 2rem));
@@ -681,18 +684,20 @@
   /* The hero is an editable sentence: two blanks, each a menu. */
   .start-sentence{
     margin: 0; font-size: 1.375rem; font-weight: 700; letter-spacing: -0.014em;
-    line-height: 1.55; text-wrap: balance;
+    /* Leading set by the blanks, not the text: the pills are taller than a
+       line of type, and a wrapped sentence must not stack them edge to edge. */
+    line-height: 1.75; text-wrap: balance;
   }
   .start-hero-sub{
-    margin: 7px auto 0; max-width: 52ch;
+    margin: 11px auto 0; max-width: 52ch;
     color: var(--muted); font-size: 0.8125rem; line-height: 1.5;
   }
-  .start-blank-wrap{ position: relative; display: inline-block; }
+  .start-blank-wrap{ position: relative; display: inline-block; margin: 0 3px; }
   .start-blank{
     font: inherit; letter-spacing: inherit; color: var(--accent-ink);
-    background: var(--accent-wash); border: none; border-radius: 8px;
-    padding: 1px 7px 2px 9px; cursor: pointer;
-    display: inline-flex; align-items: center; gap: 5px; vertical-align: baseline;
+    background: var(--accent-wash); border: none; border-radius: 9px;
+    padding: 4px 11px 5px 13px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 7px; vertical-align: baseline;
   }
   /* The wash and chevron are the whole affordance — no underline, no border;
      hover and the open state deepen the wash instead. */
@@ -1421,8 +1426,11 @@
   border: 1px solid var(--line); border-radius: 12px;
   background: var(--card-bg); box-shadow: 0 1px 3px rgba(20,24,50,.06);
 }
-.cd-head { display: flex; align-items: flex-start; gap: 10px; }
+.cd-head { display: flex; align-items: center; gap: 10px; }
 .cd-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+/* The switch's nudge is for labelled settings rows, where it aligns with a
+   first line of text; here it is centered against the whole title block. */
+.cd-actions .switch { margin-top: 0; }
 .cd-actions .icon-btn, .cd-actions .tile-menu-wrap { flex: 0 0 auto; }
 .cd-actions .tile-menu { min-width: 250px; }
 .cd-actions .icon-btn {
@@ -1589,9 +1597,24 @@
 /* Credential rows share the darker card surface of their "Saved
    credentials" parent row. */
 .credentials-expansion { background: transparent; }
-/* Align the credential table with the connection rows' text spine. */
+/* Align the credential table with the connection rows' text spine — the
+   column headers included, so "Credential" sits directly under the row title
+   it belongs to and directly over the names it labels. */
+.cat-conns .sec-table th:first-child,
 .cat-conns .sec-table td:first-child { padding-left: 64px; }
+.cat-conns .sec-table th:last-child,
 .cat-conns .sec-table td:last-child { padding-right: 14px; }
+/* Column labels, not data: small caps against the hairline under the parent
+   row, with room to breathe on both sides of it. */
+.cat-conns .sec-table th {
+  padding: 9px 6px; font-size: 0.65625rem; font-weight: 700;
+  letter-spacing: .07em; text-transform: uppercase;
+}
+/* The value column's right edge is the eye button, so a right-aligned
+   "Value" would label the icon rather than the masked value. Pull it back
+   over the value itself — and only where an eye is actually rendered (the
+   tray dropdown has none). */
+.cat-conns .sec-table:has(.eye-btn) th:nth-last-child(2) { padding-right: 36px; }
 .cat-conns > .muted-note { padding: 10px 14px; }
 /* "Add credential" is a full-bleed activatable row like "More tools"; the
    table's last-row hairline is the divider above it, so the row itself draws
@@ -1743,7 +1766,8 @@
 /* This computer's broker key, shown on the Secrets page. Reuses .agent-block. */
 .connect-keynote{ font-size: 0.78125rem; color: var(--muted); border-top: 1px solid var(--line);
   padding: 10px 16px 11px; line-height: 1.55; }
-.shared-key-card{ margin-bottom: 14px; }
+/* Trails the credential stores, so its separation is above it, not below. */
+.shared-key-card{ margin-top: 4px; }
 
 /* Connection state at a glance: green = agents on, grey = off, amber = needs attention. */
 /* The enable/disable switch — the detail header's master control. */

@@ -2073,13 +2073,14 @@ function SecretsView(): ReactNode {
   });
   const rows = connectedCatalogFirst(entries, state.connections);
   // This computer's shared broker key lives here with the other credentials;
-  // the Get started walkthrough stays focused on the next action.
+  // the Get started walkthrough stays focused on the next action. It trails
+  // the stores because it is infrastructure — the credentials people came
+  // here to manage lead the page.
   const keyCard = !needle && state.identity
     ? <SharedKeyCard identity={state.identity} />
     : null;
   return (
     <div className="catalog">
-      {keyCard}
       {rows.length
         ? rows.map((entry) => (
             <div key={entry.id} className="cat-section">
@@ -2087,6 +2088,7 @@ function SecretsView(): ReactNode {
             </div>
           ))
         : <div className="muted-note">No secrets match your search.</div>}
+      {keyCard}
     </div>
   );
 }
