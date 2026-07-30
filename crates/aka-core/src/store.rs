@@ -1332,6 +1332,7 @@ fn validate_config_and_bind_secrets(
             host,
             scheme,
             port: _,
+            trusted_ca_bundle_path,
             template,
             mcp_path,
             oauth,
@@ -1347,6 +1348,15 @@ fn validate_config_and_bind_secrets(
                 return Err(CoreError::InvalidConnectionField {
                     field: ConnectionField::Scheme,
                     message: "Use http:// or https://".into(),
+                });
+            }
+            if trusted_ca_bundle_path
+                .as_deref()
+                .is_some_and(|path| path.trim().is_empty())
+            {
+                return Err(CoreError::InvalidConnectionField {
+                    field: ConnectionField::Url,
+                    message: "The trusted CA bundle path cannot be blank".into(),
                 });
             }
             if let Some(path) = mcp_path {
@@ -1579,6 +1589,7 @@ mod tests {
                 host: host.into(),
                 scheme: "https".into(),
                 port: None,
+                trusted_ca_bundle_path: None,
                 template: template.into(),
 
                 mcp_path: None,
@@ -1769,6 +1780,7 @@ mod tests {
                     host: "stream.example.com".into(),
                     scheme: "https".into(),
                     port: None,
+                    trusted_ca_bundle_path: None,
                     template: "Authorization: Bearer {{STREAM_TOKEN}}".into(),
                     mcp_path: None,
                     oauth: None,
@@ -2156,6 +2168,7 @@ mod tests {
                 host: "slack.com".into(),
                 scheme: "https".into(),
                 port: None,
+                trusted_ca_bundle_path: None,
                 template: "Authorization: Bearer {{SLACK_OAUTH_TOKEN}}".into(),
                 mcp_path: None,
                 oauth: Some(crate::types::OAuthSpec {
@@ -2432,6 +2445,7 @@ mod tests {
                     host: "stream.example.com".into(),
                     scheme: "https".into(),
                     port: None,
+                    trusted_ca_bundle_path: None,
                     template: "Authorization: Bearer {{STREAM_TOKEN}}".into(),
                     mcp_path: None,
                     oauth: None,
@@ -2447,6 +2461,7 @@ mod tests {
                         host: "other.example.com".into(),
                         scheme: "https".into(),
                         port: None,
+                        trusted_ca_bundle_path: None,
                         template: "Authorization: Bearer {{STREAM_TOKEN}}".into(),
                         mcp_path: None,
                         oauth: None,

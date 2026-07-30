@@ -81,6 +81,10 @@ pub enum ConnectionConfig {
         /// Pinned port; defaults to the scheme's well-known port.
         #[serde(default)]
         port: Option<u16>,
+        /// Optional PEM bundle for a private API CA. When present it replaces
+        /// the public roots for this connection's upstream HTTPS leg.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trusted_ca_bundle_path: Option<String>,
         /// Injection template, a header line (or query-param form) mixing
         /// literal text with `{{ … }}` placeholders,
         /// e.g. `Authorization: Bearer {{GITHUB_API_KEY}}`.
@@ -676,6 +680,7 @@ mod tests {
             host: "api.github.com".into(),
             scheme: "https".into(),
             port: None,
+            trusted_ca_bundle_path: None,
             template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
 
             mcp_path: None,
@@ -748,6 +753,7 @@ mod tests {
             host: "API.Example.com.".into(),
             scheme: "https".into(),
             port: None,
+            trusted_ca_bundle_path: None,
             template: "Authorization: Bearer {{A}}".into(),
 
             mcp_path: None,
@@ -757,6 +763,7 @@ mod tests {
             host: "api.example.com".into(),
             scheme: "https".into(),
             port: Some(443),
+            trusted_ca_bundle_path: None,
             template: "Authorization: Bearer {{B}}".into(),
 
             mcp_path: None,

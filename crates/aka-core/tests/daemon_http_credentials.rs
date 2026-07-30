@@ -231,6 +231,7 @@ fn api_connection(h: &Harness, name: &str, port: u16) {
                 host: "127.0.0.1".into(),
                 scheme: "http".into(),
                 port: Some(port),
+                trusted_ca_bundle_path: None,
                 template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
                 mcp_path: None,
                 oauth: None,
@@ -351,6 +352,7 @@ async fn authorization_is_reserved_even_for_a_query_form_connection() {
                 host: "127.0.0.1".into(),
                 scheme: "http".into(),
                 port: Some(up.port),
+                trusted_ca_bundle_path: None,
                 template: "?token={{url(STREAM_TOKEN)}}".into(),
                 mcp_path: None,
                 oauth: None,
@@ -522,6 +524,7 @@ fn oauth_connection(h: &Harness, upstream_port: u16, token_port: u16, refresh: O
                 host: "127.0.0.1".into(),
                 scheme: "http".into(),
                 port: Some(upstream_port),
+                trusted_ca_bundle_path: None,
                 // The token secret is bound through the template ref, which is
                 // the shape `ui_oauth_connect` generates; the OAuth branch of
                 // `render_connection_injection` then mints a fresh bearer from
@@ -831,6 +834,7 @@ async fn the_endpoint_secret_is_recoverable_from_the_vault_after_a_reload() {
                 host: "127.0.0.1".into(),
                 scheme: "http".into(),
                 port: Some(up.port),
+                trusted_ca_bundle_path: None,
                 template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
                 mcp_path: None,
                 oauth: None,

@@ -890,12 +890,11 @@ async fn post_http(
     let broker = &state.broker;
     let limiter_key = authed.client_id.to_string();
     let client = authed.client;
-    if let Err(wait) = broker.token_limiter.check(&limiter_key) {
-        broker.audit.append(
-            AuditEntry::new(AuditKind::RateLimited, format!("Rate limited: {client}"))
-                .agent(client.clone()),
-        );
-        return err_rate_limited(ErrorReason::RateLimited, wait);
+    let deferred_rate_limit = is_mcp_envelope_candidate(broker, &call);
+    if !deferred_rate_limit {
+        if let Some(response) = http_rate_limit(broker, &limiter_key, &client) {
+            return response;
+        }
     }
     if let Some(response) = request_id_error(call.request_id.as_deref()) {
         return response;
@@ -1007,6 +1006,19 @@ async fn post_http(
         _ => false,
     };
     let allowed_tools_snapshot = broker.access.allowed_tools(&conn.id);
+    let mcp_envelope_leg = on_mcp_path
+        && (crate::capability::http::is_mcp_transport_leg(
+            &conn,
+            &method,
+            &call.path,
+            &header_map,
+            body_bytes.is_empty(),
+        ) || is_mcp_envelope_body(&body_bytes));
+    if deferred_rate_limit && !mcp_envelope_leg {
+        if let Some(response) = http_rate_limit(broker, &limiter_key, &client) {
+            return response;
+        }
+    }
     if let ConnectionConfig::Api {
         mcp_path: Some(mcp_path),
         ..
@@ -1039,24 +1051,18 @@ async fn post_http(
             }
         }
     }
-    // Parse and describe MCP traffic only when this request arrived with the
-    // switch on. The historical/default off path should not pay an extra
-    // full-body JSON parse for a feature it is not using.
-    let approval = broker
-        .access
-        .confirm_mode(&conn.id)
-        .is_on()
-        .then(|| {
-            approval_for_call(
-                &conn,
-                &client,
-                &method,
-                &call.path,
-                &header_map,
-                &body_bytes,
-            )
-        })
-        .flatten();
+    // Build the bounded approval description regardless of the snapshot's
+    // current switch value. `run_allowed` re-checks at the execution boundary;
+    // without a request ready there, turning confirmation on while this call
+    // was being admitted let it execute silently.
+    let approval = approval_for_call(
+        &conn,
+        &client,
+        &method,
+        &call.path,
+        &header_map,
+        &body_bytes,
+    );
     let hash = payload_hash(&conn.id, &method, &call.path, &wire_headers, &body_bytes);
     let body = match SpooledBody::from_bytes(body_bytes, broker.config.spool_threshold) {
         Ok(b) => Arc::new(b),
@@ -1327,6 +1333,90 @@ fn is_mcp_envelope(method: &str) -> bool {
             | "notifications/progress"
             | "notifications/roots/list_changed"
     )
+}
+
+fn http_rate_limit(broker: &Broker, key: &str, client: &str) -> Option<Response> {
+    let wait = broker.token_limiter.check(key).err()?;
+    broker.audit.append(
+        AuditEntry::new(AuditKind::RateLimited, format!("Rate limited: {client}"))
+            .agent(client.to_string()),
+    );
+    Some(err_rate_limited(ErrorReason::RateLimited, wait))
+}
+
+fn is_mcp_envelope_candidate(broker: &Broker, call: &HttpCallBody) -> bool {
+    let Some(connection) = broker.store.connection_by_name(&call.connection) else {
+        return false;
+    };
+    let ConnectionConfig::Api {
+        mcp_path: Some(mcp_path),
+        ..
+    } = &connection.config
+    else {
+        return false;
+    };
+    if !crate::capability::http::resolves_to_mcp_path(&call.path, mcp_path) {
+        return false;
+    }
+    let Ok(method) = parse_method(&call.method) else {
+        return false;
+    };
+    let body_empty = call.body.as_ref().is_none_or(serde_json::Value::is_null)
+        && call
+            .body_base64
+            .as_deref()
+            .is_none_or(|body| body.is_empty());
+    let mut headers = http::HeaderMap::new();
+    for (name, value) in &call.headers {
+        let (Ok(name), Ok(value)) = (
+            http::HeaderName::from_bytes(name.as_bytes()),
+            http::HeaderValue::from_str(value),
+        ) else {
+            return false;
+        };
+        headers.append(name, value);
+    }
+    if crate::capability::http::is_mcp_transport_leg(
+        &connection,
+        &method,
+        &call.path,
+        &headers,
+        body_empty,
+    ) {
+        return true;
+    }
+    match (&call.body, &call.body_base64) {
+        (Some(serde_json::Value::String(body)), None) => is_mcp_envelope_body(body.as_bytes()),
+        (Some(body), None) => is_mcp_envelope_value(body),
+        (None, Some(body)) => {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD
+                .decode(body)
+                .is_ok_and(|body| is_mcp_envelope_body(&body))
+        }
+        _ => false,
+    }
+}
+
+fn is_mcp_envelope_value(value: &serde_json::Value) -> bool {
+    let envelope = |message: &serde_json::Value| {
+        message.get("jsonrpc").and_then(serde_json::Value::as_str) == Some("2.0")
+            && message
+                .get("method")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(is_mcp_envelope)
+    };
+    match value {
+        serde_json::Value::Array(messages) => !messages.is_empty() && messages.iter().all(envelope),
+        message => envelope(message),
+    }
+}
+
+fn is_mcp_envelope_body(body: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    is_mcp_envelope_value(&value)
 }
 
 /// What the user is asked about for one `/v1/http` call, or `None` when the

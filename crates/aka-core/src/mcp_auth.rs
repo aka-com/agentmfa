@@ -134,6 +134,8 @@ pub struct McpAuthDraft {
     pub host: String,
     #[serde(default)]
     pub port: Option<u16>,
+    #[serde(default)]
+    pub trusted_ca_bundle_path: Option<String>,
     pub mcp_path: String,
     /// Re-authenticate an existing connection instead of creating one: the
     /// flow targets that connection's pinned destination and replaces its
@@ -396,6 +398,13 @@ impl Broker {
     ) -> Result<McpAuthState> {
         let (name, config, plan) = self.plan_auth(&draft)?;
         let endpoint = endpoint_for(&config)?;
+        let trusted_ca_bundle_path = match &config {
+            ConnectionConfig::Api {
+                trusted_ca_bundle_path,
+                ..
+            } => trusted_ca_bundle_path.clone(),
+            _ => None,
+        };
 
         let session_id = Uuid::new_v4();
         let state = McpAuthState {
@@ -417,8 +426,17 @@ impl Broker {
         // main thread, where no Tokio reactor is entered. Always put the
         // flow on the broker-owned runtime instead of the caller's context.
         let task = broker.task_runtime().spawn(async move {
-            let outcome =
-                run_flow(&broker, session_id, endpoint, plan, options, preset, mode).await;
+            let outcome = run_flow(
+                &broker,
+                session_id,
+                endpoint,
+                plan,
+                options,
+                preset,
+                mode,
+                trusted_ca_bundle_path,
+            )
+            .await;
             let phase = match outcome {
                 Ok(phase) => phase,
                 Err(failure) => {
@@ -495,6 +513,7 @@ impl Broker {
             host: draft.host.clone(),
             scheme: draft.scheme.clone(),
             port: draft.port,
+            trusted_ca_bundle_path: draft.trusted_ca_bundle_path.clone(),
             template: format!("Authorization: Bearer {{{{{secret_name}}}}}"),
             mcp_path: Some(draft.mcp_path.clone()),
             oauth: None,
@@ -680,13 +699,20 @@ async fn run_flow(
     options: McpCheckOptions,
     preset: ClientPreset,
     mode: RedirectMode,
+    trusted_ca_bundle_path: Option<String>,
 ) -> std::result::Result<McpAuthPhase, FlowFailure> {
     // The flow follows cross-origin hops (resource → authorization server),
     // so it uses its own client with bounded redirects rather than the
     // broker's no-redirect upstream client. No stored credential ever rides
     // these requests.
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::limited(5))
+    let mut client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::limited(5));
+    if let Some(tls) =
+        crate::capability::http::trusted_ca_tls_config(trusted_ca_bundle_path.as_deref())
+            .map_err(|error| FlowFailure::plain(format!("trusted CA: {error}")))?
+    {
+        client = client.use_preconfigured_tls(tls);
+    }
+    let client = client
         .build()
         .map_err(|e| FlowFailure::plain(format!("http client: {e}")))?;
 

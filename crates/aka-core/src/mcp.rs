@@ -353,7 +353,11 @@ pub async fn check_connection(
             return McpStatusReport::failed(format!("could not render credential: {detail}"))
         }
     };
-    check_endpoint(client.clone(), endpoint, credential, options).await
+    let client = match crate::capability::http::client_for_connection(client, connection) {
+        Ok(client) => client,
+        Err(detail) => return McpStatusReport::failed(detail),
+    };
+    check_endpoint(client, endpoint, credential, options).await
 }
 
 /// One upstream tool, as the per-wiring tool picker lists it.
@@ -379,11 +383,8 @@ pub async fn list_tools(
     let rendered = render_injection(store, template)
         .await
         .map_err(|detail| format!("could not render credential: {detail}"))?;
-    let mut session = McpSession::new(
-        client.clone(),
-        endpoint,
-        Credential::from_rendered(rendered),
-    );
+    let client = crate::capability::http::client_for_connection(client, connection)?;
+    let mut session = McpSession::new(client, endpoint, Credential::from_rendered(rendered));
     session
         .request(
             "initialize",
@@ -736,6 +737,7 @@ mod tests {
                 host: "api.githubcopilot.com".into(),
                 scheme: "https".into(),
                 port: None,
+                trusted_ca_bundle_path: None,
                 template: "Authorization: Bearer {{T}}".into(),
                 mcp_path: Some("/mcp".into()),
                 oauth: None,

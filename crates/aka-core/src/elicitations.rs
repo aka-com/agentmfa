@@ -759,6 +759,7 @@ mod tests {
                 host: "mcp.notion.com".into(),
                 scheme: "https".into(),
                 port: None,
+                trusted_ca_bundle_path: None,
                 template: "Authorization: Bearer {{T}}".into(),
                 mcp_path: Some("/mcp".into()),
                 oauth: None,

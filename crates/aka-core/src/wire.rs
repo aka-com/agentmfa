@@ -83,6 +83,10 @@ pub enum ErrorReason {
     InvalidHeader,
     InvalidBody,
     RequestTooLarge,
+    /// A direct HTTP endpoint request omitted its endpoint bearer secret.
+    MissingSecret,
+    /// A direct HTTP endpoint secret was presented but did not authenticate.
+    InvalidSecret,
     RequestIdMismatch,
     OutcomeNotReplayable,
     // Policy outcomes.
@@ -99,6 +103,8 @@ pub enum ErrorReason {
     IdempotencyCapacity,
     TicketSessionLimit,
     BrokerSessionLimit,
+    /// A direct endpoint has exhausted its bounded concurrent upload slots.
+    EndpointBusy,
     // Tickets (data-plane redemption).
     UnknownTicket,
     TicketExpired,
@@ -123,13 +129,15 @@ pub enum ErrorReason {
     BadConnectionConfig,
     BodyUnavailable,
     SpoolFailed,
+    /// A direct endpoint body did not finish within its upload deadline.
+    UploadTimeout,
     ProxyNotRunning,
     BrokerShutdown,
 }
 
 impl ErrorReason {
     /// Every registered reason, for exhaustiveness checks and docs.
-    pub const ALL: [ErrorReason; 42] = [
+    pub const ALL: [ErrorReason; 46] = [
         ErrorReason::MissingToken,
         ErrorReason::InvalidToken,
         ErrorReason::TokenExpired,
@@ -146,6 +154,8 @@ impl ErrorReason {
         ErrorReason::InvalidHeader,
         ErrorReason::InvalidBody,
         ErrorReason::RequestTooLarge,
+        ErrorReason::MissingSecret,
+        ErrorReason::InvalidSecret,
         ErrorReason::RequestIdMismatch,
         ErrorReason::OutcomeNotReplayable,
         ErrorReason::DeniedByPolicy,
@@ -156,6 +166,7 @@ impl ErrorReason {
         ErrorReason::IdempotencyCapacity,
         ErrorReason::TicketSessionLimit,
         ErrorReason::BrokerSessionLimit,
+        ErrorReason::EndpointBusy,
         ErrorReason::UnknownTicket,
         ErrorReason::TicketExpired,
         ErrorReason::UpstreamTimeout,
@@ -170,6 +181,7 @@ impl ErrorReason {
         ErrorReason::BadConnectionConfig,
         ErrorReason::BodyUnavailable,
         ErrorReason::SpoolFailed,
+        ErrorReason::UploadTimeout,
         ErrorReason::ProxyNotRunning,
         ErrorReason::BrokerShutdown,
     ];
@@ -192,6 +204,8 @@ impl ErrorReason {
             ErrorReason::InvalidHeader => "invalid_header",
             ErrorReason::InvalidBody => "invalid_body",
             ErrorReason::RequestTooLarge => "request_too_large",
+            ErrorReason::MissingSecret => "missing_secret",
+            ErrorReason::InvalidSecret => "invalid_secret",
             ErrorReason::RequestIdMismatch => "request_id_mismatch",
             ErrorReason::OutcomeNotReplayable => "outcome_not_replayable",
             ErrorReason::DeniedByPolicy => "denied_by_policy",
@@ -202,6 +216,7 @@ impl ErrorReason {
             ErrorReason::IdempotencyCapacity => "idempotency_capacity",
             ErrorReason::TicketSessionLimit => "ticket_session_limit",
             ErrorReason::BrokerSessionLimit => "broker_session_limit",
+            ErrorReason::EndpointBusy => "endpoint_busy",
             ErrorReason::UnknownTicket => "unknown_ticket",
             ErrorReason::TicketExpired => "ticket_expired",
             ErrorReason::UpstreamTimeout => "upstream_timeout",
@@ -216,9 +231,17 @@ impl ErrorReason {
             ErrorReason::BadConnectionConfig => "bad_connection_config",
             ErrorReason::BodyUnavailable => "body_unavailable",
             ErrorReason::SpoolFailed => "spool_failed",
+            ErrorReason::UploadTimeout => "upload_timeout",
             ErrorReason::ProxyNotRunning => "proxy_not_running",
             ErrorReason::BrokerShutdown => "broker_shutdown",
         }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|reason| reason.as_str() == value)
     }
 }
 

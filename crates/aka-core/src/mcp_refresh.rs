@@ -239,6 +239,8 @@ async fn try_refresh(
         RefreshError::NotRefreshable("the connection has no bound token to replace".into())
     })?;
     let endpoint = secure_token_endpoint(&grant.token_endpoint)?;
+    let http = crate::capability::http::client_for_connection(ctx.http, connection)
+        .map_err(|error| RefreshError::Transient(format!("trusted CA: {error}")))?;
 
     let mut form: Vec<(&str, &str)> = vec![
         ("grant_type", "refresh_token"),
@@ -249,8 +251,7 @@ async fn try_refresh(
     if let Some(secret) = grant.client_secret.as_deref() {
         form.push(("client_secret", secret));
     }
-    let request = ctx
-        .http
+    let request = http
         .post(endpoint)
         .timeout(REFRESH_TIMEOUT)
         .header(http::header::ACCEPT, "application/json")
@@ -402,11 +403,21 @@ pub(crate) fn spawn_refresh_sweeper(broker: &Arc<Broker>) {
                     // Pre-authorized: the broker is renewing a grant it already
                     // holds, on a timer, and discards the value. A background
                     // sweep must never put a native sheet on screen.
-                    let outcome = crate::authorization::scope(
-                        true,
-                        crate::oauth::fresh_bearer(&broker.store, &broker.http_client, &connection),
-                    )
-                    .await;
+                    let outcome = match crate::capability::http::client_for_connection(
+                        &broker.http_client,
+                        &connection,
+                    ) {
+                        Ok(http) => {
+                            crate::authorization::scope(
+                                true,
+                                crate::oauth::fresh_bearer(&broker.store, &http, &connection),
+                            )
+                            .await
+                        }
+                        Err(error) => Err(crate::oauth::RefreshFailure::Transient(format!(
+                            "trusted CA: {error}"
+                        ))),
+                    };
                     match outcome {
                         Ok(_) => {
                             retry_after.remove(&connection.id);
@@ -531,6 +542,7 @@ mod tests {
                     host: "127.0.0.1".into(),
                     scheme: "http".into(),
                     port: Some(port),
+                    trusted_ca_bundle_path: None,
                     template: "Authorization: Bearer {{OAUTH_TOKENS}}".into(),
                     mcp_path: None,
                     oauth: Some(OAuthSpec {

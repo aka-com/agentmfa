@@ -362,6 +362,7 @@ export interface McpAuthDraft {
   scheme: string;
   host: string;
   port?: number | null;
+  trusted_ca_bundle_path?: string | null;
   mcp_path: string;
   /** Re-authenticate an existing connection instead of creating one. */
   reauth_connection_id?: string | null;

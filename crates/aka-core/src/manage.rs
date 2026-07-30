@@ -171,6 +171,7 @@ pub fn connection_dto(broker: &Broker, conn: &Connection) -> ConnectionDto {
             host,
             scheme,
             port,
+            trusted_ca_bundle_path,
             template,
             mcp_path,
             oauth,
@@ -178,6 +179,7 @@ pub fn connection_dto(broker: &Broker, conn: &Connection) -> ConnectionDto {
             dto.host = Some(host.clone());
             dto.scheme = Some(scheme.clone());
             dto.port = *port;
+            dto.trusted_ca_bundle_path = trusted_ca_bundle_path.clone();
             dto.template = Some(template.clone());
             dto.mcp_path = mcp_path.clone();
             dto.oauth_spec = oauth.as_ref().map(|o| OAuthDto {
@@ -1510,6 +1512,7 @@ mod tests {
                 host: "api.github.com".into(),
                 scheme: "https".into(),
                 port: None,
+                trusted_ca_bundle_path: None,
                 template: "Authorization: Bearer {{GITHUB_KEY}}".into(),
                 mcp_path: None,
                 oauth: None,
@@ -1573,6 +1576,7 @@ mod tests {
                     host: "api.github.com".into(),
                     scheme: "https".into(),
                     port: None,
+                    trusted_ca_bundle_path: None,
                     template: "Authorization: Bearer {{MISSING}}".into(),
                     mcp_path: None,
                     oauth: None,

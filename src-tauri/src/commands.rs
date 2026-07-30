@@ -630,6 +630,10 @@ impl ConnectionInput {
                 host: self.host.unwrap_or_default(),
                 scheme: self.scheme.unwrap_or_else(|| "https".into()),
                 port: self.port,
+                trusted_ca_bundle_path: self.trusted_ca_bundle_path.and_then(|path| {
+                    let path = path.trim().to_string();
+                    (!path.is_empty()).then_some(path)
+                }),
                 template: self.template.unwrap_or_default(),
                 // Blank is treated as absent: an empty string here would
                 // make the sidecar post JSON-RPC to the upstream's root.
@@ -1579,7 +1583,6 @@ mod tests {
             ConnectionConfig::Api { ref host, ref scheme, port: Some(8080), .. }
                 if host == "localhost" && scheme == "http"
         ));
-
     }
 
     #[test]

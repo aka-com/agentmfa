@@ -1656,7 +1656,9 @@ fn add_ca_bundle_roots(roots: &mut rustls::RootCertStore, path: &str) -> Result<
 /// public CA able to satisfy a `verify-full` pin the user set precisely to
 /// exclude them: an attacker holding any of ~150 public CAs' signature for the
 /// same hostname would still verify, and the pin would be decorative.
-fn root_cert_store(ca_bundle_path: Option<&str>) -> Result<rustls::RootCertStore, String> {
+pub(crate) fn root_cert_store(
+    ca_bundle_path: Option<&str>,
+) -> Result<rustls::RootCertStore, String> {
     match ca_bundle_path.filter(|path| !path.trim().is_empty()) {
         Some(path) => {
             let mut roots = rustls::RootCertStore::empty();

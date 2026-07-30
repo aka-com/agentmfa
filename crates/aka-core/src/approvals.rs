@@ -1029,6 +1029,7 @@ mod tests {
                 host: "api.github.com".into(),
                 scheme: "https".into(),
                 port: None,
+                trusted_ca_bundle_path: None,
                 template: "Authorization: Bearer {{T}}".into(),
                 mcp_path: None,
                 oauth: None,

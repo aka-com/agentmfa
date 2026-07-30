@@ -3692,7 +3692,7 @@ async function connectionDraftFromImport(
 // behind the "Advanced" disclosure, so opening the sheet shows what is set.
 function draftUsesAdvancedFields(d: ConnectionDraft, t: ConnectionType): boolean {
   if (t === 'ssh') return Boolean((d.hostKeyFingerprint || '').trim());
-  if (t === 'pg') return Boolean((d.pgCaBundlePath || '').trim());
+  if (t === 'pg' || t === 'api') return Boolean((d.pgCaBundlePath || '').trim());
   return false;
 }
 
@@ -3798,6 +3798,7 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
   );
   let sshHostKeyField: ReactNode = null;
   let pgTlsFields: ReactNode = null;
+  let apiTlsFields: ReactNode = null;
   if (t === 'api' && isMcpDraft(d)) {
     const url = d.origin
       ?? (d.host
@@ -3908,6 +3909,17 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
         <input id="f-pg-ca-bundle" placeholder="/path/to/private-ca.pem"
           value={d.pgCaBundlePath ?? ''}
           onChange={(e) => setDraftField('pgCaBundlePath', 'pgCaBundlePath', e.currentTarget.value)} />
+      </div>
+    );
+  }
+  if (t === 'api') {
+    apiTlsFields = (
+      <div className="f-row" key="api-ca-bundle">
+        <label htmlFor="f-api-ca-bundle">Trusted CA bundle <span className="label-detail">(optional)</span></label>
+        <input id="f-api-ca-bundle" placeholder="/path/to/private-ca.pem"
+          value={d.pgCaBundlePath ?? ''}
+          onChange={(e) => setDraftField('pgCaBundlePath', 'pgCaBundlePath', e.currentTarget.value)} />
+        <div className="rule-note">Replaces public certificate authorities for this API connection.</div>
       </div>
     );
   }
@@ -4096,7 +4108,7 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
   } else {
     fields.push(<CredentialChooser type={t} key="chooser" />);
   }
-  if (pgTlsFields || sshHostKeyField) {
+  if (apiTlsFields || pgTlsFields || sshHostKeyField) {
     // Force the section open when one of its fields has a validation error,
     // so the inline message (and the focused input) is visible.
     const advancedError = ['hostKeyFingerprint', 'pgCaBundlePath']
@@ -4106,7 +4118,7 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
       <div className="adv-collapse" key="advanced">
         <button type="button" className="adv-toggle" aria-expanded={advOpen} data-act="toggle-conn-advanced">
           <span className="adv-toggle-icon" aria-hidden="true"><Icon markup={ICONS.chevronDown} /></span>Advanced</button>
-        {advOpen ? <>{pgTlsFields}{sshHostKeyField}</> : null}
+        {advOpen ? <>{apiTlsFields}{pgTlsFields}{sshHostKeyField}</> : null}
       </div>,
     );
   }
@@ -4843,6 +4855,7 @@ async function saveConn(): Promise<void> {
       scheme: apiOrigin!.scheme,
       host: apiOrigin!.host,
       port: apiOrigin!.port,
+      trusted_ca_bundle_path: (d.pgCaBundlePath || '').trim() || null,
       mcp_path: mcpPath!,
       whoami_tool: template?.whoamiTool ?? null,
       ...(mcpOauthApp ? {
@@ -4869,6 +4882,7 @@ async function saveConn(): Promise<void> {
       oauth_client_id: (d.oauthClientId || '').trim(),
       oauth_scopes: scopes,
       oauth_extra_params: oauthPreset!.extraAuthParams ?? [],
+      trusted_ca_bundle_path: (d.pgCaBundlePath || '').trim() || null,
     };
     toast('🌐 Approve access in your browser…');
     if (await run(() => invoke('oauth_connect', {
@@ -4900,6 +4914,7 @@ async function saveConn(): Promise<void> {
     input.port = apiOrigin!.port;
     input.template = injectionTemplate;
     input.mcp_path = mcpPath;
+    input.trusted_ca_bundle_path = (d.pgCaBundlePath || '').trim() || null;
   } else if (t === 'pg') {
     input.host = (d.host || '').trim();
     input.port = port;

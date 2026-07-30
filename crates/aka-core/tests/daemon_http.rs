@@ -257,6 +257,7 @@ fn api_connection(harness: &Harness, name: &str, port: u16) {
                 host: "127.0.0.1".into(),
                 scheme: "http".into(),
                 port: Some(port),
+                trusted_ca_bundle_path: None,
                 template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
 
                 mcp_path: None,
@@ -850,6 +851,7 @@ async fn query_injected_secret_not_leaked_in_upstream_error() {
                 host: "127.0.0.1".into(),
                 scheme: "http".into(),
                 port: Some(dead_port),
+                trusted_ca_bundle_path: None,
                 template: "?token={{url(STREAM_TOKEN)}}".into(),
 
                 mcp_path: None,
@@ -1029,6 +1031,7 @@ async fn mutating_request_id_is_scoped_to_connection() {
                 host: "127.0.0.1".into(),
                 scheme: "http".into(),
                 port: Some(up.port),
+                trusted_ca_bundle_path: None,
                 template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
 
                 mcp_path: None,
@@ -1287,7 +1290,7 @@ async fn whoami_is_exempt_from_the_per_token_limit() {
     // tool-call rate and surface as a mystifying rate limit, so whoami is
     // exempt — while capability calls stay limited.
     let config = BrokerConfig {
-        per_identity_per_min: 1,
+        per_identity_per_min: 2,
         ..BrokerConfig::default()
     };
     let mut h = harness(config).await;
@@ -1295,6 +1298,23 @@ async fn whoami_is_exempt_from_the_per_token_limit() {
     api_connection(&h, "github", up.port);
     let token = h.pair("claude-code").await;
     let auth = format!("Bearer {token}");
+
+    // Merely borrowing an envelope method name is not enough to bypass the
+    // limiter: it must still be a JSON-RPC 2.0 message.
+    let (status, body) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(json!({
+            "connection": "docs",
+            "method": "POST",
+            "path": "/echo",
+            "body": { "id": 0, "method": "initialize" },
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "lookalike envelope: {body}");
 
     // Far more whoami calls than the limit; every one succeeds.
     for _ in 0..5 {
@@ -1326,6 +1346,102 @@ async fn whoami_is_exempt_from_the_per_token_limit() {
         "/v1/connections",
         &[("authorization", &auth)],
         None,
+    )
+    .await;
+    assert_eq!(status, 429);
+    assert_eq!(body["reason"], "rate_limited");
+}
+
+#[tokio::test]
+async fn recognized_mcp_envelope_legs_do_not_spend_the_tool_call_budget() {
+    let config = BrokerConfig {
+        per_identity_per_min: 1,
+        ..BrokerConfig::default()
+    };
+    let mut h = harness(config).await;
+    let up = upstream().await;
+    h.broker
+        .store
+        .add_secret("MCP_KEY", Zeroizing::new("mcp_test_secret_value".into()))
+        .unwrap();
+    h.broker
+        .store
+        .add_connection(ConnectionSpec {
+            name: "docs".into(),
+            config: ConnectionConfig::Api {
+                host: "127.0.0.1".into(),
+                scheme: "http".into(),
+                port: Some(up.port),
+                trusted_ca_bundle_path: None,
+                template: "Authorization: Bearer {{MCP_KEY}}".into(),
+                mcp_path: Some("/echo".into()),
+                oauth: None,
+            },
+            secrets: vec![],
+        })
+        .unwrap();
+    let token = h.pair("claude-code").await;
+    let auth = format!("Bearer {token}");
+
+    for method in ["initialize", "notifications/initialized", "tools/list"] {
+        let (status, body) = uds_request(
+            &h.socket,
+            "POST",
+            "/v1/http",
+            &[("authorization", &auth)],
+            Some(json!({
+                "connection": "docs",
+                "method": "POST",
+                "path": "/echo",
+                "body": { "jsonrpc": "2.0", "id": 1, "method": method },
+            })),
+        )
+        .await;
+        assert_eq!(status, 200, "{method}: {body}");
+    }
+    let (status, body) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(json!({
+            "connection": "docs",
+            "method": "DELETE",
+            "path": "/echo",
+            "headers": { "mcp-session-id": "session-1" },
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "teardown: {body}");
+
+    let tool_call = || {
+        json!({
+            "connection": "docs",
+            "method": "POST",
+            "path": "/echo",
+            "body": {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": { "name": "search", "arguments": {} },
+            },
+        })
+    };
+    let (status, body) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(tool_call()),
+    )
+    .await;
+    assert_eq!(status, 200, "first tool call: {body}");
+    let (status, body) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(tool_call()),
     )
     .await;
     assert_eq!(status, 429);
@@ -1432,6 +1548,7 @@ async fn a_curated_wiring_refuses_tools_outside_its_subset() {
                 host: "127.0.0.1".into(),
                 scheme: "http".into(),
                 port: Some(up.port),
+                trusted_ca_bundle_path: None,
                 template: "Authorization: Bearer {{MCP_TOKEN}}".into(),
                 mcp_path: Some("/echo".into()),
                 oauth: None,
@@ -1976,7 +2093,11 @@ async fn disabling_access_during_http_upload_prevents_dispatch() {
 
 #[tokio::test]
 async fn http_direct_endpoint_rejects_missing_or_wrong_secret() {
-    let mut h = harness(BrokerConfig::default()).await;
+    let mut h = harness(BrokerConfig {
+        per_identity_per_min: 2,
+        ..BrokerConfig::default()
+    })
+    .await;
     let up = upstream().await;
     api_connection(&h, "github", up.port);
     h.pair("claude-code").await;
@@ -1998,6 +2119,36 @@ async fn http_direct_endpoint_rejects_missing_or_wrong_secret() {
     .await;
     assert_eq!(status, 401);
     assert_eq!(body["reason"], "invalid_secret");
+
+    // Failed authentication has its own listener-local window. It neither
+    // spends a legitimate endpoint holder's request budget nor permits an
+    // unbounded secret probe.
+    let (status, headers, body) = loopback_request(
+        port,
+        "GET",
+        "/echo",
+        &[("authorization", "Bearer end_still_wrong")],
+        None,
+    )
+    .await;
+    assert_eq!(status, 429);
+    assert_eq!(body["reason"], "rate_limited");
+    assert!(headers.contains_key("retry-after"));
+
+    let denied: Vec<_> = h
+        .broker
+        .audit
+        .recent(10)
+        .into_iter()
+        .filter(|entry| {
+            entry.kind == aka_core::audit::AuditKind::Denied
+                && entry.text.starts_with("Direct endpoint authentication ")
+        })
+        .collect();
+    assert_eq!(denied.len(), 3);
+    assert!(denied
+        .iter()
+        .all(|entry| entry.fields.contains_key("peer_addr")));
     // The upstream was never dialed on a refused request.
     assert_eq!(up.hits.load(Ordering::SeqCst), 0);
 }
@@ -2018,6 +2169,7 @@ async fn http_direct_endpoint_rejects_client_supplied_custom_credential_header()
                 host: "127.0.0.1".into(),
                 scheme: "http".into(),
                 port: Some(up.port),
+                trusted_ca_bundle_path: None,
                 template: "X-Api-Key: {{API_KEY}}".into(),
                 mcp_path: None,
                 oauth: None,

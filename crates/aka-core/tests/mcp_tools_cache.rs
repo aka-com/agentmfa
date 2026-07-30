@@ -99,6 +99,7 @@ fn add_mcp_connection(broker: &Broker, port: u16) -> aka_core::types::Connection
                 host: "127.0.0.1".into(),
                 scheme: "http".into(),
                 port: Some(port),
+                trusted_ca_bundle_path: None,
                 template: "Authorization: Bearer {{MCP_TOKEN}}".into(),
                 mcp_path: Some("/mcp".into()),
                 oauth: None,
@@ -164,6 +165,7 @@ async fn retargeting_drops_the_cached_listing() {
                     scheme: "http".into(),
                     // A port nothing listens on: a live listing cannot succeed.
                     port: Some(1),
+                    trusted_ca_bundle_path: None,
                     template: "Authorization: Bearer {{MCP_TOKEN}}".into(),
                     mcp_path: Some("/mcp".into()),
                     oauth: None,

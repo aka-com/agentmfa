@@ -44,6 +44,22 @@ impl WindowLimiter {
         self.check_at(Instant::now())
     }
 
+    /// Inspect an already-exhausted window without recording another hit.
+    /// Useful before an expensive unauthenticated verification: successful
+    /// attempts must not consume the failure budget, but a listener already
+    /// under attack should reject before doing that work.
+    pub fn retry_after(&self) -> Option<Duration> {
+        let now = Instant::now();
+        let mut hits = self.hits.lock().unwrap();
+        while hits
+            .front()
+            .is_some_and(|front| now.duration_since(*front) > self.window)
+        {
+            hits.pop_front();
+        }
+        (hits.len() >= self.max as usize).then(|| window_retry_after(&hits, self.window, now))
+    }
+
     fn check_at(&self, now: Instant) -> Result<(), Duration> {
         let mut hits = self.hits.lock().unwrap();
         while let Some(front) = hits.front() {
@@ -149,6 +165,14 @@ mod tests {
             Err(Duration::from_millis(5))
         );
         assert!(l.check_at(t0 + Duration::from_millis(20)).is_ok());
+    }
+
+    #[test]
+    fn exhausted_window_can_be_checked_without_recording() {
+        let l = WindowLimiter::new(1, Duration::from_secs(5));
+        assert_eq!(l.retry_after(), None);
+        assert!(l.check().is_ok());
+        assert!(l.retry_after().is_some());
     }
 
     #[test]

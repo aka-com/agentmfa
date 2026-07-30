@@ -263,6 +263,7 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
                     host: "127.0.0.1".into(),
                     scheme: "http".into(),
                     port: Some(upstream_port),
+                    trusted_ca_bundle_path: None,
                     template: "Authorization: Bearer {{API_KEY}}".into(),
 
                     mcp_path: None,
@@ -281,6 +282,7 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
                 host: "127.0.0.1".into(),
                 scheme: "http".into(),
                 port: Some(upstream_port),
+                trusted_ca_bundle_path: None,
                 template: "Authorization: Bearer {{API_KEY}}".into(),
                 mcp_path: Some("/mcp".into()),
                 oauth: None,

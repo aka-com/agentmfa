@@ -472,9 +472,91 @@ fn same_pinned_authority(url: &Url, scheme: &str, host: &str, port: Option<u16>)
         "https" => 443,
         _ => 80,
     });
-    url.scheme() == scheme
-        && url.host_str().is_some_and(|h| h.eq_ignore_ascii_case(host))
-        && url.port_or_known_default() == Some(pinned_port)
+    let same_host = url
+        .host_str()
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(host));
+    let same_scheme_and_port =
+        url.scheme() == scheme && url.port_or_known_default() == Some(pinned_port);
+    // A pinned plaintext origin may upgrade to the same host's standard TLS
+    // origin. The inverse is never accepted, nor is an upgrade to an
+    // arbitrary port.
+    let safe_upgrade =
+        scheme == "http" && url.scheme() == "https" && url.port_or_known_default() == Some(443);
+    same_host && (same_scheme_and_port || safe_upgrade)
+}
+
+pub(crate) fn client_for_connection(
+    default: &reqwest::Client,
+    connection: &Connection,
+) -> Result<reqwest::Client, String> {
+    let ConnectionConfig::Api {
+        trusted_ca_bundle_path,
+        ..
+    } = &connection.config
+    else {
+        return Ok(default.clone());
+    };
+    let Some(tls) = trusted_ca_tls_config(trusted_ca_bundle_path.as_deref())? else {
+        return Ok(default.clone());
+    };
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .use_preconfigured_tls(tls)
+        .build()
+        .map_err(|error| format!("trusted CA client could not be built: {error}"))
+}
+
+pub(crate) fn trusted_ca_tls_config(
+    path: Option<&str>,
+) -> Result<Option<rustls::ClientConfig>, String> {
+    let Some(path) = path.filter(|path| !path.trim().is_empty()) else {
+        return Ok(None);
+    };
+    // Match Postgres' `sslrootcert` semantics: a configured private bundle
+    // replaces public roots, rather than widening trust to both sets.
+    let roots = crate::capability::pg::root_cert_store(Some(path))?;
+    let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|error| format!("trusted CA TLS configuration failed: {error}"))?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    Ok(Some(tls))
+}
+
+fn test_request_error(error: reqwest::Error, host: &str) -> TestError {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+    let mut tls = false;
+    let mut cert = false;
+    while let Some(current) = source {
+        if let Some(rustls) = current.downcast_ref::<rustls::Error>() {
+            tls = true;
+            cert |= matches!(rustls, rustls::Error::InvalidCertificate(_));
+        }
+        source = current.source();
+    }
+    let kind = if cert {
+        TestErrorKind::CertUnverified
+    } else if tls {
+        TestErrorKind::TlsDeclined
+    } else if error.is_timeout() {
+        TestErrorKind::Timeout
+    } else if error.is_connect() {
+        TestErrorKind::Unreachable
+    } else {
+        TestErrorKind::Other
+    };
+    let cause = match kind {
+        TestErrorKind::CertUnverified => {
+            format!("The certificate presented by {host} could not be verified")
+        }
+        TestErrorKind::TlsDeclined => format!("The server at {host} did not complete TLS"),
+        TestErrorKind::Unreachable => format!("Could not reach {host}"),
+        TestErrorKind::Timeout => format!("The server at {host} did not answer in time"),
+        _ => format!("The request to {host} failed"),
+    };
+    TestError::new(kind, format!("{cause}: {}", error.without_url()))
 }
 
 fn broker_error(status: u16, reason: ErrorReason, detail: impl Into<String>) -> ExecOutcome {
@@ -594,21 +676,6 @@ impl HttpExecution {
     }
 
     async fn run_inner(&self) -> ExecOutcome {
-        // An OAuth-minted token at expiry is renewed before it rides the
-        // upstream leg, so agent calls never present a token the broker
-        // already knew was stale. Best-effort: on failure the current token
-        // goes out as-is and the upstream's verdict lands in health.
-        if self.connection.oauth.is_some() {
-            let ctx = crate::mcp_refresh::RefreshContext {
-                store: self.store.as_ref(),
-                http: &self.client,
-                audit: self.audit.as_ref(),
-                health: self.health.as_deref(),
-            };
-            crate::mcp_refresh::ensure_fresh(&ctx, &self.connection).await;
-        }
-        // Render the credential as late as possible; values are zeroized on
-        // drop.
         if !matches!(&self.connection.config, ConnectionConfig::Api { .. }) {
             return broker_error(
                 500,
@@ -616,13 +683,39 @@ impl HttpExecution {
                 "not an api connection",
             );
         }
+        let upstream_client = match client_for_connection(&self.client, &self.connection) {
+            Ok(client) => client,
+            Err(error) => {
+                return broker_error(500, ErrorReason::BadConnectionConfig, error);
+            }
+        };
+        // An OAuth-minted token at expiry is renewed before it rides the
+        // upstream leg, so agent calls never present a token the broker
+        // already knew was stale. Best-effort: on failure the current token
+        // goes out as-is and the upstream's verdict lands in health.
+        if self.connection.oauth.is_some() {
+            let ctx = crate::mcp_refresh::RefreshContext {
+                store: self.store.as_ref(),
+                http: &upstream_client,
+                audit: self.audit.as_ref(),
+                health: self.health.as_deref(),
+            };
+            crate::mcp_refresh::ensure_fresh(&ctx, &self.connection).await;
+        }
+        // Render the credential as late as possible; values are zeroized on
+        // drop.
         let (scheme, host, port) = pinned_base(&self.connection.config).expect("api config");
 
-        let injection =
-            match render_connection_injection(&self.store, &self.client, &self.connection).await {
-                Ok(i) => i,
-                Err(e) => return broker_error(502, e.reason, e.message),
-            };
+        let injection = match render_connection_injection(
+            &self.store,
+            &upstream_client,
+            &self.connection,
+        )
+        .await
+        {
+            Ok(i) => i,
+            Err(e) => return broker_error(502, e.reason, e.message),
+        };
         let redactions = Redactions::from_injection(&injection);
 
         // Build the initial URL from parsed components, never string
@@ -657,8 +750,7 @@ impl HttpExecution {
         let mut hops = 0usize;
 
         loop {
-            let mut request = self
-                .client
+            let mut request = upstream_client
                 .request(method.clone(), current.clone())
                 .timeout(self.config.upstream_timeout)
                 .headers(self.headers.clone());
@@ -676,8 +768,7 @@ impl HttpExecution {
                         _ => fragment.to_string(),
                     };
                     hop.set_query(Some(&combined));
-                    request = self
-                        .client
+                    request = upstream_client
                         .request(method.clone(), hop)
                         .timeout(self.config.upstream_timeout)
                         .headers(self.headers.clone());
@@ -770,9 +861,8 @@ impl HttpExecution {
     }
 }
 
-/// UI-initiated test: GET the pinned origin root with the credential
-/// injected, reporting the upstream status. A 401/403 means the service
-/// answered but rejected the credential.
+/// UI-initiated test: GET the pinned MCP path when present, otherwise the
+/// origin root, with the credential injected and the connection's TLS trust.
 pub async fn test_upstream(
     store: &Arc<Store>,
     client: &reqwest::Client,
@@ -783,49 +873,61 @@ pub async fn test_upstream(
         return Err("not an api connection".into());
     }
     let (scheme, host, port) = pinned_base(&connection.config).expect("api config");
-    let injection = render_connection_injection(store, client, connection)
+    let upstream_client = client_for_connection(client, connection)
+        .map_err(|error| TestError::new(TestErrorKind::CertUnverified, error))?;
+    let injection = render_connection_injection(store, &upstream_client, connection)
         .await
         .map_err(|e| TestError::from(e.message))?;
-    let mut url =
+    let mut base =
         Url::parse(&format!("{scheme}://{host}/")).map_err(|e| format!("bad origin: {e}"))?;
-    if url.set_port(port).is_err() {
+    if base.set_port(port).is_err() {
         return Err("cannot set port".into());
     }
+    let test_path = match &connection.config {
+        ConnectionConfig::Api {
+            mcp_path: Some(path),
+            ..
+        } => path.as_str(),
+        _ => "/",
+    };
+    let mut url = base
+        .join(test_path)
+        .map_err(|error| format!("bad test path: {error}"))?;
+    if !same_pinned_authority(&url, &scheme, &host, port) {
+        return Err("test path escaped the pinned authority".into());
+    }
     let request = match &injection {
-        RenderedInjection::None => client.request(Method::GET, url.clone()),
-        RenderedInjection::Header(name, value) => client
+        RenderedInjection::None => upstream_client.request(Method::GET, url.clone()),
+        RenderedInjection::Header(name, value) => upstream_client
             .request(Method::GET, url.clone())
             .header(name.clone(), value.clone()),
         RenderedInjection::Query(fragment) => {
-            url.set_query(Some(fragment));
-            client.request(Method::GET, url.clone())
+            let query = match url.query() {
+                Some(existing) if !existing.is_empty() => format!("{existing}&{}", &**fragment),
+                _ => fragment.to_string(),
+            };
+            url.set_query(Some(&query));
+            upstream_client.request(Method::GET, url.clone())
         }
     };
-    let response = request.timeout(timeout).send().await.map_err(|e| {
-        let kind = if e.is_connect() {
-            TestErrorKind::Unreachable
-        } else if e.is_timeout() {
-            TestErrorKind::Timeout
-        } else {
-            TestErrorKind::Other
-        };
-        let cause = match kind {
-            TestErrorKind::Unreachable => format!("Could not reach {host}"),
-            TestErrorKind::Timeout => format!("The server at {host} did not answer in time"),
-            _ => format!("The request to {host} failed"),
-        };
-        // reqwest's Display embeds the URL, which can carry a query-injected
-        // credential; strip it exactly as the relay path does.
-        TestError::new(kind, format!("{cause}: {}", e.without_url()))
-    })?;
+    let response = request
+        .timeout(timeout)
+        .send()
+        .await
+        .map_err(|error| test_request_error(error, &host))?;
     let status = response.status();
-    if matches!(status.as_u16(), 401 | 403) {
+    let auth_challenge = response
+        .headers()
+        .contains_key(http::header::WWW_AUTHENTICATE);
+    if status.as_u16() == 401 || (status.as_u16() == 403 && auth_challenge) {
         return Err(TestError::new(
             TestErrorKind::AuthRejected,
             format!("The server at {host} answered but rejected the credential (HTTP {status})"),
         ));
     }
-    Ok(format!("GET {scheme}://{host}/ answered HTTP {status}"))
+    Ok(format!(
+        "GET {scheme}://{host}{test_path} answered HTTP {status}"
+    ))
 }
 
 /// The credential for a connection's upstream leg: a fresh OAuth bearer
@@ -1050,6 +1152,9 @@ struct HttpEndpointState {
     /// touches. Same budget as the control plane, so choosing the endpoint is
     /// not a way to escape the rate limit.
     requests: Arc<crate::ratelimit::KeyedLimiter>,
+    /// Unauthenticated failures share one small listener-local window: there
+    /// is no trustworthy identity to key before the endpoint secret verifies.
+    auth_failures: Arc<crate::ratelimit::WindowLimiter>,
 }
 
 /// Bind a per-wiring HTTP reverse proxy on a loopback TCP port. An unmodified
@@ -1086,6 +1191,10 @@ pub async fn bind_endpoint(
             broker.config.per_identity_per_min,
             std::time::Duration::from_secs(60),
         )),
+        auth_failures: Arc::new(crate::ratelimit::WindowLimiter::new(
+            broker.config.per_identity_per_min,
+            std::time::Duration::from_secs(60),
+        )),
         broker,
         endpoint_id: endpoint.id,
     });
@@ -1095,8 +1204,11 @@ pub async fn bind_endpoint(
     let shutdown = Arc::new(tokio::sync::Notify::new());
     let sd = shutdown.clone();
     let task = tokio::spawn(async move {
-        let served =
-            axum::serve(listener, app).with_graceful_shutdown(async move { sd.notified().await });
+        let served = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move { sd.notified().await });
         if let Err(e) = served.await {
             tracing::error!("http endpoint serve ended: {e}");
         }
@@ -1108,7 +1220,7 @@ pub async fn bind_endpoint(
 /// `{"reason","detail"}` shape.
 fn endpoint_error(
     status: axum::http::StatusCode,
-    reason: &str,
+    reason: ErrorReason,
     detail: &str,
 ) -> axum::response::Response {
     use axum::response::IntoResponse as _;
@@ -1124,6 +1236,65 @@ enum EndpointUploadError {
     TimedOut,
     InvalidBody(String),
     Spool(std::io::Error),
+}
+
+fn endpoint_auth_failure(
+    state: &HttpEndpointState,
+    peer: std::net::SocketAddr,
+    reason: ErrorReason,
+    detail: &str,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+
+    state.broker.audit.append(
+        AuditEntry::new(AuditKind::Denied, "Direct endpoint authentication refused")
+            .outcome(reason.as_str())
+            .field("endpoint_id", state.endpoint_id.to_string())
+            .field("peer_addr", peer.to_string()),
+    );
+    if let Err(retry_after) = state.auth_failures.check() {
+        let mut response = endpoint_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            ErrorReason::RateLimited,
+            "too many failed authentication attempts on this endpoint",
+        );
+        if let Ok(value) = HeaderValue::from_str(&retry_after.as_secs().max(1).to_string()) {
+            response
+                .headers_mut()
+                .insert(http::header::RETRY_AFTER, value);
+        }
+        return response;
+    }
+    endpoint_error(StatusCode::UNAUTHORIZED, reason, detail)
+}
+
+fn endpoint_auth_throttled(
+    state: &HttpEndpointState,
+    peer: std::net::SocketAddr,
+    retry_after: std::time::Duration,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+
+    state.broker.audit.append(
+        AuditEntry::new(
+            AuditKind::Denied,
+            "Direct endpoint authentication throttled",
+        )
+        .outcome(ErrorReason::RateLimited.as_str())
+        .field("endpoint_id", state.endpoint_id.to_string())
+        .field("peer_addr", peer.to_string()),
+    );
+    let mut response = endpoint_error(
+        StatusCode::TOO_MANY_REQUESTS,
+        ErrorReason::RateLimited,
+        "too many failed authentication attempts on this endpoint",
+    );
+    if let Ok(value) = HeaderValue::from_str(&retry_after.as_secs().max(1).to_string()) {
+        response
+            .headers_mut()
+            .insert(http::header::RETRY_AFTER, value);
+    }
+    response
 }
 
 async fn spool_endpoint_body(
@@ -1163,6 +1334,7 @@ async fn spool_endpoint_body(
 
 async fn proxy_handler(
     axum::extract::State(state): axum::extract::State<Arc<HttpEndpointState>>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     req: axum::extract::Request,
 ) -> axum::response::Response {
     use axum::http::StatusCode;
@@ -1185,20 +1357,29 @@ async fn proxy_handler(
         })
         .map(str::trim);
     let Some(presented) = presented.filter(|s| !s.is_empty()) else {
-        return endpoint_error(
-            StatusCode::UNAUTHORIZED,
-            "missing_secret",
+        return endpoint_auth_failure(
+            &state,
+            peer,
+            ErrorReason::MissingSecret,
             "present the endpoint secret as `Authorization: Bearer <secret>`",
         );
     };
+    // Once the listener-local failure window is exhausted, reject before
+    // hashing and comparing another candidate. Successful authentication
+    // never spends this budget, so a holder is affected only while the
+    // endpoint is actively being brute-forced.
+    if let Some(retry_after) = state.auth_failures.retry_after() {
+        return endpoint_auth_throttled(&state, peer, retry_after);
+    }
     let Some(endpoint) = broker
         .endpoints
         .resolve_secret(presented)
         .filter(|e| e.id == state.endpoint_id)
     else {
-        return endpoint_error(
-            StatusCode::UNAUTHORIZED,
-            "invalid_secret",
+        return endpoint_auth_failure(
+            &state,
+            peer,
+            ErrorReason::InvalidSecret,
             "the endpoint secret is not recognized",
         );
     };
@@ -1209,7 +1390,7 @@ async fn proxy_handler(
     if let Err(retry_after) = state.requests.check(&endpoint.id.to_string()) {
         let mut response = endpoint_error(
             StatusCode::TOO_MANY_REQUESTS,
-            "rate_limited",
+            ErrorReason::RateLimited,
             &format!(
                 "this endpoint's budget is {} requests per minute",
                 broker.config.per_identity_per_min
@@ -1227,21 +1408,21 @@ async fn proxy_handler(
     if !broker.access.allows(&endpoint.connection_id) {
         return endpoint_error(
             StatusCode::FORBIDDEN,
-            "denied_by_policy",
+            ErrorReason::DeniedByPolicy,
             "agent access is disabled for this tool",
         );
     }
     let Ok(connection) = broker.store.connection_by_id(&endpoint.connection_id) else {
         return endpoint_error(
             StatusCode::BAD_GATEWAY,
-            "unknown_connection",
+            ErrorReason::UnknownConnection,
             "the connection has been removed",
         );
     };
     if connection.kind() != ConnectionKind::Api {
         return endpoint_error(
             StatusCode::BAD_GATEWAY,
-            "wrong_connection_type",
+            ErrorReason::WrongConnectionType,
             "the connection is no longer an HTTP tool",
         );
     }
@@ -1255,7 +1436,7 @@ async fn proxy_handler(
     if parts.method == Method::CONNECT {
         return endpoint_error(
             StatusCode::BAD_REQUEST,
-            "wrong_connection_type",
+            ErrorReason::WrongConnectionType,
             "this endpoint is a base URL for one pinned host, not a forward \
              proxy; CONNECT is not served. Point your client's base URL at it \
              instead of its proxy setting.",
@@ -1264,7 +1445,7 @@ async fn proxy_handler(
     if parts.uri.authority().is_some() {
         return endpoint_error(
             StatusCode::BAD_REQUEST,
-            "invalid_path",
+            ErrorReason::InvalidPath,
             "this endpoint is a base URL for one pinned host, not a forward \
              proxy; send an origin-form request (a path) rather than an \
              absolute URL.",
@@ -1276,7 +1457,7 @@ async fn proxy_handler(
     let Ok(method) = parse_method(parts.method.as_str()) else {
         return endpoint_error(
             StatusCode::BAD_REQUEST,
-            "invalid_method",
+            ErrorReason::InvalidMethod,
             "unsupported method: use GET, HEAD, POST, PUT, PATCH, DELETE or \
              OPTIONS",
         );
@@ -1289,7 +1470,7 @@ async fn proxy_handler(
     if validate_path(&path).is_err() {
         return endpoint_error(
             StatusCode::BAD_REQUEST,
-            "invalid_path",
+            ErrorReason::InvalidPath,
             "the path must begin with a single `/`",
         );
     }
@@ -1311,7 +1492,7 @@ async fn proxy_handler(
     if on_mcp_path && allowed_tools_snapshot.is_some() {
         return endpoint_error(
             StatusCode::FORBIDDEN,
-            "denied_by_policy",
+            ErrorReason::DeniedByPolicy,
             "curated MCP tools must be called through the broker or MCP sidecar, not the direct HTTP endpoint",
         );
     }
@@ -1324,10 +1505,10 @@ async fn proxy_handler(
         Ok(headers) => headers,
         Err(error) => {
             let reason = match &error {
-                HttpValidationError::ReservedHeader(_) => "reserved_header",
-                HttpValidationError::InvalidHeader(_) => "invalid_header",
+                HttpValidationError::ReservedHeader(_) => ErrorReason::ReservedHeader,
+                HttpValidationError::InvalidHeader(_) => ErrorReason::InvalidHeader,
                 HttpValidationError::InvalidMethod | HttpValidationError::InvalidPath => {
-                    "invalid_header"
+                    ErrorReason::InvalidHeader
                 }
             };
             return endpoint_error(StatusCode::BAD_REQUEST, reason, &error.detail());
@@ -1366,7 +1547,7 @@ async fn proxy_handler(
             let reason = verdict
                 .reason()
                 .unwrap_or(crate::wire::ErrorReason::ApprovalDenied);
-            return endpoint_error(status, reason.as_str(), verdict.detail());
+            return endpoint_error(status, reason, verdict.detail());
         }
         Some(version)
     } else {
@@ -1395,7 +1576,7 @@ async fn proxy_handler(
             }
             return endpoint_error(
                 StatusCode::FORBIDDEN,
-                "denied_by_policy",
+                ErrorReason::DeniedByPolicy,
                 "the endpoint or connection changed while the request was being admitted",
             );
         }
@@ -1409,7 +1590,7 @@ async fn proxy_handler(
         Err(_) => {
             return endpoint_error(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "endpoint_busy",
+                ErrorReason::EndpointBusy,
                 "the broker's direct-endpoint upload limit has been reached",
             )
         }
@@ -1419,7 +1600,7 @@ async fn proxy_handler(
         Err(_) => {
             return endpoint_error(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "endpoint_busy",
+                ErrorReason::EndpointBusy,
                 "this direct endpoint's upload limit has been reached",
             )
         }
@@ -1437,7 +1618,7 @@ async fn proxy_handler(
         Err(_) => {
             return endpoint_error(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "broker_session_limit",
+                ErrorReason::BrokerSessionLimit,
                 "the broker's live-session limit has been reached",
             )
         }
@@ -1453,7 +1634,7 @@ async fn proxy_handler(
         session.finish("access_revoked");
         return endpoint_error(
             StatusCode::FORBIDDEN,
-            "denied_by_policy",
+            ErrorReason::DeniedByPolicy,
             "the endpoint was revoked or agent access was disabled",
         );
     }
@@ -1464,7 +1645,7 @@ async fn proxy_handler(
             session.finish("access_revoked");
             return endpoint_error(
                 StatusCode::FORBIDDEN,
-                "denied_by_policy",
+                ErrorReason::DeniedByPolicy,
                 "the endpoint was revoked or agent access was disabled",
             );
         }
@@ -1482,7 +1663,7 @@ async fn proxy_handler(
             session.finish("request_too_large");
             return endpoint_error(
                 StatusCode::PAYLOAD_TOO_LARGE,
-                "request_too_large",
+                ErrorReason::RequestTooLarge,
                 "the request body exceeds the configured cap",
             );
         }
@@ -1490,19 +1671,19 @@ async fn proxy_handler(
             session.finish("upload_timeout");
             return endpoint_error(
                 StatusCode::REQUEST_TIMEOUT,
-                "upload_timeout",
+                ErrorReason::UploadTimeout,
                 "the request body upload exceeded its time limit",
             );
         }
         Err(EndpointUploadError::InvalidBody(detail)) => {
             session.finish("invalid_request_body");
-            return endpoint_error(StatusCode::BAD_REQUEST, "invalid_body", &detail);
+            return endpoint_error(StatusCode::BAD_REQUEST, ErrorReason::InvalidBody, &detail);
         }
         Err(EndpointUploadError::Spool(error)) => {
             session.finish("spool_failed");
             return endpoint_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "spool_failed",
+                ErrorReason::SpoolFailed,
                 &error.to_string(),
             );
         }
@@ -1522,7 +1703,7 @@ async fn proxy_handler(
         session.finish("access_revoked");
         return endpoint_error(
             StatusCode::UNAUTHORIZED,
-            "invalid_secret",
+            ErrorReason::InvalidSecret,
             "the endpoint was revoked or its secret was rotated",
         );
     };
@@ -1533,7 +1714,7 @@ async fn proxy_handler(
         session.finish("access_revoked");
         return endpoint_error(
             StatusCode::FORBIDDEN,
-            "denied_by_policy",
+            ErrorReason::DeniedByPolicy,
             "agent access is disabled for this tool",
         );
     }
@@ -1544,7 +1725,7 @@ async fn proxy_handler(
         session.finish("connection_removed");
         return endpoint_error(
             StatusCode::BAD_GATEWAY,
-            "unknown_connection",
+            ErrorReason::UnknownConnection,
             "the connection has been removed",
         );
     };
@@ -1555,7 +1736,7 @@ async fn proxy_handler(
         session.finish("connection_changed");
         return endpoint_error(
             StatusCode::BAD_GATEWAY,
-            "wrong_connection_type",
+            ErrorReason::WrongConnectionType,
             "the connection is no longer an HTTP tool",
         );
     }
@@ -1578,7 +1759,7 @@ async fn proxy_handler(
         session.finish("denied_by_policy");
         return endpoint_error(
             StatusCode::FORBIDDEN,
-            "denied_by_policy",
+            ErrorReason::DeniedByPolicy,
             "curated MCP tools must be called through the broker or MCP sidecar, not the direct HTTP endpoint",
         );
     }
@@ -1592,7 +1773,7 @@ async fn proxy_handler(
         session.finish("connection_changed");
         return endpoint_error(
             StatusCode::FORBIDDEN,
-            "denied_by_policy",
+            ErrorReason::DeniedByPolicy,
             "the connection changed after request policy was checked",
         );
     }
@@ -1610,7 +1791,7 @@ async fn proxy_handler(
         session.finish("access_revoked");
         return endpoint_error(
             StatusCode::FORBIDDEN,
-            "denied_by_policy",
+            ErrorReason::DeniedByPolicy,
             "the endpoint was revoked or agent access was disabled",
         );
     }
@@ -1624,7 +1805,7 @@ async fn proxy_handler(
         config: broker.config.clone(),
         agent: "endpoint".to_string(),
         connection,
-        method,
+        method: method.clone(),
         path,
         headers,
         body: spooled,
@@ -1635,31 +1816,34 @@ async fn proxy_handler(
             session.finish("access_revoked");
             return endpoint_error(
                 StatusCode::FORBIDDEN,
-                "denied_by_policy",
+                ErrorReason::DeniedByPolicy,
                 "the endpoint was revoked or agent access was disabled",
             );
         }
         outcome = crate::authorization::scope(true, execution.run()) => outcome,
     };
     session.finish("request_complete");
-    translate_outcome(outcome)
+    translate_outcome(outcome, &method)
 }
 
 /// Translate `/v1/http`'s relayed `{status, headers, body, body_encoding}`
 /// envelope back into a raw HTTP response for the reverse-proxy client. A
 /// broker-side error (`status != 200`, a `{reason, detail}` body) is returned
 /// as that status directly.
-fn translate_outcome(outcome: ExecOutcome) -> axum::response::Response {
+fn translate_outcome(outcome: ExecOutcome, request_method: &Method) -> axum::response::Response {
     use axum::http::StatusCode;
     if outcome.status != 200 {
         let status = StatusCode::from_u16(outcome.status).unwrap_or(StatusCode::BAD_GATEWAY);
         return endpoint_error(
             status,
-            outcome
-                .body
-                .get("reason")
-                .and_then(|r| r.as_str())
-                .unwrap_or("upstream_error"),
+            ErrorReason::from_str(
+                outcome
+                    .body
+                    .get("reason")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or(ErrorReason::UpstreamError.as_str()),
+            )
+            .unwrap_or(ErrorReason::UpstreamError),
             outcome
                 .body
                 .get("detail")
@@ -1685,13 +1869,17 @@ fn translate_outcome(outcome: ExecOutcome) -> axum::response::Response {
     };
 
     let mut response = axum::response::Response::builder().status(status);
+    let preserve_content_length =
+        request_method == Method::HEAD || status == StatusCode::NOT_MODIFIED;
     if let Some(headers) = env.get("headers").and_then(|h| h.as_object()) {
         for (name, value) in headers {
             // Framing/length headers are recomputed for the client leg.
+            let lower = name.to_ascii_lowercase();
             if matches!(
-                name.to_ascii_lowercase().as_str(),
-                "content-length" | "transfer-encoding" | "connection" | "set-cookie"
-            ) {
+                lower.as_str(),
+                "transfer-encoding" | "connection" | "set-cookie"
+            ) || (lower == "content-length" && !preserve_content_length)
+            {
                 continue;
             }
             if let (Ok(hn), Some(vs)) = (HeaderName::from_bytes(name.as_bytes()), value.as_str()) {
@@ -1914,22 +2102,25 @@ mod tests {
 
     #[test]
     fn direct_response_preserves_each_set_cookie_field() {
-        let response = translate_outcome(ExecOutcome {
-            status: 200,
-            body: json!({
-                "status": 200,
-                "headers": {
-                    "content-type": "text/plain",
-                    "set-cookie": "session=one, csrf=two",
-                },
-                "set_cookie_headers": [
-                    "session=one; Path=/; HttpOnly",
-                    "csrf=two; Path=/; Secure",
-                ],
-                "body": "ok",
-                "body_encoding": "utf8",
-            }),
-        });
+        let response = translate_outcome(
+            ExecOutcome {
+                status: 200,
+                body: json!({
+                    "status": 200,
+                    "headers": {
+                        "content-type": "text/plain",
+                        "set-cookie": "session=one, csrf=two",
+                    },
+                    "set_cookie_headers": [
+                        "session=one; Path=/; HttpOnly",
+                        "csrf=two; Path=/; Secure",
+                    ],
+                    "body": "ok",
+                    "body_encoding": "utf8",
+                }),
+            },
+            &Method::GET,
+        );
 
         let cookies: Vec<&str> = response
             .headers()
@@ -1940,6 +2131,43 @@ mod tests {
         assert_eq!(
             cookies,
             vec!["session=one; Path=/; HttpOnly", "csrf=two; Path=/; Secure"]
+        );
+    }
+
+    #[test]
+    fn direct_head_and_not_modified_responses_preserve_upstream_length() {
+        let outcome = || ExecOutcome {
+            status: 200,
+            body: json!({
+                "status": 200,
+                "headers": { "content-length": "1234" },
+                "body": "",
+                "body_encoding": "utf8",
+            }),
+        };
+        let head = translate_outcome(outcome(), &Method::HEAD);
+        assert_eq!(head.headers()[http::header::CONTENT_LENGTH], "1234");
+
+        let not_modified = translate_outcome(
+            ExecOutcome {
+                status: 200,
+                body: json!({
+                    "status": 304,
+                    "headers": { "content-length": "1234" },
+                    "body": "",
+                    "body_encoding": "utf8",
+                }),
+            },
+            &Method::GET,
+        );
+        assert_eq!(not_modified.headers()[http::header::CONTENT_LENGTH], "1234");
+
+        let get = translate_outcome(outcome(), &Method::GET);
+        assert_ne!(
+            get.headers()
+                .get(http::header::CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok()),
+            Some("1234")
         );
     }
 
@@ -1973,6 +2201,22 @@ mod tests {
         let explicit = Url::parse("https://api.github.com:443/x").unwrap();
         assert!(same_pinned_authority(
             &explicit, pinned.0, pinned.1, pinned.2
+        ));
+
+        let plaintext = ("http", "api.github.com", None::<u16>);
+        let upgrade = Url::parse("https://api.github.com/next").unwrap();
+        assert!(same_pinned_authority(
+            &upgrade,
+            plaintext.0,
+            plaintext.1,
+            plaintext.2
+        ));
+        let upgrade_wrong_port = Url::parse("https://api.github.com:8443/next").unwrap();
+        assert!(!same_pinned_authority(
+            &upgrade_wrong_port,
+            plaintext.0,
+            plaintext.1,
+            plaintext.2
         ));
     }
 

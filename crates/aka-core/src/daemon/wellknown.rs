@@ -43,6 +43,10 @@ pub fn manifest(
         // own timeout without first discovering which tools those are.
         "approval_timeout_seconds": config.approval_timeout.as_secs(),
         "request_id_max_bytes": REQUEST_ID_MAX_BYTES,
+        "http_request_cap_bytes": config.control_plane_request_cap,
+        "http_endpoint_request_cap_bytes": config.request_cap,
+        "http_response_cap_bytes": config.response_cap,
+        "http_max_redirects": config.max_redirects,
         "endpoints": {
             "pair": "/v1/pair",
             "whoami": "/v1/whoami",
@@ -91,6 +95,10 @@ pub fn manifest_remote(
         // own timeout without first discovering which tools those are.
         "approval_timeout_seconds": config.approval_timeout.as_secs(),
         "request_id_max_bytes": REQUEST_ID_MAX_BYTES,
+        "http_request_cap_bytes": config.control_plane_request_cap,
+        "http_endpoint_request_cap_bytes": config.request_cap,
+        "http_response_cap_bytes": config.response_cap,
+        "http_max_redirects": config.max_redirects,
         "endpoints": {
             "whoami": "/v1/whoami",
             "connections": "/v1/connections",
@@ -152,6 +160,10 @@ pub fn instructions(config: &BrokerConfig, paths: &Paths) -> String {
     let approval_timeout = config.approval_timeout.as_secs();
     let ticket = config.ticket_ttl.as_secs();
     let token_days = config.token_ttl.as_secs() / 86400;
+    let request_cap = config.control_plane_request_cap;
+    let endpoint_request_cap = config.request_cap;
+    let response_cap = config.response_cap;
+    let max_redirects = config.max_redirects;
     format!(
         r#"# AKA: broker instructions
 
@@ -287,7 +299,9 @@ not extend its lifetime. Retry the same `request_id` only during the returned
       "request_id": "req-<uuid>"        // mutating calls
     }}
 
-    → 200 {{"status": 200, "headers": {{…}}, "body": "…", "body_encoding": "utf8"}}
+    → 200 {{"status": 200, "headers": {{…}},
+            "set_cookie_headers": ["a=1; Path=/", "b=2; Path=/"],
+            "body": "…", "body_encoding": "utf8"}}
 
 You supply the method, path (query string included; there is no separate
 query field), headers and body; the connection supplies the host and the
@@ -298,12 +312,17 @@ rejected with `400 {{"reason": "reserved_header"}}`. Bodies may be a JSON
 string, a JSON object/array (serialized for you), or `body_base64` for
 binary. Non-UTF-8 response bodies come back base64-encoded with
 `"body_encoding": "base64"`. Redirects are followed only within the
-connection's pinned host; a cross-host redirect is returned to you as the
-raw 3xx.
+connection's pinned host, up to {max_redirects} hops; a cross-host redirect is
+returned to you as the raw 3xx. The `/v1/http` request body cap is
+{request_cap} bytes, direct-endpoint uploads are capped at
+{endpoint_request_cap} bytes, and relayed responses are capped at
+{response_cap} bytes. `Accept-Encoding` is broker-controlled because the
+upstream leg is HTTP/1.1-only and does not decompress responses.
 
 ABP/0 represents headers as JSON objects with string values. Repeated upstream
-response fields are combined with `, `, which is lossy for fields such as
-`Set-Cookie`; do not assume distinct repeated fields are preserved.
+response fields are combined with `, `. `Set-Cookie` is the exception: its
+distinct values are also preserved in `set_cookie_headers`; use that array
+rather than the lossy combined `headers["set-cookie"]` value.
 
 ## 5. Postgres: POST /v1/pg/open
 
@@ -486,7 +505,8 @@ mod tests {
 
     #[test]
     fn manifest_advertises_the_contract() {
-        let m = manifest(&BrokerConfig::default(), &paths(), None);
+        let config = BrokerConfig::default();
+        let m = manifest(&config, &paths(), None);
         assert_eq!(PROTOCOL_VERSION, 0);
         assert_eq!(m["protocol_version"], 0);
         assert_eq!(m["auth_schemes"], serde_json::json!(["bearer"]));
@@ -507,6 +527,13 @@ mod tests {
         assert_eq!(m["token_ttl_days"], 30);
         assert_eq!(m["ticket_ttl_seconds"], 60);
         assert_eq!(m["request_id_max_bytes"], REQUEST_ID_MAX_BYTES);
+        assert_eq!(
+            m["http_request_cap_bytes"],
+            config.control_plane_request_cap
+        );
+        assert_eq!(m["http_endpoint_request_cap_bytes"], config.request_cap);
+        assert_eq!(m["http_response_cap_bytes"], config.response_cap);
+        assert_eq!(m["http_max_redirects"], config.max_redirects);
         assert_eq!(m["endpoints"]["pair"], "/v1/pair");
         assert_eq!(m["endpoints"]["whoami"], "/v1/whoami");
         assert_eq!(m["endpoints"]["ssh_open"], "/v1/ssh/open");
@@ -593,6 +620,10 @@ mod tests {
             "retry_after_seconds",
             "invalid_json",
             "\"endpoint\": \"/v1/http\"",
+            "\"set_cookie_headers\"",
+            "direct-endpoint uploads are capped",
+            "upstream leg is HTTP/1.1-only",
+            "distinct values are also preserved",
             "/v1/pg/open",
             "/v1/ssh/open",
             "SSH_AUTH_SOCK",

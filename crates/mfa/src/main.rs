@@ -1127,13 +1127,13 @@ fn conn_config(args: &ConnAdd) -> Result<ConnectionConfig, String> {
                 ("user", args.user.is_some()),
                 ("secret", args.secret.is_some()),
                 ("sslmode", args.sslmode.is_some()),
-                ("ca-bundle", args.ca_bundle.is_some()),
                 ("host-key-fingerprint", args.host_key_fingerprint.is_some()),
             ])?;
             Ok(ConnectionConfig::Api {
                 host: require("host", &args.host)?,
                 scheme: args.scheme.clone().unwrap_or_else(|| "https".into()),
                 port: args.port,
+                trusted_ca_bundle_path: args.ca_bundle.clone(),
                 template: require("template", &args.template)?,
 
                 mcp_path: args.mcp_path.clone(),
@@ -1233,6 +1233,7 @@ fn config_from_dto(dto: &ConnectionDto) -> Result<ConnectionConfig, String> {
             host: need("host", &dto.host)?,
             scheme: need("scheme", &dto.scheme)?,
             port: dto.port,
+            trusted_ca_bundle_path: dto.trusted_ca_bundle_path.clone(),
             template: need("template", &dto.template)?,
             mcp_path: dto.mcp_path.clone(),
             oauth: dto.oauth_spec.as_ref().map(|oauth| OAuthSpec {
@@ -1295,6 +1296,7 @@ fn merged_config(
             host,
             scheme,
             port,
+            trusted_ca_bundle_path,
             template,
             mcp_path,
             oauth,
@@ -1304,13 +1306,17 @@ fn merged_config(
                 ("user", args.user.is_some()),
                 ("secret", args.secret.is_some()),
                 ("sslmode", args.sslmode.is_some()),
-                ("ca-bundle", args.ca_bundle.is_some()),
                 ("host-key-fingerprint", args.host_key_fingerprint.is_some()),
             ])?;
             Ok(ConnectionConfig::Api {
                 host: keep(&args.host, host),
                 scheme: keep(&args.scheme, scheme),
                 port: args.port.or(*port),
+                trusted_ca_bundle_path: match &args.ca_bundle {
+                    Some(path) if path.is_empty() => None,
+                    Some(path) => Some(path.clone()),
+                    None => trusted_ca_bundle_path.clone(),
+                },
                 template: keep(&args.template, template),
                 mcp_path: mcp_path.clone(),
                 oauth: oauth.clone(),
@@ -2434,8 +2440,16 @@ mod tests {
         a.host = Some("api.github.com".into());
         assert!(conn_config(&a).unwrap_err().contains("--template"));
         a.template = Some("Authorization: Bearer {{KEY}}".into());
+        a.ca_bundle = Some("/etc/api-ca.pem".into());
         let config = conn_config(&a).unwrap();
-        assert!(matches!(config, ConnectionConfig::Api { ref scheme, .. } if scheme == "https"));
+        assert!(matches!(
+            config,
+            ConnectionConfig::Api {
+                ref scheme,
+                trusted_ca_bundle_path: Some(ref path),
+                ..
+            } if scheme == "https" && path == "/etc/api-ca.pem"
+        ));
         // api derives secrets from the template; a stray --secret is a
         // misunderstanding worth naming, not ignoring.
         a.secret = Some("KEY".into());
@@ -2588,6 +2602,7 @@ mod tests {
             host: "api.github.com".into(),
             scheme: "https".into(),
             port: None,
+            trusted_ca_bundle_path: Some("/etc/api-ca.pem".into()),
             template: "Authorization: Bearer {{KEY}}".into(),
             mcp_path: Some("/mcp".into()),
             oauth: None,
@@ -2598,12 +2613,18 @@ mod tests {
             ConnectionConfig::Api {
                 host,
                 scheme,
+                trusted_ca_bundle_path,
                 template,
                 mcp_path,
                 ..
             } => {
                 assert_eq!(host, "api.example.com");
                 assert_eq!(scheme, "https", "unspecified flags keep their values");
+                assert_eq!(
+                    trusted_ca_bundle_path.as_deref(),
+                    Some("/etc/api-ca.pem"),
+                    "unspecified --ca-bundle keeps its value"
+                );
                 assert_eq!(template, "Authorization: Bearer {{KEY}}");
                 assert_eq!(mcp_path.as_deref(), Some("/mcp"), "mcp_path carries over");
             }
