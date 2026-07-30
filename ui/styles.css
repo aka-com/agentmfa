@@ -694,14 +694,10 @@
     padding: 1px 7px 2px 9px; cursor: pointer;
     display: inline-flex; align-items: center; gap: 5px; vertical-align: baseline;
   }
-  /* The affordance is a light underline on the text itself, not a border on
-     the chip. */
-  .start-blank-tx{
-    border-bottom: 1.5px solid color-mix(in srgb, var(--accent) 35%, transparent);
-    padding-bottom: 1px;
-  }
-  .start-blank:hover .start-blank-tx,
-  .start-blank.on .start-blank-tx{ border-bottom-color: var(--accent); }
+  /* The wash and chevron are the whole affordance — no underline, no border;
+     hover and the open state deepen the wash instead. */
+  .start-blank:hover,
+  .start-blank.on{ background: var(--accent-wash-2); }
   .start-blank-chev{ display: inline-flex; opacity: .65; }
   .start-blank-chev svg{ width: 13px; height: 13px; }
   .start-menu{
@@ -726,10 +722,6 @@
   .start-menu-name{ font-weight: 600; font-size: 0.8125rem; }
   .start-menu-tx{ display: flex; flex-direction: column; gap: 1px; min-width: 0; }
   .start-menu-sub{ font-size: 0.71875rem; color: var(--muted); }
-  .start-menu-kind{
-    margin-left: auto; flex: 0 0 auto; font-size: 0.625rem; font-weight: 650;
-    letter-spacing: .07em; text-transform: uppercase; color: var(--muted-2);
-  }
   .start-menu-limited{
     padding: 1px 4px; border-radius: 4px; background: var(--amber-wash);
     color: var(--amber-ink); font-size: 0.5625rem; font-weight: 700;

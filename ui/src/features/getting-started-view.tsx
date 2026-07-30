@@ -22,7 +22,6 @@ import {
   redactedStartTask,
   resolveConnectMode,
   sshInvocationCommand,
-  startKindTag,
   startOptionById,
   startProgress,
   startTask,
@@ -79,7 +78,6 @@ function ToolMenu({ option }: { option: StartOption }): ReactNode {
     <div className="start-menu" role="menu" aria-label="What to connect">
       {START_OPTIONS.map((candidate) => {
         const entry = candidate.catalogId ? catalogEntryById(candidate.catalogId) : undefined;
-        const kind = startKindTag(candidate);
         return (
           <button key={candidate.id} role="menuitemradio"
             aria-checked={candidate.id === option.id}
@@ -91,7 +89,6 @@ function ToolMenu({ option }: { option: StartOption }): ReactNode {
             <span className="start-menu-name">{candidate.label}</span>
             {entry?.limitedSupport
               ? <span className="start-menu-limited">Limited</span> : null}
-            {kind ? <span className="start-menu-kind">{kind}</span> : null}
           </button>
         );
       })}
@@ -137,7 +134,7 @@ function SentenceBlank({ kind, label, menu }: {
     <span className="start-blank-wrap">
       <button className={`start-blank ${open ? 'on' : ''}`} data-act="start-menu" data-id={kind}
         aria-haspopup="menu" aria-expanded={open}>
-        <span className="start-blank-tx">{label}</span>
+        {label}
         <span className="start-blank-chev" aria-hidden="true">
           <AppIcon icon={ICONS.chevronDown} />
         </span>

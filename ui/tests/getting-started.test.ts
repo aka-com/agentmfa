@@ -17,7 +17,6 @@ import {
   sshBrokerFlags,
   sshDirectCommand,
   sshInvocationCommand,
-  startKindTag,
   startOptionById,
   startProgress,
   startTask,
@@ -59,14 +58,15 @@ test('an unknown option id falls back to the first option', () => {
   assert.equal(startOptionById('ssh').id, 'ssh');
 });
 
-test('the picker omits Custom API and keeps labeled Custom MCP last', () => {
+test('the picker omits Custom API and ends with Slack API then Custom MCP', () => {
   assert.equal(START_OPTIONS.some((option) => option.id === 'api'), false);
   assert.deepEqual(
     START_OPTIONS.slice(-2).map((option) => option.id),
-    ['sentry', 'mcp'],
+    ['slack', 'mcp'],
   );
+  // The menu carries no kind tags, so the odd-one-out names its transport.
+  assert.equal(startOptionById('slack').label, 'Slack API');
   assert.equal(START_OPTIONS.at(-1)?.label, 'Custom MCP');
-  assert.equal(START_OPTIONS.filter((option) => option.showPickerLabel).length, 1);
 });
 
 test('progress tracks added and enabled tools independently', () => {
@@ -240,15 +240,6 @@ test('Direct is offered first, and only for kinds with a direct endpoint', () =>
   // With the guides tab gone, Other MCP client is offered as a step-2 mode.
   assert.ok(connectModesFor(startOptionById('postgres')).includes('mcp'));
   assert.ok(connectModesFor(startOptionById('notion')).includes('mcp'));
-});
-
-test('picker kind tags name the family: database, server, MCP, or API', () => {
-  assert.equal(startKindTag(startOptionById('postgres')), 'database');
-  assert.equal(startKindTag(startOptionById('ssh')), 'server');
-  assert.equal(startKindTag(startOptionById('slack')), 'API');
-  assert.equal(startKindTag(startOptionById('github')), 'MCP');
-  // Custom MCP already says MCP in its name.
-  assert.equal(startKindTag(startOptionById('mcp')), '');
 });
 
 test('the on-screen task redacts the DSN password and the socket filename', () => {

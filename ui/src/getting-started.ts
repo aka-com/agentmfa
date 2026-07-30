@@ -14,8 +14,6 @@ export interface StartOption {
   label: string;
   /** Key into the shared icon set. */
   icon: string;
-  /** Custom MCP keeps its label visible; branded choices use their logo. */
-  showPickerLabel?: boolean;
   /** Connection type this sets up. */
   connType: ConnectionType | null;
   /** Catalog row the Add button opens. */
@@ -66,14 +64,6 @@ export const START_OPTIONS: StartOption[] = [
     taskBody: `summarize the pull requests and issues that changed this week.`,
   },
   {
-    id: 'slack',
-    label: 'Slack',
-    icon: 'slack',
-    connType: 'api',
-    catalogId: 'slack',
-    taskBody: `summarize the important conversations from this week and list the decisions that were made.`,
-  },
-  {
     id: 'stripe',
     label: 'Stripe',
     icon: 'stripe',
@@ -91,11 +81,20 @@ export const START_OPTIONS: StartOption[] = [
     mcp: true,
     taskBody: `summarize the highest-impact unresolved issues from this week.`,
   },
+  // The odd ones out sit at the bottom: Slack rides the plain API (its name
+  // says so, since rows carry no kind tag), and Custom MCP is the catch-all.
+  {
+    id: 'slack',
+    label: 'Slack API',
+    icon: 'slack',
+    connType: 'api',
+    catalogId: 'slack',
+    taskBody: `summarize the important conversations from this week and list the decisions that were made.`,
+  },
   {
     id: 'mcp',
     label: 'Custom MCP',
     icon: 'plug',
-    showPickerLabel: true,
     connType: 'api',
     catalogId: 'mcp',
     mcp: true,
@@ -105,19 +104,6 @@ export const START_OPTIONS: StartOption[] = [
 
 export function startOptionById(id: string): StartOption {
   return START_OPTIONS.find((option) => option.id === id) ?? START_OPTIONS[0];
-}
-
-/**
- * The kind tag beside a tool's name in the picker menu: databases and
- * servers say what they are, API-backed rows say whether the broker speaks
- * MCP or plain HTTP for them. Skipped when the name already carries it
- * (Custom MCP).
- */
-export function startKindTag(option: StartOption): string {
-  const tag = option.connType === 'pg' ? 'database'
-    : option.connType === 'ssh' ? 'server'
-    : option.mcp ? 'MCP' : 'API';
-  return option.label.includes(tag) ? '' : tag;
 }
 
 /**
@@ -263,7 +249,7 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
   {
     id: 'claude-code',
     name: 'Claude Code',
-    sub: 'Terminal · connects over MCP',
+    sub: 'Terminal · MCP',
     mark: 'CC',
     icon: 'anthropic',
     labels: ['claude-code'],
@@ -286,7 +272,7 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
   {
     id: 'claude-desktop',
     name: 'Claude Desktop',
-    sub: 'App · connects over MCP',
+    sub: 'Desktop app · MCP',
     mark: 'CD',
     icon: 'anthropic',
     labels: ['claude-desktop'],
@@ -310,7 +296,7 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
   {
     id: 'codex',
     name: 'Codex',
-    sub: 'Terminal & desktop · connects over MCP',
+    sub: 'Terminal & desktop · MCP',
     mark: 'CX',
     icon: 'openai',
     labels: ['codex', 'codex-desktop'],
@@ -333,7 +319,7 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
   {
     id: 'mcp',
     name: 'Other MCP client',
-    sub: 'Any MCP client that speaks HTTP — no stdio needed',
+    sub: 'Connects over HTTP — no stdio needed',
     mark: '⌁',
     icon: 'plug',
     lead: () =>
