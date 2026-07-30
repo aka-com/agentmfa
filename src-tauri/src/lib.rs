@@ -385,6 +385,9 @@ pub fn run() {
             if let tauri::RunEvent::Reopen { .. } = &event {
                 windows::ui_open_main(handle.clone());
             }
+            if let tauri::RunEvent::ExitRequested { code, api, .. } = &event {
+                clipboard::defer_exit_cleanup(handle, *code, api);
+            }
             let _ = (handle, &event);
         });
 }

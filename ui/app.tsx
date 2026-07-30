@@ -5830,6 +5830,18 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       }
       break;
     }
+    case 'copy-first-task': {
+      const connectionId = btn.dataset.conn ?? '';
+      const taskBody = btn.dataset.task ?? '';
+      if (connectionId && taskBody && await run(() => invoke('copy_endpoint_text', {
+        connectionId,
+        format: 'first-task',
+        taskBody,
+      }))) {
+        toast('📋 Copied for 30s');
+      }
+      break;
+    }
     case 'select-conn':
       state.selectedConn = id;
       // In the wide layout the panel is always on screen and this flag is
@@ -7106,6 +7118,7 @@ async function boot() {
     state.epExpanded = {};
     setSheet(null);
     state.draft = {};
+    state.elicitValues = {};
     state.sheetErrors = {};
     state.sheetBaseline = null;
     state.confirmDiscard = false;

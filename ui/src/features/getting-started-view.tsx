@@ -354,7 +354,12 @@ function StartWalkthrough(): ReactNode {
                 carries the real one.</p>
             : null}
           <div className="start-actions"><button className="btn primary sm"
-            data-act="copy-text" data-text={task}>Copy prompt</button></div>
+            data-act={connectMode === 'direct' && directConnection && directEndpoint
+              ? 'copy-first-task'
+              : 'copy-text'}
+            data-conn={connectMode === 'direct' ? directConnection?.id : undefined}
+            data-task={connectMode === 'direct' ? option.taskBody : undefined}
+            data-text={connectMode === 'direct' ? undefined : task}>Copy prompt</button></div>
         </>} />
     </ol>
   );

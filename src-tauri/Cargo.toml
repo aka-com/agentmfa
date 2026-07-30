@@ -43,6 +43,7 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zeroize = "1"
+sha2 = "0.10"
 glob = "0.3"
 shell-words = "1"
 url = "2"

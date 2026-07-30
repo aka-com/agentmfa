@@ -426,6 +426,10 @@ test('connection-string credentials are masked with asterisks', async () => {
 
 test('endpoint credentials use the native hygienic copy command', async () => {
   const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+  const gettingStarted = await readFile(
+    new URL('../src/features/getting-started-view.tsx', import.meta.url),
+    'utf8',
+  );
   const endpointCopy = app.match(
     /case 'copy-endpoint-dsn':([\s\S]*?)case 'open-settings'/,
   )?.[1];
@@ -434,6 +438,18 @@ test('endpoint credentials use the native hygienic copy command', async () => {
   assert.match(endpointCopy, /invoke\('copy_endpoint_text'/);
   assert.doesNotMatch(endpointCopy, /navigator\.clipboard\.writeText/);
   assert.doesNotMatch(app, /data-act="copy-endpoint-dsn"[^>]*data-text=/);
+  assert.match(gettingStarted, /'copy-first-task'/);
+  assert.doesNotMatch(gettingStarted, /data-text=\{task\}/);
+  assert.match(app, /case 'copy-first-task':[\s\S]*?format: 'first-task'/);
+});
+
+test('dropdown hide clears credential-shaped elicitation answers', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+  const cleanup = app.match(
+    /listen\('aka:\/\/dropdown-hidden',[\s\S]*?\n  \}\);/,
+  )?.[0];
+  assert.ok(cleanup, 'dropdown cleanup listener is present');
+  assert.match(cleanup, /state\.elicitValues = \{\}/);
 });
 
 test('failed broker reads stay visible and never trigger empty-vault onboarding', async () => {

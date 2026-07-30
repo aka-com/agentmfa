@@ -550,7 +550,7 @@ pub async fn reveal_secret_prefix(state: State<'_, AppState>, id: String) -> Cmd
 /// clipboard with hygiene, audits *that* a copy happened, never the value.
 /// The value never re-enters the webview.
 #[tauri::command]
-pub async fn copy_secret(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+pub async fn copy_secret(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<()> {
     let id = parse_id(&id)?;
     let value = state
         .brokers
@@ -558,7 +558,7 @@ pub async fn copy_secret(state: State<'_, AppState>, id: String) -> CmdResult<()
         .secret_value_for_copy(id)
         .await
         .map_err(|e| e.to_string())?;
-    crate::clipboard::copy_with_hygiene(value)?;
+    crate::clipboard::copy_with_hygiene(&app, value)?;
     state
         .brokers
         .backend()
@@ -1409,9 +1409,11 @@ pub async fn get_endpoint(
 /// with the UI's copy buttons.
 #[tauri::command]
 pub async fn copy_endpoint_text(
+    app: AppHandle,
     state: State<'_, AppState>,
     connection_id: String,
     format: String,
+    task_body: Option<String>,
 ) -> CmdResult<()> {
     let connection_id = parse_id(&connection_id)?;
     let backend = state.brokers.backend();
@@ -1429,16 +1431,19 @@ pub async fn copy_endpoint_text(
         .into_iter()
         .find(|connection| connection.id == connection_id.to_string())
         .ok_or_else(|| "this tool no longer exists".to_string())?;
-    let text = endpoint_copy_text(&connection, &endpoint, &format)?;
-    crate::clipboard::copy_with_hygiene(Zeroizing::new(text))
+    let text = endpoint_copy_text(&connection, &endpoint, &format, task_body.as_deref())?;
+    crate::clipboard::copy_with_hygiene(&app, Zeroizing::new(text))
 }
 
 fn endpoint_copy_text(
     connection: &aka_api::ConnectionDto,
     endpoint: &IssuedEndpointDto,
     format: &str,
+    task_body: Option<&str>,
 ) -> CmdResult<String> {
     match (endpoint.kind.as_str(), format) {
+        ("pg", "first-task") => endpoint_first_task(endpoint, task_body),
+        ("ssh", "first-task") => endpoint_first_task(endpoint, task_body),
         ("pg", "direct" | "dsn") => Ok(endpoint.dsn.clone()),
         ("pg", "example" | "env") => Ok(format!("DATABASE_URL=\"{}\"", endpoint.dsn)),
         ("pg", "psql") => Ok(format!("psql {}", shell_quoted(&endpoint.dsn))),
@@ -1466,6 +1471,24 @@ fn endpoint_copy_text(
         )),
         (_, "secret") => Ok(endpoint.secret.clone()),
         (_, _) => Err("unknown endpoint copy format".into()),
+    }
+}
+
+fn endpoint_first_task(endpoint: &IssuedEndpointDto, task_body: Option<&str>) -> CmdResult<String> {
+    let task = task_body
+        .map(str::trim)
+        .filter(|task| !task.is_empty() && task.chars().count() <= 2_000)
+        .ok_or_else(|| "the first task is missing or too long".to_string())?;
+    match endpoint.kind.as_str() {
+        "pg" => Ok(format!(
+            "Connect to this Postgres DSN: {}\n\nThen {task}",
+            endpoint.dsn
+        )),
+        "ssh" => Ok(format!(
+            "Use this SSH endpoint: {}\n\nThen {task}",
+            endpoint.example
+        )),
+        _ => Err("this endpoint type has no direct first task".into()),
     }
 }
 
@@ -1704,14 +1727,14 @@ pub async fn rotate_key(state: State<'_, AppState>) -> CmdResult<()> {
 /// the clipboard write happens here, like a secret copy. Most setups never
 /// need it — agents read the token file themselves.
 #[tauri::command]
-pub async fn copy_key(state: State<'_, AppState>) -> CmdResult<()> {
+pub async fn copy_key(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
     let token = state
         .brokers
         .backend()
         .agent_key()
         .await
         .map_err(|e| e.to_string())?;
-    crate::clipboard::copy_with_hygiene(Zeroizing::new(token))
+    crate::clipboard::copy_with_hygiene(&app, Zeroizing::new(token))
 }
 
 /* ------------------------------ sessions --------------------------------- */
@@ -2157,6 +2180,28 @@ mod tests {
             shell_quoted("/tmp/a \"quoted\" $socket"),
             "\"/tmp/a \\\"quoted\\\" \\$socket\""
         );
+    }
+
+    #[test]
+    fn endpoint_first_task_is_rendered_natively_and_bounded() {
+        let endpoint = IssuedEndpointDto {
+            endpoint_id: "ep_test".into(),
+            kind: "pg".into(),
+            dsn: "postgresql://deploy:end_test@localhost/app".into(),
+            tcp_dsn: None,
+            secret: "end_test".into(),
+            example: "psql postgresql://deploy:end_test@localhost/app".into(),
+            expires_at: String::new(),
+            expires_in_secs: Some(60),
+        };
+        assert_eq!(
+            endpoint_first_task(&endpoint, Some("  list the newest deploys  ")).unwrap(),
+            "Connect to this Postgres DSN: postgresql://deploy:end_test@localhost/app\n\n\
+             Then list the newest deploys"
+        );
+        assert!(endpoint_first_task(&endpoint, None).is_err());
+        assert!(endpoint_first_task(&endpoint, Some("   ")).is_err());
+        assert!(endpoint_first_task(&endpoint, Some(&"x".repeat(2_001))).is_err());
     }
 
     #[test]

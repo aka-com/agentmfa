@@ -606,7 +606,10 @@ export interface CommandMap {
   issue_endpoint: CommandSpec<{ connectionId: string }, IssuedEndpoint>;
   renew_endpoint: CommandSpec<{ connectionId: string }, IssuedEndpoint>;
   get_endpoint: CommandSpec<{ connectionId: string }, IssuedEndpoint | null>;
-  copy_endpoint_text: CommandSpec<{ connectionId: string; format: string }, void>;
+  copy_endpoint_text: CommandSpec<
+    { connectionId: string; format: string; taskBody?: string },
+    void
+  >;
   revoke_endpoint: CommandSpec<{ endpointId: string }, boolean>;
   rotate_key: CommandSpec<undefined, void>;
   copy_key: CommandSpec<undefined, void>;
