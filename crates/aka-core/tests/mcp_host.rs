@@ -257,10 +257,9 @@ async fn broker_mcp_relay_returns_when_the_matching_sse_frame_arrives() {
                   data: {\"jsonrpc\":\"2.0\",\"id\":6,\"result\":{\"wrong\":true}}\n\n\
                   data: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"ok\":true}}\n\n",
             );
-            let stream = futures::stream::once(async move {
-                Ok::<axum::body::Bytes, Infallible>(frames)
-            })
-            .chain(futures::stream::pending());
+            let stream =
+                futures::stream::once(async move { Ok::<axum::body::Bytes, Infallible>(frames) })
+                    .chain(futures::stream::pending());
             axum::http::Response::builder()
                 .status(200)
                 .header("content-type", "text/event-stream")

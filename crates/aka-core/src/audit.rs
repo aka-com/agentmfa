@@ -983,12 +983,9 @@ mod tests {
                 .unwrap(),
         );
         let path = dir.join("audit.jsonl");
-        let log = AuditLog::open_sealed(
-            path.clone(),
-            dir.join("audit-seal.json"),
-            integrity.clone(),
-        )
-        .unwrap();
+        let log =
+            AuditLog::open_sealed(path.clone(), dir.join("audit-seal.json"), integrity.clone())
+                .unwrap();
         (log, integrity, path)
     }
 
@@ -1006,7 +1003,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (log, integrity, _) = sealed_log(dir.path()).await;
         for n in 0..3 {
-            log.append(AuditEntry::new(AuditKind::SecretAdded, format!("entry {n}")));
+            log.append(AuditEntry::new(
+                AuditKind::SecretAdded,
+                format!("entry {n}"),
+            ));
         }
         assert_eq!(
             log.verify(),
@@ -1032,7 +1032,10 @@ mod tests {
     async fn an_edited_entry_is_caught() {
         let dir = tempfile::tempdir().unwrap();
         let (log, integrity, path) = sealed_log(dir.path()).await;
-        log.append(AuditEntry::new(AuditKind::Denied, "Refused: agent → prod-db"));
+        log.append(AuditEntry::new(
+            AuditKind::Denied,
+            "Refused: agent → prod-db",
+        ));
         log.append(AuditEntry::new(AuditKind::SecretAdded, "after"));
 
         let text = std::fs::read_to_string(&path).unwrap();
@@ -1051,7 +1054,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (log, integrity, path) = sealed_log(dir.path()).await;
         for n in 0..4 {
-            log.append(AuditEntry::new(AuditKind::SecretAdded, format!("entry {n}")));
+            log.append(AuditEntry::new(
+                AuditKind::SecretAdded,
+                format!("entry {n}"),
+            ));
         }
         let text = std::fs::read_to_string(&path).unwrap();
         let kept: Vec<&str> = text.lines().take(2).collect();
@@ -1108,7 +1114,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (log, integrity, _) = sealed_log(dir.path()).await;
         for n in 0..3 {
-            log.append(AuditEntry::new(AuditKind::SecretAdded, format!("entry {n}")));
+            log.append(AuditEntry::new(
+                AuditKind::SecretAdded,
+                format!("entry {n}"),
+            ));
         }
         // Rewind the seal to where it would have been one append earlier.
         let rewound = {
@@ -1143,7 +1152,10 @@ mod tests {
             bare.append(AuditEntry::new(AuditKind::SecretAdded, "also from before"));
         }
         let (log, _integrity, _) = sealed_log(dir.path()).await;
-        log.append(AuditEntry::new(AuditKind::SecretAdded, "sealed from here on"));
+        log.append(AuditEntry::new(
+            AuditKind::SecretAdded,
+            "sealed from here on",
+        ));
         assert_eq!(
             log.verify(),
             AuditIntegrity::Verified {

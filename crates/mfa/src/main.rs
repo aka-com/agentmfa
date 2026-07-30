@@ -1098,7 +1098,9 @@ fn management_backend(root: Option<PathBuf>, url: Option<String>) -> Managed {
         };
         eprintln!("  managing the broker at {url}");
         let remote = Arc::new(RemoteBackend::new(config));
-        let profile = runtime.block_on(remote.whoami()).unwrap_or_else(|error| die(error));
+        let profile = runtime
+            .block_on(remote.whoami())
+            .unwrap_or_else(|error| die(error));
         warn_version_skew(&profile);
         return Managed {
             runtime,
@@ -1124,7 +1126,9 @@ fn management_backend(root: Option<PathBuf>, url: Option<String>) -> Managed {
         };
         eprintln!("  managing the running broker over {key}");
         let remote = Arc::new(RemoteBackend::over_unix_socket(socket, &token));
-        let profile = runtime.block_on(remote.whoami()).unwrap_or_else(|error| die(error));
+        let profile = runtime
+            .block_on(remote.whoami())
+            .unwrap_or_else(|error| die(error));
         warn_version_skew(&profile);
         return Managed {
             runtime,
@@ -3245,10 +3249,8 @@ mod tests {
                  surface; its calls will be refused"
             )
         );
-        assert!(
-            headless_confirmation_warning(3)
-                .unwrap()
-                .contains("3 tools are set")
-        );
+        assert!(headless_confirmation_warning(3)
+            .unwrap()
+            .contains("3 tools are set"));
     }
 }

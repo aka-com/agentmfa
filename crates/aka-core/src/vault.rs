@@ -152,9 +152,7 @@ fn check_vault_backend(
     paths: &crate::paths::Paths,
     selected: PlatformVaultBackend,
 ) -> Result<(), CoreError> {
-    if read_vault_backend_record(paths).is_none()
-        && file_vault_presence(paths) == (true, true)
-    {
+    if read_vault_backend_record(paths).is_none() && file_vault_presence(paths) == (true, true) {
         return Err(CoreError::Vault(
             "both encrypted and plaintext vault files exist, but no valid backend marker \
              selects one; refusing to guess"
@@ -869,8 +867,7 @@ mod tests {
         );
         std::fs::write(paths.dev_vault_file(), b"{}").unwrap();
         assert_eq!(recorded_platform_vault_backend(&paths), None);
-        let error =
-            check_vault_backend(&paths, PlatformVaultBackend::EncryptedFile).unwrap_err();
+        let error = check_vault_backend(&paths, PlatformVaultBackend::EncryptedFile).unwrap_err();
         assert!(
             matches!(error, CoreError::Vault(ref message) if message.contains("refusing to guess")),
             "{error}"

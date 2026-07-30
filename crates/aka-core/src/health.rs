@@ -44,10 +44,7 @@ impl HealthRegistry {
         integrity: Arc<StateIntegrity>,
     ) -> Self {
         let (map, discarded) = match integrity.read_verified(&path) {
-            Ok(Some(bytes)) => (
-                serde_json::from_slice(&bytes).unwrap_or_default(),
-                false,
-            ),
+            Ok(Some(bytes)) => (serde_json::from_slice(&bytes).unwrap_or_default(), false),
             Ok(None) => (HashMap::new(), false),
             Err(error) => {
                 tracing::error!("connection health did not verify, discarding: {error}");

@@ -914,7 +914,11 @@ async fn a_confirmed_connection_asks_before_each_login() {
     let (kind, body) = sign(&mut s, &key_blob, &data, 0).await;
     assert_eq!(kind, SSH_AGENT_SIGN_RESPONSE);
     verify_signature(key.public_key(), &body, &data);
-    assert_eq!(h.prompts.load(Ordering::SeqCst), 1, "the login was asked about");
+    assert_eq!(
+        h.prompts.load(Ordering::SeqCst),
+        1,
+        "the login was asked about"
+    );
 
     // The prompt names the verified destination and is honest about the gap
     // between confirming a login and confirming what the login goes on to do.
@@ -925,7 +929,9 @@ async fn a_confirmed_connection_asks_before_each_login() {
         "the prompt names the login: {}",
         prompt.summary
     );
-    let consequence = prompt.consequence.expect("the prompt states what it grants");
+    let consequence = prompt
+        .consequence
+        .expect("the prompt states what it grants");
     assert!(
         consequence.contains("cannot see the commands"),
         "the prompt does not imply a per-command gate: {consequence}"
@@ -959,7 +965,10 @@ async fn a_refused_login_is_not_signed() {
 
     let data = userauth_blob("deploy", "ssh-ed25519", &key_blob, &host_blob);
     let (kind, _) = sign(&mut s, &key_blob, &data, 0).await;
-    assert_eq!(kind, SSH_AGENT_FAILURE, "a refused login must not be signed");
+    assert_eq!(
+        kind, SSH_AGENT_FAILURE,
+        "a refused login must not be signed"
+    );
     assert_eq!(h.prompts.load(Ordering::SeqCst), 1);
 
     // The refusal cools down, so a client retrying in a loop does not

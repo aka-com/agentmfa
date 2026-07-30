@@ -1094,7 +1094,9 @@ mod tests {
         );
 
         assert_eq!(
-            approvals.gate(request_from(&conn, "some-other-agent")).await,
+            approvals
+                .gate(request_from(&conn, "some-other-agent"))
+                .await,
             Verdict::Allowed
         );
         assert_eq!(
@@ -1201,8 +1203,7 @@ mod tests {
         assert!(
             entries.iter().any(|entry| {
                 entry.kind == AuditKind::AutoAllowed
-                    && entry.fields.get("via").and_then(serde_json::Value::as_str)
-                        == Some("window")
+                    && entry.fields.get("via").and_then(serde_json::Value::as_str) == Some("window")
                     && entry.fields.contains_key("window_until")
             }),
             "a call riding the window remains attributable in the audit log"

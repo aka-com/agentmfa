@@ -234,9 +234,7 @@ impl KeyImportError {
             Self::NeedsPassphrase => {
                 "this private key is passphrase-protected; enter its passphrase".to_string()
             }
-            Self::WrongPassphrase => {
-                "that passphrase did not decrypt the private key".to_string()
-            }
+            Self::WrongPassphrase => "that passphrase did not decrypt the private key".to_string(),
             Self::Unusable(message) => message.clone(),
         }
     }
@@ -1951,7 +1949,12 @@ const LOGIN_CONSEQUENCE: &str =
 /// authenticates anything, and prompting on them would ask about `ssh`
 /// merely considering the key.
 async fn confirm_login(state: &Arc<AgentState>, user: &str) -> Option<Vec<u8>> {
-    if !state.broker.access.confirm_mode(&state.connection_id).is_on() {
+    if !state
+        .broker
+        .access
+        .confirm_mode(&state.connection_id)
+        .is_on()
+    {
         return None;
     }
     let Ok(connection) = state.broker.store.connection_by_id(&state.connection_id) else {
@@ -2127,7 +2130,9 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "ProxyCommand=none"));
         assert!(args.iter().any(|arg| arg == "ProxyJump=none"));
         assert_eq!(args.iter().filter(|arg| *arg == "-p").count(), 1);
-        assert!(args.windows(2).any(|pair| pair == ["--", "resolved.example"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--", "resolved.example"]));
     }
 
     /// SSH-23. A passphrase-protected key was refused with instructions to
