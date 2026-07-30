@@ -58,6 +58,133 @@ pub trait SecretVault: Send + Sync {
     fn set_attrs(&self, id: &Uuid, attrs: &VaultAttrs) -> Result<(), CoreError>;
 }
 
+/// The durable backend that owns a store's secret values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PlatformVaultBackend {
+    MacosKeychain,
+    EncryptedFile,
+    PlaintextDevFile,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VaultBackendRecord {
+    version: u32,
+    backend: PlatformVaultBackend,
+}
+
+const VAULT_BACKEND_RECORD_VERSION: u32 = 1;
+
+/// The backend this process is configured to select.
+pub fn selected_platform_vault_backend(_paths: &crate::paths::Paths) -> PlatformVaultBackend {
+    #[cfg(target_os = "macos")]
+    {
+        PlatformVaultBackend::MacosKeychain
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if master_key_from_env().is_some() {
+            PlatformVaultBackend::EncryptedFile
+        } else {
+            PlatformVaultBackend::PlaintextDevFile
+        }
+    }
+}
+
+/// The backend already recorded for the store, with a compatibility
+/// inference for stores created before the advisory record existed.
+pub fn recorded_platform_vault_backend(
+    paths: &crate::paths::Paths,
+) -> Option<PlatformVaultBackend> {
+    if let Some(recorded) = read_vault_backend_record(paths) {
+        return Some(recorded);
+    }
+    #[cfg(any(not(target_os = "macos"), test))]
+    {
+        infer_file_vault_backend(paths)
+    }
+    #[cfg(all(target_os = "macos", not(test)))]
+    {
+        None
+    }
+}
+
+fn read_vault_backend_record(paths: &crate::paths::Paths) -> Option<PlatformVaultBackend> {
+    let bytes = std::fs::read(paths.vault_backend_file()).ok()?;
+    let record: VaultBackendRecord = serde_json::from_slice(&bytes).ok()?;
+    (record.version == VAULT_BACKEND_RECORD_VERSION).then_some(record.backend)
+}
+
+#[cfg(any(not(target_os = "macos"), test))]
+fn infer_file_vault_backend(paths: &crate::paths::Paths) -> Option<PlatformVaultBackend> {
+    let (encrypted, plaintext) = file_vault_presence(paths);
+    match (encrypted, plaintext) {
+        (true, false) => Some(PlatformVaultBackend::EncryptedFile),
+        (false, true) => Some(PlatformVaultBackend::PlaintextDevFile),
+        _ => None,
+    }
+}
+
+#[cfg(any(not(target_os = "macos"), test))]
+fn file_vault_presence(paths: &crate::paths::Paths) -> (bool, bool) {
+    (
+        paths.encrypted_vault_file().try_exists().unwrap_or(false),
+        paths.dev_vault_file().try_exists().unwrap_or(false),
+    )
+}
+
+#[cfg(any(not(target_os = "macos"), test))]
+fn record_vault_backend(
+    paths: &crate::paths::Paths,
+    backend: PlatformVaultBackend,
+) -> Result<(), CoreError> {
+    let bytes = serde_json::to_vec_pretty(&VaultBackendRecord {
+        version: VAULT_BACKEND_RECORD_VERSION,
+        backend,
+    })?;
+    crate::paths::write_private_atomic(&paths.vault_backend_file(), &bytes)?;
+    Ok(())
+}
+
+#[cfg(any(not(target_os = "macos"), test))]
+fn check_vault_backend(
+    paths: &crate::paths::Paths,
+    selected: PlatformVaultBackend,
+) -> Result<(), CoreError> {
+    if read_vault_backend_record(paths).is_none()
+        && file_vault_presence(paths) == (true, true)
+    {
+        return Err(CoreError::Vault(
+            "both encrypted and plaintext vault files exist, but no valid backend marker \
+             selects one; refusing to guess"
+                .into(),
+        ));
+    }
+    let Some(recorded) = recorded_platform_vault_backend(paths) else {
+        return Ok(());
+    };
+    if recorded == selected {
+        return Ok(());
+    }
+    let message = match (recorded, selected) {
+        (PlatformVaultBackend::EncryptedFile, PlatformVaultBackend::PlaintextDevFile) => {
+            "this store's secrets are sealed by the encrypted vault — set \
+             AKA_VAULT_KEY or AKA_VAULT_KEY_FILE and retry"
+                .to_string()
+        }
+        (PlatformVaultBackend::PlaintextDevFile, PlatformVaultBackend::EncryptedFile) => {
+            "this store uses the plaintext development vault — unset \
+             AKA_VAULT_KEY/AKA_VAULT_KEY_FILE or migrate the vault before retrying"
+                .to_string()
+        }
+        _ => format!(
+            "this store uses the {recorded:?} vault, but this process selected {selected:?}"
+        ),
+    };
+    Err(CoreError::Vault(message))
+}
+
 /* ------------------------------- macOS ---------------------------------- */
 
 const MAC_KEYCHAIN_SERVICE: &str = "com.aka.desktop";
@@ -508,7 +635,7 @@ pub fn platform_vault(
     }
     #[cfg(not(target_os = "macos"))]
     {
-        non_macos_vault(paths.encrypted_vault_file(), paths.dev_vault_file())
+        non_macos_vault(paths)
     }
 }
 
@@ -517,19 +644,25 @@ pub fn platform_vault(
 /// protection is not left in the clear), otherwise the loud dev fallback.
 #[cfg(not(target_os = "macos"))]
 fn non_macos_vault(
-    encrypted_path: PathBuf,
-    plain_path: PathBuf,
+    paths: &crate::paths::Paths,
 ) -> Result<std::sync::Arc<dyn SecretVault>, CoreError> {
-    match master_key_from_env() {
+    paths.ensure()?;
+    let selected = selected_platform_vault_backend(paths);
+    check_vault_backend(paths, selected)?;
+    let vault: std::sync::Arc<dyn SecretVault> = match master_key_from_env() {
         Some(key) => {
             let key = key?;
-            Ok(std::sync::Arc::new(EncryptedFileVault::open(
-                encrypted_path,
+            std::sync::Arc::new(EncryptedFileVault::open(
+                paths.encrypted_vault_file(),
                 &key,
-            )?))
+            )?)
         }
-        None => Ok(std::sync::Arc::new(FileVault::open(plain_path)?)),
+        None => std::sync::Arc::new(FileVault::open(paths.dev_vault_file())?),
+    };
+    if read_vault_backend_record(paths) != Some(selected) {
+        record_vault_backend(paths, selected)?;
     }
+    Ok(vault)
 }
 
 /// The platform vault for an explicit CLI/dev root. On macOS this scopes the
@@ -550,7 +683,7 @@ pub fn platform_vault_for_root(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = root;
-        non_macos_vault(paths.encrypted_vault_file(), paths.dev_vault_file())
+        non_macos_vault(paths)
     }
 }
 
@@ -695,6 +828,51 @@ mod tests {
         assert_eq!(parse_master_key(&b64).unwrap()[..], [5u8; 32]);
         assert!(parse_master_key("tooshort").is_err());
         assert!(parse_master_key(&"00".repeat(16)).is_err());
+    }
+
+    #[test]
+    fn backend_record_diagnoses_a_missing_encrypted_vault_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::under(dir.path());
+        paths.ensure().unwrap();
+        record_vault_backend(&paths, PlatformVaultBackend::EncryptedFile).unwrap();
+
+        assert_eq!(
+            recorded_platform_vault_backend(&paths),
+            Some(PlatformVaultBackend::EncryptedFile)
+        );
+        let error =
+            check_vault_backend(&paths, PlatformVaultBackend::PlaintextDevFile).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                CoreError::Vault(ref message)
+                    if message.contains("sealed by the encrypted vault")
+                        && message.contains("AKA_VAULT_KEY")
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn pre_marker_file_vaults_are_inferred_without_guessing_when_both_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::under(dir.path());
+        paths.ensure().unwrap();
+
+        std::fs::write(paths.encrypted_vault_file(), b"{}").unwrap();
+        assert_eq!(
+            recorded_platform_vault_backend(&paths),
+            Some(PlatformVaultBackend::EncryptedFile)
+        );
+        std::fs::write(paths.dev_vault_file(), b"{}").unwrap();
+        assert_eq!(recorded_platform_vault_backend(&paths), None);
+        let error =
+            check_vault_backend(&paths, PlatformVaultBackend::EncryptedFile).unwrap_err();
+        assert!(
+            matches!(error, CoreError::Vault(ref message) if message.contains("refusing to guess")),
+            "{error}"
+        );
     }
 
     #[test]

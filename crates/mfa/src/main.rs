@@ -45,7 +45,10 @@ use aka_core::store::ConnectionSpec;
 use aka_core::types::{
     ConfirmationMethod, ConnectionConfig, OAuthSpec, PgSslMode, SecretMeta, SecretValue,
 };
-use aka_core::vault::{platform_vault, platform_vault_for_root, SecretVault};
+use aka_core::vault::{
+    platform_vault, platform_vault_for_root, recorded_platform_vault_backend,
+    selected_platform_vault_backend, PlatformVaultBackend, SecretVault,
+};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -644,6 +647,14 @@ struct ConnUpdate {
 }
 
 fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "warn,aka_core=info".into()),
+        )
+        .with_writer(std::io::stderr)
+        .try_init()
+        .ok();
     let cli = Cli::parse();
     match cli.command {
         Command::Skill {
@@ -788,10 +799,18 @@ fn open_vault(
     paths: &Paths,
     root: Option<&Path>,
 ) -> Result<Arc<dyn SecretVault>, aka_core::error::CoreError> {
-    match root {
+    let vault = match root {
         Some(root) => platform_vault_for_root(paths, root),
         None => platform_vault(paths),
+    }?;
+    if selected_platform_vault_backend(paths) == PlatformVaultBackend::PlaintextDevFile {
+        eprintln!(
+            "  vault: plaintext dev fallback at {} (set AKA_VAULT_KEY or \
+             AKA_VAULT_KEY_FILE)",
+            paths.dev_vault_file().display()
+        );
     }
+    Ok(vault)
 }
 
 fn acquire_offline_store_lock(paths: &Paths) -> Result<BrokerInstanceLock, CoreError> {
@@ -1660,10 +1679,14 @@ fn cmd_manage_login(url: Option<String>, token_env: Option<String>, root: Option
         }
         Err(e) => die(e),
     }
-    if let Err(e) = manage_token_store(&paths).save(&key, &token) {
+    let token_store = manage_token_store(&paths);
+    if let Err(e) = token_store.save(&key, &token) {
         die(format!("could not store the token: {e}"));
     }
-    eprintln!("management token stored for {key}");
+    eprintln!(
+        "management token stored for {key} ({})",
+        token_store.storage_description(&key)
+    );
 }
 
 fn cmd_manage_logout(url: Option<String>, root: Option<PathBuf>) {
@@ -1953,21 +1976,46 @@ fn cmd_status_remote(root: Option<PathBuf>, url: String) {
     print_tools(&connections);
 }
 
-/// Which macOS keychain this store's secret values are in — the difference
-/// between reads that are silent and reads that put an OS approval dialog in
-/// front of whoever is at the machine. Nothing to say before the first write,
-/// or on a platform with one keychain.
-fn print_keychain_line(paths: &Paths) {
+/// Report the backend that owns this store's secrets. On macOS, include which
+/// keychain controls prompts; on Linux, make encrypted versus plaintext
+/// fallback (and a missing configured master key) explicit.
+fn print_vault_line(paths: &Paths) {
     #[cfg(target_os = "macos")]
     if let Some(keychain) = aka_core::keychain::read_record(&paths.keychain_file()) {
         let note = match keychain {
             aka_core::keychain::Keychain::DataProtection => "no prompts",
             aka_core::keychain::Keychain::Login => "prompts per secret; build is unsigned",
         };
-        println!("  keychain: {keychain} ({note})");
+        println!("  vault: macOS {keychain} keychain ({note})");
+        return;
     }
-    #[cfg(not(target_os = "macos"))]
-    let _ = paths;
+    let backend = recorded_platform_vault_backend(paths)
+        .unwrap_or_else(|| selected_platform_vault_backend(paths));
+    match backend {
+        PlatformVaultBackend::MacosKeychain => {
+            println!("  vault: macOS Keychain (not initialized yet)");
+        }
+        PlatformVaultBackend::EncryptedFile => {
+            let configured =
+                selected_platform_vault_backend(paths) == PlatformVaultBackend::EncryptedFile;
+            let note = if configured {
+                "master key configured"
+            } else {
+                "set AKA_VAULT_KEY or AKA_VAULT_KEY_FILE"
+            };
+            println!(
+                "  vault: encrypted file at {} ({note})",
+                paths.encrypted_vault_file().display()
+            );
+        }
+        PlatformVaultBackend::PlaintextDevFile => {
+            println!(
+                "  vault: plaintext dev fallback at {} (set AKA_VAULT_KEY or \
+                 AKA_VAULT_KEY_FILE)",
+                paths.dev_vault_file().display()
+            );
+        }
+    }
 }
 
 fn cmd_status(root: Option<PathBuf>, url: Option<String>) {
@@ -2000,6 +2048,7 @@ fn cmd_status(root: Option<PathBuf>, url: Option<String>) {
         )),
         Err(_) => {
             println!("no broker is running at {}", socket.display());
+            print_vault_line(&paths);
             println!(
                 "  shared key: {}",
                 if key_present {
@@ -2030,7 +2079,7 @@ fn cmd_status(root: Option<PathBuf>, url: Option<String>) {
             "not minted yet".to_string()
         }
     );
-    print_keychain_line(&paths);
+    print_vault_line(&paths);
     // The tools, as an agent sees them (this appears in the activity log
     // as a listing by mfa-status).
     let listing = runtime.block_on(async {
@@ -2235,13 +2284,6 @@ fn cmd_serve(args: ServeArgs) {
         audit_pg_statements,
         no_sidecar,
     } = args;
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "aka_core=info".into()),
-        )
-        .init();
-
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -2284,7 +2326,7 @@ fn cmd_serve(args: ServeArgs) {
         advertise_host: advertise_host.clone(),
         data_plane_insecure,
     };
-    let daemon = match runtime.block_on(daemon::serve_with(broker.clone(), options)) {
+    let mut daemon = match runtime.block_on(daemon::serve_with(broker.clone(), options)) {
         Ok(daemon) => daemon,
         Err(e) => fail("could not serve the control plane", &e),
     };
@@ -2337,15 +2379,35 @@ fn cmd_serve(args: ServeArgs) {
          teaches agents this broker"
     );
     eprintln!("  agents authenticate with the shared key at the root's token file");
-    eprintln!("  Ctrl-C to quit.\n");
+    eprintln!("  Ctrl-C or SIGTERM to quit.\n");
 
-    // Block until Ctrl-C, then drop the daemon handle so it removes only
-    // the control-socket inode it owns.
-    runtime.block_on(async {
-        let _ = tokio::signal::ctrl_c().await;
-    });
+    let signal = runtime.block_on(wait_for_shutdown_signal());
+    eprintln!("  {signal} received; draining active sessions");
+    daemon.stop_accepting();
+    let sessions = broker.begin_shutdown();
+    let drained =
+        runtime.block_on(broker.wait_for_session_drain(std::time::Duration::from_secs(10)));
+    if !drained {
+        eprintln!("  shutdown deadline reached with active sessions still closing");
+    } else if sessions > 0 {
+        eprintln!("  drained {sessions} active data-plane session(s)");
+    }
     drop(sidecar);
     drop(daemon);
+}
+
+async fn wait_for_shutdown_signal() -> &'static str {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("install SIGTERM handler");
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => {
+            if let Err(error) = result {
+                eprintln!("  warning: SIGINT handler failed: {error}");
+            }
+            "SIGINT"
+        }
+        _ = terminate.recv() => "SIGTERM",
+    }
 }
 
 #[cfg(test)]

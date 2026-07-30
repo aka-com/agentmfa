@@ -46,6 +46,22 @@ impl TokenStore {
         Self { dir }
     }
 
+    /// A user-facing description of where `save` puts this broker's token.
+    #[cfg(target_os = "macos")]
+    pub fn storage_description(&self, _url: &str) -> String {
+        "macOS Keychain".to_string()
+    }
+
+    /// Non-macOS has no platform keychain integration. Name the exact 0600
+    /// fallback so a successful login never hides that the token is on disk.
+    #[cfg(not(target_os = "macos"))]
+    pub fn storage_description(&self, url: &str) -> String {
+        format!(
+            "plaintext 0600 file {}; prefer AKA_MANAGE_TOKEN for CI",
+            self.path_for(url).display()
+        )
+    }
+
     /// Which keychain this process can use, probed once. The answer is a
     /// property of the running binary's code signature, so it cannot change
     /// underneath us.

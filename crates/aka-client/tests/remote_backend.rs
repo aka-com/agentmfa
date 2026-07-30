@@ -177,6 +177,65 @@ async fn bad_tokens_and_dead_brokers_map_to_distinct_errors() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn management_bearers_are_never_replayed_across_redirects() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let followed = Arc::new(AtomicUsize::new(0));
+    let followed_for_route = followed.clone();
+    let target_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = format!("http://{}/stolen", target_listener.local_addr().unwrap());
+    let target_app = axum::Router::new().route(
+        "/stolen",
+        axum::routing::any(move || {
+            let followed = followed_for_route.clone();
+            async move {
+                followed.fetch_add(1, Ordering::SeqCst);
+                axum::Json(serde_json::json!({"ok": true}))
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(target_listener, target_app).await.unwrap();
+    });
+
+    let redirect_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target_for_route = target.clone();
+    let redirect_app = axum::Router::new().route(
+        "/v1/manage/whoami",
+        axum::routing::get(move || {
+            let target = target_for_route.clone();
+            async move {
+                (
+                    axum::http::StatusCode::TEMPORARY_REDIRECT,
+                    [(axum::http::header::LOCATION, target)],
+                )
+            }
+        }),
+    );
+    let redirect_base = format!("http://{}", redirect_listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(redirect_listener, redirect_app).await.unwrap();
+    });
+
+    let backend =
+        RemoteBackend::new(RemoteConfig::new(&redirect_base, "akamgr_redirect_test").unwrap());
+    let error = backend.whoami().await.unwrap_err();
+    assert!(
+        matches!(
+            error,
+            ManageError::Unreachable { ref message }
+                if message.contains(&target) && message.contains("final origin")
+        ),
+        "{error:?}"
+    );
+    assert_eq!(
+        followed.load(Ordering::SeqCst),
+        0,
+        "the redirect target must never receive the management bearer"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn byo_oauth_relays_through_the_client_loopback() {
     let h = harness().await;
 

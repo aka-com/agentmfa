@@ -70,7 +70,7 @@ pub async fn shared_key(paths: &Paths, label: Option<&str>) -> Result<String, St
             return Ok(token);
         }
     }
-    let body = format!(r#"{{"agent_name": "{}"}}"#, label.unwrap_or("mcp-bridge"));
+    let body = pairing_body(label);
     let (status, payload) = unix_http(
         &paths.socket_file(),
         "POST",
@@ -88,6 +88,13 @@ pub async fn shared_key(paths: &Paths, label: Option<&str>) -> Result<String, St
         .ok()
         .and_then(|v| v["token"].as_str().map(str::to_string))
         .ok_or_else(|| "the pair response carried no token".to_string())
+}
+
+fn pairing_body(label: Option<&str>) -> String {
+    serde_json::json!({
+        "agent_name": label.unwrap_or("mcp-bridge"),
+    })
+    .to_string()
 }
 
 /// POST an authenticated capability open (`{"connection": name}`) to a
@@ -142,6 +149,14 @@ pub async fn open_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pairing_body_is_json_encoded_not_interpolated() {
+        let label = "quoted\"\\\nlabel";
+        let body = pairing_body(Some(label));
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["agent_name"], label);
+    }
 
     /// A stub broker on a real Unix socket: asserts the shared key rides
     /// the request, answers /v1/pg/open, refuses /v1/ssh/open.

@@ -330,13 +330,22 @@ pub struct DaemonHandle {
     _socket_guard: SocketGuard,
 }
 
-impl Drop for DaemonHandle {
-    fn drop(&mut self) {
+impl DaemonHandle {
+    /// Stop accepting control-plane and ticket data-plane connections while
+    /// retaining ownership of the socket inode. The owner can then drain
+    /// established sessions before dropping the handle and unlinking it.
+    pub fn stop_accepting(&mut self) {
         self.task.abort();
         if let Some(task) = &self.tcp_task {
             task.abort();
         }
         self.proxy_task.abort();
+    }
+}
+
+impl Drop for DaemonHandle {
+    fn drop(&mut self) {
+        self.stop_accepting();
     }
 }
 

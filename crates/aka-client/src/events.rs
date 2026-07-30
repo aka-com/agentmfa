@@ -216,6 +216,7 @@ async fn open_stream(
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
         .read_timeout(IDLE_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|error| error.to_string())?;
     // The SSE feed is HTTP-only: a Unix-socket backend (the CLI's local
@@ -242,6 +243,9 @@ async fn open_stream(
         request = request.header("last-event-id", id);
     }
     let response = request.send().await.map_err(|error| error.to_string())?;
+    if response.status().is_redirection() {
+        return Err(crate::redirect_diagnostic(&response));
+    }
     if response.status() == reqwest::StatusCode::UNAUTHORIZED {
         return Err("the management token was rejected".into());
     }
@@ -343,15 +347,21 @@ async fn heartbeat_surface(
             .send()
             .await?;
         let status = response.status();
+        let redirect = status
+            .is_redirection()
+            .then(|| crate::redirect_diagnostic(&response));
         // Consume the tiny response so the heartbeat connection remains
         // reusable instead of accumulating one TCP connection per tick.
         let _ = response.bytes().await?;
-        Ok::<_, reqwest::Error>(status)
+        Ok::<_, reqwest::Error>((status, redirect))
     };
-    let status = tokio::time::timeout(Duration::from_secs(5), request)
+    let (status, redirect) = tokio::time::timeout(Duration::from_secs(5), request)
         .await
         .map_err(|_| "the request-surface heartbeat timed out".to_string())?
         .map_err(|error| format!("the request-surface heartbeat failed: {error}"))?;
+    if let Some(redirect) = redirect {
+        return Err(redirect);
+    }
     if status == reqwest::StatusCode::UNAUTHORIZED {
         return Err("the management token was rejected".into());
     }

@@ -2458,6 +2458,38 @@ impl Broker {
         self.data_plane.sessions()
     }
 
+    /// Stop standing endpoint listeners, invalidate outstanding tickets, and
+    /// signal every established data-plane transport. The daemon stops its
+    /// accept loops first; this covers the independently owned endpoint
+    /// listeners and lets a process supervisor wait for clean audit/accounting
+    /// teardown before the runtime disappears.
+    pub fn begin_shutdown(&self) -> usize {
+        let listeners = {
+            let mut listeners = self.endpoint_listeners.lock().unwrap();
+            std::mem::take(&mut *listeners)
+        };
+        for (_, listener) in listeners {
+            listener.stop();
+        }
+        self.data_plane.close_all()
+    }
+
+    /// Wait for signalled session tasks to retire their accounting. Returns
+    /// false at the deadline so shutdown remains bounded under a stuck
+    /// upstream transport.
+    pub async fn wait_for_session_drain(&self, timeout: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if self.data_plane.sessions().is_empty() {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
     /// Close a live session immediately. This is a remediation action: ending
     /// an agent's access must not be delayed by native authentication.
     pub fn ui_close_session(&self, id: u64) -> Result<bool> {

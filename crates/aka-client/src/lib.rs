@@ -200,6 +200,11 @@ impl Transport {
                     .map_err(|error| ManageError::Unreachable {
                         message: error.to_string(),
                     })?;
+                if response.status().is_redirection() {
+                    return Err(ManageError::Unreachable {
+                        message: redirect_diagnostic(&response),
+                    });
+                }
                 let status = response.status().as_u16();
                 let bytes = response
                     .bytes()
@@ -222,6 +227,15 @@ impl Transport {
             })?,
         }
     }
+}
+
+pub(crate) fn redirect_diagnostic(response: &reqwest::Response) -> String {
+    let location = response
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("<missing or invalid Location header>");
+    format!("the broker URL redirected to {location}; point --broker at the final origin")
 }
 
 /// One HTTP/1.1 request over the broker's Unix control socket.
@@ -329,6 +343,9 @@ impl RemoteBackend {
         let http = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .connect_timeout(CONNECT_TIMEOUT)
+            // Authorization is scoped to the configured broker origin.
+            // Never replay it to a redirect destination.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("http client");
         Self {

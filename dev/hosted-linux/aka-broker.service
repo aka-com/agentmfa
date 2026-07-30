@@ -24,6 +24,10 @@ ExecStart=/usr/local/bin/mfa serve \
     --public-url https://broker.example.dev
 Restart=on-failure
 RestartSec=2
+# `mfa serve` handles SIGTERM, stops accepting new work, and gives active
+# data-plane sessions a bounded drain window before releasing its socket.
+KillSignal=SIGTERM
+TimeoutStopSec=15s
 
 # Hardening: the broker needs only its state dir.
 NoNewPrivileges=true

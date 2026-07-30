@@ -133,6 +133,13 @@ impl Paths {
     pub fn encrypted_vault_file(&self) -> PathBuf {
         self.data_dir.join("vault.enc.json")
     }
+    /// Advisory record of the vault backend that owns this store. This stays
+    /// outside the integrity seal because the integrity key itself lives in
+    /// that vault, so a missing environment key must be diagnosed before
+    /// sealed state can be opened.
+    pub fn vault_backend_file(&self) -> PathBuf {
+        self.data_dir.join("vault-backend.json")
+    }
     /// Which macOS keychain this store's secret values were last written to;
     /// see `keychain`. Advisory, and deliberately outside the integrity seal:
     /// the key that seals state is itself a vault item, so this has to be
