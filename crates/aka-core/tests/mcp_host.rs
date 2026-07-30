@@ -241,6 +241,87 @@ async fn broker_http_relay_matches_the_shared_sidecar_fixture() {
 }
 
 #[tokio::test]
+async fn broker_mcp_relay_returns_when_the_matching_sse_frame_arrives() {
+    use futures::StreamExt as _;
+    use std::convert::Infallible;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind upstream");
+    let port = listener.local_addr().unwrap().port();
+    let app = axum::Router::new().route(
+        "/mcp",
+        axum::routing::post(|| async move {
+            let frames = axum::body::Bytes::from_static(
+                b"data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\n\
+                  data: {\"jsonrpc\":\"2.0\",\"id\":6,\"result\":{\"wrong\":true}}\n\n\
+                  data: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"ok\":true}}\n\n",
+            );
+            let stream = futures::stream::once(async move {
+                Ok::<axum::body::Bytes, Infallible>(frames)
+            })
+            .chain(futures::stream::pending());
+            axum::http::Response::builder()
+                .status(200)
+                .header("content-type", "text/event-stream")
+                .body(axum::body::Body::from_stream(stream))
+                .unwrap()
+        }),
+    );
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let broker = Broker::new(
+        Paths::under(dir.path()),
+        Arc::new(MemoryVault::new()),
+        BrokerConfig::default(),
+        Arc::new(NoopEvents),
+    )
+    .await
+    .unwrap();
+    broker
+        .store
+        .add_connection(ConnectionSpec {
+            name: "streaming-mcp".into(),
+            config: ConnectionConfig::Api {
+                host: "127.0.0.1".into(),
+                scheme: "http".into(),
+                port: Some(port),
+                trusted_ca_bundle_path: None,
+                template: String::new(),
+                mcp_path: Some("/mcp".into()),
+                oauth: None,
+            },
+            secrets: vec![],
+        })
+        .unwrap();
+    let daemon = daemon::serve(broker).await.unwrap();
+    let token = pair(&daemon.socket_path, "stream-test").await;
+    let relayed = tokio::time::timeout(
+        Duration::from_secs(2),
+        uds_post_auth(
+            &daemon.socket_path,
+            "/v1/http",
+            &token,
+            &json!({
+                "connection": "streaming-mcp",
+                "method": "POST",
+                "path": "/mcp",
+                "headers": {"accept": "text/event-stream"},
+                "body": {"jsonrpc": "2.0", "id": 7, "method": "tools/list", "params": {}},
+            }),
+        ),
+    )
+    .await
+    .expect("the matching frame should end the relay");
+    let body = relayed["body"].as_str().expect("relayed SSE");
+    assert!(body.contains("\"id\":6"), "earlier frames are preserved");
+    assert!(body.contains("\"id\":7"), "matching response is preserved");
+}
+
+#[tokio::test]
 async fn the_broker_decides_what_an_agent_sees_over_mcp() {
     let Some(script) = bundle() else {
         assert!(

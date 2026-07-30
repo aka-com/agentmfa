@@ -846,6 +846,9 @@ async fn get_connections(State(state): State<AppState>, authed: Authed) -> Respo
                 // connections are visible but refused; the user flips
                 // access in the app.
                 "wired": broker.access.allows(&c.id),
+                // Headless clients use this to warn that calls will fail
+                // closed when no approval surface is attached.
+                "confirm": broker.access.confirm_mode(&c.id).is_on(),
             });
             // Present only when this upstream speaks MCP, so the payload
             // stays exactly as it was for every other connection.

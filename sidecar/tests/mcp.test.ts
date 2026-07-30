@@ -34,6 +34,8 @@ const WIRED: Record<string, string[]> = {
 /** Connect-requests the fake broker has seen (debounce simulation). */
 const connectRequests = new Set<string>();
 const connectionListFailures = new Set<string>();
+let discoveryRateLimits = 0;
+let discoveryBrokerCalls = 0;
 
 const CONNECTIONS = [
   { name: 'prod-db', type: 'pg', target: 'db.internal:5432/app', endpoint: '/v1/pg/open' },
@@ -96,6 +98,8 @@ function resetUpstream(): void {
   upstream.toolPages = undefined;
   upstream.rpcFailure = false;
   upstream.lastRetry = undefined;
+  discoveryRateLimits = 0;
+  discoveryBrokerCalls = 0;
 }
 
 interface UpstreamReply {
@@ -392,6 +396,12 @@ function fakeBroker(socketPath: string): Promise<Server> {
           return;
         }
         if (req.url === '/v1/http' && body.path === '/mcp') {
+          discoveryBrokerCalls += 1;
+          if (discoveryRateLimits > 0) {
+            discoveryRateLimits -= 1;
+            send(429, { reason: 'rate_limited', retry_after_seconds: 0 });
+            return;
+          }
           // Relay the upstream's answer the way the real broker does:
           // `{status, headers, body, body_encoding}`, body as a string.
           const relayed = upstreamHttp(body);
@@ -1244,6 +1254,22 @@ test('an unsupported upstream protocol version is rejected during discovery', as
     ) as { errors?: Array<{ name: string; error: string }> };
     assert.equal(status.errors?.[0]?.name, 'notion');
     assert.match(status.errors?.[0]?.error ?? '', /unsupported protocol version 2099-01-01/);
+  } finally {
+    await app.close();
+  }
+});
+
+test('upstream discovery retries one transient broker refusal', async () => {
+  const app = await harness();
+  try {
+    discoveryRateLimits = 1;
+    const client = await app.connect('token-mcp');
+    const tools = await client.listTools();
+    assert.ok(
+      tools.tools.some((tool) => tool.name === 'agentmfa_notion_search'),
+      'the retry should recover the upstream tool surface',
+    );
+    assert.ok(discoveryBrokerCalls > 1, 'discovery retried after the first 429');
   } finally {
     await app.close();
   }

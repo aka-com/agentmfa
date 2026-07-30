@@ -37,6 +37,8 @@ export interface BrokerConnection {
   mcp_path?: string | null;
   /** Curated upstream MCP tool subset for this agent; absent means all. */
   allowed_tools?: string[] | null;
+  /** Whether this connection asks a human to confirm traffic. */
+  confirm?: boolean;
 }
 
 /** A non-2xx from the broker, carried through with its status intact. */

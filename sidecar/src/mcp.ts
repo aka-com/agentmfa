@@ -898,7 +898,7 @@ async function registerUpstream(
 ): Promise<UpstreamRegistration> {
   let discovery: Awaited<ReturnType<typeof discoverUpstream>>;
   try {
-    discovery = await discoverUpstream(broker, principal, connection);
+    discovery = await discoverUpstreamWithRetry(broker, principal, connection);
   } catch (error) {
     log('warn', 'could not discover an MCP upstream', {
       connection: connection.name,
@@ -1053,6 +1053,45 @@ async function registerUpstream(
     status,
     warnings: warnings.length ? warnings : undefined,
   };
+}
+
+const MAX_DISCOVERY_RETRY_DELAY_MS = 10_000;
+
+function discoveryRetryDelay(error: unknown): number {
+  if (
+    error instanceof BrokerError
+    && error.status === 429
+    && Number.isFinite(error.retryAfterSeconds)
+  ) {
+    return Math.min(
+      MAX_DISCOVERY_RETRY_DELAY_MS,
+      Math.max(0, (error.retryAfterSeconds ?? 0) * 1000),
+    );
+  }
+  // One small jittered backoff for transient network/server failures keeps
+  // concurrently opening agent sessions from retrying in lockstep.
+  return 200 + Math.floor(Math.random() * 201);
+}
+
+async function discoverUpstreamWithRetry(
+  broker: BrokerClient,
+  principal: Principal,
+  connection: BrokerConnection,
+): Promise<Awaited<ReturnType<typeof discoverUpstream>>> {
+  try {
+    return await discoverUpstream(broker, principal, connection);
+  } catch (firstError) {
+    const delayMs = discoveryRetryDelay(firstError);
+    log('info', 'retrying MCP upstream discovery once', {
+      connection: connection.name,
+      delayMs,
+      error: String(firstError),
+    });
+    if (delayMs > 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+    }
+    return discoverUpstream(broker, principal, connection);
+  }
 }
 
 /** The description an agent sees for a re-exposed resource or template. */

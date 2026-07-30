@@ -2030,6 +2030,26 @@ fn print_tools(connections: &[ConnectionDto]) {
             }
         );
     }
+    if let Some(warning) = headless_confirmation_warning(
+        connections
+            .iter()
+            .filter(|connection| connection.agent_access.confirm)
+            .count(),
+    ) {
+        println!("  {warning}");
+    }
+}
+
+fn headless_confirmation_warning(count: usize) -> Option<String> {
+    (count > 0).then(|| {
+        format!(
+            "warning: {count} tool{} {} set to confirm traffic and this broker has no approval \
+             surface; {} calls will be refused",
+            if count == 1 { "" } else { "s" },
+            if count == 1 { "is" } else { "are" },
+            if count == 1 { "its" } else { "their" },
+        )
+    })
 }
 
 /// `status --url`: the broker as its manage API reports it.
@@ -2180,7 +2200,7 @@ fn cmd_status(root: Option<PathBuf>, url: Option<String>) {
                 println!("  tools: none configured");
             } else {
                 println!("  tools:");
-                for row in rows {
+                for row in &rows {
                     println!(
                         "    {}  {}  {}  {}",
                         row["name"].as_str().unwrap_or("?"),
@@ -2193,6 +2213,13 @@ fn cmd_status(root: Option<PathBuf>, url: Option<String>) {
                         }
                     );
                 }
+            }
+            let confirm_count = rows
+                .iter()
+                .filter(|row| row["confirm"].as_bool().unwrap_or(false))
+                .count();
+            if let Some(warning) = headless_confirmation_warning(confirm_count) {
+                println!("  {warning}");
             }
         }
         Err(e) => println!("  tools: could not list ({e})"),
@@ -2439,6 +2466,15 @@ fn cmd_serve(args: ServeArgs) {
     };
 
     eprintln!("AKA broker listening on {}", daemon.socket_path.display());
+    let confirm_count = broker
+        .store
+        .list_connections()
+        .iter()
+        .filter(|connection| broker.access.confirm_mode(&connection.id).is_on())
+        .count();
+    if let Some(warning) = headless_confirmation_warning(confirm_count) {
+        eprintln!("  {warning}");
+    }
     if let Some(addr) = daemon.tcp_addr {
         eprintln!("  TCP control plane on {addr} (put TLS in front; /v1/pair is not served there)");
         if let Some(host) = &advertise_host {
@@ -2946,5 +2982,22 @@ mod tests {
         for invalid in ["", "has space", "line\nbreak", "é", &"x".repeat(65)] {
             assert!(parse_client_label(invalid).is_err(), "{invalid:?}");
         }
+    }
+
+    #[test]
+    fn headless_confirmation_warning_is_counted_and_actionable() {
+        assert_eq!(headless_confirmation_warning(0), None);
+        assert_eq!(
+            headless_confirmation_warning(1).as_deref(),
+            Some(
+                "warning: 1 tool is set to confirm traffic and this broker has no approval \
+                 surface; its calls will be refused"
+            )
+        );
+        assert!(
+            headless_confirmation_warning(3)
+                .unwrap()
+                .contains("3 tools are set")
+        );
     }
 }

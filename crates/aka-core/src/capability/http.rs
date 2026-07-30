@@ -749,7 +749,7 @@ impl HttpExecution {
             Err(e) => return broker_error(502, e.reason, e.message),
         };
         let redactions = Redactions::from_injection(&injection);
-        let mcp_tool_call_id = match &self.connection.config {
+        let mcp_request = match &self.connection.config {
             ConnectionConfig::Api {
                 mcp_path: Some(mcp_path),
                 ..
@@ -757,11 +757,17 @@ impl HttpExecution {
                 .body
                 .bytes()
                 .ok()
-                .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
-                .filter(|body| body.get("method").and_then(Value::as_str) == Some("tools/call"))
-                .and_then(|body| body.get("id").cloned()),
+                .and_then(|body| serde_json::from_slice::<Value>(&body).ok()),
             _ => None,
         };
+        let mcp_response_id = mcp_request
+            .as_ref()
+            .filter(|body| body.get("method").and_then(Value::as_str).is_some())
+            .and_then(|body| body.get("id").cloned());
+        let mcp_tool_call_id = mcp_request
+            .as_ref()
+            .filter(|body| body.get("method").and_then(Value::as_str) == Some("tools/call"))
+            .and_then(|body| body.get("id").cloned());
 
         // Build the initial URL from parsed components, never string
         // concatenation.
@@ -902,6 +908,7 @@ impl HttpExecution {
                     response,
                     &self.config,
                     &redactions,
+                    mcp_response_id.as_ref(),
                     mcp_tool_call_id.as_ref(),
                 )
                 .await;
@@ -911,6 +918,7 @@ impl HttpExecution {
                 response,
                 &self.config,
                 &redactions,
+                mcp_response_id.as_ref(),
                 mcp_tool_call_id.as_ref(),
             )
             .await;
@@ -1092,9 +1100,15 @@ async fn relay_response(
     response: reqwest::Response,
     config: &BrokerConfig,
     redactions: &Redactions,
+    mcp_response_id: Option<&Value>,
     mcp_tool_call_id: Option<&Value>,
 ) -> ExecOutcome {
     let status = response.status().as_u16();
+    let is_sse = response
+        .headers()
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/event-stream"));
     let mut headers = serde_json::Map::new();
     // Preserve Set-Cookie separately for the raw direct-endpoint response:
     // unlike ordinary HTTP fields it cannot be combined with commas. Keep
@@ -1171,6 +1185,18 @@ async fn relay_response(
                     );
                 }
                 body.extend_from_slice(&chunk);
+                // Streamable HTTP servers may leave an SSE response open for
+                // later notifications. Once the complete response frame for
+                // this request arrives, relay through that frame and release
+                // the upstream operation instead of waiting for stream close.
+                if is_sse {
+                    if let Some(end) =
+                        mcp_response_id.and_then(|id| matching_sse_response_end(&body, id))
+                    {
+                        body.truncate(end);
+                        break;
+                    }
+                }
             }
             Ok(None) => break,
             // Same reasoning as the send path: keep any query-injected
@@ -1203,6 +1229,43 @@ async fn relay_response(
             "body_encoding": encoding,
         }),
     }
+}
+
+/// End offset of the first complete SSE frame carrying the JSON-RPC response
+/// for `expected_id`. Notifications and responses for other in-flight ids do
+/// not end the relay.
+fn matching_sse_response_end(bytes: &[u8], expected_id: &Value) -> Option<usize> {
+    let mut start = 0usize;
+    while start < bytes.len() {
+        let mut separator = None;
+        for index in start..bytes.len() {
+            if bytes[index..].starts_with(b"\r\n\r\n") {
+                separator = Some((index, 4));
+                break;
+            }
+            if bytes[index..].starts_with(b"\n\n") {
+                separator = Some((index, 2));
+                break;
+            }
+        }
+        let (frame_end, separator_len) = separator?;
+        let frame = String::from_utf8_lossy(&bytes[start..frame_end]);
+        let data = frame
+            .lines()
+            .filter_map(|line| line.trim_end_matches('\r').strip_prefix("data:"))
+            .map(|line| line.strip_prefix(' ').unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Ok(message) = serde_json::from_str::<Value>(&data) {
+            let is_response = message.get("jsonrpc").and_then(Value::as_str) == Some("2.0")
+                && (message.get("result").is_some() || message.get("error").is_some());
+            if is_response && message.get("id") == Some(expected_id) {
+                return Some(frame_end + separator_len);
+            }
+        }
+        start = frame_end + separator_len;
+    }
+    None
 }
 
 /// Idempotency-key payload hash: the full normalized request, a genuine
@@ -2403,5 +2466,23 @@ mod tests {
         // Normalizing the slash must not start collapsing distinct paths.
         assert!(!resolves_to_mcp_path("/mcp/extra/", "/mcp"));
         assert!(!resolves_to_mcp_path("/mcpx/", "/mcp"));
+    }
+
+    #[test]
+    fn sse_early_exit_waits_for_the_matching_response_frame() {
+        let bytes = concat!(
+            "event: message\n",
+            "data:{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\n",
+            "data: {\"jsonrpc\":\"2.0\",\"id\":6,\"result\":{\"wrong\":true}}\r\n\r\n",
+            "data: {\"jsonrpc\":\"2.0\",\"id\":7,\n",
+            "data: \"result\":{\"ok\":true}}\n\n",
+            "data: {\"jsonrpc\":\"2.0\",\"id\":8,\"result\":{}}\n\n",
+        )
+        .as_bytes();
+        let end = matching_sse_response_end(bytes, &json!(7)).expect("matching frame");
+        let relayed = &bytes[..end];
+        assert!(String::from_utf8_lossy(relayed).contains("\"id\":7"));
+        assert!(!String::from_utf8_lossy(relayed).contains("\"id\":8"));
+        assert_eq!(matching_sse_response_end(bytes, &json!(9)), None);
     }
 }
