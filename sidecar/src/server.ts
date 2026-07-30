@@ -16,7 +16,14 @@ import { timingSafeEqual } from 'node:crypto';
 
 import { BrokerClient, BrokerError } from './broker';
 import { log } from './log';
-import { BrokerAuthProvider, MCP_PATH, SessionStore, hostIsLoopback, openSession } from './mcp';
+import {
+  BrokerAuthProvider,
+  MCP_PATH,
+  SessionStore,
+  hostIsLoopback,
+  openSession,
+  originIsLoopback,
+} from './mcp';
 import { SIDECAR_VERSION } from './version';
 
 // A server-error JSON-RPC code (the -32000..-32099 range is reserved for
@@ -176,6 +183,10 @@ async function handleMcp(
   // id any legitimate client would resolve.
   if (!hostIsLoopback(req.headers.host, req.socket.localPort ?? 0)) {
     rpcError(res, 421, -32000, 'Misdirected request');
+    return;
+  }
+  if (!originIsLoopback(req.headers.origin)) {
+    rpcError(res, 403, -32000, 'Cross-origin MCP requests are not allowed');
     return;
   }
 

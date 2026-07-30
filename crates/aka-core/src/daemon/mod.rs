@@ -1207,6 +1207,28 @@ async fn post_http(
     {
         if crate::capability::http::resolves_to_mcp_path(&call.path, mcp_path) {
             if let Some(allowed) = allowed_tools_snapshot.as_ref() {
+                if let Some(resource) = curated_mcp_resource_read(&body_bytes) {
+                    broker.audit.append(
+                        AuditEntry::new(
+                            AuditKind::Denied,
+                            format!(
+                                "Refused (resources not enabled): {client} → {} · {resource}",
+                                conn.name
+                            ),
+                        )
+                        .agent(client.clone())
+                        .connection(conn.name.clone())
+                        .outcome("denied_by_policy"),
+                    );
+                    return err_detail(
+                        StatusCode::FORBIDDEN,
+                        ErrorReason::DeniedByPolicy,
+                        format!(
+                            "resources are unavailable while {} uses a curated MCP tool subset",
+                            conn.name
+                        ),
+                    );
+                }
                 if let Some(tool) = disallowed_mcp_tool_call(&body_bytes, allowed) {
                     broker.audit.append(
                         AuditEntry::new(
@@ -1637,6 +1659,75 @@ fn disallowed_mcp_tool_call(body: &[u8], allowed: &[String]) -> Option<String> {
             .iter()
             .find_map(|request| from_request(request, allowed)),
         request => from_request(&request, allowed),
+    }
+}
+
+/// The first resource URI read from a curated MCP connection, including
+/// batched requests. `allowed_tools` has no URI vocabulary, so resource reads
+/// fail closed instead of escaping the user's selected surface.
+fn curated_mcp_resource_read(body: &[u8]) -> Option<String> {
+    fn from_request(value: &serde_json::Value) -> Option<String> {
+        if value.get("method").and_then(|method| method.as_str()) != Some("resources/read") {
+            return None;
+        }
+        Some(crate::approvals::capped_text(
+            value
+                .pointer("/params/uri")
+                .and_then(|uri| uri.as_str())
+                .unwrap_or("(unnamed resource)"),
+        ))
+    }
+
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return None;
+    };
+    match value {
+        serde_json::Value::Array(requests) => requests.iter().find_map(from_request),
+        request => from_request(&request),
+    }
+}
+
+#[cfg(test)]
+mod mcp_curation_tests {
+    use super::{curated_mcp_resource_read, disallowed_mcp_tool_call};
+
+    #[test]
+    fn curated_connections_refuse_resources_in_single_and_batch_requests() {
+        assert_eq!(
+            curated_mcp_resource_read(
+                br#"{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"vault://all"}}"#,
+            )
+            .as_deref(),
+            Some("vault://all")
+        );
+        assert_eq!(
+            curated_mcp_resource_read(
+                br#"[{"method":"ping"},{"method":"resources/read","params":{"uri":"vault://one"}}]"#,
+            )
+            .as_deref(),
+            Some("vault://one")
+        );
+        assert_eq!(curated_mcp_resource_read(br#"{"method":"resources/list"}"#), None);
+    }
+
+    #[test]
+    fn curated_tool_calls_still_use_the_selected_tool_set() {
+        let allowed = vec!["search".to_string()];
+        assert_eq!(
+            disallowed_mcp_tool_call(
+                br#"{"method":"tools/call","params":{"name":"delete_everything"}}"#,
+                &allowed,
+            )
+            .as_deref(),
+            Some("delete_everything")
+        );
+        assert_eq!(
+            disallowed_mcp_tool_call(
+                br#"{"method":"tools/call","params":{"name":"search"}}"#,
+                &allowed,
+            ),
+            None
+        );
     }
 }
 

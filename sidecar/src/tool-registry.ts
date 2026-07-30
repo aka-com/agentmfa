@@ -133,4 +133,10 @@ export class ProtocolToolRegistry {
       },
     };
   }
+
+  remove(name: string): boolean {
+    const removed = this.tools.delete(name);
+    if (removed) this.server.sendToolListChanged();
+    return removed;
+  }
 }

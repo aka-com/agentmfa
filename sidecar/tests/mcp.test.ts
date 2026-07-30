@@ -8,6 +8,7 @@ import type { AddressInfo } from 'node:net';
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
 
 import { createSidecarServer } from '../src/server';
 import { SessionStore } from '../src/mcp';
@@ -77,6 +78,12 @@ const CONNECTIONS = [
     target: 'https://mcp-three.example.com',
     endpoint: '/v1/http',
     mcp_path: '/mcp',
+  },
+  {
+    name: 'notion search',
+    type: 'api',
+    target: 'https://native.example.com',
+    endpoint: '/v1/http',
   },
 ];
 
@@ -685,23 +692,44 @@ test('a failed broker listing is reported instead of looking like empty wiring',
   }
 });
 
-test('a colliding tool name costs one tool, not the whole session', async () => {
+test('colliding native tool names are both exposed with bounded disambiguation', async () => {
   const app = await harness();
   try {
     const client = await app.connect('token-collide');
     const { tools } = await client.listTools();
-    // The session works, and the second colliding connection is dropped
-    // rather than taking every other tool down with it.
-    assert.deepEqual(tools.map((tool) => tool.name).sort(), [
-      'agentmfa_connect',
-      'agentmfa_prod_db_open',
-      'agentmfa_status',
-    ]);
+    const native = tools
+      .map((tool) => tool.name)
+      .filter((name) => name.startsWith('agentmfa_prod_db_open'));
+    assert.equal(native.length, 2);
+    assert.equal(new Set(native).size, 2);
+    assert.ok(native.every((name) => name.length <= 64));
     const status = payload(
       await client.callTool({ name: 'agentmfa_status', arguments: {} }),
-    ) as { errors?: Array<{ name: string; error: string }> };
-    assert.deepEqual(status.errors?.map((entry) => entry.name), ['prod db']);
-    assert.match(status.errors?.[0]?.error ?? '', /collid/i);
+    ) as { errors?: unknown; warnings?: Array<{ name: string; warning: string }> };
+    assert.equal(status.errors, undefined);
+    assert.ok(status.warnings?.some(({ warning }) => /exposed as/.test(warning)));
+  } finally {
+    await app.close();
+  }
+});
+
+test("a hostile upstream name cannot displace a native tool's preferred name", async () => {
+  const app = await harness();
+  try {
+    upstream.toolPages = [[{ name: 'search request', description: 'collision' }]];
+    WIRED['client-wired'] = ['notion search', 'notion'];
+    try {
+      const client = await app.connect('token-wired');
+      const tools = (await client.listTools()).tools;
+      const native = tools.find((tool) => tool.name === 'agentmfa_notion_search_request');
+      assert.equal(native?.title, 'notion search');
+      const colliders = tools.filter((tool) =>
+        tool.name.startsWith('agentmfa_notion_search_request'));
+      assert.equal(colliders.length, 2);
+      assert.equal(new Set(colliders.map((tool) => tool.name)).size, 2);
+    } finally {
+      WIRED['client-wired'] = ['prod-db'];
+    }
   } finally {
     await app.close();
   }
@@ -759,6 +787,38 @@ test('a tool switched off mid-session stops being offered', async () => {
       (await client.listTools()).tools.map((tool) => tool.name).sort(),
       ['agentmfa_connect', 'agentmfa_status'],
     );
+  } finally {
+    await app.close();
+  }
+});
+
+test("an MCP connection switched off mid-session drops its catalog", async () => {
+  const app = await harness();
+  try {
+    const client = await app.connect('token-mcp');
+    let listChanges = 0;
+    client.setNotificationHandler(ToolListChangedNotificationSchema, () => {
+      listChanges += 1;
+    });
+    assert.ok(
+      (await client.listTools()).tools.some((tool) => tool.name === 'agentmfa_notion_search'),
+    );
+
+    WIRED['client-mcp'] = [];
+    try {
+      await client.callTool({ name: 'agentmfa_status', arguments: {} });
+      assert.deepEqual(
+        (await client.listTools()).tools.map((tool) => tool.name).sort(),
+        ['agentmfa_connect', 'agentmfa_status'],
+      );
+      await waitFor(() => listChanges > 0, 'tools/list_changed was not emitted');
+      const remainingResources = await client
+        .listResources()
+        .catch(() => ({ resources: [] }));
+      assert.deepEqual(remainingResources.resources, []);
+    } finally {
+      WIRED['client-mcp'] = ['notion'];
+    }
   } finally {
     await app.close();
   }
@@ -966,6 +1026,8 @@ test('a curated wiring lists only its allowed subset of upstream tools', async (
       'agentmfa_notion_search',
       'agentmfa_status',
     ]);
+    await assert.rejects(() => client.listResources(), /Method not found/i);
+    await assert.rejects(() => client.listResourceTemplates(), /Method not found/i);
   } finally {
     delete notion.allowed_tools;
     await app.close();

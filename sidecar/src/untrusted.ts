@@ -6,6 +6,7 @@
 
 export const UNTRUSTED_BEGIN = '[BEGIN UNTRUSTED UPSTREAM MCP CONTENT]';
 export const UNTRUSTED_END = '[END UNTRUSTED UPSTREAM MCP CONTENT]';
+export const MAX_UPSTREAM_RESULT_BLOCKS = 64;
 
 const unsafeUnicode = /[\p{Cc}\p{Cf}\u115f\u1160\u17b4\u17b5\u3164\uffa0]/u;
 
@@ -65,50 +66,146 @@ export function frameUntrustedText(value: string, limit: number): SanitizedText 
  * cap across thousands of content blocks.
  */
 export function sanitizeUpstreamResult(value: unknown, limit = 128 * 1024): unknown {
-  if (!value || typeof value !== 'object') {
-    return {
-      isError: true,
-      content: [{ type: 'text', text: frameUntrustedText(String(value), limit).text }],
-    };
-  }
-
-  const result = value as {
+  const result = (!value || typeof value !== 'object'
+    ? {
+        isError: true,
+        content: [{ type: 'text', text: String(value) }],
+      }
+    : value) as {
     content?: unknown;
     contents?: unknown;
     structuredContent?: unknown;
     _meta?: Record<string, unknown>;
   };
-  let remaining = limit;
+  let remaining = Math.max(0, limit);
+  let remainingBlocks = MAX_UPSTREAM_RESULT_BLOCKS;
   let truncated = false;
   let exhaustedNoticeAdded = false;
+
+  const utf8Prefix = (text: string, byteLimit: number): { text: string; truncated: boolean } => {
+    let prefix = '';
+    let bytes = 0;
+    for (const character of text) {
+      const size = Buffer.byteLength(character);
+      if (bytes + size > byteLimit) return { text: prefix, truncated: true };
+      prefix += character;
+      bytes += size;
+    }
+    return { text: prefix, truncated: false };
+  };
+  const framedWithin = (text: string, byteLimit: number): {
+    text: string;
+    truncated: boolean;
+  } | null => {
+    const clean = sanitizeUntrustedText(text, Number.MAX_SAFE_INTEGER).text;
+    const frameOverhead = Buffer.byteLength(`${UNTRUSTED_BEGIN}\n\n${UNTRUSTED_END}`);
+    if (byteLimit < frameOverhead) return null;
+    const prefix = utf8Prefix(clean, byteLimit - frameOverhead);
+    return {
+      text: `${UNTRUSTED_BEGIN}\n${prefix.text}\n${UNTRUSTED_END}`,
+      truncated: prefix.truncated,
+    };
+  };
+  const addTextItem = (
+    destination: unknown[],
+    item: Record<string, unknown>,
+    text: string,
+  ): boolean => {
+    const empty = { ...item, text: '' };
+    const overhead = Buffer.byteLength(JSON.stringify(empty));
+    const framed = framedWithin(text, Math.max(0, remaining - overhead));
+    if (!framed) return false;
+    const bounded = { ...item, text: framed.text };
+    const bytes = Buffer.byteLength(JSON.stringify(bounded));
+    if (bytes > remaining) return false;
+    remaining -= bytes;
+    truncated ||= framed.truncated;
+    destination.push(bounded);
+    return true;
+  };
+  const addNotice = (destination: unknown[]): void => {
+    if (exhaustedNoticeAdded) return;
+    if (addTextItem(
+      destination,
+      { type: 'text' },
+      '[additional upstream content truncated]',
+    )) {
+      exhaustedNoticeAdded = true;
+    }
+  };
+
   const sanitizeItems = (items: unknown[], requireTextType: boolean): unknown[] => {
     const sanitizedItems: unknown[] = [];
     for (const rawItem of items) {
-        if (!rawItem || typeof rawItem !== 'object') {
-          sanitizedItems.push(rawItem);
-          continue;
-        }
-        const item = rawItem as Record<string, unknown>;
-        if ((requireTextType && item.type !== 'text') || typeof item.text !== 'string') {
-          sanitizedItems.push(item);
-          continue;
-        }
-        if (remaining === 0) {
-          truncated = true;
-          if (!exhaustedNoticeAdded) {
-            sanitizedItems.push({
-              ...item,
-              text: frameUntrustedText('[additional upstream text truncated]', 64).text,
-            });
-            exhaustedNoticeAdded = true;
-          }
-          continue;
-        }
-        const sanitized = frameUntrustedText(item.text, remaining);
-        remaining -= sanitized.consumed;
-        truncated ||= sanitized.truncated;
-        sanitizedItems.push({ ...item, text: sanitized.text });
+      if (remainingBlocks === 0) {
+        truncated = true;
+        addNotice(sanitizedItems);
+        break;
       }
+      remainingBlocks -= 1;
+      if (!rawItem || typeof rawItem !== 'object') {
+        const serialized = JSON.stringify(rawItem);
+        const bytes = Buffer.byteLength(serialized ?? '');
+        if (bytes <= remaining) {
+          remaining -= bytes;
+          sanitizedItems.push(rawItem);
+        } else {
+          truncated = true;
+          addNotice(sanitizedItems);
+        }
+        continue;
+      }
+      const item = rawItem as Record<string, unknown>;
+      if (!requireTextType && typeof item.text === 'string') {
+        if (!addTextItem(sanitizedItems, item, item.text)) {
+          truncated = true;
+          addNotice(sanitizedItems);
+        }
+        continue;
+      }
+      if (requireTextType && item.type === 'text' && typeof item.text === 'string') {
+        if (!addTextItem(sanitizedItems, item, item.text)) {
+          truncated = true;
+          addNotice(sanitizedItems);
+        }
+        continue;
+      }
+
+      let boundedItem = item;
+      if (
+        item.type === 'resource'
+        && item.resource
+        && typeof item.resource === 'object'
+        && typeof (item.resource as Record<string, unknown>).text === 'string'
+      ) {
+        const resource = item.resource as Record<string, unknown>;
+        const shell = { ...item, resource: { ...resource, text: '' } };
+        const overhead = Buffer.byteLength(JSON.stringify(shell));
+        const framed = framedWithin(
+          resource.text as string,
+          Math.max(0, remaining - overhead),
+        );
+        if (!framed) {
+          truncated = true;
+          addNotice(sanitizedItems);
+          continue;
+        }
+        boundedItem = {
+          ...item,
+          resource: { ...resource, text: framed.text },
+        };
+        truncated ||= framed.truncated;
+      }
+      const serialized = JSON.stringify(boundedItem);
+      const bytes = Buffer.byteLength(serialized);
+      if (bytes <= remaining) {
+        remaining -= bytes;
+        sanitizedItems.push(boundedItem);
+      } else {
+        truncated = true;
+        addNotice(sanitizedItems);
+      }
+    }
     return sanitizedItems;
   };
   const content = Array.isArray(result.content)
@@ -121,16 +218,21 @@ export function sanitizeUpstreamResult(value: unknown, limit = 128 * 1024): unkn
   let structuredContent = result.structuredContent;
   if (structuredContent !== undefined) {
     const serialized = JSON.stringify(structuredContent);
-    const sanitized = sanitizeUntrustedText(serialized, Math.min(remaining, 32 * 1024));
-    remaining -= sanitized.consumed;
-    truncated ||= sanitized.truncated;
-    try {
-      structuredContent = JSON.parse(sanitized.text);
-    } catch {
-      structuredContent = {
-        agentmfa_notice: 'Upstream structured content was truncated',
-        preview: sanitized.text,
-      };
+    const sanitized = sanitizeUntrustedText(serialized, Number.MAX_SAFE_INTEGER).text;
+    const bytes = Buffer.byteLength(sanitized);
+    if (bytes <= Math.min(remaining, 32 * 1024)) {
+      remaining -= bytes;
+      structuredContent = JSON.parse(sanitized);
+    } else {
+      truncated = true;
+      const notice = { agentmfa_notice: 'Upstream structured content was truncated' };
+      const noticeBytes = Buffer.byteLength(JSON.stringify(notice));
+      if (noticeBytes <= remaining) {
+        remaining -= noticeBytes;
+        structuredContent = notice;
+      } else {
+        structuredContent = undefined;
+      }
     }
   }
 

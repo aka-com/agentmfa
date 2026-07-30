@@ -147,6 +147,23 @@ export function hostIsLoopback(host: string | undefined, localPort: number): boo
   );
 }
 
+/** Empty/absent Origin is normal for non-browser MCP clients; a browser-origin
+ * request must come from loopback as well as target loopback. */
+export function originIsLoopback(origin: string | undefined): boolean {
+  if (!origin) return true;
+  try {
+    const parsed = new URL(origin);
+    return (
+      (parsed.protocol === 'http:' || parsed.protocol === 'https:')
+      && (parsed.hostname === '127.0.0.1'
+        || parsed.hostname === 'localhost'
+        || parsed.hostname === '[::1]')
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** What a request has proven about its caller. */
 export interface Principal extends BrokerIdentity {
   /** The token itself, reused for the broker calls made on its behalf. */
@@ -279,6 +296,12 @@ interface Registration {
   status?: 'no_tools_capability' | 'empty_tools' | 'no_allowed_tools';
   /** Non-fatal naming adjustments worth exposing to a diagnosing agent. */
   warnings?: string[];
+  /** Remove every protocol surface this upstream contributed. */
+  cleanup?: () => void;
+}
+
+interface RemovableRegistration {
+  remove(): void;
 }
 
 /**
@@ -286,8 +309,9 @@ interface Registration {
  *
  * Every connection the broker reports as enabled becomes a tool; disabled
  * ones are never registered. Native connection tools reconcile during the
- * session. Upstream MCP catalogs are discovered once at session open and
- * require a reconnect to refresh.
+ * session. Upstream MCP catalogs are discovered once at session open; stale
+ * registrations are removed when their connection or consent changes, while
+ * discovering a replacement catalog still requires a reconnect.
  */
 /// How often a session re-reads the wiring so its tool list can follow it.
 /// Short enough that a user who switches a tool off sees the agent lose it
@@ -357,6 +381,49 @@ function registerNative(
   );
 }
 
+function nativeToolName(
+  connection: BrokerConnection,
+  taken: Set<string>,
+): { name: string | null; warnings?: string[] } {
+  const preferredName = toolNameFor(connection);
+  const warnings: string[] = [];
+  if (toolNameCandidateFor(connection).length > preferredName.length) {
+    warnings.push(
+      `connection name "${connection.name}" was shortened to bounded tool name "${preferredName}"`,
+    );
+  }
+  let name = preferredName;
+  if (taken.has(name)) {
+    let attempt = 1;
+    do {
+      name = alternateToolName(preferredName, `${connection.name}\0native`, attempt);
+      attempt += 1;
+    } while (taken.has(name) && attempt <= 32);
+    if (taken.has(name)) {
+      return {
+        name: null,
+        warnings: [
+          ...warnings,
+          `could not expose native tool "${connection.name}": every bounded name collided`,
+        ],
+      };
+    }
+    warnings.push(
+      `native tool "${connection.name}" was exposed as "${name}" because "${preferredName}" was already in use`,
+    );
+  }
+  return { name, warnings: warnings.length ? warnings : undefined };
+}
+
+function sameNativeConnection(left: BrokerConnection, right: BrokerConnection): boolean {
+  return (
+    left.name === right.name
+    && left.type === right.type
+    && left.target === right.target
+    && left.endpoint === right.endpoint
+  );
+}
+
 export async function createToolServer(
   broker: BrokerClient,
   principal: Principal,
@@ -421,6 +488,7 @@ export async function createToolServer(
   // rename reads as one name leaving and another arriving — which is exactly
   // what it is, since the tool name is derived from the connection's name.
   const native = new Map<string, RegisteredProtocolTool>();
+  const nativeConnections = new Map<string, BrokerConnection>();
 
   // Always registered, for two reasons. It is what installs the MCP tool
   // handlers at all — a server with no tools answers `tools/list` with
@@ -643,65 +711,63 @@ export async function createToolServer(
       );
     }
   }
+
+  // Native broker tools win their preferred names. Register them before
+  // upstream discovery is applied so a hostile upstream catalog cannot knock
+  // out a database/API/SSH tool merely by choosing the same bounded name.
+  for (const connection of wired) {
+    if (connection.mcp_path) continue;
+    const allocated = nativeToolName(connection, taken);
+    if (!allocated.name) {
+      registrations.push({
+        connection,
+        tools: [],
+        error: allocated.warnings?.at(-1),
+        warnings: allocated.warnings,
+      });
+      continue;
+    }
+    if (allocated.warnings?.length) {
+      log('warn', 'adjusted a native MCP tool name', {
+        connection: connection.name,
+        toolName: allocated.name,
+      });
+    }
+    taken.add(allocated.name);
+    native.set(
+      allocated.name,
+      registerNative(toolRegistry, broker, principal, connection, allocated.name),
+    );
+    nativeConnections.set(allocated.name, connection);
+    registrations.push({
+      connection,
+      tools: [allocated.name],
+      warnings: allocated.warnings,
+    });
+  }
   await Promise.allSettled(discoveries.values());
 
   for (const connection of wired) {
     // An MCP upstream contributes its own tools rather than one request
     // tool. Its traffic still rides the broker's HTTP plane, so the
     // credential stays where it belongs.
-    if (connection.mcp_path) {
-      const outcome = await registerUpstream(
-        server, toolRegistry, broker, principal, connection, taken, upstreamIndex,
-        upstreamToolSurface, resourceSurface, promptSurface,
-        discoveries.get(connection)!,
-      );
-      registrations.push({
-        connection,
-        tools: outcome.tools,
-        withheld: outcome.withheld,
-        resources: outcome.resources,
-        prompts: outcome.prompts,
-        error: outcome.error,
-        status: outcome.status,
-        warnings: outcome.warnings,
-      });
-      continue;
-    }
-
-    const toolName = toolNameFor(connection);
-    const namingWarnings =
-      toolNameCandidateFor(connection).length > toolName.length
-        ? [
-            `connection name "${connection.name}" was shortened to bounded tool ` +
-              `name "${toolName}"`,
-          ]
-        : undefined;
-    if (namingWarnings) {
-      log('warn', 'shortened a native MCP tool name', {
-        connection: connection.name,
-        toolName,
-      });
-    }
-    if (taken.has(toolName)) {
-      log('warn', 'skipping a connection whose tool name collides', {
-        connection: connection.name,
-        toolName,
-      });
-      // A dropped collision registers no tool; record that so status does
-      // not advertise a name that isn't there.
-      registrations.push({
-        connection,
-        tools: [],
-        error: `tool name collided with another connection (${toolName})`,
-      });
-      continue;
-    }
-    taken.add(toolName);
-    native.set(
-      toolName,
-      registerNative(toolRegistry, broker, principal, connection, toolName),
+    if (!connection.mcp_path) continue;
+    const outcome = await registerUpstream(
+      server, toolRegistry, broker, principal, connection, taken, upstreamIndex,
+      upstreamToolSurface, resourceSurface, promptSurface,
+      discoveries.get(connection)!,
     );
-    registrations.push({ connection, tools: [toolName], warnings: namingWarnings });
+    registrations.push({
+      connection,
+      tools: outcome.tools,
+      withheld: outcome.withheld,
+      resources: outcome.resources,
+      prompts: outcome.prompts,
+      error: outcome.error,
+      status: outcome.status,
+      warnings: outcome.warnings,
+      cleanup: outcome.cleanup,
+    });
   }
 
   registerMetaTools(toolRegistry, broker, principal, upstreamIndex);
@@ -712,10 +778,10 @@ export async function createToolServer(
    * The surface used to be a snapshot taken at session open, so renaming a
    * connection left a tool whose calls 404 and switching one off left a tool
    * whose calls 403 — with nothing telling the agent why, and no way to find
-   * out short of reconnecting. Only the native `_request`/`_open` tools are
-   * reconciled: re-running MCP upstream discovery would cost several round
-   * trips per connection per tick, and its tools are keyed on the upstream's
-   * own catalogue rather than on connection access alone.
+   * out short of reconnecting. Native `_request`/`_open` tools are reconciled
+   * in place. Upstream registrations are removed when their connection or
+   * consent changes; re-running discovery would cost several round trips per
+   * connection per tick, so a replacement catalog is picked up on reconnect.
    *
    * Returns whether anything changed, so callers can decide about notifying.
    */
@@ -731,29 +797,70 @@ export async function createToolServer(
       connectionListError = `could not list AgentMFA connections: ${String(error)}`;
       return false;
     }
-    const desired = new Map<string, BrokerConnection>();
-    for (const candidate of live) {
-      if (!candidate.wired || candidate.mcp_path) continue;
-      const name = toolNameFor(candidate);
-      // First writer wins, matching the collision rule at session open.
-      if (!desired.has(name)) desired.set(name, candidate);
+    connections = live;
+    let changed = false;
+
+    // Upstream catalogs are connection-scoped. If the connection disappears,
+    // is renamed/retargeted, or its curated subset changes, drop every surface
+    // captured from the old consent immediately. A fresh session will
+    // rediscover the replacement catalog; the stale tools must not linger as
+    // callable ghosts in the meantime.
+    for (let index = registrations.length - 1; index >= 0; index -= 1) {
+      const registration = registrations[index];
+      if (!registration.connection.mcp_path) continue;
+      const current = live.find(
+        (candidate) =>
+          candidate.wired
+          && candidate.mcp_path
+          && candidate.name === registration.connection.name,
+      );
+      const unchanged = current
+        && current.target === registration.connection.target
+        && current.mcp_path === registration.connection.mcp_path
+        && JSON.stringify(current.allowed_tools ?? null)
+          === JSON.stringify(registration.connection.allowed_tools ?? null);
+      if (unchanged) continue;
+      registration.cleanup?.();
+      registrations.splice(index, 1);
+      changed = true;
     }
 
-    let changed = false;
+    const occupied = new Set(taken);
+    for (const toolName of native.keys()) occupied.delete(toolName);
+    const desired = new Map<string, {
+      connection: BrokerConnection;
+      warnings?: string[];
+    }>();
+    for (const candidate of live) {
+      if (!candidate.wired || candidate.mcp_path) continue;
+      const allocated = nativeToolName(candidate, occupied);
+      if (!allocated.name) continue;
+      occupied.add(allocated.name);
+      desired.set(allocated.name, {
+        connection: candidate,
+        warnings: allocated.warnings,
+      });
+    }
+
     for (const [toolName, handle] of [...native]) {
-      if (desired.has(toolName)) continue;
+      const next = desired.get(toolName)?.connection;
+      const previous = nativeConnections.get(toolName);
+      if (next && previous && sameNativeConnection(previous, next)) continue;
       handle.remove();
       native.delete(toolName);
+      nativeConnections.delete(toolName);
       taken.delete(toolName);
       changed = true;
     }
-    for (const [toolName, connection] of desired) {
+    for (const [toolName, desiredTool] of desired) {
+      const { connection } = desiredTool;
       if (native.has(toolName) || taken.has(toolName)) continue;
       taken.add(toolName);
       native.set(
         toolName,
         registerNative(toolRegistry, broker, principal, connection, toolName),
       );
+      nativeConnections.set(toolName, connection);
       changed = true;
     }
     if (changed) {
@@ -762,8 +869,12 @@ export async function createToolServer(
       for (let i = registrations.length - 1; i >= 0; i -= 1) {
         if (!registrations[i].connection.mcp_path) registrations.splice(i, 1);
       }
-      for (const [toolName, connection] of desired) {
-        registrations.push({ connection, tools: [toolName] });
+      for (const [toolName, desiredTool] of desired) {
+        registrations.push({
+          connection: desiredTool.connection,
+          tools: [toolName],
+          warnings: desiredTool.warnings,
+        });
       }
     }
     return changed;
@@ -1102,6 +1213,7 @@ interface UpstreamRegistration {
   error?: string;
   status?: 'no_tools_capability' | 'empty_tools' | 'no_allowed_tools';
   warnings?: string[];
+  cleanup?: () => void;
 }
 
 /**
@@ -1268,15 +1380,29 @@ async function registerUpstream(
     });
   }
 
-  const resources = registerUpstreamResources(
-    server,
-    broker,
-    principal,
-    connection,
-    discovery,
-    resourceSurface,
-  );
-  const prompts = registerUpstreamPrompts(
+  // `allowed_tools` is an explicit curated surface. It has no resource URI
+  // vocabulary, so exposing the upstream's complete resource catalog would
+  // silently escape that curation. Hide resources/templates fail-closed; the
+  // broker independently refuses direct resources/read requests.
+  const resourceRegistration = connection.allowed_tools
+    ? { count: 0, handles: [] as RemovableRegistration[] }
+    : registerUpstreamResources(
+        server,
+        broker,
+        principal,
+        connection,
+        discovery,
+        resourceSurface,
+      );
+  if (
+    connection.allowed_tools
+    && (discovery.resources.length > 0 || discovery.resourceTemplates.length > 0)
+  ) {
+    warnings.push(
+      'upstream resources and templates are hidden while this connection uses a curated tool subset',
+    );
+  }
+  const promptRegistration = registerUpstreamPrompts(
     server,
     broker,
     principal,
@@ -1288,10 +1414,33 @@ async function registerUpstream(
   return {
     tools: registered,
     withheld,
-    resources,
-    prompts,
+    resources: resourceRegistration.count,
+    prompts: promptRegistration.count,
     status,
     warnings: warnings.length ? warnings : undefined,
+    cleanup: () => {
+      for (const name of registered) {
+        if (toolRegistry.remove(name)) {
+          taken.delete(name);
+          toolSurface.registered = Math.max(0, toolSurface.registered - 1);
+        }
+      }
+      for (let indexPosition = index.length - 1; indexPosition >= 0; indexPosition -= 1) {
+        if (index[indexPosition].connection === connection) {
+          index.splice(indexPosition, 1);
+        }
+      }
+      for (const handle of resourceRegistration.handles) handle.remove();
+      resourceSurface.registered = Math.max(
+        0,
+        resourceSurface.registered - resourceRegistration.count,
+      );
+      for (const handle of promptRegistration.handles) handle.remove();
+      promptSurface.registered = Math.max(
+        0,
+        promptSurface.registered - promptRegistration.count,
+      );
+    },
   };
 }
 
@@ -1412,8 +1561,9 @@ function registerUpstreamResources(
   connection: BrokerConnection,
   discovery: { resources: UpstreamResource[]; resourceTemplates: UpstreamResourceTemplate[]; capabilities: { completions?: unknown } },
   surface: ResourceSurface,
-): number {
+): { count: number; handles: RemovableRegistration[] } {
   let count = 0;
+  const handles: RemovableRegistration[] = [];
 
   for (const resource of discovery.resources) {
     if (!resource.uri) continue;
@@ -1429,7 +1579,7 @@ function registerUpstreamResources(
       continue;
     }
     try {
-      server.registerResource(
+      const handle = server.registerResource(
         resource.name ?? resource.uri,
         resource.uri,
         {
@@ -1446,6 +1596,7 @@ function registerUpstreamResources(
             ),
           ) as ReadResourceResult,
       );
+      handles.push(handle);
       surface.takenUris.add(resource.uri);
       surface.registered++;
       count++;
@@ -1510,7 +1661,7 @@ function registerUpstreamResources(
         ) as Record<string, (value: string, context?: CompletionContext) => Promise<string[]>>)
       : undefined;
     try {
-      server.registerResource(
+      const handle = server.registerResource(
         name,
         new ResourceTemplate(template.uriTemplate, { list: undefined, complete }),
         {
@@ -1527,6 +1678,7 @@ function registerUpstreamResources(
             ),
           ) as ReadResourceResult,
       );
+      handles.push(handle);
       surface.takenTemplateUris.add(template.uriTemplate);
       surface.takenTemplateNames.add(name);
       surface.registered++;
@@ -1546,7 +1698,7 @@ function registerUpstreamResources(
       withheld: surface.withheld,
     });
   }
-  return count;
+  return { count, handles };
 }
 
 /**
@@ -1569,8 +1721,9 @@ function registerUpstreamPrompts(
   connection: BrokerConnection,
   prompts: UpstreamPrompt[],
   surface: PromptSurface,
-): number {
+): { count: number; handles: RemovableRegistration[] } {
   let count = 0;
+  const handles: RemovableRegistration[] = [];
   for (const prompt of prompts) {
     if (!prompt.name) continue;
     if (surface.registered >= promptBudget()) {
@@ -1598,7 +1751,7 @@ function registerUpstreamPrompts(
       argsShape[argument.name] = argument.required ? described : described.optional();
     }
     try {
-      server.registerPrompt(
+      const handle = server.registerPrompt(
         name,
         {
           description: describePrompt(connection, prompt),
@@ -1619,6 +1772,7 @@ function registerUpstreamPrompts(
           ) as GetPromptResult;
         },
       );
+      handles.push(handle);
       surface.takenNames.add(name);
       surface.registered++;
       count++;
@@ -1636,7 +1790,7 @@ function registerUpstreamPrompts(
       withheld: surface.withheld,
     });
   }
-  return count;
+  return { count, handles };
 }
 
 /** What an agent is told a re-exposed upstream prompt is, and whose it is. */

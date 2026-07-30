@@ -127,6 +127,23 @@ test('MCP request bodies are capped before authentication', async () => {
   }
 });
 
+test('MCP rejects non-loopback browser origins before authentication', async () => {
+  const app = await serving();
+  try {
+    const rejected = await app.post('/mcp', '{}', {
+      origin: 'https://attacker.example',
+    });
+    assert.equal(rejected.status, 403);
+
+    const loopback = await app.post('/mcp', '{}', {
+      origin: 'http://localhost:3000',
+    });
+    assert.notEqual(loopback.status, 403);
+  } finally {
+    await app.close();
+  }
+});
+
 test('the sidecar pins HTTP parser resource budgets', async () => {
   const server = createSidecarServer({ token: TOKEN, brokerSocket: '/tmp/aka.sock' });
   assert.equal(server.maxHeadersCount, 100);
