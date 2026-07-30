@@ -127,13 +127,14 @@ pub struct BrokerConfig {
 }
 
 impl BrokerConfig {
-    /// Never advertise a recommendation shorter than the longest direct
-    /// confirmed call the same configuration permits.
+    /// Never advertise a recommendation shorter than the longest direct,
+    /// confirmed, or user-eliciting call the same configuration permits.
     pub fn effective_client_timeout(&self) -> Duration {
         let minimum = self
             .approval_timeout
             .saturating_add(self.endpoint_upload_timeout)
             .saturating_add(self.upstream_operation_timeout)
+            .saturating_add(crate::elicitations::ELICITATION_TIMEOUT)
             .saturating_add(Duration::from_secs(30));
         self.recommended_client_timeout.max(minimum)
     }
@@ -153,10 +154,10 @@ impl Default for BrokerConfig {
     fn default() -> Self {
         Self {
             version: env!("CARGO_PKG_VERSION").to_string(),
-            // A confirmed direct HTTP call may spend the full approval,
-            // body-upload, and upstream-operation budgets; leave another 30
-            // seconds for broker and transport overhead (90 + 60 + 120 + 30).
-            recommended_client_timeout: Duration::from_secs(5 * 60),
+            // An MCP call may spend the full approval, body-upload,
+            // upstream-operation, and elicitation budgets; leave another 30
+            // seconds for broker and transport overhead.
+            recommended_client_timeout: Duration::from_secs(10 * 60),
             outcome_retention: Duration::from_secs(600),
             outcome_retention_max_entries: 1024,
             outcome_retention_max_bytes: 64 * 1024 * 1024,

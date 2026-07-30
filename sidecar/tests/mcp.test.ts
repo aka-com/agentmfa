@@ -64,6 +64,10 @@ const upstream = {
   sessions: new Map<string, { initialized: boolean }>(),
   counter: 0,
   deleted: [] as string[],
+  protocolVersion: '2025-06-18',
+  lastInitializeParams: undefined as Record<string, unknown> | undefined,
+  elicitationAction: 'accept' as 'accept' | 'decline' | 'cancel',
+  elicitationCount: 0,
   /** The params of the most recent input_required retry, for assertions. */
   lastRetry: undefined as { inputResponses?: Record<string, unknown>; requestState?: unknown } | undefined,
 };
@@ -71,6 +75,10 @@ const upstream = {
 function resetUpstream(): void {
   upstream.sessions.clear();
   upstream.deleted = [];
+  upstream.protocolVersion = '2025-06-18';
+  upstream.lastInitializeParams = undefined;
+  upstream.elicitationAction = 'accept';
+  upstream.elicitationCount = 0;
   upstream.lastRetry = undefined;
 }
 
@@ -113,6 +121,7 @@ function upstreamHttp(call: {
   });
 
   if (request.method === 'initialize') {
+    upstream.lastInitializeParams = request.params as Record<string, unknown>;
     const id = `sess-${++upstream.counter}`;
     upstream.sessions.set(id, { initialized: false });
     return {
@@ -124,7 +133,7 @@ function upstreamHttp(call: {
         jsonrpc: '2.0',
         id: request.id,
         result: {
-          protocolVersion: '2025-06-18',
+          protocolVersion: upstream.protocolVersion,
           // Advertise resources + completions so discovery lists and wires them.
           capabilities: { tools: {}, resources: {}, completions: {} },
           serverInfo: { name: 'notion' },
@@ -141,7 +150,7 @@ function upstreamHttp(call: {
     return { status: 202, body: '' };
   }
   if (!session.initialized) return failure('server not initialized');
-  if (requestHeaders['mcp-protocol-version'] !== '2025-06-18') {
+  if (requestHeaders['mcp-protocol-version'] !== upstream.protocolVersion) {
     return { status: 400, body: 'missing or wrong MCP-Protocol-Version' };
   }
 
@@ -172,8 +181,8 @@ function upstreamHttp(call: {
     // (SEP-2322 input_required); on the retry — recognised by the echoed
     // requestState — it completes, echoing what the user supplied.
     if (params.name === 'needs_input') {
-      if (params.requestState === undefined) {
-        return reply({
+      const inputRequired = () =>
+        reply({
           resultType: 'input_required',
           inputRequests: {
             github_login: {
@@ -190,12 +199,17 @@ function upstreamHttp(call: {
           },
           requestState: 'opaque-state-1',
         });
+      if (params.requestState === undefined) {
+        return inputRequired();
       }
       upstream.lastRetry = { inputResponses: params.inputResponses, requestState: params.requestState };
       const login = (params.inputResponses?.github_login ?? {}) as {
         action?: string;
         content?: { name?: string };
       };
+      if (login.action === 'decline' || login.action === 'cancel') {
+        return inputRequired();
+      }
       return reply({
         resultType: 'complete',
         content: [{ type: 'text', text: `hello ${login.content?.name ?? '?'}` }],
@@ -345,9 +359,15 @@ function fakeBroker(socketPath: string): Promise<Server> {
           return;
         }
         // The blocking elicitation call: the real broker parks it on the
-        // user; here the "user" always accepts with a fixed answer.
+        // user; tests select the answer while keeping a deterministic value.
         if (req.url === '/v1/elicit') {
-          send(200, { action: 'accept', content: { name: 'octocat' } });
+          upstream.elicitationCount += 1;
+          send(200, {
+            action: upstream.elicitationAction,
+            ...(upstream.elicitationAction === 'accept'
+              ? { content: { name: 'octocat' } }
+              : {}),
+          });
           return;
         }
         // An MCP upstream that answers, but with an error status — the shape
@@ -990,6 +1010,48 @@ test('an upstream elicitation is resolved via the broker and the call completes'
       action: 'accept',
       content: { name: 'octocat' },
     });
+  } finally {
+    await app.close();
+  }
+});
+
+test('the upstream client advertises only capabilities it can service', async () => {
+  const app = await harness();
+  try {
+    await app.connect('token-mcp');
+    assert.deepEqual(upstream.lastInitializeParams?.capabilities, {});
+  } finally {
+    await app.close();
+  }
+});
+
+test('an unsupported upstream protocol version is rejected during discovery', async () => {
+  const app = await harness();
+  try {
+    upstream.protocolVersion = '2099-01-01';
+    const client = await app.connect('token-mcp');
+    const status = payload(
+      await client.callTool({ name: 'agentmfa_status', arguments: {} }),
+    ) as { errors?: Array<{ name: string; error: string }> };
+    assert.equal(status.errors?.[0]?.name, 'notion');
+    assert.match(status.errors?.[0]?.error ?? '', /unsupported protocol version 2099-01-01/);
+  } finally {
+    await app.close();
+  }
+});
+
+test('a cancelled upstream input request is forwarded once without re-prompting', async () => {
+  const app = await harness();
+  try {
+    const client = await app.connect('token-mcp');
+    upstream.elicitationAction = 'cancel';
+    const result = await client.callTool({
+      name: 'agentmfa_notion_needs_input',
+      arguments: {},
+    });
+    assert.equal((result as { isError?: boolean }).isError, true);
+    assert.equal(upstream.elicitationCount, 1);
+    assert.deepEqual(upstream.lastRetry?.inputResponses?.github_login, { action: 'cancel' });
   } finally {
     await app.close();
   }

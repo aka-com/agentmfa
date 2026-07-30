@@ -42,6 +42,7 @@ pub fn manifest(
         // the value is advertised unconditionally so a client can size its
         // own timeout without first discovering which tools those are.
         "approval_timeout_seconds": config.approval_timeout.as_secs(),
+        "elicitation_timeout_seconds": crate::elicitations::ELICITATION_TIMEOUT.as_secs(),
         "request_id_max_bytes": REQUEST_ID_MAX_BYTES,
         "http_request_cap_bytes": config.control_plane_request_cap,
         "http_endpoint_request_cap_bytes": config.request_cap,
@@ -94,6 +95,7 @@ pub fn manifest_remote(
         // the value is advertised unconditionally so a client can size its
         // own timeout without first discovering which tools those are.
         "approval_timeout_seconds": config.approval_timeout.as_secs(),
+        "elicitation_timeout_seconds": crate::elicitations::ELICITATION_TIMEOUT.as_secs(),
         "request_id_max_bytes": REQUEST_ID_MAX_BYTES,
         "http_request_cap_bytes": config.control_plane_request_cap,
         "http_endpoint_request_cap_bytes": config.request_cap,
@@ -264,7 +266,8 @@ queue is full. Retrying will not help until AgentMFA is attached or capacity
 is available.
 
 Set your HTTP client timeout to **at least {client_timeout} seconds**
-(confirmation wait + direct-endpoint upload + upstream timeout + margin).
+(confirmation wait + direct-endpoint upload + upstream and elicitation
+timeouts + margin).
 
 **Always send a unique `request_id` no longer than
 {request_id_max_bytes} UTF-8 bytes (a UUID is recommended) on mutating calls.**
@@ -516,13 +519,15 @@ mod tests {
         // A call on a confirm-on tool parks for at most this long, and the
         // advertised client timeout has to cover it.
         assert_eq!(m["approval_timeout_seconds"], 90);
-        assert_eq!(m["recommended_client_timeout_seconds"], 300);
+        assert_eq!(m["elicitation_timeout_seconds"], 300);
+        assert_eq!(m["recommended_client_timeout_seconds"], 600);
         assert!(
             m["approval_timeout_seconds"].as_u64().unwrap()
                 + BrokerConfig::default().endpoint_upload_timeout.as_secs()
                 + BrokerConfig::default().upstream_operation_timeout.as_secs()
+                + m["elicitation_timeout_seconds"].as_u64().unwrap()
                 <= m["recommended_client_timeout_seconds"].as_u64().unwrap(),
-            "the client timeout must cover confirmation, upload, and the whole upstream operation"
+            "the client timeout must cover confirmation, upload, upstream, and elicitation"
         );
         assert_eq!(m["token_ttl_days"], 30);
         assert_eq!(m["ticket_ttl_seconds"], 60);
@@ -555,7 +560,7 @@ mod tests {
             ..BrokerConfig::default()
         };
         let m = manifest(&config, &paths(), None);
-        assert_eq!(m["recommended_client_timeout_seconds"], 300);
+        assert_eq!(m["recommended_client_timeout_seconds"], 600);
     }
 
     #[test]
@@ -611,7 +616,7 @@ mod tests {
             "256 UTF-8 bytes",
             "PGPASSWORD",
             "expires_in_seconds",
-            "at least 300 seconds",
+            "at least 600 seconds",
             "denied_by_policy",
             "\"wired\": true",
             "request_id_mismatch",

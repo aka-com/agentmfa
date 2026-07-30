@@ -1400,6 +1400,13 @@ fn validate_config_and_bind_secrets(
                     });
                 }
             }
+            if mcp_path.is_some() && oauth.is_some() {
+                return Err(CoreError::InvalidConnectionField {
+                    field: ConnectionField::Url,
+                    message: "An MCP path cannot be combined with API OAuth; use the MCP sign-in flow instead"
+                        .into(),
+                });
+            }
             if let Some(oauth) = oauth {
                 // https, or plain http to a loopback host (dev/test
                 // providers) — the same rule the OAuth module enforces.
@@ -2288,6 +2295,21 @@ mod tests {
                 "  "
             ))
             .is_err());
+        // API OAuth and MCP OAuth are separate token lifecycles. Combining
+        // them could render the JSON token set itself into the MCP request.
+        let mut mixed = spec(
+            "https://slack.com/authorize",
+            "https://slack.com/token",
+            "id",
+        );
+        let ConnectionConfig::Api { mcp_path, .. } = &mut mixed.config else {
+            unreachable!()
+        };
+        *mcp_path = Some("/mcp".into());
+        let error = store.add_connection(mixed).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("MCP path cannot be combined with API OAuth"));
         // …while a complete spec saves and round-trips.
         let saved = store
             .add_connection(spec(

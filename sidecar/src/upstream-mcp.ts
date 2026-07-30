@@ -66,8 +66,9 @@ export interface UpstreamDiscovery {
   resourceTemplates: UpstreamResourceTemplate[];
 }
 
-/** The version we offer; the server's `initialize` answer overrides it. */
-export const SUPPORTED_PROTOCOL_VERSION = '2025-06-18';
+/** Protocol revisions this client can actually speak, newest first. */
+export const SUPPORTED_PROTOCOL_VERSIONS = ['2025-06-18'] as const;
+export const SUPPORTED_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0];
 
 /** A hostile or looping `nextCursor` must not page forever. */
 export const MAX_TOOL_PAGES = 32;
@@ -149,12 +150,22 @@ export function relayMessages(response: UpstreamResponse): unknown[] {
     return [JSON.parse(raw)];
   } catch {
     const found: unknown[] = [];
-    for (const line of raw.split('\n')) {
-      if (!line.startsWith('data: ')) continue;
+    const normalized = raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    for (const frame of normalized.split('\n\n')) {
+      const data = frame
+        .split('\n')
+        .filter((line) => line.startsWith('data:'))
+        .map((line) => {
+          const value = line.slice('data:'.length);
+          return value.startsWith(' ') ? value.slice(1) : value;
+        })
+        .join('\n');
+      if (!data) continue;
       try {
-        found.push(JSON.parse(line.slice(6)));
+        found.push(JSON.parse(data));
       } catch {
-        // an SSE comment or partial frame; skip it
+        // A comment-only, incomplete, or non-JSON event is not a JSON-RPC
+        // message. Other complete frames remain independently usable.
       }
     }
     return found;
@@ -170,7 +181,7 @@ export function relayMessages(response: UpstreamResponse): unknown[] {
 class UpstreamClient {
   private nextId = 1;
   private sessionId: string | null = null;
-  private protocolVersion = SUPPORTED_PROTOCOL_VERSION;
+  private protocolVersion: string = SUPPORTED_PROTOCOL_VERSION;
   /** What the server said it offers; empty until `initialize` returns. */
   capabilities: UpstreamCapabilities = {};
 
@@ -208,12 +219,11 @@ class UpstreamClient {
       method: 'initialize',
       params: {
         protocolVersion: SUPPORTED_PROTOCOL_VERSION,
-        // We advertise elicitation so a 2026-spec upstream may request user
-        // input mid-call (SEP-2322), which we surface through the AgentMFA
-        // app. We do NOT advertise sampling or roots: we cannot answer them,
-        // they are deprecated, and per the spec a server must not request an
-        // input kind the client did not declare.
-        capabilities: { elicitation: {} },
+        // We do not advertise server-initiated elicitation, sampling, or
+        // roots because this short-lived request/response transport cannot
+        // answer server→client requests. Draft SEP-2322 `input_required`
+        // results remain supported below without claiming that capability.
+        capabilities: {},
         clientInfo: { name: 'agentmfa', version: '0.1.0' },
       },
     });
@@ -226,6 +236,12 @@ class UpstreamClient {
     // send none.
     this.sessionId = relayHeaderValue(response.headers, 'mcp-session-id');
     if (typeof result?.protocolVersion === 'string') {
+      if (!(SUPPORTED_PROTOCOL_VERSIONS as readonly string[]).includes(result.protocolVersion)) {
+        throw new Error(
+          `the MCP server negotiated unsupported protocol version ${result.protocolVersion}; ` +
+          `supported: ${SUPPORTED_PROTOCOL_VERSIONS.join(', ')}`,
+        );
+      }
       this.protocolVersion = result.protocolVersion;
     }
     if (result?.capabilities && typeof result.capabilities === 'object') {
@@ -383,6 +399,8 @@ export async function discoverUpstream(
 /** How many input-required round trips a single call may take before we give
  * up rather than let a misbehaving upstream loop us forever. */
 export const MAX_MRTR_ROUNDS = 8;
+/** Total user-think-time and upstream work one MRTR call may consume. */
+export const MAX_MRTR_DURATION_MS = 8 * 60 * 1000;
 
 /** One entry of an upstream's `inputRequests` map (SEP-2322). */
 interface InputRequest {
@@ -406,8 +424,9 @@ interface MrtrResult {
  * through the broker; the answers ride the retry as `inputResponses`
  * (keyed to match) alongside the echoed opaque `requestState`.
  *
- * We only advertise the elicitation capability, so a conforming upstream
- * sends nothing else; any other input kind is declined defensively.
+ * This supports the draft `input_required` result without advertising the
+ * standard server-initiated elicitation capability. Any other draft input
+ * kind is declined defensively.
  *
  * Note: the draft schema does not pin where `inputResponses`/`requestState`
  * travel on the retry. We place them in the request `params`; this is the one
@@ -423,10 +442,34 @@ async function runWithMrtr(
 ): Promise<unknown> {
   let inputResponses: Record<string, unknown> | undefined;
   let requestState: unknown;
+  let terminalAnswerForwarded = false;
+  const deadline = Date.now() + MAX_MRTR_DURATION_MS;
+
+  const withinBudget = async <T>(operation: Promise<T>): Promise<T> => {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw new Error('the MCP input flow exceeded its 8 minute time budget');
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        operation,
+        new Promise<T>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error('the MCP input flow exceeded its 8 minute time budget')),
+            remaining,
+          );
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
 
   for (let round = 0; round < MAX_MRTR_ROUNDS; round++) {
     const client = new UpstreamClient(broker, auth, connection);
-    await client.initialize();
+    await withinBudget(client.initialize());
     let result: MrtrResult | undefined;
     let elicitationTokens: Record<string, string> = {};
     try {
@@ -435,11 +478,13 @@ async function runWithMrtr(
         ...(inputResponses ? { inputResponses } : {}),
         ...(requestState !== undefined ? { requestState } : {}),
       };
-      const response = await client.requestWithElicitationTokens(method, params);
+      const response = await withinBudget(
+        client.requestWithElicitationTokens(method, params),
+      );
       result = response.result as MrtrResult | undefined;
       Object.assign(elicitationTokens, response.elicitationTokens);
     } finally {
-      await client.close();
+      await withinBudget(client.close());
     }
 
     // A pre-2026 server omits `resultType`; that (and an explicit "complete")
@@ -447,9 +492,13 @@ async function runWithMrtr(
     if (!result || result.resultType !== 'input_required') {
       return result;
     }
+    if (terminalAnswerForwarded) {
+      throw new Error('the MCP input flow remained open after the user declined or cancelled it');
+    }
 
     const requests = result.inputRequests ?? {};
     const responses: Record<string, unknown> = {};
+    let hasTerminalAnswer = false;
     for (const [key, request] of Object.entries(requests)) {
       if (request?.method !== 'elicitation/create') {
         // We never advertised sampling or roots; decline anything else so
@@ -457,11 +506,16 @@ async function runWithMrtr(
         responses[key] = { action: 'decline' };
         continue;
       }
-      const answer = await broker.elicit(auth, {
-        connection: connection.name,
-        correlationToken: elicitationTokens[key] ?? '',
-      });
+      const answer = await withinBudget(
+        broker.elicit(auth, {
+          connection: connection.name,
+          correlationToken: elicitationTokens[key] ?? '',
+        }),
+      );
       responses[key] = answer;
+      if (answer.action === 'decline' || answer.action === 'cancel') {
+        hasTerminalAnswer = true;
+      }
     }
 
     // Nothing actionable and no state to carry forward: returning avoids an
@@ -471,6 +525,9 @@ async function runWithMrtr(
     }
     inputResponses = responses;
     requestState = result.requestState;
+    // Forward the user's terminal answer exactly once. If the upstream asks
+    // again on the following round, stop instead of raising another prompt.
+    terminalAnswerForwarded = hasTerminalAnswer;
   }
 
   throw new Error(

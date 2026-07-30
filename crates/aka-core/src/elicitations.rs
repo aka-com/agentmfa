@@ -32,7 +32,7 @@ use crate::types::Connection;
 
 /// How long an elicitation waits for the user before it gives up and the
 /// upstream call is answered with a cancel.
-const ELICITATION_TIMEOUT: Duration = Duration::from_secs(300);
+pub(crate) const ELICITATION_TIMEOUT: Duration = Duration::from_secs(300);
 /// Backstop on prompts waiting at once, so a server that elicits in a loop
 /// cannot pile the queue up without bound.
 const MAX_PENDING: usize = 64;

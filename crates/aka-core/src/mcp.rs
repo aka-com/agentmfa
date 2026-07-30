@@ -12,6 +12,7 @@
 //! credential rendered exactly the way the agent plane renders it — the
 //! secret rides the upstream leg and only a summary comes back.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use http::{HeaderName, HeaderValue};
@@ -20,12 +21,13 @@ use serde_json::{json, Value};
 use url::Url;
 use zeroize::Zeroizing;
 
-use crate::capability::http::{render_injection, RenderedInjection};
+use crate::capability::http::{render_connection_injection, RenderedInjection};
 use crate::store::Store;
 use crate::types::{Connection, ConnectionConfig};
 
-/// Protocol revision this client requests; servers may negotiate down.
+/// Protocol revisions this client can actually speak, newest first.
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &[PROTOCOL_VERSION];
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const RESPONSE_CAP: usize = 4 * 1024 * 1024;
@@ -136,6 +138,7 @@ struct McpSession {
     credential: Credential,
     session_id: Option<String>,
     protocol_sent: bool,
+    protocol_version: String,
     next_id: u64,
 }
 
@@ -147,6 +150,7 @@ impl McpSession {
             credential,
             session_id: None,
             protocol_sent: false,
+            protocol_version: PROTOCOL_VERSION.to_string(),
             next_id: 1,
         }
     }
@@ -200,7 +204,7 @@ impl McpSession {
             request = request.header("Mcp-Session-Id", session.clone());
         }
         if self.protocol_sent {
-            request = request.header("MCP-Protocol-Version", PROTOCOL_VERSION);
+            request = request.header("MCP-Protocol-Version", &self.protocol_version);
         }
         // SEP-2243: mirror the JSON-RPC method (and, for a named call, the
         // tool/prompt name) into headers so a load balancer can route
@@ -283,6 +287,22 @@ impl McpSession {
             .map_err(|e| format!("the server returned invalid JSON: {e}"))?;
         Ok(Some(parsed))
     }
+
+    fn adopt_protocol_version(&mut self, initialize: &Value) -> Result<String, String> {
+        let version = initialize
+            .get("protocolVersion")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "initialize returned no protocolVersion".to_string())?;
+        if !SUPPORTED_PROTOCOL_VERSIONS.contains(&version) {
+            return Err(format!(
+                "the server negotiated unsupported protocol version {version}; supported: {}",
+                SUPPORTED_PROTOCOL_VERSIONS.join(", ")
+            ));
+        }
+        self.protocol_version = version.to_string();
+        self.protocol_sent = true;
+        Ok(version.to_string())
+    }
 }
 
 /// Scan (possibly partial) SSE bytes for a complete `data:` frame carrying
@@ -335,7 +355,7 @@ pub fn mcp_endpoint(connection: &Connection) -> Result<Url, String> {
 /// credential from the connection's template (the same late-fetch path the
 /// agent plane uses) and drives the handshake.
 pub async fn check_connection(
-    store: &Store,
+    store: &Arc<Store>,
     client: &reqwest::Client,
     connection: &Connection,
     options: &McpCheckOptions,
@@ -344,13 +364,11 @@ pub async fn check_connection(
         Ok(endpoint) => endpoint,
         Err(detail) => return McpStatusReport::failed(detail),
     };
-    let ConnectionConfig::Api { template, .. } = &connection.config else {
-        return McpStatusReport::failed("not an API connection");
-    };
-    let credential = match render_injection(store, template).await {
+    let credential = match render_connection_injection(store, client, connection).await {
         Ok(rendered) => Credential::from_rendered(rendered),
-        Err(detail) => {
-            return McpStatusReport::failed(format!("could not render credential: {detail}"))
+        Err(failure) => {
+            let detail = failure.to_string();
+            return McpStatusReport::failed(format!("could not render credential: {detail}"));
         }
     };
     let client = match crate::capability::http::client_for_connection(client, connection) {
@@ -372,20 +390,17 @@ pub struct McpToolInfo {
 /// descriptions), for the per-wiring tool picker. Same handshake and
 /// credential path as the status check, minus whoami and resources.
 pub async fn list_tools(
-    store: &Store,
+    store: &Arc<Store>,
     client: &reqwest::Client,
     connection: &Connection,
 ) -> Result<Vec<McpToolInfo>, String> {
     let endpoint = mcp_endpoint(connection)?;
-    let ConnectionConfig::Api { template, .. } = &connection.config else {
-        return Err("not an API connection".into());
-    };
-    let rendered = render_injection(store, template)
+    let rendered = render_connection_injection(store, client, connection)
         .await
-        .map_err(|detail| format!("could not render credential: {detail}"))?;
+        .map_err(|failure| format!("could not render credential: {failure}"))?;
     let client = crate::capability::http::client_for_connection(client, connection)?;
     let mut session = McpSession::new(client, endpoint, Credential::from_rendered(rendered));
-    session
+    let initialize = session
         .request(
             "initialize",
             json!({
@@ -395,7 +410,7 @@ pub async fn list_tools(
             }),
         )
         .await?;
-    session.protocol_sent = true;
+    session.adopt_protocol_version(&initialize)?;
     let _ = session.notify("notifications/initialized").await;
 
     let mut tools: Vec<McpToolInfo> = Vec::new();
@@ -469,11 +484,10 @@ async fn check_endpoint(
         Ok(result) => result,
         Err(detail) => return McpStatusReport::failed(detail),
     };
-    session.protocol_sent = true;
-    let protocol_version = init
-        .get("protocolVersion")
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    let protocol_version = match session.adopt_protocol_version(&init) {
+        Ok(version) => Some(version),
+        Err(detail) => return McpStatusReport::failed(detail),
+    };
     let server = init.get("serverInfo").map(|info| {
         let name = info.get("name").and_then(Value::as_str).unwrap_or("server");
         match info.get("version").and_then(Value::as_str) {
@@ -757,5 +771,26 @@ mod tests {
             *mcp_path = None;
         }
         assert!(mcp_endpoint(&no_path).is_err());
+    }
+
+    #[test]
+    fn negotiated_protocol_versions_must_be_supported() {
+        let mut session = McpSession::new(
+            reqwest::Client::new(),
+            Url::parse("https://mcp.example.test/mcp").unwrap(),
+            Credential::None,
+        );
+        let error = session
+            .adopt_protocol_version(&json!({ "protocolVersion": "2099-01-01" }))
+            .unwrap_err();
+        assert!(error.contains("unsupported protocol version 2099-01-01"));
+        assert!(!session.protocol_sent);
+
+        let version = session
+            .adopt_protocol_version(&json!({ "protocolVersion": PROTOCOL_VERSION }))
+            .unwrap();
+        assert_eq!(version, PROTOCOL_VERSION);
+        assert_eq!(session.protocol_version, PROTOCOL_VERSION);
+        assert!(session.protocol_sent);
     }
 }
