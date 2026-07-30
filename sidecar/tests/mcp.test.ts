@@ -11,6 +11,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 
 import { createSidecarServer } from '../src/server';
 import { SessionStore } from '../src/mcp';
+import { upstreamToolName } from '../src/upstream-mcp';
 import { UNTRUSTED_BEGIN, UNTRUSTED_END } from '../src/untrusted';
 
 const SUPERVISOR_TOKEN = 'a'.repeat(64);
@@ -53,6 +54,20 @@ const CONNECTIONS = [
     endpoint: '/v1/http',
     mcp_path: '/mcp',
   },
+  {
+    name: 'notion-two',
+    type: 'api',
+    target: 'https://mcp-two.example.com',
+    endpoint: '/v1/http',
+    mcp_path: '/mcp',
+  },
+  {
+    name: 'notion-three',
+    type: 'api',
+    target: 'https://mcp-three.example.com',
+    endpoint: '/v1/http',
+    mcp_path: '/mcp',
+  },
 ];
 
 /**
@@ -74,6 +89,13 @@ const upstream = {
   lastInitializeParams: undefined as Record<string, unknown> | undefined,
   elicitationAction: 'accept' as 'accept' | 'decline' | 'cancel',
   elicitationCount: 0,
+  elicitationCancelCount: 0,
+  holdElicitations: false,
+  toolCallDelayMs: 0,
+  toolCallCount: 0,
+  cancelledRequestIds: [] as number[],
+  discoveryBarrier: false,
+  discoveryReplies: [] as Array<() => void>,
   capabilities: { tools: {}, resources: {}, completions: {} } as
     | Record<string, unknown>
     | undefined,
@@ -99,6 +121,13 @@ function resetUpstream(): void {
   upstream.lastInitializeParams = undefined;
   upstream.elicitationAction = 'accept';
   upstream.elicitationCount = 0;
+  upstream.elicitationCancelCount = 0;
+  upstream.holdElicitations = false;
+  upstream.toolCallDelayMs = 0;
+  upstream.toolCallCount = 0;
+  upstream.cancelledRequestIds = [];
+  upstream.discoveryBarrier = false;
+  upstream.discoveryReplies = [];
   upstream.capabilities = { tools: {}, resources: {}, completions: {} };
   upstream.toolPages = undefined;
   upstream.rpcFailure = false;
@@ -174,6 +203,11 @@ function upstreamHttp(call: {
 
   if (request.method === 'notifications/initialized') {
     session.initialized = true;
+    return { status: 202, body: '' };
+  }
+  if (request.method === 'notifications/cancelled') {
+    const requestId = (request.params as { requestId?: unknown } | undefined)?.requestId;
+    if (typeof requestId === 'number') upstream.cancelledRequestIds.push(requestId);
     return { status: 202, body: '' };
   }
   if (!session.initialized) return failure('server not initialized');
@@ -410,25 +444,53 @@ function fakeBroker(socketPath: string): Promise<Server> {
           // Relay the upstream's answer the way the real broker does:
           // `{status, headers, body, body_encoding}`, body as a string.
           const relayed = upstreamHttp(body);
-          send(200, {
-            status: relayed.status,
-            headers: relayed.headers ?? {},
-            body: relayed.body,
-            body_encoding: 'utf8',
-            elicitation_tokens: { github_login: 'test-elicitation-token' },
-          });
+          const reply = () => send(200, {
+              status: relayed.status,
+              headers: relayed.headers ?? {},
+              body: relayed.body,
+              body_encoding: 'utf8',
+              elicitation_tokens: { github_login: 'test-elicitation-token' },
+            });
+          const rpcMethod = body.body?.method;
+          if (
+            upstream.discoveryBarrier
+            && rpcMethod === 'initialize'
+            && (body.connection === 'notion-two' || body.connection === 'notion-three')
+          ) {
+            upstream.discoveryReplies.push(reply);
+            if (upstream.discoveryReplies.length === 2) {
+              for (const release of upstream.discoveryReplies.splice(0)) release();
+            }
+            return;
+          }
+          if (rpcMethod === 'tools/call' && upstream.toolCallDelayMs > 0) {
+            upstream.toolCallCount += 1;
+            setTimeout(reply, upstream.toolCallDelayMs);
+            return;
+          }
+          reply();
           return;
         }
         // The blocking elicitation call: the real broker parks it on the
         // user; tests select the answer while keeping a deterministic value.
         if (req.url === '/v1/elicit') {
           upstream.elicitationCount += 1;
+          if (upstream.holdElicitations) {
+            const timer = setTimeout(() => send(200, { action: 'cancel' }), 500);
+            timer.unref();
+            return;
+          }
           send(200, {
             action: upstream.elicitationAction,
             ...(upstream.elicitationAction === 'accept'
               ? { content: { name: 'octocat' } }
               : {}),
           });
+          return;
+        }
+        if (req.url === '/v1/elicit/cancel') {
+          upstream.elicitationCancelCount += 1;
+          send(200, { cancelled: true });
           return;
         }
         // An MCP upstream that answers, but with an error status — the shape
@@ -502,6 +564,14 @@ function upstreamText(result: unknown): string {
   assert.ok(text.startsWith(prefix), text);
   assert.ok(text.endsWith(suffix), text);
   return text.slice(prefix.length, -suffix.length);
+}
+
+async function waitFor(predicate: () => boolean, message: string): Promise<void> {
+  const deadline = Date.now() + 1_000;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(message);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 }
 
 test('wired connections appear in tools/list as real tools', async () => {
@@ -668,6 +738,75 @@ test("an MCP upstream's own tools are re-exposed, credential-side untouched", as
     // The upstream's own result comes back as it stands.
     const echoed = upstreamText(result);
     assert.equal(echoed, 'search:{"query":"roadmap"}');
+  } finally {
+    await app.close();
+  }
+});
+
+test('independent upstream discovery runs concurrently behind a short deadline', async () => {
+  process.env.AGENTMFA_DISCOVERY_DEADLINE_MS = '250';
+  const app = await harness();
+  WIRED['client-bare'] = ['notion-two', 'notion-three'];
+  upstream.discoveryBarrier = true;
+  try {
+    const client = await app.connect('token-bare');
+    const names = (await client.listTools()).tools.map((tool) => tool.name);
+    assert.ok(names.includes(upstreamToolName({ ...CONNECTIONS[5], wired: true }, 'search')));
+    assert.ok(names.includes(upstreamToolName({ ...CONNECTIONS[6], wired: true }, 'search')));
+  } finally {
+    delete process.env.AGENTMFA_DISCOVERY_DEADLINE_MS;
+    WIRED['client-bare'] = [];
+    await app.close();
+  }
+});
+
+test('downstream cancellation aborts and notifies an active upstream call', async () => {
+  const app = await harness();
+  try {
+    const client = await app.connect('token-mcp');
+    upstream.toolCallDelayMs = 100;
+    const controller = new AbortController();
+    const call = client.callTool(
+      {
+        name: 'agentmfa_notion_search',
+        arguments: { query: 'cancel me' },
+      },
+      undefined,
+      { signal: controller.signal },
+    );
+    await waitFor(() => upstream.toolCallCount === 1, 'upstream call did not start');
+    controller.abort(new Error('test cancellation'));
+    await assert.rejects(call, /abort|cancel/i);
+    await waitFor(
+      () => upstream.cancelledRequestIds.length === 1,
+      'upstream did not receive notifications/cancelled',
+    );
+  } finally {
+    await app.close();
+  }
+});
+
+test('downstream cancellation drains a broker-parked elicitation', async () => {
+  const app = await harness();
+  try {
+    const client = await app.connect('token-mcp');
+    upstream.holdElicitations = true;
+    const controller = new AbortController();
+    const call = client.callTool(
+      { name: 'agentmfa_notion_needs_input', arguments: {} },
+      undefined,
+      { signal: controller.signal },
+    );
+    await waitFor(
+      () => upstream.elicitationCount === 1,
+      'broker elicitation did not start',
+    );
+    controller.abort(new Error('test cancellation'));
+    await assert.rejects(call, /abort|cancel/i);
+    await waitFor(
+      () => upstream.elicitationCancelCount === 1,
+      'broker elicitation was not cancelled',
+    );
   } finally {
     await app.close();
   }

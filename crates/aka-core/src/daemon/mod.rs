@@ -567,6 +567,7 @@ pub fn router_for(broker: Arc<Broker>, transport: Transport) -> Router {
             post(post_http).layer(DefaultBodyLimit::max(control_cap * 2 + 64 * 1024)),
         )
         .route("/v1/elicit", post(post_elicit))
+        .route("/v1/elicit/cancel", post(post_cancel_elicit))
         .route("/v1/connect-requests", post(post_connect_request))
         .route("/v1/pg/open", post(post_pg_open))
         .route("/v1/ssh/open", post(post_ssh_open))
@@ -1348,6 +1349,7 @@ async fn post_elicit(
             connection: conn,
             agent: client,
             tool: authorized.tool,
+            correlation_token: body.correlation_token,
             message: authorized.message,
             requested_schema: authorized.requested_schema,
         })
@@ -1357,6 +1359,46 @@ async fn post_elicit(
         answer["content"] = serde_json::Value::Object(content);
     }
     Json(answer).into_response()
+}
+
+/// Cancel an elicitation when its downstream MCP request was abandoned.
+async fn post_cancel_elicit(
+    State(state): State<AppState>,
+    authed: Authed,
+    ApiJson(body): ApiJson<ElicitBody>,
+) -> Response {
+    let broker = &state.broker;
+    let Some(conn) = broker.store.connection_by_name(&body.connection) else {
+        return err_unknown_connection(broker);
+    };
+    if !matches!(
+        &conn.config,
+        ConnectionConfig::Api {
+            mcp_path: Some(_),
+            ..
+        }
+    ) {
+        return err_detail(
+            StatusCode::BAD_REQUEST,
+            ErrorReason::WrongConnectionType,
+            format!("{} is not an MCP connection", conn.name),
+        );
+    }
+    if !broker.access.allows(&conn.id) {
+        return err_detail(
+            StatusCode::FORBIDDEN,
+            ErrorReason::DeniedByPolicy,
+            format!("{} is not enabled for agents", conn.name),
+        );
+    }
+    let cancelled =
+        broker
+            .elicitation_permits
+            .cancel(&body.correlation_token, authed.client_id, conn.id)
+            || broker
+                .elicitations
+                .cancel(&body.correlation_token, &conn.id);
+    Json(json!({ "cancelled": cancelled })).into_response()
 }
 
 /// `POST /v1/connect-requests`: an agent asks for a service that is not

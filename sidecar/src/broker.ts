@@ -91,6 +91,7 @@ export class BrokerClient {
     path: string,
     auth: AgentAuth,
     body?: unknown,
+    signal?: AbortSignal,
   ): Promise<RawResponse> {
     const payload = body === undefined ? null : Buffer.from(JSON.stringify(body));
     return new Promise((resolve, reject) => {
@@ -126,13 +127,26 @@ export class BrokerClient {
         );
       });
       req.on('error', reject);
+      const abort = () => req.destroy(signal?.reason ?? new Error('request cancelled'));
+      if (signal?.aborted) {
+        abort();
+      } else {
+        signal?.addEventListener('abort', abort, { once: true });
+      }
+      req.on('close', () => signal?.removeEventListener('abort', abort));
       if (payload) req.write(payload);
       req.end();
     });
   }
 
-  private async json<T>(method: string, path: string, auth: AgentAuth, body?: unknown): Promise<T> {
-    const response = await this.call(method, path, auth, body);
+  private async json<T>(
+    method: string,
+    path: string,
+    auth: AgentAuth,
+    body?: unknown,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    const response = await this.call(method, path, auth, body, signal);
     let parsed: unknown = null;
     try {
       parsed = response.body ? JSON.parse(response.body) : null;
@@ -192,8 +206,13 @@ export class BrokerClient {
    * The connection-access check happens on the far side of this call. The
    * sidecar cannot skip it, and a bug here cannot widen access.
    */
-  async invoke(path: string, auth: AgentAuth, body: unknown): Promise<unknown> {
-    return this.json<unknown>('POST', path, auth, body);
+  async invoke(
+    path: string,
+    auth: AgentAuth,
+    body: unknown,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    return this.json<unknown>('POST', path, auth, body, signal);
   }
 
   /**
@@ -208,10 +227,28 @@ export class BrokerClient {
   async elicit(
     auth: AgentAuth,
     request: { connection: string; correlationToken: string },
+    signal?: AbortSignal,
   ): Promise<{ action: string; content?: Record<string, unknown> }> {
     return this.json<{ action: string; content?: Record<string, unknown> }>(
       'POST',
       '/v1/elicit',
+      auth,
+      {
+        connection: request.connection,
+        correlation_token: request.correlationToken,
+      },
+      signal,
+    );
+  }
+
+  /** Cancel a broker-side elicitation whose downstream MCP call was abandoned. */
+  async cancelElicitation(
+    auth: AgentAuth,
+    request: { connection: string; correlationToken: string },
+  ): Promise<void> {
+    await this.json(
+      'POST',
+      '/v1/elicit/cancel',
       auth,
       {
         connection: request.connection,

@@ -328,7 +328,11 @@ class UpstreamClient {
     private readonly connection: BrokerConnection,
   ) {}
 
-  private async send(method: 'POST' | 'DELETE', payload?: unknown): Promise<UpstreamResponse> {
+  private async send(
+    method: 'POST' | 'DELETE',
+    payload?: unknown,
+    signal?: AbortSignal,
+  ): Promise<UpstreamResponse> {
     return (await this.broker.invoke('/v1/http', this.auth, {
       connection: this.connection.name,
       method,
@@ -342,13 +346,13 @@ class UpstreamClient {
         ...routingHeaders(payload),
       },
       ...(payload === undefined ? {} : { body: payload }),
-    })) as UpstreamResponse;
+    }, signal)) as UpstreamResponse;
   }
 
   private initialized = false;
 
   /** `initialize`, adopt what it negotiates, then `notifications/initialized`. */
-  async initialize(): Promise<void> {
+  async initialize(signal?: AbortSignal): Promise<void> {
     const id = this.nextId++;
     const response = await this.send('POST', {
       jsonrpc: '2.0',
@@ -363,7 +367,7 @@ class UpstreamClient {
         capabilities: {},
         clientInfo: { name: 'agentmfa', version: SIDECAR_VERSION },
       },
-    });
+    }, signal);
     const result = this.result(response, id) as
       | { protocolVersion?: string; capabilities?: UpstreamCapabilities }
       | undefined;
@@ -399,17 +403,47 @@ class UpstreamClient {
   }
 
   /** One request; the answer is the frame bearing this request's id. */
-  async request(method: string, params: unknown): Promise<unknown> {
-    return (await this.requestWithElicitationTokens(method, params)).result;
+  async request(method: string, params: unknown, signal?: AbortSignal): Promise<unknown> {
+    return (await this.requestWithElicitationTokens(method, params, signal)).result;
   }
 
   /** One request plus broker-minted capabilities for its elicitation legs. */
   async requestWithElicitationTokens(
     method: string,
     params: unknown,
+    signal?: AbortSignal,
   ): Promise<{ result: unknown; elicitationTokens: Record<string, string> }> {
     const id = this.nextId++;
-    const response = await this.send('POST', { jsonrpc: '2.0', id, method, params });
+    let cancellation: Promise<void> | undefined;
+    const forwardCancellation = () => {
+      cancellation = this.send('POST', {
+        jsonrpc: '2.0',
+        method: 'notifications/cancelled',
+        params: {
+          requestId: id,
+          reason: String(signal?.reason ?? 'downstream request cancelled'),
+        },
+      }).then(() => {}).catch((error) => {
+        log('warn', 'could not forward MCP cancellation upstream', {
+          connection: this.connection.name,
+          requestId: id,
+          error: String(error),
+        });
+      });
+    };
+    if (signal?.aborted) forwardCancellation();
+    else signal?.addEventListener('abort', forwardCancellation, { once: true });
+    let response: UpstreamResponse;
+    try {
+      response = await this.send(
+        'POST',
+        { jsonrpc: '2.0', id, method, params },
+        signal,
+      );
+    } finally {
+      signal?.removeEventListener('abort', forwardCancellation);
+      if (cancellation) await cancellation;
+    }
     return {
       result: this.result(response, id),
       elicitationTokens: response.elicitation_tokens ?? {},
@@ -421,11 +455,16 @@ class UpstreamClient {
    * a flat array, following `nextCursor` up to `maxPages` so a looping or
    * hostile server cannot page us forever.
    */
-  async listPaged<T>(method: string, key: string, maxPages: number): Promise<T[]> {
+  async listPaged<T>(
+    method: string,
+    key: string,
+    maxPages: number,
+    signal?: AbortSignal,
+  ): Promise<T[]> {
     const items: T[] = [];
     let cursor: string | undefined;
     for (let page = 0; page < maxPages; page++) {
-      const result = (await this.request(method, cursor ? { cursor } : {})) as
+      const result = (await this.request(method, cursor ? { cursor } : {}, signal)) as
         | (Record<string, unknown> & { nextCursor?: string })
         | undefined;
       const list = result?.[key];
@@ -513,16 +552,17 @@ export async function discoverUpstream(
   broker: BrokerClient,
   auth: AgentAuth,
   connection: BrokerConnection,
+  signal?: AbortSignal,
 ): Promise<UpstreamDiscovery> {
   const client = new UpstreamClient(broker, auth, connection);
   try {
     // Inside the try: `initialize` sets the session id from the response
     // header before it can throw (e.g. on an unsupported negotiated version),
     // so the `finally` must run to DELETE that session rather than leak it.
-    await client.initialize();
+    await client.initialize(signal);
     const capabilities = client.capabilities;
     const tools = capabilities.tools
-      ? await client.listPaged<UpstreamTool>('tools/list', 'tools', MAX_TOOL_PAGES)
+      ? await client.listPaged<UpstreamTool>('tools/list', 'tools', MAX_TOOL_PAGES, signal)
       : [];
 
     let resources: UpstreamResource[] = [];
@@ -533,6 +573,7 @@ export async function discoverUpstream(
           'resources/list',
           'resources',
           MAX_RESOURCE_PAGES,
+          signal,
         );
       } catch (error) {
         log('warn', 'an upstream advertised resources but failed to list them', {
@@ -547,6 +588,7 @@ export async function discoverUpstream(
           'resources/templates/list',
           'resourceTemplates',
           MAX_RESOURCE_PAGES,
+          signal,
         );
       } catch {
         resourceTemplates = [];
@@ -603,6 +645,7 @@ async function runWithMrtr(
   method: 'tools/call' | 'resources/read',
   baseParams: Record<string, unknown>,
   _toolLabel: string,
+  signal?: AbortSignal,
 ): Promise<unknown> {
   let inputResponses: Record<string, unknown> | undefined;
   let requestState: unknown;
@@ -632,20 +675,21 @@ async function runWithMrtr(
   };
 
   for (let round = 0; round < MAX_MRTR_ROUNDS; round++) {
+    signal?.throwIfAborted();
     const client = new UpstreamClient(broker, auth, connection);
     let result: MrtrResult | undefined;
     let elicitationTokens: Record<string, string> = {};
     try {
       // Inside the try so a throw after the session id is set still tears the
       // session down (see `discoverUpstream`).
-      await withinBudget(client.initialize());
+      await withinBudget(client.initialize(signal));
       const params = {
         ...baseParams,
         ...(inputResponses ? { inputResponses } : {}),
         ...(requestState !== undefined ? { requestState } : {}),
       };
       const response = await withinBudget(
-        client.requestWithElicitationTokens(method, params),
+        client.requestWithElicitationTokens(method, params, signal),
       );
       result = response.result as MrtrResult | undefined;
       Object.assign(elicitationTokens, response.elicitationTokens);
@@ -675,12 +719,33 @@ async function runWithMrtr(
         responses[key] = { action: 'decline' };
         continue;
       }
-      const answer = await withinBudget(
-        broker.elicit(auth, {
+      const correlationToken = elicitationTokens[key] ?? '';
+      let cancellation: Promise<void> | undefined;
+      const cancelElicitation = () => {
+        cancellation = broker.cancelElicitation(auth, {
           connection: connection.name,
-          correlationToken: elicitationTokens[key] ?? '',
-        }),
-      );
+          correlationToken,
+        }).catch((error) => {
+          log('warn', 'could not cancel broker elicitation', {
+            connection: connection.name,
+            error: String(error),
+          });
+        });
+      };
+      if (signal?.aborted) cancelElicitation();
+      else signal?.addEventListener('abort', cancelElicitation, { once: true });
+      let answer: Awaited<ReturnType<BrokerClient['elicit']>>;
+      try {
+        answer = await withinBudget(
+          broker.elicit(auth, {
+            connection: connection.name,
+            correlationToken,
+          }, signal),
+        );
+      } finally {
+        signal?.removeEventListener('abort', cancelElicitation);
+        if (cancellation) await cancellation;
+      }
       responses[key] = answer;
       if (answer.action === 'decline' || answer.action === 'cancel') {
         hasTerminalAnswer = true;
@@ -710,8 +775,9 @@ export async function readUpstreamResource(
   auth: AgentAuth,
   connection: BrokerConnection,
   uri: string,
+  signal?: AbortSignal,
 ): Promise<unknown> {
-  return runWithMrtr(broker, auth, connection, 'resources/read', { uri }, uri);
+  return runWithMrtr(broker, auth, connection, 'resources/read', { uri }, uri, signal);
 }
 
 /** Argument-completion context, forwarded verbatim to the upstream. */
@@ -756,6 +822,7 @@ export async function callUpstreamTool(
   connection: BrokerConnection,
   tool: string,
   args: Record<string, unknown>,
+  signal?: AbortSignal,
 ): Promise<unknown> {
   return runWithMrtr(
     broker,
@@ -764,5 +831,6 @@ export async function callUpstreamTool(
     'tools/call',
     { name: tool, arguments: args },
     tool,
+    signal,
   );
 }

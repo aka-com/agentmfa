@@ -127,6 +127,19 @@ impl ElicitationPermits {
             requested_schema: permit.requested_schema,
         })
     }
+
+    /// Revoke an unconsumed permit when the downstream MCP request is
+    /// cancelled before the broker has parked its elicitation.
+    pub fn cancel(&self, token: &str, client_id: Uuid, connection_id: Uuid) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        let matches = inner.get(token).is_some_and(|permit| {
+            permit.client_id == client_id && permit.connection_id == connection_id
+        });
+        if matches {
+            inner.remove(token);
+        }
+        matches
+    }
 }
 
 /// One input the form asks for, as the app renders it. Mirrors the UI's
@@ -188,6 +201,8 @@ pub struct ElicitationRequest {
     pub connection: Connection,
     pub agent: String,
     pub tool: String,
+    /// Opaque broker-minted token used to cancel this exact parked request.
+    pub correlation_token: String,
     pub message: String,
     /// The upstream's `requestedSchema` (JSON Schema object), turned into
     /// form fields for the app.
@@ -461,6 +476,7 @@ fn coerce_content(
 
 struct Pending {
     info: PendingElicitation,
+    correlation_token: String,
     waiter: oneshot::Sender<ElicitationOutcome>,
     deadline: Instant,
 }
@@ -586,6 +602,7 @@ impl Elicitations {
                 id,
                 Pending {
                     info: info.clone(),
+                    correlation_token: request.correlation_token,
                     waiter: tx,
                     deadline,
                 },
@@ -739,6 +756,30 @@ impl Elicitations {
         }
     }
 
+    /// Cancel the exact prompt whose downstream MCP request was abandoned.
+    pub fn cancel(&self, correlation_token: &str, connection_id: &Uuid) -> bool {
+        let id = {
+            let state = self.inner.state.lock().unwrap();
+            state
+                .pending
+                .iter()
+                .find(|(_, pending)| {
+                    pending.info.connection_id == *connection_id
+                        && pending.correlation_token == correlation_token
+                })
+                .map(|(id, _)| *id)
+        };
+        let Some(id) = id else {
+            return false;
+        };
+        self.resolve(
+            &id,
+            ElicitationOutcome::cancelled(),
+            RequestResolution::CallerDisconnected,
+        );
+        true
+    }
+
     fn announce_lapsed(&self, lapsed: &[Lapsed]) {
         for item in lapsed {
             self.inner.history.resolve(&item.id, item.resolution);
@@ -851,6 +892,23 @@ mod tests {
         assert!(permits.consume(&token, client, connection).is_none());
     }
 
+    #[test]
+    fn an_unconsumed_permit_can_be_cancelled_by_its_principal() {
+        let permits = ElicitationPermits::default();
+        let client = Uuid::new_v4();
+        let connection = Uuid::new_v4();
+        let token = permits.issue(
+            client,
+            connection,
+            "lookup".into(),
+            "Which account?".into(),
+            json!({"type":"object"}),
+        );
+        assert!(!permits.cancel(&token, Uuid::new_v4(), connection));
+        assert!(permits.cancel(&token, client, connection));
+        assert!(permits.consume(&token, client, connection).is_none());
+    }
+
     /// A shell that answers every elicitation the moment it is raised.
     struct AutoAnswer {
         approved: bool,
@@ -909,6 +967,7 @@ mod tests {
             connection: connection(),
             agent: "claude-code".into(),
             tool: "search".into(),
+            correlation_token: "eli_test".into(),
             message: "Please provide your GitHub username".into(),
             requested_schema: json!({
                 "type": "object",
@@ -942,6 +1001,32 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
         panic!("the elicitation never reached the user");
+    }
+
+    #[tokio::test]
+    async fn downstream_cancellation_drains_the_matching_prompt() {
+        let (elicitations, history, _dir) = registry(Arc::new(NeverAnswers));
+        let request = request();
+        let connection_id = request.connection.id;
+        let correlation_token = request.correlation_token.clone();
+        let waiting = tokio::spawn({
+            let elicitations = elicitations.clone();
+            async move { elicitations.elicit(request).await }
+        });
+        let pending = wait_for_pending(&elicitations).await;
+
+        assert!(elicitations.cancel(&correlation_token, &connection_id));
+        assert_eq!(waiting.await.unwrap().action, ElicitAction::Cancel);
+        assert!(elicitations.pending().is_empty());
+        assert_eq!(
+            history
+                .records()
+                .into_iter()
+                .find(|item| item.id == pending.id)
+                .unwrap()
+                .status,
+            RequestStatus::Abandoned,
+        );
     }
 
     fn auto(approved: bool) -> (Elicitations, Arc<RequestHistory>, tempfile::TempDir) {
@@ -1068,6 +1153,7 @@ mod tests {
                         connection: connection(),
                         agent: "claude-code".into(),
                         tool: "notes_search".into(),
+                        correlation_token: "eli_secret".into(),
                         message: "Re-enter your API token".into(),
                         requested_schema: json!({
                             "type": "object",
@@ -1102,6 +1188,7 @@ mod tests {
                         connection: connection(),
                         agent: "claude-code".into(),
                         tool: "vault_list".into(),
+                        correlation_token: "eli_label".into(),
                         message: "Which credential should this workflow reference?".into(),
                         requested_schema: json!({
                             "type": "object",

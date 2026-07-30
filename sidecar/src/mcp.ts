@@ -578,6 +578,23 @@ export async function createToolServer(
     withheld: 0,
   };
   const upstreamToolSurface: UpstreamToolSurface = { registered: 0 };
+  // Discovery is independent per upstream. Start every handshake together
+  // and wait only for their bounded session-open attempts; registration below
+  // remains deterministic in broker order after the promises settle.
+  const discoveries = new Map<
+    BrokerConnection,
+    Promise<Awaited<ReturnType<typeof discoverUpstream>>>
+  >();
+  for (const connection of wired) {
+    if (connection.mcp_path) {
+      discoveries.set(
+        connection,
+        discoverUpstreamForSession(broker, principal, connection),
+      );
+    }
+  }
+  await Promise.allSettled(discoveries.values());
+
   for (const connection of wired) {
     // An MCP upstream contributes its own tools rather than one request
     // tool. Its traffic still rides the broker's HTTP plane, so the
@@ -585,7 +602,7 @@ export async function createToolServer(
     if (connection.mcp_path) {
       const outcome = await registerUpstream(
         server, toolRegistry, broker, principal, connection, taken, upstreamIndex,
-        upstreamToolSurface, resourceSurface,
+        upstreamToolSurface, resourceSurface, discoveries.get(connection)!,
       );
       registrations.push({
         connection,
@@ -860,7 +877,7 @@ function registerMetaTools(
       inputSchema: callInput.inputSchema,
       annotations: { openWorldHint: true },
     },
-    async (input) => {
+    async (input, signal) => {
       const { connection, tool, arguments: args } = input as {
         connection: string;
         tool: string;
@@ -882,7 +899,7 @@ function registerMetaTools(
       }
       try {
         const result = await callUpstreamTool(
-          broker, principal, entry.connection, entry.tool.name, args ?? {},
+          broker, principal, entry.connection, entry.tool.name, args ?? {}, signal,
         );
         return sanitizeUpstreamResult(result) as {
           content: Array<{ type: 'text'; text: string }>;
@@ -972,10 +989,11 @@ async function registerUpstream(
   index: IndexedTool[],
   toolSurface: UpstreamToolSurface,
   resourceSurface: ResourceSurface,
+  discoveryPromise: Promise<Awaited<ReturnType<typeof discoverUpstream>>>,
 ): Promise<UpstreamRegistration> {
   let discovery: Awaited<ReturnType<typeof discoverUpstream>>;
   try {
-    discovery = await discoverUpstreamWithRetry(broker, principal, connection);
+    discovery = await discoveryPromise;
   } catch (error) {
     log('warn', 'could not discover an MCP upstream', {
       connection: connection.name,
@@ -1086,7 +1104,7 @@ async function registerUpstream(
         ...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}),
         ...(tool.annotations ? { annotations: tool.annotations } : {}),
       },
-      async (args) => {
+      async (args, signal) => {
         try {
           const result = await callUpstreamTool(
             broker,
@@ -1094,6 +1112,7 @@ async function registerUpstream(
             connection,
             tool.name,
             args ?? {},
+            signal,
           );
           return sanitizeUpstreamResult(result) as {
             content: Array<{ type: 'text'; text: string }>;
@@ -1131,6 +1150,14 @@ async function registerUpstream(
 }
 
 const MAX_DISCOVERY_RETRY_DELAY_MS = 10_000;
+const DEFAULT_DISCOVERY_DEADLINE_MS = 10_000;
+
+function discoveryDeadlineMs(): number {
+  const configured = Number(process.env.AGENTMFA_DISCOVERY_DEADLINE_MS);
+  return Number.isFinite(configured) && configured > 0
+    ? Math.floor(configured)
+    : DEFAULT_DISCOVERY_DEADLINE_MS;
+}
 
 function discoveryRetryDelay(error: unknown): number {
   if (
@@ -1152,10 +1179,12 @@ async function discoverUpstreamWithRetry(
   broker: BrokerClient,
   principal: Principal,
   connection: BrokerConnection,
+  signal?: AbortSignal,
 ): Promise<Awaited<ReturnType<typeof discoverUpstream>>> {
   try {
-    return await discoverUpstream(broker, principal, connection);
+    return await discoverUpstream(broker, principal, connection, signal);
   } catch (firstError) {
+    signal?.throwIfAborted();
     const delayMs = discoveryRetryDelay(firstError);
     log('info', 'retrying MCP upstream discovery once', {
       connection: connection.name,
@@ -1163,9 +1192,46 @@ async function discoverUpstreamWithRetry(
       error: String(firstError),
     });
     if (delayMs > 0) {
-      await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+      await new Promise<void>((resolve, reject) => {
+        const done = () => {
+          signal?.removeEventListener('abort', abort);
+          resolve();
+        };
+        const timer = setTimeout(done, delayMs);
+        const abort = () => {
+          clearTimeout(timer);
+          reject(signal?.reason ?? new Error('MCP discovery cancelled'));
+        };
+        signal?.addEventListener('abort', abort, { once: true });
+      });
     }
-    return discoverUpstream(broker, principal, connection);
+    return discoverUpstream(broker, principal, connection, signal);
+  }
+}
+
+async function discoverUpstreamForSession(
+  broker: BrokerClient,
+  principal: Principal,
+  connection: BrokerConnection,
+): Promise<Awaited<ReturnType<typeof discoverUpstream>>> {
+  const controller = new AbortController();
+  const deadlineMs = discoveryDeadlineMs();
+  const timer = setTimeout(
+    () => controller.abort(
+      new Error(`MCP discovery exceeded its ${deadlineMs}ms session-open deadline`),
+    ),
+    deadlineMs,
+  );
+  timer.unref?.();
+  try {
+    return await discoverUpstreamWithRetry(
+      broker,
+      principal,
+      connection,
+      controller.signal,
+    );
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -1227,9 +1293,11 @@ function registerUpstreamResources(
             : {}),
           ...(resource.mimeType ? { mimeType: resource.mimeType } : {}),
         },
-        async (uri: URL) =>
+        async (uri: URL, extra) =>
           sanitizeUpstreamResult(
-            await readUpstreamResource(broker, principal, connection, uri.toString()),
+            await readUpstreamResource(
+              broker, principal, connection, uri.toString(), extra.signal,
+            ),
           ) as ReadResourceResult,
       );
       surface.takenUris.add(resource.uri);
@@ -1306,9 +1374,11 @@ function registerUpstreamResources(
             : {}),
           ...(template.mimeType ? { mimeType: template.mimeType } : {}),
         },
-        async (uri: URL) =>
+        async (uri: URL, _variables, extra) =>
           sanitizeUpstreamResult(
-            await readUpstreamResource(broker, principal, connection, uri.toString()),
+            await readUpstreamResource(
+              broker, principal, connection, uri.toString(), extra.signal,
+            ),
           ) as ReadResourceResult,
       );
       surface.takenTemplateUris.add(template.uriTemplate);
