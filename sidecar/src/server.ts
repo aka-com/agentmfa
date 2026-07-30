@@ -133,6 +133,7 @@ export function createSidecarServer(env: SidecarEnv): Server {
     }
 
     if (req.method === 'GET' && path === '/health') {
+      sessions.sweep();
       json(res, 200, {
         status: 'ok',
         version: SIDECAR_VERSION,

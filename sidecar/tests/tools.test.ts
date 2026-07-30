@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { BrokerError, type BrokerClient, type BrokerConnection } from '../src/broker';
-import { callFor, invoke, projectForMcp, schemaFor } from '../src/tools';
+import { callFor, invoke, projectForMcp, schemaFor, toolNameFor } from '../src/tools';
 
 const connection: BrokerConnection = {
   name: 'analytics',
@@ -19,6 +19,20 @@ const apiConnection: BrokerConnection = {
   endpoint: '/v1/http',
   wired: true,
 };
+
+test('native MCP tool names are stable and bounded', () => {
+  const long = {
+    ...connection,
+    name: `analytics-${'warehouse-'.repeat(12)}`,
+  };
+  const first = toolNameFor(long);
+  assert.equal(first, toolNameFor(long));
+  assert.ok(first.length <= 64, first);
+  assert.match(first, /^agentmfa_analytics-/);
+
+  const other = toolNameFor({ ...long, name: `${long.name}other` });
+  assert.notEqual(first, other, 'the hash must disambiguate truncated names');
+});
 
 test('API tool schema matches the broker method, path, header, and binary-body contract', () => {
   const schema = schemaFor(apiConnection);
@@ -87,6 +101,23 @@ test('broker refusal detail survives the MCP tool projection', async () => {
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /analytics is disabled/);
   assert.doesNotMatch(result.content[0].text, /wire this agent/);
+});
+
+test('approval refusals return the remedy for their actual outcome', async () => {
+  for (const [failure, expected] of [
+    [new BrokerError(403, 'approval_denied'), /Do not retry/i],
+    [new BrokerError(403, 'approval_unavailable'), /no AgentMFA approval window/i],
+    [new BrokerError(408, 'approval_timeout'), /Retrying will ask the user again/i],
+  ] as const) {
+    const broker = {
+      invoke: async () => {
+        throw failure;
+      },
+    } as unknown as BrokerClient;
+    const result = await invoke(broker, { token: 'token' }, connection, {});
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, expected);
+  }
 });
 
 test('broker retry timing survives the MCP tool projection', async () => {

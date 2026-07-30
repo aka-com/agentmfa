@@ -18,11 +18,19 @@
 import { z } from 'zod';
 
 import type { AgentAuth, BrokerClient, BrokerConnection } from './broker';
+import { boundedToolName } from './tool-names';
 
 /** MCP tool names allow `[a-zA-Z0-9_-]`; connection names are freer. */
-export function toolNameFor(connection: BrokerConnection): string {
+export function toolNameCandidateFor(connection: BrokerConnection): string {
   const slug = connection.name.replace(/[^a-zA-Z0-9_-]/g, '_');
   return connection.type === 'api' ? `agentmfa_${slug}_request` : `agentmfa_${slug}_open`;
+}
+
+export function toolNameFor(connection: BrokerConnection): string {
+  return boundedToolName(
+    toolNameCandidateFor(connection),
+    `${connection.type}\0${connection.name}`,
+  );
 }
 
 /** What an agent is told a tool is for, before it calls it. */
@@ -213,9 +221,30 @@ export async function invoke(
       message?: string;
     };
     if (failure.status === 403) {
+      switch (failure.reason) {
+        case 'approval_denied':
+          return toolError(
+            `The user refused this call to "${connection.name}". Do not retry it; ` +
+              'ask the user before trying a changed request.',
+          );
+        case 'approval_unavailable':
+          return toolError(
+            `Confirmation is enabled for "${connection.name}", but no AgentMFA ` +
+              'approval window is attached. Ask the user to open AgentMFA.',
+          );
+        case 'denied_by_policy':
+        default:
+          return toolError(
+            `AgentMFA policy refused "${connection.name}". ` +
+              (failure.detail ??
+                `Ask the user to enable "${connection.name}" for agents in AgentMFA.`),
+          );
+      }
+    }
+    if (failure.status === 408 || failure.reason === 'approval_timeout') {
       return toolError(
-        `AgentMFA refused this call: ${failure.reason ?? 'denied_by_policy'}. ` +
-          (failure.detail ?? `The user can enable "${connection.name}" in AgentMFA.`),
+        `Nobody answered the confirmation for "${connection.name}" in time. ` +
+          'Retrying will ask the user again.',
       );
     }
     if (failure.status === 429) {

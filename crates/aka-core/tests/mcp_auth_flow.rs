@@ -57,6 +57,7 @@ struct MockAuthServer {
     registered_redirect: Option<String>,
     token_requests: u32,
     refresh_requests: u32,
+    mcp_session_deletes: u32,
     /// The bearer the MCP resource currently accepts; refresh rotates it.
     current_access: String,
     /// The refresh token the token endpoint currently honors; `None`
@@ -74,6 +75,7 @@ impl Default for MockAuthServer {
             registered_redirect: None,
             token_requests: 0,
             refresh_requests: 0,
+            mcp_session_deletes: 0,
             current_access: ACCESS_TOKEN.into(),
             valid_refresh: Some(REFRESH_TOKEN.into()),
             response_iss: None,
@@ -159,6 +161,17 @@ async fn spawn_mock_vendor() -> (u16, Arc<Mutex<MockAuthServer>>) {
                     .header("mcp-session-id", "mock-session-1")
                     .body(axum::body::Body::from(reply.to_string()))
                     .unwrap()
+            }
+        }
+    };
+    let mcp_delete = {
+        let state = state.clone();
+        move |headers: axum::http::HeaderMap| {
+            let state = state.clone();
+            async move {
+                assert!(headers.get("mcp-session-id").is_some());
+                state.lock().unwrap().mcp_session_deletes += 1;
+                axum::http::StatusCode::NO_CONTENT
             }
         }
     };
@@ -325,7 +338,7 @@ async fn spawn_mock_vendor() -> (u16, Arc<Mutex<MockAuthServer>>) {
     };
 
     let app = axum::Router::new()
-        .route("/mcp", axum::routing::post(mcp))
+        .route("/mcp", axum::routing::post(mcp).delete(mcp_delete))
         .route(
             "/.well-known/oauth-protected-resource/mcp",
             axum::routing::get(resource_meta),
@@ -673,6 +686,10 @@ async fn oauth_sign_in_mints_a_connection_and_the_status_check_acknowledges_it()
     assert_eq!(report.resources.len(), 1);
     assert_eq!(report.resources[0].uri, "mock://repos/one");
     assert_eq!(report.resources[0].name, "Repo One");
+    assert!(
+        vendor.lock().unwrap().mcp_session_deletes >= 2,
+        "post-auth verification and the status check must tear down their sessions"
+    );
 
     // Multiple accounts on one target: the same dance again is simply a
     // second connection with its own token — nothing deduplicates them.

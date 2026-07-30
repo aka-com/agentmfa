@@ -24,6 +24,7 @@ import { deriveMcpNamespace, joinToolPath } from '@executor-js/plugin-mcp/core';
 
 import type { AgentAuth, BrokerClient, BrokerConnection } from './broker';
 import { log } from './log';
+import { boundedToolName } from './tool-names';
 
 /** One tool as the upstream MCP server describes it. */
 export interface UpstreamTool {
@@ -82,9 +83,28 @@ export function namespaceFor(connection: BrokerConnection): string {
 }
 
 /** The MCP tool name we expose for one of the upstream's tools. */
-export function upstreamToolName(connection: BrokerConnection, tool: string): string {
+export function upstreamToolNameCandidate(connection: BrokerConnection, tool: string): string {
   const path = joinToolPath(namespaceFor(connection), tool);
   return `agentmfa_${path}`.replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
+export function upstreamToolName(connection: BrokerConnection, tool: string): string {
+  return boundedToolName(
+    upstreamToolNameCandidate(connection, tool),
+    `${connection.name}\0${tool}`,
+  );
+}
+
+/** A JSON-RPC failure returned by an upstream MCP server. */
+export class UpstreamRpcError extends Error {
+  constructor(
+    readonly code: number,
+    message: string,
+    readonly data?: unknown,
+  ) {
+    super(message);
+    this.name = 'UpstreamRpcError';
+  }
 }
 
 /** The broker's relay of the upstream response: `PROTOCOL.md`, HTTP plane. */
@@ -317,12 +337,21 @@ class UpstreamClient {
     }
     const answer = relayMessages(response).find(
       (frame) => !!frame && typeof frame === 'object' && (frame as { id?: unknown }).id === id,
-    ) as { error?: { message?: string }; result?: unknown } | undefined;
+    ) as {
+      error?: { code?: unknown; message?: unknown; data?: unknown };
+      result?: unknown;
+    } | undefined;
     if (!answer) {
       throw new Error('the MCP server sent no response to the request');
     }
     if (answer.error) {
-      throw new Error(answer.error.message ?? 'the MCP server returned an error');
+      throw new UpstreamRpcError(
+        typeof answer.error.code === 'number' ? answer.error.code : -32603,
+        typeof answer.error.message === 'string'
+          ? answer.error.message
+          : 'the MCP server returned an error',
+        answer.error.data,
+      );
     }
     return answer.result;
   }

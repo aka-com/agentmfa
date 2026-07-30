@@ -303,6 +303,34 @@ impl McpSession {
         self.protocol_sent = true;
         Ok(version.to_string())
     }
+
+    /// Best-effort teardown for a stateful streamable-HTTP session.
+    async fn close(&mut self) {
+        let Some(session_id) = self.session_id.take() else {
+            return;
+        };
+        let mut url = self.endpoint.clone();
+        if let Credential::Query(fragment) = &self.credential {
+            let combined = match url.query() {
+                Some(existing) if !existing.is_empty() => format!("{existing}&{}", &**fragment),
+                _ => fragment.to_string(),
+            };
+            url.set_query(Some(&combined));
+        }
+        let mut request = self
+            .client
+            .delete(url)
+            .timeout(REQUEST_TIMEOUT)
+            .header(http::header::ACCEPT, "application/json, text/event-stream")
+            .header("Mcp-Session-Id", session_id);
+        if let Credential::Header(name, value) = &self.credential {
+            request = request.header(name.clone(), value.clone());
+        }
+        if self.protocol_sent {
+            request = request.header("MCP-Protocol-Version", &self.protocol_version);
+        }
+        let _ = request.send().await;
+    }
 }
 
 /// Scan (possibly partial) SSE bytes for a complete `data:` frame carrying
@@ -418,43 +446,48 @@ pub async fn list_tools(
         .map_err(|failure| format!("could not render credential: {failure}"))?;
     let client = crate::capability::http::client_for_connection(client, connection)?;
     let mut session = McpSession::new(client, endpoint, Credential::from_rendered(rendered));
-    let initialize = session
-        .request(
-            "initialize",
-            json!({
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": { "name": "aka-agentmfa", "version": env!("CARGO_PKG_VERSION") },
-            }),
-        )
-        .await?;
-    session.adopt_protocol_version(&initialize)?;
-    let _ = session.notify("notifications/initialized").await;
+    let result = async {
+        let initialize = session
+            .request(
+                "initialize",
+                json!({
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": { "name": "aka-agentmfa", "version": env!("CARGO_PKG_VERSION") },
+                }),
+            )
+            .await?;
+        session.adopt_protocol_version(&initialize)?;
+        let _ = session.notify("notifications/initialized").await;
 
-    let mut tools: Vec<McpToolInfo> = Vec::new();
-    let mut cursor: Option<String> = None;
-    for _ in 0..MAX_TOOL_PAGES {
-        let params = match &cursor {
-            Some(cursor) => json!({ "cursor": cursor }),
-            None => json!({}),
-        };
-        let page = session.request("tools/list", params).await?;
-        if let Some(list) = page.get("tools").and_then(Value::as_array) {
-            for tool in list {
-                if let Some(info) = tool_info(tool) {
-                    tools.push(info);
+        let mut tools: Vec<McpToolInfo> = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..MAX_TOOL_PAGES {
+            let params = match &cursor {
+                Some(cursor) => json!({ "cursor": cursor }),
+                None => json!({}),
+            };
+            let page = session.request("tools/list", params).await?;
+            if let Some(list) = page.get("tools").and_then(Value::as_array) {
+                for tool in list {
+                    if let Some(info) = tool_info(tool) {
+                        tools.push(info);
+                    }
                 }
             }
+            cursor = page
+                .get("nextCursor")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if cursor.is_none() {
+                break;
+            }
         }
-        cursor = page
-            .get("nextCursor")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        if cursor.is_none() {
-            break;
-        }
+        Ok(tools)
     }
-    Ok(tools)
+    .await;
+    session.close().await;
+    result
 }
 
 /// Post-OAuth verification: same handshake, with the just-issued bearer
@@ -480,7 +513,12 @@ async fn check_endpoint(
     options: &McpCheckOptions,
 ) -> McpStatusReport {
     let mut session = McpSession::new(client, endpoint, credential);
+    let report = check_session(&mut session, options).await;
+    session.close().await;
+    report
+}
 
+async fn check_session(session: &mut McpSession, options: &McpCheckOptions) -> McpStatusReport {
     let init = match session
         .request(
             "initialize",

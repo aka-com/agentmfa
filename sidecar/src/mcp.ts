@@ -28,7 +28,7 @@ import { BrokerClient, BrokerError, type BrokerConnection, type BrokerIdentity }
 import { z } from 'zod';
 
 import { log } from './log';
-import { describe, invoke, schemaFor, toolNameFor } from './tools';
+import { describe, invoke, schemaFor, toolNameCandidateFor, toolNameFor } from './tools';
 import {
   callUpstreamTool,
   completeUpstream,
@@ -36,11 +36,14 @@ import {
   namespaceFor,
   readUpstreamResource,
   upstreamToolName,
+  upstreamToolNameCandidate,
   type CompletionContext,
+  UpstreamRpcError,
   type UpstreamResource,
   type UpstreamResourceTemplate,
   type UpstreamTool,
 } from './upstream-mcp';
+import { alternateToolName } from './tool-names';
 import {
   frameUntrustedText,
   sanitizeUntrustedText,
@@ -179,7 +182,10 @@ export class SessionStore {
 
   get(id: string, clientId: string): StreamableHTTPServerTransport | null {
     const session = this.sessions.get(id);
-    if (!session) return null;
+    if (!session) {
+      this.sweep();
+      return null;
+    }
     // Not "not found" — a session that exists but belongs to someone else
     // must not be usable, and must not be distinguishable either.
     if (session.clientId !== clientId) return null;
@@ -188,7 +194,7 @@ export class SessionStore {
   }
 
   put(id: string, clientId: string, transport: StreamableHTTPServerTransport): void {
-    this.sweep();
+    this.sweep(true);
     this.sessions.set(id, { transport, clientId, lastSeen: Date.now() });
   }
 
@@ -201,17 +207,18 @@ export class SessionStore {
   }
 
   /** Drop idle sessions, then the oldest ones if still over the limit. */
-  private sweep(): void {
+  sweep(reserveSlot = false): void {
     const cutoff = Date.now() - this.idleMs;
     for (const [id, session] of this.sessions) {
       if (session.lastSeen < cutoff) this.close(id, session);
     }
-    if (this.sessions.size < this.limit) return;
+    const allowed = Math.max(0, this.limit - (reserveSlot ? 1 : 0));
+    if (this.sessions.size <= allowed) return;
 
     const oldest = [...this.sessions.entries()].sort(
       (a, b) => a[1].lastSeen - b[1].lastSeen,
     );
-    for (const [id, session] of oldest.slice(0, this.sessions.size - this.limit + 1)) {
+    for (const [id, session] of oldest.slice(0, this.sessions.size - allowed)) {
       this.close(id, session);
     }
   }
@@ -234,6 +241,10 @@ interface Registration {
   resources?: number;
   /** Set when an MCP upstream could not be reached at session open. */
   error?: string;
+  /** Non-fatal upstream state that explains an intentionally empty surface. */
+  status?: 'no_tools_capability' | 'empty_tools' | 'no_allowed_tools';
+  /** Non-fatal naming adjustments worth exposing to a diagnosing agent. */
+  warnings?: string[];
 }
 
 /**
@@ -294,11 +305,11 @@ export async function createToolServer(
   );
 
   let connections: BrokerConnection[] = [];
+  let connectionListError: string | undefined;
   try {
     connections = await broker.connections(principal);
   } catch (error) {
-    // A broker that cannot be listed yields a session with no tools rather
-    // than a failed connection: the agent gets a usable, empty surface.
+    connectionListError = `could not list AgentMFA connections: ${String(error)}`;
     log('warn', 'could not list connections', { error: String(error) });
   }
 
@@ -337,9 +348,16 @@ export async function createToolServer(
       // also reconciles the tool list, so an agent that noticed something was
       // wrong does not have to wait for the next tick to have it fixed.
       if (await refreshWiring()) server.sendToolListChanged();
-      const live = (await broker.connections(principal)).filter(
-        (candidate) => candidate.wired,
-      );
+      let live = wired;
+      try {
+        live = (await broker.connections(principal)).filter(
+          (candidate) => candidate.wired,
+        );
+        connectionListError = undefined;
+      } catch (error) {
+        connectionListError = `could not list AgentMFA connections: ${String(error)}`;
+        log('warn', 'could not list connections for status', { error: String(error) });
+      }
       const liveNames = new Set(live.map((connection) => connection.name));
       const registeredNames = new Set(
         registrations.map((registration) => registration.connection.name),
@@ -363,15 +381,40 @@ export async function createToolServer(
       // Upstreams that were wired but unreachable when the session opened:
       // their tools are absent above, so naming them here is how a confused
       // agent learns the connection exists but is unavailable this session.
-      const errors = registrations
+      const errors: Array<{ scope: string; name?: string; error: string }> = registrations
         .filter(
           (registration) =>
             registration.error && liveNames.has(registration.connection.name),
         )
         .map((registration) => ({
+          scope: 'upstream',
           name: registration.connection.name,
-          error: registration.error,
+          error: registration.error!,
         }));
+      if (connectionListError) {
+        errors.unshift({ scope: 'broker', error: connectionListError });
+      }
+
+      const upstreams = registrations
+        .filter(
+          (registration) =>
+            registration.status && liveNames.has(registration.connection.name),
+        )
+        .map((registration) => ({
+          name: registration.connection.name,
+          status: registration.status,
+        }));
+      const warnings = registrations
+        .filter(
+          (registration) =>
+            registration.warnings?.length && liveNames.has(registration.connection.name),
+        )
+        .flatMap((registration) =>
+          registration.warnings!.map((warning) => ({
+            name: registration.connection.name,
+            warning,
+          })),
+        );
 
       const pending = live
         .filter((connection) => !registeredNames.has(connection.name))
@@ -388,7 +431,11 @@ export async function createToolServer(
       // One hint, chosen by what is most actionable. Reconnecting re-runs this
       // whole build, so it resolves both pending wirings and dead upstreams.
       let hint: string | undefined;
-      if (live.length === 0) {
+      if (connectionListError) {
+        hint =
+          'AgentMFA could not list connections. Reconnect this MCP session after ' +
+          'the broker is reachable or its retry delay has elapsed.';
+      } else if (live.length === 0) {
         hint =
           'This agent is not wired to any tools yet. Ask the user to open ' +
           'AgentMFA, find the tool under Tools, and wire this agent ' +
@@ -428,6 +475,8 @@ export async function createToolServer(
                     }
                   : {}),
                 ...(errors.length ? { errors } : {}),
+                ...(upstreams.length ? { upstreams } : {}),
+                ...(warnings.length ? { warnings } : {}),
                 ...(pending.length ? { pending } : {}),
                 ...(hint ? { hint } : {}),
               },
@@ -473,11 +522,26 @@ export async function createToolServer(
         withheld: outcome.withheld,
         resources: outcome.resources,
         error: outcome.error,
+        status: outcome.status,
+        warnings: outcome.warnings,
       });
       continue;
     }
 
     const toolName = toolNameFor(connection);
+    const namingWarnings =
+      toolNameCandidateFor(connection).length > toolName.length
+        ? [
+            `connection name "${connection.name}" was shortened to bounded tool ` +
+              `name "${toolName}"`,
+          ]
+        : undefined;
+    if (namingWarnings) {
+      log('warn', 'shortened a native MCP tool name', {
+        connection: connection.name,
+        toolName,
+      });
+    }
     if (taken.has(toolName)) {
       log('warn', 'skipping a connection whose tool name collides', {
         connection: connection.name,
@@ -497,7 +561,7 @@ export async function createToolServer(
       toolName,
       registerNative(server, broker, principal, connection, toolName),
     );
-    registrations.push({ connection, tools: [toolName] });
+    registrations.push({ connection, tools: [toolName], warnings: namingWarnings });
   }
 
   registerMetaTools(server, broker, principal, upstreamIndex);
@@ -519,10 +583,12 @@ export async function createToolServer(
     let live: BrokerConnection[];
     try {
       live = await broker.connections(principal);
+      connectionListError = undefined;
     } catch (error) {
       // A failed listing is not evidence that the user unwired everything.
       // Leave the surface alone and try again on the next tick.
       log('warn', 'could not refresh the wiring', { error: String(error) });
+      connectionListError = `could not list AgentMFA connections: ${String(error)}`;
       return false;
     }
     const desired = new Map<string, BrokerConnection>();
@@ -729,16 +795,7 @@ function registerMetaTools(
           content: Array<{ type: 'text'; text: string }>;
         };
       } catch (error) {
-        return {
-          isError: true,
-          content: [{
-            type: 'text' as const,
-            text: frameUntrustedText(
-              `${connection} failed: ${String(error)}`,
-              2048,
-            ).text,
-          }],
-        };
+        return upstreamToolFailure(entry.connection, error);
       }
     },
   );
@@ -774,6 +831,33 @@ function describeUpstream(connection: BrokerConnection, tool: UpstreamTool): str
   return `Proxied from ${safeConnection}.\n${description.text}\nParameters:\n${schema.text}`;
 }
 
+function upstreamToolFailure(connection: BrokerConnection, error: unknown) {
+  const payload =
+    error instanceof UpstreamRpcError
+      ? {
+          connection: connection.name,
+          error: {
+            type: 'json_rpc',
+            code: error.code,
+            message: error.message,
+            ...(error.data === undefined ? {} : { data: error.data }),
+          },
+        }
+      : {
+          connection: connection.name,
+          error: { type: 'transport', message: String(error) },
+        };
+  return {
+    isError: true,
+    content: [
+      {
+        type: 'text' as const,
+        text: frameUntrustedText(JSON.stringify(payload), 16 * 1024).text,
+      },
+    ],
+  };
+}
+
 /** What re-exposing one upstream produced: the tool names it added, or why not. */
 interface UpstreamRegistration {
   tools: string[];
@@ -782,6 +866,8 @@ interface UpstreamRegistration {
   /** How many resources + templates this upstream contributed. */
   resources: number;
   error?: string;
+  status?: 'no_tools_capability' | 'empty_tools' | 'no_allowed_tools';
+  warnings?: string[];
 }
 
 /**
@@ -822,25 +908,74 @@ async function registerUpstream(
   }
 
   let tools = discovery.tools;
+  let status: UpstreamRegistration['status'];
+  if (discovery.capabilities.tools === undefined) {
+    status = 'no_tools_capability';
+  } else if (tools.length === 0) {
+    status = 'empty_tools';
+  }
   // A curated wiring lists only its allowed subset. This mirrors what the
   // broker enforces on tools/call; hiding the rest keeps the agent's tool
   // budget honest and its failures unconfusing.
   if (connection.allowed_tools) {
     const allowed = new Set(connection.allowed_tools);
     tools = tools.filter((tool) => allowed.has(tool.name));
+    if (discovery.tools.length > 0 && tools.length === 0) {
+      status = 'no_allowed_tools';
+    }
   }
 
   const registered: string[] = [];
   const withheld: string[] = [];
+  const warnings: string[] = [];
   for (const tool of tools) {
-    const toolName = upstreamToolName(connection, tool.name);
-    if (taken.has(toolName)) {
-      log('warn', 'skipping an upstream tool whose name collides', {
+    const preferredName = upstreamToolName(connection, tool.name);
+    if (upstreamToolNameCandidate(connection, tool.name).length > preferredName.length) {
+      const warning =
+        `upstream tool "${tool.name}" was shortened to bounded tool name ` +
+        `"${preferredName}"`;
+      warnings.push(warning);
+      log('warn', 'shortened an upstream MCP tool name', {
         connection: connection.name,
         tool: tool.name,
+        toolName: preferredName,
+      });
+    }
+    let toolName = preferredName;
+    if (taken.has(toolName)) {
+      let attempt = 1;
+      do {
+        toolName = alternateToolName(
+          preferredName,
+          `${connection.name}\0${tool.name}`,
+          attempt,
+        );
+        attempt += 1;
+      } while (taken.has(toolName) && attempt <= 32);
+
+      if (taken.has(toolName)) {
+        const warning =
+          `could not expose upstream tool "${tool.name}": every bounded name collided`;
+        log('warn', 'an upstream tool remains search-only after name collisions', {
+          connection: connection.name,
+          tool: tool.name,
+          toolName: preferredName,
+        });
+        warnings.push(warning);
+        withheld.push(tool.name);
+        index.push({ connection, tool, registeredAs: null });
+        continue;
+      }
+      const warning =
+        `upstream tool "${tool.name}" was exposed as "${toolName}" because ` +
+        `"${preferredName}" was already in use`;
+      log('warn', 'disambiguated a colliding upstream tool name', {
+        connection: connection.name,
+        tool: tool.name,
+        preferredName,
         toolName,
       });
-      continue;
+      warnings.push(warning);
     }
     // Over the registration budget: the tool stays discoverable through
     // agentmfa_search_tools and callable through agentmfa_call_tool, it
@@ -881,18 +1016,7 @@ async function registerUpstream(
             content: Array<{ type: 'text'; text: string }>;
           };
         } catch (error) {
-          return {
-            isError: true,
-            content: [
-              {
-                type: 'text' as const,
-                text: frameUntrustedText(
-                  `${connection.name} failed: ${String(error)}`,
-                  2048,
-                ).text,
-              },
-            ],
-          };
+          return upstreamToolFailure(connection, error);
         }
       },
     );
@@ -914,7 +1038,13 @@ async function registerUpstream(
     resourceSurface,
   );
 
-  return { tools: registered, withheld, resources };
+  return {
+    tools: registered,
+    withheld,
+    resources,
+    status,
+    warnings: warnings.length ? warnings : undefined,
+  };
 }
 
 /** The description an agent sees for a re-exposed resource or template. */

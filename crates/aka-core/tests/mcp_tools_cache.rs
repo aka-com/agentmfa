@@ -5,7 +5,7 @@
 //! connection drops the cache — the old server's tools say nothing about the
 //! new destination.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use aka_core::broker::Broker;
@@ -15,7 +15,8 @@ use aka_core::paths::Paths;
 use aka_core::store::ConnectionSpec;
 use aka_core::types::{ConfirmationMethod, ConnectionConfig};
 use aka_core::vault::MemoryVault;
-use axum::routing::post;
+use axum::response::IntoResponse;
+use axum::routing::{delete, post};
 use axum::Router;
 use serde_json::{json, Value};
 use zeroize::Zeroizing;
@@ -33,18 +34,22 @@ impl BrokerEvents for NoopEvents {
 struct MockMcp {
     port: u16,
     healthy: Arc<AtomicBool>,
+    deleted: Arc<AtomicUsize>,
 }
 
 async fn mock_mcp() -> MockMcp {
     let healthy = Arc::new(AtomicBool::new(true));
     let flag = healthy.clone();
+    let deleted = Arc::new(AtomicUsize::new(0));
+    let deleted_for_route = deleted.clone();
     let app = Router::new().route(
         "/mcp",
         post(move |body: axum::Json<Value>| {
             let flag = flag.clone();
             async move {
                 if !flag.load(Ordering::SeqCst) {
-                    return (axum::http::StatusCode::UNAUTHORIZED, axum::Json(json!({})));
+                    return (axum::http::StatusCode::UNAUTHORIZED, axum::Json(json!({})))
+                        .into_response();
                     // credential rejected
                 }
                 let id = body.0.get("id").cloned().unwrap_or(Value::Null);
@@ -64,17 +69,30 @@ async fn mock_mcp() -> MockMcp {
                 };
                 (
                     axum::http::StatusCode::OK,
+                    [("mcp-session-id", "mock-session")],
                     axum::Json(json!({ "jsonrpc": "2.0", "id": id, "result": result })),
                 )
+                    .into_response()
             }
-        }),
+        })
+        .merge(delete(move || {
+            let deleted = deleted_for_route.clone();
+            async move {
+                deleted.fetch_add(1, Ordering::SeqCst);
+                axum::http::StatusCode::NO_CONTENT
+            }
+        })),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    MockMcp { port, healthy }
+    MockMcp {
+        port,
+        healthy,
+        deleted,
+    }
 }
 
 async fn broker() -> (Arc<Broker>, tempfile::TempDir) {
@@ -126,6 +144,11 @@ async fn a_lapsed_credential_falls_back_to_the_cached_listing() {
     // A healthy server answers live, and the listing is remembered.
     let live = broker.ui_list_mcp_tools(&conn.id).await.unwrap();
     assert_eq!(names(&live), vec!["search", "delete"]);
+    assert_eq!(
+        server.deleted.load(Ordering::SeqCst),
+        1,
+        "a successful tool listing must tear down its upstream session"
+    );
 
     // The credential lapses: every request now 401s, as it would once an
     // OAuth access token expired with no refresh left.

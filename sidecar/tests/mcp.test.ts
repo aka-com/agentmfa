@@ -33,6 +33,7 @@ const WIRED: Record<string, string[]> = {
 };
 /** Connect-requests the fake broker has seen (debounce simulation). */
 const connectRequests = new Set<string>();
+const connectionListFailures = new Set<string>();
 
 const CONNECTIONS = [
   { name: 'prod-db', type: 'pg', target: 'db.internal:5432/app', endpoint: '/v1/pg/open' },
@@ -69,6 +70,11 @@ const upstream = {
   lastInitializeParams: undefined as Record<string, unknown> | undefined,
   elicitationAction: 'accept' as 'accept' | 'decline' | 'cancel',
   elicitationCount: 0,
+  capabilities: { tools: {}, resources: {}, completions: {} } as
+    | Record<string, unknown>
+    | undefined,
+  toolPages: undefined as Array<Array<{ name: string; description?: string }>> | undefined,
+  rpcFailure: false,
   /** The params of the most recent input_required retry, for assertions. */
   lastRetry: undefined as { inputResponses?: Record<string, unknown>; requestState?: unknown } | undefined,
 };
@@ -80,6 +86,9 @@ function resetUpstream(): void {
   upstream.lastInitializeParams = undefined;
   upstream.elicitationAction = 'accept';
   upstream.elicitationCount = 0;
+  upstream.capabilities = { tools: {}, resources: {}, completions: {} };
+  upstream.toolPages = undefined;
+  upstream.rpcFailure = false;
   upstream.lastRetry = undefined;
 }
 
@@ -136,7 +145,9 @@ function upstreamHttp(call: {
         result: {
           protocolVersion: upstream.protocolVersion,
           // Advertise resources + completions so discovery lists and wires them.
-          capabilities: { tools: {}, resources: {}, completions: {} },
+          ...(upstream.capabilities === undefined
+            ? {}
+            : { capabilities: upstream.capabilities }),
           serverInfo: { name: 'notion' },
         },
       }),
@@ -156,6 +167,16 @@ function upstreamHttp(call: {
   }
 
   if (request.method === 'tools/list') {
+    if (upstream.toolPages) {
+      const cursor = (request.params as { cursor?: string } | undefined)?.cursor;
+      const page = cursor ? Number(cursor) : 0;
+      return reply({
+        tools: upstream.toolPages[page] ?? [],
+        ...(page + 1 < upstream.toolPages.length
+          ? { nextCursor: String(page + 1) }
+          : {}),
+      });
+    }
     const cursor = (request.params as { cursor?: string } | undefined)?.cursor;
     if (!cursor) {
       return reply({
@@ -178,6 +199,20 @@ function upstreamHttp(call: {
       inputResponses?: Record<string, unknown>;
       requestState?: unknown;
     };
+    if (upstream.rpcFailure) {
+      return {
+        status: 200,
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: request.id,
+          error: {
+            code: -32602,
+            message: 'invalid search parameters',
+            data: { field: 'query', expected: 'string' },
+          },
+        }),
+      };
+    }
     // A tool that needs interactive input: on the first call it asks for it
     // (SEP-2322 input_required); on the retry — recognised by the echoed
     // requestState — it completes, echoing what the user supplied.
@@ -314,6 +349,10 @@ function fakeBroker(socketPath: string): Promise<Server> {
       return;
     }
     if (req.url === '/v1/connections') {
+      if (connectionListFailures.has(token)) {
+        send(503, { reason: 'broker_unavailable', detail: 'connection listing is offline' });
+        return;
+      }
       send(
         200,
         CONNECTIONS.map((connection) => ({
@@ -480,6 +519,27 @@ test('an agent wired to nothing is told so, not left guessing', async () => {
     assert.deepEqual(status.tools, []);
     assert.match(status.hint ?? '', /wire this agent/i);
   } finally {
+    await app.close();
+  }
+});
+
+test('a failed broker listing is reported instead of looking like empty wiring', async () => {
+  connectionListFailures.add('token-bare');
+  const app = await harness();
+  try {
+    const client = await app.connect('token-bare');
+    const status = payload(
+      await client.callTool({ name: 'agentmfa_status', arguments: {} }),
+    ) as {
+      errors?: Array<{ scope: string; error: string }>;
+      hint?: string;
+    };
+    assert.equal(status.errors?.[0]?.scope, 'broker');
+    assert.match(status.errors?.[0]?.error ?? '', /connection listing is offline/);
+    assert.match(status.hint ?? '', /could not list connections/i);
+    assert.doesNotMatch(status.hint ?? '', /not wired/i);
+  } finally {
+    connectionListFailures.delete('token-bare');
     await app.close();
   }
 });
@@ -704,6 +764,83 @@ test('status reports an MCP upstream by its real tool names', async () => {
   }
 });
 
+test('status distinguishes no tools capability from an advertised empty list', async () => {
+  const appWithoutCapability = await harness();
+  try {
+    upstream.capabilities = undefined;
+    const client = await appWithoutCapability.connect('token-mcp');
+    const status = payload(
+      await client.callTool({ name: 'agentmfa_status', arguments: {} }),
+    ) as { upstreams?: Array<{ name: string; status: string }> };
+    assert.deepEqual(status.upstreams, [
+      { name: 'notion', status: 'no_tools_capability' },
+    ]);
+  } finally {
+    await appWithoutCapability.close();
+  }
+
+  const appWithEmptyList = await harness();
+  try {
+    upstream.capabilities = { tools: {} };
+    upstream.toolPages = [[]];
+    const client = await appWithEmptyList.connect('token-mcp');
+    const status = payload(
+      await client.callTool({ name: 'agentmfa_status', arguments: {} }),
+    ) as { upstreams?: Array<{ name: string; status: string }> };
+    assert.deepEqual(status.upstreams, [{ name: 'notion', status: 'empty_tools' }]);
+  } finally {
+    await appWithEmptyList.close();
+  }
+});
+
+test('upstream JSON-RPC error codes and data survive the tool projection', async () => {
+  const app = await harness();
+  try {
+    upstream.rpcFailure = true;
+    const client = await app.connect('token-mcp');
+    const result = await client.callTool({
+      name: 'agentmfa_notion_search',
+      arguments: { query: 42 },
+    });
+    const error = JSON.parse(upstreamText(result)) as {
+      error: { type: string; code: number; message: string; data: unknown };
+    };
+    assert.equal(error.error.type, 'json_rpc');
+    assert.equal(error.error.code, -32602);
+    assert.equal(error.error.message, 'invalid search parameters');
+    assert.deepEqual(error.error.data, { field: 'query', expected: 'string' });
+  } finally {
+    await app.close();
+  }
+});
+
+test('colliding upstream names are bounded, disambiguated, and reported', async () => {
+  const app = await harness();
+  try {
+    upstream.toolPages = [[
+      { name: 'same.name', description: 'first' },
+      { name: 'same name', description: 'second' },
+      { name: `very-${'long-'.repeat(20)}tool`, description: 'long' },
+    ]];
+    const client = await app.connect('token-mcp');
+    const { tools } = await client.listTools();
+    const upstreamNames = tools
+      .map((tool) => tool.name)
+      .filter((name) => name.startsWith('agentmfa_notion_'));
+    assert.equal(upstreamNames.length, 3);
+    assert.equal(new Set(upstreamNames).size, 3);
+    assert.ok(upstreamNames.every((name) => name.length <= 64));
+
+    const status = payload(
+      await client.callTool({ name: 'agentmfa_status', arguments: {} }),
+    ) as { warnings?: Array<{ name: string; warning: string }> };
+    assert.equal(status.warnings?.[0]?.name, 'notion');
+    assert.match(status.warnings?.[0]?.warning ?? '', /exposed as/);
+  } finally {
+    await app.close();
+  }
+});
+
 test('status reports an unreachable MCP upstream as an error, not a phantom tool', async () => {
   const app = await harness();
   try {
@@ -843,6 +980,17 @@ test('idle sessions are evicted rather than accumulating forever', async () => {
   store.put('b', 'client-1', fake);
   assert.equal(store.size, 1, 'the idle session should have been swept');
   assert.equal(store.get('a', 'client-1'), null);
+});
+
+test('a missing-session lookup sweeps unrelated idle sessions', async () => {
+  const store = new SessionStore(5, 10);
+  let closes = 0;
+  const fake = { close: () => { closes += 1; return Promise.resolve(); } } as never;
+  store.put('idle', 'client-1', fake);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(store.get('missing', 'client-1'), null);
+  assert.equal(store.size, 0);
+  assert.equal(closes, 1);
 });
 
 test('the session count is capped', async () => {
