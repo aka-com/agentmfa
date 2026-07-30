@@ -2267,9 +2267,10 @@ async fn post_ssh_open(
         *port,
         user.clone(),
     );
-    // `null` while unpinned: the key is confirmed with the user and pinned
-    // at the first session-bind, so agents can distinguish "not yet trusted"
-    // from a configured fingerprint.
+    // `null` while unpinned: the first session-bind pins the observed key,
+    // either after confirmation when that setting is enabled or silently
+    // under the default TOFU posture. Agents can distinguish this state from
+    // a configured fingerprint.
     let host_key_fingerprint =
         (!host_key_fingerprint.is_empty()).then(|| host_key_fingerprint.clone());
 

@@ -673,8 +673,8 @@ struct AgentState {
     /// while other connections on this socket read it.
     host_key_fingerprint: tokio::sync::Mutex<Option<Fingerprint>>,
     /// Serializes unpinned session-binds across this socket's connections so
-    /// one open raises at most one trust prompt at a time; the loser of the
-    /// race re-checks the (then pinned) state instead of double-prompting.
+    /// one open performs at most one first-use pin (and, when configured, one
+    /// confirmation); the loser of the race re-checks the then-pinned state.
     bind_gate: tokio::sync::Mutex<()>,
     connection_id: Uuid,
     connection_name: String,
@@ -1969,9 +1969,9 @@ async fn tofu_session_bind(
     binding: &mut Option<SessionBinding>,
     payload: &[u8],
 ) -> Vec<u8> {
-    // One trust prompt at a time per open: a second connection racing this
-    // one parks here and re-checks the (then pinned) state instead of
-    // raising a duplicate prompt.
+    // One first-use pin at a time per open: a second connection racing this
+    // one parks here and re-checks the then-pinned state. When first-use
+    // confirmation is enabled, this also prevents duplicate prompts.
     let _gate = state.bind_gate.lock().await;
     if let Some(expected) = *state.host_key_fingerprint.lock().await {
         return match verify_session_bind(payload, expected) {

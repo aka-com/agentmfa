@@ -1387,9 +1387,9 @@ pub async fn renew_endpoint(
 
 /// Read a connection's already-issued direct endpoint (address, retained
 /// secret, example) without minting or rotating; `None` when none is issued.
-/// The address embeds a standing credential, so the read-back takes a fresh
-/// native gate and is audited like copying a stored secret — call it only
-/// from an explicit user action, never from a background refresh.
+/// This is an ungated display read used by list refreshes. Credential-bearing
+/// copies use `copy_endpoint_text`, which carries the native gate and audit
+/// boundary instead of relying on this display read as authorization.
 #[tauri::command]
 pub async fn get_endpoint(
     state: State<'_, AppState>,

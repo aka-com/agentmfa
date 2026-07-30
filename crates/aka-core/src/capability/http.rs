@@ -2384,7 +2384,16 @@ async fn proxy_handler(
                     ErrorReason::InvalidHeader
                 }
             };
-            return endpoint_error(StatusCode::BAD_REQUEST, reason, &error.detail());
+            let detail = match &error {
+                HttpValidationError::ReservedHeader(_) => format!(
+                    "{}; configure the SDK to omit its native credential header and put this \
+                     endpoint's secret in Authorization: Bearer instead; if the SDK cannot omit \
+                     that header, use a request or transport hook before calling this endpoint",
+                    error.detail()
+                ),
+                _ => error.detail(),
+            };
+            return endpoint_error(StatusCode::BAD_REQUEST, reason, &detail);
         }
     };
 

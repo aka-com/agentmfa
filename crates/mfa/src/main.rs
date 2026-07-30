@@ -276,7 +276,8 @@ enum Command {
     SshAgent {
         /// The ssh connection whose endpoint to speak for.
         connection: String,
-        /// Operate on a broker rooted here instead of the default layout.
+        /// Use this broker root for local management; with --broker, use its
+        /// local management-credential store.
         #[arg(long)]
         root: Option<PathBuf>,
         /// Manage the broker at this manage-API URL instead of this machine's.
@@ -313,7 +314,8 @@ enum Command {
         /// Close this session instead of listing sessions.
         #[arg(long)]
         close: Option<u64>,
-        /// Operate on a broker rooted here instead of the default layout.
+        /// Use this broker root for local management; with --broker, use its
+        /// local management-credential store.
         #[arg(long)]
         root: Option<PathBuf>,
         /// Manage the broker at this manage-API URL instead of this machine's.
@@ -511,8 +513,11 @@ enum ManageCommand {
 enum SettingsCommand {
     /// Print the broker's effective settings.
     Get {
+        /// Operate on a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Manage the broker at this manage-API URL instead of this
+        /// machine's.
         #[arg(long)]
         broker: Option<String>,
     },
@@ -534,8 +539,11 @@ enum SettingsCommand {
         /// refused rather than trusted.
         #[arg(long)]
         confirm_ssh_host_keys: Option<bool>,
+        /// Operate on a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Manage the broker at this manage-API URL instead of this
+        /// machine's.
         #[arg(long)]
         broker: Option<String>,
     },
@@ -3363,7 +3371,7 @@ fn print_status_report(report: &StatusReport) {
         if let Some(warning) =
             headless_confirmation_warning(report.tools.iter().filter(|tool| tool.confirm).count())
         {
-            eprintln!("warning: {warning}");
+            eprintln!("{warning}");
         }
     }
 }

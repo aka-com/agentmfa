@@ -451,6 +451,9 @@ where authorization is checked. An SSH session that has authenticated is
 owned by your client and the server, and the broker is not in its path —
 so ticket expiry, turning the connection off, deleting it, and shutting the
 broker down all prevent **new** logins and end nothing already running.
+Likewise, a "signed" activity entry means the broker produced a login
+signature; the broker cannot observe whether the SSH server later accepted
+or rejected that login.
 Two consequences worth planning around:
 
 - `ControlMaster`/`ControlPersist` multiplexing reuses one authenticated
@@ -495,6 +498,8 @@ during a serving session and send `tools/list_changed`. Upstream MCP catalogs
 are discovered when the serving session starts; reconnect to refresh an
 upstream's tools, schemas, resources, or curated subset. Each upstream
 operation creates and then closes its own upstream MCP session.
+A call to a stale catalog entry may therefore receive a 403 because the tool
+is no longer current; do not interpret that response alone as a policy denial.
 
 An upstream elicitation is relayed through the authenticated `/v1/elicit`
 callback and waits only when an AgentMFA request surface can display it.
@@ -762,6 +767,9 @@ mod tests {
             "SSH_AUTH_SOCK",
             "session binding and host-bound authentication automatically",
             "host-key-mismatched signing requests",
+            "cannot observe whether the SSH server later accepted",
+            "stale catalog entry",
+            "do not interpret that response alone as a policy denial",
         ] {
             assert!(text.contains(needle), "instructions missing {needle:?}");
         }

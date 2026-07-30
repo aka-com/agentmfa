@@ -2607,6 +2607,13 @@ async fn http_direct_endpoint_rejects_client_supplied_custom_credential_header()
     .await;
     assert_eq!(status, 400, "response: {body}");
     assert_eq!(body["reason"], "reserved_header");
+    assert!(
+        body["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("omit its native credential header")
+                && detail.contains("Authorization: Bearer")),
+        "response: {body}"
+    );
     assert_eq!(up.hits.load(Ordering::SeqCst), 0);
 }
 

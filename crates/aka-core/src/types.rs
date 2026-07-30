@@ -292,7 +292,8 @@ impl ConnectionConfig {
     }
 
     /// OpenSSH destination an agent should invoke. Imported aliases are kept
-    /// so OpenSSH can apply ProxyJump and the rest of the user's config.
+    /// so OpenSSH can apply compatible settings from the user's config;
+    /// ProxyJump destinations are refused during import.
     pub fn ssh_destination(&self) -> Option<&str> {
         match self {
             ConnectionConfig::Ssh {
