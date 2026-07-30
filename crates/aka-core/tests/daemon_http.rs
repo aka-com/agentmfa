@@ -704,9 +704,9 @@ async fn connections_listing_shows_targets_only() {
         list,
         json!([
             {"name": "github", "type": "api", "target": format!("http://127.0.0.1:{}", up.port),
-             "endpoint": "/v1/http", "wired": true},
+             "endpoint": "/v1/http", "wired": true, "confirm": false},
             {"name": "prod-db", "type": "pg", "target": "app@db.internal.aka.com:5432/app_production",
-             "endpoint": "/v1/pg/open", "wired": true},
+             "endpoint": "/v1/pg/open", "wired": true, "confirm": false},
         ])
     );
     // No secret names, ids, or templates anywhere in the response.

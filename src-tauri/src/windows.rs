@@ -267,6 +267,13 @@ fn tray_menu(app: &AppHandle, request_count: usize) -> tauri::Result<Menu<tauri:
 pub fn update_request_count(app: &AppHandle, request_count: usize) {
     let app = app.clone();
     let _ = app.clone().run_on_main_thread(move || {
+        // Main-thread work from different producers can be delivered out of
+        // order. Re-read the coordinator here so a stale captured count can
+        // never overwrite a newer tray state.
+        let request_count = app
+            .try_state::<crate::attention::RequestAttention>()
+            .map(|attention| attention.count())
+            .unwrap_or(request_count);
         let Some(tray) = app.tray_by_id("main") else {
             return;
         };

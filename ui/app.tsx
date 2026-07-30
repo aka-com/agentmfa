@@ -1053,13 +1053,24 @@ function RequestInbox(): ReactNode {
   const recent = recentRequests(state.requests, activeIds);
   const count = active.length;
   const empty = count === 0 && recent.length === 0;
+  const unavailableRefusals = state.activity.filter((entry) =>
+    entry.text.startsWith('Refused (nobody could confirm):')).length;
   return (
     <div className="request-inbox">
+      {unavailableRefusals > 0
+        ? <div className="request-surface-warning" role="status">
+            <b>{unavailableRefusals} traffic confirmation
+              {unavailableRefusals === 1 ? ' was' : 's were'} refused</b>
+            <span>
+              No approval surface was attached. This durable count comes from the Activity Log.
+            </span>
+          </div>
+        : null}
       {empty
         ? <div className="empty request-empty">
             <div className="empty-ico"><Icon markup={ICONS.bell} /></div>
             <h3>No requests yet</h3>
-            <p>Requests that need attention and their recent outcomes will appear here.</p>
+            <p>Requests that need attention and outcomes from this broker session will appear here.</p>
           </div>
         : <>
             <section className="request-section" aria-labelledby="request-active-title">
@@ -1132,11 +1143,13 @@ function RequestInbox(): ReactNode {
             </section>
             <section className="request-section" aria-labelledby="request-recent-title">
               <div className="request-section-head">
-                <h3 id="request-recent-title">Recent</h3>
+                <h3 id="request-recent-title">Recent (this broker session)</h3>
                 <span className="request-total">{recent.length}</span>
               </div>
               {recent.length === 0
-                ? <div className="request-section-empty">Resolved requests will appear here.</div>
+                ? <div className="request-section-empty">
+                    Resolved requests from this broker session will appear here.
+                  </div>
                 : <div className="request-list request-history-list">
                     {recent.map((record) => {
                       const outcome = requestOutcome(record);
@@ -3081,10 +3094,34 @@ function AppRoot(): ReactNode {
   }
   return (
     <>
+      <RequestLiveRegion />
       {mode === 'dropdown' ? <DropdownWindow /> : <MainWindow />}
       <ConnectionContextMenu />
     </>
   );
+}
+
+function RequestLiveRegion(): ReactNode {
+  const active = activeRequests(state.approvals, state.elicitations);
+  const previousCount = useRef(0);
+  const [announcement, setAnnouncement] = useState('');
+  const count = active.length;
+  const nextExpiry = active
+    .map((request) => request.kind === 'approval'
+      ? request.approval.expires_at
+      : request.elicitation.expires_at)
+    .sort()[0];
+  useEffect(() => {
+    if (count > previousCount.current) {
+      const expiry = nextExpiry ? ` Next request expires in ${timeLeft(nextExpiry)}.` : '';
+      setAnnouncement(
+        `${count} request${count === 1 ? '' : 's'} waiting for your attention.${expiry}`,
+      );
+    }
+    previousCount.current = count;
+  }, [count, nextExpiry]);
+  return <div className="sr-only" role="status" aria-live="assertive"
+    aria-atomic="true">{announcement}</div>;
 }
 
 /* --------------------------------- sheets -------------------------------- */
@@ -6502,6 +6539,22 @@ window.addEventListener('resize', () => {
 });
 
 /* --------------------------------- boot ---------------------------------- */
+let requestRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleRequestRefresh(): void {
+  if (requestRefreshTimer) clearTimeout(requestRefreshTimer);
+  requestRefreshTimer = setTimeout(async () => {
+    requestRefreshTimer = null;
+    await Promise.all([
+      load('elicitations', 'list_elicitations'),
+      load('approvals', 'list_approvals'),
+      load('requests', 'list_requests'),
+      load('connections', 'list_connections'),
+    ]);
+    render();
+  }, 250);
+}
+
 async function boot() {
   if (mode === 'dropdown' && state.tab === 'start') state.tab = 'connections';
   // A webview reload must not leave a stale native lock behind. Forms acquire
@@ -6608,27 +6661,18 @@ async function boot() {
     } catch (e) { console.error(e); }
   }
   await listen('aka://sessions-changed', () => refresh('sessions'));
-  await listen('aka://elicitations-changed', async () => {
-    await Promise.all([
-      load('elicitations', 'list_elicitations'),
-      load('requests', 'list_requests'),
-    ]);
-    render();
+  await listen('aka://elicitations-changed', () => {
+    scheduleRequestRefresh();
     // The open dialog's request may have been answered elsewhere or
     // expired; the sheet re-renders as "gone" via ElicitationSheet, which
     // is correct — nothing to close here, the user dismisses it informed.
   });
-  await listen('aka://approvals-changed', async () => {
+  await listen('aka://approvals-changed', () => {
     // The queue drives a modal, so it must not lag: a prompt that was
     // answered elsewhere (or lapsed) re-renders the open dialog as gone.
     // Connection rows ride the same refresh so an opened/closed approval
     // window never leaves its status card stale.
-    await Promise.all([
-      load('approvals', 'list_approvals'),
-      load('requests', 'list_requests'),
-      load('connections', 'list_connections'),
-    ]);
-    render();
+    scheduleRequestRefresh();
   });
   await listen('aka://agents-changed', async () => {
     // Fires when an agent fetches the shared key (compat pair) or the key

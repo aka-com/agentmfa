@@ -140,7 +140,7 @@ impl ApprovalRequest {
         Self {
             connection: connection.clone(),
             unit,
-            agent: agent.into(),
+            agent: cap_approval_text(agent.into()),
             summary: cap_approval_text(summary.into()),
             detail: None,
             consequence: None,
@@ -419,7 +419,9 @@ impl Approvals {
 
             // An open window covers this agent on this connection — not the
             // connection at large, and not an agent the user never saw.
-            if state.grants.contains_key(&key) {
+            if let Some(grant) = state.grants.get(&key).copied() {
+                drop(state);
+                self.audit_window_allow(&request, grant);
                 return Verdict::Allowed;
             }
             if state.cooldowns.contains_key(&connection_id) {
@@ -471,11 +473,11 @@ impl Approvals {
                     let info = PendingApproval {
                         id,
                         connection_id,
-                        connection: request.connection.name.clone(),
+                        connection: cap_approval_text(request.connection.name.clone()),
                         kind: request.connection.kind(),
                         unit: request.unit,
-                        target: request.connection.target(),
-                        agent: request.agent.clone(),
+                        target: cap_approval_text(request.connection.target()),
+                        agent: cap_approval_text(request.agent.clone()),
                         summary: request.summary.clone(),
                         detail: request.detail.clone(),
                         consequence: request.consequence,
@@ -904,6 +906,25 @@ impl Approvals {
         self.inner.audit.append(entry);
     }
 
+    fn audit_window_allow(&self, request: &ApprovalRequest, grant: Grant) {
+        self.inner.audit.append(
+            AuditEntry::new(
+                AuditKind::AutoAllowed,
+                format!(
+                    "Auto-approved under open window: {} → {}",
+                    request.agent, request.connection.name
+                ),
+            )
+            .agent(request.agent.clone())
+            .connection(request.connection.name.clone())
+            .detail(request.summary.clone())
+            .outcome("approved")
+            .field("kind", request.connection.kind().as_str())
+            .field("via", "window")
+            .field("window_until", grant.wall_until.to_rfc3339()),
+        );
+    }
+
     /// Drop lapsed windows and cooldowns, and refuse prompts whose deadline
     /// has passed. A prompt whose callers all disconnected is retired too:
     /// answering it must not open a window for traffic that no longer exists.
@@ -1163,7 +1184,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_approval_opens_a_window_the_next_calls_ride() {
-        let (approvals, events, _dir) = auto(ApprovalDecision::ApproveWindow);
+        let (approvals, events, dir) = auto(ApprovalDecision::ApproveWindow);
         let conn = connection();
 
         assert_eq!(approvals.gate(request(&conn)).await, Verdict::Allowed);
@@ -1174,6 +1195,18 @@ mod tests {
             "the window covers what follows without asking again"
         );
         assert!(approvals.window_remaining(&conn.id).is_some());
+        let entries = AuditLog::open(dir.path().join("audit.jsonl"))
+            .unwrap()
+            .recent(10);
+        assert!(
+            entries.iter().any(|entry| {
+                entry.kind == AuditKind::AutoAllowed
+                    && entry.fields.get("via").and_then(serde_json::Value::as_str)
+                        == Some("window")
+                    && entry.fields.contains_key("window_until")
+            }),
+            "a call riding the window remains attributable in the audit log"
+        );
 
         // A different connection is a different decision.
         let other = connection();

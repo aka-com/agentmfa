@@ -2509,6 +2509,10 @@ impl Broker {
     /// listeners and lets a process supervisor wait for clean audit/accounting
     /// teardown before the runtime disappears.
     pub fn begin_shutdown(&self) -> usize {
+        // Refuse parked decisions while the control sockets can still carry
+        // their structured answer back to callers.
+        self.approvals.revoke_all();
+        self.elicitations.revoke_all();
         let listeners = {
             let mut listeners = self.endpoint_listeners.lock().unwrap();
             std::mem::take(&mut *listeners)

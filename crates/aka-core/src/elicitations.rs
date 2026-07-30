@@ -558,8 +558,8 @@ impl Elicitations {
             let info = PendingElicitation {
                 id,
                 connection_id: request.connection.id,
-                connection: request.connection.name.clone(),
-                agent: request.agent.clone(),
+                connection: cap_text(&request.connection.name, FIELD_TEXT_CAP),
+                agent: cap_text(&request.agent, FIELD_TEXT_CAP),
                 tool: cap_text(&request.tool, FIELD_TEXT_CAP),
                 message: cap_text(&request.message, ELICITATION_TEXT_CAP),
                 fields: fields_from_schema(&request.requested_schema),
@@ -774,6 +774,28 @@ impl Elicitations {
             }
         }
         lapsed
+    }
+
+    /// Broker teardown: cancel every parked upstream input request before
+    /// listeners disappear, so callers receive a protocol answer rather than
+    /// only observing a broken transport.
+    pub fn revoke_all(&self) {
+        let ids = self
+            .inner
+            .state
+            .lock()
+            .unwrap()
+            .pending
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        for id in ids {
+            self.resolve(
+                &id,
+                ElicitationOutcome::cancelled(),
+                RequestResolution::PolicyChanged,
+            );
+        }
     }
 }
 

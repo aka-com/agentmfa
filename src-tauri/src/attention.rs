@@ -5,7 +5,7 @@
 //! not produce duplicate desktop notifications. The inbox itself always
 //! refetches from the broker.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -20,6 +20,8 @@ const NOTIFICATION_DEBOUNCE: Duration = Duration::from_millis(400);
 const NOTIFICATION_DELIVERY_DEADLINE: Duration = Duration::from_secs(3);
 const NOTIFICATION_RESPONSE_DEADLINE: Duration = Duration::from_secs(5 * 60);
 const NOTIFICATION_QUEUE_DEPTH: usize = 2;
+const NOTIFICATION_RATE_WINDOW: Duration = Duration::from_secs(60);
+const NOTIFICATION_RATE_LIMIT: usize = 4;
 const OPEN_INBOX_ACTION: &str = "open_request_inbox";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -210,6 +212,10 @@ struct AttentionInner {
     elicitations: BTreeMap<String, ElicitationSummary>,
     notifications_available: bool,
     notification_unavailable_reason: Option<String>,
+    /// Native banners are deliberately scarce: the Inbox and tray remain
+    /// authoritative when a noisy upstream keeps creating distinct prompts.
+    notification_times: VecDeque<Instant>,
+    notification_storm_announced: bool,
 }
 
 impl AttentionInner {
@@ -227,6 +233,49 @@ impl AttentionInner {
             Some(_) | None => generation == self.remote_refresh_generation,
         }
     }
+
+    fn set_scope(&mut self, scope: String) -> Option<usize> {
+        if !self.tracker.set_scope(scope) {
+            return None;
+        }
+        self.flush_generation = self.flush_generation.wrapping_add(1);
+        self.flush_scheduled = false;
+        self.remote_refresh_generation = self.remote_refresh_generation.wrapping_add(1);
+        self.last_remote_version = None;
+        self.elicitations.clear();
+        self.notification_times.clear();
+        self.notification_storm_announced = false;
+        Some(self.total())
+    }
+
+    fn admit_notification(&mut self, now: Instant) -> NotificationAdmission {
+        while self
+            .notification_times
+            .front()
+            .is_some_and(|sent| now.saturating_duration_since(*sent) >= NOTIFICATION_RATE_WINDOW)
+        {
+            self.notification_times.pop_front();
+        }
+        if self.notification_times.is_empty() {
+            self.notification_storm_announced = false;
+        }
+        if self.notification_times.len() < NOTIFICATION_RATE_LIMIT {
+            self.notification_times.push_back(now);
+            NotificationAdmission::Normal
+        } else if !self.notification_storm_announced {
+            self.notification_storm_announced = true;
+            NotificationAdmission::Storm
+        } else {
+            NotificationAdmission::Suppressed
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NotificationAdmission {
+    Normal,
+    Storm,
+    Suppressed,
 }
 
 /// Managed Tauri state shared by local broker callbacks and the remote SSE
@@ -254,6 +303,8 @@ impl RequestAttention {
                 elicitations: BTreeMap::new(),
                 notifications_available: true,
                 notification_unavailable_reason: None,
+                notification_times: VecDeque::new(),
+                notification_storm_announced: false,
             }),
             notification_tx,
         }
@@ -311,21 +362,9 @@ impl RequestAttention {
     }
 
     fn set_scope(&self, app: &AppHandle, scope: String) {
-        let changed = {
-            let mut inner = self.inner.lock().unwrap();
-            if !inner.tracker.set_scope(scope) {
-                false
-            } else {
-                inner.flush_generation = inner.flush_generation.wrapping_add(1);
-                inner.flush_scheduled = false;
-                inner.remote_refresh_generation = inner.remote_refresh_generation.wrapping_add(1);
-                inner.last_remote_version = None;
-                inner.elicitations.clear();
-                true
-            }
-        };
-        if changed {
-            crate::windows::update_request_count(app, 0);
+        let total = self.inner.lock().unwrap().set_scope(scope);
+        if let Some(total) = total {
+            crate::windows::update_request_count(app, total);
         }
     }
 
@@ -499,7 +538,8 @@ fn flush_notification(app: &AppHandle, generation: u64) {
         }
         inner.flush_scheduled = false;
         let requests = inner.tracker.take_pending();
-        (requests, inner.tracker.active.len(), inner.settings)
+        let total = inner.total();
+        (requests, total, inner.settings)
     };
     if requests.is_empty() {
         return;
@@ -512,6 +552,28 @@ fn flush_notification(app: &AppHandle, generation: u64) {
         }
         NotificationMode::WhenHidden if crate::windows::request_surface_focused(app) => return,
         NotificationMode::WhenHidden | NotificationMode::Always => {}
+    }
+
+    match attention
+        .inner
+        .lock()
+        .unwrap()
+        .admit_notification(Instant::now())
+    {
+        NotificationAdmission::Normal => {}
+        NotificationAdmission::Storm => {
+            crate::windows::surface_for_approval(app);
+            let body = format!(
+                "Open the Request Inbox to review {total} waiting requests. Further notifications are paused for one minute."
+            );
+            if let Err(error) =
+                deliver_notification(app, "Many AgentMFA requests are waiting", &body)
+            {
+                tracing::warn!(%error, "could not deliver the notification rate-limit warning");
+            }
+            return;
+        }
+        NotificationAdmission::Suppressed => return,
     }
 
     if let Err(error) = show_notification(app, &requests, total, settings.show_context) {
@@ -867,9 +929,9 @@ pub fn approval_resolved(app: &AppHandle, id: &uuid::Uuid) {
 }
 
 /// A paused tool call is waiting on the user for input. Unlike approvals this
-/// is not folded into the coalescing tracker or the tray count — an upstream
-/// elicitation is a single, distinct question — so it raises one notification
-/// directly, honoring the same notification-mode setting.
+/// is not folded into the coalescing tracker — an upstream elicitation is a
+/// single, distinct question — so it raises one notification directly while
+/// still contributing to the shared tray count.
 pub fn elicitation_requested(
     app: &AppHandle,
     pending: &aka_core::elicitations::PendingElicitation,
@@ -905,11 +967,35 @@ fn notify_elicitation(app: &AppHandle, pending: &ElicitationSummary) {
         NotificationMode::WhenHidden if crate::windows::request_surface_focused(app) => return,
         NotificationMode::WhenHidden | NotificationMode::Always => {}
     }
+    let total = attention.count();
+    match attention
+        .inner
+        .lock()
+        .unwrap()
+        .admit_notification(Instant::now())
+    {
+        NotificationAdmission::Normal => {}
+        NotificationAdmission::Storm => {
+            crate::windows::surface_for_approval(app);
+            let body = format!(
+                "Open the Request Inbox to review {total} waiting requests. Further notifications are paused for one minute."
+            );
+            if let Err(error) =
+                deliver_notification(app, "Many AgentMFA requests are waiting", &body)
+            {
+                tracing::warn!(%error, "could not deliver the notification rate-limit warning");
+            }
+            return;
+        }
+        NotificationAdmission::Suppressed => return,
+    }
     let title = "AgentMFA needs your input".to_string();
     let body = if show_context {
         let agent = notification_label(&pending.agent, "An agent");
         let connection = notification_label(&pending.connection, "a tool");
-        format!("{connection} asked {agent} for input. Open the Request Inbox to respond.")
+        format!(
+            "{connection} needs your input. {agent} is paused. Open the Request Inbox to respond."
+        )
     } else {
         "An upstream asked for input. Open the Request Inbox to respond.".to_string()
     };
@@ -1028,6 +1114,52 @@ mod tests {
         assert!(tracker.active.is_empty());
         assert!(tracker.take_pending().is_empty());
         assert!(!tracker.set_scope("remote:https://broker.example".into()));
+    }
+
+    #[test]
+    fn changing_brokers_clears_elicitations_from_the_total() {
+        let attention = RequestAttention::new(NotificationSettings::default());
+        let mut inner = attention.inner.lock().unwrap();
+        assert_eq!(inner.set_scope("local".into()), Some(0));
+        inner.elicitations.insert(
+            "elicitation".into(),
+            ElicitationSummary {
+                id: "elicitation".into(),
+                agent: "codex".into(),
+                connection: "github".into(),
+            },
+        );
+        assert_eq!(inner.total(), 1);
+        assert_eq!(
+            inner.set_scope("remote:https://broker.example".into()),
+            Some(0)
+        );
+        assert!(inner.elicitations.is_empty());
+    }
+
+    #[test]
+    fn sustained_notifications_are_bounded_and_recover() {
+        let attention = RequestAttention::new(NotificationSettings::default());
+        let start = Instant::now();
+        let mut inner = attention.inner.lock().unwrap();
+        for offset in 0..NOTIFICATION_RATE_LIMIT {
+            assert_eq!(
+                inner.admit_notification(start + Duration::from_secs(offset as u64)),
+                NotificationAdmission::Normal
+            );
+        }
+        assert_eq!(
+            inner.admit_notification(start + Duration::from_secs(5)),
+            NotificationAdmission::Storm
+        );
+        assert_eq!(
+            inner.admit_notification(start + Duration::from_secs(6)),
+            NotificationAdmission::Suppressed
+        );
+        assert_eq!(
+            inner.admit_notification(start + NOTIFICATION_RATE_WINDOW),
+            NotificationAdmission::Normal
+        );
     }
 
     #[test]

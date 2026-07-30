@@ -8,6 +8,7 @@
 //! an async thread panics).
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use aka_client::{credentials::TokenStore, RemoteBackend, RemoteConfig};
@@ -487,6 +488,7 @@ impl BrokerState {
         let event_app = app.clone();
         let sse_backend = backend.clone();
         let event_backend = backend.clone();
+        let refresh_sequence = Arc::new(AtomicU64::new(0));
         let task = tauri::async_runtime::spawn(async move {
             aka_client::events::subscribe_request_surface(
                 sse_backend,
@@ -503,15 +505,25 @@ impl BrokerState {
                     );
                     crate::events::emit_manage_event(&event_app, event);
                     if should_reconcile {
-                        let Some(refresh_generation) =
-                            crate::attention::begin_remote_refresh(&event_app)
-                        else {
-                            crate::windows::surface_for_approval(&event_app);
-                            return;
-                        };
+                        // Approval and elicitation events often arrive in a
+                        // burst for one broker mutation. Reconcile once after
+                        // the burst instead of issuing one full snapshot read
+                        // per event.
+                        let sequence = refresh_sequence.fetch_add(1, Ordering::Relaxed) + 1;
+                        let refresh_sequence = refresh_sequence.clone();
                         let backend = event_backend.clone();
                         let app = event_app.clone();
                         tauri::async_runtime::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                            if refresh_sequence.load(Ordering::Relaxed) != sequence {
+                                return;
+                            }
+                            let Some(refresh_generation) =
+                                crate::attention::begin_remote_refresh(&app)
+                            else {
+                                crate::windows::surface_for_approval(&app);
+                                return;
+                            };
                             match tokio::time::timeout(
                                 std::time::Duration::from_secs(5),
                                 backend.approval_snapshot(),
