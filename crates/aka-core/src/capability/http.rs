@@ -1718,8 +1718,8 @@ async fn relay_response(
     }
 }
 
-/// Headers that can create, carry, or negotiate authority are contained at
-/// the upstream boundary unless the connection explicitly opts in.
+/// Headers that can create, carry, or negotiate authority follow the HTTP
+/// connection's response-credential policy.
 fn response_header_is_relayable(name: &HeaderName, expose_response_credentials: bool) -> bool {
     expose_response_credentials
         || !matches!(
@@ -3456,7 +3456,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_response_credentials_require_opt_in_and_preserve_cookie_fields() {
+    fn direct_response_credentials_follow_policy_and_preserve_cookie_fields() {
         let outcome = || ExecOutcome {
             status: 200,
             body: json!({
@@ -3512,7 +3512,7 @@ mod tests {
     }
 
     #[test]
-    fn every_credential_bearing_response_header_requires_opt_in() {
+    fn every_credential_bearing_response_header_can_be_contained() {
         for name in [
             "set-cookie",
             "set-cookie2",
@@ -3528,7 +3528,7 @@ mod tests {
             let name = HeaderName::from_bytes(name.as_bytes()).unwrap();
             assert!(
                 !response_header_is_relayable(&name, false),
-                "{name} escaped the default containment boundary"
+                "{name} escaped the configured containment boundary"
             );
             assert!(response_header_is_relayable(&name, true));
         }

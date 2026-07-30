@@ -271,16 +271,6 @@ test('the post-add banner stays a compact success message', async () => {
   assert.doesNotMatch(readyCard, /Ask your agent|Copy task|copy-first-task/);
 });
 
-test('the MCP tool filter is pinned to the detail heading’s right edge', async () => {
-  const styles = await readFile(new URL('../styles.css', import.meta.url), 'utf8');
-  const aside = styles.match(/\.cd-lbl-aside \{([\s\S]*?)\}/)?.[1];
-
-  assert.ok(aside, 'MCP heading aside styles are present');
-  assert.match(aside, /flex: 1 1 auto/);
-  assert.match(aside, /justify-content: flex-end/);
-  assert.match(styles, /\.cd-lbl-aside \.cat-meta-tools \{[^}]*margin-left: auto/);
-});
-
 test('connection detail headings have no leading connection icon', async () => {
   const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
   const detail = app.match(
@@ -549,10 +539,20 @@ test('request attention policy exposes escalation, onboarding, and autostart con
   assert.match(app, /Your system settings remain in control/);
 });
 
-test('API response credentials stay behind an explicit, gated connection opt-in', async () => {
+test('connection detail keeps only Ask before outside its Advanced disclosure', async () => {
   const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+  const endpointView = await readFile(
+    new URL('../src/features/endpoint-view.tsx', import.meta.url),
+    'utf8',
+  );
   const relay = app.match(
     /function ResponseCredentialRelay\([\s\S]*?\n\}\n\n\/\*\*/,
+  )?.[0];
+  const confirmation = app.match(
+    /function ConfirmationSection\([\s\S]*?\n\}\n\n\/\*\*/,
+  )?.[0];
+  const advanced = app.match(
+    /function ConnectionAdvancedSection\([\s\S]*?\n\}\n\nfunction McpStatus/,
   )?.[0];
   const enable = app.match(
     /case 'response-credentials-on':([\s\S]*?)case 'response-credentials-off':/,
@@ -564,6 +564,18 @@ test('API response credentials stay behind an explicit, gated connection opt-in'
   assert.ok(relay, 'API detail view exposes the response-credential policy');
   assert.match(relay, /if \(c\.type !== 'api'\) return null/);
   assert.match(relay, /Boolean\(c\.agent_access\.expose_response_credentials\)/);
+  assert.ok(confirmation, 'Ask before has its own primary detail section');
+  assert.doesNotMatch(confirmation, /ResponseCredentialRelay|StatementRecording|EndpointAuthRow/);
+  assert.ok(advanced, 'secondary connection options have an Advanced disclosure');
+  assert.match(advanced, /ConnectionToolScope/);
+  assert.match(advanced, /ResponseCredentialRelay/);
+  assert.match(advanced, /StatementRecording/);
+  assert.match(advanced, /EndpointAuthRow/);
+  const endpointStrip = endpointView.match(
+    /export function EndpointStrip\([\s\S]*?\n\}\n\n\/\*\*/,
+  )?.[0];
+  assert.ok(endpointStrip);
+  assert.doesNotMatch(endpointStrip, /EndpointAuthRow/);
   assert.ok(enable, 'the opt-in action is wired');
   assert.match(enable, /holdDropdownFormOpen\(\)/);
   assert.match(
@@ -576,6 +588,7 @@ test('API response credentials stay behind an explicit, gated connection opt-in'
     /invoke\('set_expose_response_credentials',[\s\S]*?expose: false/,
   );
   assert.doesNotMatch(disable, /holdDropdownFormOpen\(\)/);
+  assert.match(app, /AgentMFA has not connected to this tool yet\. The SSH host key will be pinned on first connection\./);
 });
 
 test('request history and secret dependencies remain actionable', async () => {

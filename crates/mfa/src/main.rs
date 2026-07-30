@@ -656,14 +656,14 @@ enum ConnCommand {
         broker: Option<String>,
     },
     /// Report or change whether an API connection may return credential-bearing
-    /// upstream response headers to agents. They are contained by default.
+    /// upstream response headers to agents. They are returned by default.
     ResponseCredentials {
         /// The API connection to inspect or change.
         name: String,
-        /// Allow credential-bearing upstream response headers to reach agents.
+        /// Restore the default and allow credential-bearing headers.
         #[arg(long, conflicts_with = "contain")]
         allow: bool,
-        /// Restore the secure default and contain credential-bearing headers.
+        /// Contain credential-bearing headers at the broker boundary.
         #[arg(long)]
         contain: bool,
         /// Operate on a broker rooted here instead of the default layout.

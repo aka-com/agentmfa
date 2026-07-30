@@ -371,28 +371,15 @@ async fn the_auth_scheme_word_is_not_redacted_from_relayed_bodies() {
     );
 }
 
-/// Authentication challenges are contained by default. A connection that
-/// truly needs to hand them to its caller can opt in, without corrupting the
-/// scheme word during credential redaction.
+/// Authentication challenges are returned by default. A connection can
+/// contain them without corrupting the scheme word during credential
+/// redaction.
 #[tokio::test]
-async fn a_www_authenticate_challenge_requires_explicit_opt_in() {
+async fn a_www_authenticate_challenge_can_be_explicitly_contained() {
     let up = upstream().await;
     let h = harness(BrokerConfig::default()).await;
     api_connection(&h, "github", up.port);
 
-    let (_, body) = h
-        .call("github", json!({ "method": "GET", "path": "/challenge" }))
-        .await;
-    assert!(
-        body["headers"].get("www-authenticate").is_none(),
-        "the default boundary must contain authentication challenges: {body}"
-    );
-
-    let connection = h.broker.store.connection_by_name("github").unwrap();
-    assert!(h
-        .broker
-        .ui_set_expose_response_credentials(&connection.id, true)
-        .unwrap());
     let (_, body) = h
         .call("github", json!({ "method": "GET", "path": "/challenge" }))
         .await;
@@ -402,6 +389,19 @@ async fn a_www_authenticate_challenge_requires_explicit_opt_in() {
     assert!(
         challenge.starts_with("Bearer realm="),
         "the challenge was corrupted: {challenge}"
+    );
+
+    let connection = h.broker.store.connection_by_name("github").unwrap();
+    assert!(h
+        .broker
+        .ui_set_expose_response_credentials(&connection.id, false)
+        .unwrap());
+    let (_, body) = h
+        .call("github", json!({ "method": "GET", "path": "/challenge" }))
+        .await;
+    assert!(
+        body["headers"].get("www-authenticate").is_none(),
+        "the configured boundary must contain authentication challenges: {body}"
     );
 }
 

@@ -126,7 +126,6 @@ export function EndpointStrip({ connection: c, withFormats = false }: {
     {withFormats && !expired && endpointText && endpointAddress
       ? <EndpointFormatRow connection={c} address={endpointAddress} />
       : null}
-    <EndpointAuthRow connection={c} />
   </>;
 }
 
@@ -144,7 +143,9 @@ export function EndpointStrip({ connection: c, withFormats = false }: {
  * send the extension, so an authenticated endpoint has to be reached through
  * `mfa ssh-agent` rather than by naming the socket.
  */
-function EndpointAuthRow({ connection: c }: { connection: ConnectionSummary }): ReactNode {
+export function EndpointAuthRow({ connection: c }: {
+  connection: ConnectionSummary;
+}): ReactNode {
   const endpoint = c.agent_access.endpoint;
   if (c.type !== 'ssh' || !endpoint) return null;
   const on = Boolean(endpoint.require_auth);

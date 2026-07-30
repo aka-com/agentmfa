@@ -359,10 +359,10 @@ an upstream's own `Idempotency-Key` passes through untouched.
 ABP/0 represents response headers as JSON objects with string values. Repeated
 upstream response fields are combined with `, `. Credential-bearing response
 fields (`Set-Cookie`, authentication challenges, and authentication-info) are
-contained by default; explicitly opt in per API connection only when an agent
-must receive them. With that opt-in, `Set-Cookie` is the exception to lossy
-combining: its distinct values are also preserved in `set_cookie_headers`; use
-that array rather than the combined `headers["set-cookie"]` value.
+returned by default; a connection can explicitly contain them at the broker
+boundary. When returned, `Set-Cookie` is the exception to lossy combining: its
+distinct values are also preserved in `set_cookie_headers`; use that array
+rather than the combined `headers["set-cookie"]` value.
 
 ## 5. Postgres: POST /v1/pg/open
 

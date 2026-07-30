@@ -563,7 +563,8 @@ function connDto(c: MockConnection): ConnectionSummary {
       return {
         enabled: record?.enabled ?? true,
         confirm: record?.confirm ?? false,
-        expose_response_credentials: record?.expose_response_credentials ?? false,
+        expose_response_credentials:
+          record?.expose_response_credentials ?? (c.type === 'api'),
         confirm_window_until: record?.confirm_window_until ?? null,
         confirm_window_agents: record?.confirm_window_agents ?? [],
         confirm_cooldown_until: record?.confirm_cooldown_until ?? null,
@@ -1401,7 +1402,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       if (!connection || connection.type !== 'api') return false;
       let record = db.access.find((a) => a.connection_id === connection.id);
       const expose = Boolean(args.expose);
-      if ((record?.expose_response_credentials ?? false) === expose) return false;
+      if ((record?.expose_response_credentials ?? true) === expose) return false;
       if (!record) {
         record = { connection_id: connection.id, enabled: true };
         db.access.push(record);

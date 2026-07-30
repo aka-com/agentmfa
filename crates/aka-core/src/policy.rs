@@ -314,14 +314,17 @@ impl AccessTable {
     }
 
     /// Whether response headers that can create or negotiate credentials may
-    /// cross the broker boundary. No entry and older entries both mean no.
+    /// cross the broker boundary. HTTP connections default to returning the
+    /// upstream response as received; an explicit policy entry can contain
+    /// credential-bearing headers instead.
     pub fn expose_response_credentials(&self, connection_id: &Uuid) -> bool {
         self.entries
             .lock()
             .unwrap()
             .iter()
             .find(|entry| &entry.connection_id == connection_id)
-            .is_some_and(|entry| entry.expose_response_credentials)
+            .map(|entry| entry.expose_response_credentials)
+            .unwrap_or(true)
     }
 
     /// The recorded entry for a connection, when one exists (i.e. the
@@ -362,7 +365,7 @@ impl AccessTable {
                 enabled,
                 allowed_tools: None,
                 confirm: ConfirmMode::Off,
-                expose_response_credentials: false,
+                expose_response_credentials: true,
                 audit_statements: None,
                 updated_at: Utc::now(),
             }),
@@ -398,7 +401,7 @@ impl AccessTable {
                 enabled: true,
                 allowed_tools: tools,
                 confirm: ConfirmMode::Off,
-                expose_response_credentials: false,
+                expose_response_credentials: true,
                 audit_statements: None,
                 updated_at: Utc::now(),
             }),
@@ -431,7 +434,7 @@ impl AccessTable {
                 enabled: true,
                 allowed_tools: None,
                 confirm,
-                expose_response_credentials: false,
+                expose_response_credentials: true,
                 audit_statements: None,
                 updated_at: Utc::now(),
             }),
@@ -442,7 +445,8 @@ impl AccessTable {
     }
 
     /// Allow or contain upstream response credentials for this connection.
-    /// False is the default and the value older policy records imply.
+    /// True is the default when no policy entry exists; older persisted
+    /// entries retain their recorded value.
     pub fn set_expose_response_credentials(
         &self,
         connection_id: Uuid,
@@ -452,7 +456,8 @@ impl AccessTable {
         let current = entries
             .iter()
             .find(|entry| entry.connection_id == connection_id)
-            .is_some_and(|entry| entry.expose_response_credentials);
+            .map(|entry| entry.expose_response_credentials)
+            .unwrap_or(true);
         if current == expose {
             return Ok(false);
         }
@@ -518,7 +523,7 @@ impl AccessTable {
                 enabled: true,
                 allowed_tools: None,
                 confirm: ConfirmMode::default(),
-                expose_response_credentials: false,
+                expose_response_credentials: true,
                 audit_statements,
                 updated_at: Utc::now(),
             }),
@@ -677,23 +682,24 @@ mod tests {
     }
 
     #[test]
-    fn response_credentials_default_to_contained_and_persist_independently() {
+    fn response_credentials_default_to_returned_and_persist_independently() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("access.json");
         let conn = Uuid::new_v4();
         let integrity = integrity();
         {
             let table = AccessTable::open(path.clone(), integrity.clone()).unwrap();
-            assert!(!table.expose_response_credentials(&conn));
-            assert!(table.set_expose_response_credentials(conn, true).unwrap());
             assert!(!table.set_expose_response_credentials(conn, true).unwrap());
+            assert!(table.expose_response_credentials(&conn));
+            assert!(table.set_expose_response_credentials(conn, false).unwrap());
+            assert!(!table.set_expose_response_credentials(conn, false).unwrap());
             table.set_enabled(conn, false).unwrap();
         }
         let table = AccessTable::open(path, integrity).unwrap();
-        assert!(table.expose_response_credentials(&conn));
-        assert!(!table.allows(&conn));
-        assert!(table.set_expose_response_credentials(conn, false).unwrap());
         assert!(!table.expose_response_credentials(&conn));
+        assert!(!table.allows(&conn));
+        assert!(table.set_expose_response_credentials(conn, true).unwrap());
+        assert!(table.expose_response_credentials(&conn));
     }
 
     #[test]

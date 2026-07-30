@@ -103,9 +103,8 @@ pub fn connection_dto(broker: &Broker, conn: &Connection) -> ConnectionDto {
             .as_ref()
             .map(|e| e.confirm.is_on())
             .unwrap_or_default(),
-        expose_response_credentials: entry
-            .as_ref()
-            .is_some_and(|entry| entry.expose_response_credentials),
+        expose_response_credentials: matches!(&conn.config, Api { .. })
+            && broker.access.expose_response_credentials(&conn.id),
         confirm_window_until: broker.approvals.window_remaining(&conn.id).map(|left| {
             (chrono::Utc::now()
                 + chrono::Duration::from_std(left).unwrap_or_else(|_| chrono::Duration::zero()))

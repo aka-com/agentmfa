@@ -23,7 +23,7 @@ export interface AgentAccess {
    * one login for SSH.
    */
   confirm?: boolean;
-  /** Explicit opt-in to relay upstream credential-bearing response headers. */
+  /** Whether HTTP tools relay upstream credential-bearing response headers (default true). */
   expose_response_credentials?: boolean;
   /**
    * While an approval window is open, the RFC 3339 time the last of them

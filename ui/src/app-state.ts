@@ -191,6 +191,7 @@ export interface AppState {
   confirmDiscard: boolean;
   formMenuOpen: string | null;
   connAdvancedOpen: boolean;
+  connDetailAdvancedOpen: string | null;
   connType: ConnectionType;
   connEntryName: string | null;
   connPreset: ConnectionPreset | null;
@@ -301,6 +302,7 @@ function createInitialState(): AppState {
     confirmDiscard: false,
     formMenuOpen: null,
     connAdvancedOpen: false,
+    connDetailAdvancedOpen: null,
     connType: 'api',
     connEntryName: null,
     connPreset: null,

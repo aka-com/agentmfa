@@ -96,6 +96,7 @@ import type { IconDefinition } from '/src/icon';
 import {
   ConnectionToggle,
   ENDPOINTABLE,
+  EndpointAuthRow,
   EndpointStrip,
 } from '/src/features/endpoint-view';
 import { StartViewPage } from '/src/features/getting-started-view';
@@ -1197,7 +1198,7 @@ function connectionIssues(
   }
   if (c.type === 'ssh' && !c.host_key_fingerprint) {
     issues.push({
-      text: 'Host key not pinned yet — pins on the first connection.',
+      text: 'AgentMFA has not connected to this tool yet. The SSH host key will be pinned on first connection.',
       tone: 'info',
     });
   }
@@ -1560,15 +1561,13 @@ function ConfirmationSection({ connection: c }: {
       ? <div className="cd-confirm-note">With no AgentMFA approval surface attached,
           this tool’s traffic is refused rather than carried.</div>
       : null}
-    <ResponseCredentialRelay connection={c} />
-    <StatementRecording connection={c} />
   </div>;
 }
 
 /**
  * Upstream cookies and authentication challenges can grant authority beyond
- * the broker's configured request credential. Keep them contained unless the
- * user explicitly accepts that expansion for this API.
+ * the broker's configured request credential. HTTP tools return them by
+ * default; Advanced lets the user contain them at the broker boundary.
  */
 function ResponseCredentialRelay({ connection: c }: {
   connection: ConnectionSummary;
@@ -1595,11 +1594,10 @@ function ResponseCredentialRelay({ connection: c }: {
 /**
  * Whether this database's statement text is kept in Activity.
  *
- * Postgres only, and it sits under the confirmation switch because it answers
- * the question that switch leaves open: one approval covers every statement in
- * the session, so this is what decides whether those statements are anywhere
- * afterwards. Off by default — SQL literals carry passwords and personal data,
- * and that is a retention choice per database rather than per machine.
+ * Postgres only, under Advanced. One approval covers every statement in the
+ * session, so this decides whether those statements are retained afterward.
+ * Off by default — SQL literals carry passwords and personal data, and that is
+ * a retention choice per database rather than per machine.
  */
 function StatementRecording({ connection: c }: { connection: ConnectionSummary }): ReactNode {
   if (c.type !== 'pg') return null;
@@ -1620,6 +1618,54 @@ function StatementRecording({ connection: c }: { connection: ConnectionSummary }
       title={on ? 'Statement text is recorded' : 'Statement text is not recorded'}
       aria-label={`${on ? 'Stop recording' : 'Record'} statement text for ${c.name}`}
       data-act={on ? 'statements-off' : 'statements-on'} data-conn={c.id}></button>
+  </div>;
+}
+
+function ConnectionToolScope({ connection: c }: {
+  connection: ConnectionSummary;
+}): ReactNode {
+  if (!c.mcp_path) return null;
+  const count = c.agent_access.allowed_tools?.length;
+  return <div className="cd-confirm-row cd-tool-scope">
+    <div className="cd-confirm-txt">
+      <div className="cd-confirm-lbl">Tools agents may call</div>
+      <div className="cd-confirm-sub">
+        {count == null
+          ? 'Every tool this MCP server advertises is available to agents.'
+          : `${count} selected tool${count === 1 ? ' is' : 's are'} available to agents.`}
+      </div>
+    </div>
+    <ConnectionToolsChip connection={c} />
+  </div>;
+}
+
+function ConnectionAdvancedSection({ connection: c }: {
+  connection: ConnectionSummary;
+}): ReactNode {
+  if (!c.agent_access.enabled) return null;
+  const hasEndpointAuth = c.type === 'ssh' && Boolean(c.agent_access.endpoint);
+  const hasOptions = Boolean(c.mcp_path)
+    || c.type === 'api'
+    || c.type === 'pg'
+    || hasEndpointAuth;
+  if (!hasOptions) return null;
+  const open = state.connDetailAdvancedOpen === c.id;
+  return <div className="cd-sec cd-advanced">
+    <button className="adv-toggle" data-act="toggle-connection-advanced"
+      data-id={c.id} aria-expanded={open} aria-controls={`connection-advanced-${c.id}`}>
+      <span className="adv-toggle-icon" aria-hidden="true">
+        <Icon markup={ICONS.chevronDown} />
+      </span>
+      Advanced
+    </button>
+    {open
+      ? <div className="cd-advanced-options" id={`connection-advanced-${c.id}`}>
+          <ConnectionToolScope connection={c} />
+          <ResponseCredentialRelay connection={c} />
+          <StatementRecording connection={c} />
+          <EndpointAuthRow connection={c} />
+        </div>
+      : null}
   </div>;
 }
 
@@ -1697,9 +1743,7 @@ function ConnectionDetail({ connection: c }: {
     : null;
   const mcpSection = enabled && c.mcp_path
     ? <div className="cd-sec">
-        <div className="cd-connect-lbl"><span>AgentMFA MCP</span>
-          <span className="cd-lbl-aside"><ConnectionToolsChip connection={c} /></span>
-        </div>
+        <div className="cd-connect-lbl"><span>AgentMFA MCP</span></div>
         {ENDPOINTABLE[c.type] ? <EndpointStrip connection={c} /> : null}
       </div>
     : null;
@@ -1750,6 +1794,7 @@ function ConnectionDetail({ connection: c }: {
     <ConnectionTestResult connection={c} />
     {c.mcp_path ? <>{mcpSection}{endpointSection}</> : <>{endpointSection}{mcpSection}</>}
     <ConfirmationSection connection={c} />
+    <ConnectionAdvancedSection connection={c} />
     {factRows.length
       ? <div className="cd-sec">
           <div className="cd-connect-lbl"><span>Details</span></div>
@@ -5947,6 +5992,10 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       break;
     case 'close-conn-detail':
       state.connDetailOpen = false;
+      render();
+      break;
+    case 'toggle-connection-advanced':
+      state.connDetailAdvancedOpen = state.connDetailAdvancedOpen === id ? null : id;
       render();
       break;
     case 'open-add-palette':

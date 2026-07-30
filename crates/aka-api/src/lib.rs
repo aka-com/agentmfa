@@ -271,9 +271,9 @@ pub struct AccessDto {
     /// session for Postgres, one login for SSH.
     #[serde(default)]
     pub confirm: bool,
-    /// Explicit opt-in to relay upstream response credential headers
-    /// (`Set-Cookie`, authentication challenges, and authentication-info).
-    /// Older brokers and connections default to containment.
+    /// Whether to relay upstream response credential headers (`Set-Cookie`,
+    /// authentication challenges, and authentication-info). New HTTP
+    /// connections default to true; an explicit false contains them.
     #[serde(default)]
     pub expose_response_credentials: bool,
     /// While an approval window is open, the RFC 3339 time the last of them

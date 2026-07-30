@@ -2833,10 +2833,10 @@ impl Broker {
         Ok(changed)
     }
 
-    /// Opt a plain HTTP connection into returning upstream headers that can
-    /// mint or negotiate credentials. Containment is the default; widening
-    /// this boundary takes the same fresh action confirmation as other
-    /// high-consequence access changes.
+    /// Choose whether a plain HTTP connection returns upstream headers that
+    /// can mint or negotiate credentials. Returning them is the default;
+    /// restoring it after an explicit containment choice takes the same fresh
+    /// action confirmation as other high-consequence access changes.
     pub fn ui_set_expose_response_credentials(
         &self,
         connection_id: &Uuid,
