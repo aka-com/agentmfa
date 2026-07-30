@@ -82,6 +82,7 @@ import type {
 import { queryClient, refetchBrokerQuery, removeBrokerQueries } from '/src/query-client';
 import { UiStore, useUiRevision } from '/src/ui-store';
 import { SafeMarkup } from '/src/safe-markup';
+import { Sheet } from '/src/sheet';
 
 const EDIT_SECRET_MASK = '••••••••••••';
 /** One activity page. Matches the broker's per-request ceiling; users can
@@ -3168,7 +3169,7 @@ function MainWindow(): ReactNode {
         </div>
       </div>
       {!takeover && (
-        <><Sheets /><SafeMarkup markup={endpointConfirmHTML() + deleteConnConfirmHTML()} /></>
+        <><Sheets /><ConfirmSheet /></>
       )}
     </>
   );
@@ -3219,7 +3220,7 @@ function DropdownWindow(): ReactNode {
         <LoadFailureBand />
         <div className="content dd-content"><TabContent /></div>
       </div>
-      <><Sheets /><SafeMarkup markup={endpointConfirmHTML() + deleteConnConfirmHTML()} /></>
+      <><Sheets /><ConfirmSheet /></>
     </>
   );
 }
@@ -3316,9 +3317,7 @@ function endpointIssuedSheet(): string {
   const sheetSubtitle = info.type === 'ssh'
     ? "Paste this into your tool's config. Note: SSH addresses have no separate secret; the socket path is the whole capability. You can copy it again anytime from the tool's details."
     : "Paste this into your tool's config. You can copy it again anytime from the tool's details.";
-  return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
-    <div class="sheet endpoint-issued-sheet" role="dialog" aria-modal="true" aria-labelledby="ep-title">
-      <h3 id="ep-title">Your connection address</h3>
+  return `<h3 id="ep-title">Your connection address</h3>
       <p class="sheet-sub">${sheetSubtitle}</p>
       ${field(addressLabel, info.dsn, 'dsn')}
       ${secretField}
@@ -3326,8 +3325,7 @@ function endpointIssuedSheet(): string {
       ${remoteEndpointCaution(state.broker, info.type)
         ? `<div class="rule-note ep-remote-note">${esc(remoteEndpointCaution(state.broker, info.type) ?? '')}</div>`
         : ''}
-      <div class="sheet-actions"><button class="btn" data-act="sheet-cancel">Done</button></div>
-    </div>`;
+      <div class="sheet-actions"><button class="btn" data-act="sheet-cancel">Done</button></div>`;
 }
 
 // Reissue/revoke endpoint asks: a centered confirm dialog with the same
@@ -3338,9 +3336,7 @@ function endpointConfirmHTML(): string {
   const conn = state.connections.find((candidate) => candidate.id === confirm.id);
   const name = conn ? conn.name : 'this tool';
   const reissue = confirm.kind === 'reissue-endpoint';
-  return `<div class="sheet-backdrop" data-act="confirm-cancel"></div>
-    <div class="sheet wide confirm-sheet" role="dialog" aria-modal="true" aria-labelledby="ep-confirm-title">
-      <h3 id="ep-confirm-title">${reissue ? 'Get a new address?' : 'Revoke this address?'}</h3>
+  return `<h3 id="ep-confirm-title">${reissue ? 'Get a new address?' : 'Revoke this address?'}</h3>
       <p>${reissue
         ? 'You’ll get a new address to paste into your tools. The current address stops working the moment the new one is issued.'
         : `Tools using ${esc(name)}’s address lose access immediately.`}</p>
@@ -3349,7 +3345,7 @@ function endpointConfirmHTML(): string {
         ${reissue
           ? `<button class="btn primary" data-act="reissue-endpoint-confirm" data-conn="${escAttr(String(confirm.id ?? ''))}">Get new address</button>`
           : `<button class="btn danger" data-act="revoke-endpoint-confirm" data-conn="${escAttr(String(confirm.id ?? ''))}">Revoke</button>`}
-      </div></div>`;
+      </div>`;
 }
 
 // Deleting a tool asks in the same centered dialog as the other
@@ -3360,14 +3356,33 @@ function deleteConnConfirmHTML(): string {
   const conn = state.connections.find((candidate) => candidate.id === confirm.id);
   const name = conn ? conn.name : 'this tool';
   const enabled = Boolean(conn && conn.agent_access.enabled);
-  return `<div class="sheet-backdrop" data-act="confirm-cancel"></div>
-    <div class="sheet wide confirm-sheet" role="dialog" aria-modal="true" aria-labelledby="del-conn-title">
-      <h3 id="del-conn-title">Delete ${esc(name)}?</h3>
+  return `<h3 id="del-conn-title">Delete ${esc(name)}?</h3>
       <p>The connection and its settings will be removed.${enabled ? ' Agents will lose access immediately.' : ''}</p>
       <div class="sheet-actions">
         <button class="btn" data-act="confirm-cancel">Cancel</button>
         <button class="btn danger" data-act="del-conn-confirm" data-id="${escAttr(String(confirm.id ?? ''))}">Delete</button>
-      </div></div>`;
+      </div>`;
+}
+
+function ConfirmSheet(): ReactNode {
+  const kind = state.confirm?.kind;
+  if (kind === 'reissue-endpoint' || kind === 'revoke-endpoint') {
+    return (
+      <Sheet titleId="ep-confirm-title" className="wide confirm-sheet"
+        backdropAction="confirm-cancel">
+        <SafeMarkup markup={endpointConfirmHTML()} />
+      </Sheet>
+    );
+  }
+  if (kind === 'del-conn') {
+    return (
+      <Sheet titleId="del-conn-title" className="wide confirm-sheet"
+        backdropAction="confirm-cancel">
+        <SafeMarkup markup={deleteConnConfirmHTML()} />
+      </Sheet>
+    );
+  }
+  return null;
 }
 
 /** The open sheet: converted forms render as controlled TSX, the rest as
@@ -3375,19 +3390,63 @@ function deleteConnConfirmHTML(): string {
 function Sheets(): ReactNode {
   if (!state.sheet) return null;
   switch (state.sheet.kind) {
-    case 'add-secret': return <SecretSheet editing={false} />;
-    case 'edit-secret': return <SecretSheet editing />;
-    case 'add-conn': return <ConnSheet editing={false} />;
-    case 'edit-conn': return <ConnSheet editing />;
-    case 'wiring-tools': return <WiringToolsSheet />;
-    case 'settings': return <SafeMarkup markup={settingsSheet()} />;
-    case 'clear-activity': return <SafeMarkup markup={clearActivitySheet()} />;
-    case 'elicitation': return <ElicitationSheet />;
-    case 'approval': return <ApprovalSheet />;
-    case 'mcp-auth': return <SafeMarkup markup={mcpAuthSheet()} />;
-    case 'endpoint-issued': return <SafeMarkup markup={endpointIssuedSheet()} />;
+    case 'add-secret':
+      return <Sheet titleId="secret-sheet-title" className="wide"><SecretSheet editing={false} /></Sheet>;
+    case 'edit-secret':
+      return <Sheet titleId="secret-sheet-title" className="wide"><SecretSheet editing /></Sheet>;
+    case 'add-conn':
+      return <ConnectionSheets editing={false} />;
+    case 'edit-conn':
+      return <ConnectionSheets editing />;
+    case 'wiring-tools':
+      return <Sheet titleId="wt-title" className="wide"><WiringToolsSheet /></Sheet>;
+    case 'settings':
+      return <Sheet titleId="settings-title" className="wide">
+        <SafeMarkup markup={settingsSheet()} />
+      </Sheet>;
+    case 'clear-activity':
+      return <Sheet titleId="clear-activity-title" className="wide confirm-sheet">
+        <SafeMarkup markup={clearActivitySheet()} />
+      </Sheet>;
+    case 'elicitation':
+      return <Sheet titleId="elicit-title" className="elicit-sheet" role="alertdialog">
+        <ElicitationSheet />
+      </Sheet>;
+    case 'approval':
+      return <Sheet titleId="approval-title" className="elicit-sheet" role="alertdialog">
+        <ApprovalSheet />
+      </Sheet>;
+    case 'mcp-auth':
+      return <Sheet titleId="mcp-auth-title" className="wide auth-sheet">
+        <SafeMarkup markup={mcpAuthSheet()} />
+      </Sheet>;
+    case 'endpoint-issued':
+      return <Sheet titleId="ep-title" className="endpoint-issued-sheet">
+        <SafeMarkup markup={endpointIssuedSheet()} />
+      </Sheet>;
     default: return null;
   }
+}
+
+function ConnectionSheets({ editing }: { editing: boolean }): ReactNode {
+  return (
+    <>
+      <Sheet titleId="conn-sheet-title" className="wide">
+        <ConnSheet editing={editing} />
+      </Sheet>
+      {state.confirmDiscard && (
+        <Sheet titleId="discard-conn-title" className="wide confirm-sheet discard-confirm"
+          backdropAction="discard-keep" backdropClassName="over-sheet">
+          <h3 id="discard-conn-title">{editing ? 'Discard changes?' : 'Discard this tool?'}</h3>
+          <p>You have unsaved changes in this form. Closing it discards them.</p>
+          <div className="sheet-actions">
+            <button className="btn" data-act="discard-keep">Keep editing</button>
+            <button className="btn danger" data-act="discard-confirm">Discard</button>
+          </div>
+        </Sheet>
+      )}
+    </>
+  );
 }
 
 /**
@@ -3404,50 +3463,45 @@ function ElicitationSheet(): ReactNode {
   if (!request) {
     return (
       <>
-        <div className="sheet-backdrop" data-act="sheet-cancel"></div>
-        <div className="sheet elicit-sheet" role="alertdialog" aria-modal="true" aria-labelledby="elicit-title">
-          <div className="elicit-dlg-ico"><Icon markup={ICONS.bell} /></div>
-          <h3 id="elicit-title" className="elicit-dlg-title">This request is gone</h3>
-          <div className="elicit-dlg-context">It was answered somewhere else or expired.</div>
-          <div className="sheet-actions elicit-dlg-actions">
-            <button className="btn primary" data-act="sheet-cancel">OK</button>
-          </div>
+        <div className="elicit-dlg-ico"><Icon markup={ICONS.bell} /></div>
+        <h3 id="elicit-title" className="elicit-dlg-title">This request is gone</h3>
+        <div className="elicit-dlg-context">It was answered somewhere else or expired.</div>
+        <div className="sheet-actions elicit-dlg-actions">
+          <button className="btn primary" data-act="sheet-cancel">OK</button>
         </div>
       </>
     );
   }
   return (
     <>
-      <div className="sheet-backdrop" data-act="sheet-cancel"></div>
-      <div className="sheet elicit-sheet" role="alertdialog" aria-modal="true" aria-labelledby="elicit-title">
-        <div className="elicit-dlg-ico"><Icon markup={ICONS.bell} /></div>
-        <h3 id="elicit-title" className="elicit-dlg-title untrusted-identity" dir="auto">
-          {agentLabel(request.agent)} says {request.connection} asked for input
-        </h3>
-        {/* Third-party text: rendered verbatim and inert. */}
-        <div className="elicit-dlg-question untrusted-identity" dir="auto">{request.prompt}</div>
-        {/* The upstream asked for something credential-shaped. It still gets
-            its form — the match is a guess about prose, and refusing on it
-            broke ordinary fields whose names merely read like secrets — but
-            the user gets told, in our voice, what this channel is not for. */}
-        {request.credential_warning
-          ? (
-            <div className="elicit-credential-warn">
-              <Icon markup={ICONS.shieldAlert} />
-              <span>
-                Don’t enter a password, API key, or other credential here.
-                This form is a round trip to {request.connection} over MCP: whatever you type is
-                sent back to it as ordinary text, and AgentMFA neither masks nor stores it.
-                Credentials belong in <strong>Secrets</strong>, where they stay in the Keychain and
-                are attached to traffic without passing through a prompt.
-              </span>
-            </div>
-          )
-          : null}
-        <div className="elicit-dlg-fields">
-          {request.fields.map((field, index) => {
-            const required = elicitFieldRequired(field);
-            return (
+      <div className="elicit-dlg-ico"><Icon markup={ICONS.bell} /></div>
+      <h3 id="elicit-title" className="elicit-dlg-title untrusted-identity" dir="auto">
+        {agentLabel(request.agent)} says {request.connection} asked for input
+      </h3>
+      {/* Third-party text: rendered verbatim and inert. */}
+      <div className="elicit-dlg-question untrusted-identity" dir="auto">{request.prompt}</div>
+      {/* The upstream asked for something credential-shaped. It still gets
+          its form — the match is a guess about prose, and refusing on it
+          broke ordinary fields whose names merely read like secrets — but
+          the user gets told, in our voice, what this channel is not for. */}
+      {request.credential_warning
+        ? (
+          <div className="elicit-credential-warn">
+            <Icon markup={ICONS.shieldAlert} />
+            <span>
+              Don’t enter a password, API key, or other credential here.
+              This form is a round trip to {request.connection} over MCP: whatever you type is
+              sent back to it as ordinary text, and AgentMFA neither masks nor stores it.
+              Credentials belong in <strong>Secrets</strong>, where they stay in the Keychain and
+              are attached to traffic without passing through a prompt.
+            </span>
+          </div>
+        )
+        : null}
+      <div className="elicit-dlg-fields">
+        {request.fields.map((field, index) => {
+          const required = elicitFieldRequired(field);
+          return (
             <label className="elicit-field" key={field.name}>
               <span className="untrusted-identity" dir="auto">
                 {field.label} {required ? <b aria-hidden="true">*</b>
@@ -3500,15 +3554,14 @@ function ElicitationSheet(): ReactNode {
               )}
               <FieldError k={`elicit:${field.name}`} />
             </label>
-            );
-          })}
-        </div>
-        <div className="sheet-actions elicit-dlg-actions">
-          <button className="btn elicit-refuse-btn" data-act="elicit-refuse" data-id={request.id}>Refuse</button>
-          <span className="elicit-dlg-spacer"></span>
-          <button className="btn" data-act="sheet-cancel">Cancel</button>
-          <button className="btn primary" data-act="elicit-send" data-id={request.id}>Send to {request.connection}</button>
-        </div>
+          );
+        })}
+      </div>
+      <div className="sheet-actions elicit-dlg-actions">
+        <button className="btn elicit-refuse-btn" data-act="elicit-refuse" data-id={request.id}>Refuse</button>
+        <span className="elicit-dlg-spacer"></span>
+        <button className="btn" data-act="sheet-cancel">Cancel</button>
+        <button className="btn primary" data-act="elicit-send" data-id={request.id}>Send to {request.connection}</button>
       </div>
     </>
   );
@@ -3533,16 +3586,13 @@ function ApprovalSheet(): ReactNode {
   if (!approval) {
     return (
       <>
-        <div className="sheet-backdrop" data-act="sheet-cancel"></div>
-        <div className="sheet elicit-sheet" role="alertdialog" aria-modal="true" aria-labelledby="approval-title">
-          <div className="elicit-dlg-ico"><Icon markup={ICONS.shieldAlert} /></div>
-          <h3 id="approval-title" className="elicit-dlg-title">This request is gone</h3>
-          <div className="elicit-dlg-context">
-            It was answered elsewhere, or nobody answered in time and the call was refused.
-          </div>
-          <div className="sheet-actions elicit-dlg-actions">
-            <button className="btn primary" data-act="sheet-cancel">OK</button>
-          </div>
+        <div className="elicit-dlg-ico"><Icon markup={ICONS.shieldAlert} /></div>
+        <h3 id="approval-title" className="elicit-dlg-title">This request is gone</h3>
+        <div className="elicit-dlg-context">
+          It was answered elsewhere, or nobody answered in time and the call was refused.
+        </div>
+        <div className="sheet-actions elicit-dlg-actions">
+          <button className="btn primary" data-act="sheet-cancel">OK</button>
         </div>
       </>
     );
@@ -3551,51 +3601,48 @@ function ApprovalSheet(): ReactNode {
   const answering = state.approvalAnswering !== null;
   return (
     <>
-      <div className="sheet-backdrop" data-act="sheet-cancel"></div>
-      <div className="sheet elicit-sheet" role="alertdialog" aria-modal="true" aria-labelledby="approval-title">
-        <div className="elicit-dlg-ico"><Icon markup={ICONS.shieldAlert} /></div>
-        <h3 id="approval-title" className="elicit-dlg-title untrusted-identity" dir="auto">
-          {agentLabel(approval.agent)} {approvalUnit(approval)}
-        </h3>
-        <div className="elicit-dlg-context untrusted-identity" dir="auto">
-          {approval.connection} · {approval.target}
-        </div>
-        {/* The call itself, verbatim and inert: it is the agent's text. */}
-        <div className="approval-call">
-          <div className="approval-summary untrusted-identity" dir="auto">{approval.summary}</div>
-          {approval.detail
-            ? <pre className="approval-detail untrusted-identity" dir="auto">{approval.detail}</pre>
-            : null}
-        </div>
-        {/* What Approve actually hands over. Outside the block above on
-            purpose: that is the agent's text, this is ours, and the whole
-            point is that it cannot be reworded by the thing being approved. */}
-        {approval.consequence
-          ? (
-            <div className="approval-consequence">
-              <Icon markup={ICONS.shieldAlert} />
-              <span>{approval.consequence}</span>
-            </div>
-          )
+      <div className="elicit-dlg-ico"><Icon markup={ICONS.shieldAlert} /></div>
+      <h3 id="approval-title" className="elicit-dlg-title untrusted-identity" dir="auto">
+        {agentLabel(approval.agent)} {approvalUnit(approval)}
+      </h3>
+      <div className="elicit-dlg-context untrusted-identity" dir="auto">
+        {approval.connection} · {approval.target}
+      </div>
+      {/* The call itself, verbatim and inert: it is the agent's text. */}
+      <div className="approval-call">
+        <div className="approval-summary untrusted-identity" dir="auto">{approval.summary}</div>
+        {approval.detail
+          ? <pre className="approval-detail untrusted-identity" dir="auto">{approval.detail}</pre>
           : null}
-        <div className="elicit-dlg-context approval-meta">
-          {approval.waiting > 1
-            ? `${approval.waiting} calls are waiting on this answer · `
-            : ''}
-          Refused automatically in {timeLeft(approval.expires_at)}
-        </div>
-        <div className="sheet-actions elicit-dlg-actions approval-actions">
-          <button className="btn elicit-refuse-btn" data-act="approval-deny"
-            data-id={approval.id} disabled={answering}>Deny</button>
-          <span className="elicit-dlg-spacer"></span>
-          <button className="btn" data-act="approval-approve-all"
-            data-id={approval.id} disabled={answering}
-            title="Allow this call and turn traffic confirmation off for this tool">Stop asking</button>
-          <button className="btn primary" data-act="approval-approve-window"
-            data-id={approval.id} disabled={answering}>
-            {answering ? 'Answering…' : `Approve ${minutes}m`}
-          </button>
-        </div>
+      </div>
+      {/* What Approve actually hands over. Outside the block above on
+          purpose: that is the agent's text, this is ours, and the whole
+          point is that it cannot be reworded by the thing being approved. */}
+      {approval.consequence
+        ? (
+          <div className="approval-consequence">
+            <Icon markup={ICONS.shieldAlert} />
+            <span>{approval.consequence}</span>
+          </div>
+        )
+        : null}
+      <div className="elicit-dlg-context approval-meta">
+        {approval.waiting > 1
+          ? `${approval.waiting} calls are waiting on this answer · `
+          : ''}
+        Refused automatically in {timeLeft(approval.expires_at)}
+      </div>
+      <div className="sheet-actions elicit-dlg-actions approval-actions">
+        <button className="btn elicit-refuse-btn" data-act="approval-deny"
+          data-id={approval.id} disabled={answering}>Deny</button>
+        <span className="elicit-dlg-spacer"></span>
+        <button className="btn" data-act="approval-approve-all"
+          data-id={approval.id} disabled={answering}
+          title="Allow this call and turn traffic confirmation off for this tool">Stop asking</button>
+        <button className="btn primary" data-act="approval-approve-window"
+          data-id={approval.id} disabled={answering}>
+          {answering ? 'Answering…' : `Approve ${minutes}m`}
+        </button>
       </div>
     </>
   );
@@ -3690,31 +3737,26 @@ function WiringToolsSheet(): ReactNode {
     : `${wt.selected.length} tool${wt.selected.length === 1 ? '' : 's'}`;
   return (
     <>
-      <div className="sheet-backdrop" data-act="sheet-cancel"></div>
-      <div className="sheet wide" role="dialog" aria-modal="true" aria-labelledby="wt-title">
-        <h3 id="wt-title">Tools agents may call on {wt.connectionName}</h3>
-        <p className="wt-sub">Agents can call {count} on this server. Everything
-          unchecked is refused by the broker and hidden from the agent's tool list.</p>
-        {body}
-        <div className="sheet-actions">
-          <button className="btn" data-act="sheet-cancel">Cancel</button>
-          <button className="btn primary" data-act="wt-save" disabled={wt.loading || wt.saving}>
-            {wt.saving ? 'Saving…' : 'Save'}</button>
-        </div>
+      <h3 id="wt-title">Tools agents may call on {wt.connectionName}</h3>
+      <p className="wt-sub">Agents can call {count} on this server. Everything
+        unchecked is refused by the broker and hidden from the agent's tool list.</p>
+      {body}
+      <div className="sheet-actions">
+        <button className="btn" data-act="sheet-cancel">Cancel</button>
+        <button className="btn primary" data-act="wt-save" disabled={wt.loading || wt.saving}>
+          {wt.saving ? 'Saving…' : 'Save'}</button>
       </div>
     </>
   );
 }
 
 function clearActivitySheet() {
-  return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
-    <div class="sheet wide confirm-sheet" role="dialog" aria-modal="true" aria-labelledby="clear-activity-title">
-      <h3 id="clear-activity-title">Clear activity?</h3>
+  return `<h3 id="clear-activity-title">Clear activity?</h3>
       <p>This permanently removes all activity history from this device.</p>
       <div class="sheet-actions">
         <button class="btn" data-act="sheet-cancel">Cancel</button>
         <button class="btn danger" data-act="clear-activity-confirm">Clear activity</button>
-      </div></div>`;
+      </div>`;
 }
 
 // Inline per-field validation: saveSecret/saveConn fill state.sheetErrors
@@ -3802,29 +3844,26 @@ function SecretSheet({ editing }: { editing: boolean }): ReactNode {
   const d = state.draft;
   return (
     <>
-      <div className="sheet-backdrop" data-act="sheet-cancel"></div>
-      <div className="sheet wide">
-        <h3>{editing ? 'Edit secret' : 'Add secret'}</h3>
-        <div className="f-row">
-          <label htmlFor="f-name">Name</label>
-          <input id="f-name" className={fieldCls('name')} placeholder="e.g. STRIPE_API_KEY"
-            value={d.name ?? ''}
-            onChange={(e) => setDraftField('name', 'name', e.currentTarget.value)} />
-          <FieldError k="name" />
-        </div>
-        <div className="f-row">
-          <label htmlFor="f-value">{editing ? 'New value (saved to macOS Keychain)' : 'Value'}</label>
-          <input id="f-value" className={fieldCls('value')} type="password"
-            placeholder={editing ? '' : 'Your secret (saved in Keychain)'}
-            value={d.value ?? ''}
-            onChange={(e) => setDraftField('value', 'value', e.currentTarget.value)} />
-          <FieldError k="value" />
-        </div>
-        <FormGlobalError />
-        <div className="sheet-actions">
-          <button className="btn" data-act="sheet-cancel">Cancel</button>
-          <button className="btn primary" data-act="save-secret">Save</button>
-        </div>
+      <h3 id="secret-sheet-title">{editing ? 'Edit secret' : 'Add secret'}</h3>
+      <div className="f-row">
+        <label htmlFor="f-name">Name</label>
+        <input id="f-name" className={fieldCls('name')} placeholder="e.g. STRIPE_API_KEY"
+          value={d.name ?? ''}
+          onChange={(e) => setDraftField('name', 'name', e.currentTarget.value)} />
+        <FieldError k="name" />
+      </div>
+      <div className="f-row">
+        <label htmlFor="f-value">{editing ? 'New value (saved to macOS Keychain)' : 'Value'}</label>
+        <input id="f-value" className={fieldCls('value')} type="password"
+          placeholder={editing ? '' : 'Your secret (saved in Keychain)'}
+          value={d.value ?? ''}
+          onChange={(e) => setDraftField('value', 'value', e.currentTarget.value)} />
+        <FieldError k="value" />
+      </div>
+      <FormGlobalError />
+      <div className="sheet-actions">
+        <button className="btn" data-act="sheet-cancel">Cancel</button>
+        <button className="btn primary" data-act="save-secret">Save</button>
       </div>
     </>
   );
@@ -4559,57 +4598,40 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
   const menuOpen = conn ? state.connMenuOpen === `sheet:${conn.id}` : false;
   return (
     <>
-      <div className="sheet-backdrop" data-act="sheet-cancel"></div>
-      <div className="sheet wide">
-        <h3>{title}</h3>
-        {fields}
-        <FormGlobalError />
-        {draftTest}
-        <div className="sheet-actions">
-          {editing && conn && (
-            <>
-              <button className="btn danger conn-delete-btn" data-act="del-conn-from-edit"
-                data-id={conn.id}>Delete…</button>
-              {managedMcpOAuth
-                ? <button className="btn" data-act="reconnect-mcp" data-id={conn.id}>Reconnect…</button>
-                : conn.mcp_path || conn.oauth_spec
-                ? <div className="tile-menu-wrap sheet-conn-menu">
-                    <button className={`icon-btn tile-menu-btn ${menuOpen ? 'on' : ''}`}
-                      title="More options" aria-label={`More options for ${conn.name}`}
-                      aria-haspopup="menu" aria-expanded={menuOpen}
-                      data-act="toggle-conn-menu" data-id={`sheet:${conn.id}`}>
-                      <Icon markup={ICONS.ellipsis} /></button>
-                    {menuOpen && (
-                      <div className="tile-menu" role="menu" aria-label={`More options for ${conn.name}`}>
-                        <button className="menu-item" role="menuitem"
-                          data-act={conn.mcp_path ? 'reconnect-mcp' : 'oauth-reconnect'}
-                          data-id={conn.id}>
-                          <Icon markup={ICONS.refresh} /> Reconnect (sign in again)</button>
-                      </div>
-                    )}
-                  </div>
-                : null}
-            </>
-          )}
-          <button className="btn" data-act="sheet-cancel">Cancel</button>
-          <button className="btn primary" data-act="save-conn" disabled={dt?.running}>
-            {editing ? 'Save' : oauthSelected ? 'Sign in & connect' : `Add ${label}`}</button>
-        </div>
+      <h3 id="conn-sheet-title">{title}</h3>
+      {fields}
+      <FormGlobalError />
+      {draftTest}
+      <div className="sheet-actions">
+        {editing && conn && (
+          <>
+            <button className="btn danger conn-delete-btn" data-act="del-conn-from-edit"
+              data-id={conn.id}>Delete…</button>
+            {managedMcpOAuth
+              ? <button className="btn" data-act="reconnect-mcp" data-id={conn.id}>Reconnect…</button>
+              : conn.mcp_path || conn.oauth_spec
+              ? <div className="tile-menu-wrap sheet-conn-menu">
+                  <button className={`icon-btn tile-menu-btn ${menuOpen ? 'on' : ''}`}
+                    title="More options" aria-label={`More options for ${conn.name}`}
+                    aria-haspopup="menu" aria-expanded={menuOpen}
+                    data-act="toggle-conn-menu" data-id={`sheet:${conn.id}`}>
+                    <Icon markup={ICONS.ellipsis} /></button>
+                  {menuOpen && (
+                    <div className="tile-menu" role="menu" aria-label={`More options for ${conn.name}`}>
+                      <button className="menu-item" role="menuitem"
+                        data-act={conn.mcp_path ? 'reconnect-mcp' : 'oauth-reconnect'}
+                        data-id={conn.id}>
+                        <Icon markup={ICONS.refresh} /> Reconnect (sign in again)</button>
+                    </div>
+                  )}
+                </div>
+              : null}
+          </>
+        )}
+        <button className="btn" data-act="sheet-cancel">Cancel</button>
+        <button className="btn primary" data-act="save-conn" disabled={dt?.running}>
+          {editing ? 'Save' : oauthSelected ? 'Sign in & connect' : `Add ${label}`}</button>
       </div>
-      {state.confirmDiscard && (
-        <>
-          <div className="sheet-backdrop over-sheet" data-act="discard-keep"></div>
-          <div className="sheet wide confirm-sheet discard-confirm" role="dialog" aria-modal="true"
-            aria-labelledby="discard-conn-title">
-            <h3 id="discard-conn-title">{editing ? 'Discard changes?' : 'Discard this tool?'}</h3>
-            <p>You have unsaved changes in this form. Closing it discards them.</p>
-            <div className="sheet-actions">
-              <button className="btn" data-act="discard-keep">Keep editing</button>
-              <button className="btn danger" data-act="discard-confirm">Discard</button>
-            </div>
-          </div>
-        </>
-      )}
     </>
   );
 }
@@ -4675,13 +4697,11 @@ function mcpAuthSheet(): string {
     actions = `<button class="btn" data-act="sheet-cancel">Close</button>
       ${state.mcpAuthDraft ? '<button class="btn primary" data-act="mcp-auth-retry">Try again</button>' : ''}`;
   }
-  return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
-    <div class="sheet wide auth-sheet" role="dialog" aria-modal="true" aria-labelledby="mcp-auth-title">
-      <h3 id="mcp-auth-title">Connect ${esc(auth.name)}</h3>
+  return `<h3 id="mcp-auth-title">Connect ${esc(auth.name)}</h3>
       <div class="auth-target"><code>${esc(auth.target)}</code></div>
       <ol class="auth-steps">${steps}</ol>
       ${body}
-      <div class="sheet-actions">${actions}</div></div>`;
+      <div class="sheet-actions">${actions}</div>`;
 }
 
 /** Kick off (or restart) a sign-in and switch to the progress sheet. */
@@ -4797,11 +4817,10 @@ function settingsSheet() {
       <div class="st-sub">When minimized to the menu bar, hide the Dock icon.</div></div>
       <button class="switch ${s.menu_bar_hides_dock ? 'on' : ''}" data-act="toggle-menubar-dock" role="checkbox" aria-checked="${s.menu_bar_hides_dock ? 'true' : 'false'}"></button></div>`
     : '';
-  return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
-    <div class="sheet wide"><h3>Settings</h3>
+  return `<h3 id="settings-title">Settings</h3>
     ${notificationRow}${notificationWarning}${notificationPreviewRow}
     ${settingsFailed ? settingsFailureRow : `${authenticationRows}${dockRow}`}
-    <div class="sheet-actions"><button class="btn primary" data-act="sheet-cancel">Done</button></div></div>`;
+    <div class="sheet-actions"><button class="btn primary" data-act="sheet-cancel">Done</button></div>`;
 }
 
 /* --------------------------------- helpers ------------------------------- */
