@@ -1489,10 +1489,17 @@ pub async fn bind_endpoint(
         );
     }
     let socket_path = endpoint_sock_path(&dir, &secret);
-    // A rebind may find the previous run's name; only ours is removed by the
-    // guard, so clear any legacy sibling too.
-    if socket_path.file_name().and_then(|n| n.to_str()) != Some(LEGACY_ENDPOINT_SOCK) {
-        let _ = std::fs::remove_file(dir.join(LEGACY_ENDPOINT_SOCK));
+    // A rebind may find a sibling from before: the legacy fixed name, or the
+    // previous secret's derived name when a reissue rotated the path. Only
+    // ours is removed by the bind guard, so clear the rest — one endpoint
+    // owns this directory, so any other socket here is dead or about to be.
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let stale = entry.path();
+            if stale != socket_path && stale.extension().and_then(|e| e.to_str()) == Some("sock") {
+                let _ = std::fs::remove_file(&stale);
+            }
+        }
     }
     let listener = bind_private_socket(&socket_path)?;
 

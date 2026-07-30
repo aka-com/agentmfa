@@ -1783,10 +1783,13 @@ impl Broker {
             None
         };
         // Mint under the gate; re-check access didn't vanish while the
-        // sheet was up. Rotating a live endpoint changes only its persisted
-        // secret: the listener resolves the registry on every request, so
-        // rebinding would collide with our own occupied port and destroy a
-        // healthy endpoint.
+        // sheet was up. For PG/HTTP, rotating a live endpoint changes only
+        // its persisted secret: the listener resolves the registry on every
+        // request, so rebinding would collide with our own occupied port and
+        // destroy a healthy endpoint. SSH is the opposite: the socket *path*
+        // derives from the secret, so a rotation that skips the rebind keeps
+        // the old socket signing (rotation revoked nothing) while every
+        // read-back advertises a path nothing listens on.
         let (issued, listener_already_live) = {
             let _gate = self.config_gate.lock().unwrap();
             if !self.access.allows(connection_id) {
@@ -1798,7 +1801,7 @@ impl Broker {
                     .lock()
                     .unwrap()
                     .contains_key(&endpoint.id)
-            });
+            }) && connection.kind() != ConnectionKind::Ssh;
             (
                 self.endpoints.issue(*connection_id, connection.kind())?,
                 listener_already_live,
