@@ -273,7 +273,9 @@ impl Store {
         // Rewrite once when a retired row was dropped, so the record on disk
         // matches what the broker is serving and the next open is a clean
         // load rather than a repeat of the same warning.
-        if migrate_legacy_pg_ca_bundle(&mut state) || !retired_connections_dropped.is_empty() {
+        let migrated_pg_ca = migrate_legacy_pg_ca_bundle(&mut state);
+        let migrated_oauth_tokens = migrate_oauth_token_secret_ids(&mut state);
+        if migrated_pg_ca || migrated_oauth_tokens || !retired_connections_dropped.is_empty() {
             integrity.write(&paths.index_file(), &serde_json::to_vec_pretty(&state)?)?;
         }
         Ok(Self {
@@ -855,7 +857,11 @@ impl Store {
     /// updated connection and whether its pinned target changed, the caller
     /// must revoke the connection's direct endpoints when it did (a pasted
     /// address granted for one destination must not silently cover another).
-    pub fn update_connection(&self, id: &Uuid, spec: ConnectionSpec) -> Result<(Connection, bool)> {
+    pub fn update_connection(
+        &self,
+        id: &Uuid,
+        mut spec: ConnectionSpec,
+    ) -> Result<(Connection, bool)> {
         validate_connection_name(&spec.name)?;
         let mut state = self.state.lock().unwrap();
         if state
@@ -873,22 +879,29 @@ impl Store {
         if existing.kind() != spec.config.kind() {
             return Err(CoreError::KindChange);
         }
-        if existing.oauth.is_some()
+        inherit_oauth_token_secret_id(&existing.config, &mut spec.config);
+        let broker_managed_oauth = existing.oauth.is_some()
             && matches!(
                 &existing.config,
                 ConnectionConfig::Api {
                     mcp_path: Some(_),
                     ..
                 }
-            )
-            && existing.config != spec.config
-        {
-            return Err(CoreError::InvalidConnectionConfig(
-                "OAuth-managed MCP tools can only be renamed; reconnect the tool \
-                 to change its authentication, or add another MCP server to use a \
-                 different destination"
-                    .into(),
-            ));
+            );
+        let byo_oauth = matches!(
+            &existing.config,
+            ConnectionConfig::Api { oauth: Some(_), .. }
+        );
+        if (broker_managed_oauth || byo_oauth) && existing.config != spec.config {
+            let kind = if byo_oauth {
+                "OAuth API"
+            } else {
+                "OAuth-managed MCP"
+            };
+            return Err(CoreError::InvalidConnectionConfig(format!(
+                "{kind} tools can only be renamed; reconnect the tool to change \
+                     its authentication, or add another tool to use a different destination"
+            )));
         }
         let old_target = existing.target();
         let old_config = existing.config.clone();
@@ -1223,12 +1236,31 @@ fn migrate_legacy_pg_ca_bundle(state: &mut IndexState) -> bool {
     true
 }
 
-fn prepare_connection(state: &IndexState, spec: ConnectionSpec) -> Result<Connection> {
+fn migrate_oauth_token_secret_ids(state: &mut IndexState) -> bool {
+    let mut changed = false;
+    for connection in &mut state.connections {
+        let ConnectionConfig::Api {
+            oauth: Some(oauth), ..
+        } = &mut connection.config
+        else {
+            continue;
+        };
+        if oauth.token_secret_id.is_none() && connection.secrets.len() == 1 {
+            oauth.token_secret_id = Some(connection.secrets[0]);
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn prepare_connection(state: &IndexState, mut spec: ConnectionSpec) -> Result<Connection> {
     validate_connection_name(&spec.name)?;
     if state.connections.iter().any(|conn| conn.name == spec.name) {
         return Err(CoreError::ConnectionNameTaken(spec.name));
     }
     let secrets = validate_config_and_bind_secrets(state, &spec)?;
+    let preferred = (spec.secrets.len() == 1).then(|| spec.secrets[0]);
+    pin_oauth_token_secret(&mut spec.config, &secrets, preferred)?;
     let now = Utc::now();
     Ok(Connection {
         id: Uuid::new_v4(),
@@ -1280,6 +1312,7 @@ fn prepare_connection_with_secret(
             "the new credential is not referenced by this connection".into(),
         ));
     }
+    pin_oauth_token_secret(&mut spec.config, &secrets, Some(meta.id))?;
     let conn = Connection {
         id: Uuid::new_v4(),
         name: spec.name,
@@ -1392,6 +1425,12 @@ fn validate_config_and_bind_secrets(
                         message: "The OAuth client ID is required".into(),
                     });
                 }
+                if template.trim().is_empty() {
+                    return Err(CoreError::InvalidConnectionField {
+                        field: ConnectionField::Template,
+                        message: "An OAuth connection must reference its token credential".into(),
+                    });
+                }
             }
             // An empty template is a credential-less connection (e.g. a public
             // MCP server): nothing is injected, so it binds no secrets.
@@ -1481,6 +1520,55 @@ fn validate_config_and_bind_secrets(
             bind_optional_secret(state, spec)
         }
     }
+}
+
+fn inherit_oauth_token_secret_id(existing: &ConnectionConfig, incoming: &mut ConnectionConfig) {
+    let (
+        ConnectionConfig::Api {
+            oauth: Some(existing),
+            ..
+        },
+        ConnectionConfig::Api {
+            oauth: Some(incoming),
+            ..
+        },
+    ) = (existing, incoming)
+    else {
+        return;
+    };
+    if incoming.token_secret_id.is_none() {
+        incoming.token_secret_id = existing.token_secret_id;
+    }
+}
+
+fn pin_oauth_token_secret(
+    config: &mut ConnectionConfig,
+    bound_secrets: &[Uuid],
+    preferred: Option<Uuid>,
+) -> Result<()> {
+    let ConnectionConfig::Api {
+        oauth: Some(oauth), ..
+    } = config
+    else {
+        return Ok(());
+    };
+    let token_secret_id = oauth
+        .token_secret_id
+        .or(preferred.filter(|id| bound_secrets.contains(id)))
+        .or_else(|| (bound_secrets.len() == 1).then_some(bound_secrets[0]))
+        .ok_or_else(|| {
+            CoreError::InvalidConnectionConfig(
+                "the OAuth token credential is ambiguous; reconnect this tool to bind it explicitly"
+                    .into(),
+            )
+        })?;
+    if !bound_secrets.contains(&token_secret_id) {
+        return Err(CoreError::InvalidConnectionConfig(
+            "the OAuth token credential is not referenced by this connection".into(),
+        ));
+    }
+    oauth.token_secret_id = Some(token_secret_id);
+    Ok(())
 }
 
 fn bind_optional_secret(state: &IndexState, spec: &ConnectionSpec) -> Result<Vec<Uuid>> {
@@ -2177,6 +2265,7 @@ mod tests {
                     client_id: client.into(),
                     scopes: vec!["chat:write".into()],
                     extra_auth_params: vec![],
+                    token_secret_id: None,
                 }),
             },
             secrets: vec![],
@@ -2209,11 +2298,99 @@ mod tests {
             .unwrap();
         let ConnectionConfig::Api {
             oauth: Some(oauth), ..
-        } = saved.config
+        } = &saved.config
         else {
             panic!("oauth spec lost");
         };
         assert_eq!(oauth.client_id, "1234.5678");
+        assert_eq!(
+            oauth.token_secret_id,
+            Some(store.secret_by_name("SLACK_OAUTH_TOKEN").unwrap().id)
+        );
+
+        let token_id = oauth.token_secret_id.unwrap();
+        let mut legacy = IndexState {
+            connections: vec![saved],
+            ..IndexState::default()
+        };
+        let ConnectionConfig::Api {
+            oauth: Some(oauth), ..
+        } = &mut legacy.connections[0].config
+        else {
+            unreachable!()
+        };
+        oauth.token_secret_id = None;
+        assert!(migrate_oauth_token_secret_ids(&mut legacy));
+        let ConnectionConfig::Api {
+            oauth: Some(oauth), ..
+        } = &legacy.connections[0].config
+        else {
+            unreachable!()
+        };
+        assert_eq!(oauth.token_secret_id, Some(token_id));
+    }
+
+    #[tokio::test]
+    async fn oauth_token_binding_is_explicit_not_secret_name_order() {
+        let (store, _, _dir) = store().await;
+        let auxiliary = store.add_secret("AUXILIARY", val("other")).unwrap();
+        let tokens = store.add_secret("Z_OAUTH_TOKENS", val("{}")).unwrap();
+        let saved = store
+            .add_connection(ConnectionSpec {
+                name: "slack".into(),
+                config: ConnectionConfig::Api {
+                    host: "slack.com".into(),
+                    scheme: "https".into(),
+                    port: None,
+                    trusted_ca_bundle_path: None,
+                    template: "Authorization: Bearer {{Z_OAUTH_TOKENS}}; auxiliary={{AUXILIARY}}"
+                        .into(),
+                    mcp_path: None,
+                    oauth: Some(crate::types::OAuthSpec {
+                        auth_url: "https://slack.com/oauth/v2/authorize".into(),
+                        token_url: "https://slack.com/api/oauth.v2.access".into(),
+                        client_id: "1234.5678".into(),
+                        scopes: vec![],
+                        extra_auth_params: vec![],
+                        token_secret_id: None,
+                    }),
+                },
+                // Explicit creation input identifies the token set even
+                // though the derived secret list sorts AUXILIARY first.
+                secrets: vec![tokens.id],
+            })
+            .unwrap();
+        assert_eq!(saved.secrets, vec![auxiliary.id, tokens.id]);
+        let ConnectionConfig::Api {
+            oauth: Some(oauth), ..
+        } = &saved.config
+        else {
+            panic!("oauth spec lost");
+        };
+        assert_eq!(oauth.token_secret_id, Some(tokens.id));
+
+        let mut legacy = IndexState {
+            connections: vec![saved],
+            ..IndexState::default()
+        };
+        let ConnectionConfig::Api {
+            oauth: Some(oauth), ..
+        } = &mut legacy.connections[0].config
+        else {
+            unreachable!()
+        };
+        oauth.token_secret_id = None;
+        assert!(
+            !migrate_oauth_token_secret_ids(&mut legacy),
+            "a multi-secret legacy connection is ambiguous and must fail closed"
+        );
+        let ConnectionConfig::Api {
+            oauth: Some(oauth), ..
+        } = &legacy.connections[0].config
+        else {
+            unreachable!()
+        };
+        assert_eq!(oauth.token_secret_id, None);
     }
 
     #[tokio::test]
@@ -2321,6 +2498,77 @@ mod tests {
         assert_eq!(unchanged.config, conn.config);
         assert!(unchanged.oauth.is_some());
         assert_eq!(unchanged.secrets, conn.secrets);
+    }
+
+    #[tokio::test]
+    async fn byo_oauth_connections_are_rename_only() {
+        let (store, _, _dir) = store().await;
+        let token = store.add_secret("SLACK_OAUTH_TOKEN", val("{}")).unwrap();
+        let conn = store
+            .add_connection(ConnectionSpec {
+                name: "Slack".into(),
+                config: ConnectionConfig::Api {
+                    host: "slack.com".into(),
+                    scheme: "https".into(),
+                    port: None,
+                    trusted_ca_bundle_path: None,
+                    template: "Authorization: Bearer {{SLACK_OAUTH_TOKEN}}".into(),
+                    mcp_path: None,
+                    oauth: Some(crate::types::OAuthSpec {
+                        auth_url: "https://slack.com/oauth/v2/authorize".into(),
+                        token_url: "https://slack.com/api/oauth.v2.access".into(),
+                        client_id: "1234.5678".into(),
+                        scopes: vec![],
+                        extra_auth_params: vec![],
+                        token_secret_id: None,
+                    }),
+                },
+                secrets: vec![token.id],
+            })
+            .unwrap();
+
+        // Manage clients do not receive the internal token-secret id. The
+        // store restores it before comparing an otherwise-identical rename.
+        let mut rename_config = conn.config.clone();
+        let ConnectionConfig::Api {
+            oauth: Some(oauth), ..
+        } = &mut rename_config
+        else {
+            unreachable!()
+        };
+        oauth.token_secret_id = None;
+        let (renamed, target_changed) = store
+            .update_connection(
+                &conn.id,
+                ConnectionSpec {
+                    name: "Slack work".into(),
+                    config: rename_config,
+                    secrets: vec![],
+                },
+            )
+            .unwrap();
+        assert!(!target_changed);
+
+        let mut broken = renamed.config.clone();
+        let ConnectionConfig::Api { template, .. } = &mut broken else {
+            unreachable!()
+        };
+        template.clear();
+        assert!(matches!(
+            store.update_connection(
+                &conn.id,
+                ConnectionSpec {
+                    name: renamed.name.clone(),
+                    config: broken,
+                    secrets: vec![],
+                }
+            ),
+            Err(CoreError::InvalidConnectionConfig(_))
+        ));
+        assert_eq!(
+            store.connection_by_id(&conn.id).unwrap().config,
+            renamed.config
+        );
     }
 
     #[tokio::test]

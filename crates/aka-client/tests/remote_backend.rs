@@ -237,6 +237,7 @@ async fn byo_oauth_relays_through_the_client_loopback() {
                 client_id: "Iv1.test".into(),
                 scopes: vec!["repo".into()],
                 extra_auth_params: vec![],
+                token_secret_id: None,
             }),
         },
         secrets: vec![],

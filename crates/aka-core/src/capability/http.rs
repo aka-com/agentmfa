@@ -1539,7 +1539,7 @@ async fn proxy_handler(
         &parts.headers,
         body_is_definitely_empty,
     );
-    let policy_version = confirmation_enabled.then_some(connection.updated_at);
+    let policy_version = connection.updated_at;
     let confirmed_version = if confirmation_enabled && !mcp_transport_leg {
         let version = connection.updated_at;
         let verdict = broker
@@ -1568,29 +1568,27 @@ async fn proxy_handler(
     // A revoke, disable, or connection edit can race with either prompt
     // insertion or the transport exemption check. Revalidate immediately,
     // and close any window a stale prompt might just have opened.
-    if let Some(expected_version) = policy_version.as_ref() {
-        let endpoint_still_valid = broker
-            .endpoints
-            .resolve_secret(presented)
-            .is_some_and(|current| current.id == endpoint.id);
-        let connection_is_current = broker
-            .store
-            .connection_by_id(&endpoint.connection_id)
-            .is_ok_and(|current| current.updated_at == *expected_version);
-        if !endpoint_still_valid
-            || !broker.access.allows(&endpoint.connection_id)
-            || !connection_is_current
-            || broker.access.allowed_tools(&endpoint.connection_id) != allowed_tools_snapshot
-        {
-            if confirmed_version.is_some() {
-                broker.approvals.revoke(&endpoint.connection_id);
-            }
-            return endpoint_error(
-                StatusCode::FORBIDDEN,
-                ErrorReason::DeniedByPolicy,
-                "the endpoint or connection changed while the request was being admitted",
-            );
+    let endpoint_still_valid = broker
+        .endpoints
+        .resolve_secret(presented)
+        .is_some_and(|current| current.id == endpoint.id);
+    let connection_is_current = broker
+        .store
+        .connection_by_id(&endpoint.connection_id)
+        .is_ok_and(|current| current.updated_at == policy_version);
+    if !endpoint_still_valid
+        || !broker.access.allows(&endpoint.connection_id)
+        || !connection_is_current
+        || broker.access.allowed_tools(&endpoint.connection_id) != allowed_tools_snapshot
+    {
+        if confirmed_version.is_some() {
+            broker.approvals.revoke(&endpoint.connection_id);
         }
+        return endpoint_error(
+            StatusCode::FORBIDDEN,
+            ErrorReason::DeniedByPolicy,
+            "the endpoint or connection changed while the request was being admitted",
+        );
     }
 
     // Admit the upload before reading even its first body frame. A malicious
@@ -1774,10 +1772,7 @@ async fn proxy_handler(
             "curated MCP tools must be called through the broker or MCP sidecar, not the direct HTTP endpoint",
         );
     }
-    if policy_version
-        .as_ref()
-        .is_some_and(|expected| connection.updated_at != *expected)
-    {
+    if connection.updated_at != policy_version {
         if confirmed_version.is_some() {
             broker.approvals.revoke(&endpoint.connection_id);
         }

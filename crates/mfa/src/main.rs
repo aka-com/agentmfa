@@ -1242,6 +1242,7 @@ fn config_from_dto(dto: &ConnectionDto) -> Result<ConnectionConfig, String> {
                 client_id: oauth.client_id.clone(),
                 scopes: oauth.scopes.clone(),
                 extra_auth_params: oauth.extra_auth_params.clone(),
+                token_secret_id: None,
             }),
         }),
         "pg" => Ok(ConnectionConfig::Pg {

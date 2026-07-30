@@ -803,6 +803,7 @@ fn oauth_connection(h: &Harness, upstream_port: u16, token_port: u16, refresh: O
                     client_id: "client-abc".into(),
                     scopes: vec!["chat:write".into()],
                     extra_auth_params: Vec::new(),
+                    token_secret_id: None,
                 }),
             },
             secrets: vec![secret.id],
@@ -950,6 +951,69 @@ async fn endpoint_raw(base: &str, line: &str, secret: &str) -> (u16, String) {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
     (status, text)
+}
+
+/// API-16. Even with confirmation disabled, the endpoint is pinned to the
+/// connection version it admitted before reading a potentially slow upload.
+/// A retarget during that upload must refuse rather than dispatching the
+/// already-authorized body to the replacement host with its credential.
+#[tokio::test]
+async fn endpoint_retarget_during_upload_is_refused_without_confirmation() {
+    let original = upstream().await;
+    let replacement = upstream().await;
+    let h = harness(BrokerConfig::default()).await;
+    api_connection(&h, "github", original.port);
+    let connection = h.broker.store.connection_by_name("github").unwrap();
+    let (base, secret) = endpoint_for(&h, "github").await;
+    let addr = base.trim_start_matches("http://");
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let request = format!(
+        "POST /echo HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {secret}\r\n\
+         Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n"
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+
+    // Session registration happens before the body is consumed. Waiting for
+    // it removes timing guesses from the retarget race.
+    for _ in 0..100 {
+        if !h.broker.sessions().is_empty() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !h.broker.sessions().is_empty(),
+        "upload never reached admission"
+    );
+
+    let mut changed = connection.config.clone();
+    let ConnectionConfig::Api { port, .. } = &mut changed else {
+        unreachable!()
+    };
+    *port = Some(replacement.port);
+    // Use the store boundary directly to isolate version pinning from the UI
+    // facade's additional endpoint-revocation behavior.
+    h.broker
+        .store
+        .update_connection(
+            &connection.id,
+            ConnectionSpec {
+                name: connection.name.clone(),
+                config: changed,
+                secrets: vec![],
+            },
+        )
+        .unwrap();
+
+    stream.write_all(b"0\r\n\r\n").await.unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.unwrap();
+    let text = String::from_utf8_lossy(&raw);
+    assert!(text.starts_with("HTTP/1.1 403"), "{text}");
+    assert!(
+        replacement.seen_auth.lock().unwrap().is_empty(),
+        "the admitted upload reached the replacement credential target"
+    );
 }
 
 /// API-8. The endpoint is a base URL, not a forward proxy. Reading only the path

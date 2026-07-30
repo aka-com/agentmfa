@@ -653,6 +653,7 @@ impl ConnectionInput {
                             client_id: client_id.trim().to_string(),
                             scopes: self.oauth_scopes.unwrap_or_default(),
                             extra_auth_params: self.oauth_extra_params.unwrap_or_default(),
+                            token_secret_id: None,
                         })
                     }
                     _ => None,

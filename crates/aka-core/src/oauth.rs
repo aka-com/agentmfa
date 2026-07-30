@@ -542,11 +542,25 @@ fn oauth_parts(connection: &Connection) -> Result<(&OAuthSpec, uuid::Uuid), Stri
     else {
         return Err("not an OAuth connection".into());
     };
-    let secret_id = *connection
-        .secrets
-        .first()
-        .ok_or_else(|| "the OAuth connection has no bound token secret".to_string())?;
+    let secret_id = oauth_token_secret_id(connection)?;
     Ok((spec, secret_id))
+}
+
+pub(crate) fn oauth_token_secret_id(connection: &Connection) -> Result<uuid::Uuid, String> {
+    let ConnectionConfig::Api {
+        oauth: Some(spec), ..
+    } = &connection.config
+    else {
+        return Err("not an OAuth connection".into());
+    };
+    let secret_id = spec
+        .token_secret_id
+        .ok_or_else(|| "the OAuth connection has no explicit token-secret linkage".to_string())?;
+    connection
+        .secrets
+        .contains(&secret_id)
+        .then_some(secret_id)
+        .ok_or_else(|| "the OAuth token secret is not bound to the connection".to_string())
 }
 
 /// A fresh access token for the upstream leg, refreshing (and persisting)
@@ -642,6 +656,7 @@ mod tests {
             client_id: "Iv1.example".into(),
             scopes: vec!["repo".into(), "read:org".into()],
             extra_auth_params: vec![],
+            token_secret_id: None,
         };
         let pending = begin(&spec).await.unwrap();
         let url = Url::parse(&pending.authorize_url).unwrap();
@@ -664,6 +679,7 @@ mod tests {
             client_id: "x".into(),
             scopes: vec![],
             extra_auth_params: vec![],
+            token_secret_id: None,
         };
         assert!(begin(&spec).await.is_err());
     }

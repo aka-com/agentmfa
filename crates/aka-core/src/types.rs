@@ -315,6 +315,11 @@ pub struct OAuthSpec {
     /// `prompt=consent`). Applied verbatim to the authorize URL.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_auth_params: Vec<(String, String)>,
+    /// The bound secret containing the token set. This is populated by the
+    /// store when the connection is created and MAC-protected with the rest
+    /// of the config; refresh must never infer it from secret-name ordering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_secret_id: Option<Uuid>,
 }
 
 /// Persisted per-connection health, updated by tests and brokered calls.

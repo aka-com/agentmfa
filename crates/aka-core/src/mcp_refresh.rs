@@ -772,6 +772,7 @@ mod tests {
                         client_id: "client-abc".into(),
                         scopes: Vec::new(),
                         extra_auth_params: Vec::new(),
+                        token_secret_id: None,
                     }),
                 },
                 secrets: vec![secret.id],

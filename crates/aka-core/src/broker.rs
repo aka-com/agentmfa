@@ -1125,9 +1125,8 @@ impl Broker {
                 "this tool is not an OAuth connection".into(),
             ));
         };
-        let secret_id = *conn.secrets.first().ok_or_else(|| {
-            CoreError::InvalidConnectionConfig("the OAuth connection has no token secret".into())
-        })?;
+        let secret_id = crate::oauth::oauth_token_secret_id(&conn)
+            .map_err(CoreError::InvalidConnectionConfig)?;
         // Carry the client secret across, exactly like the local reconnect.
         let previous = self
             .store
@@ -1347,9 +1346,8 @@ impl Broker {
                 "this tool is not an OAuth connection".into(),
             ));
         };
-        let secret_id = *conn.secrets.first().ok_or_else(|| {
-            CoreError::InvalidConnectionConfig("the OAuth connection has no token secret".into())
-        })?;
+        let secret_id = crate::oauth::oauth_token_secret_id(&conn)
+            .map_err(CoreError::InvalidConnectionConfig)?;
         // No native gate, matching connect: the browser consent page is the
         // deliberate act, and the replaced token targets the same pinned
         // destination.
