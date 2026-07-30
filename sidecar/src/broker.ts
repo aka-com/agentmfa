@@ -174,7 +174,7 @@ export class BrokerClient {
    */
   async elicit(
     auth: AgentAuth,
-    request: { connection: string; tool: string; message: string; requestedSchema: unknown },
+    request: { connection: string; correlationToken: string },
   ): Promise<{ action: string; content?: Record<string, unknown> }> {
     return this.json<{ action: string; content?: Record<string, unknown> }>(
       'POST',
@@ -182,9 +182,7 @@ export class BrokerClient {
       auth,
       {
         connection: request.connection,
-        tool: request.tool,
-        message: request.message,
-        requested_schema: request.requestedSchema,
+        correlation_token: request.correlationToken,
       },
     );
   }

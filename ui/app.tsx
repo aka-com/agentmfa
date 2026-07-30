@@ -1036,7 +1036,7 @@ function RequestInbox(): ReactNode {
                             <span className="request-card-top">
                               <span className="request-kind">Input request</span>
                             </span>
-                            <b>{request.connection} asked for input</b>
+                            <b>{request.agent} says {request.connection} asked for input</b>
                             <span className="request-context">
                               {request.agent} is paused · {request.tool}
                             </span>
@@ -3102,7 +3102,9 @@ function ElicitationSheet(): ReactNode {
       <div className="sheet-backdrop" data-act="sheet-cancel"></div>
       <div className="sheet elicit-sheet" role="alertdialog" aria-modal="true" aria-labelledby="elicit-title">
         <div className="elicit-dlg-ico"><Icon markup={ICONS.bell} /></div>
-        <h3 id="elicit-title" className="elicit-dlg-title">{request.connection} asked for input</h3>
+        <h3 id="elicit-title" className="elicit-dlg-title">
+          {request.agent} says {request.connection} asked for input
+        </h3>
         {/* Third-party text: rendered verbatim and inert. */}
         <div className="elicit-dlg-question">{request.prompt}</div>
         {/* The upstream asked for something credential-shaped. It still gets

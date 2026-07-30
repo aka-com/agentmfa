@@ -30,6 +30,8 @@ use crate::Result;
 /// Presence-window lengths the Settings sheet offers: 15 minutes, 1 hour,
 /// 2 hours.
 pub const PRESENCE_WINDOW_CHOICES: &[u64] = &[15 * 60, 60 * 60, 2 * 60 * 60];
+const CONNECT_REQUEST_DEBOUNCE: Duration = Duration::from_secs(60);
+const MAX_CONNECT_REQUEST_DEBOUNCE_KEYS: usize = 256;
 
 /// Outcome of a UI-initiated connection test: a pass/fail flag, a short
 /// human-readable summary (never credential material), and — on failure —
@@ -142,6 +144,9 @@ pub struct Broker {
     pub approvals: crate::approvals::Approvals,
     /// Upstream MCP tool calls parked on the user for interactive input.
     pub elicitations: crate::elicitations::Elicitations,
+    /// Short-lived, single-use capabilities proving that an elicitation came
+    /// from an upstream response the broker relayed.
+    pub(crate) elicitation_permits: Arc<crate::elicitations::ElicitationPermits>,
     /// Unified lifecycle history for human-decision requests. Approvals and
     /// elicitations both write it, so both land in one Recent Inbox.
     pub request_history: Arc<crate::request_history::RequestHistory>,
@@ -320,6 +325,7 @@ impl Broker {
             data_plane,
             approvals,
             elicitations,
+            elicitation_permits: Arc::new(crate::elicitations::ElicitationPermits::default()),
             request_history,
             mcp_auth: crate::mcp_auth::McpAuthSessions::default(),
             manage_oauth: Mutex::new(HashMap::new()),
@@ -1482,7 +1488,6 @@ impl Broker {
     /// and the same client label asking for the same service within a minute
     /// is coalesced. Returns whether this call surfaced a fresh request.
     pub fn agent_connect_request(&self, client: &str, service: &str) -> Result<bool> {
-        const DEBOUNCE: Duration = Duration::from_secs(60);
         let service = service.trim();
         if service.is_empty()
             || service.len() > 120
@@ -1494,13 +1499,10 @@ impl Broker {
         }
         {
             let mut recent = self.connect_request_debounce.lock().unwrap();
-            let now = Instant::now();
-            recent.retain(|_, at| now.duration_since(*at) < DEBOUNCE);
             let key = (client.to_string(), service.to_ascii_lowercase());
-            if recent.contains_key(&key) {
+            if !remember_connect_request(&mut recent, key, Instant::now()) {
                 return Ok(false);
             }
-            recent.insert(key, now);
         }
         self.audit.append(
             AuditEntry::new(
@@ -2390,6 +2392,28 @@ impl Broker {
     }
 }
 
+fn remember_connect_request(
+    recent: &mut HashMap<(String, String), Instant>,
+    key: (String, String),
+    now: Instant,
+) -> bool {
+    recent.retain(|_, at| now.duration_since(*at) < CONNECT_REQUEST_DEBOUNCE);
+    if recent.contains_key(&key) {
+        return false;
+    }
+    if recent.len() >= MAX_CONNECT_REQUEST_DEBOUNCE_KEYS {
+        if let Some(oldest) = recent
+            .iter()
+            .min_by_key(|(_, at)| *at)
+            .map(|(key, _)| key.clone())
+        {
+            recent.remove(&oldest);
+        }
+    }
+    recent.insert(key, now);
+    true
+}
+
 /// The `ssh` command an issued endpoint hands the user.
 ///
 /// A non-default port is spelled out even behind an imported alias, so the
@@ -2474,7 +2498,25 @@ async fn reject_legacy_live_socket(paths: &Paths) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::ssh_endpoint_invocation;
+    use super::{
+        remember_connect_request, ssh_endpoint_invocation, MAX_CONNECT_REQUEST_DEBOUNCE_KEYS,
+    };
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn connect_request_debounce_is_hard_bounded() {
+        let mut recent = HashMap::new();
+        let start = Instant::now();
+        for index in 0..(MAX_CONNECT_REQUEST_DEBOUNCE_KEYS + 20) {
+            assert!(remember_connect_request(
+                &mut recent,
+                ("agent".into(), format!("service-{index}")),
+                start + Duration::from_millis(index as u64),
+            ));
+        }
+        assert_eq!(recent.len(), MAX_CONNECT_REQUEST_DEBOUNCE_KEYS);
+    }
 
     #[test]
     fn ssh_endpoint_invocation_preserves_imported_non_default_ports() {

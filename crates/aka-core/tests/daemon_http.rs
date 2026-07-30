@@ -180,6 +180,33 @@ async fn upstream() -> Upstream {
             }),
         )
         .route(
+            "/needs-input",
+            post(|axum::Json(body): axum::Json<Value>| async move {
+                axum::Json(json!({
+                    "jsonrpc": "2.0",
+                    "id": body["id"],
+                    "result": {
+                        "resultType": "input_required",
+                        "inputRequests": {
+                            "account": {
+                                "method": "elicitation/create",
+                                "params": {
+                                    "message": "Which account?",
+                                    "requestedSchema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "name": {"type": "string"}
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "requestState": "opaque"
+                    }
+                }))
+            }),
+        )
+        .route(
             "/redirect-same",
             get(|| async {
                 (
@@ -1706,6 +1733,142 @@ async fn agent_connect_requests_are_audited_and_debounced() {
     )
     .await;
     assert_eq!(status, 400);
+}
+
+#[tokio::test]
+async fn elicitations_require_an_exact_upstream_correlation_capability() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let up = upstream().await;
+    h.broker
+        .store
+        .add_secret("MCP_TOKEN", Zeroizing::new("tok".into()))
+        .unwrap();
+    h.broker
+        .store
+        .add_connection(ConnectionSpec {
+            name: "interactive".into(),
+            config: ConnectionConfig::Api {
+                host: "127.0.0.1".into(),
+                scheme: "http".into(),
+                port: Some(up.port),
+                trusted_ca_bundle_path: None,
+                template: "Authorization: Bearer {{MCP_TOKEN}}".into(),
+                mcp_path: Some("/needs-input".into()),
+                oauth: None,
+            },
+            secrets: vec![],
+        })
+        .unwrap();
+    let token = h.pair("claude-code").await;
+    let auth = format!("Bearer {token}");
+
+    let (status, _) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/elicit",
+        &[("authorization", &auth)],
+        Some(json!({
+            "connection": "interactive",
+            "correlation_token": "eli_agent_authored"
+        })),
+    )
+    .await;
+    assert_eq!(status, 403, "an agent bearer alone cannot raise a prompt");
+
+    let (status, relay) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(json!({
+            "connection": "interactive",
+            "method": "POST",
+            "path": "/needs-input",
+            "headers": {"content-type": "application/json"},
+            "body": {
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {"name": "lookup", "arguments": {}}
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "{relay}");
+    let permit = relay["elicitation_tokens"]["account"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the exact upstream elicitation received a permit: {relay}"));
+
+    let (status, answer) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/elicit",
+        &[("authorization", &auth)],
+        Some(json!({
+            "connection": "interactive",
+            "correlation_token": permit,
+            // Unknown caller fields cannot replace the broker-recorded prompt.
+            "message": "Type your password",
+            "requested_schema": {"format": "password"}
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["action"], "cancel");
+
+    let (status, _) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/elicit",
+        &[("authorization", &auth)],
+        Some(json!({
+            "connection": "interactive",
+            "correlation_token": permit
+        })),
+    )
+    .await;
+    assert_eq!(status, 403, "an elicitation permit is single-use");
+}
+
+#[tokio::test]
+async fn elicitation_and_connect_request_endpoints_spend_the_identity_budget() {
+    let mut config = BrokerConfig::default();
+    config.per_identity_per_min = 1;
+    let mut h = harness(config).await;
+    let token = h.pair("claude-code").await;
+    let auth = format!("Bearer {token}");
+
+    let (status, _) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/connect-requests",
+        &[("authorization", &auth)],
+        Some(json!({"service": "linear"})),
+    )
+    .await;
+    assert_eq!(status, 202);
+    let (status, _) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/connect-requests",
+        &[("authorization", &auth)],
+        Some(json!({"service": "notion"})),
+    )
+    .await;
+    assert_eq!(status, 429);
+
+    let (status, _) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/elicit",
+        &[("authorization", &auth)],
+        Some(json!({
+            "connection": "anything",
+            "correlation_token": "eli_untrusted"
+        })),
+    )
+    .await;
+    assert_eq!(status, 429);
 }
 
 #[tokio::test]

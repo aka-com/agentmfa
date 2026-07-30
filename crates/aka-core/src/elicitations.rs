@@ -41,6 +41,93 @@ const MAX_PENDING: usize = 64;
 /// treatment [`crate::approvals`] gives agent-controlled strings.
 const ELICITATION_TEXT_CAP: usize = 2000;
 const FIELD_TEXT_CAP: usize = 200;
+const PERMIT_TTL: Duration = Duration::from_secs(300);
+const MAX_PERMITS: usize = 256;
+
+struct ElicitationPermit {
+    client_id: Uuid,
+    connection_id: Uuid,
+    tool: String,
+    message: String,
+    requested_schema: Value,
+    expires_at: Instant,
+}
+
+/// The exact upstream-authored elicitation associated with one short-lived
+/// correlation token.
+pub(crate) struct AuthorizedElicitation {
+    pub tool: String,
+    pub message: String,
+    pub requested_schema: Value,
+}
+
+/// Capability tokens minted only from an upstream `input_required` response.
+///
+/// An ordinary agent bearer cannot originate an elicitation. The broker
+/// records the exact prompt while relaying the upstream response; the sidecar
+/// can redeem its opaque token once, but cannot replace the prompt text or
+/// schema with agent-authored content.
+#[derive(Default)]
+pub(crate) struct ElicitationPermits {
+    inner: Mutex<HashMap<String, ElicitationPermit>>,
+}
+
+impl ElicitationPermits {
+    pub fn issue(
+        &self,
+        client_id: Uuid,
+        connection_id: Uuid,
+        tool: String,
+        message: String,
+        requested_schema: Value,
+    ) -> String {
+        let now = Instant::now();
+        let mut inner = self.inner.lock().unwrap();
+        inner.retain(|_, permit| permit.expires_at > now);
+        if inner.len() >= MAX_PERMITS {
+            if let Some(oldest) = inner
+                .iter()
+                .min_by_key(|(_, permit)| permit.expires_at)
+                .map(|(token, _)| token.clone())
+            {
+                inner.remove(&oldest);
+            }
+        }
+        let token = format!("eli_{}", Uuid::new_v4().simple());
+        inner.insert(
+            token.clone(),
+            ElicitationPermit {
+                client_id,
+                connection_id,
+                tool,
+                message,
+                requested_schema,
+                expires_at: now + PERMIT_TTL,
+            },
+        );
+        token
+    }
+
+    pub fn consume(
+        &self,
+        token: &str,
+        client_id: Uuid,
+        connection_id: Uuid,
+    ) -> Option<AuthorizedElicitation> {
+        let permit = self.inner.lock().unwrap().remove(token)?;
+        if permit.expires_at <= Instant::now()
+            || permit.client_id != client_id
+            || permit.connection_id != connection_id
+        {
+            return None;
+        }
+        Some(AuthorizedElicitation {
+            tool: permit.tool,
+            message: permit.message,
+            requested_schema: permit.requested_schema,
+        })
+    }
+}
 
 /// One input the form asks for, as the app renders it. Mirrors the UI's
 /// `ElicitationField` exactly.
@@ -135,7 +222,6 @@ impl ElicitationOutcome {
             content: None,
         }
     }
-
 }
 
 /// Directional-override and isolate characters, stripped so an upstream
@@ -719,6 +805,37 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[test]
+    fn upstream_permits_are_single_use_and_principal_bound() {
+        let permits = ElicitationPermits::default();
+        let client = Uuid::new_v4();
+        let connection = Uuid::new_v4();
+        let token = permits.issue(
+            client,
+            connection,
+            "lookup".into(),
+            "Which account?".into(),
+            json!({"type":"object"}),
+        );
+
+        assert!(permits
+            .consume(&token, Uuid::new_v4(), connection)
+            .is_none());
+
+        let token = permits.issue(
+            client,
+            connection,
+            "lookup".into(),
+            "Which account?".into(),
+            json!({"type":"object"}),
+        );
+        let authorized = permits.consume(&token, client, connection).unwrap();
+        assert_eq!(authorized.tool, "lookup");
+        assert_eq!(authorized.message, "Which account?");
+        assert_eq!(authorized.requested_schema, json!({"type":"object"}));
+        assert!(permits.consume(&token, client, connection).is_none());
+    }
+
     /// A shell that answers every elicitation the moment it is raised.
     struct AutoAnswer {
         approved: bool,
@@ -983,7 +1100,10 @@ mod tests {
         assert!(parked.credential_warning);
 
         let mut values = HashMap::new();
-        values.insert("client_secret_name".to_string(), "staging-oauth".to_string());
+        values.insert(
+            "client_secret_name".to_string(),
+            "staging-oauth".to_string(),
+        );
         elicitations.respond(&parked.id, true, values);
 
         let outcome = pending.await.unwrap();

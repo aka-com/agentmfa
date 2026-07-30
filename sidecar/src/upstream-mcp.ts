@@ -92,6 +92,7 @@ interface UpstreamResponse {
   headers?: Record<string, string>;
   body?: unknown;
   body_encoding?: string;
+  elicitation_tokens?: Record<string, string>;
 }
 
 /** Response header names arrive in whatever case the broker preserved. */
@@ -246,9 +247,20 @@ class UpstreamClient {
 
   /** One request; the answer is the frame bearing this request's id. */
   async request(method: string, params: unknown): Promise<unknown> {
+    return (await this.requestWithElicitationTokens(method, params)).result;
+  }
+
+  /** One request plus broker-minted capabilities for its elicitation legs. */
+  async requestWithElicitationTokens(
+    method: string,
+    params: unknown,
+  ): Promise<{ result: unknown; elicitationTokens: Record<string, string> }> {
     const id = this.nextId++;
     const response = await this.send('POST', { jsonrpc: '2.0', id, method, params });
-    return this.result(response, id);
+    return {
+      result: this.result(response, id),
+      elicitationTokens: response.elicitation_tokens ?? {},
+    };
   }
 
   /**
@@ -407,7 +419,7 @@ async function runWithMrtr(
   connection: BrokerConnection,
   method: 'tools/call' | 'resources/read',
   baseParams: Record<string, unknown>,
-  toolLabel: string,
+  _toolLabel: string,
 ): Promise<unknown> {
   let inputResponses: Record<string, unknown> | undefined;
   let requestState: unknown;
@@ -416,13 +428,16 @@ async function runWithMrtr(
     const client = new UpstreamClient(broker, auth, connection);
     await client.initialize();
     let result: MrtrResult | undefined;
+    let elicitationTokens: Record<string, string> = {};
     try {
       const params = {
         ...baseParams,
         ...(inputResponses ? { inputResponses } : {}),
         ...(requestState !== undefined ? { requestState } : {}),
       };
-      result = (await client.request(method, params)) as MrtrResult | undefined;
+      const response = await client.requestWithElicitationTokens(method, params);
+      result = response.result as MrtrResult | undefined;
+      Object.assign(elicitationTokens, response.elicitationTokens);
     } finally {
       await client.close();
     }
@@ -444,9 +459,7 @@ async function runWithMrtr(
       }
       const answer = await broker.elicit(auth, {
         connection: connection.name,
-        tool: toolLabel,
-        message: request.params?.message ?? '',
-        requestedSchema: request.params?.requestedSchema ?? {},
+        correlationToken: elicitationTokens[key] ?? '',
       });
       responses[key] = answer;
     }

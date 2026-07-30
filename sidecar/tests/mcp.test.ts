@@ -340,6 +340,7 @@ function fakeBroker(socketPath: string): Promise<Server> {
             headers: relayed.headers ?? {},
             body: relayed.body,
             body_encoding: 'utf8',
+            elicitation_tokens: { github_login: 'test-elicitation-token' },
           });
           return;
         }

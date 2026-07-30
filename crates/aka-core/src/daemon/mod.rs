@@ -888,6 +888,7 @@ async fn post_http(
     ApiJson(call): ApiJson<HttpCallBody>,
 ) -> Response {
     let broker = &state.broker;
+    let client_id = authed.client_id;
     let limiter_key = authed.client_id.to_string();
     let client = authed.client;
     let deferred_rate_limit = is_mcp_envelope_candidate(broker, &call);
@@ -1014,6 +1015,9 @@ async fn post_http(
             &header_map,
             body_bytes.is_empty(),
         ) || is_mcp_envelope_body(&body_bytes));
+    let elicitation_tool = on_mcp_path
+        .then(|| mcp_elicitation_tool(&body_bytes))
+        .flatten();
     if deferred_rate_limit && !mcp_envelope_leg {
         if let Some(response) = http_rate_limit(broker, &limiter_key, &client) {
             return response;
@@ -1101,6 +1105,7 @@ async fn post_http(
     let executor: crate::executions::Executor = Box::pin(executor.run());
     let access = broker.access.clone();
     let approvals = broker.approvals.clone();
+    let elicitation_permits = broker.elicitation_permits.clone();
     let connection_id = conn.id;
     let executor: crate::executions::Executor = Box::pin(async move {
         if on_mcp_path && access.allowed_tools(&connection_id) != allowed_tools_snapshot {
@@ -1110,7 +1115,17 @@ async fn post_http(
             approvals.revoke(&connection_id);
             return ExecOutcome::refusal(ErrorReason::DeniedByPolicy);
         }
-        executor.await
+        let mut outcome = executor.await;
+        if let Some(tool) = elicitation_tool {
+            attach_elicitation_permits(
+                &elicitation_permits,
+                client_id,
+                connection_id,
+                &tool,
+                &mut outcome,
+            );
+        }
+        outcome
     });
 
     run_allowed(
@@ -1134,11 +1149,7 @@ async fn post_http(
 #[derive(Deserialize)]
 struct ElicitBody {
     connection: String,
-    tool: String,
-    #[serde(default)]
-    message: String,
-    #[serde(default)]
-    requested_schema: serde_json::Value,
+    correlation_token: String,
 }
 
 /// `POST /v1/elicit`: park an upstream elicitation on the user. Authenticated
@@ -1150,10 +1161,27 @@ async fn post_elicit(
     ApiJson(body): ApiJson<ElicitBody>,
 ) -> Response {
     let broker = &state.broker;
+    let limiter_key = authed.client_id.to_string();
+    if let Some(response) = http_rate_limit(broker, &limiter_key, &authed.client) {
+        return response;
+    }
     let client = authed.client;
     let Some(conn) = broker.store.connection_by_name(&body.connection) else {
         return err_unknown_connection(broker);
     };
+    if !matches!(
+        &conn.config,
+        ConnectionConfig::Api {
+            mcp_path: Some(_),
+            ..
+        }
+    ) {
+        return err_detail(
+            StatusCode::BAD_REQUEST,
+            ErrorReason::WrongConnectionType,
+            format!("{} is not an MCP connection", conn.name),
+        );
+    }
     if !broker.access.allows(&conn.id) {
         broker.audit.append(
             AuditEntry::new(
@@ -1173,13 +1201,33 @@ async fn post_elicit(
             ),
         );
     }
+    let Some(authorized) =
+        broker
+            .elicitation_permits
+            .consume(&body.correlation_token, authed.client_id, conn.id)
+    else {
+        broker.audit.append(
+            AuditEntry::new(
+                AuditKind::Denied,
+                format!("Refused uncorrelated elicitation: {client} → {}", conn.name),
+            )
+            .agent(client.clone())
+            .connection(conn.name.clone())
+            .outcome("denied_by_policy"),
+        );
+        return err_detail(
+            StatusCode::FORBIDDEN,
+            ErrorReason::DeniedByPolicy,
+            "the elicitation was not correlated with an upstream MCP response",
+        );
+    };
     let outcome = broker
         .elicit(crate::elicitations::ElicitationRequest {
             connection: conn,
             agent: client,
-            tool: body.tool,
-            message: body.message,
-            requested_schema: body.requested_schema,
+            tool: authorized.tool,
+            message: authorized.message,
+            requested_schema: authorized.requested_schema,
         })
         .await;
     let mut answer = json!({ "action": outcome.action.as_str() });
@@ -1198,6 +1246,10 @@ async fn post_connect_request(
     body: axum::Json<serde_json::Value>,
 ) -> Response {
     let broker = &state.broker;
+    let limiter_key = authed.client_id.to_string();
+    if let Some(response) = http_rate_limit(broker, &limiter_key, &authed.client) {
+        return response;
+    }
     let Some(service) = body.0.get("service").and_then(|v| v.as_str()) else {
         return err_detail(
             StatusCode::BAD_REQUEST,
@@ -1220,6 +1272,78 @@ async fn post_connect_request(
             ErrorReason::InvalidBody,
             error.to_string(),
         ),
+    }
+}
+
+fn mcp_elicitation_tool(body: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    match value.get("method")?.as_str()? {
+        "tools/call" => value
+            .pointer("/params/name")
+            .and_then(|name| name.as_str())
+            .map(str::to_string),
+        "resources/read" => value
+            .pointer("/params/uri")
+            .and_then(|uri| uri.as_str())
+            .map(str::to_string),
+        _ => None,
+    }
+}
+
+fn attach_elicitation_permits(
+    permits: &crate::elicitations::ElicitationPermits,
+    client_id: uuid::Uuid,
+    connection_id: uuid::Uuid,
+    tool: &str,
+    outcome: &mut ExecOutcome,
+) {
+    const MAX_PER_RESPONSE: usize = 64;
+    if outcome.status != StatusCode::OK.as_u16()
+        || outcome
+            .body
+            .get("body_encoding")
+            .and_then(|encoding| encoding.as_str())
+            .is_some_and(|encoding| encoding == "base64")
+    {
+        return;
+    }
+    let Some(body) = outcome.body.get("body").and_then(|body| body.as_str()) else {
+        return;
+    };
+    let Ok(response) = serde_json::from_str::<serde_json::Value>(body) else {
+        return;
+    };
+    let Some(requests) = response
+        .pointer("/result/inputRequests")
+        .and_then(|requests| requests.as_object())
+    else {
+        return;
+    };
+    let mut tokens = serde_json::Map::new();
+    for (key, request) in requests.iter().take(MAX_PER_RESPONSE) {
+        if request.get("method").and_then(|method| method.as_str()) != Some("elicitation/create") {
+            continue;
+        }
+        let message = request
+            .pointer("/params/message")
+            .and_then(|message| message.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let requested_schema = request
+            .pointer("/params/requestedSchema")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        let token = permits.issue(
+            client_id,
+            connection_id,
+            tool.to_string(),
+            message,
+            requested_schema,
+        );
+        tokens.insert(key.clone(), serde_json::Value::String(token));
+    }
+    if !tokens.is_empty() {
+        outcome.body["elicitation_tokens"] = serde_json::Value::Object(tokens);
     }
 }
 
