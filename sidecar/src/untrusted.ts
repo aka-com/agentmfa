@@ -9,6 +9,18 @@ export const UNTRUSTED_END = '[END UNTRUSTED UPSTREAM MCP CONTENT]';
 
 const unsafeUnicode = /[\p{Cc}\p{Cf}\u115f\u1160\u17b4\u17b5\u3164\uffa0]/u;
 
+// Upstream text that itself contains the frame delimiters could otherwise
+// close the untrusted region early and present attacker text as if it were
+// AgentMFA's own contract. Neutralize any occurrence (case-insensitive,
+// whitespace-tolerant) so the only real delimiters are the ones
+// `frameUntrustedText` adds. The replacement uses guillemets, not brackets,
+// so it can never re-match.
+const delimiterEcho =
+  /\[\s*(?:BEGIN|END)\s+UNTRUSTED\s+UPSTREAM\s+MCP\s+CONTENT\s*\]/giu;
+function neutralizeDelimiters(text: string): string {
+  return text.replace(delimiterEcho, '‹elided upstream boundary marker›');
+}
+
 export interface SanitizedText {
   text: string;
   truncated: boolean;
@@ -32,6 +44,7 @@ export function sanitizeUntrustedText(value: string, limit: number): SanitizedTe
         : character;
     count++;
   }
+  text = neutralizeDelimiters(text);
   if (truncated) text += '…';
   return { text, truncated, consumed: count };
 }
