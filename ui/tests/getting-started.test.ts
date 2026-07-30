@@ -62,7 +62,7 @@ test('the picker omits Custom API and keeps labeled Custom MCP last', () => {
   assert.equal(START_OPTIONS.some((option) => option.id === 'api'), false);
   assert.deepEqual(
     START_OPTIONS.slice(-2).map((option) => option.id),
-    ['vercel', 'mcp'],
+    ['sentry', 'mcp'],
   );
   assert.equal(START_OPTIONS.at(-1)?.label, 'Custom MCP');
   assert.equal(START_OPTIONS.filter((option) => option.showPickerLabel).length, 1);

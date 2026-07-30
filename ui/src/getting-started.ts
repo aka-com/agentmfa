@@ -92,15 +92,6 @@ export const START_OPTIONS: StartOption[] = [
     taskBody: `summarize the highest-impact unresolved issues from this week.`,
   },
   {
-    id: 'vercel',
-    label: 'Vercel',
-    icon: 'vercel',
-    connType: 'api',
-    catalogId: 'mcp-vercel',
-    mcp: true,
-    taskBody: `summarize this week’s deployments and explain any failures.`,
-  },
-  {
     id: 'mcp',
     label: 'Custom MCP',
     icon: 'plug',
