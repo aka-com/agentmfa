@@ -365,6 +365,17 @@ async fn retire_refresh_token(ctx: &RefreshContext<'_>, connection: &Connection)
     }
 }
 
+/// The sweeper's park key for a BYO-OAuth connection: the bound token
+/// secret's `updated_at`. Any write to the token set — a reconnect's fresh
+/// sign-in, retiring a rejected refresh token — moves it, which is exactly
+/// when a parked connection deserves another attempt.
+fn byo_park_key(broker: &Broker, connection: &Connection) -> Option<DateTime<Utc>> {
+    crate::oauth::oauth_token_secret_id(connection)
+        .ok()
+        .and_then(|id| broker.store.secret_by_id(&id).ok())
+        .map(|meta| meta.updated_at)
+}
+
 /// Background sweeper: renew every OAuth connection's access token as it
 /// enters the expiry window, so agents and status checks keep working
 /// without anyone noticing the token ever aged. Holds only a weak broker
@@ -394,7 +405,14 @@ pub(crate) fn spawn_refresh_sweeper(broker: &Arc<Broker>) {
                     &connection.config,
                     crate::types::ConnectionConfig::Api { oauth: Some(_), .. }
                 ) {
-                    if parked.contains(&(connection.id, None)) {
+                    // The park key is the bound token secret's `updated_at`: a
+                    // reconnect replaces the token set in place (same
+                    // connection id), so the timestamp is what a new sign-in
+                    // changes — the BYO analogue of `expires_at` below. A
+                    // fixed key parked the connection forever, surviving the
+                    // very reconnect that was supposed to revive it.
+                    let park_key = byo_park_key(&broker, &connection);
+                    if parked.contains(&(connection.id, park_key)) {
                         continue;
                     }
                     if retry_after.get(&connection.id).is_some_and(|at| now < *at) {
@@ -423,8 +441,10 @@ pub(crate) fn spawn_refresh_sweeper(broker: &Arc<Broker>) {
                             retry_after.remove(&connection.id);
                         }
                         Err(failure) if failure.needs_reconnect() => {
-                            // Only a new sign-in helps; stop asking.
-                            parked.insert((connection.id, None));
+                            // Only a new sign-in helps; stop asking. Re-keyed
+                            // after the failure, because retiring a rejected
+                            // refresh token rewrites the secret on the way out.
+                            parked.insert((connection.id, byo_park_key(&broker, &connection)));
                         }
                         Err(_) => {
                             retry_after.insert(connection.id, now + RETRY_BACKOFF);

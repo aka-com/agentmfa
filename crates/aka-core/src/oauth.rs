@@ -420,16 +420,34 @@ async fn token_request(
                 format!(" ({code})")
             }
         );
-        // A 4xx is the grant itself being refused — `invalid_grant`, a revoked
-        // client — and replaying it cannot succeed. Anything else may be a
-        // passing outage. The distinction is the whole point: without it a 30
-        // second blip told the user to re-consent, and a spent token was left in
-        // the vault so every later call fired another doomed token request.
-        return Err(if status.is_client_error() {
+        // Only 400/401 mean the grant itself was refused — `invalid_grant`, a
+        // revoked client (RFC 6749 §5.2 uses exactly these two) — and replaying
+        // it cannot succeed. The rest of 4xx is not a refusal: 429 is the
+        // provider throttling this client id and 403/408 are WAF artifacts, so
+        // grouping them under `Rejected` destroyed a perfectly valid refresh
+        // token over a rate limit. Anything else may be a passing outage. The
+        // distinction is the whole point: without it a 30 second blip told the
+        // user to re-consent, and a spent token was left in the vault so every
+        // later call fired another doomed token request.
+        let rejected = status == reqwest::StatusCode::BAD_REQUEST
+            || status == reqwest::StatusCode::UNAUTHORIZED;
+        return Err(if rejected {
             RefreshFailure::Rejected(message)
         } else {
             RefreshFailure::Transient(message)
         });
+    }
+    // Some providers (GitHub's OAuth token endpoint among them) answer grant
+    // errors as HTTP 200 with an `error` body. An explicit error code is the
+    // same refusal as a 400, and must classify the same way so the caller
+    // retires the spent refresh token instead of replaying it forever.
+    if let Some(code) = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
+    {
+        return Err(RefreshFailure::Rejected(format!(
+            "the token endpoint refused the request ({code})"
+        )));
     }
     Ok(body)
 }

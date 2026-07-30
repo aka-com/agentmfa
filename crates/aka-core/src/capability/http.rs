@@ -336,6 +336,12 @@ impl Redactions {
                         .map(|(_scheme, rest)| rest.trim_start())
                         .unwrap_or(value);
                     redactions.add_component(credential);
+                    // Multi-token credentials (AWS SigV4, Digest) can reflect
+                    // in parts, so each post-scheme component is its own
+                    // needle too — the scheme word stays excluded either way.
+                    for part in credential.split_ascii_whitespace() {
+                        redactions.add_component(part);
+                    }
                 }
             }
             RenderedInjection::Query(fragment) => {

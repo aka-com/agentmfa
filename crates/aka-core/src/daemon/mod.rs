@@ -161,6 +161,18 @@ where
     async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
         match Json::<T>::from_request(req, state).await {
             Ok(Json(value)) => Ok(ApiJson(value)),
+            // One rejection is not a shape problem: the transport-layer length
+            // limit. Folding it into `invalid_json` hid the documented 413
+            // (and its pointer at the direct endpoint) exactly when an agent
+            // sent an oversized upload.
+            Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+                Err(err_detail(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    ErrorReason::RequestTooLarge,
+                    "the request exceeds this plane's transport cap; larger uploads \
+                     go through the connection's direct endpoint, which streams",
+                ))
+            }
             Err(rejection) => Err(err_detail(
                 StatusCode::BAD_REQUEST,
                 ErrorReason::InvalidJson,
@@ -546,11 +558,13 @@ pub fn router_for(broker: Arc<Broker>, transport: Transport) -> Router {
         .route("/v1/whoami", get(get_whoami))
         // The JSON-envelope plane is buffered end to end, so it gets its own,
         // much smaller transport limit rather than riding the endpoint plane's.
+        // Headroom is 2× the decoded cap: base64 inflates by 4/3, but a body
+        // sent as a JSON *string* doubles when quote/backslash/newline-heavy
+        // text is escaped — sizing for base64 alone rejected in-cap uploads at
+        // the transport layer.
         .route(
             "/v1/http",
-            post(post_http).layer(DefaultBodyLimit::max(
-                control_cap + control_cap / 2 + 64 * 1024,
-            )),
+            post(post_http).layer(DefaultBodyLimit::max(control_cap * 2 + 64 * 1024)),
         )
         .route("/v1/elicit", post(post_elicit))
         .route("/v1/connect-requests", post(post_connect_request))
