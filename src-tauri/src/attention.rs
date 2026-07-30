@@ -63,8 +63,31 @@ impl RemoteSnapshotVersion {
 
 struct NotificationJob {
     app: AppHandle,
+    key: String,
     title: String,
     body: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum NativeNotificationId {
+    #[cfg(target_os = "macos")]
+    Mac(String),
+    #[cfg(all(unix, not(target_os = "macos")))]
+    Xdg(u32),
+}
+
+#[derive(Debug)]
+struct TrackedNotification {
+    subjects: BTreeSet<String>,
+    native_id: Option<NativeNotificationId>,
+}
+
+fn approval_subject(id: &str) -> String {
+    format!("approval:{id}")
+}
+
+fn elicitation_subject(id: &str) -> String {
+    format!("elicitation:{id}")
 }
 
 /// Preferences plus this process's delivery health. The health fields are
@@ -127,16 +150,23 @@ impl AttentionTracker {
             count: self.active.len(),
             count_changed: old_count != self.active.len(),
             notification_added: is_new && announce_if_new,
+            resolved_ids: Vec::new(),
         }
     }
 
     fn reconcile(&mut self, approvals: Vec<ApprovalDto>) -> TrackerChange {
         let old_count = self.active.len();
-        let next = approvals
+        let next: BTreeMap<String, RequestSummary> = approvals
             .into_iter()
             .map(RequestSummary::from)
             .map(|request| (request.id.clone(), request))
             .collect::<BTreeMap<_, _>>();
+        let resolved_ids = self
+            .active
+            .keys()
+            .filter(|id| !next.contains_key(*id))
+            .cloned()
+            .collect();
         let new_ids = next
             .keys()
             .filter(|id| !self.active.contains_key(*id))
@@ -150,6 +180,7 @@ impl AttentionTracker {
             count: self.active.len(),
             count_changed: old_count != self.active.len(),
             notification_added: !new_ids.is_empty(),
+            resolved_ids,
         }
     }
 
@@ -159,17 +190,25 @@ impl AttentionTracker {
     /// already, so this restores tracking without alerting twice.
     fn adopt(&mut self, approvals: Vec<ApprovalDto>) -> TrackerChange {
         let old_count = self.active.len();
-        self.active = approvals
+        let next: BTreeMap<String, RequestSummary> = approvals
             .into_iter()
             .map(RequestSummary::from)
             .map(|request| (request.id.clone(), request))
             .collect();
+        let resolved_ids = self
+            .active
+            .keys()
+            .filter(|id| !next.contains_key(*id))
+            .cloned()
+            .collect();
+        self.active = next;
         self.pending_notification
             .retain(|id| self.active.contains_key(id));
         TrackerChange {
             count: self.active.len(),
             count_changed: old_count != self.active.len(),
             notification_added: false,
+            resolved_ids,
         }
     }
 
@@ -181,6 +220,7 @@ impl AttentionTracker {
             count: self.active.len(),
             count_changed: old_count != self.active.len(),
             notification_added: false,
+            resolved_ids: vec![id.to_string()],
         }
     }
 
@@ -196,6 +236,7 @@ struct TrackerChange {
     count: usize,
     count_changed: bool,
     notification_added: bool,
+    resolved_ids: Vec<String>,
 }
 
 struct AttentionInner {
@@ -217,6 +258,10 @@ struct AttentionInner {
     /// authoritative when a noisy upstream keeps creating distinct prompts.
     notification_times: VecDeque<Instant>,
     notification_storm_announced: bool,
+    /// A debounced banner can represent several requests. Keep the native
+    /// identifier plus the unresolved subjects it represents so one resolved
+    /// member does not withdraw a banner that still describes live work.
+    tracked_notifications: BTreeMap<String, TrackedNotification>,
 }
 
 impl AttentionInner {
@@ -235,10 +280,11 @@ impl AttentionInner {
         }
     }
 
-    fn set_scope(&mut self, scope: String) -> Option<usize> {
+    fn set_scope(&mut self, scope: String) -> Option<(usize, Vec<NativeNotificationId>)> {
         if !self.tracker.set_scope(scope) {
             return None;
         }
+        let native_notifications = self.clear_notifications();
         self.flush_generation = self.flush_generation.wrapping_add(1);
         self.flush_scheduled = false;
         self.remote_refresh_generation = self.remote_refresh_generation.wrapping_add(1);
@@ -246,7 +292,90 @@ impl AttentionInner {
         self.elicitations.clear();
         self.notification_times.clear();
         self.notification_storm_announced = false;
-        Some(self.total())
+        Some((self.total(), native_notifications))
+    }
+
+    fn track_notification(&mut self, key: String, subjects: BTreeSet<String>) {
+        self.tracked_notifications.insert(
+            key,
+            TrackedNotification {
+                subjects,
+                native_id: None,
+            },
+        );
+    }
+
+    /// Record delivery and attach the platform identifier when one exists.
+    /// `false` means every represented request resolved while the job was
+    /// waiting in the bounded queue, so the just-shown banner must be
+    /// withdrawn immediately on platforms that support it.
+    fn attach_native_notification(
+        &mut self,
+        key: &str,
+        native_id: Option<NativeNotificationId>,
+    ) -> bool {
+        let Some(tracked) = self.tracked_notifications.get_mut(key) else {
+            return false;
+        };
+        if tracked.subjects.is_empty() {
+            self.tracked_notifications.remove(key);
+            return false;
+        }
+        tracked.native_id = native_id;
+        true
+    }
+
+    fn notification_is_pending(&self, key: &str) -> bool {
+        self.tracked_notifications
+            .get(key)
+            .is_some_and(|tracked| !tracked.subjects.is_empty())
+    }
+
+    fn notification_finished(&mut self, key: &str) {
+        self.tracked_notifications.remove(key);
+    }
+
+    fn resolve_notification_subject(&mut self, subject: &str) -> Vec<NativeNotificationId> {
+        let mut empty = Vec::new();
+        for (key, tracked) in &mut self.tracked_notifications {
+            tracked.subjects.remove(subject);
+            if tracked.subjects.is_empty() {
+                empty.push(key.clone());
+            }
+        }
+        empty
+            .into_iter()
+            .filter_map(|key| {
+                self.tracked_notifications
+                    .remove(&key)
+                    .and_then(|tracked| tracked.native_id)
+            })
+            .collect()
+    }
+
+    fn clear_notifications(&mut self) -> Vec<NativeNotificationId> {
+        std::mem::take(&mut self.tracked_notifications)
+            .into_values()
+            .filter_map(|tracked| tracked.native_id)
+            .collect()
+    }
+
+    fn notification_subject_is_active(&self, subject: &str) -> bool {
+        subject
+            .strip_prefix("approval:")
+            .is_some_and(|id| self.tracker.active.contains_key(id))
+            || subject
+                .strip_prefix("elicitation:")
+                .is_some_and(|id| self.elicitations.contains_key(id))
+    }
+
+    fn active_notification_subjects(&self) -> BTreeSet<String> {
+        self.tracker
+            .active
+            .keys()
+            .map(|id| approval_subject(id))
+            .chain(self.elicitations.keys().map(|id| elicitation_subject(id)))
+            .collect()
     }
 
     fn admit_notification(&mut self, now: Instant) -> NotificationAdmission {
@@ -299,12 +428,17 @@ trait NotificationSink {
 struct QueueNotificationSink<'a> {
     attention: &'a RequestAttention,
     app: &'a AppHandle,
+    subjects: BTreeSet<String>,
 }
 
 impl NotificationSink for QueueNotificationSink<'_> {
     fn deliver(&self, content: &NotificationContent) -> Result<(), String> {
-        self.attention
-            .enqueue_notification(self.app, content.title.clone(), content.body.clone())
+        self.attention.enqueue_notification(
+            self.app,
+            content.title.clone(),
+            content.body.clone(),
+            self.subjects.clone(),
+        )
     }
 }
 
@@ -313,6 +447,19 @@ impl NotificationSink for QueueNotificationSink<'_> {
 pub struct RequestAttention {
     inner: Mutex<AttentionInner>,
     notification_tx: mpsc::SyncSender<NotificationJob>,
+}
+
+impl Drop for RequestAttention {
+    fn drop(&mut self) {
+        let Ok(inner) = self.inner.get_mut() else {
+            return;
+        };
+        for notification in inner.clear_notifications() {
+            if let Err(error) = withdraw_native_notification(&notification) {
+                tracing::warn!(%error, "could not withdraw a native notification during shutdown");
+            }
+        }
+    }
 }
 
 impl RequestAttention {
@@ -335,6 +482,7 @@ impl RequestAttention {
                 notification_unavailable_reason: None,
                 notification_times: VecDeque::new(),
                 notification_storm_announced: false,
+                tracked_notifications: BTreeMap::new(),
             }),
             notification_tx,
         }
@@ -353,12 +501,14 @@ impl RequestAttention {
     }
 
     fn resolve(&self, app: &AppHandle, id: &str) {
-        let change = {
+        let (change, notifications) = {
             let mut inner = self.inner.lock().unwrap();
             let mut change = inner.tracker.resolve(id);
             change.count = inner.total();
-            change
+            let notifications = inner.resolve_notification_subject(&approval_subject(id));
+            (change, notifications)
         };
+        withdraw_notifications(notifications);
         apply_change(app, change, None);
     }
 
@@ -381,19 +531,22 @@ impl RequestAttention {
 
     /// Drop a resolved elicitation from the badge and push the new total.
     fn remove_elicitation(&self, app: &AppHandle, id: &str) {
-        let (total, changed) = {
+        let (total, changed, notifications) = {
             let mut inner = self.inner.lock().unwrap();
             let changed = inner.elicitations.remove(id).is_some();
-            (inner.total(), changed)
+            let notifications = inner.resolve_notification_subject(&elicitation_subject(id));
+            (inner.total(), changed, notifications)
         };
+        withdraw_notifications(notifications);
         if changed {
             crate::windows::update_request_count(app, total);
         }
     }
 
     fn set_scope(&self, app: &AppHandle, scope: String) {
-        let total = self.inner.lock().unwrap().set_scope(scope);
-        if let Some(total) = total {
+        let change = self.inner.lock().unwrap().set_scope(scope);
+        if let Some((total, notifications)) = change {
+            withdraw_notifications(notifications);
             crate::windows::update_request_count(app, total);
         }
     }
@@ -405,15 +558,30 @@ impl RequestAttention {
         approvals: Vec<ApprovalDto>,
         elicitations: Vec<ElicitationSummary>,
     ) {
-        let total = {
+        let (total, notifications) = {
             let mut inner = self.inner.lock().unwrap();
-            let _ = inner.tracker.adopt(approvals);
-            inner.elicitations = elicitations
+            let change = inner.tracker.adopt(approvals);
+            let next_elicitations: BTreeMap<String, ElicitationSummary> = elicitations
                 .into_iter()
                 .map(|elicitation| (elicitation.id.clone(), elicitation))
                 .collect();
-            inner.total()
+            let resolved_elicitations = inner
+                .elicitations
+                .keys()
+                .filter(|id| !next_elicitations.contains_key(*id))
+                .cloned()
+                .collect::<Vec<_>>();
+            inner.elicitations = next_elicitations;
+            let mut notifications = Vec::new();
+            for id in change.resolved_ids {
+                notifications.extend(inner.resolve_notification_subject(&approval_subject(&id)));
+            }
+            for id in resolved_elicitations {
+                notifications.extend(inner.resolve_notification_subject(&elicitation_subject(&id)));
+            }
+            (inner.total(), notifications)
         };
+        withdraw_notifications(notifications);
         crate::windows::update_request_count(app, total);
     }
 
@@ -455,19 +623,28 @@ impl RequestAttention {
         app: &AppHandle,
         title: String,
         body: String,
+        mut subjects: BTreeSet<String>,
     ) -> Result<(), String> {
+        let key = uuid::Uuid::new_v4().to_string();
         {
-            let inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock().unwrap();
             if !inner.notifications_available {
                 return Err(inner
                     .notification_unavailable_reason
                     .clone()
                     .unwrap_or_else(|| "native notifications are unavailable".into()));
             }
+            subjects.retain(|subject| inner.notification_subject_is_active(subject));
+            if subjects.is_empty() {
+                return Ok(());
+            }
+            inner.track_notification(key.clone(), subjects);
         }
-        self.notification_tx
+        let result = self
+            .notification_tx
             .try_send(NotificationJob {
                 app: app.clone(),
+                key: key.clone(),
                 title,
                 body,
             })
@@ -479,11 +656,19 @@ impl RequestAttention {
                 mpsc::TrySendError::Disconnected(_) => {
                     "native notification worker is unavailable".into()
                 }
-            })
+            });
+        if result.is_err() {
+            self.inner.lock().unwrap().notification_finished(&key);
+        }
+        result
     }
 
     pub fn count(&self) -> usize {
         self.inner.lock().unwrap().total()
+    }
+
+    fn active_notification_subjects(&self) -> BTreeSet<String> {
+        self.inner.lock().unwrap().active_notification_subjects()
     }
 
     fn begin_remote_refresh(&self) -> u64 {
@@ -500,7 +685,7 @@ impl RequestAttention {
             }
             return;
         };
-        let (change, flush_generation, new_elicitations) = {
+        let (change, flush_generation, new_elicitations, notifications) = {
             let mut inner = self.inner.lock().unwrap();
             if !inner.accepts_remote_version(generation, &version) {
                 return;
@@ -519,12 +704,27 @@ impl RequestAttention {
                 .filter(|(id, _)| !inner.elicitations.contains_key(*id))
                 .map(|(_, elicitation)| elicitation.clone())
                 .collect::<Vec<_>>();
+            let resolved_elicitations = inner
+                .elicitations
+                .keys()
+                .filter(|id| !next_elicitations.contains_key(*id))
+                .cloned()
+                .collect::<Vec<_>>();
             inner.elicitations = next_elicitations;
             change.count = inner.total();
             change.count_changed = old_total != change.count;
             let flush_generation = schedule_generation(&mut inner, change.notification_added);
-            (change, flush_generation, new_elicitations)
+            let resolved_approvals = change.resolved_ids.clone();
+            let mut notifications = Vec::new();
+            for id in resolved_approvals {
+                notifications.extend(inner.resolve_notification_subject(&approval_subject(&id)));
+            }
+            for id in resolved_elicitations {
+                notifications.extend(inner.resolve_notification_subject(&elicitation_subject(&id)));
+            }
+            (change, flush_generation, new_elicitations, notifications)
         };
+        withdraw_notifications(notifications);
         apply_change(app, change, flush_generation);
         for elicitation in new_elicitations {
             notify_elicitation(app, &elicitation);
@@ -533,6 +733,37 @@ impl RequestAttention {
 
     fn remote_refresh_is_current(&self, generation: u64) -> bool {
         generation == self.inner.lock().unwrap().remote_refresh_generation
+    }
+
+    fn attach_native_notification(
+        &self,
+        key: &str,
+        native_id: Option<NativeNotificationId>,
+    ) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .attach_native_notification(key, native_id)
+    }
+
+    fn notification_is_pending(&self, key: &str) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .notification_is_pending(key)
+    }
+
+    fn notification_finished(&self, key: &str) {
+        self.inner.lock().unwrap().notification_finished(key);
+    }
+
+    fn take_native_notification(&self, key: &str) -> Option<NativeNotificationId> {
+        self.inner
+            .lock()
+            .unwrap()
+            .tracked_notifications
+            .remove(key)
+            .and_then(|tracked| tracked.native_id)
     }
 }
 
@@ -603,6 +834,11 @@ fn flush_notification(app: &AppHandle, generation: u64) {
         DeliveryPlan::Suppress => return,
         DeliveryPlan::Notify(content) => content,
     };
+    let subjects = pending
+        .requests
+        .iter()
+        .map(|request| approval_subject(&request.id))
+        .collect::<BTreeSet<_>>();
 
     match attention
         .inner
@@ -613,6 +849,7 @@ fn flush_notification(app: &AppHandle, generation: u64) {
         NotificationAdmission::Normal => {}
         NotificationAdmission::Storm => {
             crate::windows::surface_for_approval(app);
+            let storm_subjects = attention.active_notification_subjects();
             let body = format!(
                 "Open the Request Inbox to review {} waiting requests. Further notifications are paused for one minute.",
                 pending.total
@@ -621,7 +858,7 @@ fn flush_notification(app: &AppHandle, generation: u64) {
                 title: "Many AgentMFA requests are waiting".into(),
                 body,
             };
-            if let Err(error) = deliver_notification(app, &storm) {
+            if let Err(error) = deliver_notification(app, &storm, storm_subjects) {
                 tracing::warn!(%error, "could not deliver the notification rate-limit warning");
             }
             return;
@@ -629,7 +866,7 @@ fn flush_notification(app: &AppHandle, generation: u64) {
         NotificationAdmission::Suppressed => return,
     }
 
-    if let Err(error) = deliver_notification(app, &content) {
+    if let Err(error) = deliver_notification(app, &content, subjects) {
         tracing::warn!(%error, "could not deliver a native request notification");
         crate::windows::surface_for_approval(app);
     }
@@ -671,7 +908,11 @@ fn request_delivery_plan(
 /// Queue one native notification. One worker owns delivery and interaction
 /// observation for the process, so an unacknowledged banner cannot leak one
 /// blocked thread and one platform timer per request.
-fn deliver_notification(app: &AppHandle, content: &NotificationContent) -> Result<(), String> {
+fn deliver_notification(
+    app: &AppHandle,
+    content: &NotificationContent,
+    subjects: BTreeSet<String>,
+) -> Result<(), String> {
     let attention = app
         .try_state::<RequestAttention>()
         .ok_or_else(|| "notification coordinator is unavailable".to_string())?;
@@ -679,6 +920,7 @@ fn deliver_notification(app: &AppHandle, content: &NotificationContent) -> Resul
         &QueueNotificationSink {
             attention: &attention,
             app,
+            subjects,
         },
         content,
     )
@@ -697,6 +939,7 @@ fn notification_worker(rx: mpsc::Receiver<NotificationJob>) {
             continue;
         };
         if !attention.inner.lock().unwrap().notifications_available {
+            attention.notification_finished(&job.key);
             continue;
         }
         deliver_notification_job(job);
@@ -709,22 +952,56 @@ fn deliver_notification_job(job: NotificationJob) {
         .summary(&job.title)
         .body(&job.body)
         .action(OPEN_INBOX_ACTION, "Open Inbox");
+    #[cfg(target_os = "macos")]
+    notification.id(job.key.as_str());
     // XDG servers only emit body activation when the special default action
     // is advertised; some desktops hide named buttons entirely.
     #[cfg(all(unix, not(target_os = "macos")))]
     notification.action("default", "Open Inbox");
     if let Err(error) = configure_notification_identity(&job.app, &mut notification) {
+        if let Some(attention) = job.app.try_state::<RequestAttention>() {
+            attention.notification_finished(&job.key);
+        }
         notification_delivery_failed(&job.app, error);
+        return;
+    }
+    // A bounded queue can hold a job after every request represented by it
+    // has resolved. Check before calling the platform so identifier-less
+    // Windows notifications do not flash stale work merely because there is
+    // no native handle available to withdraw afterward.
+    let should_deliver = job
+        .app
+        .try_state::<RequestAttention>()
+        .is_some_and(|attention| attention.notification_is_pending(&job.key));
+    if !should_deliver {
         return;
     }
     let shown_at = Instant::now();
     let handle = match notification.show() {
         Ok(handle) => handle,
         Err(error) => {
+            if let Some(attention) = job.app.try_state::<RequestAttention>() {
+                attention.notification_finished(&job.key);
+            }
             notification_delivery_failed(&job.app, error.to_string());
             return;
         }
     };
+    let native_id = native_notification_id(&handle);
+    let should_observe = job
+        .app
+        .try_state::<RequestAttention>()
+        .is_some_and(|attention| {
+            attention.attach_native_notification(&job.key, native_id.clone())
+        });
+    if !should_observe {
+        if let Some(native_id) = native_id {
+            if let Err(error) = withdraw_native_notification(&native_id) {
+                tracing::warn!(%error, "could not withdraw a resolved native notification");
+            }
+        }
+        return;
+    }
 
     // Interaction may remain open until a banner is acted on. One short-lived
     // watchdog guards the single worker; on timeout delivery is disabled for
@@ -732,6 +1009,7 @@ fn deliver_notification_job(job: NotificationJob) {
     // and no further platform timers are created.
     let (done_tx, done_rx) = mpsc::sync_channel(1);
     let watchdog_app = job.app.clone();
+    let watchdog_key = job.key.clone();
     let _ = std::thread::Builder::new()
         .name("aka-notification-watchdog".into())
         .spawn(move || {
@@ -739,6 +1017,16 @@ fn deliver_notification_job(job: NotificationJob) {
                 .recv_timeout(NOTIFICATION_RESPONSE_DEADLINE)
                 .is_err()
             {
+                if let Some(attention) = watchdog_app.try_state::<RequestAttention>() {
+                    if let Some(native_id) = attention.take_native_notification(&watchdog_key) {
+                        if let Err(error) = withdraw_native_notification(&native_id) {
+                            tracing::warn!(
+                                %error,
+                                "could not withdraw a timed-out native notification"
+                            );
+                        }
+                    }
+                }
                 notification_delivery_failed(
                     &watchdog_app,
                     "native notification interaction timed out; using the Request Inbox instead"
@@ -764,11 +1052,76 @@ fn deliver_notification_job(job: NotificationJob) {
         }
     });
     let _ = done_tx.try_send(());
+    if let Some(attention) = job.app.try_state::<RequestAttention>() {
+        attention.notification_finished(&job.key);
+    }
     if let Err(error) = result {
         notification_delivery_failed(
             &job.app,
             format!("could not observe native notification delivery: {error}"),
         );
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn native_notification_id(
+    handle: &notify_rust::NotificationHandle,
+) -> Option<NativeNotificationId> {
+    match handle.id() {
+        notify_rust::NotificationId::Mac(id) => Some(NativeNotificationId::Mac(id)),
+        notify_rust::NotificationId::Xdg(_) => None,
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn native_notification_id(
+    handle: &notify_rust::NotificationHandle,
+) -> Option<NativeNotificationId> {
+    Some(NativeNotificationId::Xdg(handle.id()))
+}
+
+#[cfg(windows)]
+fn native_notification_id(
+    _handle: &notify_rust::NotificationHandle,
+) -> Option<NativeNotificationId> {
+    None
+}
+
+fn withdraw_notifications(notifications: Vec<NativeNotificationId>) {
+    if notifications.is_empty() {
+        return;
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        for notification in notifications {
+            if let Err(error) = withdraw_native_notification(&notification) {
+                tracing::warn!(%error, "could not withdraw a resolved native notification");
+            }
+        }
+    });
+}
+
+fn withdraw_native_notification(notification: &NativeNotificationId) -> Result<(), String> {
+    match notification {
+        #[cfg(target_os = "macos")]
+        NativeNotificationId::Mac(id) => {
+            mac_usernotifications::blocking::close_delivered(id);
+            Ok(())
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        NativeNotificationId::Xdg(id) => {
+            let connection =
+                zbus::blocking::Connection::session().map_err(|error| error.to_string())?;
+            connection
+                .call_method(
+                    Some("org.freedesktop.Notifications"),
+                    "/org/freedesktop/Notifications",
+                    Some("org.freedesktop.Notifications"),
+                    "CloseNotification",
+                    &(*id,),
+                )
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        }
     }
 }
 
@@ -913,7 +1266,10 @@ fn configure_notification_identity(
     // The icon is cosmetic. An error here would abort delivery and mark
     // notifications unavailable for the rest of the session, so a missing
     // or odd resource layout merely loses the icon, never the notification.
-    match app.path().resolve("icons/icon.png", BaseDirectory::Resource) {
+    match app
+        .path()
+        .resolve("icons/icon.png", BaseDirectory::Resource)
+    {
         Ok(icon) => match icon.to_str() {
             Some(icon) => {
                 notification.icon(icon);
@@ -1072,6 +1428,7 @@ fn notify_elicitation(app: &AppHandle, pending: &ElicitationSummary) {
         DeliveryPlan::Notify(content) => content,
     };
     let total = attention.count();
+    let subjects = BTreeSet::from([elicitation_subject(&pending.id)]);
     match attention
         .inner
         .lock()
@@ -1081,6 +1438,7 @@ fn notify_elicitation(app: &AppHandle, pending: &ElicitationSummary) {
         NotificationAdmission::Normal => {}
         NotificationAdmission::Storm => {
             crate::windows::surface_for_approval(app);
+            let storm_subjects = attention.active_notification_subjects();
             let body = format!(
                 "Open the Request Inbox to review {total} waiting requests. Further notifications are paused for one minute."
             );
@@ -1088,14 +1446,14 @@ fn notify_elicitation(app: &AppHandle, pending: &ElicitationSummary) {
                 title: "Many AgentMFA requests are waiting".into(),
                 body,
             };
-            if let Err(error) = deliver_notification(app, &storm) {
+            if let Err(error) = deliver_notification(app, &storm, storm_subjects) {
                 tracing::warn!(%error, "could not deliver the notification rate-limit warning");
             }
             return;
         }
         NotificationAdmission::Suppressed => return,
     }
-    if let Err(error) = deliver_notification(app, &content) {
+    if let Err(error) = deliver_notification(app, &content, subjects) {
         tracing::warn!(%error, "could not deliver an elicitation notification");
         crate::windows::surface_for_approval(app);
     }
@@ -1226,6 +1584,7 @@ mod tests {
         assert!(!replay.notification_added);
         assert!(replacement.notification_added);
         assert_eq!(replacement.count, 1);
+        assert_eq!(replacement.resolved_ids, vec!["one"]);
         assert_eq!(
             tracker.take_pending(),
             vec![RequestSummary::from(approval("two", "claude"))]
@@ -1241,6 +1600,78 @@ mod tests {
 
         assert!(tracker.take_pending().is_empty());
         assert_eq!(tracker.active.len(), 0);
+    }
+
+    #[cfg(not(windows))]
+    fn test_native_id(value: &str) -> NativeNotificationId {
+        #[cfg(target_os = "macos")]
+        {
+            NativeNotificationId::Mac(value.into())
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            let _ = value;
+            NativeNotificationId::Xdg(42)
+        }
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn a_batched_banner_withdraws_only_after_its_last_request_resolves() {
+        let attention = RequestAttention::new(NotificationSettings::default());
+        let mut inner = attention.inner.lock().unwrap();
+        let key = "notification";
+        inner.track_notification(
+            key.into(),
+            BTreeSet::from([approval_subject("one"), approval_subject("two")]),
+        );
+        let native_id = test_native_id(key);
+        assert!(inner.attach_native_notification(key, Some(native_id.clone())));
+
+        assert!(inner
+            .resolve_notification_subject(&approval_subject("one"))
+            .is_empty());
+        assert!(inner.tracked_notifications.contains_key(key));
+        assert_eq!(
+            inner.resolve_notification_subject(&approval_subject("two")),
+            vec![native_id]
+        );
+        assert!(!inner.tracked_notifications.contains_key(key));
+    }
+
+    #[test]
+    fn a_request_resolved_in_the_delivery_queue_is_not_shown() {
+        let attention = RequestAttention::new(NotificationSettings::default());
+        let mut inner = attention.inner.lock().unwrap();
+        let key = "queued";
+        inner.track_notification(
+            key.into(),
+            BTreeSet::from([elicitation_subject("question")]),
+        );
+
+        assert!(inner
+            .resolve_notification_subject(&elicitation_subject("question"))
+            .is_empty());
+        assert!(!inner.notification_is_pending(key));
+        assert!(!inner.attach_native_notification(key, None));
+        assert!(!inner.tracked_notifications.contains_key(key));
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn a_scope_change_returns_every_delivered_identifier_for_withdrawal() {
+        let attention = RequestAttention::new(NotificationSettings::default());
+        let mut inner = attention.inner.lock().unwrap();
+        assert_eq!(inner.set_scope("local".into()), Some((0, Vec::new())));
+        inner.track_notification("old".into(), BTreeSet::from([approval_subject("one")]));
+        let native_id = test_native_id("old");
+        assert!(inner.attach_native_notification("old", Some(native_id.clone())));
+
+        assert_eq!(
+            inner.set_scope("remote:https://broker.example".into()),
+            Some((0, vec![native_id]))
+        );
+        assert!(inner.tracked_notifications.is_empty());
     }
 
     #[test]
@@ -1388,7 +1819,7 @@ mod tests {
     fn debounced_flush_drains_once_then_resolution_clears_the_count() {
         let attention = RequestAttention::new(settings(NotificationMode::Always, false));
         let mut inner = attention.inner.lock().unwrap();
-        assert_eq!(inner.set_scope("local".into()), Some(0));
+        assert_eq!(inner.set_scope("local".into()), Some((0, Vec::new())));
         let change = inner
             .tracker
             .upsert(RequestSummary::from(approval("one", "codex")), true);
@@ -1432,7 +1863,7 @@ mod tests {
 
         assert_eq!(
             inner.set_scope("remote:https://broker.example".into()),
-            Some(0)
+            Some((0, Vec::new()))
         );
         assert!(take_pending_flush(&mut inner, old_generation).is_none());
         assert!(inner.tracker.active.is_empty());
@@ -1454,7 +1885,7 @@ mod tests {
     fn changing_brokers_clears_elicitations_from_the_total() {
         let attention = RequestAttention::new(NotificationSettings::default());
         let mut inner = attention.inner.lock().unwrap();
-        assert_eq!(inner.set_scope("local".into()), Some(0));
+        assert_eq!(inner.set_scope("local".into()), Some((0, Vec::new())));
         inner.elicitations.insert(
             "elicitation".into(),
             ElicitationSummary {
@@ -1466,7 +1897,7 @@ mod tests {
         assert_eq!(inner.total(), 1);
         assert_eq!(
             inner.set_scope("remote:https://broker.example".into()),
-            Some(0)
+            Some((0, Vec::new()))
         );
         assert!(inner.elicitations.is_empty());
     }

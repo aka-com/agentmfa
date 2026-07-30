@@ -50,6 +50,9 @@ url = "2"
 # at import, instead of being refused (the vault seals the cleartext form).
 ssh-key = { version = "0.6", default-features = false, features = ["std", "ed25519", "rsa", "ecdsa", "encryption"] }
 
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+zbus = "5"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 mac-usernotifications = "0.3"
 objc2 = "0.6"
