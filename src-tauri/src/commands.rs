@@ -405,12 +405,13 @@ pub async fn list_sessions(state: State<'_, AppState>) -> CmdResult<Vec<aka_api:
 pub async fn list_activity(
     state: State<'_, AppState>,
     limit: Option<usize>,
-) -> CmdResult<Vec<aka_api::ActivityDto>> {
+    before: Option<u64>,
+) -> CmdResult<aka_api::ActivityPageDto> {
     let limit = activity_view_limit(limit);
     state
         .brokers
         .backend()
-        .activity(limit)
+        .activity_page(limit, before)
         .await
         .map_err(|e| e.to_string())
 }

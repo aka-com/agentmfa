@@ -1100,6 +1100,13 @@ pub trait ManagementBackend: Send + Sync {
     async fn close_session(&self, id: u64) -> ManageResult<bool>;
     /// Newest-first activity tail; `0` requests the full retained log.
     async fn activity(&self, limit: usize) -> ManageResult<Vec<ActivityDto>>;
+    /// Stable newest-first page; `before` is the opaque cursor returned by
+    /// the preceding page.
+    async fn activity_page(
+        &self,
+        limit: usize,
+        before: Option<u64>,
+    ) -> ManageResult<aka_api::ActivityPageDto>;
     async fn clear_activity(&self) -> ManageResult<()>;
 
     /* settings */
@@ -1461,6 +1468,18 @@ impl ManagementBackend for LocalBackend {
             .iter()
             .map(activity_dto)
             .collect())
+    }
+
+    async fn activity_page(
+        &self,
+        limit: usize,
+        before: Option<u64>,
+    ) -> ManageResult<aka_api::ActivityPageDto> {
+        let page = self.broker.audit.recent_page(limit, before);
+        Ok(aka_api::ActivityPageDto {
+            entries: page.entries.iter().map(activity_dto).collect(),
+            next_before: page.next_before,
+        })
     }
 
     async fn clear_activity(&self) -> ManageResult<()> {

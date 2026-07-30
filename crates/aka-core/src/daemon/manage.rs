@@ -187,6 +187,7 @@ pub fn router() -> Router<AppState> {
         .route("/sessions", get(sessions))
         .route("/sessions/{id}", delete(close_session))
         .route("/activity", get(activity).delete(clear_activity))
+        .route("/activity/page", get(activity_page))
         .route("/settings", get(settings).patch(patch_settings))
         .route("/agent-setup", get(agent_setup))
         .layer(axum::middleware::from_fn(remote_decision_context))
@@ -890,6 +891,14 @@ struct ActivityQuery {
     limit: Option<usize>,
 }
 
+#[derive(serde::Deserialize)]
+struct ActivityPageQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    before: Option<u64>,
+}
+
 /// Default activity tail when the caller does not choose a limit. Matches the
 /// desktop view's ceiling so a default read and the app's own read agree.
 const ACTIVITY_VIEW_LIMIT: usize = 500;
@@ -901,6 +910,18 @@ async fn activity(
 ) -> Response {
     let limit = query.limit.unwrap_or(ACTIVITY_VIEW_LIMIT);
     respond(state.manage.activity(limit).await)
+}
+
+async fn activity_page(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+    Query(query): Query<ActivityPageQuery>,
+) -> Response {
+    let limit = query
+        .limit
+        .unwrap_or(ACTIVITY_VIEW_LIMIT)
+        .min(ACTIVITY_VIEW_LIMIT);
+    respond(state.manage.activity_page(limit, query.before).await)
 }
 
 async fn clear_activity(State(state): State<AppState>, _authed: ManageAuthed) -> Response {

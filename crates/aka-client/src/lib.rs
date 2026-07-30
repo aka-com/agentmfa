@@ -17,8 +17,9 @@ pub mod credentials;
 pub mod events;
 
 use aka_api::{
-    ActivityDto, ApprovalDecisionDto, ApprovalDto, ApprovalSnapshotDto, ConnectionDto, IdentityDto,
-    IssuedEndpointDto, ManageError, RequestDto, SecretDto, SessionDto, SettingsDto,
+    ActivityDto, ActivityPageDto, ApprovalDecisionDto, ApprovalDto, ApprovalSnapshotDto,
+    ConnectionDto, IdentityDto, IssuedEndpointDto, ManageError, RequestDto, SecretDto, SessionDto,
+    SettingsDto,
 };
 use aka_core::broker::ConnectionTestReport;
 use aka_core::manage::{
@@ -966,6 +967,18 @@ impl ManagementBackend for RemoteBackend {
     async fn activity(&self, limit: usize) -> ManageResult<Vec<ActivityDto>> {
         self.get(&format!("/v1/manage/activity?limit={limit}"))
             .await
+    }
+
+    async fn activity_page(
+        &self,
+        limit: usize,
+        before: Option<u64>,
+    ) -> ManageResult<ActivityPageDto> {
+        let mut path = format!("/v1/manage/activity/page?limit={limit}");
+        if let Some(before) = before {
+            path.push_str(&format!("&before={before}"));
+        }
+        self.get(&path).await
     }
 
     async fn clear_activity(&self) -> ManageResult<()> {

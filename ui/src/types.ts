@@ -148,6 +148,12 @@ export interface ActivityEntry {
   at: string;
 }
 
+export interface ActivityPage {
+  entries: ActivityEntry[];
+  /** Opaque broker cursor; pass back unchanged to fetch the next older page. */
+  next_before?: number | null;
+}
+
 /**
  * One input the upstream asked for (SEP-2322 `InputRequiredResult`).
  *
@@ -480,7 +486,7 @@ export interface CommandMap {
   list_connections: CommandSpec<undefined, ConnectionSummary[]>;
   get_identity: CommandSpec<undefined, IdentityInfo>;
   list_sessions: CommandSpec<undefined, SessionSummary[]>;
-  list_activity: CommandSpec<{ limit: number }, ActivityEntry[]>;
+  list_activity: CommandSpec<{ limit: number; before?: number | null }, ActivityPage>;
   clear_activity: CommandSpec<undefined, void>;
   get_settings: CommandSpec<undefined, Settings>;
   get_notification_settings: CommandSpec<undefined, NotificationSettings>;

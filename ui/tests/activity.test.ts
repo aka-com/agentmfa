@@ -59,16 +59,16 @@ test('a view read does not ask for more of the log than the broker will return',
   // The Tauri command clamps to its own ceiling, so a UI asking for more would
   // silently get less: the tail would be shorter than the code above believes,
   // and the filters would quietly search a smaller window than intended.
-  const requested = constant(app, 'ACTIVITY_RENDER_LIMIT');
+  const requested = constant(app, 'ACTIVITY_PAGE_LIMIT');
   assert.ok(
     requested <= constant(command, 'ACTIVITY_VIEW_LIMIT'),
-    'ACTIVITY_RENDER_LIMIT exceeds the ceiling list_activity clamps to',
+    'ACTIVITY_PAGE_LIMIT exceeds the ceiling list_activity clamps to',
   );
   // The manage route's default is what a caller passing no limit receives; a
   // smaller default would make an HTTP read disagree with the app's own read.
   assert.ok(
     requested <= constant(route, 'ACTIVITY_VIEW_LIMIT'),
-    'ACTIVITY_RENDER_LIMIT exceeds the manage route default',
+    'ACTIVITY_PAGE_LIMIT exceeds the manage route default',
   );
   // The dev mock stands in for the command surface; capping lower would make
   // the frontend-only build behave unlike the app it stands in for.
@@ -76,4 +76,13 @@ test('a view read does not ask for more of the log than the broker will return',
     requested <= constant(mock, 'MOCK_ACTIVITY_LIMIT'),
     'the dev mock caps a view read below what the app asks for',
   );
+});
+
+test('the activity view exposes older pages and labels the filter scope', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+
+  assert.match(app, /data-act="activity-load-older"/);
+  assert.match(app, /Filters currently cover .* loaded entries/);
+  assert.match(app, /next_before/);
+  assert.doesNotMatch(app, /filteredActivity\(\)\.slice\(0,/);
 });

@@ -236,6 +236,7 @@ interface MockArgs {
   expectedUpdatedAt: string;
   input: ConnectionInput & Partial<McpAuthDraft>;
   limit: number;
+  before?: number | null;
   on: boolean;
   secs: number;
   connectionId: string;
@@ -808,7 +809,22 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       return db.connections.map(connDto);
     case 'get_identity': return { ...db.identity };
     case 'list_sessions': return db.sessions.slice();
-    case 'list_activity': return db.activity.slice(0, Math.min(args.limit ?? MOCK_ACTIVITY_LIMIT, MOCK_ACTIVITY_LIMIT));
+    case 'list_activity': {
+      const limit = Math.min(args.limit ?? MOCK_ACTIVITY_LIMIT, MOCK_ACTIVITY_LIMIT);
+      const before = typeof args.before === 'number' ? args.before : null;
+      const start = before === null
+        ? 0
+        : db.activity.findIndex((entry) => Date.parse(entry.at) < before);
+      const offset = start < 0 ? db.activity.length : start;
+      const entries = db.activity.slice(offset, offset + limit);
+      const hasOlder = offset + entries.length < db.activity.length;
+      return {
+        entries,
+        next_before: hasOlder && entries.length
+          ? Date.parse(entries[entries.length - 1].at)
+          : null,
+      };
+    }
     case 'clear_activity': db.activity = []; emit('aka://activity-changed', {}); return;
     case 'get_broker_profile':
       if (mockFault('dead_local')) {

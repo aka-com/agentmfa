@@ -150,6 +150,8 @@ async fn the_remote_backend_manages_a_tcp_broker_end_to_end() {
     assert!(snapshot.version.split_once(':').is_some());
 
     assert!(!backend.activity(50).await.unwrap().is_empty());
+    let activity_page = backend.activity_page(1, None).await.unwrap();
+    assert_eq!(activity_page.entries.len(), 1);
 
     // BYO OAuth relays now; reconnecting a non-OAuth connection is the
     // structured config error, not a transport failure.

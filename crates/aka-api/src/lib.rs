@@ -441,6 +441,15 @@ pub struct ActivityDto {
     pub at: String,
 }
 
+/// One newest-first activity page. `next_before` is an opaque cursor for the
+/// next older page and must be passed back unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityPageDto {
+    pub entries: Vec<ActivityDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_before: Option<u64>,
+}
+
 /// One prompt waiting on the user: agent traffic parked until it is
 /// answered. Carries what was summarized for the decision — never a
 /// credential, never the request body itself.

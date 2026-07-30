@@ -165,6 +165,14 @@ pub struct AuditEntry {
     pub mac: Option<String>,
 }
 
+/// One stable newest-first page of the append-only log. `next_before` is an
+/// opaque byte cursor: appends do not move it, so loading an older page while
+/// new activity arrives cannot skip or duplicate entries.
+pub struct AuditPage {
+    pub entries: Vec<AuditEntry>,
+    pub next_before: Option<u64>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditKind {
@@ -829,15 +837,35 @@ impl AuditLog {
     /// skipped (the log survives partial writes). Reads backward and stops
     /// after `limit` valid entries so refresh cost does not grow with the log.
     pub fn recent(&self, limit: usize) -> Vec<AuditEntry> {
+        self.recent_page(limit, None).entries
+    }
+
+    /// A stable newest-first page ending before an opaque file cursor.
+    ///
+    /// The cursor points at a line boundary in the append-only file rather
+    /// than an array offset from the newest entry. New appends therefore do
+    /// not shift subsequent pages. A cursor beyond EOF (for example after a
+    /// concurrent clear) is safely clamped.
+    pub fn recent_page(&self, limit: usize, before: Option<u64>) -> AuditPage {
         if limit == 0 {
-            return Vec::new();
+            return AuditPage {
+                entries: Vec::new(),
+                next_before: None,
+            };
         }
         let Ok(mut file) = File::open(&self.path) else {
-            return Vec::new();
+            return AuditPage {
+                entries: Vec::new(),
+                next_before: None,
+            };
         };
-        let Ok(mut position) = file.seek(SeekFrom::End(0)) else {
-            return Vec::new();
+        let Ok(end) = file.seek(SeekFrom::End(0)) else {
+            return AuditPage {
+                entries: Vec::new(),
+                next_before: None,
+            };
         };
+        let mut position = before.unwrap_or(end).min(end);
 
         // Callers may use usize::MAX for an explicitly unbounded management
         // read. Grow with the data instead of trying to reserve that sentinel.
@@ -855,12 +883,15 @@ impl AuditLog {
                 break;
             }
 
-            for &byte in chunk[..read_len].iter().rev() {
+            for (offset, &byte) in chunk[..read_len].iter().enumerate().rev() {
                 if byte == b'\n' {
                     push_reversed_entry(&mut entries, &mut reversed_line, oversized);
                     oversized = false;
                     if entries.len() == limit {
-                        break;
+                        return AuditPage {
+                            entries,
+                            next_before: Some(position + offset as u64 + 1),
+                        };
                     }
                 } else if !oversized {
                     if reversed_line.len() < MAX_AUDIT_LINE_BYTES {
@@ -876,7 +907,10 @@ impl AuditLog {
         if entries.len() < limit {
             push_reversed_entry(&mut entries, &mut reversed_line, oversized);
         }
-        entries
+        AuditPage {
+            entries,
+            next_before: None,
+        }
     }
 }
 
@@ -942,6 +976,45 @@ mod tests {
         assert_eq!(recent[0].kind, AuditKind::Requested);
         assert_eq!(recent[0].connection.as_deref(), Some("github"));
         assert_eq!(recent[1].kind, AuditKind::PairRequested);
+    }
+
+    #[test]
+    fn activity_pages_remain_stable_when_new_entries_arrive() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = AuditLog::open(dir.path().join("audit.jsonl")).unwrap();
+        for number in 1..=5 {
+            log.append(AuditEntry::new(
+                AuditKind::Requested,
+                format!("event {number}"),
+            ));
+        }
+
+        let newest = log.recent_page(2, None);
+        assert_eq!(
+            newest
+                .entries
+                .iter()
+                .map(|entry| entry.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["event 5", "event 4"]
+        );
+        let cursor = newest.next_before.expect("older activity remains");
+
+        // The cursor is a file boundary, not an offset from the newest item.
+        log.append(AuditEntry::new(AuditKind::Requested, "event 6"));
+        let older = log.recent_page(2, Some(cursor));
+        assert_eq!(
+            older
+                .entries
+                .iter()
+                .map(|entry| entry.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["event 3", "event 2"]
+        );
+        let oldest = log.recent_page(2, older.next_before);
+        assert_eq!(oldest.entries.len(), 1);
+        assert_eq!(oldest.entries[0].text, "event 1");
+        assert!(oldest.next_before.is_none());
     }
 
     #[test]

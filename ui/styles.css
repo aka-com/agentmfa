@@ -1652,6 +1652,11 @@
 .activity-live-sessions { margin: 0 0 14px; }
 .act-search { flex: 1 1 160px; min-width: 140px; }
 .act-filter { flex: 0 0 auto; padding: 3px 10px; font-size: 12px; }
+.activity-page-footer {
+  display: flex; align-items: center; justify-content: center; gap: 9px; flex-wrap: wrap;
+  padding: 14px 8px 4px; color: var(--muted); font-size: 12px; text-align: center;
+}
+.activity-page-error { color: var(--danger); }
 .request-filters { padding-top: 2px; }
 .host-key-check { display: flex; align-items: center; gap: 9px; margin-top: 3px; }
 .host-key-check .rule-note { margin: 0; }

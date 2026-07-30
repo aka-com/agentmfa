@@ -59,6 +59,7 @@ import { virtualListWindow } from '/src/virtual-list';
 import type { HostKeyCandidate } from '/src/connection-input';
 import type {
   ActivityEntry,
+  ActivityPage,
   Approval,
   ApprovalDecision,
   BrokerProfile,
@@ -85,11 +86,9 @@ import { queryClient, refetchBrokerQuery, removeBrokerQueries } from '/src/query
 import { UiStore, useUiRevision } from '/src/ui-store';
 
 const EDIT_SECRET_MASK = '••••••••••••';
-/** How much of the log a view read asks the broker for. Matches the broker's
- * own ceiling (ACTIVITY_VIEW_LIMIT), which clamps anything larger. The list
- * windows its rows, so this bounds the read and the filter scope rather than
- * how many rows are mounted. */
-const ACTIVITY_RENDER_LIMIT = 500;
+/** One activity page. Matches the broker's per-request ceiling; users can
+ * load subsequent stable pages without imposing an unbounded IPC read. */
+const ACTIVITY_PAGE_LIMIT = 500;
 /** Rows kept mounted past each edge of the activity window. Enough that a
  * flick of the wheel, or a row that turns out taller than its estimate, never
  * exposes a blank strip before the next frame. */
@@ -229,6 +228,10 @@ interface AppState {
   identity: IdentityInfo | null;
   sessions: SessionSummary[];
   activity: ActivityEntry[];
+  /** Opaque cursor for the next older activity page, null at the retained end. */
+  activityNextBefore: number | null;
+  activityLoadingOlder: boolean;
+  activityOlderError: string | null;
   elicitations: ElicitationRequest[];
   /** The open elicitation dialog's field values, keyed by field name. */
   elicitValues: Record<string, string>;
@@ -390,6 +393,9 @@ const initialState: AppState = {
   identity: null,
   sessions: [],
   activity: [],
+  activityNextBefore: null,
+  activityLoadingOlder: false,
+  activityOlderError: null,
   elicitations: [],      // paused upstream tool calls awaiting the user (SEP-2322)
   elicitValues: {},      // open elicitation dialog's field values (transient)
   approvals: [],         // agent traffic parked on the user's confirmation
@@ -492,6 +498,9 @@ function clearBrokerOwnedState(): void {
   state.identity = null;
   state.sessions = [];
   state.activity = [];
+  state.activityNextBefore = null;
+  state.activityLoadingOlder = false;
+  state.activityOlderError = null;
   state.elicitations = [];
   state.elicitValues = {};
   state.approvals = [];
@@ -653,7 +662,7 @@ async function refresh(which: RefreshTarget = 'all'): Promise<boolean> {
   if (which === 'all' || which === 'approvals') jobs.push(load('approvals', 'list_approvals'));
   if (which === 'all' || which === 'requests') jobs.push(load('requests', 'list_requests'));
   if (which === 'all' || which === 'activity') {
-    jobs.push(load('activity', 'list_activity', { limit: ACTIVITY_RENDER_LIMIT }));
+    jobs.push(load('activity', 'list_activity', { limit: ACTIVITY_PAGE_LIMIT }));
   }
   if (which === 'all' || which === 'settings') jobs.push(loadSettings());
   const succeeded = (await Promise.all(jobs)).every(Boolean);
@@ -692,7 +701,14 @@ async function load<K extends CommandName>(
         void resolveSshEndpointSockets(broker, epoch);
         break;
       case 'sessions': state.sessions = result as SessionSummary[]; break;
-      case 'activity': state.activity = result as ActivityEntry[]; break;
+      case 'activity': {
+        const page = result as ActivityPage;
+        state.activity = page.entries;
+        state.activityNextBefore = page.next_before ?? null;
+        state.activityLoadingOlder = false;
+        state.activityOlderError = null;
+        break;
+      }
       // Deadlines are re-anchored to this machine's clock at receipt, so a
       // remote broker's clock offset cannot distort the countdowns.
       case 'elicitations':
@@ -2564,6 +2580,38 @@ function filteredActivity(): ActivityEntry[] {
   });
 }
 
+async function loadOlderActivity(): Promise<void> {
+  const before = state.activityNextBefore;
+  if (before === null || state.activityLoadingOlder) return;
+  const broker = state.broker;
+  const epoch = brokerEpoch;
+  state.activityLoadingOlder = true;
+  state.activityOlderError = null;
+  render();
+  try {
+    const page = await refetchBrokerQuery(
+      broker,
+      'list_activity',
+      { limit: ACTIVITY_PAGE_LIMIT, before },
+    );
+    if (!brokerEpochIsCurrent(epoch) || state.activityNextBefore !== before) return;
+    // The broker cursor is a stable file boundary, so pages do not overlap
+    // even when new entries arrive. Preserve genuinely identical audit rows.
+    state.activity = [...state.activity, ...page.entries];
+    state.activityNextBefore = page.next_before ?? null;
+  } catch (error) {
+    console.error('list_activity older page', error);
+    if (brokerEpochIsCurrent(epoch) && state.activityNextBefore === before) {
+      state.activityOlderError = errorMessage(error);
+    }
+  } finally {
+    if (brokerEpochIsCurrent(epoch)) {
+      state.activityLoadingOlder = false;
+      render();
+    }
+  }
+}
+
 function ActivityView(): ReactNode {
   const liveSessions = state.sessions.length
     ? <SafeMarkup markup={liveSessionsHTML('activity-live-sessions')} />
@@ -2581,7 +2629,8 @@ function ActivityView(): ReactNode {
   }
   // Agents seen in the loaded window; chips beat a dropdown at this scale.
   const agents = [...new Set(state.activity.map((entry) => entry.agent).filter(Boolean))] as string[];
-  const entries = filteredActivity().slice(0, ACTIVITY_RENDER_LIMIT);
+  const entries = filteredActivity();
+  const hasOlder = state.activityNextBefore !== null;
   return (
     <>
       {liveSessions}
@@ -2600,13 +2649,29 @@ function ActivityView(): ReactNode {
       {entries.length
         ? <ActivityList entries={entries} />
         : <div className="muted-note">Nothing matches these filters.</div>}
+      <div className="activity-page-footer">
+        {hasOlder
+          ? <span>
+              Filters currently cover {state.activity.length.toLocaleString()} loaded entries.
+            </span>
+          : <span>All {state.activity.length.toLocaleString()} retained entries are loaded.</span>}
+        {state.activityOlderError
+          ? <span className="activity-page-error" role="alert">{state.activityOlderError}</span>
+          : null}
+        {hasOlder
+          ? <button className="btn sm" data-act="activity-load-older"
+              disabled={state.activityLoadingOlder}>
+              {state.activityLoadingOlder ? 'Loading…' : 'Load older activity'}
+            </button>
+          : null}
+      </div>
     </>
   );
 }
 
 async function receiveActivity(entry: ActivityEntry | null | undefined): Promise<void> {
   if (!entry || !entry.at || !entry.text) {
-    await load('activity', 'list_activity', { limit: ACTIVITY_RENDER_LIMIT });
+    await load('activity', 'list_activity', { limit: ACTIVITY_PAGE_LIMIT });
     if (state.tab === 'activity' && !state.sheet && !state.menuOpen) render();
     return;
   }
@@ -2614,7 +2679,7 @@ async function receiveActivity(entry: ActivityEntry | null | undefined): Promise
   const identity = activityIdentity(entry);
   const duplicate = state.activity.some((item) => activityIdentity(item) === identity);
   if (duplicate) return;
-  state.activity = [entry, ...state.activity].slice(0, ACTIVITY_RENDER_LIMIT);
+  state.activity = [entry, ...state.activity];
 
   if (state.tab !== 'activity' || state.sheet || state.menuOpen) return;
   // With filters active the cheap prepend would bypass them; re-render.
@@ -5925,6 +5990,9 @@ document.addEventListener('click', async (e) => {
     case 'clear-activity-confirm':
       if (await run(() => invoke('clear_activity'))) {
         state.activity = [];
+        state.activityNextBefore = null;
+        state.activityLoadingOlder = false;
+        state.activityOlderError = null;
         closeSheet();
         toast('Activity cleared');
       }
@@ -6368,6 +6436,9 @@ document.addEventListener('click', async (e) => {
       render();
       break;
     }
+    case 'activity-load-older':
+      await loadOlderActivity();
+      break;
     case 'request-filter-issues':
       state.requestIssuesOnly = !state.requestIssuesOnly;
       render();
