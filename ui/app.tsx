@@ -1087,10 +1087,10 @@ function SecretsTable({ query = '' }: { query?: string }): ReactNode {
                 data-id={connection.id}>{name}</button>
             : <span key={name}>{name}</span>;
         })}</div>
-    ) : <span className="s-sub">Not in use</span>;
+    ) : <span className="used-by-empty">Not in use</span>;
     return <tr key={s.id}>
       <td><div className="s-name">{s.name}</div></td>
-      <td>{usedBy}</td>
+      <td className="used-by-cell">{usedBy}</td>
       <td className="val"><span className="val-wrap">
         <span className={`val-slot ${copied ? 'is-copied' : ''}`}><code>{valText}</code>
           <span className="val-overlay">{overlay}</span></span>

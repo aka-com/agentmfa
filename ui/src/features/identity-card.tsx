@@ -43,8 +43,8 @@ export function SharedKeyCard({ identity }: { identity: IdentityInfo }): ReactNo
             : null}
         </div>
       </div>
-      <div className="connect-keynote">One shared key for everything that runs as you on this
-        computer. Rotating it disconnects every agent at once.</div>
+      <div className="connect-keynote">This key is used across all agents and services connected
+        to AgentMFA on this computer. Rotate it to disconnect every service at once.</div>
     </div>
   );
 }

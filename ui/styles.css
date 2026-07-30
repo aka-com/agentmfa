@@ -232,6 +232,7 @@
   .dw-head{
   flex: 0 0 auto;
   display: flex; align-items: center; justify-content: space-between;
+  height: 56px;
   width: 100%; max-width: calc(var(--content-max) + .5rem); margin: 0 auto;
   padding: 12px 16px 12px 24px;
 }
@@ -840,11 +841,13 @@
 .sec-table .ghost-copy{ transform: translateY(-3.5px); }
   .dropdown-surface .sec-table .ghost-copy{ transform: none; }
   .rowdel{ text-align: right; white-space: nowrap; }
+  .used-by-cell{ font-size: 0.875rem; }
   .used-by-links{ display: flex; align-items: flex-start; flex-direction: column; gap: 2px; }
   .used-by-link{ max-width: 180px; padding: 0; border: 0; background: none;
-    color: var(--accent-text); font: inherit; font-size: 0.75rem; text-align: left;
+    color: var(--accent-text); font: inherit; text-align: left;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
   .used-by-link:hover{ text-decoration: underline; }
+  .used-by-empty{ color: var(--muted); }
   .confirm-row td{ height: 48px; padding: 0 6px; background: var(--danger-wash); border-radius: 0; font-size: 0.8125rem; }
   .confirm-inline{ min-height: 48px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .confirm-inline span{ flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1581,6 +1584,11 @@
 /* Credential rows share the darker card surface of their "Saved
    credentials" parent row. */
 .credentials-expansion { background: transparent; }
+/* Credential-to-credential rules should recede like the surrounding card
+   separators instead of looking like nested section boundaries. */
+.credentials-expansion .sec-table td {
+  border-bottom-color: color-mix(in srgb, var(--line-soft) 65%, transparent);
+}
 /* Align the credential table with the connection rows' text spine — the
    column headers included, so "Credential" sits directly under the row title
    it belongs to and directly over the names it labels. */
@@ -1594,11 +1602,8 @@
   padding: 9px 6px; font-size: 0.65625rem; font-weight: 700;
   letter-spacing: .07em; text-transform: uppercase;
 }
-/* The value column's right edge is the eye button, so a right-aligned
-   "Value" would label the icon rather than the masked value. Pull it back
-   over the value itself — and only where an eye is actually rendered (the
-   tray dropdown has none). */
-.cat-conns .sec-table:has(.eye-btn) th:nth-last-child(2) { padding-right: 36px; }
+/* Label the value itself, not the eye/action controls at the right edge. */
+.cat-conns .sec-table th:nth-child(3) { text-align: left; }
 .cat-conns > .muted-note { padding: 10px 14px; }
 /* "Add credential" is a full-bleed activatable row like "More tools"; the
    table's last-row hairline is the divider above it, so the row itself draws
@@ -1749,7 +1754,7 @@
 /* --------------------------- Shared key card ----------------------------- */
 /* This computer's broker key, shown on the Secrets page. Reuses .agent-block. */
 .connect-keynote{ font-size: 0.78125rem; color: var(--muted); border-top: 1px solid var(--line);
-  padding: 10px 16px 11px; line-height: 1.55; }
+  padding: 6px 14px 7px; line-height: 1.55; }
 /* Trails the credential stores, so its separation is above it, not below. */
 .shared-key-card{ margin-top: 4px; }
 
