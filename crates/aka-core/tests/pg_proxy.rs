@@ -1568,6 +1568,62 @@ async fn the_tcp_endpoint_refuses_a_wrong_secret() {
     );
 }
 
+#[tokio::test]
+async fn endpoint_secret_guessing_is_throttled_and_audit_coalesced() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let fake = fake_pg(FakeAuth::Cleartext).await;
+    add_pg_connection(&h.broker, fake.port);
+    h.pair().await;
+    let info = h.issue_endpoint().await;
+    let wrong = info
+        .tcp_dsn
+        .as_ref()
+        .unwrap()
+        .replace(&info.secret, "end_not_the_secret");
+
+    for _ in 0..5 {
+        let error = match tokio_postgres::connect(&wrong, NoTls).await {
+            Ok(_) => panic!("a wrong endpoint secret must be refused"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.as_db_error().map(|error| error.code()),
+            Some(&SqlState::INVALID_PASSWORD)
+        );
+    }
+    for _ in 0..3 {
+        let error = match tokio_postgres::connect(&wrong, NoTls).await {
+            Ok(_) => panic!("an exhausted auth window must be refused"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.as_db_error().map(|error| error.code()),
+            Some(&SqlState::TOO_MANY_CONNECTIONS)
+        );
+    }
+
+    let activity = h.broker.audit.recent(50);
+    assert_eq!(
+        activity
+            .iter()
+            .filter(|entry| entry.outcome.as_deref() == Some("invalid_secret"))
+            .count(),
+        5
+    );
+    assert_eq!(
+        activity
+            .iter()
+            .filter(|entry| {
+                entry.text == "Postgres endpoint authentication throttled"
+                    && entry.outcome.as_deref() == Some("rate_limited")
+            })
+            .count(),
+        1,
+        "one throttle episode should emit one durable audit entry"
+    );
+    assert!(fake.state.startups.lock().unwrap().is_empty());
+}
+
 /// The pinned port survives a rebind, so a pasted TCP DSN keeps working across
 /// a broker restart — the property the socket path had for free.
 #[tokio::test]

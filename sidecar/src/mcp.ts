@@ -449,16 +449,15 @@ export async function createToolServer(
       // Asking also reconciles the tool list, so an agent that noticed
       // something was wrong does not wait for the next tick to have it fixed.
       if (await refreshWiring()) server.sendToolListChanged();
-      let live = wired;
+      let latest = connections;
       try {
-        live = (await broker.connections(principal)).filter(
-          (candidate) => candidate.wired,
-        );
+        latest = await broker.connections(principal);
         connectionListError = undefined;
       } catch (error) {
         connectionListError = `could not list AgentMFA connections: ${String(error)}`;
         log('warn', 'could not list connections for status', { error: String(error) });
       }
+      const live = latest.filter((candidate) => candidate.wired);
       const liveNames = new Set(live.map((connection) => connection.name));
       const registeredNames = new Set(
         registrations.map((registration) => registration.connection.name),
@@ -516,6 +515,12 @@ export async function createToolServer(
             warning,
           })),
         );
+      const sshRefusals = latest
+        .filter((connection) => connection.type === 'ssh' && connection.recent_ssh_refusal)
+        .map((connection) => ({
+          name: connection.name,
+          ...connection.recent_ssh_refusal!,
+        }));
 
       const pending = live
         .filter((connection) => !registeredNames.has(connection.name))
@@ -584,6 +589,7 @@ export async function createToolServer(
                 ...(errors.length ? { errors } : {}),
                 ...(upstreams.length ? { upstreams } : {}),
                 ...(warnings.length ? { warnings } : {}),
+                ...(sshRefusals.length ? { recent_ssh_refusals: sshRefusals } : {}),
                 ...(pending.length ? { pending } : {}),
                 ...(hint ? { hint } : {}),
               },

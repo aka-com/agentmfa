@@ -213,7 +213,6 @@ async fn key_rotation_is_confirmed_and_closes_live_sessions() {
         .unwrap()
         .start(ConnectionKind::Pg);
     let close = session.close_signal.clone();
-    let notified = close.notified();
     let endpoint = broker
         .endpoints
         .issue(conn.id, ConnectionKind::Api)
@@ -223,9 +222,12 @@ async fn key_rotation_is_confirmed_and_closes_live_sessions() {
     // Rotation touches the credential, so it always re-prompts.
     broker.ui_rotate_key().unwrap();
     assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
-    tokio::time::timeout(std::time::Duration::from_secs(1), notified)
-        .await
-        .expect("rotation should close live data-plane sessions");
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), close.reason())
+            .await
+            .expect("rotation should close live data-plane sessions"),
+        "key_rotated"
+    );
     assert!(matches!(
         broker.data_plane.redeem(&ticket),
         Err(RedeemError::Expired)
@@ -1591,9 +1593,12 @@ async fn rebinding_a_tools_secret_closes_its_live_sessions() {
         .ui_update_connection(&conn.id, pg_config(second.id))
         .unwrap();
 
-    tokio::time::timeout(std::time::Duration::from_secs(1), closed.notified())
-        .await
-        .expect("the session on the old credential must be closed");
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), closed.reason())
+            .await
+            .expect("the session on the old credential must be closed"),
+        "connection_changed"
+    );
     // And the ticket it came from stops redeeming, so the agent cannot simply
     // reopen inside the window it was already granted.
     assert_eq!(
@@ -1674,9 +1679,12 @@ async fn rotating_a_secret_closes_the_sessions_of_every_tool_bound_to_it() {
         None,
         "credential rotation must revoke the old approval window"
     );
-    tokio::time::timeout(std::time::Duration::from_secs(1), closed.notified())
-        .await
-        .expect("the session on the rotated credential must be closed");
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), closed.reason())
+            .await
+            .expect("the session on the rotated credential must be closed"),
+        "secret_rotated"
+    );
     assert_eq!(
         broker.data_plane.redeem(&ticket).err(),
         Some(RedeemError::Expired)

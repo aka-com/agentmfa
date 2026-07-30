@@ -614,6 +614,32 @@ fn verify_session_bind(payload: &[u8], expected: Fingerprint) -> Result<SessionB
 /// between `bind` and `rename` leaves one behind under a name never reused.
 const SOCKET_STAGING_EXT: &str = "bind";
 
+/// Maximum pathname bytes accepted by `sockaddr_un::sun_path`, excluding its
+/// terminating NUL. Linux provides 108 bytes including the NUL; the Apple/BSD
+/// layout used by the desktop build provides 104.
+#[cfg(target_os = "linux")]
+const UNIX_SOCKET_PATH_MAX: usize = 107;
+#[cfg(not(target_os = "linux"))]
+const UNIX_SOCKET_PATH_MAX: usize = 103;
+
+fn validate_unix_socket_path(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let len = path.as_os_str().as_bytes().len();
+    if len > UNIX_SOCKET_PATH_MAX {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "SSH agent socket path {} is {len} bytes; this platform's Unix socket limit is \
+                 {UNIX_SOCKET_PATH_MAX} bytes (excluding the terminating NUL) — use a shorter \
+                 --root",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Bind a Unix socket that is never observable with looser permissions than
 /// 0600.
 ///
@@ -626,6 +652,7 @@ const SOCKET_STAGING_EXT: &str = "bind";
 /// listener keeps its own fd.
 fn bind_private_socket(path: &Path) -> std::io::Result<UnixListener> {
     use std::os::unix::fs::PermissionsExt;
+    validate_unix_socket_path(path)?;
     let staging = path.with_extension(SOCKET_STAGING_EXT);
     // A crash could have left either name behind; bind fails on an existing
     // path even when nothing is listening.
@@ -1636,15 +1663,31 @@ async fn handle_endpoint_conn(
         .is_some_and(|endpoint| {
             endpoint.connection_id == ctx.connection_id && !endpoint.is_expired()
         });
-    if !endpoint_is_active || !state.broker.access.allows(&ctx.connection_id) {
+    if !endpoint_is_active {
+        audit_refused_connection(
+            &state,
+            "endpoint_revoked",
+            "the direct endpoint is missing, expired, or no longer names this tool",
+        );
+        let _ = stream.shutdown().await;
+        return Ok(());
+    }
+    if !state.broker.access.allows(&ctx.connection_id) {
+        audit_refused_connection(&state, "denied_by_policy", "agent access is disabled");
         let _ = stream.shutdown().await;
         return Ok(());
     }
     let Ok(connection) = state.broker.store.connection_by_id(&ctx.connection_id) else {
+        audit_refused_connection(&state, "unknown_connection", "the tool no longer exists");
         let _ = stream.shutdown().await;
         return Ok(());
     };
     if connection.kind() != ConnectionKind::Ssh {
+        audit_refused_connection(
+            &state,
+            "wrong_connection_type",
+            "the tool is no longer an SSH connection",
+        );
         let _ = stream.shutdown().await;
         return Ok(());
     }
@@ -1742,7 +1785,7 @@ async fn serve(
 
     loop {
         tokio::select! {
-            _ = close_signal.notified() => return "closed_by_user",
+            reason = close_signal.reason() => return reason,
             _ = tokio::time::sleep_until(ttl_deadline) => return "session_ttl",
             _ = tokio::time::sleep_until(idle_deadline) => return "idle_timeout",
             msg = read_message(&mut reader) => {
@@ -1761,7 +1804,7 @@ async fn serve(
                 // request future also drops its approval waiter, which is how
                 // the registry learns the prompt has nobody left on it.
                 let response = tokio::select! {
-                    _ = close_signal.notified() => return "closed_by_user",
+                    reason = close_signal.reason() => return reason,
                     _ = tokio::time::sleep_until(ttl_deadline) => return "session_ttl",
                     _ = client_gone(&mut reader) => return "client_closed",
                     response = handle_request(
@@ -2115,7 +2158,7 @@ async fn confirm_host_key(state: &Arc<AgentState>, observed: &Fingerprint) -> Op
 /// was ever asked to sign here. The client sees only a closed socket, so without
 /// this the reason existed nowhere.
 fn audit_refused_connection(state: &AgentState, outcome: &str, detail: &str) {
-    state.broker.audit.append(
+    let mut entry =
         AuditEntry::new(
             AuditKind::Denied,
             format!("SSH agent connection refused: {}", state.connection_name),
@@ -2125,8 +2168,15 @@ fn audit_refused_connection(state: &AgentState, outcome: &str, detail: &str) {
         .detail(detail.to_string())
         .outcome(outcome.to_string())
         .field("kind", "ssh")
-        .field("reason", outcome),
-    );
+        .field("reason", outcome);
+    if let Some(endpoint_id) = state.endpoint_id {
+        entry = entry
+            .field("via", "endpoint")
+            .field("endpoint_id", endpoint_id.to_string());
+    } else {
+        entry = entry.field("via", "ticket");
+    }
+    state.broker.audit.append(entry);
 }
 
 fn refuse(state: &AgentState, reason: &str) -> Vec<u8> {
@@ -2745,5 +2795,18 @@ mod tests {
         assert_ne!(0x02 & SSH_AGENT_RSA_SHA2_256, 0);
         assert_eq!(0x04 & SSH_AGENT_RSA_SHA2_256, 0);
         assert_ne!(0x04 & SSH_AGENT_RSA_SHA2_512, 0);
+    }
+
+    #[test]
+    fn socket_paths_are_rejected_before_bind_at_the_platform_limit() {
+        let too_long = PathBuf::from(format!(
+            "/tmp/{}.sock",
+            "x".repeat(UNIX_SOCKET_PATH_MAX)
+        ));
+        let error = validate_unix_socket_path(&too_long).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        let detail = error.to_string();
+        assert!(detail.contains(&UNIX_SOCKET_PATH_MAX.to_string()));
+        assert!(detail.contains("--root"));
     }
 }

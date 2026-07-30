@@ -379,10 +379,19 @@ pub fn activity_dto(entry: &AuditEntry) -> ActivityDto {
     ActivityDto {
         icon: entry.kind.icon().to_string(),
         tone: entry.kind.tone().to_string(),
+        kind: serde_json::to_value(entry.kind)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string)),
         text: entry.text.clone(),
         detail: entry.detail.clone(),
         agent: entry.agent.clone(),
         connection: entry.connection.clone(),
+        outcome: entry.outcome.clone(),
+        protocol: entry
+            .fields
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
         duration_ms: entry.duration_ms,
         approver: entry.approver.clone(),
         surface: surface.map(str::to_string),

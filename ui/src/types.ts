@@ -158,11 +158,15 @@ export interface SessionSummary {
 export interface ActivityEntry {
   icon: string;
   tone: string;
+  /** Stable audit event classification (`denied`, `session_closed`, …). */
+  kind?: string | null;
   text: string;
   detail: string | null;
   /** Which agent acted / which connection was touched, when attributable. */
   agent?: string | null;
   connection?: string | null;
+  outcome?: string | null;
+  protocol?: string | null;
   /** Brokered call / session duration, when measured. */
   duration_ms?: number | null;
   /** Decision provenance. A remote approver is the directly connected

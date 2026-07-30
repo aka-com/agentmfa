@@ -25,7 +25,7 @@
 //! pid/key: a `CancelRequest` connection is recognized, translated, and
 //! fired at the mapped upstream.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::pin::Pin;
 use std::sync::atomic::Ordering;
@@ -43,6 +43,11 @@ use tokio::io::{
 };
 use tokio::net::{TcpStream, UnixListener};
 use tokio::sync::Notify;
+
+/// Keep audit coalescing bounded just like the rate limiter it supplements.
+/// Rotating source addresses must not turn a throttling safeguard into a
+/// separate, permanent allocation.
+const MAX_ENDPOINT_AUTH_FLOODS: usize = 1024;
 
 use super::{TestError, TestErrorKind};
 use crate::audit::{AuditEntry, AuditKind};
@@ -339,6 +344,13 @@ struct ProxyState {
     /// prevents arbitrary-ticket churn from evading that bucket.
     redemptions_by_ticket: crate::ratelimit::KeyedLimiter,
     redemptions_by_peer: crate::ratelimit::KeyedLimiter,
+    /// Failed direct-endpoint passwords are keyed by endpoint + peer so one
+    /// local or hosted source cannot guess at handshake speed or grow the
+    /// sealed audit log without bound.
+    endpoint_auth_failures: crate::ratelimit::KeyedLimiter,
+    /// Keys whose current throttle episode has already emitted its one audit
+    /// entry. A newly admitted failure re-arms the episode.
+    endpoint_auth_floods: Mutex<HashSet<String>>,
 }
 
 impl ProxyState {
@@ -353,11 +365,40 @@ impl ProxyState {
                 broker.config.per_identity_per_min,
                 Duration::from_secs(60),
             ),
+            endpoint_auth_failures: crate::ratelimit::KeyedLimiter::new(
+                5,
+                Duration::from_secs(60),
+            ),
+            endpoint_auth_floods: Mutex::new(HashSet::new()),
             cancels: broker.pg_cancels.clone(),
             broker,
             handshakes: tokio::sync::Semaphore::new(permits),
         }
     }
+}
+
+fn audit_endpoint_auth_throttled(
+    state: &ProxyState,
+    endpoint_id: uuid::Uuid,
+    peer: &str,
+    key: &str,
+) {
+    let mut floods = state.endpoint_auth_floods.lock().unwrap();
+    if floods.contains(key) || floods.len() >= MAX_ENDPOINT_AUTH_FLOODS {
+        return;
+    }
+    floods.insert(key.to_string());
+    state.broker.audit.append(
+        AuditEntry::new(
+            AuditKind::Denied,
+            "Postgres endpoint authentication throttled",
+        )
+        .outcome("rate_limited")
+        .field("kind", "pg")
+        .field("reason", "rate_limited")
+        .field("endpoint_id", endpoint_id.to_string())
+        .field("peer_addr", peer),
+    );
 }
 
 /// Record a refused data-plane connection.
@@ -656,7 +697,9 @@ pub async fn bind_endpoint(
                     Ok((stream, _)) => {
                         let state = state.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_endpoint_conn(state, stream, endpoint_id).await {
+                            if let Err(e) =
+                                handle_endpoint_conn(state, stream, endpoint_id, "unix".into()).await
+                            {
                                 tracing::debug!("pg endpoint connection ended: {e}");
                             }
                         });
@@ -667,11 +710,18 @@ pub async fn bind_endpoint(
                     }
                 },
                 accepted = tcp.accept() => match accepted {
-                    Ok((stream, _)) => {
+                    Ok((stream, peer)) => {
                         let _ = stream.set_nodelay(true);
                         let state = state.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_endpoint_conn(state, stream, endpoint_id).await {
+                            if let Err(e) = handle_endpoint_conn(
+                                state,
+                                stream,
+                                endpoint_id,
+                                peer.ip().to_string(),
+                            )
+                            .await
+                            {
                                 tracing::debug!("pg endpoint connection ended: {e}");
                             }
                         });
@@ -696,6 +746,7 @@ async fn handle_endpoint_conn<S>(
     state: Arc<ProxyState>,
     stream: S,
     endpoint_id: uuid::Uuid,
+    peer: String,
 ) -> io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -709,10 +760,23 @@ where
     // reachable by any local process — and, off-loopback, by any peer — so a
     // client that connects and says nothing must not hold a task and an fd
     // for as long as it likes.
-    let admission = state
-        .handshakes
-        .try_acquire()
-        .map_err(|_| io::Error::other("pg endpoint handshake admission exhausted"))?;
+    let admission = match state.handshakes.try_acquire() {
+        Ok(admission) => admission,
+        Err(_) => {
+            // libpq understands a pre-startup ErrorResponse. Best effort is
+            // enough here: the peer may already have gone away, but a live
+            // client gets the real PostgreSQL "too many connections" class
+            // instead of an unexplained EOF.
+            let _ = client
+                .write_all(&error_response(
+                    "FATAL",
+                    "53300",
+                    "AKA: Postgres handshake admission exhausted; retry shortly",
+                ))
+                .await;
+            return Ok(());
+        }
+    };
     let deadline = tokio::time::Instant::now() + state.broker.config.pg_handshake_timeout;
 
     let params = match tokio::time::timeout_at(deadline, read_startup_phase(&mut client, &state))
@@ -739,6 +803,21 @@ where
         return Ok(());
     }
     let (presented, _) = take_cstr(&payload)?;
+    let failure_key = format!("{endpoint_id}:{peer}");
+    if let Some(wait) = state.endpoint_auth_failures.retry_after(&failure_key) {
+        audit_endpoint_auth_throttled(&state, endpoint_id, &peer, &failure_key);
+        client
+            .write_all(&error_response(
+                "FATAL",
+                "53300",
+                &format!(
+                    "AKA: endpoint authentication rate limited; retry in {}s",
+                    wait.as_secs().max(1)
+                ),
+            ))
+            .await?;
+        return Ok(());
+    }
 
     // Attribute the secret to THIS endpoint. A secret that resolves to another
     // endpoint (or to nothing) is refused as an invalid password.
@@ -748,14 +827,37 @@ where
         .resolve_secret(&presented)
         .filter(|e| e.id == endpoint_id)
     else {
-        // Same condition, same name as the HTTP endpoint's rejection: one
-        // reason string so a filter on it catches both data planes.
-        audit_refusal(
-            &state.broker,
-            None,
-            "invalid_secret",
-            "the presented password is not this endpoint's secret",
-        );
+        match state.endpoint_auth_failures.check(&failure_key) {
+            Ok(()) => {
+                state
+                    .endpoint_auth_floods
+                    .lock()
+                    .unwrap()
+                    .remove(&failure_key);
+                // Same condition, same name as the HTTP endpoint's rejection:
+                // one reason string so a filter catches both data planes.
+                audit_refusal(
+                    &state.broker,
+                    None,
+                    "invalid_secret",
+                    "the presented password is not this endpoint's secret",
+                );
+            }
+            Err(wait) => {
+                audit_endpoint_auth_throttled(&state, endpoint_id, &peer, &failure_key);
+                client
+                    .write_all(&error_response(
+                        "FATAL",
+                        "53300",
+                        &format!(
+                            "AKA: endpoint authentication rate limited; retry in {}s",
+                            wait.as_secs().max(1)
+                        ),
+                    ))
+                    .await?;
+                return Ok(());
+            }
+        }
         client
             .write_all(&error_response(
                 "FATAL",
@@ -2913,7 +3015,7 @@ async fn splice<C>(
                 ttl_deadline + Duration::from_secs(1)
             };
             tokio::select! {
-                _ = close_signal.notified() => break "closed_by_user",
+                reason = close_signal.reason() => break reason,
                 _ = tokio::time::sleep_until(ttl_deadline) => break "session_ttl",
                 _ = tokio::time::sleep_until(idle_at) => break "idle_timeout",
                 read = client_rx.read(&mut client_buf) => match read {

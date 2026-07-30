@@ -720,7 +720,9 @@ impl Broker {
                 if connection.secrets.contains(id) {
                     self.approvals.revoke(&connection.id);
                     self.elicitations.revoke(&connection.id);
-                    closed_sessions += self.data_plane.close_connection_sessions(&connection.id);
+                    closed_sessions += self
+                        .data_plane
+                        .close_connection_sessions(&connection.id, "secret_rotated");
                 }
             }
         }
@@ -1083,7 +1085,9 @@ impl Broker {
         // agent's next call redials under the settings the user just chose.
         let mut closed_sessions = 0;
         if capability_changed {
-            closed_sessions = self.data_plane.close_connection_sessions(id);
+            closed_sessions = self
+                .data_plane
+                .close_connection_sessions(id, "connection_changed");
         }
         let mut endpoints_revoked = false;
         if target_changed {
@@ -1093,7 +1097,7 @@ impl Broker {
             // any curated MCP tool subset name the *tool* and survive: stale
             // tool names simply stop matching, which only narrows access.
             let endpoints = self.endpoints.remove_for_connection(id)?;
-            self.teardown_endpoints(&endpoints);
+            self.teardown_endpoints(&endpoints, "connection_changed");
             endpoints_revoked = !endpoints.is_empty();
             if endpoints_revoked {
                 self.events.wirings_changed();
@@ -1168,11 +1172,13 @@ impl Broker {
         self.elicitations.revoke(id);
         let dropped = self.access.remove_for_connection(id)?;
         let endpoints = self.endpoints.remove_for_connection(id)?;
-        self.teardown_endpoints(&endpoints);
+        self.teardown_endpoints(&endpoints, "connection_deleted");
         // The connection is gone, so nothing it authorized may keep running:
         // invalidate its tickets and close its live sessions, ticket-served
         // ones included.
-        let closed_sessions = self.data_plane.close_connection_sessions(id);
+        let closed_sessions = self
+            .data_plane
+            .close_connection_sessions(id, "connection_deleted");
         if dropped || !endpoints.is_empty() {
             self.events.wirings_changed();
         }
@@ -2333,7 +2339,8 @@ impl Broker {
         // were accepted under the old rule. Turning authentication *on* is a
         // decision that those must stop signing, so close them.
         if require_auth {
-            self.data_plane.close_endpoint_sessions(&endpoint.id);
+            self.data_plane
+                .close_endpoint_sessions(&endpoint.id, "endpoint_auth_required");
         }
         self.audit.append(
             AuditEntry::new(
@@ -2361,7 +2368,7 @@ impl Broker {
             return Ok(false);
         };
         let _ = self.vault.delete(&endpoint.id);
-        self.teardown_endpoints(std::slice::from_ref(&endpoint));
+        self.teardown_endpoints(std::slice::from_ref(&endpoint), "endpoint_revoked");
         let connection = self
             .store
             .connection_by_id(&endpoint.connection_id)
@@ -2411,7 +2418,10 @@ impl Broker {
                             endpoint.id
                         );
                         if let Ok(Some(removed)) = self.endpoints.revoke(&endpoint.id) {
-                            self.teardown_endpoints(std::slice::from_ref(&removed));
+                            self.teardown_endpoints(
+                                std::slice::from_ref(&removed),
+                                "endpoint_revoked",
+                            );
                             self.audit.append(
                                 AuditEntry::new(
                                     AuditKind::Unwired,
@@ -2434,7 +2444,10 @@ impl Broker {
                         endpoint.id
                     );
                     if let Ok(Some(removed)) = self.endpoints.revoke(&endpoint.id) {
-                        self.teardown_endpoints(std::slice::from_ref(&removed));
+                        self.teardown_endpoints(
+                            std::slice::from_ref(&removed),
+                            "connection_changed",
+                        );
                     }
                 }
             }
@@ -2510,12 +2523,13 @@ impl Broker {
     /// (the listener and its socket directory) and closes any live
     /// sessions it was serving, so a revoked endpoint stops working at once —
     /// unlike a ticket, its access is standing and cannot be left to expire.
-    fn teardown_endpoints(&self, removed: &[DirectEndpoint]) {
+    fn teardown_endpoints(&self, removed: &[DirectEndpoint], reason: &'static str) {
         for endpoint in removed {
             if let Some(handle) = self.endpoint_listeners.lock().unwrap().remove(&endpoint.id) {
                 handle.stop();
             }
-            self.data_plane.close_endpoint_sessions(&endpoint.id);
+            self.data_plane
+                .close_endpoint_sessions(&endpoint.id, reason);
             let dir = self.paths.endpoint_dir(&endpoint.id);
             if let Err(error) = std::fs::remove_dir_all(&dir) {
                 if error.kind() != std::io::ErrorKind::NotFound {
@@ -2560,7 +2574,8 @@ impl Broker {
             let closed_sessions = if enabled {
                 0
             } else {
-                self.data_plane.close_connection_sessions(connection_id)
+                self.data_plane
+                    .close_connection_sessions(connection_id, "access_disabled")
             };
             self.audit.append(
                 AuditEntry::new(
@@ -2999,9 +3014,9 @@ impl Broker {
         for endpoint in &endpoints {
             let _ = self.vault.delete(&endpoint.id);
         }
-        self.teardown_endpoints(&endpoints);
+        self.teardown_endpoints(&endpoints, "key_rotated");
         self.identity.rotate()?;
-        let sessions_closed = self.data_plane.close_all();
+        let sessions_closed = self.data_plane.close_all("key_rotated");
         // An approval window is permission for traffic from the generation
         // being disconnected; it must not outlive it.
         self.approvals.revoke_all();
@@ -3041,7 +3056,7 @@ impl Broker {
         for (_, listener) in listeners {
             listener.stop();
         }
-        self.data_plane.close_all()
+        self.data_plane.close_all("broker_shutdown")
     }
 
     /// Wait for signalled session tasks to retire their accounting. Returns

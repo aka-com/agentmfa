@@ -456,12 +456,23 @@ pub struct SessionDto {
 pub struct ActivityDto {
     pub icon: String,
     pub tone: String,
+    /// Stable audit event classification (for example `denied` or
+    /// `session_closed`). Optional so newer clients can read older brokers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     pub text: String,
     pub detail: Option<String>,
     /// Structured attribution for filtering: which agent acted and which
     /// connection was touched (both optional per entry).
     pub agent: Option<String>,
     pub connection: Option<String>,
+    /// Stable machine outcome and protocol, when the audit entry carries
+    /// them. Consumers must not reverse-engineer either from presentation
+    /// prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
     /// How long a brokered call or session took, when measured.
     pub duration_ms: Option<u64>,
     /// The decision surface and its directly observed principal, when the
@@ -819,10 +830,13 @@ mod tests {
             entry: ActivityDto {
                 icon: "plug".into(),
                 tone: "neutral".into(),
+                kind: Some("connection_added".into()),
                 text: "Connection added".into(),
                 detail: None,
                 agent: None,
                 connection: None,
+                outcome: None,
+                protocol: None,
                 duration_ms: None,
                 approver: None,
                 surface: None,

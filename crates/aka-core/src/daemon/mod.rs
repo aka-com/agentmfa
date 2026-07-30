@@ -870,6 +870,24 @@ async fn get_connections(State(state): State<AppState>, authed: Authed) -> Respo
         )
         .agent(authed.client.clone()),
     );
+    let mut recent_ssh_refusals = std::collections::HashMap::new();
+    for entry in broker.audit.recent(200) {
+        if entry.kind != AuditKind::Denied
+            || entry.fields.get("kind").and_then(serde_json::Value::as_str) != Some("ssh")
+        {
+            continue;
+        }
+        let Some(connection) = entry.connection else {
+            continue;
+        };
+        recent_ssh_refusals.entry(connection).or_insert_with(|| {
+            json!({
+                "at": entry.ts,
+                "reason": entry.outcome,
+                "detail": entry.detail,
+            })
+        });
+    }
     let list: Vec<serde_json::Value> = broker
         .store
         .list_connections()
@@ -904,6 +922,9 @@ async fn get_connections(State(state): State<AppState>, authed: Authed) -> Respo
                 if let Some(tools) = broker.access.allowed_tools(&c.id) {
                     row["allowed_tools"] = json!(tools);
                 }
+            }
+            if let Some(refusal) = recent_ssh_refusals.get(&c.name) {
+                row["recent_ssh_refusal"] = refusal.clone();
             }
             row
         })

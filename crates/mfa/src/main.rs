@@ -35,7 +35,6 @@ use std::sync::Arc;
 use aka_api::{ActivityDto, ConnectionDto, ManageError, SecretDto};
 use aka_client::credentials::TokenStore;
 use aka_client::{RemoteBackend, RemoteConfig};
-use aka_core::audit::AuditEntry;
 use aka_core::broker::{Broker, PRESENCE_WINDOW_CHOICES};
 use aka_core::config::BrokerConfig;
 use aka_core::daemon;
@@ -3416,9 +3415,42 @@ struct StatusReport {
     vault: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     approval_surface_attached: Option<bool>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    recent_ssh_refusals: Vec<StatusSshRefusal>,
     tools: Vec<StatusTool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools_error: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct StatusSshRefusal {
+    connection: String,
+    at: String,
+    reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+}
+
+fn status_ssh_refusals(entries: &[ActivityDto]) -> Vec<StatusSshRefusal> {
+    let mut seen = std::collections::HashSet::new();
+    entries
+        .iter()
+        .filter(|entry| entry.kind.as_deref() == Some("denied"))
+        .filter(|entry| entry.protocol.as_deref() == Some("ssh"))
+        .filter_map(|entry| {
+            let connection = entry.connection.as_ref()?;
+            let reason = entry.outcome.as_ref()?;
+            if !seen.insert(connection.clone()) {
+                return None;
+            }
+            Some(StatusSshRefusal {
+                connection: connection.clone(),
+                at: entry.at.clone(),
+                reason: reason.clone(),
+                detail: entry.detail.clone(),
+            })
+        })
+        .collect()
 }
 
 fn status_tools(connections: &[ConnectionDto]) -> Vec<StatusTool> {
@@ -3462,6 +3494,22 @@ fn print_status_report(report: &StatusReport) {
     }
     if let Some(vault) = &report.vault {
         println!("  vault: {vault}");
+    }
+    if !report.recent_ssh_refusals.is_empty() {
+        println!("  recent SSH refusals:");
+        for refusal in &report.recent_ssh_refusals {
+            println!(
+                "    {}  {}  {}{}",
+                refusal.connection,
+                refusal.at,
+                refusal.reason,
+                refusal
+                    .detail
+                    .as_deref()
+                    .map(|detail| format!(" · {detail}"))
+                    .unwrap_or_default()
+            );
+        }
     }
     if let Some(error) = &report.tools_error {
         println!("  tools: unavailable ({error})");
@@ -3526,6 +3574,7 @@ fn remote_status(root: Option<PathBuf>, url: String) -> StatusReport {
     let managed = management_backend(root, Some(url.clone()));
     let identity = managed.run(managed.backend.identity());
     let connections = managed.run(managed.backend.list_connections());
+    let activity = managed.run(managed.backend.activity(100));
     StatusReport {
         running: true,
         transport: "manage_api".into(),
@@ -3550,6 +3599,7 @@ fn remote_status(root: Option<PathBuf>, url: String) -> StatusReport {
         shared_key_present: None,
         vault: None,
         approval_surface_attached: Some(managed.approval_surface_attached()),
+        recent_ssh_refusals: status_ssh_refusals(&activity),
         tools: status_tools(&connections),
         tools_error: None,
     }
@@ -3640,6 +3690,7 @@ fn local_status(root: Option<PathBuf>) -> Result<StatusReport, (StatusReport, Ex
         shared_key_present: Some(key_present),
         vault: Some(vault_description(&paths)),
         approval_surface_attached: None,
+        recent_ssh_refusals: Vec::new(),
         tools: Vec::new(),
         tools_error: None,
     };
@@ -3674,24 +3725,27 @@ fn local_status(root: Option<PathBuf>) -> Result<StatusReport, (StatusReport, Ex
     // management credential is available, use the read-only manage plane for
     // tool detail; otherwise report that subsection as unavailable.
     let manage_key = socket.display().to_string();
-    let (client_id, approval_surface_attached, tools, tools_error) =
+    let (client_id, approval_surface_attached, recent_ssh_refusals, tools, tools_error) =
         match manage_token(&paths, &manage_key) {
             Some(token) => {
                 let backend = RemoteBackend::over_unix_socket(socket.clone(), &token);
                 match runtime.block_on(async {
                     let profile = backend.whoami().await?;
                     let connections = backend.list_connections().await?;
-                    Ok::<_, ManageError>((profile, connections))
+                    let activity = backend.activity(100).await?;
+                    Ok::<_, ManageError>((profile, connections, activity))
                 }) {
-                    Ok((profile, connections)) => (
+                    Ok((profile, connections, activity)) => (
                         profile["client_id"].as_str().map(str::to_string),
                         profile["approval_surface_attached"].as_bool(),
+                        status_ssh_refusals(&activity),
                         status_tools(&connections),
                         None,
                     ),
                     Err(error) => (
                         None,
                         None,
+                        Vec::new(),
                         Vec::new(),
                         Some(format!("manage API read failed: {error}")),
                     ),
@@ -3700,6 +3754,7 @@ fn local_status(root: Option<PathBuf>) -> Result<StatusReport, (StatusReport, Ex
             None => (
                 None,
                 None,
+                Vec::new(),
                 Vec::new(),
                 Some(
                     "no management token configured; run `mfa manage login` to include tools"
@@ -3720,6 +3775,7 @@ fn local_status(root: Option<PathBuf>) -> Result<StatusReport, (StatusReport, Ex
         shared_key_present: Some(key_present),
         vault: Some(vault_description(&paths)),
         approval_surface_attached,
+        recent_ssh_refusals,
         tools,
         tools_error,
     })
@@ -3816,8 +3872,8 @@ fn cmd_activity(limit: usize, json: bool, root: Option<PathBuf>, url: Option<Str
     }
     let paths = store_paths(root.as_deref());
     let file = paths.audit_file();
-    let content = match std::fs::read_to_string(&file) {
-        Ok(content) => content,
+    match std::fs::metadata(&file) {
+        Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             if json {
                 print_activity(&[], true);
@@ -3829,23 +3885,54 @@ fn cmd_activity(limit: usize, json: bool, root: Option<PathBuf>, url: Option<Str
             }
             return;
         }
-        Err(e) => die(format!("could not read {}: {e}", file.display())),
+        Err(e) => die(format!("could not inspect {}: {e}", file.display())),
+    }
+    let vault = match open_vault(&paths, root.as_deref()) {
+        Ok(vault) => vault,
+        Err(e) => die(format!("could not open the secret vault: {e}")),
     };
-    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
-    let start = if limit == 0 {
-        0
-    } else {
-        lines.len().saturating_sub(limit)
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let integrity = match runtime.block_on(aka_core::integrity::StateIntegrity::open_for_paths(
+        &*vault, &paths,
+    )) {
+        Ok(integrity) => Arc::new(integrity),
+        Err(e) => die(format!("could not open the state integrity key: {e}")),
     };
-    let entries = lines[start..]
+    // Check an existing seal before `open_sealed`: opening is allowed to
+    // adopt a genuinely absent legacy seal, but must not turn a damaged seal
+    // into a fresh legacy baseline merely because this is a CLI read.
+    if paths.audit_seal_file().exists() {
+        if let Err(error) = integrity.read_verified(&paths.audit_seal_file()) {
+            die(format!("activity log integrity check failed: {error}"));
+        }
+    }
+    let audit = match aka_core::audit::AuditLog::open_sealed(
+        file,
+        paths.audit_seal_file(),
+        integrity,
+    ) {
+        Ok(audit) => audit,
+        Err(e) => die(format!("could not open the activity log: {e}")),
+    };
+    let verification = audit.verify();
+    match &verification {
+        aka_core::audit::AuditIntegrity::Tampered { .. } => die(verification.summary()),
+        aka_core::audit::AuditIntegrity::Unsealed { .. } => {
+            eprintln!("warning: {}", verification.summary())
+        }
+        aka_core::audit::AuditIntegrity::Verified { legacy, .. } if *legacy > 0 => {
+            eprintln!("warning: {}", verification.summary())
+        }
+        aka_core::audit::AuditIntegrity::Verified { .. } => {}
+    }
+    let mut entries = audit.recent(if limit == 0 { usize::MAX } else { limit });
+    entries.reverse();
+    let entries = entries
         .iter()
-        .filter_map(|line| {
-            // A trailing line the broker is mid-append on parses as garbage;
-            // skip it rather than break the listing.
-            serde_json::from_str::<AuditEntry>(line)
-                .ok()
-                .map(|entry| activity_dto(&entry))
-        })
+        .map(activity_dto)
         .collect::<Vec<_>>();
     print_activity(&entries, json);
 }
@@ -4779,10 +4866,13 @@ mod tests {
         let entry = ActivityDto {
             icon: "network".into(),
             tone: "blue".into(),
+            kind: Some("http_executed".into()),
             text: "claude-code requested github".into(),
             detail: Some("GET api.github.com/user/repos".into()),
             agent: Some("claude-code".into()),
             connection: Some("github".into()),
+            outcome: Some("ok".into()),
+            protocol: Some("http".into()),
             duration_ms: None,
             approver: None,
             surface: None,
@@ -4795,14 +4885,58 @@ mod tests {
              api.github.com/user/repos  [claude-code]"
         );
         let bare = ActivityDto {
+            kind: Some("settings_changed".into()),
             text: "Agent access enabled".into(),
             detail: None,
             agent: None,
             connection: None,
+            outcome: None,
+            protocol: None,
             at: "-".into(),
             ..entry
         };
         assert_eq!(format_activity_line(&bare), "-  Agent access enabled");
+    }
+
+    #[test]
+    fn ssh_status_ignores_normal_session_closes_when_finding_refusals() {
+        let normal_close = ActivityDto {
+            icon: "logOut".into(),
+            tone: "neutral".into(),
+            kind: Some("session_closed".into()),
+            text: "SSH session closed".into(),
+            detail: Some("idle timeout".into()),
+            agent: Some("codex".into()),
+            connection: Some("deploy".into()),
+            outcome: Some("idle_timeout".into()),
+            protocol: Some("ssh".into()),
+            duration_ms: Some(120_000),
+            approver: None,
+            surface: None,
+            confirmation: None,
+            at: "2026-07-30T12:01:00Z".into(),
+        };
+        let denial = ActivityDto {
+            icon: "circleX".into(),
+            tone: "danger".into(),
+            kind: Some("denied".into()),
+            text: "SSH agent connection refused: deploy".into(),
+            detail: Some("agent access is disabled".into()),
+            agent: Some("endpoint".into()),
+            connection: Some("deploy".into()),
+            outcome: Some("denied_by_policy".into()),
+            protocol: Some("ssh".into()),
+            duration_ms: None,
+            approver: None,
+            surface: None,
+            confirmation: None,
+            at: "2026-07-30T12:00:00Z".into(),
+        };
+
+        let refusals = status_ssh_refusals(&[normal_close, denial]);
+        assert_eq!(refusals.len(), 1);
+        assert_eq!(refusals[0].reason, "denied_by_policy");
+        assert_eq!(refusals[0].at, "2026-07-30T12:00:00Z");
     }
 
     fn update_args() -> ConnUpdate {

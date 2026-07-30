@@ -42,7 +42,17 @@ let discoveryBrokerCalls = 0;
 
 const CONNECTIONS = [
   { name: 'prod-db', type: 'pg', target: 'db.internal:5432/app', endpoint: '/v1/pg/open' },
-  { name: 'deploy-host', type: 'ssh', target: 'deploy@host.internal', endpoint: '/v1/ssh/open' },
+  {
+    name: 'deploy-host',
+    type: 'ssh',
+    target: 'deploy@host.internal',
+    endpoint: '/v1/ssh/open',
+    recent_ssh_refusal: {
+      at: '2026-07-30T12:00:00Z',
+      reason: 'denied_by_policy',
+      detail: 'agent access is disabled',
+    },
+  },
   // These two slug to the same MCP tool name: `agentmfa_prod_db_open`.
   // Hyphens survive; dots and spaces do not.
   { name: 'prod.db', type: 'pg', target: 'db.other:5432/app', endpoint: '/v1/pg/open' },
@@ -638,9 +648,17 @@ test('an empty connection-wide access set is explained', async () => {
 
     const status = payload(
       await client.callTool({ name: 'agentmfa_status', arguments: {} }),
-    ) as { tools: unknown[]; hint?: string };
+    ) as {
+      tools: unknown[];
+      hint?: string;
+      recent_ssh_refusals?: Array<{ name: string; reason: string }>;
+    };
     assert.deepEqual(status.tools, []);
     assert.match(status.hint ?? '', /No tools are enabled for agents/i);
+    assert.deepEqual(status.recent_ssh_refusals, [
+      { name: 'deploy-host', at: '2026-07-30T12:00:00Z',
+        reason: 'denied_by_policy', detail: 'agent access is disabled' },
+    ]);
   } finally {
     await app.close();
   }

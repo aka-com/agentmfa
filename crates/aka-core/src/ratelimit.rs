@@ -112,6 +112,24 @@ impl KeyedLimiter {
         self.check_at(key, Instant::now())
     }
 
+    /// Inspect an exhausted keyed window without recording another hit.
+    pub fn retry_after(&self, key: &str) -> Option<Duration> {
+        let now = Instant::now();
+        let mut map = self.map.lock().unwrap();
+        let hits = map.get_mut(key)?;
+        while hits
+            .front()
+            .is_some_and(|front| now.duration_since(*front) > self.window)
+        {
+            hits.pop_front();
+        }
+        if hits.is_empty() {
+            map.remove(key);
+            return None;
+        }
+        (hits.len() >= self.max as usize).then(|| window_retry_after(hits, self.window, now))
+    }
+
     fn check_at(&self, key: &str, now: Instant) -> Result<(), Duration> {
         let mut map = self.map.lock().unwrap();
         // Prune all expired entries before considering a new bucket. This is
@@ -182,6 +200,15 @@ mod tests {
         let wait = l.check("a").unwrap_err();
         assert!(wait <= Duration::from_secs(60));
         assert!(l.check("b").is_ok());
+    }
+
+    #[test]
+    fn keyed_exhaustion_can_be_checked_without_another_hit() {
+        let l = KeyedLimiter::new(1, Duration::from_secs(60));
+        assert_eq!(l.retry_after("a"), None);
+        assert!(l.check("a").is_ok());
+        assert!(l.retry_after("a").is_some());
+        assert_eq!(l.retry_after("b"), None);
     }
 
     #[test]

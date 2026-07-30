@@ -8,6 +8,7 @@
 //! scheme/host/port, re-applying the one freshly rendered injection to every
 //! permitted hop.
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -2543,8 +2544,8 @@ async fn proxy_handler(
 
     let close_signal = session.close_signal.clone();
     let upload = tokio::select! {
-        _ = close_signal.notified() => {
-            session.finish("access_revoked");
+        reason = close_signal.reason() => {
+            session.finish(reason);
             return endpoint_error(
                 StatusCode::FORBIDDEN,
                 ErrorReason::DeniedByPolicy,
@@ -2590,6 +2591,9 @@ async fn proxy_handler(
             );
         }
     };
+    session
+        .bytes_up
+        .fetch_add(spooled.len(), Ordering::Relaxed);
 
     // Receiving a request body can take arbitrarily long. Reauthenticate and
     // re-check access immediately before dispatch so a disable, revoke, or
@@ -2722,8 +2726,8 @@ async fn proxy_handler(
     // therefore an explicit trade of size for retry safety.
     if let Some(request_id) = coalesce_request_id {
         let outcome = tokio::select! {
-            _ = close_signal.notified() => {
-                session.finish("access_revoked");
+            reason = close_signal.reason() => {
+                session.finish(reason);
                 return endpoint_error(
                     StatusCode::FORBIDDEN,
                     ErrorReason::DeniedByPolicy,
@@ -2733,6 +2737,11 @@ async fn proxy_handler(
             outcome = run_coalesced(broker, &endpoint, &connection, &method, &path,
                                     &headers, &spooled, request_id, execution) => outcome,
         };
+        if let Ok(outcome) = &outcome {
+            session
+                .bytes_down
+                .fetch_add(outcome_body_len(outcome), Ordering::Relaxed);
+        }
         session.finish("request_complete");
         let expose_response_credentials = broker
             .access
@@ -2744,8 +2753,8 @@ async fn proxy_handler(
     }
 
     let dialed = tokio::select! {
-        _ = close_signal.notified() => {
-            session.finish("access_revoked");
+        reason = close_signal.reason() => {
+            session.finish(reason);
             return endpoint_error(
                 StatusCode::FORBIDDEN,
                 ErrorReason::DeniedByPolicy,
@@ -2858,15 +2867,18 @@ fn stream_response(
     let status_label = status.as_u16().to_string();
     let body = redacting_stream(response, redactions, move |bytes, finish| match finish {
         StreamFinish::Complete => {
+            session.bytes_down.fetch_add(bytes, Ordering::Relaxed);
             relay.finish(&status_label, Some(bytes));
             session.finish("request_complete");
         }
         StreamFinish::UpstreamError(detail) => {
+            session.bytes_down.fetch_add(bytes, Ordering::Relaxed);
             record_upstream_failure_health(&health, &connection_id, detail);
             relay.finish("stream_interrupted", Some(bytes));
             session.finish("request_failed");
         }
         StreamFinish::ConsumerDropped => {
+            session.bytes_down.fetch_add(bytes, Ordering::Relaxed);
             relay.finish("caller_disconnected", Some(bytes));
             session.finish("client_closed");
         }
@@ -3001,6 +3013,29 @@ fn outcome_status_label(outcome: &ExecOutcome) -> String {
         .and_then(|status| status.as_u64())
         .map(|status| status.to_string())
         .unwrap_or_else(|| format!("broker:{}", outcome.status))
+}
+
+fn outcome_body_len(outcome: &ExecOutcome) -> u64 {
+    if outcome.status != 200 {
+        return 0;
+    }
+    let Some(body) = outcome.body.get("body").and_then(Value::as_str) else {
+        return 0;
+    };
+    match outcome
+        .body
+        .get("body_encoding")
+        .and_then(Value::as_str)
+    {
+        Some("base64") => {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD
+                .decode(body)
+                .map(|bytes| bytes.len() as u64)
+                .unwrap_or(0)
+        }
+        _ => body.len() as u64,
+    }
 }
 
 /// Translate `/v1/http`'s relayed `{status, headers, body, body_encoding}`
@@ -3382,6 +3417,36 @@ mod tests {
         )
         .unwrap();
         assert_eq!(inline, streamed);
+    }
+
+    #[test]
+    fn endpoint_session_accounting_decodes_buffered_response_lengths() {
+        let utf8 = ExecOutcome {
+            status: 200,
+            body: json!({
+                "status": 200,
+                "body": "hello",
+                "body_encoding": "utf8",
+            }),
+        };
+        assert_eq!(outcome_body_len(&utf8), 5);
+
+        let binary = ExecOutcome {
+            status: 200,
+            body: json!({
+                "status": 200,
+                "body": "AAECAw==",
+                "body_encoding": "base64",
+            }),
+        };
+        assert_eq!(outcome_body_len(&binary), 4);
+        assert_eq!(
+            outcome_body_len(&ExecOutcome {
+                status: 502,
+                body: json!({"reason": "upstream_error"}),
+            }),
+            0
+        );
     }
 
     #[test]

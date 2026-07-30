@@ -2305,10 +2305,10 @@ async fn http_direct_endpoint_proxies_with_injected_credential() {
     let auth = format!("Bearer {}", info.secret);
     let (status, _, body) = loopback_request(
         port,
-        "GET",
+        "POST",
         "/echo",
         &[("authorization", &auth), ("x-test", "hello")],
-        None,
+        Some("hello"),
     )
     .await;
     assert_eq!(status, 200, "proxied response: {body}");
@@ -2323,6 +2323,21 @@ async fn http_direct_endpoint_proxies_with_injected_credential() {
     assert!(
         !body.to_string().contains("ghp_test_secret_value"),
         "the injected credential must be redacted: {body}"
+    );
+    let closed = h
+        .broker
+        .audit
+        .recent(20)
+        .into_iter()
+        .find(|entry| {
+            entry.kind == aka_core::audit::AuditKind::SessionClosed
+                && entry.connection.as_deref() == Some("github")
+        })
+        .expect("the endpoint request should close an accounted API session");
+    assert_eq!(closed.bytes_up, Some(5));
+    assert!(
+        closed.bytes_down.is_some_and(|bytes| bytes > 0),
+        "the relayed response body must feed session accounting: {closed:?}"
     );
 }
 

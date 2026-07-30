@@ -102,10 +102,13 @@ export interface SessionDto {
 export interface ActivityDto {
   icon: string;
   tone: string;
+  kind?: string | null;
   text: string;
   detail: string | null;
   agent: string | null;
   connection: string | null;
+  outcome?: string | null;
+  protocol?: string | null;
   at: string;
 }
 

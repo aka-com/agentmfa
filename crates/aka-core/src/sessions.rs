@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use tokio::sync::Notify;
+use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::audit::{AuditEntry, AuditKind, AuditLog};
@@ -65,7 +65,7 @@ struct SessionEntry {
     /// outlives its ticket by up to `session_max_ttl`, so disabling or
     /// deleting the connection needs this to reach it.
     connection_id: Uuid,
-    close: Arc<Notify>,
+    close: watch::Sender<Option<&'static str>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -115,12 +115,33 @@ pub struct Redemption {
 pub struct SessionHandle {
     plane: Arc<DataPlaneInner>,
     pub id: u64,
-    pub close_signal: Arc<Notify>,
+    pub close_signal: SessionCloseSignal,
     pub bytes_up: Arc<AtomicU64>,
     pub bytes_down: Arc<AtomicU64>,
     kind: ConnectionKind,
     agent: String,
     connection: String,
+}
+
+/// A reason-carrying close signal for a live data-plane transport.
+///
+/// `watch` retains the reason when signalling races waiter registration, and
+/// cloning this wrapper lets independent protocol branches observe the same
+/// revocation without collapsing every cause into "closed by user".
+#[derive(Debug, Clone)]
+pub struct SessionCloseSignal {
+    receiver: watch::Receiver<Option<&'static str>>,
+}
+
+impl SessionCloseSignal {
+    pub async fn reason(&self) -> &'static str {
+        let mut receiver = self.receiver.clone();
+        let reason = match receiver.wait_for(Option::is_some).await {
+            Ok(reason) => reason.unwrap_or("broker_shutdown"),
+            Err(_) => "broker_shutdown",
+        };
+        reason
+    }
 }
 
 struct DataPlaneInner {
@@ -262,7 +283,7 @@ impl DataPlane {
             detail: connection.target(),
             opened_at: Utc::now(),
         };
-        let close = Arc::new(Notify::new());
+        let (close, close_signal) = watch::channel(None);
         let bytes_up = Arc::new(AtomicU64::new(0));
         let bytes_down = Arc::new(AtomicU64::new(0));
         state.sessions.insert(
@@ -272,7 +293,7 @@ impl DataPlane {
                 ticket: None,
                 endpoint_id: Some(endpoint_id),
                 connection_id: connection.id,
-                close: close.clone(),
+                close,
             },
         );
         drop(state);
@@ -295,7 +316,9 @@ impl DataPlane {
         Ok(SessionHandle {
             plane: inner,
             id,
-            close_signal: close,
+            close_signal: SessionCloseSignal {
+                receiver: close_signal,
+            },
             bytes_up,
             bytes_down,
             kind,
@@ -319,7 +342,7 @@ impl DataPlane {
         let state = self.inner.state.lock().unwrap();
         match state.sessions.get(&id) {
             Some(entry) => {
-                entry.close.notify_one();
+                signal_close(&entry.close, "closed_by_user");
                 true
             }
             None => false,
@@ -329,7 +352,7 @@ impl DataPlane {
     /// Invalidate every unredeemed capability and close every live transport,
     /// regardless of which agent opened it. Rotating the shared key must not
     /// leave the old generation's data-plane capabilities usable.
-    pub fn close_all(&self) -> usize {
+    pub fn close_all(&self, reason: &'static str) -> usize {
         let mut state = self.inner.state.lock().unwrap();
         for ticket in state.tickets.values_mut() {
             ticket.invalidated = true;
@@ -342,9 +365,7 @@ impl DataPlane {
         let count = sessions.len();
         drop(state);
         for close in sessions {
-            // One transport waits on each session. `notify_one` retains a
-            // permit if closure races the transport beginning its wait.
-            close.notify_one();
+            signal_close(&close, reason);
         }
         count
     }
@@ -358,7 +379,11 @@ impl DataPlane {
     /// deleting a connection has to reach both, or "turn it off" leaves an
     /// authenticated upstream connection running against the credential the
     /// user just revoked.
-    pub fn close_connection_sessions(&self, connection_id: &Uuid) -> usize {
+    pub fn close_connection_sessions(
+        &self,
+        connection_id: &Uuid,
+        reason: &'static str,
+    ) -> usize {
         let mut state = self.inner.state.lock().unwrap();
         for ticket in state.tickets.values_mut() {
             if ticket.connection.id != *connection_id {
@@ -375,9 +400,7 @@ impl DataPlane {
         let count = sessions.len();
         drop(state);
         for close in sessions {
-            // One transport waits on each session. Preserve a permit in case
-            // revocation races the transport beginning its close wait.
-            close.notify_one();
+            signal_close(&close, reason);
         }
         count
     }
@@ -387,7 +410,7 @@ impl DataPlane {
     /// endpoint grants standing access, so revoking its wiring must chase down
     /// established sessions rather than wait them out. Returns how many were
     /// signalled.
-    pub fn close_endpoint_sessions(&self, endpoint_id: &Uuid) -> usize {
+    pub fn close_endpoint_sessions(&self, endpoint_id: &Uuid, reason: &'static str) -> usize {
         let state = self.inner.state.lock().unwrap();
         let sessions: Vec<_> = state
             .sessions
@@ -398,9 +421,7 @@ impl DataPlane {
         let count = sessions.len();
         drop(state);
         for close in sessions {
-            // One transport waits on each session. Preserve a permit if
-            // revocation races the transport beginning its close wait.
-            close.notify_one();
+            signal_close(&close, reason);
         }
         count
     }
@@ -415,6 +436,19 @@ impl DataPlane {
             .tickets
             .retain(|_, t| t.active_sessions > 0 || t.issued.elapsed() <= keep_until);
     }
+}
+
+/// Preserve the first revocation cause. Several control-plane events can race
+/// while a transport is winding down; a later broad shutdown must not replace
+/// the more specific reason that actually caused the close.
+fn signal_close(close: &watch::Sender<Option<&'static str>>, reason: &'static str) {
+    close.send_if_modified(|current| {
+        if current.is_some() {
+            return false;
+        }
+        *current = Some(reason);
+        true
+    });
 }
 
 impl Redemption {
@@ -442,7 +476,7 @@ impl Redemption {
             detail: self.connection.target(),
             opened_at: Utc::now(),
         };
-        let close = Arc::new(Notify::new());
+        let (close, close_signal) = watch::channel(None);
         let bytes_up = Arc::new(AtomicU64::new(0));
         let bytes_down = Arc::new(AtomicU64::new(0));
         state.sessions.insert(
@@ -452,7 +486,7 @@ impl Redemption {
                 ticket: Some(self.ticket.clone()),
                 endpoint_id: None,
                 connection_id: self.connection.id,
-                close: close.clone(),
+                close,
             },
         );
         drop(state);
@@ -474,7 +508,9 @@ impl Redemption {
         SessionHandle {
             plane: inner,
             id,
-            close_signal: close,
+            close_signal: SessionCloseSignal {
+                receiver: close_signal,
+            },
             bytes_up,
             bytes_down,
             kind,
@@ -716,11 +752,13 @@ mod tests {
         let other_ticket = plane.issue("claude", &pg_connection());
         let session = plane.redeem(&ticket).unwrap().start(ConnectionKind::Pg);
         let closed = session.close_signal.clone();
-        let notified = closed.notified();
-        assert_eq!(plane.close_all(), 1);
-        tokio::time::timeout(Duration::from_secs(1), notified)
-            .await
-            .expect("live session should receive the close signal");
+        assert_eq!(plane.close_all("key_rotated"), 1);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), closed.reason())
+                .await
+                .expect("live session should receive the close signal"),
+            "key_rotated"
+        );
         assert_eq!(expect_err(plane.redeem(&ticket)), RedeemError::Expired);
         assert_eq!(
             expect_err(plane.redeem(&other_ticket)),
@@ -728,6 +766,24 @@ mod tests {
             "rotation invalidates every outstanding ticket"
         );
         session.finish("key_rotated");
+    }
+
+    #[tokio::test]
+    async fn first_close_reason_wins_when_signals_arrive_sequentially() {
+        let (plane, _dir) = plane(Duration::from_secs(60), 60, 300);
+        let ticket = plane.issue("codex", &pg_connection());
+        let session = plane.redeem(&ticket).unwrap().start(ConnectionKind::Pg);
+        let closed = session.close_signal.clone();
+
+        assert!(plane.close_session(session.id));
+        assert_eq!(plane.close_all("broker_shutdown"), 1);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), closed.reason())
+                .await
+                .expect("live session should receive its first close signal"),
+            "closed_by_user"
+        );
+        session.finish("closed_by_user");
     }
 
     #[tokio::test]
@@ -744,12 +800,18 @@ mod tests {
             .unwrap();
         let closed = session.close_signal.clone();
 
-        // Close before the transport begins awaiting. `notify_one` retains a
-        // permit, so the late waiter must still wake immediately.
-        assert_eq!(plane.close_endpoint_sessions(&endpoint_id), 1);
-        tokio::time::timeout(Duration::from_secs(1), closed.notified())
-            .await
-            .expect("the close permit must survive a late waiter");
+        // Close before the transport begins awaiting. `watch` retains the
+        // reason, so the late waiter must still wake immediately.
+        assert_eq!(
+            plane.close_endpoint_sessions(&endpoint_id, "endpoint_revoked"),
+            1
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), closed.reason())
+                .await
+                .expect("the close reason must survive a late waiter"),
+            "endpoint_revoked"
+        );
         session.finish("access_revoked");
     }
 
@@ -767,10 +829,16 @@ mod tests {
             .start(ConnectionKind::Ssh);
         let closed = session.close_signal.clone();
 
-        assert_eq!(plane.close_connection_sessions(&connection.id), 1);
-        tokio::time::timeout(Duration::from_secs(1), closed.notified())
-            .await
-            .expect("the live session must be signalled to close");
+        assert_eq!(
+            plane.close_connection_sessions(&connection.id, "access_disabled"),
+            1
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), closed.reason())
+                .await
+                .expect("the live session must be signalled to close"),
+            "access_disabled"
+        );
         session.finish("access_revoked");
     }
 
@@ -783,7 +851,10 @@ mod tests {
         let connection = ssh_connection();
         let ticket = plane.issue("claude-code", &connection);
 
-        assert_eq!(plane.close_connection_sessions(&connection.id), 0);
+        assert_eq!(
+            plane.close_connection_sessions(&connection.id, "access_disabled"),
+            0
+        );
         assert_eq!(expect_err(plane.redeem(&ticket)), RedeemError::Expired);
     }
 
@@ -799,7 +870,10 @@ mod tests {
             .expect("redeem")
             .start(ConnectionKind::Ssh);
 
-        assert_eq!(plane.close_connection_sessions(&withdrawn.id), 0);
+        assert_eq!(
+            plane.close_connection_sessions(&withdrawn.id, "access_disabled"),
+            0
+        );
         assert_eq!(plane.sessions().len(), 1, "the other session must survive");
         // And its ticket must still redeem.
         let second = plane

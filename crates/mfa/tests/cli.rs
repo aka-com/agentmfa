@@ -156,6 +156,57 @@ fn status_is_machine_readable_and_classifies_a_missing_broker() {
 }
 
 #[test]
+fn remote_status_surfaces_structured_recent_ssh_refusals() {
+    let root = tempfile::tempdir().unwrap();
+    let (url, _, handle) = stub(vec![
+        whoami(),
+        Reply {
+            method: "GET",
+            path: "/v1/manage/identity",
+            body: json!({
+                "client_id": "00000000-0000-0000-0000-000000000001",
+                "token_path": "/srv/aka/token",
+                "socket_path": "/srv/aka/broker.sock",
+                "minted_at": "2026-07-30T12:00:00Z",
+                "last_used": "2026-07-30T12:00:00Z",
+                "legacy_aliases": 0
+            }),
+        },
+        Reply {
+            method: "GET",
+            path: "/v1/manage/connections",
+            body: json!([]),
+        },
+        Reply {
+            method: "GET",
+            path: "/v1/manage/activity?limit=100",
+            body: json!([{
+                "icon": "lock",
+                "tone": "warning",
+                "kind": "denied",
+                "text": "SSH agent connection refused: deploy",
+                "detail": "agent access is disabled",
+                "agent": "endpoint",
+                "connection": "deploy",
+                "outcome": "denied_by_policy",
+                "protocol": "ssh",
+                "duration_ms": null,
+                "at": "2026-07-30T12:00:00Z"
+            }]),
+        },
+    ]);
+    let output = run(&["--json", "status"], root.path(), Some(&url), None);
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        report["recent_ssh_refusals"][0]["reason"],
+        "denied_by_policy"
+    );
+    assert_eq!(report["recent_ssh_refusals"][0]["connection"], "deploy");
+    handle.join().unwrap();
+}
+
+#[test]
 fn json_mutations_are_rejected_instead_of_silently_ignoring_the_flag() {
     let root = tempfile::tempdir().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_mfa"))

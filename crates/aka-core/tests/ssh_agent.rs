@@ -891,6 +891,14 @@ async fn disabling_access_refuses_the_ssh_endpoint_and_revoke_tears_it_down() {
         "a disabled tool must close an established agent connection"
     );
     assert!(h.broker.sessions().is_empty());
+    assert!(
+        h.broker.audit.recent(20).iter().any(|entry| {
+            entry.kind == aka_core::audit::AuditKind::SessionClosed
+                && entry.connection.as_deref() == Some("prod-ssh")
+                && entry.outcome.as_deref() == Some("access_disabled")
+        }),
+        "the established session must retain the disable cause"
+    );
     let mut refused = UnixStream::connect(&info.dsn)
         .await
         .expect("the socket persists while disabled");
@@ -902,6 +910,26 @@ async fn disabling_access_refuses_the_ssh_endpoint_and_revoke_tears_it_down() {
     assert!(
         matches!(read, Ok(0) | Err(_)),
         "a disabled tool must not serve the agent protocol"
+    );
+    let refusal = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(entry) = h.broker.audit.recent(20).into_iter().find(|entry| {
+                entry.kind == aka_core::audit::AuditKind::Denied
+                    && entry.outcome.as_deref() == Some("denied_by_policy")
+                    && entry.fields.get("via").and_then(|value| value.as_str())
+                        == Some("endpoint")
+            }) {
+                break entry;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the endpoint refusal should be audited");
+    assert_eq!(refusal.connection.as_deref(), Some("prod-ssh"));
+    assert_eq!(
+        refusal.fields.get("endpoint_id"),
+        Some(&serde_json::json!(info.endpoint_id.to_string()))
     );
 
     // Re-enabling restores service without re-issuing.

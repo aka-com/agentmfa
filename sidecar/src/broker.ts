@@ -39,6 +39,12 @@ export interface BrokerConnection {
   allowed_tools?: string[] | null;
   /** Whether this connection asks a human to confirm traffic. */
   confirm?: boolean;
+  /** Latest agent-protocol refusal for an SSH socket, when Activity has one. */
+  recent_ssh_refusal?: {
+    at: string;
+    reason?: string;
+    detail?: string;
+  };
 }
 
 /**
