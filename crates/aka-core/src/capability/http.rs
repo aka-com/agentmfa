@@ -544,10 +544,18 @@ fn test_request_error(error: reqwest::Error, host: &str) -> TestError {
     }
     // hyper-util's connector error does not expose its nested rustls error
     // through `source()` on every version. Its Debug chain still retains the
-    // typed variant. Inspect it only for classification; never return it,
-    // because the request URL may contain a query-injected credential.
+    // typed variant. Sniff only the *source* chain's Debug, never the
+    // top-level `reqwest::Error`: that one embeds the request URL, so a host,
+    // path, or query-injected credential containing "rustls" or "tls
+    // handshake" would misclassify a plain timeout or connection refusal as a
+    // TLS/cert failure. The source errors carry the variant, not the URL.
     if !tls {
-        let debug = format!("{error:?}").to_ascii_lowercase();
+        let mut debug = String::new();
+        let mut current = (&error as &(dyn std::error::Error + 'static)).source();
+        while let Some(src) = current {
+            debug.push_str(&format!("{src:?} ").to_ascii_lowercase());
+            current = src.source();
+        }
         cert = debug.contains("invalidcertificate")
             || debug.contains("invalid peer certificate")
             || debug.contains("certificateunknown");
