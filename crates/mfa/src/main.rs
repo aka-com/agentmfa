@@ -80,7 +80,12 @@ fn parse_manage_ttl_days(value: &str) -> Result<u64, String> {
 }
 
 #[derive(Parser)]
-#[command(name = "mfa", version, about = "AgentMFA broker CLI")]
+#[command(
+    name = "mfa",
+    version,
+    about = "AgentMFA broker CLI",
+    after_help = "EXIT CODES:\n  1  generic/internal failure\n  2  invalid command usage or input\n  3  broker is not running\n  4  authentication or confirmation failed\n  5  requested object was not found\n  6  state conflict\n  7  remote broker is unreachable\n  8  connection test failed"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -815,9 +820,63 @@ fn main() {
     }
 }
 
-fn die(message: impl std::fmt::Display) -> ! {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(i32)]
+enum ExitCode {
+    Generic = 1,
+    Usage = 2,
+    NoBroker = 3,
+    Authentication = 4,
+    NotFound = 5,
+    Conflict = 6,
+    RemoteUnreachable = 7,
+    TestFailed = 8,
+}
+
+fn die_with(code: ExitCode, message: impl std::fmt::Display) -> ! {
     eprintln!("error: {message}");
-    std::process::exit(1);
+    std::process::exit(code as i32);
+}
+
+fn die(message: impl std::fmt::Display) -> ! {
+    die_with(ExitCode::Generic, message)
+}
+
+fn manage_error_exit_code(error: &ManageError) -> ExitCode {
+    match error {
+        ManageError::InvalidSecretName { .. }
+        | ManageError::InvalidConnectionName { .. }
+        | ManageError::Template { .. }
+        | ManageError::UnknownTemplateRef { .. }
+        | ManageError::WrongSecretCount { .. }
+        | ManageError::InvalidConnectionConfig { .. }
+        | ManageError::InvalidSetting { .. }
+        | ManageError::InvalidConnectionField { .. }
+        | ManageError::KindChange
+        | ManageError::EndpointRequiresWiring => ExitCode::Usage,
+        ManageError::SecretReadNotAuthenticated
+        | ManageError::NotConfirmed
+        | ManageError::InvalidManageToken { .. } => ExitCode::Authentication,
+        ManageError::SecretNotFound
+        | ManageError::ConnectionNotFound
+        | ManageError::EndpointNotFound => ExitCode::NotFound,
+        ManageError::SecretNameTaken { .. }
+        | ManageError::ConnectionNameTaken { .. }
+        | ManageError::ConnectionTargetTaken { .. }
+        | ManageError::ConnectionChanged
+        | ManageError::ApprovalConnectionChanged
+        | ManageError::SecretInUse { .. }
+        | ManageError::EndpointLimit { .. } => ExitCode::Conflict,
+        ManageError::Unreachable { .. } => ExitCode::RemoteUnreachable,
+        ManageError::OAuth { .. }
+        | ManageError::Vault { .. }
+        | ManageError::RemoteUnsupported { .. }
+        | ManageError::Internal { .. } => ExitCode::Generic,
+    }
+}
+
+fn die_manage(error: ManageError) -> ! {
+    die_with(manage_error_exit_code(&error), error)
 }
 
 fn store_paths(root: Option<&Path>) -> Paths {
@@ -1009,7 +1068,7 @@ impl Managed {
     fn run<T>(&self, call: impl std::future::Future<Output = ManageResult<T>>) -> T {
         match self.runtime.block_on(call) {
             Ok(value) => value,
-            Err(e) => die(e),
+            Err(e) => die_manage(e),
         }
     }
 
@@ -1092,24 +1151,27 @@ fn management_backend(root: Option<PathBuf>, url: Option<String>) -> Managed {
     if let Some(url) = url {
         let url = match RemoteConfig::normalize_url(&url) {
             Ok(url) => url,
-            Err(e) => die(e),
+            Err(e) => die_with(ExitCode::Usage, e),
         };
         let Some(token) = manage_token(&paths, &url) else {
-            die(format!(
-                "no management token for {url} — set AKA_MANAGE_TOKEN, or store \
+            die_with(
+                ExitCode::Authentication,
+                format!(
+                    "no management token for {url} — set AKA_MANAGE_TOKEN, or store \
                  one with `mfa manage login --broker {url}` (issued by `mfa \
                  manage token` on the broker host)"
-            ));
+                ),
+            );
         };
         let config = match RemoteConfig::new(&url, &token) {
             Ok(config) => config,
-            Err(e) => die(e),
+            Err(e) => die_with(ExitCode::Usage, e),
         };
         eprintln!("  managing the broker at {url}");
         let remote = Arc::new(RemoteBackend::new(config));
         let profile = runtime
             .block_on(remote.whoami())
-            .unwrap_or_else(|error| die(error));
+            .unwrap_or_else(|error| die_manage(error));
         warn_version_skew(&profile);
         return Managed {
             runtime,
@@ -1125,19 +1187,22 @@ fn management_backend(root: Option<PathBuf>, url: Option<String>) -> Managed {
     if broker_running {
         let key = socket.display().to_string();
         let Some(token) = manage_token(&paths, &key) else {
-            die(format!(
-                "a broker is running on {key}.\n\
+            die_with(
+                ExitCode::Authentication,
+                format!(
+                    "a broker is running on {key}.\n\
                  To edit it live, store its management token with `mfa manage \
                  login` (issue one with `mfa manage token` while the broker is \
                  stopped) or set AKA_MANAGE_TOKEN — or stop the broker for an \
                  offline edit."
-            ));
+                ),
+            );
         };
         eprintln!("  managing the running broker over {key}");
         let remote = Arc::new(RemoteBackend::over_unix_socket(socket, &token));
         let profile = runtime
             .block_on(remote.whoami())
-            .unwrap_or_else(|error| die(error));
+            .unwrap_or_else(|error| die_manage(error));
         warn_version_skew(&profile);
         return Managed {
             runtime,
@@ -1212,7 +1277,10 @@ fn secret_dto(managed: &Managed, name: &str) -> SecretDto {
     let secrets = managed.run(managed.backend.list_secrets());
     match secrets.into_iter().find(|s| s.name == name) {
         Some(dto) => dto,
-        None => die(format!("no secret named {name:?} (see `mfa secret list`)")),
+        None => die_with(
+            ExitCode::NotFound,
+            format!("no secret named {name:?} (see `mfa secret list`)"),
+        ),
     }
 }
 
@@ -1220,9 +1288,10 @@ fn conn_dto(managed: &Managed, name: &str) -> ConnectionDto {
     let connections = managed.run(managed.backend.list_connections());
     match connections.into_iter().find(|c| c.name == name) {
         Some(dto) => dto,
-        None => die(format!(
-            "no connection named {name:?} (see `mfa conn list`)"
-        )),
+        None => die_with(
+            ExitCode::NotFound,
+            format!("no connection named {name:?} (see `mfa conn list`)"),
+        ),
     }
 }
 
@@ -1234,7 +1303,10 @@ fn secret_ids_by_names(managed: &Managed, names: &[String]) -> Vec<Uuid> {
         .iter()
         .map(|name| match secrets.iter().find(|s| &s.name == name) {
             Some(dto) => dto_id(&dto.id),
-            None => die(format!("no secret named {name:?} (see `mfa secret list`)")),
+            None => die_with(
+                ExitCode::NotFound,
+                format!("no secret named {name:?} (see `mfa secret list`)"),
+            ),
         })
         .collect()
 }
@@ -1279,7 +1351,7 @@ fn cmd_secret_rm(name: String, root: Option<PathBuf>, url: Option<String>) {
 fn cmd_conn_add(args: ConnAdd) {
     let config = match conn_config(&args) {
         Ok(config) => config,
-        Err(e) => die(e),
+        Err(e) => die_with(ExitCode::Usage, e),
     };
     let managed = management_backend(args.root.clone(), args.broker.clone());
     // pg/ssh bind at most one secret by name; api derives its secrets
@@ -1599,11 +1671,11 @@ fn cmd_conn_update(args: ConnUpdate) {
     refuse_oauth_managed(&dto);
     let existing = match config_from_dto(&dto) {
         Ok(config) => config,
-        Err(e) => die(e),
+        Err(e) => die_with(ExitCode::Usage, e),
     };
     let config = match merged_config(&existing, &args) {
         Ok(config) => config,
-        Err(e) => die(e),
+        Err(e) => die_with(ExitCode::Usage, e),
     };
     // api derives its secrets from the template; pg/ssh rebind when
     // --secret is given and keep the current binding otherwise.
@@ -1636,7 +1708,7 @@ fn cmd_conn_rename(name: String, new_name: String, root: Option<PathBuf>, url: O
     let dto = conn_dto(&managed, &name);
     let config = match config_from_dto(&dto) {
         Ok(config) => config,
-        Err(e) => die(e),
+        Err(e) => die_with(ExitCode::Usage, e),
     };
     let secrets = if dto.kind == "api" {
         Vec::new()
@@ -1707,7 +1779,7 @@ fn cmd_conn_test(name: String, root: Option<PathBuf>, url: Option<String>) {
             Some(kind) => eprintln!("failed ({kind:?}): {}", report.detail),
             None => eprintln!("failed: {}", report.detail),
         }
-        std::process::exit(1);
+        std::process::exit(ExitCode::TestFailed as i32);
     }
 }
 
@@ -1729,9 +1801,10 @@ fn cmd_conn_endpoint(
     let dto = conn_dto(&managed, &name);
     let info = match managed.run(managed.backend.get_endpoint(dto_id(&dto.id))) {
         Some(info) => info,
-        None => die(format!(
-            "no direct endpoint issued for {name} — issue one from the AgentMFA app first"
-        )),
+        None => die_with(
+            ExitCode::NotFound,
+            format!("no direct endpoint issued for {name} — issue one from the AgentMFA app first"),
+        ),
     };
     // Selectors print exactly one field with no decoration, so a `$(...)`
     // capture carries only the value. `--url` prefers the TCP form when the
@@ -1863,11 +1936,11 @@ fn cmd_manage_login(url: Option<String>, token_env: Option<String>, root: Option
         Some(url) => {
             let url = match RemoteConfig::normalize_url(&url) {
                 Ok(url) => url,
-                Err(e) => die(e),
+                Err(e) => die_with(ExitCode::Usage, e),
             };
             let config = match RemoteConfig::new(&url, &token) {
                 Ok(config) => config,
-                Err(e) => die(e),
+                Err(e) => die_with(ExitCode::Usage, e),
             };
             (url, RemoteBackend::new(config))
         }
@@ -1882,14 +1955,17 @@ fn cmd_manage_login(url: Option<String>, token_env: Option<String>, root: Option
             warn_version_skew(&profile);
             eprintln!("token verified against the running broker");
         }
-        Err(ManageError::InvalidManageToken { detail }) => die(detail.unwrap_or_else(|| {
-            "the broker rejected this management token — issue a fresh one with `mfa manage token`"
-                .into()
-        })),
+        Err(ManageError::InvalidManageToken { detail }) => die_with(
+            ExitCode::Authentication,
+            detail.unwrap_or_else(|| {
+                "the broker rejected this management token — issue a fresh one with `mfa manage token`"
+                    .into()
+            }),
+        ),
         Err(ManageError::Unreachable { .. }) => {
             eprintln!("the broker is not reachable right now; storing the token unverified");
         }
-        Err(e) => die(e),
+        Err(e) => die_manage(e),
     }
     let token_store = manage_token_store(&paths);
     if let Err(e) = token_store.save(&key, &token) {
@@ -1906,7 +1982,7 @@ fn cmd_manage_logout(url: Option<String>, root: Option<PathBuf>) {
     let key = match url {
         Some(url) => match RemoteConfig::normalize_url(&url) {
             Ok(url) => url,
-            Err(e) => die(e),
+            Err(e) => die_with(ExitCode::Usage, e),
         },
         None => paths.socket_file().display().to_string(),
     };
@@ -1923,15 +1999,21 @@ fn cmd_manage_token(revoke: bool, ttl_days: Option<u64>, root: Option<PathBuf>) 
     let paths = store_paths(root.as_deref());
     let _lock = match acquire_offline_store_lock(&paths) {
         Ok(lock) => lock,
-        Err(CoreError::BrokerAlreadyRunning(_)) => die(format!(
-            "a broker is running on {} — stop it first (its in-memory \
-             identity would overwrite this change)",
-            paths.socket_file().display()
-        )),
-        Err(CoreError::BrokerStateBusy(pid)) => die(format!(
-            "another CLI process{} is editing this broker state — wait for it to finish, then retry",
-            pid.map(|pid| format!(" (pid {pid})")).unwrap_or_default()
-        )),
+        Err(CoreError::BrokerAlreadyRunning(_)) => die_with(
+            ExitCode::Conflict,
+            format!(
+                "a broker is running on {} — stop it first (its in-memory \
+                 identity would overwrite this change)",
+                paths.socket_file().display()
+            ),
+        ),
+        Err(CoreError::BrokerStateBusy(pid)) => die_with(
+            ExitCode::Conflict,
+            format!(
+                "another CLI process{} is editing this broker state — wait for it to finish, then retry",
+                pid.map(|pid| format!(" (pid {pid})")).unwrap_or_default()
+            ),
+        ),
         Err(error) => die(format!("could not acquire the broker state lease: {error}")),
     };
     let vault = match open_vault(&paths, root.as_deref()) {
@@ -2027,7 +2109,14 @@ fn open_session(
         label.as_deref(),
     )) {
         Ok(body) => body,
-        Err(message) => die(message),
+        Err(message) => {
+            let code = if message.starts_with("no broker is running at ") {
+                ExitCode::NoBroker
+            } else {
+                ExitCode::Generic
+            };
+            die_with(code, message)
+        }
     }
 }
 
@@ -2436,7 +2525,14 @@ fn socket_status_error(socket: &Path, error: &std::io::Error) -> String {
     }
 }
 
-fn local_status(root: Option<PathBuf>) -> Result<StatusReport, (StatusReport, String)> {
+fn socket_status_exit_code(error: &std::io::Error) -> ExitCode {
+    match error.kind() {
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => ExitCode::NoBroker,
+        _ => ExitCode::Generic,
+    }
+}
+
+fn local_status(root: Option<PathBuf>) -> Result<StatusReport, (StatusReport, ExitCode, String)> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -2481,7 +2577,11 @@ fn local_status(root: Option<PathBuf>) -> Result<StatusReport, (StatusReport, St
         )),
         Err(error) => {
             let report = base();
-            return Err((report, socket_status_error(&socket, &error)));
+            return Err((
+                report,
+                socket_status_exit_code(&error),
+                socket_status_error(&socket, &error),
+            ));
         }
     };
 
@@ -2569,7 +2669,7 @@ fn cmd_status(json: bool, root: Option<PathBuf>, url: Option<String>) {
                 print_status_report(&report);
             }
         }
-        Err((report, diagnostic)) => {
+        Err((report, code, diagnostic)) => {
             if json {
                 println!(
                     "{}",
@@ -2588,7 +2688,7 @@ fn cmd_status(json: bool, root: Option<PathBuf>, url: Option<String>) {
                     eprintln!("  shared key: {state} at {path}");
                 }
             }
-            die(diagnostic);
+            die_with(code, diagnostic);
         }
     }
 }
@@ -2908,6 +3008,54 @@ mod tests {
         fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
             Some(ConfirmationMethod::Waived)
         }
+    }
+
+    #[test]
+    fn cli_exit_codes_are_stable_and_documented() {
+        assert_eq!(ExitCode::Generic as i32, 1);
+        assert_eq!(ExitCode::Usage as i32, 2);
+        assert_eq!(ExitCode::NoBroker as i32, 3);
+        assert_eq!(ExitCode::Authentication as i32, 4);
+        assert_eq!(ExitCode::NotFound as i32, 5);
+        assert_eq!(ExitCode::Conflict as i32, 6);
+        assert_eq!(ExitCode::RemoteUnreachable as i32, 7);
+        assert_eq!(ExitCode::TestFailed as i32, 8);
+
+        let help = match Cli::try_parse_from(["mfa", "--help"]) {
+            Ok(_) => panic!("--help unexpectedly parsed as a command"),
+            Err(error) => error.to_string(),
+        };
+        for code in 1..=8 {
+            assert!(help.contains(&format!("  {code}  ")), "{help}");
+        }
+    }
+
+    #[test]
+    fn structured_management_failures_have_specific_exit_codes() {
+        assert_eq!(
+            manage_error_exit_code(&ManageError::InvalidConnectionName {
+                name: "bad/name".into()
+            }),
+            ExitCode::Usage
+        );
+        assert_eq!(
+            manage_error_exit_code(&ManageError::InvalidManageToken { detail: None }),
+            ExitCode::Authentication
+        );
+        assert_eq!(
+            manage_error_exit_code(&ManageError::ConnectionNotFound),
+            ExitCode::NotFound
+        );
+        assert_eq!(
+            manage_error_exit_code(&ManageError::ConnectionChanged),
+            ExitCode::Conflict
+        );
+        assert_eq!(
+            manage_error_exit_code(&ManageError::Unreachable {
+                message: "offline".into()
+            }),
+            ExitCode::RemoteUnreachable
+        );
     }
 
     #[test]
