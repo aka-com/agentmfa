@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use aka_api::{ApprovalDto, ApprovalSnapshotDto, ElicitationDto};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter as _, Manager as _};
+#[cfg(not(target_os = "macos"))]
 use tauri_plugin_notification::{NotificationExt as _, PermissionState};
 
 use crate::broker_mode::{NotificationMode, NotificationSettings};
@@ -655,10 +656,10 @@ fn deliver_notification_job(job: NotificationJob) {
         }
     };
 
-    // The deprecated macOS backend can block forever after delivery. One
-    // short-lived watchdog guards the single worker; on timeout delivery is
-    // disabled for the session, so this worker is the only thread that can
-    // remain parked and no further platform timers are created.
+    // Interaction may remain open until a banner is acted on. One short-lived
+    // watchdog guards the single worker; on timeout delivery is disabled for
+    // the session, so this worker is the only thread that can remain parked
+    // and no further platform timers are created.
     let (done_tx, done_rx) = mpsc::sync_channel(1);
     let watchdog_app = job.app.clone();
     let _ = std::thread::Builder::new()
@@ -727,29 +728,27 @@ pub fn initialize_notification_delivery(app: &AppHandle) {
             );
             return;
         }
-        let expected = app.config().identifier.as_str();
-        #[allow(deprecated)]
-        let configured = notify_rust::set_application(expected);
-        let actual = main_bundle_identifier();
-        if let Err(error) = configured {
-            mark_notifications_unavailable(
-                app,
-                format!("Could not configure native notifications: {error}"),
-            );
-            return;
-        }
-        if actual.as_deref() != Some(expected) {
-            mark_notifications_unavailable(
-                app,
-                format!(
-                    "Native notification identity changed unexpectedly (expected {expected}, got {})",
-                    actual.as_deref().unwrap_or("no bundle identifier")
-                ),
-            );
-            return;
-        }
+        // A first launch parks the authorization probe on the system
+        // permission dialog until the user answers it. That wait must not
+        // hold the main thread: setup still has windows, the tray, and the
+        // broker itself to bring up. A delivery attempted while the probe is
+        // still parked fails over to `notification_delivery_failed`, which
+        // surfaces the approval window instead.
+        let app = app.clone();
+        let _ = std::thread::Builder::new()
+            .name("aka-notification-init".into())
+            .spawn(move || {
+                if let Err(error) = initialize_macos_notification_delivery() {
+                    mark_notifications_unavailable(
+                        &app,
+                        format!("Could not enable native notifications: {error}"),
+                    );
+                }
+            });
+        return;
     }
 
+    #[cfg(not(target_os = "macos"))]
     match app.notification().permission_state() {
         Ok(PermissionState::Granted) => {}
         Ok(PermissionState::Denied) => mark_notifications_unavailable(
@@ -770,11 +769,36 @@ pub fn initialize_notification_delivery(app: &AppHandle) {
 }
 
 #[cfg(target_os = "macos")]
-fn main_bundle_identifier() -> Option<String> {
-    use objc2_foundation::NSBundle;
-    NSBundle::mainBundle()
-        .bundleIdentifier()
-        .map(|identifier| identifier.to_string())
+fn initialize_macos_notification_delivery() -> Result<(), String> {
+    use mac_usernotifications::AuthorizationStatus;
+
+    // UNUserNotificationCenter requires a real application bundle. Unlike
+    // notify-rust's legacy backend, this validates the bundle without
+    // process-wide NSBundle method swizzling.
+    notify_rust::check_bundle().map_err(|error| error.to_string())?;
+    let mut settings =
+        notify_rust::get_notification_settings_blocking().map_err(|error| error.to_string())?;
+    if settings.authorization_status == AuthorizationStatus::NotDetermined {
+        if !notify_rust::request_auth_blocking().map_err(|error| error.to_string())? {
+            return Err("notification permission was denied".into());
+        }
+        settings =
+            notify_rust::get_notification_settings_blocking().map_err(|error| error.to_string())?;
+    }
+    match settings.authorization_status {
+        AuthorizationStatus::Authorized
+        | AuthorizationStatus::Provisional
+        | AuthorizationStatus::Ephemeral => Ok(()),
+        AuthorizationStatus::Denied => {
+            Err("notifications are blocked in operating-system settings".into())
+        }
+        AuthorizationStatus::NotDetermined => {
+            Err("notification permission has not been granted".into())
+        }
+        AuthorizationStatus::Unknown => {
+            Err("the operating system returned an unknown notification permission state".into())
+        }
+    }
 }
 
 fn notification_opens_inbox(response: &notify_rust::NotificationResponse) -> bool {
@@ -791,8 +815,8 @@ fn configure_notification_identity(
     _app: &AppHandle,
     _notification: &mut notify_rust::Notification,
 ) -> Result<(), String> {
-    // Initialized exactly once during setup. Calling set_application here
-    // would process-wide swizzle NSBundle after a request was already parked.
+    // UNUserNotificationCenter reads identity from the signed application
+    // bundle; setup validated authorization before requests could be parked.
     Ok(())
 }
 
