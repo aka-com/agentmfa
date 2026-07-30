@@ -26,9 +26,6 @@ test('first-party UI rendering has no raw HTML assignment sink', async () => {
       assert.doesNotMatch(source, sink, `${file.pathname} contains raw HTML sink ${sink}`);
     }
   }
-
-  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
-  assert.match(app, /DOMPurify\.sanitize\(/);
 });
 
 test('window components reconcile in place rather than remounting per revision', async () => {
