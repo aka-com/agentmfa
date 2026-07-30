@@ -11,7 +11,11 @@ import { QueryClientProvider } from '@tanstack/react-query';
 import {
   StrictMode, useEffect, useLayoutEffect, useRef, useState,
 } from 'react';
-import type { ReactNode } from 'react';
+import type {
+  DragEvent as ReactDragEvent,
+  MouseEvent as ReactMouseEvent,
+  ReactNode,
+} from 'react';
 import { createPortal, flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import {
@@ -3368,6 +3372,7 @@ function AppRoot(): ReactNode {
   // Subscribes this root to store publications; the revision itself is not
   // used as a key — the windows reconcile in place rather than remounting.
   useUiRevision(uiStore);
+  useExternalAppEvents();
   const inboxVisible = booted && state.tab === 'inbox'
     && !brokerTakeover(state.broker, state.remoteSetup.open);
   useEffect(() => {
@@ -3384,11 +3389,17 @@ function AppRoot(): ReactNode {
     );
   }
   return (
-    <>
+    <div className="app-event-root" style={{ display: 'contents' }}
+      onClick={handleActionClick}
+      onContextMenu={handleConnectionContextMenu}
+      onDragStart={handleConnectionDragStart}
+      onDragOver={handleConnectionDragOver}
+      onDrop={handleConnectionDrop}
+      onDragEnd={handleConnectionDragEnd}>
       <RequestLiveRegion />
       {mode === 'dropdown' ? <DropdownWindow /> : <MainWindow />}
       <ConnectionContextMenu />
-    </>
+    </div>
   );
 }
 
@@ -5799,10 +5810,11 @@ function positionConnContextMenu(): void {
 // broker last saw unhealthy, so a fixed credential clears its badge
 // without a manual test. Throttled so window-switching stays free.
 let lastFocusRecheck = 0;
-window.addEventListener('blur', () => {
+function handleWindowBlur(): void {
   if (clearSensitivePresentation()) render();
-});
-window.addEventListener('focus', () => {
+}
+
+function handleWindowFocus(): void {
   if (Date.now() - lastFocusRecheck < 60_000) return;
   lastFocusRecheck = Date.now();
   for (const connection of state.connections) {
@@ -5811,9 +5823,9 @@ window.addEventListener('focus', () => {
       void runConnectionTest(connection.id);
     }
   }
-});
+}
 
-document.addEventListener('contextmenu', (e) => {
+function handleConnectionContextMenu(e: ReactMouseEvent<HTMLDivElement>): void {
   const target = e.target instanceof Element ? e.target : null;
   const row = target?.closest<HTMLElement>('.flat-conn-wrap');
   const id = row?.dataset.connRow;
@@ -5825,9 +5837,9 @@ document.addEventListener('contextmenu', (e) => {
   state.catalogActionMenuOpen = null;
   state.agentMenuOpen = null;
   render();
-});
+}
 
-document.addEventListener('click', async (e) => {
+async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<void> {
   const target = e.target instanceof Element ? e.target : null;
   const btn = target?.closest<HTMLElement>('[data-act]') ?? null;
   if (btn?.dataset.act === 'open-external-url') e.preventDefault();
@@ -6886,7 +6898,7 @@ document.addEventListener('click', async (e) => {
       break;
     default: break;
   }
-});
+}
 
 /* ---------------------- Tools list drag reordering ----------------------- */
 // The connected-tools list on the Tools tab can be reordered by dragging a
@@ -6966,7 +6978,7 @@ function moveConnByKeyboard(id: string, delta: number): void {
   void persistConnOrder(ids, previous, generation);
 }
 
-document.addEventListener('dragstart', (e) => {
+function handleConnectionDragStart(e: ReactDragEvent<HTMLDivElement>): void {
   const wrap = (e.target instanceof Element ? e.target : null)
     ?.closest<HTMLElement>('.flat-conn-wrap.reorderable');
   if (!wrap) return;
@@ -6981,9 +6993,9 @@ document.addEventListener('dragstart', (e) => {
     e.dataTransfer.setDragImage(wrap, 24, wrap.offsetHeight / 2);
   }
   render();
-});
+}
 
-document.addEventListener('dragover', (e) => {
+function handleConnectionDragOver(e: ReactDragEvent<HTMLDivElement>): void {
   if (!dragConnId) return;
   const list = (e.target instanceof Element ? e.target : null)?.closest<HTMLElement>('[data-conn-list="on"]');
   if (!list) return;
@@ -6995,21 +7007,23 @@ document.addEventListener('dragover', (e) => {
   if (next.every((id, index) => id === current[index])) return;
   dragConnOrder = next;
   render();
-});
+}
 
-document.addEventListener('drop', (e) => {
+function handleConnectionDrop(e: ReactDragEvent<HTMLDivElement>): void {
   if (!dragConnId) return;
   if ((e.target instanceof Element ? e.target : null)?.closest('[data-conn-list="on"]')) {
     e.preventDefault();
   }
   commitConnDrag();
-});
+}
 
 // Fires after every drag, including one cancelled outside the list; it is the
 // backstop that clears the dragging state and commits the final order.
-document.addEventListener('dragend', () => commitConnDrag());
+function handleConnectionDragEnd(): void {
+  commitConnDrag();
+}
 
-document.addEventListener('keydown', (e) => {
+function handleAppKeyDown(e: KeyboardEvent): void {
   // A focused row moves with Alt+Up/Down — the keyboard-accessible
   // equivalent of dragging it.
   if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')
@@ -7129,7 +7143,7 @@ document.addEventListener('keydown', (e) => {
       e.preventDefault(); first.focus();
     }
   }
-});
+}
 
 // Custom-select triggers map to the draft field whose inline validation
 // error a new pick clears (text fields clear their own via setDraftField).
@@ -7141,15 +7155,35 @@ const ERR_KEY_BY_INPUT = {
 // Form fields are controlled React inputs; their onChange handlers own
 // draft updates, error clearing, and the draft-test-override disarm.
 
-// Keep an open fixed-position listbox glued to its trigger while the sheet
-// scrolls or the window resizes.
-document.addEventListener('scroll', () => {
+function handleDocumentScroll(): void {
   if (state.formMenuOpen) positionFormMenu();
-}, true);
-window.addEventListener('resize', () => {
+}
+
+function handleWindowResize(): void {
   if (state.formMenuOpen) positionFormMenu();
   if (state.connMenuPoint) positionConnContextMenu();
-});
+}
+
+// Browser-level events that are genuinely global stay native, but their
+// lifetime belongs to React so Strict Mode and future root remounts cannot
+// accumulate duplicate listeners. Click, context-menu, and drag events are
+// handled by the React event boundary above.
+function useExternalAppEvents(): void {
+  useEffect(() => {
+    window.addEventListener('blur', handleWindowBlur);
+    window.addEventListener('focus', handleWindowFocus);
+    window.addEventListener('resize', handleWindowResize);
+    document.addEventListener('keydown', handleAppKeyDown);
+    document.addEventListener('scroll', handleDocumentScroll, true);
+    return () => {
+      window.removeEventListener('blur', handleWindowBlur);
+      window.removeEventListener('focus', handleWindowFocus);
+      window.removeEventListener('resize', handleWindowResize);
+      document.removeEventListener('keydown', handleAppKeyDown);
+      document.removeEventListener('scroll', handleDocumentScroll, true);
+    };
+  }, []);
+}
 
 /* --------------------------------- boot ---------------------------------- */
 let requestRefreshTimer: ReturnType<typeof setTimeout> | null = null;

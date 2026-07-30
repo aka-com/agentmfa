@@ -28,6 +28,24 @@ test('first-party UI rendering has no raw HTML assignment sink', async () => {
   }
 });
 
+test('React owns pointer actions and native global listeners have cleanup', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+
+  for (const event of ['click', 'contextmenu', 'dragstart', 'dragover', 'drop', 'dragend']) {
+    assert.doesNotMatch(
+      app,
+      new RegExp(`document\\.addEventListener\\('${event}'`),
+      `${event} must stay on the React event boundary`,
+    );
+  }
+  assert.match(app, /className="app-event-root"[\s\S]*?onClick=\{handleActionClick\}/);
+  assert.match(app, /onContextMenu=\{handleConnectionContextMenu\}/);
+  assert.match(app, /onDragStart=\{handleConnectionDragStart\}/);
+  assert.match(app, /function useExternalAppEvents\(\): void \{/);
+  assert.match(app, /document\.removeEventListener\('keydown', handleAppKeyDown\)/);
+  assert.match(app, /document\.removeEventListener\('scroll', handleDocumentScroll, true\)/);
+});
+
 test('window components reconcile in place rather than remounting per revision', async () => {
   const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
 

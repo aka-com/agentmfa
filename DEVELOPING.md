@@ -65,6 +65,11 @@ selection, and scroll untouched. Icons are declarative React SVG components;
 first-party UI code has no HTML-string rendering boundary. A regression test
 (`ui/tests/react-boundary.test.ts`) prevents raw HTML sinks from being added.
 
+Pointer actions, context menus, and connection drag-and-drop use React's
+synthetic event boundary. Browser-global keyboard, focus, scroll, and resize
+events are installed by a React effect with symmetric cleanup; do not add
+module-level document click listeners.
+
 ## The macOS Keychain
 
 Secret values are one Keychain item each. macOS has two keychains behind the
