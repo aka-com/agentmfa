@@ -587,6 +587,7 @@ mod tests {
                     trusted_ca_bundle_path: None,
                     template: "Authorization: Bearer {{MCP_TOKEN}}".into(),
                     mcp_path: Some("/mcp".into()),
+                    test_path: None,
                     oauth: None,
                 },
                 secrets: vec![secret.id],
@@ -786,6 +787,7 @@ mod tests {
                     trusted_ca_bundle_path: None,
                     template: "Authorization: Bearer {{OAUTH_TOKENS}}".into(),
                     mcp_path: None,
+                    test_path: None,
                     oauth: Some(OAuthSpec {
                         auth_url: "http://127.0.0.1/authorize".into(),
                         token_url: format!("http://127.0.0.1:{port}/token"),

@@ -310,6 +310,7 @@ fn api_connection(harness: &Harness, name: &str, port: u16) {
                 template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
 
                 mcp_path: None,
+                test_path: None,
                 oauth: None,
             },
             secrets: vec![],
@@ -932,6 +933,7 @@ async fn query_injected_secret_not_leaked_in_upstream_error() {
                 template: "?token={{url(STREAM_TOKEN)}}".into(),
 
                 mcp_path: None,
+                test_path: None,
                 oauth: None,
             },
             secrets: vec![],
@@ -1135,6 +1137,7 @@ async fn mutating_request_id_is_independent_per_connection() {
                 template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
 
                 mcp_path: None,
+                test_path: None,
                 oauth: None,
             },
             secrets: vec![],
@@ -1476,6 +1479,7 @@ async fn recognized_mcp_envelope_legs_do_not_spend_the_tool_call_budget() {
                 trusted_ca_bundle_path: None,
                 template: "Authorization: Bearer {{MCP_KEY}}".into(),
                 mcp_path: Some("/echo".into()),
+                test_path: None,
                 oauth: None,
             },
             secrets: vec![],
@@ -1602,16 +1606,35 @@ async fn a_brokered_401_flips_connection_health_to_needs_reconnect() {
     // Nothing checked yet.
     assert!(h.broker.health.get(&conn_id).is_none());
 
-    // A brokered call the upstream rejects (401) is a credential problem.
+    let rejected = json!({ "connection": "github", "method": "GET", "path": "/unauthorized" });
+
+    // One rejection is not evidence the credential is dead: the agent chose
+    // the path, and a token merely unscoped for it answers 401 there while
+    // working everywhere else. The badge does not move yet.
     let (status, _) = uds_request(
         &h.socket,
         "POST",
         "/v1/http",
         &[("authorization", &auth)],
-        Some(json!({ "connection": "github", "method": "GET", "path": "/unauthorized" })),
+        Some(rejected.clone()),
     )
     .await;
     assert_eq!(status, 200, "the broker relays the upstream response");
+    assert!(
+        h.broker.health.get(&conn_id).is_none(),
+        "a single 401 must not tell the user to reconnect a working credential"
+    );
+
+    // A second consecutive rejection corroborates it.
+    let (status, _) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(rejected),
+    )
+    .await;
+    assert_eq!(status, 200);
     let health = h.broker.health.get(&conn_id).expect("health recorded");
     assert_eq!(health.status, aka_core::types::HealthStatus::NeedsReconnect);
 
@@ -1652,6 +1675,7 @@ async fn a_curated_wiring_refuses_tools_outside_its_subset() {
                 trusted_ca_bundle_path: None,
                 template: "Authorization: Bearer {{MCP_TOKEN}}".into(),
                 mcp_path: Some("/echo".into()),
+                test_path: None,
                 oauth: None,
             },
             secrets: vec![],
@@ -1769,6 +1793,7 @@ async fn an_oversized_mcp_tool_result_becomes_a_bounded_explicit_tool_error() {
                 trusted_ca_bundle_path: None,
                 template: String::new(),
                 mcp_path: Some("/large-mcp".into()),
+                test_path: None,
                 oauth: None,
             },
             secrets: vec![],
@@ -1889,6 +1914,7 @@ async fn elicitations_require_an_exact_upstream_correlation_capability() {
                 trusted_ca_bundle_path: None,
                 template: "Authorization: Bearer {{MCP_TOKEN}}".into(),
                 mcp_path: Some("/needs-input".into()),
+                test_path: None,
                 oauth: None,
             },
             secrets: vec![],
@@ -2470,6 +2496,7 @@ async fn http_direct_endpoint_rejects_client_supplied_custom_credential_header()
                 trusted_ca_bundle_path: None,
                 template: "X-Api-Key: {{API_KEY}}".into(),
                 mcp_path: None,
+                test_path: None,
                 oauth: None,
             },
             secrets: vec![],

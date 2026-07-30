@@ -189,6 +189,16 @@ pub fn validate_path(path: &str) -> Result<(), HttpValidationError> {
 /// party. The endpoint plane strips it unconditionally; this is the same rule.
 const ALWAYS_RESERVED: &[&str] = &["authorization"];
 
+/// The direct endpoint's idempotency key, carrying `/v1/http`'s `request_id`
+/// on a plane that has no JSON envelope to put it in.
+///
+/// Deliberately not `Idempotency-Key`: that name belongs to the upstreams
+/// (Stripe and friends define their own semantics for it), and a broker that
+/// swallowed it would silently disable the vendor's own retry safety. A
+/// broker-namespaced header is unambiguous and is stripped before the upstream
+/// leg, like every other piece of broker plumbing.
+pub const ENDPOINT_REQUEST_ID_HEADER: &str = "x-agentmfa-request-id";
+
 pub fn validate_headers(
     headers: &[(String, String)],
     credential_header: Option<&str>,
@@ -285,6 +295,7 @@ fn endpoint_forward_headers(
         }
         if lower == "authorization"
             || lower == "accept-encoding"
+            || lower == ENDPOINT_REQUEST_ID_HEADER
             || DENYLIST.contains(&lower)
             || connection_nominated.iter().any(|n| n == name)
         {
@@ -307,7 +318,7 @@ pub(crate) enum RenderedInjection {
 
 /// Best-effort response scrubber for reflected credentials. This deliberately
 /// treats redaction material as sensitive and only exposes replacement text.
-struct Redactions {
+pub(crate) struct Redactions {
     needles: Vec<Zeroizing<String>>,
 }
 
@@ -408,6 +419,129 @@ impl Redactions {
         }
         out
     }
+
+    /// The longest needle, which is how much tail a streaming relay has to
+    /// hold back: a credential split across two chunks is only recognizable
+    /// once the bytes on both sides of the boundary are in hand.
+    fn max_needle_len(&self) -> usize {
+        self.needles
+            .iter()
+            .map(|needle| needle.len())
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Redact everything that can be decided from `buf` alone, returning the
+    /// scrubbed prefix and the tail that must wait for more bytes.
+    ///
+    /// A match is taken wherever one fits. Anything short of `max_needle_len`
+    /// from the end is deferred instead of emitted, because a needle could
+    /// still start there and complete in the next chunk — which is exactly the
+    /// case a naive per-chunk `apply_to_bytes` would leak.
+    fn split_redacted(&self, buf: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        let hold = self.max_needle_len().saturating_sub(1);
+        if hold == 0 {
+            return (buf.to_vec(), Vec::new());
+        }
+        let undecided_from = buf.len().saturating_sub(hold);
+        let mut out = Vec::with_capacity(buf.len());
+        let mut i = 0usize;
+        while i < buf.len() {
+            if let Some(needle) = self
+                .needles
+                .iter()
+                .find(|needle| !needle.is_empty() && buf[i..].starts_with(needle.as_bytes()))
+            {
+                out.extend_from_slice(b"[REDACTED]");
+                i += needle.len();
+                continue;
+            }
+            if i >= undecided_from {
+                break;
+            }
+            out.push(buf[i]);
+            i += 1;
+        }
+        (out, buf[i..].to_vec())
+    }
+}
+
+/// Forward an upstream body chunk by chunk, scrubbing reflected credentials
+/// across chunk boundaries, and report the byte total when the stream ends.
+///
+/// The buffered relay can scan a whole body at once; a streaming one cannot,
+/// so it carries the boundary tail forward. `on_finish` runs exactly once,
+/// whether the stream completed, failed, or the client hung up mid-transfer —
+/// a session the broker opened must be retired either way.
+pub(crate) fn redacting_stream(
+    response: reqwest::Response,
+    redactions: Redactions,
+    on_finish: impl FnOnce(u64) + Send + 'static,
+) -> impl futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send {
+    use futures::StreamExt as _;
+
+    struct Finish<F: FnOnce(u64)> {
+        callback: Option<F>,
+        bytes: u64,
+    }
+    impl<F: FnOnce(u64)> Finish<F> {
+        /// Counted through a method rather than by touching the field: a
+        /// closure that only names `finish.bytes` captures that field alone,
+        /// leaving the guard itself to drop here — firing the callback (and
+        /// retiring the session) before a single byte has been forwarded.
+        fn count(&mut self, bytes: usize) {
+            self.bytes = self.bytes.saturating_add(bytes as u64);
+        }
+    }
+    impl<F: FnOnce(u64)> Drop for Finish<F> {
+        fn drop(&mut self) {
+            if let Some(callback) = self.callback.take() {
+                callback(self.bytes);
+            }
+        }
+    }
+
+    let mut upstream = response.bytes_stream();
+    let mut carry: Vec<u8> = Vec::new();
+    let mut finish = Finish {
+        callback: Some(on_finish),
+        bytes: 0,
+    };
+    futures::stream::poll_fn(move |cx| {
+        loop {
+            match futures::ready!(upstream.poll_next_unpin(cx)) {
+                Some(Ok(chunk)) => {
+                    finish.count(chunk.len());
+                    carry.extend_from_slice(&chunk);
+                    let (emit, held) = redactions.split_redacted(&carry);
+                    carry = held;
+                    if emit.is_empty() {
+                        // Everything so far could still be the head of a
+                        // credential; ask the upstream for more rather than
+                        // emitting a chunk that might complete one.
+                        continue;
+                    }
+                    return std::task::Poll::Ready(Some(Ok(bytes::Bytes::from(emit))));
+                }
+                Some(Err(error)) => {
+                    // The URL is stripped for the same reason the buffered
+                    // path strips it: a query-form credential lives in it.
+                    return std::task::Poll::Ready(Some(Err(std::io::Error::other(
+                        error.without_url().to_string(),
+                    ))));
+                }
+                None => {
+                    if carry.is_empty() {
+                        return std::task::Poll::Ready(None);
+                    }
+                    // End of stream: nothing more can complete a needle, so
+                    // the held tail is scrubbed on its own terms and flushed.
+                    let tail = redactions.apply_to_bytes(&std::mem::take(&mut carry));
+                    return std::task::Poll::Ready(Some(Ok(bytes::Bytes::from(tail))));
+                }
+            }
+        }
+    })
 }
 
 /// Everything the executor needs, captured at submission time, the
@@ -659,15 +793,22 @@ impl HttpExecution {
     /// Health bookkeeping from one outcome: a relayed upstream 401/403 means
     /// the destination rejected the credential; any other relayed response
     /// proves the connection works; broker-side errors are not conclusive.
+    ///
+    /// A rejection seen in passing needs a second one before it moves the
+    /// badge. The agent picks the path here, and a credential that is simply
+    /// unscoped for one route answers 401/403 there while working everywhere
+    /// else — telling the user to reconnect over that is a false alarm they
+    /// cannot act on. The Test button stays immediate: they asked.
     fn record_health(&self, outcome: &ExecOutcome) {
         let Some(health) = &self.health else { return };
         let id = self.connection.id;
         match outcome.body.get("status").and_then(|s| s.as_u64()) {
-            Some(status @ (401 | 403)) => health.record(
-                &id,
-                crate::types::HealthStatus::NeedsReconnect,
-                format!("The destination answered but rejected the credential (HTTP {status})"),
-            ),
+            Some(status @ (401 | 403)) => {
+                health.record_credential_rejection(
+                    &id,
+                    format!("The destination answered but rejected the credential (HTTP {status})"),
+                );
+            }
             Some(_) => health.record_ok_if_changed(&id, "A brokered call reached the destination"),
             None => {
                 // A credential that cannot be rendered is conclusive about the
@@ -722,17 +863,51 @@ impl HttpExecution {
     }
 
     async fn run_inner(&self) -> ExecOutcome {
+        let dialed = match self.dial(self.config.upstream_timeout).await {
+            Ok(dialed) => dialed,
+            Err(outcome) => return outcome,
+        };
+        relay_response(
+            dialed.response,
+            &self.config,
+            &dialed.redactions,
+            dialed.mcp_response_id.as_ref(),
+            dialed.mcp_tool_call_id.as_ref(),
+        )
+        .await
+    }
+
+    /// Dial for a relay that forwards the body as it arrives rather than
+    /// buffering it whole.
+    ///
+    /// The per-hop budget is the *operation* budget here, not the hop budget:
+    /// a streamed response may be a large artifact whose transfer legitimately
+    /// outlasts what a buffered call is allowed, and cutting it at the hop
+    /// deadline would make the streaming path useless for the case it exists
+    /// for. Everything else — pinning, redirect rules, re-injection — is the
+    /// same code the buffered path runs.
+    pub(crate) async fn dial_for_streaming(
+        &self,
+    ) -> Result<(reqwest::Response, Redactions), ExecOutcome> {
+        let dialed = self.dial(self.config.upstream_operation_timeout).await?;
+        Ok((dialed.response, dialed.redactions))
+    }
+
+    /// Everything up to the final upstream response: token refresh, credential
+    /// render, authority pinning, and the hand-rolled redirect loop. Shared so
+    /// the buffered and streaming relays cannot drift on any of it.
+    async fn dial(&self, per_request_timeout: std::time::Duration) -> Result<Dialed, ExecOutcome> {
         if !matches!(&self.connection.config, ConnectionConfig::Api { .. }) {
-            return broker_error(
+            return Err(broker_error(
                 500,
                 ErrorReason::WrongConnectionType,
                 "not an api connection",
-            );
+            ));
         }
         let upstream_client = match client_for_connection(&self.client, &self.connection) {
             Ok(client) => client,
             Err(error) => {
-                return broker_error(500, ErrorReason::BadConnectionConfig, error);
+                return Err(broker_error(500, ErrorReason::BadConnectionConfig, error));
             }
         };
         // An OAuth-minted token at expiry is renewed before it rides the
@@ -760,7 +935,7 @@ impl HttpExecution {
         .await
         {
             Ok(i) => i,
-            Err(e) => return broker_error(502, e.reason, e.message),
+            Err(e) => return Err(broker_error(502, e.reason, e.message)),
         };
         let redactions = Redactions::from_injection(&injection);
         let mcp_request = match &self.connection.config {
@@ -787,14 +962,24 @@ impl HttpExecution {
         // concatenation.
         let mut base = match Url::parse(&format!("{scheme}://{host}")) {
             Ok(u) => u,
-            Err(e) => return broker_error(500, ErrorReason::BadConnectionConfig, e.to_string()),
+            Err(e) => {
+                return Err(broker_error(
+                    500,
+                    ErrorReason::BadConnectionConfig,
+                    e.to_string(),
+                ))
+            }
         };
         if base.set_port(port).is_err() {
-            return broker_error(500, ErrorReason::BadConnectionConfig, "cannot set port");
+            return Err(broker_error(
+                500,
+                ErrorReason::BadConnectionConfig,
+                "cannot set port",
+            ));
         }
         let mut current = match base.join(&self.path) {
             Ok(u) => u,
-            Err(e) => return broker_error(400, ErrorReason::InvalidPath, e.to_string()),
+            Err(e) => return Err(broker_error(400, ErrorReason::InvalidPath, e.to_string())),
         };
         // Belt and braces: the joined URL must still point at the pinned
         // authority, with no userinfo.
@@ -802,11 +987,11 @@ impl HttpExecution {
             || !current.username().is_empty()
             || current.password().is_some()
         {
-            return broker_error(
+            return Err(broker_error(
                 400,
                 ErrorReason::InvalidPath,
                 "path escaped the pinned authority",
-            );
+            ));
         }
         base.set_path("");
 
@@ -817,7 +1002,7 @@ impl HttpExecution {
         loop {
             let mut request = upstream_client
                 .request(method.clone(), current.clone())
-                .timeout(self.config.upstream_timeout)
+                .timeout(per_request_timeout)
                 .headers(self.headers.clone());
             match &injection {
                 RenderedInjection::None => {}
@@ -835,7 +1020,7 @@ impl HttpExecution {
                     hop.set_query(Some(&combined));
                     request = upstream_client
                         .request(method.clone(), hop)
-                        .timeout(self.config.upstream_timeout)
+                        .timeout(per_request_timeout)
                         .headers(self.headers.clone());
                 }
             }
@@ -843,7 +1028,11 @@ impl HttpExecution {
                 match self.body.bytes() {
                     Ok(bytes) => request = request.body(bytes),
                     Err(e) => {
-                        return broker_error(500, ErrorReason::BodyUnavailable, e.to_string())
+                        return Err(broker_error(
+                            500,
+                            ErrorReason::BodyUnavailable,
+                            e.to_string(),
+                        ))
                     }
                 }
             }
@@ -856,18 +1045,18 @@ impl HttpExecution {
                 // the credential in that URL, so the raw error string would
                 // leak the secret the broker exists to withhold.
                 Err(e) if e.is_timeout() => {
-                    return broker_error(
+                    return Err(broker_error(
                         504,
                         ErrorReason::UpstreamTimeout,
                         e.without_url().to_string(),
-                    )
+                    ))
                 }
                 Err(e) => {
-                    return broker_error(
+                    return Err(broker_error(
                         502,
                         ErrorReason::UpstreamError,
                         e.without_url().to_string(),
-                    )
+                    ))
                 }
             };
 
@@ -915,33 +1104,60 @@ impl HttpExecution {
                     }
                 }
                 // Cross-host, unresolvable, over-budget, or non-followable
-                // 3xx: return it to the agent instead of following,
+                // 3xx: hand it back to the agent instead of following,
                 // following would send the credential somewhere no
                 // connection was configured for.
-                return relay_response(
+                return Ok(Dialed {
                     response,
-                    &self.config,
-                    &redactions,
-                    mcp_response_id.as_ref(),
-                    mcp_tool_call_id.as_ref(),
-                )
-                .await;
+                    redactions,
+                    mcp_response_id,
+                    mcp_tool_call_id,
+                });
             }
 
-            return relay_response(
+            return Ok(Dialed {
                 response,
-                &self.config,
-                &redactions,
-                mcp_response_id.as_ref(),
-                mcp_tool_call_id.as_ref(),
-            )
-            .await;
+                redactions,
+                mcp_response_id,
+                mcp_tool_call_id,
+            });
         }
     }
 }
 
-/// UI-initiated test: GET the pinned MCP path when present, otherwise the
-/// origin root, with the credential injected and the connection's TLS trust.
+/// The upstream response a dial arrived at, plus what the relay needs to
+/// present it: the credential needles to scrub, and the MCP request ids that
+/// tell a buffered SSE relay which frame ends the exchange.
+struct Dialed {
+    response: reqwest::Response,
+    redactions: Redactions,
+    mcp_response_id: Option<Value>,
+    mcp_tool_call_id: Option<Value>,
+}
+
+/// The path the Test button probes: the connection's configured `test_path`,
+/// else its pinned MCP path, else the origin root.
+///
+/// The root is the weakest of the three and the default only because it is the
+/// one path every origin has. Most APIs answer 404 or 403 there, which proves
+/// reachability and TLS and nothing about the credential — so a connection that
+/// wants the button to mean something names a route that reads the identity.
+fn probe_path(config: &ConnectionConfig) -> &str {
+    match config {
+        ConnectionConfig::Api {
+            test_path: Some(path),
+            ..
+        } => path.as_str(),
+        ConnectionConfig::Api {
+            mcp_path: Some(path),
+            ..
+        } => path.as_str(),
+        _ => "/",
+    }
+}
+
+/// UI-initiated test: GET the connection's probe path with the credential
+/// injected and the connection's TLS trust.
 pub async fn test_upstream(
     store: &Arc<Store>,
     client: &reqwest::Client,
@@ -962,13 +1178,8 @@ pub async fn test_upstream(
     if base.set_port(port).is_err() {
         return Err("cannot set port".into());
     }
-    let test_path = match &connection.config {
-        ConnectionConfig::Api {
-            mcp_path: Some(path),
-            ..
-        } => path.as_str(),
-        _ => "/",
-    };
+    let test_path = probe_path(&connection.config);
+    let configured_probe = !matches!(test_path, "/");
     let mut url = base
         .join(test_path)
         .map_err(|error| format!("bad test path: {error}"))?;
@@ -1004,9 +1215,32 @@ pub async fn test_upstream(
             format!("The server at {host} answered but rejected the credential (HTTP {status})"),
         ));
     }
-    Ok(format!(
-        "GET {scheme}://{host}{test_path} answered HTTP {status}"
-    ))
+    // Everything below is a pass, but not every pass proves the same thing,
+    // and a green badge that proved nothing is worse than no badge. A 403
+    // without a `WWW-Authenticate` challenge is not a credential rejection the
+    // broker can name — it is equally a WAF, a permission the token lacks, or
+    // a path that is simply not for reading — and 404/405 on an unconfigured
+    // root is the normal answer for an API that has no root resource. Say
+    // which of those happened rather than reporting a bare "HTTP 403".
+    let inconclusive = match status.as_u16() {
+        403 => Some(
+            "the server answered but would not serve this path; if it needs \
+             different permissions, set a test path that reads the account",
+        ),
+        404 | 405 if !configured_probe => Some(
+            "the origin root has no resource, which is normal; set a test path \
+             to probe a route that reads the account",
+        ),
+        _ => None,
+    };
+    Ok(match inconclusive {
+        Some(caveat) => format!(
+            "GET {scheme}://{host}{test_path} answered HTTP {status} — \
+             reachable and TLS is fine, but the credential was not exercised: \
+             {caveat}"
+        ),
+        None => format!("GET {scheme}://{host}{test_path} answered HTTP {status}"),
+    })
 }
 
 /// The credential for a connection's upstream leg: a fresh OAuth bearer
@@ -1288,16 +1522,38 @@ fn matching_sse_response_end(bytes: &[u8], expected_id: &Value) -> Option<usize>
 /// identity (and so one coalesce namespace), and folding the label in here
 /// turns another label's reuse of a request id into a refusal instead of
 /// silently handing it the first label's cached outcome.
-pub fn payload_hash(
+/// The same fingerprint over a body that may be spooled to disk, for the
+/// direct endpoint plane. Streamed through the hasher rather than materialized
+/// so a large upload is fingerprinted without being pulled back into memory.
+pub fn spooled_payload_hash(
     client: &str,
     connection_id: &Uuid,
     method: &Method,
     path: &str,
     headers: &[(String, String)],
-    body: &[u8],
-) -> String {
+    body: &SpooledBody,
+) -> std::io::Result<String> {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
+    hash_request_prefix(&mut hasher, client, connection_id, method, path, headers);
+    body.for_each_chunk(|chunk| hasher.update(chunk))?;
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
+/// Everything before the body, hashed identically for both planes.
+fn hash_request_prefix(
+    hasher: &mut sha2::Sha256,
+    client: &str,
+    connection_id: &Uuid,
+    method: &Method,
+    path: &str,
+    headers: &[(String, String)],
+) {
+    use sha2::Digest as _;
     hasher.update(client.as_bytes());
     hasher.update([0]);
     hasher.update(connection_id.as_bytes());
@@ -1315,6 +1571,19 @@ pub fn payload_hash(
         hasher.update(line.as_bytes());
         hasher.update([0]);
     }
+}
+
+pub fn payload_hash(
+    client: &str,
+    connection_id: &Uuid,
+    method: &Method,
+    path: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hash_request_prefix(&mut hasher, client, connection_id, method, path, headers);
     hasher.update(body);
     hasher
         .finalize()
@@ -1656,6 +1925,36 @@ async fn proxy_handler(
              OPTIONS",
         );
     };
+    // The idempotency key, if the caller offered one. Reads are never
+    // coalesced — the same rule `/v1/http` follows — so a key on a GET is
+    // inert rather than an error, and such a call streams like any other.
+    let coalesce_request_id = match parts
+        .headers
+        .get(ENDPOINT_REQUEST_ID_HEADER)
+        .map(|value| value.to_str().map(str::trim))
+    {
+        None => None,
+        Some(Err(_)) => {
+            return endpoint_error(
+                StatusCode::BAD_REQUEST,
+                ErrorReason::InvalidHeader,
+                "the request id must be printable ASCII",
+            )
+        }
+        Some(Ok("")) => None,
+        Some(Ok(request_id)) if request_id.len() > crate::wire::REQUEST_ID_MAX_BYTES => {
+            return endpoint_error(
+                StatusCode::BAD_REQUEST,
+                ErrorReason::InvalidBody,
+                &format!(
+                    "the request id is {} UTF-8 bytes; the maximum is {}",
+                    request_id.len(),
+                    crate::wire::REQUEST_ID_MAX_BYTES
+                ),
+            )
+        }
+        Some(Ok(request_id)) => is_mutating(&method).then(|| request_id.to_string()),
+    };
     let path = parts
         .uri
         .path_and_query()
@@ -1993,14 +2292,43 @@ async fn proxy_handler(
         client: broker.http_client.clone(),
         config: broker.config.clone(),
         agent: "endpoint".to_string(),
-        connection,
+        connection: connection.clone(),
         method: method.clone(),
-        path,
-        headers,
-        body: spooled,
+        path: path.clone(),
+        headers: headers.clone(),
+        body: spooled.clone(),
         health: Some(broker.health.clone()),
     };
-    let outcome = tokio::select! {
+
+    // Two relays, and the request chooses between them.
+    //
+    // Coalescing needs a replayable outcome, which means holding the whole
+    // response — so a keyed call takes the buffered path and inherits its size
+    // cap. An unkeyed one has nothing to replay to, so it streams: the body
+    // goes out as it arrives, past the cap, which is the only way this plane
+    // can carry an artifact bigger than `response_cap`. Naming a request id is
+    // therefore an explicit trade of size for retry safety.
+    if let Some(request_id) = coalesce_request_id {
+        let outcome = tokio::select! {
+            _ = close_signal.notified() => {
+                session.finish("access_revoked");
+                return endpoint_error(
+                    StatusCode::FORBIDDEN,
+                    ErrorReason::DeniedByPolicy,
+                    "the endpoint was revoked or agent access was disabled",
+                );
+            }
+            outcome = run_coalesced(broker, &endpoint, &connection, &method, &path,
+                                    &headers, &spooled, request_id, execution) => outcome,
+        };
+        session.finish("request_complete");
+        return match outcome {
+            Ok(outcome) => translate_outcome(outcome, &method),
+            Err(response) => response,
+        };
+    }
+
+    let dialed = tokio::select! {
         _ = close_signal.notified() => {
             session.finish("access_revoked");
             return endpoint_error(
@@ -2009,10 +2337,217 @@ async fn proxy_handler(
                 "the endpoint was revoked or agent access was disabled",
             );
         }
-        outcome = crate::authorization::scope(true, execution.run()) => outcome,
+        dialed = crate::authorization::scope(true, execution.dial_for_streaming()) => dialed,
     };
-    session.finish("request_complete");
-    translate_outcome(outcome, &method)
+    let relay = StreamAudit {
+        audit: broker.audit.clone(),
+        connection: connection.name.clone(),
+        method: method.to_string(),
+        path: path.clone(),
+        started: Instant::now(),
+    };
+    match dialed {
+        Ok((response, redactions)) => {
+            record_streamed_health(broker, &connection, response.status().as_u16());
+            stream_response(response, redactions, &method, relay, session)
+        }
+        Err(outcome) => {
+            relay.finish(&outcome_status_label(&outcome), None);
+            session.finish("request_failed");
+            translate_outcome(outcome, &method)
+        }
+    }
+}
+
+/// Grade a streamed relay's health from the status line, which is all a
+/// stream knows before its body has gone anywhere. Same rule as the buffered
+/// path: a rejection needs corroboration, anything else served is proof the
+/// credential works.
+fn record_streamed_health(broker: &Arc<Broker>, connection: &Connection, status: u16) {
+    match status {
+        401 | 403 => {
+            broker.health.record_credential_rejection(
+                &connection.id,
+                format!("The destination answered but rejected the credential (HTTP {status})"),
+            );
+        }
+        _ => broker
+            .health
+            .record_ok_if_changed(&connection.id, "A brokered call reached the destination"),
+    }
+}
+
+/// Forward an upstream response to the endpoint's client as it arrives.
+///
+/// The buffered relay's size cap does not apply here — that cap exists because
+/// a JSON envelope has to hold the whole body in memory, and this one never
+/// does. What still applies is redaction, which runs across chunk boundaries,
+/// and the session accounting, which is retired by the stream's own guard so a
+/// client that disconnects mid-transfer is not left holding a live session.
+fn stream_response(
+    response: reqwest::Response,
+    redactions: Redactions,
+    request_method: &Method,
+    relay: StreamAudit,
+    session: crate::sessions::SessionHandle,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+
+    let status = StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    // A HEAD or 304 carries the upstream's length without a body; everything
+    // else is re-framed for this leg, since redaction changes the length.
+    let preserve_content_length =
+        request_method == Method::HEAD || status == StatusCode::NOT_MODIFIED;
+    let mut builder = axum::response::Response::builder().status(status);
+    for (name, value) in response.headers() {
+        let lower = name.as_str().to_ascii_lowercase();
+        if matches!(lower.as_str(), "transfer-encoding" | "connection")
+            || (lower == "content-length" && !preserve_content_length)
+        {
+            continue;
+        }
+        // Header values are scrubbed too: a reflected credential in a
+        // `Location` or a custom echo header must not survive the relay.
+        let scrubbed = redactions.apply_to_string(&String::from_utf8_lossy(value.as_bytes()));
+        if let Ok(value) = HeaderValue::from_str(&scrubbed) {
+            builder = builder.header(name.clone(), value);
+        }
+    }
+    let status_label = status.as_u16().to_string();
+    let body = redacting_stream(response, redactions, move |bytes| {
+        relay.finish(&status_label, Some(bytes));
+        session.finish("request_complete");
+    });
+    builder
+        .body(axum::body::Body::from_stream(body))
+        .unwrap_or_else(|_| {
+            use axum::response::IntoResponse as _;
+            StatusCode::BAD_GATEWAY.into_response()
+        })
+}
+
+/// Run the request through the shared idempotency table so a retried mutating
+/// call joins the in-flight execution (or replays its outcome) instead of
+/// hitting the upstream twice.
+///
+/// Keyed on the *endpoint* rather than an agent identity: this plane has no
+/// authenticated principal beyond the endpoint secret itself, and the endpoint
+/// is exactly the right namespace — one pasted credential, one retry space,
+/// revoked as a unit.
+#[allow(clippy::too_many_arguments)]
+async fn run_coalesced(
+    broker: &Arc<Broker>,
+    endpoint: &DirectEndpoint,
+    connection: &Connection,
+    method: &Method,
+    path: &str,
+    headers: &HeaderMap,
+    body: &Arc<SpooledBody>,
+    request_id: String,
+    execution: HttpExecution,
+) -> Result<ExecOutcome, axum::response::Response> {
+    use axum::http::StatusCode;
+    use crate::executions::{ExecError, ExecRequest, Execution};
+
+    let wire_headers: Vec<(String, String)> = headers
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_string(),
+                String::from_utf8_lossy(value.as_bytes()).into_owned(),
+            )
+        })
+        .collect();
+    let hash = match spooled_payload_hash(
+        "endpoint",
+        &connection.id,
+        method,
+        path,
+        &wire_headers,
+        body,
+    ) {
+        Ok(hash) => hash,
+        Err(error) => {
+            return Err(endpoint_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorReason::BodyUnavailable,
+                &error.to_string(),
+            ))
+        }
+    };
+    let request = ExecRequest {
+        coalesce_key: Some((endpoint.id, connection.id, request_id)),
+        payload_hash: Some(hash),
+        executor: Box::pin(crate::authorization::scope(true, execution.run())),
+        abandon: None,
+    };
+    match broker.executions.run(request) {
+        Ok(Execution::Wait(handle)) => handle.wait().await.ok_or_else(|| {
+            endpoint_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorReason::BrokerShutdown,
+                "the broker is shutting down",
+            )
+        }),
+        Ok(Execution::Replay(outcome)) => Ok(outcome),
+        Err(ExecError::RequestIdMismatch) => Err(endpoint_error(
+            StatusCode::CONFLICT,
+            ErrorReason::RequestIdMismatch,
+            "this request id was already used for a different request",
+        )),
+        Err(ExecError::OutcomeNotReplayable) => Err(endpoint_error(
+            StatusCode::CONFLICT,
+            ErrorReason::OutcomeNotReplayable,
+            "that request completed, but its response is no longer available to replay",
+        )),
+        Err(ExecError::IdempotencyCapacity) => Err(endpoint_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorReason::IdempotencyCapacity,
+            "the broker's idempotency table is full; retry shortly",
+        )),
+    }
+}
+
+/// What a streamed relay still owes the activity log once its body has gone
+/// out: the buffered path audits inside `HttpExecution::run`, which a stream
+/// never reaches.
+struct StreamAudit {
+    audit: Arc<AuditLog>,
+    connection: String,
+    method: String,
+    path: String,
+    started: Instant,
+}
+
+impl StreamAudit {
+    /// One entry per streamed call, written when the body finishes rather
+    /// than when it starts, so `response_bytes` is what actually crossed.
+    fn finish(&self, outcome: &str, bytes: Option<u64>) {
+        let mut entry = AuditEntry::new(
+            AuditKind::HttpExecuted,
+            format!("{} {} via {}", self.method, self.path, self.connection),
+        )
+        .agent("endpoint")
+        .connection(self.connection.clone())
+        .outcome(outcome)
+        .duration_ms(self.started.elapsed().as_millis() as u64)
+        .field("method", self.method.clone())
+        .field("path", self.path.clone())
+        .field("relay", "streamed");
+        if let Some(bytes) = bytes {
+            entry = entry.field("response_bytes", bytes);
+        }
+        self.audit.append(entry);
+    }
+}
+
+fn outcome_status_label(outcome: &ExecOutcome) -> String {
+    outcome
+        .body
+        .get("status")
+        .and_then(|status| status.as_u64())
+        .map(|status| status.to_string())
+        .unwrap_or_else(|| format!("broker:{}", outcome.status))
 }
 
 /// Translate `/v1/http`'s relayed `{status, headers, body, body_encoding}`
@@ -2287,6 +2822,94 @@ mod tests {
             redactions.apply_to_bytes(b"\x00ghp_test_secret_value\xff"),
             b"\x00[REDACTED]\xff"
         );
+    }
+
+    /// H2. A streamed relay sees the body in whatever chunks the upstream
+    /// sends, so a credential straddling a chunk boundary is exactly the case
+    /// a naive per-chunk scrub misses — and the one an upstream could arrange
+    /// deliberately. Every split point must scrub identically to the buffered
+    /// relay's single-pass scan.
+    #[test]
+    fn streamed_redaction_survives_every_chunk_boundary() {
+        let injection = RenderedInjection::Header(
+            HeaderName::from_static("authorization"),
+            HeaderValue::from_static("Bearer ghp_test_secret_value"),
+        );
+        let redactions = Redactions::from_injection(&injection);
+        let body = b"prefix ghp_test_secret_value suffix ghp_test_secret_value end";
+        let expected = redactions.apply_to_bytes(body);
+
+        for split in 0..=body.len() {
+            let mut emitted = Vec::new();
+            let mut carry: Vec<u8> = Vec::new();
+            for chunk in [&body[..split], &body[split..]] {
+                carry.extend_from_slice(chunk);
+                let (emit, held) = redactions.split_redacted(&carry);
+                emitted.extend_from_slice(&emit);
+                carry = held;
+            }
+            emitted.extend_from_slice(&redactions.apply_to_bytes(&carry));
+            assert_eq!(
+                emitted,
+                expected,
+                "a credential split at byte {split} escaped the stream"
+            );
+        }
+    }
+
+    /// The tail a stream holds back is bounded by the longest needle, so a
+    /// body with nothing to scrub still flows rather than accumulating.
+    #[test]
+    fn streamed_redaction_holds_back_only_a_boundary_tail() {
+        let injection = RenderedInjection::Header(
+            HeaderName::from_static("authorization"),
+            HeaderValue::from_static("Bearer ghp_test_secret_value"),
+        );
+        let redactions = Redactions::from_injection(&injection);
+        let hold = redactions.max_needle_len() - 1;
+        let body = vec![b'x'; hold * 4];
+        let (emit, held) = redactions.split_redacted(&body);
+        assert_eq!(held.len(), hold);
+        assert_eq!(emit.len(), body.len() - hold);
+
+        // A credential-less connection scrubs nothing and therefore holds
+        // nothing: the stream is a straight pass-through.
+        let none = Redactions::from_injection(&RenderedInjection::None);
+        let (emit, held) = none.split_redacted(&body);
+        assert_eq!(emit, body);
+        assert!(held.is_empty());
+    }
+
+    /// H1. The endpoint plane's idempotency key must fingerprint a spooled
+    /// body exactly as the control plane fingerprints an in-memory one, or a
+    /// genuine retry would read as a payload mismatch.
+    #[test]
+    fn spooled_and_inline_payload_hashes_agree() {
+        let connection = Uuid::new_v4();
+        let body = vec![b'z'; 512 * 1024];
+        let headers = [("Accept".to_string(), "application/json".to_string())];
+
+        let inline = payload_hash(
+            "endpoint",
+            &connection,
+            &Method::POST,
+            "/things",
+            &headers,
+            &body,
+        );
+        // Threshold below the body length, so this one is on disk.
+        let spooled = SpooledBody::from_bytes(body, 4096).unwrap();
+        assert!(matches!(spooled, SpooledBody::Spooled { .. }));
+        let streamed = spooled_payload_hash(
+            "endpoint",
+            &connection,
+            &Method::POST,
+            "/things",
+            &headers,
+            &spooled,
+        )
+        .unwrap();
+        assert_eq!(inline, streamed);
     }
 
     #[test]

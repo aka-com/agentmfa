@@ -342,9 +342,19 @@ body form. Non-UTF-8 response bodies come back base64-encoded with
 connection's pinned host, up to {max_redirects} hops; a cross-host redirect is
 returned to you as the raw 3xx. The `/v1/http` request body cap is
 {request_cap} bytes, direct-endpoint uploads are capped at
-{endpoint_request_cap} bytes, and relayed responses are capped at
-{response_cap} bytes. `Accept-Encoding` is broker-controlled because the
-upstream leg is HTTP/1.1-only and does not decompress responses.
+{endpoint_request_cap} bytes, and responses relayed through `/v1/http` are
+capped at {response_cap} bytes. `Accept-Encoding` is broker-controlled because
+the upstream leg is HTTP/1.1-only and does not decompress responses.
+
+A connection's **direct HTTP endpoint** relays responses as a stream, so that
+{response_cap}-byte cap does not apply to it: point a client at the endpoint's
+base URL to pull an artifact larger than the control plane can carry. Send
+`X-AgentMFA-Request-Id: <uuid>` on a mutating call there to get the same
+idempotency `/v1/http` gives `request_id` — with the same trade the control
+plane makes, since a coalesced call has to be buffered to stay replayable and
+therefore takes the response cap back. Reads are never coalesced, so the header
+is inert on GET/HEAD. It is broker plumbing and is not forwarded upstream;
+an upstream's own `Idempotency-Key` passes through untouched.
 
 ABP/0 represents response headers as JSON objects with string values. Repeated
 upstream response fields are combined with `, `. `Set-Cookie` is the exception:

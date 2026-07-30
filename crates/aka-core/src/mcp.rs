@@ -895,6 +895,7 @@ mod tests {
                 trusted_ca_bundle_path: None,
                 template: "Authorization: Bearer {{T}}".into(),
                 mcp_path: Some("/mcp".into()),
+                test_path: None,
                 oauth: None,
             },
             secrets: vec![],

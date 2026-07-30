@@ -132,6 +132,7 @@ interface MockConnection {
   host?: string | null;
   scheme?: string | null;
   mcp_path?: string | null;
+  test_path?: string | null;
   account?: string | null;
   port?: number | null;
   template?: string | null;
@@ -569,7 +570,8 @@ function connDto(c: MockConnection): ConnectionSummary {
       };
     })(),
     host: c.host || null, scheme: c.scheme || null, port: c.port || null, template: c.template || null,
-    mcp_path: c.mcp_path || null, account: c.account || null, oauth_spec: c.oauth_spec || null,
+    mcp_path: c.mcp_path || null, test_path: c.test_path || null,
+    account: c.account || null, oauth_spec: c.oauth_spec || null,
     dbname: c.dbname || null, user: c.user || null, host_key_fingerprint: c.host_key_fingerprint || null,
     destination: c.destination || null,
     sslmode: c.sslmode || null,
@@ -946,7 +948,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         destination: i.destination, host: i.host, scheme: i.scheme, port: i.port, template: i.template, dbname: i.dbname, user: i.user,
         host_key_fingerprint: i.host_key_fingerprint, sslmode: i.sslmode,
         trusted_ca_bundle_path: i.trusted_ca_bundle_path, url: i.url,
-        mcp_path: i.mcp_path });
+        mcp_path: i.mcp_path, test_path: i.test_path });
       audit('connectionAdded', `Tool added: ${i.name}`); return;
     }
     case 'edit_connection': {
@@ -970,7 +972,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         destination: i.destination,
         dbname: i.dbname, user: i.user, sslmode: i.sslmode, trusted_ca_bundle_path: i.trusted_ca_bundle_path,
         host_key_fingerprint: i.host_key_fingerprint, url: i.url,
-        template: i.template, mcp_path: i.mcp_path });
+        template: i.template, mcp_path: i.mcp_path, test_path: i.test_path });
       if (i.type !== 'api') {
         c.secret_names = i.secret_id
           ? [db.secrets.find((s) => s.id === i.secret_id)?.name]

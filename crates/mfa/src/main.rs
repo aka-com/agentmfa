@@ -684,6 +684,12 @@ struct ConnAdd {
     /// the credential still rides the pinned host's `/v1/http` plane.
     #[arg(long)]
     mcp_path: Option<String>,
+    /// api: the path `conn test` fetches (e.g. `/user`). Most APIs answer
+    /// 404 or 403 at the origin root, so a test there proves reachability
+    /// and TLS but never exercises the credential. Name a route that reads
+    /// the account and the test answers the question it is being asked.
+    #[arg(long)]
+    test_path: Option<String>,
     /// Operate on a broker rooted here instead of the default layout.
     #[arg(long)]
     root: Option<PathBuf>,
@@ -774,6 +780,10 @@ struct ConnUpdate {
     /// clear it.
     #[arg(long)]
     ca_bundle: Option<String>,
+    /// api: the path `conn test` fetches (e.g. `/user`); pass '' to fall
+    /// back to the MCP path or the origin root.
+    #[arg(long)]
+    test_path: Option<String>,
     /// Operate on a broker rooted here instead of the default layout.
     #[arg(long)]
     root: Option<PathBuf>,
@@ -1554,6 +1564,7 @@ fn conn_config(args: &ConnAdd) -> Result<ConnectionConfig, String> {
                 template: require("template", &args.template)?,
 
                 mcp_path: args.mcp_path.clone(),
+                test_path: args.test_path.clone(),
                 oauth: None,
             })
         }
@@ -1563,6 +1574,7 @@ fn conn_config(args: &ConnAdd) -> Result<ConnectionConfig, String> {
                 ("template", args.template.is_some()),
                 ("host-key-fingerprint", args.host_key_fingerprint.is_some()),
                 ("mcp-path", args.mcp_path.is_some()),
+                ("test-path", args.test_path.is_some()),
             ])?;
             require("secret", &args.secret)?;
             Ok(ConnectionConfig::Pg {
@@ -1582,6 +1594,7 @@ fn conn_config(args: &ConnAdd) -> Result<ConnectionConfig, String> {
                 ("sslmode", args.sslmode.is_some()),
                 ("ca-bundle", args.ca_bundle.is_some()),
                 ("mcp-path", args.mcp_path.is_some()),
+                ("test-path", args.test_path.is_some()),
             ])?;
             require("secret", &args.secret)?;
             Ok(ConnectionConfig::Ssh {
@@ -1878,6 +1891,7 @@ fn connection_config_patch(
         && args.secret.is_none()
         && args.sslmode.is_none()
         && args.ca_bundle.is_none()
+        && args.test_path.is_none()
     {
         return Err("conn update requires at least one field flag".into());
     }
@@ -1885,6 +1899,12 @@ fn connection_config_patch(
         return Err("--port must be 1–65535".into());
     }
     let (trusted_ca_bundle_path, clear_trusted_ca_bundle) = match &args.ca_bundle {
+        Some(path) if path.is_empty() => (None, true),
+        Some(path) => (Some(path.clone()), false),
+        None => (None, false),
+    };
+    // An empty string clears, matching --ca-bundle and --host-key-fingerprint.
+    let (test_path, clear_test_path) = match &args.test_path {
         Some(path) if path.is_empty() => (None, true),
         Some(path) => (Some(path.clone()), false),
         None => (None, false),
@@ -1903,6 +1923,8 @@ fn connection_config_patch(
         trusted_ca_bundle_path,
         clear_trusted_ca_bundle,
         host_key_fingerprint: args.host_key_fingerprint.clone(),
+        test_path,
+        clear_test_path,
         secret_id,
     };
     match dto.kind.as_str() {
@@ -1921,6 +1943,7 @@ fn connection_config_patch(
                 ("scheme", args.scheme.is_some()),
                 ("template", args.template.is_some()),
                 ("host-key-fingerprint", args.host_key_fingerprint.is_some()),
+                ("test-path", args.test_path.is_some()),
             ])?;
             Ok(patch)
         }
@@ -1931,6 +1954,7 @@ fn connection_config_patch(
                 ("dbname", args.dbname.is_some()),
                 ("sslmode", args.sslmode.is_some()),
                 ("ca-bundle", args.ca_bundle.is_some()),
+                ("test-path", args.test_path.is_some()),
             ])?;
             Ok(patch)
         }
@@ -3762,6 +3786,7 @@ mod tests {
             sslmode: None,
             ca_bundle: None,
             mcp_path: None,
+            test_path: None,
             root: None,
             broker: None,
         }
@@ -3879,6 +3904,7 @@ mod tests {
             secret: None,
             sslmode: None,
             ca_bundle: None,
+            test_path: None,
             root: None,
             broker: None,
         }
@@ -3914,6 +3940,7 @@ mod tests {
             sslmode: None,
             trusted_ca_bundle_path: None,
             mcp_path: None,
+            test_path: None,
             account: Some("operator@example.com".into()),
             oauth_spec: None,
             last_status: None,

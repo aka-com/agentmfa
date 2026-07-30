@@ -1315,11 +1315,14 @@ impl Broker {
             },
         };
         // The test result is the connection's new last-known health, graded by
-        // the same mapping the data planes use.
+        // the same mapping the data planes use. It is authoritative — the user
+        // asked for it — so it supersedes any half-accumulated evidence the
+        // agent plane had gathered from rejections it saw in passing.
         let status = match report.kind {
             None => crate::types::HealthStatus::Ok,
             Some(kind) => kind.health_status(),
         };
+        self.health.clear_rejection_streak(id);
         self.health.record(id, status, report.detail.clone());
         let mut entry = AuditEntry::new(
             AuditKind::ConnectionTested,
@@ -1759,7 +1762,8 @@ impl Broker {
                 .set_connection_account(id, report.account.clone())?;
             self.events.connections_changed();
         }
-        // The check's verdict is the connection's new last-known health.
+        // The check's verdict is the connection's new last-known health, and
+        // like the Test button it is authoritative rather than corroborative.
         let status = if report.ok {
             crate::types::HealthStatus::Ok
         } else if report.credential_rejected {
@@ -1767,6 +1771,7 @@ impl Broker {
         } else {
             crate::types::HealthStatus::Failed
         };
+        self.health.clear_rejection_streak(id);
         self.health.record(id, status, report.detail.clone());
         Ok(report)
     }

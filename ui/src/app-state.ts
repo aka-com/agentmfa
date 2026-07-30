@@ -73,6 +73,7 @@ export interface ConnectionDraft {
   sslmode?: string | null;
   sslmodeIsAutomatic?: boolean;
   pgCaBundlePath?: string | null;
+  testPath?: string | null;
   url?: string | null;
   template?: string | null;
   secretId?: string | null;

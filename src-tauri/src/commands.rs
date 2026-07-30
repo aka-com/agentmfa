@@ -581,6 +581,8 @@ pub struct ConnectionInput {
     pub template: Option<String>,
     /// Set when this API upstream speaks MCP at that path.
     pub mcp_path: Option<String>,
+    /// The path the Test button probes instead of the origin root.
+    pub test_path: Option<String>,
     // BYO-app OAuth (plain REST rows): non-secret provider coordinates.
     pub oauth_auth_url: Option<String>,
     pub oauth_token_url: Option<String>,
@@ -665,6 +667,12 @@ impl ConnectionInput {
                 // make the sidecar post JSON-RPC to the upstream's root.
                 mcp_path: self
                     .mcp_path
+                    .map(|path| path.trim().to_string())
+                    .filter(|path| !path.is_empty()),
+                // Blank means "not configured", so the probe falls back to
+                // the MCP path and then the origin root.
+                test_path: self
+                    .test_path
                     .map(|path| path.trim().to_string())
                     .filter(|path| !path.is_empty()),
                 oauth: match (

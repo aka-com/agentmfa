@@ -537,6 +537,9 @@ impl Broker {
             trusted_ca_bundle_path: draft.trusted_ca_bundle_path.clone(),
             template: format!("Authorization: Bearer {{{{{secret_name}}}}}"),
             mcp_path: Some(draft.mcp_path.clone()),
+            // An MCP connection's probe is its own MCP path, which
+            // `test_upstream` already falls back to.
+            test_path: None,
             oauth: None,
         };
         let spec = ConnectionSpec {

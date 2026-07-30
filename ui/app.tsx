@@ -3675,13 +3675,26 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
   }
   if (t === 'api') {
     apiTlsFields = (
-      <div className="f-row" key="api-ca-bundle">
-        <label htmlFor="f-api-ca-bundle">Trusted CA bundle <span className="label-detail">(optional)</span></label>
-        <input id="f-api-ca-bundle" placeholder="/path/to/private-ca.pem"
-          value={d.pgCaBundlePath ?? ''}
-          onChange={(e) => setDraftField('pgCaBundlePath', 'pgCaBundlePath', e.currentTarget.value)} />
-        <div className="rule-note">Replaces public certificate authorities for this API connection.</div>
-      </div>
+      <>
+        <div className="f-row" key="api-ca-bundle">
+          <label htmlFor="f-api-ca-bundle">Trusted CA bundle <span className="label-detail">(optional)</span></label>
+          <input id="f-api-ca-bundle" placeholder="/path/to/private-ca.pem"
+            value={d.pgCaBundlePath ?? ''}
+            onChange={(e) => setDraftField('pgCaBundlePath', 'pgCaBundlePath', e.currentTarget.value)} />
+          <div className="rule-note">Replaces public certificate authorities for this API connection.</div>
+        </div>
+        <div className="f-row" key="api-test-path">
+          <label htmlFor="f-api-test-path">Test path <span className="label-detail">(optional)</span></label>
+          <input id="f-api-test-path" className={fieldCls('testPath')} placeholder="/user"
+            value={d.testPath ?? ''}
+            onChange={(e) => setDraftField('testPath', 'testPath', e.currentTarget.value)} />
+          <FieldError k="testPath" />
+          <div className="rule-note">
+            What Test fetches. Left blank it fetches the origin root, which
+            most APIs answer without ever checking the credential.
+          </div>
+        </div>
+      </>
     );
   }
   const templateField = (placeholder?: string, note?: ReactNode): ReactNode => (
@@ -3872,7 +3885,7 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
   if (apiTlsFields || pgTlsFields || sshHostKeyField) {
     // Force the section open when one of its fields has a validation error,
     // so the inline message (and the focused input) is visible.
-    const advancedError = ['hostKeyFingerprint', 'pgCaBundlePath']
+    const advancedError = ['hostKeyFingerprint', 'pgCaBundlePath', 'testPath']
       .some((key) => state.sheetErrors[key]);
     const advOpen = state.connAdvancedOpen || advancedError;
     fields.push(
@@ -4491,6 +4504,7 @@ function initializeCatalogConnectionDraft(
     state.draft.origin = entry.preset.origin;
     state.draft.authMode = entry.preset.authMode;
     state.draft.authDetail = entry.preset.authDetail;
+    state.draft.testPath = entry.preset.testPath;
   }
   if (entry.connType === 'pg') state.draft.port = '5432';
   if (entry.connType === 'ssh') state.draft.port = '22';
@@ -4786,6 +4800,7 @@ async function saveConn(): Promise<void> {
     input.template = injectionTemplate;
     input.mcp_path = mcpPath;
     input.trusted_ca_bundle_path = (d.pgCaBundlePath || '').trim() || null;
+    input.test_path = (d.testPath || '').trim() || null;
   } else if (t === 'pg') {
     input.host = (d.host || '').trim();
     input.port = port;
@@ -4927,7 +4942,7 @@ function closeSheet() {
 // cancelling should ask before discarding.
 const DIRTY_DRAFT_FIELDS: Array<keyof ConnectionDraft> = [
   'name', 'origin', 'host', 'port', 'dbname', 'user', 'url', 'template',
-  'hostKeyFingerprint', 'sslmode', 'pgCaBundlePath', 'secretId', 'secretSource',
+  'hostKeyFingerprint', 'sslmode', 'pgCaBundlePath', 'testPath', 'secretId', 'secretSource',
   'newSecretName', 'newSecretValue', 'authMode', 'authDetail', 'identityFile',
 ];
 
@@ -5519,6 +5534,7 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
         destination: c.destination,
         hostKeyFingerprint: c.host_key_fingerprint,
         sslmode: c.sslmode || 'verify-full', pgCaBundlePath: c.trusted_ca_bundle_path,
+        testPath: c.test_path ?? null,
         secretId: null,
         secretSource: c.type !== 'api' && !c.secret_names.length ? 'none' : 'existing' };
       // best-effort: prefill single-secret binding by name→id

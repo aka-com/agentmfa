@@ -200,6 +200,34 @@ impl SpooledBody {
         self.len() == 0
     }
 
+    /// Feed the body through `sink` in bounded chunks.
+    ///
+    /// Hashing a spooled request for its idempotency key must not undo the
+    /// spooling: `bytes()` would pull a 150 MB upload back into memory purely
+    /// to fingerprint it, which is the allocation the disk spool exists to
+    /// avoid.
+    pub fn for_each_chunk(&self, mut sink: impl FnMut(&[u8])) -> std::io::Result<()> {
+        match self {
+            SpooledBody::Empty => Ok(()),
+            SpooledBody::Inline(bytes) => {
+                sink(bytes);
+                Ok(())
+            }
+            SpooledBody::Spooled { file, .. } => {
+                let mut file = file.lock().unwrap();
+                file.rewind()?;
+                let mut buf = vec![0u8; 64 * 1024];
+                loop {
+                    let read = file.read(&mut buf)?;
+                    if read == 0 {
+                        return Ok(());
+                    }
+                    sink(&buf[..read]);
+                }
+            }
+        }
+    }
+
     /// Materialize the bytes (per upstream attempt; 307/308 replays re-read).
     pub fn bytes(&self) -> std::io::Result<Vec<u8>> {
         match self {

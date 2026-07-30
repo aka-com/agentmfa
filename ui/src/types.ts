@@ -73,6 +73,8 @@ export interface ConnectionSummary {
   type: ConnectionType;
   /** Set when an API upstream speaks MCP at that path. */
   mcp_path?: string | null;
+  /** The path the Test button probes instead of the origin root. */
+  test_path?: string | null;
   /**
    * The upstream account this connection's credential was last verified as
    * (an MCP whoami answer). Display metadata — it tells two connections to
@@ -343,6 +345,8 @@ export interface ConnectionInput {
   port?: number | null;
   /** Set when this API upstream speaks MCP at that path. */
   mcp_path?: string | null;
+  /** The path the Test button probes instead of the origin root. */
+  test_path?: string | null;
   // BYO-app OAuth (plain REST rows): non-secret provider coordinates.
   oauth_auth_url?: string | null;
   oauth_token_url?: string | null;

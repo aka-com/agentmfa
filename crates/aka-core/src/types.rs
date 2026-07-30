@@ -100,6 +100,17 @@ pub enum ConnectionConfig {
         /// sidecar: the MCP traffic rides the existing HTTP plane.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mcp_path: Option<String>,
+        /// The path the Test button fetches, when the origin root is not a
+        /// useful probe.
+        ///
+        /// Most APIs 404 or 403 at `/`, so testing there proves reachability
+        /// and TLS but says nothing about the credential — and a passing test
+        /// that proved nothing is worse than none. A vendor's documented
+        /// identity route (`/user`, `/v1/me`) answers 200 for a good token and
+        /// 401 for a bad one, which is the question the button is asking.
+        /// Absent falls back to `mcp_path`, then the root.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        test_path: Option<String>,
         /// When set, the credential is an OAuth 2.0 token set minted by a
         /// browser sign-in against the user's own OAuth app (BYO-app,
         /// loopback PKCE). The bound secret holds the JSON token set; the
@@ -749,6 +760,7 @@ mod tests {
             template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
 
             mcp_path: None,
+            test_path: None,
             oauth: None,
         };
         assert_eq!(api.target(), "https://api.github.com");
@@ -822,6 +834,7 @@ mod tests {
             template: "Authorization: Bearer {{A}}".into(),
 
             mcp_path: None,
+            test_path: None,
             oauth: None,
         };
         let api_b = ConnectionConfig::Api {
@@ -832,6 +845,7 @@ mod tests {
             template: "Authorization: Bearer {{B}}".into(),
 
             mcp_path: None,
+            test_path: None,
             oauth: None,
         };
         assert!(api_a.has_equivalent_target(&api_b));

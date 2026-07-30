@@ -1436,6 +1436,7 @@ fn validate_config_and_bind_secrets(
             trusted_ca_bundle_path,
             template,
             mcp_path,
+            test_path,
             oauth,
         } => {
             if host.is_empty() || host.contains('/') || host.contains('@') || host.contains(':') {
@@ -1465,6 +1466,21 @@ fn validate_config_and_bind_secrets(
                     return Err(CoreError::InvalidConnectionField {
                         field: ConnectionField::Url,
                         message: "The MCP path must start with / (for example /mcp)".into(),
+                    });
+                }
+            }
+            // Validated exactly like an agent-supplied path, because that is
+            // what it becomes: the Test button joins it onto the pinned origin
+            // and re-checks the authority, and a probe that could aim itself
+            // somewhere else would be a hole in the same pinning the data
+            // plane relies on.
+            if let Some(path) = test_path {
+                if crate::capability::http::validate_path(path).is_err() {
+                    return Err(CoreError::InvalidConnectionField {
+                        field: ConnectionField::Url,
+                        message: "The test path must start with a single / \
+                                  (for example /user)"
+                            .into(),
                     });
                 }
             }
@@ -1781,6 +1797,7 @@ mod tests {
                 template: template.into(),
 
                 mcp_path: None,
+                test_path: None,
                 oauth: None,
             },
             secrets: vec![],
@@ -1971,6 +1988,7 @@ mod tests {
                     trusted_ca_bundle_path: None,
                     template: "Authorization: Bearer {{STREAM_TOKEN}}".into(),
                     mcp_path: None,
+                    test_path: None,
                     oauth: None,
                 },
                 secrets: vec![token.id],
@@ -2359,6 +2377,7 @@ mod tests {
                 trusted_ca_bundle_path: None,
                 template: "Authorization: Bearer {{SLACK_OAUTH_TOKEN}}".into(),
                 mcp_path: None,
+                test_path: None,
                 oauth: Some(crate::types::OAuthSpec {
                     auth_url: auth.into(),
                     token_url: token.into(),
@@ -2461,6 +2480,7 @@ mod tests {
                     template: "Authorization: Bearer {{Z_OAUTH_TOKENS}}; auxiliary={{AUXILIARY}}"
                         .into(),
                     mcp_path: None,
+                    test_path: None,
                     oauth: Some(crate::types::OAuthSpec {
                         auth_url: "https://slack.com/oauth/v2/authorize".into(),
                         token_url: "https://slack.com/api/oauth.v2.access".into(),
@@ -2629,6 +2649,7 @@ mod tests {
                     trusted_ca_bundle_path: None,
                     template: "Authorization: Bearer {{SLACK_OAUTH_TOKEN}}".into(),
                     mcp_path: None,
+                    test_path: None,
                     oauth: Some(crate::types::OAuthSpec {
                         auth_url: "https://slack.com/oauth/v2/authorize".into(),
                         token_url: "https://slack.com/api/oauth.v2.access".into(),
@@ -2811,6 +2832,7 @@ mod tests {
                     trusted_ca_bundle_path: None,
                     template: "Authorization: Bearer {{STREAM_TOKEN}}".into(),
                     mcp_path: None,
+                    test_path: None,
                     oauth: None,
                 },
                 secrets: vec![tok.id],
@@ -2827,6 +2849,7 @@ mod tests {
                         trusted_ca_bundle_path: None,
                         template: "Authorization: Bearer {{STREAM_TOKEN}}".into(),
                         mcp_path: None,
+                        test_path: None,
                         oauth: None,
                     },
                     secrets: vec![tok.id],

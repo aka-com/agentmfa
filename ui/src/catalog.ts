@@ -50,6 +50,14 @@ export interface ConnectionPreset {
   docsUrl?: string;
   /** Placeholder for the credential value input, e.g. 'sk_live_…'. */
   credentialHint?: string;
+  /**
+   * The vendor's documented identity route, prefilled into the form's test
+   * path field. Testing the origin root proves reachability and TLS but
+   * never exercises the credential — most of these APIs answer 404 or 403
+   * there — so the row carries the route that actually reads the account.
+   * Like every other preset value it lands in a visible, editable field.
+   */
+  testPath?: string;
 }
 
 /**
@@ -165,6 +173,7 @@ export const CATALOG: CatalogEntry[] = [
       name: 'Slack',
       docsUrl: 'api.slack.com/apps',
       credentialHint: 'xoxb-…',
+      testPath: '/api/auth.test',
     },
     oauthPreset: {
       authUrl: 'https://slack.com/oauth/v2/authorize',
@@ -238,6 +247,7 @@ export const CATALOG: CatalogEntry[] = [
       name: 'Airtable',
       docsUrl: 'airtable.com/create/tokens',
       credentialHint: 'pat…',
+      testPath: '/v0/meta/whoami',
     },
   },
   {
@@ -256,6 +266,7 @@ export const CATALOG: CatalogEntry[] = [
       name: 'Anthropic',
       docsUrl: 'console.anthropic.com/settings/keys',
       credentialHint: 'sk-ant-…',
+      testPath: '/v1/models',
     },
   },
   {
@@ -273,6 +284,7 @@ export const CATALOG: CatalogEntry[] = [
       name: 'OpenAI',
       docsUrl: 'platform.openai.com/api-keys',
       credentialHint: 'sk-…',
+      testPath: '/v1/models',
     },
   },
   {
@@ -327,6 +339,7 @@ export const CATALOG: CatalogEntry[] = [
       name: 'Sentry',
       docsUrl: 'sentry.io/settings/account/api/auth-tokens',
       credentialHint: 'sntrys_…',
+      testPath: '/api/0/organizations/',
     },
   },
   {
@@ -350,6 +363,7 @@ export const CATALOG: CatalogEntry[] = [
       name: 'Stripe',
       docsUrl: 'dashboard.stripe.com/apikeys',
       credentialHint: 'sk_live_… or rk_live_…',
+      testPath: '/v1/account',
     },
   },
   {
@@ -370,6 +384,7 @@ export const CATALOG: CatalogEntry[] = [
       name: 'Vercel',
       docsUrl: 'vercel.com/account/settings/tokens',
       credentialHint: 'Vercel access token',
+      testPath: '/v2/user',
     },
   },
   {

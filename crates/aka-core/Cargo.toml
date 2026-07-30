@@ -36,6 +36,7 @@ tower = { workspace = true }
 url = { workspace = true }
 reqwest = { workspace = true }
 futures = { workspace = true }
+bytes = { workspace = true }
 
 postgres-protocol = { workspace = true }
 rustls = { workspace = true }

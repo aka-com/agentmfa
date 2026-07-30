@@ -367,6 +367,10 @@ pub struct ConnectionDto {
     /// re-exposes its tools under this connection's name.
     #[serde(default)]
     pub mcp_path: Option<String>,
+    /// The path the Test button probes instead of the origin root, when the
+    /// root is not a useful answer to "does this credential work".
+    #[serde(default)]
+    pub test_path: Option<String>,
     /// The upstream account this connection's credential was last verified
     /// as (an MCP whoami answer). Display metadata, never authorization.
     #[serde(default)]
@@ -720,6 +724,7 @@ mod tests {
             sslmode: None,
             trusted_ca_bundle_path: None,
             mcp_path: None,
+            test_path: None,
             account: None,
             oauth_spec: None,
             last_status: None,

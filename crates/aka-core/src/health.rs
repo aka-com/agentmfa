@@ -24,9 +24,20 @@ use crate::events::BrokerEvents;
 use crate::integrity::StateIntegrity;
 use crate::types::{ConnectionHealth, HealthStatus};
 
+/// Consecutive upstream credential rejections required before a connection's
+/// badge turns amber. One is not evidence: an API key that is valid but
+/// unscoped for a single path answers 401/403 there and 200 everywhere else,
+/// and a connection whose credential *works* must not be labelled "reconnect"
+/// because one call reached a route it may not use.
+const CREDENTIAL_REJECTION_CORROBORATION: u32 = 2;
+
 pub struct HealthRegistry {
     path: PathBuf,
     map: Mutex<HashMap<Uuid, ConnectionHealth>>,
+    /// Consecutive credential rejections per connection, cleared by any
+    /// relayed success. Runtime only: a restart re-learns it, and the stored
+    /// badge is whatever the last corroborated verdict was.
+    rejections: Mutex<HashMap<Uuid, u32>>,
     events: Arc<dyn BrokerEvents>,
     integrity: Arc<StateIntegrity>,
     /// Set when the stored file failed verification and was discarded, so
@@ -54,6 +65,7 @@ impl HealthRegistry {
         Self {
             path,
             map: Mutex::new(map),
+            rejections: Mutex::new(HashMap::new()),
             events,
             integrity,
             discarded,
@@ -88,10 +100,36 @@ impl HealthRegistry {
     /// Upgrade to Ok only when the connection is not already Ok — brokered
     /// calls succeed constantly and must not rewrite the file per request.
     pub fn record_ok_if_changed(&self, id: &Uuid, detail: impl Into<String>) {
+        // A served response is proof the credential works, so it also clears
+        // any half-accumulated rejection streak.
+        self.rejections.lock().unwrap().remove(id);
         let already_ok = self.get(id).is_some_and(|h| h.status == HealthStatus::Ok);
         if !already_ok {
             self.record(id, HealthStatus::Ok, detail);
         }
+    }
+
+    /// Record an upstream credential rejection observed in passing on a
+    /// brokered call, downgrading the badge only once a second consecutive
+    /// rejection corroborates it.
+    ///
+    /// A single 401/403 is ambiguous in a way the Test button's is not: the
+    /// agent chose the path, and a token that is merely unscoped for that one
+    /// route is not a token the user needs to reconnect. Requiring corroboration
+    /// keeps the amber badge meaning "this credential stopped working" instead
+    /// of "an agent probed something it may not read". Returns whether the badge
+    /// was downgraded.
+    pub fn record_credential_rejection(&self, id: &Uuid, detail: impl Into<String>) -> bool {
+        let corroborated = {
+            let mut rejections = self.rejections.lock().unwrap();
+            let seen = rejections.entry(*id).or_insert(0);
+            *seen = seen.saturating_add(1);
+            *seen >= CREDENTIAL_REJECTION_CORROBORATION
+        };
+        if corroborated {
+            self.record_if_changed(id, HealthStatus::NeedsReconnect, detail);
+        }
+        corroborated
     }
 
     /// Record a failure only when it says something new. An unreachable
@@ -110,9 +148,19 @@ impl HealthRegistry {
         }
     }
 
+    /// Forget the passive rejection streak without touching the badge.
+    ///
+    /// Called when an explicit, user-initiated check produces an authoritative
+    /// verdict: whatever the agent plane had half-observed is superseded, and
+    /// the next passive rejection starts counting from scratch.
+    pub fn clear_rejection_streak(&self, id: &Uuid) {
+        self.rejections.lock().unwrap().remove(id);
+    }
+
     /// Drop a connection's entry (deleted, or repointed at a new target —
     /// a result for the old destination must not describe the new one).
     pub fn forget(&self, id: &Uuid) {
+        self.rejections.lock().unwrap().remove(id);
         let mut map = self.map.lock().unwrap();
         if map.remove(id).is_some() {
             self.persist(&map);

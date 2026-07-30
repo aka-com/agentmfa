@@ -79,6 +79,7 @@ fn api_spec(name: &str, template: &str) -> ConnectionSpec {
             trusted_ca_bundle_path: None,
             template: template.into(),
             mcp_path: None,
+            test_path: None,
             oauth: None,
         },
         secrets: vec![],
@@ -339,6 +340,7 @@ async fn byo_oauth_relays_through_the_client_loopback() {
             trusted_ca_bundle_path: None,
             template: "Authorization: Bearer {{GH_OAUTH_TOKEN}}".into(),
             mcp_path: None,
+            test_path: None,
             oauth: Some(aka_core::types::OAuthSpec {
                 auth_url: format!("http://127.0.0.1:{provider_port}/authorize"),
                 token_url: format!("http://127.0.0.1:{provider_port}/token"),

@@ -164,6 +164,7 @@ pub fn connection_dto(broker: &Broker, conn: &Connection) -> ConnectionDto {
         sslmode: None,
         trusted_ca_bundle_path: None,
         mcp_path: None,
+        test_path: None,
         account: conn.account.clone(),
         oauth_spec: None,
         last_status: health.as_ref().map(|h| h.status.as_str().to_string()),
@@ -178,6 +179,7 @@ pub fn connection_dto(broker: &Broker, conn: &Connection) -> ConnectionDto {
             trusted_ca_bundle_path,
             template,
             mcp_path,
+            test_path,
             oauth,
         } => {
             dto.host = Some(host.clone());
@@ -186,6 +188,7 @@ pub fn connection_dto(broker: &Broker, conn: &Connection) -> ConnectionDto {
             dto.trusted_ca_bundle_path = trusted_ca_bundle_path.clone();
             dto.template = Some(template.clone());
             dto.mcp_path = mcp_path.clone();
+            dto.test_path = test_path.clone();
             dto.oauth_spec = oauth.as_ref().map(|o| OAuthDto {
                 auth_url: o.auth_url.clone(),
                 token_url: o.token_url.clone(),
@@ -892,6 +895,12 @@ pub struct ConnectionConfigPatch {
     pub clear_trusted_ca_bundle: bool,
     #[serde(default)]
     pub host_key_fingerprint: Option<String>,
+    /// The path the Test button probes on an API connection. Absence
+    /// preserves the current one.
+    #[serde(default)]
+    pub test_path: Option<String>,
+    #[serde(default)]
+    pub clear_test_path: bool,
     /// Rebind the one credential used by Postgres or SSH. Absence preserves
     /// the current binding.
     #[serde(default)]
@@ -920,6 +929,11 @@ fn patched_connection_spec(
             message: "cannot set and clear the CA bundle in one update".into(),
         });
     }
+    if patch.clear_test_path && patch.test_path.is_some() {
+        return Err(ManageError::InvalidConnectionConfig {
+            message: "cannot set and clear the test path in one update".into(),
+        });
+    }
     let ca_bundle = |current: &Option<String>| {
         if patch.clear_trusted_ca_bundle {
             None
@@ -938,6 +952,7 @@ fn patched_connection_spec(
             trusted_ca_bundle_path,
             template,
             mcp_path,
+            test_path,
             oauth,
         } => {
             for (field, present) in [
@@ -958,6 +973,11 @@ fn patched_connection_spec(
                 trusted_ca_bundle_path: ca_bundle(trusted_ca_bundle_path),
                 template: patch.template.unwrap_or_else(|| template.clone()),
                 mcp_path: mcp_path.clone(),
+                test_path: if patch.clear_test_path {
+                    None
+                } else {
+                    patch.test_path.clone().or_else(|| test_path.clone())
+                },
                 oauth: oauth.clone(),
             }
         }
@@ -973,6 +993,10 @@ fn patched_connection_spec(
                 ("scheme", patch.scheme.is_some()),
                 ("template", patch.template.is_some()),
                 ("host_key_fingerprint", patch.host_key_fingerprint.is_some()),
+                (
+                    "test_path",
+                    patch.test_path.is_some() || patch.clear_test_path,
+                ),
             ] {
                 if present {
                     return Err(invalid_patch(field, "Postgres"));
@@ -1002,6 +1026,10 @@ fn patched_connection_spec(
                 (
                     "trusted_ca_bundle_path",
                     patch.trusted_ca_bundle_path.is_some() || patch.clear_trusted_ca_bundle,
+                ),
+                (
+                    "test_path",
+                    patch.test_path.is_some() || patch.clear_test_path,
                 ),
             ] {
                 if present {
@@ -1860,6 +1888,7 @@ mod tests {
                 trusted_ca_bundle_path: None,
                 template: "Authorization: Bearer {{GITHUB_KEY}}".into(),
                 mcp_path: None,
+                test_path: None,
                 oauth: None,
             },
             secrets: vec![],
@@ -1944,6 +1973,7 @@ mod tests {
                     trusted_ca_bundle_path: None,
                     template: "Authorization: Bearer {{MISSING}}".into(),
                     mcp_path: None,
+                    test_path: None,
                     oauth: None,
                 },
                 secrets: vec![],
@@ -2051,6 +2081,7 @@ mod tests {
                 trusted_ca_bundle_path: Some("/etc/company-ca.pem".into()),
                 template: "Authorization: Bearer {{CALENDAR}}".into(),
                 mcp_path: Some("/mcp".into()),
+                test_path: None,
                 oauth: None,
             },
             secrets: vec![secret],
