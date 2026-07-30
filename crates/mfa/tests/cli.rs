@@ -156,6 +156,117 @@ fn status_is_machine_readable_and_classifies_a_missing_broker() {
 }
 
 #[test]
+fn json_mutations_are_rejected_instead_of_silently_ignoring_the_flag() {
+    let root = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_mfa"))
+        .args([
+            "--json",
+            "secret",
+            "rm",
+            "unused",
+            "--root",
+            root.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--json is not supported"));
+}
+
+#[test]
+fn explicit_missing_roots_are_not_created_by_mutations() {
+    let parent = tempfile::tempdir().unwrap();
+    let missing = parent.path().join("typo");
+    let output = Command::new(env!("CARGO_BIN_EXE_mfa"))
+        .args(["conn", "rm", "unused", "--root", missing.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not an existing broker root"));
+    assert!(!missing.exists(), "a typo must not create broker state");
+}
+
+#[test]
+fn broker_url_environment_variable_matches_the_broker_flag() {
+    let root = tempfile::tempdir().unwrap();
+    let (url, _, handle) = stub(vec![
+        whoami(),
+        Reply {
+            method: "GET",
+            path: "/v1/manage/connections",
+            body: json!([]),
+        },
+    ]);
+    let output = Command::new(env!("CARGO_BIN_EXE_mfa"))
+        .args([
+            "--json",
+            "conn",
+            "list",
+            "--root",
+            root.path().to_str().unwrap(),
+        ])
+        .env("AKA_MANAGE_TOKEN", "akamgr_test")
+        .env("AKA_BROKER_URL", &url)
+        .output()
+        .unwrap();
+    assert_success(&output);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!([])
+    );
+    handle.join().unwrap();
+}
+
+#[test]
+fn broker_url_environment_cannot_bypass_local_only_root_guards() {
+    let parent = tempfile::tempdir().unwrap();
+    let missing = parent.path().join("typo");
+    let output = Command::new(env!("CARGO_BIN_EXE_mfa"))
+        .args([
+            "manage",
+            "token",
+            "--root",
+            missing.to_str().unwrap(),
+        ])
+        .env("AKA_BROKER_URL", "https://broker.example.test")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not an existing broker root"));
+    assert!(!missing.exists(), "the local-only command created a typoed root");
+}
+
+#[test]
+fn broker_url_environment_applies_to_agent_key_reads() {
+    let root = tempfile::tempdir().unwrap();
+    let (url, _, handle) = stub(vec![
+        whoami(),
+        Reply {
+            method: "GET",
+            path: "/v1/manage/identity/agent-key",
+            body: json!({ "token": "aka_remote_key" }),
+        },
+    ]);
+    let output = Command::new(env!("CARGO_BIN_EXE_mfa"))
+        .args([
+            "--json",
+            "key",
+            "--root",
+            root.path().to_str().unwrap(),
+        ])
+        .env("AKA_MANAGE_TOKEN", "akamgr_test")
+        .env("AKA_BROKER_URL", &url)
+        .output()
+        .unwrap();
+    assert_success(&output);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()["key"],
+        "aka_remote_key"
+    );
+    handle.join().unwrap();
+}
+
+#[test]
 fn visibility_commands_project_sessions_requests_settings_and_connection_detail() {
     let root = tempfile::tempdir().unwrap();
     let cases = [

@@ -47,14 +47,32 @@ async fn manifest(socket: &Path) -> std::io::Result<serde_json::Value> {
     serde_json::from_str(&body).map_err(std::io::Error::other)
 }
 
+fn agent_protocol_warning(manifest: &serde_json::Value) -> Option<String> {
+    let version = manifest["protocol_version"].as_u64()?;
+    (version != aka_core::wire::PROTOCOL_VERSION as u64).then(|| {
+        format!(
+            "broker advertises unsupported Agent Broker Protocol version {version}; \
+             this CLI supports version {}",
+            aka_core::wire::PROTOCOL_VERSION
+        )
+    })
+}
+
 /// Wait for the broker's manifest to advertise a running MCP host.
 async fn discover_mcp_url(socket: &Path) -> Result<String, String> {
     let deadline = tokio::time::Instant::now() + DISCOVER_TIMEOUT;
     let mut reported_waiting = false;
     let mut reported_no_mcp = false;
+    let mut reported_protocol_skew = false;
     loop {
         match manifest(socket).await {
             Ok(manifest) => {
+                if !reported_protocol_skew {
+                    if let Some(warning) = agent_protocol_warning(&manifest) {
+                        eprintln!("mfa mcp: warning: {warning}");
+                        reported_protocol_skew = true;
+                    }
+                }
                 if let Some(url) = manifest["mcp_url"].as_str() {
                     return Ok(url.to_string());
                 }
@@ -885,6 +903,22 @@ pub async fn run(paths: Paths, label: Option<String>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovery_warns_only_for_unknown_agent_protocol_versions() {
+        assert!(agent_protocol_warning(&serde_json::json!({
+            "protocol_version": aka_core::wire::PROTOCOL_VERSION,
+        }))
+        .is_none());
+        let warning = agent_protocol_warning(&serde_json::json!({
+            "protocol_version": aka_core::wire::PROTOCOL_VERSION + 1,
+        }))
+        .expect("future protocol must warn");
+        assert!(
+            warning.contains("unsupported Agent Broker Protocol"),
+            "{warning}"
+        );
+    }
 
     #[test]
     fn sse_parser_yields_completed_events() {

@@ -8,6 +8,48 @@ use std::path::Path;
 use aka_core::paths::Paths;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+#[derive(Debug)]
+pub enum OpenSessionError {
+    NoBroker {
+        socket: std::path::PathBuf,
+    },
+    Refused {
+        status: u16,
+        reason: Option<String>,
+        detail: String,
+    },
+    Transport {
+        socket: std::path::PathBuf,
+        detail: String,
+    },
+    Malformed(String),
+}
+
+impl std::fmt::Display for OpenSessionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoBroker { socket } => write!(
+                f,
+                "no broker is running at {} — start the AgentMFA app or `mfa serve`",
+                socket.display()
+            ),
+            Self::Refused { status, detail, .. } => {
+                write!(f, "the broker refused the open (HTTP {status}): {detail}")
+            }
+            Self::Transport { socket, detail } => {
+                write!(
+                    f,
+                    "could not reach the broker at {}: {detail}",
+                    socket.display()
+                )
+            }
+            Self::Malformed(detail) => f.write_str(detail),
+        }
+    }
+}
+
+impl std::error::Error for OpenSessionError {}
+
 /// One minimal HTTP/1.1 request over the broker's Unix socket. The broker
 /// answers small JSON bodies with a Content-Length, so read-to-EOF with
 /// `Connection: close` is sufficient — no HTTP client dependency can reach
@@ -20,6 +62,17 @@ pub async fn unix_http(
     bearer: Option<&str>,
     client_label: Option<&str>,
 ) -> std::io::Result<(u16, String)> {
+    for (name, value) in [
+        ("bearer token", bearer.unwrap_or_default()),
+        ("client label", client_label.unwrap_or_default()),
+    ] {
+        if value.contains(['\r', '\n']) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{name} must not contain CR or LF"),
+            ));
+        }
+    }
     let mut stream = tokio::net::UnixStream::connect(socket).await?;
     let mut request = format!(
         "{method} {path} HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nConnection: close\r\n"
@@ -106,10 +159,37 @@ pub async fn open_session(
     endpoint: &str,
     connection: &str,
     client_label: Option<&str>,
-) -> Result<serde_json::Value, String> {
-    let key = shared_key(paths, client_label).await?;
-    let body = serde_json::json!({ "connection": connection }).to_string();
+) -> Result<serde_json::Value, OpenSessionError> {
     let socket = paths.socket_file();
+    let key = std::fs::read_to_string(paths.token_file())
+        .ok()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty());
+    let key = match key {
+        Some(key) => key,
+        None => {
+            let body = pairing_body(client_label);
+            let (status, payload) = unix_http(&socket, "POST", "/v1/pair", Some(&body), None, None)
+                .await
+                .map_err(|error| transport_error(&socket, error))?;
+            let value: serde_json::Value = serde_json::from_str(&payload).unwrap_or_default();
+            if status != 200 {
+                return Err(OpenSessionError::Refused {
+                    status,
+                    reason: value["reason"].as_str().map(str::to_string),
+                    detail: value["detail"]
+                        .as_str()
+                        .or_else(|| value["reason"].as_str())
+                        .unwrap_or(payload.trim())
+                        .to_string(),
+                });
+            }
+            value["token"].as_str().map(str::to_string).ok_or_else(|| {
+                OpenSessionError::Malformed("the pair response carried no token".to_string())
+            })?
+        }
+    };
+    let body = serde_json::json!({ "connection": connection }).to_string();
     let (status, payload) = unix_http(
         &socket,
         "POST",
@@ -119,16 +199,7 @@ pub async fn open_session(
         client_label,
     )
     .await
-    .map_err(|error| match error.kind() {
-        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => format!(
-            "no broker is running at {} — start the AgentMFA app or `mfa serve`",
-            socket.display()
-        ),
-        _ => format!(
-            "could not reach the broker at {}: {error}",
-            socket.display()
-        ),
-    })?;
+    .map_err(|error| transport_error(&socket, error))?;
     let value: serde_json::Value = serde_json::from_str(&payload).unwrap_or_default();
     if status != 200 {
         let detail = value["detail"]
@@ -136,14 +207,32 @@ pub async fn open_session(
             .or_else(|| value["reason"].as_str())
             .map(str::to_string)
             .unwrap_or_else(|| payload.trim().to_string());
-        return Err(format!(
-            "the broker refused the open (HTTP {status}): {detail}"
-        ));
+        return Err(OpenSessionError::Refused {
+            status,
+            reason: value["reason"].as_str().map(str::to_string),
+            detail,
+        });
     }
     if !value.is_object() {
-        return Err("the broker returned a malformed response".into());
+        return Err(OpenSessionError::Malformed(
+            "the broker returned a malformed response".into(),
+        ));
     }
     Ok(value)
+}
+
+fn transport_error(socket: &Path, error: std::io::Error) -> OpenSessionError {
+    match error.kind() {
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
+            OpenSessionError::NoBroker {
+                socket: socket.to_path_buf(),
+            }
+        }
+        _ => OpenSessionError::Transport {
+            socket: socket.to_path_buf(),
+            detail: error.to_string(),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -156,6 +245,21 @@ mod tests {
         let body = pairing_body(Some(label));
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(parsed["agent_name"], label);
+    }
+
+    #[tokio::test]
+    async fn unix_http_rejects_header_newlines_before_connecting() {
+        let error = unix_http(
+            Path::new("/does/not/exist"),
+            "GET",
+            "/",
+            None,
+            None,
+            Some("honest\r\nX-Forged: yes"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     /// A stub broker on a real Unix socket: asserts the shared key rides
@@ -218,14 +322,24 @@ mod tests {
         let error = open_session(&paths, "/v1/pg/open", "analytics", None)
             .await
             .unwrap_err();
-        assert!(error.contains("no broker is running"), "{error}");
+        assert!(
+            matches!(error, OpenSessionError::NoBroker { .. }),
+            "{error}"
+        );
 
         // A refusal carries the broker's detail through.
         stub_broker(&paths).await;
         let error = open_session(&paths, "/v1/ssh/open", "analytics", Some("test-cli"))
             .await
             .unwrap_err();
-        assert!(error.contains("HTTP 403"), "{error}");
-        assert!(error.contains("agent access is off for prod"), "{error}");
+        assert!(matches!(
+            error,
+            OpenSessionError::Refused {
+                status: 403,
+                ref reason,
+                ..
+            } if reason.as_deref() == Some("denied_by_policy")
+        ));
+        assert!(error.to_string().contains("agent access is off for prod"));
     }
 }

@@ -95,6 +95,21 @@ fn parse_presence_window_secs(value: &str) -> Result<u64, String> {
     }
 }
 
+fn parse_positive_seconds(value: &str) -> Result<u64, String> {
+    let secs: u64 = value
+        .parse()
+        .map_err(|_| "must be a whole number of seconds".to_string())?;
+    if secs == 0 {
+        Err("must be at least 1 second".to_string())
+    } else {
+        Ok(secs)
+    }
+}
+
+fn parse_public_url(value: &str) -> Result<String, String> {
+    RemoteConfig::normalize_url(value)
+}
+
 #[derive(Parser)]
 #[command(
     name = "mfa",
@@ -170,7 +185,7 @@ enum Command {
         listen: Option<std::net::SocketAddr>,
         /// The URL remote clients reach this broker at (your proxy or
         /// tunnel address); advertised in discovery served over TCP.
-        #[arg(long)]
+        #[arg(long, requires = "listen", value_parser = parse_public_url)]
         public_url: Option<String>,
         /// Bind the PG data plane and API direct endpoints to this
         /// address (e.g. 0.0.0.0 or a LAN IP) for remote agents, instead of
@@ -187,17 +202,17 @@ enum Command {
         /// Accept that a non-loopback --data-plane-listen puts the Postgres
         /// ticket, statements, and results on the network in clear text. The
         /// bind is refused without this.
-        #[arg(long)]
+        #[arg(long, requires = "data_plane_listen")]
         data_plane_insecure: bool,
         /// Tear a brokered session down after this many seconds with the
         /// backend idle and the client silent (default 300). Raise it for
         /// LISTEN/NOTIFY workloads, which are protocol-idle while waiting.
-        #[arg(long, value_name = "SECS")]
+        #[arg(long, value_name = "SECS", value_parser = parse_positive_seconds)]
         session_idle_timeout: Option<u64>,
         /// Hard ceiling on one brokered session, in seconds (default 3600).
         /// Raise it for long COPY/pg_dump runs, which are severed mid-stream
         /// when it expires.
-        #[arg(long, value_name = "SECS")]
+        #[arg(long, value_name = "SECS", value_parser = parse_positive_seconds)]
         session_max_ttl: Option<u64>,
         /// Record the SQL of each statement on a brokered Postgres session in
         /// the activity log. Off by default: statement text can carry
@@ -231,7 +246,7 @@ enum Command {
         root: Option<PathBuf>,
         /// Label this client in the user's activity log (e.g. claude-code).
         /// Attribution only, never authorization.
-        #[arg(long)]
+        #[arg(long, value_parser = parse_client_label)]
         client: Option<String>,
         /// Output shape. `env` (the default) keeps the ticket in PGPASSWORD;
         /// `uri` embeds it in a DSN and is visible in argv.
@@ -257,7 +272,7 @@ enum Command {
         root: Option<PathBuf>,
         /// Label this client in the user's activity log (e.g. claude-code).
         /// Attribution only, never authorization.
-        #[arg(long)]
+        #[arg(long, value_parser = parse_client_label)]
         client: Option<String>,
     },
     /// Run a local ssh-agent socket that speaks for a connection's *direct
@@ -396,6 +411,9 @@ enum SecretCommand {
         /// Operate on a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Create a missing explicit --root before seeding this first secret.
+        #[arg(long, requires = "root")]
+        create_root: bool,
         /// Manage the broker at this manage-API URL instead of this
         /// machine's.
         #[arg(long)]
@@ -506,6 +524,9 @@ enum ManageCommand {
         /// Operate on a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Create a missing explicit --root before issuing its first token.
+        #[arg(long, requires = "root")]
+        create_root: bool,
     },
 }
 
@@ -806,6 +827,9 @@ struct ConnAdd {
     /// Operate on a broker rooted here instead of the default layout.
     #[arg(long)]
     root: Option<PathBuf>,
+    /// Create a missing explicit --root before seeding this first connection.
+    #[arg(long, requires = "root")]
+    create_root: bool,
     /// Manage the broker at this manage-API URL instead of this
     /// machine's.
     #[arg(long)]
@@ -1012,38 +1036,67 @@ fn run_cli() {
                 value_env,
                 raw,
                 root,
+                create_root,
                 broker,
-            } => cmd_secret_add(name, value_env, raw, root, broker),
+            } => {
+                reject_json_for_mutation(json);
+                cmd_secret_add(name, value_env, raw, root, create_root, broker)
+            }
             SecretCommand::List { root, broker } => cmd_secret_list(root, broker, json),
             SecretCommand::Rename {
                 name,
                 new_name,
                 root,
                 broker,
-            } => cmd_secret_rename(name, new_name, root, broker),
+            } => {
+                reject_json_for_mutation(json);
+                cmd_secret_rename(name, new_name, root, broker)
+            }
             SecretCommand::Replace {
                 name,
                 value_env,
                 raw,
                 root,
                 broker,
-            } => cmd_secret_replace(name, value_env, raw, root, broker),
-            SecretCommand::Rm { name, root, broker } => cmd_secret_rm(name, root, broker),
+            } => {
+                reject_json_for_mutation(json);
+                cmd_secret_replace(name, value_env, raw, root, broker)
+            }
+            SecretCommand::Rm { name, root, broker } => {
+                reject_json_for_mutation(json);
+                cmd_secret_rm(name, root, broker)
+            }
         },
         Command::Conn { command } => match command {
-            ConnCommand::Add(args) => cmd_conn_add(args),
+            ConnCommand::Add(args) => {
+                reject_json_for_mutation(json);
+                cmd_conn_add(args)
+            }
             ConnCommand::List { root, broker } => cmd_conn_list(root, broker, json),
             ConnCommand::Show { name, root, broker } => cmd_conn_show(name, root, broker, json),
-            ConnCommand::Update(args) => cmd_conn_update(args),
+            ConnCommand::Update(args) => {
+                reject_json_for_mutation(json);
+                cmd_conn_update(args)
+            }
             ConnCommand::Rename {
                 name,
                 new_name,
                 root,
                 broker,
-            } => cmd_conn_rename(name, new_name, root, broker),
-            ConnCommand::Rm { name, root, broker } => cmd_conn_rm(name, root, broker),
-            ConnCommand::Enable { name, root, broker } => cmd_conn_access(name, root, broker, true),
+            } => {
+                reject_json_for_mutation(json);
+                cmd_conn_rename(name, new_name, root, broker)
+            }
+            ConnCommand::Rm { name, root, broker } => {
+                reject_json_for_mutation(json);
+                cmd_conn_rm(name, root, broker)
+            }
+            ConnCommand::Enable { name, root, broker } => {
+                reject_json_for_mutation(json);
+                cmd_conn_access(name, root, broker, true)
+            }
             ConnCommand::Disable { name, root, broker } => {
+                reject_json_for_mutation(json);
                 cmd_conn_access(name, root, broker, false)
             }
             ConnCommand::Confirm {
@@ -1051,14 +1104,20 @@ fn run_cli() {
                 off,
                 root,
                 broker,
-            } => cmd_conn_confirm(name, root, broker, !off),
+            } => {
+                reject_json_for_mutation(json);
+                cmd_conn_confirm(name, root, broker, !off)
+            }
             ConnCommand::ResponseCredentials {
                 name,
                 allow,
                 contain,
                 root,
                 broker,
-            } => cmd_conn_response_credentials(name, root, broker, allow, contain),
+            } => {
+                reject_json_for_mutation(json);
+                cmd_conn_response_credentials(name, root, broker, allow, contain)
+            }
             ConnCommand::AuditStatements {
                 name,
                 on,
@@ -1066,7 +1125,10 @@ fn run_cli() {
                 default,
                 root,
                 broker,
-            } => cmd_conn_audit_statements(name, root, broker, on, off, default),
+            } => {
+                reject_json_for_mutation(json);
+                cmd_conn_audit_statements(name, root, broker, on, off, default)
+            }
             ConnCommand::Test { name, root, broker } => cmd_conn_test(name, root, broker, json),
             ConnCommand::Endpoint {
                 name,
@@ -1122,13 +1184,23 @@ fn run_cli() {
                 broker,
                 token_env,
                 root,
-            } => cmd_manage_login(broker, token_env, root),
-            ManageCommand::Logout { broker, root } => cmd_manage_logout(broker, root),
+            } => {
+                reject_json_for_mutation(json);
+                cmd_manage_login(broker, token_env, root)
+            }
+            ManageCommand::Logout { broker, root } => {
+                reject_json_for_mutation(json);
+                cmd_manage_logout(broker, root)
+            }
             ManageCommand::Token {
                 revoke,
                 ttl_days,
                 root,
-            } => cmd_manage_token(revoke, ttl_days, root),
+                create_root,
+            } => {
+                reject_json_for_mutation(json);
+                cmd_manage_token(revoke, ttl_days, root, create_root)
+            }
         },
         Command::Key {
             rotate,
@@ -1231,6 +1303,15 @@ fn print_json(value: &impl serde::Serialize) {
     );
 }
 
+fn reject_json_for_mutation(json: bool) {
+    if json {
+        die_with(
+            ExitCode::Usage,
+            "--json is not supported for this mutation; omit it to continue",
+        );
+    }
+}
+
 fn store_paths(root: Option<&Path>) -> Paths {
     match root {
         Some(root) => Paths::under(root),
@@ -1243,9 +1324,9 @@ fn store_paths(root: Option<&Path>) -> Paths {
     }
 }
 
-/// A typo in `--root` must not make a read-only command silently create and
-/// report on a brand-new empty broker. Remote reads use the root only as an
-/// optional management-token location, so the broker URL remains authoritative.
+/// A typo in `--root` must not make a command silently create and operate on
+/// a brand-new broker. Remote commands use the root only as an optional
+/// management-token location, so the broker URL remains authoritative.
 fn require_existing_root_for_read(root: Option<&Path>, remote: bool) {
     let Some(root) = root.filter(|_| !remote) else {
         return;
@@ -1378,17 +1459,17 @@ fn cmd_secret_add(
     value_env: Option<String>,
     raw: bool,
     root: Option<PathBuf>,
+    create_root: bool,
     url: Option<String>,
 ) {
+    let managed = management_backend_with_create(root, url, create_root);
     let value = read_secret_value(&value_env, raw);
     let byte_len = value.len();
-    let managed = management_backend(root, url);
     managed.run(managed.backend.add_secret(name.clone(), value));
     eprintln!("added secret {name} ({byte_len} bytes)");
 }
 
 fn cmd_secret_list(root: Option<PathBuf>, url: Option<String>, json: bool) {
-    require_existing_root_for_read(root.as_deref(), url.is_some());
     let managed = management_backend(root, url);
     let secrets = managed.run(managed.backend.list_secrets());
     if json {
@@ -1499,6 +1580,26 @@ fn manage_token(paths: &Paths, key: &str) -> Option<Zeroizing<String>> {
 ///   which must never reach the manage plane;
 /// - no broker running → construct the broker offline, as before.
 fn management_backend(root: Option<PathBuf>, url: Option<String>) -> Managed {
+    management_backend_with_create(root, url, false)
+}
+
+fn effective_broker_url(url: Option<String>) -> Option<String> {
+    url.or_else(|| {
+        std::env::var("AKA_BROKER_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    })
+}
+
+fn management_backend_with_create(
+    root: Option<PathBuf>,
+    url: Option<String>,
+    create_root: bool,
+) -> Managed {
+    let url = effective_broker_url(url);
+    if !create_root {
+        require_existing_root_for_read(root.as_deref(), url.is_some());
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -1693,7 +1794,8 @@ fn cmd_conn_add(args: ConnAdd) {
         Ok(config) => config,
         Err(e) => die_with(ExitCode::Usage, e),
     };
-    let managed = management_backend(args.root.clone(), args.broker.clone());
+    let managed =
+        management_backend_with_create(args.root.clone(), args.broker.clone(), args.create_root);
     // pg/ssh bind at most one secret by name; api derives its secrets
     // from the template's refs inside add_connection.
     let secrets = match (&args.secret, args.kind) {
@@ -1810,7 +1912,6 @@ fn parse_sslmode(value: Option<&str>) -> Result<PgSslMode, String> {
 }
 
 fn cmd_conn_list(root: Option<PathBuf>, url: Option<String>, json: bool) {
-    require_existing_root_for_read(root.as_deref(), url.is_some());
     let managed = management_backend(root, url);
     let connections = managed.run(managed.backend.list_connections());
     if json {
@@ -1851,7 +1952,6 @@ fn cmd_conn_list(root: Option<PathBuf>, url: Option<String>, json: bool) {
 }
 
 fn cmd_conn_show(name: String, root: Option<PathBuf>, url: Option<String>, json: bool) {
-    require_existing_root_for_read(root.as_deref(), url.is_some());
     let managed = management_backend(root, url);
     let dto = conn_dto(&managed, &name);
     if json {
@@ -1962,7 +2062,6 @@ fn cmd_conn_show(name: String, root: Option<PathBuf>, url: Option<String>, json:
 }
 
 fn cmd_sessions(close: Option<u64>, root: Option<PathBuf>, url: Option<String>, json: bool) {
-    require_existing_root_for_read(root.as_deref(), url.is_some());
     let managed = management_backend(root, url);
     if let Some(id) = close {
         let closed = managed.run(managed.backend.close_session(id));
@@ -1992,7 +2091,6 @@ fn cmd_sessions(close: Option<u64>, root: Option<PathBuf>, url: Option<String>, 
 }
 
 fn cmd_requests(root: Option<PathBuf>, url: Option<String>, json: bool) {
-    require_existing_root_for_read(root.as_deref(), url.is_some());
     let managed = management_backend(root, url);
     let requests = managed.run(managed.backend.requests());
     if json {
@@ -2019,7 +2117,6 @@ fn cmd_requests(root: Option<PathBuf>, url: Option<String>, json: bool) {
 }
 
 fn cmd_settings_get(root: Option<PathBuf>, url: Option<String>, json: bool) {
-    require_existing_root_for_read(root.as_deref(), url.is_some());
     let managed = management_backend(root, url);
     let settings = managed.run(managed.backend.settings());
     if json {
@@ -2428,7 +2525,6 @@ fn cmd_conn_endpoint(
             "--json cannot be combined with --url or --secret",
         );
     }
-    require_existing_root_for_read(root.as_deref(), broker.is_some());
     let managed = management_backend(root, broker);
     let dto = conn_dto(&managed, &name);
     if let Err(message) = endpoint_action_supported(action, managed.remote.is_some()) {
@@ -2653,6 +2749,8 @@ impl BrokerEvents for CliEvents {
 /// broker's manage URL, or by the local socket path. Verified against the
 /// broker when it is reachable — a rejected token is never stored.
 fn cmd_manage_login(url: Option<String>, token_env: Option<String>, root: Option<PathBuf>) {
+    let url = effective_broker_url(url);
+    require_existing_root_for_read(root.as_deref(), url.is_some());
     if std::io::IsTerminal::is_terminal(&std::io::stdin()) && token_env.is_none() {
         eprintln!("  paste the management token (akamgr_…); end with Ctrl-D");
     }
@@ -2708,6 +2806,8 @@ fn cmd_manage_login(url: Option<String>, token_env: Option<String>, root: Option
 }
 
 fn cmd_manage_logout(url: Option<String>, root: Option<PathBuf>) {
+    let url = effective_broker_url(url);
+    require_existing_root_for_read(root.as_deref(), url.is_some());
     let paths = store_paths(root.as_deref());
     let key = match url {
         Some(url) => match RemoteConfig::normalize_url(&url) {
@@ -2725,7 +2825,10 @@ fn cmd_manage_logout(url: Option<String>, root: Option<PathBuf>) {
 /// Issue, rotate, or revoke the management token. Offline like `secret add`:
 /// a live broker holds identity state in memory and would overwrite the
 /// edit, so it must be stopped first.
-fn cmd_manage_token(revoke: bool, ttl_days: Option<u64>, root: Option<PathBuf>) {
+fn cmd_manage_token(revoke: bool, ttl_days: Option<u64>, root: Option<PathBuf>, create_root: bool) {
+    if !create_root {
+        require_existing_root_for_read(root.as_deref(), false);
+    }
     let paths = store_paths(root.as_deref());
     let _lock = match acquire_offline_store_lock(&paths) {
         Ok(lock) => lock,
@@ -2840,14 +2943,42 @@ fn open_session(
         label.as_deref(),
     )) {
         Ok(body) => body,
-        Err(message) => {
-            let code = if message.starts_with("no broker is running at ") {
-                ExitCode::NoBroker
-            } else {
-                ExitCode::Generic
-            };
-            die_with(code, message)
-        }
+        Err(error) => die_with(open_session_exit_code(&error), error),
+    }
+}
+
+fn open_session_exit_code(error: &client::OpenSessionError) -> ExitCode {
+    use client::OpenSessionError;
+    match error {
+        OpenSessionError::NoBroker { .. } => ExitCode::NoBroker,
+        OpenSessionError::Refused { status, reason, .. } => match reason.as_deref() {
+            Some("unknown_connection") => ExitCode::NotFound,
+            Some(
+                "missing_token"
+                | "invalid_token"
+                | "token_expired"
+                | "token_superseded"
+                | "denied_by_policy"
+                | "approval_denied"
+                | "approval_timeout"
+                | "approval_unavailable",
+            ) => ExitCode::Authentication,
+            Some(
+                "request_id_mismatch"
+                | "outcome_not_replayable"
+                | "rate_limited"
+                | "ticket_session_limit"
+                | "broker_session_limit"
+                | "endpoint_busy",
+            ) => ExitCode::Conflict,
+            _ => match status {
+                401 | 403 => ExitCode::Authentication,
+                404 => ExitCode::NotFound,
+                409 | 429 => ExitCode::Conflict,
+                _ => ExitCode::Generic,
+            },
+        },
+        OpenSessionError::Transport { .. } | OpenSessionError::Malformed(_) => ExitCode::Generic,
     }
 }
 
@@ -2904,6 +3035,7 @@ fn cmd_dsn(
             "--json cannot be combined with --format or --password-only",
         );
     }
+    let client = Some(client.unwrap_or_else(|| "mfa-dsn".to_string()));
     let body = open_session("/v1/pg/open", &connection, root, client);
     let (Some(dsn), Some(ticket)) = (body["dsn"].as_str(), body["ticket"].as_str()) else {
         die("the broker's response carried no DSN and ticket");
@@ -3042,6 +3174,7 @@ fn ssh_config_block(
 }
 
 fn cmd_ssh(connection: String, root: Option<PathBuf>, client: Option<String>, json: bool) {
+    let client = Some(client.unwrap_or_else(|| "mfa-ssh".to_string()));
     let body = open_session("/v1/ssh/open", &connection, root, client);
     let Some(auth_sock) = body["auth_sock"].as_str() else {
         die("the broker's response carried no agent socket path");
@@ -3071,7 +3204,6 @@ fn cmd_ssh_agent(
     socket_path: Option<PathBuf>,
     command: Vec<String>,
 ) {
-    require_existing_root_for_read(root.as_deref(), broker.is_some());
     let managed = management_backend(root, broker);
     let dto = conn_dto(&managed, &connection);
     if dto.kind != "ssh" {
@@ -3202,6 +3334,7 @@ fn print_key(key: &str, json: bool) {
 }
 
 fn cmd_key(rotate: bool, root: Option<PathBuf>, url: Option<String>, json: bool) {
+    let url = effective_broker_url(url);
     if url.is_none() && !rotate {
         require_existing_root_for_read(root.as_deref(), false);
         let paths = store_paths(root.as_deref());
@@ -3593,6 +3726,7 @@ fn local_status(root: Option<PathBuf>) -> Result<StatusReport, (StatusReport, Ex
 }
 
 fn cmd_status(json: bool, root: Option<PathBuf>, url: Option<String>) {
+    let url = effective_broker_url(url);
     require_existing_root_for_read(root.as_deref(), url.is_some());
     let result = match url {
         Some(url) => Ok(remote_status(root, url)),
@@ -3673,6 +3807,7 @@ fn cmd_activity_remote(limit: usize, root: Option<PathBuf>, url: String) -> Vec<
 }
 
 fn cmd_activity(limit: usize, json: bool, root: Option<PathBuf>, url: Option<String>) {
+    let url = effective_broker_url(url);
     require_existing_root_for_read(root.as_deref(), url.is_some());
     if let Some(url) = url {
         let entries = cmd_activity_remote(limit, root, url);
@@ -4055,6 +4190,74 @@ mod tests {
         assert!(
             Cli::try_parse_from(["mfa", "settings", "set", "--presence-window-secs", "3600",])
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn agent_plane_labels_and_serve_flags_are_validated_by_clap() {
+        for command in ["dsn", "ssh"] {
+            assert!(Cli::try_parse_from([
+                "mfa",
+                command,
+                "production",
+                "--client",
+                "honest\r\nX-Forged: yes",
+            ])
+            .is_err());
+            assert!(
+                Cli::try_parse_from(["mfa", command, "production", "--client", "ci-runner"])
+                    .is_ok()
+            );
+        }
+
+        assert!(Cli::try_parse_from([
+            "mfa",
+            "serve",
+            "--public-url",
+            "https://broker.example.test",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from(["mfa", "serve", "--data-plane-insecure"]).is_err());
+        for flag in ["--session-idle-timeout", "--session-max-ttl"] {
+            assert!(Cli::try_parse_from(["mfa", "serve", flag, "0"]).is_err());
+            assert!(Cli::try_parse_from(["mfa", "serve", flag, "1"]).is_ok());
+        }
+        assert!(Cli::try_parse_from([
+            "mfa",
+            "serve",
+            "--listen",
+            "127.0.0.1:4780",
+            "--public-url",
+            "not-a-url",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn structured_open_failures_follow_the_documented_exit_codes() {
+        use client::OpenSessionError;
+        let refused = |status: u16, reason: &str| OpenSessionError::Refused {
+            status,
+            reason: Some(reason.to_string()),
+            detail: "refused".into(),
+        };
+        assert_eq!(
+            open_session_exit_code(&refused(404, "unknown_connection")),
+            ExitCode::NotFound
+        );
+        assert_eq!(
+            open_session_exit_code(&refused(403, "denied_by_policy")),
+            ExitCode::Authentication
+        );
+        assert_eq!(
+            open_session_exit_code(&refused(429, "rate_limited")),
+            ExitCode::Conflict
+        );
+        assert_eq!(
+            open_session_exit_code(&OpenSessionError::NoBroker {
+                socket: "/tmp/missing.sock".into(),
+            }),
+            ExitCode::NoBroker
         );
     }
 
@@ -4498,6 +4701,7 @@ mod tests {
             mcp_path: None,
             test_path: None,
             root: None,
+            create_root: false,
             broker: None,
         }
     }
