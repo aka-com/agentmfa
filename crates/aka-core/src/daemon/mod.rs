@@ -2113,8 +2113,8 @@ async fn post_pg_open(
     let broker = &state.broker;
     let limiter_key = authed.client_id.to_string();
     let client = authed.client;
-    if let Err(wait) = broker.token_limiter.check(&limiter_key) {
-        return err_rate_limited(ErrorReason::RateLimited, wait);
+    if let Some(response) = http_rate_limit(broker, &limiter_key, &client) {
+        return response;
     }
     if let Some(response) = request_id_error(body.request_id.as_deref()) {
         return response;
@@ -2164,8 +2164,8 @@ async fn post_pg_open(
     // Nothing is dialed here; the proxy dials upstream at
     // redemption time. The ticket is NOT embedded in the DSN: returning
     // the two separately lets callers keep it out of ps-visible argv via
-    // PGPASSWORD, while callers that accept the exposure for the ticket's
-    // short window (`mfa dsn`) embed it themselves.
+    // PGPASSWORD. A caller can still make the explicit compatibility choice
+    // to embed it in a URI, but the broker does not make that choice for it.
     let executor: crate::executions::Executor = {
         let broker = broker.clone();
         let conn = conn.clone();
@@ -2184,6 +2184,11 @@ async fn post_pg_open(
                     "example": format!("PGPASSWORD=<ticket> psql \"{dsn}\""),
                     "dsn": dsn,
                     "ticket": ticket,
+                    "downstream_tls": "not_supported",
+                    "sslmode_note": "The broker-facing Postgres leg does not support TLS. \
+                        Use this DSN only over the trusted path to the broker and configure \
+                        the client with sslmode=disable; upstream TLS is governed separately \
+                        by the connection's sslmode.",
                     // The redemption deadline, machine-actionable instead
                     // of prose-only.
                     "expires_in_seconds": broker.config.ticket_ttl.as_secs(),

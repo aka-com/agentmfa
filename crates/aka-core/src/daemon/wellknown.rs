@@ -333,20 +333,22 @@ rather than the lossy combined `headers["set-cookie"]` value.
 
     → 200 {{"dsn": "postgres://ticket@127.0.0.1:<port>/<dbname>?sslmode=disable",
             "ticket": "<ticket>",
+            "downstream_tls": "not_supported",
+            "sslmode_note": "…",
             "expires_in_seconds": {ticket},
             "example": "PGPASSWORD=<ticket> psql \"<dsn>\""}}
 
 Run any unmodified client against the DSN. PGPASSWORD or a passfile keeps
-the ticket out of `ps`-visible argv and shell history; embedding it in the
-DSN as the password (what `mfa dsn <connection>` prints) is an accepted
-tradeoff for the ticket's short window:
+the ticket out of `ps`-visible argv and shell history. `mfa dsn <connection>`
+prints shell-safe PG* exports for this by default; its explicit
+`--format uri` compatibility mode embeds the ticket in argv:
 
     PGPASSWORD=<ticket> psql "<dsn>" -c "SELECT 1;"
 
-The broker's local proxy speaks real Postgres on the loopback leg and
-opens the upstream Postgres leg itself; you never see the real password or
-host. `sslmode=disable` applies only to the loopback leg; the upstream
-leg uses the connection's configured TLS. The default upstream
+The broker-facing leg does not support TLS, so use it only over the trusted
+path to the broker and configure the client with `sslmode=disable`. The broker
+opens the upstream Postgres leg itself; you never see the real password.
+The upstream leg uses the connection's configured TLS. The default upstream
 `sslmode=verify-full` validates the certificate chain and hostname. A
 per-connection private CA bundle can extend the trusted roots.
 

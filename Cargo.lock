@@ -1558,6 +1558,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing-subscriber",
+ "url",
  "uuid",
  "zeroize",
 ]

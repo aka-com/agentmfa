@@ -13,10 +13,9 @@
 //!   harness never hand-writes (sealed) store files. Mutations beyond
 //!   seeding run through the broker's own `ui_*` layer, so audit entries
 //!   and access/endpoint side effects cannot drift from the app.
-//! - `mfa dsn` / `mfa ssh` open data-plane sessions on a running broker
-//!   and print the one value a stock client needs — a ticket-embedded DSN,
-//!   an `SSH_AUTH_SOCK` path — so `psql "$(mfa dsn …)"` works as a
-//!   one-liner.
+//! - `mfa dsn` / `mfa ssh` open data-plane sessions on a running broker.
+//!   Postgres prints shell-safe `PG*` exports by default so the ticket stays
+//!   out of argv; SSH prints the `SSH_AUTH_SOCK` path.
 //! - `mfa key` / `mfa status` / `mfa activity` are the operator's view:
 //!   the shared agent key (and its rotation), whether a broker is up and
 //!   what it serves, and the audit trail.
@@ -184,11 +183,9 @@ enum Command {
         #[arg(long, value_parser = parse_client_label)]
         client: Option<String>,
     },
-    /// Open a Postgres session on a running broker and print a ready-to-run
-    /// DSN with the short-lived session ticket embedded:
-    /// `psql "$(mfa dsn analytics)"`. The ticket sits in ps-visible argv
-    /// and shell history for its short window; POST /v1/pg/open with
-    /// PGPASSWORD keeps it out when that matters.
+    /// Open a Postgres session on a running broker. By default this prints
+    /// shell-safe PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD/PGSSLMODE exports:
+    /// `eval "$(mfa dsn analytics)" && psql`. The ticket stays out of argv.
     Dsn {
         /// The pg connection's name.
         connection: String,
@@ -199,6 +196,14 @@ enum Command {
         /// Attribution only, never authorization.
         #[arg(long)]
         client: Option<String>,
+        /// Output shape. `env` (the default) keeps the ticket in PGPASSWORD;
+        /// `uri` embeds it in a DSN and is visible in argv.
+        #[arg(long, value_enum)]
+        format: Option<DsnFormat>,
+        /// Print only the short-lived ticket, for an explicit PGPASSWORD
+        /// assignment. Mutually exclusive with --format.
+        #[arg(long, conflicts_with = "format")]
+        password_only: bool,
     },
     /// Open an SSH session on a running broker and print the agent socket
     /// path: `export SSH_AUTH_SOCK="$(mfa ssh production)"` — then stock
@@ -596,6 +601,12 @@ enum ConnKind {
     Ssh,
 }
 
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum DsnFormat {
+    Env,
+    Uri,
+}
+
 /// `conn update`: the same field flags as `conn add`, all optional — the
 /// kind comes from the existing connection and unspecified flags keep
 /// their current values.
@@ -697,7 +708,9 @@ fn main() {
             connection,
             root,
             client,
-        } => cmd_dsn(connection, root, client),
+            format,
+            password_only,
+        } => cmd_dsn(connection, root, client, format, password_only),
         Command::Ssh {
             connection,
             root,
@@ -1823,10 +1836,8 @@ fn open_session(
     }
 }
 
-/// Embed the session ticket as the DSN's password. The broker returns the
-/// two separately so callers can keep the ticket out of ps-visible argv
-/// (PGPASSWORD); `mfa dsn` exists for the one-liner and accepts that
-/// exposure for the ticket's short window.
+/// Embed the session ticket as the DSN's password for the explicit legacy
+/// `--format uri` output.
 fn embed_ticket(dsn: &str, ticket: &str) -> Result<String, String> {
     match dsn.split_once("://ticket@") {
         Some((scheme, rest)) => Ok(format!("{scheme}://ticket:{ticket}@{rest}")),
@@ -1834,19 +1845,70 @@ fn embed_ticket(dsn: &str, ticket: &str) -> Result<String, String> {
     }
 }
 
-fn cmd_dsn(connection: String, root: Option<PathBuf>, client: Option<String>) {
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn pg_env_exports(dsn: &str, ticket: &str) -> Result<String, String> {
+    let parsed = url::Url::parse(dsn).map_err(|e| format!("invalid DSN from the broker: {e}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| format!("the broker's DSN has no host: {dsn}"))?;
+    let port = parsed
+        .port()
+        .ok_or_else(|| format!("the broker's DSN has no port: {dsn}"))?;
+    let database = parsed.path().trim_start_matches('/');
+    if database.is_empty() {
+        return Err(format!("the broker's DSN has no database: {dsn}"));
+    }
+    Ok([
+        ("PGHOST", host.to_string()),
+        ("PGPORT", port.to_string()),
+        ("PGDATABASE", database.to_string()),
+        ("PGUSER", parsed.username().to_string()),
+        ("PGPASSWORD", ticket.to_string()),
+        ("PGSSLMODE", "disable".to_string()),
+    ]
+    .into_iter()
+    .map(|(name, value)| format!("export {name}={}", shell_quote(&value)))
+    .collect::<Vec<_>>()
+    .join("\n"))
+}
+
+fn cmd_dsn(
+    connection: String,
+    root: Option<PathBuf>,
+    client: Option<String>,
+    format: Option<DsnFormat>,
+    password_only: bool,
+) {
     let body = open_session("/v1/pg/open", &connection, root, client);
     let (Some(dsn), Some(ticket)) = (body["dsn"].as_str(), body["ticket"].as_str()) else {
         die("the broker's response carried no DSN and ticket");
     };
-    let dsn = match embed_ticket(dsn, ticket) {
-        Ok(dsn) => dsn,
-        Err(message) => die(message),
-    };
     if let Some(secs) = body["expires_in_seconds"].as_u64() {
         eprintln!("  ticket expires in {secs}s — connect before then; a later connection needs a fresh open");
     }
-    println!("{dsn}");
+    if let Some(note) = body["sslmode_note"].as_str() {
+        eprintln!("  note: {note}");
+    }
+    if password_only {
+        println!("{ticket}");
+        return;
+    }
+    match format.unwrap_or(DsnFormat::Env) {
+        DsnFormat::Env => match pg_env_exports(dsn, ticket) {
+            Ok(exports) => println!("{exports}"),
+            Err(message) => die(message),
+        },
+        DsnFormat::Uri => match embed_ticket(dsn, ticket) {
+            Ok(dsn) => {
+                eprintln!("  warning: --format uri puts the ticket in process-visible argv");
+                println!("{dsn}");
+            }
+            Err(message) => die(message),
+        },
+    }
 }
 
 /// The `-o` flags every brokered `ssh` invocation should carry; see the core's
@@ -2558,6 +2620,27 @@ mod tests {
         // A DSN without the expected placeholder user is a contract change
         // worth failing loudly on, not silently mangling.
         assert!(embed_ticket("postgres://other@host/db", "tkt_x").is_err());
+    }
+
+    #[test]
+    fn pg_env_output_keeps_the_ticket_out_of_the_connection_arguments() {
+        let exports = pg_env_exports(
+            "postgres://ticket@127.0.0.1:6543/app_production?sslmode=disable",
+            "tkt_secret",
+        )
+        .unwrap();
+        assert!(exports.contains("export PGHOST='127.0.0.1'"));
+        assert!(exports.contains("export PGPORT='6543'"));
+        assert!(exports.contains("export PGDATABASE='app_production'"));
+        assert!(exports.contains("export PGUSER='ticket'"));
+        assert!(exports.contains("export PGPASSWORD='tkt_secret'"));
+        assert!(exports.contains("export PGSSLMODE='disable'"));
+        assert!(!exports.contains("postgres://ticket:tkt_secret"));
+    }
+
+    #[test]
+    fn shell_exports_quote_broker_controlled_values() {
+        assert_eq!(shell_quote("a'b"), "'a'\"'\"'b'");
     }
 
     fn args(kind: ConnKind) -> ConnAdd {

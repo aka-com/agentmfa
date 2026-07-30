@@ -303,6 +303,13 @@ async fn data_plane_opens_advertise_the_configured_host() {
     assert_eq!(status, 200, "{body}");
     let dsn = body["dsn"].as_str().unwrap();
     assert!(dsn.contains("@broker.lan:"), "{dsn}");
+    assert_eq!(body["downstream_tls"], "not_supported");
+    assert!(
+        body["sslmode_note"]
+            .as_str()
+            .is_some_and(|note| note.contains("does not support TLS")),
+        "{body}"
+    );
 }
 
 async fn uds_json(

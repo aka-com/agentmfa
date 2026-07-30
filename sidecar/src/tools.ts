@@ -37,7 +37,9 @@ export function describe(connection: BrokerConnection): string {
       return (
         `Open a Postgres session on ${connection.target}. Returns a password-less ` +
         'DSN and a short-lived ticket to use as PGPASSWORD with psql or any ' +
-        'standard client.'
+        'standard client. The broker-facing leg is plaintext and requires ' +
+        'sslmode=disable; use it only over the trusted path to the broker. ' +
+        'The configured upstream TLS mode still applies from broker to database.'
       );
     case 'ssh':
       return (
@@ -148,11 +150,24 @@ export async function invoke(
   try {
     return text(await broker.invoke(path, auth, body));
   } catch (error) {
-    const failure = error as { status?: number; reason?: string; message?: string };
+    const failure = error as {
+      status?: number;
+      reason?: string;
+      detail?: string;
+      retryAfterSeconds?: number;
+      message?: string;
+    };
     if (failure.status === 403) {
       return toolError(
         `AgentMFA refused this call: ${failure.reason ?? 'denied_by_policy'}. ` +
-          `Ask the user to wire this agent to "${connection.name}" in the AgentMFA app.`,
+          (failure.detail ?? `The user can enable "${connection.name}" in AgentMFA.`),
+      );
+    }
+    if (failure.status === 429) {
+      const retry = failure.retryAfterSeconds;
+      return toolError(
+        `AgentMFA rate limited this call: ${failure.detail ?? failure.reason ?? 'rate_limited'}.` +
+          (retry === undefined ? '' : ` Retry after ${retry} second${retry === 1 ? '' : 's'}.`),
       );
     }
     return toolError(`AgentMFA call failed: ${failure.message ?? String(error)}`);

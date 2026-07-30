@@ -647,6 +647,46 @@ async fn passwordless_connection_uses_postgres_trust_auth() {
 }
 
 #[tokio::test]
+async fn redemption_attempts_are_rate_limited_and_audited() {
+    let mut config = BrokerConfig::default();
+    config.per_identity_per_min = 2;
+    let h = harness(config).await;
+
+    for attempt in 0..2 {
+        let error =
+            tokio_postgres::connect(&h.pg_conn_str(&format!("tkt_invalid_{attempt}")), NoTls)
+                .await
+                .err()
+                .expect("an invalid ticket must be refused");
+        let message = error
+            .as_db_error()
+            .map(|error| error.message())
+            .unwrap_or("missing Postgres error");
+        assert!(message.contains("unknown_ticket"), "{message}");
+    }
+    let error = tokio_postgres::connect(&h.pg_conn_str("tkt_invalid_2"), NoTls)
+        .await
+        .err()
+        .expect("the peer redemption budget must be enforced");
+    let message = error
+        .as_db_error()
+        .map(|error| error.message())
+        .unwrap_or("missing Postgres error");
+    assert!(message.contains("rate_limited"), "{message}");
+
+    let entry = h
+        .broker
+        .audit
+        .recent(10)
+        .into_iter()
+        .find(|entry| entry.kind == aka_core::audit::AuditKind::RateLimited)
+        .expect("the data-plane throttle is audited");
+    assert_eq!(entry.fields["kind"], "pg");
+    assert_eq!(entry.fields["scope"], "peer");
+    assert!(entry.fields.contains_key("retry_after_seconds"));
+}
+
+#[tokio::test]
 async fn open_flow_end_to_end_with_cleartext_upstream() {
     let mut h = harness(BrokerConfig::default()).await;
     let fake = fake_pg(FakeAuth::Cleartext).await;
@@ -951,6 +991,11 @@ async fn the_session_prompt_says_it_grants_full_sql_access() {
 
     let prompt = h.last_prompt.lock().unwrap().clone().expect("a prompt");
     assert_eq!(prompt.unit, aka_core::approvals::ApprovalUnit::Session);
+    let detail = prompt.detail.clone().unwrap_or_default();
+    assert!(
+        detail.contains("user=app") && !detail.contains("user=ticket"),
+        "the prompt names the configured upstream role, not the ticket user: {detail}"
+    );
     let consequence = prompt
         .consequence
         .expect("the prompt states what it grants");
@@ -1368,6 +1413,11 @@ async fn draft_test_signs_in_with_a_typed_credential_and_defers_stored_ones() {
         .unwrap();
     assert!(report.ok, "{}", report.detail);
     assert!(report.detail.contains("Signed in"), "{}", report.detail);
+    assert!(
+        report.detail.contains("SELECT 1 succeeded"),
+        "{}",
+        report.detail
+    );
 
     // A chosen *stored* secret is never sent pre-add: the dial stops where
     // the server asks for a password and reports a qualified pass.

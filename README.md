@@ -40,7 +40,7 @@ support limited audit logging, and team management is coming soon.
    DATABASE_URL, SSH endpoint, etc., while MCPs get a unified tool.
 
    ```sh
-   psql "$(mfa dsn analytics)"                     # passwordless DSN
+   eval "$(mfa dsn analytics)" && psql             # ticket stays in PGPASSWORD
    export SSH_AUTH_SOCK="$(mfa ssh production)"    # scoped signing agent
    claude mcp add agentmfa -- mfa mcp             # unified MCP tool
    ```
@@ -61,12 +61,20 @@ Agents that run shell commands don't need MCP at all: each connection
 is automatically exposed as a local endpoint, that automatically
 injects the credential on the upstream.
 
-- **Postgres** — `mfa dsn <connection>` prints a passwordless DSN with a
-  short-lived ticket, ready for `psql`, ORMs, or migration tools:
+- **Postgres** — `mfa dsn <connection>` prints shell-safe `PG*` exports with
+  the short-lived ticket in `PGPASSWORD`, keeping it out of process-visible
+  argv:
 
   ```sh
-  psql "$(mfa dsn analytics)"
+  eval "$(mfa dsn analytics)"
+  psql
   ```
+
+  The broker-facing Postgres leg does not support TLS and therefore sets
+  `PGSSLMODE=disable`; use it only over the trusted path to the broker.
+  Upstream TLS from the broker to the database is configured separately on
+  the connection. `--format uri` is available for compatibility but embeds
+  the ticket in argv.
 
 - **SSH** — `mfa ssh <connection>` prints an `SSH_AUTH_SOCK` backed by a
   scoped signing agent; the private key never leaves the broker. Works

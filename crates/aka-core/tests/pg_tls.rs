@@ -319,6 +319,75 @@ async fn black_hole() -> u16 {
     port
 }
 
+async fn fake_repeating_password_challenge() -> u16 {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let Ok((mut socket, _)) = listener.accept().await else {
+            return;
+        };
+        let mut len = [0u8; 4];
+        if socket.read_exact(&mut len).await.is_err() {
+            return;
+        }
+        let mut startup = vec![0u8; i32::from_be_bytes(len) as usize - 4];
+        if socket.read_exact(&mut startup).await.is_err() {
+            return;
+        }
+        for _ in 0..16 {
+            if socket
+                .write_all(&frame(b'R', &3i32.to_be_bytes()))
+                .await
+                .is_err()
+            {
+                return;
+            }
+            let mut head = [0u8; 5];
+            if socket.read_exact(&mut head).await.is_err() {
+                return;
+            }
+            let mut password =
+                vec![0u8; i32::from_be_bytes(head[1..5].try_into().unwrap()) as usize - 4];
+            if socket.read_exact(&mut password).await.is_err() {
+                return;
+            }
+        }
+    });
+    port
+}
+
+async fn fake_startup_metadata_flood() -> u16 {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let Ok((mut socket, _)) = listener.accept().await else {
+            return;
+        };
+        let mut len = [0u8; 4];
+        if socket.read_exact(&mut len).await.is_err() {
+            return;
+        }
+        let mut startup = vec![0u8; i32::from_be_bytes(len) as usize - 4];
+        if socket.read_exact(&mut startup).await.is_err() {
+            return;
+        }
+        if socket
+            .write_all(&frame(b'R', &0i32.to_be_bytes()))
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let notice = vec![b'x'; 9 * 1024];
+        for _ in 0..8 {
+            if socket.write_all(&frame(b'N', &notice)).await.is_err() {
+                return;
+            }
+        }
+    });
+    port
+}
+
 async fn test_pg(
     h: &Harness,
     connection: &aka_core::types::Connection,
@@ -372,8 +441,35 @@ async fn require_accepts_a_certificate_it_cannot_verify() {
     let h = harness(BrokerConfig::default()).await;
     let conn = add_connection(&h.broker, "127.0.0.1", port, PgSslMode::Require, None);
 
-    let report = test_pg(&h, &conn).await;
-    assert!(report.is_ok(), "{report:?}");
+    let report = test_pg(&h, &conn).await.unwrap();
+    assert!(report.contains("SELECT 1 succeeded"), "{report}");
+    assert!(report.contains("PostgreSQL 16.2"), "{report}");
+}
+
+#[tokio::test]
+async fn repeated_password_challenges_hit_the_auth_iteration_bound() {
+    let port = fake_repeating_password_challenge().await;
+    let h = harness(BrokerConfig::default()).await;
+    let conn = add_connection(&h.broker, "127.0.0.1", port, PgSslMode::Disable, None);
+
+    let error = test_pg(&h, &conn)
+        .await
+        .expect_err("the auth loop must stop");
+    assert_eq!(error.kind, TestErrorKind::WrongProtocol);
+    assert!(error.detail.contains("within 8 messages"), "{error}");
+}
+
+#[tokio::test]
+async fn startup_metadata_hits_the_accumulation_bound() {
+    let port = fake_startup_metadata_flood().await;
+    let h = harness(BrokerConfig::default()).await;
+    let conn = add_connection(&h.broker, "127.0.0.1", port, PgSslMode::Disable, None);
+
+    let error = test_pg(&h, &conn)
+        .await
+        .expect_err("startup metadata must be bounded");
+    assert_eq!(error.kind, TestErrorKind::WrongProtocol);
+    assert!(error.detail.contains("64 KiB"), "{error}");
 }
 
 /// `verify-full` fails closed on a certificate no trusted root vouches for,

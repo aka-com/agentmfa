@@ -62,6 +62,16 @@ const GSSENC_REQUEST_CODE: i32 = 80877104;
 const MAX_STARTUP_PACKET: usize = 10_000;
 /// Sanity cap on handshake-phase typed messages.
 const MAX_HANDSHAKE_MESSAGE: usize = 1024 * 1024;
+/// Total ParameterStatus/NoticeResponse bytes retained until the downstream
+/// handshake is ready. Individual frames are bounded above; this bounds the
+/// otherwise unlimited number of frames.
+const MAX_STARTUP_FORWARD_BYTES: usize = 64 * 1024;
+/// A legitimate authentication exchange needs only a handful of messages,
+/// including SCRAM. Repeated password challenges must not make the broker
+/// resend a credential forever.
+const MAX_UPSTREAM_AUTH_MESSAGES: usize = 8;
+const MAX_TEST_QUERY_MESSAGES: usize = 64;
+const MAX_TEST_QUERY_BYTES: usize = 64 * 1024;
 /// Protocol ceiling on a message's self-inclusive length field. The data path
 /// forwards bytes without parsing them; the observational scanner uses this
 /// only to notice that it has lost the message boundary.
@@ -256,12 +266,25 @@ struct ProxyState {
     /// buffers without presenting a ticket; the permit is released as soon as
     /// the ticket is redeemed, so an authorized session never holds one.
     handshakes: tokio::sync::Semaphore,
+    /// Meter redemption on both the presented capability and the network
+    /// source. Ticket limiting constrains a captured ticket; peer limiting
+    /// prevents arbitrary-ticket churn from evading that bucket.
+    redemptions_by_ticket: crate::ratelimit::KeyedLimiter,
+    redemptions_by_peer: crate::ratelimit::KeyedLimiter,
 }
 
 impl ProxyState {
     fn new(broker: Arc<Broker>) -> Self {
         let permits = broker.config.max_pending_pg_handshakes;
         Self {
+            redemptions_by_ticket: crate::ratelimit::KeyedLimiter::new(
+                broker.config.per_identity_per_min,
+                Duration::from_secs(60),
+            ),
+            redemptions_by_peer: crate::ratelimit::KeyedLimiter::new(
+                broker.config.per_identity_per_min,
+                Duration::from_secs(60),
+            ),
             broker,
             cancels: Mutex::new(HashMap::new()),
             handshakes: tokio::sync::Semaphore::new(permits),
@@ -288,6 +311,29 @@ fn audit_refusal(broker: &Broker, connection: Option<&str>, reason: &str, detail
         entry = entry.connection(name.to_string());
     }
     broker.audit.append(entry);
+}
+
+fn audit_redemption_rate_limit(
+    broker: &Broker,
+    peer: std::net::SocketAddr,
+    scope: &str,
+    retry_after: Duration,
+) {
+    broker.audit.append(
+        AuditEntry::new(
+            AuditKind::RateLimited,
+            format!("Postgres redemption rate limited: {}", peer.ip()),
+        )
+        .detail(format!(
+            "Too many data-plane redemption attempts; retry in {}s",
+            retry_after.as_secs().max(1)
+        ))
+        .outcome("rate_limited")
+        .field("kind", "pg")
+        .field("scope", scope)
+        .field("peer_addr", peer.to_string())
+        .field("retry_after_seconds", retry_after.as_secs().max(1)),
+    );
 }
 
 /// Record that `sslmode=prefer` asked for TLS, the server refused, and the
@@ -415,10 +461,10 @@ pub async fn start_proxy(broker: Arc<Broker>) -> io::Result<(u16, tokio::task::J
     let task = tokio::spawn(async move {
         loop {
             match listener.accept().await {
-                Ok((stream, _)) => {
+                Ok((stream, peer)) => {
                     let state = state.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_conn(state, stream).await {
+                        if let Err(e) = handle_conn(state, stream, peer).await {
                             tracing::debug!("pg proxy connection ended: {e}");
                         }
                     });
@@ -942,9 +988,13 @@ where
             .find(|(name, _)| name == key)
             .map(|(_, value)| value.clone())
     };
+    let upstream_user = match &connection.config {
+        ConnectionConfig::Pg { user, .. } => user.clone(),
+        _ => String::new(),
+    };
     let detail = [
         lookup("application_name"),
-        lookup("user").map(|u| format!("user={u}")),
+        (!upstream_user.is_empty()).then(|| format!("user={upstream_user}")),
     ]
     .into_iter()
     .flatten()
@@ -1088,7 +1138,11 @@ where
 
 /// One accepted loopback connection: probes → startup (or cancel) → ticket
 /// auth → upstream handshake → completion → splice.
-async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()> {
+async fn handle_conn(
+    state: Arc<ProxyState>,
+    stream: TcpStream,
+    peer: std::net::SocketAddr,
+) -> io::Result<()> {
     let _ = stream.set_nodelay(true);
     let mut client = BufReader::new(stream);
 
@@ -1131,6 +1185,26 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
         return Ok(());
     }
     let (ticket, _) = take_cstr(&payload)?;
+
+    for (scope, result) in [
+        (
+            "peer",
+            state.redemptions_by_peer.check(&peer.ip().to_string()),
+        ),
+        ("ticket", state.redemptions_by_ticket.check(&ticket)),
+    ] {
+        if let Err(wait) = result {
+            audit_redemption_rate_limit(&state.broker, peer, scope, wait);
+            client
+                .write_all(&error_response(
+                    "FATAL",
+                    "53300",
+                    &format!("AKA: rate_limited: retry in {}s", wait.as_secs().max(1)),
+                ))
+                .await?;
+            return Ok(());
+        }
+    }
 
     // Redeem: expiry and the two-level session budget are enforced here,
     // failing fast with the machine reason. The redemption reserves the
@@ -1988,6 +2062,8 @@ struct UpstreamSession {
     backend_key: i32,
     /// The upstream ReadyForQuery transaction-status byte.
     ready_status: u8,
+    /// `server_version` from ParameterStatus, when supplied.
+    server_version: Option<String>,
 }
 
 /// Dial the connection's configured host:port with the optional stored password
@@ -2074,7 +2150,8 @@ async fn dial_upstream_with_password(
         .map_err(|e| format!("startup write failed: {e}"))?;
 
     // Authentication phase.
-    loop {
+    let mut authenticated = false;
+    for _ in 0..MAX_UPSTREAM_AUTH_MESSAGES {
         let (tag, payload) = read_message(&mut stream)
             .await
             .map_err(|e| format!("auth read failed: {e}"))?;
@@ -2088,7 +2165,10 @@ async fn dial_upstream_with_password(
             b'v' => continue,
             b'R' if payload.len() < 4 => return Err("short auth request".into()),
             b'R' => match be_i32(&payload[..4]) {
-                0 => break, // AuthenticationOk
+                0 => {
+                    authenticated = true;
+                    break;
+                }
                 3 => {
                     // AuthenticationCleartextPassword
                     let password = password.ok_or_else(needs_password)?;
@@ -2142,18 +2222,49 @@ async fn dial_upstream_with_password(
             }
         }
     }
+    if !authenticated {
+        return Err(TestError::new(
+            TestErrorKind::WrongProtocol,
+            format!(
+                "The server did not finish authentication within \
+                 {MAX_UPSTREAM_AUTH_MESSAGES} messages"
+            ),
+        ));
+    }
 
     // Post-auth: collect ParameterStatus (forwarded), BackendKeyData
     // (captured, NOT forwarded), up to ReadyForQuery.
     let mut forward = Vec::new();
     let mut backend_pid = 0i32;
     let mut backend_key = 0i32;
+    let mut server_version = None;
     let ready_status = loop {
         let (tag, payload) = read_message(&mut stream)
             .await
             .map_err(|e| format!("startup read failed: {e}"))?;
         match tag {
-            b'S' | b'N' => forward.extend_from_slice(&frame(tag, &payload)),
+            b'S' | b'N' => {
+                let framed_len = payload.len().saturating_add(5);
+                if forward.len().saturating_add(framed_len) > MAX_STARTUP_FORWARD_BYTES {
+                    return Err(TestError::new(
+                        TestErrorKind::WrongProtocol,
+                        format!(
+                            "The server sent more than {} KiB of startup metadata",
+                            MAX_STARTUP_FORWARD_BYTES / 1024
+                        ),
+                    ));
+                }
+                if tag == b'S' {
+                    if let Ok((name, rest)) = take_cstr(&payload) {
+                        if name == "server_version" {
+                            if let Ok((value, _)) = take_cstr(rest) {
+                                server_version = Some(value);
+                            }
+                        }
+                    }
+                }
+                forward.extend_from_slice(&frame(tag, &payload));
+            }
             b'K' => {
                 if payload.len() < 8 {
                     return Err("short BackendKeyData".into());
@@ -2182,11 +2293,50 @@ async fn dial_upstream_with_password(
         backend_pid,
         backend_key,
         ready_status,
+        server_version,
     })
 }
 
+async fn verify_select_one(upstream: &mut UpstreamSession) -> Result<(), TestError> {
+    upstream
+        .stream
+        .write_all(&frame(b'Q', b"SELECT 1\0"))
+        .await
+        .map_err(|e| format!("test query write failed: {e}"))?;
+    let mut bytes = 0usize;
+    let mut completed = false;
+    for _ in 0..MAX_TEST_QUERY_MESSAGES {
+        let (tag, payload) = read_message(&mut upstream.stream)
+            .await
+            .map_err(|e| format!("test query read failed: {e}"))?;
+        bytes = bytes.saturating_add(payload.len().saturating_add(5));
+        if bytes > MAX_TEST_QUERY_BYTES {
+            return Err(TestError::new(
+                TestErrorKind::WrongProtocol,
+                "The SELECT 1 test response exceeded 64 KiB",
+            ));
+        }
+        match tag {
+            b'E' => return Err(upstream_error(&payload)),
+            b'C' => completed = true,
+            b'Z' if completed => return Ok(()),
+            b'Z' => {
+                return Err(TestError::new(
+                    TestErrorKind::WrongProtocol,
+                    "The server returned ReadyForQuery without completing SELECT 1",
+                ))
+            }
+            _ => {}
+        }
+    }
+    Err(TestError::new(
+        TestErrorKind::WrongProtocol,
+        "The server did not finish SELECT 1 within 64 messages",
+    ))
+}
+
 /// UI-initiated connectivity/credential test: dial and authenticate exactly
-/// as a brokered session would, then send Terminate without issuing a query.
+/// as a brokered session would, then prove the database can execute a query.
 pub async fn test_upstream(
     store: &Arc<Store>,
     connection: &Connection,
@@ -2195,9 +2345,15 @@ pub async fn test_upstream(
         return Err("not a postgres connection".into());
     };
     let mut upstream = dial_upstream(store, connection, &[]).await?;
+    verify_select_one(&mut upstream).await?;
     let _ = upstream.stream.write_all(&frame(b'X', &[])).await;
     let _ = upstream.stream.shutdown().await;
-    Ok(format!("Signed in to {dbname} as {user}"))
+    Ok(match upstream.server_version {
+        Some(version) => {
+            format!("Signed in to {dbname} as {user}; SELECT 1 succeeded (PostgreSQL {version})")
+        }
+        None => format!("Signed in to {dbname} as {user}; SELECT 1 succeeded"),
+    })
 }
 
 /// Test an unsaved draft, never touching the secret store. A password typed
@@ -2220,9 +2376,15 @@ pub async fn test_draft_upstream(
     };
     match dial_upstream_with_password(connection, typed_password, &[]).await {
         Ok(mut upstream) => {
+            verify_select_one(&mut upstream).await?;
             let _ = upstream.stream.write_all(&frame(b'X', &[])).await;
             let _ = upstream.stream.shutdown().await;
-            Ok(format!("Signed in to {dbname} as {user}"))
+            Ok(match upstream.server_version {
+                Some(version) => format!(
+                    "Signed in to {dbname} as {user}; SELECT 1 succeeded (PostgreSQL {version})"
+                ),
+                None => format!("Signed in to {dbname} as {user}; SELECT 1 succeeded"),
+            })
         }
         Err(e) if credential_deferred && e.kind == TestErrorKind::NeedsPassword => Ok(format!(
             "Reached {host} and TLS checks passed; the saved credential is verified after adding"
