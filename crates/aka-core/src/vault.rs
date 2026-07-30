@@ -82,20 +82,22 @@ impl MacKeychainVault {
 
     /// The production vault for `paths`.
     pub fn open_default(paths: &crate::paths::Paths) -> Result<Self, CoreError> {
-        Self::open(
+        Self::open_for_store(
             crate::keychain::darwin::SecurityFramework,
             Self::SERVICE,
             &paths.keychain_file(),
+            paths.index_file().try_exists()?,
         )
     }
 
     /// The vault for an explicit CLI/dev root: same keychain, a service name
     /// derived from the root so it can never touch production items.
     pub fn open_for_dev_root(paths: &crate::paths::Paths, root: &Path) -> Result<Self, CoreError> {
-        Self::open(
+        Self::open_for_store(
             crate::keychain::darwin::SecurityFramework,
             dev_root_vault_service(root)?,
             &paths.keychain_file(),
+            paths.index_file().try_exists()?,
         )
     }
 }

@@ -1675,7 +1675,9 @@ fn cmd_manage_token(revoke: bool, ttl_days: Option<u64>, root: Option<PathBuf>) 
         .enable_all()
         .build()
         .expect("tokio runtime");
-    let integrity = match runtime.block_on(aka_core::integrity::StateIntegrity::open(&*vault)) {
+    let integrity = match runtime.block_on(aka_core::integrity::StateIntegrity::open_for_paths(
+        &*vault, &paths,
+    )) {
         Ok(integrity) => Arc::new(integrity),
         Err(e) => die(format!("could not open the state integrity key: {e}")),
     };

@@ -232,6 +232,9 @@ pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
 }
 
 /// Write `bytes` to `path` atomically (temp file + rename) with `0600` perms.
+///
+/// Both the file contents and the directory entry are synchronized before
+/// returning, so a successful security-state update survives a crash.
 pub(crate) fn write_private_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let dir = path
         .parent()
@@ -243,6 +246,7 @@ pub(crate) fn write_private_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> 
         .set_permissions(fs::Permissions::from_mode(0o600))?;
     tmp.as_file().sync_all()?;
     tmp.persist(path).map_err(|e| e.error)?;
+    fs::File::open(dir)?.sync_all()?;
     Ok(())
 }
 

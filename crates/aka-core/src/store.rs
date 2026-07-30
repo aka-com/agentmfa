@@ -250,7 +250,7 @@ pub struct Store {
 
 impl Store {
     pub async fn open(paths: Paths, vault: Arc<dyn SecretVault>) -> Result<Self> {
-        let integrity = Arc::new(StateIntegrity::open(&*vault).await?);
+        let integrity = Arc::new(StateIntegrity::open_for_paths(&*vault, &paths).await?);
         Self::open_with_events(paths, vault, Arc::new(NoopEvents), integrity)
     }
 

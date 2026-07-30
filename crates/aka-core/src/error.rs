@@ -100,4 +100,13 @@ pub enum CoreError {
 
     #[error("state file {0} failed integrity verification (possible tampering); refusing to load")]
     StateTampered(String),
+
+    #[error(
+        "state file {path} uses schema version {found}, but this build supports up to {supported}; upgrade AKA before opening this store"
+    )]
+    UnsupportedStateVersion {
+        path: String,
+        found: u32,
+        supported: u32,
+    },
 }

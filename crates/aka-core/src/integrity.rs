@@ -33,7 +33,7 @@ use uuid::Uuid;
 use zeroize::{Zeroize as _, Zeroizing};
 
 use crate::error::CoreError;
-use crate::paths::write_private_atomic;
+use crate::paths::{write_private_atomic, Paths};
 use crate::vault::{SecretVault, VaultAttrs};
 use crate::Result;
 
@@ -43,19 +43,24 @@ use crate::Result;
 const KEY_ID: Uuid = Uuid::nil();
 const KEY_NAME: &str = "AKA_STATE_INTEGRITY_KEY";
 const ENVELOPE_VERSION: u32 = 1;
+const STATE_SCHEMA_VERSION: u32 = 1;
 const ALG: &str = "hmac-sha256";
 
 #[derive(Serialize)]
 struct SealWrite<'a> {
     v: u32,
+    schema_version: u32,
     alg: &'a str,
     mac: String,
     payload: &'a serde_json::value::RawValue,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SealRead<'a> {
     v: u32,
+    #[serde(default)]
+    schema_version: Option<u32>,
     alg: String,
     mac: String,
     #[serde(borrow)]
@@ -72,6 +77,23 @@ pub struct StateIntegrity {
 impl StateIntegrity {
     /// Load the integrity key from the vault, creating it on first run.
     pub async fn open(vault: &dyn SecretVault) -> Result<Self> {
+        Self::open_with_established_state(vault, false).await
+    }
+
+    /// Load the integrity key while accounting for already-sealed state.
+    ///
+    /// The vault item alone cannot distinguish a first run from deletion of
+    /// the integrity key. A recognizable sealed envelope on disk proves that
+    /// this store was established, so a missing key must not reopen the
+    /// trust-on-first-use migration path.
+    pub async fn open_for_paths(vault: &dyn SecretVault, paths: &Paths) -> Result<Self> {
+        Self::open_with_established_state(vault, sealed_state_exists(paths)?).await
+    }
+
+    async fn open_with_established_state(
+        vault: &dyn SecretVault,
+        established_on_disk: bool,
+    ) -> Result<Self> {
         match vault.get(&KEY_ID).await {
             Ok(stored) => {
                 let key = decode_hex(&stored)
@@ -97,7 +119,7 @@ impl StateIntegrity {
                 bytes.zeroize();
                 Ok(Self {
                     key,
-                    established: false,
+                    established: established_on_disk,
                 })
             }
             Err(e) => Err(e),
@@ -123,8 +145,24 @@ impl StateIntegrity {
                     return Err(CoreError::StateTampered(display(path)));
                 }
                 let payload = sealed.payload.get().as_bytes();
-                if !self.verify(&basename(path), payload, &sealed.mac) {
+                if !self.verify(&basename(path), sealed.schema_version, payload, &sealed.mac) {
                     return Err(CoreError::StateTampered(display(path)));
+                }
+                match sealed.schema_version {
+                    Some(version) if version > STATE_SCHEMA_VERSION => {
+                        return Err(CoreError::UnsupportedStateVersion {
+                            path: display(path),
+                            found: version,
+                            supported: STATE_SCHEMA_VERSION,
+                        });
+                    }
+                    Some(STATE_SCHEMA_VERSION) => {}
+                    Some(_) => return Err(CoreError::StateTampered(display(path))),
+                    None => {
+                        // Version the already-authenticated legacy envelope
+                        // immediately, without changing its payload format.
+                        self.write(path, payload)?;
+                    }
                 }
                 Ok(Some(payload.to_vec()))
             }
@@ -152,10 +190,15 @@ impl StateIntegrity {
         let raw = serde_json::value::RawValue::from_string(text)?;
         let sealed = SealWrite {
             v: ENVELOPE_VERSION,
+            schema_version: STATE_SCHEMA_VERSION,
             alg: ALG,
             // MAC the exact bytes that will be read back out of the
             // envelope (RawValue embeds and yields them verbatim).
-            mac: self.mac_hex(&basename(path), raw.get().as_bytes()),
+            mac: self.mac_hex(
+                &basename(path),
+                Some(STATE_SCHEMA_VERSION),
+                raw.get().as_bytes(),
+            ),
             payload: &raw,
         };
         write_private_atomic(path, &serde_json::to_vec(&sealed)?)?;
@@ -201,26 +244,71 @@ impl StateIntegrity {
             == 0
     }
 
-    fn mac(&self, basename: &str, payload: &[u8]) -> Hmac<Sha256> {
+    fn mac(&self, basename: &str, schema_version: Option<u32>, payload: &[u8]) -> Hmac<Sha256> {
         let mut mac =
             Hmac::<Sha256>::new_from_slice(&self.key).expect("hmac accepts any key length");
         mac.update(basename.as_bytes());
         mac.update(&[0]);
+        if let Some(schema_version) = schema_version {
+            mac.update(&schema_version.to_be_bytes());
+            mac.update(&[0]);
+        }
         mac.update(payload);
         mac
     }
 
-    fn mac_hex(&self, basename: &str, payload: &[u8]) -> String {
-        encode_hex(&self.mac(basename, payload).finalize().into_bytes())
+    fn mac_hex(&self, basename: &str, schema_version: Option<u32>, payload: &[u8]) -> String {
+        encode_hex(
+            &self
+                .mac(basename, schema_version, payload)
+                .finalize()
+                .into_bytes(),
+        )
     }
 
-    fn verify(&self, basename: &str, payload: &[u8], mac_hex: &str) -> bool {
+    fn verify(
+        &self,
+        basename: &str,
+        schema_version: Option<u32>,
+        payload: &[u8],
+        mac_hex: &str,
+    ) -> bool {
         let Some(expected) = decode_hex(mac_hex) else {
             return false;
         };
         // Constant-time comparison via the hmac crate.
-        self.mac(basename, payload).verify_slice(&expected).is_ok()
+        self.mac(basename, schema_version, payload)
+            .verify_slice(&expected)
+            .is_ok()
     }
+}
+
+fn sealed_state_exists(paths: &Paths) -> Result<bool> {
+    let protected = [
+        paths.index_file(),
+        paths.access_file(),
+        paths.identity_file(),
+        paths.endpoints_file(),
+        paths.audit_seal_file(),
+        paths.health_file(),
+    ];
+    for path in protected {
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+        let Some(object) = value.as_object() else {
+            continue;
+        };
+        if object.contains_key("mac") && object.contains_key("payload") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn basename(path: &Path) -> String {
@@ -336,5 +424,65 @@ mod tests {
             again.read_verified(&path),
             Err(CoreError::StateTampered(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn sealed_state_keeps_tofu_closed_when_the_vault_key_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        std::fs::create_dir_all(&paths.data_dir).unwrap();
+
+        let original_vault = MemoryVault::new();
+        let original = StateIntegrity::open(&original_vault).await.unwrap();
+        original
+            .write(&paths.index_file(), br#"{"secrets":[]}"#)
+            .unwrap();
+
+        // Model deletion of the integrity item by opening the established
+        // state with an otherwise-empty vault.
+        let replacement_vault = MemoryVault::new();
+        let replacement = StateIntegrity::open_for_paths(&replacement_vault, &paths)
+            .await
+            .unwrap();
+        assert!(replacement.established);
+
+        std::fs::write(&paths.index_file(), br#"{"secrets":[]}"#).unwrap();
+        assert!(matches!(
+            replacement.read_verified(&paths.index_file()),
+            Err(CoreError::StateTampered(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_future_state_schema_is_refused_without_truncating_it() {
+        let (integrity, _vault) = fresh().await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.json");
+        let raw = serde_json::value::RawValue::from_string(r#"{"future_narrowing":true}"#.into())
+            .unwrap();
+        let future_version = STATE_SCHEMA_VERSION + 1;
+        let sealed = SealWrite {
+            v: ENVELOPE_VERSION,
+            schema_version: future_version,
+            alg: ALG,
+            mac: integrity.mac_hex(&basename(&path), Some(future_version), raw.get().as_bytes()),
+            payload: &raw,
+        };
+        std::fs::write(&path, serde_json::to_vec(&sealed).unwrap()).unwrap();
+
+        assert!(matches!(
+            integrity.read_verified(&path),
+            Err(CoreError::UnsupportedStateVersion {
+                found,
+                supported,
+                ..
+            }) if found == future_version && supported == STATE_SCHEMA_VERSION
+        ));
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("future_narrowing"),
+            "a refused future payload must remain untouched"
+        );
     }
 }

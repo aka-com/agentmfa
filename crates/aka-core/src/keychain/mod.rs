@@ -284,6 +284,15 @@ pub fn resolve(
     recorded: Option<Keychain>,
     available: Result<(), KeychainError>,
 ) -> Result<Keychain, CoreError> {
+    resolve_for_store(requested, recorded, false, available)
+}
+
+fn resolve_for_store(
+    requested: Option<Keychain>,
+    recorded: Option<Keychain>,
+    store_exists: bool,
+    available: Result<(), KeychainError>,
+) -> Result<Keychain, CoreError> {
     match requested {
         // An explicit choice is honoured, including the choice to stay on the
         // prompting keychain — that is the escape hatch for a mixed setup
@@ -307,6 +316,12 @@ pub fn resolve(
                      not see those values)."
                 )))
             }
+            Err(error) if store_exists && recorded.is_none() => Err(CoreError::Vault(format!(
+                "this store already has state but its macOS keychain marker is missing or \
+                 unreadable, so AKA will not silently fall back to an empty login keychain \
+                 ({error}). Restore keychain.json, use the signed AgentMFA app, or set \
+                 {KEYCHAIN_ENV}=login explicitly if the fallback is intentional."
+            ))),
             Err(error) => {
                 tracing::warn!(
                     "falling back to the macOS login keychain, which prompts per item: {error}"
@@ -491,10 +506,24 @@ impl<A: KeychainApi> KeychainVault<A> {
     /// Probe, consult the operator's override and the store's marker, and
     /// record the outcome.
     pub fn open(api: A, service: impl Into<String>, record_path: &Path) -> Result<Self, CoreError> {
+        Self::open_for_store(api, service, record_path, false)
+    }
+
+    /// Open a vault whose associated store may already contain binding state.
+    ///
+    /// Existing state plus a missing marker makes an automatic login-keychain
+    /// fallback ambiguous and therefore fail-closed.
+    pub fn open_for_store(
+        api: A,
+        service: impl Into<String>,
+        record_path: &Path,
+        store_exists: bool,
+    ) -> Result<Self, CoreError> {
         let service = service.into();
-        let keychain = resolve(
+        let keychain = resolve_for_store(
             requested_from_env()?,
             read_record(record_path),
+            store_exists,
             api.data_protection_available(),
         )?;
         tracing::info!("macOS keychain in use: {keychain} (service {service})");
@@ -912,6 +941,29 @@ pub(crate) mod tests {
             Err(KeychainError::MissingEntitlement)
         )
         .is_err());
+    }
+
+    #[test]
+    fn an_existing_store_cannot_silently_fall_back_without_its_marker() {
+        assert!(
+            resolve_for_store(None, None, true, Err(KeychainError::MissingEntitlement)).is_err()
+        );
+
+        assert_eq!(
+            resolve_for_store(
+                Some(Keychain::Login),
+                None,
+                true,
+                Err(KeychainError::MissingEntitlement)
+            )
+            .unwrap(),
+            Keychain::Login
+        );
+
+        assert_eq!(
+            resolve_for_store(None, None, false, Err(KeychainError::MissingEntitlement)).unwrap(),
+            Keychain::Login
+        );
     }
 
     #[test]

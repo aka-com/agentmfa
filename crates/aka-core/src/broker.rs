@@ -237,7 +237,8 @@ impl Broker {
         // access.json, and identity.json refuse to load if tampered with.
         // It is established before the activity log so the log's own entries
         // are chained from the first one this process writes.
-        let integrity = Arc::new(crate::integrity::StateIntegrity::open(&*vault).await?);
+        let integrity =
+            Arc::new(crate::integrity::StateIntegrity::open_for_paths(&*vault, &paths).await?);
         let audit = Arc::new(AuditLog::open_sealed(
             paths.audit_file(),
             paths.audit_seal_file(),
