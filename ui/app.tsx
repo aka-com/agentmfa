@@ -319,6 +319,10 @@ interface WiringToolsState {
   loading: boolean;
   error?: string;
   tools?: McpToolInfo[];
+  stale?: boolean;
+  fetchedAt?: string;
+  cacheAgeSeconds?: number;
+  truncated?: boolean;
   /** Checked tool names; null means "all tools" (no curation). */
   selected: string[] | null;
   saving: boolean;
@@ -1847,7 +1851,10 @@ function mcpStatusHTML(c: ConnectionSummary): string {
     resources = `<div class="mcp-res-head">Resources (${report.resources.length})</div>
       ${rows || '<div class="mcp-res-more">None listed by the server.</div>'}${more}`;
   }
-  return `${head}${resources}`;
+  const truncated = report.truncated
+    ? '<div class="mcp-res-more">Catalog results were capped; more items are available upstream.</div>'
+    : '';
+  return `${head}${resources}${truncated}`;
 }
 
 // The built-in credentials store, expanded inline: the same secrets table
@@ -3413,6 +3420,16 @@ function WiringToolsSheet(): ReactNode {
             <span>Couldn’t refresh the tool list from the server — showing your saved selection.
               Reconnect the tool to see every tool.</span></div>
         )}
+        {wt.stale && (
+          <div className="cc-test warn"><Icon markup={ICONS.circleX} />
+            <span>Showing the last successful tool list from{' '}
+              {wt.fetchedAt ? new Date(wt.fetchedAt).toLocaleString() : 'an earlier check'}
+              {wt.cacheAgeSeconds ? ` (${wt.cacheAgeSeconds}s old)` : ''}.</span></div>
+        )}
+        {wt.truncated && (
+          <div className="cc-test warn"><span>The server’s tool catalog was capped at{' '}
+            {tools.length} entries. Narrow the upstream catalog to curate tools beyond this list.</span></div>
+        )}
         <label className="wt-row wt-all">
           <input type="checkbox" checked={allChecked} onChange={toggleAll} />
           <span className="wt-name"><b>All tools</b>
@@ -4716,12 +4733,16 @@ async function loadWiringTools(connectionId: string): Promise<void> {
   const broker = state.broker;
   const epoch = brokerEpoch;
   try {
-    const tools = await refetchBrokerQuery(broker, 'list_mcp_tools', { id: connectionId });
+    const catalog = await refetchBrokerQuery(broker, 'list_mcp_tools', { id: connectionId });
     if (!brokerEpochIsCurrent(epoch)) return;
     const wt = state.wiringTools;
     if (!wt || wt.connectionId !== connectionId) return;
     wt.loading = false;
-    wt.tools = tools;
+    wt.tools = catalog.tools;
+    wt.stale = catalog.stale;
+    wt.fetchedAt = catalog.fetched_at;
+    wt.cacheAgeSeconds = catalog.cache_age_seconds;
+    wt.truncated = catalog.truncated;
   } catch (error) {
     if (!brokerEpochIsCurrent(epoch)) return;
     const wt = state.wiringTools;

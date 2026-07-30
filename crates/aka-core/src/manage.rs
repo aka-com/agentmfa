@@ -1004,7 +1004,7 @@ pub trait ManagementBackend: Send + Sync {
         id: Uuid,
         options: crate::mcp::McpCheckOptions,
     ) -> ManageResult<crate::mcp::McpStatusReport>;
-    async fn list_mcp_tools(&self, id: Uuid) -> ManageResult<Vec<crate::mcp::McpToolInfo>>;
+    async fn list_mcp_tools(&self, id: Uuid) -> ManageResult<crate::mcp::McpToolCatalog>;
 
     /* OAuth (BYO app) */
     async fn oauth_connect(
@@ -1242,7 +1242,7 @@ impl ManagementBackend for LocalBackend {
         Ok(self.broker.ui_mcp_check(&id, options).await?)
     }
 
-    async fn list_mcp_tools(&self, id: Uuid) -> ManageResult<Vec<crate::mcp::McpToolInfo>> {
+    async fn list_mcp_tools(&self, id: Uuid) -> ManageResult<crate::mcp::McpToolCatalog> {
         Ok(self.broker.ui_list_mcp_tools(&id).await?)
     }
 

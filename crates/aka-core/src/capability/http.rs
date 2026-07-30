@@ -606,18 +606,39 @@ impl HttpExecution {
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("broker:{}", outcome.status));
         self.record_health(&outcome);
-        self.audit.append(
-            AuditEntry::new(
-                AuditKind::HttpExecuted,
-                format!("{} {} via {}", self.method, self.path, self.connection.name),
-            )
-            .agent(self.agent.clone())
-            .connection(self.connection.name.clone())
-            .outcome(upstream_status)
-            .duration_ms(started.elapsed().as_millis() as u64)
-            .field("method", self.method.to_string())
-            .field("path", self.path.clone()),
-        );
+        let mut audit = AuditEntry::new(
+            AuditKind::HttpExecuted,
+            format!("{} {} via {}", self.method, self.path, self.connection.name),
+        )
+        .agent(self.agent.clone())
+        .connection(self.connection.name.clone())
+        .outcome(upstream_status)
+        .duration_ms(started.elapsed().as_millis() as u64)
+        .field("method", self.method.to_string())
+        .field("path", self.path.clone());
+        if let ConnectionConfig::Api {
+            mcp_path: Some(mcp_path),
+            ..
+        } = &self.connection.config
+        {
+            if resolves_to_mcp_path(&self.path, mcp_path) {
+                if let Some(method) = self
+                    .headers
+                    .get("mcp-method")
+                    .and_then(|value| value.to_str().ok())
+                {
+                    audit = audit.field("mcp_method", method);
+                }
+                if let Some(name) = self
+                    .headers
+                    .get("mcp-name")
+                    .and_then(|value| value.to_str().ok())
+                {
+                    audit = audit.field("mcp_name", name);
+                }
+            }
+        }
+        self.audit.append(audit);
         outcome
     }
 

@@ -15,6 +15,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use http::{HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -31,9 +32,12 @@ pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &[PROTOCOL_VERSION];
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const RESPONSE_CAP: usize = 4 * 1024 * 1024;
-const MAX_TOOL_PAGES: usize = 5;
-const MAX_RESOURCE_PAGES: usize = 3;
-const MAX_LISTED_RESOURCES: usize = 100;
+// Keep these catalog bounds aligned with the agent-facing sidecar. The two
+// clients cannot share a compiled constant across Rust/TypeScript, so tests
+// assert the behavior at both boundaries.
+const MAX_TOOL_PAGES: usize = 32;
+const MAX_RESOURCE_PAGES: usize = 16;
+const MAX_CATALOG_ITEMS: usize = 2_000;
 
 /// One resource the server advertises, trimmed to display metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +72,14 @@ pub struct McpStatusReport {
     /// Whether the server advertises the resources capability at all.
     pub resources_supported: bool,
     pub resources: Vec<McpResourceInfo>,
+    /// The upstream advertised another catalog page (or more items) after
+    /// the bounded status check stopped.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+    /// Internal audit handoff: set only when the guarded status tool was
+    /// actually invoked, never serialized to a management caller.
+    #[serde(skip)]
+    pub(crate) status_tool_invoked: Option<String>,
 }
 
 /// The marker `post` puts in a 401/403 failure; `failed` keys the
@@ -87,6 +99,8 @@ impl McpStatusReport {
             tools: Vec::new(),
             resources_supported: false,
             resources: Vec::new(),
+            truncated: false,
+            status_tool_invoked: None,
         }
     }
 
@@ -102,6 +116,22 @@ impl McpStatusReport {
 pub struct McpCheckOptions {
     /// Tool that identifies the connected account (e.g. GitHub's `get_me`).
     pub whoami_tool: Option<String>,
+}
+
+/// Account-status tools shipped by the product catalog. The webview may ask
+/// for one of these names, but cannot turn the status button into an
+/// arbitrary tool-call primitive. The upstream must independently annotate
+/// the selected tool read-only before it is invoked.
+fn catalog_status_tool(candidate: Option<&str>) -> Option<String> {
+    const TOOLS: &[&str] = &[
+        "get_me",
+        "notion-get-self",
+        "whoami",
+        "get_stripe_account_info",
+    ];
+    candidate
+        .filter(|candidate| TOOLS.contains(candidate))
+        .map(str::to_string)
 }
 
 /// The credential attached to every upstream request. `None` is a
@@ -419,6 +449,24 @@ pub struct McpToolInfo {
     pub description: Option<String>,
 }
 
+/// One bounded upstream tool listing before cache metadata is attached.
+#[derive(Debug, Clone)]
+pub struct McpToolListing {
+    pub tools: Vec<McpToolInfo>,
+    pub truncated: bool,
+}
+
+/// Tool-picker response. Cache provenance belongs to the catalog rather
+/// than each tool so an empty cached listing can still be identified.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpToolCatalog {
+    pub tools: Vec<McpToolInfo>,
+    pub truncated: bool,
+    pub stale: bool,
+    pub fetched_at: DateTime<Utc>,
+    pub cache_age_seconds: u64,
+}
+
 fn tool_info(value: &Value) -> Option<McpToolInfo> {
     let name = value.get("name").and_then(Value::as_str)?;
     let safe_name = crate::untrusted_text::cap(name, 200);
@@ -439,7 +487,7 @@ pub async fn list_tools(
     store: &Arc<Store>,
     client: &reqwest::Client,
     connection: &Connection,
-) -> Result<Vec<McpToolInfo>, String> {
+) -> Result<McpToolListing, String> {
     let endpoint = mcp_endpoint(connection)?;
     let rendered = render_connection_injection(store, client, connection)
         .await
@@ -462,6 +510,7 @@ pub async fn list_tools(
 
         let mut tools: Vec<McpToolInfo> = Vec::new();
         let mut cursor: Option<String> = None;
+        let mut truncated = false;
         for _ in 0..MAX_TOOL_PAGES {
             let params = match &cursor {
                 Some(cursor) => json!({ "cursor": cursor }),
@@ -471,6 +520,10 @@ pub async fn list_tools(
             if let Some(list) = page.get("tools").and_then(Value::as_array) {
                 for tool in list {
                     if let Some(info) = tool_info(tool) {
+                        if tools.len() >= MAX_CATALOG_ITEMS {
+                            truncated = true;
+                            break;
+                        }
                         tools.push(info);
                     }
                 }
@@ -479,11 +532,14 @@ pub async fn list_tools(
                 .get("nextCursor")
                 .and_then(Value::as_str)
                 .map(str::to_string);
-            if cursor.is_none() {
+            if cursor.is_none() || tools.len() >= MAX_CATALOG_ITEMS {
                 break;
             }
         }
-        Ok(tools)
+        if cursor.is_some() {
+            truncated = true;
+        }
+        Ok(McpToolListing { truncated, tools })
     }
     .await;
     session.close().await;
@@ -513,7 +569,10 @@ async fn check_endpoint(
     options: &McpCheckOptions,
 ) -> McpStatusReport {
     let mut session = McpSession::new(client, endpoint, credential);
-    let report = check_session(&mut session, options).await;
+    let guarded_options = McpCheckOptions {
+        whoami_tool: catalog_status_tool(options.whoami_tool.as_deref()),
+    };
+    let report = check_session(&mut session, &guarded_options).await;
     session.close().await;
     report
 }
@@ -554,6 +613,8 @@ async fn check_session(session: &mut McpSession, options: &McpCheckOptions) -> M
     let _ = session.notify("notifications/initialized").await;
 
     let mut tools: Vec<String> = Vec::new();
+    let mut read_only_tools: Vec<String> = Vec::new();
+    let mut truncated = false;
     let mut cursor: Option<String> = None;
     for _ in 0..MAX_TOOL_PAGES {
         let params = match &cursor {
@@ -565,11 +626,24 @@ async fn check_session(session: &mut McpSession, options: &McpCheckOptions) -> M
             Err(detail) => return McpStatusReport::failed(detail),
         };
         if let Some(list) = page.get("tools").and_then(Value::as_array) {
-            tools.extend(
-                list.iter()
-                    .filter_map(|tool| tool.get("name").and_then(Value::as_str))
-                    .map(str::to_string),
-            );
+            for tool in list {
+                let Some(name) = tool.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                if tools.len() >= MAX_CATALOG_ITEMS {
+                    truncated = true;
+                    break;
+                }
+                tools.push(name.to_string());
+                if tool
+                    .get("annotations")
+                    .and_then(|annotations| annotations.get("readOnlyHint"))
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                {
+                    read_only_tools.push(name.to_string());
+                }
+            }
         }
         cursor = page
             .get("nextCursor")
@@ -578,10 +652,22 @@ async fn check_session(session: &mut McpSession, options: &McpCheckOptions) -> M
         if cursor.is_none() {
             break;
         }
+        if tools.len() >= MAX_CATALOG_ITEMS {
+            truncated = true;
+            break;
+        }
+    }
+    if cursor.is_some() {
+        truncated = true;
     }
     let mut account = None;
+    let mut status_tool_invoked = None;
     if let Some(whoami) = &options.whoami_tool {
-        if tools.iter().any(|tool| tool == whoami) {
+        // A catalog template may nominate an account-status tool, but it is
+        // still upstream code. Invoke it only when the upstream explicitly
+        // marks that exact tool read-only.
+        if read_only_tools.iter().any(|tool| tool == whoami) {
+            status_tool_invoked = Some(whoami.clone());
             match session
                 .request("tools/call", json!({ "name": whoami, "arguments": {} }))
                 .await
@@ -610,6 +696,10 @@ async fn check_session(session: &mut McpSession, options: &McpCheckOptions) -> M
                     let Some(uri) = resource.get("uri").and_then(Value::as_str) else {
                         continue;
                     };
+                    if resources.len() >= MAX_CATALOG_ITEMS {
+                        truncated = true;
+                        break 'pages;
+                    }
                     resources.push(McpResourceInfo {
                         uri: uri.to_string(),
                         name: resource
@@ -622,9 +712,6 @@ async fn check_session(session: &mut McpSession, options: &McpCheckOptions) -> M
                             .and_then(Value::as_str)
                             .map(str::to_string),
                     });
-                    if resources.len() >= MAX_LISTED_RESOURCES {
-                        break 'pages;
-                    }
                 }
             }
             cursor = page
@@ -634,6 +721,9 @@ async fn check_session(session: &mut McpSession, options: &McpCheckOptions) -> M
             if cursor.is_none() {
                 break;
             }
+        }
+        if cursor.is_some() {
+            truncated = true;
         }
     }
 
@@ -668,6 +758,8 @@ async fn check_session(session: &mut McpSession, options: &McpCheckOptions) -> M
         tools,
         resources_supported,
         resources,
+        truncated,
+        status_tool_invoked,
     }
 }
 

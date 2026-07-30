@@ -215,6 +215,7 @@ enum CompletionPlan {
 
 struct SessionSlot {
     state: McpAuthState,
+    reauth_connection_id: Option<Uuid>,
     task: Option<tokio::task::JoinHandle<()>>,
     /// External-redirect sessions: fulfilled by the remote shell's code
     /// delivery; the flow task is waiting on the paired receiver. The tuple
@@ -230,8 +231,15 @@ pub struct McpAuthSessions {
 }
 
 impl McpAuthSessions {
-    fn insert(&self, id: Uuid, state: McpAuthState) {
+    fn insert(&self, id: Uuid, state: McpAuthState, reauth_connection_id: Option<Uuid>) -> bool {
         let mut slots = self.slots.lock().unwrap();
+        if reauth_connection_id.is_some_and(|connection_id| {
+            slots.values().any(|slot| {
+                slot.reauth_connection_id == Some(connection_id) && !slot.state.phase.is_terminal()
+            })
+        }) {
+            return false;
+        }
         // Prune old terminal sessions so the map cannot grow unbounded.
         if slots.len() >= MAX_FINISHED_SESSIONS {
             let stale: Vec<Uuid> = slots
@@ -247,10 +255,12 @@ impl McpAuthSessions {
             id,
             SessionSlot {
                 state,
+                reauth_connection_id,
                 task: None,
                 code_tx: None,
             },
         );
+        true
     }
 
     fn attach_task(&self, id: &Uuid, task: tokio::task::JoinHandle<()>) {
@@ -407,6 +417,10 @@ impl Broker {
         };
 
         let session_id = Uuid::new_v4();
+        let reauth_connection_id = match &plan {
+            CompletionPlan::Reauth { connection_id, .. } => Some(*connection_id),
+            CompletionPlan::New { .. } => None,
+        };
         let state = McpAuthState {
             id: session_id.to_string(),
             name: name.clone(),
@@ -414,7 +428,14 @@ impl Broker {
             phase: McpAuthPhase::Probing,
             updated_at: Utc::now(),
         };
-        self.mcp_auth.insert(session_id, state.clone());
+        if !self
+            .mcp_auth
+            .insert(session_id, state.clone(), reauth_connection_id)
+        {
+            return Err(CoreError::OAuth(
+                "a reconnect is already in progress for this connection".into(),
+            ));
+        }
         self.events.mcp_auth_changed(&state);
 
         let broker = self.clone();
@@ -905,6 +926,19 @@ async fn run_flow(
 
     /* 6 — store & verify */
     broadcast(broker, &session_id, McpAuthPhase::Verifying);
+    // Refresh and reconnect both replace the same access/refresh-token pair.
+    // Serialize the write and verification with refresh so neither path can
+    // orphan a newly rotated provider grant.
+    let reauth_lock = match &plan {
+        CompletionPlan::Reauth { connection_id, .. } => {
+            Some(crate::mcp_refresh::connection_lock(connection_id))
+        }
+        CompletionPlan::New { .. } => None,
+    };
+    let _reauth_guard = match reauth_lock.as_ref() {
+        Some(lock) => Some(lock.lock().await),
+        None => None,
+    };
     let (connection_id, connection_name) = match plan {
         CompletionPlan::New { secret_name, spec } => {
             let spec = *spec;
@@ -976,6 +1010,18 @@ async fn run_flow(
         &options,
     )
     .await;
+    if let Some(tool) = report.status_tool_invoked.as_deref() {
+        broker.audit.append(
+            AuditEntry::new(
+                AuditKind::ConnectionTested,
+                format!("MCP account status checked: {connection_name}"),
+            )
+            .connection(connection_name.clone())
+            .outcome(if report.ok { "ok" } else { "failed" })
+            .field("mcp_method", "tools/call")
+            .field("mcp_name", tool),
+        );
+    }
     let (account, warning) = if report.ok {
         if report.account.is_some() {
             let _ = broker
@@ -1643,5 +1689,33 @@ mod tests {
         assert!(verifier
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+    }
+
+    #[test]
+    fn reconnect_sessions_are_serialized_per_connection() {
+        fn state(id: Uuid) -> McpAuthState {
+            McpAuthState {
+                id: id.to_string(),
+                name: "tool".into(),
+                target: "https://example.test/mcp".into(),
+                phase: McpAuthPhase::Probing,
+                updated_at: Utc::now(),
+            }
+        }
+
+        let sessions = McpAuthSessions::default();
+        let connection = Uuid::new_v4();
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        assert!(sessions.insert(first, state(first), Some(connection)));
+        assert!(
+            !sessions.insert(second, state(second), Some(connection)),
+            "a second live reconnect must be refused"
+        );
+        sessions.set_phase(&first, McpAuthPhase::Cancelled);
+        assert!(
+            sessions.insert(second, state(second), Some(connection)),
+            "a terminal reconnect releases the connection"
+        );
     }
 }

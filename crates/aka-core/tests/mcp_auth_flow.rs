@@ -92,7 +92,11 @@ fn mcp_result(method: Option<&str>) -> Value {
         }),
         Some("tools/list") => json!({
             "tools": [
-                { "name": "get_me", "inputSchema": { "type": "object" } },
+                {
+                    "name": "get_me",
+                    "inputSchema": { "type": "object" },
+                    "annotations": { "readOnlyHint": true }
+                },
                 { "name": "search", "inputSchema": { "type": "object" } },
             ],
         }),
@@ -686,6 +690,45 @@ async fn oauth_sign_in_mints_a_connection_and_the_status_check_acknowledges_it()
     assert_eq!(report.resources.len(), 1);
     assert_eq!(report.resources[0].uri, "mock://repos/one");
     assert_eq!(report.resources[0].name, "Repo One");
+    let status_audit = broker
+        .audit
+        .recent(20)
+        .into_iter()
+        .find(|entry| {
+            entry.fields.get("mcp_name") == Some(&json!("get_me"))
+                && entry.fields.get("mcp_method") == Some(&json!("tools/call"))
+        })
+        .expect("the guarded status tool invocation is audited");
+    assert_eq!(status_audit.connection.as_deref(), Some("github-test"));
+
+    // A curated subset also governs the management-plane status helper.
+    broker
+        .ui_set_allowed_tools(&connection.id, Some(vec!["search".into()]))
+        .unwrap();
+    let restricted = broker
+        .ui_mcp_check(
+            &connection.id,
+            McpCheckOptions {
+                whoami_tool: Some("get_me".into()),
+            },
+        )
+        .await
+        .expect("restricted status check");
+    assert!(restricted.ok);
+    assert_eq!(restricted.account, None);
+
+    // Nor can a compromised webview nominate an arbitrary listed tool.
+    let arbitrary = broker
+        .ui_mcp_check(
+            &connection.id,
+            McpCheckOptions {
+                whoami_tool: Some("search".into()),
+            },
+        )
+        .await
+        .expect("guarded status check");
+    assert!(arbitrary.ok);
+    assert_eq!(arbitrary.account, None);
     assert!(
         vendor.lock().unwrap().mcp_session_deletes >= 2,
         "post-auth verification and the status check must tear down their sessions"

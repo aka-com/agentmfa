@@ -428,6 +428,7 @@ export interface McpStatusReport {
   tools: string[];
   resources_supported: boolean;
   resources: McpResourceInfo[];
+  truncated?: boolean;
 }
 
 export interface McpCheckOptions {
@@ -441,6 +442,14 @@ export interface McpToolInfo {
   /** Display-safe form when the identifier contains invisible text or was capped. */
   display_name?: string;
   description?: string;
+}
+
+export interface McpToolCatalog {
+  tools: McpToolInfo[];
+  truncated: boolean;
+  stale: boolean;
+  fetched_at: string;
+  cache_age_seconds: number;
 }
 
 interface CommandSpec<Args, Result> {
@@ -490,7 +499,7 @@ export interface CommandMap {
   cancel_mcp_auth: CommandSpec<{ id: string }, boolean>;
   mcp_status: CommandSpec<{ id: string; options?: McpCheckOptions | null }, McpStatusReport>;
   set_allowed_tools: CommandSpec<{ connectionId: string; tools?: string[] | null }, boolean>;
-  list_mcp_tools: CommandSpec<{ id: string }, McpToolInfo[]>;
+  list_mcp_tools: CommandSpec<{ id: string }, McpToolCatalog>;
   oauth_connect: CommandSpec<{ input: ConnectionInput; clientSecret?: string | null }, void>;
   oauth_reconnect: CommandSpec<{ id: string }, void>;
   open_url: CommandSpec<{ url: string }, void>;

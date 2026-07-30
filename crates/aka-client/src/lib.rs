@@ -761,7 +761,7 @@ impl ManagementBackend for RemoteBackend {
             .await
     }
 
-    async fn list_mcp_tools(&self, id: Uuid) -> ManageResult<Vec<aka_core::mcp::McpToolInfo>> {
+    async fn list_mcp_tools(&self, id: Uuid) -> ManageResult<aka_core::mcp::McpToolCatalog> {
         self.get(&format!("/v1/manage/connections/{id}/mcp-tools"))
             .await
     }

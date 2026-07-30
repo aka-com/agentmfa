@@ -143,7 +143,9 @@ async fn a_lapsed_credential_falls_back_to_the_cached_listing() {
 
     // A healthy server answers live, and the listing is remembered.
     let live = broker.ui_list_mcp_tools(&conn.id).await.unwrap();
-    assert_eq!(names(&live), vec!["search", "delete"]);
+    assert_eq!(names(&live.tools), vec!["search", "delete"]);
+    assert!(!live.stale);
+    assert!(!live.truncated);
     assert_eq!(
         server.deleted.load(Ordering::SeqCst),
         1,
@@ -157,7 +159,9 @@ async fn a_lapsed_credential_falls_back_to_the_cached_listing() {
     // The picker still lists — from the cache — so a subset can be curated
     // and saved without reconnecting first.
     let cached = broker.ui_list_mcp_tools(&conn.id).await.unwrap();
-    assert_eq!(names(&cached), vec!["search", "delete"]);
+    assert_eq!(names(&cached.tools), vec!["search", "delete"]);
+    assert!(cached.stale);
+    assert_eq!(cached.fetched_at, live.fetched_at);
 }
 
 #[tokio::test]

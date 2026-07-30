@@ -1092,11 +1092,17 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       await new Promise((resolve) => setTimeout(resolve, 500));
       // The status-report mock already knows each brand's tools; dress
       // them with light descriptions for the picker.
-      return mockStatusReport(c).tools.map((name) => ({
-        name,
-        display_name: name,
-        description: `The server's ${name.replace(/[_-]/g, ' ')} tool`,
-      }));
+      return {
+        tools: mockStatusReport(c).tools.map((name) => ({
+          name,
+          display_name: name,
+          description: `The server's ${name.replace(/[_-]/g, ' ')} tool`,
+        })),
+        truncated: false,
+        stale: false,
+        fetched_at: new Date().toISOString(),
+        cache_age_seconds: 0,
+      };
     }
     case 'issue_endpoint': {
       const connection = db.connections.find((c) => c.id === args.connectionId);

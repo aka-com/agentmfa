@@ -46,6 +46,12 @@ pub struct ConnectionTestReport {
     pub kind: Option<crate::capability::TestErrorKind>,
 }
 
+#[derive(Debug, Clone)]
+struct CachedMcpTools {
+    fetched_at: chrono::DateTime<chrono::Utc>,
+    listing: crate::mcp::McpToolListing,
+}
+
 /// The result of issuing a direct endpoint: the pasteable connection string
 /// and its secret. The secret is retained on the endpoint record, so later
 /// copies of the address carry it too; re-issuing rotates it.
@@ -174,7 +180,7 @@ pub struct Broker {
     /// fetched (an OAuth access token lapsed, the upstream is briefly
     /// unreachable), so curating and saving a tool subset never forces a
     /// reconnect. Runtime only; enforcement on `tools/call` is always by name.
-    mcp_tools_cache: Mutex<HashMap<Uuid, Vec<crate::mcp::McpToolInfo>>>,
+    mcp_tools_cache: Mutex<HashMap<Uuid, CachedMcpTools>>,
     /// Admission backstop acquired before direct HTTP request bodies are
     /// read. Each listener has a narrower semaphore as well.
     pub(crate) endpoint_uploads: Arc<tokio::sync::Semaphore>,
@@ -1559,10 +1565,17 @@ impl Broker {
     pub async fn ui_mcp_check(
         &self,
         id: &Uuid,
-        options: crate::mcp::McpCheckOptions,
+        mut options: crate::mcp::McpCheckOptions,
     ) -> Result<crate::mcp::McpStatusReport> {
         const CHECK_TIMEOUT: Duration = Duration::from_secs(45);
         let mut connection = self.store.connection_by_id(id)?;
+        if let (Some(whoami), Some(allowed)) =
+            (options.whoami_tool.as_ref(), self.access.allowed_tools(id))
+        {
+            if !allowed.iter().any(|tool| tool == whoami) {
+                options.whoami_tool = None;
+            }
+        }
         // An access token at (or past) expiry is renewed silently before
         // the check, so an aged token reads as healthy rather than
         // "credential rejected".
@@ -1617,6 +1630,18 @@ impl Broker {
                 Ok(report) => report,
                 Err(_) => crate::mcp::McpStatusReport::timed_out(CHECK_TIMEOUT),
             };
+        }
+        if let Some(tool) = report.status_tool_invoked.as_deref() {
+            self.audit.append(
+                AuditEntry::new(
+                    AuditKind::ConnectionTested,
+                    format!("MCP account status checked: {}", connection.name),
+                )
+                .connection(connection.name.clone())
+                .outcome(if report.ok { "ok" } else { "failed" })
+                .field("mcp_method", "tools/call")
+                .field("mcp_name", tool),
+            );
         }
         if report.ok && report.account.is_some() && report.account != connection.account {
             self.store
@@ -2356,7 +2381,7 @@ impl Broker {
     /// Ask an MCP connection's upstream server for its tool list (the
     /// per-wiring tool picker). Read-only against the upstream; the
     /// credential rides only the upstream leg, as everywhere.
-    pub async fn ui_list_mcp_tools(&self, id: &Uuid) -> Result<Vec<crate::mcp::McpToolInfo>> {
+    pub async fn ui_list_mcp_tools(&self, id: &Uuid) -> Result<crate::mcp::McpToolCatalog> {
         let connection = self.store.connection_by_id(id)?;
         if crate::mcp_refresh::wants_refresh(&connection) {
             let _ = crate::mcp_refresh::refresh_connection_token(
@@ -2375,14 +2400,24 @@ impl Broker {
         )
         .await;
         match live {
-            Ok(tools) => {
+            Ok(listing) => {
                 // Remember the last good listing so a later open can still
                 // curate the subset once the credential has lapsed.
-                self.mcp_tools_cache
-                    .lock()
-                    .unwrap()
-                    .insert(*id, tools.clone());
-                Ok(tools)
+                let fetched_at = chrono::Utc::now();
+                self.mcp_tools_cache.lock().unwrap().insert(
+                    *id,
+                    CachedMcpTools {
+                        fetched_at,
+                        listing: listing.clone(),
+                    },
+                );
+                Ok(crate::mcp::McpToolCatalog {
+                    tools: listing.tools,
+                    truncated: listing.truncated,
+                    stale: false,
+                    fetched_at,
+                    cache_age_seconds: 0,
+                })
             }
             Err(error) => {
                 // A live listing needs a valid credential; when it can't be
@@ -2390,7 +2425,17 @@ impl Broker {
                 // back to the last good listing rather than forcing a
                 // reconnect just to change which tools agents may call.
                 if let Some(cached) = self.mcp_tools_cache.lock().unwrap().get(id).cloned() {
-                    return Ok(cached);
+                    let age = chrono::Utc::now()
+                        .signed_duration_since(cached.fetched_at)
+                        .num_seconds()
+                        .max(0) as u64;
+                    return Ok(crate::mcp::McpToolCatalog {
+                        tools: cached.listing.tools,
+                        truncated: cached.listing.truncated,
+                        stale: true,
+                        fetched_at: cached.fetched_at,
+                        cache_age_seconds: age,
+                    });
                 }
                 Err(CoreError::InvalidConnectionConfig(error))
             }

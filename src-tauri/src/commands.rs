@@ -1268,7 +1268,7 @@ pub async fn set_allowed_tools(
 pub async fn list_mcp_tools(
     state: State<'_, AppState>,
     id: String,
-) -> CmdResult<Vec<aka_core::mcp::McpToolInfo>> {
+) -> CmdResult<aka_core::mcp::McpToolCatalog> {
     let id = parse_id(&id)?;
     state
         .brokers

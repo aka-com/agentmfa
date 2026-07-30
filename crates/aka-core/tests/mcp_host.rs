@@ -470,6 +470,17 @@ async fn the_broker_decides_what_an_agent_sees_over_mcp() {
         !text.contains(&first),
         "the agent's own token must not reach the MCP upstream"
     );
+    let mcp_audit = broker
+        .audit
+        .recent(50)
+        .into_iter()
+        .find(|entry| {
+            entry.connection.as_deref() == Some("notes")
+                && entry.fields.get("mcp_method") == Some(&json!("tools/call"))
+                && entry.fields.get("mcp_name") == Some(&json!("search"))
+        })
+        .expect("the proxied MCP tool call must carry method and name audit fields");
+    assert_eq!(mcp_audit.fields["path"], json!("/mcp"));
 
     // `agentmfa_status` — the tool an agent is told to trust when confused —
     // names the upstream by its real tool names, not the request-tool naming

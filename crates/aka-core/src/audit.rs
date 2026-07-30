@@ -187,8 +187,8 @@ pub enum AuditKind {
     ConnectionAdded,
     ConnectionUpdated,
     ConnectionDeleted,
-    /// Retained so activity logs written by older versions still deserialize.
-    /// New service tests do not create activity entries.
+    /// A guarded MCP account-status tool was invoked by a management-plane
+    /// status check. Retained name keeps older activity logs compatible.
     ConnectionTested,
     // MCP sign-in (OAuth) outcomes
     McpAuthCompleted,
