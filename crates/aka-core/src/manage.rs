@@ -1031,9 +1031,14 @@ pub trait ManagementBackend: Send + Sync {
     ) -> ManageResult<bool>;
     async fn issue_endpoint(&self, connection_id: Uuid) -> ManageResult<IssuedEndpointDto>;
     /// Read the connection's already-issued direct endpoint without minting or
-    /// rotating; `None` when none is issued. `GET
+    /// rotating; `None` when none is issued. Ungated display read — it takes no
+    /// native gate and writes no audit entry. `GET
     /// /v1/manage/connections/{id}/endpoint`.
     async fn get_endpoint(&self, connection_id: Uuid) -> ManageResult<Option<IssuedEndpointDto>>;
+    /// Read the endpoint for an explicit copy-to-clipboard: same address, but
+    /// takes the native gate and writes a "Direct endpoint copied" audit entry.
+    /// `POST /v1/manage/connections/{id}/endpoint/copy`.
+    async fn copy_endpoint(&self, connection_id: Uuid) -> ManageResult<Option<IssuedEndpointDto>>;
     async fn revoke_endpoint(&self, endpoint_id: Uuid) -> ManageResult<bool>;
 
     /* identity */
@@ -1366,6 +1371,14 @@ impl ManagementBackend for LocalBackend {
         Ok(self
             .broker
             .ui_get_endpoint(&connection_id)
+            .await?
+            .map(issued_endpoint_dto))
+    }
+
+    async fn copy_endpoint(&self, connection_id: Uuid) -> ManageResult<Option<IssuedEndpointDto>> {
+        Ok(self
+            .broker
+            .ui_copy_endpoint(&connection_id)
             .await?
             .map(issued_endpoint_dto))
     }

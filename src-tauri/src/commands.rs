@@ -1324,8 +1324,10 @@ pub async fn copy_endpoint_text(
 ) -> CmdResult<()> {
     let connection_id = parse_id(&connection_id)?;
     let backend = state.brokers.backend();
+    // The copy path takes the gate and writes the "Direct endpoint copied"
+    // audit entry; the ungated `get_endpoint` backs display only.
     let endpoint = backend
-        .get_endpoint(connection_id)
+        .copy_endpoint(connection_id)
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "this tool has no direct endpoint".to_string())?;

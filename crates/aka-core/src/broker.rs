@@ -1947,11 +1947,29 @@ impl Broker {
         Ok(info)
     }
 
-    /// Read an existing direct endpoint's pasteable address and retained
-    /// secret without minting or rotating; `None` when none is issued for the
-    /// connection. The address contains a standing credential, so read-back
-    /// takes a fresh gate and is audited just like copying a stored secret.
+    /// Read an existing direct endpoint's pasteable address without minting or
+    /// rotating; `None` when none is issued for the connection. This re-reads
+    /// already-surfaced state and takes **no** native gate — it backs the UI's
+    /// endpoint display (the connection strip resolves the SSH socket path this
+    /// way on every list refresh), which must never raise a sheet or write an
+    /// audit entry. Putting a credential on the clipboard is a separate,
+    /// deliberate act: `ui_copy_endpoint` carries the gate and the audit.
     pub async fn ui_get_endpoint(
+        &self,
+        connection_id: &Uuid,
+    ) -> Result<Option<IssuedEndpointInfo>> {
+        let connection = self.store.connection_by_id(connection_id)?;
+        let Some(endpoint) = self.endpoints.get_for_connection(connection_id) else {
+            return Ok(None);
+        };
+        Ok(Some(self.endpoint_info(&connection, &endpoint).await?))
+    }
+
+    /// Read an existing direct endpoint for a copy-to-clipboard: same address
+    /// as `ui_get_endpoint`, but the address embeds a standing credential, so
+    /// this takes a fresh native gate and is audited just like copying a
+    /// stored secret. Called only from explicit copy affordances.
+    pub async fn ui_copy_endpoint(
         &self,
         connection_id: &Uuid,
     ) -> Result<Option<IssuedEndpointInfo>> {

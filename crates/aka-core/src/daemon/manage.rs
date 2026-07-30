@@ -162,6 +162,7 @@ pub fn router() -> Router<AppState> {
             "/connections/{id}/endpoint",
             post(issue_endpoint).get(get_endpoint),
         )
+        .route("/connections/{id}/endpoint/copy", post(copy_endpoint))
         .route("/endpoints/{id}", delete(revoke_endpoint))
         .route("/mcp-auth", post(mcp_auth_start))
         .route(
@@ -697,6 +698,14 @@ async fn get_endpoint(
     Path(id): Path<Uuid>,
 ) -> Response {
     respond(state.manage.get_endpoint(id).await)
+}
+
+async fn copy_endpoint(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+    Path(id): Path<Uuid>,
+) -> Response {
+    respond(state.manage.copy_endpoint(id).await)
 }
 
 async fn revoke_endpoint(

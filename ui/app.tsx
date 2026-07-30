@@ -677,9 +677,11 @@ async function load<K extends CommandName>(
  * The socket's filename is derived from the endpoint secret so that the path
  * cannot be found by listing `~/.aka/endpoints`, which means the connection
  * list — built without touching the vault — cannot carry it. `get_endpoint`
- * can: it is the same read the Copy buttons already make for a Postgres TCP
- * address or an API secret. Cached because the path is stable until the
- * endpoint is reissued, and re-read on every list refresh so a reissue lands.
+ * can: it is the ungated display read (no native sheet, no audit entry), so
+ * running it in the background on every list refresh is safe — the gate and
+ * the "copied" audit live on the separate copy path the Copy buttons take.
+ * Cached because the path is stable until the endpoint is reissued, and
+ * re-read on every list refresh so a reissue lands.
  */
 async function resolveSshEndpointSockets(broker: BrokerProfile, epoch: number): Promise<void> {
   const wanted = state.connections.filter((c) => c.type === 'ssh' && c.agent_access.endpoint);

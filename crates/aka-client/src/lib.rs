@@ -918,6 +918,13 @@ impl ManagementBackend for RemoteBackend {
             .await
     }
 
+    async fn copy_endpoint(&self, connection_id: Uuid) -> ManageResult<Option<IssuedEndpointDto>> {
+        self.post_empty(&format!(
+            "/v1/manage/connections/{connection_id}/endpoint/copy"
+        ))
+        .await
+    }
+
     async fn revoke_endpoint(&self, endpoint_id: Uuid) -> ManageResult<bool> {
         self.delete::<RevokedBody>(&format!("/v1/manage/endpoints/{endpoint_id}"))
             .await
