@@ -28,7 +28,7 @@ import {
 } from './query-client';
 import { UiStore } from './ui-store';
 
-export const TABS = ['start', 'inbox', 'connections', 'secrets', 'activity'] as const;
+export const TABS = ['start', 'connections', 'secrets', 'inbox', 'activity'] as const;
 export const DROPDOWN_TABS = TABS.filter((tab) => tab !== 'start');
 export type Tab = typeof TABS[number];
 

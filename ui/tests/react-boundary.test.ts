@@ -272,12 +272,12 @@ test('selected master rows have no left accent border', async () => {
   assert.doesNotMatch(selected, /border-left|inset\s+\d+px\s+0/);
 });
 
-test('Activity Log sits above the normal sidebar footer', async () => {
+test('Inbox and Activity Log sit above the normal sidebar footer', async () => {
   const styles = await readFile(new URL('../styles.css', import.meta.url), 'utf8');
 
   assert.match(
     styles,
-    /@media \(min-width: 721px\) \{[\s\S]*?\.dw-nav \.nav-item\[data-tab="activity"\]\s*\{\s*margin-top: auto;\s*margin-bottom: 4px;/,
+    /@media \(min-width: 721px\) \{[\s\S]*?\.dw-nav \.nav-item\[data-tab="inbox"\]\s*\{\s*margin-top: auto;\s*\}[\s\S]*?\.dw-nav \.nav-item\[data-tab="activity"\]\s*\{\s*margin-bottom: 4px;/,
   );
 });
 
