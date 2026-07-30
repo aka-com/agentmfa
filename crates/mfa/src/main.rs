@@ -29,16 +29,17 @@ use std::os::unix::fs::FileTypeExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use aka_api::{ConnectionDto, ManageError, SecretDto};
+use aka_api::{ActivityDto, ConnectionDto, ManageError, SecretDto};
 use aka_client::credentials::TokenStore;
 use aka_client::{RemoteBackend, RemoteConfig};
+use aka_core::audit::AuditEntry;
 use aka_core::broker::Broker;
 use aka_core::config::BrokerConfig;
 use aka_core::daemon;
 use aka_core::daemon::wellknown;
 use aka_core::error::CoreError;
 use aka_core::events::{BrokerEvents, PresenceAuthority};
-use aka_core::manage::{LocalBackend, ManageResult, ManagementBackend};
+use aka_core::manage::{activity_dto, LocalBackend, ManageResult, ManagementBackend};
 use aka_core::paths::{BrokerInstanceLock, BrokerLockAttempt, BrokerLockRole, Paths};
 use aka_core::store::ConnectionSpec;
 use aka_core::types::{
@@ -87,6 +88,9 @@ fn parse_manage_ttl_days(value: &str) -> Result<u64, String> {
     after_help = "EXIT CODES:\n  1  generic/internal failure\n  2  invalid command usage or input\n  3  broker is not running\n  4  authentication or confirmation failed\n  5  requested object was not found\n  6  state conflict\n  7  remote broker is unreachable\n  8  connection test failed"
 )]
 struct Cli {
+    /// Emit one machine-readable JSON document for read and session commands.
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -268,9 +272,6 @@ enum Command {
     /// Report whether a broker is running on this layout and what it
     /// serves (MCP host, tools, key file). Exits nonzero when none is up.
     Status {
-        /// Emit one machine-readable status object.
-        #[arg(long)]
-        json: bool,
         /// Check a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
@@ -279,15 +280,12 @@ enum Command {
         #[arg(long)]
         broker: Option<String>,
     },
-    /// Show the broker's audit trail, newest last. Reads the append-only
-    /// log directly, so it works while the broker is running.
+    /// Show the broker's audit trail, newest last. Local reads project the
+    /// append-only log onto the same schema returned by a remote broker.
     Activity {
         /// Show only the last N entries; 0 shows everything.
         #[arg(long, default_value_t = 20)]
         limit: usize,
-        /// Print the raw JSON lines instead of formatted text.
-        #[arg(long)]
-        json: bool,
         /// Read a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
@@ -688,6 +686,7 @@ fn main() {
         .try_init()
         .ok();
     let cli = Cli::parse();
+    let json = cli.json;
     match cli.command {
         Command::Skill {
             write,
@@ -732,12 +731,12 @@ fn main() {
             client,
             format,
             password_only,
-        } => cmd_dsn(connection, root, client, format, password_only),
+        } => cmd_dsn(connection, root, client, format, password_only, json),
         Command::Ssh {
             connection,
             root,
             client,
-        } => cmd_ssh(connection, root, client),
+        } => cmd_ssh(connection, root, client, json),
         Command::Secret { command } => match command {
             SecretCommand::Add {
                 name,
@@ -746,7 +745,7 @@ fn main() {
                 root,
                 broker,
             } => cmd_secret_add(name, value_env, raw, root, broker),
-            SecretCommand::List { root, broker } => cmd_secret_list(root, broker),
+            SecretCommand::List { root, broker } => cmd_secret_list(root, broker, json),
             SecretCommand::Rename {
                 name,
                 new_name,
@@ -764,7 +763,7 @@ fn main() {
         },
         Command::Conn { command } => match command {
             ConnCommand::Add(args) => cmd_conn_add(args),
-            ConnCommand::List { root, broker } => cmd_conn_list(root, broker),
+            ConnCommand::List { root, broker } => cmd_conn_list(root, broker, json),
             ConnCommand::Update(args) => cmd_conn_update(args),
             ConnCommand::Rename {
                 name,
@@ -783,14 +782,14 @@ fn main() {
                 root,
                 broker,
             } => cmd_conn_confirm(name, root, broker, !off),
-            ConnCommand::Test { name, root, broker } => cmd_conn_test(name, root, broker),
+            ConnCommand::Test { name, root, broker } => cmd_conn_test(name, root, broker, json),
             ConnCommand::Endpoint {
                 name,
                 url,
                 secret,
                 root,
                 broker,
-            } => cmd_conn_endpoint(name, url, secret, root, broker),
+            } => cmd_conn_endpoint(name, url, secret, root, broker, json),
         },
         Command::Manage { command } => match command {
             ManageCommand::Login {
@@ -809,11 +808,10 @@ fn main() {
             rotate,
             root,
             broker,
-        } => cmd_key(rotate, root, broker),
-        Command::Status { json, root, broker } => cmd_status(json, root, broker),
+        } => cmd_key(rotate, root, broker, json),
+        Command::Status { root, broker } => cmd_status(json, root, broker),
         Command::Activity {
             limit,
-            json,
             root,
             broker,
         } => cmd_activity(limit, json, root, broker),
@@ -877,6 +875,13 @@ fn manage_error_exit_code(error: &ManageError) -> ExitCode {
 
 fn die_manage(error: ManageError) -> ! {
     die_with(manage_error_exit_code(&error), error)
+}
+
+fn print_json(value: &impl serde::Serialize) {
+    println!(
+        "{}",
+        serde_json::to_string(value).expect("CLI result is serializable")
+    );
 }
 
 fn store_paths(root: Option<&Path>) -> Paths {
@@ -1035,10 +1040,14 @@ fn cmd_secret_add(
     eprintln!("added secret {name} ({byte_len} bytes)");
 }
 
-fn cmd_secret_list(root: Option<PathBuf>, url: Option<String>) {
+fn cmd_secret_list(root: Option<PathBuf>, url: Option<String>, json: bool) {
     require_existing_root_for_read(root.as_deref(), url.is_some());
     let managed = management_backend(root, url);
     let secrets = managed.run(managed.backend.list_secrets());
+    if json {
+        print_json(&secrets);
+        return;
+    }
     if secrets.is_empty() {
         eprintln!("no secrets configured (add one with `mfa secret add <name>`)");
         return;
@@ -1466,10 +1475,14 @@ fn parse_sslmode(value: Option<&str>) -> Result<PgSslMode, String> {
     })
 }
 
-fn cmd_conn_list(root: Option<PathBuf>, url: Option<String>) {
+fn cmd_conn_list(root: Option<PathBuf>, url: Option<String>, json: bool) {
     require_existing_root_for_read(root.as_deref(), url.is_some());
     let managed = management_backend(root, url);
     let connections = managed.run(managed.backend.list_connections());
+    if json {
+        print_json(&connections);
+        return;
+    }
     if connections.is_empty() {
         eprintln!("no connections configured (add one with `mfa conn add`)");
         return;
@@ -1768,16 +1781,23 @@ fn cmd_conn_confirm(name: String, root: Option<PathBuf>, url: Option<String>, on
     }
 }
 
-fn cmd_conn_test(name: String, root: Option<PathBuf>, url: Option<String>) {
+fn cmd_conn_test(name: String, root: Option<PathBuf>, url: Option<String>, json: bool) {
     let managed = management_backend(root, url);
     let dto = conn_dto(&managed, &name);
     let report = managed.run_gated(managed.backend.test_connection(dto_id(&dto.id)));
+    if json {
+        print_json(&report);
+    }
     if report.ok {
-        eprintln!("ok: {}", report.detail);
+        if !json {
+            eprintln!("ok: {}", report.detail);
+        }
     } else {
-        match report.kind {
-            Some(kind) => eprintln!("failed ({kind:?}): {}", report.detail),
-            None => eprintln!("failed: {}", report.detail),
+        if !json {
+            match report.kind {
+                Some(kind) => eprintln!("failed ({kind:?}): {}", report.detail),
+                None => eprintln!("failed: {}", report.detail),
+            }
         }
         std::process::exit(ExitCode::TestFailed as i32);
     }
@@ -1795,7 +1815,14 @@ fn cmd_conn_endpoint(
     secret: bool,
     root: Option<PathBuf>,
     broker: Option<String>,
+    json: bool,
 ) {
+    if json && (url || secret) {
+        die_with(
+            ExitCode::Usage,
+            "--json cannot be combined with --url or --secret",
+        );
+    }
     require_existing_root_for_read(root.as_deref(), broker.is_some());
     let managed = management_backend(root, broker);
     let dto = conn_dto(&managed, &name);
@@ -1806,6 +1833,10 @@ fn cmd_conn_endpoint(
             format!("no direct endpoint issued for {name} — issue one from the AgentMFA app first"),
         ),
     };
+    if json {
+        print_json(&info);
+        return;
+    }
     // Selectors print exactly one field with no decoration, so a `$(...)`
     // capture carries only the value. `--url` prefers the TCP form when the
     // endpoint has one: it is the address that works from another machine and
@@ -2165,11 +2196,22 @@ fn cmd_dsn(
     client: Option<String>,
     format: Option<DsnFormat>,
     password_only: bool,
+    json: bool,
 ) {
+    if json && (format.is_some() || password_only) {
+        die_with(
+            ExitCode::Usage,
+            "--json cannot be combined with --format or --password-only",
+        );
+    }
     let body = open_session("/v1/pg/open", &connection, root, client);
     let (Some(dsn), Some(ticket)) = (body["dsn"].as_str(), body["ticket"].as_str()) else {
         die("the broker's response carried no DSN and ticket");
     };
+    if json {
+        print_json(&body);
+        return;
+    }
     if let Some(secs) = body["expires_in_seconds"].as_u64() {
         eprintln!("  ticket expires in {secs}s — connect before then; a later connection needs a fresh open");
     }
@@ -2257,11 +2299,15 @@ fn ssh_open_hints(
     lines
 }
 
-fn cmd_ssh(connection: String, root: Option<PathBuf>, client: Option<String>) {
+fn cmd_ssh(connection: String, root: Option<PathBuf>, client: Option<String>, json: bool) {
     let body = open_session("/v1/ssh/open", &connection, root, client);
     let Some(auth_sock) = body["auth_sock"].as_str() else {
         die("the broker's response carried no agent socket path");
     };
+    if json {
+        print_json(&body);
+        return;
+    }
     for line in ssh_open_hints(&body, auth_sock, chrono::Local::now()) {
         eprintln!("  {line}");
     }
@@ -2272,13 +2318,21 @@ fn cmd_ssh(connection: String, root: Option<PathBuf>, client: Option<String>) {
 /// print without `--url` is a file read of the key's plaintext home (the
 /// same file agents read), so it works alongside a running broker with no
 /// token; rotation and remote reads go through the management backend.
-fn cmd_key(rotate: bool, root: Option<PathBuf>, url: Option<String>) {
+fn print_key(key: &str, json: bool) {
+    if json {
+        print_json(&serde_json::json!({ "key": key }));
+    } else {
+        println!("{key}");
+    }
+}
+
+fn cmd_key(rotate: bool, root: Option<PathBuf>, url: Option<String>, json: bool) {
     if url.is_none() && !rotate {
         require_existing_root_for_read(root.as_deref(), false);
         let paths = store_paths(root.as_deref());
         let token_file = paths.token_file();
         match std::fs::read_to_string(&token_file) {
-            Ok(token) if !token.trim().is_empty() => println!("{}", token.trim()),
+            Ok(token) if !token.trim().is_empty() => print_key(token.trim(), json),
             _ => die(format!(
                 "no shared key at {} — the broker mints it when it first starts",
                 token_file.display()
@@ -2292,7 +2346,7 @@ fn cmd_key(rotate: bool, root: Option<PathBuf>, url: Option<String>) {
         eprintln!("key rotated; agents that read the token file reconnect on their own");
     }
     let key = managed.run(managed.backend.agent_key());
-    println!("{key}");
+    print_key(&key, json);
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -2661,20 +2715,14 @@ fn cmd_status(json: bool, root: Option<PathBuf>, url: Option<String>) {
                 );
             }
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string(&report).expect("status report is serializable")
-                );
+                print_json(&report);
             } else {
                 print_status_report(&report);
             }
         }
         Err((report, code, diagnostic)) => {
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string(&report).expect("status report is serializable")
-                );
+                print_json(&report);
             } else {
                 if let Some(vault) = &report.vault {
                     eprintln!("  vault: {vault}");
@@ -2693,53 +2741,44 @@ fn cmd_status(json: bool, root: Option<PathBuf>, url: Option<String>) {
     }
 }
 
-/// One formatted line per audit entry: timestamp (seconds precision),
-/// kind, summary, detail, and the acting agent when recorded.
-fn format_audit_line(entry: &serde_json::Value) -> String {
-    let ts = entry["ts"].as_str().unwrap_or("-");
-    let ts = if ts.len() >= 19 { &ts[..19] } else { ts };
-    let kind = entry["kind"].as_str().unwrap_or("?");
-    let text = entry["text"].as_str().unwrap_or("");
-    let mut line = format!("{ts}  {kind:<20}  {text}");
-    if let Some(detail) = entry["detail"].as_str() {
+/// One formatted line per projected activity entry: timestamp (seconds
+/// precision), summary, detail, and the acting agent when recorded.
+fn format_activity_line(entry: &ActivityDto) -> String {
+    let ts = entry.at.get(..19).unwrap_or(&entry.at);
+    let mut line = format!("{ts}  {}", entry.text);
+    if let Some(detail) = &entry.detail {
         line.push_str(&format!(" — {detail}"));
     }
-    if let Some(agent) = entry["agent"].as_str() {
+    if let Some(agent) = &entry.agent {
         line.push_str(&format!("  [{agent}]"));
     }
     line
 }
 
-/// `activity --url`: entries as the manage API renders them.
-fn cmd_activity_remote(limit: usize, json: bool, root: Option<PathBuf>, url: String) {
+fn print_activity(entries: &[ActivityDto], json: bool) {
+    if json {
+        print_json(&entries);
+    } else {
+        for entry in entries {
+            println!("{}", format_activity_line(entry));
+        }
+    }
+}
+
+/// Remote activity as the manage API renders it.
+fn cmd_activity_remote(limit: usize, root: Option<PathBuf>, url: String) -> Vec<ActivityDto> {
     let managed = management_backend(root, Some(url));
     let mut entries = managed.run(managed.backend.activity(limit));
     // The manage API returns newest first; match the local newest-last view.
     entries.reverse();
-    for entry in entries {
-        if json {
-            println!(
-                "{}",
-                serde_json::to_string(&entry).expect("serializable entry")
-            );
-            continue;
-        }
-        let ts = entry.at.get(..19).unwrap_or(&entry.at);
-        let mut line = format!("{ts}  {}", entry.text);
-        if let Some(detail) = &entry.detail {
-            line.push_str(&format!(" — {detail}"));
-        }
-        if let Some(agent) = &entry.agent {
-            line.push_str(&format!("  [{agent}]"));
-        }
-        println!("{line}");
-    }
+    entries
 }
 
 fn cmd_activity(limit: usize, json: bool, root: Option<PathBuf>, url: Option<String>) {
     require_existing_root_for_read(root.as_deref(), url.is_some());
     if let Some(url) = url {
-        cmd_activity_remote(limit, json, root, url);
+        let entries = cmd_activity_remote(limit, root, url);
+        print_activity(&entries, json);
         return;
     }
     let paths = store_paths(root.as_deref());
@@ -2747,10 +2786,14 @@ fn cmd_activity(limit: usize, json: bool, root: Option<PathBuf>, url: Option<Str
     let content = match std::fs::read_to_string(&file) {
         Ok(content) => content,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!(
-                "no activity recorded yet ({} does not exist)",
-                file.display()
-            );
+            if json {
+                print_activity(&[], true);
+            } else {
+                eprintln!(
+                    "no activity recorded yet ({} does not exist)",
+                    file.display()
+                );
+            }
             return;
         }
         Err(e) => die(format!("could not read {}: {e}", file.display())),
@@ -2761,17 +2804,17 @@ fn cmd_activity(limit: usize, json: bool, root: Option<PathBuf>, url: Option<Str
     } else {
         lines.len().saturating_sub(limit)
     };
-    for line in &lines[start..] {
-        if json {
-            println!("{line}");
-            continue;
-        }
-        // A trailing line the broker is mid-append on parses as garbage;
-        // skip it rather than break the listing.
-        if let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) {
-            println!("{}", format_audit_line(&entry));
-        }
-    }
+    let entries = lines[start..]
+        .iter()
+        .filter_map(|line| {
+            // A trailing line the broker is mid-append on parses as garbage;
+            // skip it rather than break the listing.
+            serde_json::from_str::<AuditEntry>(line)
+                .ok()
+                .map(|entry| activity_dto(&entry))
+        })
+        .collect::<Vec<_>>();
+    print_activity(&entries, json);
 }
 
 fn cmd_mcp(root: Option<PathBuf>, client: Option<String>) {
@@ -3229,14 +3272,22 @@ mod tests {
     }
 
     #[test]
-    fn status_json_is_an_explicit_machine_readable_mode() {
+    fn json_is_global_across_read_commands() {
         let cli = Cli::try_parse_from(["mfa", "status", "--json"]).unwrap();
+        assert!(cli.json);
         assert!(matches!(
             cli.command,
             Command::Status {
-                json: true,
                 root: None,
                 broker: None,
+            }
+        ));
+        let cli = Cli::try_parse_from(["mfa", "--json", "secret", "list"]).unwrap();
+        assert!(cli.json);
+        assert!(matches!(
+            cli.command,
+            Command::Secret {
+                command: SecretCommand::List { .. }
             }
         ));
     }
@@ -3404,24 +3455,34 @@ mod tests {
     }
 
     #[test]
-    fn audit_lines_format_with_optional_fields() {
-        let entry = serde_json::json!({
-            "ts": "2026-07-24T12:00:00.123456Z",
-            "kind": "http_request",
-            "text": "claude-code requested github",
-            "detail": "GET api.github.com/user/repos",
-            "agent": "claude-code",
-        });
+    fn activity_lines_format_with_optional_fields() {
+        let entry = ActivityDto {
+            icon: "network".into(),
+            tone: "blue".into(),
+            text: "claude-code requested github".into(),
+            detail: Some("GET api.github.com/user/repos".into()),
+            agent: Some("claude-code".into()),
+            connection: Some("github".into()),
+            duration_ms: None,
+            approver: None,
+            surface: None,
+            confirmation: None,
+            at: "2026-07-24T12:00:00.123456Z".into(),
+        };
         assert_eq!(
-            format_audit_line(&entry),
-            "2026-07-24T12:00:00  http_request          claude-code requested github \
-             — GET api.github.com/user/repos  [claude-code]"
+            format_activity_line(&entry),
+            "2026-07-24T12:00:00  claude-code requested github — GET \
+             api.github.com/user/repos  [claude-code]"
         );
-        let bare = serde_json::json!({ "kind": "wired", "text": "Agent access enabled" });
-        assert_eq!(
-            format_audit_line(&bare),
-            "-  wired                 Agent access enabled"
-        );
+        let bare = ActivityDto {
+            text: "Agent access enabled".into(),
+            detail: None,
+            agent: None,
+            connection: None,
+            at: "-".into(),
+            ..entry
+        };
+        assert_eq!(format_activity_line(&bare), "-  Agent access enabled");
     }
 
     fn update_args() -> ConnUpdate {
