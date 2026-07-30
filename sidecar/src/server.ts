@@ -24,6 +24,10 @@ export const SIDECAR_VERSION = '0.1.0';
 // implementation-defined errors) mirroring HTTP 429, so a rate-limited agent
 // meets a distinct, retryable error rather than an opaque "Internal error".
 const RPC_RATE_LIMITED = -32029;
+const MAX_MCP_BODY_BYTES = 8 * 1024 * 1024;
+const REQUEST_TIMEOUT_MS = 30_000;
+const HEADERS_TIMEOUT_MS = 10_000;
+const MAX_HEADER_COUNT = 100;
 
 export interface SidecarEnv {
   /** Shared secret minted by the supervisor and passed in the environment. */
@@ -55,9 +59,17 @@ function json(res: ServerResponse, status: number, body: unknown): void {
   res.end(payload);
 }
 
+type JsonRpcId = string | number | null;
+
 /** JSON-RPC shaped error, which is what an MCP client knows how to read. */
-function rpcError(res: ServerResponse, status: number, code: number, message: string): void {
-  const payload = JSON.stringify({ jsonrpc: '2.0', error: { code, message }, id: null });
+function rpcError(
+  res: ServerResponse,
+  status: number,
+  code: number,
+  message: string,
+  id: JsonRpcId = null,
+): void {
+  const payload = JSON.stringify({ jsonrpc: '2.0', error: { code, message }, id });
   res.writeHead(status, {
     'content-type': 'application/json',
     'content-length': Buffer.byteLength(payload),
@@ -65,11 +77,36 @@ function rpcError(res: ServerResponse, status: number, code: number, message: st
   res.end(payload);
 }
 
+class BodyTooLargeError extends Error {}
+
 async function readBody(req: IncomingMessage): Promise<unknown> {
+  const contentLength = Number(req.headers['content-length']);
+  if (Number.isFinite(contentLength) && contentLength > MAX_MCP_BODY_BYTES) {
+    req.resume();
+    throw new BodyTooLargeError();
+  }
+
   const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
+  let bytes = 0;
+  let tooLarge = false;
+  for await (const rawChunk of req) {
+    const chunk = rawChunk as Buffer;
+    bytes += chunk.length;
+    if (bytes > MAX_MCP_BODY_BYTES) {
+      tooLarge = true;
+      continue;
+    }
+    chunks.push(chunk);
+  }
+  if (tooLarge) throw new BodyTooLargeError();
   if (chunks.length === 0) return undefined;
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+}
+
+function requestId(body: unknown): JsonRpcId {
+  if (typeof body !== 'object' || body === null || !('id' in body)) return null;
+  const id = (body as { id?: unknown }).id;
+  return typeof id === 'string' || typeof id === 'number' || id === null ? id : null;
 }
 
 export function createSidecarServer(env: SidecarEnv): Server {
@@ -77,23 +114,12 @@ export function createSidecarServer(env: SidecarEnv): Server {
   const auth = new BrokerAuthProvider(broker);
   const sessions = new SessionStore();
 
-  return createServer((req, res) => {
+  const server = createServer((req, res) => {
     const path = (req.url ?? '').split('?')[0];
 
     if (path === MCP_PATH) {
       handleMcp(req, res, { broker, auth, sessions }).catch((error) => {
         if (res.headersSent) return;
-        // The broker throttles per token. Because the sidecar resolves the
-        // token on every request, a busy agent can trip that limit while
-        // merely authenticating — surface it as a retryable 429, not a 500
-        // the agent will hammer blindly.
-        if (error instanceof BrokerError && error.status === 429) {
-          if (error.retryAfterSeconds !== undefined) {
-            res.setHeader('retry-after', String(error.retryAfterSeconds));
-          }
-          rpcError(res, 429, RPC_RATE_LIMITED, 'Rate limited by AgentMFA; retry after a short delay');
-          return;
-        }
         log('error', 'mcp request failed', { error: String(error) });
         rpcError(res, 500, -32603, 'Internal error');
       });
@@ -118,6 +144,13 @@ export function createSidecarServer(env: SidecarEnv): Server {
 
     json(res, 404, { error: 'not_found' });
   });
+  // Pin the listener's resource budgets rather than inheriting changing Node
+  // defaults. The MCP calls themselves may take much longer; requestTimeout
+  // only bounds receipt of their headers and body.
+  server.maxHeadersCount = MAX_HEADER_COUNT;
+  server.requestTimeout = REQUEST_TIMEOUT_MS;
+  server.headersTimeout = HEADERS_TIMEOUT_MS;
+  return server;
 }
 
 interface McpDeps {
@@ -131,47 +164,91 @@ async function handleMcp(
   res: ServerResponse,
   { broker, auth, sessions }: McpDeps,
 ): Promise<void> {
-  if (!hostIsLoopback(req.headers.host, req.socket.localPort ?? 0)) {
-    rpcError(res, 421, -32000, 'Misdirected request');
-    return;
+  // Read and parse POST bodies before checks which can fail. That lets every
+  // JSON-RPC-shaped HTTP error carry the caller's id, so the MCP client can
+  // resolve the correct pending request.
+  let body: unknown;
+  if (req.method === 'POST') {
+    try {
+      body = await readBody(req);
+    } catch (error) {
+      if (error instanceof BodyTooLargeError) {
+        rpcError(res, 413, -32000, 'MCP request body exceeds the 8 MiB limit');
+        return;
+      }
+      if (error instanceof SyntaxError) {
+        rpcError(res, 400, -32700, 'Parse error');
+        return;
+      }
+      throw error;
+    }
   }
+  const id = requestId(body);
 
-  // Every request, including one carrying a live session id: a token
-  // revoked in the app must stop working on the very next call. The
-  // self-reported label rides along so the user's activity log names the
-  // real client; it is attribution only, never authorization.
-  const rawLabel = req.headers['x-agentmfa-client'];
-  const label = typeof rawLabel === 'string' && /^[A-Za-z0-9._-]{1,64}$/.test(rawLabel.trim())
-    ? rawLabel.trim()
-    : undefined;
-  const principal = await auth.authenticate(bearer(req), label);
-  if (!principal) {
-    res.setHeader('www-authenticate', 'Bearer');
-    rpcError(res, 401, -32001, 'Unauthorized: pair this agent with AgentMFA first');
-    return;
+  try {
+    if (!hostIsLoopback(req.headers.host, req.socket.localPort ?? 0)) {
+      rpcError(res, 421, -32000, 'Misdirected request', id);
+      return;
+    }
+
+    // Every request, including one carrying a live session id: a token
+    // revoked in the app must stop working on the very next call. The
+    // self-reported label rides along so the user's activity log names the
+    // real client; it is attribution only, never authorization.
+    const rawLabel = req.headers['x-agentmfa-client'];
+    const label = typeof rawLabel === 'string' && /^[A-Za-z0-9._-]{1,64}$/.test(rawLabel.trim())
+      ? rawLabel.trim()
+      : undefined;
+    const principal = await auth.authenticate(bearer(req), label);
+    if (!principal) {
+      res.setHeader('www-authenticate', 'Bearer');
+      rpcError(res, 401, -32001, 'Unauthorized: pair this agent with AgentMFA first', id);
+      return;
+    }
+
+    const sessionId = req.headers['mcp-session-id'];
+    const existing = typeof sessionId === 'string' ? sessions.get(sessionId, principal.clientId) : null;
+
+    if (existing) {
+      await existing.handleRequest(req, res, body);
+      return;
+    }
+
+    // A session id we do not recognize — or one belonging to another agent —
+    // is refused rather than silently reopened, so a leaked id cannot be
+    // turned into a working session by anyone else.
+    if (typeof sessionId === 'string') {
+      rpcError(res, 404, -32001, 'Unknown or expired session', id);
+      return;
+    }
+
+    if (req.method !== 'POST') {
+      rpcError(res, 405, -32000, 'Expected an initialize request', id);
+      return;
+    }
+
+    const transport = await openSession(broker, principal, sessions);
+    await transport.handleRequest(req, res, body);
+  } catch (error) {
+    if (res.headersSent) return;
+    // The broker throttles per token. Because the sidecar resolves the token
+    // on every request, a busy agent can trip that limit while merely
+    // authenticating — surface it as a retryable 429, not a 500 the agent
+    // will hammer blindly.
+    if (error instanceof BrokerError && error.status === 429) {
+      if (error.retryAfterSeconds !== undefined) {
+        res.setHeader('retry-after', String(error.retryAfterSeconds));
+      }
+      rpcError(
+        res,
+        429,
+        RPC_RATE_LIMITED,
+        'Rate limited by AgentMFA; retry after a short delay',
+        id,
+      );
+      return;
+    }
+    log('error', 'mcp request failed', { error: String(error) });
+    rpcError(res, 500, -32603, 'Internal error', id);
   }
-
-  const sessionId = req.headers['mcp-session-id'];
-  const existing = typeof sessionId === 'string' ? sessions.get(sessionId, principal.clientId) : null;
-
-  if (existing) {
-    await existing.handleRequest(req, res, req.method === 'POST' ? await readBody(req) : undefined);
-    return;
-  }
-
-  // A session id we do not recognize — or one belonging to another agent —
-  // is refused rather than silently reopened, so a leaked id cannot be
-  // turned into a working session by anyone else.
-  if (typeof sessionId === 'string') {
-    rpcError(res, 404, -32001, 'Unknown or expired session');
-    return;
-  }
-
-  if (req.method !== 'POST') {
-    rpcError(res, 405, -32000, 'Expected an initialize request');
-    return;
-  }
-
-  const transport = await openSession(broker, principal, sessions);
-  await transport.handleRequest(req, res, await readBody(req));
 }

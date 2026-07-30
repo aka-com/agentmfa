@@ -148,6 +148,10 @@ struct Bridge {
     /// The streamable-HTTP session, captured from the initialize response's
     /// `Mcp-Session-Id` header and echoed on every later request.
     session: Option<String>,
+    /// The client's handshake, retained so a sidecar restart or idle session
+    /// eviction can be recovered without restarting the stdio MCP process.
+    initialize_message: Option<String>,
+    initialized_notification: Option<String>,
 }
 
 /// One request's outcome: the JSON-RPC messages to emit on stdout.
@@ -157,6 +161,7 @@ enum Relay {
     /// named state and retries once.
     StaleToken,
     Unreachable,
+    SessionGone,
 }
 
 impl Bridge {
@@ -208,11 +213,16 @@ impl Bridge {
         {
             self.session = Some(session.to_string());
         }
-        let status = response.status().as_u16();
+        let status = response.status();
         if status == 202 || status == 204 {
             // An accepted notification produces no reply.
             return Ok(Relay::Messages(Vec::new()));
         }
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
         let content_type = response
             .headers()
             .get("content-type")
@@ -243,6 +253,17 @@ impl Bridge {
             .text()
             .await
             .map_err(|error| format!("MCP response read failed: {error}"))?;
+        if status == reqwest::StatusCode::NOT_FOUND && self.session.is_some() {
+            return Ok(Relay::SessionGone);
+        }
+        if !status.is_success() {
+            return Ok(Relay::Messages(vec![correlate_http_error(
+                message,
+                status.as_u16(),
+                retry_after.as_deref(),
+                &body,
+            )]));
+        }
         if body.trim().is_empty() {
             return Ok(Relay::Messages(Vec::new()));
         }
@@ -260,6 +281,197 @@ impl Bridge {
         self.mcp_url = discover_mcp_url(&self.paths.socket_file()).await?;
         Ok(())
     }
+
+    fn remember_handshake(&mut self, message: &str, value: &serde_json::Value) {
+        match value.get("method").and_then(serde_json::Value::as_str) {
+            Some("initialize") => self.initialize_message = Some(message.to_string()),
+            Some("notifications/initialized") => {
+                self.initialized_notification = Some(message.to_string())
+            }
+            _ => {}
+        }
+    }
+
+    async fn recover_session(&mut self, current_method: Option<&str>) -> Result<(), String> {
+        let initialize = self
+            .initialize_message
+            .clone()
+            .ok_or_else(|| "the MCP session expired before initialize was observed".to_string())?;
+        self.session = None;
+
+        let mut relay = self.post(&initialize).await?;
+        if matches!(relay, Relay::StaleToken) {
+            self.refresh_token().await?;
+            relay = self.post(&initialize).await?;
+        }
+        match relay {
+            Relay::Messages(_) if self.session.is_some() => {}
+            Relay::Messages(_) => {
+                return Err("the MCP host did not establish a replacement session".into())
+            }
+            Relay::StaleToken => {
+                return Err("the MCP host refused the refreshed key during recovery".into())
+            }
+            Relay::Unreachable => {
+                return Err("the MCP host remained unreachable during recovery".into())
+            }
+            Relay::SessionGone => {
+                return Err("the replacement MCP session expired during recovery".into())
+            }
+        }
+
+        // If the failed message is itself the initialized notification, its
+        // retry below completes the handshake. Otherwise replay the retained
+        // notification before retrying the application request.
+        if current_method != Some("notifications/initialized") {
+            if let Some(initialized) = self.initialized_notification.clone() {
+                match self.post(&initialized).await? {
+                    Relay::Messages(_) => {}
+                    Relay::StaleToken => {
+                        return Err(
+                            "the MCP host refused the key while restoring the session".into()
+                        )
+                    }
+                    Relay::Unreachable => {
+                        return Err("the MCP host went away while restoring the session".into())
+                    }
+                    Relay::SessionGone => {
+                        return Err("the restored MCP session expired immediately".into())
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn relay_message(&mut self, message: &str, value: &serde_json::Value) -> Vec<String> {
+        self.remember_handshake(message, value);
+        let method = value.get("method").and_then(serde_json::Value::as_str);
+        let mut retried_token = false;
+        let mut recovered_session = false;
+
+        loop {
+            let relay = match self.post(message).await {
+                Ok(relay) => relay,
+                Err(error) => return vec![internal_error(message, &error)],
+            };
+            match relay {
+                Relay::Messages(messages) => return messages,
+                Relay::StaleToken if !retried_token => {
+                    retried_token = true;
+                    if let Err(error) = self.refresh_token().await {
+                        return vec![internal_error(message, &error)];
+                    }
+                }
+                Relay::Unreachable if !recovered_session => {
+                    recovered_session = true;
+                    if let Err(error) = self.rediscover().await {
+                        return vec![internal_error(message, &error)];
+                    }
+                    self.session = None;
+                    if method != Some("initialize") {
+                        if let Err(error) = self.recover_session(method).await {
+                            return vec![internal_error(message, &error)];
+                        }
+                    }
+                }
+                Relay::SessionGone if !recovered_session => {
+                    recovered_session = true;
+                    if let Err(error) = self.recover_session(method).await {
+                        return vec![internal_error(message, &error)];
+                    }
+                }
+                Relay::StaleToken => {
+                    return vec![internal_error(
+                        message,
+                        "the broker refused the shared key even after re-reading it",
+                    )]
+                }
+                Relay::Unreachable => {
+                    return vec![internal_error(message, "the MCP host went away")]
+                }
+                Relay::SessionGone => {
+                    return vec![internal_error(
+                        message,
+                        "the MCP session expired again after recovery",
+                    )]
+                }
+            }
+        }
+    }
+}
+
+fn request_id(message: &str) -> serde_json::Value {
+    serde_json::from_str::<serde_json::Value>(message)
+        .ok()
+        .and_then(|value| value.get("id").cloned())
+        .filter(|id| id.is_null() || id.is_string() || id.is_number())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+fn internal_error(message: &str, detail: &str) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": request_id(message),
+        "error": {
+            "code": -32603,
+            "message": "AgentMFA MCP transport error",
+            "data": { "detail": detail },
+        },
+    })
+    .to_string()
+}
+
+fn parse_error(detail: &str) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": null,
+        "error": {
+            "code": -32700,
+            "message": "Parse error",
+            "data": { "detail": detail },
+        },
+    })
+    .to_string()
+}
+
+fn correlate_http_error(
+    request: &str,
+    status: u16,
+    retry_after: Option<&str>,
+    body: &str,
+) -> String {
+    let id = request_id(request);
+    let mut response = serde_json::from_str::<serde_json::Value>(body).unwrap_or_else(|_| {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {
+                "code": -32000,
+                "message": format!("AgentMFA MCP host returned HTTP {status}"),
+            },
+        })
+    });
+    if let Some(object) = response.as_object_mut() {
+        if object.get("id").is_none_or(serde_json::Value::is_null) {
+            object.insert("id".into(), id);
+        }
+        if let Some(error) = object
+            .get_mut("error")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            let data = error.entry("data").or_insert_with(|| serde_json::json!({}));
+            if let Some(data) = data.as_object_mut() {
+                data.entry("http_status")
+                    .or_insert_with(|| serde_json::json!(status));
+                if let Some(retry_after) = retry_after {
+                    data.entry("retry_after")
+                        .or_insert_with(|| serde_json::json!(retry_after));
+                }
+            }
+        }
+    }
+    response.to_string()
 }
 
 /// Serialize a JSON-RPC message to exactly one stdout line. Anything that
@@ -288,38 +500,59 @@ pub async fn run(paths: Paths, label: Option<String>) -> Result<(), String> {
         token,
         label,
         session: None,
+        initialize_message: None,
+        initialized_notification: None,
     };
 
-    let stdin = BufReader::new(tokio::io::stdin());
+    let mut stdin = BufReader::new(tokio::io::stdin());
     let mut stdout = tokio::io::stdout();
-    let mut lines = stdin.lines();
-    while let Some(line) = lines
-        .next_line()
-        .await
-        .map_err(|error| format!("stdin read failed: {error}"))?
-    {
+    let mut input = Vec::new();
+    loop {
+        input.clear();
+        let read = stdin
+            .read_until(b'\n', &mut input)
+            .await
+            .map_err(|error| format!("stdin read failed: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        while matches!(input.last(), Some(b'\n' | b'\r')) {
+            input.pop();
+        }
+        let line = match std::str::from_utf8(&input) {
+            Ok(line) => line,
+            Err(error) => {
+                let frame = parse_error(&format!("stdin was not UTF-8: {error}"));
+                stdout
+                    .write_all(format!("{frame}\n").as_bytes())
+                    .await
+                    .map_err(|error| format!("stdout write failed: {error}"))?;
+                stdout
+                    .flush()
+                    .await
+                    .map_err(|error| format!("stdout flush failed: {error}"))?;
+                continue;
+            }
+        };
         if line.trim().is_empty() {
             continue;
         }
-        let mut relay = bridge.post(&line).await?;
-        // One recovery attempt per failure mode: a rotated key is re-read
-        // from the token file; a moved MCP host is re-discovered. A repeat
-        // failure surfaces instead of looping.
-        if matches!(relay, Relay::StaleToken) {
-            bridge.refresh_token().await?;
-            relay = bridge.post(&line).await?;
-        } else if matches!(relay, Relay::Unreachable) {
-            bridge.rediscover().await?;
-            bridge.session = None;
-            relay = bridge.post(&line).await?;
-        }
-        let messages = match relay {
-            Relay::Messages(messages) => messages,
-            Relay::StaleToken => {
-                return Err("the broker refused the shared key even after re-reading it".into())
+        let value = match serde_json::from_str::<serde_json::Value>(line) {
+            Ok(value) => value,
+            Err(error) => {
+                let frame = parse_error(&format!("invalid JSON on stdin: {error}"));
+                stdout
+                    .write_all(format!("{frame}\n").as_bytes())
+                    .await
+                    .map_err(|error| format!("stdout write failed: {error}"))?;
+                stdout
+                    .flush()
+                    .await
+                    .map_err(|error| format!("stdout flush failed: {error}"))?;
+                continue;
             }
-            Relay::Unreachable => return Err("the MCP host went away".into()),
         };
+        let messages = bridge.relay_message(line, &value).await;
         for message in messages {
             if let Some(line) = one_line(&message) {
                 stdout
@@ -386,6 +619,28 @@ mod tests {
         assert_eq!(one_line("not json"), None);
     }
 
+    #[test]
+    fn transport_errors_are_correlated_to_the_request() {
+        let response: serde_json::Value = serde_json::from_str(&internal_error(
+            r#"{"jsonrpc":"2.0","id":"call-7"}"#,
+            "boom",
+        ))
+        .unwrap();
+        assert_eq!(response["id"], "call-7");
+        assert_eq!(response["error"]["code"], -32603);
+
+        let response: serde_json::Value = serde_json::from_str(&correlate_http_error(
+            r#"{"jsonrpc":"2.0","id":9}"#,
+            429,
+            Some("7"),
+            r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32029,"message":"slow down"}}"#,
+        ))
+        .unwrap();
+        assert_eq!(response["id"], 9);
+        assert_eq!(response["error"]["data"]["http_status"], 429);
+        assert_eq!(response["error"]["data"]["retry_after"], "7");
+    }
+
     /// End-to-end over a real loopback server: JSON responses, SSE
     /// responses, the session header round-trip, and 202 notifications.
     #[tokio::test]
@@ -428,15 +683,15 @@ mod tests {
                         .into_response()
                 }
                 "missing" => (
-                    axum::http::StatusCode::NOT_FOUND,
+                    axum::http::StatusCode::TOO_MANY_REQUESTS,
                     [("content-type", "application/json")],
-                    r#"{"jsonrpc":"2.0","id":41,"error":{"code":-32004,"message":"gone"}}"#,
+                    r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32029,"message":"slow down"}}"#,
                 )
                     .into_response(),
                 "failed" => (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                     [("content-type", "application/json")],
-                    r#"{"jsonrpc":"2.0","id":42,"error":{"code":-32603,"message":"failed"}}"#,
+                    r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"failed"}}"#,
                 )
                     .into_response(),
                 other => panic!("unexpected method {other}"),
@@ -456,6 +711,8 @@ mod tests {
             token: "aka_testkey".into(),
             label: Some("test-client".into()),
             session: None,
+            initialize_message: None,
+            initialized_notification: None,
         };
 
         let Relay::Messages(init) = bridge
@@ -492,7 +749,9 @@ mod tests {
         // Non-success HTTP statuses still carry correlated JSON-RPC replies;
         // the bridge must relay their request ids instead of synthesizing an
         // uncorrelated transport error.
-        for (id, method, code) in [(41, "missing", -32004), (42, "failed", -32603)] {
+        for (id, method, code, status) in
+            [(41, "missing", -32029, 429), (42, "failed", -32603, 500)]
+        {
             let Relay::Messages(messages) = bridge
                 .post(
                     &serde_json::json!({
@@ -510,6 +769,7 @@ mod tests {
             let value: serde_json::Value = serde_json::from_str(&messages[0]).unwrap();
             assert_eq!(value["id"], id);
             assert_eq!(value["error"]["code"], code);
+            assert_eq!(value["error"]["data"]["http_status"], status);
         }
     }
 
@@ -532,6 +792,8 @@ mod tests {
             token: "aka_old".into(),
             label: None,
             session: None,
+            initialize_message: None,
+            initialized_notification: None,
         };
         assert!(matches!(
             bridge
@@ -539,5 +801,118 @@ mod tests {
                 .await,
             Ok(Relay::StaleToken)
         ));
+    }
+
+    #[tokio::test]
+    async fn an_expired_session_replays_the_handshake_once() {
+        use std::sync::{Arc, Mutex};
+
+        use axum::extract::State;
+        use axum::http::HeaderMap;
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+
+        #[derive(Default)]
+        struct ServerState {
+            generation: usize,
+            initialized: bool,
+        }
+
+        async fn handler(
+            State(state): State<Arc<Mutex<ServerState>>>,
+            headers: HeaderMap,
+            body: String,
+        ) -> axum::response::Response {
+            let message: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let method = message["method"].as_str().unwrap();
+            let mut state = state.lock().unwrap();
+            if method == "initialize" {
+                state.generation += 1;
+                state.initialized = false;
+                return (
+                    [("mcp-session-id", format!("session-{}", state.generation))],
+                    r#"{"jsonrpc":"2.0","id":1,"result":{}}"#,
+                )
+                    .into_response();
+            }
+
+            let expected = format!("session-{}", state.generation);
+            if headers
+                .get("mcp-session-id")
+                .and_then(|value| value.to_str().ok())
+                != Some(expected.as_str())
+            {
+                return (
+                    axum::http::StatusCode::NOT_FOUND,
+                    [("content-type", "application/json")],
+                    r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32001,"message":"expired"}}"#,
+                )
+                    .into_response();
+            }
+            if method == "notifications/initialized" {
+                state.initialized = true;
+                return axum::http::StatusCode::ACCEPTED.into_response();
+            }
+            assert!(
+                state.initialized,
+                "the initialized notification was replayed"
+            );
+            (
+                [("content-type", "application/json")],
+                r#"{"jsonrpc":"2.0","id":7,"result":{"recovered":true}}"#,
+            )
+                .into_response()
+        }
+
+        let state = Arc::new(Mutex::new(ServerState::default()));
+        let app = axum::Router::new()
+            .route("/mcp", post(handler))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut bridge = Bridge {
+            http: reqwest::Client::new(),
+            paths: Paths::under(dir.path()),
+            mcp_url: format!("http://127.0.0.1:{port}/mcp"),
+            token: "aka_testkey".into(),
+            label: None,
+            session: None,
+            initialize_message: None,
+            initialized_notification: None,
+        };
+        let initialize = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {},
+        });
+        let initialized = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+        });
+        bridge
+            .relay_message(&initialize.to_string(), &initialize)
+            .await;
+        bridge
+            .relay_message(&initialized.to_string(), &initialized)
+            .await;
+
+        // Simulate an idle eviction or a sidecar restart on the same port.
+        bridge.session = Some("stale-session".into());
+        let call = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/list",
+            "params": {},
+        });
+        let messages = bridge.relay_message(&call.to_string(), &call).await;
+        let response: serde_json::Value = serde_json::from_str(&messages[0]).unwrap();
+        assert_eq!(response["id"], 7);
+        assert_eq!(response["result"]["recovered"], true);
+        assert_eq!(state.lock().unwrap().generation, 2);
+        assert_eq!(bridge.session.as_deref(), Some("session-2"));
     }
 }

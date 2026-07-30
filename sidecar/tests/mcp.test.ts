@@ -717,7 +717,11 @@ test('a throttled broker surfaces a retryable 429, not an opaque 500', async () 
     });
     assert.equal(response.status, 429);
     assert.equal(response.headers.get('retry-after'), '7');
-    const body = (await response.json()) as { error?: { code: number; message: string } };
+    const body = (await response.json()) as {
+      id?: number | null;
+      error?: { code: number; message: string };
+    };
+    assert.equal(body.id, 1, 'the HTTP error must resolve the initialize request');
     assert.equal(body.error?.code, -32029);
     assert.match(body.error?.message ?? '', /rate limit/i);
   } finally {
@@ -789,6 +793,8 @@ test("one agent cannot ride another agent's session id", async () => {
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
     });
     assert.equal(stolen.status, 404, "another agent's session must not be usable");
+    const error = (await stolen.json()) as { id?: number | null };
+    assert.equal(error.id, 1, 'the rejection must resolve the tools/list request');
   } finally {
     await app.close();
   }

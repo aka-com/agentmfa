@@ -53,6 +53,19 @@ use zeroize::Zeroizing;
 mod client;
 mod mcp_bridge;
 
+fn parse_client_label(value: &str) -> Result<String, String> {
+    if !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        Ok(value.to_string())
+    } else {
+        Err("must be 1-64 ASCII letters, digits, dots, underscores, or hyphens".into())
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "mfa", version, about = "AgentMFA broker CLI")]
 struct Cli {
@@ -154,7 +167,7 @@ enum Command {
         root: Option<PathBuf>,
         /// Label this client in the user's activity log (e.g. claude-code).
         /// Attribution only, never authorization.
-        #[arg(long)]
+        #[arg(long, value_parser = parse_client_label)]
         client: Option<String>,
     },
     /// Open a Postgres session on a running broker and print a ready-to-run
@@ -2700,6 +2713,14 @@ mod tests {
         match conn_config(&a).unwrap() {
             ConnectionConfig::Ssh { port, .. } => assert_eq!(port, 22),
             other => panic!("wrong config: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mcp_client_labels_are_valid_http_header_values() {
+        assert_eq!(parse_client_label("claude-code").unwrap(), "claude-code");
+        for invalid in ["", "has space", "line\nbreak", "é", &"x".repeat(65)] {
+            assert!(parse_client_label(invalid).is_err(), "{invalid:?}");
         }
     }
 }

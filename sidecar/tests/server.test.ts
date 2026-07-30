@@ -9,6 +9,7 @@ const TOKEN = 'a'.repeat(64);
 /** Start the server on an ephemeral port and hand back a fetch helper. */
 async function serving(): Promise<{
   get: (path: string, token?: string | null) => Promise<Response>;
+  post: (path: string, body: string, headers?: Record<string, string>) => Promise<Response>;
   close: () => Promise<void>;
 }> {
   const server = createSidecarServer({ token: TOKEN, brokerSocket: '/tmp/aka.sock' });
@@ -18,6 +19,12 @@ async function serving(): Promise<{
     get: (path, token = TOKEN) =>
       fetch(`http://127.0.0.1:${port}${path}`, {
         headers: token === null ? {} : { authorization: `Bearer ${token}` },
+      }),
+    post: (path, body, headers = {}) =>
+      fetch(`http://127.0.0.1:${port}${path}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...headers },
+        body,
       }),
     close: () =>
       new Promise<void>((resolve) => {
@@ -67,4 +74,39 @@ test('token comparison survives a length mismatch', () => {
   assert.equal(tokenMatches('short', TOKEN), false);
   assert.equal(tokenMatches(`${TOKEN}extra`, TOKEN), false);
   assert.equal(tokenMatches(TOKEN, TOKEN), true);
+});
+
+test('malformed MCP JSON reports a parse error before authentication', async () => {
+  const app = await serving();
+  try {
+    const response = await app.post('/mcp', '{"jsonrpc":');
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), {
+      jsonrpc: '2.0',
+      error: { code: -32700, message: 'Parse error' },
+      id: null,
+    });
+  } finally {
+    await app.close();
+  }
+});
+
+test('MCP request bodies are capped before authentication', async () => {
+  const app = await serving();
+  try {
+    const response = await app.post('/mcp', 'x'.repeat(8 * 1024 * 1024 + 1));
+    assert.equal(response.status, 413);
+    const body = (await response.json()) as { error?: { message?: string } };
+    assert.match(body.error?.message ?? '', /8 MiB/);
+  } finally {
+    await app.close();
+  }
+});
+
+test('the sidecar pins HTTP parser resource budgets', async () => {
+  const server = createSidecarServer({ token: TOKEN, brokerSocket: '/tmp/aka.sock' });
+  assert.equal(server.maxHeadersCount, 100);
+  assert.equal(server.requestTimeout, 30_000);
+  assert.equal(server.headersTimeout, 10_000);
+  server.close();
 });
