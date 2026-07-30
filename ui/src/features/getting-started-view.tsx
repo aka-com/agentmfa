@@ -1,9 +1,9 @@
 // The Get started walkthrough. The hero is an editable sentence — “Connect
 // <tool> to <client>” — whose two blanks are the only choices the page asks
 // for. Below it, the same three steps as always (add the tool, connect the
-// agent, ask for something useful), but state-aware: completed steps
-// collapse to a checked line, upcoming steps dim to a title, and the page
-// has exactly one primary action at a time.
+// agent, ask for something useful), all open all the time: status colors
+// the badge — checked, current, upcoming — but never hides a step's
+// contents, so the whole path is readable in one pass.
 
 import type { ReactNode } from 'react';
 import { state } from '../app-state';
@@ -22,6 +22,7 @@ import {
   redactedStartTask,
   resolveConnectMode,
   sshInvocationCommand,
+  startAddLead,
   startOptionById,
   startProgress,
   startTask,
@@ -230,37 +231,26 @@ function StartConnectPane({ mode: connectMode, option, progress }: {
 
 type StepStatus = 'done' | 'now' | 'todo';
 
+/**
+ * Every step shows its body, whatever its status. The walkthrough is short
+ * enough to read as one page, and a finished step's contents stay useful —
+ * the address it issued, the prompt it built — so hiding them behind a
+ * disclosure only costs a click. Status colors the badge; it no longer
+ * decides what is visible.
+ */
 function StartStep({ number, status, title, body }: {
   number: number;
   status: StepStatus;
   title: ReactNode;
   body: ReactNode;
 }): ReactNode {
-  const open = status === 'done' && state.startStepOpen === number;
   const badge = status === 'done'
     ? <span className="start-num" aria-hidden="true"><AppIcon icon={ICONS.check} /></span>
     : <span className="start-num" aria-hidden="true">{number}</span>;
-  if (status === 'done') {
-    return (
-      <li className={`start-step done ${open ? 'open' : ''}`}>
-        {badge}
-        <div className="start-body">
-          <button className="start-step-head" data-act="start-step-toggle"
-            data-id={String(number)} aria-expanded={open}>
-            <b>{title}</b>
-            <span className={`cat-chev ${open ? 'open' : ''}`}>
-              <AppIcon icon={ICONS.chevronDown} />
-            </span>
-          </button>
-          {open ? body : null}
-        </div>
-      </li>
-    );
-  }
   return (
     <li className={`start-step ${status}`}>
       {badge}
-      <div className="start-body"><b>{title}</b>{status === 'now' ? body : null}</div>
+      <div className="start-body"><b>{title}</b>{body}</div>
     </li>
   );
 }
@@ -309,7 +299,7 @@ function StartWalkthrough(): ReactNode {
   const shownTask = redactedStartTask(task);
 
   const addBody = <>
-    <p>The real credential goes in the vault. Your agent only ever sees brokered access.</p>
+    <p>{startAddLead(option)}</p>
     <div className="start-actions">
       <button className="btn primary sm" data-act={addAction} data-id={option.catalogId}>
         {step1Done ? `${addVerb} another` : `${addVerb} ${option.label}`}
@@ -322,7 +312,7 @@ function StartWalkthrough(): ReactNode {
     {connectMode !== 'direct' && step1Done && !step2Done
       ? <div className="start-waiting">
           <span className="start-pulse" aria-hidden="true"></span>
-          Waiting for {clientLabel} to reach the broker…
+          Waiting for {clientLabel} to connect to AgentMFA…
         </div>
       : null}
   </>;
@@ -331,14 +321,14 @@ function StartWalkthrough(): ReactNode {
     <ol className="start-steps">
       <StartStep number={1} status={step1Done ? 'done' : 'now'}
         title={step1Done
-          ? <>{option.label} connected · <code>{progress.toolName}</code></>
+          ? `${option.label} connected`
           : `${addVerb} ${option.label}`}
         body={addBody} />
       <StartStep number={2}
         status={step2Done ? 'done' : step1Done ? 'now' : 'todo'}
         title={step2Done
           ? connectMode === 'direct'
-            ? <>Direct address issued · <code>{progress.toolName}</code></>
+            ? 'Direct address issued'
             : <>{clientLabel} connected · seen {relTime(seenAt as string)}</>
           : connectMode === 'direct'
             ? 'Connect your agent directly'

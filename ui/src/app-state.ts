@@ -203,8 +203,6 @@ export interface AppState {
   connectMode: string;
   /** Which hero-sentence blank has its menu open. */
   startMenuOpen: 'tool' | 'client' | null;
-  /** A completed walkthrough step re-opened to show its body again. */
-  startStepOpen: number | null;
   connImportSource: string;
   connImportError: string | null;
   menuOpen: boolean;
@@ -314,7 +312,6 @@ function createInitialState(): AppState {
     startOption: 'postgres',
     connectMode: 'direct',
     startMenuOpen: null,
-    startStepOpen: null,
     connImportSource: '',
     connImportError: null,
     menuOpen: false,

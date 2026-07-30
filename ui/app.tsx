@@ -5900,7 +5900,6 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       if (id && START_OPTIONS.some((option) => option.id === id)) {
         state.startOption = id;
         state.startMenuOpen = null;
-        state.startStepOpen = null;
         render();
       }
       break;
@@ -5908,7 +5907,6 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       if (id) {
         state.connectMode = id;
         state.startMenuOpen = null;
-        state.startStepOpen = null;
         render();
       }
       break;
@@ -5917,12 +5915,6 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
         : id === 'tool' || id === 'client' ? id : null;
       render();
       break;
-    case 'start-step-toggle': {
-      const step = Number(id);
-      state.startStepOpen = state.startStepOpen === step ? null : step;
-      render();
-      break;
-    }
     case 'copy-text': {
       const text = btn.dataset.text ?? '';
       if (!text) break;

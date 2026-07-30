@@ -752,9 +752,8 @@
     width: 24px; height: 24px; margin-top: 1px; border-radius: 50%;
     background: var(--chip-bg); color: var(--ink-2); font-size: 0.78125rem; font-weight: 700;
   }
-  /* One step at a time: the current step carries the page's only primary
-     action, finished steps collapse to a checked line that can be reopened,
-     upcoming steps dim to a title. */
+  /* Every step stays open; the badge is what carries state — filled for the
+     current step, checked when finished, dashed while still ahead. */
   .start-step.now .start-num{ background: var(--accent); color: #fff; }
   .start-step.done .start-num{
     background: var(--ok-wash); border: 1px solid var(--ok-border); color: var(--ok-ink);
@@ -764,19 +763,6 @@
     background: transparent; border: 1.5px dashed var(--line-mid); color: var(--muted);
   }
   .start-step.todo .start-body > b{ color: var(--muted); font-weight: 600; }
-  .start-step-head{
-    display: flex; align-items: center; gap: 7px; width: 100%;
-    border: none; background: none; cursor: pointer; text-align: left;
-    padding: 0; font: inherit; color: inherit;
-  }
-  .start-step-head b{ font-size: 0.875rem; }
-  .start-step-head code{ font-size: 0.8125rem; }
-  .start-step-head .cat-chev svg{ width: 14px; height: 14px; }
-  .start-step-head .cat-chev.open{ transform: rotate(180deg); }
-  .start-step.done .start-step-head .cat-chev{ opacity: 0; }
-  .start-step.done:hover .start-step-head .cat-chev,
-  .start-step.done.open .start-step-head .cat-chev,
-  .start-step.done .start-step-head:focus-visible .cat-chev{ opacity: 1; }
   .start-waiting{
     display: flex; align-items: center; gap: 8px; margin-top: 12px;
     font-size: 0.78125rem; color: var(--muted);

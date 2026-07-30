@@ -107,6 +107,26 @@ export function startOptionById(id: string): StartOption {
 }
 
 /**
+ * Step 1's lead: what is about to be hooked up, named the way the user
+ * thinks of it. Databases and servers are things you point at, so they read
+ * as kinds ("this Postgres database"); a service is a name you recognize.
+ */
+export function startAddLead(option: StartOption): string {
+  const subject = option.connType === 'pg'
+    ? 'this Postgres database'
+    : option.connType === 'ssh'
+    ? 'this SSH server'
+    : option.id === 'mcp'
+    ? 'your MCP server'
+    // "Slack API" names the transport on the picker row, where it sits
+    // beside MCP-backed rows; in a sentence it is just Slack.
+    : option.id === 'slack'
+    ? 'Slack'
+    : option.label;
+  return `Connect to ${subject} via AgentMFA.`;
+}
+
+/**
  * How the agent reaches the broker in step 2. `direct` is the per-tool
  * endpoint (a Postgres DSN or SSH agent socket) and is only offered for
  * kinds that have one; every other mode rides the shared key.
