@@ -1362,7 +1362,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       emit('aka://settings-changed', {});
       return;
     case 'ui_set_mode': case 'ui_hide_main': case 'ui_hide_dropdown':
-    case 'ui_set_dropdown_form_active': return;
+    case 'ui_set_dropdown_form_active': case 'ui_set_request_inbox_visible': return;
     case 'ui_take_open_requests': return false;
     default: throw new Error(`mock: unknown command ${cmd}`);
   }

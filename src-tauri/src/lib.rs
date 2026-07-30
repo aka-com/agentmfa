@@ -332,25 +332,40 @@ pub fn run() {
             // rather than quitting; reopen from the Dock or the tray.
             if let Some(win) = app.get_webview_window(windows::MAIN) {
                 windows::move_traffic_lights_down(&win, 3.0)?;
+                windows::set_window_focused(windows::MAIN, win.is_focused().unwrap_or(false));
                 let handle = handle.clone();
-                win.on_window_event(move |event| {
-                    if let WindowEvent::CloseRequested { api, .. } = event {
+                win.on_window_event(move |event| match event {
+                    WindowEvent::Focused(focused) => {
+                        windows::set_window_focused(windows::MAIN, *focused);
+                    }
+                    WindowEvent::CloseRequested { api, .. } => {
                         api.prevent_close();
                         windows::ui_hide_main(handle.clone());
                     }
+                    WindowEvent::Destroyed => {
+                        windows::set_window_focused(windows::MAIN, false);
+                    }
+                    _ => {}
                 });
             }
             if let Some(win) = app.get_webview_window(windows::DROPDOWN) {
+                windows::set_window_focused(windows::DROPDOWN, win.is_focused().unwrap_or(false));
                 let handle = handle.clone();
                 win.on_window_event(move |event| match event {
-                    WindowEvent::Focused(false) => {
-                        let _ = windows::hide_dropdown(&handle);
+                    WindowEvent::Focused(focused) => {
+                        windows::set_window_focused(windows::DROPDOWN, *focused);
+                        if !focused {
+                            let _ = windows::hide_dropdown(&handle);
+                        }
                     }
                     WindowEvent::CloseRequested { api, .. } => {
                         api.prevent_close();
                         let _ = windows::hide_dropdown(&handle);
                     }
-                    WindowEvent::Destroyed => windows::clear_dropdown_form_hold(),
+                    WindowEvent::Destroyed => {
+                        windows::set_window_focused(windows::DROPDOWN, false);
+                        windows::clear_dropdown_form_hold();
+                    }
                     _ => {}
                 });
             }

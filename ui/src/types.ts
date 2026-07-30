@@ -546,6 +546,7 @@ export interface CommandMap {
   ui_hide_main: CommandSpec<undefined, void>;
   ui_hide_dropdown: CommandSpec<undefined, void>;
   ui_set_dropdown_form_active: CommandSpec<{ active: boolean }, void>;
+  ui_set_request_inbox_visible: CommandSpec<{ visible: boolean }, void>;
   ui_take_open_requests: CommandSpec<undefined, boolean>;
 }
 

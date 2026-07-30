@@ -77,6 +77,14 @@ const DROPDOWN_FORM_TTL: Duration = Duration::from_secs(2 * 60);
 /// after boot instead of silently losing the user's click.
 static MAIN_REQUESTS_PENDING: AtomicBool = AtomicBool::new(false);
 static DROPDOWN_REQUESTS_PENDING: AtomicBool = AtomicBool::new(false);
+/// Window focus and request-tab visibility are written by the main-thread
+/// window/webview event handlers and read by async notification delivery.
+/// Keeping this state here avoids synchronous window-server calls from a
+/// broker task while still distinguishing a visible Inbox from another tab.
+static MAIN_FOCUSED: AtomicBool = AtomicBool::new(false);
+static DROPDOWN_FOCUSED: AtomicBool = AtomicBool::new(false);
+static MAIN_INBOX_VISIBLE: AtomicBool = AtomicBool::new(false);
+static DROPDOWN_INBOX_VISIBLE: AtomicBool = AtomicBool::new(false);
 
 fn dropdown_hide_allowed() -> bool {
     dropdown_hide_allowed_at(Instant::now())
@@ -441,22 +449,106 @@ fn dropdown_origin(
 pub fn surface_for_approval(app: &AppHandle) {
     let app = app.clone();
     let _ = app.clone().run_on_main_thread(move || {
-        if window_presented(&app, MAIN) || window_presented(&app, DROPDOWN) {
+        if request_window_focused() {
+            return;
+        }
+        if let Some(window) = [DROPDOWN, MAIN].into_iter().find_map(|label| {
+            window_presented(&app, label)
+                .then(|| app.get_webview_window(label))
+                .flatten()
+        }) {
+            raise_for_approval(&window);
             return;
         }
         open_main(&app);
     });
 }
 
-/// Whether one of the trusted request surfaces is actually focused. A
-/// visible main window can be covered by another application; in that case a
-/// native notification is still useful.
-pub fn request_surface_focused(app: &AppHandle) -> bool {
-    [MAIN, DROPDOWN].into_iter().any(|label| {
-        app.get_webview_window(label)
-            .and_then(|window| window.is_focused().ok())
-            .unwrap_or(false)
-    })
+/// Record native focus without making a synchronous window-server call from
+/// notification delivery.
+pub fn set_window_focused(label: &str, focused: bool) {
+    match label {
+        MAIN => MAIN_FOCUSED.store(focused, Ordering::Release),
+        DROPDOWN => DROPDOWN_FOCUSED.store(focused, Ordering::Release),
+        _ => {}
+    }
+}
+
+fn set_inbox_visible(label: &str, visible: bool) {
+    match label {
+        MAIN => MAIN_INBOX_VISIBLE.store(visible, Ordering::Release),
+        DROPDOWN => DROPDOWN_INBOX_VISIBLE.store(visible, Ordering::Release),
+        _ => {}
+    }
+}
+
+fn request_window_focused() -> bool {
+    MAIN_FOCUSED.load(Ordering::Acquire) || DROPDOWN_FOCUSED.load(Ordering::Acquire)
+}
+
+/// Whether the Inbox is genuinely frontmost. A focused window showing
+/// another tab must not suppress a native request notification, nor may a
+/// locked or switched-away macOS session.
+pub fn request_surface_focused() -> bool {
+    request_surface_state(
+        MAIN_FOCUSED.load(Ordering::Acquire),
+        MAIN_INBOX_VISIBLE.load(Ordering::Acquire),
+        DROPDOWN_FOCUSED.load(Ordering::Acquire),
+        DROPDOWN_INBOX_VISIBLE.load(Ordering::Acquire),
+        session_unavailable(),
+    )
+}
+
+fn request_surface_state(
+    main_focused: bool,
+    main_inbox: bool,
+    dropdown_focused: bool,
+    dropdown_inbox: bool,
+    session_unavailable: bool,
+) -> bool {
+    !session_unavailable && ((main_focused && main_inbox) || (dropdown_focused && dropdown_inbox))
+}
+
+#[cfg(target_os = "macos")]
+fn session_unavailable() -> bool {
+    use objc2_core_foundation::{CFBoolean, CFDictionary, CFString};
+
+    let Some(session) = objc2_core_graphics::CGSessionCopyCurrentDictionary() else {
+        return false;
+    };
+    // CGSession's dictionary is untyped. These two known keys both carry
+    // CFBoolean values: one catches the lock screen, the other fast-user
+    // switching to a different console session.
+    let session: &CFDictionary<CFString, CFBoolean> = unsafe { session.cast_unchecked() };
+    let locked = CFString::from_static_str("CGSSessionScreenIsLocked");
+    if session.get(&locked).is_some_and(|value| value.as_bool()) {
+        return true;
+    }
+    let on_console = CFString::from_static_str("kCGSSessionOnConsoleKey");
+    session
+        .get(&on_console)
+        .is_some_and(|value| !value.as_bool())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn session_unavailable() -> bool {
+    false
+}
+
+fn raise_for_approval(window: &tauri::WebviewWindow) {
+    let _ = window.unminimize();
+    let _ = window.show();
+    #[cfg(target_os = "macos")]
+    if let Ok(raw) = window.ns_window() {
+        use objc2_app_kit::{NSWindow, NSWindowCollectionBehavior};
+
+        let native: &NSWindow = unsafe { &*raw.cast() };
+        native.setCollectionBehavior(
+            native.collectionBehavior() | NSWindowCollectionBehavior::MoveToActiveSpace,
+        );
+        native.orderFrontRegardless();
+    }
+    let _ = window.set_focus();
 }
 
 /// Visible and not minimized. Window managers may report a minimized window
@@ -521,6 +613,21 @@ pub fn ui_set_dropdown_form_active(
         return Err("only the menu-bar dropdown can hold its form open".into());
     }
     *DROPDOWN_FORM_ACTIVE.lock().unwrap() = active.then(Instant::now);
+    Ok(())
+}
+
+/// The webview owns tab visibility; the native layer owns actual focus.
+/// Combining both prevents a focused Settings/Activity tab from hiding an
+/// approval notification.
+#[tauri::command]
+pub fn ui_set_request_inbox_visible(
+    window: tauri::WebviewWindow,
+    visible: bool,
+) -> Result<(), String> {
+    if !matches!(window.label(), MAIN | DROPDOWN) {
+        return Err("only a request surface can report Inbox visibility".into());
+    }
+    set_inbox_visible(window.label(), visible);
     Ok(())
 }
 
@@ -658,6 +765,20 @@ mod tests {
         assert!(!dropdown_hide_allowed_at(now + Duration::from_secs(119)));
         assert!(dropdown_hide_allowed_at(now + Duration::from_secs(120)));
         assert!(DROPDOWN_FORM_ACTIVE.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn notification_suppression_requires_the_focused_inbox() {
+        assert!(request_surface_state(true, true, false, false, false));
+        assert!(request_surface_state(false, false, true, true, false));
+        assert!(!request_surface_state(true, false, false, false, false));
+        assert!(!request_surface_state(false, true, false, false, false));
+    }
+
+    #[test]
+    fn unavailable_session_never_suppresses_notification() {
+        assert!(!request_surface_state(true, true, false, false, true));
+        assert!(!request_surface_state(false, false, true, true, true));
     }
 
     #[test]

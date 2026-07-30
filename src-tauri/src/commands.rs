@@ -1779,6 +1779,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         crate::windows::ui_hide_main,
         crate::windows::ui_hide_dropdown,
         crate::windows::ui_set_dropdown_form_active,
+        crate::windows::ui_set_request_inbox_visible,
         crate::windows::ui_take_open_requests,
     ]
 }

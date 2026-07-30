@@ -3266,6 +3266,11 @@ function AppRoot(): ReactNode {
   // Subscribes this root to store publications; the revision itself is not
   // used as a key — the windows reconcile in place rather than remounting.
   useUiRevision(uiStore);
+  const inboxVisible = booted && state.tab === 'inbox'
+    && !brokerTakeover(state.broker, state.remoteSetup.open);
+  useEffect(() => {
+    void invoke('ui_set_request_inbox_visible', { visible: inboxVisible });
+  }, [inboxVisible]);
   if (!booted) {
     // Mounting React replaced index.html's placeholder; keep the same
     // splash up until boot() has real data, instead of flashing a fully

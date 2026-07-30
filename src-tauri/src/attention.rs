@@ -551,7 +551,7 @@ fn flush_notification(app: &AppHandle, generation: u64) {
             crate::windows::surface_for_approval(app);
             return;
         }
-        NotificationMode::WhenHidden if crate::windows::request_surface_focused(app) => return,
+        NotificationMode::WhenHidden if crate::windows::request_surface_focused() => return,
         NotificationMode::WhenHidden | NotificationMode::Always => {}
     }
 
@@ -994,7 +994,7 @@ fn notify_elicitation(app: &AppHandle, pending: &ElicitationSummary) {
             crate::windows::surface_for_approval(app);
             return;
         }
-        NotificationMode::WhenHidden if crate::windows::request_surface_focused(app) => return,
+        NotificationMode::WhenHidden if crate::windows::request_surface_focused() => return,
         NotificationMode::WhenHidden | NotificationMode::Always => {}
     }
     let total = attention.count();
