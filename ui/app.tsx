@@ -4860,6 +4860,18 @@ function settingsSheet() {
           <div class="st-title">Native OS authentication unavailable</div>
           <div class="st-sub">This broker shell does not advertise an operating-system authentication prompt.</div>
         </div></div>`;
+  // The settings read is the sheet's only source of broker truth, and this
+  // sheet is the only place that truth is consumed — a failed read has no
+  // other surface. Never present defaults or stale values as the broker's
+  // state; the notification rows stay because they are this machine's.
+  const settingsFailed = state.loadStatus.settings.status === 'error';
+  const settingsFailureRow = settingsFailed
+    ? `<div class="load-failure" role="alert">
+        <div><b>Couldn’t load this broker’s settings.</b>${state.loadStatus.settings.error
+          ? `<span>${esc(state.loadStatus.settings.error)}</span>` : ''}</div>
+        <button class="btn sm" data-act="retry-view-loads">Retry</button>
+      </div>`
+    : '';
   // Window chrome is a this-machine concern: in remote mode the toggle
   // would patch the *remote* broker's setting, which this app's chrome
   // deliberately never reads (windows.rs) — and could silently reconfigure
@@ -4871,7 +4883,8 @@ function settingsSheet() {
     : '';
   return `<div class="sheet-backdrop" data-act="sheet-cancel"></div>
     <div class="sheet wide"><h3>Settings</h3>
-    ${notificationRow}${notificationWarning}${notificationPreviewRow}${authenticationRows}${dockRow}
+    ${notificationRow}${notificationWarning}${notificationPreviewRow}
+    ${settingsFailed ? settingsFailureRow : `${authenticationRows}${dockRow}`}
     <div class="sheet-actions"><button class="btn primary" data-act="sheet-cancel">Done</button></div></div>`;
 }
 
