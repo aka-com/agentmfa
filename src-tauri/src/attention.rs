@@ -279,6 +279,35 @@ enum NotificationAdmission {
     Suppressed,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NotificationContent {
+    title: String,
+    body: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DeliveryPlan {
+    Notify(NotificationContent),
+    SurfaceWindow,
+    Suppress,
+}
+
+trait NotificationSink {
+    fn deliver(&self, content: &NotificationContent) -> Result<(), String>;
+}
+
+struct QueueNotificationSink<'a> {
+    attention: &'a RequestAttention,
+    app: &'a AppHandle,
+}
+
+impl NotificationSink for QueueNotificationSink<'_> {
+    fn deliver(&self, content: &NotificationContent) -> Result<(), String> {
+        self.attention
+            .enqueue_notification(self.app, content.title.clone(), content.body.clone())
+    }
+}
+
 /// Managed Tauri state shared by local broker callbacks and the remote SSE
 /// reconciliation path.
 pub struct RequestAttention {
@@ -528,32 +557,52 @@ fn apply_change(app: &AppHandle, change: TrackerChange, generation: Option<u64>)
     }
 }
 
+struct PendingFlush {
+    requests: Vec<RequestSummary>,
+    total: usize,
+    settings: NotificationSettings,
+}
+
+fn take_pending_flush(inner: &mut AttentionInner, generation: u64) -> Option<PendingFlush> {
+    if generation != inner.flush_generation {
+        return None;
+    }
+    inner.flush_scheduled = false;
+    let requests = inner.tracker.take_pending();
+    if requests.is_empty() {
+        return None;
+    }
+    Some(PendingFlush {
+        requests,
+        total: inner.total(),
+        settings: inner.settings,
+    })
+}
+
 fn flush_notification(app: &AppHandle, generation: u64) {
     let Some(attention) = app.try_state::<RequestAttention>() else {
         return;
     };
-    let (requests, total, settings) = {
+    let Some(pending) = ({
         let mut inner = attention.inner.lock().unwrap();
-        if generation != inner.flush_generation {
-            return;
-        }
-        inner.flush_scheduled = false;
-        let requests = inner.tracker.take_pending();
-        let total = inner.total();
-        (requests, total, inner.settings)
-    };
-    if requests.is_empty() {
+        take_pending_flush(&mut inner, generation)
+    }) else {
         return;
-    }
+    };
 
-    match settings.mode {
-        NotificationMode::Off => {
+    let content = match request_delivery_plan(
+        &pending.requests,
+        pending.total,
+        pending.settings,
+        crate::windows::request_surface_focused(),
+    ) {
+        DeliveryPlan::SurfaceWindow => {
             crate::windows::surface_for_approval(app);
             return;
         }
-        NotificationMode::WhenHidden if crate::windows::request_surface_focused() => return,
-        NotificationMode::WhenHidden | NotificationMode::Always => {}
-    }
+        DeliveryPlan::Suppress => return,
+        DeliveryPlan::Notify(content) => content,
+    };
 
     match attention
         .inner
@@ -565,11 +614,14 @@ fn flush_notification(app: &AppHandle, generation: u64) {
         NotificationAdmission::Storm => {
             crate::windows::surface_for_approval(app);
             let body = format!(
-                "Open the Request Inbox to review {total} waiting requests. Further notifications are paused for one minute."
+                "Open the Request Inbox to review {} waiting requests. Further notifications are paused for one minute.",
+                pending.total
             );
-            if let Err(error) =
-                deliver_notification(app, "Many AgentMFA requests are waiting", &body)
-            {
+            let storm = NotificationContent {
+                title: "Many AgentMFA requests are waiting".into(),
+                body,
+            };
+            if let Err(error) = deliver_notification(app, &storm) {
                 tracing::warn!(%error, "could not deliver the notification rate-limit warning");
             }
             return;
@@ -577,24 +629,29 @@ fn flush_notification(app: &AppHandle, generation: u64) {
         NotificationAdmission::Suppressed => return,
     }
 
-    if let Err(error) = show_notification(app, &requests, total, settings.show_context) {
+    if let Err(error) = deliver_notification(app, &content) {
         tracing::warn!(%error, "could not deliver a native request notification");
         crate::windows::surface_for_approval(app);
     }
 }
 
-fn show_notification(
-    app: &AppHandle,
+fn request_delivery_plan(
     requests: &[RequestSummary],
     total: usize,
-    show_context: bool,
-) -> Result<(), String> {
+    settings: NotificationSettings,
+    surface_focused: bool,
+) -> DeliveryPlan {
+    match settings.mode {
+        NotificationMode::Off => return DeliveryPlan::SurfaceWindow,
+        NotificationMode::WhenHidden if surface_focused => return DeliveryPlan::Suppress,
+        NotificationMode::WhenHidden | NotificationMode::Always => {}
+    }
     let title = if requests.len() == 1 {
         "AgentMFA needs your approval".to_string()
     } else {
         format!("{} new requests need your approval", requests.len())
     };
-    let body = if show_context && requests.len() == 1 {
+    let body = if settings.show_context && requests.len() == 1 {
         let request = &requests[0];
         let agent = agent_display(&request.agent, "An agent");
         let connection = notification_label(&request.connection, "a tool");
@@ -608,17 +665,30 @@ fn show_notification(
         format!("Open the Request Inbox to review {total} waiting requests.")
     };
 
-    deliver_notification(app, &title, &body)
+    DeliveryPlan::Notify(NotificationContent { title, body })
 }
 
 /// Queue one native notification. One worker owns delivery and interaction
 /// observation for the process, so an unacknowledged banner cannot leak one
 /// blocked thread and one platform timer per request.
-fn deliver_notification(app: &AppHandle, title: &str, body: &str) -> Result<(), String> {
+fn deliver_notification(app: &AppHandle, content: &NotificationContent) -> Result<(), String> {
     let attention = app
         .try_state::<RequestAttention>()
         .ok_or_else(|| "notification coordinator is unavailable".to_string())?;
-    attention.enqueue_notification(app, title.to_string(), body.to_string())
+    deliver_with_sink(
+        &QueueNotificationSink {
+            attention: &attention,
+            app,
+        },
+        content,
+    )
+}
+
+fn deliver_with_sink(
+    sink: &dyn NotificationSink,
+    content: &NotificationContent,
+) -> Result<(), String> {
+    sink.deliver(content)
 }
 
 fn notification_worker(rx: mpsc::Receiver<NotificationJob>) {
@@ -985,18 +1055,22 @@ fn notify_elicitation(app: &AppHandle, pending: &ElicitationSummary) {
     let Some(attention) = app.try_state::<RequestAttention>() else {
         return;
     };
-    let (mode, show_context) = {
+    let settings = {
         let inner = attention.inner.lock().unwrap();
-        (inner.settings.mode, inner.settings.show_context)
+        inner.settings
     };
-    match mode {
-        NotificationMode::Off => {
+    let content = match elicitation_delivery_plan(
+        pending,
+        settings,
+        crate::windows::request_surface_focused(),
+    ) {
+        DeliveryPlan::SurfaceWindow => {
             crate::windows::surface_for_approval(app);
             return;
         }
-        NotificationMode::WhenHidden if crate::windows::request_surface_focused() => return,
-        NotificationMode::WhenHidden | NotificationMode::Always => {}
-    }
+        DeliveryPlan::Suppress => return,
+        DeliveryPlan::Notify(content) => content,
+    };
     let total = attention.count();
     match attention
         .inner
@@ -1010,17 +1084,35 @@ fn notify_elicitation(app: &AppHandle, pending: &ElicitationSummary) {
             let body = format!(
                 "Open the Request Inbox to review {total} waiting requests. Further notifications are paused for one minute."
             );
-            if let Err(error) =
-                deliver_notification(app, "Many AgentMFA requests are waiting", &body)
-            {
+            let storm = NotificationContent {
+                title: "Many AgentMFA requests are waiting".into(),
+                body,
+            };
+            if let Err(error) = deliver_notification(app, &storm) {
                 tracing::warn!(%error, "could not deliver the notification rate-limit warning");
             }
             return;
         }
         NotificationAdmission::Suppressed => return,
     }
+    if let Err(error) = deliver_notification(app, &content) {
+        tracing::warn!(%error, "could not deliver an elicitation notification");
+        crate::windows::surface_for_approval(app);
+    }
+}
+
+fn elicitation_delivery_plan(
+    pending: &ElicitationSummary,
+    settings: NotificationSettings,
+    surface_focused: bool,
+) -> DeliveryPlan {
+    match settings.mode {
+        NotificationMode::Off => return DeliveryPlan::SurfaceWindow,
+        NotificationMode::WhenHidden if surface_focused => return DeliveryPlan::Suppress,
+        NotificationMode::WhenHidden | NotificationMode::Always => {}
+    }
     let title = "AgentMFA needs your input".to_string();
-    let body = if show_context {
+    let body = if settings.show_context {
         let agent = notification_label(&pending.agent, "An agent");
         let connection = notification_label(&pending.connection, "a tool");
         format!(
@@ -1029,10 +1121,7 @@ fn notify_elicitation(app: &AppHandle, pending: &ElicitationSummary) {
     } else {
         "An upstream asked for input. Open the Request Inbox to respond.".to_string()
     };
-    if let Err(error) = deliver_notification(app, &title, &body) {
-        tracing::warn!(%error, "could not deliver an elicitation notification");
-        crate::windows::surface_for_approval(app);
-    }
+    DeliveryPlan::Notify(NotificationContent { title, body })
 }
 
 /// A parked elicitation left the queue (answered, cancelled, or lapsed): drop
@@ -1070,6 +1159,26 @@ pub fn sync_tray(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct FakeNotificationSink {
+        delivered: Mutex<Vec<NotificationContent>>,
+        failure: Option<String>,
+    }
+
+    impl NotificationSink for FakeNotificationSink {
+        fn deliver(&self, content: &NotificationContent) -> Result<(), String> {
+            if let Some(failure) = &self.failure {
+                return Err(failure.clone());
+            }
+            self.delivered.lock().unwrap().push(content.clone());
+            Ok(())
+        }
+    }
+
+    fn settings(mode: NotificationMode, show_context: bool) -> NotificationSettings {
+        NotificationSettings { mode, show_context }
+    }
 
     fn approval(id: &str, agent: &str) -> ApprovalDto {
         ApprovalDto {
@@ -1132,6 +1241,201 @@ mod tests {
 
         assert!(tracker.take_pending().is_empty());
         assert_eq!(tracker.active.len(), 0);
+    }
+
+    #[test]
+    fn request_delivery_mode_and_focus_matrix_is_explicit() {
+        let requests = vec![RequestSummary::from(approval("one", "codex"))];
+        for focused in [false, true] {
+            assert_eq!(
+                request_delivery_plan(
+                    &requests,
+                    1,
+                    settings(NotificationMode::Off, false),
+                    focused,
+                ),
+                DeliveryPlan::SurfaceWindow
+            );
+            assert!(matches!(
+                request_delivery_plan(
+                    &requests,
+                    1,
+                    settings(NotificationMode::Always, false),
+                    focused,
+                ),
+                DeliveryPlan::Notify(_)
+            ));
+        }
+        assert!(matches!(
+            request_delivery_plan(
+                &requests,
+                1,
+                settings(NotificationMode::WhenHidden, false),
+                false,
+            ),
+            DeliveryPlan::Notify(_)
+        ));
+        assert_eq!(
+            request_delivery_plan(
+                &requests,
+                1,
+                settings(NotificationMode::WhenHidden, false),
+                true,
+            ),
+            DeliveryPlan::Suppress
+        );
+    }
+
+    #[test]
+    fn request_delivery_content_covers_single_batch_and_privacy_modes() {
+        let request = RequestSummary::from(approval("one", "codex\nagent"));
+        let contextual = request_delivery_plan(
+            std::slice::from_ref(&request),
+            1,
+            settings(NotificationMode::Always, true),
+            true,
+        );
+        assert_eq!(
+            contextual,
+            DeliveryPlan::Notify(NotificationContent {
+                title: "AgentMFA needs your approval".into(),
+                body: "codex agent is waiting to use github. Open the Request Inbox to review."
+                    .into(),
+            })
+        );
+
+        let private = request_delivery_plan(
+            std::slice::from_ref(&request),
+            1,
+            settings(NotificationMode::Always, false),
+            false,
+        );
+        assert_eq!(
+            private,
+            DeliveryPlan::Notify(NotificationContent {
+                title: "AgentMFA needs your approval".into(),
+                body: "Open the Request Inbox to review this request.".into(),
+            })
+        );
+
+        let batch = request_delivery_plan(
+            &[request, RequestSummary::from(approval("two", "claude"))],
+            4,
+            settings(NotificationMode::Always, true),
+            false,
+        );
+        assert_eq!(
+            batch,
+            DeliveryPlan::Notify(NotificationContent {
+                title: "2 new requests need your approval".into(),
+                body: "Open the Request Inbox to review 4 waiting requests.".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn elicitation_delivery_mode_focus_and_context_are_covered() {
+        let elicitation = ElicitationSummary {
+            id: "question".into(),
+            agent: "codex".into(),
+            connection: "postgres".into(),
+        };
+        assert_eq!(
+            elicitation_delivery_plan(&elicitation, settings(NotificationMode::Off, true), false,),
+            DeliveryPlan::SurfaceWindow
+        );
+        assert_eq!(
+            elicitation_delivery_plan(
+                &elicitation,
+                settings(NotificationMode::WhenHidden, true),
+                true,
+            ),
+            DeliveryPlan::Suppress
+        );
+        assert_eq!(
+            elicitation_delivery_plan(&elicitation, settings(NotificationMode::Always, true), true,),
+            DeliveryPlan::Notify(NotificationContent {
+                title: "AgentMFA needs your input".into(),
+                body:
+                    "postgres needs your input. codex is paused. Open the Request Inbox to respond."
+                        .into(),
+            })
+        );
+    }
+
+    #[test]
+    fn notification_sink_observes_payloads_and_can_fail() {
+        let content = NotificationContent {
+            title: "A title".into(),
+            body: "A body".into(),
+        };
+        let sink = FakeNotificationSink::default();
+        deliver_with_sink(&sink, &content).unwrap();
+        assert_eq!(*sink.delivered.lock().unwrap(), vec![content.clone()]);
+
+        let failing = FakeNotificationSink {
+            delivered: Mutex::new(Vec::new()),
+            failure: Some("blocked".into()),
+        };
+        assert_eq!(
+            deliver_with_sink(&failing, &content).unwrap_err(),
+            "blocked"
+        );
+        assert!(failing.delivered.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn debounced_flush_drains_once_then_resolution_clears_the_count() {
+        let attention = RequestAttention::new(settings(NotificationMode::Always, false));
+        let mut inner = attention.inner.lock().unwrap();
+        assert_eq!(inner.set_scope("local".into()), Some(0));
+        let change = inner
+            .tracker
+            .upsert(RequestSummary::from(approval("one", "codex")), true);
+        let generation = schedule_generation(&mut inner, change.notification_added).unwrap();
+        assert!(inner.flush_scheduled);
+        assert!(schedule_generation(&mut inner, true).is_none());
+
+        let pending = take_pending_flush(&mut inner, generation).unwrap();
+        assert_eq!(pending.requests.len(), 1);
+        assert_eq!(pending.total, 1);
+        assert!(!inner.flush_scheduled);
+        assert!(take_pending_flush(&mut inner, generation).is_none());
+
+        let content = match request_delivery_plan(
+            &pending.requests,
+            pending.total,
+            pending.settings,
+            false,
+        ) {
+            DeliveryPlan::Notify(content) => content,
+            other => panic!("expected a notification, got {other:?}"),
+        };
+        let sink = FakeNotificationSink::default();
+        deliver_with_sink(&sink, &content).unwrap();
+        assert_eq!(sink.delivered.lock().unwrap().len(), 1);
+
+        let resolved = inner.tracker.resolve("one");
+        assert_eq!(resolved.count, 0);
+        assert_eq!(inner.total(), 0);
+    }
+
+    #[test]
+    fn scope_switch_invalidates_a_scheduled_flush() {
+        let attention = RequestAttention::new(settings(NotificationMode::Always, false));
+        let mut inner = attention.inner.lock().unwrap();
+        inner.set_scope("local".into());
+        let change = inner
+            .tracker
+            .upsert(RequestSummary::from(approval("one", "codex")), true);
+        let old_generation = schedule_generation(&mut inner, change.notification_added).unwrap();
+
+        assert_eq!(
+            inner.set_scope("remote:https://broker.example".into()),
+            Some(0)
+        );
+        assert!(take_pending_flush(&mut inner, old_generation).is_none());
+        assert!(inner.tracker.active.is_empty());
     }
 
     #[test]
