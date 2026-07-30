@@ -39,7 +39,7 @@
         "visible": false,
         "dragDropEnabled": false,
         "skipTaskbar": true,
-        "focus": true,
+        "focus": false,
         "url": "index.html#dropdown"
       }
     ],

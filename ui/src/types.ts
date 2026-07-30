@@ -353,6 +353,7 @@ export interface NotificationSettings {
   available: boolean;
   unavailableReason?: string;
   canOpenSystemSettings: boolean;
+  canRequestPermission: boolean;
 }
 
 export interface HostKeyCandidate {
@@ -553,7 +554,10 @@ export interface CommandMap {
   set_notification_settings: CommandSpec<{
     settings: NotificationSettings;
   }, NotificationSettings>;
+  request_notification_permission: CommandSpec<undefined, NotificationSettings>;
   open_notification_settings: CommandSpec<undefined, void>;
+  get_autostart: CommandSpec<undefined, boolean>;
+  set_autostart: CommandSpec<{ on: boolean }, boolean>;
   get_agent_setup: CommandSpec<undefined, string>;
   copy_agent_setup: CommandSpec<undefined, void>;
   inspect_ssh_import: CommandSpec<{ source: string }, SshImportPreview>;

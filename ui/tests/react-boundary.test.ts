@@ -535,12 +535,17 @@ test('approval sheets use structured credential and TOFU provenance context', as
   assert.match(app, /hostKeyDecision \? 'Trust and pin'/);
 });
 
-test('request notification policy exposes sound, Focus, and escalation controls', async () => {
+test('request attention policy exposes escalation, onboarding, and autostart controls', async () => {
   const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
 
   assert.match(app, /data-act="toggle-notification-sound"/);
   assert.match(app, /data-act="toggle-notification-time-sensitive"/);
   assert.match(app, /data-act="set-notification-escalation"/);
+  assert.match(app, /data-act="request-notification-permission"/);
+  assert.match(app, /data-act="toggle-autostart"/);
+  assert.match(app, /invoke\('set_autostart'/);
+  assert.match(app, /notificationModeBtn\('off', 'Window only'\)/);
+  assert.match(app, /Window only still brings the Inbox forward/);
   assert.match(app, /Your system settings remain in control/);
 });
 

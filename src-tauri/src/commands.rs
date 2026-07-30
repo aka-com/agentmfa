@@ -1836,6 +1836,7 @@ pub fn get_notification_settings(
             available: false,
             unavailable_reason: Some("notification coordinator is unavailable".into()),
             can_open_system_settings: cfg!(target_os = "macos"),
+            can_request_permission: false,
         })
 }
 
@@ -1859,10 +1860,39 @@ pub fn set_notification_settings(
             available: false,
             unavailable_reason: Some("notification coordinator is unavailable".into()),
             can_open_system_settings: cfg!(target_os = "macos"),
+            can_request_permission: false,
         }
     };
     let _ = app.emit(EVT_NOTIFICATION_SETTINGS, view.clone());
     Ok(view)
+}
+
+#[tauri::command]
+pub async fn request_notification_permission(
+    app: AppHandle,
+) -> CmdResult<crate::attention::NotificationSettingsView> {
+    crate::attention::request_notification_permission(&app).await
+}
+
+#[tauri::command]
+pub fn get_autostart(app: AppHandle) -> CmdResult<bool> {
+    use tauri_plugin_autostart::ManagerExt as _;
+    app.autolaunch()
+        .is_enabled()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn set_autostart(app: AppHandle, on: bool) -> CmdResult<bool> {
+    use tauri_plugin_autostart::ManagerExt as _;
+    let manager = app.autolaunch();
+    if on {
+        manager.enable()
+    } else {
+        manager.disable()
+    }
+    .map_err(|error| error.to_string())?;
+    manager.is_enabled().map_err(|error| error.to_string())
 }
 
 /// Open the operating system's notification settings. This is a fixed,
@@ -1945,7 +1975,10 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         set_presence_window,
         get_notification_settings,
         set_notification_settings,
+        request_notification_permission,
         open_notification_settings,
+        get_autostart,
+        set_autostart,
         crate::windows::ui_set_mode,
         crate::windows::ui_hide_main,
         crate::windows::ui_hide_dropdown,

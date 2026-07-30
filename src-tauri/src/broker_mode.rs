@@ -91,8 +91,9 @@ pub struct NotificationSettings {
     /// The operating system and user remain authoritative about Focus/DND.
     #[serde(default)]
     pub time_sensitive: bool,
-    /// Bring the Request Inbox forward if work is still waiting after this
-    /// many seconds. Zero disables escalation.
+    /// Bring the Request Inbox forward and re-alert this many seconds before
+    /// a waiting request expires. Zero disables the second native banner;
+    /// the near-deadline in-app fallback remains active.
     #[serde(default = "default_notification_escalation_secs")]
     pub escalation_secs: u64,
 }

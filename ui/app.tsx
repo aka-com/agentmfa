@@ -457,11 +457,20 @@ async function loadSettings(): Promise<boolean> {
 }
 async function loadNotificationSettings(): Promise<void> {
   const epoch = notificationSettingsEpoch;
-  try {
-    const settings = await invoke('get_notification_settings');
-    if (epoch === notificationSettingsEpoch) state.notificationSettings = settings;
+  const [settings, launchAtLogin] = await Promise.allSettled([
+    invoke('get_notification_settings'),
+    invoke('get_autostart'),
+  ]);
+  if (settings.status === 'fulfilled' && epoch === notificationSettingsEpoch) {
+    state.notificationSettings = settings.value;
+  } else if (settings.status === 'rejected') {
+    console.error('get_notification_settings', settings.reason);
   }
-  catch (e) { console.error('get_notification_settings', e); }
+  if (launchAtLogin.status === 'fulfilled') {
+    state.launchAtLogin = launchAtLogin.value;
+  } else {
+    console.error('get_autostart', launchAtLogin.reason);
+  }
 }
 async function loadLocalUsername(): Promise<void> {
   try { state.localUsername = await invoke('get_local_username'); }
@@ -4517,9 +4526,9 @@ function SettingsSheet(): ReactNode {
   );
   const notificationRow = <div className="set-row notification-setting"><div className="set-txt">
       <div className="st-title">Request notifications</div>
-      <div className="st-sub">Native notifications are delivered by this computer and never include request details.</div></div>
+      <div className="st-sub">Native notifications are delivered by this computer and never include request details. Window only still brings the Inbox forward.</div></div>
       <div className="seg in-form notification-modes" role="radiogroup" aria-label="Request notifications">
-        {notificationModeBtn('off', 'Off')}
+        {notificationModeBtn('off', 'Window only')}
         {notificationModeBtn('when_hidden', 'When away')}
         {notificationModeBtn('always', 'Always')}
       </div></div>;
@@ -4527,7 +4536,9 @@ function SettingsSheet(): ReactNode {
     : <div className="notification-warning" role="status">
       <b>Native notifications are unavailable.</b>
       <span>{notifications.unavailableReason || 'Use the Request Inbox for waiting requests.'}</span>
-      {notifications.canOpenSystemSettings
+      {notifications.canRequestPermission
+        ? <button className="cd-live-link" data-act="request-notification-permission">Enable notifications</button>
+        : notifications.canOpenSystemSettings
         ? <button className="cd-live-link" data-act="open-notification-settings">Open notification settings</button>
         : null}
     </div>;
@@ -4558,12 +4569,19 @@ function SettingsSheet(): ReactNode {
       aria-checked={notifications.escalationSecs === secs}>{label}</button>
   );
   const notificationEscalationRow = notifications.mode === 'off' ? null
-    : <div className="set-row"><div className="set-txt"><div className="st-title">Bring Inbox forward if unanswered</div>
-      <div className="st-sub">Escalate only while the same request is still waiting.</div></div>
-      <div className="seg in-form" role="radiogroup" aria-label="Escalate waiting requests after">
+    : <div className="set-row"><div className="set-txt"><div className="st-title">Re-alert before the deadline</div>
+      <div className="st-sub">Bring the Inbox forward only while the same request is still waiting. The final in-app fallback remains on when re-alerting is off.</div></div>
+      <div className="seg in-form" role="radiogroup" aria-label="Re-alert before a waiting request expires">
         {escalationBtn(0, 'Off')}{escalationBtn(15, '15 sec')}
         {escalationBtn(30, '30 sec')}{escalationBtn(60, '1 min')}
       </div></div>;
+  const autostartRow = <div className="set-row"><div className="set-txt">
+      <div className="st-title">Launch AgentMFA at login</div>
+      <div className="st-sub">Start the broker and tray automatically so agents do not arrive before their approval surface.</div></div>
+      <button className={`switch ${state.launchAtLogin ? 'on' : ''}`}
+        data-act="toggle-autostart" role="checkbox"
+        aria-label="Launch AgentMFA at login"
+        aria-checked={state.launchAtLogin}></button></div>;
   const reauthRow = <div className="set-row"><div className="set-txt"><div className="st-title">Confirm before using saved secrets</div>
       <div className="st-sub">Optional: use OS authentication before showing, copying, or sending a saved credential. Off by default.</div></div>
       <button className={`switch ${s.reauth_on_read ? 'on' : ''}`} data-act="toggle-reauth"
@@ -4642,6 +4660,7 @@ function SettingsSheet(): ReactNode {
       <h3 id="settings-title">Settings</h3>
       {notificationRow}{notificationWarning}{notificationPreviewRow}
       {notificationSoundRow}{notificationFocusRow}{notificationEscalationRow}
+      {autostartRow}
       {brokerKeyRow}
       {settingsFailed ? settingsFailureRow : <>{authenticationRows}{hostKeyRow}{dockRow}</>}
       <div className="sheet-actions"><button className="btn primary" data-act="sheet-cancel">Done</button></div>
@@ -6600,8 +6619,34 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       try {
         const saved = await invoke('set_notification_settings', { settings });
         if (settingsEpoch === notificationSettingsEpoch) state.notificationSettings = saved;
-        const label = id === 'off' ? 'off' : id === 'always' ? 'always on' : 'on when you’re away';
+        const label = id === 'off'
+          ? 'use the Inbox window only'
+          : id === 'always' ? 'always on' : 'on when you’re away';
         toast(`🔔 Request notifications ${label}`);
+      } catch (error) {
+        toast('⚠ ' + errorMessage(error));
+      }
+      render();
+      break;
+    }
+    case 'request-notification-permission': {
+      try {
+        state.notificationSettings = await invoke('request_notification_permission');
+        toast('🔔 Request notifications enabled');
+      } catch (error) {
+        toast('⚠ ' + errorMessage(error));
+      }
+      render();
+      break;
+    }
+    case 'toggle-autostart': {
+      try {
+        state.launchAtLogin = await invoke('set_autostart', {
+          on: !state.launchAtLogin,
+        });
+        toast(state.launchAtLogin
+          ? '✓ AgentMFA will launch at login'
+          : 'AgentMFA will not launch at login');
       } catch (error) {
         toast('⚠ ' + errorMessage(error));
       }
@@ -6674,8 +6719,8 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
         const saved = await invoke('set_notification_settings', { settings });
         if (settingsEpoch === notificationSettingsEpoch) state.notificationSettings = saved;
         toast(secs === 0
-          ? '🔕 Request Inbox escalation off'
-          : `🔔 Request Inbox escalates after ${secs} seconds`);
+          ? '🔕 Native request re-alerts off'
+          : `🔔 Requests re-alert ${secs} seconds before expiry`);
       } catch (error) {
         toast('⚠ ' + errorMessage(error));
       }

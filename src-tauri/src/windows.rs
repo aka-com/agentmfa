@@ -10,15 +10,15 @@ use std::time::{Duration, Instant};
 
 use tauri::menu::{Menu, MenuItem, MenuItemKind, PredefinedMenuItem, WINDOW_SUBMENU_ID};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, Rect};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, Rect, UserAttentionType};
 
 #[cfg(target_os = "macos")]
 use tauri_nspanel::{tauri_panel, ManagerExt as _, WebviewWindowExt as _};
 
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(any(test, target_os = "windows", all(unix, not(target_os = "macos"))))]
 use tauri::image::Image;
 
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(any(test, target_os = "windows", all(unix, not(target_os = "macos"))))]
 const TRAY_ICON_BYTES: &[u8] = include_bytes!("../icons/tray.png");
 #[cfg(test)]
 const APP_ICON_BYTES: &[u8] = include_bytes!("../icons/icon.png");
@@ -36,9 +36,10 @@ const TRAY_REQUESTS_ID: &str = "tray-requests";
 const TRAY_SETTINGS_ID: &str = "tray-settings";
 const TRAY_QUIT_ID: &str = "tray-quit";
 
-/// Windows does not render tray titles, so pending work needs an icon-level
-/// state change. The tooltip and menu continue to carry the exact count.
-#[cfg(any(test, target_os = "windows"))]
+/// Windows and many Linux StatusNotifierItem hosts do not render tray titles,
+/// so pending work needs an icon-level state change. The tooltip and menu
+/// continue to carry the exact count.
+#[cfg(any(test, target_os = "windows", all(unix, not(target_os = "macos"))))]
 fn request_tray_icon(waiting: bool) -> tauri::Result<Image<'static>> {
     let icon = Image::from_bytes(TRAY_ICON_BYTES)?;
     if !waiting {
@@ -330,25 +331,35 @@ pub fn update_request_count(app: &AppHandle, request_count: usize) {
             )
         };
         let _ = tray.set_tooltip(Some(tooltip));
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", all(unix, not(target_os = "macos"))))]
         match request_tray_icon(request_count > 0) {
             Ok(icon) => {
                 let _ = tray.set_icon(Some(icon));
             }
             Err(error) => tracing::warn!(%error, "could not update the tray request icon"),
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "macos")]
         {
             let title = (request_count > 0).then(|| request_count.to_string());
             let _ = tray.set_title(title.as_deref());
+        }
+        if let Some(window) = app.get_webview_window(MAIN) {
+            let badge = (request_count > 0).then_some(request_count as i64);
+            let _ = window.set_badge_count(badge);
         }
     });
 }
 
 fn remember_tray_anchor(app: &AppHandle, rect: Rect) {
+    // Tray events report a physical rectangle. Resolve that point against the
+    // desktop before converting the rect so the first dropdown placement does
+    // not inherit the scale of whichever monitor created its hidden window.
+    let tray_position = rect.position.to_physical::<f64>(1.0);
     let scale = app
-        .get_webview_window(DROPDOWN)
-        .and_then(|window| window.scale_factor().ok())
+        .monitor_from_point(tray_position.x, tray_position.y)
+        .ok()
+        .flatten()
+        .map(|monitor| monitor.scale_factor())
         .unwrap_or(1.0);
     let position = rect.position.to_physical::<f64>(scale);
     let size = rect.size.to_physical::<f64>(scale);
@@ -358,6 +369,15 @@ fn remember_tray_anchor(app: &AppHandle, rect: Rect) {
         width: size.width,
         height: size.height,
     });
+}
+
+/// Escalate a waiting request beyond a passive banner. On macOS this maps to
+/// the critical Dock bounce; other desktop runtimes use their strongest
+/// supported attention request.
+pub fn request_critical_attention(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(MAIN) {
+        let _ = window.request_user_attention(Some(UserAttentionType::Critical));
+    }
 }
 
 fn toggle_dropdown(app: &AppHandle) {
@@ -413,10 +433,27 @@ fn show_dropdown_window(app: &AppHandle, window: &tauri::WebviewWindow) {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
 fn show_dropdown_window(_app: &AppHandle, window: &tauri::WebviewWindow) {
     let _ = window.show();
     let _ = window.set_focus();
+}
+
+/// StatusNotifierItem dropdowns should not activate the application merely
+/// because the tray icon was clicked. The first explicit control click can
+/// focus the panel naturally.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn show_dropdown_window(_app: &AppHandle, window: &tauri::WebviewWindow) {
+    // Some Linux window managers activate any newly-shown focusable window.
+    // Make the show itself non-activating, then restore focusability so the
+    // user's first explicit click can focus a control naturally.
+    let _ = window.set_focusable(false);
+    let _ = window.show();
+    let window = window.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = window.set_focusable(true);
+    });
 }
 
 fn dropdown_origin(

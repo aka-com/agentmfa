@@ -751,7 +751,9 @@ let mockNotificationSettings: NotificationSettings = {
   available: false,
   unavailableReason: 'Development build: native notifications are disabled',
   canOpenSystemSettings: false,
+  canRequestPermission: false,
 };
+let mockAutostart = false;
 
 function mockConnectRemote(url: string, token: string | null): unknown {
   const trimmed = url.trim().replace(/\/+$/, '');
@@ -856,6 +858,18 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       emit('aka://notification-settings-changed', { ...mockNotificationSettings });
       return { ...mockNotificationSettings };
     case 'open_notification_settings': return;
+    case 'request_notification_permission':
+      mockNotificationSettings = {
+        ...mockNotificationSettings,
+        available: true,
+        unavailableReason: undefined,
+        canRequestPermission: false,
+      };
+      return { ...mockNotificationSettings };
+    case 'get_autostart': return mockAutostart;
+    case 'set_autostart':
+      mockAutostart = Boolean(args.on);
+      return mockAutostart;
     case 'get_agent_setup': return MOCK_AGENT_SETUP;
     case 'copy_agent_setup': return;
     case 'inspect_ssh_import':

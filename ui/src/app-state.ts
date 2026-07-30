@@ -179,6 +179,7 @@ export interface AppState {
   agentSetupInstructions: string;
   settings: Settings;
   notificationSettings: NotificationSettings;
+  launchAtLogin: boolean;
   loadStatus: Record<LoadKey, LoadStatus>;
   reveal: Record<string, string>;
   epExpanded: Record<string, boolean>;
@@ -249,6 +250,7 @@ const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   escalationSecs: 30,
   available: true,
   canOpenSystemSettings: false,
+  canRequestPermission: false,
 };
 
 export const defaultLoadStatus = (): Record<LoadKey, LoadStatus> => ({
@@ -289,6 +291,7 @@ function createInitialState(): AppState {
     agentSetupInstructions: '',
     settings: { ...DEFAULT_SETTINGS },
     notificationSettings: { ...DEFAULT_NOTIFICATION_SETTINGS },
+    launchAtLogin: false,
     loadStatus: defaultLoadStatus(),
     reveal: {},
     epExpanded: {},
