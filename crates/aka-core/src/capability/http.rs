@@ -877,6 +877,151 @@ impl HttpExecution {
         .await
     }
 
+    /// Perform the approved request and report it as it happens, instead of
+    /// as one object once it is over.
+    ///
+    /// Returns an `ExecOutcome` like the buffered path so the shared policy
+    /// wrappers can refuse it in the same shape — but a call that reached the
+    /// upstream has already answered through the sink by then, and the
+    /// returned outcome is only a record of how it went.
+    ///
+    /// The response cap does not apply: it exists because the JSON envelope
+    /// must hold the whole body, and this path never does. That is the point —
+    /// a large artifact is a transfer here rather than a 502.
+    pub(crate) async fn run_streamed(self, sink: StreamSink) -> ExecOutcome {
+        let started = Instant::now();
+        let (response, redactions) = match self.dial_for_streaming().await {
+            Ok(dialed) => dialed,
+            Err(outcome) => {
+                self.record_health(&outcome);
+                self.audit_streamed(started, &outcome_status_label(&outcome), None);
+                return outcome;
+            }
+        };
+        let status = response.status().as_u16();
+        let mut headers = serde_json::Map::new();
+        for (name, value) in response.headers() {
+            let scrubbed = redactions.apply_to_string(&String::from_utf8_lossy(value.as_bytes()));
+            match headers.get_mut(name.as_str()) {
+                Some(Value::String(existing)) => *existing = format!("{existing}, {scrubbed}"),
+                _ => {
+                    headers.insert(name.as_str().to_string(), json!(scrubbed));
+                }
+            }
+        }
+        if let Some(health) = &self.health {
+            match status {
+                401 | 403 => {
+                    health.record_credential_rejection(
+                        &self.connection.id,
+                        format!(
+                            "The destination answered but rejected the credential (HTTP {status})"
+                        ),
+                    );
+                }
+                _ => {
+                    health.record_ok_if_changed(
+                        &self.connection.id,
+                        "A brokered call reached the destination",
+                    );
+                }
+            }
+        }
+        // Committing the head is what makes every later failure a truncation
+        // rather than a refusal, so it is set before the first chunk can race
+        // the executor's own error path.
+        sink.began.store(true, std::sync::atomic::Ordering::SeqCst);
+        sink.send(StreamEvent::Head {
+            status,
+            headers: Value::Object(headers),
+        })
+        .await;
+
+        let mut body = std::pin::pin!(redacting_stream(response, redactions, |_| {}));
+        let mut bytes = 0u64;
+        let mut failure = None;
+        // Kept only so the steps that run *after* the relay can still read the
+        // response they were written against — most importantly the SEP-2322
+        // scan that mints elicitation permits. Bounded, and abandoned the
+        // moment the body outgrows it: an interactive `input_required` result
+        // is a small JSON document, never the large artifact this path exists
+        // for, so a response past the bound cannot be one.
+        let mut retained: Option<Vec<u8>> = Some(Vec::new());
+        {
+            use futures::StreamExt as _;
+            while let Some(chunk) = body.next().await {
+                match chunk {
+                    Ok(chunk) => {
+                        bytes = bytes.saturating_add(chunk.len() as u64);
+                        match &mut retained {
+                            Some(kept) if kept.len() + chunk.len() <= INSPECTABLE_STREAM_CAP => {
+                                kept.extend_from_slice(&chunk)
+                            }
+                            slot => *slot = None,
+                        }
+                        if !sink.send(StreamEvent::Chunk(chunk)).await {
+                            // The caller hung up. Dropping the body stream
+                            // here is what stops the broker paying for a
+                            // transfer nobody is receiving.
+                            failure = Some("the caller closed the stream".to_string());
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        failure = Some(error.to_string());
+                        break;
+                    }
+                }
+            }
+        }
+        match failure {
+            // A body that died mid-transfer cannot be un-sent, so it ends the
+            // stream where it stopped. The activity log is where the caller
+            // finds out it was short — the wire has no way left to say so.
+            Some(detail) => {
+                self.audit_streamed(started, "stream_interrupted", Some(bytes));
+                broker_error(502, ErrorReason::UpstreamError, detail)
+            }
+            None => {
+                self.audit_streamed(started, &status.to_string(), Some(bytes));
+                let mut record = json!({
+                    "status": status,
+                    "streamed": true,
+                    "bytes": bytes,
+                });
+                if let Some(text) = retained.and_then(|kept| String::from_utf8(kept).ok()) {
+                    record["body"] = json!(text);
+                    record["body_encoding"] = json!("utf8");
+                }
+                ExecOutcome {
+                    status: 200,
+                    body: record,
+                }
+            }
+        }
+    }
+
+    /// The activity entry for a streamed call. Written when the body is done,
+    /// so `response_bytes` is what actually crossed rather than what was
+    /// promised.
+    fn audit_streamed(&self, started: Instant, outcome: &str, bytes: Option<u64>) {
+        let mut entry = AuditEntry::new(
+            AuditKind::HttpExecuted,
+            format!("{} {} via {}", self.method, self.path, self.connection.name),
+        )
+        .agent(self.agent.clone())
+        .connection(self.connection.name.clone())
+        .outcome(outcome)
+        .duration_ms(started.elapsed().as_millis() as u64)
+        .field("method", self.method.as_str())
+        .field("path", self.path.clone())
+        .field("relay", "streamed");
+        if let Some(bytes) = bytes {
+            entry = entry.field("response_bytes", bytes);
+        }
+        self.audit.append(entry);
+    }
+
     /// Dial for a relay that forwards the body as it arrives rather than
     /// buffering it whole.
     ///
@@ -1590,6 +1735,147 @@ pub fn payload_hash(
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
+}
+
+/* ------------------------------- streamed relay --------------------------- */
+
+/// How many frames a slow reader may fall behind before the relay parks.
+///
+/// Small on purpose: the point of streaming is that the broker does not hold
+/// the body, and a deep queue would put it back — just in a channel instead of
+/// a `Vec`.
+const STREAM_QUEUE: usize = 8;
+
+/// How much of a streamed body is kept for the post-relay steps that read it.
+///
+/// Only large enough for the small JSON documents those steps look for; past
+/// it the body is forgotten as it is forwarded, which is the whole point of
+/// streaming.
+const INSPECTABLE_STREAM_CAP: usize = 256 * 1024;
+
+/// One frame of a streamed `/v1/http` answer.
+///
+/// The buffered plane answers with a single JSON object, which means the
+/// caller learns nothing until the last byte and the broker must hold every
+/// byte to say anything at all. The same call asked to stream reports the same
+/// facts in the order they become true.
+#[derive(Debug)]
+pub(crate) enum StreamEvent {
+    /// The call is parked on the user. Sent before the wait, not after, since
+    /// its whole purpose is to be visible during it.
+    Waiting,
+    /// The upstream answered; body bytes follow.
+    Head { status: u16, headers: Value },
+    /// Redacted body bytes, in arrival order.
+    Chunk(bytes::Bytes),
+    /// The body ended normally. Carries the execution's own record of the
+    /// call — anything the wrappers attached after the relay finished, such
+    /// as the elicitation permits an interactive MCP result mints.
+    End { body: Value },
+    /// The call failed or was refused. Terminal, and mutually exclusive with
+    /// `Head` — a caller that has seen a head will never see this.
+    Error(ExecOutcome),
+}
+
+/// The writer half of a streamed answer.
+///
+/// Cloneable so the approval gate can announce the wait on the same channel
+/// the relay will later use, without either of them owning the other.
+#[derive(Clone)]
+pub(crate) struct StreamSink {
+    tx: tokio::sync::mpsc::Sender<StreamEvent>,
+    /// Set once a head has gone out. After that the answer is committed:
+    /// a later failure can only truncate the body, never become a refusal,
+    /// because the status line is already on the wire.
+    began: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl StreamSink {
+    pub(crate) fn new() -> (Self, tokio::sync::mpsc::Receiver<StreamEvent>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(STREAM_QUEUE);
+        (
+            Self {
+                tx,
+                began: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+            rx,
+        )
+    }
+
+    /// Send one frame. `false` means the reader is gone, which is the relay's
+    /// cue to stop pulling an upstream body nobody will receive.
+    async fn send(&self, event: StreamEvent) -> bool {
+        self.tx.send(event).await.is_ok()
+    }
+
+    pub(crate) async fn waiting(&self) {
+        self.send(StreamEvent::Waiting).await;
+    }
+
+    /// Close the stream with how the execution ended.
+    ///
+    /// Sent from one place, after the whole wrapped executor — including the
+    /// steps that run *after* the relay and add to the outcome — so the
+    /// terminal frame carries everything the buffered plane's single object
+    /// would have. A call that never produced a head was refused before it
+    /// reached the upstream, and ends as an error instead.
+    pub(crate) async fn finish(&self, outcome: ExecOutcome) {
+        if self.began.load(std::sync::atomic::Ordering::SeqCst) {
+            self.send(StreamEvent::End { body: outcome.body }).await;
+            return;
+        }
+        self.send(StreamEvent::Error(outcome)).await;
+    }
+}
+
+/// Encode `StreamEvent`s as `text/event-stream` frames.
+///
+/// SSE rather than a bespoke framing because the one consumer that matters —
+/// an MCP transport leg — is already reading SSE, and because a line-oriented
+/// format survives the proxies a JSON-envelope plane is expected to sit
+/// behind. Bodies ride base64 so an arbitrary upstream byte string cannot
+/// break the framing.
+pub(crate) fn stream_events_body(
+    rx: tokio::sync::mpsc::Receiver<StreamEvent>,
+) -> axum::body::Body {
+    let stream = futures::stream::unfold(rx, |mut rx| async move {
+        let event = rx.recv().await?;
+        Some((Ok::<_, std::io::Error>(stream_frame(event)), rx))
+    });
+    axum::body::Body::from_stream(stream)
+}
+
+/// One SSE frame. Split out so the encoding is testable without a socket.
+pub(crate) fn stream_frame(event: StreamEvent) -> bytes::Bytes {
+    use base64::Engine as _;
+    let frame = match event {
+        StreamEvent::Waiting => {
+            format!("event: waiting\ndata: {}\n\n", json!({ "reason": "approval" }))
+        }
+        StreamEvent::Head { status, headers } => format!(
+            "event: head\ndata: {}\n\n",
+            json!({ "status": status, "headers": headers })
+        ),
+        StreamEvent::Chunk(bytes) => format!(
+            "event: chunk\ndata: {}\n\n",
+            json!({ "b64": base64::engine::general_purpose::STANDARD.encode(&bytes) })
+        ),
+        StreamEvent::End { mut body } => {
+            // The relayed bytes already crossed as `chunk` frames; repeating
+            // them here would double every streamed response. What is left is
+            // the call's own record — status, byte count, permits.
+            if let Some(object) = body.as_object_mut() {
+                object.remove("body");
+                object.remove("body_encoding");
+            }
+            format!("event: end\ndata: {body}\n\n")
+        }
+        StreamEvent::Error(outcome) => format!(
+            "event: error\ndata: {}\n\n",
+            json!({ "status": outcome.status, "body": outcome.body })
+        ),
+    };
+    bytes::Bytes::from(frame)
 }
 
 /* --------------------------- per-wiring endpoint -------------------------- */

@@ -143,12 +143,15 @@ impl SseParser {
 
 /* -------------------------------- bridge ---------------------------------- */
 
-struct Bridge {
-    http: reqwest::Client,
-    paths: Paths,
-    mcp_url: String,
-    token: String,
-    label: Option<String>,
+/// Everything about the bridge that one request can change.
+///
+/// Behind a lock because requests run concurrently: a stdio client that
+/// pipelines two calls must not have the second wait out the first, which is
+/// the difference between "one tool call is slow" and "the session is
+/// unusable while one tool call is slow". The lock is held for reads and
+/// writes of these fields only, never across a request.
+#[derive(Default)]
+struct SessionState {
     /// The streamable-HTTP session, captured from the initialize response's
     /// `Mcp-Session-Id` header and echoed on every later request.
     session: Option<String>,
@@ -159,6 +162,39 @@ struct Bridge {
     /// The revision `initialize` settled on, echoed on the notification leg
     /// so a server that checks the header there accepts the stream.
     protocol_version: Option<String>,
+    /// Where the MCP host is, and the key to present. Both are re-read on
+    /// recovery — a rotated key, a restarted sidecar on a new port.
+    mcp_url: String,
+    token: String,
+}
+
+struct Bridge {
+    http: reqwest::Client,
+    paths: Paths,
+    label: Option<String>,
+    state: std::sync::Mutex<SessionState>,
+    /// Held across a whole recovery so two calls that both hit an expired
+    /// session re-initialize once between them rather than racing to mint
+    /// competing replacements.
+    recovery: tokio::sync::Mutex<()>,
+}
+
+impl Bridge {
+    fn session(&self) -> Option<String> {
+        self.state.lock().unwrap().session.clone()
+    }
+
+    fn protocol_version(&self) -> Option<String> {
+        self.state.lock().unwrap().protocol_version.clone()
+    }
+
+    fn mcp_url(&self) -> String {
+        self.state.lock().unwrap().mcp_url.clone()
+    }
+
+    fn token(&self) -> String {
+        self.state.lock().unwrap().token.clone()
+    }
 }
 
 /// One request's outcome: the JSON-RPC messages to emit on stdout.
@@ -171,16 +207,21 @@ enum Relay {
     SessionGone,
 }
 
+/// Where a live frame goes the moment it is parsed, rather than when the
+/// request it arrived on finishes.
+type Outbox = tokio::sync::mpsc::UnboundedSender<String>;
+
 impl Bridge {
-    async fn post(&mut self, message: &str) -> Result<Relay, String> {
+    async fn post(&self, message: &str, out: &Outbox) -> Result<Relay, String> {
         let mut request = self
             .http
-            .post(&self.mcp_url)
-            .header("authorization", format!("Bearer {}", self.token))
+            .post(self.mcp_url())
+            .header("authorization", format!("Bearer {}", self.token()))
             .header("accept", "application/json, text/event-stream")
             .header("content-type", "application/json")
             .body(message.to_string());
-        if let Some(session) = &self.session {
+        let sent_with_session = self.session();
+        if let Some(session) = &sent_with_session {
             request = request.header("mcp-session-id", session.clone());
         }
         if let Some(label) = &self.label {
@@ -218,7 +259,7 @@ impl Bridge {
             .get("mcp-session-id")
             .and_then(|v| v.to_str().ok())
         {
-            self.session = Some(session.to_string());
+            self.state.lock().unwrap().session = Some(session.to_string());
         }
         let status = response.status();
         if status == 202 || status == 204 {
@@ -247,11 +288,11 @@ impl Bridge {
                 .map_err(|error| format!("MCP stream failed: {error}"))?
             {
                 for event in parser.push_bytes(&chunk) {
-                    messages.push(event);
+                    forward_or_collect(event, out, &mut messages);
                 }
             }
             if let Some(event) = parser.finish() {
-                messages.push(event);
+                forward_or_collect(event, out, &mut messages);
             }
             return Ok(Relay::Messages(messages));
         }
@@ -260,7 +301,7 @@ impl Bridge {
             .text()
             .await
             .map_err(|error| format!("MCP response read failed: {error}"))?;
-        if status == reqwest::StatusCode::NOT_FOUND && self.session.is_some() {
+        if status == reqwest::StatusCode::NOT_FOUND && sent_with_session.is_some() {
             return Ok(Relay::SessionGone);
         }
         if !status.is_success() {
@@ -278,22 +319,25 @@ impl Bridge {
     }
 
     /// Refresh the shared key from the token file (rotation rewrote it).
-    async fn refresh_token(&mut self) -> Result<(), String> {
-        self.token = shared_key(&self.paths, self.label.as_deref()).await?;
+    async fn refresh_token(&self) -> Result<(), String> {
+        let token = shared_key(&self.paths, self.label.as_deref()).await?;
+        self.state.lock().unwrap().token = token;
         Ok(())
     }
 
     /// Re-discover the MCP host (a sidecar restart moves the port).
-    async fn rediscover(&mut self) -> Result<(), String> {
-        self.mcp_url = discover_mcp_url(&self.paths.socket_file()).await?;
+    async fn rediscover(&self) -> Result<(), String> {
+        let url = discover_mcp_url(&self.paths.socket_file()).await?;
+        self.state.lock().unwrap().mcp_url = url;
         Ok(())
     }
 
-    fn remember_handshake(&mut self, message: &str, value: &serde_json::Value) {
+    fn remember_handshake(&self, message: &str, value: &serde_json::Value) {
+        let mut state = self.state.lock().unwrap();
         match value.get("method").and_then(serde_json::Value::as_str) {
-            Some("initialize") => self.initialize_message = Some(message.to_string()),
+            Some("initialize") => state.initialize_message = Some(message.to_string()),
             Some("notifications/initialized") => {
-                self.initialized_notification = Some(message.to_string())
+                state.initialized_notification = Some(message.to_string())
             }
             _ => {}
         }
@@ -302,7 +346,7 @@ impl Bridge {
     /// Capture the revision `initialize` settled on, so the notification leg
     /// can present the header a conforming server requires on every request
     /// after the handshake.
-    fn remember_negotiated_version(&mut self, messages: &[String]) {
+    fn remember_negotiated_version(&self, messages: &[String]) {
         for message in messages {
             let Ok(value) = serde_json::from_str::<serde_json::Value>(message) else {
                 continue;
@@ -311,26 +355,42 @@ impl Bridge {
                 .pointer("/result/protocolVersion")
                 .and_then(serde_json::Value::as_str)
             {
-                self.protocol_version = Some(version.to_string());
+                self.state.lock().unwrap().protocol_version = Some(version.to_string());
                 return;
             }
         }
     }
 
-    async fn recover_session(&mut self, current_method: Option<&str>) -> Result<(), String> {
+    async fn recover_session(
+        &self,
+        current_method: Option<&str>,
+        out: &Outbox,
+        failed_with: Option<String>,
+    ) -> Result<(), String> {
+        let _recovering = self.recovery.lock().await;
+        // Another call may have rebuilt the session while this one waited for
+        // the lock. Recovering again would discard a working session and
+        // strand every request already using it.
+        let current = self.session();
+        if current.is_some() && current != failed_with {
+            return Ok(());
+        }
         let initialize = self
+            .state
+            .lock()
+            .unwrap()
             .initialize_message
             .clone()
             .ok_or_else(|| "the MCP session expired before initialize was observed".to_string())?;
-        self.session = None;
+        self.state.lock().unwrap().session = None;
 
-        let mut relay = self.post(&initialize).await?;
+        let mut relay = self.post(&initialize, out).await?;
         if matches!(relay, Relay::StaleToken) {
             self.refresh_token().await?;
-            relay = self.post(&initialize).await?;
+            relay = self.post(&initialize, out).await?;
         }
         match relay {
-            Relay::Messages(_) if self.session.is_some() => {}
+            Relay::Messages(_) if self.session().is_some() => {}
             Relay::Messages(_) => {
                 return Err("the MCP host did not establish a replacement session".into())
             }
@@ -349,8 +409,9 @@ impl Bridge {
         // retry below completes the handshake. Otherwise replay the retained
         // notification before retrying the application request.
         if current_method != Some("notifications/initialized") {
-            if let Some(initialized) = self.initialized_notification.clone() {
-                match self.post(&initialized).await? {
+            let initialized = self.state.lock().unwrap().initialized_notification.clone();
+            if let Some(initialized) = initialized {
+                match self.post(&initialized, out).await? {
                     Relay::Messages(_) => {}
                     Relay::StaleToken => {
                         return Err(
@@ -369,14 +430,19 @@ impl Bridge {
         Ok(())
     }
 
-    async fn relay_message(&mut self, message: &str, value: &serde_json::Value) -> Vec<String> {
+    async fn relay_message(
+        &self,
+        message: &str,
+        value: &serde_json::Value,
+        out: &Outbox,
+    ) -> Vec<String> {
         self.remember_handshake(message, value);
         let method = value.get("method").and_then(serde_json::Value::as_str);
         let mut retried_token = false;
         let mut recovered_session = false;
 
         loop {
-            let relay = match self.post(message).await {
+            let relay = match self.post(message, out).await {
                 Ok(relay) => relay,
                 Err(error) => return vec![internal_error(message, &error)],
             };
@@ -396,16 +462,18 @@ impl Bridge {
                     if let Err(error) = self.rediscover().await {
                         return vec![internal_error(message, &error)];
                     }
-                    self.session = None;
+                    let stale = self.session();
+                    self.state.lock().unwrap().session = None;
                     if method != Some("initialize") {
-                        if let Err(error) = self.recover_session(method).await {
+                        if let Err(error) = self.recover_session(method, out, stale).await {
                             return vec![internal_error(message, &error)];
                         }
                     }
                 }
                 Relay::SessionGone if !recovered_session => {
                     recovered_session = true;
-                    if let Err(error) = self.recover_session(method).await {
+                    let stale = self.session();
+                    if let Err(error) = self.recover_session(method, out, stale).await {
                         return vec![internal_error(message, &error)];
                     }
                 }
@@ -427,6 +495,27 @@ impl Bridge {
             }
         }
     }
+}
+
+/// A server→client notification goes to stdout the moment it parses; a frame
+/// answering the request is collected for the caller.
+///
+/// The distinction matters because a progress notification is worthless once
+/// the call it describes has returned. Collecting both and emitting them
+/// together — which this used to do — delivered every "37% done" at the same
+/// instant as "done".
+///
+/// A retried request re-forwards nothing: notifications already sent stay sent,
+/// and the retry's own stream produces its own.
+fn forward_or_collect(event: String, out: &Outbox, messages: &mut Vec<String>) {
+    let is_notification = serde_json::from_str::<serde_json::Value>(&event)
+        .ok()
+        .is_some_and(|frame| frame.get("id").is_none() && frame.get("method").is_some());
+    if is_notification {
+        let _ = out.send(event);
+        return;
+    }
+    messages.push(event);
 }
 
 fn request_id(message: &str) -> serde_json::Value {
@@ -640,22 +729,23 @@ pub async fn run(paths: Paths, label: Option<String>) -> Result<(), String> {
     let socket = paths.socket_file();
     let mcp_url = discover_mcp_url(&socket).await?;
     let token = shared_key(&paths, label.as_deref()).await?;
-    let mut bridge = Bridge {
+    let bridge = std::sync::Arc::new(Bridge {
         http: reqwest::Client::new(),
         paths,
-        mcp_url,
-        token,
         label,
-        session: None,
-        initialize_message: None,
-        initialized_notification: None,
-        protocol_version: None,
-    };
+        state: std::sync::Mutex::new(SessionState {
+            mcp_url,
+            token,
+            ..SessionState::default()
+        }),
+        recovery: tokio::sync::Mutex::new(()),
+    });
 
-    // Two sources write stdout — request answers and the server's own
-    // notifications — so one task owns the handle and both queue through it.
-    // Interleaving them any other way would risk splicing two JSON-RPC lines
-    // into one.
+    // Several sources write stdout — every in-flight request's answer, the
+    // notifications arriving on their streams, and the server's own
+    // notification leg — so one task owns the handle and all of them queue
+    // through it. Interleaving them any other way would risk splicing two
+    // JSON-RPC lines into one.
     let (out, mut outbox) = tokio::sync::mpsc::unbounded_channel::<String>();
     let writer = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();
@@ -674,9 +764,41 @@ pub async fn run(paths: Paths, label: Option<String>) -> Result<(), String> {
 
     // The notification leg is bound to one session; a re-initialize (a sidecar
     // restart, an evicted session) mints a new one and this follows it there.
-    let mut notifications: Option<tokio::task::JoinHandle<()>> = None;
-    let mut followed_session: Option<String> = None;
+    // Watched rather than checked inline, because with requests running
+    // concurrently there is no single point where "the session just changed"
+    // happens.
+    let (session_tx, mut session_rx) = tokio::sync::watch::channel(None::<String>);
+    let follower = tokio::spawn({
+        let bridge = bridge.clone();
+        let out = out.clone();
+        async move {
+            let mut leg: Option<tokio::task::JoinHandle<()>> = None;
+            while session_rx.changed().await.is_ok() {
+                let session = session_rx.borrow_and_update().clone();
+                if let Some(task) = leg.take() {
+                    task.abort();
+                }
+                if let Some(session) = session {
+                    leg = Some(tokio::spawn(follow_notifications(
+                        bridge.http.clone(),
+                        bridge.mcp_url(),
+                        bridge.token(),
+                        bridge.label.clone(),
+                        session,
+                        bridge.protocol_version(),
+                        out.clone(),
+                    )));
+                }
+            }
+            if let Some(task) = leg.take() {
+                task.abort();
+            }
+        }
+    });
 
+    // Every in-flight relay, so stdin closing waits for the answers already
+    // promised instead of cutting them off.
+    let mut inflight = tokio::task::JoinSet::new();
     let mut stdin = BufReader::new(tokio::io::stdin());
     let mut input = Vec::new();
     loop {
@@ -692,7 +814,7 @@ pub async fn run(paths: Paths, label: Option<String>) -> Result<(), String> {
             input.pop();
         }
         let line = match std::str::from_utf8(&input) {
-            Ok(line) => line,
+            Ok(line) => line.to_string(),
             Err(error) => {
                 let _ = out.send(parse_error(&format!("stdin was not UTF-8: {error}")));
                 continue;
@@ -701,40 +823,60 @@ pub async fn run(paths: Paths, label: Option<String>) -> Result<(), String> {
         if line.trim().is_empty() {
             continue;
         }
-        let value = match serde_json::from_str::<serde_json::Value>(line) {
+        let value = match serde_json::from_str::<serde_json::Value>(&line) {
             Ok(value) => value,
             Err(error) => {
                 let _ = out.send(parse_error(&format!("invalid JSON on stdin: {error}")));
                 continue;
             }
         };
-        let messages = bridge.relay_message(line, &value).await;
-        for message in messages {
-            if out.send(message).is_err() {
-                return Ok(());
+        // The handshake stays in line. Everything else is keyed to the session
+        // `initialize` establishes, so letting a request overtake it would
+        // send it with no session id — a conforming client waits for the
+        // result before sending anything, but the ordering guarantee should
+        // not rest on the client being one.
+        let handshake = matches!(
+            value.get("method").and_then(serde_json::Value::as_str),
+            Some("initialize") | Some("notifications/initialized")
+        );
+        // Otherwise one task per message. A tool call that parks on a human
+        // for a minute used to hold the whole bridge: stdin was not even read
+        // while it ran, so a client could not cancel it, list tools, or start
+        // anything else.
+        let relay = {
+            let bridge = bridge.clone();
+            let out = out.clone();
+            let session_tx = session_tx.clone();
+            async move {
+                for message in bridge.relay_message(&line, &value, &out).await {
+                    if out.send(message).is_err() {
+                        return;
+                    }
+                }
+                // Announce the session this relay observed. `send_if_modified`
+                // makes a re-initialize wake the follower exactly once, however
+                // many concurrent relays noticed it.
+                let session = bridge.session();
+                session_tx.send_if_modified(|current| {
+                    if *current == session {
+                        return false;
+                    }
+                    *current = session;
+                    true
+                });
             }
-        }
-        if bridge.session != followed_session {
-            if let Some(task) = notifications.take() {
-                task.abort();
-            }
-            followed_session = bridge.session.clone();
-            if let Some(session) = bridge.session.clone() {
-                notifications = Some(tokio::spawn(follow_notifications(
-                    bridge.http.clone(),
-                    bridge.mcp_url.clone(),
-                    bridge.token.clone(),
-                    bridge.label.clone(),
-                    session,
-                    bridge.protocol_version.clone(),
-                    out.clone(),
-                )));
-            }
+        };
+        if handshake {
+            relay.await;
+        } else {
+            inflight.spawn(relay);
         }
     }
-    if let Some(task) = notifications.take() {
-        task.abort();
-    }
+    // Answers already in flight are still owed to the client, and the writer
+    // is still holding stdout open for them.
+    while inflight.join_next().await.is_some() {}
+    drop(session_tx);
+    let _ = follower.await;
     drop(out);
     let _ = writer.await;
     Ok(())
@@ -874,7 +1016,12 @@ mod tests {
                     assert_eq!(headers.get("mcp-name").unwrap(), "search");
                     (
                         [("content-type", "text/event-stream")],
-                        "event: message\ndata: {\"jsonrpc\":\"2.0\",\n\
+                        // A progress notification ahead of the answer, as a
+                        // long-running server sends: it must reach stdout on
+                        // its own rather than riding the response out.
+                        "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\
+                         \"notifications/progress\",\"params\":{\"progress\":1}}\n\n\
+                         event: message\ndata: {\"jsonrpc\":\"2.0\",\n\
                          data: \"id\":2,\"result\":{\"ok\":true}}\n\n",
                     )
                         .into_response()
@@ -901,30 +1048,31 @@ mod tests {
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
         let dir = tempfile::tempdir().unwrap();
-        let mut bridge = Bridge {
+        let bridge = Bridge {
             http: reqwest::Client::new(),
             paths: Paths::under(dir.path()),
-            mcp_url: format!("http://127.0.0.1:{port}/mcp"),
-            token: "aka_testkey".into(),
             label: Some("test-client".into()),
-            session: None,
-            initialize_message: None,
-            initialized_notification: None,
-            protocol_version: None,
+            state: std::sync::Mutex::new(SessionState {
+                mcp_url: format!("http://127.0.0.1:{port}/mcp"),
+                token: "aka_testkey".into(),
+                ..SessionState::default()
+            }),
+            recovery: tokio::sync::Mutex::new(()),
         };
+        let (out, mut live) = tokio::sync::mpsc::unbounded_channel::<String>();
 
         let Relay::Messages(init) = bridge
-            .post(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#)
+            .post(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#, &out)
             .await
             .unwrap()
         else {
             panic!("initialize should relay")
         };
         assert_eq!(init, vec![r#"{"jsonrpc":"2.0","id":1,"result":{}}"#]);
-        assert_eq!(bridge.session.as_deref(), Some("sess-1"));
+        assert_eq!(bridge.session().as_deref(), Some("sess-1"));
 
         let Relay::Messages(none) = bridge
-            .post(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
+            .post(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#, &out)
             .await
             .unwrap()
         else {
@@ -933,16 +1081,26 @@ mod tests {
         assert!(none.is_empty(), "202 carries no reply");
 
         let Relay::Messages(called) = bridge
-            .post(r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search"}}"#)
+            .post(
+                r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search"}}"#,
+                &out,
+            )
             .await
             .unwrap()
         else {
             panic!("call should relay")
         };
         // The SSE payload spanned two data lines; joined, it is one message.
-        assert_eq!(called.len(), 1);
+        assert_eq!(called.len(), 1, "only the answer is returned: {called:?}");
         let value: serde_json::Value = serde_json::from_str(&called[0]).unwrap();
         assert_eq!(value["result"]["ok"], true);
+        // MCP-U6. The notification went out on its own, before the answer —
+        // collecting both and emitting them together delivered every
+        // "37% done" at the same instant as "done".
+        let live = live.try_recv().expect("the progress notification is forwarded live");
+        let live: serde_json::Value = serde_json::from_str(&live).unwrap();
+        assert_eq!(live["method"], "notifications/progress");
+        assert!(live.get("id").is_none());
 
         // Non-success HTTP statuses still carry correlated JSON-RPC replies;
         // the bridge must relay their request ids instead of synthesizing an
@@ -958,6 +1116,7 @@ mod tests {
                         "method": method,
                     })
                     .to_string(),
+                    &out,
                 )
                 .await
                 .unwrap()
@@ -983,20 +1142,21 @@ mod tests {
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
         let dir = tempfile::tempdir().unwrap();
-        let mut bridge = Bridge {
+        let bridge = Bridge {
             http: reqwest::Client::new(),
             paths: Paths::under(dir.path()),
-            mcp_url: format!("http://127.0.0.1:{port}/mcp"),
-            token: "aka_old".into(),
             label: None,
-            session: None,
-            initialize_message: None,
-            initialized_notification: None,
-            protocol_version: None,
+            state: std::sync::Mutex::new(SessionState {
+                mcp_url: format!("http://127.0.0.1:{port}/mcp"),
+                token: "aka_old".into(),
+                ..SessionState::default()
+            }),
+            recovery: tokio::sync::Mutex::new(()),
         };
+        let (out, _live) = tokio::sync::mpsc::unbounded_channel::<String>();
         assert!(matches!(
             bridge
-                .post(r#"{"jsonrpc":"2.0","id":1,"method":"x"}"#)
+                .post(r#"{"jsonrpc":"2.0","id":1,"method":"x"}"#, &out)
                 .await,
             Ok(Relay::StaleToken)
         ));
@@ -1072,16 +1232,16 @@ mod tests {
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
         let dir = tempfile::tempdir().unwrap();
-        let mut bridge = Bridge {
+        let bridge = Bridge {
             http: reqwest::Client::new(),
             paths: Paths::under(dir.path()),
-            mcp_url: format!("http://127.0.0.1:{port}/mcp"),
-            token: "aka_testkey".into(),
             label: None,
-            session: None,
-            initialize_message: None,
-            initialized_notification: None,
-            protocol_version: None,
+            state: std::sync::Mutex::new(SessionState {
+                mcp_url: format!("http://127.0.0.1:{port}/mcp"),
+                token: "aka_testkey".into(),
+                ..SessionState::default()
+            }),
+            recovery: tokio::sync::Mutex::new(()),
         };
         let initialize = serde_json::json!({
             "jsonrpc": "2.0",
@@ -1093,27 +1253,114 @@ mod tests {
             "jsonrpc": "2.0",
             "method": "notifications/initialized",
         });
+        let (out, _live) = tokio::sync::mpsc::unbounded_channel::<String>();
         bridge
-            .relay_message(&initialize.to_string(), &initialize)
+            .relay_message(&initialize.to_string(), &initialize, &out)
             .await;
         bridge
-            .relay_message(&initialized.to_string(), &initialized)
+            .relay_message(&initialized.to_string(), &initialized, &out)
             .await;
 
         // Simulate an idle eviction or a sidecar restart on the same port.
-        bridge.session = Some("stale-session".into());
+        bridge.state.lock().unwrap().session = Some("stale-session".into());
         let call = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 7,
             "method": "tools/list",
             "params": {},
         });
-        let messages = bridge.relay_message(&call.to_string(), &call).await;
+        let messages = bridge.relay_message(&call.to_string(), &call, &out).await;
         let response: serde_json::Value = serde_json::from_str(&messages[0]).unwrap();
         assert_eq!(response["id"], 7);
         assert_eq!(response["result"]["recovered"], true);
         assert_eq!(state.lock().unwrap().generation, 2);
-        assert_eq!(bridge.session.as_deref(), Some("session-2"));
+        assert_eq!(bridge.session().as_deref(), Some("session-2"));
+    }
+
+    /// MCP-H1. A relay used to own the loop: a tool call parked on a human
+    /// for a minute meant stdin was not even read while it ran, so the client
+    /// could not cancel it, list tools, or start anything else. The two calls
+    /// here only both finish if they overlap.
+    #[tokio::test]
+    async fn a_slow_call_does_not_hold_the_bridge() {
+        use std::sync::Arc;
+
+        use axum::routing::post;
+
+        async fn handler(body: String) -> axum::response::Response {
+            use axum::response::IntoResponse as _;
+            let message: serde_json::Value = serde_json::from_str(&body).unwrap();
+            if message["method"] == "slow" {
+                // Answers only once the fast call has been served, so a serial
+                // bridge deadlocks here and a concurrent one does not.
+                GATE.get().unwrap().notified().await;
+            } else {
+                GATE.get().unwrap().notify_one();
+            }
+            (
+                [
+                    ("mcp-session-id", "sess-1"),
+                    ("content-type", "application/json"),
+                ],
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": message["id"],
+                    "result": {},
+                })
+                .to_string(),
+            )
+                .into_response()
+        }
+
+        static GATE: std::sync::OnceLock<Arc<tokio::sync::Notify>> = std::sync::OnceLock::new();
+        GATE.set(Arc::new(tokio::sync::Notify::new())).ok();
+
+        let app = axum::Router::new().route("/mcp", post(handler));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = Arc::new(Bridge {
+            http: reqwest::Client::new(),
+            paths: Paths::under(dir.path()),
+            label: None,
+            state: std::sync::Mutex::new(SessionState {
+                mcp_url: format!("http://127.0.0.1:{port}/mcp"),
+                token: "aka_testkey".into(),
+                ..SessionState::default()
+            }),
+            recovery: tokio::sync::Mutex::new(()),
+        });
+        let (out, _live) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+        let slow = tokio::spawn({
+            let bridge = bridge.clone();
+            let out = out.clone();
+            async move {
+                let message = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"slow"});
+                bridge
+                    .relay_message(&message.to_string(), &message, &out)
+                    .await
+            }
+        });
+        let fast = tokio::spawn({
+            let bridge = bridge.clone();
+            async move {
+                let message = serde_json::json!({"jsonrpc":"2.0","id":2,"method":"fast"});
+                bridge
+                    .relay_message(&message.to_string(), &message, &out)
+                    .await
+            }
+        });
+
+        let both = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            (fast.await.unwrap(), slow.await.unwrap())
+        })
+        .await
+        .expect("a serial bridge would deadlock here");
+        assert_eq!(both.0.len(), 1);
+        assert_eq!(both.1.len(), 1);
     }
 
     /// M2. The host announces tool-list changes on the streamable-HTTP GET

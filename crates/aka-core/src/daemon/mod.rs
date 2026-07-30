@@ -1004,6 +1004,14 @@ struct HttpCallBody {
     /// Idempotency key: coalesces retried mutating calls.
     #[serde(default)]
     request_id: Option<String>,
+    /// Answer as `text/event-stream` instead of one JSON object: the wait on
+    /// the user, the response head, body chunks as they arrive, then an end.
+    ///
+    /// Mutually exclusive with `request_id`, and for the same reason the
+    /// direct endpoint's idempotency header is: coalescing has to replay a
+    /// completed outcome to a retry, and a stream leaves nothing to replay.
+    #[serde(default)]
+    stream: bool,
 }
 
 fn request_id_error(request_id: Option<&str>) -> Option<Response> {
@@ -1039,6 +1047,14 @@ async fn post_http(
     }
     if let Some(response) = request_id_error(call.request_id.as_deref()) {
         return response;
+    }
+    if call.stream && call.request_id.is_some() {
+        return err_detail(
+            StatusCode::BAD_REQUEST,
+            ErrorReason::InvalidBody,
+            "request_id and stream cannot be combined: coalescing a retry means \
+             replaying a completed outcome, and a stream keeps none",
+        );
     }
 
     // Resolve the connection: it supplies the *where* and the credential.
@@ -1250,7 +1266,13 @@ async fn post_http(
         body: body.clone(),
         health: Some(broker.health.clone()),
     };
-    let executor: crate::executions::Executor = Box::pin(executor.run());
+    // The two relays share every step up to here — connection, method, path,
+    // headers, body, policy — and differ only in how the answer is shaped.
+    let stream = call.stream.then(crate::capability::http::StreamSink::new);
+    let executor: crate::executions::Executor = match &stream {
+        Some((sink, _)) => Box::pin(executor.run_streamed(sink.clone())),
+        None => Box::pin(executor.run()),
+    };
     let access = broker.access.clone();
     let approvals = broker.approvals.clone();
     let elicitation_permits = broker.elicitation_permits.clone();
@@ -1287,6 +1309,7 @@ async fn post_http(
             executor,
             abandon: None,
         },
+        stream,
     )
     .await
 }
@@ -1899,6 +1922,21 @@ fn approval_refusal(verdict: crate::approvals::Verdict, connection: &str) -> Exe
     }
 }
 
+/// Wrap a streamed answer in the response the SSE contract promises.
+///
+/// `no-store` and `no-transform` are not decoration: a proxy that buffers or
+/// re-encodes this body turns a stream back into the buffered plane it exists
+/// to escape, and the caller has no way to tell.
+fn sse_response(body: axum::body::Body) -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(http::header::CONTENT_TYPE, "text/event-stream")
+        .header(http::header::CACHE_CONTROL, "no-store, no-transform")
+        .header("x-accel-buffering", "no")
+        .body(body)
+        .unwrap_or_else(|_| err(StatusCode::INTERNAL_SERVER_ERROR, ErrorReason::BrokerShutdown))
+}
+
 /// Shared capability tail: an enabled connection executes immediately
 /// (retries still coalesce under their idempotency key); a disabled one is
 /// refused.
@@ -1909,12 +1947,21 @@ fn approval_refusal(verdict: crate::approvals::Verdict, connection: &str) -> Exe
 /// where it actually connects, in the proxy, not at the open that hands out
 /// its ticket: a ticket may be minted and never used, and one ticket can
 /// open many sessions.
+///
+/// `stream` turns the answer from one JSON object into a live event stream.
+/// It carries the sink the executor writes through and the receiver the
+/// response body reads from; everything above it — access, version, and the
+/// approval gate — is the same code either way.
 async fn run_allowed(
     broker: &Arc<Broker>,
     client: &str,
     conn: &crate::types::Connection,
     approval: Option<crate::approvals::ApprovalRequest>,
     exec: ExecRequest,
+    stream: Option<(
+        crate::capability::http::StreamSink,
+        tokio::sync::mpsc::Receiver<crate::capability::http::StreamEvent>,
+    )>,
 ) -> Response {
     if !broker.access.allows(&conn.id) {
         broker.audit.append(
@@ -1975,6 +2022,7 @@ async fn run_allowed(
             let connection_id = conn.id;
             let expected_version = conn.updated_at;
             let connection = conn.name.clone();
+            let waiting_sink = stream.as_ref().map(|(sink, _)| sink.clone());
             // An unkeyed call has no `request_id` a retry could return
             // under: once its one caller disconnects, nobody can ever read
             // the answer, so the parked wait may stop. Keyed calls keep
@@ -1999,6 +2047,12 @@ async fn run_allowed(
                         .is_ok_and(|current| current.updated_at == expected_version);
                     if !access.allows(&connection_id) || !connection_is_current {
                         return ExecOutcome::refusal(ErrorReason::DeniedByPolicy);
+                    }
+                    // Said before the wait, not after: an agent watching a
+                    // stream needs to know it is being asked about *while* it
+                    // is, which is the whole gap between "slow" and "stuck".
+                    if let Some(sink) = &waiting_sink {
+                        sink.waiting().await;
                     }
                     let verdict = match abandon_rx {
                         Some(mut abandoned) => tokio::select! {
@@ -2030,6 +2084,22 @@ async fn run_allowed(
         }
         _ => exec,
     };
+
+    // A streamed answer never enters the idempotency table: it has no
+    // replayable outcome, which is exactly why `request_id` is refused
+    // alongside it. Everything above — access, version, and the approval
+    // gate — has already been applied to the same executor.
+    if let Some((sink, rx)) = stream {
+        tokio::spawn(async move {
+            // The same authorization scope `executions` puts around a buffered
+            // executor. Without it the credential read inside would raise a
+            // native confirmation of its own, on a call the wiring already
+            // authorized.
+            let outcome = crate::authorization::scope(true, exec.executor).await;
+            sink.finish(outcome).await;
+        });
+        return sse_response(crate::capability::http::stream_events_body(rx));
+    }
 
     match broker.executions.run(exec) {
         Ok(Execution::Wait(handle)) => match handle.wait().await {
@@ -2261,6 +2331,9 @@ async fn post_ssh_open(
             executor,
             abandon: None,
         },
+        // Opening a session is a short call whose answer is a small envelope;
+        // there is nothing here to stream.
+        None,
     )
     .await
 }
@@ -2371,6 +2444,9 @@ async fn post_pg_open(
             executor,
             abandon: None,
         },
+        // Opening a session is a short call whose answer is a small envelope;
+        // there is nothing here to stream.
+        None,
     )
     .await
 }

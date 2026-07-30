@@ -44,11 +44,13 @@ import {
   type UpstreamResource,
   type UpstreamResourceTemplate,
   type UpstreamTool,
+  type UpstreamWatch,
 } from './upstream-mcp';
 import { alternateToolName } from './tool-names';
 import {
   ProtocolToolRegistry,
   type RegisteredProtocolTool,
+  type ToolCallContext,
   zodToolInput,
 } from './tool-registry';
 import {
@@ -921,7 +923,7 @@ function registerMetaTools(
       inputSchema: callInput.inputSchema,
       annotations: { openWorldHint: true },
     },
-    async (input, signal) => {
+    async (input, signal, context) => {
       const { connection, tool, arguments: args } = input as {
         connection: string;
         tool: string;
@@ -943,7 +945,13 @@ function registerMetaTools(
       }
       try {
         const result = await callUpstreamTool(
-          broker, principal, entry.connection, entry.tool.name, args ?? {}, signal,
+          broker,
+          principal,
+          entry.connection,
+          entry.tool.name,
+          args ?? {},
+          signal,
+          progressWatch(context, entry.connection),
         );
         return sanitizeUpstreamResult(result) as {
           content: Array<{ type: 'text'; text: string }>;
@@ -954,6 +962,80 @@ function registerMetaTools(
     },
     callInput.parse,
   );
+}
+
+/**
+ * How many progress notifications one tool call may forward.
+ *
+ * An upstream that emits progress in a tight loop would otherwise turn into a
+ * flood on the agent's own connection — and the agent has no way to refuse it
+ * short of dropping the call. The cap is generous for anything reporting real
+ * work and cheap for anything that is not.
+ */
+const MAX_FORWARDED_PROGRESS = 200;
+
+/**
+ * Relay an upstream's progress to the caller that asked for it.
+ *
+ * MCP progress is opt-in per request: a client attaches `_meta.progressToken`
+ * and gets `notifications/progress` back under *its* token. So this translates
+ * rather than forwards — the upstream's token names its own request and means
+ * nothing here. Without a downstream token there is nobody to tell, and the
+ * watcher is omitted entirely so the call stays on the buffered path.
+ *
+ * `message` is upstream prose reaching the agent, so it is sanitized on the
+ * way through like every other untrusted string in this file.
+ */
+function progressWatch(
+  context: ToolCallContext,
+  connection: BrokerConnection,
+): UpstreamWatch | undefined {
+  const progressToken = context.progressToken;
+  if (progressToken === undefined) return undefined;
+  let forwarded = 0;
+  const send = (params: Record<string, unknown>) => {
+    if (forwarded >= MAX_FORWARDED_PROGRESS) return;
+    forwarded += 1;
+    void context
+      .sendNotification({
+        method: 'notifications/progress',
+        params: { progressToken, ...params },
+      })
+      .catch((error) => {
+        log('warn', 'could not forward progress to the caller', {
+          connection: connection.name,
+          error: String(error),
+        });
+      });
+  };
+  return {
+    onWaiting: () => {
+      // The one piece of progress the upstream cannot report, because the
+      // call has not reached it: a human is being asked about this.
+      send({
+        progress: 0,
+        message: `waiting for approval in AgentMFA for ${
+          sanitizeUntrustedText(connection.name, 100).text
+        }`,
+      });
+    },
+    onNotification: (frame) => {
+      if (frame.method !== 'notifications/progress') return;
+      const params = (frame.params ?? {}) as {
+        progress?: unknown;
+        total?: unknown;
+        message?: unknown;
+      };
+      if (typeof params.progress !== 'number') return;
+      send({
+        progress: params.progress,
+        ...(typeof params.total === 'number' ? { total: params.total } : {}),
+        ...(typeof params.message === 'string'
+          ? { message: sanitizeUntrustedText(params.message, 500).text }
+          : {}),
+      });
+    },
+  };
 }
 
 /**
@@ -1152,7 +1234,7 @@ async function registerUpstream(
         ...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}),
         ...(tool.annotations ? { annotations: tool.annotations } : {}),
       },
-      async (args, signal) => {
+      async (args, signal, context) => {
         try {
           const result = await callUpstreamTool(
             broker,
@@ -1161,6 +1243,7 @@ async function registerUpstream(
             tool.name,
             args ?? {},
             signal,
+            progressWatch(context, connection),
           );
           return sanitizeUpstreamResult(result) as {
             content: Array<{ type: 'text'; text: string }>;

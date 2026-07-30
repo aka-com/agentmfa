@@ -363,6 +363,74 @@ export function relayMessages(response: UpstreamResponse): unknown[] {
 }
 
 /**
+ * What a caller wants to hear about while an upstream operation is still
+ * running, rather than after.
+ *
+ * A tool call against a slow server used to be indistinguishable from a hung
+ * one, because the whole exchange was one buffered request. With the broker
+ * streaming, the frames a server emits ahead of its answer — progress,
+ * logging — arrive while they still mean something.
+ */
+export interface UpstreamWatch {
+  /** The broker parked this call on a human decision. */
+  onWaiting?: () => void;
+  /** A server→client JSON-RPC notification that arrived before the answer. */
+  onNotification?: (frame: { method: string; params?: unknown }) => void;
+}
+
+/**
+ * Turn a byte stream of SSE (or of plain JSON) into JSON-RPC frames as they
+ * complete.
+ *
+ * Incremental because that is the entire point: the frames worth forwarding
+ * are the ones that arrive *before* the response, and a parser that waits for
+ * the end sees them at the same time as everyone else. Plain-JSON bodies have
+ * no frame boundary short of the end, so they simply never emit early — which
+ * is correct, since such a body is the answer.
+ */
+export class UpstreamFrameParser {
+  private pending = '';
+
+  push(chunk: Buffer | string): { method: string; params?: unknown }[] {
+    this.pending += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+    const frames: { method: string; params?: unknown }[] = [];
+    for (;;) {
+      const normalized = this.pending.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+      const boundary = normalized.indexOf('\n\n');
+      if (boundary === -1) {
+        this.pending = normalized;
+        break;
+      }
+      const block = normalized.slice(0, boundary);
+      this.pending = normalized.slice(boundary + 2);
+      const data = block
+        .split('\n')
+        .filter((line) => line.startsWith('data:'))
+        .map((line) => {
+          const value = line.slice('data:'.length);
+          return value.startsWith(' ') ? value.slice(1) : value;
+        })
+        .join('\n');
+      if (!data) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(data);
+      } catch {
+        continue;
+      }
+      // Only notifications: a frame with an `id` is a response (which the
+      // caller reads from the assembled body) or a server→client *request*,
+      // which this transport cannot answer and must not pretend to.
+      const frame = parsed as { id?: unknown; method?: unknown; params?: unknown };
+      if (frame && typeof frame === 'object' && frame.id === undefined && typeof frame.method === 'string') {
+        frames.push({ method: frame.method, params: frame.params });
+      }
+    }
+    return frames;
+  }
+}
+
+/**
  * One short-lived session against an upstream MCP server.
  *
  * All traffic rides the broker's `/v1/http` plane; this class only supplies
@@ -379,14 +447,22 @@ class UpstreamClient {
     private readonly broker: BrokerClient,
     private readonly auth: AgentAuth,
     private readonly connection: BrokerConnection,
+    /**
+     * Set for the one operation the caller wants to watch. Only that
+     * operation streams; `initialize`, the initialized notification, and the
+     * teardown DELETE are short exchanges with nothing to report, and
+     * streaming them would cost a second transport path for no signal.
+     */
+    private readonly watch?: UpstreamWatch,
   ) {}
 
   private async send(
     method: 'POST' | 'DELETE',
     payload?: unknown,
     signal?: AbortSignal,
+    watched = false,
   ): Promise<UpstreamResponse> {
-    return (await this.broker.invoke('/v1/http', this.auth, {
+    const call = {
       connection: this.connection.name,
       method,
       path: this.connection.mcp_path,
@@ -399,7 +475,23 @@ class UpstreamClient {
         ...routingHeaders(payload),
       },
       ...(payload === undefined ? {} : { body: payload }),
-    }, signal)) as UpstreamResponse;
+    };
+    if (!watched || !this.watch) {
+      return (await this.broker.invoke('/v1/http', this.auth, call, signal)) as UpstreamResponse;
+    }
+    const watch = this.watch;
+    const parser = new UpstreamFrameParser();
+    return (await this.broker.invokeStreamed(
+      this.auth,
+      call,
+      {
+        onWaiting: () => watch.onWaiting?.(),
+        onBody: (chunk) => {
+          for (const frame of parser.push(chunk)) watch.onNotification?.(frame);
+        },
+      },
+      signal,
+    )) as UpstreamResponse;
   }
 
   private initialized = false;
@@ -492,6 +584,9 @@ class UpstreamClient {
         'POST',
         { jsonrpc: '2.0', id, method, params },
         signal,
+        // This is the operation worth watching: everything the server has to
+        // say about a long call arrives on it.
+        true,
       );
     } finally {
       signal?.removeEventListener('abort', forwardCancellation);
@@ -717,6 +812,7 @@ async function runWithMrtr(
   baseParams: Record<string, unknown>,
   _toolLabel: string,
   signal?: AbortSignal,
+  watch?: UpstreamWatch,
 ): Promise<unknown> {
   let inputResponses: Record<string, unknown> | undefined;
   let requestState: unknown;
@@ -747,7 +843,7 @@ async function runWithMrtr(
 
   for (let round = 0; round < MAX_MRTR_ROUNDS; round++) {
     signal?.throwIfAborted();
-    const client = new UpstreamClient(broker, auth, connection);
+    const client = new UpstreamClient(broker, auth, connection, watch);
     let result: MrtrResult | undefined;
     let elicitationTokens: Record<string, string> = {};
     try {
@@ -919,6 +1015,7 @@ export async function callUpstreamTool(
   tool: string,
   args: Record<string, unknown>,
   signal?: AbortSignal,
+  watch?: UpstreamWatch,
 ): Promise<unknown> {
   return runWithMrtr(
     broker,
@@ -928,5 +1025,6 @@ export async function callUpstreamTool(
     { name: tool, arguments: args },
     tool,
     signal,
+    watch,
   );
 }

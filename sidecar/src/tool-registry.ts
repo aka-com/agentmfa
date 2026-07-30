@@ -17,9 +17,27 @@ export interface ToolDefinition {
   annotations?: ToolAnnotations;
 }
 
+/**
+ * What a handler knows about the call beyond its arguments.
+ *
+ * Only what a *streamed* answer needs: whether the caller asked to be kept
+ * informed, and the channel to inform them on. Nothing here is authorization —
+ * the broker decides that, on the far side of every upstream call.
+ */
+export interface ToolCallContext {
+  /** Set when the caller attached `_meta.progressToken` and wants progress. */
+  progressToken?: string | number;
+  /** Send one server→client notification on the connection this call arrived on. */
+  sendNotification: (notification: {
+    method: string;
+    params?: Record<string, unknown>;
+  }) => Promise<void>;
+}
+
 type ToolHandler<Args extends Record<string, unknown> = Record<string, unknown>> = (
   args: Args,
   signal: AbortSignal,
+  context: ToolCallContext,
 ) => CallToolResult | Promise<CallToolResult>;
 
 interface ToolEntry {
@@ -71,9 +89,19 @@ export class ProtocolToolRegistry {
         );
       }
       const supplied = request.params.arguments ?? {};
+      const progressToken = request.params._meta?.progressToken;
+      const context: ToolCallContext = {
+        ...(typeof progressToken === 'string' || typeof progressToken === 'number'
+          ? { progressToken }
+          : {}),
+        // Bound to this request's own connection by the SDK, so a
+        // notification cannot be delivered to a session that did not ask.
+        sendNotification: (notification) =>
+          extra.sendNotification(notification as Parameters<typeof extra.sendNotification>[0]),
+      };
       try {
         const args = entry.parse ? entry.parse(supplied) : supplied;
-        return await entry.handler(args, extra.signal);
+        return await entry.handler(args, extra.signal, context);
       } catch (error) {
         if (error instanceof z.ZodError) {
           throw new McpError(

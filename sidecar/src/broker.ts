@@ -41,6 +41,41 @@ export interface BrokerConnection {
   confirm?: boolean;
 }
 
+/**
+ * What a caller wants to know while a streamed call is still running.
+ *
+ * Deliberately narrow: the broker's stream carries facts about the *call*
+ * (parked on a user, bytes arriving), and interpreting the bytes — finding an
+ * upstream progress notification in them — is the caller's job, because only
+ * the caller knows what protocol they are in.
+ */
+export interface StreamWatcher {
+  /** The call is parked on a human decision. */
+  onWaiting?: () => void;
+  /** Body bytes, in arrival order, already redacted by the broker. */
+  onBody?: (chunk: Buffer) => void;
+}
+
+/** One SSE block, or `null` when it carries no data line. */
+function parseSseBlock(block: string): { event: string; data: unknown } | null {
+  let event = 'message';
+  const data: string[] = [];
+  for (const line of block.replace(/\r\n/g, '\n').split('\n')) {
+    if (line.startsWith('event:')) {
+      event = line.slice('event:'.length).trim();
+    } else if (line.startsWith('data:')) {
+      const value = line.slice('data:'.length);
+      data.push(value.startsWith(' ') ? value.slice(1) : value);
+    }
+  }
+  if (!data.length) return null;
+  try {
+    return { event, data: JSON.parse(data.join('\n')) };
+  } catch {
+    return null;
+  }
+}
+
 /** A non-2xx from the broker, carried through with its status intact. */
 export class BrokerError extends Error {
   constructor(
@@ -213,6 +248,149 @@ export class BrokerClient {
     signal?: AbortSignal,
   ): Promise<unknown> {
     return this.json<unknown>('POST', path, auth, body, signal);
+  }
+
+  /**
+   * Call `/v1/http` and watch it happen, rather than waiting for one object.
+   *
+   * The broker answers a streamed call as `text/event-stream`: `waiting` while
+   * a confirmation is on screen, `head` when the upstream answers, `chunk` for
+   * body bytes, then `end` — or a single terminal `error`. Body chunks are
+   * handed to `onBody` as they arrive so a caller watching an upstream SSE
+   * stream can act on a notification before the response frame exists, and the
+   * accumulated body is returned in exactly the buffered shape so callers that
+   * only want the answer are unchanged.
+   */
+  async invokeStreamed(
+    auth: AgentAuth,
+    body: unknown,
+    watch: StreamWatcher,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    const chunks: Buffer[] = [];
+    let head: { status?: number; headers?: Record<string, string> } | undefined;
+    let trailer: Record<string, unknown> = {};
+    let failure: BrokerError | undefined;
+    const { status } = await this.stream(
+      '/v1/http',
+      auth,
+      { ...(body as Record<string, unknown>), stream: true },
+      (event, data) => {
+        switch (event) {
+          case 'waiting':
+            watch.onWaiting?.();
+            break;
+          case 'head':
+            head = data as { status?: number; headers?: Record<string, string> };
+            break;
+          case 'chunk': {
+            const chunk = Buffer.from(String((data as { b64?: string }).b64 ?? ''), 'base64');
+            chunks.push(chunk);
+            watch.onBody?.(chunk);
+            break;
+          }
+          case 'end':
+            // The call's own record, carrying whatever the broker attached
+            // after the relay — the elicitation permits an interactive result
+            // mints, which a buffered answer would have had in its envelope.
+            trailer = (data ?? {}) as Record<string, unknown>;
+            break;
+          case 'error': {
+            const failed = data as { status?: number; body?: { reason?: string; detail?: string } };
+            failure = new BrokerError(
+              failed.status ?? 500,
+              failed.body?.reason ?? 'broker_error',
+              failed.body?.detail,
+            );
+            break;
+          }
+          default:
+            break;
+        }
+      },
+      signal,
+    );
+    if (failure) throw failure;
+    if (status < 200 || status >= 300) {
+      throw new BrokerError(status, 'broker_error', 'the broker refused the streamed call');
+    }
+    if (!head) {
+      // The stream ended without ever committing to an answer. Saying so beats
+      // handing back an empty body that reads like a successful empty response.
+      throw new BrokerError(502, 'upstream_error', 'the broker stream ended before the upstream answered');
+    }
+    return {
+      status: head.status,
+      headers: head.headers,
+      body: Buffer.concat(chunks).toString('base64'),
+      body_encoding: 'base64',
+      ...(trailer.elicitation_tokens
+        ? { elicitation_tokens: trailer.elicitation_tokens }
+        : {}),
+    };
+  }
+
+  /**
+   * POST and deliver each SSE frame as it arrives.
+   *
+   * The parser is incremental on purpose: buffering to the end would make the
+   * whole exercise pointless, and the frames that matter (a `waiting`, an
+   * upstream progress notification) are the ones that arrive before it.
+   */
+  private stream(
+    path: string,
+    auth: AgentAuth,
+    body: unknown,
+    onEvent: (event: string, data: unknown) => void,
+    signal?: AbortSignal,
+  ): Promise<{ status: number }> {
+    const payload = Buffer.from(JSON.stringify(body));
+    return new Promise((resolve, reject) => {
+      const req = request(
+        {
+          socketPath: this.socketPath,
+          path,
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${auth.token}`,
+            accept: 'text/event-stream',
+            ...(auth.label ? { 'x-agentmfa-client': auth.label } : {}),
+            'content-type': 'application/json',
+            'content-length': payload.length,
+          },
+        },
+        (res) => {
+          const status = res.statusCode ?? 0;
+          let pending = '';
+          res.on('data', (chunk: Buffer) => {
+            pending += chunk.toString('utf8');
+            let boundary = pending.indexOf('\n\n');
+            while (boundary !== -1) {
+              const block = pending.slice(0, boundary);
+              pending = pending.slice(boundary + 2);
+              const parsed = parseSseBlock(block);
+              if (parsed) onEvent(parsed.event, parsed.data);
+              boundary = pending.indexOf('\n\n');
+            }
+          });
+          res.on('end', () => resolve({ status }));
+          res.on('error', reject);
+        },
+      );
+      // The inactivity timeout is the right one for a stream: a transfer that
+      // keeps delivering bytes is healthy however long it runs, and a stalled
+      // one is not rescued by a longer total budget.
+      req.setTimeout(this.timeouts.upstreamMs, () => {
+        req.destroy(new Error(`AgentMFA broker stream ${path} stalled for ${this.timeouts.upstreamMs}ms`));
+      });
+      req.on('error', reject);
+      const abort = () => req.destroy(signal?.reason ?? new Error('request cancelled'));
+      if (signal?.aborted) abort();
+      else signal?.addEventListener('abort', abort, { once: true });
+      req.on('close', () => signal?.removeEventListener('abort', abort));
+      req.write(payload);
+      req.end();
+    });
   }
 
   /**

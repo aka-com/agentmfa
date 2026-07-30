@@ -1112,3 +1112,74 @@ async fn the_activity_log_records_the_ask_and_the_answer() {
     assert_eq!(denied.outcome.as_deref(), Some("denied"));
     assert_eq!(denied.connection.as_deref(), Some("github"));
 }
+
+/// The event names of a streamed answer, in arrival order. The SSE body comes
+/// back through `uds_request`'s non-JSON fallback as one string.
+fn streamed_events(body: &Value) -> Vec<String> {
+    body.as_str()
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.strip_prefix("event: ").map(str::to_string))
+        .collect()
+}
+
+/// MCP-H1. A confirmed call parks on the user, and until now said nothing
+/// while it did: an agent watching the socket could not tell "being asked
+/// about" from "hung". A streamed call announces the wait before entering it,
+/// which is the only moment the announcement is worth anything.
+#[tokio::test]
+async fn a_streamed_call_says_it_is_waiting_before_it_asks() {
+    let user = ScriptedUser::new(Some(ApprovalDecision::ApproveWindow));
+    let h = harness(user.clone()).await;
+    let up = upstream().await;
+    api_connection(&h, "github", up.port, None);
+    h.confirm("github");
+
+    let (status, body) = h
+        .http(json!({
+            "connection": "github",
+            "method": "GET",
+            "path": "/user/repos",
+            "stream": true,
+        }))
+        .await;
+    assert_eq!(status, 200);
+    let events = streamed_events(&body);
+    assert_eq!(
+        events.first().map(String::as_str),
+        Some("waiting"),
+        "the wait is announced before anything else: {events:?}"
+    );
+    assert!(events.contains(&"head".to_string()), "{events:?}");
+    assert_eq!(events.last().map(String::as_str), Some("end"), "{events:?}");
+    assert_eq!(user.prompts(), 1);
+    assert_eq!(up.hits.load(Ordering::SeqCst), 1);
+}
+
+/// A denial after the wait is the terminal frame, and the upstream is never
+/// reached — the announcement must not read as a commitment to proceed.
+#[tokio::test]
+async fn a_denied_stream_ends_at_the_error_frame() {
+    let user = ScriptedUser::new(Some(ApprovalDecision::Deny));
+    let h = harness(user.clone()).await;
+    let up = upstream().await;
+    api_connection(&h, "github", up.port, None);
+    h.confirm("github");
+
+    let (status, body) = h
+        .http(json!({
+            "connection": "github",
+            "method": "GET",
+            "path": "/user/repos",
+            "stream": true,
+        }))
+        .await;
+    assert_eq!(status, 200, "the stream itself was accepted");
+    let events = streamed_events(&body);
+    assert_eq!(events, vec!["waiting", "error"], "{events:?}");
+    assert!(
+        body.as_str().unwrap().contains("approval_denied"),
+        "the error frame carries the reason: {body}"
+    );
+    assert_eq!(up.hits.load(Ordering::SeqCst), 0);
+}

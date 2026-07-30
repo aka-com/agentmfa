@@ -132,6 +132,81 @@ async fn uds_request(
     (status, value)
 }
 
+/// Like `uds_request`, but returns the raw body — the streamed plane answers
+/// `text/event-stream`, which is not one JSON value.
+async fn uds_request_raw(
+    socket: &std::path::Path,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: Option<Value>,
+) -> (u16, String, String) {
+    let stream = tokio::net::UnixStream::connect(socket).await.unwrap();
+    let io = hyper_util::rt::TokioIo::new(stream);
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await.unwrap();
+    tokio::spawn(conn);
+    let mut builder = hyper::Request::builder()
+        .method(method)
+        .uri(path)
+        .header("host", "localhost");
+    for (k, v) in headers {
+        builder = builder.header(*k, *v);
+    }
+    let request = match body {
+        Some(value) => builder
+            .header("content-type", "application/json")
+            .body(value.to_string())
+            .unwrap(),
+        None => builder.body(String::new()).unwrap(),
+    };
+    let response = sender.send_request(request).await.unwrap();
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
+        .unwrap_or_default();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        content_type,
+        String::from_utf8_lossy(&bytes).into_owned(),
+    )
+}
+
+/// Split an SSE body into `(event, data)` pairs in arrival order.
+fn sse_frames(body: &str) -> Vec<(String, Value)> {
+    body.split("\n\n")
+        .filter(|block| !block.trim().is_empty())
+        .map(|block| {
+            let mut event = String::new();
+            let mut data = String::new();
+            for line in block.lines() {
+                if let Some(rest) = line.strip_prefix("event: ") {
+                    event = rest.to_string();
+                } else if let Some(rest) = line.strip_prefix("data: ") {
+                    data.push_str(rest);
+                }
+            }
+            (event, serde_json::from_str(&data).unwrap_or(Value::Null))
+        })
+        .collect()
+}
+
+/// Concatenate the body carried by a streamed answer's `chunk` frames.
+fn sse_body_bytes(frames: &[(String, Value)]) -> Vec<u8> {
+    use base64::Engine as _;
+    frames
+        .iter()
+        .filter(|(event, _)| event == "chunk")
+        .flat_map(|(_, data)| {
+            base64::engine::general_purpose::STANDARD
+                .decode(data["b64"].as_str().unwrap_or_default())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
 /// Local upstream the api connections point at. Counts executions.
 struct Upstream {
     port: u16,
@@ -279,6 +354,12 @@ async fn upstream() -> Upstream {
         .route(
             "/unauthorized",
             get(|| async { (axum::http::StatusCode::UNAUTHORIZED, "nope") }),
+        )
+        // Comfortably past the 10 MB buffered cap, so the two relays disagree
+        // about it and the test can say which is which.
+        .route(
+            "/large",
+            get(|| async { "z".repeat(12 * 1024 * 1024) }),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -2572,4 +2653,287 @@ async fn http_endpoint_survives_rebind_and_revoke_frees_the_port() {
     })
     .await
     .expect("the port should be refused after revoke");
+}
+
+/* ---------------------------- streamed relay ------------------------------ */
+
+/// API-3. The JSON-envelope plane answers once, at the end, with everything in
+/// memory. A streamed call reports the same facts in the order they become
+/// true — which is what lets a caller see a large transfer progressing rather
+/// than a socket that has gone quiet.
+#[tokio::test]
+async fn a_streamed_call_reports_its_head_and_body_as_they_arrive() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let up = upstream().await;
+    api_connection(&h, "github", up.port);
+    let token = h.pair("agent").await;
+
+    let (status, content_type, body) = uds_request_raw(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &format!("Bearer {token}"))],
+        Some(json!({
+            "connection": "github",
+            "method": "GET",
+            "path": "/user/repos",
+            "stream": true,
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(content_type.starts_with("text/event-stream"), "{content_type}");
+
+    let frames = sse_frames(&body);
+    let names: Vec<&str> = frames.iter().map(|(event, _)| event.as_str()).collect();
+    assert_eq!(names.first(), Some(&"head"), "{names:?}");
+    assert_eq!(names.last(), Some(&"end"), "{names:?}");
+    assert!(!names.contains(&"error"), "{names:?}");
+    assert_eq!(frames[0].1["status"], 200);
+    assert_eq!(frames[0].1["headers"]["content-type"], "application/json");
+
+    let relayed = sse_body_bytes(&frames);
+    let parsed: Value = serde_json::from_slice(&relayed).unwrap();
+    assert_eq!(parsed[1]["name"], "aka");
+    let end = frames.last().unwrap();
+    assert_eq!(
+        end.1["bytes"].as_u64().unwrap() as usize,
+        relayed.len(),
+        "the end frame counts what actually crossed"
+    );
+}
+
+/// The credential is scrubbed on the streaming path too, and — because a
+/// needle can straddle a chunk boundary — by a relay that carries the
+/// undecided tail forward rather than scanning each chunk alone.
+#[tokio::test]
+async fn a_streamed_body_is_redacted_across_chunk_boundaries() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let up = upstream().await;
+    api_connection(&h, "github", up.port);
+    let token = h.pair("agent").await;
+
+    // `/echo` reflects the injected Authorization header straight back.
+    let (status, _, body) = uds_request_raw(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &format!("Bearer {token}"))],
+        Some(json!({
+            "connection": "github",
+            "method": "GET",
+            "path": "/echo",
+            "stream": true,
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let relayed = String::from_utf8(sse_body_bytes(&sse_frames(&body))).unwrap();
+    assert!(
+        relayed.contains("[REDACTED]"),
+        "the reflected credential should have been scrubbed: {relayed}"
+    );
+    assert!(
+        !relayed.contains("ghp_test_secret_value"),
+        "the credential must not survive the stream: {relayed}"
+    );
+}
+
+/// API-3/API-25's other half: the buffered cap exists because the envelope
+/// holds the whole body. The streamed relay never does, so the same response
+/// that 502s buffered is simply a transfer.
+#[tokio::test]
+async fn a_streamed_response_is_not_bound_by_the_buffered_cap() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let up = upstream().await;
+    api_connection(&h, "github", up.port);
+    let token = h.pair("agent").await;
+    let auth = format!("Bearer {token}");
+
+    let (status, buffered) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(json!({
+            "connection": "github",
+            "method": "GET",
+            "path": "/large",
+        })),
+    )
+    .await;
+    assert_eq!(status, 502, "{buffered}");
+    assert_eq!(buffered["reason"], "response_too_large");
+
+    let (status, _, streamed) = uds_request_raw(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(json!({
+            "connection": "github",
+            "method": "GET",
+            "path": "/large",
+            "stream": true,
+        })),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let frames = sse_frames(&streamed);
+    assert_eq!(frames[0].0, "head");
+    assert_eq!(frames.last().unwrap().0, "end");
+    assert_eq!(
+        frames.last().unwrap().1["bytes"].as_u64().unwrap(),
+        12 * 1024 * 1024,
+        "the whole body crossed"
+    );
+}
+
+/// A refusal that never reached the upstream is one terminal `error` frame and
+/// nothing else: a caller that has seen a head is committed to that answer, so
+/// the two can never both appear.
+#[tokio::test]
+async fn a_refused_stream_carries_one_error_frame_and_no_head() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let up = upstream().await;
+    api_connection(&h, "github", up.port);
+    let conn = h.broker.store.connection_by_name("github").unwrap();
+    h.broker.ui_set_tool_access(&conn.id, false).unwrap();
+    let token = h.pair("agent").await;
+
+    let (status, content_type, body) = uds_request_raw(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &format!("Bearer {token}"))],
+        Some(json!({
+            "connection": "github",
+            "method": "GET",
+            "path": "/user/repos",
+            "stream": true,
+        })),
+    )
+    .await;
+    // The refusal predates the stream, so it is an ordinary JSON error rather
+    // than an event-stream carrying one frame.
+    assert_eq!(status, 403, "{body}");
+    assert!(!content_type.starts_with("text/event-stream"), "{content_type}");
+    assert_eq!(up.hits.load(Ordering::SeqCst), 0);
+}
+
+/// Coalescing has to replay a completed outcome to a retry. A stream keeps
+/// none, so asking for both is a contradiction the broker names rather than
+/// silently resolving one way.
+#[tokio::test]
+async fn a_stream_cannot_also_ask_to_be_coalesced() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let up = upstream().await;
+    api_connection(&h, "github", up.port);
+    let token = h.pair("agent").await;
+
+    let (status, body) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &format!("Bearer {token}"))],
+        Some(json!({
+            "connection": "github",
+            "method": "POST",
+            "path": "/dispatch",
+            "request_id": "abc",
+            "stream": true,
+        })),
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        body["detail"].as_str().unwrap_or_default().contains("replaying"),
+        "the refusal should say why: {body}"
+    );
+    assert_eq!(up.hits.load(Ordering::SeqCst), 0);
+}
+
+/// The buffered plane's answer is one object, so anything the broker attaches
+/// after the relay — the elicitation permits an interactive MCP result mints —
+/// rides along for free. A stream has to carry them deliberately, on the
+/// terminal frame, or every interactive tool call over the streaming path
+/// silently loses its ability to raise a prompt.
+#[tokio::test]
+async fn a_streamed_answer_still_carries_what_the_broker_attached_after_it() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let up = upstream().await;
+    h.broker
+        .store
+        .add_secret("MCP_TOKEN", Zeroizing::new("tok".into()))
+        .unwrap();
+    h.broker
+        .store
+        .add_connection(ConnectionSpec {
+            name: "interactive".into(),
+            config: ConnectionConfig::Api {
+                host: "127.0.0.1".into(),
+                scheme: "http".into(),
+                port: Some(up.port),
+                trusted_ca_bundle_path: None,
+                template: "Authorization: Bearer {{MCP_TOKEN}}".into(),
+                mcp_path: Some("/needs-input".into()),
+                test_path: None,
+                oauth: None,
+            },
+            secrets: vec![],
+        })
+        .unwrap();
+    let token = h.pair("claude-code").await;
+    let auth = format!("Bearer {token}");
+
+    let (status, _, body) = uds_request_raw(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(json!({
+            "connection": "interactive",
+            "method": "POST",
+            "path": "/needs-input",
+            "headers": {"content-type": "application/json"},
+            "stream": true,
+            "body": {
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {"name": "lookup", "arguments": {}}
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let frames = sse_frames(&body);
+    let end = frames
+        .iter()
+        .find(|(event, _)| event == "end")
+        .expect("the stream ends");
+    let permit = end.1["elicitation_tokens"]["account"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the end frame carries the minted permit: {}", end.1));
+
+    // The permit works exactly as the buffered plane's does.
+    let (status, answer) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/elicit",
+        &[("authorization", &auth)],
+        Some(json!({
+            "connection": "interactive",
+            "correlation_token": permit,
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["action"], "cancel");
+
+    // The relayed body itself is not repeated on the end frame: it already
+    // crossed as chunks, and sending it twice would double every response.
+    assert!(end.1.get("body").is_none(), "{}", end.1);
+    let relayed: Value = serde_json::from_slice(&sse_body_bytes(&frames)).unwrap();
+    assert_eq!(relayed["result"]["resultType"], "input_required");
 }
