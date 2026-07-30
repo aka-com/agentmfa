@@ -59,14 +59,11 @@ state lives in the small external store in `ui/src/ui-store.ts`; broker-owned
 reads go through the broker-scoped TanStack Query client in
 `ui/src/query-client.ts`.
 
-Every form is a controlled TSX component reading and writing the store
-directly, so React reconciles in place and renders leave focus, selection,
-and scroll untouched. The remaining read-mostly view and sheet helpers still
-emit HTML strings that cross one compatibility boundary (`SafeMarkup`), where
-they are sanitized with DOMPurify and parsed into React elements. New UI
-should be written as TSX components rather than adding new HTML-string
-templates; a regression test (`ui/tests/react-boundary.test.ts`) guards the
-boundary.
+Every form, sheet, and view is a controlled TSX component reading and writing
+the store directly, so React reconciles in place and renders leave focus,
+selection, and scroll untouched. Icons are declarative React SVG components;
+first-party UI code has no HTML-string rendering boundary. A regression test
+(`ui/tests/react-boundary.test.ts`) prevents raw HTML sinks from being added.
 
 ## The macOS Keychain
 

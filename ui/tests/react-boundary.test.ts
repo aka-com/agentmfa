@@ -3,7 +3,7 @@ import { readFile, readdir } from 'node:fs/promises';
 import test from 'node:test';
 
 // Every way first-party code could hand a raw HTML string to the DOM,
-// bypassing the SafeMarkup sanitize-and-parse boundary.
+// bypassing React's escaping and reconciliation.
 const RAW_HTML_SINKS = [
   /\.innerHTML\s*=/,
   /\.outerHTML\s*=/,
@@ -136,11 +136,11 @@ test('creating a credential does not auto-trigger the endpoint confirmation gate
 test('the post-add banner stays a compact success message', async () => {
   const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
   const readyCard = app.match(
-    /function connectionReadyCardHTML\(\): string \{([\s\S]*?)function connectionsHTML/,
+    /function ConnectionReadyCard\(\): ReactNode \{([\s\S]*?)function ConnectionsView/,
   )?.[1];
 
   assert.ok(readyCard, 'connection success banner is present');
-  assert.match(readyCard, /\$\{esc\(ready\.name\)\} successfully added/);
+  assert.match(readyCard, /\{ready\.name\} successfully added/);
   assert.doesNotMatch(readyCard, /Ask your agent|Copy task|copy-first-task/);
 });
 
@@ -157,7 +157,7 @@ test('the MCP tool filter is pinned to the detail heading’s right edge', async
 test('connection detail headings have no leading connection icon', async () => {
   const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
   const detail = app.match(
-    /function connDetailHTML\([\s\S]*?\): string \{([\s\S]*?)function mcpStatusHTML/,
+    /function ConnectionDetail\([\s\S]*?\): ReactNode \{([\s\S]*?)function FlatConnectionRow/,
   )?.[1];
 
   assert.ok(detail, 'connection detail renderer is present');
@@ -189,7 +189,7 @@ test('the Activity Log shows live sessions independently of audit filters', asyn
 
   assert.ok(activity, 'Activity view is present');
   assert.match(activity, /state\.sessions\.length/);
-  assert.match(activity, /liveSessionsHTML\('activity-live-sessions'\)/);
+  assert.match(activity, /<LiveSessions extraClass="activity-live-sessions"/);
   assert.match(activity, /\{liveSessions\}\s*<div className="act-filters">/);
 });
 
@@ -207,7 +207,7 @@ test('the Inbox ticks its second-level countdowns while requests wait', async ()
 test('the SSH endpoint field includes the configured ssh invocation', async () => {
   const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
   const endpointStrip = app.match(
-    /function endpointStripHTML\([\s\S]*?\): string \{([\s\S]*?)function connToggleHTML/,
+    /function EndpointStrip\([\s\S]*?\): ReactNode \{([\s\S]*?)function ConnectionToggle/,
   )?.[1];
 
   assert.ok(endpointStrip, 'endpoint strip renderer is present');

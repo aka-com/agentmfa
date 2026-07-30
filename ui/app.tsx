@@ -33,7 +33,7 @@ import type {
 } from '/src/getting-started';
 import type { CatalogEntry } from '/src/catalog';
 import {
-  ICONS, TYPES, esc, escAttr, toast, relTime, absTime, timeLeft, clockTime,
+  ICONS, TYPES, toast, relTime, absTime, timeLeft, clockTime,
 } from '/src/util';
 import {
   apiOriginFromParts, authTemplate, defaultConnectionName, parseApiOrigin, parseConnectionImport,
@@ -81,7 +81,8 @@ import type {
 } from '/src/types';
 import { queryClient, refetchBrokerQuery, removeBrokerQueries } from '/src/query-client';
 import { UiStore, useUiRevision } from '/src/ui-store';
-import { SafeMarkup } from '/src/safe-markup';
+import { AppIcon } from '/src/icon';
+import type { IconDefinition } from '/src/icon';
 import { Sheet } from '/src/sheet';
 
 const EDIT_SECRET_MASK = '••••••••••••';
@@ -969,7 +970,7 @@ const elicitFieldRequired = (field: { required?: boolean }): boolean => field.re
 function requestOutcome(record: RequestRecord): {
   label: string;
   detail: string;
-  icon: string;
+  icon: IconDefinition;
   tone: string;
 } {
   const minutes = Math.max(1, Math.round((record.window_secs ?? 900) / 60));
@@ -1054,7 +1055,7 @@ function requestOutcome(record: RequestRecord): {
         unavailable: ['Unavailable', ICONS.clockAlert, 'muted'],
         abandoned: ['Abandoned', ICONS.clockAlert, 'muted'],
         pending: ['Pending', ICONS.clockAlert, 'muted'],
-      } as Record<string, [string, string, string]>)[record.status]
+      } as Record<string, [string, IconDefinition, string]>)[record.status]
         ?? ['Completed', ICONS.circleCheck, 'muted'];
       return {
         label: fallback[0],
@@ -1066,42 +1067,51 @@ function requestOutcome(record: RequestRecord): {
   }
 }
 
-function liveSessionsHTML(extraClass = ''): string {
-  const sessions = state.sessions.map((session) => {
-    const type = TYPES[session.type];
-    const who = session.agent
-      ? `${esc(session.agent)} → ${esc(session.connection)}`
-      : esc(session.connection);
-    if (state.confirm?.kind === 'close-session' && state.confirm.id === session.id) {
-      return `<div class="live-row"><span class="badge ${type.cls}">${type.label}</span>
-        <div class="live-txt"><div class="c-name">${who}</div>
-        <div class="s-sub">Close this session now?</div></div>
-        <button class="btn sm" data-act="confirm-cancel">Cancel</button>
-        <button class="btn sm danger" data-act="close-session-confirm"
-          data-id="${session.id}">Close</button></div>`;
-    }
-    return `<div class="live-row"><span class="badge ${type.cls}">${type.label}</span>
-      <div class="live-txt"><div class="c-name">${who}</div>
-      <div class="s-sub" title="${escAttr(session.detail)}">${esc(session.detail)}</div></div>
-      <button class="btn sm" data-act="close-session-ask"
-        data-id="${session.id}">Close</button></div>`;
-  }).join('');
-  return `<section class="live-sessions ${extraClass}" aria-label="Active sessions">
-    <div class="live-head">Active sessions</div>
-    <div class="live-list">${sessions}</div></section>`;
+function LiveSessions({ extraClass = '' }: { extraClass?: string }): ReactNode {
+  return (
+    <section className={`live-sessions ${extraClass}`} aria-label="Active sessions">
+      <div className="live-head">Active sessions</div>
+      <div className="live-list">
+        {state.sessions.map((session) => {
+          const type = TYPES[session.type];
+          const who = session.agent
+            ? `${session.agent} → ${session.connection}`
+            : session.connection;
+          const confirming = state.confirm?.kind === 'close-session'
+            && state.confirm.id === session.id;
+          return (
+            <div key={session.id} className="live-row">
+              <span className={`badge ${type.cls}`}>{type.label}</span>
+              <div className="live-txt"><div className="c-name">{who}</div>
+                <div className="s-sub" title={confirming ? undefined : session.detail}>
+                  {confirming ? 'Close this session now?' : session.detail}
+                </div>
+              </div>
+              {confirming
+                ? <>
+                    <button className="btn sm" data-act="confirm-cancel">Cancel</button>
+                    <button className="btn sm danger" data-act="close-session-confirm"
+                      data-id={session.id}>Close</button>
+                  </>
+                : <button className="btn sm" data-act="close-session-ask"
+                    data-id={session.id}>Close</button>}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
 }
 
-function globalSectionsHTML(embeddedInStart = false) {
-  let out = '';
-  const hasOnboarding = false;
+function GlobalSections({ embeddedInStart = false }: { embeddedInStart?: boolean }): ReactNode {
   const requestCount = activeRequestCount(state.approvals, state.elicitations);
   const hasLiveSessions = state.tab === 'start'
     && state.startView === 'guides'
     && state.sessions.length > 0;
-  // Requests keep a compact, persistent route from every other screen. Their
-  // details and actions now live in the Inbox instead of being duplicated
-  // above every tab.
-  if (requestCount && state.tab !== 'inbox') {
+  const showRequests = requestCount > 0 && state.tab !== 'inbox';
+  if (!showRequests && !hasLiveSessions) return null;
+  let requestBanner: ReactNode = null;
+  if (showRequests) {
     const requests = activeRequests(state.approvals, state.elicitations);
     const next = requests[0];
     const label = requestCount === 1 ? '1 request needs attention'
@@ -1114,30 +1124,25 @@ function globalSectionsHTML(embeddedInStart = false) {
         ? `${state.elicitations.length} input request${state.elicitations.length === 1 ? '' : 's'}`
         : '',
     ].filter(Boolean).join(' · ');
-    out += `<button class="request-banner" data-act="open-inbox"
-      aria-label="${escAttr(label)}. Open the Request Inbox.">
-      <span class="request-banner-ico">${state.approvals.length ? ICONS.shieldAlert : ICONS.bell}</span>
-      <span class="request-banner-copy"><b>${esc(label)}</b>
-        <span>${esc(kinds)} · next expires ${esc(timeLeft(next.expiresAt))}</span></span>
-      <span class="request-banner-cta">Open Inbox</span>
-    </button>`;
+    requestBanner = (
+      <button className="request-banner" data-act="open-inbox"
+        aria-label={`${label}. Open the Request Inbox.`}>
+        <span className="request-banner-ico">
+          <Icon markup={state.approvals.length ? ICONS.shieldAlert : ICONS.bell} />
+        </span>
+        <span className="request-banner-copy"><b>{label}</b>
+          <span>{kinds} · next expires {timeLeft(next.expiresAt)}</span></span>
+        <span className="request-banner-cta">Open Inbox</span>
+      </button>
+    );
   }
-  // Live sessions answer "what is my agent doing right now?", so they sit
-  // with the connection guides rather than above every screen.
-  if (hasLiveSessions) {
-    out += liveSessionsHTML();
-  }
-  const requestRouteOnly = requestCount > 0
-    && state.tab !== 'inbox'
-    && !hasLiveSessions
-    && !hasOnboarding;
-  return out
-    ? `<div class="dd-global ${embeddedInStart ? 'start-global ' : ''}${
-      hasOnboarding ? 'onboarding-global' : ''
-    }${
-      requestRouteOnly ? ' request-route-only' : ''
-    }">${out}</div>`
-    : '';
+  return (
+    <div className={`dd-global ${embeddedInStart ? 'start-global' : ''}${
+      showRequests && !hasLiveSessions ? ' request-route-only' : ''}`}>
+      {requestBanner}
+      {hasLiveSessions ? <LiveSessions /> : null}
+    </div>
+  );
 }
 
 function RequestInbox(): ReactNode {
@@ -1348,27 +1353,35 @@ function RequestInbox(): ReactNode {
   );
 }
 
-function secretsTableHTML(query = '') {
+function SecretsTable({ query = '' }: { query?: string }): ReactNode {
   const needle = query.trim().toLowerCase();
-  const rows = state.secrets.filter((secret) => !needle
+  const secrets = state.secrets.filter((secret) => !needle
     || secret.name.toLowerCase().includes(needle)
-    || secret.used_by_names.some((name) => name.toLowerCase().includes(needle))).map((s) => {
+    || secret.used_by_names.some((name) => name.toLowerCase().includes(needle)));
+  return (
+    <table className="sec-table">
+      <thead><tr><th>Credential</th><th>Used by</th><th>Value</th>
+        <th><span className="sr-only">Actions</span></th></tr></thead>
+      <tbody>{secrets.map((s) => {
     if (state.confirm && state.confirm.kind === 'del-secret-inuse' && state.confirm.id === s.id) {
-      const deleteButtons = s.used_by_names.map((name) => {
-        const connection = state.connections.find((candidate) => candidate.name === name);
-        return connection
-          ? `<button class="btn sm danger" data-act="delete-using-connection"
-              data-id="${escAttr(connection.id)}">Delete ${esc(name)}…</button>`
-          : '';
-      }).join('');
-      return `<tr class="confirm-row"><td colspan="4"><div class="confirm-inline"><span>Currently used by ${esc(s.used_by_names.join(', '))}. Delete the tool first.</span>
-          ${deleteButtons}
-          <button class="btn sm" data-act="confirm-cancel">OK</button></div></td></tr>`;
+      return <tr key={s.id} className="confirm-row"><td colSpan={4}><div className="confirm-inline">
+        <span>Currently used by {s.used_by_names.join(', ')}. Delete the tool first.</span>
+        {s.used_by_names.map((name) => {
+          const connection = state.connections.find((candidate) => candidate.name === name);
+          return connection
+            ? <button key={connection.id} className="btn sm danger"
+                data-act="delete-using-connection" data-id={connection.id}>Delete {name}…</button>
+            : null;
+        })}
+        <button className="btn sm" data-act="confirm-cancel">OK</button>
+      </div></td></tr>;
     }
     if (state.confirm && state.confirm.kind === 'del-secret' && state.confirm.id === s.id) {
-      return `<tr class="confirm-row"><td colspan="4"><div class="confirm-inline"><span>Delete “${esc(s.name)}” from the macOS Keychain?</span>
-          <button class="btn sm" data-act="confirm-cancel">Cancel</button>
-          <button class="btn sm danger" data-act="del-secret-confirm" data-id="${s.id}">Delete</button></div></td></tr>`;
+      return <tr key={s.id} className="confirm-row"><td colSpan={4}><div className="confirm-inline">
+        <span>Delete “{s.name}” from the macOS Keychain?</span>
+        <button className="btn sm" data-act="confirm-cancel">Cancel</button>
+        <button className="btn sm danger" data-act="del-secret-confirm" data-id={s.id}>Delete</button>
+      </div></td></tr>;
     }
     // The eye reveals only a short prefix (the full value never
     // enters the webview).
@@ -1376,33 +1389,44 @@ function secretsTableHTML(query = '') {
     const copied = state.copied === s.id;
     // the eye toggles reveal ↔ conceal; copy is a ghost button that surfaces on
     // hovering the value (available whether or not the prefix is revealed)
-    const eyeBtn = mode === 'dropdown' ? '' : revealed
-      ? `<button class="icon-btn eye-btn" title="Hide prefix" aria-label="Hide prefix" data-act="hide-secret" data-id="${s.id}">${ICONS.eyeOff}</button>`
-      : `<button class="icon-btn eye-btn" title="Reveal prefix" aria-label="Reveal prefix" data-act="reveal-secret" data-id="${s.id}">${ICONS.eye}</button>`;
+    const eyeBtn = mode === 'dropdown' ? null : revealed
+      ? <button className="icon-btn eye-btn" title="Hide prefix" aria-label="Hide prefix"
+          data-act="hide-secret" data-id={s.id}><Icon markup={ICONS.eyeOff} /></button>
+      : <button className="icon-btn eye-btn" title="Reveal prefix" aria-label="Reveal prefix"
+          data-act="reveal-secret" data-id={s.id}><Icon markup={ICONS.eye} /></button>;
     // The copy affordance and the post-copy "Copied" status both overlay the
     // masked value, centered — never beside it (the placeholder dims behind).
     const overlay = copied
-      ? `<span class="copied-badge">${ICONS.check}<span>Copied</span></span>`
-      : `<button class="ghost-copy" title="Copy value" data-act="copy-secret" data-id="${s.id}">${ICONS.copy}<span>Copy</span></button>`;
-    const valText = revealed ? esc(revealed) : '••••••••';
-    const usedBy = s.used_by_names.length
-      ? `<div class="used-by-links">${s.used_by_names.map((name) => {
+      ? <span className="copied-badge"><Icon markup={ICONS.check} /><span>Copied</span></span>
+      : <button className="ghost-copy" title="Copy value" data-act="copy-secret"
+          data-id={s.id}><Icon markup={ICONS.copy} /><span>Copy</span></button>;
+    const valText = revealed || '••••••••';
+    const usedBy = s.used_by_names.length ? (
+      <div className="used-by-links">{s.used_by_names.map((name) => {
           const connection = state.connections.find((candidate) => candidate.name === name);
           return connection
-            ? `<button class="used-by-link" data-act="show-connection"
-                data-id="${escAttr(connection.id)}">${esc(name)}</button>`
-            : `<span>${esc(name)}</span>`;
-        }).join('')}</div>`
-      : '<span class="s-sub">Not in use</span>';
-    return `<tr>
-      <td><div class="s-name">${esc(s.name)}</div></td>
-      <td>${usedBy}</td>
-      <td class="val"><span class="val-wrap"><span class="val-slot ${copied ? 'is-copied' : ''}"><code>${valText}</code><span class="val-overlay">${overlay}</span></span></span> ${eyeBtn}</td>
-      <td class="rowdel">
-        <button class="icon-btn" title="Edit secret" aria-label="Edit secret ${escAttr(s.name)}" data-act="edit-secret" data-id="${s.id}">${ICONS.pencil}</button>
-        <button class="icon-btn" title="Delete secret" aria-label="Delete secret ${escAttr(s.name)}" data-act="del-secret-ask" data-id="${s.id}">${ICONS.trash}</button></td></tr>`;
-  }).join('');
-  return `<table class="sec-table"><thead><tr><th>Credential</th><th>Used by</th><th>Value</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody>${rows}</tbody></table>`;
+            ? <button key={connection.id} className="used-by-link" data-act="show-connection"
+                data-id={connection.id}>{name}</button>
+            : <span key={name}>{name}</span>;
+        })}</div>
+    ) : <span className="s-sub">Not in use</span>;
+    return <tr key={s.id}>
+      <td><div className="s-name">{s.name}</div></td>
+      <td>{usedBy}</td>
+      <td className="val"><span className="val-wrap">
+        <span className={`val-slot ${copied ? 'is-copied' : ''}`}><code>{valText}</code>
+          <span className="val-overlay">{overlay}</span></span>
+        </span> {eyeBtn}</td>
+      <td className="rowdel">
+        <button className="icon-btn" title="Edit secret" aria-label={`Edit secret ${s.name}`}
+          data-act="edit-secret" data-id={s.id}><Icon markup={ICONS.pencil} /></button>
+        <button className="icon-btn" title="Delete secret" aria-label={`Delete secret ${s.name}`}
+          data-act="del-secret-ask" data-id={s.id}><Icon markup={ICONS.trash} /></button>
+      </td>
+    </tr>;
+      })}</tbody>
+    </table>
+  );
 }
 
 /* ---- connection guides (Get started > guides view) ---- */
@@ -1427,99 +1451,103 @@ function maskedEndpoint(address: string): string {
   return address.replace(/(:\/\/[^:@/\s]*:)[^@\s]+(?=@)/, '$1******');
 }
 
-/** The full address as markup with soft break opportunities after its own
- * punctuation — so a long address wraps at "/", "@", or ":" instead of
- * mid-identifier. Runs of separators stay whole ("://" never splits), and
- * each segment is escaped individually so the injected tags survive. */
-function breakableAddress(address: string): string {
-  return address.split(/(?<=[/?&@:=])(?![/?&@:=])/).map(esc).join('<wbr>');
-}
-
 // The direct-endpoint lifecycle strip on an enabled Postgres/SSH/HTTP row:
 // a hairline footer that owns issue → live badge → reissue/revoke. The
 // SSH renders the socket assignment together with its configured `ssh`
 // invocation so the copied value connects immediately.
-function endpointStripHTML(c: ConnectionSummary, withFormats = false): string {
-  if (!c.agent_access.enabled || !ENDPOINTABLE[c.type]) return '';
+function BreakableAddress({ address }: { address: string }): ReactNode {
+  const parts = address.split(/(?<=[/?&@:=])(?![/?&@:=])/);
+  return <>{parts.map((part, index) => (
+    <span key={`${index}:${part}`}>{index ? <wbr /> : null}{part}</span>
+  ))}</>;
+}
+
+function EndpointFormatRow({ connection, address }: {
+  connection: ConnectionSummary;
+  address: string;
+}): ReactNode {
+  const formats = ENDPOINT_FORMATS[connection.type].filter(
+    (format) =>
+      format.needsSecret || format.needsAltAddress || format.build(connection, address) != null,
+  );
+  if (!formats.length) return null;
+  return (
+    <div className="ep-formats" role="group" aria-label="Copy the connection for other applications">
+      <span className="ep-formats-lbl">Copy for</span>
+      {formats.map((format) => {
+        const copied = state.copied === `epf:${connection.id}:${format.key}`;
+        return <button key={format.key}
+          className={`btn sm ep-fmt ${copied ? 'is-copied' : ''}`} title={format.title}
+          aria-label={`${copied ? 'Copied. ' : ''}${format.title} for ${connection.name}`}
+          data-act="copy-endpoint-format" data-conn={connection.id} data-format={format.key}>
+          <span className="ep-fmt-label">{format.label}</span>
+          {copied
+            ? <span className="ep-fmt-check" aria-hidden="true"><Icon markup={ICONS.check} /></span>
+            : null}
+        </button>;
+      })}
+    </div>
+  );
+}
+
+function EndpointStrip({ connection: c, withFormats = false }: {
+  connection: ConnectionSummary;
+  withFormats?: boolean;
+}): ReactNode {
+  if (!c.agent_access.enabled || !ENDPOINTABLE[c.type]) return null;
   const endpoint = c.agent_access.endpoint ?? null;
   if (!endpoint) {
-    return `<div class="ep-strip">
-      <button class="btn primary sm" data-act="issue-endpoint" data-conn="${c.id}"
+    return <div className="ep-strip">
+      <button className="btn primary sm" data-act="issue-endpoint" data-conn={c.id}
         title="A pasteable address for an unmodified tool">Get connection address…</button>
-    </div>`;
+    </div>;
   }
-  // The address rides in a field with its Copy button showing — copying is
-  // what everyone does with this string, so the affordance is explicit, not
-  // a hover reveal. The field and the button use the same complete DSN,
-  // including its issued credential and any socket-path query.
-  //
-  // In the detail pane the field starts as a masked one-liner (credential
-  // replaced with asterisks, address ellipsized) — Copy still carries the complete DSN;
-  // clicking the line expands it. Losing focus or leaving the tab collapses
-  // the full capability again.
   const copied = state.copied === `ep:${c.id}`;
   const expanded = Boolean(state.epExpanded[c.id]);
   const endpointAddress = directEndpointAddress(c.type, endpoint, state.sshSockets[c.id]);
   const endpointText = endpointAddress
-    ? c.type === 'ssh'
-      ? sshDirectCommand(endpointAddress, c)
-      : endpointAddress
+    ? c.type === 'ssh' ? sshDirectCommand(endpointAddress, c) : endpointAddress
     : null;
-  const copyTitle = c.type === 'ssh'
-    ? 'Copy the SSH command'
-    : 'Copy the connection command';
-  const copyBtn = endpointText
-    ? `<button class="btn sm ep-copy" title="${copyTitle}"
-        aria-label="${copyTitle} for ${escAttr(c.name)}" data-act="copy-endpoint-dsn"
-        data-conn="${c.id}">${
-        copied ? `${ICONS.check} Copied` : `${ICONS.copy} Copy`}</button>`
-    : '';
-  const address = endpointText
-    ? expanded
-      ? `<div class="ep-field">
-          <code class="ep-addr">${breakableAddress(endpointText)}</code>
-          ${copyBtn}
-        </div>`
-      : `<div class="ep-field collapsed">
-          <button class="ep-addr ep-addr-masked" title="Show the full address"
-            aria-label="Show the full connection address for ${escAttr(c.name)}"
-            aria-expanded="false" data-act="expand-endpoint" data-conn="${c.id}">${
-            esc(maskedEndpoint(endpointText))}</button>
-          ${copyBtn}
-        </div>`
-    : '<span class="ep-addr ep-addr-hidden">Connection address unavailable</span>';
-  // The strip is the field, nothing more: reissue/revoke live in the row's
-  // one options menu. The detail pane adds the per-application copy row
-  // beneath it; the guides keep just the address they narrate.
-  const formats = withFormats && endpointText && endpointAddress
-    ? endpointFormatRowHTML(c, endpointAddress)
-    : '';
-  return `<div class="ep-strip">${address}</div>${formats}`;
+  const copyTitle = c.type === 'ssh' ? 'Copy the SSH command' : 'Copy the connection command';
+  const copyButton = endpointText
+    ? <button className="btn sm ep-copy" title={copyTitle}
+        aria-label={`${copyTitle} for ${c.name}`} data-act="copy-endpoint-dsn" data-conn={c.id}>
+        {copied ? <><Icon markup={ICONS.check} /> Copied</> : <><Icon markup={ICONS.copy} /> Copy</>}
+      </button>
+    : null;
+  let address: ReactNode;
+  if (!endpointText) {
+    address = <span className="ep-addr ep-addr-hidden">Connection address unavailable</span>;
+  } else if (expanded) {
+    address = <div className="ep-field">
+      <code className="ep-addr"><BreakableAddress address={endpointText} /></code>
+      {copyButton}
+    </div>;
+  } else {
+    address = <div className="ep-field collapsed">
+      <button className="ep-addr ep-addr-masked" title="Show the full address"
+        aria-label={`Show the full connection address for ${c.name}`}
+        aria-expanded={false} data-act="expand-endpoint" data-conn={c.id}>
+        {maskedEndpoint(endpointText)}
+      </button>
+      {copyButton}
+    </div>;
+  }
+  return <>
+    <div className="ep-strip">{address}</div>
+    {withFormats && endpointText && endpointAddress
+      ? <EndpointFormatRow connection={c} address={endpointAddress} />
+      : null}
+  </>;
 }
 
-// One button per common client rendering of the issued endpoint (psql,
-// libpq keywords, .env, ssh config, …). Each copies a string derived from
-// the same summary + address the field shows. The click invokes a native
-// command that reads the retained endpoint and renders the selected format
-// without putting the credential-bearing copy text in a DOM attribute.
-function endpointFormatRowHTML(c: ConnectionSummary, address: string): string {
-  const buttons = ENDPOINT_FORMATS[c.type]
-    .filter(
-      (format) =>
-        format.needsSecret || format.needsAltAddress || format.build(c, address) != null,
-    )
-    .map((format) => {
-      const copied = state.copied === `epf:${c.id}:${format.key}`;
-      return `<button class="btn sm ep-fmt ${copied ? 'is-copied' : ''}" title="${escAttr(format.title)}"
-        aria-label="${escAttr(`${copied ? 'Copied. ' : ''}${format.title} for ${c.name}`)}"
-        data-act="copy-endpoint-format" data-conn="${c.id}" data-format="${format.key}">${
-        `<span class="ep-fmt-label">${esc(format.label)}</span>${
-          copied ? `<span class="ep-fmt-check" aria-hidden="true">${ICONS.check}</span>` : ''}`}</button>`;
-    })
-    .join('');
-  if (!buttons) return '';
-  return `<div class="ep-formats" role="group" aria-label="Copy the connection for other applications">
-    <span class="ep-formats-lbl">Copy for</span>${buttons}</div>`;
+function ConnectionToggle({ connection: c }: { connection: ConnectionSummary }): ReactNode {
+  const enabled = c.agent_access.enabled;
+  return <button className={`switch ${enabled ? 'on' : ''}`} role="switch"
+    aria-checked={enabled}
+    title={enabled ? 'Agents may use this tool' : 'Agents may not use this tool'}
+    aria-label={`${enabled ? 'Disable' : 'Enable'} ${c.name} for agents`}
+    data-act={enabled ? 'disable-tool' : 'enable-tool'} data-conn={c.id}></button>;
 }
 
 /** The agents on/off switch, in the detail panel's header — the tool's one
@@ -1527,14 +1555,6 @@ function endpointFormatRowHTML(c: ConnectionSummary, address: string): string {
  * ("Enabled" / "Off"), so the switch itself stays unlabeled and the header
  * keeps its width for the name. The list rows carry only the health dot
  * (gray = off). */
-function connToggleHTML(c: ConnectionSummary): string {
-  const enabled = c.agent_access.enabled;
-  return `<button class="switch ${enabled ? 'on' : ''}" role="switch" aria-checked="${enabled}"
-    title="${enabled ? 'Agents may use this tool' : 'Agents may not use this tool'}"
-    aria-label="${enabled ? 'Disable' : 'Enable'} ${escAttr(c.name)} for agents"
-    data-act="${enabled ? 'disable-tool' : 'enable-tool'}" data-conn="${c.id}"></button>`;
-}
-
 /* ---- connection guides ---- */
 // The guides' job is no longer to manage identities the broker stores —
 // there is exactly one, this computer's key — but to get the user's own
@@ -1574,103 +1594,126 @@ function recentClients(): Array<{ name: string; at: string }> {
     .slice(0, 6);
 }
 
-function connectKeyCardHTML(identity: IdentityInfo): string {
+function ConnectKeyCard({ identity }: { identity: IdentityInfo }): ReactNode {
   const menuOpen = state.agentMenuOpen === 'identity';
   const copied = state.copied === 'shared-key';
-  return `<div class="agent-block">
-    <div class="agent-card">
-      <span class="agent-avatar" role="img" aria-label="This computer's key">${ICONS.fileKey}</span>
-      <div class="agent-id"><div class="c-name">This computer’s key</div>
-        <div class="s-sub agent-sub">${esc(identity.token_path)}${identity.legacy_aliases
-          ? ` · ${identity.legacy_aliases} older key${identity.legacy_aliases === 1 ? '' : 's'} still accepted briefly`
-          : ''}</div></div>
-      <button class="btn sm" data-act="copy-key">${copied ? `${ICONS.check} Copied` : 'Copy key'}</button>
-      <div class="agent-menu-wrap">
-        <button class="icon-btn agent-menu-btn ${menuOpen ? 'on' : ''}" title="Key options"
-          aria-label="Key options" aria-haspopup="menu"
-          aria-expanded="${menuOpen}" data-act="toggle-agent-menu" data-id="identity">${ICONS.ellipsis}</button>
-        ${menuOpen ? `<div class="agent-menu" role="menu" aria-label="Key options">
-          <button class="menu-item danger" role="menuitem" data-act="rotate-key-ask">${ICONS.unplug} Rotate key…</button>
-        </div>` : ''}
+  return (
+    <div className="agent-block">
+      <div className="agent-card">
+        <span className="agent-avatar" role="img" aria-label="This computer's key">
+          <Icon markup={ICONS.fileKey} />
+        </span>
+        <div className="agent-id"><div className="c-name">This computer’s key</div>
+          <div className="s-sub agent-sub">{identity.token_path}
+            {identity.legacy_aliases
+              ? ` · ${identity.legacy_aliases} older key${identity.legacy_aliases === 1 ? '' : 's'} still accepted briefly`
+              : ''}
+          </div>
+        </div>
+        <button className="btn sm" data-act="copy-key">
+          {copied ? <><Icon markup={ICONS.check} /> Copied</> : 'Copy key'}
+        </button>
+        <div className="agent-menu-wrap">
+          <button className={`icon-btn agent-menu-btn ${menuOpen ? 'on' : ''}`}
+            title="Key options" aria-label="Key options" aria-haspopup="menu"
+            aria-expanded={menuOpen} data-act="toggle-agent-menu" data-id="identity">
+            <Icon markup={ICONS.ellipsis} />
+          </button>
+          {menuOpen
+            ? <div className="agent-menu" role="menu" aria-label="Key options">
+                <button className="menu-item danger" role="menuitem" data-act="rotate-key-ask">
+                  <Icon markup={ICONS.unplug} /> Rotate key…
+                </button>
+              </div>
+            : null}
+        </div>
+      </div>
+      <div className="connect-keynote">One shared key for everything that runs as you on this computer.
+        Rotating it disconnects every agent at once.</div>
+    </div>
+  );
+}
+
+function ConnectStepView({ step, number }: { step: ConnectStep; number: number }): ReactNode {
+  return (
+    <div className="connect-step">
+      <span className="connect-step-n" aria-hidden="true">{number}</span>
+      <div className="connect-step-bd"><b>{step.title}</b>
+        {step.detail ? <div className="connect-step-d">{step.detail}</div> : null}
+        {step.snippet
+          ? <div className="connect-snip"><pre><code>{step.snippet}</code></pre>
+              <button className="btn sm connect-copy" data-act="copy-text"
+                data-text={step.snippet}>Copy</button>
+            </div>
+          : null}
+        {step.followup
+          ? <div className="connect-step-d connect-step-followup">{step.followup}</div>
+          : null}
       </div>
     </div>
-    <div class="connect-keynote">One shared key for everything that runs as you on this computer.
-      Rotating it disconnects every agent at once.</div>
-  </div>`;
+  );
 }
 
-function connectStepHTML(step: ConnectStep, n: number): string {
-  const snippet = step.snippet
-    ? `<div class="connect-snip"><pre><code>${esc(step.snippet)}</code></pre>
-        <button class="btn sm connect-copy" data-act="copy-text" data-text="${escAttr(step.snippet)}">Copy</button></div>`
-    : '';
-  return `<div class="connect-step">
-    <span class="connect-step-n" aria-hidden="true">${n}</span>
-    <div class="connect-step-bd"><b>${esc(step.title)}</b>
-      ${step.detail ? `<div class="connect-step-d">${esc(step.detail)}</div>` : ''}
-      ${snippet}
-      ${step.followup ? `<div class="connect-step-d connect-step-followup">${esc(step.followup)}</div>` : ''}</div>
-  </div>`;
-}
-
-function connectCardHTML(client: ConnectClient, env: ConnectClientEnv): string {
+function ConnectCard({ client, env }: { client: ConnectClient; env: ConnectClientEnv }): ReactNode {
   const open = state.connectOpen === client.id;
   const seen = recentClients().find((recent) => clientMatchesLabel(client, recent.name));
-  const seenChip = seen
-    ? `<span class="connect-seen" title="An agent using this label reached the broker">● seen ${relTime(seen.at)}</span>`
-    : '';
-  const steps = open
-    ? `<div class="connect-steps">${connectGuideSteps(client, env).map((step, i) => connectStepHTML(step, i + 1)).join('')}
-        ${client.note ? `<div class="connect-note">${esc(client.note)}</div>` : ''}</div>`
-    : '';
-  return `<div class="agent-block connect-card ${open ? 'open' : ''}">
-    <button class="connect-row" data-act="connect-toggle" data-id="${client.id}" aria-expanded="${open}">
-      <span class="connect-mark ${client.id}" aria-hidden="true">${client.icon ? ICONS[client.icon] || esc(client.mark) : esc(client.mark)}</span>
-      <span class="connect-tx"><b>${esc(client.name)}</b><span>${esc(client.sub)}</span></span>
-      ${seenChip}
-      <span class="cat-chev ${open ? 'open' : ''}">${ICONS.chevronDown}</span>
-    </button>
-    ${steps}
-  </div>`;
+  return (
+    <div className={`agent-block connect-card ${open ? 'open' : ''}`}>
+      <button className="connect-row" data-act="connect-toggle" data-id={client.id}
+        aria-expanded={open}>
+        <span className={`connect-mark ${client.id}`} aria-hidden="true">
+          {client.icon ? <Icon markup={ICONS[client.icon] || ''} /> : client.mark}
+        </span>
+        <span className="connect-tx"><b>{client.name}</b><span>{client.sub}</span></span>
+        {seen
+          ? <span className="connect-seen" title="An agent using this label reached the broker">
+              ● seen {relTime(seen.at)}
+            </span>
+          : null}
+        <span className={`cat-chev ${open ? 'open' : ''}`}>
+          <Icon markup={ICONS.chevronDown} />
+        </span>
+      </button>
+      {open
+        ? <div className="connect-steps">
+            {connectGuideSteps(client, env).map((step, index) =>
+              <ConnectStepView key={`${client.id}:${index}`} step={step} number={index + 1} />)}
+            {client.note ? <div className="connect-note">{client.note}</div> : null}
+          </div>
+        : null}
+    </div>
+  );
 }
 
-function recentClientsHTML(): string {
+function RecentClients(): ReactNode {
   const clients = recentClients();
-  if (!clients.length) return '';
-  const rows = clients.map((client) => `<div class="connect-recent-row">
-      <code>${esc(client.name)}</code><span class="grow"></span>
-      <span class="s-sub">${relTime(client.at)}</span>
-    </div>`).join('');
-  return `<div class="connect-sec-lbl">Recently seen</div>
-    <div class="agent-block"><div class="connect-recent">${rows}</div>
-    <div class="connect-keynote">Names are labels agents report about themselves for the
-      activity log — they aren’t identities, and access doesn’t depend on them.</div></div>`;
+  if (!clients.length) return null;
+  return <>
+    <div className="connect-sec-lbl">Recently seen</div>
+    <div className="agent-block"><div className="connect-recent">
+      {clients.map((client) => <div key={client.name} className="connect-recent-row">
+        <code>{client.name}</code><span className="grow"></span>
+        <span className="s-sub">{relTime(client.at)}</span>
+      </div>)}
+    </div>
+    <div className="connect-keynote">Names are labels agents report about themselves for the
+      activity log — they aren’t identities, and access doesn’t depend on them.</div></div>
+  </>;
 }
 
-function connectGuidesHTML(): string {
+function ConnectGuides(): ReactNode {
   const identity = state.identity;
-  if (!identity) return '';
+  if (!identity) return null;
   const env = connectClientEnv();
-  const guides = CONNECT_CLIENTS.map((client) => connectCardHTML(client, env)).join('');
-  return `${connectKeyCardHTML(identity)}
-    <div class="connect-sec-lbl">Connect an agent</div>
-    ${guides}
-    ${recentClientsHTML()}`;
+  return <>
+    <ConnectKeyCard identity={identity} />
+    <div className="connect-sec-lbl">Connect an agent</div>
+    {CONNECT_CLIENTS.map((client) => <ConnectCard key={client.id} client={client} env={env} />)}
+    <RecentClients />
+  </>;
 }
 const liveCount = (c: ConnectionSummary): number =>
   state.sessions.filter((s) => s.connection === c.name).length;
-const connTestResultHTML = (c: ConnectionSummary): string => {
-  const test = state.connTests[c.id];
-  if (!test) return '';
-  // While running, the status row's pill already says Testing…
-  if (test.running) return '';
-  // Failures are health, not feedback: they render through the row's
-  // issue list (connectionIssues), never as a line under a green verdict.
-  if (test.detail === undefined || !test.ok) return '';
-  return `<div class="cc-test ok">${ICONS.circleCheck}<span>${esc(test.detail)}</span></div>`;
-};
-
-
 /** The coarse kind a connection belongs to. Drives the muted per-kind
  * icon tint so a mixed list sorts itself visually without being
  * grouped. */
@@ -1686,10 +1729,23 @@ function connectionKind(c: ConnectionSummary): ConnKind {
 // the issue text. A fix names the action ("Fix settings", "Reconnect…"),
 // never the remedy in prose — the message stays diagnosis-only so it reads
 // the same in the banner, the tooltip, and the panel.
-const fixBtn = (act: string, id: string, label: string, primary = false): string =>
-  `<button class="btn ${primary ? 'primary' : 'outline'} sm cat-meta-fix" data-act="${act}" data-id="${id}">${label}</button>`;
+interface IssueFix {
+  action: string;
+  id: string;
+  label: string;
+  primary: boolean;
+}
+interface ConnectionIssue {
+  text: string;
+  detail?: string;
+  fix?: IssueFix;
+  tone?: 'info';
+}
+const fixBtn = (action: string, id: string, label: string, primary = false): IssueFix =>
+  ({ action, id, label, primary });
 /** Open the connection editor — the fix for a TLS/cert mismatch. */
-const editFix = (c: ConnectionSummary): string => fixBtn('edit-conn', c.id, 'Fix settings', true);
+const editFix = (c: ConnectionSummary): IssueFix =>
+  fixBtn('edit-conn', c.id, 'Fix settings', true);
 
 // One row inside an expanded catalog entry. It spans the full card width and
 // carries enough to identify the connection without opening it: who is signed
@@ -1705,8 +1761,8 @@ const editFix = (c: ConnectionSummary): string => fixBtn('edit-conn', c.id, 'Fix
  * one. */
 function connectionIssues(
   c: ConnectionSummary,
-): Array<{ text: string; detail?: string; fix?: string; tone?: 'info' }> {
-  const issues: Array<{ text: string; detail?: string; fix?: string; tone?: 'info' }> = [];
+): ConnectionIssue[] {
+  const issues: ConnectionIssue[] = [];
   if (c.type === 'pg' && c.sslmode && c.sslmode !== 'verify-full' && !isLoopbackHost(c.host)) {
     issues.push({
       text: c.sslmode === 'disable'
@@ -1732,7 +1788,7 @@ function connectionIssues(
         ? fixBtn('reconnect-mcp', c.id, 'Reconnect…')
         : c.oauth_spec
         ? fixBtn('oauth-reconnect', c.id, 'Reconnect…')
-        : '',
+        : undefined,
     });
   }
   // A test or check finished this session supersedes the broker's
@@ -1774,9 +1830,9 @@ function connectionIssues(
           text: 'TLS handshake failed',
           detail: `The server refused TLS; this connection requires ${
             c.sslmode ? `"${c.sslmode}"` : 'it'}.`,
-          fix: fixable ? editFix(c) : '',
+          fix: fixable ? editFix(c) : undefined,
         }
-      : { text: failure, fix: fixable ? editFix(c) : '' });
+      : { text: failure, fix: fixable ? editFix(c) : undefined });
   }
   return issues;
 }
@@ -1797,37 +1853,6 @@ function connectionTitle(c: ConnectionSummary): string {
 }
 
 /** The per-server tool filter chip an enabled MCP connection carries. */
-function connectionToolsChipHTML(c: ConnectionSummary): string {
-  if (!c.agent_access.enabled || !c.mcp_path) return '';
-  return `<button class="cat-meta-tools" data-act="wiring-tools" data-conn="${c.id}"
-      aria-label="Choose which tools agents may call on ${escAttr(c.name)}"
-      title="Choose which of this server’s tools agents may call">${ICONS.filter}<span>${
-        c.agent_access.allowed_tools
-          ? `${c.agent_access.allowed_tools.length} tool${c.agent_access.allowed_tools.length === 1 ? '' : 's'}`
-          : 'All tools'}</span></button>`;
-}
-
-/** The shared contents of a tool's options menu. Both the detail-panel
- * ellipsis and a right-click on its master row open these exact actions. */
-function connectionMenuItemsHTML(c: ConnectionSummary): string {
-  const test = state.connTests[c.id];
-  const mcpStatus = c.mcp_path ? state.mcpStatus[c.id] : undefined;
-  const running = c.mcp_path
-    ? Boolean(mcpStatus && mcpStatus.running)
-    : Boolean(test && test.running);
-  const endpointItems = c.agent_access.enabled && c.agent_access.endpoint
-    ? `<div class="menu-divider" role="separator"></div>
-        <button class="menu-item" role="menuitem" data-act="reissue-endpoint-ask" data-conn="${c.id}">${ICONS.refresh} Rotate connection address</button>
-        <button class="menu-item danger" role="menuitem" data-act="revoke-endpoint-ask" data-conn="${c.id}">${ICONS.x} Revoke connection address</button>`
-    : '';
-  return `<button class="menu-item" role="menuitem" data-act="${c.mcp_path ? 'mcp-status' : 'test-conn'}"
-      data-id="${c.id}" ${running ? 'disabled' : ''}>${ICONS.flaskConical} ${running ? 'Testing…' : 'Test connection'}</button>
-    <button class="menu-item" role="menuitem" data-act="edit-conn" data-id="${c.id}">${ICONS.pencil} Edit tool</button>
-    <button class="menu-item danger" role="menuitem" data-act="del-conn-ask" data-id="${c.id}">${ICONS.trash} Delete tool</button>
-    ${endpointItems}`;
-}
-
-/** What the switch promises to ask about, in this tool's own terms. */
 function confirmUnitLabel(c: ConnectionSummary): string {
   if (c.type === 'pg') return 'Ask before database sessions';
   if (c.type === 'ssh') return 'Ask before SSH logins';
@@ -1858,272 +1883,98 @@ function confirmScopeNote(c: ConnectionSummary): string {
  * interrupted, and it belongs next to the access switch it narrows rather
  * than in global Settings, because the answer differs per tool.
  */
-function confirmSectionHTML(c: ConnectionSummary): string {
-  if (!c.agent_access.enabled) return '';
-  const on = Boolean(c.agent_access.confirm);
-  const until = c.agent_access.confirm_window_until;
-  // An approval covers the agent the prompt named, not the connection, so
-  // the line names it. "Approved until 14:32" on its own would read as the
-  // tool being open to everything, which is the opposite of what it means.
-  const windowAgents = c.agent_access.confirm_window_agents ?? [];
-  const covered = windowAgents.length === 1
-    ? `for ${esc(windowAgents[0])}`
-    : windowAgents.length > 1
-      ? `for ${windowAgents.length} agents`
-      : '';
-  const window = on && until && new Date(until).getTime() > Date.now()
-    ? `<div class="cd-confirm-window">${ICONS.timer}<span>Approved ${covered} until
-        ${esc(clockTime(until))} — not asking ${windowAgents.length === 1 ? 'again' : 'them again'}
-        until then. Other agents are still asked.</span></div>`
-    : '';
-  // The mirror image of the window: after a Deny, retries are refused
-  // without a fresh prompt for a short cooldown. Without this line that
-  // refusal is invisible, and a mis-clicked Deny reads as a broken tool.
-  const cooldownUntil = c.agent_access.confirm_cooldown_until;
-  const cooldown = on && cooldownUntil && new Date(cooldownUntil).getTime() > Date.now()
-    ? `<div class="cd-confirm-window cd-confirm-cooldown">${ICONS.clockAlert}<span>Denied —
-        retries are refused without asking for ${esc(timeLeft(cooldownUntil))}. Turning
-        confirmation off and back on clears it.</span></div>`
-    : '';
-  // Shown whether the switch is on or off: what it can promise is part of
-  // deciding whether to turn it on at all.
-  const scope = confirmScopeNote(c);
-  return `<div class="cd-sec cd-confirm">
-      <div class="cd-confirm-row">
-        <div class="cd-confirm-txt">
-          <div class="cd-confirm-lbl">${esc(confirmUnitLabel(c))}</div>
-          ${scope ? `<div class="cd-confirm-sub">${esc(scope)}</div>` : ''}
-        </div>
-        <button class="switch ${on ? 'on' : ''}" role="switch" aria-checked="${on}"
-          title="${on ? 'Traffic is confirmed with you first' : 'Traffic goes without asking'}"
-          aria-label="${on ? 'Stop confirming' : 'Confirm'} traffic on ${escAttr(c.name)}"
-          data-act="${on ? 'confirm-off' : 'confirm-on'}" data-conn="${c.id}"></button>
-      </div>
-      ${window}
-      ${cooldown}
-      ${on ? `<div class="cd-confirm-note">With no AgentMFA approval surface attached,
-        this tool’s traffic is refused rather than carried.</div>` : ''}
-    </div>`;
-}
-
-// The Tools tab's detail panel: everything about connecting to the
-// selected tool that the compact rows no longer carry — its connection
-// endpoints, issues with their fixes, and the row's one options menu.
-// Beside the list when the window is wide; a slide-over when it isn't.
-function connDetailHTML(c: ConnectionSummary): string {
-  const menuOpen = state.connMenuOpen === c.id && !state.connMenuPoint;
-  const enabled = c.agent_access.enabled;
-  const entry = entryForConnection(c);
-  const mcpStatus = c.mcp_path ? state.mcpStatus[c.id] : undefined;
-  const issues = connectionIssues(c);
-  const issuesBlock = enabled && issues.length
-    ? `<div class="cc-issues">${issues.map((issue) =>
-        `<div class="cc-issue ${issue.tone ?? ''}">${
-          issue.tone === 'info' ? ICONS.info : ICONS.triangleAlert}<div class="cc-issue-body">
-          <span class="cc-issue-headline">${esc(issue.text)}</span>${
-          issue.detail ? `<span class="cc-issue-detail">${esc(issue.detail)}</span>` : ''}${
-          issue.fix
-            ? `<div class="cc-issue-fixes">${issue.fix}</div>`
-            : ''}</div></div>`).join('')}</div>`
-    : '';
-  // The connect section is addressed to the user, not the machinery: a
-  // sentence-case invitation naming what they're connecting to, where the
-  // panel's other sections keep the tracked-caps label.
-  const connectTitle = ((): string => {
-    switch (connectionKind(c)) {
-      case 'db': return 'Connect to this database';
-      case 'ssh': return 'Connect to this server';
-      default: return 'Connect to this service';
-    }
-  })();
-  const endpointSection = enabled && ENDPOINTABLE[c.type] && !c.mcp_path
-    ? `<div class="cd-sec"><div class="cd-connect-lbl"><span>${connectTitle}</span></div>
-        ${endpointStripHTML(c, true)}
-      </div>`
-    : '';
-  // MCP tools combine their filter and direct endpoint into one section:
-  // both describe how agents reach and constrain this tool. The label
-  // speaks in the connect headline's sentence-case register — the panel
-  // has one voice, no tracked-caps machinery labels.
-  const mcpSection = enabled && c.mcp_path
-    ? `<div class="cd-sec"><div class="cd-connect-lbl"><span>AgentMFA MCP</span><span class="cd-lbl-aside">${connectionToolsChipHTML(c)}</span></div>
-        ${ENDPOINTABLE[c.type] ? endpointStripHTML(c) : ''}</div>`
-    : '';
-  const offNote = enabled
-    ? ''
-    : '<div class="cd-help cd-off-note">This tool is disabled.</div>';
-  // The tool's facts, unpacked. The row keeps the terse machine target;
-  // this card is where its parts are readable — only facts
-  // the summary actually carries render, so every kind contributes what it
-  // has. The live-session line surfaces what the list's "N live" badge
-  // counts and links it to the log that explains it.
-  const factRows = ((): Array<[string, string]> => {
-    const rows: Array<[string, string]> = [];
-    if (c.mcp_path) {
-      if (c.host) rows.push(['Server', `${c.host}${c.mcp_path === '/' ? '' : c.mcp_path}`]);
-      if (c.account) rows.push(['Signs in as', c.account]);
-    } else if (c.type === 'pg') {
-      if (c.host) rows.push(['Host', c.host]);
-      if (c.port != null) rows.push(['Port', String(c.port)]);
-      if (c.dbname) rows.push(['Database', c.dbname]);
-      if (c.user) rows.push(['Signs in as', c.user]);
-      if (c.sslmode) rows.push(['TLS', c.sslmode]);
-    } else if (c.type === 'ssh') {
-      if (c.destination) rows.push(['Destination', c.destination]);
-      if (c.host) rows.push(['Host', c.host]);
-      if (c.port != null) rows.push(['Port', String(c.port)]);
-      if (c.user) rows.push(['User', c.user]);
-      rows.push(['Host key', c.host_key_fingerprint ? 'Pinned' : 'Not pinned yet']);
-    } else if (c.host) {
-      rows.push(['Server', `${c.scheme ? `${c.scheme}://` : ''}${c.host}`]);
-    }
-    if (c.secret_names.length) rows.push(['Credential', c.secret_names.join(', ')]);
-    else if (c.oauth) rows.push(['Credential', 'OAuth, renewed by AgentMFA']);
-    return rows;
-  })();
-  const live = liveCount(c);
-  const confirmSection = confirmSectionHTML(c);
-  const detailsSection = factRows.length
-    ? `<div class="cd-sec"><div class="cd-connect-lbl"><span>Details</span></div>
-        <div class="cd-facts">${factRows.map(([key, value]) =>
-          `<div class="cd-fact"><span class="cd-fact-k">${esc(key)}</span><code class="cd-fact-v">${esc(value)}</code></div>`).join('')}</div>
-        ${live ? `<div class="cd-live">${live} live session${live === 1 ? '' : 's'} ·
-          <button class="cd-live-link" data-act="tab" data-tab="activity">View in Activity Log</button></div>` : ''}
-      </div>`
-    : '';
-  return `<div class="cd-head">
-      <span class="cat-ico kind-${connectionKind(c)}" aria-hidden="true">${entry ? ICONS[entry.icon] || '' : ''}</span>
-      <div class="cd-title"><b title="${escAttr(c.name)}">${esc(connectionRowName(c))}</b>
-        <span>${enabled ? 'Enabled' : 'Off'}</span></div>
-      <div class="cd-actions">
-        ${connToggleHTML(c)}
-        <div class="tile-menu-wrap">
-          <button class="icon-btn tile-menu-btn ${menuOpen ? 'on' : ''}" title="Tool options"
-            aria-label="Options for ${escAttr(c.name)}" aria-haspopup="menu"
-            aria-expanded="${menuOpen}" data-act="toggle-conn-menu" data-id="${c.id}">${ICONS.ellipsis}</button>
-          ${menuOpen ? `<div class="tile-menu" role="menu" aria-label="Options for ${escAttr(c.name)}">
-            ${connectionMenuItemsHTML(c)}
-          </div>` : ''}
-        </div>
-      </div>
-    </div>
-    ${offNote}${issuesBlock}${connTestResultHTML(c)}${c.mcp_path
-      ? mcpSection + endpointSection
-      : endpointSection + mcpSection}${confirmSection}${detailsSection}${mcpStatusHTML(c)}`;
-}
-
-// The status check's result, rendered under the MCP connection it belongs
-// to — reachability and account first, then the server's resources the
-// same way credentials and wirings are listed.
-function mcpStatusHTML(c: ConnectionSummary): string {
-  if (!c.mcp_path) return '';
-  const status = state.mcpStatus[c.id];
-  if (!status) return '';
-  // While running, the options-menu action already says Testing…
-  if (status.running) return '';
-  // Errors and failed reports surface through the row's issue list
-  // (connectionIssues); only a healthy report renders here.
-  if (status.error) return '';
-  const report = status.report;
-  if (!report || !report.ok) return '';
-  const head = `<div class="cc-test ok">${ICONS.circleCheck}<span>${esc(report.detail)}</span></div>`;
-  let resources = '';
-  if (report.resources_supported) {
-    const shown = report.resources.slice(0, 8);
-    const rows = shown.map((resource) =>
-      `<div class="mcp-res"><b title="${escAttr(resource.name)}">${esc(resource.name)}</b><code title="${escAttr(resource.uri)}">${esc(resource.uri)}</code></div>`).join('');
-    const more = report.resources.length > shown.length
-      ? `<div class="mcp-res-more">+ ${report.resources.length - shown.length} more</div>` : '';
-    resources = `<div class="mcp-res-head">Resources (${report.resources.length})</div>
-      ${rows || '<div class="mcp-res-more">None listed by the server.</div>'}${more}`;
-  }
-  const truncated = report.truncated
-    ? '<div class="mcp-res-more">Catalog results were capped; more items are available upstream.</div>'
-    : '';
-  return `${head}${resources}${truncated}`;
-}
-
 // The built-in credentials store, expanded inline: the same secrets table
 // the standalone tab used to own.
-function credentialsExpansionHTML(): string {
+function CredentialsExpansion(): ReactNode {
   const query = state.tab === 'secrets' ? state.secretSearch : '';
-  const matching = state.secrets.filter((secret) => !query.trim()
-    || secret.name.toLowerCase().includes(query.trim().toLowerCase())
-    || secret.used_by_names.some((name) => name.toLowerCase().includes(query.trim().toLowerCase())));
-  const body = matching.length
-    ? secretsTableHTML(query)
-    : `<div class="muted-note">${state.secrets.length ? 'No saved credentials match your search.' : 'No saved credentials yet.'}</div>`;
-  return `<div class="cat-conns credentials-expansion">${body}
-    <button class="cat-more cat-add-secret" data-act="open-add-secret">＋ Add credential</button></div>`;
+  const needle = query.trim().toLowerCase();
+  const matching = state.secrets.filter((secret) => !needle
+    || secret.name.toLowerCase().includes(needle)
+    || secret.used_by_names.some((name) => name.toLowerCase().includes(needle)));
+  return (
+    <div className="cat-conns credentials-expansion">
+      {matching.length
+        ? <SecretsTable query={query} />
+        : <div className="muted-note">
+            {state.secrets.length ? 'No saved credentials match your search.' : 'No saved credentials yet.'}
+          </div>}
+      <button className="cat-more cat-add-secret" data-act="open-add-secret">＋ Add credential</button>
+    </div>
+  );
 }
 
-// One catalog row: icon chip, name, one-line description, and a trailing
-// action — Add for addable tools, a dimmed "Soon" chip for MCP-backed ones,
-// or a count badge that expands the row into what is configured.
-// Connections live in the flat list above the catalog, so a catalog row
-// only ever offers its add action — connected generic entries included.
-function catalogRowHTML(entry: CatalogEntry): string {
-  // A grayed-out placeholder: visible, not yet addable.
+function CatalogRow({ entry }: { entry: CatalogEntry }): ReactNode {
   if (entry.disabled) {
-    return `<div class="cat-row-wrap is-soon">
-      <div class="cat-row">
-        <span class="cat-ico" aria-hidden="true">${ICONS[entry.icon] || ''}</span>
-        <div class="cat-tx"><b>${esc(entry.name)}</b></div>
-        <span class="cat-soon" title="Not available yet">Coming soon</span>
-      </div></div>`;
+    return (
+      <div className="cat-row-wrap is-soon">
+        <div className="cat-row">
+          <span className="cat-ico" aria-hidden="true"><Icon markup={ICONS[entry.icon] || ''} /></span>
+          <div className="cat-tx"><b>{entry.name}</b></div>
+          <span className="cat-soon" title="Not available yet">Coming soon</span>
+        </div>
+      </div>
+    );
   }
   const builtin = entry.via === 'builtin';
   const quickConnect = canQuickConnectMcp(entry);
   const actionMenuOpen = state.catalogActionMenuOpen === entry.id;
-  // Rows that need provider-side setup (Slack, Gmail) and generic custom
-  // connection rows all say Configure: the user supplies something before
-  // the connection can be made.
-  const addLabel = entry.requiresSetup
-    ? 'Configure'
-    : ['mcp', 'http'].includes(entry.id)
-    ? 'Configure'
-    : entry.preset
+  const addLabel = entry.requiresSetup || ['mcp', 'http'].includes(entry.id) || entry.preset
     ? 'Configure'
     : entry.mcp && !entry.mcpTemplate?.serverUrl
     ? 'Add custom app'
     : entry.mcp
     ? 'Connect now'
     : 'Add';
-  const quickConnectAction = `<div class="cat-connect-wrap ${actionMenuOpen ? 'open' : ''}">
-      <div class="cat-connect-buttons">
-        <button class="btn cat-add cat-connect-primary" data-act="catalog-connect-oauth"
-          data-id="${entry.id}">Connect</button>
-        <button class="btn cat-add cat-connect-menu-btn" data-act="toggle-catalog-connect-menu"
-          data-id="${entry.id}" title="More ways to connect ${escAttr(entry.name)}"
-          aria-label="More ways to connect ${escAttr(entry.name)}" aria-haspopup="menu"
-          aria-expanded="${actionMenuOpen}">${ICONS.chevronDown}</button>
+  let action: ReactNode = null;
+  if (!builtin && quickConnect) {
+    action = (
+      <div className={`cat-connect-wrap ${actionMenuOpen ? 'open' : ''}`}>
+        <div className="cat-connect-buttons">
+          <button className="btn cat-add cat-connect-primary" data-act="catalog-connect-oauth"
+            data-id={entry.id}>Connect</button>
+          <button className="btn cat-add cat-connect-menu-btn"
+            data-act="toggle-catalog-connect-menu" data-id={entry.id}
+            title={`More ways to connect ${entry.name}`} aria-label={`More ways to connect ${entry.name}`}
+            aria-haspopup="menu" aria-expanded={actionMenuOpen}>
+            <Icon markup={ICONS.chevronDown} />
+          </button>
+        </div>
+        {actionMenuOpen
+          ? <div className="cat-connect-menu" role="menu" aria-label={`Connect ${entry.name}`}>
+              <button className="menu-item" role="menuitem" data-act="catalog-connect-oauth"
+                data-id={entry.id}>Connect</button>
+              <button className="menu-item" role="menuitem" data-act="catalog-connect-manual"
+                data-id={entry.id}>Connect via custom URL</button>
+              {entry.preset
+                ? <button className="menu-item" role="menuitem" data-act="catalog-connect-api"
+                    data-id={entry.id}>Connect custom API</button>
+                : null}
+            </div>
+          : null}
       </div>
-      ${actionMenuOpen ? `<div class="cat-connect-menu" role="menu" aria-label="Connect ${escAttr(entry.name)}">
-        <button class="menu-item" role="menuitem" data-act="catalog-connect-oauth" data-id="${entry.id}">Connect</button>
-        <button class="menu-item" role="menuitem" data-act="catalog-connect-manual" data-id="${entry.id}">Connect via custom URL</button>
-        ${entry.preset ? `<button class="menu-item" role="menuitem" data-act="catalog-connect-api" data-id="${entry.id}">Connect custom API</button>` : ''}
-      </div>` : ''}
-    </div>`;
-  // The credentials store renders its table right below (always expanded),
-  // so the row itself carries no trailing badge — the table is the count.
-  const action = builtin
-    ? ''
-    : quickConnect
-    ? quickConnectAction
-    : entry.via === 'connection'
-    ? `<button class="btn cat-add" data-act="catalog-add" data-id="${entry.id}">${addLabel}</button>`
-    : `<span class="cat-soon" title="Arrives with the MCP layer">Soon</span>`;
-  // Only the credentials store expands here, and it renders expanded
-  // always — its table is the content of the Secrets tab, not a
-  // disclosure. Connected tools live in the flat list, never in here.
-  const expansion = builtin ? credentialsExpansionHTML() : '';
-  return `<div class="cat-row-wrap ${builtin ? 'open' : ''} ${actionMenuOpen ? 'menu-open' : ''}">
-    <div class="cat-row">
-      <span class="cat-ico" aria-hidden="true">${ICONS[entry.icon] || ''}</span>
-      <div class="cat-tx"><b>${esc(entry.name)}</b></div>
-      ${entry.limitedSupport ? `<span class="cat-limited" tabindex="0" data-tippy-content="${escAttr(entry.name)} only accepts OAuth sign-ins from pre-approved clients. Use the API connector, or contact your representative at the company for support.">Limited support</span>` : ''}
-      ${action}
-    </div>${expansion}</div>`;
+    );
+  } else if (!builtin && entry.via === 'connection') {
+    action = <button className="btn cat-add" data-act="catalog-add"
+      data-id={entry.id}>{addLabel}</button>;
+  } else if (!builtin) {
+    action = <span className="cat-soon" title="Arrives with the MCP layer">Soon</span>;
+  }
+  return (
+    <div className={`cat-row-wrap ${builtin ? 'open' : ''} ${actionMenuOpen ? 'menu-open' : ''}`}>
+      <div className="cat-row">
+        <span className="cat-ico" aria-hidden="true"><Icon markup={ICONS[entry.icon] || ''} /></span>
+        <div className="cat-tx"><b>{entry.name}</b></div>
+        {entry.limitedSupport
+          ? <span className="cat-limited" tabIndex={0}
+              data-tippy-content={`${entry.name} only accepts OAuth sign-ins from pre-approved clients. Use the API connector, or contact your representative at the company for support.`}>
+              Limited support
+            </span>
+          : null}
+        {action}
+      </div>
+      {builtin ? <CredentialsExpansion /> : null}
+    </div>
+  );
 }
 
 /* ---- flat tools list (steady state) ----------------------------------- */
@@ -2140,24 +1991,6 @@ function connectionRowName(c: ConnectionSummary): string {
 
 /** The master row's second line carries only the destination. Tool filtering
  * and credential details live in the detail pane. */
-function connectionSublineHTML(c: ConnectionSummary): string {
-  return `<span class="flat-dest" title="${escAttr(c.target)}">${esc(c.target)}</span>`;
-}
-
-/** The flat row's health glyph. Not a control: the row itself opens the
- * detail, which is where issues are read and fixed. */
-function flatHealthHTML(c: ConnectionSummary): string {
-  if (!c.agent_access.enabled) {
-    return '<span class="cc-dot off" role="img" title="Off" aria-label="Off — agents may not use this tool"></span>';
-  }
-  const issues = connectionIssues(c).filter((issue) => issue.tone !== 'info');
-  if (!issues.length) return '<span class="cc-dot ok" role="img" title="Ready" aria-label="Ready"></span>';
-  // A dot, not a badge: the count and the issues themselves are read in
-  // the detail panel the row opens.
-  return `<span class="cc-dot warn" role="img" title="${escAttr(issues.map((issue) => issue.text).join(' '))}"
-      aria-label="${issues.length} issue${issues.length === 1 ? '' : 's'}"></span>`;
-}
-
 /** The connection the detail panel shows: the explicit selection while it
  * still exists, else the first row that needs attention, else the first
  * row — the panel never opens empty. */
@@ -2172,25 +2005,6 @@ function selectedConnection(): ConnectionSummary | null {
   return attn ?? state.connections[0];
 }
 
-function flatConnRowHTML(c: ConnectionSummary, reorderable = false): string {
-  const kind = connectionKind(c);
-  const live = liveCount(c);
-  const entry = entryForConnection(c);
-  const selected = selectedConnection()?.id === c.id;
-  // The row is the detail panel's opener; the on/off switch lives in the
-  // detail header, so the health dot alone carries state here (gray = off).
-  return `<div class="flat-conn-wrap ${selected ? 'sel' : ''}${reorderable ? ' reorderable' : ''}${dragConnId === c.id ? ' dragging' : ''}"
-    data-conn-row="${c.id}"${reorderable ? ' draggable="true"' : ''}>
-    <div class="flat-conn-row" role="button" tabindex="0" data-act="select-conn" data-id="${c.id}"
-      aria-expanded="${selected}" aria-label="Show details for ${escAttr(connectionRowName(c))}"${
-        reorderable ? ' aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"' : ''}>
-      <span class="cat-ico kind-${kind}" aria-hidden="true">${entry ? ICONS[entry.icon] || '' : ''}</span>
-      <div class="flat-tx"><b title="${escAttr(c.name)}">${esc(connectionRowName(c))}</b>
-        <span>${connectionSublineHTML(c)}</span></div>
-      ${live ? `<span class="cc-live">${live} live</span>` : ''}
-      <div class="cat-conn-status">${flatHealthHTML(c)}</div>
-    </div></div>`;
-}
 
 
 /** Whether a draft is being edited as an MCP server rather than a raw API. */
@@ -2203,124 +2017,410 @@ function isMcpDraft(draft: { isMcp?: boolean; mcpPath?: string | null }): boolea
 // to grow, so it collapses the same way as the larger sections.
 const COLLAPSIBLE_SECTIONS: string[] = ['MCP Apps', 'API Apps'];
 
-// The compact success banner shown after adding a tool. Rendered by
-// connectionsHTML in the wide window; the dropdown hoists it above its
-// inline search (see TabContent), so it keeps topping the tab either way.
-function connectionReadyCardHTML(): string {
-  const ready = state.connectionReady;
-  if (!ready) return '';
-  return `<div class="connection-ready">
-    <b>${esc(ready.name)} successfully added</b>
-    <button class="icon-btn" title="Dismiss" aria-label="Dismiss success message"
-      data-act="dismiss-connection-ready">${ICONS.circleX}</button>
-  </div>`;
+function ConnectionTestResult({ connection }: { connection: ConnectionSummary }): ReactNode {
+  const test = state.connTests[connection.id];
+  if (!test || test.running || test.detail === undefined || !test.ok) return null;
+  return <div className="cc-test ok"><Icon markup={ICONS.circleCheck} /><span>{test.detail}</span></div>;
 }
 
-function connectionsHTML(withReadyCard = true) {
-  const readyCard = withReadyCard ? connectionReadyCardHTML() : '';
+function ConnectionToolsChip({ connection: c }: {
+  connection: ConnectionSummary;
+}): ReactNode {
+  if (!c.agent_access.enabled || !c.mcp_path) return null;
+  const count = c.agent_access.allowed_tools?.length;
+  return <button className="cat-meta-tools" data-act="wiring-tools" data-conn={c.id}
+    aria-label={`Choose which tools agents may call on ${c.name}`}
+    title="Choose which of this server’s tools agents may call">
+    <Icon markup={ICONS.filter} />
+    <span>{count == null ? 'All tools' : `${count} tool${count === 1 ? '' : 's'}`}</span>
+  </button>;
+}
+
+function ConnectionMenuItems({ connection: c }: {
+  connection: ConnectionSummary;
+}): ReactNode {
+  const test = state.connTests[c.id];
+  const mcpStatus = c.mcp_path ? state.mcpStatus[c.id] : undefined;
+  const running = c.mcp_path ? Boolean(mcpStatus?.running) : Boolean(test?.running);
+  return <>
+    <button className="menu-item" role="menuitem"
+      data-act={c.mcp_path ? 'mcp-status' : 'test-conn'} data-id={c.id} disabled={running}>
+      <Icon markup={ICONS.flaskConical} /> {running ? 'Testing…' : 'Test connection'}
+    </button>
+    <button className="menu-item" role="menuitem" data-act="edit-conn" data-id={c.id}>
+      <Icon markup={ICONS.pencil} /> Edit tool
+    </button>
+    <button className="menu-item danger" role="menuitem" data-act="del-conn-ask" data-id={c.id}>
+      <Icon markup={ICONS.trash} /> Delete tool
+    </button>
+    {c.agent_access.enabled && c.agent_access.endpoint
+      ? <>
+          <div className="menu-divider" role="separator"></div>
+          <button className="menu-item" role="menuitem" data-act="reissue-endpoint-ask"
+            data-conn={c.id}><Icon markup={ICONS.refresh} /> Rotate connection address</button>
+          <button className="menu-item danger" role="menuitem" data-act="revoke-endpoint-ask"
+            data-conn={c.id}><Icon markup={ICONS.x} /> Revoke connection address</button>
+        </>
+      : null}
+  </>;
+}
+
+function ConfirmationSection({ connection: c }: {
+  connection: ConnectionSummary;
+}): ReactNode {
+  if (!c.agent_access.enabled) return null;
+  const on = Boolean(c.agent_access.confirm);
+  const until = c.agent_access.confirm_window_until;
+  const windowAgents = c.agent_access.confirm_window_agents ?? [];
+  const covered = windowAgents.length === 1
+    ? `for ${windowAgents[0]}`
+    : windowAgents.length > 1
+    ? `for ${windowAgents.length} agents`
+    : '';
+  const windowActive = Boolean(on && until && new Date(until).getTime() > Date.now());
+  const cooldownUntil = c.agent_access.confirm_cooldown_until;
+  const cooldownActive = Boolean(
+    on && cooldownUntil && new Date(cooldownUntil).getTime() > Date.now(),
+  );
+  const scope = confirmScopeNote(c);
+  return <div className="cd-sec cd-confirm">
+    <div className="cd-confirm-row">
+      <div className="cd-confirm-txt">
+        <div className="cd-confirm-lbl">{confirmUnitLabel(c)}</div>
+        {scope ? <div className="cd-confirm-sub">{scope}</div> : null}
+      </div>
+      <button className={`switch ${on ? 'on' : ''}`} role="switch" aria-checked={on}
+        title={on ? 'Traffic is confirmed with you first' : 'Traffic goes without asking'}
+        aria-label={`${on ? 'Stop confirming' : 'Confirm'} traffic on ${c.name}`}
+        data-act={on ? 'confirm-off' : 'confirm-on'} data-conn={c.id}></button>
+    </div>
+    {windowActive && until
+      ? <div className="cd-confirm-window"><Icon markup={ICONS.timer} /><span>
+          Approved {covered} until {clockTime(until)} — not asking{' '}
+          {windowAgents.length === 1 ? 'again' : 'them again'} until then. Other agents are
+          still asked.
+        </span></div>
+      : null}
+    {cooldownActive && cooldownUntil
+      ? <div className="cd-confirm-window cd-confirm-cooldown">
+          <Icon markup={ICONS.clockAlert} /><span>Denied — retries are refused without asking
+            for {timeLeft(cooldownUntil)}. Turning confirmation off and back on clears it.</span>
+        </div>
+      : null}
+    {on
+      ? <div className="cd-confirm-note">With no AgentMFA approval surface attached,
+          this tool’s traffic is refused rather than carried.</div>
+      : null}
+  </div>;
+}
+
+function McpStatus({ connection: c }: { connection: ConnectionSummary }): ReactNode {
+  const status = c.mcp_path ? state.mcpStatus[c.id] : undefined;
+  const report = status && !status.running && !status.error ? status.report : undefined;
+  if (!report?.ok) return null;
+  const shown = report.resources.slice(0, 8);
+  return <>
+    <div className="cc-test ok"><Icon markup={ICONS.circleCheck} /><span>{report.detail}</span></div>
+    {report.resources_supported
+      ? <>
+          <div className="mcp-res-head">Resources ({report.resources.length})</div>
+          {shown.length
+            ? shown.map((resource) => <div key={`${resource.uri}:${resource.name}`} className="mcp-res">
+                <b title={resource.name}>{resource.name}</b>
+                <code title={resource.uri}>{resource.uri}</code>
+              </div>)
+            : <div className="mcp-res-more">None listed by the server.</div>}
+          {report.resources.length > shown.length
+            ? <div className="mcp-res-more">+ {report.resources.length - shown.length} more</div>
+            : null}
+        </>
+      : null}
+    {report.truncated
+      ? <div className="mcp-res-more">
+          Catalog results were capped; more items are available upstream.
+        </div>
+      : null}
+  </>;
+}
+
+function connectionFactRows(c: ConnectionSummary): Array<[string, string]> {
+  const rows: Array<[string, string]> = [];
+  if (c.mcp_path) {
+    if (c.host) rows.push(['Server', `${c.host}${c.mcp_path === '/' ? '' : c.mcp_path}`]);
+    if (c.account) rows.push(['Signs in as', c.account]);
+  } else if (c.type === 'pg') {
+    if (c.host) rows.push(['Host', c.host]);
+    if (c.port != null) rows.push(['Port', String(c.port)]);
+    if (c.dbname) rows.push(['Database', c.dbname]);
+    if (c.user) rows.push(['Signs in as', c.user]);
+    if (c.sslmode) rows.push(['TLS', c.sslmode]);
+  } else if (c.type === 'ssh') {
+    if (c.destination) rows.push(['Destination', c.destination]);
+    if (c.host) rows.push(['Host', c.host]);
+    if (c.port != null) rows.push(['Port', String(c.port)]);
+    if (c.user) rows.push(['User', c.user]);
+    rows.push(['Host key', c.host_key_fingerprint ? 'Pinned' : 'Not pinned yet']);
+  } else if (c.host) {
+    rows.push(['Server', `${c.scheme ? `${c.scheme}://` : ''}${c.host}`]);
+  }
+  if (c.secret_names.length) rows.push(['Credential', c.secret_names.join(', ')]);
+  else if (c.oauth) rows.push(['Credential', 'OAuth, renewed by AgentMFA']);
+  return rows;
+}
+
+function ConnectionDetail({ connection: c }: {
+  connection: ConnectionSummary;
+}): ReactNode {
+  const menuOpen = state.connMenuOpen === c.id && !state.connMenuPoint;
+  const enabled = c.agent_access.enabled;
+  const entry = entryForConnection(c);
+  const issues = connectionIssues(c);
+  const connectTitle = connectionKind(c) === 'db'
+    ? 'Connect to this database'
+    : connectionKind(c) === 'ssh'
+    ? 'Connect to this server'
+    : 'Connect to this service';
+  const endpointSection = enabled && ENDPOINTABLE[c.type] && !c.mcp_path
+    ? <div className="cd-sec">
+        <div className="cd-connect-lbl"><span>{connectTitle}</span></div>
+        <EndpointStrip connection={c} withFormats />
+      </div>
+    : null;
+  const mcpSection = enabled && c.mcp_path
+    ? <div className="cd-sec">
+        <div className="cd-connect-lbl"><span>AgentMFA MCP</span>
+          <span className="cd-lbl-aside"><ConnectionToolsChip connection={c} /></span>
+        </div>
+        {ENDPOINTABLE[c.type] ? <EndpointStrip connection={c} /> : null}
+      </div>
+    : null;
+  const factRows = connectionFactRows(c);
+  const live = liveCount(c);
+  return <>
+    <div className="cd-head">
+      <span className={`cat-ico kind-${connectionKind(c)}`} aria-hidden="true">
+        {entry ? <Icon markup={ICONS[entry.icon] || ''} /> : null}
+      </span>
+      <div className="cd-title"><b title={c.name}>{connectionRowName(c)}</b>
+        <span>{enabled ? 'Enabled' : 'Off'}</span>
+      </div>
+      <div className="cd-actions">
+        <ConnectionToggle connection={c} />
+        <div className="tile-menu-wrap">
+          <button className={`icon-btn tile-menu-btn ${menuOpen ? 'on' : ''}`}
+            title="Tool options" aria-label={`Options for ${c.name}`} aria-haspopup="menu"
+            aria-expanded={menuOpen} data-act="toggle-conn-menu" data-id={c.id}>
+            <Icon markup={ICONS.ellipsis} />
+          </button>
+          {menuOpen
+            ? <div className="tile-menu" role="menu" aria-label={`Options for ${c.name}`}>
+                <ConnectionMenuItems connection={c} />
+              </div>
+            : null}
+        </div>
+      </div>
+    </div>
+    {!enabled ? <div className="cd-help cd-off-note">This tool is disabled.</div> : null}
+    {enabled && issues.length
+      ? <div className="cc-issues">{issues.map((issue, index) =>
+          <div key={`${issue.text}:${index}`} className={`cc-issue ${issue.tone ?? ''}`}>
+            <Icon markup={issue.tone === 'info' ? ICONS.info : ICONS.triangleAlert} />
+            <div className="cc-issue-body">
+              <span className="cc-issue-headline">{issue.text}</span>
+              {issue.detail ? <span className="cc-issue-detail">{issue.detail}</span> : null}
+              {issue.fix
+                ? <div className="cc-issue-fixes">
+                    <button className={`btn sm ${issue.fix.primary ? 'primary' : ''}`}
+                      data-act={issue.fix.action} data-id={issue.fix.id}>{issue.fix.label}</button>
+                  </div>
+                : null}
+            </div>
+          </div>)}
+        </div>
+      : null}
+    <ConnectionTestResult connection={c} />
+    {c.mcp_path ? <>{mcpSection}{endpointSection}</> : <>{endpointSection}{mcpSection}</>}
+    <ConfirmationSection connection={c} />
+    {factRows.length
+      ? <div className="cd-sec">
+          <div className="cd-connect-lbl"><span>Details</span></div>
+          <div className="cd-facts">{factRows.map(([key, value]) =>
+            <div key={key} className="cd-fact">
+              <span className="cd-fact-k">{key}</span><code className="cd-fact-v">{value}</code>
+            </div>)}
+          </div>
+          {live
+            ? <div className="cd-live">{live} live session{live === 1 ? '' : 's'} ·{' '}
+                <button className="cd-live-link" data-act="tab" data-tab="activity">
+                  View in Activity Log
+                </button>
+              </div>
+            : null}
+        </div>
+      : null}
+    <McpStatus connection={c} />
+  </>;
+}
+
+function FlatConnectionRow({ connection: c, reorderable = false }: {
+  connection: ConnectionSummary;
+  reorderable?: boolean;
+}): ReactNode {
+  const kind = connectionKind(c);
+  const live = liveCount(c);
+  const entry = entryForConnection(c);
+  const selected = selectedConnection()?.id === c.id;
+  const issues = connectionIssues(c).filter((issue) => issue.tone !== 'info');
+  const health = !c.agent_access.enabled
+    ? <span className="cc-dot off" role="img" title="Off"
+        aria-label="Off — agents may not use this tool"></span>
+    : !issues.length
+    ? <span className="cc-dot ok" role="img" title="Ready" aria-label="Ready"></span>
+    : <span className="cc-dot warn" role="img" title={issues.map((issue) => issue.text).join(' ')}
+        aria-label={`${issues.length} issue${issues.length === 1 ? '' : 's'}`}></span>;
+  return <div
+    className={`flat-conn-wrap ${selected ? 'sel' : ''}${reorderable ? ' reorderable' : ''}${dragConnId === c.id ? ' dragging' : ''}`}
+    data-conn-row={c.id} draggable={reorderable || undefined}>
+    <div className="flat-conn-row" role="button" tabIndex={0} data-act="select-conn"
+      data-id={c.id} aria-expanded={selected}
+      aria-label={`Show details for ${connectionRowName(c)}`}
+      aria-keyshortcuts={reorderable ? 'Alt+ArrowUp Alt+ArrowDown' : undefined}>
+      <span className={`cat-ico kind-${kind}`} aria-hidden="true">
+        {entry ? <Icon markup={ICONS[entry.icon] || ''} /> : null}
+      </span>
+      <div className="flat-tx"><b title={c.name}>{connectionRowName(c)}</b>
+        <span><span className="flat-dest" title={c.target}>{c.target}</span></span>
+      </div>
+      {live ? <span className="cc-live">{live} live</span> : null}
+      <div className="cat-conn-status">{health}</div>
+    </div>
+  </div>;
+}
+
+function ConnectionReadyCard(): ReactNode {
+  const ready = state.connectionReady;
+  if (!ready) return null;
+  return <div className="connection-ready">
+    <b>{ready.name} successfully added</b>
+    <button className="icon-btn" title="Dismiss" aria-label="Dismiss success message"
+      data-act="dismiss-connection-ready"><Icon markup={ICONS.circleX} /></button>
+  </div>;
+}
+
+function ConnectionsView({ withReadyCard = true }: { withReadyCard?: boolean }): ReactNode {
   const byId = new Map(state.connections.map((connection) => [connection.id, connection] as const));
-  const previewOrder = dragConnOrder;
-  const orderedConnections = previewOrder
+  const orderedConnections = dragConnOrder
     ? [
-        ...previewOrder.map((id) => byId.get(id)).filter(
+        ...dragConnOrder.map((id) => byId.get(id)).filter(
           (connection): connection is ConnectionSummary => Boolean(connection),
         ),
-        ...state.connections.filter((connection) => !previewOrder.includes(connection.id)),
+        ...state.connections.filter((connection) => !dragConnOrder!.includes(connection.id)),
       ]
     : state.connections;
-  // One view, no navigation: the connected tools stay at the top as flat
-  // rows, and an "Add a tool" row at the bottom of the list expands the
-  // catalog of everything not yet connected, in place, beneath it.
   const entries = visibleCatalog(state.toolSearch);
   const isConnected = (entry: CatalogEntry): boolean =>
     connectionsForEntry(entry, state.connections).length > 0;
   const needle = state.toolSearch.trim().toLowerCase();
-  // A connected row also answers to what the tool *is* — its catalog
-  // entry's name, description, and keywords — not just what the user
-  // named it, so "postgres" still finds a row called "Analytics DB".
-  const entryMatches = (c: ConnectionSummary): boolean => {
+  const matching = orderedConnections.filter((c) => {
     const entry = entryForConnection(c);
-    return Boolean(entry) && [entry!.name, entry!.description, ...(entry!.keywords || [])]
-      .some((text) => text.toLowerCase().includes(needle));
-  };
-  const matching = orderedConnections.filter((c) => !needle
-    || c.name.toLowerCase().includes(needle)
-    || c.target.toLowerCase().includes(needle)
-    || (c.account || '').toLowerCase().includes(needle)
-    || entryMatches(c));
-  // Reordering persists the full list order, so it is only offered when the
-  // whole list is on screen: no active search filter, and more than one tool.
+    const entryMatches = Boolean(entry) && [
+      entry!.name, entry!.description, ...(entry!.keywords || []),
+    ].some((text) => text.toLowerCase().includes(needle));
+    return !needle
+      || c.name.toLowerCase().includes(needle)
+      || c.target.toLowerCase().includes(needle)
+      || (c.account || '').toLowerCase().includes(needle)
+      || entryMatches;
+  });
   const reorderable = !needle && matching.length > 1;
-  const connectedList = state.connections.length
-    ? `<div class="cat-section"><div class="cat-rows${reorderable ? ' reorderable' : ''}${dragConnId ? ' drag-active' : ''}"
-        data-conn-list${reorderable ? '="on"' : ''}>${matching.length
-        ? matching.map((c) => flatConnRowHTML(c, reorderable)).join('')
-        : '<div class="muted-note">No tools match your search.</div>'}</div></div>`
-    : '';
-  // With nothing connected, adding is the only thing to do — the catalog
-  // starts open.
   const addOpen = state.addToolOpen || !state.connections.length;
-  const addRow = state.connections.length
-    ? `<div class="cat-section"><div class="cat-rows">
-        <div class="cat-row is-toggle add-tools-row" role="button" tabindex="0"
-          data-act="toggle-add-tools" aria-expanded="${addOpen}"
-          aria-label="${addOpen ? 'Hide' : 'Show'} tools that can be added">
-          <span class="cat-ico" aria-hidden="true">${ICONS.plus}</span>
-          <div class="cat-tx"><b>Add a tool</b></div>
-          <span class="cat-chev group-chev ${addOpen ? 'open' : ''}" aria-hidden="true">${ICONS.chevronDown}</span>
-        </div></div></div>`
-    : '';
-  // Generic rows are tool types, not accounts: they stay addable even
-  // while connected, or there would be no way to add a second database.
   const alwaysAddable = (entry: CatalogEntry): boolean =>
     entry.section === 'Infrastructure' || ['http', 'mcp'].includes(entry.id);
-  // Infrastructure leads; every other section (Secrets aside) follows as
-  // its own group, offering what isn't connected yet plus the generics.
-  const ADD_SECTIONS = [
+  const addSections = [
     'Infrastructure',
     ...CATALOG_SECTIONS.filter((section) => section !== 'Infrastructure' && section !== 'Secrets'),
   ];
-  const sections = !addOpen ? '' : ADD_SECTIONS.map((section) => {
+  const sections = !addOpen ? [] : addSections.flatMap((section) => {
     const sectionEntries = entries.filter(
-      (entry) => entry.section === section
-        && (!isConnected(entry) || alwaysAddable(entry)),
+      (entry) => entry.section === section && (!isConnected(entry) || alwaysAddable(entry)),
     );
-    if (!sectionEntries.length) return '';
+    if (!sectionEntries.length) return [];
     const ordered = connectedCatalogFirst(sectionEntries, state.connections);
     const collapsible = COLLAPSIBLE_SECTIONS.includes(section) && !state.toolSearch.trim();
     const expanded = state.sectionsExpanded.includes(section);
     const collapsed = collapsible
       ? collapsedCatalogGroup(sectionEntries, state.connections)
       : { visible: ordered, hiddenCount: 0 };
-    const rows = collapsible && !expanded ? collapsed.visible : ordered;
-    const disclosure = collapsible && collapsed.hiddenCount > 0
-      ? `<button class="cat-more" data-act="toggle-section-expanded" data-id="${escAttr(section)}"
-          aria-expanded="${expanded}">
-          <span>${expanded ? 'Show fewer tools' : 'Show more tools'}</span>
-          <span class="cat-more-chev ${expanded ? 'open' : ''}" aria-hidden="true">${ICONS.chevronDown}</span>
-        </button>`
-      : '';
-    return `<div class="cat-section add-section"><div class="cat-section-h">${section.toUpperCase()}</div>
-      <div class="cat-rows">${rows.map(catalogRowHTML).join('')}${disclosure}</div></div>`;
-  }).join('');
-  // Master–detail: the rows keep only what identifies a tool; everything
-  // about connecting to it lives in the panel beside the list. Narrow
-  // windows get the same panel as a slide-over instead (see styles).
+    return [{
+      section,
+      rows: collapsible && !expanded ? collapsed.visible : ordered,
+      expanded,
+      hiddenCount: collapsed.hiddenCount,
+    }];
+  });
   const detail = selectedConnection();
-  const detailPane = detail
-    ? `<aside class="conn-detail-pane" aria-label="Connection details">${connDetailHTML(detail)}</aside>`
-    : '';
-  const backdrop = detail && state.connDetailOpen
-    ? '<button class="conn-detail-backdrop" data-act="close-conn-detail" aria-label="Close connection details" tabindex="-1"></button>'
-    : '';
-  return readyCard + `<div class="catalog ${state.connDetailOpen ? 'detail-open' : ''}">
-    <div class="tools-split"><div class="tools-list">
-      ${connectedList}${addRow}${addOpen && !sections ? '<div class="muted-note">No tools match your search.</div>' : sections}
-    </div>${detailPane}</div>${backdrop}
-  </div>`;
+  return <>
+    {withReadyCard ? <ConnectionReadyCard /> : null}
+    <div className={`catalog ${state.connDetailOpen ? 'detail-open' : ''}`}>
+      <div className="tools-split">
+        <div className="tools-list">
+          {state.connections.length
+            ? <div className="cat-section">
+                <div className={`cat-rows${reorderable ? ' reorderable' : ''}${dragConnId ? ' drag-active' : ''}`}
+                  data-conn-list={reorderable ? 'on' : ''}>
+                  {matching.length
+                    ? matching.map((connection) =>
+                        <FlatConnectionRow key={connection.id} connection={connection}
+                          reorderable={reorderable} />)
+                    : <div className="muted-note">No tools match your search.</div>}
+                </div>
+              </div>
+            : null}
+          {state.connections.length
+            ? <div className="cat-section"><div className="cat-rows">
+                <div className="cat-row is-toggle add-tools-row" role="button" tabIndex={0}
+                  data-act="toggle-add-tools" aria-expanded={addOpen}
+                  aria-label={`${addOpen ? 'Hide' : 'Show'} tools that can be added`}>
+                  <span className="cat-ico" aria-hidden="true"><Icon markup={ICONS.plus} /></span>
+                  <div className="cat-tx"><b>Add a tool</b></div>
+                  <span className={`cat-chev group-chev ${addOpen ? 'open' : ''}`}
+                    aria-hidden="true"><Icon markup={ICONS.chevronDown} /></span>
+                </div>
+              </div></div>
+            : null}
+          {addOpen && !sections.length
+            ? <div className="muted-note">No tools match your search.</div>
+            : sections.map(({ section, rows, expanded, hiddenCount }) =>
+                <div key={section} className="cat-section add-section">
+                  <div className="cat-section-h">{section.toUpperCase()}</div>
+                  <div className="cat-rows">
+                    {rows.map((entry) => <CatalogRow key={entry.id} entry={entry} />)}
+                    {hiddenCount > 0
+                      ? <button className="cat-more" data-act="toggle-section-expanded"
+                          data-id={section} aria-expanded={expanded}>
+                          <span>{expanded ? 'Show fewer tools' : 'Show more tools'}</span>
+                          <span className={`cat-more-chev ${expanded ? 'open' : ''}`}
+                            aria-hidden="true"><Icon markup={ICONS.chevronDown} /></span>
+                        </button>
+                      : null}
+                  </div>
+                </div>)}
+        </div>
+        {detail
+          ? <aside className="conn-detail-pane" aria-label="Connection details">
+              <ConnectionDetail connection={detail} />
+            </aside>
+          : null}
+      </div>
+      {detail && state.connDetailOpen
+        ? <button className="conn-detail-backdrop" data-act="close-conn-detail"
+            aria-label="Close connection details" tabIndex={-1}></button>
+        : null}
+    </div>
+  </>;
 }
 
-function secretsHTML(): string {
+function SecretsView(): ReactNode {
   const allEntries = visibleCatalog('').filter((entry) => entry.section === 'Secrets');
   const needle = state.secretSearch.trim().toLowerCase();
   const entries = allEntries.filter((entry) => {
@@ -2334,14 +2434,17 @@ function secretsHTML(): string {
     return entryMatch || savedSecretMatch;
   });
   const rows = connectedCatalogFirst(entries, state.connections);
-  // Each store renders as its own card so the Keychain credentials and the
-  // 1Password placeholder read as separate groups, not rows of one list.
-  const sections = rows.length
-    ? rows.map((entry) =>
-      `<div class="cat-section"><div class="cat-rows">${catalogRowHTML(entry)}</div></div>`).join('')
-    : '<div class="muted-note">No secrets match your search.</div>';
-  return `<div class="catalog">${sections}
-  </div>`;
+  return (
+    <div className="catalog">
+      {rows.length
+        ? rows.map((entry) => (
+            <div key={entry.id} className="cat-section">
+              <div className="cat-rows"><CatalogRow entry={entry} /></div>
+            </div>
+          ))
+        : <div className="muted-note">No secrets match your search.</div>}
+    </div>
+  );
 }
 
 // Console.app-style rows: a proportional timestamp gutter, restrained
@@ -2613,7 +2716,7 @@ async function loadOlderActivity(): Promise<void> {
 
 function ActivityView(): ReactNode {
   const liveSessions = state.sessions.length
-    ? <SafeMarkup markup={liveSessionsHTML('activity-live-sessions')} />
+    ? <LiveSessions extraClass="activity-live-sessions" />
     : null;
   if (!state.activity.length) {
     return (
@@ -2691,145 +2794,99 @@ async function receiveActivity(entry: ActivityEntry | null | undefined): Promise
 
 /** Step 2's pane for one connect mode: a one-line lead, the snippet, and its
  * action row. */
-function startConnectPaneHTML(mode: ConnectModeId, option: StartOption, progress: StartProgress): string {
-  const conn = progress.toolName
+function StartConnectPane({ mode: connectMode, option, progress }: {
+  mode: ConnectModeId;
+  option: StartOption;
+  progress: StartProgress;
+}): ReactNode {
+  const connection = progress.toolName
     ? state.connections.find((candidate) => candidate.name === progress.toolName) ?? null
     : null;
-  const snip = (text: string) => `<pre class="setup-instructions"><code>${esc(text)}</code></pre>`;
-  const copyBtn = (text: string, label: string) =>
-    `<button class="btn primary sm" data-act="copy-text" data-text="${escAttr(text)}">${label}</button>`;
-  const actions = (inner: string) => `<div class="start-actions">${inner}</div>`;
+  const snippet = (text: string): ReactNode =>
+    <pre className="setup-instructions"><code>{text}</code></pre>;
+  const copyButton = (text: string, label: string): ReactNode =>
+    <button className="btn primary sm" data-act="copy-text" data-text={text}>{label}</button>;
 
-  switch (mode) {
-    case 'direct': {
-      if (!conn) {
-        const prerequisite = option.connType === 'pg'
-          ? 'Add a Postgres database first.'
-          : option.connType === 'ssh'
-          ? 'Add an SSH server first.'
-          : `Add a ${esc(option.label)} tool first.`;
-        return `<p>${prerequisite}</p>
-          <div class="start-actions"><button class="btn primary sm" disabled>Get connection address</button></div>`;
-      }
-      const endpoint = conn.agent_access.endpoint ?? null;
-      if (!endpoint) {
-        const lead = conn.type === 'pg'
-          ? `Get a local DSN for “${esc(conn.name)}” that any unmodified Postgres client can use —
-              psql, drivers, ORMs.`
-          : `Get a signing-agent socket for “${esc(conn.name)}”. Plain ssh, git, and rsync work
-              unmodified; the private key never leaves this machine.`;
-        return `<p>${lead}</p>
-          <div class="start-actions"><button class="btn primary sm" data-act="issue-endpoint"
-            data-conn="${conn.id}">Get connection address</button></div>`;
-      }
-      // The address itself is the deliverable: the same field as the
-      // tool's row. Getting a new one / revoking stay in that row's ⋯ menu.
-      const lead = conn.type === 'pg'
-        ? 'Tell your agent to connect directly to this database.'
-        : 'Tell your agent to connect directly to this server.';
-      return `<p>${lead}</p>${endpointStripHTML(conn)}`;
+  if (connectMode === 'direct') {
+    if (!connection) {
+      const prerequisite = option.connType === 'pg'
+        ? 'Add a Postgres database first.'
+        : option.connType === 'ssh'
+        ? 'Add an SSH server first.'
+        : `Add a ${option.label} tool first.`;
+      return <><p>{prerequisite}</p>
+        <div className="start-actions"><button className="btn primary sm" disabled>
+          Get connection address</button></div></>;
     }
+    if (!connection.agent_access.endpoint) {
+      const lead = connection.type === 'pg'
+        ? `Get a local DSN for “${connection.name}” that any unmodified Postgres client can use — psql, drivers, ORMs.`
+        : `Get a signing-agent socket for “${connection.name}”. Plain ssh, git, and rsync work unmodified; the private key never leaves this machine.`;
+      return <><p>{lead}</p>
+        <div className="start-actions"><button className="btn primary sm"
+          data-act="issue-endpoint" data-conn={connection.id}>Get connection address</button></div></>;
+    }
+    const lead = connection.type === 'pg'
+      ? 'Tell your agent to connect directly to this database.'
+      : 'Tell your agent to connect directly to this server.';
+    return <><p>{lead}</p><EndpointStrip connection={connection} /></>;
   }
 
-  // Every other mode renders straight from its shared client definition.
-  const client = connectClientById(mode);
-  if (!client) return '';
+  const client = connectClientById(connectMode);
+  if (!client) return null;
   const env = connectClientEnv();
   if (client.paneSource === 'agent-setup') {
-    return `<p>${esc(client.lead(env))}</p>
-      <pre class="setup-instructions"><code>${esc(state.agentSetupInstructions || 'Loading…')}</code></pre>
-      ${actions(`<button class="btn primary sm" data-act="copy-agent-setup">${client.copyLabel}</button>`)}`;
+    return <><p>{client.lead(env)}</p>
+      {snippet(state.agentSetupInstructions || 'Loading…')}
+      <div className="start-actions"><button className="btn primary sm"
+        data-act="copy-agent-setup">{client.copyLabel}</button></div></>;
   }
   const clientSnippet = client.snippet(env);
   if (client.requiresCli && !client.inlineCliInstall) {
-    return `<p>Install the AgentMFA CLI:</p>
-      ${snip(CLI_INSTALL_COMMAND)}
-      <p class="start-pane-next">${esc(client.lead(env))}</p>
-      ${snip(clientSnippet)}
-      ${actions(copyBtn(clientSnippet, client.copyLabel))}`;
+    return <><p>Install the AgentMFA CLI:</p>
+      {snippet(CLI_INSTALL_COMMAND)}
+      <p className="start-pane-next">{client.lead(env)}</p>
+      {snippet(clientSnippet)}
+      <div className="start-actions">{copyButton(clientSnippet, client.copyLabel)}</div></>;
   }
-  const snippet = client.inlineCliInstall
+  const text = client.inlineCliInstall
     ? `${CLI_INSTALL_COMMAND}\n${clientSnippet}`
     : clientSnippet;
-  return `<p>${esc(client.lead(env))}</p>
-    ${snip(snippet)}${actions(copyBtn(snippet, client.copyLabel))}`;
+  return <><p>{client.lead(env)}</p>{snippet(text)}
+    <div className="start-actions">{copyButton(text, client.copyLabel)}</div></>;
 }
 
-// The centered walkthrough/guides switch directly under the page heading.
-function startViewToggleHTML(): string {
-  const btn = (view: StartView, label: string) =>
-    `<button class="seg-btn ${state.startView === view ? 'on' : ''}"
-      aria-pressed="${state.startView === view}" data-act="start-view" data-id="${view}">${label}</button>`;
-  return `<div class="start-view-toggle"><div class="seg" role="group" aria-label="Get started view">
-    ${btn('walkthrough', 'Quick start')}${btn('guides', 'Agent guides')}</div></div>`;
+function StartViewToggle(): ReactNode {
+  const button = (view: StartView, label: string): ReactNode => (
+    <button className={`seg-btn ${state.startView === view ? 'on' : ''}`}
+      aria-pressed={state.startView === view} data-act="start-view" data-id={view}>{label}</button>
+  );
+  return <div className="start-view-toggle"><div className="seg" role="group"
+    aria-label="Get started view">
+    {button('walkthrough', 'Quick start')}{button('guides', 'Agent guides')}
+  </div></div>;
 }
 
-function startHTML(): string {
-  const body = state.startView === 'guides'
-    ? connectGuidesHTML()
-    : startWalkthroughHTML();
-  return `<div class="start">
-    <div class="start-hero"><h3>Connect your agent to tools and services</h3></div>
-    ${startViewToggleHTML()}
-    ${globalSectionsHTML(true)}
-    <div class="start-view-body">${body}</div>
-  </div>`;
-}
-
-function startWalkthroughHTML(): string {
+function StartWalkthrough(): ReactNode {
   const option = startOptionById(state.startOption);
   const catalogEntry = option.catalogId ? catalogEntryById(option.catalogId) : undefined;
   const progress = startProgress(option, state.connections);
-
-  const picker = START_OPTIONS.map((candidate) => {
-    const candidateEntry = candidate.catalogId ? catalogEntryById(candidate.catalogId) : undefined;
-    const visibleLabel = candidate.showPickerLabel
-      ? `<span class="start-pick-label">${esc(candidate.label)}</span>` : '';
-    const limited = candidateEntry?.limitedSupport
-      ? '<span class="start-pick-limited">Limited</span>' : '';
-    const kind = startKindLabel(candidate);
-    const fullLabel = kind ? `${candidate.label} ${kind}` : candidate.label;
-    return `<button class="start-pick ${candidate.showPickerLabel ? 'has-label' : ''} ${candidate.id === option.id ? 'on' : ''}"
-      aria-pressed="${candidate.id === option.id}"
-      aria-label="${escAttr(fullLabel)}" title="${escAttr(fullLabel)}"
-      data-act="start-option" data-id="${candidate.id}">
-      <span class="start-pick-icon" aria-hidden="true">${ICONS[candidate.icon] || ''}</span>${visibleLabel}${limited}</button>`;
-  }).join('');
-
-  const step = (n: number, title: string, done: boolean, body: string): string =>
-    `<li class="start-step ${done ? 'done' : ''}">
-      <span class="start-num" aria-hidden="true">${n}</span>
-      <div class="start-body"><b>${esc(title)}</b>${body}</div></li>`;
-
+  const connectMode = resolveConnectMode(state.connectMode, option);
   const addAction = catalogEntry && canQuickConnectMcp(catalogEntry)
     ? 'catalog-connect-oauth' : 'catalog-add';
   const optionKind = startKindLabel(option);
   const optionName = optionKind ? `${option.label} ${optionKind}` : option.label;
   const addLabel = progress.added ? `${optionName} Connected` : `Add ${optionName}`;
-  const addBody = `<p>AgentMFA supports databases, SSH, APIs, and MCPs.</p>
-      <div class="start-picker" role="group" aria-label="What to connect">${picker}</div>
-      <div class="start-actions">
-        <button class="btn primary sm" data-act="${addAction}" data-id="${option.catalogId}"
-          ${progress.added ? 'disabled' : ''}>${esc(addLabel)}</button>
-      </div>`;
-
-  const connectMode = resolveConnectMode(state.connectMode, option);
-  const modePicker = connectModesFor(option).map((candidate) =>
-    `<button class="start-pick has-label ${candidate === connectMode ? 'on' : ''}"
-      aria-pressed="${candidate === connectMode}" data-act="start-mode" data-id="${candidate}">
-      <span class="start-pick-label">${esc(CONNECT_MODE_LABELS[candidate])}</span></button>`).join('');
-  const connectBody = `
-    <div class="start-picker" role="group" aria-label="How your agent connects">${modePicker}</div>
-    ${startConnectPaneHTML(connectMode, option, progress)}`;
-
-  // Over the direct endpoint the agent talks straight to the DSN/socket, so
-  // the task leads with that endpoint (secret included) instead of the tool.
-  const directConn = progress.toolName
+  const directConnection = progress.toolName
     ? state.connections.find((candidate) => candidate.name === progress.toolName) ?? null
     : null;
-  const directEndpoint = directConn?.agent_access.endpoint ?? null;
-  const directAddress = directConn && directEndpoint
-    ? directEndpointAddress(directConn.type, directEndpoint, state.sshSockets[directConn.id])
+  const directEndpoint = directConnection?.agent_access.endpoint ?? null;
+  const directAddress = directConnection && directEndpoint
+    ? directEndpointAddress(
+        directConnection.type,
+        directEndpoint,
+        state.sshSockets[directConnection.id],
+      )
     : null;
   const task = connectMode === 'direct'
     ? directStartTask(
@@ -2839,30 +2896,87 @@ function startWalkthroughHTML(): string {
           ? {
               ...directEndpoint,
               dsn: directAddress,
-              sshInvocation: directConn?.type === 'ssh'
-                ? sshInvocationCommand(directConn)
+              sshInvocation: directConnection?.type === 'ssh'
+                ? sshInvocationCommand(directConnection)
                 : null,
             }
           : null,
       )
     : startTask(option, progress);
-  const wireBody = `<pre class="setup-instructions"><code>${esc(task)}</code></pre>
-    <div class="start-actions">
-      <button class="btn primary sm" data-act="copy-text" data-text="${escAttr(task)}">Copy</button>
-    </div>`;
-
-  return `<ol class="start-steps">
-      ${step(1, 'Select a tool to connect', progress.added, addBody)}
-      ${step(2, 'Connect your agent', recentClients().length > 0, connectBody)}
-      ${step(3, 'Ask for something useful', progress.wired, wireBody)}
-    </ol>`;
+  const step = (number: number, title: string, done: boolean, body: ReactNode): ReactNode => (
+    <li className={`start-step ${done ? 'done' : ''}`}>
+      <span className="start-num" aria-hidden="true">{number}</span>
+      <div className="start-body"><b>{title}</b>{body}</div>
+    </li>
+  );
+  return (
+    <ol className="start-steps">
+      {step(1, 'Select a tool to connect', progress.added, <>
+        <p>AgentMFA supports databases, SSH, APIs, and MCPs.</p>
+        <div className="start-picker" role="group" aria-label="What to connect">
+          {START_OPTIONS.map((candidate) => {
+            const candidateEntry = candidate.catalogId
+              ? catalogEntryById(candidate.catalogId) : undefined;
+            const kind = startKindLabel(candidate);
+            const fullLabel = kind ? `${candidate.label} ${kind}` : candidate.label;
+            return <button key={candidate.id}
+              className={`start-pick ${candidate.showPickerLabel ? 'has-label' : ''} ${
+                candidate.id === option.id ? 'on' : ''}`}
+              aria-pressed={candidate.id === option.id} aria-label={fullLabel} title={fullLabel}
+              data-act="start-option" data-id={candidate.id}>
+              <span className="start-pick-icon" aria-hidden="true">
+                <Icon markup={ICONS[candidate.icon] || ''} />
+              </span>
+              {candidate.showPickerLabel
+                ? <span className="start-pick-label">{candidate.label}</span> : null}
+              {candidateEntry?.limitedSupport
+                ? <span className="start-pick-limited">Limited</span> : null}
+            </button>;
+          })}
+        </div>
+        <div className="start-actions">
+          <button className="btn primary sm" data-act={addAction} data-id={option.catalogId}
+            disabled={progress.added}>{addLabel}</button>
+        </div>
+      </>)}
+      {step(2, 'Connect your agent', recentClients().length > 0, <>
+        <div className="start-picker" role="group" aria-label="How your agent connects">
+          {connectModesFor(option).map((candidate) => (
+            <button key={candidate}
+              className={`start-pick has-label ${candidate === connectMode ? 'on' : ''}`}
+              aria-pressed={candidate === connectMode} data-act="start-mode" data-id={candidate}>
+              <span className="start-pick-label">{CONNECT_MODE_LABELS[candidate]}</span>
+            </button>
+          ))}
+        </div>
+        <StartConnectPane mode={connectMode} option={option} progress={progress} />
+      </>)}
+      {step(3, 'Ask for something useful', progress.wired, <>
+        <pre className="setup-instructions"><code>{task}</code></pre>
+        <div className="start-actions"><button className="btn primary sm"
+          data-act="copy-text" data-text={task}>Copy</button></div>
+      </>)}
+    </ol>
+  );
 }
 
-/** The active tab's content: TSX for converted views, legacy markup for the
- * rest (crossing the SafeMarkup boundary). */
+function StartViewPage(): ReactNode {
+  return (
+    <div className="start">
+      <div className="start-hero"><h3>Connect your agent to tools and services</h3></div>
+      <StartViewToggle />
+      <GlobalSections embeddedInStart />
+      <div className="start-view-body">
+        {state.startView === 'guides'
+          ? <ConnectGuides />
+          : <StartWalkthrough />}
+      </div>
+    </div>
+  );
+}
+
 /** The dropdown's inline catalog search (the main window's lives in its
- * header). Controlled, so it needs no delegated handler; the legacy catalog
- * markup it sits above stays read-only. */
+ * header). */
 function DropdownCatalogSearch({ kind }: { kind: 'tool' | 'secret' }): ReactNode {
   const isTool = kind === 'tool';
   return (
@@ -2881,6 +2995,7 @@ function DropdownCatalogSearch({ kind }: { kind: 'tool' | 'secret' }): ReactNode
 function TabContent(): ReactNode {
   if (state.tab === 'inbox') return <RequestInbox />;
   if (state.tab === 'activity') return <ActivityView />;
+  if (state.tab === 'start') return <StartViewPage />;
   // The dropdown puts its catalog search inline above the list; the wide
   // window has it in the header instead (see MainWindow). The ready card
   // stays above the search, where the one-markup-blob layout had it.
@@ -2888,55 +3003,61 @@ function TabContent(): ReactNode {
     const isTools = state.tab === 'connections';
     return (
       <>
-        {isTools && <SafeMarkup markup={connectionReadyCardHTML()} />}
+        {isTools && <ConnectionReadyCard />}
         <DropdownCatalogSearch kind={isTools ? 'tool' : 'secret'} />
-        <SafeMarkup markup={isTools ? connectionsHTML(false) : secretsHTML()} />
+        {isTools ? <ConnectionsView withReadyCard={false} /> : <SecretsView />}
       </>
     );
   }
-  const markup = state.tab === 'start' ? startHTML()
-    : state.tab === 'connections' ? connectionsHTML()
-    : secretsHTML();
-  return <SafeMarkup markup={markup} />;
+  if (state.tab === 'secrets') return <SecretsView />;
+  return <ConnectionsView />;
 }
 
-function brokerReadyHTML() {
+function BrokerReady(): ReactNode {
   const copied = state.readyCopied;
   // The badge tracks the *managed* broker: a remote link that is down must
   // not sit under a green "Ready".
   const tone = brokerTone(state.broker);
   const label = tone === 'error' ? 'Unreachable' : tone === 'pending' ? 'Connecting…' : 'Ready';
-  return `<div class="dd-sub ready-status">
-    <span class="ready-state" role="status"><span class="dot dot-${tone}" aria-hidden="true"></span>
-      <span>${label}</span></span>
-    <button class="ready-copy ${copied ? 'is-copied' : ''}"
+  const copyLabel = copied ? 'Setup instructions copied' : 'Copy setup instructions';
+  return <div className="dd-sub ready-status">
+    <span className="ready-state" role="status"><span className={`dot dot-${tone}`} aria-hidden="true"></span>
+      <span>{label}</span></span>
+    <button className={`ready-copy ${copied ? 'is-copied' : ''}`}
       data-act="copy-ready-setup"
-      title="${copied ? 'Setup instructions copied' : 'Copy setup instructions'}"
-      aria-label="${copied ? 'Setup instructions copied' : 'Copy setup instructions'}">
-      <span class="ready-copy-label" aria-live="polite">${copied ? `${ICONS.check} Copied` : 'Copy'}</span>
-    </button></div>`;
+      title={copyLabel} aria-label={copyLabel}>
+      <span className="ready-copy-label" aria-live="polite">
+        {copied ? <><Icon markup={ICONS.check} /> Copied</> : 'Copy'}
+      </span>
+    </button>
+  </div>;
 }
 
 /* --------------------------- broker switcher ------------------------------ */
 
 /** The header's custom local/remote dropdown (right-justified). */
-function brokerSwitchHTML(): string {
+function BrokerSwitch(): ReactNode {
   const tone = brokerTone(state.broker);
   const label = brokerLabel(state.broker);
-  const menu = state.brokerMenuOpen
-    ? `<div class="broker-menu" role="menu">
-        <button class="menu-item" role="menuitem" data-act="broker-pick-local">
-          <span class="broker-check">${state.broker.mode === 'local' ? '✓' : ''}</span> Local</button>
-        <button class="menu-item" role="menuitem" data-act="broker-pick-remote">
-          <span class="broker-check">${state.broker.mode === 'remote' ? '✓' : ''}</span> Connect remote…</button>
-      </div>`
-    : '';
-  return `<div class="broker-switch-wrap">
-    <button class="broker-btn ${state.brokerMenuOpen ? 'on' : ''}" data-act="broker-menu"
-      aria-haspopup="menu" aria-expanded="${state.brokerMenuOpen}" title="Which broker this app manages">
-      <span class="broker-dot ${tone}"></span><span class="broker-label">${esc(label)}</span>
-      <span class="broker-caret" aria-hidden="true">${ICONS.chevronDown}</span>
-    </button>${menu}</div>`;
+  return (
+    <div className="broker-switch-wrap">
+      <button className={`broker-btn ${state.brokerMenuOpen ? 'on' : ''}`} data-act="broker-menu"
+        aria-haspopup="menu" aria-expanded={state.brokerMenuOpen} title="Which broker this app manages">
+        <span className={`broker-dot ${tone}`}></span><span className="broker-label">{label}</span>
+        <span className="broker-caret" aria-hidden="true"><Icon markup={ICONS.chevronDown} /></span>
+      </button>
+      {state.brokerMenuOpen
+        ? <div className="broker-menu" role="menu">
+            <button className="menu-item" role="menuitem" data-act="broker-pick-local">
+              <span className="broker-check">{state.broker.mode === 'local' ? '✓' : ''}</span> Local
+            </button>
+            <button className="menu-item" role="menuitem" data-act="broker-pick-remote">
+              <span className="broker-check">{state.broker.mode === 'remote' ? '✓' : ''}</span> Connect remote…
+            </button>
+          </div>
+        : null}
+    </div>
+  );
 }
 
 /** The full-content-pane takeover while a remote link is not usable. */
@@ -3030,8 +3151,8 @@ function currentTheme(): 'light' | 'dark' {
   return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
 }
 
-function Icon({ markup }: { markup: string }): ReactNode {
-  return <SafeMarkup markup={markup} />;
+function Icon({ markup }: { markup?: IconDefinition }): ReactNode {
+  return <AppIcon icon={markup} />;
 }
 
 /** The appearance toggle riding beside the settings gear, in both chromes. */
@@ -3102,13 +3223,13 @@ function MainWindow(): ReactNode {
       <div className="surface">
         <div className="dw-titlebar" data-tauri-drag-region="">
           <span className="dw-title dw-title-center">AgentMFA</span>
-          <SafeMarkup markup={brokerSwitchHTML()} />
+          <BrokerSwitch />
         </div>
         <div className="dw-body">
           <div className={`dw-side ${takeover ? 'disabled' : ''}`}>
             <div className="dw-brand">
               <div className="dd-appicon"><Icon markup={ICONS.blocks} /></div>
-              <div><div className="dd-title">AgentMFA</div><SafeMarkup markup={brokerReadyHTML()} /></div>
+              <div><div className="dd-title">AgentMFA</div><BrokerReady /></div>
             </div>
             <div className="dw-nav">
               {TABS.map((tab) => (
@@ -3161,7 +3282,7 @@ function MainWindow(): ReactNode {
                       {pageAction}
                     </div>
                   )}
-                  <SafeMarkup markup={state.tab === 'start' ? '' : globalSectionsHTML()} />
+                  {state.tab === 'start' ? null : <GlobalSections />}
                   <LoadFailureBand />
                   <div className="content"><TabContent /></div>
                 </>}
@@ -3197,7 +3318,7 @@ function DropdownWindow(): ReactNode {
         <div className="dd-head">
           <div className="dd-appicon"><Icon markup={ICONS.blocks} /></div>
           <div className="dd-identity">
-            <div className="dd-title">AgentMFA</div><SafeMarkup markup={brokerReadyHTML()} />
+            <div className="dd-title">AgentMFA</div><BrokerReady />
           </div>
           <button className="icon-btn" title="Open as a window" aria-label="Open as a window"
             data-act="mode-window"><Icon markup={ICONS.expand} /></button>
@@ -3216,7 +3337,7 @@ function DropdownWindow(): ReactNode {
             </button>
           ))}
         </div>
-        <SafeMarkup markup={state.tab === 'start' ? '' : globalSectionsHTML()} />
+        {state.tab === 'start' ? null : <GlobalSections />}
         <LoadFailureBand />
         <div className="content dd-content"><TabContent /></div>
       </div>
@@ -3235,10 +3356,9 @@ function ConnectionContextMenu(): ReactNode {
   if (!connection) return null;
   return createPortal(
     <div className="tile-menu-wrap conn-context-menu-wrap">
-      <SafeMarkup markup={`<div class="tile-menu" role="menu"
-        aria-label="Options for ${escAttr(connection.name)}">
-        ${connectionMenuItemsHTML(connection)}
-      </div>`} />
+      <div className="tile-menu" role="menu" aria-label={`Options for ${connection.name}`}>
+        <ConnectionMenuItems connection={connection} />
+      </div>
     </div>,
     document.body,
   );
@@ -3301,67 +3421,81 @@ function RequestLiveRegion(): ReactNode {
 // The secret is retained on the endpoint, so the row's chip keeps carrying
 // it — losing this sheet loses nothing. Copy buttons write to the
 // clipboard; the text is also selectable as a fallback.
-function endpointIssuedSheet(): string {
+function EndpointIssuedSheet(): ReactNode {
   const info = state.sheet?.endpoint;
-  if (!info) return '';
+  if (!info) return null;
   const addressLabel = info.type === 'ssh' ? 'Agent socket' : info.type === 'pg' ? 'DSN' : 'Base URL';
-  const field = (label: string, value: string, fieldKey: string, note = ''): string =>
-    `<div class="issued-ep-field">
-      <div class="ep-label">${label}${note ? ` <span class="ep-note">${note}</span>` : ''}</div>
-      <code class="ep-code">${esc(value)}</code>
-      <button class="btn ghost sm" data-act="copy-endpoint" data-field="${fieldKey}" aria-label="Copy ${label}">Copy</button>
-    </div>`;
-  const secretField = info.secret
-    ? field('Secret', info.secret, 'secret')
-    : '';
+  const field = (label: string, value: string, fieldKey: string, note = ''): ReactNode => (
+    <div className="issued-ep-field">
+      <div className="ep-label">{label}{note ? <> <span className="ep-note">{note}</span></> : null}</div>
+      <code className="ep-code">{value}</code>
+      <button className="btn ghost sm" data-act="copy-endpoint" data-field={fieldKey}
+        aria-label={`Copy ${label}`}>Copy</button>
+    </div>
+  );
   const sheetSubtitle = info.type === 'ssh'
     ? "Paste this into your tool's config. Note: SSH addresses have no separate secret; the socket path is the whole capability. You can copy it again anytime from the tool's details."
     : "Paste this into your tool's config. You can copy it again anytime from the tool's details.";
-  return `<h3 id="ep-title">Your connection address</h3>
-      <p class="sheet-sub">${sheetSubtitle}</p>
-      ${field(addressLabel, info.dsn, 'dsn')}
-      ${secretField}
-      ${field('Example', info.example, 'example')}
-      ${remoteEndpointCaution(state.broker, info.type)
-        ? `<div class="rule-note ep-remote-note">${esc(remoteEndpointCaution(state.broker, info.type) ?? '')}</div>`
-        : ''}
-      <div class="sheet-actions"><button class="btn" data-act="sheet-cancel">Done</button></div>`;
+  const remoteCaution = remoteEndpointCaution(state.broker, info.type);
+  return (
+    <>
+      <h3 id="ep-title">Your connection address</h3>
+      <p className="sheet-sub">{sheetSubtitle}</p>
+      {field(addressLabel, info.dsn, 'dsn')}
+      {info.secret ? field('Secret', info.secret, 'secret') : null}
+      {field('Example', info.example, 'example')}
+      {remoteCaution ? <div className="rule-note ep-remote-note">{remoteCaution}</div> : null}
+      <div className="sheet-actions"><button className="btn" data-act="sheet-cancel">Done</button></div>
+    </>
+  );
 }
 
 // Reissue/revoke endpoint asks: a centered confirm dialog with the same
 // chrome as the other confirm sheets, instead of an inline row swap.
-function endpointConfirmHTML(): string {
+function EndpointConfirm(): ReactNode {
   const confirm = state.confirm;
-  if (!confirm || (confirm.kind !== 'reissue-endpoint' && confirm.kind !== 'revoke-endpoint')) return '';
+  if (!confirm || (confirm.kind !== 'reissue-endpoint' && confirm.kind !== 'revoke-endpoint')) return null;
   const conn = state.connections.find((candidate) => candidate.id === confirm.id);
   const name = conn ? conn.name : 'this tool';
   const reissue = confirm.kind === 'reissue-endpoint';
-  return `<h3 id="ep-confirm-title">${reissue ? 'Get a new address?' : 'Revoke this address?'}</h3>
-      <p>${reissue
+  return (
+    <>
+      <h3 id="ep-confirm-title">{reissue ? 'Get a new address?' : 'Revoke this address?'}</h3>
+      <p>{reissue
         ? 'You’ll get a new address to paste into your tools. The current address stops working the moment the new one is issued.'
-        : `Tools using ${esc(name)}’s address lose access immediately.`}</p>
-      <div class="sheet-actions">
-        <button class="btn" data-act="confirm-cancel">Cancel</button>
-        ${reissue
-          ? `<button class="btn primary" data-act="reissue-endpoint-confirm" data-conn="${escAttr(String(confirm.id ?? ''))}">Get new address</button>`
-          : `<button class="btn danger" data-act="revoke-endpoint-confirm" data-conn="${escAttr(String(confirm.id ?? ''))}">Revoke</button>`}
-      </div>`;
+        : `Tools using ${name}’s address lose access immediately.`}</p>
+      <div className="sheet-actions">
+        <button className="btn" data-act="confirm-cancel">Cancel</button>
+        {reissue
+          ? <button className="btn primary" data-act="reissue-endpoint-confirm"
+              data-conn={String(confirm.id ?? '')}>Get new address</button>
+          : <button className="btn danger" data-act="revoke-endpoint-confirm"
+              data-conn={String(confirm.id ?? '')}>Revoke</button>}
+      </div>
+    </>
+  );
 }
 
 // Deleting a tool asks in the same centered dialog as the other
 // destructive confirms, instead of an inline row swap.
-function deleteConnConfirmHTML(): string {
+function DeleteConnectionConfirm(): ReactNode {
   const confirm = state.confirm;
-  if (!confirm || confirm.kind !== 'del-conn') return '';
+  if (!confirm || confirm.kind !== 'del-conn') return null;
   const conn = state.connections.find((candidate) => candidate.id === confirm.id);
   const name = conn ? conn.name : 'this tool';
   const enabled = Boolean(conn && conn.agent_access.enabled);
-  return `<h3 id="del-conn-title">Delete ${esc(name)}?</h3>
-      <p>The connection and its settings will be removed.${enabled ? ' Agents will lose access immediately.' : ''}</p>
-      <div class="sheet-actions">
-        <button class="btn" data-act="confirm-cancel">Cancel</button>
-        <button class="btn danger" data-act="del-conn-confirm" data-id="${escAttr(String(confirm.id ?? ''))}">Delete</button>
-      </div>`;
+  return (
+    <>
+      <h3 id="del-conn-title">Delete {name}?</h3>
+      <p>The connection and its settings will be removed.
+        {enabled ? ' Agents will lose access immediately.' : ''}</p>
+      <div className="sheet-actions">
+        <button className="btn" data-act="confirm-cancel">Cancel</button>
+        <button className="btn danger" data-act="del-conn-confirm"
+          data-id={String(confirm.id ?? '')}>Delete</button>
+      </div>
+    </>
+  );
 }
 
 function ConfirmSheet(): ReactNode {
@@ -3370,7 +3504,7 @@ function ConfirmSheet(): ReactNode {
     return (
       <Sheet titleId="ep-confirm-title" className="wide confirm-sheet"
         backdropAction="confirm-cancel">
-        <SafeMarkup markup={endpointConfirmHTML()} />
+        <EndpointConfirm />
       </Sheet>
     );
   }
@@ -3378,7 +3512,7 @@ function ConfirmSheet(): ReactNode {
     return (
       <Sheet titleId="del-conn-title" className="wide confirm-sheet"
         backdropAction="confirm-cancel">
-        <SafeMarkup markup={deleteConnConfirmHTML()} />
+        <DeleteConnectionConfirm />
       </Sheet>
     );
   }
@@ -3386,7 +3520,7 @@ function ConfirmSheet(): ReactNode {
 }
 
 /** The open sheet: converted forms render as controlled TSX, the rest as
- * legacy markup across the SafeMarkup boundary. */
+ * React-owned view tree. */
 function Sheets(): ReactNode {
   if (!state.sheet) return null;
   switch (state.sheet.kind) {
@@ -3402,11 +3536,11 @@ function Sheets(): ReactNode {
       return <Sheet titleId="wt-title" className="wide"><WiringToolsSheet /></Sheet>;
     case 'settings':
       return <Sheet titleId="settings-title" className="wide">
-        <SafeMarkup markup={settingsSheet()} />
+        <SettingsSheet />
       </Sheet>;
     case 'clear-activity':
       return <Sheet titleId="clear-activity-title" className="wide confirm-sheet">
-        <SafeMarkup markup={clearActivitySheet()} />
+        <ClearActivitySheet />
       </Sheet>;
     case 'elicitation':
       return <Sheet titleId="elicit-title" className="elicit-sheet" role="alertdialog">
@@ -3418,11 +3552,11 @@ function Sheets(): ReactNode {
       </Sheet>;
     case 'mcp-auth':
       return <Sheet titleId="mcp-auth-title" className="wide auth-sheet">
-        <SafeMarkup markup={mcpAuthSheet()} />
+        <McpAuthSheet />
       </Sheet>;
     case 'endpoint-issued':
       return <Sheet titleId="ep-title" className="endpoint-issued-sheet">
-        <SafeMarkup markup={endpointIssuedSheet()} />
+        <EndpointIssuedSheet />
       </Sheet>;
     default: return null;
   }
@@ -3750,13 +3884,17 @@ function WiringToolsSheet(): ReactNode {
   );
 }
 
-function clearActivitySheet() {
-  return `<h3 id="clear-activity-title">Clear activity?</h3>
+function ClearActivitySheet(): ReactNode {
+  return (
+    <>
+      <h3 id="clear-activity-title">Clear activity?</h3>
       <p>This permanently removes all activity history from this device.</p>
-      <div class="sheet-actions">
-        <button class="btn" data-act="sheet-cancel">Cancel</button>
-        <button class="btn danger" data-act="clear-activity-confirm">Clear activity</button>
-      </div>`;
+      <div className="sheet-actions">
+        <button className="btn" data-act="sheet-cancel">Cancel</button>
+        <button className="btn danger" data-act="clear-activity-confirm">Clear activity</button>
+      </div>
+    </>
+  );
 }
 
 // Inline per-field validation: saveSecret/saveConn fill state.sheetErrors
@@ -4654,54 +4792,78 @@ function isTerminalAuth(auth: McpAuthState): boolean {
 // Every intermediate state of the sign-in flow, live: the step list shows
 // where the dance is, and the terminal states (connected / failed /
 // cancelled) each carry their own actions.
-function mcpAuthSheet(): string {
+function McpAuthSheet(): ReactNode {
   const auth = state.mcpAuth;
-  if (!auth) return '';
+  if (!auth) return null;
   const stepIndex = AUTH_STEPS.findIndex(([phase]) => phase === auth.phase);
   const succeeded = auth.phase === 'succeeded';
   const steps = AUTH_STEPS.map(([, label], index) => {
-    const done = succeeded || (stepIndex > index);
+    const done = succeeded || stepIndex > index;
     const current = !isTerminalAuth(auth) && stepIndex === index;
-    return `<li class="auth-step ${done ? 'done' : ''} ${current ? 'current' : ''}">
-      <span class="auth-step-mark" aria-hidden="true">${done ? ICONS.check : current ? '<span class="auth-spinner"></span>' : ''}</span>
-      <span>${esc(label)}</span></li>`;
-  }).join('');
+    return (
+      <li key={label} className={`auth-step ${done ? 'done' : ''} ${current ? 'current' : ''}`}>
+        <span className="auth-step-mark" aria-hidden="true">
+          {done ? <Icon markup={ICONS.check} /> : current ? <span className="auth-spinner" /> : null}
+        </span>
+        <span>{label}</span>
+      </li>
+    );
+  });
 
-  let body = '';
-  let actions = `<button class="btn" data-act="mcp-auth-cancel">Cancel</button>`;
+  let body: ReactNode = null;
+  let actions: ReactNode = <button className="btn" data-act="mcp-auth-cancel">Cancel</button>;
   if (auth.phase === 'awaiting_authorization') {
-    body = `<div class="auth-note">Your browser should have opened. Approve the request there,
+    body = <>
+      <div className="auth-note">Your browser should have opened. Approve the request there,
         then come back — this dialog follows along by itself.</div>
-      <div class="auth-url"><code title="${escAttr(auth.authorization_url)}">${esc(auth.authorization_url)}</code></div>`;
-    actions = `<button class="btn" data-act="mcp-auth-cancel">Cancel</button>
-      <button class="btn primary" data-act="mcp-open-browser" data-url="${escAttr(auth.authorization_url)}">Open browser again</button>`;
+      <div className="auth-url"><code title={auth.authorization_url}>{auth.authorization_url}</code></div>
+    </>;
+    actions = <>
+      <button className="btn" data-act="mcp-auth-cancel">Cancel</button>
+      <button className="btn primary" data-act="mcp-open-browser"
+        data-url={auth.authorization_url}>Open browser again</button>
+    </>;
   } else if (auth.phase === 'succeeded') {
-    body = `<div class="auth-done">${ICONS.circleCheck}
-      <div><b>${esc(auth.connection_name)} is connected${auth.account ? ` as ${esc(auth.account)}` : ''}.</b>
-      ${auth.warning
-        ? `<div class="auth-warning">Token saved, but verification did not complete: ${esc(sentenceCase(auth.warning))}</div>`
-        : '<div class="auth-sub">Use the status button on the tool any time to re-check the server and account.</div>'}
-      </div></div>`;
-    actions = `<button class="btn primary" data-act="mcp-auth-done">Done</button>`;
+    body = <div className="auth-done"><Icon markup={ICONS.circleCheck} />
+      <div><b>{auth.connection_name} is connected{auth.account ? ` as ${auth.account}` : ''}.</b>
+        {auth.warning
+          ? <div className="auth-warning">Token saved, but verification did not complete: {sentenceCase(auth.warning)}</div>
+          : <div className="auth-sub">Use the status button on the tool any time to re-check the server and account.</div>}
+      </div>
+    </div>;
+    actions = <button className="btn primary" data-act="mcp-auth-done">Done</button>;
   } else if (auth.phase === 'failed') {
-    body = `<div class="auth-failed">${ICONS.circleX}
-      <div><b>${esc(cap(auth.message))}</b>
-      ${auth.hint ? `<div class="auth-sub">${esc(auth.hint)}</div>` : ''}</div></div>`;
-    actions = `<button class="btn" data-act="mcp-open-browser" data-url="${escAttr(auth.target)}">Open in browser</button>
-      ${state.mcpAuthDraft && !state.mcpAuthDraft.reauth_connection_id
-        ? '<button class="btn" data-act="mcp-auth-token">Use a token instead</button>'
-        : '<button class="btn" data-act="sheet-cancel">Close</button>'}
-      ${state.mcpAuthDraft ? '<button class="btn primary" data-act="mcp-auth-retry">Try again</button>' : ''}`;
+    body = <div className="auth-failed"><Icon markup={ICONS.circleX} />
+      <div><b>{cap(auth.message)}</b>
+        {auth.hint ? <div className="auth-sub">{auth.hint}</div> : null}</div>
+    </div>;
+    actions = <>
+      <button className="btn" data-act="mcp-open-browser" data-url={auth.target}>Open in browser</button>
+      {state.mcpAuthDraft && !state.mcpAuthDraft.reauth_connection_id
+        ? <button className="btn" data-act="mcp-auth-token">Use a token instead</button>
+        : <button className="btn" data-act="sheet-cancel">Close</button>}
+      {state.mcpAuthDraft
+        ? <button className="btn primary" data-act="mcp-auth-retry">Try again</button>
+        : null}
+    </>;
   } else if (auth.phase === 'cancelled') {
-    body = '<div class="auth-note">Sign-in cancelled. Nothing was saved.</div>';
-    actions = `<button class="btn" data-act="sheet-cancel">Close</button>
-      ${state.mcpAuthDraft ? '<button class="btn primary" data-act="mcp-auth-retry">Try again</button>' : ''}`;
+    body = <div className="auth-note">Sign-in cancelled. Nothing was saved.</div>;
+    actions = <>
+      <button className="btn" data-act="sheet-cancel">Close</button>
+      {state.mcpAuthDraft
+        ? <button className="btn primary" data-act="mcp-auth-retry">Try again</button>
+        : null}
+    </>;
   }
-  return `<h3 id="mcp-auth-title">Connect ${esc(auth.name)}</h3>
-      <div class="auth-target"><code>${esc(auth.target)}</code></div>
-      <ol class="auth-steps">${steps}</ol>
-      ${body}
-      <div class="sheet-actions">${actions}</div>`;
+  return (
+    <>
+      <h3 id="mcp-auth-title">Connect {auth.name}</h3>
+      <div className="auth-target"><code>{auth.target}</code></div>
+      <ol className="auth-steps">{steps}</ol>
+      {body}
+      <div className="sheet-actions">{actions}</div>
+    </>
+  );
 }
 
 /** Kick off (or restart) a sign-in and switch to the progress sheet. */
@@ -4740,87 +4902,97 @@ function receiveMcpAuth(auth: McpAuthState): void {
   if (state.sheet && state.sheet.kind === 'mcp-auth') render();
 }
 
-function settingsSheet() {
+function SettingsSheet(): ReactNode {
   const s = state.settings;
   const notifications = state.notificationSettings;
   const notificationModeBtn = (
     value: NotificationSettings['mode'],
     label: string,
-  ): string =>
-    `<button class="seg-btn ${notifications.mode === value ? 'on' : ''}"
-      data-act="set-notification-mode" data-id="${value}" role="radio"
-      aria-checked="${notifications.mode === value}">${label}</button>`;
-  const notificationRow = `<div class="set-row notification-setting"><div class="set-txt">
-      <div class="st-title">Request notifications</div>
-      <div class="st-sub">Native notifications are delivered by this computer and never include request details.</div></div>
-      <div class="seg in-form notification-modes" role="radiogroup" aria-label="Request notifications">
-        ${notificationModeBtn('off', 'Off')}
-        ${notificationModeBtn('when_hidden', 'When away')}
-        ${notificationModeBtn('always', 'Always')}
-      </div></div>`;
-  const notificationWarning = notifications.available ? ''
-    : `<div class="notification-warning" role="status">
+  ): ReactNode => (
+    <button className={`seg-btn ${notifications.mode === value ? 'on' : ''}`}
+      data-act="set-notification-mode" data-id={value} role="radio"
+      aria-checked={notifications.mode === value}>{label}</button>
+  );
+  const notificationRow = <div className="set-row notification-setting"><div className="set-txt">
+      <div className="st-title">Request notifications</div>
+      <div className="st-sub">Native notifications are delivered by this computer and never include request details.</div></div>
+      <div className="seg in-form notification-modes" role="radiogroup" aria-label="Request notifications">
+        {notificationModeBtn('off', 'Off')}
+        {notificationModeBtn('when_hidden', 'When away')}
+        {notificationModeBtn('always', 'Always')}
+      </div></div>;
+  const notificationWarning = notifications.available ? null
+    : <div className="notification-warning" role="status">
       <b>Native notifications are unavailable.</b>
-      <span>${esc(notifications.unavailableReason || 'Use the Request Inbox for waiting requests.')}</span>
-      ${notifications.canOpenSystemSettings
-        ? '<button class="cd-live-link" data-act="open-notification-settings">Open notification settings</button>'
-        : ''}
-    </div>`;
-  const notificationPreviewRow = notifications.mode === 'off' ? ''
-    : `<div class="set-row"><div class="set-txt"><div class="st-title">Show agent and tool names</div>
-      <div class="st-sub">Include only those names in notifications. Targets, summaries, and arguments always stay in the Inbox.</div></div>
-      <button class="switch ${notifications.showContext ? 'on' : ''}"
+      <span>{notifications.unavailableReason || 'Use the Request Inbox for waiting requests.'}</span>
+      {notifications.canOpenSystemSettings
+        ? <button className="cd-live-link" data-act="open-notification-settings">Open notification settings</button>
+        : null}
+    </div>;
+  const notificationPreviewRow = notifications.mode === 'off' ? null
+    : <div className="set-row"><div className="set-txt"><div className="st-title">Show agent and tool names</div>
+      <div className="st-sub">Include only those names in notifications. Targets, summaries, and arguments always stay in the Inbox.</div></div>
+      <button className={`switch ${notifications.showContext ? 'on' : ''}`}
         data-act="toggle-notification-context" role="checkbox"
         aria-label="Show agent and tool names in notifications"
-        aria-checked="${notifications.showContext}"></button></div>`;
-  const reauthRow = `<div class="set-row"><div class="set-txt"><div class="st-title">Confirm before using saved secrets</div>
-      <div class="st-sub">Use OS authentication before showing, copying, or sending a saved credential.</div></div>
-      <button class="switch ${s.reauth_on_read ? 'on' : ''}" data-act="toggle-reauth" role="checkbox" aria-checked="${s.reauth_on_read ? 'true' : 'false'}"></button></div>`;
-  const windowBtn = (secs: number, label: string): string =>
-    `<button class="seg-btn ${s.presence_window_secs === secs ? 'on' : ''}" data-act="set-presence-window"
-      data-id="${secs}" role="radio" aria-checked="${s.presence_window_secs === secs}">${label}</button>`;
+        aria-checked={notifications.showContext}></button></div>;
+  const reauthRow = <div className="set-row"><div className="set-txt"><div className="st-title">Confirm before using saved secrets</div>
+      <div className="st-sub">Use OS authentication before showing, copying, or sending a saved credential.</div></div>
+      <button className={`switch ${s.reauth_on_read ? 'on' : ''}`} data-act="toggle-reauth"
+        role="checkbox" aria-checked={s.reauth_on_read}></button></div>;
+  const windowBtn = (secs: number, label: string): ReactNode => (
+    <button className={`seg-btn ${s.presence_window_secs === secs ? 'on' : ''}`}
+      data-act="set-presence-window" data-id={secs} role="radio"
+      aria-checked={s.presence_window_secs === secs}>{label}</button>
+  );
   const presenceRow = s.reauth_on_read
-    ? `<div class="set-row"><div class="set-txt"><div class="st-title">Stay unlocked after confirming</div>
-      <div class="st-sub">Confirming access allows actions for this long. An agent requesting new access will always ask again.</div></div>
-      <div class="seg in-form" role="radiogroup" aria-label="Stay unlocked for">
-      ${windowBtn(15 * 60, '15 min')}${windowBtn(60 * 60, '1 hr')}${windowBtn(2 * 60 * 60, '2 hrs')}</div></div>`
-    : '';
+    ? <div className="set-row"><div className="set-txt"><div className="st-title">Stay unlocked after confirming</div>
+      <div className="st-sub">Confirming access allows actions for this long. An agent requesting new access will always ask again.</div></div>
+      <div className="seg in-form" role="radiogroup" aria-label="Stay unlocked for">
+      {windowBtn(15 * 60, '15 min')}{windowBtn(60 * 60, '1 hr')}{windowBtn(2 * 60 * 60, '2 hrs')}</div></div>
+    : null;
   const authenticationRows = state.broker.native_authentication
-    ? `${reauthRow}${presenceRow}`
+    ? <>{reauthRow}{presenceRow}</>
     : state.broker.mode === 'remote'
-      ? `<div class="set-row"><div class="set-txt">
-          <div class="st-title">Authorized by management token on ${esc(brokerLabel(state.broker))}</div>
-          <div class="st-sub">This broker does not advertise native OS authentication. Sensitive settings are authorized by the management token instead.</div>
-        </div></div>`
-      : `<div class="set-row"><div class="set-txt">
-          <div class="st-title">Native OS authentication unavailable</div>
-          <div class="st-sub">This broker shell does not advertise an operating-system authentication prompt.</div>
-        </div></div>`;
+      ? <div className="set-row"><div className="set-txt">
+          <div className="st-title">Authorized by management token on {brokerLabel(state.broker)}</div>
+          <div className="st-sub">This broker does not advertise native OS authentication. Sensitive settings are authorized by the management token instead.</div>
+        </div></div>
+      : <div className="set-row"><div className="set-txt">
+          <div className="st-title">Native OS authentication unavailable</div>
+          <div className="st-sub">This broker shell does not advertise an operating-system authentication prompt.</div>
+        </div></div>;
   // The settings read is the sheet's only source of broker truth, and this
   // sheet is the only place that truth is consumed — a failed read has no
   // other surface. Never present defaults or stale values as the broker's
   // state; the notification rows stay because they are this machine's.
   const settingsFailed = state.loadStatus.settings.status === 'error';
   const settingsFailureRow = settingsFailed
-    ? `<div class="load-failure" role="alert">
-        <div><b>Couldn’t load this broker’s settings.</b>${state.loadStatus.settings.error
-          ? `<span>${esc(state.loadStatus.settings.error)}</span>` : ''}</div>
-        <button class="btn sm" data-act="retry-view-loads">Retry</button>
-      </div>`
-    : '';
+    ? <div className="load-failure" role="alert">
+        <div><b>Couldn’t load this broker’s settings.</b>{state.loadStatus.settings.error
+          ? <span>{state.loadStatus.settings.error}</span> : null}</div>
+        <button className="btn sm" data-act="retry-view-loads">Retry</button>
+      </div>
+    : null;
   // Window chrome is a this-machine concern: in remote mode the toggle
   // would patch the *remote* broker's setting, which this app's chrome
   // deliberately never reads (windows.rs) — and could silently reconfigure
   // a desktop app running on the broker host. Local mode only.
   const dockRow = state.broker.mode === 'local'
-    ? `<div class="set-row"><div class="set-txt"><div class="st-title">Hide Dock icon in the menu bar</div>
-      <div class="st-sub">When minimized to the menu bar, hide the Dock icon.</div></div>
-      <button class="switch ${s.menu_bar_hides_dock ? 'on' : ''}" data-act="toggle-menubar-dock" role="checkbox" aria-checked="${s.menu_bar_hides_dock ? 'true' : 'false'}"></button></div>`
-    : '';
-  return `<h3 id="settings-title">Settings</h3>
-    ${notificationRow}${notificationWarning}${notificationPreviewRow}
-    ${settingsFailed ? settingsFailureRow : `${authenticationRows}${dockRow}`}
-    <div class="sheet-actions"><button class="btn primary" data-act="sheet-cancel">Done</button></div>`;
+    ? <div className="set-row"><div className="set-txt"><div className="st-title">Hide Dock icon in the menu bar</div>
+      <div className="st-sub">When minimized to the menu bar, hide the Dock icon.</div></div>
+      <button className={`switch ${s.menu_bar_hides_dock ? 'on' : ''}`}
+        data-act="toggle-menubar-dock" role="checkbox"
+        aria-checked={s.menu_bar_hides_dock}></button></div>
+    : null;
+  return (
+    <>
+      <h3 id="settings-title">Settings</h3>
+      {notificationRow}{notificationWarning}{notificationPreviewRow}
+      {settingsFailed ? settingsFailureRow : <>{authenticationRows}{dockRow}</>}
+      <div className="sheet-actions"><button className="btn primary" data-act="sheet-cancel">Done</button></div>
+    </>
+  );
 }
 
 /* --------------------------------- helpers ------------------------------- */

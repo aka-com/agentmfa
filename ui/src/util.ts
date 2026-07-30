@@ -1,14 +1,8 @@
 import { BRAND_ICONS } from './brand-icons';
+import type { IconDefinition } from './icon';
 import { LUCIDE_ICONS } from './icons';
 
 // Small shared helpers.
-
-export function esc(s: unknown): string {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-export function escAttr(s: unknown): string {
-  return esc(s).replace(/"/g, '&quot;');
-}
 
 // Activity timestamps. `relTime` renders relative ("just now", "5m", "3h")
 // for anything under 24h and a short absolute date beyond that; `absTime` is
@@ -70,7 +64,7 @@ export const TYPES = {
 
 // Lucide line icons plus the inlined Simple Icons brand marks, under one
 // lookup so a catalog entry just names its icon.
-export const ICONS: Record<string, string> = { ...LUCIDE_ICONS, ...BRAND_ICONS };
+export const ICONS: Record<string, IconDefinition> = { ...LUCIDE_ICONS, ...BRAND_ICONS };
 
 let toastHost: HTMLElement | null = null;
 export function toast(msg: string): void {
