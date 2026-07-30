@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use crate::approvals::PendingApproval;
 use crate::elicitations::PendingElicitation;
+use crate::request_history::RequestResolution;
 use crate::types::{ConfirmationMethod, SecretMeta};
 
 /// What an observer did with a traffic-confirmation prompt.
@@ -169,7 +170,7 @@ pub trait BrokerEvents: Send + Sync {
 
     /// A prompt left the queue — answered, revoked, or lapsed. Shells close
     /// whatever they raised for it.
-    fn approval_resolved(&self, _id: &uuid::Uuid) {}
+    fn approval_resolved(&self, _id: &uuid::Uuid, _resolution: RequestResolution) {}
 
     /// An upstream MCP server asked the user for input mid tool call, and the
     /// call is parked until the user answers through

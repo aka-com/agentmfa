@@ -77,13 +77,64 @@ pub enum NotificationMode {
 /// This-machine notification preferences. Preview text is deliberately
 /// limited to agent and connection names; request summaries and details can
 /// contain paths, arguments, or other lock-screen-inappropriate context.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NotificationSettings {
     #[serde(default)]
     pub mode: NotificationMode,
     #[serde(default)]
     pub show_context: bool,
+    /// Play the platform's default sound for request notifications.
+    #[serde(default = "default_notification_sound")]
+    pub play_sound: bool,
+    /// Ask the platform to treat request notifications as time-sensitive.
+    /// The operating system and user remain authoritative about Focus/DND.
+    #[serde(default)]
+    pub time_sensitive: bool,
+    /// Bring the Request Inbox forward if work is still waiting after this
+    /// many seconds. Zero disables escalation.
+    #[serde(default = "default_notification_escalation_secs")]
+    pub escalation_secs: u64,
+}
+
+const fn default_notification_sound() -> bool {
+    true
+}
+
+const fn default_notification_escalation_secs() -> u64 {
+    30
+}
+
+impl Default for NotificationSettings {
+    fn default() -> Self {
+        Self {
+            mode: NotificationMode::default(),
+            show_context: false,
+            play_sound: default_notification_sound(),
+            time_sensitive: false,
+            escalation_secs: default_notification_escalation_secs(),
+        }
+    }
+}
+
+impl NotificationSettings {
+    fn validate(self) -> Result<Self, String> {
+        if matches!(self.escalation_secs, 0 | 15 | 30 | 60) {
+            Ok(self)
+        } else {
+            Err("notification escalation must be off, 15, 30, or 60 seconds".into())
+        }
+    }
+
+    /// Preserve privacy and delivery choices when a hand-edited, corrupt, or
+    /// newer shell config carries a delay this version does not understand.
+    /// Disabling escalation is safer than silently re-enabling every default.
+    fn with_safe_persisted_escalation(mut self) -> Self {
+        if self.validate().is_err() {
+            self.escalation_secs = 0;
+        }
+        self
+    }
 }
 
 /// The remote link: the backend plus its event-stream task.
@@ -156,7 +207,9 @@ pub fn saved_remote(data_dir: &Path) -> Option<String> {
 /// Notification settings are loaded before the broker starts so even an
 /// early remote event observes the user's saved delivery preference.
 pub fn saved_notification_settings(data_dir: &Path) -> NotificationSettings {
-    load_config(data_dir).notifications
+    load_config(data_dir)
+        .notifications
+        .with_safe_persisted_escalation()
 }
 
 impl BrokerState {
@@ -249,13 +302,16 @@ impl BrokerState {
 
     pub fn notification_settings(&self) -> NotificationSettings {
         let _write = self.shell_write.lock().unwrap();
-        load_config(&self.data_dir).notifications
+        load_config(&self.data_dir)
+            .notifications
+            .with_safe_persisted_escalation()
     }
 
     pub fn set_notification_settings(
         &self,
         settings: NotificationSettings,
     ) -> Result<NotificationSettings, String> {
+        let settings = settings.validate()?;
         self.update_shell_config(|config| config.notifications = settings)?;
         Ok(settings)
     }
@@ -514,6 +570,7 @@ impl BrokerState {
                     let should_reconcile = matches!(
                         &event,
                         aka_api::ManageEvent::ApprovalsChanged
+                            | aka_api::ManageEvent::ApprovalExpired { .. }
                             | aka_api::ManageEvent::ElicitationsChanged
                             | aka_api::ManageEvent::Resync
                     );
@@ -617,6 +674,7 @@ mod tests {
             NotificationSettings {
                 mode: NotificationMode::WhenHidden,
                 show_context: false,
+                ..NotificationSettings::default()
             }
         );
     }
@@ -635,6 +693,9 @@ mod tests {
         config.notifications = NotificationSettings {
             mode: NotificationMode::Always,
             show_context: true,
+            play_sound: false,
+            time_sensitive: true,
+            escalation_secs: 60,
         };
         save_config(dir.path(), &config).unwrap();
 
@@ -642,5 +703,42 @@ mod tests {
         assert_eq!(saved.mode.as_deref(), Some("remote"));
         assert_eq!(saved.remote_url.as_deref(), Some("https://broker.example"));
         assert_eq!(saved.notifications, config.notifications);
+    }
+
+    #[test]
+    fn invalid_notification_escalation_is_never_persisted() {
+        let invalid = NotificationSettings {
+            escalation_secs: 31,
+            ..NotificationSettings::default()
+        };
+        assert_eq!(
+            invalid.validate().unwrap_err(),
+            "notification escalation must be off, 15, 30, or 60 seconds"
+        );
+    }
+
+    #[test]
+    fn unknown_saved_delay_preserves_notification_privacy_choices() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            config_path(dir.path()),
+            br#"{
+                "notifications": {
+                    "mode": "off",
+                    "showContext": true,
+                    "playSound": false,
+                    "timeSensitive": true,
+                    "escalationSecs": 120
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let settings = saved_notification_settings(dir.path());
+        assert_eq!(settings.mode, NotificationMode::Off);
+        assert!(settings.show_context);
+        assert!(!settings.play_sound);
+        assert!(settings.time_sensitive);
+        assert_eq!(settings.escalation_secs, 0);
     }
 }

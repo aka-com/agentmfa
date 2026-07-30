@@ -736,6 +736,9 @@ let mockBroker: import('./types').BrokerProfile = {
 let mockNotificationSettings: NotificationSettings = {
   mode: 'when_hidden',
   showContext: false,
+  playSound: true,
+  timeSensitive: false,
+  escalationSecs: 30,
   available: false,
   unavailableReason: 'Development build: native notifications are disabled',
   canOpenSystemSettings: false,

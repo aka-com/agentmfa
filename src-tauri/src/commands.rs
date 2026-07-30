@@ -1774,6 +1774,9 @@ pub fn get_notification_settings(
         .unwrap_or(crate::attention::NotificationSettingsView {
             mode: settings.mode,
             show_context: settings.show_context,
+            play_sound: settings.play_sound,
+            time_sensitive: settings.time_sensitive,
+            escalation_secs: settings.escalation_secs,
             available: false,
             unavailable_reason: Some("notification coordinator is unavailable".into()),
             can_open_system_settings: cfg!(target_os = "macos"),
@@ -1788,12 +1791,15 @@ pub fn set_notification_settings(
 ) -> CmdResult<crate::attention::NotificationSettingsView> {
     let saved = state.brokers.set_notification_settings(settings)?;
     let view = if let Some(attention) = app.try_state::<crate::attention::RequestAttention>() {
-        attention.set_settings(saved);
+        attention.set_settings(&app, saved);
         attention.settings_view()
     } else {
         crate::attention::NotificationSettingsView {
             mode: saved.mode,
             show_context: saved.show_context,
+            play_sound: saved.play_sound,
+            time_sensitive: saved.time_sensitive,
+            escalation_secs: saved.escalation_secs,
             available: false,
             unavailable_reason: Some("notification coordinator is unavailable".into()),
             can_open_system_settings: cfg!(target_os = "macos"),

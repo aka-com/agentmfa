@@ -676,9 +676,7 @@ impl Approvals {
                 state.inflight.remove(&key);
             }
             match decision {
-                ApprovalDecision::ApproveWindow
-                    if pending.info.unit != ApprovalUnit::HostKey =>
-                {
+                ApprovalDecision::ApproveWindow if pending.info.unit != ApprovalUnit::HostKey => {
                     // Scoped to the agent the prompt named. Another agent on
                     // the same connection is a question the user has not been
                     // asked yet, and gets asked in its own name.
@@ -716,18 +714,16 @@ impl Approvals {
             _ => Verdict::Allowed,
         };
         self.inner.history.update_approval(&pending.info);
-        self.inner.history.resolve(
-            id,
-            match decision {
-                ApprovalDecision::ApproveWindow => RequestResolution::ApprovedForWindow,
-                ApprovalDecision::ApproveAll => RequestResolution::ApprovedAll,
-                ApprovalDecision::Deny => RequestResolution::Denied,
-            },
-        );
+        let resolution = match decision {
+            ApprovalDecision::ApproveWindow => RequestResolution::ApprovedForWindow,
+            ApprovalDecision::ApproveAll => RequestResolution::ApprovedAll,
+            ApprovalDecision::Deny => RequestResolution::Denied,
+        };
+        self.inner.history.resolve(id, resolution);
         for waiter in pending.waiters {
             let _ = waiter.send(verdict);
         }
-        self.inner.events.approval_resolved(id);
+        self.inner.events.approval_resolved(id, resolution);
         true
     }
 
@@ -831,7 +827,9 @@ impl Approvals {
         for item in lapsed {
             self.inner.history.update_approval(&item.info);
             self.inner.history.resolve(&item.info.id, item.resolution);
-            self.inner.events.approval_resolved(&item.info.id);
+            self.inner
+                .events
+                .approval_resolved(&item.info.id, item.resolution);
         }
     }
 
@@ -918,7 +916,7 @@ impl Approvals {
         for waiter in pending.waiters {
             let _ = waiter.send(verdict);
         }
-        self.inner.events.approval_resolved(id);
+        self.inner.events.approval_resolved(id, resolution);
     }
 
     fn audit_decision(&self, request: &ApprovalRequest, verdict: Verdict, note: Option<&str>) {

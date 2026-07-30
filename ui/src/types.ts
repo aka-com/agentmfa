@@ -332,6 +332,12 @@ export interface NotificationSettings {
   mode: 'off' | 'when_hidden' | 'always';
   /** Include agent and connection names, never request summaries/details. */
   showContext: boolean;
+  /** Play the operating system's default notification sound. */
+  playSound: boolean;
+  /** Ask the operating system for time-sensitive delivery through Focus/DND. */
+  timeSensitive: boolean;
+  /** Seconds before a still-waiting request surfaces the Inbox; zero is off. */
+  escalationSecs: 0 | 15 | 30 | 60;
   /** Runtime platform health; preferences can still be edited when false. */
   available: boolean;
   unavailableReason?: string;

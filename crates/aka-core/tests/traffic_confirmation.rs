@@ -421,6 +421,7 @@ async fn a_refusal_stops_the_call_and_covers_the_retry() {
 async fn an_unanswered_prompt_lapses_into_a_refusal_the_agent_can_read() {
     let user = ScriptedUser::new(None); // takes the prompt, never answers
     let h = harness(user.clone()).await;
+    let mut events = h.broker.manage_bus().subscribe();
     let up = upstream().await;
     api_connection(&h, "github", up.port, None);
     h.confirm("github");
@@ -433,6 +434,17 @@ async fn an_unanswered_prompt_lapses_into_a_refusal_the_agent_can_read() {
         h.broker.pending_approvals().is_empty(),
         "a lapsed prompt leaves the queue"
     );
+    let expired_id = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if let aka_api::ManageEvent::ApprovalExpired { id } = events.recv().await.unwrap().event
+            {
+                break id;
+            }
+        }
+    })
+    .await
+    .expect("a request surface should receive the precise expiry signal");
+    assert_eq!(expired_id, user.last_prompt().id.to_string());
 
     // Timing out decided nothing, so the next call asks again.
     let (status, _) = h.get_repos("github").await;

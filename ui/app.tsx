@@ -4250,6 +4250,32 @@ function SettingsSheet(): ReactNode {
         data-act="toggle-notification-context" role="checkbox"
         aria-label="Show agent and tool names in notifications"
         aria-checked={notifications.showContext}></button></div>;
+  const notificationSoundRow = notifications.mode === 'off' ? null
+    : <div className="set-row"><div className="set-txt"><div className="st-title">Play a sound</div>
+      <div className="st-sub">Use this computer’s default notification sound for new and expired requests.</div></div>
+      <button className={`switch ${notifications.playSound ? 'on' : ''}`}
+        data-act="toggle-notification-sound" role="checkbox"
+        aria-label="Play a request notification sound"
+        aria-checked={notifications.playSound}></button></div>;
+  const notificationFocusRow = notifications.mode === 'off' ? null
+    : <div className="set-row"><div className="set-txt"><div className="st-title">Time-sensitive delivery</div>
+      <div className="st-sub">Ask the operating system to deliver through Focus or Do Not Disturb where supported. Your system settings remain in control.</div></div>
+      <button className={`switch ${notifications.timeSensitive ? 'on' : ''}`}
+        data-act="toggle-notification-time-sensitive" role="checkbox"
+        aria-label="Use time-sensitive request notifications"
+        aria-checked={notifications.timeSensitive}></button></div>;
+  const escalationBtn = (secs: NotificationSettings['escalationSecs'], label: string): ReactNode => (
+    <button className={`seg-btn ${notifications.escalationSecs === secs ? 'on' : ''}`}
+      data-act="set-notification-escalation" data-id={secs} role="radio"
+      aria-checked={notifications.escalationSecs === secs}>{label}</button>
+  );
+  const notificationEscalationRow = notifications.mode === 'off' ? null
+    : <div className="set-row"><div className="set-txt"><div className="st-title">Bring Inbox forward if unanswered</div>
+      <div className="st-sub">Escalate only while the same request is still waiting.</div></div>
+      <div className="seg in-form" role="radiogroup" aria-label="Escalate waiting requests after">
+        {escalationBtn(0, 'Off')}{escalationBtn(15, '15 sec')}
+        {escalationBtn(30, '30 sec')}{escalationBtn(60, '1 min')}
+      </div></div>;
   const reauthRow = <div className="set-row"><div className="set-txt"><div className="st-title">Confirm before using saved secrets</div>
       <div className="st-sub">Use OS authentication before showing, copying, or sending a saved credential.</div></div>
       <button className={`switch ${s.reauth_on_read ? 'on' : ''}`} data-act="toggle-reauth"
@@ -4315,6 +4341,7 @@ function SettingsSheet(): ReactNode {
     <>
       <h3 id="settings-title">Settings</h3>
       {notificationRow}{notificationWarning}{notificationPreviewRow}
+      {notificationSoundRow}{notificationFocusRow}{notificationEscalationRow}
       {settingsFailed ? settingsFailureRow : <>{authenticationRows}{hostKeyRow}{dockRow}</>}
       <div className="sheet-actions"><button className="btn primary" data-act="sheet-cancel">Done</button></div>
     </>
@@ -6250,6 +6277,62 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
         toast(settings.showContext
           ? '🔔 Notifications show agent and tool names'
           : '🔔 Notification previews are private');
+      } catch (error) {
+        toast('⚠ ' + errorMessage(error));
+      }
+      render();
+      break;
+    }
+    case 'toggle-notification-sound': {
+      const settings: NotificationSettings = {
+        ...state.notificationSettings,
+        playSound: !state.notificationSettings.playSound,
+      };
+      const settingsEpoch = notificationSettingsEpoch;
+      try {
+        const saved = await invoke('set_notification_settings', { settings });
+        if (settingsEpoch === notificationSettingsEpoch) state.notificationSettings = saved;
+        toast(settings.playSound
+          ? '🔔 Request notification sounds on'
+          : '🔕 Request notification sounds off');
+      } catch (error) {
+        toast('⚠ ' + errorMessage(error));
+      }
+      render();
+      break;
+    }
+    case 'toggle-notification-time-sensitive': {
+      const settings: NotificationSettings = {
+        ...state.notificationSettings,
+        timeSensitive: !state.notificationSettings.timeSensitive,
+      };
+      const settingsEpoch = notificationSettingsEpoch;
+      try {
+        const saved = await invoke('set_notification_settings', { settings });
+        if (settingsEpoch === notificationSettingsEpoch) state.notificationSettings = saved;
+        toast(settings.timeSensitive
+          ? '🔔 Time-sensitive request notifications on'
+          : '🔔 Request notifications respect Focus and Do Not Disturb');
+      } catch (error) {
+        toast('⚠ ' + errorMessage(error));
+      }
+      render();
+      break;
+    }
+    case 'set-notification-escalation': {
+      const secs = Number(id);
+      if (secs !== 0 && secs !== 15 && secs !== 30 && secs !== 60) break;
+      const settings: NotificationSettings = {
+        ...state.notificationSettings,
+        escalationSecs: secs,
+      };
+      const settingsEpoch = notificationSettingsEpoch;
+      try {
+        const saved = await invoke('set_notification_settings', { settings });
+        if (settingsEpoch === notificationSettingsEpoch) state.notificationSettings = saved;
+        toast(secs === 0
+          ? '🔕 Request Inbox escalation off'
+          : `🔔 Request Inbox escalates after ${secs} seconds`);
       } catch (error) {
         toast('⚠ ' + errorMessage(error));
       }

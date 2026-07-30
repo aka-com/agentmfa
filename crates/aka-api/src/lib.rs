@@ -678,6 +678,13 @@ pub enum ManageEvent {
     AgentsChanged,
     /// A prompt was raised, updated, answered, or lapsed: refetch the queue.
     ApprovalsChanged,
+    /// A prompt specifically left the queue because its decision window
+    /// elapsed. Request surfaces use this precise terminal signal for a
+    /// coalesced expiry notification; `ApprovalsChanged` still follows so
+    /// older queue-reconciliation behavior remains intact.
+    ApprovalExpired {
+        id: String,
+    },
     /// An elicitation was raised, answered, or lapsed: refetch the queue.
     ElicitationsChanged,
     WiringsChanged,
@@ -804,5 +811,12 @@ mod tests {
         let value = serde_json::to_value(&event).unwrap();
         assert_eq!(value["event"], "activity_appended");
         assert_eq!(value["entry"]["icon"], "plug");
+
+        let expiry = serde_json::to_value(ManageEvent::ApprovalExpired {
+            id: "request-id".into(),
+        })
+        .unwrap();
+        assert_eq!(expiry["event"], "approval_expired");
+        assert_eq!(expiry["id"], "request-id");
     }
 }

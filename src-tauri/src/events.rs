@@ -9,6 +9,7 @@ use std::time::Duration;
 use aka_core::audit::AuditEntry;
 use aka_core::events::{ApprovalHandling, BrokerEvents};
 use aka_core::manage::activity_dto;
+use aka_core::request_history::RequestResolution;
 use aka_core::types::{ConfirmationMethod, SecretMeta};
 use tauri::{AppHandle, Emitter};
 
@@ -126,8 +127,8 @@ impl BrokerEvents for TauriEvents {
         let _ = self.app.emit(EVT_APPROVALS, ());
     }
 
-    fn approval_resolved(&self, id: &uuid::Uuid) {
-        crate::attention::approval_resolved(&self.app, id);
+    fn approval_resolved(&self, id: &uuid::Uuid, resolution: RequestResolution) {
+        crate::attention::approval_resolved(&self.app, id, resolution);
         let _ = self.app.emit(EVT_APPROVALS, ());
     }
 
@@ -220,6 +221,9 @@ pub fn emit_manage_event(app: &AppHandle, event: aka_api::ManageEvent) {
         }
         ManageEvent::ApprovalsChanged => {
             let _ = app.emit(EVT_APPROVALS, ());
+        }
+        ManageEvent::ApprovalExpired { id } => {
+            crate::attention::remote_approval_expired(app, &id);
         }
         ManageEvent::ElicitationsChanged => {
             let _ = app.emit(EVT_ELICITATIONS, ());

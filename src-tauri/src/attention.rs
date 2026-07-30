@@ -66,6 +66,8 @@ struct NotificationJob {
     key: String,
     title: String,
     body: String,
+    play_sound: bool,
+    time_sensitive: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -97,6 +99,9 @@ fn elicitation_subject(id: &str) -> String {
 pub struct NotificationSettingsView {
     pub mode: NotificationMode,
     pub show_context: bool,
+    pub play_sound: bool,
+    pub time_sensitive: bool,
+    pub escalation_secs: u64,
     pub available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unavailable_reason: Option<String>,
@@ -150,7 +155,7 @@ impl AttentionTracker {
             count: self.active.len(),
             count_changed: old_count != self.active.len(),
             notification_added: is_new && announce_if_new,
-            resolved_ids: Vec::new(),
+            resolved_requests: Vec::new(),
         }
     }
 
@@ -161,11 +166,11 @@ impl AttentionTracker {
             .map(RequestSummary::from)
             .map(|request| (request.id.clone(), request))
             .collect::<BTreeMap<_, _>>();
-        let resolved_ids = self
+        let resolved_requests = self
             .active
-            .keys()
-            .filter(|id| !next.contains_key(*id))
-            .cloned()
+            .iter()
+            .filter(|(id, _)| !next.contains_key(*id))
+            .map(|(_, request)| request.clone())
             .collect();
         let new_ids = next
             .keys()
@@ -180,7 +185,7 @@ impl AttentionTracker {
             count: self.active.len(),
             count_changed: old_count != self.active.len(),
             notification_added: !new_ids.is_empty(),
-            resolved_ids,
+            resolved_requests,
         }
     }
 
@@ -195,11 +200,11 @@ impl AttentionTracker {
             .map(RequestSummary::from)
             .map(|request| (request.id.clone(), request))
             .collect();
-        let resolved_ids = self
+        let resolved_requests = self
             .active
-            .keys()
-            .filter(|id| !next.contains_key(*id))
-            .cloned()
+            .iter()
+            .filter(|(id, _)| !next.contains_key(*id))
+            .map(|(_, request)| request.clone())
             .collect();
         self.active = next;
         self.pending_notification
@@ -208,19 +213,19 @@ impl AttentionTracker {
             count: self.active.len(),
             count_changed: old_count != self.active.len(),
             notification_added: false,
-            resolved_ids,
+            resolved_requests,
         }
     }
 
     fn resolve(&mut self, id: &str) -> TrackerChange {
         let old_count = self.active.len();
-        self.active.remove(id);
+        let resolved_requests = self.active.remove(id).into_iter().collect();
         self.pending_notification.remove(id);
         TrackerChange {
             count: self.active.len(),
             count_changed: old_count != self.active.len(),
             notification_added: false,
-            resolved_ids: vec![id.to_string()],
+            resolved_requests,
         }
     }
 
@@ -236,7 +241,7 @@ struct TrackerChange {
     count: usize,
     count_changed: bool,
     notification_added: bool,
-    resolved_ids: Vec<String>,
+    resolved_requests: Vec<RequestSummary>,
 }
 
 struct AttentionInner {
@@ -244,6 +249,9 @@ struct AttentionInner {
     settings: NotificationSettings,
     flush_generation: u64,
     flush_scheduled: bool,
+    expiry_flush_generation: u64,
+    expiry_flush_scheduled: bool,
+    pending_expirations: BTreeMap<String, RequestSummary>,
     /// Authoritative remote reads can complete out of order. Only the latest
     /// event-triggered read may establish a new broker epoch; within one
     /// epoch, the broker's sequence orders snapshots by data freshness.
@@ -287,6 +295,9 @@ impl AttentionInner {
         let native_notifications = self.clear_notifications();
         self.flush_generation = self.flush_generation.wrapping_add(1);
         self.flush_scheduled = false;
+        self.expiry_flush_generation = self.expiry_flush_generation.wrapping_add(1);
+        self.expiry_flush_scheduled = false;
+        self.pending_expirations.clear();
         self.remote_refresh_generation = self.remote_refresh_generation.wrapping_add(1);
         self.last_remote_version = None;
         self.elicitations.clear();
@@ -412,6 +423,8 @@ enum NotificationAdmission {
 struct NotificationContent {
     title: String,
     body: String,
+    play_sound: bool,
+    time_sensitive: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -437,7 +450,10 @@ impl NotificationSink for QueueNotificationSink<'_> {
             self.app,
             content.title.clone(),
             content.body.clone(),
+            content.play_sound,
+            content.time_sensitive,
             self.subjects.clone(),
+            true,
         )
     }
 }
@@ -475,6 +491,9 @@ impl RequestAttention {
                 settings,
                 flush_generation: 0,
                 flush_scheduled: false,
+                expiry_flush_generation: 0,
+                expiry_flush_scheduled: false,
+                pending_expirations: BTreeMap::new(),
                 remote_refresh_generation: 0,
                 last_remote_version: None,
                 elicitations: BTreeMap::new(),
@@ -500,16 +519,26 @@ impl RequestAttention {
         apply_change(app, change, generation);
     }
 
-    fn resolve(&self, app: &AppHandle, id: &str) {
-        let (change, notifications) = {
+    fn resolve(&self, app: &AppHandle, id: &str, expired: bool) {
+        let (change, notifications, expiry_generation) = {
             let mut inner = self.inner.lock().unwrap();
             let mut change = inner.tracker.resolve(id);
             change.count = inner.total();
+            let expiry_generation = if expired {
+                change
+                    .resolved_requests
+                    .first()
+                    .cloned()
+                    .and_then(|request| queue_expiration(&mut inner, request))
+            } else {
+                None
+            };
             let notifications = inner.resolve_notification_subject(&approval_subject(id));
-            (change, notifications)
+            (change, notifications, expiry_generation)
         };
         withdraw_notifications(notifications);
         apply_change(app, change, None);
+        schedule_expiry_flush(app, expiry_generation);
     }
 
     /// Track a parked elicitation for the badge and push the new total. The
@@ -573,8 +602,9 @@ impl RequestAttention {
                 .collect::<Vec<_>>();
             inner.elicitations = next_elicitations;
             let mut notifications = Vec::new();
-            for id in change.resolved_ids {
-                notifications.extend(inner.resolve_notification_subject(&approval_subject(&id)));
+            for request in change.resolved_requests {
+                notifications
+                    .extend(inner.resolve_notification_subject(&approval_subject(&request.id)));
             }
             for id in resolved_elicitations {
                 notifications.extend(inner.resolve_notification_subject(&elicitation_subject(&id)));
@@ -585,8 +615,21 @@ impl RequestAttention {
         crate::windows::update_request_count(app, total);
     }
 
-    pub fn set_settings(&self, settings: NotificationSettings) {
-        self.inner.lock().unwrap().settings = settings;
+    pub fn set_settings(&self, app: &AppHandle, settings: NotificationSettings) {
+        let reschedule = {
+            let mut inner = self.inner.lock().unwrap();
+            let delay_changed = inner.settings.escalation_secs != settings.escalation_secs;
+            inner.settings = settings;
+            (delay_changed && settings.escalation_secs > 0).then(|| {
+                (
+                    inner.active_notification_subjects(),
+                    settings.escalation_secs,
+                )
+            })
+        };
+        if let Some((subjects, delay_secs)) = reschedule {
+            schedule_escalation(app, subjects, delay_secs);
+        }
     }
 
     pub fn settings_view(&self) -> NotificationSettingsView {
@@ -594,6 +637,9 @@ impl RequestAttention {
         NotificationSettingsView {
             mode: inner.settings.mode,
             show_context: inner.settings.show_context,
+            play_sound: inner.settings.play_sound,
+            time_sensitive: inner.settings.time_sensitive,
+            escalation_secs: inner.settings.escalation_secs,
             available: inner.notifications_available,
             unavailable_reason: inner.notification_unavailable_reason.clone(),
             can_open_system_settings: cfg!(target_os = "macos"),
@@ -612,6 +658,9 @@ impl RequestAttention {
         Some(NotificationSettingsView {
             mode: inner.settings.mode,
             show_context: inner.settings.show_context,
+            play_sound: inner.settings.play_sound,
+            time_sensitive: inner.settings.time_sensitive,
+            escalation_secs: inner.settings.escalation_secs,
             available: false,
             unavailable_reason: inner.notification_unavailable_reason.clone(),
             can_open_system_settings: cfg!(target_os = "macos"),
@@ -623,7 +672,10 @@ impl RequestAttention {
         app: &AppHandle,
         title: String,
         body: String,
+        play_sound: bool,
+        time_sensitive: bool,
         mut subjects: BTreeSet<String>,
+        filter_active: bool,
     ) -> Result<(), String> {
         let key = uuid::Uuid::new_v4().to_string();
         {
@@ -634,7 +686,9 @@ impl RequestAttention {
                     .clone()
                     .unwrap_or_else(|| "native notifications are unavailable".into()));
             }
-            subjects.retain(|subject| inner.notification_subject_is_active(subject));
+            if filter_active {
+                subjects.retain(|subject| inner.notification_subject_is_active(subject));
+            }
             if subjects.is_empty() {
                 return Ok(());
             }
@@ -647,6 +701,8 @@ impl RequestAttention {
                 key: key.clone(),
                 title,
                 body,
+                play_sound,
+                time_sensitive,
             })
             .map_err(|error| match error {
                 mpsc::TrySendError::Full(_) => {
@@ -714,10 +770,11 @@ impl RequestAttention {
             change.count = inner.total();
             change.count_changed = old_total != change.count;
             let flush_generation = schedule_generation(&mut inner, change.notification_added);
-            let resolved_approvals = change.resolved_ids.clone();
+            let resolved_approvals = change.resolved_requests.clone();
             let mut notifications = Vec::new();
-            for id in resolved_approvals {
-                notifications.extend(inner.resolve_notification_subject(&approval_subject(&id)));
+            for request in resolved_approvals {
+                notifications
+                    .extend(inner.resolve_notification_subject(&approval_subject(&request.id)));
             }
             for id in resolved_elicitations {
                 notifications.extend(inner.resolve_notification_subject(&elicitation_subject(&id)));
@@ -747,10 +804,7 @@ impl RequestAttention {
     }
 
     fn notification_is_pending(&self, key: &str) -> bool {
-        self.inner
-            .lock()
-            .unwrap()
-            .notification_is_pending(key)
+        self.inner.lock().unwrap().notification_is_pending(key)
     }
 
     fn notification_finished(&self, key: &str) {
@@ -775,6 +829,28 @@ fn schedule_generation(inner: &mut AttentionInner, notification_added: bool) -> 
     Some(inner.flush_generation)
 }
 
+fn queue_expiration(inner: &mut AttentionInner, request: RequestSummary) -> Option<u64> {
+    inner
+        .pending_expirations
+        .insert(request.id.clone(), request);
+    if inner.expiry_flush_scheduled {
+        return None;
+    }
+    inner.expiry_flush_scheduled = true;
+    Some(inner.expiry_flush_generation)
+}
+
+fn schedule_expiry_flush(app: &AppHandle, generation: Option<u64>) {
+    let Some(generation) = generation else {
+        return;
+    };
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(NOTIFICATION_DEBOUNCE).await;
+        flush_expirations(&app, generation);
+    });
+}
+
 fn apply_change(app: &AppHandle, change: TrackerChange, generation: Option<u64>) {
     if change.count_changed {
         crate::windows::update_request_count(app, change.count);
@@ -794,6 +870,11 @@ struct PendingFlush {
     settings: NotificationSettings,
 }
 
+struct PendingExpirations {
+    requests: Vec<RequestSummary>,
+    settings: NotificationSettings,
+}
+
 fn take_pending_flush(inner: &mut AttentionInner, generation: u64) -> Option<PendingFlush> {
     if generation != inner.flush_generation {
         return None;
@@ -806,6 +887,26 @@ fn take_pending_flush(inner: &mut AttentionInner, generation: u64) -> Option<Pen
     Some(PendingFlush {
         requests,
         total: inner.total(),
+        settings: inner.settings,
+    })
+}
+
+fn take_pending_expirations(
+    inner: &mut AttentionInner,
+    generation: u64,
+) -> Option<PendingExpirations> {
+    if generation != inner.expiry_flush_generation {
+        return None;
+    }
+    inner.expiry_flush_scheduled = false;
+    let requests = std::mem::take(&mut inner.pending_expirations)
+        .into_values()
+        .collect::<Vec<_>>();
+    if requests.is_empty() {
+        return None;
+    }
+    Some(PendingExpirations {
+        requests,
         settings: inner.settings,
     })
 }
@@ -854,10 +955,8 @@ fn flush_notification(app: &AppHandle, generation: u64) {
                 "Open the Request Inbox to review {} waiting requests. Further notifications are paused for one minute.",
                 pending.total
             );
-            let storm = NotificationContent {
-                title: "Many AgentMFA requests are waiting".into(),
-                body,
-            };
+            let storm =
+                notification_content(pending.settings, "Many AgentMFA requests are waiting", body);
             if let Err(error) = deliver_notification(app, &storm, storm_subjects) {
                 tracing::warn!(%error, "could not deliver the notification rate-limit warning");
             }
@@ -866,9 +965,103 @@ fn flush_notification(app: &AppHandle, generation: u64) {
         NotificationAdmission::Suppressed => return,
     }
 
-    if let Err(error) = deliver_notification(app, &content, subjects) {
+    if let Err(error) = deliver_notification(app, &content, subjects.clone()) {
         tracing::warn!(%error, "could not deliver a native request notification");
         crate::windows::surface_for_approval(app);
+    } else {
+        schedule_escalation(app, subjects, pending.settings.escalation_secs);
+    }
+}
+
+fn flush_expirations(app: &AppHandle, generation: u64) {
+    let Some(attention) = app.try_state::<RequestAttention>() else {
+        return;
+    };
+    let Some(pending) = ({
+        let mut inner = attention.inner.lock().unwrap();
+        take_pending_expirations(&mut inner, generation)
+    }) else {
+        return;
+    };
+    let Some(content) = expiration_delivery_plan(
+        &pending.requests,
+        pending.settings,
+        crate::windows::request_surface_focused(),
+    ) else {
+        return;
+    };
+    let subjects = pending
+        .requests
+        .iter()
+        .map(|request| format!("expired:{}", request.id))
+        .collect::<BTreeSet<_>>();
+    match attention
+        .inner
+        .lock()
+        .unwrap()
+        .admit_notification(Instant::now())
+    {
+        NotificationAdmission::Normal => {}
+        NotificationAdmission::Storm => {
+            let storm = notification_content(
+                pending.settings,
+                "Several AgentMFA requests expired",
+                "Open Recent in the Request Inbox for details. Further notifications are paused for one minute.",
+            );
+            if let Err(error) = deliver_terminal_notification(app, &storm, subjects) {
+                tracing::warn!(%error, "could not deliver the expiry rate-limit warning");
+            }
+            return;
+        }
+        NotificationAdmission::Suppressed => return,
+    }
+    if let Err(error) = deliver_terminal_notification(app, &content, subjects) {
+        tracing::warn!(%error, "could not deliver an approval-expiry notification");
+    }
+}
+
+fn expiration_delivery_plan(
+    requests: &[RequestSummary],
+    settings: NotificationSettings,
+    surface_focused: bool,
+) -> Option<NotificationContent> {
+    if settings.mode == NotificationMode::Off
+        || (settings.mode == NotificationMode::WhenHidden && surface_focused)
+    {
+        return None;
+    }
+    let title = if requests.len() == 1 {
+        "An AgentMFA request expired".to_string()
+    } else {
+        format!("{} AgentMFA requests expired", requests.len())
+    };
+    let body = if settings.show_context && requests.len() == 1 {
+        let request = &requests[0];
+        let agent = agent_display(&request.agent, "An agent");
+        let connection = notification_label(&request.connection, "a tool");
+        format!(
+            "{agent} was refused access to {connection} because no decision arrived in time. Open Recent for details."
+        )
+    } else if requests.len() == 1 {
+        "The waiting agent was refused because no decision arrived in time. Open Recent for details."
+            .to_string()
+    } else {
+        "The waiting agents were refused because no decisions arrived in time. Open Recent for details."
+            .to_string()
+    };
+    Some(notification_content(settings, title, body))
+}
+
+fn notification_content(
+    settings: NotificationSettings,
+    title: impl Into<String>,
+    body: impl Into<String>,
+) -> NotificationContent {
+    NotificationContent {
+        title: title.into(),
+        body: body.into(),
+        play_sound: settings.play_sound,
+        time_sensitive: settings.time_sensitive,
     }
 }
 
@@ -902,7 +1095,7 @@ fn request_delivery_plan(
         format!("Open the Request Inbox to review {total} waiting requests.")
     };
 
-    DeliveryPlan::Notify(NotificationContent { title, body })
+    DeliveryPlan::Notify(notification_content(settings, title, body))
 }
 
 /// Queue one native notification. One worker owns delivery and interaction
@@ -924,6 +1117,52 @@ fn deliver_notification(
         },
         content,
     )
+}
+
+fn deliver_terminal_notification(
+    app: &AppHandle,
+    content: &NotificationContent,
+    subjects: BTreeSet<String>,
+) -> Result<(), String> {
+    let attention = app
+        .try_state::<RequestAttention>()
+        .ok_or_else(|| "notification coordinator is unavailable".to_string())?;
+    attention.enqueue_notification(
+        app,
+        content.title.clone(),
+        content.body.clone(),
+        content.play_sound,
+        content.time_sensitive,
+        subjects,
+        false,
+    )
+}
+
+fn schedule_escalation(app: &AppHandle, subjects: BTreeSet<String>, delay_secs: u64) {
+    if delay_secs == 0 || subjects.is_empty() {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(delay_secs)).await;
+        let should_surface = app
+            .try_state::<RequestAttention>()
+            .is_some_and(|attention| {
+                let inner = attention.inner.lock().unwrap();
+                escalation_is_due(&inner, &subjects, delay_secs)
+            });
+        if should_surface && !crate::windows::request_surface_focused() {
+            crate::windows::surface_for_approval(&app);
+        }
+    });
+}
+
+fn escalation_is_due(inner: &AttentionInner, subjects: &BTreeSet<String>, delay_secs: u64) -> bool {
+    inner.settings.escalation_secs == delay_secs
+        && inner.settings.mode != NotificationMode::Off
+        && subjects
+            .iter()
+            .any(|subject| inner.notification_subject_is_active(subject))
 }
 
 fn deliver_with_sink(
@@ -952,6 +1191,17 @@ fn deliver_notification_job(job: NotificationJob) {
         .summary(&job.title)
         .body(&job.body)
         .action(OPEN_INBOX_ACTION, "Open Inbox");
+    if job.play_sound {
+        #[cfg(target_os = "windows")]
+        notification.sound_name("Default");
+        #[cfg(target_os = "macos")]
+        notification.sound_name("default");
+        #[cfg(all(unix, not(target_os = "macos")))]
+        notification.sound_name("message-new-instant");
+    }
+    if job.time_sensitive {
+        notification.urgency(notify_rust::Urgency::Critical);
+    }
     #[cfg(target_os = "macos")]
     notification.id(job.key.as_str());
     // XDG servers only emit body activation when the special default action
@@ -991,9 +1241,7 @@ fn deliver_notification_job(job: NotificationJob) {
     let should_observe = job
         .app
         .try_state::<RequestAttention>()
-        .is_some_and(|attention| {
-            attention.attach_native_notification(&job.key, native_id.clone())
-        });
+        .is_some_and(|attention| attention.attach_native_notification(&job.key, native_id.clone()));
     if !should_observe {
         if let Some(native_id) = native_id {
             if let Err(error) = withdraw_native_notification(&native_id) {
@@ -1378,9 +1626,23 @@ pub fn approval_updated(app: &AppHandle, pending: &aka_core::approvals::PendingA
     }
 }
 
-pub fn approval_resolved(app: &AppHandle, id: &uuid::Uuid) {
+pub fn approval_resolved(
+    app: &AppHandle,
+    id: &uuid::Uuid,
+    resolution: aka_core::request_history::RequestResolution,
+) {
     if let Some(attention) = app.try_state::<RequestAttention>() {
-        attention.resolve(app, &id.to_string());
+        attention.resolve(
+            app,
+            &id.to_string(),
+            resolution == aka_core::request_history::RequestResolution::TimedOut,
+        );
+    }
+}
+
+pub fn remote_approval_expired(app: &AppHandle, id: &str) {
+    if let Some(attention) = app.try_state::<RequestAttention>() {
+        attention.resolve(app, id, true);
     }
 }
 
@@ -1442,10 +1704,7 @@ fn notify_elicitation(app: &AppHandle, pending: &ElicitationSummary) {
             let body = format!(
                 "Open the Request Inbox to review {total} waiting requests. Further notifications are paused for one minute."
             );
-            let storm = NotificationContent {
-                title: "Many AgentMFA requests are waiting".into(),
-                body,
-            };
+            let storm = notification_content(settings, "Many AgentMFA requests are waiting", body);
             if let Err(error) = deliver_notification(app, &storm, storm_subjects) {
                 tracing::warn!(%error, "could not deliver the notification rate-limit warning");
             }
@@ -1453,9 +1712,11 @@ fn notify_elicitation(app: &AppHandle, pending: &ElicitationSummary) {
         }
         NotificationAdmission::Suppressed => return,
     }
-    if let Err(error) = deliver_notification(app, &content, subjects) {
+    if let Err(error) = deliver_notification(app, &content, subjects.clone()) {
         tracing::warn!(%error, "could not deliver an elicitation notification");
         crate::windows::surface_for_approval(app);
+    } else {
+        schedule_escalation(app, subjects, settings.escalation_secs);
     }
 }
 
@@ -1479,7 +1740,7 @@ fn elicitation_delivery_plan(
     } else {
         "An upstream asked for input. Open the Request Inbox to respond.".to_string()
     };
-    DeliveryPlan::Notify(NotificationContent { title, body })
+    DeliveryPlan::Notify(notification_content(settings, title, body))
 }
 
 /// A parked elicitation left the queue (answered, cancelled, or lapsed): drop
@@ -1535,7 +1796,11 @@ mod tests {
     }
 
     fn settings(mode: NotificationMode, show_context: bool) -> NotificationSettings {
-        NotificationSettings { mode, show_context }
+        NotificationSettings {
+            mode,
+            show_context,
+            ..NotificationSettings::default()
+        }
     }
 
     fn approval(id: &str, agent: &str) -> ApprovalDto {
@@ -1588,7 +1853,14 @@ mod tests {
         assert!(!replay.notification_added);
         assert!(replacement.notification_added);
         assert_eq!(replacement.count, 1);
-        assert_eq!(replacement.resolved_ids, vec!["one"]);
+        assert_eq!(
+            replacement
+                .resolved_requests
+                .iter()
+                .map(|request| request.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["one"]
+        );
         assert_eq!(
             tracker.take_pending(),
             vec![RequestSummary::from(approval("two", "claude"))]
@@ -1736,6 +2008,8 @@ mod tests {
                 title: "AgentMFA needs your approval".into(),
                 body: "codex agent is waiting to use github. Open the Request Inbox to review."
                     .into(),
+                play_sound: true,
+                time_sensitive: false,
             })
         );
 
@@ -1750,6 +2024,8 @@ mod tests {
             DeliveryPlan::Notify(NotificationContent {
                 title: "AgentMFA needs your approval".into(),
                 body: "Open the Request Inbox to review this request.".into(),
+                play_sound: true,
+                time_sensitive: false,
             })
         );
 
@@ -1764,8 +2040,78 @@ mod tests {
             DeliveryPlan::Notify(NotificationContent {
                 title: "2 new requests need your approval".into(),
                 body: "Open the Request Inbox to review 4 waiting requests.".into(),
+                play_sound: true,
+                time_sensitive: false,
             })
         );
+    }
+
+    #[test]
+    fn sound_and_time_sensitive_preferences_reach_the_native_payload() {
+        let mut preferences = settings(NotificationMode::Always, false);
+        preferences.play_sound = false;
+        preferences.time_sensitive = true;
+        let request = RequestSummary::from(approval("one", "codex"));
+
+        assert_eq!(
+            request_delivery_plan(&[request], 1, preferences, false),
+            DeliveryPlan::Notify(NotificationContent {
+                title: "AgentMFA needs your approval".into(),
+                body: "Open the Request Inbox to review this request.".into(),
+                play_sound: false,
+                time_sensitive: true,
+            })
+        );
+    }
+
+    #[test]
+    fn expirations_coalesce_and_respect_delivery_privacy() {
+        let attention = RequestAttention::new(settings(NotificationMode::Always, true));
+        let mut inner = attention.inner.lock().unwrap();
+        let one = RequestSummary::from(approval("one", "codex"));
+        let two = RequestSummary::from(approval("two", "claude"));
+        let generation = queue_expiration(&mut inner, one.clone()).unwrap();
+        assert!(queue_expiration(&mut inner, two).is_none());
+        let pending = take_pending_expirations(&mut inner, generation).unwrap();
+        assert_eq!(pending.requests.len(), 2);
+        assert!(!inner.expiry_flush_scheduled);
+        assert!(take_pending_expirations(&mut inner, generation).is_none());
+
+        let single =
+            expiration_delivery_plan(&[one], settings(NotificationMode::Always, true), false)
+                .unwrap();
+        assert_eq!(single.title, "An AgentMFA request expired");
+        assert!(single.body.contains("codex was refused access to github"));
+        assert!(expiration_delivery_plan(
+            &pending.requests,
+            settings(NotificationMode::WhenHidden, false),
+            true,
+        )
+        .is_none());
+        assert!(expiration_delivery_plan(
+            &pending.requests,
+            settings(NotificationMode::Off, false),
+            false,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn escalation_requires_the_same_request_setting_and_live_subject() {
+        let attention = RequestAttention::new(settings(NotificationMode::Always, false));
+        let mut inner = attention.inner.lock().unwrap();
+        inner
+            .tracker
+            .upsert(RequestSummary::from(approval("one", "codex")), true);
+        let subjects = BTreeSet::from([approval_subject("one")]);
+        assert!(escalation_is_due(&inner, &subjects, 30));
+
+        inner.settings.escalation_secs = 15;
+        assert!(!escalation_is_due(&inner, &subjects, 30));
+        assert!(escalation_is_due(&inner, &subjects, 15));
+
+        inner.tracker.resolve("one");
+        assert!(!escalation_is_due(&inner, &subjects, 15));
     }
 
     #[test]
@@ -1794,6 +2140,8 @@ mod tests {
                 body:
                     "postgres needs your input. codex is paused. Open the Request Inbox to respond."
                         .into(),
+                play_sound: true,
+                time_sensitive: false,
             })
         );
     }
@@ -1803,6 +2151,8 @@ mod tests {
         let content = NotificationContent {
             title: "A title".into(),
             body: "A body".into(),
+            play_sound: false,
+            time_sensitive: false,
         };
         let sink = FakeNotificationSink::default();
         deliver_with_sink(&sink, &content).unwrap();
@@ -1992,6 +2342,7 @@ mod tests {
         let attention = RequestAttention::new(NotificationSettings {
             mode: NotificationMode::Always,
             show_context: true,
+            ..NotificationSettings::default()
         });
 
         let changed = attention

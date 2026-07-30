@@ -805,8 +805,12 @@ impl crate::events::BrokerEvents for FanoutEvents {
         self.bus.emit(aka_api::ManageEvent::ApprovalsChanged);
     }
 
-    fn approval_resolved(&self, id: &Uuid) {
-        self.inner.approval_resolved(id);
+    fn approval_resolved(&self, id: &Uuid, resolution: crate::request_history::RequestResolution) {
+        self.inner.approval_resolved(id, resolution);
+        if resolution == crate::request_history::RequestResolution::TimedOut {
+            self.bus
+                .emit(aka_api::ManageEvent::ApprovalExpired { id: id.to_string() });
+        }
         self.bus.emit(aka_api::ManageEvent::ApprovalsChanged);
     }
 

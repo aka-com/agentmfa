@@ -240,6 +240,9 @@ export const DEFAULT_SETTINGS: Settings = {
 const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   mode: 'when_hidden',
   showContext: false,
+  playSound: true,
+  timeSensitive: false,
+  escalationSecs: 30,
   available: true,
   canOpenSystemSettings: false,
 };
