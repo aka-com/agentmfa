@@ -11,13 +11,15 @@
 
 import { log } from './log';
 import { createSidecarServer, type SidecarEnv } from './server';
+import { SIDECAR_VERSION } from './version';
 
 function readEnv(): SidecarEnv {
   const token = process.env.AKA_SIDECAR_TOKEN;
   const brokerSocket = process.env.AKA_BROKER_SOCKET;
+  const brokerVersion = process.env.AKA_BROKER_VERSION;
   if (!token) throw new Error('AKA_SIDECAR_TOKEN is required');
   if (!brokerSocket) throw new Error('AKA_BROKER_SOCKET is required');
-  return { token, brokerSocket };
+  return { token, brokerSocket, brokerVersion };
 }
 
 function main(): void {
@@ -36,8 +38,26 @@ function main(): void {
       process.exit(1);
       return;
     }
-    process.stdout.write(`${JSON.stringify({ event: 'ready', port: address.port })}\n`);
-    log('info', 'sidecar ready', { port: address.port, broker: env.brokerSocket });
+    const versionSkew =
+      env.brokerVersion !== undefined && env.brokerVersion !== SIDECAR_VERSION;
+    process.stdout.write(`${JSON.stringify({
+      event: 'ready',
+      port: address.port,
+      sidecar_version: SIDECAR_VERSION,
+      broker_version: env.brokerVersion ?? null,
+      version_skew: versionSkew,
+    })}\n`);
+    if (versionSkew) {
+      log('warn', 'sidecar and broker versions do not match', {
+        sidecarVersion: SIDECAR_VERSION,
+        brokerVersion: env.brokerVersion,
+      });
+    }
+    log('info', 'sidecar ready', {
+      port: address.port,
+      broker: env.brokerSocket,
+      version: SIDECAR_VERSION,
+    });
   });
 
   const shutdown = (signal: string): void => {

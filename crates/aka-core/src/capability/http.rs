@@ -15,7 +15,7 @@ use axum::body::HttpBody as _;
 use http::{HeaderMap, HeaderName, HeaderValue, Method};
 use http_body_util::BodyExt as _;
 use percent_encoding::percent_decode_str;
-use serde_json::json;
+use serde_json::{json, Value};
 use url::Url;
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -728,6 +728,19 @@ impl HttpExecution {
             Err(e) => return broker_error(502, e.reason, e.message),
         };
         let redactions = Redactions::from_injection(&injection);
+        let mcp_tool_call_id = match &self.connection.config {
+            ConnectionConfig::Api {
+                mcp_path: Some(mcp_path),
+                ..
+            } if resolves_to_mcp_path(&self.path, mcp_path) => self
+                .body
+                .bytes()
+                .ok()
+                .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
+                .filter(|body| body.get("method").and_then(Value::as_str) == Some("tools/call"))
+                .and_then(|body| body.get("id").cloned()),
+            _ => None,
+        };
 
         // Build the initial URL from parsed components, never string
         // concatenation.
@@ -864,10 +877,22 @@ impl HttpExecution {
                 // 3xx: return it to the agent instead of following,
                 // following would send the credential somewhere no
                 // connection was configured for.
-                return relay_response(response, &self.config, &redactions).await;
+                return relay_response(
+                    response,
+                    &self.config,
+                    &redactions,
+                    mcp_tool_call_id.as_ref(),
+                )
+                .await;
             }
 
-            return relay_response(response, &self.config, &redactions).await;
+            return relay_response(
+                response,
+                &self.config,
+                &redactions,
+                mcp_tool_call_id.as_ref(),
+            )
+            .await;
         }
     }
 }
@@ -1046,6 +1071,7 @@ async fn relay_response(
     response: reqwest::Response,
     config: &BrokerConfig,
     redactions: &Redactions,
+    mcp_tool_call_id: Option<&Value>,
 ) -> ExecOutcome {
     let status = response.status().as_u16();
     let mut headers = serde_json::Map::new();
@@ -1075,6 +1101,48 @@ async fn relay_response(
         match stream.chunk().await {
             Ok(Some(chunk)) => {
                 if body.len() + chunk.len() > config.response_cap {
+                    if let Some(id) = mcp_tool_call_id {
+                        const PREVIEW_CAP: usize = 64 * 1024;
+                        let mut preview_bytes = body[..body.len().min(PREVIEW_CAP)].to_vec();
+                        let remaining = PREVIEW_CAP.saturating_sub(preview_bytes.len());
+                        preview_bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+                        let preview = redactions.apply_to_bytes(&preview_bytes);
+                        let preview = String::from_utf8_lossy(&preview);
+                        let result = json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {
+                                "isError": true,
+                                "content": [{
+                                    "type": "text",
+                                    "text": format!(
+                                        "The upstream MCP result exceeded the {} byte broker cap. \
+                                         Narrow the request or ask for a smaller page. \
+                                         Truncated upstream preview (first {} bytes):\n{}",
+                                        config.response_cap,
+                                        preview.len(),
+                                        preview,
+                                    ),
+                                }],
+                                "_meta": {
+                                    "agentmfa": {
+                                        "result_truncated": true,
+                                        "response_cap_bytes": config.response_cap,
+                                    }
+                                }
+                            }
+                        });
+                        return ExecOutcome {
+                            status: 200,
+                            body: json!({
+                                "status": status,
+                                "headers": headers,
+                                "set_cookie_headers": set_cookie_headers,
+                                "body": result.to_string(),
+                                "body_encoding": "utf8",
+                            }),
+                        };
+                    }
                     return broker_error(
                         502,
                         ErrorReason::ResponseTooLarge,

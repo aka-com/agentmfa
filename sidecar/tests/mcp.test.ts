@@ -73,7 +73,13 @@ const upstream = {
   capabilities: { tools: {}, resources: {}, completions: {} } as
     | Record<string, unknown>
     | undefined,
-  toolPages: undefined as Array<Array<{ name: string; description?: string }>> | undefined,
+  toolPages: undefined as
+    | Array<Array<{
+        name: string;
+        description?: string;
+        inputSchema?: Record<string, unknown>;
+      }>>
+    | undefined,
   rpcFailure: false,
   /** The params of the most recent input_required retry, for assertions. */
   lastRetry: undefined as { inputResponses?: Record<string, unknown>; requestState?: unknown } | undefined,
@@ -837,6 +843,44 @@ test('colliding upstream names are bounded, disambiguated, and reported', async 
     assert.equal(status.warnings?.[0]?.name, 'notion');
     assert.match(status.warnings?.[0]?.warning ?? '', /exposed as/);
   } finally {
+    await app.close();
+  }
+});
+
+test('upstream catalogs and schemas are bounded before entering the session index', async () => {
+  process.env.AGENTMFA_TOOL_BUDGET = '1';
+  const app = await harness();
+  try {
+    upstream.toolPages = [[
+      {
+        name: 'first',
+        inputSchema: { huge: 'x'.repeat(70 * 1024) },
+      },
+      ...Array.from({ length: 2_004 }, (_, index) => ({
+        name: `catalog-tool-${index}`,
+        description: `catalog entry ${index}`,
+      })),
+    ]];
+    const client = await app.connect('token-mcp');
+    const { tools } = await client.listTools();
+    const first = tools.find((tool) => tool.name === 'agentmfa_notion_first');
+    assert.ok(first, 'the first tool remains directly callable');
+    assert.doesNotMatch(first.description ?? '', /"huge"/, 'oversized schema was omitted');
+
+    const status = payload(
+      await client.callTool({ name: 'agentmfa_status', arguments: {} }),
+    ) as { search_only_tools?: number };
+    assert.equal(status.search_only_tools, 1_999);
+
+    const missing = payload(
+      await client.callTool({
+        name: 'agentmfa_search_tools',
+        arguments: { query: 'catalog-tool-2003' },
+      }),
+    ) as { results: unknown[] };
+    assert.deepEqual(missing.results, [], 'items beyond the catalog cap are discarded');
+  } finally {
+    delete process.env.AGENTMFA_TOOL_BUDGET;
     await app.close();
   }
 });

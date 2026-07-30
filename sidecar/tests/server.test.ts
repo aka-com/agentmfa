@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
 
 import { createSidecarServer, tokenMatches } from '../src/server';
+import { SIDECAR_VERSION } from '../src/version';
 
 const TOKEN = 'a'.repeat(64);
 
@@ -42,8 +43,31 @@ test('health reports ok to a caller holding the token', async () => {
     const body = (await response.json()) as Record<string, unknown>;
     assert.equal(body.status, 'ok');
     assert.equal(body.pid, process.pid);
+    assert.equal(body.version, SIDECAR_VERSION);
   } finally {
     await app.close();
+  }
+});
+
+test('health surfaces sidecar and broker version skew', async () => {
+  const server = createSidecarServer({
+    token: TOKEN,
+    brokerSocket: '/tmp/aka.sock',
+    brokerVersion: 'different-version',
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address() as AddressInfo;
+    const response = await fetch(`http://127.0.0.1:${port}/health`, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    const body = (await response.json()) as Record<string, unknown>;
+    assert.equal(body.version, SIDECAR_VERSION);
+    assert.equal(body.broker_version, 'different-version');
+    assert.equal(body.version_skew, true);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
 

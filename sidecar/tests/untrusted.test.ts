@@ -30,10 +30,17 @@ test('tool result text shares one cap and carries provenance metadata', () => {
       { type: 'text', text: 'second block' },
     ],
     structuredContent: { note: 'safe\u202etext' },
+    _meta: { agentmfa: { result_truncated: true } },
   }, 8) as {
     content: Array<{ text: string }>;
     structuredContent: unknown;
-    _meta: { agentmfa: { provenance: string; text_truncated: boolean } };
+    _meta: {
+      agentmfa: {
+        provenance: string;
+        text_truncated: boolean;
+        result_truncated: boolean;
+      };
+    };
   };
   assert.equal(
     result.content[0].text,
@@ -42,4 +49,5 @@ test('tool result text shares one cap and carries provenance metadata', () => {
   assert.match(result.content[1].text, /s…/);
   assert.equal(result._meta.agentmfa.provenance, 'untrusted upstream MCP content');
   assert.equal(result._meta.agentmfa.text_truncated, true);
+  assert.equal(result._meta.agentmfa.result_truncated, true);
 });

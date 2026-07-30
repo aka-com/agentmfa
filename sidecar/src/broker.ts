@@ -58,8 +58,31 @@ interface RawResponse {
   body: string;
 }
 
+export interface BrokerCallTimeouts {
+  controlMs: number;
+  upstreamMs: number;
+  elicitationMs: number;
+}
+
+const DEFAULT_TIMEOUTS: BrokerCallTimeouts = {
+  controlMs: 10_000,
+  // The broker's complete upstream-operation budget is 120 seconds.
+  upstreamMs: 130_000,
+  // The broker may wait five minutes for a person to answer an elicitation.
+  elicitationMs: 310_000,
+};
+
 export class BrokerClient {
-  constructor(private readonly socketPath: string) {}
+  constructor(
+    private readonly socketPath: string,
+    private readonly timeouts: BrokerCallTimeouts = DEFAULT_TIMEOUTS,
+  ) {}
+
+  private timeoutFor(path: string): number {
+    if (path === '/v1/elicit') return this.timeouts.elicitationMs;
+    if (path === '/v1/http') return this.timeouts.upstreamMs;
+    return this.timeouts.controlMs;
+  }
 
   private call(
     method: string,
@@ -92,6 +115,14 @@ export class BrokerClient {
           );
         },
       );
+      req.setTimeout(this.timeoutFor(path), () => {
+        req.destroy(
+          new Error(
+            `AgentMFA broker call ${method} ${path} timed out after ` +
+              `${this.timeoutFor(path)}ms`,
+          ),
+        );
+      });
       req.on('error', reject);
       if (payload) req.write(payload);
       req.end();

@@ -49,6 +49,7 @@ import {
   sanitizeUntrustedText,
   sanitizeUpstreamResult,
 } from './untrusted';
+import { SIDECAR_VERSION } from './version';
 
 export const MCP_PATH = '/mcp';
 
@@ -88,6 +89,10 @@ interface ResourceSurface {
   takenTemplateUris: Set<string>;
   registered: number;
   withheld: number;
+}
+
+interface UpstreamToolSurface {
+  registered: number;
 }
 
 /** One upstream tool in the session's search index. */
@@ -286,7 +291,7 @@ export async function createToolServer(
   principal: Principal,
 ): Promise<McpServer> {
   const server = new McpServer(
-    { name: 'agentmfa', version: '0.1.0' },
+    { name: 'agentmfa', version: SIDECAR_VERSION },
     {
       // Declared up front rather than implied by the first `registerTool`.
       // An agent wired to nothing has zero tools, and without this it would
@@ -508,13 +513,15 @@ export async function createToolServer(
     registered: 0,
     withheld: 0,
   };
+  const upstreamToolSurface: UpstreamToolSurface = { registered: 0 };
   for (const connection of wired) {
     // An MCP upstream contributes its own tools rather than one request
     // tool. Its traffic still rides the broker's HTTP plane, so the
     // credential stays where it belongs.
     if (connection.mcp_path) {
       const outcome = await registerUpstream(
-        server, broker, principal, connection, taken, upstreamIndex, resourceSurface,
+        server, broker, principal, connection, taken, upstreamIndex,
+        upstreamToolSurface, resourceSurface,
       );
       registrations.push({
         connection,
@@ -886,6 +893,7 @@ async function registerUpstream(
   connection: BrokerConnection,
   taken: Set<string>,
   index: IndexedTool[],
+  toolSurface: UpstreamToolSurface,
   resourceSurface: ResourceSurface,
 ): Promise<UpstreamRegistration> {
   let discovery: Awaited<ReturnType<typeof discoverUpstream>>;
@@ -980,14 +988,14 @@ async function registerUpstream(
     // Over the registration budget: the tool stays discoverable through
     // agentmfa_search_tools and callable through agentmfa_call_tool, it
     // just doesn't occupy a slot in the agent's tool list.
-    const upstreamCount = index.filter((entry) => entry.registeredAs !== null).length;
-    if (upstreamCount >= upstreamToolBudget()) {
+    if (toolSurface.registered >= upstreamToolBudget()) {
       withheld.push(tool.name);
       index.push({ connection, tool, registeredAs: null });
       continue;
     }
     taken.add(toolName);
     index.push({ connection, tool, registeredAs: toolName });
+    toolSurface.registered += 1;
 
     server.registerTool(
       toolName,

@@ -84,7 +84,16 @@ pub fn start(app: &AppHandle, broker_socket: PathBuf) -> Option<Sidecar> {
     let watch = sidecar.watch();
     tokio::spawn(async move {
         match watch.wait_ready(FIRST_READY).await {
-            Ok(endpoint) => tracing::info!(port = endpoint.port, "sidecar listening"),
+            Ok(endpoint) => {
+                if endpoint.version_skew {
+                    tracing::warn!(
+                        sidecar_version = ?endpoint.sidecar_version,
+                        broker_version = %endpoint.broker_version,
+                        "MCP sidecar version mismatch; rebuild or reinstall AgentMFA"
+                    );
+                }
+                tracing::info!(port = endpoint.port, "sidecar listening");
+            }
             Err(error) => tracing::warn!(%error, "sidecar has not started yet; still retrying"),
         }
     });

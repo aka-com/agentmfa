@@ -49,6 +49,9 @@ pub struct SidecarConfig {
 pub struct SidecarEndpoint {
     pub port: u16,
     pub token: String,
+    pub sidecar_version: Option<String>,
+    pub broker_version: String,
+    pub version_skew: bool,
 }
 
 impl SidecarEndpoint {
@@ -72,6 +75,12 @@ pub enum SidecarError {
 struct ReadyLine {
     event: String,
     port: u16,
+    #[serde(default)]
+    sidecar_version: Option<String>,
+    #[serde(default)]
+    broker_version: Option<String>,
+    #[serde(default)]
+    version_skew: bool,
 }
 
 /// A JSON log line from the sidecar's stderr.
@@ -197,6 +206,7 @@ async fn run_once(
         .arg(&config.script)
         .env("AKA_SIDECAR_TOKEN", &token)
         .env("AKA_BROKER_SOCKET", &config.broker_socket)
+        .env("AKA_BROKER_VERSION", env!("CARGO_PKG_VERSION"))
         // Piped, not null: the sidecar treats its stdin as a liveness
         // channel. Nothing is ever written to it, but the moment this
         // process goes away the OS closes the write end and the sidecar
@@ -228,9 +238,9 @@ async fn run_once(
 
     // Race the handshake against an early exit, so a sidecar that dies on
     // startup surfaces as `ExitedEarly` rather than a 15-second timeout.
-    let port = tokio::select! {
+    let ready = tokio::select! {
         ready = tokio::time::timeout(READY_TIMEOUT, ready_rx) => match ready {
-            Ok(Ok(port)) => port,
+            Ok(Ok(ready)) => ready,
             // The sender dropped: stdout reached EOF with no ready line.
             Ok(Err(_)) => {
                 let _ = child.kill().await;
@@ -249,8 +259,25 @@ async fn run_once(
         }
     };
 
-    tracing::info!(port, "sidecar ready");
-    let _ = tx.send(Some(SidecarEndpoint { port, token }));
+    let broker_version = env!("CARGO_PKG_VERSION").to_string();
+    let version_skew = ready.version_skew
+        || ready.sidecar_version.as_deref() != Some(broker_version.as_str())
+        || ready.broker_version.as_deref() != Some(broker_version.as_str());
+    if version_skew {
+        tracing::warn!(
+            sidecar_version = ?ready.sidecar_version,
+            %broker_version,
+            "sidecar and broker versions do not match; rebuild the sidecar"
+        );
+    }
+    tracing::info!(port = ready.port, "sidecar ready");
+    let _ = tx.send(Some(SidecarEndpoint {
+        port: ready.port,
+        token,
+        sidecar_version: ready.sidecar_version,
+        broker_version,
+        version_skew,
+    }));
 
     let status = child.wait().await?;
     settle(pump, logs).await;
@@ -260,7 +287,7 @@ async fn run_once(
 /// Drain stdout for the life of the process, reporting the ready line once.
 async fn pump_stdout(
     stdout: tokio::process::ChildStdout,
-    ready: tokio::sync::oneshot::Sender<u16>,
+    ready: tokio::sync::oneshot::Sender<ReadyLine>,
 ) {
     let mut lines = BufReader::new(stdout).lines();
     let mut ready = Some(ready);
@@ -269,7 +296,7 @@ async fn pump_stdout(
             if let Ok(parsed) = serde_json::from_str::<ReadyLine>(&line) {
                 if parsed.event == "ready" {
                     if let Some(sender) = ready.take() {
-                        let _ = sender.send(parsed.port);
+                        let _ = sender.send(parsed);
                     }
                     continue;
                 }
@@ -339,10 +366,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_ready_line_publishes_the_endpoint() {
-        let (_dir, config) = stub(
-            r#"echo '{"event":"ready","port":45678}'
-               sleep 30"#,
+        let version = env!("CARGO_PKG_VERSION");
+        let script = format!(
+            r#"echo '{{"event":"ready","port":45678,"sidecar_version":"{version}","broker_version":"{version}","version_skew":false}}'
+               sleep 30"#
         );
+        let (_dir, config) = stub(&script);
         let sidecar = Sidecar::spawn(config);
         let endpoint = sidecar
             .wait_ready(Duration::from_secs(5))
@@ -351,6 +380,27 @@ mod tests {
         assert_eq!(endpoint.port, 45678);
         assert_eq!(endpoint.token.len(), 64);
         assert_eq!(endpoint.base_url(), "http://127.0.0.1:45678");
+        assert_eq!(
+            endpoint.sidecar_version.as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(endpoint.broker_version, env!("CARGO_PKG_VERSION"));
+        assert!(!endpoint.version_skew);
+    }
+
+    #[tokio::test]
+    async fn a_legacy_ready_line_is_reported_as_version_skew() {
+        let (_dir, config) = stub(
+            r#"echo '{"event":"ready","port":45677}'
+               sleep 30"#,
+        );
+        let sidecar = Sidecar::spawn(config);
+        let endpoint = sidecar
+            .wait_ready(Duration::from_secs(5))
+            .await
+            .expect("ready");
+        assert_eq!(endpoint.sidecar_version, None);
+        assert!(endpoint.version_skew);
     }
 
     #[tokio::test]

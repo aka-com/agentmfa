@@ -153,12 +153,65 @@ export interface ToolResult {
   content: Array<{ type: 'text'; text: string }>;
 }
 
+const DEFAULT_AGENT_RESULT_BYTES = 128 * 1024;
+
+function agentResultBudget(): number {
+  const configured = Number(process.env.AGENTMFA_RESULT_BUDGET);
+  return Number.isFinite(configured) && configured >= 1024
+    ? Math.floor(configured)
+    : DEFAULT_AGENT_RESULT_BYTES;
+}
+
+/** Serialize an MCP-visible value without allowing one HTTP envelope to
+ * consume an unbounded amount of agent context. */
+export function boundedToolText(value: unknown, budget = agentResultBudget()): string {
+  const serialized = typeof value === 'string' ? value : JSON.stringify(value);
+  const originalBytes = Buffer.byteLength(serialized);
+  if (originalBytes <= budget) return serialized;
+
+  const source =
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null;
+  const body = source && typeof source.body === 'string' ? source.body : serialized;
+  let shell: Record<string, unknown> = source
+    ? { ...source, body: '' }
+    : { preview: '' };
+  shell._truncated = {
+    original_bytes: originalBytes,
+    limit_bytes: budget,
+  };
+  if (Buffer.byteLength(JSON.stringify(shell)) > budget) {
+    shell = {
+      preview: '',
+      _truncated: { original_bytes: originalBytes, limit_bytes: budget },
+    };
+  }
+
+  let low = 0;
+  let high = body.length;
+  let best = JSON.stringify(shell);
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    if ('body' in shell) shell.body = body.slice(0, middle);
+    else shell.preview = body.slice(0, middle);
+    const candidate = JSON.stringify(shell);
+    if (Buffer.byteLength(candidate) <= budget) {
+      best = candidate;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return best;
+}
+
 function text(value: unknown): ToolResult {
   return {
     content: [
       {
         type: 'text',
-        text: typeof value === 'string' ? value : JSON.stringify(value, null, 2),
+        text: boundedToolText(value),
       },
     ],
   };

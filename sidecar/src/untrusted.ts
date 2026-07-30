@@ -129,6 +129,11 @@ export function sanitizeUpstreamResult(value: unknown, limit = 128 * 1024): unkn
     _meta: {
       ...(result._meta ?? {}),
       agentmfa: {
+        ...(result._meta?.agentmfa &&
+        typeof result._meta.agentmfa === 'object' &&
+        !Array.isArray(result._meta.agentmfa)
+          ? result._meta.agentmfa
+          : {}),
         provenance: 'untrusted upstream MCP content',
         text_truncated: truncated,
       },

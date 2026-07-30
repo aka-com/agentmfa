@@ -25,6 +25,7 @@ import { deriveMcpNamespace, joinToolPath } from '@executor-js/plugin-mcp/core';
 import type { AgentAuth, BrokerClient, BrokerConnection } from './broker';
 import { log } from './log';
 import { boundedToolName } from './tool-names';
+import { SIDECAR_VERSION } from './version';
 
 /** One tool as the upstream MCP server describes it. */
 export interface UpstreamTool {
@@ -76,6 +77,73 @@ export const MAX_TOOL_PAGES = 32;
 
 /** Resources and templates page too; keep the same guard, a little tighter. */
 export const MAX_RESOURCE_PAGES = 16;
+/** A single listing cannot grow the session without bound. */
+export const MAX_CATALOG_ITEMS = 2_000;
+/** Schemas larger than this are omitted from the in-memory search index. */
+export const MAX_TOOL_SCHEMA_BYTES = 64 * 1024;
+const MAX_CATALOG_TEXT = 8 * 1024;
+
+function boundedString(value: unknown, max = MAX_CATALOG_TEXT): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  return value.length <= max ? value : `${value.slice(0, max - 1)}…`;
+}
+
+function boundedCatalogItem(method: string, value: unknown): unknown | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const item = value as Record<string, unknown>;
+  if (method === 'tools/list') {
+    const name = boundedString(item.name, 1024);
+    if (!name || name !== item.name) return null;
+    let inputSchema =
+      item.inputSchema && typeof item.inputSchema === 'object'
+        ? item.inputSchema
+        : undefined;
+    if (
+      inputSchema !== undefined &&
+      Buffer.byteLength(JSON.stringify(inputSchema)) > MAX_TOOL_SCHEMA_BYTES
+    ) {
+      inputSchema = undefined;
+    }
+    return {
+      name,
+      ...(boundedString(item.description) === undefined
+        ? {}
+        : { description: boundedString(item.description) }),
+      ...(inputSchema === undefined ? {} : { inputSchema }),
+    };
+  }
+  if (method === 'resources/list') {
+    const uri = boundedString(item.uri);
+    if (!uri || uri !== item.uri) return null;
+    return {
+      uri,
+      ...(boundedString(item.name) === undefined ? {} : { name: boundedString(item.name) }),
+      ...(boundedString(item.title) === undefined ? {} : { title: boundedString(item.title) }),
+      ...(boundedString(item.description) === undefined
+        ? {}
+        : { description: boundedString(item.description) }),
+      ...(boundedString(item.mimeType, 256) === undefined
+        ? {}
+        : { mimeType: boundedString(item.mimeType, 256) }),
+    };
+  }
+  if (method === 'resources/templates/list') {
+    const uriTemplate = boundedString(item.uriTemplate);
+    if (!uriTemplate || uriTemplate !== item.uriTemplate) return null;
+    return {
+      uriTemplate,
+      ...(boundedString(item.name) === undefined ? {} : { name: boundedString(item.name) }),
+      ...(boundedString(item.title) === undefined ? {} : { title: boundedString(item.title) }),
+      ...(boundedString(item.description) === undefined
+        ? {}
+        : { description: boundedString(item.description) }),
+      ...(boundedString(item.mimeType, 256) === undefined
+        ? {}
+        : { mimeType: boundedString(item.mimeType, 256) }),
+    };
+  }
+  return null;
+}
 
 /** The namespace an upstream's tools are grouped under. */
 export function namespaceFor(connection: BrokerConnection): string {
@@ -244,7 +312,7 @@ class UpstreamClient {
         // answer server→client requests. Draft SEP-2322 `input_required`
         // results remain supported below without claiming that capability.
         capabilities: {},
-        clientInfo: { name: 'agentmfa', version: '0.1.0' },
+        clientInfo: { name: 'agentmfa', version: SIDECAR_VERSION },
       },
     });
     const result = this.result(response, id) as
@@ -312,7 +380,20 @@ class UpstreamClient {
         | (Record<string, unknown> & { nextCursor?: string })
         | undefined;
       const list = result?.[key];
-      if (Array.isArray(list)) items.push(...(list as T[]));
+      if (Array.isArray(list)) {
+        for (const rawItem of list) {
+          if (items.length >= MAX_CATALOG_ITEMS) {
+            log('warn', 'an upstream catalog exceeded the item cap', {
+              connection: this.connection.name,
+              method,
+              items: MAX_CATALOG_ITEMS,
+            });
+            return items;
+          }
+          const item = boundedCatalogItem(method, rawItem);
+          if (item !== null) items.push(item as T);
+        }
+      }
       if (!result?.nextCursor) return items;
       cursor = result.nextCursor;
     }

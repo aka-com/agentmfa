@@ -17,8 +17,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { BrokerClient, BrokerError } from './broker';
 import { log } from './log';
 import { BrokerAuthProvider, MCP_PATH, SessionStore, hostIsLoopback, openSession } from './mcp';
-
-export const SIDECAR_VERSION = '0.1.0';
+import { SIDECAR_VERSION } from './version';
 
 // A server-error JSON-RPC code (the -32000..-32099 range is reserved for
 // implementation-defined errors) mirroring HTTP 429, so a rate-limited agent
@@ -34,6 +33,8 @@ export interface SidecarEnv {
   token: string;
   /** Path to the broker's Unix socket — the sidecar's only way back in. */
   brokerSocket: string;
+  /** Version of the supervising broker process. */
+  brokerVersion?: string;
 }
 
 /** Constant-time compare that also tolerates a length mismatch. */
@@ -137,6 +138,9 @@ export function createSidecarServer(env: SidecarEnv): Server {
       json(res, 200, {
         status: 'ok',
         version: SIDECAR_VERSION,
+        broker_version: env.brokerVersion ?? null,
+        version_skew:
+          env.brokerVersion !== undefined && env.brokerVersion !== SIDECAR_VERSION,
         pid: process.pid,
         sessions: sessions.size,
       });

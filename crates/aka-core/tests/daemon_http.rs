@@ -214,6 +214,21 @@ async fn upstream() -> Upstream {
             }),
         )
         .route(
+            "/large-mcp",
+            post(|axum::Json(body): axum::Json<Value>| async move {
+                axum::Json(json!({
+                    "jsonrpc": "2.0",
+                    "id": body["id"],
+                    "result": {
+                        "content": [{
+                            "type": "text",
+                            "text": format!("useful-prefix-{}", "x".repeat(16 * 1024)),
+                        }]
+                    }
+                }))
+            }),
+        )
+        .route(
             "/redirect-same",
             get(|| async {
                 (
@@ -1709,6 +1724,67 @@ async fn a_curated_wiring_refuses_tools_outside_its_subset() {
     )
     .await;
     assert_eq!(status, 200, "no subset means every tool is callable");
+}
+
+#[tokio::test]
+async fn an_oversized_mcp_tool_result_becomes_a_bounded_explicit_tool_error() {
+    let config = BrokerConfig {
+        response_cap: 1024,
+        ..BrokerConfig::default()
+    };
+    let mut h = harness(config).await;
+    let up = upstream().await;
+    h.broker
+        .store
+        .add_connection(ConnectionSpec {
+            name: "large-docs".into(),
+            config: ConnectionConfig::Api {
+                host: "127.0.0.1".into(),
+                scheme: "http".into(),
+                port: Some(up.port),
+                trusted_ca_bundle_path: None,
+                template: String::new(),
+                mcp_path: Some("/large-mcp".into()),
+                oauth: None,
+            },
+            secrets: vec![],
+        })
+        .unwrap();
+    let token = h.pair("claude-code").await;
+    let auth = format!("Bearer {token}");
+    let (status, envelope) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(json!({
+            "connection": "large-docs",
+            "method": "POST",
+            "path": "/large-mcp",
+            "headers": { "content-type": "application/json" },
+            "body": {
+                "jsonrpc": "2.0",
+                "id": 77,
+                "method": "tools/call",
+                "params": { "name": "search", "arguments": {} },
+            },
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "{envelope}");
+    let response: Value =
+        serde_json::from_str(envelope["body"].as_str().expect("relayed JSON-RPC")).unwrap();
+    assert_eq!(response["id"], 77);
+    assert_eq!(response["result"]["isError"], true);
+    assert_eq!(
+        response["result"]["_meta"]["agentmfa"]["result_truncated"],
+        true
+    );
+    let text = response["result"]["content"][0]["text"]
+        .as_str()
+        .expect("tool error text");
+    assert!(text.contains("exceeded the 1024 byte broker cap"), "{text}");
+    assert!(text.contains("useful-prefix"), "{text}");
 }
 
 #[tokio::test]

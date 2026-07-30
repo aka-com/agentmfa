@@ -2,7 +2,14 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { BrokerError, type BrokerClient, type BrokerConnection } from '../src/broker';
-import { callFor, invoke, projectForMcp, schemaFor, toolNameFor } from '../src/tools';
+import {
+  boundedToolText,
+  callFor,
+  invoke,
+  projectForMcp,
+  schemaFor,
+  toolNameFor,
+} from '../src/tools';
 
 const connection: BrokerConnection = {
   name: 'analytics',
@@ -84,6 +91,26 @@ test('MCP HTTP projection omits cookie arrays and masks cookie header values', (
     'set-cookie': '[OMITTED BY AGENTMFA]',
     Cookie: '[OMITTED BY AGENTMFA]',
   });
+});
+
+test('large HTTP envelopes are compactly capped with an explicit marker', () => {
+  const rendered = boundedToolText(
+    {
+      status: 200,
+      headers: { 'content-type': 'text/plain' },
+      body: `prefix-${'x'.repeat(20_000)}`,
+      body_encoding: 'utf8',
+    },
+    1024,
+  );
+  assert.ok(Buffer.byteLength(rendered) <= 1024);
+  const parsed = JSON.parse(rendered) as {
+    body: string;
+    _truncated: { original_bytes: number; limit_bytes: number };
+  };
+  assert.match(parsed.body, /^prefix-/);
+  assert.ok(parsed._truncated.original_bytes > 20_000);
+  assert.equal(parsed._truncated.limit_bytes, 1024);
 });
 
 test('broker refusal detail survives the MCP tool projection', async () => {

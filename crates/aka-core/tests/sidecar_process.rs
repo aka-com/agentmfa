@@ -61,6 +61,11 @@ async fn the_real_sidecar_announces_a_port_and_serves_health() {
         .await
         .expect("sidecar becomes ready");
     assert!(endpoint.port > 0);
+    assert_eq!(
+        endpoint.sidecar_version.as_deref(),
+        Some(env!("CARGO_PKG_VERSION"))
+    );
+    assert!(!endpoint.version_skew);
 
     let client = reqwest::Client::new();
     let url = format!("{}/health", endpoint.base_url());
@@ -87,6 +92,9 @@ async fn the_real_sidecar_announces_a_port_and_serves_health() {
     assert_eq!(allowed.status(), 200);
     let body: serde_json::Value = allowed.json().await.expect("json");
     assert_eq!(body["status"], "ok");
+    assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(body["broker_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(body["version_skew"], false);
 
     // Dropping the supervisor must reap the process, not orphan it.
     let pid = body["pid"].as_u64().expect("pid") as i32;

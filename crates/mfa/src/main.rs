@@ -2413,6 +2413,16 @@ fn cmd_serve(args: ServeArgs) {
                 let watch = sidecar.watch();
                 let broker_for_watch = broker.clone();
                 runtime.spawn(watch.follow(move |endpoint| {
+                    if let Some(endpoint) =
+                        endpoint.as_ref().filter(|endpoint| endpoint.version_skew)
+                    {
+                        eprintln!(
+                            "  warning: MCP sidecar version {} does not match broker {}; \
+                             rebuild or reinstall the sidecar",
+                            endpoint.sidecar_version.as_deref().unwrap_or("unknown"),
+                            endpoint.broker_version,
+                        );
+                    }
                     broker_for_watch.set_sidecar_mcp_port(endpoint.map(|e| e.port));
                 }));
                 Some(sidecar)
