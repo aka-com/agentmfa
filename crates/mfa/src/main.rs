@@ -88,7 +88,7 @@ fn parse_manage_ttl_days(value: &str) -> Result<u64, String> {
     after_help = "EXIT CODES:\n  1  generic/internal failure\n  2  invalid command usage or input\n  3  broker is not running\n  4  authentication or confirmation failed\n  5  requested object was not found\n  6  state conflict\n  7  remote broker is unreachable\n  8  connection test failed"
 )]
 struct Cli {
-    /// Emit one machine-readable JSON document for read and session commands.
+    /// Emit one machine-readable JSON document for commands with bounded output.
     #[arg(long, global = true)]
     json: bool,
     #[command(subcommand)]
@@ -531,14 +531,20 @@ enum ConnCommand {
         #[arg(long)]
         broker: Option<String>,
     },
-    /// Print the connection's already-issued direct endpoint: the pasteable
-    /// address and its endpoint secret. Read-only — issue or rotate the
-    /// endpoint from the desktop app. Works against a running local or remote
-    /// broker as well as an offline store. Exits nonzero when no endpoint has
-    /// been issued yet.
+    /// Print, issue/rotate, or revoke a connection's direct endpoint.
+    /// Issuance requires a running local or remote broker to own the listener;
+    /// reads and revocation also work as offline edits.
     Endpoint {
         /// The connection whose endpoint to print.
         name: String,
+        /// Issue a new endpoint, or rotate the existing endpoint's secret.
+        /// The broker must be running so it can own the endpoint listener.
+        #[arg(long, conflicts_with = "revoke")]
+        issue: bool,
+        /// Revoke this connection's issued endpoint. Unlike issuance, this
+        /// can be performed as an offline edit while the broker is stopped.
+        #[arg(long, conflicts_with_all = ["issue", "url", "secret"])]
+        revoke: bool,
         /// Print only the pasteable address (the base URL / DSN / agent
         /// socket), for `$(mfa conn endpoint <name> --url)`.
         #[arg(long, conflicts_with = "secret")]
@@ -550,8 +556,7 @@ enum ConnCommand {
         /// Operate on a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
-        /// Read from the broker at this manage-API URL instead of this
-        /// machine's.
+        /// Manage the broker at this manage-API URL instead of this machine's.
         #[arg(long)]
         broker: Option<String>,
     },
@@ -624,6 +629,33 @@ enum ConnKind {
 enum DsnFormat {
     Env,
     Uri,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EndpointAction {
+    Read,
+    Issue,
+    Revoke,
+}
+
+fn endpoint_action(issue: bool, revoke: bool) -> Result<EndpointAction, &'static str> {
+    match (issue, revoke) {
+        (false, false) => Ok(EndpointAction::Read),
+        (true, false) => Ok(EndpointAction::Issue),
+        (false, true) => Ok(EndpointAction::Revoke),
+        (true, true) => Err("--issue and --revoke are mutually exclusive"),
+    }
+}
+
+fn endpoint_action_supported(action: EndpointAction, online: bool) -> Result<(), &'static str> {
+    if action == EndpointAction::Issue && !online {
+        Err(
+            "direct endpoint issuance requires a running broker to own the listener; \
+             start AgentMFA or `mfa serve`, then retry",
+        )
+    } else {
+        Ok(())
+    }
 }
 
 /// `conn update`: the same field flags as `conn add`, all optional — the
@@ -795,11 +827,13 @@ fn run_cli() {
             ConnCommand::Test { name, root, broker } => cmd_conn_test(name, root, broker, json),
             ConnCommand::Endpoint {
                 name,
+                issue,
+                revoke,
                 url,
                 secret,
                 root,
                 broker,
-            } => cmd_conn_endpoint(name, url, secret, root, broker, json),
+            } => cmd_conn_endpoint(name, issue, revoke, url, secret, root, broker, json),
         },
         Command::Manage { command } => match command {
             ManageCommand::Login {
@@ -1825,20 +1859,22 @@ fn cmd_conn_test(name: String, root: Option<PathBuf>, url: Option<String>, json:
     }
 }
 
-/// Print an already-issued direct endpoint's address and secret. Read-only:
-/// issuance/rotation binds a live listener, so it belongs to the app; this
-/// reads the persisted record through the same managed backend as the other
-/// `conn` subcommands (live over the socket with a stored token, hosted with
-/// `--broker`, or offline with the broker stopped). `--url`/`--secret` print a
-/// single field for `$(...)` use.
+/// Read, issue/rotate, or revoke a direct endpoint through the same management
+/// backend as the app. Issuance is deliberately online-only: a short-lived
+/// offline broker would drop the newly bound listener as soon as this command
+/// exits. Revocation only narrows access, so it remains a safe offline edit.
 fn cmd_conn_endpoint(
     name: String,
+    issue: bool,
+    revoke: bool,
     url: bool,
     secret: bool,
     root: Option<PathBuf>,
     broker: Option<String>,
     json: bool,
 ) {
+    let action =
+        endpoint_action(issue, revoke).unwrap_or_else(|message| die_with(ExitCode::Usage, message));
     if json && (url || secret) {
         die_with(
             ExitCode::Usage,
@@ -1848,16 +1884,62 @@ fn cmd_conn_endpoint(
     require_existing_root_for_read(root.as_deref(), broker.is_some());
     let managed = management_backend(root, broker);
     let dto = conn_dto(&managed, &name);
-    let info = match managed.run(managed.backend.get_endpoint(dto_id(&dto.id))) {
-        Some(info) => info,
-        None => die_with(
-            ExitCode::NotFound,
-            format!("no direct endpoint issued for {name} — issue one from the AgentMFA app first"),
-        ),
+    if let Err(message) = endpoint_action_supported(action, managed.remote.is_some()) {
+        die_with(ExitCode::NoBroker, message);
+    }
+    let connection_id = dto_id(&dto.id);
+
+    if action == EndpointAction::Revoke {
+        let Some(endpoint) = dto.agent_access.endpoint.as_ref() else {
+            die_with(
+                ExitCode::NotFound,
+                format!("no direct endpoint is issued for {name}"),
+            );
+        };
+        let endpoint_id = endpoint.endpoint_id.clone();
+        let revoked = managed.run(
+            managed
+                .backend
+                .revoke_endpoint(dto_id(&endpoint.endpoint_id)),
+        );
+        if !revoked {
+            die_with(
+                ExitCode::NotFound,
+                format!("the direct endpoint for {name} was already revoked"),
+            );
+        }
+        if json {
+            print_json(&serde_json::json!({
+                "connection": name,
+                "endpoint_id": endpoint_id,
+                "revoked": true,
+            }));
+        } else {
+            eprintln!("revoked direct endpoint for {name}");
+        }
+        return;
+    }
+
+    let info = match action {
+        EndpointAction::Issue => managed.run_gated(managed.backend.issue_endpoint(connection_id)),
+        EndpointAction::Read => match managed.run(managed.backend.get_endpoint(connection_id)) {
+            Some(info) => info,
+            None => die_with(
+                ExitCode::NotFound,
+                format!(
+                    "no direct endpoint issued for {name} — start the broker and retry with \
+                         `mfa conn endpoint {name} --issue`"
+                ),
+            ),
+        },
+        EndpointAction::Revoke => unreachable!("revocation returns above"),
     };
     if json {
         print_json(&info);
         return;
+    }
+    if action == EndpointAction::Issue {
+        eprintln!("issued direct endpoint for {name}");
     }
     // Selectors print exactly one field with no decoration, so a `$(...)`
     // capture carries only the value. `--url` prefers the TCP form when the
@@ -3341,6 +3423,59 @@ mod tests {
                 command: SecretCommand::List { .. }
             }
         ));
+    }
+
+    #[test]
+    fn endpoint_lifecycle_flags_parse_and_conflict() {
+        let cli = Cli::try_parse_from(["mfa", "conn", "endpoint", "database", "--issue"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Conn {
+                command: ConnCommand::Endpoint {
+                    issue: true,
+                    revoke: false,
+                    ..
+                }
+            }
+        ));
+
+        let cli = Cli::try_parse_from(["mfa", "conn", "endpoint", "database", "--revoke"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Conn {
+                command: ConnCommand::Endpoint {
+                    issue: false,
+                    revoke: true,
+                    ..
+                }
+            }
+        ));
+
+        assert!(Cli::try_parse_from([
+            "mfa", "conn", "endpoint", "database", "--issue", "--revoke",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "mfa", "conn", "endpoint", "database", "--revoke", "--secret",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn endpoint_issuance_requires_online_broker_but_revocation_does_not() {
+        assert_eq!(endpoint_action(false, false).unwrap(), EndpointAction::Read);
+        assert_eq!(endpoint_action(true, false).unwrap(), EndpointAction::Issue);
+        assert_eq!(
+            endpoint_action(false, true).unwrap(),
+            EndpointAction::Revoke
+        );
+        assert!(endpoint_action(true, true).is_err());
+
+        let error = endpoint_action_supported(EndpointAction::Issue, false).unwrap_err();
+        assert!(error.contains("running broker"));
+        assert!(endpoint_action_supported(EndpointAction::Issue, true).is_ok());
+        assert!(endpoint_action_supported(EndpointAction::Read, false).is_ok());
+        assert!(endpoint_action_supported(EndpointAction::Revoke, false).is_ok());
     }
 
     #[test]
