@@ -853,6 +853,16 @@ pub struct ConnectionUpdateBody {
     pub spec: ConnectionSpec,
 }
 
+/// `PATCH /v1/manage/connections/{id}`. Rename is deliberately separate from
+/// full replacement so a client never has to reconstruct capability fields it
+/// does not intend to edit.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct ConnectionRenameBody {
+    /// Version returned by the GET that supplied the connection name.
+    pub expected_updated_at: String,
+    pub name: String,
+}
+
 /// `POST /v1/manage/connections/reorder`: the full desired front-to-back
 /// order of connection ids.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -1008,6 +1018,12 @@ pub trait ManagementBackend: Send + Sync {
         id: Uuid,
         expected_updated_at: String,
         spec: ConnectionSpec,
+    ) -> ManageResult<()>;
+    async fn rename_connection(
+        &self,
+        id: Uuid,
+        expected_updated_at: String,
+        name: String,
     ) -> ManageResult<()>;
     async fn delete_connection(&self, id: Uuid) -> ManageResult<()>;
     /// Persist a user-chosen order for the Tools list. `ordered_ids` is the
@@ -1256,6 +1272,20 @@ impl ManagementBackend for LocalBackend {
         self.blocking(move |broker| {
             broker
                 .ui_update_connection_if_current(&id, &expected_updated_at, spec)
+                .map(|_| ())
+        })
+        .await
+    }
+
+    async fn rename_connection(
+        &self,
+        id: Uuid,
+        expected_updated_at: String,
+        name: String,
+    ) -> ManageResult<()> {
+        self.blocking(move |broker| {
+            broker
+                .ui_rename_connection_if_current(&id, &expected_updated_at, name)
                 .map(|_| ())
         })
         .await
@@ -1670,6 +1700,26 @@ mod tests {
             !backend.list_connections().await.unwrap()[0]
                 .agent_access
                 .enabled
+        );
+
+        backend
+            .rename_connection(id, conn.updated_at.clone(), "github renamed".into())
+            .await
+            .unwrap();
+        let renamed = backend.list_connections().await.unwrap().remove(0);
+        assert_eq!(renamed.name, "github renamed");
+        assert_eq!(renamed.target, conn.target);
+        assert_eq!(renamed.secret_names, conn.secret_names);
+        assert!(
+            !renamed.agent_access.enabled,
+            "rename preserves access state"
+        );
+        assert_eq!(
+            backend
+                .rename_connection(id, conn.updated_at.clone(), "stale rename".into())
+                .await
+                .unwrap_err(),
+            ManageError::ConnectionChanged
         );
     }
 

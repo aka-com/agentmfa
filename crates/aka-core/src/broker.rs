@@ -968,6 +968,27 @@ impl Broker {
         self.ui_update_connection_inner(id, Some(expected_updated_at), spec)
     }
 
+    /// Rename only, merging against the broker's authoritative connection
+    /// instead of accepting a client reconstruction of its capability config.
+    /// The optimistic token still makes a stale rename fail closed.
+    pub fn ui_rename_connection_if_current(
+        &self,
+        id: &Uuid,
+        expected_updated_at: &str,
+        name: String,
+    ) -> Result<Connection> {
+        let current = self.store.connection_by_id(id)?;
+        self.ui_update_connection_inner(
+            id,
+            Some(expected_updated_at),
+            ConnectionSpec {
+                name,
+                config: current.config,
+                secrets: current.secrets,
+            },
+        )
+    }
+
     fn ui_update_connection_inner(
         &self,
         id: &Uuid,

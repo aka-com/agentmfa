@@ -1775,23 +1775,10 @@ fn cmd_conn_update(args: ConnUpdate) {
 fn cmd_conn_rename(name: String, new_name: String, root: Option<PathBuf>, url: Option<String>) {
     let managed = management_backend(root, url);
     let dto = conn_dto(&managed, &name);
-    let config = match config_from_dto(&dto) {
-        Ok(config) => config,
-        Err(e) => die_with(ExitCode::Usage, e),
-    };
-    let secrets = if dto.kind == "api" {
-        Vec::new()
-    } else {
-        secret_ids_by_names(&managed, &dto.secret_names)
-    };
-    managed.run(managed.backend.update_connection(
+    managed.run(managed.backend.rename_connection(
         dto_id(&dto.id),
         dto.updated_at,
-        ConnectionSpec {
-            name: new_name.clone(),
-            config,
-            secrets,
-        },
+        new_name.clone(),
     ));
     eprintln!("renamed connection {name} → {new_name}");
 }
@@ -3690,7 +3677,7 @@ mod tests {
     }
 
     #[test]
-    fn dto_reconstruction_preserves_byo_oauth_coordinates_for_renames() {
+    fn dto_reconstruction_preserves_byo_oauth_coordinates_for_full_updates() {
         use aka_api::{AccessDto, OAuthDto};
 
         let dto = ConnectionDto {
@@ -3737,7 +3724,7 @@ mod tests {
         let ConnectionConfig::Api { oauth, .. } = config_from_dto(&dto).unwrap() else {
             panic!("expected API config");
         };
-        let oauth = oauth.expect("BYO OAuth coordinates survive DTO reconstruction");
+        let oauth = oauth.expect("BYO OAuth coordinates survive full-update reconstruction");
         assert_eq!(oauth.client_id, "client-id");
         assert_eq!(oauth.scopes, vec!["calendar.read"]);
         assert_eq!(

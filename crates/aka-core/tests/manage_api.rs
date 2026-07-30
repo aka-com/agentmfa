@@ -410,6 +410,76 @@ async fn secrets_and_connections_round_trip_over_the_manage_api() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn rename_is_patch_shaped_and_preserves_authoritative_connection_state() {
+    let h = harness().await;
+    let (status, body) = h
+        .manage(
+            "POST",
+            "/v1/manage/connections",
+            Some(json!({
+                "spec": {
+                    "name": "github",
+                    "config": {
+                        "kind": "api",
+                        "host": "api.github.com",
+                        "scheme": "https",
+                        "template": "",
+                        "mcp_path": "/mcp",
+                    },
+                    "secrets": [],
+                },
+            })),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+
+    let (_, connections) = h.manage("GET", "/v1/manage/connections", None).await;
+    let id = connections[0]["id"].as_str().unwrap().to_string();
+    let stale_version = connections[0]["updated_at"].as_str().unwrap().to_string();
+    let (status, body) = h
+        .manage(
+            "POST",
+            &format!("/v1/manage/connections/{id}/access"),
+            Some(json!({ "enabled": false })),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+
+    let (status, body) = h
+        .manage(
+            "PATCH",
+            &format!("/v1/manage/connections/{id}"),
+            Some(json!({
+                "expected_updated_at": stale_version.clone(),
+                "name": "github production",
+            })),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+
+    let (_, connections) = h.manage("GET", "/v1/manage/connections", None).await;
+    let renamed = &connections[0];
+    assert_eq!(renamed["name"], "github production");
+    assert_eq!(renamed["host"], "api.github.com");
+    assert_eq!(renamed["mcp_path"], "/mcp");
+    assert_eq!(renamed["agent_access"]["enabled"], false);
+    assert_ne!(renamed["updated_at"], stale_version);
+
+    let (status, body) = h
+        .manage(
+            "PATCH",
+            &format!("/v1/manage/connections/{id}"),
+            Some(json!({
+                "expected_updated_at": stale_version.clone(),
+                "name": "stale rename",
+            })),
+        )
+        .await;
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(body["code"], "connection_changed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn request_history_round_trips_pending_and_terminal_lifecycles() {
     let h = harness().await;
     let (status, body) = h

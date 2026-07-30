@@ -24,10 +24,10 @@ use aka_api::{
 use aka_core::broker::ConnectionTestReport;
 use aka_core::manage::{
     AccessBody, AllowedToolsBody, ApprovalResponseBody, BackendProfile, ConfirmBody,
-    ConnectionAddBody, ConnectionUpdateBody, ConnectionsReorderBody, DraftTestBody,
-    ElicitationResponseBody, ManageResult, ManagementBackend, McpAuthDeliverBody, McpAuthStartBody,
-    OAuthCompleteBody, OAuthReconnectBody, OAuthStartBody, SecretAddBody, SecretEditBody,
-    SettingsPatchBody,
+    ConnectionAddBody, ConnectionRenameBody, ConnectionUpdateBody, ConnectionsReorderBody,
+    DraftTestBody, ElicitationResponseBody, ManageResult, ManagementBackend, McpAuthDeliverBody,
+    McpAuthStartBody, OAuthCompleteBody, OAuthReconnectBody, OAuthStartBody, SecretAddBody,
+    SecretEditBody, SettingsPatchBody,
 };
 use aka_core::store::ConnectionSpec;
 use aka_core::types::SecretValue;
@@ -682,6 +682,22 @@ impl ManagementBackend for RemoteBackend {
         .await
     }
 
+    async fn rename_connection(
+        &self,
+        id: Uuid,
+        expected_updated_at: String,
+        name: String,
+    ) -> ManageResult<()> {
+        self.patch(
+            &format!("/v1/manage/connections/{id}"),
+            &ConnectionRenameBody {
+                expected_updated_at,
+                name,
+            },
+        )
+        .await
+    }
+
     async fn delete_connection(&self, id: Uuid) -> ManageResult<()> {
         self.delete(&format!("/v1/manage/connections/{id}")).await
     }
@@ -1140,6 +1156,17 @@ mod tests {
             assert_eq!(parsed["new_name"], "GH_TOKEN", "PATCH body crosses");
             axum::Json(serde_json::json!(())).into_response()
         }
+        async fn rename_connection(body: String) -> axum::response::Response {
+            use axum::response::IntoResponse as _;
+            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(parsed["expected_updated_at"], "opaque-version");
+            assert_eq!(parsed["name"], "GitHub production");
+            assert!(
+                parsed.get("spec").is_none(),
+                "rename must not carry reconstructed capability state"
+            );
+            axum::Json(serde_json::json!(())).into_response()
+        }
         async fn taken() -> axum::response::Response {
             use axum::response::IntoResponse as _;
             (
@@ -1180,6 +1207,7 @@ mod tests {
                 "/v1/manage/identity/rotate",
                 post(|| async { axum::Json(serde_json::json!(())) }),
             )
+            .route("/v1/manage/connections/{id}", patch(rename_connection))
             .route("/v1/manage/connections/{id}/endpoint", get(endpoint));
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1202,6 +1230,15 @@ mod tests {
                 secrets[0].id.parse().unwrap(),
                 Some("GH_TOKEN".into()),
                 None,
+            )
+            .await
+            .unwrap();
+
+        backend
+            .rename_connection(
+                "aaaaaaaa-0000-0000-0000-000000000000".parse().unwrap(),
+                "opaque-version".into(),
+                "GitHub production".into(),
             )
             .await
             .unwrap();

@@ -29,9 +29,10 @@ use zeroize::Zeroizing;
 use super::{bearer_token, err_missing_token, request_peer, ApiJson, AppState};
 use crate::manage::{
     AccessBody, AllowedToolsBody, ApprovalResponseBody, ConfirmBody, ConnectionAddBody,
-    ConnectionUpdateBody, ConnectionsReorderBody, DraftTestBody, ElicitationResponseBody,
-    ManagementBackend, McpAuthDeliverBody, McpAuthStartBody, OAuthCompleteBody, OAuthReconnectBody,
-    OAuthStartBody, SecretAddBody, SecretEditBody, SettingsPatchBody,
+    ConnectionRenameBody, ConnectionUpdateBody, ConnectionsReorderBody, DraftTestBody,
+    ElicitationResponseBody, ManagementBackend, McpAuthDeliverBody, McpAuthStartBody,
+    OAuthCompleteBody, OAuthReconnectBody, OAuthStartBody, SecretAddBody, SecretEditBody,
+    SettingsPatchBody,
 };
 
 /// Bearer authentication against the management token.
@@ -152,7 +153,9 @@ pub fn router() -> Router<AppState> {
         .route("/connections/reorder", post(reorder_connections))
         .route(
             "/connections/{id}",
-            put(update_connection).delete(delete_connection),
+            put(update_connection)
+                .patch(rename_connection)
+                .delete(delete_connection),
         )
         .route("/connections/{id}/test", post(test_connection))
         .route("/connections/{id}/access", post(set_tool_access))
@@ -543,6 +546,20 @@ async fn update_connection(
         state
             .manage
             .update_connection(id, body.expected_updated_at, body.spec)
+            .await,
+    )
+}
+
+async fn rename_connection(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+    Path(id): Path<Uuid>,
+    ApiJson(body): ApiJson<ConnectionRenameBody>,
+) -> Response {
+    respond(
+        state
+            .manage
+            .rename_connection(id, body.expected_updated_at, body.name)
             .await,
     )
 }
