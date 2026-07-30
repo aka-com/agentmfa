@@ -2181,7 +2181,7 @@ mod tests {
         );
 
         let settings = backend.settings().await.unwrap();
-        assert!(settings.reauth_on_read);
+        assert!(!settings.reauth_on_read, "the read gate defaults to off");
 
         let setup = backend.agent_setup().await.unwrap();
         assert!(setup.contains("--unix-socket"));

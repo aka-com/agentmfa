@@ -714,10 +714,15 @@ impl DecisionContext {
 /// User settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Settings {
-    /// "Require OS authentication to read secrets", default on. This gates
-    /// user-plane reveals and copies in the macOS app. Agent-plane injection
-    /// is authorized by the connection's access policy and deliberately does
-    /// not put LocalAuthentication in every request path.
+    /// "Require OS authentication to read secrets", default **off**. Opt-in:
+    /// when enabled it gates user-plane reveals and copies in the macOS app.
+    /// The default matches the product's posture — a credential stored here
+    /// would otherwise have been pasted into an agent's environment in
+    /// plaintext, so routine use of one's own vault should not prompt.
+    /// Agent-plane injection is authorized by the connection's access policy
+    /// and deliberately does not put LocalAuthentication in every request
+    /// path. Stores written while the default was "on" are flipped once at
+    /// open (see `store::migrate_read_gate_default`) and the flip is audited.
     pub reauth_on_read: bool,
     /// Read-only migration source for pre-connection-scoped CA settings.
     #[serde(
@@ -764,7 +769,7 @@ fn default_presence_window_secs() -> u64 {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            reauth_on_read: true,
+            reauth_on_read: false,
             legacy_pg_trusted_ca_bundle_path: None,
             menu_bar_hides_dock: false,
             presence_window_secs: default_presence_window_secs(),

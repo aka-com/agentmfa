@@ -268,6 +268,7 @@ async fn one_confirmation_opens_the_presence_window_for_reads() {
         secret_read_confirms: AtomicUsize::new(0),
     });
     let (broker, _dir) = broker_with(events.clone()).await;
+    broker.ui_change_reauth_on_read(true).unwrap();
     let first = broker
         .store
         .add_secret("FIRST_SECRET", Zeroizing::new("first".into()))
@@ -377,6 +378,7 @@ async fn substituted_action_authority_does_not_open_the_presence_window() {
     });
     let (broker, _dir) = broker_with(events.clone()).await;
     add_github(&broker);
+    broker.ui_change_reauth_on_read(true).unwrap();
     let secret = broker.store.secret_by_name("GITHUB_API_KEY").unwrap();
 
     broker.ui_rotate_key().unwrap();
@@ -398,6 +400,7 @@ async fn a_copy_authentication_unlocks_nearby_config_actions() {
     });
     let (broker, _dir) = broker_with(events.clone()).await;
     let conn = add_github(&broker);
+    broker.ui_change_reauth_on_read(true).unwrap();
     let secret = broker.store.secret_by_name("GITHUB_API_KEY").unwrap();
 
     // The copy sheet is a real native authentication, so a config action in
@@ -446,6 +449,7 @@ async fn presence_prompts_are_globally_serialized_across_purposes() {
     });
     let (broker, _dir) = broker_with(events.clone()).await;
     let conn = add_github(&broker);
+    broker.ui_change_reauth_on_read(true).unwrap();
     let secret = broker.store.secret_by_name("GITHUB_API_KEY").unwrap();
 
     let copy_broker = broker.clone();
@@ -483,6 +487,7 @@ async fn an_expired_presence_window_prompts_again() {
         secret_read_confirms: AtomicUsize::new(0),
     });
     let (broker, _dir) = broker_with(events.clone()).await;
+    broker.ui_change_reauth_on_read(true).unwrap();
     // A zero-length window is stale the moment it is noted (store-level:
     // the UI command only offers the real choices).
     broker.store.set_presence_window_secs(0).unwrap();
@@ -647,6 +652,9 @@ async fn the_presence_window_never_covers_weakening_the_gates() {
     });
     let (broker, _dir) = broker_with(events.clone()).await;
     let conn = add_github(&broker);
+    // The read gate is opt-in; enabling it only adds friction and is free.
+    broker.ui_change_reauth_on_read(true).unwrap();
+    assert_eq!(events.confirms.load(Ordering::SeqCst), 0);
 
     // Open the window with a gated user-plane action (a capability change)…
     broker
@@ -1026,15 +1034,17 @@ async fn sensitive_settings_fail_closed_before_mutating() {
     });
     let (broker, _dir) = broker_with(events.clone()).await;
 
+    // Enabling the stricter read gate is not security-reducing and is free.
+    broker.ui_change_reauth_on_read(true).unwrap();
+    assert_eq!(events.confirms.load(Ordering::SeqCst), 0);
+
+    // Disabling it again is the gate-weakening direction, and fails closed
+    // when the confirmation is refused.
     assert!(matches!(
         broker.ui_change_reauth_on_read(false),
         Err(CoreError::NotConfirmed)
     ));
     assert!(broker.settings().reauth_on_read);
-    assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
-
-    // Re-enabling the stricter read gate is not security-reducing.
-    broker.ui_change_reauth_on_read(true).unwrap();
     assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
 }
 
@@ -1046,9 +1056,13 @@ async fn settings_changes_are_audited_with_old_and_new_values() {
     });
     let (broker, _dir) = broker_with(events.clone()).await;
 
-    broker.ui_change_reauth_on_read(false).unwrap();
+    broker.ui_change_reauth_on_read(true).unwrap();
     broker.ui_set_menu_bar_hides_dock(true).unwrap();
-    assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        events.confirms.load(Ordering::SeqCst),
+        0,
+        "neither enabling the read gate nor a cosmetic setting prompts"
+    );
     let mut settings: Vec<_> = broker
         .audit
         .recent(10)
@@ -1065,9 +1079,24 @@ async fn settings_changes_are_audited_with_old_and_new_values() {
     assert_eq!(settings[0].fields["old"], false);
     assert_eq!(settings[0].fields["new"], true);
     assert_eq!(settings[1].fields["setting"], "reauth_on_read");
-    assert_eq!(settings[1].fields["old"], true);
-    assert_eq!(settings[1].fields["new"], false);
-    assert!(settings[1].confirmation.is_some());
+    assert_eq!(settings[1].fields["old"], false);
+    assert_eq!(settings[1].fields["new"], true);
+    assert_eq!(settings[1].confirmation, None);
+
+    // The gate-weakening direction records the confirmation it took.
+    broker.ui_change_reauth_on_read(false).unwrap();
+    assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
+    let disabled = broker
+        .audit
+        .recent(10)
+        .into_iter()
+        .find(|entry| {
+            entry.kind == aka_core::audit::AuditKind::SettingsChanged
+                && entry.fields["setting"] == "reauth_on_read"
+                && entry.fields["new"] == false
+        })
+        .expect("disabling the read gate is audited");
+    assert!(disabled.confirmation.is_some());
 }
 
 #[tokio::test]
@@ -1113,6 +1142,7 @@ async fn prefix_reveals_use_the_read_gate_and_are_audited() {
         secret_read_confirms: AtomicUsize::new(0),
     });
     let (broker, _dir) = broker_with(events.clone()).await;
+    broker.ui_change_reauth_on_read(true).unwrap();
     let secret = broker
         .store
         .add_secret("TOKEN", Zeroizing::new("abcdefghijkl".into()))

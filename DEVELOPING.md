@@ -156,13 +156,17 @@ Nothing about the app's behaviour changes between the two — same entitlement,
 same access group, same runtime probe. The only question either answers is
 whether macOS honours the entitlement at all, so try the default first.
 
-Human presence is *not* enforced by the Keychain. It is enforced by the
-shell's own LocalAuthentication gate (`src-tauri/src/auth.rs`) and the
-presence window in `Store` — one prompt, then a sliding window
-(`presence_window_secs`, 15 minutes by default, 12-hour hard ceiling).
+Human presence is *not* enforced by the Keychain. Where the app asks for it,
+it is enforced by the shell's own LocalAuthentication gate
+(`src-tauri/src/auth.rs`) and the presence window in `Store` — one prompt,
+then a sliding window (`presence_window_secs`, 15 minutes by default,
+12-hour hard ceiling). Reading or copying one's own secrets is prompt-free
+by default: the read gate (`reauth_on_read`) is opt-in, and stores written
+while it defaulted to on are flipped off once at open, with an activity-log
+entry (`migrate_read_gate_default` in `store.rs`).
 Attaching `SecAccessControl(userPresence)` to the items instead would move
 that decision into the OS, but Touch ID reuse there caps at five minutes, so
-it would prompt more often than the app does today rather than less.
+it would prompt more often than the app's opt-in gate does rather than less.
 
 ## Publishing
 

@@ -451,6 +451,29 @@ impl Broker {
                 .field("reason", "connection_kind_retired"),
             );
         }
+        // The read gate's default flipped from on to off. A store that
+        // predates the flip loses a prompt the user may have been relying
+        // on, so the change is recorded where they will see it, along with
+        // the way back.
+        if broker.store.read_gate_default_migrated() {
+            broker.audit.append(
+                AuditEntry::new(
+                    AuditKind::SettingsChanged,
+                    "Setting changed on upgrade: OS authentication is no longer required to \
+                     read secrets",
+                )
+                .detail(
+                    "AgentMFA no longer asks for Touch ID or your password before revealing \
+                     or copying a saved secret. Turn “Confirm before using saved secrets” \
+                     back on in Settings to keep the prompt."
+                        .to_string(),
+                )
+                .field("setting", "reauth_on_read")
+                .field("old", true)
+                .field("new", false)
+                .field("reason", "default_changed_on_upgrade"),
+            );
+        }
         if start_background_tasks {
             // Keeps OAuth-minted MCP access tokens fresh in the background;
             // the task holds only a weak reference and exits when the broker

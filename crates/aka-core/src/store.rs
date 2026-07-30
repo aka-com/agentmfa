@@ -135,8 +135,12 @@ struct PresenceCoordinator {
     confirmation: Mutex<()>,
 }
 
+/// Current settings-migration generation. Bump it when a persisted default
+/// needs a one-time rewrite on open (see [`migrate_read_gate_default`]).
+const SETTINGS_SCHEMA: u32 = 1;
+
 /// Everything `index.json` holds.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct IndexState {
     #[serde(default)]
     secrets: Vec<SecretMeta>,
@@ -149,6 +153,24 @@ struct IndexState {
     /// integrity failure instead of silently restoring default access.
     #[serde(default)]
     access_generation: u64,
+    /// Settings-migration generation. Files written before the field existed
+    /// deserialize as 0 and take the one-time migrations up to
+    /// [`SETTINGS_SCHEMA`]; a fresh store starts current (see the manual
+    /// [`Default`] impl) so migrations only ever see pre-existing state.
+    #[serde(default)]
+    settings_schema: u32,
+}
+
+impl Default for IndexState {
+    fn default() -> Self {
+        Self {
+            secrets: Vec::new(),
+            connections: Vec::new(),
+            settings: None,
+            access_generation: 0,
+            settings_schema: SETTINGS_SCHEMA,
+        }
+    }
 }
 
 /// Connection kinds this build still understands. A store written by an older
@@ -259,6 +281,10 @@ pub struct Store {
     /// Tools this build could not load because their kind was retired, as
     /// `name (kind)`. Captured at open so the broker can audit the loss.
     retired_connections_dropped: Vec<String>,
+    /// Whether this open flipped an effectively-on read gate off (the
+    /// one-time `reauth_on_read` default migration), so the broker can
+    /// record the behaviour change in the activity log.
+    read_gate_default_migrated: bool,
 }
 
 impl Store {
@@ -289,7 +315,12 @@ impl Store {
         // load rather than a repeat of the same warning.
         let migrated_pg_ca = migrate_legacy_pg_ca_bundle(&mut state);
         let migrated_oauth_tokens = migrate_oauth_token_secret_ids(&mut state);
-        if migrated_pg_ca || migrated_oauth_tokens || !retired_connections_dropped.is_empty() {
+        let migrated_read_gate = migrate_read_gate_default(&mut state);
+        if migrated_pg_ca
+            || migrated_oauth_tokens
+            || migrated_read_gate.is_some()
+            || !retired_connections_dropped.is_empty()
+        {
             integrity.write(&paths.index_file(), &serde_json::to_vec_pretty(&state)?)?;
         }
         Ok(Self {
@@ -300,6 +331,7 @@ impl Store {
             state: Mutex::new(state),
             presence: Arc::new(PresenceCoordinator::default()),
             retired_connections_dropped,
+            read_gate_default_migrated: migrated_read_gate == Some(true),
         })
     }
 
@@ -309,6 +341,14 @@ impl Store {
     /// `tracing` warning is not somewhere they will ever look.
     pub fn retired_connections_dropped(&self) -> &[String] {
         &self.retired_connections_dropped
+    }
+
+    /// Whether opening this store flipped the read gate off as part of the
+    /// one-time `reauth_on_read` default migration. The broker audits it: a
+    /// prompt the user may have been relying on disappearing silently is not
+    /// acceptable, and the activity log is where they will see it.
+    pub fn read_gate_default_migrated(&self) -> bool {
+        self.read_gate_default_migrated
     }
 
     /* ----------------------------- presence ------------------------------- */
@@ -1291,6 +1331,30 @@ impl crate::policy::AccessGenerationStore for Store {
     }
 }
 
+/// One-time default flip (schema 0 → 1): `reauth_on_read` shipped default-on,
+/// and the desktop app now treats OS authentication for user-plane reads as
+/// opt-in. A persisted `true` predating the flip is indistinguishable from
+/// that old default — nobody had to choose it — so it is flipped once here.
+/// Returns `Some(was_effectively_on)` when this open performed the migration
+/// (the state must be rewritten, and a `true` is audited by the broker at
+/// startup so the change is visible where the user looks); `None` when the
+/// store is already current. Re-enabling afterwards is a free settings change.
+fn migrate_read_gate_default(state: &mut IndexState) -> Option<bool> {
+    if state.settings_schema >= SETTINGS_SCHEMA {
+        return None;
+    }
+    state.settings_schema = SETTINGS_SCHEMA;
+    // `settings: None` means the old default applied, which was "on".
+    let was_on = state
+        .settings
+        .as_ref()
+        .map_or(true, |settings| settings.reauth_on_read);
+    if let Some(settings) = state.settings.as_mut() {
+        settings.reauth_on_read = false;
+    }
+    Some(was_on)
+}
+
 fn migrate_legacy_pg_ca_bundle(state: &mut IndexState) -> bool {
     let Some(path) = state
         .settings
@@ -1932,7 +1996,14 @@ mod tests {
             .add_secret("GITHUB_API_KEY", val("ghp_secret"))
             .unwrap();
 
-        assert!(store.settings().reauth_on_read);
+        assert!(
+            !store.settings().reauth_on_read,
+            "the read gate is opt-in: off until the user enables it"
+        );
+        assert_eq!(&*store.secret_value(&meta.id).await.unwrap(), "ghp_secret");
+        assert_eq!(gate.calls.load(Ordering::SeqCst), 0);
+
+        store.set_reauth_on_read(true).unwrap();
         assert!(matches!(
             store.secret_value(&meta.id).await.unwrap_err(),
             CoreError::SecretReadNotAuthenticated
@@ -1950,6 +2021,113 @@ mod tests {
         gate.allow.store(false, Ordering::SeqCst);
         assert_eq!(&*store.secret_value(&meta.id).await.unwrap(), "ghp_secret");
         assert_eq!(gate.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn read_gate_default_migration_flips_pre_schema_state_once() {
+        // A persisted `true` from the default-on era is flipped off and
+        // reported for the startup audit entry.
+        let mut legacy = IndexState {
+            settings: Some(Settings {
+                reauth_on_read: true,
+                ..Settings::default()
+            }),
+            settings_schema: 0,
+            ..IndexState::default()
+        };
+        assert_eq!(migrate_read_gate_default(&mut legacy), Some(true));
+        assert!(!legacy.settings().reauth_on_read);
+        assert_eq!(legacy.settings_schema, SETTINGS_SCHEMA);
+        assert_eq!(
+            migrate_read_gate_default(&mut legacy),
+            None,
+            "the flip happens once, not on every open"
+        );
+
+        // No persisted settings means the old default ("on") applied, so the
+        // behaviour change is still reported even though there is nothing to
+        // rewrite inside the settings themselves.
+        let mut untouched = IndexState {
+            settings_schema: 0,
+            ..IndexState::default()
+        };
+        assert_eq!(migrate_read_gate_default(&mut untouched), Some(true));
+        assert!(untouched.settings.is_none());
+
+        // A user who had already turned the gate off gets the schema stamp
+        // but no behaviour change to report.
+        let mut opted_out = IndexState {
+            settings: Some(Settings {
+                reauth_on_read: false,
+                ..Settings::default()
+            }),
+            settings_schema: 0,
+            ..IndexState::default()
+        };
+        assert_eq!(migrate_read_gate_default(&mut opted_out), Some(false));
+
+        // A fresh store starts at the current schema and is never migrated.
+        let mut fresh = IndexState::default();
+        assert_eq!(migrate_read_gate_default(&mut fresh), None);
+    }
+
+    #[tokio::test]
+    async fn reenabling_the_read_gate_survives_a_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Arc::new(MemoryVault::new());
+        {
+            let store = Store::open(Paths::under(dir.path()), vault.clone())
+                .await
+                .unwrap();
+            assert!(!store.read_gate_default_migrated());
+            store.set_reauth_on_read(true).unwrap();
+        }
+        let store = Store::open(Paths::under(dir.path()), vault).await.unwrap();
+        assert!(
+            store.settings().reauth_on_read,
+            "an explicit opt-in after the migration is not a legacy default and stays"
+        );
+        assert!(!store.read_gate_default_migrated());
+    }
+
+    #[tokio::test]
+    async fn a_legacy_index_is_migrated_and_reported_at_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        let vault = Arc::new(MemoryVault::new());
+        {
+            // Write what a default-on-era build persisted: settings with the
+            // gate on, and no `settings_schema` field at all.
+            paths.ensure().unwrap();
+            let integrity = Arc::new(StateIntegrity::open_for_paths(&*vault, &paths).await.unwrap());
+            let legacy = serde_json::json!({
+                "secrets": [],
+                "connections": [],
+                "settings": {
+                    "reauth_on_read": true,
+                    "menu_bar_hides_dock": false,
+                    "presence_window_secs": 900,
+                    "confirm_ssh_host_keys": false,
+                },
+                "access_generation": 0,
+            });
+            integrity
+                .write(&paths.index_file(), &serde_json::to_vec_pretty(&legacy).unwrap())
+                .unwrap();
+        }
+
+        let store = Store::open(Paths::under(dir.path()), vault.clone())
+            .await
+            .unwrap();
+        assert!(!store.settings().reauth_on_read);
+        assert!(store.read_gate_default_migrated());
+
+        // The rewrite is durable: the next open loads a current-schema file
+        // and reports nothing.
+        drop(store);
+        let store = Store::open(Paths::under(dir.path()), vault).await.unwrap();
+        assert!(!store.settings().reauth_on_read);
+        assert!(!store.read_gate_default_migrated());
     }
 
     #[tokio::test]

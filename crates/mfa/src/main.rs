@@ -518,7 +518,8 @@ enum SettingsCommand {
     },
     /// Change one or more broker settings.
     Set {
-        /// Require authentication before revealing or copying saved secrets.
+        /// Require OS authentication before revealing or copying saved
+        /// secrets (off by default; disabling it again takes a confirmation).
         #[arg(long)]
         reauth_on_read: Option<bool>,
         /// Hide the Dock icon while the menu-bar window is active.

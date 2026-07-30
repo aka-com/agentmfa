@@ -259,7 +259,7 @@ const db: MockDatabase = {
   approvals: [],
   requests: [],
   settings: {
-    reauth_on_read: true,
+    reauth_on_read: false,
     menu_bar_hides_dock: false,
     confirm_ssh_host_keys: false,
     presence_window_secs: 15 * 60,

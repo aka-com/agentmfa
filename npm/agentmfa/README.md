@@ -111,8 +111,10 @@ demos, tests, and CI.
 ## Platform notes
 
 - **macOS** is the fully supported product platform: secrets live in the
-  Keychain, and copying a secret's full value from the desktop app can
-  require native reauthentication (Touch ID). ABP/0
+  Keychain. Copying a secret's full value from the desktop app can be gated
+  behind native reauthentication (Touch ID) with the opt-in "Confirm before
+  using saved secrets" setting; by default it is off and copies are audited
+  but not prompted. ABP/0
   agents authenticate with the machine's shared broker key; the key is not
   bound to a process or code-signing identity.
 

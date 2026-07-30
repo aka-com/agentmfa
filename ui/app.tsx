@@ -4476,7 +4476,7 @@ function SettingsSheet(): ReactNode {
         {escalationBtn(30, '30 sec')}{escalationBtn(60, '1 min')}
       </div></div>;
   const reauthRow = <div className="set-row"><div className="set-txt"><div className="st-title">Confirm before using saved secrets</div>
-      <div className="st-sub">Use OS authentication before showing, copying, or sending a saved credential.</div></div>
+      <div className="st-sub">Optional: use OS authentication before showing, copying, or sending a saved credential. Off by default.</div></div>
       <button className={`switch ${s.reauth_on_read ? 'on' : ''}`} data-act="toggle-reauth"
         role="checkbox" aria-checked={s.reauth_on_read}></button></div>;
   const windowBtn = (secs: number, label: string): ReactNode => (
