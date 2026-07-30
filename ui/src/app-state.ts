@@ -170,6 +170,8 @@ export interface AppState {
     approvalId: string;
     loading: boolean;
     candidates: HostKeyCandidate[];
+    revokedFingerprints: string[];
+    hasCertificateAuthority: boolean;
     error?: string;
   } | null;
   agentSetupInstructions: string;

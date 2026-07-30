@@ -352,6 +352,14 @@ export interface HostKeyCandidate {
   source: string;
 }
 
+export interface KnownHostsLookup {
+  candidates: HostKeyCandidate[];
+  /** Revoked keys are evidence, never candidates a form may offer to pin. */
+  revokedFingerprints: string[];
+  /** A CA entry cannot corroborate a concrete key without certificate verification. */
+  hasCertificateAuthority: boolean;
+}
+
 export interface SshImportPreview {
   importId: string;
   destination: string;
@@ -540,7 +548,7 @@ export interface CommandMap {
   get_agent_setup: CommandSpec<undefined, string>;
   copy_agent_setup: CommandSpec<undefined, void>;
   inspect_ssh_import: CommandSpec<{ source: string }, SshImportPreview>;
-  check_known_hosts: CommandSpec<{ host: string; port: number }, HostKeyCandidate[]>;
+  check_known_hosts: CommandSpec<{ host: string; port: number }, KnownHostsLookup>;
   add_secret: CommandSpec<{ name: string; value: string }, void>;
   edit_secret: CommandSpec<{
     id: string;

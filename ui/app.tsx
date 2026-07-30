@@ -2996,19 +2996,29 @@ function ApprovalSheet(): ReactNode {
   const matchingKnownHost = provenance?.candidates.find(
     (candidate) => candidate.fingerprint === approval.host_key_fingerprint,
   );
+  const revokedKnownHost = Boolean(
+    approval.host_key_fingerprint
+      && provenance?.revokedFingerprints.includes(approval.host_key_fingerprint),
+  );
   const hostKeyProvenance = hostKeyDecision
     ? !provenance
       ? 'This computer’s known_hosts comparison is unavailable. '
         + 'Verify the fingerprint through another trusted channel before pinning it.'
       : provenance.loading
       ? 'Checking this computer’s known_hosts…'
-      : matchingKnownHost
-        ? `Matches ${matchingKnownHost.algorithm} in ${matchingKnownHost.source}.`
-        : provenance.error
-          ? `Could not check this computer’s known_hosts: ${provenance.error}`
+      : provenance.error
+        ? `Could not check this computer’s known_hosts: ${provenance.error}`
+        : revokedKnownHost
+          ? 'Warning: this computer’s known_hosts marks this exact key as revoked. Do not trust it.'
+          : matchingKnownHost
+            ? `Matches ${matchingKnownHost.algorithm} in ${matchingKnownHost.source}.`
           : provenance.candidates.length
             ? `Warning: this fingerprint does not match the ${provenance.candidates.length} `
               + `key${provenance.candidates.length === 1 ? '' : 's'} in this computer’s known_hosts.`
+            : provenance.hasCertificateAuthority
+              ? 'This computer’s known_hosts trusts a certificate authority for this destination, '
+                + 'but AgentMFA cannot verify this concrete key through that CA. '
+                + 'Verify it through another trusted channel before pinning it.'
             : 'No key for this destination was found in this computer’s known_hosts. '
               + 'Verify the fingerprint through another trusted channel before pinning it.'
     : null;
@@ -3041,7 +3051,9 @@ function ApprovalSheet(): ReactNode {
           : null}
       </dl>
       {hostKeyProvenance
-        ? <div className={matchingKnownHost ? 'rule-note' : 'approval-consequence'}
+        ? <div className={matchingKnownHost && !revokedKnownHost
+            ? 'rule-note'
+            : 'approval-consequence'}
             role="status">{hostKeyProvenance}</div>
         : null}
       {/* The call itself, verbatim and inert: it is the agent's text. */}
@@ -5741,11 +5753,12 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       draft.hostKeyCheckMessage = undefined;
       render();
       try {
-        const candidates = await invoke('check_known_hosts', {
+        const lookup = await invoke('check_known_hosts', {
           host,
           port: Number.isInteger(port) && port > 0 ? port : 22,
         });
         if (!brokerEpochIsCurrent(epoch) || state.draft !== draft) break;
+        const { candidates } = lookup;
         draft.hostKeyCandidates = candidates;
         if (candidates.length === 1) {
           draft.hostKeyFingerprint = candidates[0].fingerprint;
@@ -6210,10 +6223,12 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
             approvalId: approval.id,
             loading: true,
             candidates: [],
+            revokedFingerprints: [],
+            hasCertificateAuthority: false,
           };
           render();
           try {
-            const candidates = await invoke('check_known_hosts', {
+            const lookup = await invoke('check_known_hosts', {
               host: connection.host,
               port: connection.port ?? 22,
             });
@@ -6221,7 +6236,7 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
               state.approvalHostKeyProvenance = {
                 approvalId: approval.id,
                 loading: false,
-                candidates,
+                ...lookup,
               };
               render();
             }
@@ -6231,6 +6246,8 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
                 approvalId: approval.id,
                 loading: false,
                 candidates: [],
+                revokedFingerprints: [],
+                hasCertificateAuthority: false,
                 error: errorMessage(error),
               };
               render();

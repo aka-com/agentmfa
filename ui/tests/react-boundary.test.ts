@@ -462,6 +462,10 @@ test('approval sheets use structured credential and TOFU provenance context', as
   assert.match(app, /approval\.host_key_fingerprint/);
   assert.match(app, /Matches \$\{matchingKnownHost\.algorithm\} in/);
   assert.match(app, /fingerprint does not match/);
+  assert.match(app, /revokedFingerprints\.includes\(approval\.host_key_fingerprint\)/);
+  assert.match(app, /marks this exact key as revoked/);
+  assert.match(app, /hasCertificateAuthority/);
+  assert.match(app, /port: connection\.port \?\? 22/);
   assert.match(app, /hostKeyDecision \? 'Trust and pin'/);
 });
 

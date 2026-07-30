@@ -49,6 +49,18 @@ pub struct HostKeyCandidate {
     pub source: String,
 }
 
+/// The destination-scoped evidence returned to a first-use trust surface.
+///
+/// Revoked fingerprints stay separate from candidates so a connection form
+/// can never offer a revoked key as something the user may pin.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnownHostsLookup {
+    pub candidates: Vec<HostKeyCandidate>,
+    pub revoked_fingerprints: Vec<String>,
+    pub has_certificate_authority: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SshImportPreview {
@@ -539,7 +551,7 @@ fn resolved_from_output(destination: String, output: &str) -> Result<ResolvedSsh
 
 struct KnownHostsScan {
     candidates: Vec<HostKeyCandidate>,
-    saw_revoked: bool,
+    revoked_fingerprints: Vec<String>,
     saw_authority: bool,
 }
 
@@ -552,7 +564,7 @@ fn scan_known_hosts(host: &str, port: u16, files: &[PathBuf]) -> Result<KnownHos
         format!("[{host}]:{port}")
     };
     let mut candidates = Vec::new();
-    let mut saw_revoked = false;
+    let mut revoked_fingerprints = Vec::new();
     let mut saw_authority = false;
     for path in files {
         let mut command = Command::new("/usr/bin/ssh-keygen");
@@ -580,9 +592,11 @@ fn scan_known_hosts(host: &str, port: u16, files: &[PathBuf]) -> Result<KnownHos
         }
         let text = String::from_utf8_lossy(&output.stdout);
         for entry in KnownHosts::new(&text).flatten() {
+            let public = entry.public_key();
+            let fingerprint = public.fingerprint(HashAlg::Sha256).to_string();
             match entry.marker() {
                 Some(Marker::Revoked) => {
-                    saw_revoked = true;
+                    revoked_fingerprints.push(fingerprint);
                     continue;
                 }
                 Some(Marker::CertAuthority) => {
@@ -591,9 +605,8 @@ fn scan_known_hosts(host: &str, port: u16, files: &[PathBuf]) -> Result<KnownHos
                 }
                 None => {}
             }
-            let public = entry.public_key();
             candidates.push(HostKeyCandidate {
-                fingerprint: public.fingerprint(HashAlg::Sha256).to_string(),
+                fingerprint,
                 algorithm: public.algorithm().as_str().to_string(),
                 source: path.to_string_lossy().into_owned(),
             });
@@ -601,9 +614,12 @@ fn scan_known_hosts(host: &str, port: u16, files: &[PathBuf]) -> Result<KnownHos
     }
     let mut seen = HashSet::new();
     candidates.retain(|candidate| seen.insert(candidate.fingerprint.clone()));
+    let mut seen_revoked = HashSet::new();
+    revoked_fingerprints.retain(|fingerprint| seen_revoked.insert(fingerprint.clone()));
+    candidates.retain(|candidate| !seen_revoked.contains(&candidate.fingerprint));
     Ok(KnownHostsScan {
         candidates,
-        saw_revoked,
+        revoked_fingerprints,
         saw_authority,
     })
 }
@@ -612,7 +628,7 @@ fn scan_known_hosts(host: &str, port: u16, files: &[PathBuf]) -> Result<KnownHos
 /// OpenSSH default files. Used at approval time so the first-connection
 /// trust prompt can say whether the observed key matches, conflicts with,
 /// or is absent from the user's known_hosts.
-pub fn known_hosts_candidates(host: &str, port: u16) -> Result<Vec<HostKeyCandidate>, String> {
+pub fn known_hosts_lookup(host: &str, port: u16) -> Result<KnownHostsLookup, String> {
     let home = home_dir()?;
     let files: Vec<PathBuf> = [
         home.join(".ssh/known_hosts"),
@@ -623,13 +639,18 @@ pub fn known_hosts_candidates(host: &str, port: u16) -> Result<Vec<HostKeyCandid
     .into_iter()
     .filter(|path| path.is_file())
     .collect();
-    Ok(scan_known_hosts(host, port, &files)?.candidates)
+    let scan = scan_known_hosts(host, port, &files)?;
+    Ok(KnownHostsLookup {
+        candidates: scan.candidates,
+        revoked_fingerprints: scan.revoked_fingerprints,
+        has_certificate_authority: scan.saw_authority,
+    })
 }
 
 fn resolve_known_hosts(resolved: &mut ResolvedSshImport) -> Result<(), String> {
     let lookup_host = resolved.host_key_alias.as_deref().unwrap_or(&resolved.host);
     let scan = scan_known_hosts(lookup_host, resolved.port, &resolved.known_hosts_files)?;
-    if scan.saw_revoked {
+    if !scan.revoked_fingerprints.is_empty() {
         resolved
             .warnings
             .push("known_hosts contains a revoked key for this destination.".into());
@@ -866,6 +887,57 @@ mod tests {
         assert_eq!(
             resolved.host_key_candidates[0].fingerprint,
             key.public_key().fingerprint(HashAlg::Sha256).to_string()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn known_hosts_evidence_is_port_scoped_and_keeps_revocations_separate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        let trusted =
+            PrivateKey::random(&mut ssh_key::rand_core::OsRng, Algorithm::Ed25519).unwrap();
+        let revoked =
+            PrivateKey::random(&mut ssh_key::rand_core::OsRng, Algorithm::Ed25519).unwrap();
+        let authority =
+            PrivateKey::random(&mut ssh_key::rand_core::OsRng, Algorithm::Ed25519).unwrap();
+        fs::write(
+            &path,
+            format!(
+                "prod.example.com {}\nprod.example.com {}\n\
+                 @revoked prod.example.com {}\n\
+                 @cert-authority prod.example.com {}\n",
+                trusted.public_key().to_openssh().unwrap(),
+                revoked.public_key().to_openssh().unwrap(),
+                revoked.public_key().to_openssh().unwrap(),
+                authority.public_key().to_openssh().unwrap(),
+            ),
+        )
+        .unwrap();
+
+        let on_22 = scan_known_hosts("prod.example.com", 22, std::slice::from_ref(&path)).unwrap();
+        assert_eq!(on_22.candidates.len(), 1);
+        assert_eq!(
+            on_22.revoked_fingerprints,
+            [revoked
+                .public_key()
+                .fingerprint(HashAlg::Sha256)
+                .to_string()]
+        );
+        assert!(on_22.saw_authority);
+        assert!(
+            on_22
+                .candidates
+                .iter()
+                .all(|candidate| !on_22.revoked_fingerprints.contains(&candidate.fingerprint)),
+            "a revoked key must never be offered as a pin candidate"
+        );
+
+        let on_2222 =
+            scan_known_hosts("prod.example.com", 2222, std::slice::from_ref(&path)).unwrap();
+        assert!(
+            on_2222.candidates.is_empty() && on_2222.revoked_fingerprints.is_empty(),
+            "a port-22 entry says nothing about the same hostname on another port"
         );
     }
 

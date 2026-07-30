@@ -865,12 +865,16 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
     case 'check_known_hosts':
       // The prod.example.com fixture matches its known_hosts entry; other
       // hosts read as a first sighting.
-      return args.host === 'prod.example.com'
-        ? [{
-            fingerprint: 'SHA256:vdZ5N8kNxU7J4W2WYa6qK0sJYv8oXb8s2H7n3jE5q1A',
-            algorithm: 'ssh-ed25519', source: '~/.ssh/known_hosts',
-          }]
-        : [];
+      return {
+        candidates: args.host === 'prod.example.com'
+          ? [{
+              fingerprint: 'SHA256:vdZ5N8kNxU7J4W2WYa6qK0sJYv8oXb8s2H7n3jE5q1A',
+              algorithm: 'ssh-ed25519', source: '~/.ssh/known_hosts',
+            }]
+          : [],
+        revokedFingerprints: [],
+        hasCertificateAuthority: false,
+      };
     case 'add_secret': {
       if (mockFault('keychain_unavailable')) {
         throw formError(

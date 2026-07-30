@@ -106,6 +106,13 @@ pub(crate) fn capped_text(text: &str) -> String {
     }
 }
 
+fn oauth_credential_name(connection: &Connection) -> String {
+    cap_approval_text(match &connection.account {
+        Some(account) => format!("OAuth sign-in as {account}"),
+        None => format!("OAuth sign-in for {}", connection.name),
+    })
+}
+
 /// What the user is being asked about: one unit of traffic, described in
 /// the terms of its own plane.
 #[derive(Debug, Clone)]
@@ -187,10 +194,7 @@ impl ApprovalRequest {
     /// stable label so the prompt says which credential class will ride.
     pub fn credentials_from(mut self, store: &crate::store::Store) -> Self {
         self.credential_names = if self.connection.oauth.is_some() {
-            vec![cap_approval_text(format!(
-                "OAuth token for {}",
-                self.connection.name
-            ))]
+            vec![oauth_credential_name(&self.connection)]
         } else {
             self.connection
                 .secrets
@@ -1101,6 +1105,21 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn oauth_credential_context_names_the_verified_account() {
+        let mut connection = connection();
+        connection.account = Some("ray@example.com".into());
+        assert_eq!(
+            oauth_credential_name(&connection),
+            "OAuth sign-in as ray@example.com"
+        );
+        connection.account = None;
+        assert_eq!(
+            oauth_credential_name(&connection),
+            "OAuth sign-in for github"
+        );
     }
 
     fn config() -> ApprovalConfig {

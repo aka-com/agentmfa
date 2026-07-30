@@ -480,8 +480,8 @@ pub async fn inspect_ssh_import(
 pub async fn check_known_hosts(
     host: String,
     port: u16,
-) -> CmdResult<Vec<crate::ssh_import::HostKeyCandidate>> {
-    tokio::task::spawn_blocking(move || crate::ssh_import::known_hosts_candidates(&host, port))
+) -> CmdResult<crate::ssh_import::KnownHostsLookup> {
+    tokio::task::spawn_blocking(move || crate::ssh_import::known_hosts_lookup(&host, port))
         .await
         .map_err(|error| format!("known_hosts lookup stopped: {error}"))?
 }
