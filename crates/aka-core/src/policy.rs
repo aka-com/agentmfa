@@ -112,8 +112,23 @@ impl AccessTable {
             .transpose()?;
         let (mut entries, generation, migrate_legacy_access) = match loaded {
             Some(AccessStateRead::Current(state)) => {
-                if generation_store.is_some() && state.generation != expected_generation {
-                    return Err(crate::CoreError::StateTampered(path.display().to_string()));
+                match &generation_store {
+                    Some(store) if state.generation.checked_sub(expected_generation) == Some(1) => {
+                        // The sealed file is written before the index advances
+                        // (see `persist`), so a file exactly one ahead is the
+                        // interrupted-commit shape — never a rollback, which
+                        // only ever leaves the file *behind*. Heal the index
+                        // forward instead of refusing to start forever.
+                        if store.advance_access_generation()? != state.generation {
+                            return Err(crate::CoreError::StateTampered(
+                                path.display().to_string(),
+                            ));
+                        }
+                    }
+                    Some(_) if state.generation != expected_generation => {
+                        return Err(crate::CoreError::StateTampered(path.display().to_string()));
+                    }
+                    _ => {}
                 }
                 (Some(state.entries), state.generation, false)
             }
@@ -228,22 +243,30 @@ impl AccessTable {
     }
 
     fn persist(&self, entries: &[ToolAccess]) -> Result<()> {
-        let generation = match &self.generation_store {
-            Some(store) => store.advance_access_generation()?,
-            None => self
-                .generation
-                .load(std::sync::atomic::Ordering::SeqCst)
-                .checked_add(1)
-                .ok_or_else(|| {
-                    crate::CoreError::InvalidSetting("access generation overflow".into())
-                })?,
-        };
+        let generation = self
+            .generation
+            .load(std::sync::atomic::Ordering::SeqCst)
+            .checked_add(1)
+            .ok_or_else(|| crate::CoreError::InvalidSetting("access generation overflow".into()))?;
         let state = AccessState {
             generation,
             entries: entries.to_vec(),
         };
+        // File first, index second: the two sealed writes cannot be atomic,
+        // and a crash (or plain write failure) between them must leave a
+        // shape `open` can tell apart from tampering. File-one-ahead is that
+        // shape, and it heals. The reverse order left an index the file could
+        // never catch up to — a permanent, false `StateTampered` wall on
+        // every later start, with both files MAC-sealed beyond hand repair.
         self.integrity
             .write(&self.path, &serde_json::to_vec_pretty(&state)?)?;
+        if let Some(store) = &self.generation_store {
+            if store.advance_access_generation()? != generation {
+                return Err(crate::CoreError::InvalidSetting(
+                    "access generation skew".into(),
+                ));
+            }
+        }
         self.generation
             .store(generation, std::sync::atomic::Ordering::SeqCst);
         Ok(())
