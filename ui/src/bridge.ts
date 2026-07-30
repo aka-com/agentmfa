@@ -117,8 +117,25 @@ async function mockListen<K extends EventName>(
 let seq = 1;
 const uid = () => `id-${seq++}`;
 const now = () => new Date().toISOString();
-const formError = (kind: string, code: string, field: string, message: string) =>
-  ({ kind, code, field, message });
+const formError = (
+  kind: string,
+  code: string,
+  field: string | null,
+  message: string,
+  detail?: string,
+) => ({
+  kind, code, ...(field ? { field } : {}), message, ...(detail ? { detail } : {}),
+});
+
+/** Standalone-browser fault injection. Examples:
+ * `?mockFault=locked_vault`, `partial_load`, `dead_local`,
+ * `keychain_unavailable`, or `denied_presence`. */
+function mockFault(name: string): boolean {
+  if (typeof location === 'undefined') return false;
+  return (new URLSearchParams(location.search).get('mockFault') ?? '')
+    .split(',')
+    .includes(name);
+}
 
 interface MockSecret {
   id: string;
@@ -763,16 +780,28 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
   switch (cmd) {
     case 'get_local_username': return 'satoshi';
     case 'list_secrets':
+      if (mockFault('locked_vault')) {
+        throw 'the encrypted vault could not be opened with this installation’s key';
+      }
       return db.secrets.map((s) => {
         const names = db.connections.filter((c) => c.secret_names.includes(s.name)).map((c) => c.name);
         return { id: s.id, name: s.name, used_by: names.length, used_by_names: names, created_at: s.created_at, updated_at: s.updated_at };
       });
-    case 'list_connections': return db.connections.map(connDto);
+    case 'list_connections':
+      if (mockFault('partial_load')) throw 'the mock connection index could not be read';
+      return db.connections.map(connDto);
     case 'get_identity': return { ...db.identity };
     case 'list_sessions': return db.sessions.slice();
     case 'list_activity': return db.activity.slice(0, Math.min(args.limit ?? MOCK_ACTIVITY_LIMIT, MOCK_ACTIVITY_LIMIT));
     case 'clear_activity': db.activity = []; emit('aka://activity-changed', {}); return;
-    case 'get_broker_profile': return { ...mockBroker };
+    case 'get_broker_profile':
+      if (mockFault('dead_local')) {
+        return {
+          mode: 'local', url: null, connected: false,
+          error: 'the local broker exited unexpectedly', has_saved_token: false,
+        };
+      }
+      return { ...mockBroker };
     case 'connect_remote_broker': return mockConnectRemote(args.url as string, (args.token as string | null) ?? null);
     case 'retry_remote_broker': {
       if (mockBroker.url?.includes('down')) {
@@ -821,13 +850,25 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
           }]
         : [];
     case 'add_secret': {
+      if (mockFault('keychain_unavailable')) {
+        throw formError(
+          'system',
+          'keychain_unavailable',
+          null,
+          'Couldn’t save to macOS Keychain',
+          'The keychain is locked or unavailable',
+        );
+      }
       if (db.secrets.some((s) => s.name === args.name)) {
         throw formError('conflict', 'secret_name_taken', 'name', 'That credential name is already in use');
       }
       db.secrets.push(mkSecret(args.name, args.value)); audit('secretAdded', `Secret added: ${args.name}`); return;
     }
     case 'edit_secret': {
-      const s = db.secrets.find((x) => x.id === args.id); if (!s) throw new Error('no such secret');
+      const s = db.secrets.find((x) => x.id === args.id);
+      if (!s) {
+        throw formError('conflict', 'secret_not_found', null, 'This credential was removed elsewhere');
+      }
       if (args.newName && args.newName !== s.name) {
         const newName = args.newName;
         if (db.secrets.some((other) => other.id !== s.id && other.name === newName)) {
@@ -843,17 +884,18 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       s.updated_at = now(); audit('secretUpdated', `Secret updated: ${s.name}`); return;
     }
     case 'delete_secret': {
-      const s = db.secrets.find((x) => x.id === args.id); if (!s) throw new Error('no such secret');
+      const s = db.secrets.find((x) => x.id === args.id);
+      if (!s) throw 'no such secret';
       const users = db.connections.filter((c) => c.secret_names.includes(s.name)).map((c) => c.name);
-      if (users.length) throw new Error(`in use by ${users.join(', ')}`);
+      if (users.length) throw `in use by ${users.join(', ')}`;
       db.secrets = db.secrets.filter((x) => x.id !== args.id); audit('secretDeleted', `Secret deleted: ${s.name}`); return;
     }
     case 'reveal_secret_prefix': {
-      const s = db.secrets.find((x) => x.id === args.id); if (!s) throw new Error('no such secret');
+      const s = db.secrets.find((x) => x.id === args.id); if (!s) throw 'no such secret';
       return revealPrefix(s._value);
     }
     case 'copy_secret': {
-      const s = db.secrets.find((x) => x.id === args.id); if (!s) throw new Error('no such secret');
+      const s = db.secrets.find((x) => x.id === args.id); if (!s) throw 'no such secret';
       const entry = audit('secretCopied', `Secret copied: ${s.name}`);
       emit('aka://activity-appended', entry);
       return;
@@ -904,7 +946,10 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       audit('connectionAdded', `Tool added: ${i.name}`); return;
     }
     case 'edit_connection': {
-      const c = db.connections.find((x) => x.id === args.id); if (!c) throw new Error('no such connection');
+      const c = db.connections.find((x) => x.id === args.id);
+      if (!c) {
+        throw formError('conflict', 'connection_not_found', null, 'This tool was removed elsewhere');
+      }
       const i = args.input;
       // Clearing the fingerprint un-pins (re-trusted at the next connection).
       if (i.type === 'ssh' && i.host_key_fingerprint && !/^SHA(?:256|512):\S+$/.test(i.host_key_fingerprint)) {
@@ -928,7 +973,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       audit('connectionUpdated', `Tool updated: ${i.name}`); return;
     }
     case 'delete_connection': {
-      const c = db.connections.find((x) => x.id === args.id); if (!c) throw new Error('no such connection');
+      const c = db.connections.find((x) => x.id === args.id); if (!c) throw 'no such connection';
       db.connections = db.connections.filter((x) => x.id !== args.id);
       db.access = db.access.filter((a) => a.connection_id !== args.id);
       audit('connectionDeleted', `Tool deleted: ${c.name}`); return;
@@ -948,7 +993,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       return;
     }
     case 'test_connection': {
-      const c = db.connections.find((x) => x.id === args.id); if (!c) throw new Error('no such connection');
+      const c = db.connections.find((x) => x.id === args.id); if (!c) throw 'no such connection';
       await new Promise((resolve) => setTimeout(resolve, 700));
       // Deterministic mock: the internal-api fixture fails, everything else
       // passes, so both result presentations are exercisable standalone.
@@ -1001,7 +1046,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       return true;
     }
     case 'mcp_status': {
-      const c = db.connections.find((x) => x.id === args.id); if (!c) throw new Error('no such connection');
+      const c = db.connections.find((x) => x.id === args.id); if (!c) throw 'no such connection';
       await new Promise((resolve) => setTimeout(resolve, 700));
       if (!c.mcp_path) {
         return {
@@ -1037,6 +1082,9 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
     }
     case 'oauth_connect': {
       const input = args.input;
+      if (mockFault('denied_presence')) {
+        throw formError('cancelled', 'not_confirmed', null, 'Nothing was saved');
+      }
       if (db.connections.some((c) => c.name === input.name)) {
         throw formError('conflict', 'connection_name_taken', 'name', 'That tool name is already in use');
       }
@@ -1065,7 +1113,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
     }
     case 'oauth_reconnect': {
       const c = db.connections.find((x) => x.id === args.id);
-      if (!c || !c.oauth_spec) throw new Error('this tool is not an OAuth connection');
+      if (!c || !c.oauth_spec) throw 'this tool is not an OAuth connection';
       await new Promise((resolve) => setTimeout(resolve, 900));
       audit('connectionUpdated', `Tool reconnected via OAuth: ${c.name}`);
       emit('aka://connections-changed', {});
@@ -1088,7 +1136,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
     }
     case 'list_mcp_tools': {
       const c = db.connections.find((x) => x.id === args.id);
-      if (!c || !c.mcp_path) throw new Error('this connection has no MCP path');
+      if (!c || !c.mcp_path) throw 'this connection has no MCP path';
       await new Promise((resolve) => setTimeout(resolve, 500));
       // The status-report mock already knows each brand's tools; dress
       // them with light descriptions for the picker.
@@ -1106,9 +1154,9 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
     }
     case 'issue_endpoint': {
       const connection = db.connections.find((c) => c.id === args.connectionId);
-      if (!connection) throw new Error('no such tool');
+      if (!connection) throw 'no such tool';
       let record = db.access.find((a) => a.connection_id === connection.id);
-      if (record && !record.enabled) throw new Error('enable this tool for agents before issuing a direct endpoint');
+      if (record && !record.enabled) throw 'enable this tool for agents before issuing a direct endpoint';
       if (!record) {
         record = { connection_id: connection.id, enabled: true };
         db.access.push(record);
@@ -1259,7 +1307,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
     case 'list_elicitations': return db.elicitations.slice();
     case 'respond_elicitation': {
       const request = db.elicitations.find((r) => r.id === args.id);
-      if (!request) throw new Error('no such elicitation (answered elsewhere or expired)');
+      if (!request) return false;
       db.elicitations = db.elicitations.filter((r) => r.id !== args.id);
       resolveMockRequest(
         request.id,
@@ -1275,13 +1323,20 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
             `${request.agent} · ${request.tool} is told the user declined`);
       emit('aka://elicitations-changed', {});
       emit('aka://activity-appended', entry);
-      return;
+      return true;
     }
-    case 'set_reauth_on_read': db.settings.reauth_on_read = args.on; return;
+    case 'set_reauth_on_read':
+      db.settings.reauth_on_read = args.on;
+      emit('aka://settings-changed', {});
+      return;
     case 'set_menu_bar_hides_dock':
       db.settings.menu_bar_hides_dock = args.on;
+      emit('aka://settings-changed', {});
       return;
-    case 'set_presence_window': db.settings.presence_window_secs = args.secs; return;
+    case 'set_presence_window':
+      db.settings.presence_window_secs = args.secs;
+      emit('aka://settings-changed', {});
+      return;
     case 'ui_set_mode': case 'ui_hide_main': case 'ui_hide_dropdown':
     case 'ui_set_dropdown_form_active': return;
     case 'ui_take_open_requests': return false;

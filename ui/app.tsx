@@ -40,7 +40,7 @@ import {
 } from '/src/util';
 import {
   apiOriginFromParts, authTemplate, defaultConnectionName, parseApiOrigin, parseConnectionImport,
-  isLoopbackHost, parseMcpServerUrl,
+  insecureNonLoopbackHttp, isLoopbackHost, parseMcpServerUrl,
   quickSetupPlaceholder, shouldResolveSshImport, sshImportFromPreview, suggestedSecretName,
 } from '/src/connection-input';
 import { ENDPOINT_FORMATS } from '/src/endpoint-formats';
@@ -437,9 +437,9 @@ const initialState: AppState = {
 const uiStore = new UiStore(initialState);
 const state = uiStore.state;
 let reactMounted = false;
-/** Changes whenever the active broker profile changes. Async work captures
- * this value so a result from an earlier backend cannot update the current
- * broker's UI or launch a follow-up command against it. */
+/** Changes only when broker identity changes. Async work captures this value
+ * so a result from an earlier backend cannot update the current broker's UI.
+ * Link-state changes within that scope do not invalidate useful reads. */
 let brokerEpoch = 0;
 /** Changes whenever another webview saves this desktop's notification
  * preferences. It prevents an older in-flight read from overwriting the
@@ -452,6 +452,7 @@ let dropdownFormHeartbeat: number | null = null;
  * React; drag handlers never move React-owned DOM nodes themselves. */
 let dragConnId: string | null = null;
 let dragConnOrder: string[] | null = null;
+let connectionReorderGeneration = 0;
 /** False until boot() has loaded the first broker data; AppRoot keeps
  * showing the loading splash instead of painting an empty window. */
 let booted = false;
@@ -521,11 +522,7 @@ function setSheet(sheet: SheetState | null): void {
 /** Change broker identity without ever showing the previous broker's data under it. */
 function setBrokerProfile(profile: BrokerProfile): void {
   const scopeChanged = !sameBrokerScope(state.broker, profile);
-  const profileChanged = scopeChanged
-    || state.broker.connected !== profile.connected
-    || state.broker.error !== profile.error
-    || state.broker.has_saved_token !== profile.has_saved_token;
-  if (profileChanged) brokerEpoch += 1;
+  if (scopeChanged) brokerEpoch += 1;
   if (scopeChanged) {
     removeBrokerQueries(state.broker);
     clearBrokerOwnedState();
@@ -1090,8 +1087,7 @@ function RequestInbox(): ReactNode {
                         return (
                           <button key={`approval:${approval.id}`}
                             className="request-card request-card-approval"
-                            data-act="approval-open" data-id={approval.id}
-                            aria-label={`Review approval from ${agentLabel(approval.agent)} for ${approval.connection}`}>
+                            data-act="approval-open" data-id={approval.id}>
                             <span className="request-card-ico"><Icon markup={ICONS.shieldAlert} /></span>
                             <span className="request-card-body">
                               <span className="request-card-top">
@@ -1117,8 +1113,7 @@ function RequestInbox(): ReactNode {
                       return (
                         <button key={`elicitation:${request.id}`}
                           className="request-card request-card-elicitation"
-                          data-act="elicit-open" data-id={request.id}
-                          aria-label={`Answer input request from ${request.connection}`}>
+                          data-act="elicit-open" data-id={request.id}>
                           <span className="request-card-ico"><Icon markup={ICONS.bell} /></span>
                           <span className="request-card-body">
                             <span className="request-card-top">
@@ -2553,15 +2548,18 @@ function startWalkthroughHTML(): string {
   const progress = startProgress(option, state.connections);
 
   const picker = START_OPTIONS.map((candidate) => {
+    const candidateEntry = candidate.catalogId ? catalogEntryById(candidate.catalogId) : undefined;
     const visibleLabel = candidate.showPickerLabel
       ? `<span class="start-pick-label">${esc(candidate.label)}</span>` : '';
+    const limited = candidateEntry?.limitedSupport
+      ? '<span class="start-pick-limited">Limited</span>' : '';
     const kind = startKindLabel(candidate);
     const fullLabel = kind ? `${candidate.label} ${kind}` : candidate.label;
     return `<button class="start-pick ${candidate.showPickerLabel ? 'has-label' : ''} ${candidate.id === option.id ? 'on' : ''}"
       aria-pressed="${candidate.id === option.id}"
       aria-label="${escAttr(fullLabel)}" title="${escAttr(fullLabel)}"
       data-act="start-option" data-id="${candidate.id}">
-      <span class="start-pick-icon" aria-hidden="true">${ICONS[candidate.icon] || ''}</span>${visibleLabel}</button>`;
+      <span class="start-pick-icon" aria-hidden="true">${ICONS[candidate.icon] || ''}</span>${visibleLabel}${limited}</button>`;
   }).join('');
 
   const step = (n: number, title: string, done: boolean, body: string): string =>
@@ -2621,7 +2619,7 @@ function startWalkthroughHTML(): string {
 
   return `<ol class="start-steps">
       ${step(1, 'Select a tool to connect', progress.added, addBody)}
-      ${step(2, 'Connect your agent', false, connectBody)}
+      ${step(2, 'Connect your agent', recentClients().length > 0, connectBody)}
       ${step(3, 'Ask for something useful', progress.wired, wireBody)}
     </ol>`;
 }
@@ -2674,10 +2672,15 @@ function brokerReadyHTML() {
   // not sit under a green "Ready".
   const tone = brokerTone(state.broker);
   const label = tone === 'error' ? 'Unreachable' : tone === 'pending' ? 'Connecting…' : 'Ready';
-  return `<button class="dd-sub ready-copy ${copied ? 'is-copied' : ''}"
-    data-act="copy-ready-setup" title="${copied ? 'Setup instructions copied' : 'Copy setup instructions'}"
-    aria-label="Copy setup instructions"><span class="dot dot-${tone}"></span>
-    <span class="ready-copy-label" aria-live="polite">${copied ? `${ICONS.check} Copied` : label}</span></button>`;
+  return `<div class="dd-sub ready-status">
+    <span class="ready-state" role="status"><span class="dot dot-${tone}" aria-hidden="true"></span>
+      <span>${label}</span></span>
+    <button class="ready-copy ${copied ? 'is-copied' : ''}"
+      data-act="copy-ready-setup"
+      title="${copied ? 'Setup instructions copied' : 'Copy setup instructions'}"
+      aria-label="${copied ? 'Setup instructions copied' : 'Copy setup instructions'}">
+      <span class="ready-copy-label" aria-live="polite">${copied ? `${ICONS.check} Copied` : 'Copy'}</span>
+    </button></div>`;
 }
 
 /* --------------------------- broker switcher ------------------------------ */
@@ -2708,8 +2711,12 @@ function brokerSwitchHTML(): string {
 function BrokerPane({ kind }: { kind: 'setup' | 'connecting' | 'error' }): ReactNode {
   if (kind === 'setup') {
     const setup = state.remoteSetup;
+    const setupInstructions =
+      '# To start a remote instance, run this behind a TLS proxy or tunnel:\n'
+      + 'mfa serve --listen 0.0.0.0:4780\nmfa manage token';
     const hasSaved = state.broker.has_saved_token
       && (setup.url.trim() === '' || setup.url.trim().replace(/\/+$/, '') === (state.broker.url ?? ''));
+    const insecureRemote = insecureNonLoopbackHttp(setup.url);
     return (
       <div className="broker-pane" role="form" aria-label="Connect to hosted AgentMFA">
         <div className="bp-icon"><Icon markup={ICONS.blocks} /></div>
@@ -2720,9 +2727,11 @@ function BrokerPane({ kind }: { kind: 'setup' | 'connecting' | 'error' }): React
             data-act="toggle-remote-advanced">
             <span className="adv-toggle-icon" aria-hidden="true"><Icon markup={ICONS.chevronDown} /></span>Advanced</button>
           {setup.advancedOpen && (
-            <pre className="setup-instructions bp-setup-code"><code>{
-              '# To start a remote instance, run this behind a TLS proxy or tunnel:\naka serve --listen 0.0.0.0:4780\naka manage token'
-            }</code></pre>
+            <div className="bp-setup-wrap">
+              <pre className="setup-instructions bp-setup-code"><code>{setupInstructions}</code></pre>
+              <button className="btn sm" data-act="copy-text"
+                data-text={setupInstructions}>Copy</button>
+            </div>
           )}
         </div>
         <div className="f-row">
@@ -2730,6 +2739,11 @@ function BrokerPane({ kind }: { kind: 'setup' | 'connecting' | 'error' }): React
           <input id="rb-url" placeholder="https://agentmfa.aka.com" value={setup.url}
             autoComplete="off" spellCheck={false}
             onChange={(e) => { setup.url = e.currentTarget.value; render(); }} />
+          {insecureRemote
+            ? <div className="field-warning" role="alert">
+                This sends the management token over unencrypted HTTP. Use HTTPS or a loopback URL.
+              </div>
+            : null}
         </div>
         <div className="f-row">
           <label htmlFor="rb-token">Management token</label>
@@ -4695,9 +4709,34 @@ async function run(fn: () => Promise<unknown>): Promise<boolean> {
     await fn();
     return brokerEpochIsCurrent(epoch);
   } catch (error) {
-    if (brokerEpochIsCurrent(epoch)) toast('⚠ ' + errorMessage(error));
+    if (brokerEpochIsCurrent(epoch) && formErrorKind(error) !== 'cancelled') {
+      toast('⚠ ' + errorMessage(error));
+    }
     return false;
   }
+}
+
+async function answerElicitation(
+  id: string,
+  approved: boolean,
+  values?: Record<string, string>,
+): Promise<boolean> {
+  let answered = false;
+  const ok = await run(async () => {
+    answered = await invoke('respond_elicitation', { id, approved, values });
+  });
+  if (!ok) return false;
+  if (!answered) {
+    toast('This input request was already answered or expired');
+    closeSheet();
+    await Promise.all([
+      load('elicitations', 'list_elicitations'),
+      load('requests', 'list_requests'),
+    ]);
+    render();
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -6156,7 +6195,7 @@ document.addEventListener('click', async (e) => {
         values[field.name] = value;
       }
       if (missing) break;
-      if (await run(() => invoke('respond_elicitation', { id, approved: true, values }))) {
+      if (await answerElicitation(id, true, values)) {
         toast(`📨 Sent to ${request.connection} — ${request.agent} resumes`);
         closeSheet();
         await Promise.all([
@@ -6204,7 +6243,7 @@ document.addEventListener('click', async (e) => {
 
     case 'elicit-refuse': {
       const request = state.elicitations.find((r) => r.id === id);
-      if (await run(() => invoke('respond_elicitation', { id, approved: false }))) {
+      if (await answerElicitation(id, false)) {
         toast(`🚫 Refused — ${request?.agent ?? 'the agent'} is told no, without your reasons`);
         closeSheet();
         await Promise.all([
@@ -6312,14 +6351,23 @@ function moveConnectionBefore(ids: string[], movedId: string, beforeId: string |
   return next;
 }
 
-async function persistConnOrder(orderedIds: string[]): Promise<void> {
-  await run(() => invoke('reorder_connections', { orderedIds }));
+async function persistConnOrder(
+  orderedIds: string[],
+  previous: ConnectionSummary[],
+  generation: number,
+): Promise<void> {
+  if (!await run(() => invoke('reorder_connections', { orderedIds }))
+      && generation === connectionReorderGeneration) {
+    state.connections = previous;
+    render();
+  }
 }
 
 // Commit the React-rendered preview order and persist it.
 function commitConnDrag(): void {
   if (!dragConnId) return;
   const ids = dragConnOrder ?? state.connections.map((connection) => connection.id);
+  const previous = state.connections.slice();
   dragConnId = null;
   dragConnOrder = null;
   const byId = new Map(state.connections.map((c) => [c.id, c] as const));
@@ -6331,12 +6379,14 @@ function commitConnDrag(): void {
   if (changed) state.connections = next;
   render();
   if (!changed) return;
-  void persistConnOrder(next.map((c) => c.id));
+  const generation = ++connectionReorderGeneration;
+  void persistConnOrder(next.map((c) => c.id), previous, generation);
 }
 
 // Move one connection up (-1) or down (+1) by keyboard, optimistically
 // re-rendering and keeping the moved row focused, then persisting.
 function moveConnByKeyboard(id: string, delta: number): void {
+  const previous = state.connections.slice();
   const ids = state.connections.map((c) => c.id);
   const from = ids.indexOf(id);
   if (from === -1) return;
@@ -6350,7 +6400,8 @@ function moveConnByKeyboard(id: string, delta: number): void {
   document.querySelector<HTMLElement>(
     `[data-conn-row="${CSS.escape(id)}"] .flat-conn-row`,
   )?.focus();
-  void persistConnOrder(ids);
+  const generation = ++connectionReorderGeneration;
+  void persistConnOrder(ids, previous, generation);
 }
 
 document.addEventListener('dragstart', (e) => {
@@ -6566,6 +6617,9 @@ async function boot() {
     notificationSettingsEpoch += 1;
     state.notificationSettings = event.payload;
     if (booted) render();
+  });
+  await listen('aka://settings-changed', () => {
+    void refresh('settings');
   });
   // Which broker this app manages decides everything else about boot.
   try {

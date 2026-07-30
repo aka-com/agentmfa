@@ -24,7 +24,7 @@
   <!-- Portal target for fixed-position overlays (the credential listbox),
        kept outside #root so React's tree and positioned DOM never mix. -->
   <div id="overlays"></div>
-  <div id="toasts" class="toasts"></div>
+  <div id="toasts" class="toasts" role="status" aria-live="polite" aria-atomic="false"></div>
   <!-- Tooltip library (Tippy.js on Popper, self-hosted for the 'self'-only
        CSP). Popper must load first — it defines window.Popper, which Tippy
        consumes; Tippy then exposes window.tippy for app.tsx. -->

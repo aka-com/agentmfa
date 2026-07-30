@@ -143,7 +143,7 @@ impl BrokerEvents for TauriEvents {
 /// Open an OAuth consent page in the default browser. Only web URLs, ever:
 /// this exists for the consent page, local mode and relayed-remote alike.
 pub fn open_consent_url(url: &str) -> bool {
-    if !url.starts_with("https://") {
+    if !allowed_external_url(url) {
         return false;
     }
     #[cfg(target_os = "macos")]
@@ -154,6 +154,29 @@ pub fn open_consent_url(url: &str) -> bool {
         .arg(url)
         .spawn()
         .is_ok()
+}
+
+/// Browser launches may carry OAuth state or management context. Permit
+/// cleartext HTTP only when it cannot leave this machine.
+pub(crate) fn allowed_external_url(raw: &str) -> bool {
+    let Ok(url) = url::Url::parse(raw.trim()) else {
+        return false;
+    };
+    if !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    match url.scheme() {
+        "https" => true,
+        "http" => url.host_str().is_some_and(|host| {
+            let address_host = host.trim_start_matches('[').trim_end_matches(']');
+            host.eq_ignore_ascii_case("localhost")
+                || host.to_ascii_lowercase().ends_with(".localhost")
+                || address_host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        }),
+        _ => false,
+    }
 }
 
 /// Convenience for the shell to construct the observer as a trait object.
@@ -227,5 +250,16 @@ mod tests {
             copy_authorization_reason(Duration::from_secs(5 * 60)),
             "allow copying saved secrets for the next 5 minutes"
         );
+    }
+
+    #[test]
+    fn browser_urls_require_https_off_machine() {
+        assert!(allowed_external_url("https://broker.example/authorize"));
+        assert!(allowed_external_url("http://127.0.0.1:4780/callback"));
+        assert!(allowed_external_url("http://[::1]:4780/callback"));
+        assert!(allowed_external_url("http://app.localhost/callback"));
+        assert!(!allowed_external_url("http://broker.example/authorize"));
+        assert!(!allowed_external_url("https://user:secret@broker.example/"));
+        assert!(!allowed_external_url("file:///tmp/secret"));
     }
 }

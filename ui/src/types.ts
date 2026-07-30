@@ -521,7 +521,7 @@ export interface CommandMap {
     approved: boolean;
     /** Field name -> value; required when approved, forbidden otherwise. */
     values?: Record<string, string>;
-  }, void>;
+  }, boolean>;
   set_reauth_on_read: CommandSpec<{ on: boolean }, void>;
   set_menu_bar_hides_dock: CommandSpec<{ on: boolean }, void>;
   set_presence_window: CommandSpec<{ secs: number }, void>;

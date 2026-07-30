@@ -79,6 +79,10 @@ export function toast(msg: string): void {
   const el = document.createElement('div');
   el.className = 'toast';
   el.textContent = msg;
+  if (msg.trimStart().startsWith('⚠')) {
+    el.setAttribute('role', 'alert');
+    el.setAttribute('aria-live', 'assertive');
+  }
   toastHost.appendChild(el);
   requestAnimationFrame(() => el.classList.add('show'));
   setTimeout(() => { el.classList.remove('show'); setTimeout(() => el.remove(), 300); }, 2600);

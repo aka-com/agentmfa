@@ -5,6 +5,7 @@ import {
   apiOriginFromParts,
   authTemplate,
   defaultConnectionName,
+  insecureNonLoopbackHttp,
   isLoopbackHost,
   parseConnectionImport,
   parseApiOrigin,
@@ -17,6 +18,14 @@ import {
 test('provides a quick-setup placeholder for every connection type', () => {
   assert.equal(quickSetupPlaceholder('pg'), 'postgresql://app@db.example.com/production');
   assert.equal(quickSetupPlaceholder('ssh'), 'ssh deploy@prod.example.com');
+});
+
+test('warns for cleartext URLs only when they leave loopback', () => {
+  assert.equal(insecureNonLoopbackHttp('http://broker.example:4780'), true);
+  assert.equal(insecureNonLoopbackHttp('https://broker.example:4780'), false);
+  assert.equal(insecureNonLoopbackHttp('http://127.0.0.1:4780'), false);
+  assert.equal(insecureNonLoopbackHttp('http://[::1]:4780'), false);
+  assert.equal(insecureNonLoopbackHttp('not a URL yet'), false);
 });
 
 test('recognizes loopback hosts without treating lookalike remote hosts as local', () => {

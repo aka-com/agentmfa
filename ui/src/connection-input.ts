@@ -29,6 +29,17 @@ export function isLoopbackHost(host: string | null | undefined): boolean {
     && octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255);
 }
 
+/** Warn when a complete broker/browser URL would expose credentials on the
+ * network. Incomplete input is left to normal form validation. */
+export function insecureNonLoopbackHttp(value: unknown): boolean {
+  try {
+    const parsed = new URL(String(value).trim());
+    return parsed.protocol === 'http:' && !isLoopbackHost(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
 /** The default name for a new connection: the tool's label, numbered when
  * the label is already taken — "Postgres", then "Postgres 2". The endpoint
  * never rides in the name; the row's subline carries the live target. */

@@ -56,6 +56,7 @@ type FormResult<T> = Result<T, FormError>;
 /// and the retained entries, not the DOM.
 const ACTIVITY_VIEW_LIMIT: usize = 500;
 pub const EVT_NOTIFICATION_SETTINGS: &str = "aka://notification-settings-changed";
+pub const EVT_SETTINGS: &str = "aka://settings-changed";
 
 /// The local OS account name is presentation-only: connection forms use it
 /// as a hint, never as a submitted or persisted value.
@@ -1019,11 +1020,8 @@ pub async fn mcp_status(
 #[tauri::command]
 pub fn open_url(url: String) -> CmdResult<()> {
     let url = url.trim().to_string();
-    if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return Err("only http(s) URLs can be opened".into());
-    }
-    if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
-        return Err("invalid URL".into());
+    if !crate::events::allowed_external_url(&url) {
+        return Err("only HTTPS or loopback HTTP URLs can be opened".into());
     }
     #[cfg(target_os = "macos")]
     let launcher = "open";
@@ -1596,33 +1594,51 @@ pub async fn close_session(state: State<'_, AppState>, id: u64) -> CmdResult<boo
 /* ------------------------------ settings --------------------------------- */
 
 #[tauri::command]
-pub async fn set_reauth_on_read(state: State<'_, AppState>, on: bool) -> CmdResult<()> {
+pub async fn set_reauth_on_read(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    on: bool,
+) -> CmdResult<()> {
     state
         .brokers
         .backend()
         .set_reauth_on_read(on)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit(EVT_SETTINGS, ());
+    Ok(())
 }
 
 #[tauri::command]
-pub async fn set_menu_bar_hides_dock(state: State<'_, AppState>, on: bool) -> CmdResult<()> {
+pub async fn set_menu_bar_hides_dock(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    on: bool,
+) -> CmdResult<()> {
     state
         .brokers
         .backend()
         .set_menu_bar_hides_dock(on)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit(EVT_SETTINGS, ());
+    Ok(())
 }
 
 #[tauri::command]
-pub async fn set_presence_window(state: State<'_, AppState>, secs: u64) -> CmdResult<()> {
+pub async fn set_presence_window(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    secs: u64,
+) -> CmdResult<()> {
     state
         .brokers
         .backend()
         .set_presence_window(secs)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit(EVT_SETTINGS, ());
+    Ok(())
 }
 
 /// This desktop's native request-notification preferences. They live beside
