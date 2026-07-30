@@ -2,8 +2,7 @@
 //!
 //! The Rust core owns all state transitions; the shell (Tauri layer, tests,
 //! or the headless dev harness) observes them through this trait to refresh
-//! views and to run the native confirmation gates for user-initiated
-//! actions.
+//! views and surface agent traffic that needs a human decision.
 
 use std::time::Duration;
 
@@ -36,9 +35,8 @@ pub enum ElicitationHandling {
     Unavailable,
 }
 
-/// Whether a successful shell gate proved fresh user presence or merely
-/// substituted another authority (management bearer, terminal intent, or a
-/// test waiver). Only the former may establish the reusable presence window.
+/// Compatibility classification for shells that still implement the retired
+/// native-authentication hooks. The broker no longer consults it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PresenceAuthority {
     Authenticated,
@@ -59,9 +57,8 @@ pub trait BrokerEvents: Send + Sync {
         false
     }
 
-    /// Whether this shell can prove fresh user presence with a native
-    /// operating-system authentication prompt. Management clients surface
-    /// this as a negotiated capability instead of making platform guesses.
+    /// Compatibility hook for older management clients. Native
+    /// authentication is no longer part of broker policy.
     fn native_authentication_available(&self) -> bool {
         false
     }
@@ -91,29 +88,22 @@ pub trait BrokerEvents: Send + Sync {
     /// live auth-progress view.
     fn mcp_auth_changed(&self, _state: &crate::mcp_auth::McpAuthState) {}
 
-    /// A secret value is about to be read from the vault for a
-    /// user-initiated action while the re-auth-on-read setting is enabled.
-    /// Product shells should show their native authentication gate here.
-    /// Agent-plane executions are pre-authorized by their wiring and never
-    /// reach this. The default fails closed so new shell implementations do
-    /// not silently bypass this setting.
+    /// Retired compatibility hook. Secret reads no longer call it.
     fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
-        false
+        true
     }
 
-    /// Classify the authority behind [`Self::confirm_secret_read`].
+    /// Retired compatibility hook.
     fn secret_read_authority(&self) -> PresenceAuthority {
-        PresenceAuthority::Authenticated
+        PresenceAuthority::Substituted
     }
 
-    /// A user-initiated clipboard copy is about to open a short authorization
-    /// window for more copies. The default delegates to the ordinary secret
-    /// read gate so existing shells remain fail-closed and compatible.
+    /// Retired compatibility hook. Secret copies no longer call it.
     fn confirm_secret_copy(&self, secret: &SecretMeta, _duration: Duration) -> bool {
         self.confirm_secret_read(secret)
     }
 
-    /// Classify the authority behind [`Self::confirm_secret_copy`].
+    /// Retired compatibility hook.
     fn secret_copy_authority(&self) -> PresenceAuthority {
         self.secret_read_authority()
     }
@@ -132,27 +122,14 @@ pub trait BrokerEvents: Send + Sync {
         false
     }
 
-    /// A core-classified gated action is about to take effect. Fresh gates
-    /// cover full-authority operations such as enabling explicitly disabled
-    /// agent access, removing a confirmation/read gate, rotating or copying
-    /// broker credentials, and clearing audit history. Configuration-presence
-    /// gates cover capability edits and stored-value replacement. Creating a
-    /// tool prompts only when it extends an existing secret to a new target;
-    /// deleting a tool or an unused secret only narrows authority and does not
-    /// call this hook. `None` aborts, and the default fails closed.
+    /// Retired compatibility hook. Configuration actions no longer call it.
     fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
-        None
+        Some(ConfirmationMethod::Waived)
     }
 
-    /// Only native OS authentication proves reusable presence. Terminal
-    /// intent, management-token authority, and test waivers may authorize the
-    /// requested operation but must not silently unlock later operations.
-    fn action_authority(&self, method: ConfirmationMethod) -> PresenceAuthority {
-        if method == ConfirmationMethod::OsAuthentication {
-            PresenceAuthority::Authenticated
-        } else {
-            PresenceAuthority::Substituted
-        }
+    /// Retired compatibility hook.
+    fn action_authority(&self, _method: ConfirmationMethod) -> PresenceAuthority {
+        PresenceAuthority::Substituted
     }
 
     /// Agent traffic is parked on a connection whose confirmation switch is
@@ -188,8 +165,8 @@ pub trait BrokerEvents: Send + Sync {
     fn elicitation_resolved(&self, _id: &uuid::Uuid) {}
 }
 
-/// Default observer: nothing to notify. Confirmation gates are explicitly
-/// waived — this observer is for tests and dev harnesses, not products.
+/// Default observer: nothing to notify. This observer is for tests and dev
+/// harnesses, not products.
 #[cfg(any(test, feature = "test-harness"))]
 pub struct NoopEvents;
 
@@ -197,18 +174,6 @@ pub struct NoopEvents;
 impl BrokerEvents for NoopEvents {
     fn has_approval_surface(&self) -> bool {
         true
-    }
-
-    fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
-        true
-    }
-
-    fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
-        Some(ConfirmationMethod::Waived)
-    }
-
-    fn secret_read_authority(&self) -> PresenceAuthority {
-        PresenceAuthority::Substituted
     }
 
     fn approval_requested(&self, _pending: &PendingApproval) -> ApprovalHandling {

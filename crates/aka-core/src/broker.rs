@@ -200,11 +200,6 @@ pub struct Broker {
     /// activity log or the shell's attention. Keyed on the self-reported
     /// client label. Never leaves memory.
     connect_request_debounce: Mutex<std::collections::HashMap<(String, String), Instant>>,
-    /// Capability retargets that still require a fresh, non-presence-window
-    /// confirmation before a stored credential may be sent by the Test
-    /// affordance. Runtime-only: restarting the broker cannot preserve an
-    /// in-process presence grant either.
-    recent_retargets: Mutex<HashMap<Uuid, Instant>>,
     /// Rejected credentials are security telemetry, but an automated stale
     /// client must not amplify the append-only activity log without bound.
     /// Keys include plane, transport, peer, and failure reason.
@@ -372,7 +367,6 @@ impl Broker {
             mcp_auth: crate::mcp_auth::McpAuthSessions::default(),
             manage_oauth: Mutex::new(HashMap::new()),
             connect_request_debounce: Mutex::new(std::collections::HashMap::new()),
-            recent_retargets: Mutex::new(HashMap::new()),
             auth_failure_debounce: Mutex::new(HashMap::new()),
             public_url: Mutex::new(None),
             data_plane_bind: std::sync::OnceLock::new(),
@@ -590,25 +584,6 @@ impl Broker {
             .map(|port| format!("http://127.0.0.1:{port}/mcp"))
     }
 
-    /// Demand the shell's native confirmation, regardless of the presence
-    /// window. Fails closed when the shell refuses or does not implement the
-    /// gate. Operations explicitly classified as full-authority go through
-    /// here; creating an enabled-by-default tool is separately gated only
-    /// when it extends an existing credential to a new target. Async callers
-    /// run this same serialized store gate off-runtime.
-    /// A successful prompt opens the user-plane presence window (see
-    /// `Store::confirm_action`), so a following read or config change rides it.
-    fn confirm_action(&self, description: &str) -> Result<crate::types::ConfirmationMethod> {
-        self.store.confirm_action(description)
-    }
-
-    /// Confirm a user-plane configuration action (tool and secret CRUD):
-    /// rides the presence window when it is fresh, otherwise prompts and
-    /// opens it. Never used for granting an agent authority.
-    fn confirm_user_action(&self, description: &str) -> Result<crate::types::ConfirmationMethod> {
-        self.store.confirm_configuration_action(description)
-    }
-
     /// Record one rejected control-plane credential, coalescing identical
     /// failures for 30 seconds. No token material is included in the key or
     /// entry.
@@ -685,15 +660,6 @@ impl Broker {
         new_name: Option<&str>,
         new_value: Option<SecretValue>,
     ) -> Result<SecretMeta> {
-        let confirmation = if new_value.is_some() {
-            let meta = self.store.secret_by_id(id)?;
-            Some(self.confirm_user_action(&format!(
-                "Replace the stored value of secret “{}”",
-                meta.name
-            ))?)
-        } else {
-            None
-        };
         let _gate = self.config_gate.lock().unwrap();
         let mut meta = self.store.secret_by_id(id)?;
         let mut changes = Vec::new();
@@ -749,9 +715,6 @@ impl Broker {
                     .field("renamed_to", to)
                     .field("templates_rewritten", rewritten);
             }
-            if let Some(confirmation) = confirmation {
-                entry = entry.confirmation(confirmation);
-            }
             self.audit.append(entry);
             self.events.secrets_changed();
         }
@@ -793,38 +756,21 @@ impl Broker {
         Ok(prefix)
     }
 
-    /// Fetch a value for the shell's core-side clipboard copy. A successful
-    /// OS authentication opens (or a fresh one extends) the presence window;
-    /// agent executions keep their own authorization scopes.
+    /// Fetch a value for the shell's core-side clipboard copy.
     pub async fn ui_secret_value_for_copy(&self, id: &Uuid) -> Result<SecretValue> {
-        if !self.store.settings().reauth_on_read {
-            return self.store.secret_value(id).await;
-        }
-        let meta = self.store.secret_by_id(id)?;
-        self.store.confirm_secret_copy(meta).await?;
-        crate::authorization::scope(true, self.store.secret_value(id)).await
+        self.store.secret_value(id).await
     }
 
-    /// Management backends are bearer-authorized and may be network
-    /// reachable, so releasing plaintext through them requires a fresh
-    /// step-up rather than merely riding the ordinary read-presence window.
+    /// Fetch a value for an authenticated management client's clipboard.
     pub async fn ui_managed_secret_value_for_copy(&self, id: &Uuid) -> Result<SecretValue> {
-        let meta = self.store.secret_by_id(id)?;
-        let store = self.store.clone();
-        let description = format!("Copy secret “{}” through management", meta.name);
-        tokio::task::spawn_blocking(move || store.confirm_action(&description))
-            .await
-            .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))??;
-        crate::authorization::scope(true, self.store.secret_value(id)).await
+        self.store.secret_value(id).await
     }
 
-    /// Release the shared agent key through a management backend only after
-    /// a fresh step-up, and attribute that release in the audit trail.
+    /// Release the shared agent key through an authenticated management
+    /// backend and attribute that release in the audit trail.
     pub fn ui_agent_key_for_copy(&self) -> Result<String> {
-        let confirmation = self.confirm_action("Copy the shared agent key through management")?;
         self.audit.append(
             AuditEntry::new(AuditKind::SecretCopied, "Shared key copied")
-                .confirmation(confirmation)
                 .field("credential", "agent_key")
                 .field("surface", "management"),
         );
@@ -844,75 +790,12 @@ impl Broker {
 
     /* --------------------- connections (UI commands) ---------------------- */
 
-    /// Whether the spec attaches a stored secret to a destination that
-    /// secret does not already cover. Attaching a stored credential to a
-    /// *new* destination extends that credential's reach, which is the
-    /// escalation the native gate exists for; reusing it at a destination
-    /// an existing tool already binds it to extends nothing, so it adds
-    /// without a prompt. A credential typed into the form alongside the
-    /// tool is self-authorizing: the form is the intent. `exclude` names a
-    /// secret being created atomically with the tool, so its own template
-    /// ref does not count as reuse.
-    fn spec_extends_stored_secret_reach(
-        &self,
-        spec: &ConnectionSpec,
-        exclude: Option<&str>,
-    ) -> bool {
-        let secrets = self.store.list_secrets();
-        // The stored secrets the spec attaches: explicit bindings plus
-        // template refs that name a secret the vault already holds.
-        let mut attached: Vec<Uuid> = spec.secrets.clone();
-        let template = match &spec.config {
-            crate::types::ConnectionConfig::Api { template, .. } => Some(template.as_str()),
-            _ => None,
-        };
-        if let Some(template) = template {
-            let Ok(parsed) = crate::template::Template::parse(template) else {
-                // Unparseable templates are rejected later by validation;
-                // treat the ambiguity as an escalation so the gate fails safe.
-                return true;
-            };
-            for name in parsed.refs() {
-                if Some(name.as_str()) == exclude {
-                    continue;
-                }
-                if let Some(meta) = secrets.iter().find(|meta| meta.name == name) {
-                    attached.push(meta.id);
-                }
-            }
-        }
-        if attached.is_empty() {
-            return false;
-        }
-        // A secret already covers the spec's destination when some existing
-        // tool binds it to an equivalent target (API connections derive
-        // their secret list from template refs, so `secrets` is the full
-        // binding set for every kind).
-        let connections = self.store.list_connections();
-        attached.iter().any(|secret_id| {
-            !connections.iter().any(|conn| {
-                conn.secrets.contains(secret_id) && conn.config.has_equivalent_target(&spec.config)
-            })
-        })
-    }
-
-    /// A connection pins a destination and may bind a secret to it. The
-    /// native confirmation fires only when the spec attaches an
-    /// already-stored secret to a destination it does not already cover;
-    /// credential-less tools, tools whose secret arrives with the form, and
-    /// same-destination reuse add without a prompt.
+    /// Add a connection after validating its pinned destination and secret
+    /// bindings. Submitting the form is the user's authorization.
     pub fn ui_add_connection(&self, spec: ConnectionSpec) -> Result<Connection> {
-        // Reject invalid or already-stale input before asking the user to
-        // authenticate. `add_connection` repeats the state-dependent checks
-        // after confirmation in case the index changed while the sheet was up.
         self.store.preflight_add_connection(&spec)?;
-        let confirmation = if self.spec_extends_stored_secret_reach(&spec, None) {
-            Some(self.confirm_user_action(&format!("Add tool “{}”", spec.name))?)
-        } else {
-            None
-        };
         let conn = self.store.add_connection(spec)?;
-        let mut entry = AuditEntry::new(
+        let entry = AuditEntry::new(
             AuditKind::ConnectionAdded,
             format!("Tool added: {}", conn.name),
         )
@@ -920,9 +803,6 @@ impl Broker {
         .detail(format!("{} → {}", conn.kind().label(), conn.target()))
         .field("kind", conn.kind().as_str())
         .field("target", conn.target());
-        if let Some(confirmation) = confirmation {
-            entry = entry.confirmation(confirmation);
-        }
         self.audit.append(entry);
         Ok(conn)
     }
@@ -959,8 +839,7 @@ impl Broker {
     /// One connection-first setup action: save a new credential and bind it
     /// without exposing an intermediate, partially configured state. The
     /// credential arrives with the form (or was just minted by an OAuth
-    /// sign-in the user drove), so no native confirmation fires unless the
-    /// spec additionally extends some other stored secret's reach.
+    /// sign-in the user drove), so the form submission authorizes both writes.
     pub fn ui_add_connection_with_secret(
         &self,
         secret_name: &str,
@@ -969,11 +848,6 @@ impl Broker {
     ) -> Result<Connection> {
         self.store
             .preflight_add_connection_with_secret(secret_name, &spec)?;
-        let confirmation = if self.spec_extends_stored_secret_reach(&spec, Some(secret_name)) {
-            Some(self.confirm_user_action(&format!("Add tool “{}”", spec.name))?)
-        } else {
-            None
-        };
         let (secret, conn) = self
             .store
             .add_connection_with_secret(secret_name, value, spec)?;
@@ -982,7 +856,7 @@ impl Broker {
             format!("Secret added: {}", secret.name),
         ));
         self.events.secrets_changed();
-        let mut entry = AuditEntry::new(
+        let entry = AuditEntry::new(
             AuditKind::ConnectionAdded,
             format!("Tool added: {}", conn.name),
         )
@@ -990,16 +864,11 @@ impl Broker {
         .detail(format!("{} → {}", conn.kind().label(), conn.target()))
         .field("kind", conn.kind().as_str())
         .field("target", conn.target());
-        if let Some(confirmation) = confirmation {
-            entry = entry.confirmation(confirmation);
-        }
         self.audit.append(entry);
         Ok(conn)
     }
 
-    /// Update a connection. Name-only edits are metadata and do not require
-    /// native authentication; changes to configuration, secret bindings, or
-    /// authentication do. Any capability change closes the tool's live
+    /// Update a connection. Any capability change closes the tool's live
     /// sessions, so in-flight traffic cannot outlive the settings it was
     /// authorized under. When the pinned target changes, its direct endpoints
     /// are revoked as well: a pasted address granted for one destination must
@@ -1054,21 +923,9 @@ impl Broker {
         let explicit_secrets_changed =
             old.kind() != ConnectionKind::Api && old.secrets != spec.secrets;
         let capability_changed = old.config != spec.config || explicit_secrets_changed;
-        let confirmation = if capability_changed {
-            Some(self.confirm_user_action(&format!(
-                "Change security settings for tool “{}”",
-                spec.name
-            ))?)
-        } else {
-            None
-        };
         let _gate = self.config_gate.lock().unwrap();
         if self.store.connection_by_id(id)?.updated_at != old.updated_at {
-            return Err(if confirmation.is_some() {
-                CoreError::ApprovalConnectionChanged
-            } else {
-                CoreError::ConnectionChanged
-            });
+            return Err(CoreError::ConnectionChanged);
         }
         let (conn, target_changed) = if capability_changed {
             match expected_updated_at {
@@ -1125,10 +982,6 @@ impl Broker {
             self.health.forget(id);
             // Nor do the old destination's advertised tools.
             self.forget_mcp_tools_cache(id);
-            let mut recent = self.recent_retargets.lock().unwrap();
-            let now = Instant::now();
-            recent.retain(|_, at| now.duration_since(*at) < Duration::from_secs(60));
-            recent.insert(*id, now);
         }
         let mut entry = AuditEntry::new(
             AuditKind::ConnectionUpdated,
@@ -1156,9 +1009,6 @@ impl Broker {
         .field("capability_changed", capability_changed)
         .field("endpoints_revoked", endpoints_revoked)
         .field("closed_sessions", closed_sessions);
-        if let Some(confirmation) = confirmation {
-            entry = entry.confirmation(confirmation);
-        }
         if old.name != conn.name {
             entry = entry
                 .field("renamed_from", old.name.clone())
@@ -1291,30 +1141,7 @@ impl Broker {
     /// summary comes back.
     pub async fn ui_test_connection(&self, id: &Uuid) -> Result<ConnectionTestReport> {
         const TEST_TIMEOUT: Duration = Duration::from_secs(15);
-        const RETARGET_STEP_UP_WINDOW: Duration = Duration::from_secs(60);
         let mut connection = self.store.connection_by_id(id)?;
-        let recently_retargeted = {
-            let now = Instant::now();
-            let mut recent = self.recent_retargets.lock().unwrap();
-            recent.retain(|_, at| now.duration_since(*at) < RETARGET_STEP_UP_WINDOW);
-            recent.contains_key(id)
-        };
-        let confirmation = if recently_retargeted {
-            // Confirm off the async runtime: the native sheet blocks its
-            // thread for as long as the user leaves it up.
-            let store = self.store.clone();
-            let description = format!(
-                "Test newly retargeted tool “{}” with its stored credential",
-                connection.name
-            );
-            Some(
-                tokio::task::spawn_blocking(move || store.confirm_action(&description))
-                    .await
-                    .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))??,
-            )
-        } else {
-            None
-        };
         // An OAuth token at expiry is renewed before the test, so the test
         // grades the connection, not a token the broker knew was stale.
         if crate::mcp_refresh::wants_refresh(&connection)
@@ -1395,23 +1222,19 @@ impl Broker {
         // agent plane had gathered from rejections it saw in passing.
         self.health.clear_rejection_streak(id);
         self.health.record(id, status, report.detail.clone());
-        let mut entry = AuditEntry::new(
+        let entry = AuditEntry::new(
             AuditKind::ConnectionTested,
             format!("Tool tested: {}", connection.name),
         )
         .connection(connection.name.clone())
         .outcome(if report.ok { "succeeded" } else { "failed" })
         .field("target", connection.target())
-        .field("recently_retargeted", recently_retargeted)
         .field(
             "failure_kind",
             report
                 .kind
                 .map(|kind| format!("{kind:?}").to_ascii_lowercase()),
         );
-        if let Some(confirmation) = confirmation {
-            entry = entry.confirmation(confirmation);
-        }
         self.audit.append(entry);
         Ok(report)
     }
@@ -1900,11 +1723,7 @@ impl Broker {
     /// Issue (or rotate) a direct endpoint for a connection: mint the
     /// endpoint secret, bind its listener, and hand back the pasteable DSN.
     /// The secret is retained on the record so later copies of the address
-    /// carry it too. Gated behind the
-    /// configuration gate: a fresh native authentication is reused (the
-    /// presence window), otherwise the OS prompt appears — issuance grants
-    /// standing access, so it is never silent for a user who has not
-    /// authenticated recently. The connection's agent access must be enabled.
+    /// carry it too. The connection's agent access must be enabled.
     pub async fn ui_issue_endpoint(
         self: &Arc<Self>,
         connection_id: &Uuid,
@@ -1921,26 +1740,8 @@ impl Broker {
             return Err(CoreError::EndpointExpired);
         }
 
-        // First issuance mints standing access, so it takes the native gate.
-        // A *reissue* only rotates the secret of an endpoint the user already
-        // authorized — the in-app confirm is its gate (revoking, which only
-        // narrows, is likewise in-app only).
-        let confirmation = if self.endpoints.get_for_connection(connection_id).is_none() {
-            // Confirm off the async runtime: the native sheet blocks its thread.
-            let store = self.store.clone();
-            let description = format!("Issue a direct endpoint for {}", connection.name);
-            Some(
-                tokio::task::spawn_blocking(move || {
-                    store.confirm_configuration_action(&description)
-                })
-                .await
-                .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))??,
-            )
-        } else {
-            None
-        };
-        // Mint under the gate; re-check access didn't vanish while the
-        // sheet was up. For PG/HTTP, rotating a live endpoint changes only
+        // Re-check access under the mutation gate. For PG/HTTP, rotating a
+        // live endpoint changes only
         // its persisted secret: the listener resolves the registry on every
         // request, so rebinding would collide with our own occupied port and
         // destroy a healthy endpoint. SSH is the opposite: the socket *path*
@@ -1997,16 +1798,13 @@ impl Broker {
             .unwrap_or_else(|| issued.endpoint.clone());
         record.secret = issued.secret.clone();
         let info = self.endpoint_info(&connection, &record).await?;
-        let mut entry = AuditEntry::new(
+        let entry = AuditEntry::new(
             AuditKind::Wired,
             format!("Direct endpoint issued: {}", connection.name),
         )
         .connection(connection.name.clone())
         .field("endpoint_id", issued.endpoint.id.to_string())
         .field("kind", connection.kind().as_str());
-        if let Some(confirmation) = confirmation {
-            entry = entry.confirmation(confirmation);
-        }
         self.audit.append(entry);
         self.events.wirings_changed();
         Ok(info)
@@ -2134,9 +1932,7 @@ impl Broker {
     /// rotating; `None` when none is issued for the connection. This re-reads
     /// already-surfaced state and takes **no** native gate — it backs the UI's
     /// endpoint display (the connection strip resolves the SSH socket path this
-    /// way on every list refresh), which must never raise a sheet or write an
-    /// audit entry. Putting a credential on the clipboard is a separate,
-    /// deliberate act: `ui_copy_endpoint` carries the gate and the audit.
+    /// way on every list refresh), which must never write an audit entry.
     pub async fn ui_get_endpoint(
         &self,
         connection_id: &Uuid,
@@ -2149,8 +1945,7 @@ impl Broker {
     }
 
     /// Extend an endpoint's deadline without changing its id, address, or
-    /// secret. Renewal is an explicit expansion of standing authority and
-    /// therefore takes the same native configuration gate as first issuance.
+    /// secret.
     /// An expired endpoint remains in the registry precisely so this operation
     /// can preserve a long-lived client configuration.
     pub async fn ui_renew_endpoint(
@@ -2165,13 +1960,6 @@ impl Broker {
             .endpoints
             .get_for_connection(connection_id)
             .ok_or(CoreError::EndpointNotFound)?;
-        let store = self.store.clone();
-        let description = format!("Renew the direct endpoint for {}", connection.name);
-        let confirmation =
-            tokio::task::spawn_blocking(move || store.confirm_configuration_action(&description))
-                .await
-                .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))??;
-
         // Expired endpoints are not rebound at startup. Reclaim their stable
         // socket/port before making the credential valid again, so renewal can
         // never send a still-configured client to a listener another process
@@ -2213,7 +2001,6 @@ impl Broker {
                 format!("Direct endpoint renewed: {}", connection.name),
             )
             .connection(connection.name)
-            .confirmation(confirmation)
             .field("endpoint_id", renewed.id.to_string())
             .field("expires_at", renewed.expires_at.to_rfc3339()),
         );
@@ -2222,9 +2009,8 @@ impl Broker {
     }
 
     /// Read an existing direct endpoint for a copy-to-clipboard: same address
-    /// as `ui_get_endpoint`, but the address embeds a standing credential, so
-    /// this takes a fresh native gate and is audited just like copying a
-    /// stored secret. Called only from explicit copy affordances.
+    /// as `ui_get_endpoint`, audited just like copying a stored secret. Called
+    /// only from explicit copy affordances.
     pub async fn ui_copy_endpoint(
         &self,
         connection_id: &Uuid,
@@ -2236,11 +2022,6 @@ impl Broker {
         if endpoint.is_expired() {
             return Err(CoreError::EndpointExpired);
         }
-        let store = self.store.clone();
-        let description = format!("Copy the direct endpoint for “{}”", connection.name);
-        let confirmation = tokio::task::spawn_blocking(move || store.confirm_action(&description))
-            .await
-            .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))??;
         if self
             .endpoints
             .get(&endpoint.id)
@@ -2255,7 +2036,6 @@ impl Broker {
                 format!("Direct endpoint copied: {}", connection.name),
             )
             .connection(connection.name)
-            .confirmation(confirmation)
             .field("endpoint_id", endpoint.id.to_string()),
         );
         Ok(Some(info))
@@ -2300,9 +2080,8 @@ impl Broker {
     /// endpoint's socket, rebinding its listener so the change takes effect on
     /// the next connection rather than the next broker start.
     ///
-    /// Turning it **on** only narrows, so the in-app confirm is the gate.
-    /// Turning it **off** widens who may sign with a standing credential, so
-    /// it takes a fresh authentication the presence window does not cover.
+    /// The explicit switch is the user's authorization. Turning authentication
+    /// on also closes clients admitted under the old rule.
     pub async fn ui_set_endpoint_require_auth(
         self: &Arc<Self>,
         connection_id: &Uuid,
@@ -2322,21 +2101,6 @@ impl Broker {
         if endpoint.require_auth == require_auth {
             return Ok(false);
         }
-        let confirmation = if require_auth {
-            None
-        } else {
-            let store = self.store.clone();
-            let description = format!(
-                "stop requiring authentication on the SSH endpoint for “{}” — any \
-                 process that finds its socket can sign again",
-                connection.name
-            );
-            Some(
-                tokio::task::spawn_blocking(move || store.confirm_action(&description))
-                    .await
-                    .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))??,
-            )
-        };
         let changed = {
             let _gate = self.config_gate.lock().unwrap();
             self.endpoints.set_require_auth(&endpoint.id, require_auth)?
@@ -2365,8 +2129,7 @@ impl Broker {
             )
             .connection(connection.name.clone())
             .field("endpoint_id", endpoint.id.to_string())
-            .field("require_auth", require_auth)
-            .maybe_confirmation(confirmation),
+            .field("require_auth", require_auth),
         );
         self.events.wirings_changed();
         Ok(true)
@@ -2561,25 +2324,6 @@ impl Broker {
     /// endpoint itself remains available for later re-enabling.
     pub fn ui_set_tool_access(&self, connection_id: &Uuid, enabled: bool) -> Result<bool> {
         let connection = self.store.connection_by_id(connection_id)?;
-        // Turning access **on** hands every agent on this machine standing use
-        // of the credential — the same grant `ui_issue_endpoint` takes the
-        // native gate for, and strictly more than it (an endpoint covers one
-        // pasted address; this covers every agent). Turning it **off** only
-        // narrows, so it stays free: revocation must never wait on
-        // authentication.
-        //
-        // Only a real off→on transition prompts. A no-op call, or the
-        // enabled-by-default state a new connection already has, is not a
-        // change in authority and must not put a sheet in front of the user.
-        let confirmation = if enabled && !self.access.allows(connection_id) {
-            Some(self.confirm_action(&format!(
-                "Let agents use “{}” — every agent on this computer can use its \
-                 saved credential until you turn this off",
-                connection.name
-            ))?)
-        } else {
-            None
-        };
         let _gate = self.config_gate.lock().unwrap();
         let changed = self.access.set_enabled(*connection_id, enabled)?;
         if changed {
@@ -2603,8 +2347,7 @@ impl Broker {
                     ),
                 )
                 .connection(connection.name.clone())
-                .field("closed_sessions", closed_sessions)
-                .maybe_confirmation(confirmation),
+                .field("closed_sessions", closed_sessions),
             );
             self.events.wirings_changed();
         }
@@ -2620,12 +2363,7 @@ impl Broker {
 
     /// Ask the user to confirm this connection's traffic — or stop asking.
     ///
-    /// Turning it **on** only adds friction, so the in-app switch is the
-    /// gate. Turning it **off** removes a gate the user deliberately put
-    /// up, which is the same class of change as disabling the read gate:
-    /// it takes a real authentication, and the presence window does not
-    /// cover it. That is also what the prompt's "Approve all" button
-    /// routes through, so "stop asking" can never be one stray click.
+    /// The explicit switch is the user's authorization in either direction.
     pub fn ui_set_confirm_mode(&self, connection_id: &Uuid, confirm: ConfirmMode) -> Result<bool> {
         self.ui_set_confirm_mode_with_resolution(
             connection_id,
@@ -2642,16 +2380,6 @@ impl Broker {
     ) -> Result<bool> {
         let connection = self.store.connection_by_id(connection_id)?;
         let old_mode = self.access.confirm_mode(connection_id);
-        let confirmation = if confirm.is_on() {
-            None
-        } else if old_mode.is_on() {
-            Some(self.confirm_action(&format!(
-                "stop confirming traffic on “{}” — agents will use it without asking",
-                connection.name
-            ))?)
-        } else {
-            None
-        };
         let _gate = self.config_gate.lock().unwrap();
         let current = self.store.connection_by_id(connection_id)?;
         if current.updated_at != connection.updated_at {
@@ -2661,8 +2389,8 @@ impl Broker {
         if current_mode == confirm {
             return Ok(false);
         }
-        // In particular, an unauthenticated "already off" request must not
-        // turn off a mode another window enabled while this call was waiting.
+        // Do not overwrite a change made by another window while this call
+        // was waiting for the mutation gate.
         if current_mode != old_mode {
             return Err(CoreError::ApprovalConnectionChanged);
         }
@@ -2673,7 +2401,7 @@ impl Broker {
                 // whatever is parked on it instead of refusing it.
                 self.approvals.release_as(connection_id, release_resolution);
             }
-            let mut entry = AuditEntry::new(
+            let entry = AuditEntry::new(
                 AuditKind::Wired,
                 format!(
                     "Traffic confirmation {} for {}",
@@ -2687,9 +2415,6 @@ impl Broker {
             )
             .connection(connection.name.clone())
             .field("confirm", confirm.is_on());
-            if let Some(confirmation) = confirmation {
-                entry = entry.confirmation(confirmation);
-            }
             self.audit.append(entry);
             self.events.wirings_changed();
         }
@@ -2711,10 +2436,8 @@ impl Broker {
         self.request_history.records()
     }
 
-    /// Answer a prompt. "Approve all" persists the switch going off first —
-    /// through [`Self::ui_set_confirm_mode`] and its authentication — so a
-    /// refused authentication leaves the traffic parked and the prompt up,
-    /// rather than half-applying the decision.
+    /// Answer a prompt. "Approve all" persists the switch going off first,
+    /// then releases every call parked on the connection.
     pub fn ui_respond_approval(
         &self,
         id: &Uuid,
@@ -2834,9 +2557,7 @@ impl Broker {
     }
 
     /// Choose whether a plain HTTP connection returns upstream headers that
-    /// can mint or negotiate credentials. Returning them is the default;
-    /// restoring it after an explicit containment choice takes the same fresh
-    /// action confirmation as other high-consequence access changes.
+    /// can mint or negotiate credentials. Returning them is the default.
     pub fn ui_set_expose_response_credentials(
         &self,
         connection_id: &Uuid,
@@ -2849,14 +2570,6 @@ impl Broker {
             ));
         }
         let old = self.access.expose_response_credentials(connection_id);
-        let confirmation = if expose && !old {
-            Some(self.confirm_action(&format!(
-                "Allow agents using “{}” to receive upstream cookies and authentication challenges",
-                connection.name
-            ))?)
-        } else {
-            None
-        };
 
         let _gate = self.config_gate.lock().unwrap();
         let current = self.store.connection_by_id(connection_id)?;
@@ -2869,7 +2582,7 @@ impl Broker {
             .access
             .set_expose_response_credentials(*connection_id, expose)?;
         if changed {
-            let mut audit = AuditEntry::new(
+            let audit = AuditEntry::new(
                 AuditKind::SettingsChanged,
                 format!(
                     "Upstream response credentials {} for {}",
@@ -2880,9 +2593,6 @@ impl Broker {
             .connection(connection.name.clone())
             .field("setting", "expose_response_credentials")
             .field("new", expose);
-            if let Some(confirmation) = confirmation {
-                audit = audit.confirmation(confirmation);
-            }
             self.audit.append(audit);
             self.events.wirings_changed();
         }
@@ -3010,13 +2720,8 @@ impl Broker {
     /// data-plane capability, including standing direct endpoints. This is
     /// the "disconnect everything" action — agents that read the token file
     /// reconnect on their own; pasted endpoint addresses must be reissued.
-    /// The single native sheet is both the warning and the gate: its reason
-    /// text carries the consequences, so no separate dialog precedes it.
+    /// The shell presents the destructive confirmation before calling this.
     pub fn ui_rotate_key(&self) -> Result<()> {
-        let confirmation = self.confirm_action(
-            "rotate this computer's key — every live agent session closes now, \
-             and agents reconnect on their own from the key file",
-        )?;
         let _gate = self.config_gate.lock().unwrap();
         // Revoke standing capabilities before rotating the shared identity.
         // If a persistence error interrupts the operation, failing with fewer
@@ -3037,7 +2742,6 @@ impl Broker {
                 AuditKind::TokenRevoked,
                 "Key rotated; all agents disconnected".to_string(),
             )
-            .confirmation(confirmation)
             .field("sessions_closed", sessions_closed)
             .field("endpoints_revoked", endpoints.len()),
         );
@@ -3093,16 +2797,13 @@ impl Broker {
         Ok(self.data_plane.close_session(id))
     }
 
-    /// Clear the audit log only after a fresh full-authority confirmation,
-    /// then leave a tombstone as the first entry in the new chain.
+    /// Clear the audit log after the shell's destructive confirmation, then
+    /// leave a tombstone as the first entry in the new chain.
     pub fn ui_clear_activity(&self) -> Result<()> {
-        let confirmation =
-            self.confirm_action("Clear AgentMFA activity history and restart its audit chain")?;
         let removed = self.audit.recent(usize::MAX).len();
         self.audit.clear()?;
         self.audit.append(
             AuditEntry::new(AuditKind::ActivityCleared, "Activity history cleared")
-                .confirmation(confirmation)
                 .field("entries_removed", removed)
                 .field("surface", "management"),
         );
@@ -3120,15 +2821,7 @@ impl Broker {
         if old == on {
             return Ok(());
         }
-        let confirmation = if !on {
-            // Weakening the read gate always re-prompts; the presence window
-            // does not cover it.
-            Some(self.confirm_action("Disable OS authentication requirement for reading secrets")?)
-        } else {
-            None
-        };
         self.store.set_reauth_on_read(on)?;
-        self.store.clear_user_presence();
         self.audit.append(
             AuditEntry::new(
                 AuditKind::SettingsChanged,
@@ -3136,14 +2829,12 @@ impl Broker {
             )
             .field("setting", "reauth_on_read")
             .field("old", old)
-            .field("new", on)
-            .maybe_confirmation(confirmation),
+            .field("new", on),
         );
         Ok(())
     }
 
-    /// Change the presence-window length. Restricted to the offered choices;
-    /// the window restarts under the new length immediately.
+    /// Compatibility setter for the retired presence-window setting.
     pub fn ui_set_presence_window(&self, secs: u64) -> Result<()> {
         if !PRESENCE_WINDOW_CHOICES.contains(&secs) {
             return Err(CoreError::InvalidSetting(format!(
@@ -3154,11 +2845,7 @@ impl Broker {
         if old == secs {
             return Ok(());
         }
-        let confirmation = self.confirm_user_action("Change how long AgentMFA stays unlocked")?;
         self.store.set_presence_window_secs(secs)?;
-        // Re-anchor the just-confirmed window so a shortened length takes
-        // effect now instead of at the old deadline.
-        self.store.reanchor_presence();
         self.audit.append(
             AuditEntry::new(
                 AuditKind::SettingsChanged,
@@ -3166,31 +2853,19 @@ impl Broker {
             )
             .field("setting", "presence_window_secs")
             .field("old", old)
-            .field("new", secs)
-            .confirmation(confirmation),
+            .field("new", secs),
         );
         Ok(())
     }
 
     /// Ask before trusting a first-seen SSH host key, or stop asking.
     ///
-    /// Turning it **off** removes a gate the user deliberately put up, the same
-    /// class of change as disabling the read gate, so it takes a real
-    /// authentication that the presence window does not cover. Turning it on
-    /// only adds friction and is free.
+    /// The explicit switch is the user's authorization in either direction.
     pub fn ui_set_confirm_ssh_host_keys(&self, on: bool) -> Result<()> {
         let old = self.store.settings().confirm_ssh_host_keys;
         if old == on {
             return Ok(());
         }
-        let confirmation = if on {
-            None
-        } else {
-            Some(self.confirm_action(
-                "stop asking before trusting a new SSH host key — the first key a \
-                 server presents will be pinned without asking",
-            )?)
-        };
         self.store.set_confirm_ssh_host_keys(on)?;
         self.audit.append(
             AuditEntry::new(
@@ -3199,8 +2874,7 @@ impl Broker {
             )
             .field("setting", "confirm_ssh_host_keys")
             .field("old", old)
-            .field("new", on)
-            .maybe_confirmation(confirmation),
+            .field("new", on),
         );
         Ok(())
     }
@@ -3432,44 +3106,8 @@ mod tests {
         assert!(!example.contains("IdentitiesOnly"), "{example}");
     }
 
-    /// SEC-45. Confirmation policy is intentionally asymmetric, so keep an
-    /// explicit source inventory beside the comments maintainers rely on.
-    /// Adding or removing a gate changes these counts and forces this list to
-    /// be reviewed in the same patch.
     #[test]
-    fn confirmation_call_site_inventory_is_explicit() {
-        let source = include_str!("broker.rs");
-        let fresh_gate = ["confirm_", "action("].concat();
-        let windowed_gate = ["confirm_user_", "action("].concat();
-        let configuration_gate = ["confirm_configuration_", "action("].concat();
-        assert_eq!(source.matches(&fresh_gate).count(), 14);
-        assert_eq!(source.matches(&windowed_gate).count(), 6);
-        assert_eq!(source.matches(&configuration_gate).count(), 3);
-
-        for reason in [
-            "Replace the stored value of secret",
-            "Copy secret",
-            "Copy the shared agent key through management",
-            "Add tool",
-            "Change security settings for tool",
-            "Test newly retargeted tool",
-            "Issue a direct endpoint",
-            "Copy the direct endpoint",
-            "Let agents use",
-            "stop confirming traffic",
-            "rotate this computer's key",
-            "Clear AgentMFA activity history",
-            "Disable OS authentication requirement",
-            "Change how long AgentMFA stays unlocked",
-            "stop asking before trusting a new SSH host key",
-            "stop requiring authentication on the SSH endpoint",
-            "Allow agents using",
-        ] {
-            assert!(
-                source.contains(reason),
-                "missing confirmation inventory item: {reason}"
-            );
-        }
+    fn ssh_host_key_confirmation_stays_connected_to_the_setting() {
         // Trust-on-first-use pins a host key permanently, so whether it asks
         // first has to stay traceable to the setting.
         //

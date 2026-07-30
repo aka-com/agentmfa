@@ -20,7 +20,6 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::{ConnectionField, CoreError};
-use crate::events::BrokerEvents;
 #[cfg(any(test, feature = "test-harness"))]
 use crate::events::NoopEvents;
 use crate::integrity::StateIntegrity;
@@ -32,8 +31,6 @@ use crate::types::{
 use crate::vault::{SecretVault, VaultAttrs};
 use crate::Result;
 
-const PRESENCE_ABSOLUTE_MAX: std::time::Duration = std::time::Duration::from_secs(12 * 60 * 60);
-
 /// Every persisted connection mutation must advance its optimistic-lock
 /// version, even when the wall clock has not ticked (or moves backwards).
 fn next_connection_updated_at(previous: &chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
@@ -43,96 +40,6 @@ fn next_connection_updated_at(previous: &chrono::DateTime<Utc>) -> chrono::DateT
     } else {
         previous.to_owned() + chrono::Duration::nanoseconds(1)
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct PresenceGrant {
-    idle_until: std::time::Instant,
-    absolute_until: std::time::Instant,
-    idle_wall_until: chrono::DateTime<Utc>,
-    absolute_wall_until: chrono::DateTime<Utc>,
-}
-
-impl PresenceGrant {
-    fn new(
-        now: std::time::Instant,
-        wall_now: chrono::DateTime<Utc>,
-        window: std::time::Duration,
-    ) -> Self {
-        let absolute_until = now + PRESENCE_ABSOLUTE_MAX;
-        let absolute_wall_until = wall_now
-            + chrono::Duration::from_std(PRESENCE_ABSOLUTE_MAX)
-                .expect("the presence maximum fits chrono");
-        Self {
-            idle_until: std::cmp::min(now + window, absolute_until),
-            absolute_until,
-            idle_wall_until: std::cmp::min(
-                wall_now
-                    + chrono::Duration::from_std(window)
-                        .expect("the configured presence window fits chrono"),
-                absolute_wall_until,
-            ),
-            absolute_wall_until,
-        }
-    }
-
-    fn ride(
-        &mut self,
-        now: std::time::Instant,
-        wall_now: chrono::DateTime<Utc>,
-        window: std::time::Duration,
-    ) -> bool {
-        if now >= self.idle_until
-            || now >= self.absolute_until
-            || wall_now >= self.idle_wall_until
-            || wall_now >= self.absolute_wall_until
-        {
-            return false;
-        }
-        self.idle_until = std::cmp::min(now + window, self.absolute_until);
-        self.idle_wall_until = std::cmp::min(
-            wall_now
-                + chrono::Duration::from_std(window)
-                    .expect("the configured presence window fits chrono"),
-            self.absolute_wall_until,
-        );
-        true
-    }
-
-    fn reanchor(
-        &mut self,
-        now: std::time::Instant,
-        wall_now: chrono::DateTime<Utc>,
-        window: std::time::Duration,
-    ) {
-        if now < self.idle_until
-            && now < self.absolute_until
-            && wall_now < self.idle_wall_until
-            && wall_now < self.absolute_wall_until
-        {
-            self.idle_until = std::cmp::min(now + window, self.absolute_until);
-            self.idle_wall_until = std::cmp::min(
-                wall_now
-                    + chrono::Duration::from_std(window)
-                        .expect("the configured presence window fits chrono"),
-                self.absolute_wall_until,
-            );
-        }
-    }
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-struct PresenceState {
-    secret_read: Option<PresenceGrant>,
-    configuration: Option<PresenceGrant>,
-}
-
-#[derive(Debug, Default)]
-struct PresenceCoordinator {
-    state: Mutex<PresenceState>,
-    /// One process-wide lane for the freshness re-check and any native
-    /// prompt it triggers. The check must happen after acquiring this lock.
-    confirmation: Mutex<()>,
 }
 
 /// Current settings-migration generation. Bump it when a persisted default
@@ -268,16 +175,8 @@ pub struct ConnectionSpec {
 pub struct Store {
     paths: Paths,
     vault: Arc<dyn SecretVault>,
-    events: Arc<dyn BrokerEvents>,
     integrity: Arc<StateIntegrity>,
     state: Mutex<IndexState>,
-    /// Native-authentication grants. Any *native* prompt the user passes —
-    /// configuration, full-authority, or the clipboard copy sheet — opens the
-    /// whole user-plane window ("one OS authentication keeps AgentMFA
-    /// unlocked"); only riding an existing read grant stays read-scoped. No
-    /// grant can slide beyond its original 12-hour absolute lifetime. Never
-    /// persisted.
-    presence: Arc<PresenceCoordinator>,
     /// Tools this build could not load because their kind was retired, as
     /// `name (kind)`. Captured at open so the broker can audit the loss.
     retired_connections_dropped: Vec<String>,
@@ -297,7 +196,7 @@ impl Store {
     pub fn open_with_events(
         paths: Paths,
         vault: Arc<dyn SecretVault>,
-        events: Arc<dyn BrokerEvents>,
+        _events: Arc<dyn crate::events::BrokerEvents>,
         integrity: Arc<StateIntegrity>,
     ) -> Result<Self> {
         paths.ensure()?;
@@ -326,10 +225,8 @@ impl Store {
         Ok(Self {
             paths,
             vault,
-            events,
             integrity,
             state: Mutex::new(state),
-            presence: Arc::new(PresenceCoordinator::default()),
             retired_connections_dropped,
             read_gate_default_migrated: migrated_read_gate == Some(true),
         })
@@ -349,149 +246,6 @@ impl Store {
     /// acceptable, and the activity log is where they will see it.
     pub fn read_gate_default_migrated(&self) -> bool {
         self.read_gate_default_migrated
-    }
-
-    /* ----------------------------- presence ------------------------------- */
-
-    fn presence_window(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(self.settings().presence_window_secs)
-    }
-
-    /// Establish a configuration grant, which also covers reads. Used after
-    /// any successful *native* authentication — a configuration action
-    /// (preserving the save-then-test flow), a full-authority action-gate
-    /// prompt (agent grants, key rotation), or the clipboard copy sheet. The
-    /// prompts all present the same OS authentication, so one passed sheet
-    /// opens the same window regardless of which gate collected it; riding
-    /// an existing read grant establishes nothing new.
-    fn note_configuration_presence(&self) {
-        let now = std::time::Instant::now();
-        let grant = PresenceGrant::new(now, Utc::now(), self.presence_window());
-        let mut presence = self.presence.state.lock().unwrap();
-        presence.configuration = Some(grant);
-        presence.secret_read = Some(grant);
-    }
-
-    /// Ride a configuration grant. It may extend an existing read grant, but
-    /// cannot create one unless a native configuration authentication did.
-    fn use_configuration_presence(&self) -> bool {
-        let now = std::time::Instant::now();
-        let wall_now = Utc::now();
-        let window = self.presence_window();
-        let mut presence = self.presence.state.lock().unwrap();
-        let fresh = presence
-            .configuration
-            .as_mut()
-            .is_some_and(|grant| grant.ride(now, wall_now, window));
-        if fresh {
-            if let Some(grant) = presence.secret_read.as_mut() {
-                grant.ride(now, wall_now, window);
-            }
-        }
-        fresh
-    }
-
-    /// Re-anchor active grants after the configured idle window changes. The
-    /// original absolute deadline is deliberately retained.
-    pub fn reanchor_presence(&self) {
-        let _confirmation = self.presence.confirmation.lock().unwrap();
-        let now = std::time::Instant::now();
-        let wall_now = Utc::now();
-        let window = self.presence_window();
-        let mut presence = self.presence.state.lock().unwrap();
-        if let Some(grant) = presence.secret_read.as_mut() {
-            grant.reanchor(now, wall_now, window);
-        }
-        if let Some(grant) = presence.configuration.as_mut() {
-            grant.reanchor(now, wall_now, window);
-        }
-    }
-
-    /// Drop all grants so the next gated action re-prompts (e.g. after the
-    /// read-authentication setting changes).
-    pub fn clear_user_presence(&self) {
-        let _confirmation = self.presence.confirmation.lock().unwrap();
-        *self.presence.state.lock().unwrap() = PresenceState::default();
-    }
-
-    /// Always invoke the native action gate, serialized with every other
-    /// presence check and prompt. The action gate never *rides* the presence
-    /// window — a full-authority action (agent grants, key rotation) always
-    /// re-prompts — but a successful authentication here *opens* it, so an
-    /// immediately following user-plane read or configuration change is not a
-    /// surprise re-prompt. This keeps the documented "one OS authentication
-    /// keeps AgentMFA unlocked" model: the strongest prompt there is also
-    /// covers the weaker user-plane actions that follow it.
-    pub fn confirm_action(&self, description: &str) -> Result<crate::types::ConfirmationMethod> {
-        let _confirmation = self.presence.confirmation.lock().unwrap();
-        let method = self
-            .events
-            .confirm_action(description)
-            .ok_or(CoreError::NotConfirmed)?;
-        if self.events.action_authority(method).establishes_presence() {
-            self.note_configuration_presence();
-        }
-        Ok(method)
-    }
-
-    /// Check and ride the configuration grant, or establish purpose-scoped
-    /// grants after one serialized native prompt.
-    pub fn confirm_configuration_action(
-        &self,
-        description: &str,
-    ) -> Result<crate::types::ConfirmationMethod> {
-        let _confirmation = self.presence.confirmation.lock().unwrap();
-        if self.use_configuration_presence() {
-            return Ok(crate::types::ConfirmationMethod::RecentAuthentication);
-        }
-        let method = self
-            .events
-            .confirm_action(description)
-            .ok_or(CoreError::NotConfirmed)?;
-        if self.events.action_authority(method).establishes_presence() {
-            self.note_configuration_presence();
-        }
-        Ok(method)
-    }
-
-    /// Check and ride the read grant, or establish grants after the
-    /// clipboard's native authentication. The blocking prompt and check share
-    /// the same global lane as config and ordinary read prompts. A *passed
-    /// sheet* opens the full user-plane window (read + configuration): it is
-    /// the same OS authentication a configuration prompt would collect, so
-    /// acting near the copy (edit, reissue, delete) must not re-prompt
-    /// back-to-back. Riding an existing read grant grants nothing new.
-    pub async fn confirm_secret_copy(&self, meta: SecretMeta) -> Result<()> {
-        let presence = self.presence.clone();
-        let events = self.events.clone();
-        let window = self.presence_window();
-        tokio::task::spawn_blocking(move || {
-            let _confirmation = presence.confirmation.lock().unwrap();
-            let now = std::time::Instant::now();
-            let wall_now = Utc::now();
-            if presence
-                .state
-                .lock()
-                .unwrap()
-                .secret_read
-                .as_mut()
-                .is_some_and(|grant| grant.ride(now, wall_now, window))
-            {
-                return Ok(());
-            }
-            if !events.confirm_secret_copy(&meta, window) {
-                return Err(CoreError::SecretReadNotAuthenticated);
-            }
-            if events.secret_copy_authority().establishes_presence() {
-                let grant = PresenceGrant::new(std::time::Instant::now(), Utc::now(), window);
-                let mut state = presence.state.lock().unwrap();
-                state.secret_read = Some(grant);
-                state.configuration = Some(grant);
-            }
-            Ok(())
-        })
-        .await
-        .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))?
     }
 
     fn persist(&self, state: &IndexState) -> Result<()> {
@@ -698,8 +452,7 @@ impl Store {
     }
 
     /// Core-side Keychain read returning only the short prefix
-    /// (`min(6, ⌊len/2⌋)` chars). This is still secret disclosure, so it
-    /// rides the ordinary read gate and presence window.
+    /// (`min(6, ⌊len/2⌋)` chars).
     pub async fn reveal_secret_prefix(&self, id: &Uuid) -> Result<String> {
         let value = self.secret_value(id).await?;
         Ok(reveal_prefix(&value))
@@ -709,15 +462,15 @@ impl Store {
     /// upstream credential injection and the clipboard-copy command. There
     /// is deliberately no Tauri command that returns this to the webview.
     pub async fn secret_value(&self, id: &Uuid) -> Result<SecretValue> {
-        let (meta, reauth) = self.secret_read_target(id)?;
-        self.confirm_secret_read(meta, reauth).await?;
+        self.secret_by_id(id)?;
         self.vault.get(id).await
     }
 
     pub async fn secret_value_by_name(&self, name: &str) -> Result<SecretValue> {
-        let (meta, reauth) = self.secret_read_target_by_name(name)?;
-        let id = meta.id;
-        self.confirm_secret_read(meta, reauth).await?;
+        let id = self
+            .secret_by_name(name)
+            .ok_or(CoreError::SecretNotFound)?
+            .id;
         self.vault.get(&id).await
     }
 
@@ -738,74 +491,6 @@ impl Store {
                 .cloned()
                 .ok_or_else(|| CoreError::UnknownTemplateRef(name.to_string()))
         })
-    }
-
-    fn secret_read_target(&self, id: &Uuid) -> Result<(SecretMeta, bool)> {
-        let state = self.state.lock().unwrap();
-        let meta = state
-            .secrets
-            .iter()
-            .find(|s| &s.id == id)
-            .cloned()
-            .ok_or(CoreError::SecretNotFound)?;
-        Ok((meta, state.settings().reauth_on_read))
-    }
-
-    fn secret_read_target_by_name(&self, name: &str) -> Result<(SecretMeta, bool)> {
-        let state = self.state.lock().unwrap();
-        let meta = state
-            .secrets
-            .iter()
-            .find(|s| s.name == name)
-            .cloned()
-            .ok_or(CoreError::SecretNotFound)?;
-        Ok((meta, state.settings().reauth_on_read))
-    }
-
-    /// The confirmation hook can block on a native re-auth prompt (Touch
-    /// ID), so it runs on the blocking pool rather than tying up a runtime
-    /// worker while the user decides.
-    async fn confirm_secret_read(&self, meta: SecretMeta, reauth: bool) -> Result<()> {
-        if !reauth {
-            return Ok(());
-        }
-        let presence = self.presence.clone();
-        let events = self.events.clone();
-        let window = self.presence_window();
-        crate::authorization::confirm_once(|| async move {
-            tokio::task::spawn_blocking(move || {
-                let _confirmation = presence.confirmation.lock().unwrap();
-                // Re-check only after joining the global lane: another prompt
-                // may have established a suitable grant while this read was
-                // waiting. Pre-authorized agent executions never reach here.
-                let now = std::time::Instant::now();
-                let wall_now = Utc::now();
-                if presence
-                    .state
-                    .lock()
-                    .unwrap()
-                    .secret_read
-                    .as_mut()
-                    .is_some_and(|grant| grant.ride(now, wall_now, window))
-                {
-                    return Ok(());
-                }
-                if !events.confirm_secret_read(&meta) {
-                    return Err(CoreError::SecretReadNotAuthenticated);
-                }
-                if events.secret_read_authority().establishes_presence() {
-                    presence.state.lock().unwrap().secret_read = Some(PresenceGrant::new(
-                        std::time::Instant::now(),
-                        Utc::now(),
-                        window,
-                    ));
-                }
-                Ok(())
-            })
-            .await
-            .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))?
-        })
-        .await
     }
 
     /// Names of connections referencing this secret (for the "Used by N
@@ -1782,69 +1467,10 @@ mod tests {
     use super::*;
     use crate::types::PgSslMode;
     use crate::vault::MemoryVault;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use zeroize::Zeroizing;
 
     const SSH_HOST_FP: &str = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     const SSH_HOST_FP_ALT: &str = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE";
-
-    #[test]
-    fn presence_grant_cannot_slide_past_twelve_hours() {
-        let start = std::time::Instant::now();
-        let wall_start = Utc::now();
-        let window = std::time::Duration::from_secs(2 * 60 * 60);
-        let mut grant = PresenceGrant::new(start, wall_start, window);
-
-        for hour in 1..12 {
-            assert!(grant.ride(
-                start + std::time::Duration::from_secs(hour * 60 * 60),
-                wall_start + chrono::Duration::hours(hour as i64),
-                window,
-            ));
-        }
-        assert_eq!(grant.absolute_until, start + PRESENCE_ABSOLUTE_MAX);
-        assert_eq!(grant.idle_until, grant.absolute_until);
-        assert!(!grant.ride(grant.absolute_until, grant.absolute_wall_until, window));
-    }
-
-    #[test]
-    fn reanchoring_never_resets_the_absolute_deadline() {
-        let start = std::time::Instant::now();
-        let wall_start = Utc::now();
-        let mut grant =
-            PresenceGrant::new(start, wall_start, std::time::Duration::from_secs(60 * 60));
-        let absolute = grant.absolute_until;
-        let wall_absolute = grant.absolute_wall_until;
-        grant.reanchor(
-            start + std::time::Duration::from_secs(30 * 60),
-            wall_start + chrono::Duration::minutes(30),
-            std::time::Duration::from_secs(2 * 60 * 60),
-        );
-        assert_eq!(grant.absolute_until, absolute);
-        assert_eq!(grant.absolute_wall_until, wall_absolute);
-    }
-
-    #[test]
-    fn presence_grant_expires_when_wall_clock_advances_during_suspend() {
-        let start = std::time::Instant::now();
-        let wall_start = Utc::now();
-        let window = std::time::Duration::from_secs(15 * 60);
-        let mut grant = PresenceGrant::new(start, wall_start, window);
-
-        assert!(!grant.ride(start, wall_start + chrono::Duration::days(1), window));
-    }
-
-    struct ReadGate {
-        allow: AtomicBool,
-        calls: AtomicUsize,
-    }
-
-    impl BrokerEvents for ReadGate {
-        fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            self.allow.load(Ordering::SeqCst)
-        }
-    }
 
     async fn store() -> (Store, Arc<MemoryVault>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -1978,49 +1604,6 @@ mod tests {
         );
         let short = store.add_secret("SHORT", val("abcd")).unwrap();
         assert_eq!(store.reveal_secret_prefix(&short.id).await.unwrap(), "ab…");
-    }
-
-    #[tokio::test]
-    async fn secret_reads_require_reauth_when_enabled() {
-        let dir = tempfile::tempdir().unwrap();
-        let vault = Arc::new(MemoryVault::new());
-        let gate = Arc::new(ReadGate {
-            allow: AtomicBool::new(false),
-            calls: AtomicUsize::new(0),
-        });
-        let integrity = Arc::new(StateIntegrity::open(&*vault).await.unwrap());
-        let store =
-            Store::open_with_events(Paths::under(dir.path()), vault, gate.clone(), integrity)
-                .unwrap();
-        let meta = store
-            .add_secret("GITHUB_API_KEY", val("ghp_secret"))
-            .unwrap();
-
-        assert!(
-            !store.settings().reauth_on_read,
-            "the read gate is opt-in: off until the user enables it"
-        );
-        assert_eq!(&*store.secret_value(&meta.id).await.unwrap(), "ghp_secret");
-        assert_eq!(gate.calls.load(Ordering::SeqCst), 0);
-
-        store.set_reauth_on_read(true).unwrap();
-        assert!(matches!(
-            store.secret_value(&meta.id).await.unwrap_err(),
-            CoreError::SecretReadNotAuthenticated
-        ));
-        assert_eq!(gate.calls.load(Ordering::SeqCst), 1);
-
-        gate.allow.store(true, Ordering::SeqCst);
-        assert_eq!(
-            &*store.secret_value_by_name("GITHUB_API_KEY").await.unwrap(),
-            "ghp_secret"
-        );
-        assert_eq!(gate.calls.load(Ordering::SeqCst), 2);
-
-        store.set_reauth_on_read(false).unwrap();
-        gate.allow.store(false, Ordering::SeqCst);
-        assert_eq!(&*store.secret_value(&meta.id).await.unwrap(), "ghp_secret");
-        assert_eq!(gate.calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]
