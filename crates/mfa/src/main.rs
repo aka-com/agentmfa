@@ -626,6 +626,24 @@ enum ConnCommand {
         #[arg(long)]
         broker: Option<String>,
     },
+    /// Report or change whether an API connection may return credential-bearing
+    /// upstream response headers to agents. They are contained by default.
+    ResponseCredentials {
+        /// The API connection to inspect or change.
+        name: String,
+        /// Allow credential-bearing upstream response headers to reach agents.
+        #[arg(long, conflicts_with = "contain")]
+        allow: bool,
+        /// Restore the secure default and contain credential-bearing headers.
+        #[arg(long)]
+        contain: bool,
+        /// Operate on a broker rooted here instead of the default layout.
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Manage the broker at this manage-API URL instead of this machine's.
+        #[arg(long)]
+        broker: Option<String>,
+    },
     /// Record the SQL of this Postgres connection's statements in the
     /// activity log, or stop. Without --on or --off, prints the effective
     /// setting. Statement text can carry credentials and personal data, so
@@ -1015,6 +1033,13 @@ fn run_cli() {
                 root,
                 broker,
             } => cmd_conn_confirm(name, root, broker, !off),
+            ConnCommand::ResponseCredentials {
+                name,
+                allow,
+                contain,
+                root,
+                broker,
+            } => cmd_conn_response_credentials(name, root, broker, allow, contain),
             ConnCommand::AuditStatements {
                 name,
                 on,
@@ -1786,6 +1811,9 @@ fn cmd_conn_list(root: Option<PathBuf>, url: Option<String>, json: bool) {
                 "confirm: on (no approval surface attached — traffic will be refused)"
             });
         }
+        if dto.agent_access.expose_response_credentials {
+            state.push("response credentials: exposed");
+        }
         println!(
             "{}  {}  {}{}",
             dto.name,
@@ -1845,6 +1873,16 @@ fn cmd_conn_show(name: String, root: Option<PathBuf>, url: Option<String>, json:
     }
     if let Some(until) = &dto.agent_access.confirm_cooldown_until {
         println!("denial cooldown: until {until}");
+    }
+    if dto.kind == "api" {
+        println!(
+            "upstream response credentials: {}",
+            if dto.agent_access.expose_response_credentials {
+                "exposed to agents"
+            } else {
+                "contained"
+            }
+        );
     }
     println!(
         "allowed MCP tools: {}",
@@ -2194,6 +2232,67 @@ fn cmd_conn_confirm(name: String, root: Option<PathBuf>, url: Option<String>, on
         }
     } else {
         eprintln!("traffic confirmation was already {state} for {name}");
+    }
+}
+
+fn cmd_conn_response_credentials(
+    name: String,
+    root: Option<PathBuf>,
+    url: Option<String>,
+    allow: bool,
+    contain: bool,
+) {
+    let managed = management_backend(root, url);
+    let dto = conn_dto(&managed, &name);
+    if dto.kind != "api" {
+        die_with(
+            ExitCode::Usage,
+            format!(
+                "{name} is a {} connection; upstream response credentials apply to API connections",
+                dto.kind
+            ),
+        );
+    }
+    if !allow && !contain {
+        println!(
+            "{}",
+            if dto.agent_access.expose_response_credentials {
+                "exposed to agents"
+            } else {
+                "contained"
+            }
+        );
+        return;
+    }
+
+    let expose = allow;
+    let changed = if expose {
+        managed.run_gated(
+            managed
+                .backend
+                .set_expose_response_credentials(dto_id(&dto.id), true),
+        )
+    } else {
+        managed.run(
+            managed
+                .backend
+                .set_expose_response_credentials(dto_id(&dto.id), false),
+        )
+    };
+    let state = if expose {
+        "exposed to agents"
+    } else {
+        "contained"
+    };
+    if changed {
+        eprintln!("upstream response credentials are now {state} for {name}");
+        if expose {
+            eprintln!(
+                "  warning: Set-Cookie and authentication response headers can now reach agents"
+            );
+        }
+    } else {
+        eprintln!("upstream response credentials were already {state} for {name}");
     }
 }
 
@@ -3074,6 +3173,8 @@ struct StatusTool {
     target: String,
     enabled: bool,
     confirm: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    response_credentials_exposed: bool,
     /// Whether a direct endpoint is issued for this tool.
     ///
     /// Status listed what agents *could* reach through the control plane and
@@ -3092,6 +3193,7 @@ impl From<&ConnectionDto> for StatusTool {
             target: connection.target.clone(),
             enabled: connection.agent_access.enabled,
             confirm: connection.agent_access.confirm,
+            response_credentials_exposed: connection.agent_access.expose_response_credentials,
             endpoint: connection.agent_access.endpoint.is_some(),
         }
     }
@@ -4124,6 +4226,35 @@ mod tests {
     }
 
     #[test]
+    fn response_credential_flags_parse_and_conflict() {
+        let cli =
+            Cli::try_parse_from(["mfa", "conn", "response-credentials", "api", "--allow"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Conn {
+                command: ConnCommand::ResponseCredentials {
+                    allow: true,
+                    contain: false,
+                    ..
+                }
+            }
+        ));
+        assert!(Cli::try_parse_from([
+            "mfa",
+            "conn",
+            "response-credentials",
+            "api",
+            "--allow",
+            "--contain",
+        ])
+        .is_err());
+        assert!(
+            Cli::try_parse_from(["mfa", "conn", "response-credentials", "api"]).is_ok(),
+            "no flag reports the effective state"
+        );
+    }
+
+    #[test]
     fn endpoint_issuance_requires_online_broker_but_revocation_does_not() {
         assert_eq!(endpoint_action(false, false).unwrap(), EndpointAction::Read);
         assert_eq!(endpoint_action(true, false).unwrap(), EndpointAction::Issue);
@@ -4419,6 +4550,7 @@ mod tests {
             agent_access: AccessDto {
                 enabled: true,
                 confirm: false,
+                expose_response_credentials: false,
                 confirm_window_until: None,
                 confirm_window_agents: vec![],
                 confirm_cooldown_until: None,

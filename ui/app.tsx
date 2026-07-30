@@ -1492,7 +1492,35 @@ function ConfirmationSection({ connection: c }: {
       ? <div className="cd-confirm-note">With no AgentMFA approval surface attached,
           this tool’s traffic is refused rather than carried.</div>
       : null}
+    <ResponseCredentialRelay connection={c} />
     <StatementRecording connection={c} />
+  </div>;
+}
+
+/**
+ * Upstream cookies and authentication challenges can grant authority beyond
+ * the broker's configured request credential. Keep them contained unless the
+ * user explicitly accepts that expansion for this API.
+ */
+function ResponseCredentialRelay({ connection: c }: {
+  connection: ConnectionSummary;
+}): ReactNode {
+  if (c.type !== 'api') return null;
+  const on = Boolean(c.agent_access.expose_response_credentials);
+  return <div className="cd-confirm-row cd-response-credentials">
+    <div className="cd-confirm-txt">
+      <div className="cd-confirm-lbl">Return upstream credentials to agents</div>
+      <div className="cd-confirm-sub">
+        {on
+          ? 'Set-Cookie and authentication challenge/info headers are returned to control-plane and direct-endpoint callers.'
+          : 'Cookies and authentication challenge/info headers stay inside the upstream boundary.'}
+      </div>
+    </div>
+    <button className={`switch ${on ? 'on' : ''}`} role="switch" aria-checked={on}
+      title={on ? 'Upstream response credentials are exposed' : 'Upstream response credentials are contained'}
+      aria-label={`${on ? 'Contain' : 'Return'} upstream response credentials for ${c.name}`}
+      data-act={on ? 'response-credentials-off' : 'response-credentials-on'}
+      data-conn={c.id}></button>
   </div>;
 }
 
@@ -6043,6 +6071,27 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
         toast('🔕 No longer asking about this tool’s traffic');
       }
       releaseDropdownForm();
+      await refresh('connections');
+      break;
+    case 'response-credentials-on':
+      // This expands what an agent receives and opens the broker's fresh
+      // confirmation sheet. Keep the dropdown alive while that sheet owns
+      // focus, exactly like the other high-consequence toggles.
+      if (!await holdDropdownFormOpen()) break;
+      if (await run(() => invoke('set_expose_response_credentials', {
+        connectionId: btn.dataset.conn || '', expose: true,
+      }))) {
+        toast('⚠ Upstream cookies and authentication fields are now returned to agents');
+      }
+      releaseDropdownForm();
+      await refresh('connections');
+      break;
+    case 'response-credentials-off':
+      if (await run(() => invoke('set_expose_response_credentials', {
+        connectionId: btn.dataset.conn || '', expose: false,
+      }))) {
+        toast('🔒 Upstream response credentials are contained');
+      }
       await refresh('connections');
       break;
     case 'endpoint-auth-on':

@@ -32,8 +32,8 @@ use crate::manage::{
     ConnectionAddBody, EndpointRequireAuthBody,
     ConnectionConfigPatchBody, ConnectionRenameBody, ConnectionUpdateBody, ConnectionsReorderBody,
     DraftTestBody, ElicitationResponseBody, ManagementBackend, McpAuthDeliverBody,
-    McpAuthStartBody, OAuthCompleteBody, OAuthReconnectBody, OAuthStartBody, SecretAddBody,
-    SecretEditBody, SettingsPatchBody,
+    McpAuthStartBody, OAuthCompleteBody, OAuthReconnectBody, OAuthStartBody,
+    ResponseCredentialsBody, SecretAddBody, SecretEditBody, SettingsPatchBody,
 };
 
 /// Bearer authentication against the management token.
@@ -162,6 +162,10 @@ pub fn router() -> Router<AppState> {
         .route("/connections/{id}/test", post(test_connection))
         .route("/connections/{id}/access", post(set_tool_access))
         .route("/connections/{id}/confirm", post(set_confirm_mode))
+        .route(
+            "/connections/{id}/response-credentials",
+            post(set_expose_response_credentials),
+        )
         .route("/connections/{id}/allowed-tools", post(set_allowed_tools))
         .route(
             "/connections/{id}/audit-statements",
@@ -649,6 +653,21 @@ async fn set_confirm_mode(
         state
             .manage
             .set_confirm_mode(id, body.on)
+            .await
+            .map(|changed| json!({ "changed": changed })),
+    )
+}
+
+async fn set_expose_response_credentials(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+    Path(id): Path<Uuid>,
+    ApiJson(body): ApiJson<ResponseCredentialsBody>,
+) -> Response {
+    respond(
+        state
+            .manage
+            .set_expose_response_credentials(id, body.expose)
             .await
             .map(|changed| json!({ "changed": changed })),
     )

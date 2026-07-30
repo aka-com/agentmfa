@@ -151,6 +151,7 @@ interface MockAccess {
   connection_id: string;
   enabled: boolean;
   confirm?: boolean;
+  expose_response_credentials?: boolean;
   /** RFC 3339 end of an open approval window, when one is running. */
   confirm_window_until?: string | null;
   /** The agents those windows cover; approvals are scoped per agent. */
@@ -214,6 +215,7 @@ interface MockArgs {
   secs: number;
   connectionId: string;
   enabled: boolean;
+  expose: boolean;
   decision?: ApprovalDecision;
   tools?: string[] | null;
   auditStatements?: boolean | null;
@@ -560,6 +562,7 @@ function connDto(c: MockConnection): ConnectionSummary {
       return {
         enabled: record?.enabled ?? true,
         confirm: record?.confirm ?? false,
+        expose_response_credentials: record?.expose_response_credentials ?? false,
         confirm_window_until: record?.confirm_window_until ?? null,
         confirm_window_agents: record?.confirm_window_agents ?? [],
         confirm_cooldown_until: record?.confirm_cooldown_until ?? null,
@@ -1323,6 +1326,21 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         `Traffic confirmation ${args.on ? 'enabled' : 'disabled'} for ${connection.name}`,
         null, { connection: connection.name });
       emit('aka://wirings-changed', {});
+      return true;
+    }
+    case 'set_expose_response_credentials': {
+      const connection = db.connections.find((c) => c.id === args.connectionId);
+      if (!connection || connection.type !== 'api') return false;
+      let record = db.access.find((a) => a.connection_id === connection.id);
+      const expose = Boolean(args.expose);
+      if ((record?.expose_response_credentials ?? false) === expose) return false;
+      if (!record) {
+        record = { connection_id: connection.id, enabled: true };
+        db.access.push(record);
+      }
+      record.expose_response_credentials = expose;
+      emit('aka://wirings-changed', {});
+      emit('aka://connections-changed', {});
       return true;
     }
     case 'list_approvals': return db.approvals.slice();

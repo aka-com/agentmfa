@@ -266,6 +266,11 @@ pub struct AccessDto {
     /// session for Postgres, one login for SSH.
     #[serde(default)]
     pub confirm: bool,
+    /// Explicit opt-in to relay upstream response credential headers
+    /// (`Set-Cookie`, authentication challenges, and authentication-info).
+    /// Older brokers and connections default to containment.
+    #[serde(default)]
+    pub expose_response_credentials: bool,
     /// While an approval window is open, the RFC 3339 time the last of them
     /// lapses — so the app can say why nothing is being asked. Absent when no
     /// window is open.
@@ -752,6 +757,7 @@ mod tests {
             agent_access: AccessDto {
                 enabled: true,
                 confirm: false,
+                expose_response_credentials: false,
                 confirm_window_until: None,
                 confirm_window_agents: vec![],
                 confirm_cooldown_until: None,

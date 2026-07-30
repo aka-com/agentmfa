@@ -293,7 +293,35 @@ async fn secrets_and_connections_round_trip_over_the_manage_api() {
     assert_eq!(list[0]["type"], "api");
     assert_eq!(list[0]["secret_names"][0], "GITHUB_KEY");
     assert_eq!(list[0]["agent_access"]["enabled"], true);
+    assert_eq!(
+        list[0]["agent_access"]["expose_response_credentials"],
+        false
+    );
     let id = list[0]["id"].as_str().unwrap().to_string();
+
+    // Credential-bearing upstream response headers stay contained until the
+    // connection explicitly opts in, and the choice crosses the remote
+    // management boundary in both directions.
+    let (status, body) = h
+        .manage(
+            "POST",
+            &format!("/v1/manage/connections/{id}/response-credentials"),
+            Some(json!({ "expose": true })),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["changed"], true);
+    let (_, body) = h.manage("GET", "/v1/manage/connections", None).await;
+    assert_eq!(body[0]["agent_access"]["expose_response_credentials"], true);
+    let (status, body) = h
+        .manage(
+            "POST",
+            &format!("/v1/manage/connections/{id}/response-credentials"),
+            Some(json!({ "expose": false })),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["changed"], true);
 
     // Toggle agent access off and observe it in the listing.
     let (status, body) = h

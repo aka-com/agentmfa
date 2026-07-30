@@ -474,6 +474,35 @@ test('request notification policy exposes sound, Focus, and escalation controls'
   assert.match(app, /Your system settings remain in control/);
 });
 
+test('API response credentials stay behind an explicit, gated connection opt-in', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+  const relay = app.match(
+    /function ResponseCredentialRelay\([\s\S]*?\n\}\n\n\/\*\*/,
+  )?.[0];
+  const enable = app.match(
+    /case 'response-credentials-on':([\s\S]*?)case 'response-credentials-off':/,
+  )?.[1];
+  const disable = app.match(
+    /case 'response-credentials-off':([\s\S]*?)case 'endpoint-auth-on':/,
+  )?.[1];
+
+  assert.ok(relay, 'API detail view exposes the response-credential policy');
+  assert.match(relay, /if \(c\.type !== 'api'\) return null/);
+  assert.match(relay, /Boolean\(c\.agent_access\.expose_response_credentials\)/);
+  assert.ok(enable, 'the opt-in action is wired');
+  assert.match(enable, /holdDropdownFormOpen\(\)/);
+  assert.match(
+    enable,
+    /invoke\('set_expose_response_credentials',[\s\S]*?expose: true/,
+  );
+  assert.ok(disable, 'the containment action is wired');
+  assert.match(
+    disable,
+    /invoke\('set_expose_response_credentials',[\s\S]*?expose: false/,
+  );
+  assert.doesNotMatch(disable, /holdDropdownFormOpen\(\)/);
+});
+
 test('request history and secret dependencies remain actionable', async () => {
   const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
 

@@ -543,6 +543,11 @@ pub struct ToolAccess {
     /// written before this existed load as `Off`, the behaviour they had.
     #[serde(default)]
     pub confirm: ConfirmMode,
+    /// Whether upstream headers that can mint or negotiate credentials
+    /// (`Set-Cookie`, authentication challenges, and authentication-info)
+    /// may cross back to agents. False is the fail-closed default.
+    #[serde(default)]
+    pub expose_response_credentials: bool,
     /// Whether this Postgres connection's statement text is recorded in the
     /// activity log, overriding the broker-wide default.
     ///

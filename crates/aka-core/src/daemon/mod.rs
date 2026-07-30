@@ -1256,6 +1256,7 @@ async fn post_http(
 
     let executor = HttpExecution {
         store: broker.store.clone(),
+        access: broker.access.clone(),
         audit: broker.audit.clone(),
         client: broker.http_client.clone(),
         config: broker.config.clone(),

@@ -549,6 +549,7 @@ pub(crate) fn redacting_stream(
 /// user approved.
 pub struct HttpExecution {
     pub store: Arc<Store>,
+    pub access: Arc<crate::policy::AccessTable>,
     pub audit: Arc<AuditLog>,
     pub client: reqwest::Client,
     pub config: BrokerConfig,
@@ -885,6 +886,7 @@ impl HttpExecution {
             dialed.response,
             &self.config,
             &dialed.redactions,
+            self.access.expose_response_credentials(&self.connection.id),
             dialed.mcp_response_id.as_ref(),
             dialed.mcp_tool_call_id.as_ref(),
         )
@@ -913,8 +915,13 @@ impl HttpExecution {
             }
         };
         let status = response.status().as_u16();
+        let expose_response_credentials =
+            self.access.expose_response_credentials(&self.connection.id);
         let mut headers = serde_json::Map::new();
         for (name, value) in response.headers() {
+            if !response_header_is_relayable(name, expose_response_credentials) {
+                continue;
+            }
             let scrubbed = redactions.apply_to_string(&String::from_utf8_lossy(value.as_bytes()));
             match headers.get_mut(name.as_str()) {
                 Some(Value::String(existing)) => *existing = format!("{existing}, {scrubbed}"),
@@ -1557,6 +1564,7 @@ async fn relay_response(
     response: reqwest::Response,
     config: &BrokerConfig,
     redactions: &Redactions,
+    expose_response_credentials: bool,
     mcp_response_id: Option<&Value>,
     mcp_tool_call_id: Option<&Value>,
 ) -> ExecOutcome {
@@ -1572,6 +1580,9 @@ async fn relay_response(
     // the existing flattened `headers` object for control-plane compatibility.
     let mut set_cookie_headers = Vec::new();
     for (name, value) in response.headers() {
+        if !response_header_is_relayable(name, expose_response_credentials) {
+            continue;
+        }
         let value_lossy = String::from_utf8_lossy(value.as_bytes());
         let value_str = redactions.apply_to_string(value_lossy.as_ref());
         if name == http::header::SET_COOKIE {
@@ -1686,6 +1697,25 @@ async fn relay_response(
             "body_encoding": encoding,
         }),
     }
+}
+
+/// Headers that can create, carry, or negotiate authority are contained at
+/// the upstream boundary unless the connection explicitly opts in.
+fn response_header_is_relayable(name: &HeaderName, expose_response_credentials: bool) -> bool {
+    expose_response_credentials
+        || !matches!(
+            name.as_str(),
+            "set-cookie"
+                | "set-cookie2"
+                | "cookie"
+                | "cookie2"
+                | "www-authenticate"
+                | "proxy-authenticate"
+                | "authentication-info"
+                | "proxy-authentication-info"
+                | "authorization"
+                | "proxy-authorization"
+        )
 }
 
 /// End offset of the first complete SSE frame carrying the JSON-RPC response
@@ -2642,6 +2672,7 @@ async fn proxy_handler(
     // authorization, so the vault read is pre-authorized (scope confirmed).
     let execution = HttpExecution {
         store: broker.store.clone(),
+        access: broker.access.clone(),
         audit: broker.audit.clone(),
         client: broker.http_client.clone(),
         config: broker.config.clone(),
@@ -2676,8 +2707,11 @@ async fn proxy_handler(
                                     &headers, &spooled, request_id, execution) => outcome,
         };
         session.finish("request_complete");
+        let expose_response_credentials = broker
+            .access
+            .expose_response_credentials(&endpoint.connection_id);
         return match outcome {
-            Ok(outcome) => translate_outcome(outcome, &method),
+            Ok(outcome) => translate_outcome(outcome, &method, expose_response_credentials),
             Err(response) => response,
         };
     }
@@ -2703,12 +2737,27 @@ async fn proxy_handler(
     match dialed {
         Ok((response, redactions)) => {
             record_streamed_health(broker, &connection, response.status().as_u16());
-            stream_response(response, redactions, &method, relay, session)
+            stream_response(
+                response,
+                redactions,
+                broker
+                    .access
+                    .expose_response_credentials(&endpoint.connection_id),
+                &method,
+                relay,
+                session,
+            )
         }
         Err(outcome) => {
             relay.finish(&outcome_status_label(&outcome), None);
             session.finish("request_failed");
-            translate_outcome(outcome, &method)
+            translate_outcome(
+                outcome,
+                &method,
+                broker
+                    .access
+                    .expose_response_credentials(&endpoint.connection_id),
+            )
         }
     }
 }
@@ -2741,6 +2790,7 @@ fn record_streamed_health(broker: &Arc<Broker>, connection: &Connection, status:
 fn stream_response(
     response: reqwest::Response,
     redactions: Redactions,
+    expose_response_credentials: bool,
     request_method: &Method,
     relay: StreamAudit,
     session: crate::sessions::SessionHandle,
@@ -2754,6 +2804,9 @@ fn stream_response(
         request_method == Method::HEAD || status == StatusCode::NOT_MODIFIED;
     let mut builder = axum::response::Response::builder().status(status);
     for (name, value) in response.headers() {
+        if !response_header_is_relayable(name, expose_response_credentials) {
+            continue;
+        }
         let lower = name.as_str().to_ascii_lowercase();
         if matches!(lower.as_str(), "transfer-encoding" | "connection")
             || (lower == "content-length" && !preserve_content_length)
@@ -2908,7 +2961,11 @@ fn outcome_status_label(outcome: &ExecOutcome) -> String {
 /// envelope back into a raw HTTP response for the reverse-proxy client. A
 /// broker-side error (`status != 200`, a `{reason, detail}` body) is returned
 /// as that status directly.
-fn translate_outcome(outcome: ExecOutcome, request_method: &Method) -> axum::response::Response {
+fn translate_outcome(
+    outcome: ExecOutcome,
+    request_method: &Method,
+    expose_response_credentials: bool,
+) -> axum::response::Response {
     use axum::http::StatusCode;
     if outcome.status != 200 {
         let status = StatusCode::from_u16(outcome.status).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -2953,6 +3010,12 @@ fn translate_outcome(outcome: ExecOutcome, request_method: &Method) -> axum::res
         for (name, value) in headers {
             // Framing/length headers are recomputed for the client leg.
             let lower = name.to_ascii_lowercase();
+            let Ok(header_name) = HeaderName::from_bytes(name.as_bytes()) else {
+                continue;
+            };
+            if !response_header_is_relayable(&header_name, expose_response_credentials) {
+                continue;
+            }
             if matches!(
                 lower.as_str(),
                 "transfer-encoding" | "connection" | "set-cookie"
@@ -2960,17 +3023,19 @@ fn translate_outcome(outcome: ExecOutcome, request_method: &Method) -> axum::res
             {
                 continue;
             }
-            if let (Ok(hn), Some(vs)) = (HeaderName::from_bytes(name.as_bytes()), value.as_str()) {
+            if let Some(vs) = value.as_str() {
                 if let Ok(hv) = HeaderValue::from_str(vs) {
-                    response = response.header(hn, hv);
+                    response = response.header(header_name, hv);
                 }
             }
         }
     }
-    if let Some(cookies) = env.get("set_cookie_headers").and_then(|h| h.as_array()) {
-        for cookie in cookies.iter().filter_map(|cookie| cookie.as_str()) {
-            if let Ok(value) = HeaderValue::from_str(cookie) {
-                response = response.header(http::header::SET_COOKIE, value);
+    if expose_response_credentials {
+        if let Some(cookies) = env.get("set_cookie_headers").and_then(|h| h.as_array()) {
+            for cookie in cookies.iter().filter_map(|cookie| cookie.as_str()) {
+                if let Ok(value) = HeaderValue::from_str(cookie) {
+                    response = response.header(http::header::SET_COOKIE, value);
+                }
             }
         }
     }
@@ -3267,26 +3332,27 @@ mod tests {
     }
 
     #[test]
-    fn direct_response_preserves_each_set_cookie_field() {
-        let response = translate_outcome(
-            ExecOutcome {
-                status: 200,
-                body: json!({
-                    "status": 200,
-                    "headers": {
-                        "content-type": "text/plain",
-                        "set-cookie": "session=one, csrf=two",
-                    },
-                    "set_cookie_headers": [
-                        "session=one; Path=/; HttpOnly",
-                        "csrf=two; Path=/; Secure",
-                    ],
-                    "body": "ok",
-                    "body_encoding": "utf8",
-                }),
-            },
-            &Method::GET,
-        );
+    fn direct_response_credentials_require_opt_in_and_preserve_cookie_fields() {
+        let outcome = || ExecOutcome {
+            status: 200,
+            body: json!({
+                "status": 200,
+                "headers": {
+                    "content-type": "text/plain",
+                    "set-cookie": "session=one, csrf=two",
+                },
+                "set_cookie_headers": [
+                    "session=one; Path=/; HttpOnly",
+                    "csrf=two; Path=/; Secure",
+                ],
+                "body": "ok",
+                "body_encoding": "utf8",
+            }),
+        };
+        let contained = translate_outcome(outcome(), &Method::GET, false);
+        assert!(!contained.headers().contains_key(http::header::SET_COOKIE));
+
+        let response = translate_outcome(outcome(), &Method::GET, true);
 
         let cookies: Vec<&str> = response
             .headers()
@@ -3301,6 +3367,33 @@ mod tests {
     }
 
     #[test]
+    fn every_credential_bearing_response_header_requires_opt_in() {
+        for name in [
+            "set-cookie",
+            "set-cookie2",
+            "cookie",
+            "cookie2",
+            "www-authenticate",
+            "proxy-authenticate",
+            "authentication-info",
+            "proxy-authentication-info",
+            "authorization",
+            "proxy-authorization",
+        ] {
+            let name = HeaderName::from_bytes(name.as_bytes()).unwrap();
+            assert!(
+                !response_header_is_relayable(&name, false),
+                "{name} escaped the default containment boundary"
+            );
+            assert!(response_header_is_relayable(&name, true));
+        }
+        assert!(response_header_is_relayable(
+            &http::header::CONTENT_TYPE,
+            false
+        ));
+    }
+
+    #[test]
     fn direct_head_and_not_modified_responses_preserve_upstream_length() {
         let outcome = || ExecOutcome {
             status: 200,
@@ -3311,7 +3404,7 @@ mod tests {
                 "body_encoding": "utf8",
             }),
         };
-        let head = translate_outcome(outcome(), &Method::HEAD);
+        let head = translate_outcome(outcome(), &Method::HEAD, false);
         assert_eq!(head.headers()[http::header::CONTENT_LENGTH], "1234");
 
         let not_modified = translate_outcome(
@@ -3325,10 +3418,11 @@ mod tests {
                 }),
             },
             &Method::GET,
+            false,
         );
         assert_eq!(not_modified.headers()[http::header::CONTENT_LENGTH], "1234");
 
-        let get = translate_outcome(outcome(), &Method::GET);
+        let get = translate_outcome(outcome(), &Method::GET, false);
         assert_ne!(
             get.headers()
                 .get(http::header::CONTENT_LENGTH)

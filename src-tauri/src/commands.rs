@@ -1181,6 +1181,23 @@ pub async fn set_confirm_mode(
         .map_err(|e| e.to_string())
 }
 
+/// Explicitly allow or contain upstream cookies and authentication response
+/// fields. The broker applies the fresh confirmation when this widens access.
+#[tauri::command]
+pub async fn set_expose_response_credentials(
+    state: State<'_, AppState>,
+    connection_id: String,
+    expose: bool,
+) -> CmdResult<bool> {
+    let connection_id = parse_id(&connection_id)?;
+    state
+        .brokers
+        .backend()
+        .set_expose_response_credentials(connection_id, expose)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Traffic parked on the user right now, oldest first.
 #[tauri::command]
 pub async fn list_approvals(state: State<'_, AppState>) -> CmdResult<Vec<aka_api::ApprovalDto>> {
@@ -1865,6 +1882,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         oauth_reconnect,
         set_tool_access,
         set_confirm_mode,
+        set_expose_response_credentials,
         list_approvals,
         list_requests,
         respond_approval,

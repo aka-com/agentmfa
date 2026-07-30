@@ -23,6 +23,8 @@ export interface AgentAccess {
    * one login for SSH.
    */
   confirm?: boolean;
+  /** Explicit opt-in to relay upstream credential-bearing response headers. */
+  expose_response_credentials?: boolean;
   /**
    * While an approval window is open, the RFC 3339 time the last of them
    * lapses — so the panel can say why nothing is being asked right now.
@@ -577,6 +579,10 @@ export interface CommandMap {
   open_url: CommandSpec<{ url: string }, void>;
   set_tool_access: CommandSpec<{ connectionId: string; enabled: boolean }, boolean>;
   set_confirm_mode: CommandSpec<{ connectionId: string; on: boolean }, boolean>;
+  set_expose_response_credentials: CommandSpec<
+    { connectionId: string; expose: boolean },
+    boolean
+  >;
   list_approvals: CommandSpec<undefined, Approval[]>;
   list_requests: CommandSpec<undefined, RequestRecord[]>;
   respond_approval: CommandSpec<{ id: string; decision: ApprovalDecision }, boolean>;

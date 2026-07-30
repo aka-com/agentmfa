@@ -1394,6 +1394,33 @@ async fn asking_to_be_asked_is_free_but_stopping_takes_an_authentication() {
 }
 
 #[tokio::test]
+async fn exposing_response_credentials_is_gated_but_containing_them_is_free() {
+    let events = Arc::new(GateEvents {
+        allow: true,
+        confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    let conn = add_github(&broker);
+
+    assert!(!broker.access.expose_response_credentials(&conn.id));
+    assert!(broker
+        .ui_set_expose_response_credentials(&conn.id, true)
+        .unwrap());
+    assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
+    assert!(broker.access.expose_response_credentials(&conn.id));
+    assert!(!broker
+        .ui_set_expose_response_credentials(&conn.id, true)
+        .unwrap());
+    assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
+
+    assert!(broker
+        .ui_set_expose_response_credentials(&conn.id, false)
+        .unwrap());
+    assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
+    assert!(!broker.access.expose_response_credentials(&conn.id));
+}
+
+#[tokio::test]
 async fn a_refused_authentication_leaves_the_confirmation_on() {
     let events = Arc::new(GateEvents {
         allow: false,

@@ -29,7 +29,8 @@ use aka_core::manage::{
     ConnectionUpdateBody, ConnectionsReorderBody, DraftTestBody, ElicitationResponseBody,
     EndpointRequireAuthBody,
     ManageResult, ManagementBackend, McpAuthDeliverBody, McpAuthStartBody, OAuthCompleteBody,
-    OAuthReconnectBody, OAuthStartBody, SecretAddBody, SecretEditBody, SettingsPatchBody,
+    OAuthReconnectBody, OAuthStartBody, ResponseCredentialsBody, SecretAddBody, SecretEditBody,
+    SettingsPatchBody,
 };
 use aka_core::store::ConnectionSpec;
 use aka_core::types::SecretValue;
@@ -876,6 +877,19 @@ impl ManagementBackend for RemoteBackend {
         self.post::<ChangedBody, _>(
             &format!("/v1/manage/connections/{connection_id}/confirm"),
             &ConfirmBody { on },
+        )
+        .await
+        .map(|body| body.changed)
+    }
+
+    async fn set_expose_response_credentials(
+        &self,
+        connection_id: Uuid,
+        expose: bool,
+    ) -> ManageResult<bool> {
+        self.post::<ChangedBody, _>(
+            &format!("/v1/manage/connections/{connection_id}/response-credentials"),
+            &ResponseCredentialsBody { expose },
         )
         .await
         .map(|body| body.changed)

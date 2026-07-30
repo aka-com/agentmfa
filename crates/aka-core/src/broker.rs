@@ -2659,6 +2659,62 @@ impl Broker {
         Ok(changed)
     }
 
+    /// Opt a plain HTTP connection into returning upstream headers that can
+    /// mint or negotiate credentials. Containment is the default; widening
+    /// this boundary takes the same fresh action confirmation as other
+    /// high-consequence access changes.
+    pub fn ui_set_expose_response_credentials(
+        &self,
+        connection_id: &Uuid,
+        expose: bool,
+    ) -> Result<bool> {
+        let connection = self.store.connection_by_id(connection_id)?;
+        if connection.kind() != ConnectionKind::Api {
+            return Err(CoreError::InvalidSetting(
+                "upstream response credentials apply only to API connections".into(),
+            ));
+        }
+        let old = self.access.expose_response_credentials(connection_id);
+        let confirmation = if expose && !old {
+            Some(self.confirm_action(&format!(
+                "Allow agents using “{}” to receive upstream cookies and authentication challenges",
+                connection.name
+            ))?)
+        } else {
+            None
+        };
+
+        let _gate = self.config_gate.lock().unwrap();
+        let current = self.store.connection_by_id(connection_id)?;
+        if current.updated_at != connection.updated_at
+            || self.access.expose_response_credentials(connection_id) != old
+        {
+            return Err(CoreError::ApprovalConnectionChanged);
+        }
+        let changed = self
+            .access
+            .set_expose_response_credentials(*connection_id, expose)?;
+        if changed {
+            let mut audit = AuditEntry::new(
+                AuditKind::SettingsChanged,
+                format!(
+                    "Upstream response credentials {} for {}",
+                    if expose { "exposed" } else { "contained" },
+                    connection.name
+                ),
+            )
+            .connection(connection.name.clone())
+            .field("setting", "expose_response_credentials")
+            .field("new", expose);
+            if let Some(confirmation) = confirmation {
+                audit = audit.confirmation(confirmation);
+            }
+            self.audit.append(audit);
+            self.events.wirings_changed();
+        }
+        Ok(changed)
+    }
+
     /// Curate which upstream MCP tools agents may call on a connection.
     /// `None` restores the default (all tools); `Some` is enforced by the
     /// broker on every `tools/call` and mirrored by the sidecar's tool
@@ -3186,7 +3242,7 @@ mod tests {
         let fresh_gate = ["confirm_", "action("].concat();
         let windowed_gate = ["confirm_user_", "action("].concat();
         let configuration_gate = ["confirm_configuration_", "action("].concat();
-        assert_eq!(source.matches(&fresh_gate).count(), 13);
+        assert_eq!(source.matches(&fresh_gate).count(), 14);
         assert_eq!(source.matches(&windowed_gate).count(), 6);
         assert_eq!(source.matches(&configuration_gate).count(), 2);
 
@@ -3207,6 +3263,7 @@ mod tests {
             "Change how long AgentMFA stays unlocked",
             "stop asking before trusting a new SSH host key",
             "stop requiring authentication on the SSH endpoint",
+            "Allow agents using",
         ] {
             assert!(
                 source.contains(reason),

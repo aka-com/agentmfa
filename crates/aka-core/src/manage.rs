@@ -102,6 +102,9 @@ pub fn connection_dto(broker: &Broker, conn: &Connection) -> ConnectionDto {
             .as_ref()
             .map(|e| e.confirm.is_on())
             .unwrap_or_default(),
+        expose_response_credentials: entry
+            .as_ref()
+            .is_some_and(|entry| entry.expose_response_credentials),
         confirm_window_until: broker.approvals.window_remaining(&conn.id).map(|left| {
             (chrono::Utc::now()
                 + chrono::Duration::from_std(left).unwrap_or_else(|_| chrono::Duration::zero()))
@@ -1104,6 +1107,13 @@ pub struct ConfirmBody {
     pub on: bool,
 }
 
+/// `POST /v1/manage/connections/{id}/response-credentials`: explicitly
+/// expose or contain credential-bearing upstream response headers.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct ResponseCredentialsBody {
+    pub expose: bool,
+}
+
 /// `POST /v1/manage/approvals/{id}`: answer a waiting prompt.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ApprovalResponseBody {
@@ -1299,6 +1309,11 @@ pub trait ManagementBackend: Send + Sync {
     /// Ask the user to confirm this connection's traffic, or stop asking.
     /// Turning it off weakens a gate and takes its own authentication.
     async fn set_confirm_mode(&self, connection_id: Uuid, on: bool) -> ManageResult<bool>;
+    async fn set_expose_response_credentials(
+        &self,
+        connection_id: Uuid,
+        expose: bool,
+    ) -> ManageResult<bool>;
     async fn set_allowed_tools(
         &self,
         connection_id: Uuid,
@@ -1644,6 +1659,17 @@ impl ManagementBackend for LocalBackend {
         };
         self.blocking(move |broker| broker.ui_set_confirm_mode(&connection_id, confirm))
             .await
+    }
+
+    async fn set_expose_response_credentials(
+        &self,
+        connection_id: Uuid,
+        expose: bool,
+    ) -> ManageResult<bool> {
+        self.blocking(move |broker| {
+            broker.ui_set_expose_response_credentials(&connection_id, expose)
+        })
+        .await
     }
 
     async fn approvals(&self) -> ManageResult<Vec<ApprovalDto>> {

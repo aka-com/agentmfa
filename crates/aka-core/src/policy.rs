@@ -175,6 +175,7 @@ impl AccessTable {
                                 enabled: false,
                                 allowed_tools: None,
                                 confirm: ConfirmMode::Off,
+                                expose_response_credentials: false,
                                 audit_statements: None,
                                 updated_at: Utc::now(),
                             });
@@ -200,6 +201,7 @@ impl AccessTable {
                             enabled: true,
                             allowed_tools,
                             confirm: ConfirmMode::Off,
+                            expose_response_credentials: false,
                             audit_statements: None,
                             updated_at: Utc::now(),
                         });
@@ -228,6 +230,7 @@ impl AccessTable {
                             }),
                             allowed_tools: None,
                             confirm: ConfirmMode::Off,
+                            expose_response_credentials: false,
                             audit_statements: None,
                             updated_at: Utc::now(),
                         })
@@ -310,6 +313,17 @@ impl AccessTable {
             .unwrap_or_default()
     }
 
+    /// Whether response headers that can create or negotiate credentials may
+    /// cross the broker boundary. No entry and older entries both mean no.
+    pub fn expose_response_credentials(&self, connection_id: &Uuid) -> bool {
+        self.entries
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|entry| &entry.connection_id == connection_id)
+            .is_some_and(|entry| entry.expose_response_credentials)
+    }
+
     /// The recorded entry for a connection, when one exists (i.e. the
     /// connection has left the default state at least once).
     pub fn entry(&self, connection_id: &Uuid) -> Option<ToolAccess> {
@@ -348,6 +362,7 @@ impl AccessTable {
                 enabled,
                 allowed_tools: None,
                 confirm: ConfirmMode::Off,
+                expose_response_credentials: false,
                 audit_statements: None,
                 updated_at: Utc::now(),
             }),
@@ -383,6 +398,7 @@ impl AccessTable {
                 enabled: true,
                 allowed_tools: tools,
                 confirm: ConfirmMode::Off,
+                expose_response_credentials: false,
                 audit_statements: None,
                 updated_at: Utc::now(),
             }),
@@ -415,6 +431,46 @@ impl AccessTable {
                 enabled: true,
                 allowed_tools: None,
                 confirm,
+                expose_response_credentials: false,
+                audit_statements: None,
+                updated_at: Utc::now(),
+            }),
+        }
+        self.persist(&next)?;
+        *entries = next;
+        Ok(true)
+    }
+
+    /// Allow or contain upstream response credentials for this connection.
+    /// False is the default and the value older policy records imply.
+    pub fn set_expose_response_credentials(
+        &self,
+        connection_id: Uuid,
+        expose: bool,
+    ) -> Result<bool> {
+        let mut entries = self.entries.lock().unwrap();
+        let current = entries
+            .iter()
+            .find(|entry| entry.connection_id == connection_id)
+            .is_some_and(|entry| entry.expose_response_credentials);
+        if current == expose {
+            return Ok(false);
+        }
+        let mut next = entries.clone();
+        match next
+            .iter_mut()
+            .find(|entry| entry.connection_id == connection_id)
+        {
+            Some(entry) => {
+                entry.expose_response_credentials = expose;
+                entry.updated_at = Utc::now();
+            }
+            None => next.push(ToolAccess {
+                connection_id,
+                enabled: true,
+                allowed_tools: None,
+                confirm: ConfirmMode::default(),
+                expose_response_credentials: expose,
                 audit_statements: None,
                 updated_at: Utc::now(),
             }),
@@ -462,6 +518,7 @@ impl AccessTable {
                 enabled: true,
                 allowed_tools: None,
                 confirm: ConfirmMode::default(),
+                expose_response_credentials: false,
                 audit_statements,
                 updated_at: Utc::now(),
             }),
@@ -617,6 +674,26 @@ mod tests {
 
         assert!(t.set_confirm_mode(conn, ConfirmMode::Off).unwrap());
         assert_eq!(t.confirm_mode(&conn), ConfirmMode::Off);
+    }
+
+    #[test]
+    fn response_credentials_default_to_contained_and_persist_independently() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("access.json");
+        let conn = Uuid::new_v4();
+        let integrity = integrity();
+        {
+            let table = AccessTable::open(path.clone(), integrity.clone()).unwrap();
+            assert!(!table.expose_response_credentials(&conn));
+            assert!(table.set_expose_response_credentials(conn, true).unwrap());
+            assert!(!table.set_expose_response_credentials(conn, true).unwrap());
+            table.set_enabled(conn, false).unwrap();
+        }
+        let table = AccessTable::open(path, integrity).unwrap();
+        assert!(table.expose_response_credentials(&conn));
+        assert!(!table.allows(&conn));
+        assert!(table.set_expose_response_credentials(conn, false).unwrap());
+        assert!(!table.expose_response_credentials(&conn));
     }
 
     #[test]

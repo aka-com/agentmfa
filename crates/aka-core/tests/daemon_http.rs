@@ -2425,7 +2425,7 @@ async fn curated_mcp_tools_cannot_bypass_the_subset_through_a_direct_endpoint() 
 }
 
 #[tokio::test]
-async fn http_direct_endpoint_preserves_multiple_set_cookie_headers() {
+async fn http_direct_endpoint_contains_cookies_until_explicitly_enabled() {
     let mut h = harness(BrokerConfig::default()).await;
     let up = upstream().await;
     api_connection(&h, "github", up.port);
@@ -2433,6 +2433,16 @@ async fn http_direct_endpoint_preserves_multiple_set_cookie_headers() {
     let (info, port) = issue_http_endpoint(&h).await;
     let auth = format!("Bearer {}", info.secret);
 
+    let (status, headers, _) =
+        loopback_request(port, "GET", "/cookies", &[("authorization", &auth)], None).await;
+    assert_eq!(status, 200);
+    assert!(!headers.contains_key(axum::http::header::SET_COOKIE));
+
+    let connection = h.broker.store.connection_by_name("github").unwrap();
+    assert!(h
+        .broker
+        .ui_set_expose_response_credentials(&connection.id, true)
+        .unwrap());
     let (status, headers, _) =
         loopback_request(port, "GET", "/cookies", &[("authorization", &auth)], None).await;
     assert_eq!(status, 200);
@@ -2701,6 +2711,52 @@ async fn a_streamed_call_reports_its_head_and_body_as_they_arrive() {
         relayed.len(),
         "the end frame counts what actually crossed"
     );
+}
+
+#[tokio::test]
+async fn streamed_response_credentials_follow_the_connection_opt_in() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let up = upstream().await;
+    api_connection(&h, "github", up.port);
+    let token = h.pair("agent").await;
+    let request = || {
+        json!({
+            "connection": "github",
+            "method": "GET",
+            "path": "/cookies",
+            "stream": true,
+        })
+    };
+
+    let (_, _, body) = uds_request_raw(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &format!("Bearer {token}"))],
+        Some(request()),
+    )
+    .await;
+    let frames = sse_frames(&body);
+    assert!(frames[0].1["headers"].get("set-cookie").is_none());
+
+    let connection = h.broker.store.connection_by_name("github").unwrap();
+    h.broker
+        .ui_set_expose_response_credentials(&connection.id, true)
+        .unwrap();
+    let (_, _, body) = uds_request_raw(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &format!("Bearer {token}"))],
+        Some(request()),
+    )
+    .await;
+    let frames = sse_frames(&body);
+    let cookies = frames[0].1["headers"]["set-cookie"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(cookies.contains("session=one"));
+    assert!(cookies.contains("csrf=two"));
 }
 
 /// The credential is scrubbed on the streaming path too, and — because a
