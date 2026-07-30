@@ -69,6 +69,71 @@ async fn harness(public_url: Option<&str>) -> Harness {
     }
 }
 
+/// C6. The plaintext development vault exists so a non-macOS checkout runs
+/// without a master key; it announces itself in the log and nothing more. A
+/// log line is not a boundary, so serving that broker to a network is refused
+/// rather than warned about — while loopback, which is the same trust boundary
+/// the Unix socket already has, still works.
+#[tokio::test]
+async fn a_plaintext_vault_refuses_to_serve_a_network() {
+    async fn serve(options: ServeOptions) -> Result<daemon::DaemonHandle, String> {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        paths.ensure().unwrap();
+        let vault = aka_core::vault::FileVault::open(paths.dev_vault_file()).unwrap();
+        let broker = Broker::new(
+            paths,
+            Arc::new(vault),
+            BrokerConfig::default(),
+            Arc::new(TestEvents),
+        )
+        .await
+        .unwrap();
+        assert!(broker.vault_is_plaintext_development());
+        let served = daemon::serve_with(broker, options).await;
+        // The directory must outlive the handle, so leak it deliberately
+        // rather than letting the socket vanish underneath a live daemon.
+        std::mem::forget(dir);
+        served.map_err(|error| error.to_string())
+    }
+
+    for (label, options) in [
+        (
+            "control plane",
+            ServeOptions {
+                listen: Some("0.0.0.0:0".parse().unwrap()),
+                ..Default::default()
+            },
+        ),
+        (
+            "data plane",
+            ServeOptions {
+                data_plane_listen: Some("0.0.0.0".parse().unwrap()),
+                data_plane_insecure: true,
+                ..Default::default()
+            },
+        ),
+    ] {
+        let error = serve(options)
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{label}: a network bind must be refused"));
+        assert!(
+            error.contains("unencrypted") && error.contains("AKA_VAULT_KEY"),
+            "{label}: the refusal must name the cause and the fix: {error}"
+        );
+    }
+
+    // Loopback is the boundary the 0600 control socket already has, so it is
+    // allowed — refusing it would break every non-macOS development run.
+    serve(ServeOptions {
+        listen: Some("127.0.0.1:0".parse().unwrap()),
+        ..Default::default()
+    })
+    .await
+    .expect("loopback stays available to a development vault");
+}
+
 async fn get_json(url: &str, bearer: Option<&str>) -> (u16, Value) {
     let client = reqwest::Client::new();
     let mut request = client.get(url);

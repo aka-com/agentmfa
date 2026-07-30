@@ -1057,6 +1057,9 @@
   .cred-menu-divider{ height: 1px; margin: 4px 6px; background: var(--line-soft); }.sheet-actions{ display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 14px; }
   .confirm-sheet p{ margin-top: 8px; color: var(--muted); font-size: 0.84375rem; line-height: 1.45; }
   .rule-note{ font-size: 0.78125rem; color: var(--muted); margin: 4px 0 8px; line-height: 1.4; }
+  /* A note that reports a limitation rather than describing a field: it has to
+     read as something to act on, not as more imported detail. */
+  .rule-note.warn{ color: var(--amber-ink); }
   .external-doc-link {
     color: inherit; text-decoration: underline; text-decoration-color: currentColor;
     text-underline-offset: 2px;

@@ -3626,7 +3626,18 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
           <FieldError k="port" />
         </div>
       </div>,
-      d.proxyJump ? <div className="rule-note" key="proxyjump">ProxyJump: {d.proxyJump}</div> : null,
+      // Naming the jump host without saying what it means read as ordinary
+      // imported detail, so the limitation was met later as a connection
+      // failure. A tool pins one host key, and the jump hop is a second SSH
+      // login against a second one — so it cannot be brokered in one tool.
+      d.proxyJump
+        ? <div className="rule-note warn" key="proxyjump">
+            Connects through ProxyJump <b>{d.proxyJump}</b>, which AgentMFA
+            cannot broker in one tool: the jump hop is a separate SSH login
+            against its own host key. Add <b>{d.proxyJump}</b> as its own tool
+            and connect in two hops.
+          </div>
+        : null,
     );
     sshHostKeyField = (
       <div className="f-row" key="host-key">

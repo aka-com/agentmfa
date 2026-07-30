@@ -15,6 +15,7 @@ aka-client = { workspace = true }
 aka-core = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
+clap_complete = { workspace = true }
 uuid = { workspace = true }
 dirs = { workspace = true }
 libc = { workspace = true }

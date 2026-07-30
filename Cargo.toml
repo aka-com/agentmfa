@@ -70,6 +70,7 @@ rsa = { version = "0.9", default-features = false, features = ["std", "sha2"] }
 signature = "2"
 
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 
 # Test-only: generates the CA and leaf certificates the Postgres TLS tests
 # need. Never built into a shipped binary.

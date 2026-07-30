@@ -529,6 +529,14 @@ impl Broker {
         }
     }
 
+    /// Whether this broker's secret values are stored in the clear.
+    ///
+    /// True only for the non-macOS development fallback. `serve_with` refuses
+    /// to put such a broker on a network.
+    pub fn vault_is_plaintext_development(&self) -> bool {
+        self.vault.is_plaintext_development()
+    }
+
     /// The manage-plane event bus (SSE subscription + reconnect replay).
     pub fn manage_bus(&self) -> &Arc<crate::manage::ManageBus> {
         &self.manage_bus

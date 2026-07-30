@@ -597,6 +597,31 @@ pub async fn serve(broker: Arc<Broker>) -> crate::Result<DaemonHandle> {
 
 /// [`serve`] plus the optional TCP listener.
 pub async fn serve_with(broker: Arc<Broker>, options: ServeOptions) -> crate::Result<DaemonHandle> {
+    // A plaintext vault is a development convenience: it exists so a non-macOS
+    // checkout runs with no master key, and it announces itself in the log.
+    // A log line is not a boundary, though, and every path below this one puts
+    // the broker's credentials within reach of a network — so the combination
+    // is refused outright rather than warned about.
+    if broker.vault_is_plaintext_development() {
+        let exposed = options
+            .listen
+            .filter(|address| !address.ip().is_loopback())
+            .map(|address| format!("--listen {address}"))
+            .or_else(|| {
+                options
+                    .data_plane_listen
+                    .filter(|address| !address.is_loopback())
+                    .map(|address| format!("--data-plane-listen {address}"))
+            });
+        if let Some(exposed) = exposed {
+            return Err(CoreError::Io(std::io::Error::other(format!(
+                "{exposed} would serve this broker to a network, but its secrets are \
+                 stored unencrypted in the development vault. Set AKA_VAULT_KEY or \
+                 AKA_VAULT_KEY_FILE to use the encrypted vault, or keep this broker \
+                 on loopback."
+            ))));
+        }
+    }
     broker.set_data_plane_address(options.data_plane_listen, options.advertise_host.clone());
     if let Some(bind) = options.data_plane_listen {
         if !bind.is_loopback() {

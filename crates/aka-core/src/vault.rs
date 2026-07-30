@@ -56,6 +56,17 @@ pub trait SecretVault: Send + Sync {
 
     /// Update the non-sensitive attributes.
     fn set_attrs(&self, id: &Uuid, attrs: &VaultAttrs) -> Result<(), CoreError>;
+
+    /// Whether this backend stores secret values in the clear.
+    ///
+    /// Only the dev fallback does. It exists so a non-macOS checkout runs
+    /// without a master key, and it says so loudly in the log — but a log line
+    /// is not a boundary, and a broker started with `--listen` would happily
+    /// serve a network from a vault that is a readable JSON file. The serve
+    /// path asks this and refuses.
+    fn is_plaintext_development(&self) -> bool {
+        false
+    }
 }
 
 /// The durable backend that owns a store's secret values.
@@ -320,6 +331,12 @@ impl SecretVault for FileVault {
         self.persist(&next)?;
         *state = next;
         Ok(())
+    }
+
+    /// This is the one backend whose "vault" is a file anyone able to read the
+    /// data directory can read.
+    fn is_plaintext_development(&self) -> bool {
+        true
     }
 }
 

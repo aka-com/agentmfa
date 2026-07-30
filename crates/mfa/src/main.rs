@@ -137,6 +137,15 @@ enum Command {
         #[arg(long)]
         root: Option<PathBuf>,
     },
+    /// Print a shell completion script to stdout.
+    ///
+    /// `mfa completions zsh > "${fpath[1]}/_mfa"`, or source it from your
+    /// shell's rc file. The script is generated from this CLI's own command
+    /// tree, so it cannot drift from the commands it completes.
+    Completions {
+        /// The shell to generate for.
+        shell: clap_complete::Shell,
+    },
     /// Print the raw /instructions markdown to stdout.
     Instructions {
         /// Render for a broker rooted here instead of the production layout.
@@ -853,6 +862,12 @@ fn run_cli() {
             force,
             root,
         } => cmd_skill(write, path, user, force, root),
+        Command::Completions { shell } => {
+            use clap::CommandFactory as _;
+            let mut command = Cli::command();
+            let name = command.get_name().to_string();
+            clap_complete::generate(shell, &mut command, name, &mut std::io::stdout());
+        }
         Command::Instructions { root } => {
             print!(
                 "{}",
@@ -2712,8 +2727,50 @@ fn ssh_open_hints(
             .join(" ");
         lines.push(format!("export SSH_AUTH_SOCK=\"{auth_sock}\""));
         lines.push(format!("ssh{port} {flags} {destination}"));
+        // The flags above are not optional decoration. `SSH_AUTH_SOCK` alone
+        // leaves the default IdentityFile list in place, so a user with a
+        // working ~/.ssh/id_ed25519 logs in with no broker involvement and no
+        // activity entry — a success that looks brokered and is not. A config
+        // block is how that becomes hard to get wrong, and it is also what
+        // ssh-config-aware clients (VS Code Remote-SSH, plain `ssh <name>`)
+        // can use at all.
+        lines.push(String::new());
+        lines.push("or add to ~/.ssh/config so plain `ssh` and editors use it too:".to_string());
+        lines.extend(ssh_config_block(body, auth_sock, &destination));
     }
     lines
+}
+
+/// A `~/.ssh/config` stanza pointing `IdentityAgent` at the issued socket,
+/// carrying the same options as the one-liner above.
+fn ssh_config_block(
+    body: &serde_json::Value,
+    auth_sock: &str,
+    destination: &str,
+) -> Vec<String> {
+    // An alias with whitespace is not a legal Host pattern; the destination is
+    // already the alias when one was imported.
+    let alias = destination
+        .rsplit('@')
+        .next()
+        .unwrap_or(destination)
+        .replace(char::is_whitespace, "-");
+    let mut block = vec![format!("  Host {alias}")];
+    if let Some(host) = body["host"].as_str() {
+        block.push(format!("    HostName {host}"));
+    }
+    if let Some(port) = body["port"].as_u64().filter(|port| *port != 22) {
+        block.push(format!("    Port {port}"));
+    }
+    if let Some(user) = body["user"].as_str().filter(|user| !user.is_empty()) {
+        block.push(format!("    User {user}"));
+    }
+    block.push(format!("    IdentityAgent \"{auth_sock}\""));
+    for option in SSH_BROKER_OPTIONS {
+        let (key, value) = option.split_once('=').unwrap_or((option, ""));
+        block.push(format!("    {key} {value}"));
+    }
+    block
 }
 
 fn cmd_ssh(connection: String, root: Option<PathBuf>, client: Option<String>, json: bool) {
@@ -2777,6 +2834,14 @@ struct StatusTool {
     target: String,
     enabled: bool,
     confirm: bool,
+    /// Whether a direct endpoint is issued for this tool.
+    ///
+    /// Status listed what agents *could* reach through the control plane and
+    /// said nothing about standing access already handed out, which is the
+    /// longer-lived of the two and the one a reader is more likely to have
+    /// forgotten.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    endpoint: bool,
 }
 
 impl From<&ConnectionDto> for StatusTool {
@@ -2787,6 +2852,7 @@ impl From<&ConnectionDto> for StatusTool {
             target: connection.target.clone(),
             enabled: connection.agent_access.enabled,
             confirm: connection.agent_access.confirm,
+            endpoint: connection.agent_access.endpoint.is_some(),
         }
     }
 }
@@ -2880,13 +2946,21 @@ fn print_status_report(report: &StatusReport) {
         } else {
             ""
         };
+        // A direct endpoint outlives any session and is revoked separately, so
+        // it is named on the row rather than left to the app to reveal.
+        let endpoint = if tool.endpoint {
+            " · direct endpoint issued"
+        } else {
+            ""
+        };
         println!(
-            "    {}  {}  {}  {}{}",
+            "    {}  {}  {}  {}{}{}",
             tool.name,
             tool.kind,
             tool.target,
             if tool.enabled { "enabled" } else { "disabled" },
             confirm,
+            endpoint,
         );
     }
     if !approval_surface_attached {
@@ -3616,7 +3690,7 @@ mod tests {
         // The imported alias, not user@host: ~/.ssh/config is what supplies the
         // rest of the routing, and the pinned host may not even be typeable.
         assert!(joined.contains("ssh -p 2222 "), "{joined}");
-        assert!(joined.ends_with(" production"), "{joined}");
+        assert!(joined.contains(" production\n"), "{joined}");
         for option in SSH_BROKER_OPTIONS {
             assert!(
                 joined.contains(&format!("-o {option}")),
@@ -3627,6 +3701,25 @@ mod tests {
             !joined.contains("IdentitiesOnly"),
             "that flag breaks the agent: {joined}"
         );
+
+        // The config stanza carries the same authority as the one-liner, in the
+        // form ssh-config-aware clients can use: the routing fields plus every
+        // broker option, spelled the way a config file spells them.
+        assert!(joined.contains("Host production"), "{joined}");
+        assert!(joined.contains("HostName prod.example.com"), "{joined}");
+        assert!(joined.contains("Port 2222"), "{joined}");
+        assert!(joined.contains("User deploy"), "{joined}");
+        assert!(
+            joined.contains("IdentityAgent \"/tmp/agent-3f1c9a2b04d7e685.sock\""),
+            "{joined}"
+        );
+        for option in SSH_BROKER_OPTIONS {
+            let (key, value) = option.split_once('=').unwrap();
+            assert!(
+                joined.contains(&format!("    {key} {value}")),
+                "{option} missing from the config block: {joined}"
+            );
+        }
     }
 
     /// An unpinned connection says so rather than staying silent: the next
