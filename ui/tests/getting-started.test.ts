@@ -290,7 +290,7 @@ test('every shared-key mode renders from a client definition; direct has none', 
   }
   // The two escape hatches keep their spelled-out labels.
   assert.equal(CONNECT_MODE_LABELS.mcp, 'Other MCP client');
-  assert.equal(CONNECT_MODE_LABELS.cli, 'Anything else (HTTP API)');
+  assert.equal(CONNECT_MODE_LABELS.cli, 'HTTP API');
 });
 
 test('stdio connection guides and quick-start clients require the separate CLI', () => {

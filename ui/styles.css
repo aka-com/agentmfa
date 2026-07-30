@@ -683,14 +683,10 @@
   .start-hero{ text-align: center; }
   /* The hero is an editable sentence: two blanks, each a menu. */
   .start-sentence{
-    margin: 0; font-size: 1.375rem; font-weight: 700; letter-spacing: -0.014em;
+    margin: 10px 0 0; font-size: 1.375rem; font-weight: 700; letter-spacing: -0.014em;
     /* Leading set by the blanks, not the text: the pills are taller than a
        line of type, and a wrapped sentence must not stack them edge to edge. */
     line-height: 1.75; text-wrap: balance;
-  }
-  .start-hero-sub{
-    margin: 11px auto 0; max-width: 52ch;
-    color: var(--muted); font-size: 0.8125rem; line-height: 1.5;
   }
   .start-blank-wrap{ position: relative; display: inline-block; margin: 0 3px; }
   .start-blank{
@@ -715,6 +711,8 @@
     line-height: 1.4; text-align: left;
   }
   .start-menu-clients{ min-width: 276px; }
+  /* Rules group the client menu: direct / named agents / escape hatches. */
+  .start-menu-rule{ margin: 3px 5px; border-top: 1px solid var(--line); }
   .start-menu-item{
     display: flex; align-items: center; gap: 9px; width: 100%;
     border: none; background: none; cursor: pointer; text-align: left;

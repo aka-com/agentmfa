@@ -5,6 +5,7 @@
 // the badge — checked, current, upcoming — but never hides a step's
 // contents, so the whole path is readable in one pass.
 
+import { Fragment } from 'react';
 import type { ReactNode } from 'react';
 import { state } from '../app-state';
 import { canQuickConnectMcp, catalogEntryById } from '../catalog';
@@ -102,22 +103,27 @@ function ClientMenu({ option, connectMode }: {
 }): ReactNode {
   return (
     <div className="start-menu start-menu-clients" aria-label="How your agent connects">
-      {connectModesFor(option).map((mode) => {
+      {connectModesFor(option).map((mode, index) => {
         const client = connectClientById(mode);
         const sub = mode === 'direct'
           ? (option.connType === 'ssh'
-              ? 'An SSH agent socket — plain ssh works'
-              : 'A Postgres DSN — any client works')
+              ? 'SSH agent socket — works with plain ssh'
+              : 'Postgres DSN — works with any client')
           : client?.sub;
+        // Rules split the menu into direct / named agents / escape hatches.
+        const startsGroup = (mode === 'claude-code' && index > 0) || mode === 'mcp';
         return (
-          <button key={mode} aria-pressed={mode === connectMode}
-            className={`start-menu-item ${mode === connectMode ? 'on' : ''}`}
-            data-act="start-mode" data-id={mode}>
-            <span className="start-menu-tx">
-              <span className="start-menu-name">{CONNECT_MODE_LABELS[mode]}</span>
-              {sub ? <span className="start-menu-sub">{sub}</span> : null}
-            </span>
-          </button>
+          <Fragment key={mode}>
+            {startsGroup ? <div className="start-menu-rule" role="separator" /> : null}
+            <button aria-pressed={mode === connectMode}
+              className={`start-menu-item ${mode === connectMode ? 'on' : ''}`}
+              data-act="start-mode" data-id={mode}>
+              <span className="start-menu-tx">
+                <span className="start-menu-name">{CONNECT_MODE_LABELS[mode]}</span>
+                {sub ? <span className="start-menu-sub">{sub}</span> : null}
+              </span>
+            </button>
+          </Fragment>
         );
       })}
     </div>
@@ -157,8 +163,6 @@ function StartSentence({ option, connectMode }: {
         <SentenceBlank kind="client" label={CONNECT_MODE_SENTENCE_LABELS[connectMode]}
           menu={<ClientMenu option={option} connectMode={connectMode} />} />
       </h3>
-      <p className="start-hero-sub">Real credentials stay in the vault. Agents get brokered
-        access you can watch and revoke.</p>
     </div>
   );
 }

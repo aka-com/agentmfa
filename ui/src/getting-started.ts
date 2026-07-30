@@ -140,12 +140,12 @@ export const CONNECT_MODE_LABELS: Record<ConnectModeId, string> = {
   'claude-desktop': 'Claude Desktop',
   codex: 'Codex',
   mcp: 'Other MCP client',
-  cli: 'Anything else (HTTP API)',
+  cli: 'HTTP API',
 };
 
 /** How the hero sentence names each mode: “Connect Postgres to <this>.” */
 export const CONNECT_MODE_SENTENCE_LABELS: Record<ConnectModeId, string> = {
-  direct: 'your agent, directly',
+  direct: 'your agent directly',
   'claude-code': 'Claude Code',
   'claude-desktop': 'Claude Desktop',
   codex: 'Codex',
@@ -269,7 +269,7 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
   {
     id: 'claude-code',
     name: 'Claude Code',
-    sub: 'Terminal · MCP',
+    sub: 'Terminal',
     mark: 'CC',
     icon: 'anthropic',
     labels: ['claude-code'],
@@ -292,7 +292,7 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
   {
     id: 'claude-desktop',
     name: 'Claude Desktop',
-    sub: 'Desktop app · MCP',
+    sub: 'Desktop app',
     mark: 'CD',
     icon: 'anthropic',
     labels: ['claude-desktop'],
@@ -316,7 +316,7 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
   {
     id: 'codex',
     name: 'Codex',
-    sub: 'Terminal & desktop · MCP',
+    sub: 'Terminal & desktop',
     mark: 'CX',
     icon: 'openai',
     labels: ['codex', 'codex-desktop'],
@@ -339,7 +339,7 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
   {
     id: 'mcp',
     name: 'Other MCP client',
-    sub: 'Connects over HTTP — no stdio needed',
+    sub: 'Any client that speaks MCP over HTTP',
     mark: '⌁',
     icon: 'plug',
     lead: () =>
@@ -361,7 +361,7 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
   },
   {
     id: 'cli',
-    name: 'Anything else (HTTP API)',
+    name: 'HTTP API',
     sub: 'curl, scripts, your own agent loop',
     mark: '>_',
     icon: 'terminal',
