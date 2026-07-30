@@ -21,6 +21,7 @@ use aka_core::vault::MemoryVault;
 use aka_core::{daemon, types::ConfirmationMethod};
 use axum::routing::{any, get, post};
 use axum::Router;
+use rustls_pki_types::PrivateKeyDer;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use zeroize::Zeroizing;
@@ -180,6 +181,37 @@ async fn upstream() -> Upstream {
         )
         .route("/huge", get(|| async { "x".repeat(4 * 1024 * 1024) }))
         .route(
+            "/slow",
+            get(|| async {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                "late"
+            }),
+        )
+        .route(
+            "/status/{code}",
+            any(|axum::extract::Path(code): axum::extract::Path<u16>| async move {
+                axum::http::StatusCode::from_u16(code)
+                    .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+            }),
+        )
+        .route(
+            "/redirect/{code}/{remaining}",
+            any(
+                |axum::extract::Path((code, remaining)): axum::extract::Path<(u16, u8)>| async move {
+                    let location = if remaining > 1 {
+                        format!("/redirect/{code}/{}", remaining - 1)
+                    } else {
+                        "/echo".to_string()
+                    };
+                    axum::http::Response::builder()
+                        .status(code)
+                        .header(axum::http::header::LOCATION, location)
+                        .body(axum::body::Body::empty())
+                        .unwrap()
+                },
+            ),
+        )
+        .route(
             "/echo",
             any(move |req: axum::extract::Request| {
                 let record = record.clone();
@@ -217,6 +249,56 @@ async fn upstream() -> Upstream {
     Upstream { port, seen_auth }
 }
 
+async fn https_upstream() -> (tempfile::TempDir, u16, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let ca_key = rcgen::KeyPair::generate().unwrap();
+    let mut ca_params = rcgen::CertificateParams::new(vec!["API Test CA".into()]).unwrap();
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let ca = ca_params.self_signed(&ca_key).unwrap();
+
+    let leaf_key = rcgen::KeyPair::generate().unwrap();
+    let leaf_params = rcgen::CertificateParams::new(vec!["127.0.0.1".into()]).unwrap();
+    let issuer = rcgen::Issuer::from_params(&ca_params, &ca_key);
+    let leaf = leaf_params.signed_by(&leaf_key, &issuer).unwrap();
+    let ca_path = dir.path().join("api-ca.pem");
+    std::fs::write(&ca_path, ca.pem()).unwrap();
+
+    let tls = Arc::new(
+        rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![leaf.der().clone()],
+            PrivateKeyDer::try_from(leaf_key.serialize_der()).unwrap(),
+        )
+        .unwrap(),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            let acceptor = tokio_rustls::TlsAcceptor::from(tls.clone());
+            tokio::spawn(async move {
+                let Ok(mut stream) = acceptor.accept(socket).await else {
+                    return;
+                };
+                let mut request = vec![0u8; 8192];
+                let _ = stream.read(&mut request).await;
+                let body = "secure";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    (dir, port, ca_path.to_string_lossy().into_owned())
+}
+
 /// A header-injected API connection with a real secret behind it.
 fn api_connection(h: &Harness, name: &str, port: u16) {
     h.broker
@@ -233,6 +315,25 @@ fn api_connection(h: &Harness, name: &str, port: u16) {
                 port: Some(port),
                 trusted_ca_bundle_path: None,
                 template: "Authorization: Bearer {{GITHUB_API_KEY}}".into(),
+                mcp_path: None,
+                oauth: None,
+            },
+            secrets: vec![],
+        })
+        .unwrap();
+}
+
+fn api_tls_connection(h: &Harness, name: &str, port: u16, ca: Option<String>) {
+    h.broker
+        .store
+        .add_connection(ConnectionSpec {
+            name: name.into(),
+            config: ConnectionConfig::Api {
+                host: "127.0.0.1".into(),
+                scheme: "https".into(),
+                port: Some(port),
+                trusted_ca_bundle_path: ca,
+                template: String::new(),
                 mcp_path: None,
                 oauth: None,
             },
@@ -413,6 +514,171 @@ async fn the_control_plane_body_cap_names_the_direct_endpoint() {
         )
         .await;
     assert_eq!(status, 200);
+}
+
+/// API-30: the broker's response ceiling and operation deadline are distinct,
+/// machine-actionable outcomes rather than a truncated success or a hung call.
+#[tokio::test]
+async fn response_caps_and_upstream_deadlines_are_enforced() {
+    let up = upstream().await;
+    let config = BrokerConfig {
+        response_cap: 1024,
+        upstream_timeout: std::time::Duration::from_millis(100),
+        upstream_operation_timeout: std::time::Duration::from_millis(250),
+        ..Default::default()
+    };
+    let h = harness(config).await;
+    api_connection(&h, "github", up.port);
+
+    let (status, body) = h
+        .call("github", json!({ "method": "GET", "path": "/huge" }))
+        .await;
+    assert_eq!(status, 502, "{body}");
+    assert_eq!(body["reason"], "response_too_large");
+
+    let (status, body) = h
+        .call("github", json!({ "method": "GET", "path": "/slow" }))
+        .await;
+    assert_eq!(status, 504, "{body}");
+    assert_eq!(body["reason"], "upstream_timeout");
+}
+
+/// API-30: every advertised method crosses the JSON plane, including a body
+/// large enough to take the disk-spool branch.
+#[tokio::test]
+async fn all_advertised_methods_and_the_spool_threshold_reach_upstream() {
+    let up = upstream().await;
+    let config = BrokerConfig {
+        spool_threshold: 32,
+        control_plane_request_cap: 16 * 1024,
+        ..Default::default()
+    };
+    let h = harness(config).await;
+    api_connection(&h, "github", up.port);
+
+    for method in ["PUT", "PATCH", "OPTIONS"] {
+        let (status, body) = h
+            .call(
+                "github",
+                json!({
+                    "method": method,
+                    "path": "/echo",
+                    "body": "s".repeat(4096),
+                }),
+            )
+            .await;
+        assert_eq!(status, 200, "{method}: {body}");
+        let echoed: Value = serde_json::from_str(body["body"].as_str().unwrap()).unwrap();
+        assert_eq!(echoed["method"], method);
+        assert_eq!(echoed["len"], 4096);
+    }
+}
+
+/// API-9/API-30: all redirect status codes follow HTTP method rules, and a
+/// same-origin chain stops exactly at the configured hop budget.
+#[tokio::test]
+async fn redirect_methods_and_budget_match_http_semantics() {
+    let up = upstream().await;
+    let config = BrokerConfig {
+        max_redirects: 1,
+        ..Default::default()
+    };
+    let h = harness(config).await;
+    api_connection(&h, "github", up.port);
+
+    for (code, expected_method) in [(301, "GET"), (303, "GET"), (307, "POST"), (308, "POST")] {
+        let (status, body) = h
+            .call(
+                "github",
+                json!({
+                    "method": "POST",
+                    "path": format!("/redirect/{code}/1"),
+                    "body": "payload",
+                }),
+            )
+            .await;
+        assert_eq!(status, 200, "{code}: {body}");
+        let echoed: Value = serde_json::from_str(body["body"].as_str().unwrap()).unwrap();
+        assert_eq!(echoed["method"], expected_method, "redirect {code}");
+    }
+
+    let (status, body) = h
+        .call(
+            "github",
+            json!({
+                "method": "POST",
+                "path": "/redirect/307/2",
+                "body": "payload",
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["status"], 307, "the over-budget redirect is relayed");
+}
+
+/// API-30: ordinary upstream failures are relayed as upstream statuses, not
+/// confused with broker failures.
+#[tokio::test]
+async fn upstream_429_and_5xx_statuses_are_relayed() {
+    let up = upstream().await;
+    let h = harness(BrokerConfig::default()).await;
+    api_connection(&h, "github", up.port);
+    for code in [429, 500, 503] {
+        let (status, body) = h
+            .call(
+                "github",
+                json!({ "method": "GET", "path": format!("/status/{code}") }),
+            )
+            .await;
+        assert_eq!(status, 200, "{code}: {body}");
+        assert_eq!(body["status"], code);
+    }
+}
+
+/// API-11/API-11b/API-30: a private bundle is used by both real calls and the
+/// Test action, while the same leaf is classified as an unverifiable
+/// certificate without that bundle.
+#[tokio::test]
+async fn private_api_ca_is_honored_and_tls_failures_are_classified() {
+    let (_certs, port, ca) = https_upstream().await;
+    let h = harness(BrokerConfig::default()).await;
+    api_tls_connection(&h, "private-api", port, Some(ca));
+    api_tls_connection(&h, "untrusted-api", port, None);
+
+    let (status, body) = h
+        .call("private-api", json!({ "method": "GET", "path": "/" }))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["body"], "secure");
+
+    let test_client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let trusted = h.broker.store.connection_by_name("private-api").unwrap();
+    let report = aka_core::capability::http::test_upstream(
+        &h.broker.store,
+        &test_client,
+        std::time::Duration::from_secs(2),
+        &trusted,
+    )
+    .await;
+    assert!(report.is_ok(), "{report:?}");
+
+    let untrusted = h.broker.store.connection_by_name("untrusted-api").unwrap();
+    let error = aka_core::capability::http::test_upstream(
+        &h.broker.store,
+        &test_client,
+        std::time::Duration::from_secs(2),
+        &untrusted,
+    )
+    .await
+    .expect_err("the private leaf must not validate against public roots");
+    assert_eq!(
+        error.kind,
+        aka_core::capability::TestErrorKind::CertUnverified,
+        "{error:?}"
+    );
 }
 
 /* ------------------------- API-6: render failures ------------------------- */
@@ -761,19 +1027,19 @@ async fn the_endpoint_plane_is_rate_limited() {
 async fn a_wrong_endpoint_secret_does_not_spend_the_budget() {
     let up = upstream().await;
     let config = BrokerConfig {
-        per_identity_per_min: 2,
+        per_identity_per_min: 3,
         ..Default::default()
     };
     let h = harness(config).await;
     api_connection(&h, "github", up.port);
     let (base, secret) = endpoint_for(&h, "github").await;
 
-    for _ in 0..5 {
+    for _ in 0..2 {
         let (status, _) = endpoint_raw(&base, "GET /echo HTTP/1.1", "end_wrong").await;
         assert_eq!(status, 401);
     }
     // The real holder still has its full budget.
-    for i in 0..2 {
+    for i in 0..3 {
         let (status, body) = endpoint_raw(&base, "GET /echo HTTP/1.1", &secret).await;
         assert_eq!(status, 200, "call {i}: {body}");
     }

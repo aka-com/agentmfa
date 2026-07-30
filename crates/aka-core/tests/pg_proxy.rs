@@ -951,7 +951,9 @@ async fn the_session_prompt_says_it_grants_full_sql_access() {
 
     let prompt = h.last_prompt.lock().unwrap().clone().expect("a prompt");
     assert_eq!(prompt.unit, aka_core::approvals::ApprovalUnit::Session);
-    let consequence = prompt.consequence.expect("the prompt states what it grants");
+    let consequence = prompt
+        .consequence
+        .expect("the prompt states what it grants");
     assert!(
         consequence.contains("full SQL access"),
         "the user is told what a session covers: {consequence}"
@@ -964,7 +966,10 @@ async fn the_session_prompt_says_it_grants_full_sql_access() {
     // influence — an `application_name` must not be able to reword it.
     assert!(
         !prompt.summary.contains("full SQL access")
-            && !prompt.detail.unwrap_or_default().contains("full SQL access"),
+            && !prompt
+                .detail
+                .unwrap_or_default()
+                .contains("full SQL access"),
         "the warning does not share a field with client-supplied text"
     );
 }
@@ -1005,6 +1010,51 @@ async fn a_refused_session_never_reaches_the_database() {
         "the upstream must never be dialed for a refused session"
     );
     assert!(h.broker.sessions().is_empty());
+
+    // A client retry during the denial cooldown is refused without raising a
+    // second prompt or touching the database.
+    let retry = match tokio_postgres::connect(&h.pg_conn_str(&ticket), NoTls).await {
+        Ok(_) => panic!("the cooldown must repeat the refusal"),
+        Err(error) => error,
+    };
+    assert!(retry
+        .as_db_error()
+        .is_some_and(|db| db.message().contains("approval_denied")));
+    assert_eq!(h.prompts.load(Ordering::SeqCst), 1);
+    assert!(fake.state.startups.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_unanswered_pg_prompt_times_out_without_dialing_upstream() {
+    let mut h = harness_answering(
+        BrokerConfig {
+            approval_timeout: Duration::from_millis(150),
+            ..BrokerConfig::default()
+        },
+        None,
+    )
+    .await;
+    let fake = fake_pg(FakeAuth::Cleartext).await;
+    add_pg_connection(&h.broker, fake.port);
+    let conn = h.broker.store.connection_by_name("prod-db").unwrap();
+    h.broker
+        .ui_set_confirm_mode(&conn.id, aka_core::types::ConfirmMode::On)
+        .unwrap();
+
+    let token = h.pair().await;
+    let (_, ticket) = h.open_pg(&token).await;
+    let error = match tokio_postgres::connect(&h.pg_conn_str(&ticket), NoTls).await {
+        Ok(_) => panic!("an unanswered prompt must lapse"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .as_db_error()
+            .is_some_and(|db| db.message().contains("approval_timeout")),
+        "{error}"
+    );
+    assert_eq!(h.prompts.load(Ordering::SeqCst), 1);
+    assert!(fake.state.startups.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -1366,7 +1416,10 @@ async fn a_pg_endpoint_also_serves_an_ordinary_tcp_dsn() {
     h.pair().await;
     let info = h.issue_endpoint().await;
 
-    let tcp = info.tcp_dsn.clone().expect("a pg endpoint has a TCP address");
+    let tcp = info
+        .tcp_dsn
+        .clone()
+        .expect("a pg endpoint has a TCP address");
     // An ordinary URL every driver already parses: no `host=<dir>` convention,
     // and the endpoint secret in the password slot so it works standalone.
     assert!(tcp.starts_with("postgresql://"), "{tcp}");

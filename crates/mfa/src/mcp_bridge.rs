@@ -93,17 +93,24 @@ async fn discover_mcp_url(socket: &Path) -> Result<String, String> {
 /// entirely in `data`.
 #[derive(Default)]
 pub struct SseParser {
-    buffer: String,
+    buffer: Vec<u8>,
     data: Vec<String>,
 }
 
 impl SseParser {
     pub fn push(&mut self, chunk: &str) -> Vec<String> {
-        self.buffer.push_str(chunk);
+        self.push_bytes(chunk.as_bytes())
+    }
+
+    pub fn push_bytes(&mut self, chunk: &[u8]) -> Vec<String> {
+        self.buffer.extend_from_slice(chunk);
         let mut events = Vec::new();
-        while let Some(newline) = self.buffer.find('\n') {
-            let line: String = self.buffer.drain(..=newline).collect();
-            let line = line.trim_end_matches(['\n', '\r']);
+        while let Some(newline) = self.buffer.iter().position(|byte| *byte == b'\n') {
+            let mut line: Vec<u8> = self.buffer.drain(..=newline).collect();
+            while matches!(line.last(), Some(b'\n' | b'\r')) {
+                line.pop();
+            }
+            let line = String::from_utf8_lossy(&line);
             if line.is_empty() {
                 if !self.data.is_empty() {
                     events.push(self.data.join("\n"));
@@ -222,7 +229,7 @@ impl Bridge {
                 .await
                 .map_err(|error| format!("MCP stream failed: {error}"))?
             {
-                for event in parser.push(&String::from_utf8_lossy(&chunk)) {
+                for event in parser.push_bytes(&chunk) {
                     messages.push(event);
                 }
             }
@@ -355,6 +362,22 @@ mod tests {
     }
 
     #[test]
+    fn sse_parser_preserves_utf8_split_across_transport_chunks() {
+        let mut parser = SseParser::default();
+        let frame = "data: {\"text\":\"working…\"}\n\n".as_bytes();
+        let split = frame
+            .windows("…".len())
+            .position(|bytes| bytes == "…".as_bytes())
+            .unwrap()
+            + 1;
+        assert!(parser.push_bytes(&frame[..split]).is_empty());
+        assert_eq!(
+            parser.push_bytes(&frame[split..]),
+            vec!["{\"text\":\"working…\"}".to_string()]
+        );
+    }
+
+    #[test]
     fn one_line_compacts_and_refuses_garbage() {
         assert_eq!(
             one_line("{\n  \"jsonrpc\": \"2.0\"\n}"),
@@ -404,6 +427,18 @@ mod tests {
                     )
                         .into_response()
                 }
+                "missing" => (
+                    axum::http::StatusCode::NOT_FOUND,
+                    [("content-type", "application/json")],
+                    r#"{"jsonrpc":"2.0","id":41,"error":{"code":-32004,"message":"gone"}}"#,
+                )
+                    .into_response(),
+                "failed" => (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    [("content-type", "application/json")],
+                    r#"{"jsonrpc":"2.0","id":42,"error":{"code":-32603,"message":"failed"}}"#,
+                )
+                    .into_response(),
                 other => panic!("unexpected method {other}"),
             }
         }
@@ -453,6 +488,29 @@ mod tests {
         assert_eq!(called.len(), 1);
         let value: serde_json::Value = serde_json::from_str(&called[0]).unwrap();
         assert_eq!(value["result"]["ok"], true);
+
+        // Non-success HTTP statuses still carry correlated JSON-RPC replies;
+        // the bridge must relay their request ids instead of synthesizing an
+        // uncorrelated transport error.
+        for (id, method, code) in [(41, "missing", -32004), (42, "failed", -32603)] {
+            let Relay::Messages(messages) = bridge
+                .post(
+                    &serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "method": method,
+                    })
+                    .to_string(),
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("{method} should relay")
+            };
+            let value: serde_json::Value = serde_json::from_str(&messages[0]).unwrap();
+            assert_eq!(value["id"], id);
+            assert_eq!(value["error"]["code"], code);
+        }
     }
 
     #[tokio::test]

@@ -464,6 +464,11 @@ test('a colliding tool name costs one tool, not the whole session', async () => 
       'agentmfa_prod_db_open',
       'agentmfa_status',
     ]);
+    const status = payload(
+      await client.callTool({ name: 'agentmfa_status', arguments: {} }),
+    ) as { errors?: Array<{ name: string; error: string }> };
+    assert.deepEqual(status.errors?.map((entry) => entry.name), ['prod db']);
+    assert.match(status.errors?.[0]?.error ?? '', /collid/i);
   } finally {
     await app.close();
   }

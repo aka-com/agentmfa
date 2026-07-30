@@ -469,8 +469,10 @@ pub(crate) fn spawn_refresh_sweeper(broker: &Arc<Broker>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp_auth::McpOAuthGrant;
     use crate::store::ConnectionSpec;
     use crate::types::{ConnectionConfig, OAuthSpec};
+    use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct Events;
@@ -483,6 +485,225 @@ mod tests {
         fn confirm_action(&self, _description: &str) -> Option<crate::types::ConfirmationMethod> {
             Some(crate::types::ConfirmationMethod::Waived)
         }
+    }
+
+    #[derive(Clone)]
+    struct TokenState {
+        status: axum::http::StatusCode,
+        payload: Value,
+        hits: Arc<AtomicUsize>,
+        forms: Arc<Mutex<Vec<HashMap<String, String>>>>,
+        release: Option<Arc<tokio::sync::Notify>>,
+    }
+
+    async fn token_fixture(
+        status: axum::http::StatusCode,
+        payload: Value,
+        release: Option<Arc<tokio::sync::Notify>>,
+    ) -> (
+        u16,
+        Arc<AtomicUsize>,
+        Arc<Mutex<Vec<HashMap<String, String>>>>,
+    ) {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let forms = Arc::new(Mutex::new(Vec::new()));
+        let state = TokenState {
+            status,
+            payload,
+            hits: hits.clone(),
+            forms: forms.clone(),
+            release,
+        };
+        let app =
+            axum::Router::new()
+                .route(
+                    "/token",
+                    axum::routing::post(
+                        |axum::extract::State(state): axum::extract::State<TokenState>,
+                         axum::extract::Form(form): axum::extract::Form<
+                            HashMap<String, String>,
+                        >| async move {
+                            state.hits.fetch_add(1, Ordering::SeqCst);
+                            state.forms.lock().unwrap().push(form);
+                            if let Some(release) = state.release {
+                                release.notified().await;
+                            }
+                            (state.status, axum::Json(state.payload))
+                        },
+                    ),
+                )
+                .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (port, hits, forms)
+    }
+
+    async fn managed_oauth_broker(
+        token_endpoint: String,
+    ) -> (Arc<Broker>, tempfile::TempDir, crate::types::Connection) {
+        let dir = tempfile::tempdir().unwrap();
+        let broker = Broker::new(
+            crate::paths::Paths::under(dir.path()),
+            Arc::new(crate::vault::MemoryVault::new()),
+            crate::config::BrokerConfig::default(),
+            Arc::new(Events),
+        )
+        .await
+        .unwrap();
+        broker
+            .store
+            .add_secret("MCP_TOKEN", Zeroizing::new("old-access".into()))
+            .unwrap();
+        let secret = broker.store.secret_by_name("MCP_TOKEN").unwrap();
+        let connection = broker
+            .store
+            .add_connection(ConnectionSpec {
+                name: format!("mcp-refresh-{}", Uuid::new_v4()),
+                config: ConnectionConfig::Api {
+                    host: "127.0.0.1".into(),
+                    scheme: "http".into(),
+                    port: Some(9),
+                    trusted_ca_bundle_path: None,
+                    template: "Authorization: Bearer {{MCP_TOKEN}}".into(),
+                    mcp_path: Some("/mcp".into()),
+                    oauth: None,
+                },
+                secrets: vec![secret.id],
+            })
+            .unwrap();
+        let grant = McpOAuthGrant {
+            refresh_token: Some("refresh-live".into()),
+            client_id: "client-1".into(),
+            client_secret: None,
+            token_endpoint,
+            resource: "http://127.0.0.1/mcp".into(),
+        };
+        broker
+            .store
+            .set_connection_oauth(
+                &connection.id,
+                grant.to_secret_value(),
+                Some(Utc::now() - chrono::Duration::minutes(1)),
+            )
+            .unwrap();
+        let connection = broker.store.connection_by_id(&connection.id).unwrap();
+        (broker, dir, connection)
+    }
+
+    async fn force_refresh(broker: Arc<Broker>, connection_id: Uuid) -> Result<(), RefreshError> {
+        crate::authorization::scope(true, async move {
+            refresh_connection_token(
+                &broker.refresh_context(),
+                &connection_id,
+                RefreshMode::Force,
+            )
+            .await
+        })
+        .await
+    }
+
+    async fn stored_grant(broker: &Broker, connection_id: Uuid) -> McpOAuthGrant {
+        let raw =
+            crate::authorization::scope(true, broker.store.connection_oauth_grant(&connection_id))
+                .await
+                .unwrap();
+        McpOAuthGrant::from_secret_value(&raw).unwrap()
+    }
+
+    #[tokio::test]
+    async fn concurrent_forced_refreshes_spend_the_rotating_grant_once() {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (port, hits, forms) = token_fixture(
+            axum::http::StatusCode::OK,
+            serde_json::json!({
+                "access_token": "new-access",
+                "refresh_token": "refresh-rotated",
+                "expires_in": 3600,
+            }),
+            Some(release.clone()),
+        )
+        .await;
+        let (broker, _dir, connection) =
+            managed_oauth_broker(format!("http://127.0.0.1:{port}/token")).await;
+
+        let first = tokio::spawn(force_refresh(broker.clone(), connection.id));
+        for _ in 0..100 {
+            if hits.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        let second = tokio::spawn(force_refresh(broker.clone(), connection.id));
+        tokio::task::yield_now().await;
+        release.notify_one();
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(forms.lock().unwrap()[0]["resource"], "http://127.0.0.1/mcp");
+        assert_eq!(
+            stored_grant(&broker, connection.id)
+                .await
+                .refresh_token
+                .as_deref(),
+            Some("refresh-rotated")
+        );
+    }
+
+    #[tokio::test]
+    async fn transient_refresh_failure_preserves_the_refresh_token() {
+        let (port, hits, _) = token_fixture(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({ "error": "temporarily_unavailable" }),
+            None,
+        )
+        .await;
+        let (broker, _dir, connection) =
+            managed_oauth_broker(format!("http://127.0.0.1:{port}/token")).await;
+        assert!(matches!(
+            force_refresh(broker.clone(), connection.id).await,
+            Err(RefreshError::Transient(_))
+        ));
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            stored_grant(&broker, connection.id)
+                .await
+                .refresh_token
+                .as_deref(),
+            Some("refresh-live")
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_refresh_retires_the_refresh_token() {
+        let (port, _, _) = token_fixture(
+            axum::http::StatusCode::BAD_REQUEST,
+            serde_json::json!({ "error": "invalid_grant" }),
+            None,
+        )
+        .await;
+        let (broker, _dir, connection) =
+            managed_oauth_broker(format!("http://127.0.0.1:{port}/token")).await;
+        assert!(matches!(
+            force_refresh(broker.clone(), connection.id).await,
+            Err(RefreshError::Rejected(_))
+        ));
+        assert_eq!(
+            stored_grant(&broker, connection.id).await.refresh_token,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn non_https_non_loopback_token_endpoint_is_not_contacted() {
+        let (broker, _dir, connection) =
+            managed_oauth_broker("http://example.com/token".into()).await;
+        assert!(matches!(
+            force_refresh(broker, connection.id).await,
+            Err(RefreshError::NotRefreshable(_))
+        ));
     }
 
     /// API-19. A BYO-OAuth connection keeps its token set in a secret rather

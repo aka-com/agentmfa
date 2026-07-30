@@ -536,6 +536,17 @@ fn test_request_error(error: reqwest::Error, host: &str) -> TestError {
         }
         source = current.source();
     }
+    // hyper-util's connector error does not expose its nested rustls error
+    // through `source()` on every version. Its Debug chain still retains the
+    // typed variant. Inspect it only for classification; never return it,
+    // because the request URL may contain a query-injected credential.
+    if !tls {
+        let debug = format!("{error:?}").to_ascii_lowercase();
+        cert = debug.contains("invalidcertificate")
+            || debug.contains("invalid peer certificate")
+            || debug.contains("certificateunknown");
+        tls = cert || debug.contains("rustls") || debug.contains("tls handshake");
+    }
     let kind = if cert {
         TestErrorKind::CertUnverified
     } else if tls {

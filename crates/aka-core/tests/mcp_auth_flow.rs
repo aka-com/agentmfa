@@ -44,6 +44,9 @@ struct MockAuthServer {
     /// The refresh token the token endpoint currently honors; `None`
     /// makes every refresh answer 400 invalid_grant.
     valid_refresh: Option<String>,
+    /// Issuer returned by the authorization response. `None` uses the
+    /// discovered issuer; tests override it to exercise mix-up rejection.
+    response_iss: Option<String>,
 }
 
 impl Default for MockAuthServer {
@@ -55,6 +58,7 @@ impl Default for MockAuthServer {
             refresh_requests: 0,
             current_access: ACCESS_TOKEN.into(),
             valid_refresh: Some(REFRESH_TOKEN.into()),
+            response_iss: None,
         }
     }
 }
@@ -165,6 +169,7 @@ async fn spawn_mock_vendor() -> (u16, Arc<Mutex<MockAuthServer>>) {
                     "authorization_endpoint": format!("{base}/authorize"),
                     "token_endpoint": format!("{base}/token"),
                     "registration_endpoint": format!("{base}/register"),
+                    "authorization_response_iss_parameter_supported": true,
                 }))
             }
         }
@@ -190,8 +195,10 @@ async fn spawn_mock_vendor() -> (u16, Arc<Mutex<MockAuthServer>>) {
     // with a code, like a browser session that clicked Approve.
     let authorize = {
         let state = state.clone();
+        let base = base.clone();
         move |axum::extract::Query(query): axum::extract::Query<HashMap<String, String>>| {
             let state = state.clone();
+            let base = base.clone();
             async move {
                 assert_eq!(query.get("response_type").map(String::as_str), Some("code"));
                 assert_eq!(
@@ -205,17 +212,34 @@ async fn spawn_mock_vendor() -> (u16, Arc<Mutex<MockAuthServer>>) {
                 assert!(query.get("resource").is_some_and(|r| r.ends_with("/mcp")));
                 let redirect = query.get("redirect_uri").expect("redirect_uri").clone();
                 let nonce = query.get("state").expect("state").clone();
-                state.lock().unwrap().code_challenge =
-                    Some(query.get("code_challenge").expect("challenge").clone());
-                axum::response::Redirect::to(&format!("{redirect}?code={AUTH_CODE}&state={nonce}"))
+                let issuer = {
+                    let mut state = state.lock().unwrap();
+                    state.code_challenge =
+                        Some(query.get("code_challenge").expect("challenge").clone());
+                    state.response_iss.clone().unwrap_or(base)
+                };
+                let mut callback = url::Url::parse(&redirect).unwrap();
+                callback
+                    .query_pairs_mut()
+                    .append_pair("code", AUTH_CODE)
+                    .append_pair("state", &nonce)
+                    .append_pair("iss", &issuer);
+                axum::response::Redirect::to(callback.as_str())
             }
         }
     };
     let token = {
         let state = state.clone();
+        let base = base.clone();
         move |axum::extract::Form(form): axum::extract::Form<HashMap<String, String>>| {
             let state = state.clone();
+            let base = base.clone();
             async move {
+                let expected_resource = format!("{base}/mcp");
+                assert_eq!(
+                    form.get("resource").map(String::as_str),
+                    Some(expected_resource.as_str())
+                );
                 // A silent renewal: honor the current refresh token, rotate
                 // both tokens, and start rejecting the previous bearer.
                 if form.get("grant_type").map(String::as_str) == Some("refresh_token") {
@@ -680,6 +704,41 @@ async fn oauth_sign_in_mints_a_connection_and_the_status_check_acknowledges_it()
         .collect();
     assert!(secrets.contains(&"GITHUB_TEST_MCP_TOKEN".to_string()));
     assert!(secrets.contains(&"GITHUB_PERSONAL_MCP_TOKEN".to_string()));
+}
+
+#[tokio::test]
+async fn an_authorization_response_from_the_wrong_issuer_is_rejected_end_to_end() {
+    let (port, vendor) = spawn_mock_vendor().await;
+    vendor.lock().unwrap().response_iss = Some("https://attacker.example".into());
+    let (broker, _dir) = test_broker().await;
+    let started = broker
+        .ui_start_mcp_auth(McpAuthDraft {
+            name: "issuer-mismatch".into(),
+            scheme: "http".into(),
+            host: "127.0.0.1".into(),
+            port: Some(port),
+            mcp_path: "/mcp".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let session_id = Uuid::parse_str(&started.id).unwrap();
+    let awaiting = wait_for(&broker, &session_id, "the browser step", |state| {
+        matches!(state.phase, McpAuthPhase::AwaitingAuthorization { .. })
+    })
+    .await;
+    let McpAuthPhase::AwaitingAuthorization { authorization_url } = awaiting.phase else {
+        unreachable!()
+    };
+    let _ = reqwest::Client::new().get(authorization_url).send().await;
+    let failed = wait_for(&broker, &session_id, "issuer rejection", |state| {
+        state.phase.is_terminal()
+    })
+    .await;
+    let McpAuthPhase::Failed { message, .. } = failed.phase else {
+        panic!("issuer mismatch unexpectedly succeeded")
+    };
+    assert!(message.contains("unexpected issuer"), "{message}");
+    assert!(broker.store.connection_by_name("issuer-mismatch").is_none());
 }
 
 #[tokio::test]

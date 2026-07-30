@@ -480,7 +480,11 @@ export async function createToolServer(
       });
       // A dropped collision registers no tool; record that so status does
       // not advertise a name that isn't there.
-      registrations.push({ connection, tools: [] });
+      registrations.push({
+        connection,
+        tools: [],
+        error: `tool name collided with another connection (${toolName})`,
+      });
       continue;
     }
     taken.add(toolName);
