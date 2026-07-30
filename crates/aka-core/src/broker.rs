@@ -1170,10 +1170,18 @@ impl Broker {
             recent.contains_key(id)
         };
         let confirmation = if recently_retargeted {
-            Some(self.confirm_action(&format!(
+            // Confirm off the async runtime: the native sheet blocks its
+            // thread for as long as the user leaves it up.
+            let store = self.store.clone();
+            let description = format!(
                 "Test newly retargeted tool “{}” with its stored credential",
                 connection.name
-            ))?)
+            );
+            Some(
+                tokio::task::spawn_blocking(move || store.confirm_action(&description))
+                    .await
+                    .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))??,
+            )
         } else {
             None
         };

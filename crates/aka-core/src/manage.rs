@@ -1382,8 +1382,10 @@ impl ManagementBackend for LocalBackend {
     async fn agent_key(&self) -> ManageResult<String> {
         // Gated and audited at release: the trait's only caller is the
         // shell's clipboard affordance, and a remote shell reaches this same
-        // path through the manage route.
-        Ok(self.broker.ui_agent_key_for_copy()?)
+        // path through the manage route. The gate prompts, so it runs through
+        // `blocking` like every other prompting entry point.
+        self.blocking(move |broker| broker.ui_agent_key_for_copy())
+            .await
     }
 
     async fn rotate_key(&self) -> ManageResult<()> {

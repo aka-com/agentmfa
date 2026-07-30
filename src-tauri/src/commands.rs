@@ -1296,8 +1296,9 @@ pub async fn issue_endpoint(
 
 /// Read a connection's already-issued direct endpoint (address, retained
 /// secret, example) without minting or rotating; `None` when none is issued.
-/// Unlike issuance this takes no native gate — it re-reads surfaced state,
-/// so the UI's per-application copy buttons can embed the secret on demand.
+/// The address embeds a standing credential, so the read-back takes a fresh
+/// native gate and is audited like copying a stored secret — call it only
+/// from an explicit user action, never from a background refresh.
 #[tauri::command]
 pub async fn get_endpoint(
     state: State<'_, AppState>,
