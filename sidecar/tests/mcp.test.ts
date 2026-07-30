@@ -80,8 +80,11 @@ const upstream = {
   toolPages: undefined as
     | Array<Array<{
         name: string;
+        title?: string;
         description?: string;
         inputSchema?: Record<string, unknown>;
+        outputSchema?: Record<string, unknown>;
+        annotations?: Record<string, unknown>;
       }>>
     | undefined,
   rpcFailure: false,
@@ -670,6 +673,93 @@ test("an MCP upstream's own tools are re-exposed, credential-side untouched", as
   }
 });
 
+test('upstream tool schemas and metadata survive the MCP projection', async () => {
+  const app = await harness();
+  upstream.toolPages = [[{
+    name: 'search',
+    title: 'Workspace search',
+    description: 'Search the workspace',
+    inputSchema: {
+      type: 'object',
+      properties: { query: { type: 'string', minLength: 2 } },
+      required: ['query'],
+      additionalProperties: false,
+    },
+    outputSchema: {
+      type: 'object',
+      properties: { hits: { type: 'array' } },
+      required: ['hits'],
+    },
+    annotations: {
+      readOnlyHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }]];
+  try {
+    const client = await app.connect('token-mcp');
+    const search = (await client.listTools()).tools.find(
+      (tool) => tool.name === 'agentmfa_notion_search',
+    );
+    assert.equal(search?.title, 'Workspace search');
+    assert.deepEqual(search?.inputSchema, upstream.toolPages[0][0].inputSchema);
+    assert.deepEqual(search?.outputSchema, upstream.toolPages[0][0].outputSchema);
+    assert.deepEqual(search?.annotations, upstream.toolPages[0][0].annotations);
+  } finally {
+    await app.close();
+  }
+});
+
+test('upstream tool annotations are projected onto known bounded hints', async () => {
+  const app = await harness();
+  upstream.toolPages = [[{
+    name: 'search',
+    annotations: {
+      title: 'x'.repeat(1_000),
+      readOnlyHint: true,
+      destructiveHint: 'yes',
+      smuggled: 'y'.repeat(200_000),
+    },
+  }]];
+  try {
+    const client = await app.connect('token-mcp');
+    const search = (await client.listTools()).tools.find(
+      (tool) => tool.name === 'agentmfa_notion_search',
+    );
+    assert.deepEqual(search?.annotations, {
+      title: `${'x'.repeat(200)}…`,
+      readOnlyHint: true,
+    });
+  } finally {
+    await app.close();
+  }
+});
+
+test('native tools advertise behavior and return structured results', async () => {
+  const app = await harness();
+  try {
+    const client = await app.connect('token-wired');
+    const tools = (await client.listTools()).tools;
+    const status = tools.find((tool) => tool.name === 'agentmfa_status');
+    assert.equal(status?.annotations?.readOnlyHint, true);
+    assert.equal(status?.annotations?.idempotentHint, true);
+    const open = tools.find((tool) => tool.name === 'agentmfa_prod-db_open');
+    assert.equal(open?.annotations?.idempotentHint, false);
+    assert.ok(open?.outputSchema);
+
+    const result = await client.callTool({
+      name: 'agentmfa_prod-db_open',
+      arguments: {},
+    });
+    assert.deepEqual((result as { structuredContent?: unknown }).structuredContent, {
+      endpoint: '/v1/pg/open',
+      body: { connection: 'prod-db' },
+    });
+  } finally {
+    await app.close();
+  }
+});
+
 test('a curated wiring lists only its allowed subset of upstream tools', async () => {
   // The broker advertises `allowed_tools` on the connection when the user
   // curated a subset; the sidecar's listing mirrors it (the broker enforces
@@ -973,11 +1063,13 @@ test('an unwired connection is never even registered as a tool', async () => {
     const client = await app.connect('token-wired');
     // Calling it by the name it *would* have had must fail at the protocol
     // level: there is no such tool to invoke.
-    const result = await client.callTool({
-      name: 'agentmfa_deploy-host_open',
-      arguments: {},
-    });
-    assert.equal((result as { isError?: boolean }).isError, true);
+    await assert.rejects(
+      () => client.callTool({
+        name: 'agentmfa_deploy-host_open',
+        arguments: {},
+      }),
+      /Tool agentmfa_deploy-host_open not found/,
+    );
   } finally {
     await app.close();
   }

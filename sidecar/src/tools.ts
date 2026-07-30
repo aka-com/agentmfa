@@ -151,6 +151,7 @@ export interface ToolResult {
   [key: string]: unknown;
   isError?: boolean;
   content: Array<{ type: 'text'; text: string }>;
+  structuredContent?: Record<string, unknown>;
 }
 
 const DEFAULT_AGENT_RESULT_BYTES = 128 * 1024;
@@ -207,13 +208,24 @@ export function boundedToolText(value: unknown, budget = agentResultBudget()): s
 }
 
 function text(value: unknown): ToolResult {
+  const rendered = boundedToolText(value);
+  let structuredContent: Record<string, unknown> | undefined;
+  try {
+    const parsed = JSON.parse(rendered);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      structuredContent = parsed as Record<string, unknown>;
+    }
+  } catch {
+    // A non-object broker result remains text-only.
+  }
   return {
     content: [
       {
         type: 'text',
-        text: boundedToolText(value),
+        text: rendered,
       },
     ],
+    ...(structuredContent ? { structuredContent } : {}),
   };
 }
 

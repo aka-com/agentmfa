@@ -20,7 +20,6 @@ import { randomUUID } from 'node:crypto';
 import {
   McpServer,
   ResourceTemplate,
-  type RegisteredTool,
 } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
@@ -45,6 +44,11 @@ import {
   type UpstreamTool,
 } from './upstream-mcp';
 import { alternateToolName } from './tool-names';
+import {
+  ProtocolToolRegistry,
+  type RegisteredProtocolTool,
+  zodToolInput,
+} from './tool-registry';
 import {
   frameUntrustedText,
   sanitizeUntrustedText,
@@ -270,21 +274,63 @@ const WIRING_REFRESH_MS = 10_000;
 /// Register one connection's `_request`/`_open` tool and hand back its handle,
 /// so the surface can be reconciled later rather than only built once.
 function registerNative(
-  server: McpServer,
+  tools: ProtocolToolRegistry,
   broker: BrokerClient,
   principal: Principal,
   connection: BrokerConnection,
   toolName: string,
-): RegisteredTool {
-  return server.registerTool(
+): RegisteredProtocolTool {
+  const input = zodToolInput(schemaFor(connection));
+  const outputSchema =
+    connection.type === 'api'
+      ? {
+          type: 'object',
+          properties: {
+            status: { type: 'integer' },
+            headers: { type: 'object' },
+            body: { type: 'string' },
+            body_encoding: { enum: ['utf8', 'base64'] },
+          },
+          additionalProperties: true,
+        }
+      : connection.type === 'pg'
+        ? {
+            type: 'object',
+            properties: {
+              dsn: { type: 'string' },
+              ticket: { type: 'string' },
+              expires_in_seconds: { type: 'integer' },
+            },
+            additionalProperties: true,
+          }
+        : {
+            type: 'object',
+            properties: {
+              auth_sock: { type: 'string' },
+              destination: { type: 'string' },
+              host: { type: 'string' },
+              port: { type: 'integer' },
+              user: { type: 'string' },
+              host_key_fingerprint: { type: ['string', 'null'] },
+              expires_in_seconds: { type: 'integer' },
+            },
+            additionalProperties: true,
+          };
+  return tools.register(
     toolName,
     {
       title: connection.name,
       description: describe(connection),
-      inputSchema: schemaFor(connection),
+      inputSchema: input.inputSchema,
+      outputSchema,
+      annotations: {
+        idempotentHint: false,
+        openWorldHint: connection.type === 'api',
+      },
     },
-    async (args: Record<string, unknown>) =>
+    async (args) =>
       invoke(broker, principal, connection, args ?? {}),
+    input.parse,
   );
 }
 
@@ -319,6 +365,7 @@ export async function createToolServer(
         'is missing, and search/call meta-tools for catalog overflow.',
     },
   );
+  const toolRegistry = new ProtocolToolRegistry(server);
 
   let connections: BrokerConnection[] = [];
   let connectionListError: string | undefined;
@@ -341,21 +388,27 @@ export async function createToolServer(
   // Live handles for the per-connection native tools, keyed by tool name so a
   // rename reads as one name leaving and another arriving — which is exactly
   // what it is, since the tool name is derived from the connection's name.
-  const native = new Map<string, RegisteredTool>();
+  const native = new Map<string, RegisteredProtocolTool>();
 
   // Always registered, for two reasons. It is what installs the MCP tool
   // handlers at all — a server with no tools answers `tools/list` with
   // "Method not found", which is a baffling result when no connections are
   // enabled. It also gives the agent somewhere to look: the reply says what
   // is available and what to ask the user for.
-  server.registerTool(
+  const statusInput = zodToolInput({});
+  toolRegistry.register(
     'agentmfa_status',
     {
       title: 'AgentMFA status',
       description:
         'Report which AgentMFA tools this agent can use, and what to do when ' +
         'there are none.',
-      inputSchema: {},
+      inputSchema: statusInput.inputSchema,
+      annotations: {
+        readOnlyHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
     },
     async () => {
       // Deliberately re-queried rather than reported from the list captured
@@ -502,6 +555,7 @@ export async function createToolServer(
         ],
       };
     },
+    statusInput.parse,
   );
 
   // Connection names are freer than MCP tool names, so two of them can slug
@@ -530,7 +584,7 @@ export async function createToolServer(
     // credential stays where it belongs.
     if (connection.mcp_path) {
       const outcome = await registerUpstream(
-        server, broker, principal, connection, taken, upstreamIndex,
+        server, toolRegistry, broker, principal, connection, taken, upstreamIndex,
         upstreamToolSurface, resourceSurface,
       );
       registrations.push({
@@ -576,12 +630,12 @@ export async function createToolServer(
     taken.add(toolName);
     native.set(
       toolName,
-      registerNative(server, broker, principal, connection, toolName),
+      registerNative(toolRegistry, broker, principal, connection, toolName),
     );
     registrations.push({ connection, tools: [toolName], warnings: namingWarnings });
   }
 
-  registerMetaTools(server, broker, principal, upstreamIndex);
+  registerMetaTools(toolRegistry, broker, principal, upstreamIndex);
 
   /**
    * Bring the native per-connection tools back in line with current access.
@@ -629,7 +683,7 @@ export async function createToolServer(
       taken.add(toolName);
       native.set(
         toolName,
-        registerNative(server, broker, principal, connection, toolName),
+        registerNative(toolRegistry, broker, principal, connection, toolName),
       );
       changed = true;
     }
@@ -674,12 +728,13 @@ export async function createToolServer(
  * discovery, never authorization.
  */
 function registerMetaTools(
-  server: McpServer,
+  tools: ProtocolToolRegistry,
   broker: BrokerClient,
   principal: Principal,
   index: IndexedTool[],
 ): void {
-  server.registerTool(
+  const connectInput = zodToolInput({ service: z.string().min(1).max(120) });
+  tools.register(
     'agentmfa_connect',
     {
       title: 'Request a new tool',
@@ -688,9 +743,15 @@ function registerMetaTools(
         '"linear" or "https://mcp.example.com/mcp"). This only files a request in ' +
         'the AgentMFA app — the user adds and enables the tool there, and its ' +
         'tools appear on your next session (check with agentmfa_status).',
-      inputSchema: { service: z.string().min(1).max(120) },
+      inputSchema: connectInput.inputSchema,
+      annotations: {
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
     },
-    async ({ service }: { service: string }) => {
+    async (args) => {
+      const { service } = args as { service: string };
       try {
         const outcome = await broker.requestConnect(principal, service);
         return {
@@ -711,12 +772,14 @@ function registerMetaTools(
         };
       }
     },
+    connectInput.parse,
   );
 
   const withheld = index.filter((entry) => entry.registeredAs === null);
   if (!withheld.length) return;
 
-  server.registerTool(
+  const searchInput = zodToolInput({ query: z.string().min(1).max(200) });
+  tools.register(
     'agentmfa_search_tools',
     {
       title: 'Search available tools',
@@ -724,9 +787,15 @@ function registerMetaTools(
         `${withheld.length} of this session's upstream tools are not listed here ` +
         '(tool-budget). Search them by name or purpose; call the results with ' +
         'agentmfa_call_tool (or directly, when a tool name is listed).',
-      inputSchema: { query: z.string().min(1).max(200) },
+      inputSchema: searchInput.inputSchema,
+      annotations: {
+        readOnlyHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
     },
-    async ({ query }: { query: string }) => {
+    async (args) => {
+      const { query } = args as { query: string };
       const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
       const scored = index
         .map((entry) => {
@@ -772,9 +841,15 @@ function registerMetaTools(
         }],
       };
     },
+    searchInput.parse,
   );
 
-  server.registerTool(
+  const callInput = zodToolInput({
+    connection: z.string().min(1),
+    tool: z.string().min(1),
+    arguments: z.looseObject({}).optional(),
+  });
+  tools.register(
     'agentmfa_call_tool',
     {
       title: 'Call a searchable tool',
@@ -782,14 +857,15 @@ function registerMetaTools(
         'Invoke an upstream tool found via agentmfa_search_tools, by connection ' +
         'and tool name. Subject to the same access and tool-selection checks as ' +
         'every other call.',
-      inputSchema: {
-        connection: z.string().min(1),
-        tool: z.string().min(1),
-        arguments: z.looseObject({}).optional(),
-      },
+      inputSchema: callInput.inputSchema,
+      annotations: { openWorldHint: true },
     },
-    async ({ connection, tool, arguments: args }:
-      { connection: string; tool: string; arguments?: Record<string, unknown> }) => {
+    async (input) => {
+      const { connection, tool, arguments: args } = input as {
+        connection: string;
+        tool: string;
+        arguments?: Record<string, unknown>;
+      };
       const entry = index.find(
         (candidate) =>
           candidate.connection.name === connection && candidate.tool.name === tool,
@@ -815,15 +891,15 @@ function registerMetaTools(
         return upstreamToolFailure(entry.connection, error);
       }
     },
+    callInput.parse,
   );
 }
 
 /**
  * What the agent is told about an upstream tool.
  *
- * The upstream's JSON Schema is inlined here because our own declared
- * schema is deliberately permissive — this is where the agent learns what
- * the tool actually takes.
+ * The schema itself is exposed in tools/list; the description only adds a
+ * fixed provenance label around the upstream's untrusted prose.
  */
 function describeUpstream(connection: BrokerConnection, tool: UpstreamTool): string {
   const base = tool.description ?? `${tool.name} via ${connection.name}`;
@@ -835,17 +911,7 @@ function describeUpstream(connection: BrokerConnection, tool: UpstreamTool): str
       tool: tool.name,
     });
   }
-  if (!tool.inputSchema) {
-    return `Proxied from ${safeConnection}.\n${description.text}`;
-  }
-  const schema = frameUntrustedText(JSON.stringify(tool.inputSchema), 4096);
-  if (schema.truncated) {
-    log('warn', 'truncated an upstream MCP tool schema', {
-      connection: connection.name,
-      tool: tool.name,
-    });
-  }
-  return `Proxied from ${safeConnection}.\n${description.text}\nParameters:\n${schema.text}`;
+  return `Proxied from ${safeConnection}.\n${description.text}`;
 }
 
 function upstreamToolFailure(connection: BrokerConnection, error: unknown) {
@@ -898,6 +964,7 @@ interface UpstreamRegistration {
  */
 async function registerUpstream(
   server: McpServer,
+  toolRegistry: ProtocolToolRegistry,
   broker: BrokerClient,
   principal: Principal,
   connection: BrokerConnection,
@@ -1007,21 +1074,19 @@ async function registerUpstream(
     index.push({ connection, tool, registeredAs: toolName });
     toolSurface.registered += 1;
 
-    server.registerTool(
+    toolRegistry.register(
       toolName,
       {
-        title: sanitizeUntrustedText(tool.name, 200).text,
+        title: sanitizeUntrustedText(tool.title ?? tool.name, 200).text,
         description: describeUpstream(connection, tool),
-        // A permissive object, NOT `undefined`. With no schema the SDK
-        // calls the handler with its `extra` (session id, request headers,
-        // the agent's own Authorization) as the first argument — which we
-        // would then forward to the upstream as tool arguments. Declaring a
-        // schema keeps the callback's first argument the agent's arguments
-        // and nothing else. Loose, so the upstream's own parameters pass
-        // through unvalidated by us; the upstream validates them.
-        inputSchema: z.looseObject({}),
+        inputSchema: tool.inputSchema ?? {
+          type: 'object',
+          additionalProperties: true,
+        },
+        ...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}),
+        ...(tool.annotations ? { annotations: tool.annotations } : {}),
       },
-      async (args: Record<string, unknown>) => {
+      async (args) => {
         try {
           const result = await callUpstreamTool(
             broker,

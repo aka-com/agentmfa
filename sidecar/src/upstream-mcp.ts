@@ -25,13 +25,23 @@ import { deriveMcpNamespace, joinToolPath } from '@executor-js/plugin-mcp/core';
 import type { AgentAuth, BrokerClient, BrokerConnection } from './broker';
 import { log } from './log';
 import { boundedToolName } from './tool-names';
+import { sanitizeUntrustedText } from './untrusted';
 import { SIDECAR_VERSION } from './version';
 
 /** One tool as the upstream MCP server describes it. */
 export interface UpstreamTool {
   name: string;
+  title?: string;
   description?: string;
   inputSchema?: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
+  annotations?: {
+    title?: string;
+    readOnlyHint?: boolean;
+    destructiveHint?: boolean;
+    idempotentHint?: boolean;
+    openWorldHint?: boolean;
+  };
 }
 
 /** One static resource as the upstream describes it. */
@@ -88,6 +98,29 @@ function boundedString(value: unknown, max = MAX_CATALOG_TEXT): string | undefin
   return value.length <= max ? value : `${value.slice(0, max - 1)}…`;
 }
 
+const ANNOTATION_HINTS = [
+  'readOnlyHint',
+  'destructiveHint',
+  'idempotentHint',
+  'openWorldHint',
+] as const;
+
+/** Annotations are relayed to the agent verbatim in tools/list, so project
+ * them onto the known hint fields rather than passing an arbitrary upstream
+ * object through the catalog's size bounds unchecked. */
+function boundedToolAnnotations(value: unknown): UpstreamTool['annotations'] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const annotations: NonNullable<UpstreamTool['annotations']> = {};
+  if (typeof raw.title === 'string') {
+    annotations.title = sanitizeUntrustedText(raw.title, 200).text;
+  }
+  for (const hint of ANNOTATION_HINTS) {
+    if (typeof raw[hint] === 'boolean') annotations[hint] = raw[hint];
+  }
+  return annotations;
+}
+
 function boundedCatalogItem(method: string, value: unknown): unknown | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const item = value as Record<string, unknown>;
@@ -98,18 +131,34 @@ function boundedCatalogItem(method: string, value: unknown): unknown | null {
       item.inputSchema && typeof item.inputSchema === 'object'
         ? item.inputSchema
         : undefined;
+    let outputSchema =
+      item.outputSchema && typeof item.outputSchema === 'object'
+        ? item.outputSchema
+        : undefined;
     if (
       inputSchema !== undefined &&
       Buffer.byteLength(JSON.stringify(inputSchema)) > MAX_TOOL_SCHEMA_BYTES
     ) {
       inputSchema = undefined;
     }
+    if (
+      outputSchema !== undefined &&
+      Buffer.byteLength(JSON.stringify(outputSchema)) > MAX_TOOL_SCHEMA_BYTES
+    ) {
+      outputSchema = undefined;
+    }
+    const annotations = boundedToolAnnotations(item.annotations);
     return {
       name,
+      ...(boundedString(item.title, 1024) === undefined
+        ? {}
+        : { title: boundedString(item.title, 1024) }),
       ...(boundedString(item.description) === undefined
         ? {}
         : { description: boundedString(item.description) }),
       ...(inputSchema === undefined ? {} : { inputSchema }),
+      ...(outputSchema === undefined ? {} : { outputSchema }),
+      ...(annotations === undefined ? {} : { annotations }),
     };
   }
   if (method === 'resources/list') {
