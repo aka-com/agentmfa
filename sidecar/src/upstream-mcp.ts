@@ -466,8 +466,11 @@ export async function discoverUpstream(
   connection: BrokerConnection,
 ): Promise<UpstreamDiscovery> {
   const client = new UpstreamClient(broker, auth, connection);
-  await client.initialize();
   try {
+    // Inside the try: `initialize` sets the session id from the response
+    // header before it can throw (e.g. on an unsupported negotiated version),
+    // so the `finally` must run to DELETE that session rather than leak it.
+    await client.initialize();
     const capabilities = client.capabilities;
     const tools = capabilities.tools
       ? await client.listPaged<UpstreamTool>('tools/list', 'tools', MAX_TOOL_PAGES)
@@ -502,7 +505,9 @@ export async function discoverUpstream(
     }
     return { capabilities, tools, resources, resourceTemplates };
   } finally {
-    await client.close();
+    // Best-effort: a failed teardown must not mask the real error, nor turn a
+    // successful discovery into a failure.
+    await client.close().catch(() => {});
   }
 }
 
@@ -579,10 +584,12 @@ async function runWithMrtr(
 
   for (let round = 0; round < MAX_MRTR_ROUNDS; round++) {
     const client = new UpstreamClient(broker, auth, connection);
-    await withinBudget(client.initialize());
     let result: MrtrResult | undefined;
     let elicitationTokens: Record<string, string> = {};
     try {
+      // Inside the try so a throw after the session id is set still tears the
+      // session down (see `discoverUpstream`).
+      await withinBudget(client.initialize());
       const params = {
         ...baseParams,
         ...(inputResponses ? { inputResponses } : {}),
@@ -594,7 +601,10 @@ async function runWithMrtr(
       result = response.result as MrtrResult | undefined;
       Object.assign(elicitationTokens, response.elicitationTokens);
     } finally {
-      await withinBudget(client.close());
+      // Teardown is cheap and best-effort: wrapping it in `withinBudget` let an
+      // exhausted budget throw here and mask the real error from the try (and
+      // skip the DELETE entirely).
+      await client.close().catch(() => {});
     }
 
     // A pre-2026 server omits `resultType`; that (and an explicit "complete")
@@ -674,8 +684,10 @@ export async function completeUpstream(
   context?: CompletionContext,
 ): Promise<string[]> {
   const client = new UpstreamClient(broker, auth, connection);
-  await client.initialize();
   try {
+    // Inside the try so a throw after the session id is set still tears the
+    // session down (see `discoverUpstream`).
+    await client.initialize();
     const result = (await client.request('completion/complete', {
       ref,
       argument,
@@ -684,7 +696,7 @@ export async function completeUpstream(
     const values = result?.completion?.values;
     return Array.isArray(values) ? values.filter((value): value is string => typeof value === 'string') : [];
   } finally {
-    await client.close();
+    await client.close().catch(() => {});
   }
 }
 
