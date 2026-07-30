@@ -17,7 +17,6 @@ function remote(overrides: Partial<BrokerProfile> = {}): BrokerProfile {
     connected: true,
     error: null,
     has_saved_token: true,
-    native_authentication: false,
     ...overrides,
   };
 }

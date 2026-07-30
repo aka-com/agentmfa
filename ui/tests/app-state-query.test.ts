@@ -33,7 +33,7 @@ test('query-backed state follows the active broker scope', async () => {
 
     const localSettings = {
       ...state.settings,
-      presence_window_secs: 60 * 60,
+      confirm_ssh_host_keys: true,
     };
     state.settings = localSettings;
     assert.equal(getBrokerQueryData(localBroker, 'get_settings'), localSettings);

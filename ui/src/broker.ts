@@ -11,8 +11,6 @@ export const LOCAL_BROKER: BrokerProfile = {
   connected: true,
   error: null,
   has_saved_token: false,
-  // Fail closed until the native shell reports its actual capability.
-  native_authentication: false,
 };
 
 /** The switcher's label: "Local" for this machine, or the remote host. */

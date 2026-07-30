@@ -3017,6 +3017,22 @@ function DeleteConnectionConfirm(): ReactNode {
   );
 }
 
+function RotateKeyConfirm(): ReactNode {
+  if (state.confirm?.kind !== 'rotate-key') return null;
+  const subject = state.broker.mode === 'local' ? 'this computer’s' : 'the broker’s';
+  return (
+    <>
+      <h3 id="rotate-key-title">Rotate {subject} agent key?</h3>
+      <p>Every live agent session and direct endpoint stops working immediately.
+        Agents that read the token file reconnect automatically; pasted addresses must be reissued.</p>
+      <div className="sheet-actions">
+        <button className="btn" data-act="confirm-cancel">Cancel</button>
+        <button className="btn danger" data-act="rotate-key-confirm">Rotate key</button>
+      </div>
+    </>
+  );
+}
+
 function ConfirmSheet(): ReactNode {
   const kind = state.confirm?.kind;
   if (kind === 'reissue-endpoint' || kind === 'revoke-endpoint') {
@@ -3032,6 +3048,14 @@ function ConfirmSheet(): ReactNode {
       <Sheet titleId="del-conn-title" className="wide confirm-sheet"
         backdropAction="confirm-cancel">
         <DeleteConnectionConfirm />
+      </Sheet>
+    );
+  }
+  if (kind === 'rotate-key') {
+    return (
+      <Sheet titleId="rotate-key-title" className="wide confirm-sheet"
+        backdropAction="confirm-cancel">
+        <RotateKeyConfirm />
       </Sheet>
     );
   }
@@ -3230,9 +3254,7 @@ function ElicitationSheet(): ReactNode {
  *
  * The three answers are the whole point of the switch: let this through for
  * a while, stop asking altogether, or refuse. "Stop asking" turns the
- * connection's confirmation off, which the broker treats as removing a
- * gate — it runs its own native authentication before applying it, so a
- * stray click cannot silently disarm the switch.
+ * connection's confirmation off as part of this explicit decision.
  */
 function ApprovalSheet(): ReactNode {
   const approval = state.approvals.find((a) => a.id === state.sheet?.id);
@@ -4629,32 +4651,6 @@ function SettingsSheet(): ReactNode {
         data-act="toggle-autostart" role="checkbox"
         aria-label="Launch AgentMFA at login"
         aria-checked={state.launchAtLogin}></button></div>;
-  const reauthRow = <div className="set-row"><div className="set-txt"><div className="st-title">Confirm before using saved secrets</div>
-      <div className="st-sub">Optional: use OS authentication before showing, copying, or sending a saved credential. Off by default.</div></div>
-      <button className={`switch ${s.reauth_on_read ? 'on' : ''}`} data-act="toggle-reauth"
-        role="checkbox" aria-checked={s.reauth_on_read}></button></div>;
-  const windowBtn = (secs: number, label: string): ReactNode => (
-    <button className={`seg-btn ${s.presence_window_secs === secs ? 'on' : ''}`}
-      data-act="set-presence-window" data-id={secs} role="radio"
-      aria-checked={s.presence_window_secs === secs}>{label}</button>
-  );
-  const presenceRow = s.reauth_on_read
-    ? <div className="set-row"><div className="set-txt"><div className="st-title">Stay unlocked after confirming</div>
-      <div className="st-sub">Confirming access allows actions for this long. An agent requesting new access will always ask again.</div></div>
-      <div className="seg in-form" role="radiogroup" aria-label="Stay unlocked for">
-      {windowBtn(15 * 60, '15 min')}{windowBtn(60 * 60, '1 hr')}{windowBtn(2 * 60 * 60, '2 hrs')}</div></div>
-    : null;
-  const authenticationRows = state.broker.native_authentication
-    ? <>{reauthRow}{presenceRow}</>
-    : state.broker.mode === 'remote'
-      ? <div className="set-row"><div className="set-txt">
-          <div className="st-title">Authorized by management token on {brokerLabel(state.broker)}</div>
-          <div className="st-sub">This broker does not advertise native OS authentication. Sensitive settings are authorized by the management token instead.</div>
-        </div></div>
-      : <div className="set-row"><div className="set-txt">
-          <div className="st-title">Native OS authentication unavailable</div>
-          <div className="st-sub">This broker shell does not advertise an operating-system authentication prompt.</div>
-        </div></div>;
   // The settings read is the sheet's only source of broker truth, and this
   // sheet is the only place that truth is consumed — a failed read has no
   // other surface. Never present defaults or stale values as the broker's
@@ -4709,7 +4705,7 @@ function SettingsSheet(): ReactNode {
       {notificationSoundRow}{notificationFocusRow}{notificationEscalationRow}
       {autostartRow}
       {brokerKeyRow}
-      {settingsFailed ? settingsFailureRow : <>{authenticationRows}{hostKeyRow}{dockRow}</>}
+      {settingsFailed ? settingsFailureRow : <>{hostKeyRow}{dockRow}</>}
       <div className="sheet-actions"><button className="btn primary" data-act="sheet-cancel">Done</button></div>
     </>
   );
@@ -4894,11 +4890,6 @@ async function answerApproval(
   success: string,
 ): Promise<void> {
   if (state.approvalAnswering) return;
-  // "Stop asking" runs the broker's native authentication, whose sheet
-  // takes focus. In the menu-bar dropdown that focus loss would hide the
-  // chrome and dismiss this dialog mid-answer, so hold it open the way
-  // credential forms do.
-  if (decision === 'approve_all' && !await holdDropdownFormOpen()) return;
   state.approvalAnswering = id;
   render();
   let answered = false;
@@ -6481,9 +6472,13 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
 
     case 'rotate-key-ask': {
       if (state.agentMenuOpen) { state.agentMenuOpen = null; render(); }
-      // The OS authentication sheet is both the warning and the gate: its
-      // reason text carries the consequences, so nothing precedes it.
+      state.confirm = { kind: 'rotate-key' };
+      render();
+      break;
+    }
+    case 'rotate-key-confirm': {
       if (await run(() => invoke('rotate_key'))) {
+        state.confirm = null;
         toast('🔑 Key rotated — agents reconnect from the token file'); await refresh('all');
       }
       break;
@@ -6559,9 +6554,7 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       break;
     }
     // Traffic confirmation: the queue row opens the dialog, and the answer
-    // releases (or refuses) the parked call broker-side. "Approve all" runs
-    // the broker's native authentication on the way through, because it
-    // turns the tool's switch off.
+    // releases (or refuses) the parked call broker-side.
     case 'approval-open': {
       if (!await holdDropdownFormOpen()) break;
       const approval = state.approvals.find((candidate) => candidate.id === id);
@@ -6770,26 +6763,6 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       render();
       break;
     }
-    case 'toggle-reauth':
-      {
-        const on = !state.settings.reauth_on_read;
-        await run(() => invoke('set_reauth_on_read', { on }));
-        toast(on ? '💳 Confirmation required before using saved secrets' : '💳 Extra confirmation removed');
-      }
-      await refresh('settings');
-      break;
-    case 'set-presence-window':
-      {
-        const secs = Number(id);
-        if (secs !== state.settings.presence_window_secs
-            && await run(() => invoke('set_presence_window', { secs }))) {
-          state.settings = { ...state.settings, presence_window_secs: secs };
-          const label = secs === 15 * 60 ? '15 minutes' : secs === 60 * 60 ? '1 hour' : '2 hours';
-          toast(`🔓 Stays unlocked for ${label} after confirming`);
-        }
-      }
-      await refresh('settings');
-      break;
     case 'toggle-menubar-dock':
       {
         const on = !state.settings.menu_bar_hides_dock;

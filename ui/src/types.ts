@@ -325,17 +325,12 @@ export interface BrokerProfile {
   error: string | null;
   /** A saved management token exists for `url`. */
   has_saved_token: boolean;
-  /** The managed broker advertises native operating-system authentication. */
-  native_authentication: boolean;
 }
 
 export interface Settings {
-  reauth_on_read: boolean;
   menu_bar_hides_dock: boolean;
   /** Ask before trusting a first-seen SSH host key. */
   confirm_ssh_host_keys: boolean;
-  /** Seconds one OS authentication keeps user-plane actions from re-prompting. */
-  presence_window_secs: number;
 }
 
 /** Native request notifications are local to this desktop shell. */
@@ -625,10 +620,8 @@ export interface CommandMap {
     /** Field name -> value; required when approved, forbidden otherwise. */
     values?: Record<string, string>;
   }, boolean>;
-  set_reauth_on_read: CommandSpec<{ on: boolean }, void>;
   set_menu_bar_hides_dock: CommandSpec<{ on: boolean }, void>;
   set_confirm_ssh_host_keys: CommandSpec<{ on: boolean }, void>;
-  set_presence_window: CommandSpec<{ secs: number }, void>;
   ui_set_mode: CommandSpec<{ mode: string }, void>;
   ui_hide_main: CommandSpec<undefined, void>;
   ui_hide_dropdown: CommandSpec<undefined, void>;

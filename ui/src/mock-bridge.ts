@@ -259,10 +259,8 @@ const db: MockDatabase = {
   approvals: [],
   requests: [],
   settings: {
-    reauth_on_read: false,
     menu_bar_hides_dock: false,
     confirm_ssh_host_keys: false,
-    presence_window_secs: 15 * 60,
   },
 };
 function mkSecret(name: string, value: string): MockSecret {
@@ -741,7 +739,6 @@ function mockStatusReport(c: MockConnection): McpStatusReport {
 // are reviewable in a plain browser.
 let mockBroker: import('./types').BrokerProfile = {
   mode: 'local', url: null, connected: true, error: null, has_saved_token: false,
-  native_authentication: true,
 };
 let mockNotificationSettings: NotificationSettings = {
   mode: 'when_hidden',
@@ -771,7 +768,6 @@ function mockConnectRemote(url: string, token: string | null): unknown {
   }
   mockBroker = {
     mode: 'remote', url: trimmed, connected: true, error: null, has_saved_token: true,
-    native_authentication: false,
   };
   emit('aka://broker-changed', mockBroker);
   // A "flaky" broker connects, then drops the link shortly after — the
@@ -844,7 +840,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
     case 'switch_broker_local': {
       mockBroker = {
         mode: 'local', url: mockBroker.url, connected: true, error: null,
-        has_saved_token: mockBroker.has_saved_token, native_authentication: true,
+        has_saved_token: mockBroker.has_saved_token,
       };
       emit('aka://broker-changed', mockBroker);
       return { ...mockBroker };
@@ -1356,9 +1352,6 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       audit('secretCopied', 'Shared key copied');
       return;
     case 'rotate_key':
-      // Stands in for the native sheet (whose reason text is the warning).
-      if (!window.confirm("Rotate this computer's key?\n\nEvery live agent session closes now; agents reconnect on their own from the key file.")) throw 'declined';
-      // falls through to apply
       db.identity = { ...db.identity, minted_at: now(), last_used: now(), legacy_aliases: 0 };
       db.sessions = [];
       audit('tokenRevoked', 'Key rotated; all agents disconnected');
@@ -1475,20 +1468,12 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       emit('aka://activity-appended', entry);
       return true;
     }
-    case 'set_reauth_on_read':
-      db.settings.reauth_on_read = args.on;
-      emit('aka://settings-changed', {});
-      return;
     case 'set_confirm_ssh_host_keys':
       db.settings.confirm_ssh_host_keys = args.on;
       emit('aka://settings-changed', {});
       return;
     case 'set_menu_bar_hides_dock':
       db.settings.menu_bar_hides_dock = args.on;
-      emit('aka://settings-changed', {});
-      return;
-    case 'set_presence_window':
-      db.settings.presence_window_secs = args.secs;
       emit('aka://settings-changed', {});
       return;
     case 'ui_set_mode': case 'ui_hide_main': case 'ui_hide_dropdown':

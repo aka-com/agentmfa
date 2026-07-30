@@ -113,7 +113,7 @@ test('the application root boots against the mock bridge', () => {
   assert.ok(testingLibrary.getByRole(document.body, 'button', { name: 'Settings' }));
 });
 
-test('the mounted Settings sheet exposes broker key rotation', async () => {
+test('key rotation requires an ordinary destructive confirmation', async () => {
   testingLibrary.fireEvent.click(
     testingLibrary.getByRole(document.body, 'button', { name: 'Settings' }),
   );
@@ -123,5 +123,17 @@ test('the mounted Settings sheet exposes broker key rotation', async () => {
   assert.ok(openSettings);
   testingLibrary.fireEvent.click(openSettings);
   const dialog = await testingLibrary.findByRole(document.body, 'dialog', { name: 'Settings' });
-  assert.ok(testingLibrary.getByRole(dialog, 'button', { name: 'Rotate key…' }));
+  testingLibrary.fireEvent.click(
+    testingLibrary.getByRole(dialog, 'button', { name: 'Rotate key…' }),
+  );
+  const confirmation = await testingLibrary.findByRole(
+    document.body,
+    'dialog',
+    { name: 'Rotate this computer’s agent key?' },
+  );
+  assert.match(confirmation.textContent ?? '', /direct endpoint stops working immediately/);
+  assert.ok(testingLibrary.getByRole(confirmation, 'button', { name: 'Rotate key' }));
+  testingLibrary.fireEvent.click(
+    testingLibrary.getByRole(confirmation, 'button', { name: 'Cancel' }),
+  );
 });

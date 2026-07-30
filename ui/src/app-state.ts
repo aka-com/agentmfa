@@ -235,10 +235,8 @@ export interface AppState {
 }
 
 export const DEFAULT_SETTINGS: Settings = {
-  reauth_on_read: false,
   menu_bar_hides_dock: false,
   confirm_ssh_host_keys: false,
-  presence_window_secs: 15 * 60,
 };
 
 const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
