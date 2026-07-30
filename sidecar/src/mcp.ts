@@ -41,6 +41,11 @@ import {
   type UpstreamResourceTemplate,
   type UpstreamTool,
 } from './upstream-mcp';
+import {
+  frameUntrustedText,
+  sanitizeUntrustedText,
+  sanitizeUpstreamResult,
+} from './untrusted';
 
 export const MCP_PATH = '/mcp';
 
@@ -657,8 +662,15 @@ function registerMetaTools(
       const results = scored.map(({ entry }) => ({
         tool: entry.tool.name,
         connection: entry.connection.name,
-        description: entry.tool.description,
-        ...(entry.tool.inputSchema ? { parameters: entry.tool.inputSchema } : {}),
+        description: frameUntrustedText(entry.tool.description ?? '', 1024).text,
+        ...(entry.tool.inputSchema
+          ? {
+              parameters: frameUntrustedText(
+                JSON.stringify(entry.tool.inputSchema),
+                4096,
+              ).text,
+            }
+          : {}),
         call: entry.registeredAs
           ? { tool: entry.registeredAs }
           : {
@@ -713,11 +725,19 @@ function registerMetaTools(
         const result = await callUpstreamTool(
           broker, principal, entry.connection, entry.tool.name, args ?? {},
         );
-        return result as { content: Array<{ type: 'text'; text: string }> };
+        return sanitizeUpstreamResult(result) as {
+          content: Array<{ type: 'text'; text: string }>;
+        };
       } catch (error) {
         return {
           isError: true,
-          content: [{ type: 'text' as const, text: `${connection} failed: ${String(error)}` }],
+          content: [{
+            type: 'text' as const,
+            text: frameUntrustedText(
+              `${connection} failed: ${String(error)}`,
+              2048,
+            ).text,
+          }],
         };
       }
     },
@@ -733,8 +753,25 @@ function registerMetaTools(
  */
 function describeUpstream(connection: BrokerConnection, tool: UpstreamTool): string {
   const base = tool.description ?? `${tool.name} via ${connection.name}`;
-  if (!tool.inputSchema) return `${base} (via ${connection.name})`;
-  return `${base} (via ${connection.name}). Parameters: ${JSON.stringify(tool.inputSchema)}`;
+  const description = frameUntrustedText(base, 1024);
+  const safeConnection = sanitizeUntrustedText(connection.name, 200).text;
+  if (description.truncated) {
+    log('warn', 'truncated an upstream MCP tool description', {
+      connection: connection.name,
+      tool: tool.name,
+    });
+  }
+  if (!tool.inputSchema) {
+    return `Proxied from ${safeConnection}.\n${description.text}`;
+  }
+  const schema = frameUntrustedText(JSON.stringify(tool.inputSchema), 4096);
+  if (schema.truncated) {
+    log('warn', 'truncated an upstream MCP tool schema', {
+      connection: connection.name,
+      tool: tool.name,
+    });
+  }
+  return `Proxied from ${safeConnection}.\n${description.text}\nParameters:\n${schema.text}`;
 }
 
 /** What re-exposing one upstream produced: the tool names it added, or why not. */
@@ -777,7 +814,10 @@ async function registerUpstream(
       tools: [],
       withheld: [],
       resources: 0,
-      error: `could not reach the MCP server: ${String(error)}`,
+      error: frameUntrustedText(
+        `could not reach the MCP server: ${String(error)}`,
+        2048,
+      ).text,
     };
   }
 
@@ -817,7 +857,7 @@ async function registerUpstream(
     server.registerTool(
       toolName,
       {
-        title: tool.name,
+        title: sanitizeUntrustedText(tool.name, 200).text,
         description: describeUpstream(connection, tool),
         // A permissive object, NOT `undefined`. With no schema the SDK
         // calls the handler with its `extra` (session id, request headers,
@@ -837,16 +877,19 @@ async function registerUpstream(
             tool.name,
             args ?? {},
           );
-          // The upstream already speaks MCP, so its result is returned as
-          // it stands rather than rewrapped.
-          return result as { content: Array<{ type: 'text'; text: string }> };
+          return sanitizeUpstreamResult(result) as {
+            content: Array<{ type: 'text'; text: string }>;
+          };
         } catch (error) {
           return {
             isError: true,
             content: [
               {
                 type: 'text' as const,
-                text: `${connection.name} failed: ${String(error)}`,
+                text: frameUntrustedText(
+                  `${connection.name} failed: ${String(error)}`,
+                  2048,
+                ).text,
               },
             ],
           };
@@ -880,7 +923,8 @@ function describeResource(
   item: UpstreamResource | UpstreamResourceTemplate,
 ): string {
   const base = item.description ?? item.name ?? ('uri' in item ? item.uri : item.uriTemplate);
-  return `${base} (via ${connection.name})`;
+  const safeConnection = sanitizeUntrustedText(connection.name, 200).text;
+  return `Proxied from ${safeConnection}.\n${frameUntrustedText(base, 1024).text}`;
 }
 
 /**
@@ -926,11 +970,15 @@ function registerUpstreamResources(
         resource.uri,
         {
           description: describeResource(connection, resource),
-          ...(resource.title ? { title: resource.title } : {}),
+          ...(resource.title
+            ? { title: sanitizeUntrustedText(resource.title, 200).text }
+            : {}),
           ...(resource.mimeType ? { mimeType: resource.mimeType } : {}),
         },
         async (uri: URL) =>
-          (await readUpstreamResource(broker, principal, connection, uri.toString())) as ReadResourceResult,
+          sanitizeUpstreamResult(
+            await readUpstreamResource(broker, principal, connection, uri.toString()),
+          ) as ReadResourceResult,
       );
       surface.takenUris.add(resource.uri);
       surface.registered++;
@@ -978,7 +1026,7 @@ function registerUpstreamResources(
               if (typeof variable !== 'string') return undefined;
               return async (value: string, context?: CompletionContext) => {
                 try {
-                  return await completeUpstream(
+                  const values = await completeUpstream(
                     broker,
                     principal,
                     connection,
@@ -986,6 +1034,7 @@ function registerUpstreamResources(
                     { name: variable, value },
                     context,
                   );
+                  return values.map((value) => sanitizeUntrustedText(value, 500).text);
                 } catch {
                   return [];
                 }
@@ -1000,11 +1049,15 @@ function registerUpstreamResources(
         new ResourceTemplate(template.uriTemplate, { list: undefined, complete }),
         {
           description: describeResource(connection, template),
-          ...(template.title ? { title: template.title } : {}),
+          ...(template.title
+            ? { title: sanitizeUntrustedText(template.title, 200).text }
+            : {}),
           ...(template.mimeType ? { mimeType: template.mimeType } : {}),
         },
         async (uri: URL) =>
-          (await readUpstreamResource(broker, principal, connection, uri.toString())) as ReadResourceResult,
+          sanitizeUpstreamResult(
+            await readUpstreamResource(broker, principal, connection, uri.toString()),
+          ) as ReadResourceResult,
       );
       surface.takenTemplateUris.add(template.uriTemplate);
       surface.takenTemplateNames.add(name);

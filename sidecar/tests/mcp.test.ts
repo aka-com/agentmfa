@@ -11,6 +11,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 
 import { createSidecarServer } from '../src/server';
 import { SessionStore } from '../src/mcp';
+import { UNTRUSTED_BEGIN, UNTRUSTED_END } from '../src/untrusted';
 
 const SUPERVISOR_TOKEN = 'a'.repeat(64);
 
@@ -433,6 +434,16 @@ function payload(result: unknown): unknown {
   return JSON.parse(content[0].text);
 }
 
+/** Assert and unwrap the provenance frame on third-party MCP result text. */
+function upstreamText(result: unknown): string {
+  const text = (result as { content: Array<{ text: string }> }).content[0].text;
+  const prefix = `${UNTRUSTED_BEGIN}\n`;
+  const suffix = `\n${UNTRUSTED_END}`;
+  assert.ok(text.startsWith(prefix), text);
+  assert.ok(text.endsWith(suffix), text);
+  return text.slice(prefix.length, -suffix.length);
+}
+
 test('wired connections appear in tools/list as real tools', async () => {
   const app = await harness();
   try {
@@ -565,15 +576,17 @@ test("an MCP upstream's own tools are re-exposed, credential-side untouched", as
       'agentmfa_notion_search',
       'agentmfa_status',
     ]);
+    const search = tools.find((tool) => tool.name === 'agentmfa_notion_search');
+    assert.match(search?.description ?? '', /BEGIN UNTRUSTED UPSTREAM MCP CONTENT/);
+    assert.match(search?.description ?? '', /Search the workspace/);
 
     const result = await client.callTool({
       name: 'agentmfa_notion_search',
       arguments: { query: 'roadmap' },
     });
     // The upstream's own result comes back as it stands.
-    assert.deepEqual((result as { content: Array<{ text: string }> }).content, [
-      { type: 'text', text: 'search:{"query":"roadmap"}' },
-    ]);
+    const echoed = upstreamText(result);
+    assert.equal(echoed, 'search:{"query":"roadmap"}');
   } finally {
     await app.close();
   }
@@ -631,7 +644,7 @@ test('an upstream tool call carries only the agent arguments', async () => {
       name: 'agentmfa_notion_search',
       arguments: { query: 'roadmap' },
     });
-    const echoed = (result as { content: Array<{ text: string }> }).content[0].text;
+    const echoed = upstreamText(result);
     assert.equal(echoed, 'search:{"query":"roadmap"}');
     assert.ok(!echoed.includes('token-mcp'), 'the agent token must not reach the upstream');
     assert.ok(!echoed.includes('authorization'), 'headers must not reach the upstream');
@@ -879,9 +892,7 @@ test('over-budget upstream tools are searchable and callable, not lost', async (
       name: 'agentmfa_call_tool',
       arguments: { connection: 'notion', tool: 'create_page', arguments: { title: 'Hi' } },
     });
-    assert.deepEqual((result as { content: Array<{ text: string }> }).content, [
-      { type: 'text', text: 'create_page:{"title":"Hi"}' },
-    ]);
+    assert.equal(upstreamText(result), 'create_page:{"title":"Hi"}');
 
     // An unknown tool is refused with a pointer at search, not a crash.
     const missing = await client.callTool({
@@ -943,7 +954,11 @@ test('reading a static resource proxies to the upstream through the broker', asy
     const client = await app.connect('token-mcp');
     const result = await client.readResource({ uri: 'notion://page/home' });
     assert.deepEqual(result.contents, [
-      { uri: 'notion://page/home', mimeType: 'text/markdown', text: '# contents of notion://page/home' },
+      {
+        uri: 'notion://page/home',
+        mimeType: 'text/markdown',
+        text: `${UNTRUSTED_BEGIN}\n# contents of notion://page/home\n${UNTRUSTED_END}`,
+      },
     ]);
   } finally {
     await app.close();
@@ -957,7 +972,11 @@ test('reading a templated URI routes to the owning connection', async () => {
     // A concrete URI matching the template is read via the template's callback.
     const result = await client.readResource({ uri: 'notion://page/abc123' });
     assert.deepEqual(result.contents, [
-      { uri: 'notion://page/abc123', mimeType: 'text/markdown', text: '# contents of notion://page/abc123' },
+      {
+        uri: 'notion://page/abc123',
+        mimeType: 'text/markdown',
+        text: `${UNTRUSTED_BEGIN}\n# contents of notion://page/abc123\n${UNTRUSTED_END}`,
+      },
     ]);
   } finally {
     await app.close();
@@ -1000,9 +1019,7 @@ test('an upstream elicitation is resolved via the broker and the call completes'
     });
     // The tool asked for input, the broker "user" accepted, and the retry
     // completed with the supplied value.
-    assert.deepEqual((result as { content: Array<{ text: string }> }).content, [
-      { type: 'text', text: 'hello octocat' },
-    ]);
+    assert.equal(upstreamText(result), 'hello octocat');
     // The retry echoed the opaque requestState and carried the answer keyed
     // to match the upstream's inputRequests entry.
     assert.equal(upstream.lastRetry?.requestState, 'opaque-state-1');

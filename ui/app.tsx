@@ -3318,7 +3318,7 @@ function WiringToolsSheet(): ReactNode {
             <label key={tool.name} className="wt-row">
               <input type="checkbox" checked={isChecked(tool.name)}
                 onChange={() => toggleTool(tool.name)} />
-              <span className="wt-name"><code>{tool.name}</code>
+              <span className="wt-name"><code>{tool.display_name || tool.name}</code>
                 {tool.description ? <span className="wt-desc">{tool.description}</span> : null}</span>
             </label>
           ))}

@@ -81,26 +81,6 @@ const APPROVAL_TEXT_CAP: usize = 400;
 /// queue (and the user's Inbox) until its deadline.
 const WAITER_LIVENESS_PERIOD: Duration = Duration::from_secs(3);
 
-/// Directional-override and isolate characters. In text an agent controls
-/// they can visually reorder the very string the user is deciding on
-/// (`DELETE /prod` dressed up as something harmless), so a prompt never
-/// renders them.
-const BIDI_CONTROLS: [char; 12] = [
-    '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}',
-    '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
-];
-
-/// Whether a character may appear in prompt text. Newlines and tabs keep a
-/// body preview readable; other controls (and the bidi set above) are
-/// replaced so they cannot reorder, hide, or corrupt what the user is shown.
-fn approval_text_char(c: char) -> char {
-    if BIDI_CONTROLS.contains(&c) || (c.is_control() && c != '\n' && c != '\t') {
-        '\u{FFFD}'
-    } else {
-        c
-    }
-}
-
 /// Every string a prompt shows funnels through here: bounded, and stripped
 /// of characters that could visually rewrite the question.
 ///
@@ -108,15 +88,7 @@ fn approval_text_char(c: char) -> char {
 /// statement previews), so the bidi/control policy has one definition rather
 /// than a copy per call site that can drift from it.
 pub(crate) fn cap_approval_text(text: String) -> String {
-    let mut capped: String = text
-        .chars()
-        .take(APPROVAL_TEXT_CAP)
-        .map(approval_text_char)
-        .collect();
-    if text.chars().nth(APPROVAL_TEXT_CAP).is_some() {
-        capped.push('…');
-    }
-    capped
+    crate::untrusted_text::cap(&text, APPROVAL_TEXT_CAP)
 }
 
 /// Bound an untrusted field before cloning it into a prompt. Callers use
@@ -1424,13 +1396,19 @@ mod tests {
         // corrupt whatever surface shows it. Both are replaced, while the
         // newlines and tabs of an ordinary body preview survive.
         let conn = connection();
-        let request =
-            ApprovalRequest::new(&conn, "agent", "GET /safe\u{202E}dorp/ ETELED".to_string())
-                .detail("line one\n\tindented\u{0007}\u{200F}".to_string());
-        assert_eq!(request.summary, "GET /safe\u{FFFD}dorp/ ETELED");
+        let request = ApprovalRequest::new(
+            &conn,
+            "agent",
+            "GET /safe\u{202E}dorp/\u{200B}\u{3164} ETELED".to_string(),
+        )
+        .detail("line one\n\tindented\u{0007}\u{200F}\u{E0001}".to_string());
+        assert_eq!(
+            request.summary,
+            "GET /safe\u{FFFD}dorp/\u{FFFD}\u{FFFD} ETELED"
+        );
         assert_eq!(
             request.detail.as_deref(),
-            Some("line one\n\tindented\u{FFFD}\u{FFFD}")
+            Some("line one\n\tindented\u{FFFD}\u{FFFD}\u{FFFD}")
         );
     }
 

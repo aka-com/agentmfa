@@ -431,7 +431,10 @@ export interface McpCheckOptions {
 
 /** One upstream tool, as the per-wiring tool picker lists it. */
 export interface McpToolInfo {
+  /** Exact upstream identifier used for the policy selection. */
   name: string;
+  /** Display-safe form when the identifier contains invisible text or was capped. */
+  display_name?: string;
   description?: string;
 }
 

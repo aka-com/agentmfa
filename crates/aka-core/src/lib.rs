@@ -40,6 +40,7 @@ pub mod sidecar;
 pub mod store;
 pub mod template;
 pub mod types;
+pub mod untrusted_text;
 pub mod vault;
 pub mod wire;
 

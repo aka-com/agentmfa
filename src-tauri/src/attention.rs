@@ -472,11 +472,8 @@ fn agent_display(agent: &str, fallback: &str) -> String {
 }
 
 fn notification_label(value: &str, fallback: &str) -> String {
-    let normalized = value
+    let normalized = aka_core::untrusted_text::sanitize(value)
         .chars()
-        // Directional formatting can make an untrusted agent label look
-        // like OS-owned text or reorder the trusted suffix around it.
-        .filter(|character| !is_bidi_formatting(*character))
         .map(|character| {
             if character.is_control() || character.is_whitespace() {
                 ' '
@@ -496,17 +493,6 @@ fn notification_label(value: &str, fallback: &str) -> String {
     } else {
         normalized
     }
-}
-
-fn is_bidi_formatting(character: char) -> bool {
-    matches!(
-        character,
-        '\u{061c}'
-            | '\u{200e}'
-            | '\u{200f}'
-            | '\u{202a}'..='\u{202e}'
-            | '\u{2066}'..='\u{2069}'
-    )
 }
 
 fn scope_key(mode: &str, url: Option<&str>) -> String {
@@ -745,7 +731,11 @@ mod tests {
         );
         assert_eq!(
             notification_label("codex\u{202e}gpj.exe\u{202c}", "An agent"),
-            "codexgpj.exe"
+            "codex\u{FFFD}gpj.exe\u{FFFD}"
+        );
+        assert_eq!(
+            notification_label("codex\u{200B}\u{3164}\u{E0001}", "An agent"),
+            "codex\u{FFFD}\u{FFFD}\u{FFFD}"
         );
     }
 

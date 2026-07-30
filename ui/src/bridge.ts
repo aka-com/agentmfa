@@ -1086,6 +1086,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       // them with light descriptions for the picker.
       return mockStatusReport(c).tools.map((name) => ({
         name,
+        display_name: name,
         description: `The server's ${name.replace(/[_-]/g, ' ')} tool`,
       }));
     }

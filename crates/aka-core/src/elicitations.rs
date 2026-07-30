@@ -224,28 +224,8 @@ impl ElicitationOutcome {
     }
 }
 
-/// Directional-override and isolate characters, stripped so an upstream
-/// cannot visually reorder the prompt the user is deciding on. Mirrors
-/// [`crate::approvals`].
-const BIDI_CONTROLS: [char; 12] = [
-    '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}',
-    '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
-];
-
-fn safe_char(c: char) -> char {
-    if BIDI_CONTROLS.contains(&c) || (c.is_control() && c != '\n' && c != '\t') {
-        '\u{FFFD}'
-    } else {
-        c
-    }
-}
-
 fn cap_text(text: &str, cap: usize) -> String {
-    let mut capped: String = text.chars().take(cap).map(safe_char).collect();
-    if text.chars().nth(cap).is_some() {
-        capped.push('…');
-    }
-    capped
+    crate::untrusted_text::cap(text, cap)
 }
 
 /// Whether a requested schema asks for a secret in any form.
@@ -1141,6 +1121,11 @@ mod tests {
                 "name": { "type": "string", "title": "Full name" },
                 "dry_run": { "type": "boolean", "title": "Dry run" },
                 "env": { "type": "string", "title": "Environment", "enum": ["prod", "staging"] },
+                "hidden\u{200B}name": {
+                    "type": "string",
+                    "title": "Visible\u{3164}label",
+                    "enum": ["yes\u{E0001}"]
+                },
             },
         }));
         let by_name: HashMap<_, _> = fields.iter().map(|f| (f.name.as_str(), f)).collect();
@@ -1150,6 +1135,15 @@ mod tests {
         assert_eq!(
             by_name["env"].options.as_deref(),
             Some(["prod".to_string(), "staging".to_string()].as_slice())
+        );
+        let hidden = fields
+            .iter()
+            .find(|field| field.name == "hidden\u{FFFD}name")
+            .unwrap();
+        assert_eq!(hidden.label, "Visible\u{FFFD}label");
+        assert_eq!(
+            hidden.options.as_deref(),
+            Some(["yes\u{FFFD}".to_string()].as_slice())
         );
     }
 

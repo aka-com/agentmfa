@@ -381,9 +381,27 @@ pub async fn check_connection(
 /// One upstream tool, as the per-wiring tool picker lists it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpToolInfo {
+    /// Exact upstream identifier, sent back when the user curates access.
     pub name: String,
+    /// Display-safe form when the exact identifier contains invisible text or
+    /// is too long. The raw name remains the policy key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+}
+
+fn tool_info(value: &Value) -> Option<McpToolInfo> {
+    let name = value.get("name").and_then(Value::as_str)?;
+    let safe_name = crate::untrusted_text::cap(name, 200);
+    Some(McpToolInfo {
+        name: name.to_string(),
+        display_name: (safe_name != name).then_some(safe_name),
+        description: value
+            .get("description")
+            .and_then(Value::as_str)
+            .map(|description| crate::untrusted_text::cap(description, 400)),
+    })
 }
 
 /// Ask an MCP connection's upstream for its tool list (names +
@@ -423,16 +441,9 @@ pub async fn list_tools(
         let page = session.request("tools/list", params).await?;
         if let Some(list) = page.get("tools").and_then(Value::as_array) {
             for tool in list {
-                let Some(name) = tool.get("name").and_then(Value::as_str) else {
-                    continue;
-                };
-                tools.push(McpToolInfo {
-                    name: name.to_string(),
-                    description: tool
-                        .get("description")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                });
+                if let Some(info) = tool_info(tool) {
+                    tools.push(info);
+                }
             }
         }
         cursor = page
@@ -792,5 +803,20 @@ mod tests {
         assert_eq!(version, PROTOCOL_VERSION);
         assert_eq!(session.protocol_version, PROTOCOL_VERSION);
         assert!(session.protocol_sent);
+    }
+
+    #[test]
+    fn tool_picker_text_is_safe_without_changing_the_policy_identifier() {
+        let info = tool_info(&json!({
+            "name": "delete\u{200B}all",
+            "description": format!("Looks safe\u{202E}{}", "x".repeat(500)),
+        }))
+        .unwrap();
+        assert_eq!(info.name, "delete\u{200B}all");
+        assert_eq!(info.display_name.as_deref(), Some("delete\u{FFFD}all"));
+        let description = info.description.unwrap();
+        assert!(description.starts_with("Looks safe\u{FFFD}"));
+        assert_eq!(description.chars().count(), 401);
+        assert!(description.ends_with('…'));
     }
 }
