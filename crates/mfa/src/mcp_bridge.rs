@@ -442,13 +442,28 @@ fn correlate_http_error(
     body: &str,
 ) -> String {
     let id = request_id(request);
-    let mut response = serde_json::from_str::<serde_json::Value>(body).unwrap_or_else(|_| {
+    // Adopt the upstream body only when it is itself a JSON-RPC response —
+    // `jsonrpc: "2.0"` with an `error` object or a `result`. A body that
+    // merely parses as JSON (a bare string, `null`, an array, or a plain
+    // `{"error":"not_found"}` like the host's own root router emits) is not a
+    // frame the MCP client can correlate: it would be forwarded verbatim,
+    // rejected by the client's schema, and leave the request hanging until its
+    // own timeout — the very uncorrelated failure this function exists to fix.
+    let adopted = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .filter(|value| {
+            value.get("jsonrpc").and_then(serde_json::Value::as_str) == Some("2.0")
+                && (value.get("error").is_some_and(serde_json::Value::is_object)
+                    || value.get("result").is_some())
+        });
+    let mut response = adopted.unwrap_or_else(|| {
         serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
             "error": {
                 "code": -32000,
                 "message": format!("AgentMFA MCP host returned HTTP {status}"),
+                "data": { "detail": body.chars().take(256).collect::<String>() },
             },
         })
     });
@@ -639,6 +654,32 @@ mod tests {
         assert_eq!(response["id"], 9);
         assert_eq!(response["error"]["data"]["http_status"], 429);
         assert_eq!(response["error"]["data"]["retry_after"], "7");
+
+        // A JSON body that is not a JSON-RPC response (the host's own root
+        // router emits `{"error":"not_found"}`) must be replaced with a
+        // well-formed frame the client can correlate, not forwarded verbatim.
+        let response: serde_json::Value = serde_json::from_str(&correlate_http_error(
+            r#"{"jsonrpc":"2.0","id":11,"method":"tools/call"}"#,
+            502,
+            None,
+            r#"{"error":"not_found"}"#,
+        ))
+        .unwrap();
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 11);
+        assert_eq!(response["error"]["code"], -32000);
+        assert_eq!(response["error"]["data"]["http_status"], 502);
+
+        // A bare JSON scalar is likewise not adoptable.
+        let response: serde_json::Value = serde_json::from_str(&correlate_http_error(
+            r#"{"jsonrpc":"2.0","id":12}"#,
+            500,
+            None,
+            r#""Internal Server Error""#,
+        ))
+        .unwrap();
+        assert_eq!(response["id"], 12);
+        assert!(response["error"].is_object());
     }
 
     /// End-to-end over a real loopback server: JSON responses, SSE

@@ -169,6 +169,16 @@ async function handleMcp(
   res: ServerResponse,
   { broker, auth, sessions }: McpDeps,
 ): Promise<void> {
+  // The Host-header rebinding check needs only headers, so run it before
+  // reading any body: a rebinding (or otherwise misdirected) caller must not
+  // be able to make us buffer and JSON.parse up to 8 MiB before we reject it.
+  // A 421 carries no id — a misdirected request is not a JSON-RPC call whose
+  // id any legitimate client would resolve.
+  if (!hostIsLoopback(req.headers.host, req.socket.localPort ?? 0)) {
+    rpcError(res, 421, -32000, 'Misdirected request');
+    return;
+  }
+
   // Read and parse POST bodies before checks which can fail. That lets every
   // JSON-RPC-shaped HTTP error carry the caller's id, so the MCP client can
   // resolve the correct pending request.
@@ -191,11 +201,6 @@ async function handleMcp(
   const id = requestId(body);
 
   try {
-    if (!hostIsLoopback(req.headers.host, req.socket.localPort ?? 0)) {
-      rpcError(res, 421, -32000, 'Misdirected request', id);
-      return;
-    }
-
     // Every request, including one carrying a live session id: a token
     // revoked in the app must stop working on the very next call. The
     // self-reported label rides along so the user's activity log names the
