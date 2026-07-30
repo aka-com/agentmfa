@@ -128,6 +128,10 @@ pub enum AuditKind {
     /// Registration is immediate now; nothing emits this.
     PairDenied,
     TokenRevoked,
+    ManagementTokenIssued,
+    ManagementTokenRevoked,
+    ManagementTokenExpired,
+    AuthenticationFailed,
     /// Retained so activity logs written by older versions still deserialize.
     /// Peer identity verification was removed; nothing emits this.
     PeerIdentityMismatch,
@@ -218,6 +222,10 @@ impl AuditKind {
             AuditKind::Paired => "userRoundCheck",
             AuditKind::PairDenied => "userRoundX",
             AuditKind::TokenRevoked => "unplug",
+            AuditKind::ManagementTokenIssued => "keyRound",
+            AuditKind::ManagementTokenRevoked => "keyRound",
+            AuditKind::ManagementTokenExpired => "clockAlert",
+            AuditKind::AuthenticationFailed => "shieldAlert",
             AuditKind::PeerIdentityMismatch => "shieldAlert",
             AuditKind::Requested => "bell",
             AuditKind::AllowedOnce => "circleCheck",
@@ -275,6 +283,9 @@ impl AuditKind {
             | AuditKind::ConnectRequested => "warning",
             AuditKind::PairDenied
             | AuditKind::TokenRevoked
+            | AuditKind::ManagementTokenRevoked
+            | AuditKind::ManagementTokenExpired
+            | AuditKind::AuthenticationFailed
             | AuditKind::PeerIdentityMismatch
             | AuditKind::GrantRevoked
             | AuditKind::Denied

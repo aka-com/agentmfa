@@ -50,13 +50,17 @@ async fn mock_mcp() -> MockMcp {
                 let id = body.0.get("id").cloned().unwrap_or(Value::Null);
                 let method = body.0.get("method").and_then(Value::as_str).unwrap_or("");
                 let result = match method {
+                    "initialize" => json!({
+                        "protocolVersion": "2025-06-18",
+                        "serverInfo": { "name": "mock", "version": "1.0" }
+                    }),
                     "tools/list" => json!({
                         "tools": [
                             { "name": "search", "description": "Search the docs" },
                             { "name": "delete", "description": "Delete a doc" },
                         ]
                     }),
-                    _ => json!({ "serverInfo": { "name": "mock", "version": "1.0" } }),
+                    _ => json!({}),
                 };
                 (
                     axum::http::StatusCode::OK,

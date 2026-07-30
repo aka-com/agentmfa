@@ -66,6 +66,13 @@ impl Transport {
             Transport::Tcp { public_url } => public_url.as_deref(),
         }
     }
+
+    pub(super) fn audit_label(&self) -> &'static str {
+        match self {
+            Transport::Uds => "uds",
+            Transport::Tcp { .. } => "tcp",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -113,6 +120,13 @@ pub(crate) fn bearer_token(headers: &axum::http::HeaderMap) -> Result<&str, Miss
         return Err(MissingTokenCause::BearerTokenEmpty);
     }
     Ok(token)
+}
+
+pub(super) fn request_peer(parts: &Parts) -> Option<std::net::SocketAddr> {
+    parts
+        .extensions
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|info| info.0)
 }
 
 #[cfg(test)]
@@ -261,6 +275,13 @@ impl FromRequestParts<AppState> for Authed {
                 })
             }
             Err(e) => {
+                let peer = request_peer(parts).map(|peer| peer.ip().to_string());
+                state.broker.audit_auth_failure(
+                    "agent",
+                    e.reason().as_str(),
+                    state.transport.audit_label(),
+                    peer.as_deref(),
+                );
                 if e == TokenError::Superseded {
                     // The key was rotated. Without this hint each 401 reads
                     // as a dead token; `store_at` names the exact file so
@@ -618,7 +639,12 @@ pub async fn serve_with(broker: Arc<Broker>, options: ServeOptions) -> crate::Re
                 },
             );
             let task = tokio::spawn(async move {
-                if let Err(e) = axum::serve(tcp_listener, tcp_app).await {
+                if let Err(e) = axum::serve(
+                    tcp_listener,
+                    tcp_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
+                .await
+                {
                     tracing::error!("tcp control plane exited: {e}");
                 }
             });

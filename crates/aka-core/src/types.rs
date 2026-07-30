@@ -503,12 +503,11 @@ pub struct ToolAccess {
 /// deliberately **not** the shared broker key: an endpoint listens on a
 /// loopback port or socket that outlives any one setup, and its secret can be
 /// pasted into one tool's config and revoked alone without rotating the key
-/// every agent shares. The plaintext is retained so the pasteable address can
-/// carry it whenever it is copied; nothing in the app runs foreign code that
-/// could read it back out, so recoverability costs nothing here (revoke or
-/// reissue still invalidates it instantly). The listener re-checks the
-/// connection's agent access on every request/connection, exactly as the
-/// control plane does.
+/// every agent shares. The plaintext is retained only in the vault so a
+/// pasteable address can be reconstructed after a gated, audited copy-back;
+/// `endpoints.json` carries only its hash. Revoke or reissue invalidates it
+/// instantly. The listener re-checks the connection's agent access on every
+/// request/connection, exactly as the control plane does.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DirectEndpoint {
     pub id: Uuid,

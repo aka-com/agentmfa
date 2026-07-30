@@ -166,6 +166,25 @@ async fn manage_routes_require_the_management_token() {
     assert!(body["capabilities"].as_array().is_some_and(|items| items
         .iter()
         .any(|item| { item.as_str() == Some(aka_api::APPROVAL_SURFACE_CAPABILITY) })));
+    let auth_failures: Vec<_> = h
+        .broker
+        .audit
+        .recent(20)
+        .into_iter()
+        .filter(|entry| entry.kind == aka_core::audit::AuditKind::AuthenticationFailed)
+        .collect();
+    assert!(
+        auth_failures
+            .iter()
+            .any(|entry| entry.fields["plane"] == "manage"),
+        "invalid manage credentials should be visible in activity"
+    );
+    assert!(
+        auth_failures
+            .iter()
+            .any(|entry| entry.fields["plane"] == "agent"),
+        "invalid agent credentials should be visible in activity"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -192,6 +211,38 @@ async fn an_expired_manage_token_is_rejected_over_http() {
     assert!(
         body["detail"].as_str().unwrap().contains("expired"),
         "{body}"
+    );
+    assert!(h.broker.audit.recent(10).iter().any(|entry| {
+        entry.kind == aka_core::audit::AuditKind::ManagementTokenExpired
+            && entry.fields["transport"] == "uds"
+    }));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn repeated_manage_auth_failures_are_coalesced_and_rate_limited() {
+    let h = harness().await;
+    for attempt in 0..11 {
+        let (status, _) = uds_request(
+            &h.socket,
+            "GET",
+            "/v1/manage/whoami",
+            &[("authorization", "Bearer akamgr_invalid")],
+            None,
+        )
+        .await;
+        assert_eq!(status, if attempt < 10 { 401 } else { 429 });
+    }
+    let failures: Vec<_> = h
+        .broker
+        .audit
+        .recent(50)
+        .into_iter()
+        .filter(|entry| entry.kind == aka_core::audit::AuditKind::AuthenticationFailed)
+        .collect();
+    assert_eq!(
+        failures.len(),
+        1,
+        "one stale caller must not amplify the activity log"
     );
 }
 
@@ -481,7 +532,9 @@ async fn identity_settings_and_activity_surface_over_the_manage_api() {
     let (status, _) = h.manage("DELETE", "/v1/manage/activity", None).await;
     assert_eq!(status, 200);
     let (_, body) = h.manage("GET", "/v1/manage/activity", None).await;
-    assert!(body.as_array().unwrap().is_empty());
+    let body = body.as_array().unwrap();
+    assert_eq!(body.len(), 1);
+    assert_eq!(body[0]["text"], "Activity history cleared");
 
     let (status, body) = h.manage("GET", "/v1/manage/agent-setup", None).await;
     assert_eq!(status, 200);

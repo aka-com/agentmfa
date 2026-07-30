@@ -66,6 +66,17 @@ fn parse_client_label(value: &str) -> Result<String, String> {
     }
 }
 
+fn parse_manage_ttl_days(value: &str) -> Result<u64, String> {
+    let days: u64 = value
+        .parse()
+        .map_err(|_| "must be a whole number of days".to_string())?;
+    if (1..=3650).contains(&days) {
+        Ok(days)
+    } else {
+        Err("must be between 1 and 3650 days".to_string())
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "mfa", version, about = "AgentMFA broker CLI")]
 struct Cli {
@@ -374,10 +385,13 @@ enum ManageCommand {
         /// Revoke the management token instead (closes the manage API).
         #[arg(long)]
         revoke: bool,
-        /// Expire the token this many days after issue (bounds a leaked
-        /// token's blast radius). Omit for a token that never expires; the
-        /// desktop app re-prompts for a fresh one when it does.
-        #[arg(long, conflicts_with = "revoke")]
+        /// Expire the token this many days after issue (default 30, maximum
+        /// 3650). The desktop app re-prompts for a fresh one when it expires.
+        #[arg(
+            long,
+            default_value = "30",
+            value_parser = parse_manage_ttl_days
+        )]
         ttl_days: Option<u64>,
         /// Operate on a broker rooted here instead of the default layout.
         #[arg(long)]
@@ -1700,14 +1714,28 @@ fn cmd_manage_token(revoke: bool, ttl_days: Option<u64>, root: Option<PathBuf>) 
         paths.token_file(),
         Some(&paths.agents_file()),
         BrokerConfig::default().token_ttl,
-        integrity,
+        integrity.clone(),
     ) {
         Ok(identity) => identity,
         Err(e) => die(format!("could not open the broker identity: {e}")),
     };
+    let audit = match aka_core::audit::AuditLog::open_sealed(
+        paths.audit_file(),
+        paths.audit_seal_file(),
+        integrity,
+    ) {
+        Ok(audit) => audit,
+        Err(e) => die(format!("could not open the activity log: {e}")),
+    };
     if revoke {
         match identity.revoke_manage_token() {
-            Ok(true) => eprintln!("management token revoked; the manage API is closed"),
+            Ok(true) => {
+                audit.append(aka_core::audit::AuditEntry::new(
+                    aka_core::audit::AuditKind::ManagementTokenRevoked,
+                    "Management token revoked",
+                ));
+                eprintln!("management token revoked; the manage API is closed");
+            }
             Ok(false) => eprintln!("no management token was issued"),
             Err(e) => die(e),
         }
@@ -1716,6 +1744,15 @@ fn cmd_manage_token(revoke: bool, ttl_days: Option<u64>, root: Option<PathBuf>) 
     let ttl = ttl_days.map(|days| std::time::Duration::from_secs(days * 86400));
     match identity.issue_manage_token_with_ttl(ttl) {
         Ok(token) => {
+            let mut entry = aka_core::audit::AuditEntry::new(
+                aka_core::audit::AuditKind::ManagementTokenIssued,
+                "Management token issued",
+            )
+            .outcome("issued");
+            if let Some(expires_at) = identity.manage_token_expires_at() {
+                entry = entry.field("expires_at", expires_at.to_rfc3339());
+            }
+            audit.append(entry);
             eprintln!("management token (shown once — only its hash is stored):\n");
             println!("{token}");
             eprintln!("\nEnter it in the AgentMFA app to manage this broker remotely.");
@@ -1724,9 +1761,7 @@ fn cmd_manage_token(revoke: bool, ttl_days: Option<u64>, root: Option<PathBuf>) 
                     "Expires in {days} day{}; re-run to rotate, or --revoke to close the manage API.",
                     if days == 1 { "" } else { "s" }
                 ),
-                None => eprintln!(
-                    "Never expires; re-run this command to rotate it, or --revoke to close the manage API."
-                ),
+                None => unreachable!("the CLI always supplies a bounded management-token TTL"),
             }
         }
         Err(e) => die(e),
@@ -2319,6 +2354,24 @@ mod tests {
     use aka_core::events::NoopEvents;
     use aka_core::vault::MemoryVault;
     use chrono::TimeZone as _;
+
+    #[test]
+    fn management_tokens_default_to_a_bounded_ttl() {
+        let cli = Cli::try_parse_from(["mfa", "manage", "token"]).unwrap();
+        let Command::Manage {
+            command:
+                ManageCommand::Token {
+                    ttl_days, revoke, ..
+                },
+        } = cli.command
+        else {
+            panic!("wrong command");
+        };
+        assert!(!revoke);
+        assert_eq!(ttl_days, Some(30));
+        assert!(parse_manage_ttl_days("0").is_err());
+        assert!(parse_manage_ttl_days("3651").is_err());
+    }
 
     /// SSH-24 and SSH-9. Everything printed here was already in the response
     /// and discarded: the destination an alias-imported tool is reached by, the

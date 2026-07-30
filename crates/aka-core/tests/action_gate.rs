@@ -8,6 +8,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use aka_core::approvals::{ApprovalDecision, ApprovalRequest, Verdict};
 use aka_core::audit::{AuditEntry, AuditKind};
 use aka_core::broker::Broker;
 use aka_core::config::BrokerConfig;
@@ -31,6 +32,10 @@ struct GateEvents {
 
 struct UnifiedAuthEvents {
     secret_read_confirms: AtomicUsize,
+}
+
+struct ApprovalSurfaceEvents {
+    confirms: AtomicUsize,
 }
 
 /// Counts both gate kinds, so a test can tell an action-gate prompt from a
@@ -99,6 +104,24 @@ impl BrokerEvents for GateEvents {
     fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
         self.confirms.fetch_add(1, Ordering::SeqCst);
         self.allow.then_some(ConfirmationMethod::Waived)
+    }
+}
+
+impl BrokerEvents for ApprovalSurfaceEvents {
+    fn confirm_secret_read(&self, _secret: &aka_core::types::SecretMeta) -> bool {
+        true
+    }
+
+    fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
+        self.confirms.fetch_add(1, Ordering::SeqCst);
+        Some(ConfirmationMethod::Waived)
+    }
+
+    fn approval_requested(
+        &self,
+        _pending: &aka_core::approvals::PendingApproval,
+    ) -> aka_core::events::ApprovalHandling {
+        aka_core::events::ApprovalHandling::Taken
     }
 }
 
@@ -1031,7 +1054,7 @@ async fn clearing_activity_requires_confirmation_and_leaves_a_tombstone() {
 }
 
 #[tokio::test]
-async fn prefix_reveals_are_not_added_to_the_activity_log() {
+async fn prefix_reveals_use_the_read_gate_and_are_audited() {
     let events = Arc::new(UnifiedAuthEvents {
         secret_read_confirms: AtomicUsize::new(0),
     });
@@ -1045,18 +1068,18 @@ async fn prefix_reveals_are_not_added_to_the_activity_log() {
         broker.ui_reveal_secret_prefix(&secret.id).await.unwrap(),
         "abcdef…"
     );
-    // The prefix is deliberately low-sensitivity: revealing it never
-    // re-authenticates (the full-value copy keeps its gate).
-    assert_eq!(events.secret_read_confirms.load(Ordering::SeqCst), 0);
-    assert!(broker
+    assert_eq!(events.secret_read_confirms.load(Ordering::SeqCst), 1);
+    let reveal = broker
         .audit
         .recent(10)
-        .iter()
-        .all(|entry| entry.kind != aka_core::audit::AuditKind::SecretRevealed));
+        .into_iter()
+        .find(|entry| entry.kind == aka_core::audit::AuditKind::SecretRevealed)
+        .expect("prefix disclosure should be visible in activity");
+    assert_eq!(reveal.fields["characters"], 6);
 }
 
 #[tokio::test]
-async fn service_tests_are_not_added_to_the_activity_log() {
+async fn service_tests_are_audited_with_target_and_outcome() {
     let (broker, _dir) = broker_with(Arc::new(UnimplementedShell)).await;
     broker
         .store
@@ -1081,11 +1104,14 @@ async fn service_tests_are_not_added_to_the_activity_log() {
         .unwrap();
 
     assert!(!broker.ui_test_connection(&connection.id).await.unwrap().ok);
-    assert!(broker
+    let tested = broker
         .audit
         .recent(10)
-        .iter()
-        .all(|entry| entry.kind != aka_core::audit::AuditKind::ConnectionTested));
+        .into_iter()
+        .find(|entry| entry.kind == aka_core::audit::AuditKind::ConnectionTested)
+        .expect("credential-bearing test should be visible in activity");
+    assert_eq!(tested.outcome.as_deref(), Some("failed"));
+    assert_eq!(tested.fields["target"], "http://127.0.0.1");
 }
 
 /* ----------------------------- agent access -------------------------------- */
@@ -1466,8 +1492,7 @@ async fn rebinding_a_tools_secret_closes_its_live_sessions() {
 /// rotation only takes effect for traffic that had not started yet.
 #[tokio::test]
 async fn rotating_a_secret_closes_the_sessions_of_every_tool_bound_to_it() {
-    let events = Arc::new(GateEvents {
-        allow: true,
+    let events = Arc::new(ApprovalSurfaceEvents {
         confirms: AtomicUsize::new(0),
     });
     let (broker, _dir) = broker_with(events.clone()).await;
@@ -1498,16 +1523,41 @@ async fn rotating_a_secret_closes_the_sessions_of_every_tool_bound_to_it() {
         .expect("redeem")
         .start(ConnectionKind::Pg);
     let closed = session.close_signal.clone();
+    let approvals = broker.approvals.clone();
+    let request = ApprovalRequest::new(&conn, "codex", "psql session");
+    let gate = tokio::spawn(async move { approvals.gate(request).await });
+    let prompt = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if let Some(prompt) = broker.pending_approvals().first().cloned() {
+                break prompt;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("approval prompt");
+    assert!(broker
+        .ui_respond_approval(&prompt.id, ApprovalDecision::ApproveWindow)
+        .unwrap());
+    assert_eq!(gate.await.unwrap(), Verdict::Allowed);
+    assert!(broker.approvals.window_remaining(&conn.id).is_some());
 
     // A rename leaves the value alone, so it leaves the traffic alone.
     broker
         .ui_edit_secret(&secret.id, Some("PG_SECRET"), None)
         .unwrap();
     assert_eq!(broker.data_plane.sessions().len(), 1);
+    assert_eq!(events.confirms.load(Ordering::SeqCst), 0);
 
     broker
         .ui_edit_secret(&secret.id, None, Some(Zeroizing::new("after".into())))
         .unwrap();
+    assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        broker.approvals.window_remaining(&conn.id),
+        None,
+        "credential rotation must revoke the old approval window"
+    );
     tokio::time::timeout(std::time::Duration::from_secs(1), closed.notified())
         .await
         .expect("the session on the rotated credential must be closed");
@@ -1516,6 +1566,66 @@ async fn rotating_a_secret_closes_the_sessions_of_every_tool_bound_to_it() {
         Some(RedeemError::Expired)
     );
     session.finish("connection_changed");
+}
+
+#[tokio::test]
+async fn a_test_immediately_after_retarget_requires_a_fresh_confirmation() {
+    let events = Arc::new(GateEvents {
+        allow: true,
+        confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    let conn = broker
+        .store
+        .add_connection(ConnectionSpec {
+            name: "service".into(),
+            config: ConnectionConfig::Api {
+                host: "first.invalid".into(),
+                scheme: "https".into(),
+                port: None,
+                trusted_ca_bundle_path: None,
+                template: String::new(),
+                mcp_path: None,
+                oauth: None,
+            },
+            secrets: vec![],
+        })
+        .unwrap();
+
+    broker
+        .ui_update_connection(
+            &conn.id,
+            ConnectionSpec {
+                name: conn.name,
+                config: ConnectionConfig::Api {
+                    host: "second.invalid".into(),
+                    scheme: "https".into(),
+                    port: None,
+                    trusted_ca_bundle_path: None,
+                    template: String::new(),
+                    mcp_path: None,
+                    oauth: None,
+                },
+                secrets: vec![],
+            },
+        )
+        .unwrap();
+    assert_eq!(events.confirms.load(Ordering::SeqCst), 1);
+
+    let _ = broker.ui_test_connection(&conn.id).await.unwrap();
+    assert_eq!(
+        events.confirms.load(Ordering::SeqCst),
+        2,
+        "the presence established by retargeting must not waive the test step-up"
+    );
+    let tested = broker
+        .audit
+        .recent(10)
+        .into_iter()
+        .find(|entry| entry.kind == AuditKind::ConnectionTested)
+        .unwrap();
+    assert_eq!(tested.fields["recently_retargeted"], true);
+    assert!(tested.confirmation.is_some());
 }
 
 #[tokio::test]

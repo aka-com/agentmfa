@@ -638,12 +638,10 @@ impl Store {
     }
 
     /// Core-side Keychain read returning only the short prefix
-    /// (`min(6, ⌊len/2⌋)` chars). The prefix is deliberately
-    /// low-sensitivity — the full value never leaves the core — so
-    /// revealing it rides without a native re-auth; full-value copy keeps
-    /// its own gate.
+    /// (`min(6, ⌊len/2⌋)` chars). This is still secret disclosure, so it
+    /// rides the ordinary read gate and presence window.
     pub async fn reveal_secret_prefix(&self, id: &Uuid) -> Result<String> {
-        let value = crate::authorization::scope(true, self.secret_value(id)).await?;
+        let value = self.secret_value(id).await?;
         Ok(reveal_prefix(&value))
     }
 

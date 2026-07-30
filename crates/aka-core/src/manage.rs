@@ -1138,7 +1138,7 @@ impl ManagementBackend for LocalBackend {
     }
 
     async fn secret_value_for_copy(&self, id: Uuid) -> ManageResult<SecretValue> {
-        Ok(self.broker.ui_secret_value_for_copy(&id).await?)
+        Ok(self.broker.ui_managed_secret_value_for_copy(&id).await?)
     }
 
     async fn note_secret_copied(&self, id: Uuid) -> ManageResult<()> {
@@ -1349,15 +1349,10 @@ impl ManagementBackend for LocalBackend {
     }
 
     async fn agent_key(&self) -> ManageResult<String> {
-        // Audited at release, like a secret copy: the trait's only caller
-        // is the shell's clipboard affordance, and once the plaintext
-        // leaves the broker the copy has happened for audit purposes. A
-        // remote shell reaches this same path through the manage route.
-        self.broker.audit.append(AuditEntry::new(
-            crate::audit::AuditKind::SecretCopied,
-            "Shared key copied".to_string(),
-        ));
-        Ok(self.broker.identity.token())
+        // Gated and audited at release: the trait's only caller is the
+        // shell's clipboard affordance, and a remote shell reaches this same
+        // path through the manage route.
+        Ok(self.broker.ui_agent_key_for_copy()?)
     }
 
     async fn rotate_key(&self) -> ManageResult<()> {

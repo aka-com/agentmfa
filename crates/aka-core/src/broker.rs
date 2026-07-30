@@ -188,7 +188,19 @@ pub struct Broker {
     /// activity log or the shell's attention. Keyed on the self-reported
     /// client label. Never leaves memory.
     connect_request_debounce: Mutex<std::collections::HashMap<(String, String), Instant>>,
+    /// Capability retargets that still require a fresh, non-presence-window
+    /// confirmation before a stored credential may be sent by the Test
+    /// affordance. Runtime-only: restarting the broker cannot preserve an
+    /// in-process presence grant either.
+    recent_retargets: Mutex<HashMap<Uuid, Instant>>,
+    /// Rejected credentials are security telemetry, but an automated stale
+    /// client must not amplify the append-only activity log without bound.
+    /// Keys include plane, transport, peer, and failure reason.
+    auth_failure_debounce: Mutex<HashMap<String, Instant>>,
     pub(crate) token_limiter: KeyedLimiter,
+    /// Failed manage authentication attempts, keyed by transport/peer.
+    /// Successful callers never consume this budget.
+    pub(crate) manage_auth_limiter: KeyedLimiter,
     pub(crate) discovery_limiter: WindowLimiter,
     pub(crate) pairing_limiter: WindowLimiter,
     /// Acquired before any persistent state is opened and declared last so it
@@ -330,6 +342,8 @@ impl Broker {
             mcp_auth: crate::mcp_auth::McpAuthSessions::default(),
             manage_oauth: Mutex::new(HashMap::new()),
             connect_request_debounce: Mutex::new(std::collections::HashMap::new()),
+            recent_retargets: Mutex::new(HashMap::new()),
+            auth_failure_debounce: Mutex::new(HashMap::new()),
             public_url: Mutex::new(None),
             data_plane_bind: std::sync::OnceLock::new(),
             advertise_host: std::sync::OnceLock::new(),
@@ -339,6 +353,7 @@ impl Broker {
                 config.per_identity_per_min,
                 std::time::Duration::from_secs(60),
             ),
+            manage_auth_limiter: KeyedLimiter::new(10, std::time::Duration::from_secs(60)),
             discovery_limiter: WindowLimiter::new(
                 config.discovery_per_min,
                 std::time::Duration::from_secs(60),
@@ -530,6 +545,62 @@ impl Broker {
         self.store.confirm_configuration_action(description)
     }
 
+    /// Record one rejected control-plane credential, coalescing identical
+    /// failures for 30 seconds. No token material is included in the key or
+    /// entry.
+    pub(crate) fn audit_auth_failure(
+        &self,
+        plane: &str,
+        reason: &str,
+        transport: &str,
+        peer: Option<&str>,
+    ) {
+        const COALESCE: Duration = Duration::from_secs(30);
+        const MAX_KEYS: usize = 1024;
+        let key = format!(
+            "{plane}\u{1f}{transport}\u{1f}{}\u{1f}{reason}",
+            peer.unwrap_or("")
+        );
+        let now = Instant::now();
+        {
+            let mut recent = self.auth_failure_debounce.lock().unwrap();
+            recent.retain(|_, at| now.duration_since(*at) < COALESCE);
+            if recent.contains_key(&key) {
+                return;
+            }
+            if recent.len() >= MAX_KEYS {
+                if let Some(oldest) = recent
+                    .iter()
+                    .min_by_key(|(_, at)| *at)
+                    .map(|(key, _)| key.clone())
+                {
+                    recent.remove(&oldest);
+                }
+            }
+            recent.insert(key, now);
+        }
+        let kind = if plane == "manage" && reason == "token_expired" {
+            AuditKind::ManagementTokenExpired
+        } else {
+            AuditKind::AuthenticationFailed
+        };
+        let mut entry = AuditEntry::new(
+            kind,
+            if kind == AuditKind::ManagementTokenExpired {
+                "Management token expired".to_string()
+            } else {
+                format!("Rejected {plane} authentication")
+            },
+        )
+        .outcome(reason)
+        .field("plane", plane)
+        .field("transport", transport);
+        if let Some(peer) = peer {
+            entry = entry.field("peer_addr", peer);
+        }
+        self.audit.append(entry);
+    }
+
     /* ----------------------- secrets (UI commands) ------------------------ */
 
     pub fn ui_add_secret(&self, name: &str, value: SecretValue) -> Result<SecretMeta> {
@@ -549,6 +620,15 @@ impl Broker {
         new_name: Option<&str>,
         new_value: Option<SecretValue>,
     ) -> Result<SecretMeta> {
+        let confirmation = if new_value.is_some() {
+            let meta = self.store.secret_by_id(id)?;
+            Some(self.confirm_user_action(&format!(
+                "Replace the stored value of secret “{}”",
+                meta.name
+            ))?)
+        } else {
+            None
+        };
         let _gate = self.config_gate.lock().unwrap();
         let mut meta = self.store.secret_by_id(id)?;
         let mut changes = Vec::new();
@@ -582,6 +662,8 @@ impl Broker {
             // A rename leaves the value alone and needs none of this.
             for connection in self.store.list_connections() {
                 if connection.secrets.contains(id) {
+                    self.approvals.revoke(&connection.id);
+                    self.elicitations.revoke(&connection.id);
                     closed_sessions += self.data_plane.close_connection_sessions(&connection.id);
                 }
             }
@@ -599,6 +681,9 @@ impl Broker {
                     .field("renamed_from", from)
                     .field("renamed_to", to)
                     .field("templates_rewritten", rewritten);
+            }
+            if let Some(confirmation) = confirmation {
+                entry = entry.confirmation(confirmation);
             }
             self.audit.append(entry);
         }
@@ -627,7 +712,16 @@ impl Broker {
 
     /// Core-side reveal: only the short prefix ever leaves.
     pub async fn ui_reveal_secret_prefix(&self, id: &Uuid) -> Result<String> {
-        self.store.reveal_secret_prefix(id).await
+        let meta = self.store.secret_by_id(id)?;
+        let prefix = self.store.reveal_secret_prefix(id).await?;
+        self.audit.append(
+            AuditEntry::new(
+                AuditKind::SecretRevealed,
+                format!("Secret prefix revealed: {}", meta.name),
+            )
+            .field("characters", prefix.chars().count().saturating_sub(1)),
+        );
+        Ok(prefix)
     }
 
     /// Fetch a value for the shell's core-side clipboard copy. A successful
@@ -640,6 +734,32 @@ impl Broker {
         let meta = self.store.secret_by_id(id)?;
         self.store.confirm_secret_copy(meta).await?;
         crate::authorization::scope(true, self.store.secret_value(id)).await
+    }
+
+    /// Management backends are bearer-authorized and may be network
+    /// reachable, so releasing plaintext through them requires a fresh
+    /// step-up rather than merely riding the ordinary read-presence window.
+    pub async fn ui_managed_secret_value_for_copy(&self, id: &Uuid) -> Result<SecretValue> {
+        let meta = self.store.secret_by_id(id)?;
+        let store = self.store.clone();
+        let description = format!("Copy secret “{}” through management", meta.name);
+        tokio::task::spawn_blocking(move || store.confirm_action(&description))
+            .await
+            .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))??;
+        crate::authorization::scope(true, self.store.secret_value(id)).await
+    }
+
+    /// Release the shared agent key through a management backend only after
+    /// a fresh step-up, and attribute that release in the audit trail.
+    pub fn ui_agent_key_for_copy(&self) -> Result<String> {
+        let confirmation = self.confirm_action("Copy the shared agent key through management")?;
+        self.audit.append(
+            AuditEntry::new(AuditKind::SecretCopied, "Shared key copied")
+                .confirmation(confirmation)
+                .field("credential", "agent_key")
+                .field("surface", "management"),
+        );
+        Ok(self.identity.token())
     }
 
     /// Audit trail for the core-side clipboard copy; the shell owns the
@@ -842,6 +962,10 @@ impl Broker {
             self.health.forget(id);
             // Nor do the old destination's advertised tools.
             self.forget_mcp_tools_cache(id);
+            let mut recent = self.recent_retargets.lock().unwrap();
+            let now = Instant::now();
+            recent.retain(|_, at| now.duration_since(*at) < Duration::from_secs(60));
+            recent.insert(*id, now);
         }
         let mut entry = AuditEntry::new(
             AuditKind::ConnectionUpdated,
@@ -1002,7 +1126,22 @@ impl Broker {
     /// summary comes back.
     pub async fn ui_test_connection(&self, id: &Uuid) -> Result<ConnectionTestReport> {
         const TEST_TIMEOUT: Duration = Duration::from_secs(15);
+        const RETARGET_STEP_UP_WINDOW: Duration = Duration::from_secs(60);
         let mut connection = self.store.connection_by_id(id)?;
+        let recently_retargeted = {
+            let now = Instant::now();
+            let mut recent = self.recent_retargets.lock().unwrap();
+            recent.retain(|_, at| now.duration_since(*at) < RETARGET_STEP_UP_WINDOW);
+            recent.contains_key(id)
+        };
+        let confirmation = if recently_retargeted {
+            Some(self.confirm_action(&format!(
+                "Test newly retargeted tool “{}” with its stored credential",
+                connection.name
+            ))?)
+        } else {
+            None
+        };
         // An OAuth token at expiry is renewed before the test, so the test
         // grades the connection, not a token the broker knew was stale.
         if crate::mcp_refresh::wants_refresh(&connection)
@@ -1065,6 +1204,24 @@ impl Broker {
             Some(kind) => kind.health_status(),
         };
         self.health.record(id, status, report.detail.clone());
+        let mut entry = AuditEntry::new(
+            AuditKind::ConnectionTested,
+            format!("Tool tested: {}", connection.name),
+        )
+        .connection(connection.name.clone())
+        .outcome(if report.ok { "succeeded" } else { "failed" })
+        .field("target", connection.target())
+        .field("recently_retargeted", recently_retargeted)
+        .field(
+            "failure_kind",
+            report
+                .kind
+                .map(|kind| format!("{kind:?}").to_ascii_lowercase()),
+        );
+        if let Some(confirmation) = confirmation {
+            entry = entry.confirmation(confirmation);
+        }
+        self.audit.append(entry);
         Ok(report)
     }
 
@@ -1727,8 +1884,8 @@ impl Broker {
 
     /// Read an existing direct endpoint's pasteable address and retained
     /// secret without minting or rotating; `None` when none is issued for the
-    /// connection. Unlike issuance this is a read of already-surfaced state,
-    /// so it takes no native gate — it grants nothing the issue did not.
+    /// connection. The address contains a standing credential, so read-back
+    /// takes a fresh gate and is audited just like copying a stored secret.
     pub async fn ui_get_endpoint(
         &self,
         connection_id: &Uuid,
@@ -1737,7 +1894,22 @@ impl Broker {
         let Some(endpoint) = self.endpoints.get_for_connection(connection_id) else {
             return Ok(None);
         };
-        self.endpoint_info(&connection, &endpoint).await.map(Some)
+        let store = self.store.clone();
+        let description = format!("Copy the direct endpoint for “{}”", connection.name);
+        let confirmation = tokio::task::spawn_blocking(move || store.confirm_action(&description))
+            .await
+            .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))??;
+        let info = self.endpoint_info(&connection, &endpoint).await?;
+        self.audit.append(
+            AuditEntry::new(
+                AuditKind::SecretCopied,
+                format!("Direct endpoint copied: {}", connection.name),
+            )
+            .connection(connection.name)
+            .confirmation(confirmation)
+            .field("endpoint_id", endpoint.id.to_string()),
+        );
+        Ok(Some(info))
     }
 
     /// The vault item holding one endpoint's plaintext secret.

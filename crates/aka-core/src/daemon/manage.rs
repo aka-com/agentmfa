@@ -25,7 +25,7 @@ use serde_json::json;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use super::{bearer_token, err_missing_token, ApiJson, AppState};
+use super::{bearer_token, err_missing_token, request_peer, ApiJson, AppState};
 use crate::manage::{
     AccessBody, AllowedToolsBody, ApprovalResponseBody, ConfirmBody, ConnectionAddBody,
     ConnectionUpdateBody, ConnectionsReorderBody, DraftTestBody, ElicitationResponseBody,
@@ -53,6 +53,23 @@ impl FromRequestParts<AppState> for ManageAuthed {
                 token: Zeroizing::new(token.to_string()),
             }),
             Err(error) => {
+                let peer = request_peer(parts);
+                let source = peer
+                    .map(|peer| peer.ip().to_string())
+                    .unwrap_or_else(|| state.transport.audit_label().to_string());
+                let peer = peer.map(|peer| peer.ip().to_string());
+                state.broker.audit_auth_failure(
+                    "manage",
+                    error.reason().as_str(),
+                    state.transport.audit_label(),
+                    peer.as_deref(),
+                );
+                if let Err(wait) = state.broker.manage_auth_limiter.check(&source) {
+                    return Err(super::err_rate_limited(
+                        crate::wire::ErrorReason::RateLimited,
+                        wait,
+                    ));
+                }
                 // Both map to InvalidManageToken client-side (re-enter the
                 // token), but the detail names the cause so a curl user
                 // knows whether to re-issue or check what they pasted.

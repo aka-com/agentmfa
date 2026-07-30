@@ -1334,7 +1334,7 @@ async fn whoami_is_exempt_from_the_per_token_limit() {
         "/v1/http",
         &[("authorization", &auth)],
         Some(json!({
-            "connection": "docs",
+            "connection": "github",
             "method": "POST",
             "path": "/echo",
             "body": { "id": 0, "method": "initialize" },
