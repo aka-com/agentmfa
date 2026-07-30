@@ -2269,22 +2269,13 @@ function TabContent(): ReactNode {
 }
 
 function BrokerReady(): ReactNode {
-  const copied = state.readyCopied;
   // The badge tracks the *managed* broker: a remote link that is down must
   // not sit under a green "Ready".
   const tone = brokerTone(state.broker);
   const label = tone === 'error' ? 'Unreachable' : tone === 'pending' ? 'Connecting…' : 'Ready';
-  const copyLabel = copied ? 'Setup instructions copied' : 'Copy setup instructions';
   return <div className="dd-sub ready-status">
     <span className="ready-state" role="status"><span className={`dot dot-${tone}`} aria-hidden="true"></span>
       <span>{label}</span></span>
-    <button className={`ready-copy ${copied ? 'is-copied' : ''}`}
-      data-act="copy-ready-setup"
-      title={copyLabel} aria-label={copyLabel}>
-      <span className="ready-copy-label" aria-live="polite">
-        {copied ? <><Icon markup={ICONS.check} /> Copied</> : 'Copy'}
-      </span>
-    </button>
   </div>;
 }
 
@@ -4388,14 +4379,6 @@ function flashCopied(id: string): void {
   copiedTimer = setTimeout(() => { state.copied = null; render(); }, 1400);
 }
 
-let readyCopiedTimer: ReturnType<typeof setTimeout> | null = null;
-function flashReadyCopied(): void {
-  state.readyCopied = true;
-  render();
-  if (readyCopiedTimer) clearTimeout(readyCopiedTimer);
-  readyCopiedTimer = setTimeout(() => { state.readyCopied = false; render(); }, 1400);
-}
-
 // Focus a sheet field on open (after the render that creates it).
 function focusField(id: string): void {
   setTimeout(() => {
@@ -5480,9 +5463,6 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
     case 'copy-agent-setup':
       if (state.agentMenuOpen) { state.agentMenuOpen = null; render(); }
       if (await run(() => invoke('copy_agent_setup'))) toast('📋 Setup instructions copied');
-      break;
-    case 'copy-ready-setup':
-      if (await run(() => invoke('copy_agent_setup'))) flashReadyCopied();
       break;
     case 'clear-activity-ask':
       setSheet({ kind: 'clear-activity' });

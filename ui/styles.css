@@ -167,19 +167,6 @@
   .dd-sub .dot{ width: 7px; height: 7px; border-radius: 50%; background: #30c94e; box-shadow: 0 0 4px rgba(48,201,78,.7); display: inline-block; }
   .ready-status{ gap: 6px; }
   .ready-state{ display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
-  .ready-copy{
-  min-height: 18px; padding: 1px 4px;
-  border: 0; border-radius: 5px; background: transparent;
-  color: var(--accent-text); text-align: left; cursor: pointer;
-  transition: color .14s ease, background .14s ease;
-}
-  .ready-copy:hover{ color: var(--ink-2); background: var(--hover); }
-  .ready-copy:focus-visible{ outline: 2px solid var(--accent-text); outline-offset: 1px; }
-  .ready-copy-label{ display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
-  .ready-copy-label svg{ width: 11px; height: 11px; stroke-width: 2.5; }
-  .ready-copy.is-copied{
-  color: var(--ok-ink); background: var(--accent-wash);
-}
   .dd-head{ display: flex; align-items: center; gap: 10px; padding: 12px 14px 10px; }
   .dd-identity{ flex: 1; min-width: 0; }
   /* ---- main window layout ---------------------------------------------- */
@@ -1217,13 +1204,13 @@
     --kind-api-ink: #e8a077;
     --kind-api-wash: rgba(190,100,40,.18);
 
-    --surface: rgba(30,30,36,.98);
+    --surface: rgba(16,16,20,.98);
     --main-surface: var(--surface);
-    --panel: #26262c;
-    --field-bg: #1c1c22;
+    --panel: #1b1b20;
+    --field-bg: #131317;
     --code-block-bg: var(--wash-2);
-    --btn-bg: #34343c;
-    --btn-hover: #3d3d47;
+    --btn-bg: #26262d;
+    --btn-hover: #30303a;
     --card-bg: rgba(255,255,255,.045);
     --chip-bg: rgba(255,255,255,.08);
     --chip-ink: #c9c9d2;
@@ -1232,9 +1219,9 @@
     --wash: rgba(255,255,255,.03);
     --wash-2: rgba(255,255,255,.05);
     --seg-bg: rgba(255,255,255,.09);
-    --seg-on-bg: #4a4a54;
+    --seg-on-bg: #3d3d46;
     --seg-on-ink: #fff;
-    --backdrop: rgba(0,0,0,.45);
+    --backdrop: rgba(0,0,0,.55);
     --always-bg: rgba(255,255,255,.06);
     --always-border: rgba(255,255,255,.22);
     --switch-off: rgba(255,255,255,.26);

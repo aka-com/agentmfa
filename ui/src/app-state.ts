@@ -210,7 +210,6 @@ export interface AppState {
   selectedConn: string | null;
   connDetailOpen: boolean;
   copied: string | null;
-  readyCopied: boolean;
   connectionReady: ConnectionReadyState | null;
   connTests: Record<string, ConnectionTestState>;
   draftTest: ConnectionTestState | null;
@@ -317,7 +316,6 @@ function createInitialState(): AppState {
     selectedConn: null,
     connDetailOpen: false,
     copied: null,
-    readyCopied: false,
     connectionReady: null,
     connTests: {},
     draftTest: null,
