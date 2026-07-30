@@ -1324,6 +1324,11 @@ struct HttpEndpointState {
     /// Unauthenticated failures share one small listener-local window: there
     /// is no trustworthy identity to key before the endpoint secret verifies.
     auth_failures: Arc<crate::ratelimit::WindowLimiter>,
+    /// Whether the current throttle episode has already been audited. The
+    /// sealed audit log is an unbounded synchronous write under a shared
+    /// mutex, so an unauthenticated flood must not get one entry per request
+    /// — one per episode says the same thing at none of the cost.
+    auth_flood_noted: std::sync::atomic::AtomicBool,
 }
 
 /// Bind a per-wiring HTTP reverse proxy on a loopback TCP port. An unmodified
@@ -1364,6 +1369,7 @@ pub async fn bind_endpoint(
             broker.config.per_identity_per_min,
             std::time::Duration::from_secs(60),
         )),
+        auth_flood_noted: std::sync::atomic::AtomicBool::new(false),
         broker,
         endpoint_id: endpoint.id,
     });
@@ -1415,25 +1421,22 @@ fn endpoint_auth_failure(
 ) -> axum::response::Response {
     use axum::http::StatusCode;
 
+    // The window bounds the sealed audit log too: this plane is reachable by
+    // any local process, and appending before the throttle verdict gave an
+    // unauthenticated flood one MAC-chained write (and one UI event) per
+    // request, forever — the throttle only spared the hash comparison.
+    if let Err(retry_after) = state.auth_failures.check() {
+        return endpoint_auth_throttled(state, peer, retry_after);
+    }
+    state
+        .auth_flood_noted
+        .store(false, std::sync::atomic::Ordering::Relaxed);
     state.broker.audit.append(
         AuditEntry::new(AuditKind::Denied, "Direct endpoint authentication refused")
             .outcome(reason.as_str())
             .field("endpoint_id", state.endpoint_id.to_string())
             .field("peer_addr", peer.to_string()),
     );
-    if let Err(retry_after) = state.auth_failures.check() {
-        let mut response = endpoint_error(
-            StatusCode::TOO_MANY_REQUESTS,
-            ErrorReason::RateLimited,
-            "too many failed authentication attempts on this endpoint",
-        );
-        if let Ok(value) = HeaderValue::from_str(&retry_after.as_secs().max(1).to_string()) {
-            response
-                .headers_mut()
-                .insert(http::header::RETRY_AFTER, value);
-        }
-        return response;
-    }
     endpoint_error(StatusCode::UNAUTHORIZED, reason, detail)
 }
 
@@ -1444,15 +1447,22 @@ fn endpoint_auth_throttled(
 ) -> axum::response::Response {
     use axum::http::StatusCode;
 
-    state.broker.audit.append(
-        AuditEntry::new(
-            AuditKind::Denied,
-            "Direct endpoint authentication throttled",
-        )
-        .outcome(ErrorReason::RateLimited.as_str())
-        .field("endpoint_id", state.endpoint_id.to_string())
-        .field("peer_addr", peer.to_string()),
-    );
+    // One audit entry per throttle episode, not per suppressed request; the
+    // flag re-arms when a failure is next admitted within the window.
+    if !state
+        .auth_flood_noted
+        .swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+        state.broker.audit.append(
+            AuditEntry::new(
+                AuditKind::Denied,
+                "Direct endpoint authentication throttled",
+            )
+            .outcome(ErrorReason::RateLimited.as_str())
+            .field("endpoint_id", state.endpoint_id.to_string())
+            .field("peer_addr", peer.to_string()),
+        );
+    }
     let mut response = endpoint_error(
         StatusCode::TOO_MANY_REQUESTS,
         ErrorReason::RateLimited,
