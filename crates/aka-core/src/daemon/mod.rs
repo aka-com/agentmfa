@@ -894,6 +894,7 @@ async fn get_whoami(State(state): State<AppState>, authed: Authed) -> Response {
         "client_id": authed.client_id,
         "agent": authed.client,
         "paired_at": identity.minted_at,
+        "approval_surface_attached": broker.events.has_approval_surface(),
         // The sliding TTL's current horizon; refreshed on every
         // authenticated call.
         "expires_at": expires_at,

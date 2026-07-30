@@ -51,6 +51,13 @@ impl PresenceAuthority {
 }
 
 pub trait BrokerEvents: Send + Sync {
+    /// Whether this shell can currently surface and answer traffic approval
+    /// prompts. The default is deliberately false: shells must opt in rather
+    /// than making confirmed traffic wait for a UI that is not there.
+    fn has_approval_surface(&self) -> bool {
+        false
+    }
+
     /// Live session set changed.
     fn sessions_changed(&self) {}
 
@@ -173,6 +180,10 @@ pub struct NoopEvents;
 
 #[cfg(any(test, feature = "test-harness"))]
 impl BrokerEvents for NoopEvents {
+    fn has_approval_surface(&self) -> bool {
+        true
+    }
+
     fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
         true
     }

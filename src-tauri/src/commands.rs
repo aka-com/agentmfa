@@ -311,11 +311,11 @@ impl FormError {
                 format!("{feature} isn’t available for a remote broker yet"),
                 None,
             ),
-            ManageError::InvalidManageToken => Self::global(
+            ManageError::InvalidManageToken { detail } => Self::global(
                 "system",
                 "invalid_manage_token",
                 "The broker rejected the management token — re-enter it from `mfa manage token`",
-                None,
+                detail,
             ),
             ManageError::Unreachable { message } => Self::global(
                 "system",

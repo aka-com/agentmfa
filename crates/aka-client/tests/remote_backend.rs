@@ -166,7 +166,13 @@ async fn bad_tokens_and_dead_brokers_map_to_distinct_errors() {
     );
     assert_eq!(
         wrong.list_secrets().await.unwrap_err(),
-        ManageError::InvalidManageToken
+        ManageError::InvalidManageToken {
+            detail: Some(
+                "manage routes require this broker's management token (issue one on the broker \
+                 host with `mfa manage token`)"
+                    .into()
+            )
+        }
     );
 
     let dead = RemoteBackend::new(RemoteConfig::new("http://127.0.0.1:9", "akamgr_x").unwrap());

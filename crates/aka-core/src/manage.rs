@@ -656,6 +656,10 @@ impl FanoutEvents {
 }
 
 impl crate::events::BrokerEvents for FanoutEvents {
+    fn has_approval_surface(&self) -> bool {
+        self.inner.has_approval_surface() || self.bus.has_approval_surface()
+    }
+
     fn sessions_changed(&self) {
         self.inner.sessions_changed();
         self.bus.emit(aka_api::ManageEvent::SessionsChanged);
@@ -1171,6 +1175,9 @@ impl ManagementBackend for LocalBackend {
     }
 
     async fn add_connection(&self, spec: ConnectionSpec) -> ManageResult<()> {
+        self.broker
+            .validate_ssh_connection_credential(&spec, None)
+            .await?;
         self.blocking(move |broker| broker.ui_add_connection(spec).map(|_| ()))
             .await
     }
@@ -1181,6 +1188,9 @@ impl ManagementBackend for LocalBackend {
         value: SecretValue,
         spec: ConnectionSpec,
     ) -> ManageResult<()> {
+        self.broker
+            .validate_ssh_connection_credential(&spec, Some(&value))
+            .await?;
         self.blocking(move |broker| {
             broker
                 .ui_add_connection_with_secret(&secret_name, value, spec)
@@ -1190,6 +1200,12 @@ impl ManagementBackend for LocalBackend {
     }
 
     async fn update_connection(&self, id: Uuid, spec: ConnectionSpec) -> ManageResult<()> {
+        let old = self.broker.store.connection_by_id(&id)?;
+        if old.config != spec.config || old.secrets != spec.secrets {
+            self.broker
+                .validate_ssh_connection_credential(&spec, None)
+                .await?;
+        }
         self.blocking(move |broker| broker.ui_update_connection(&id, spec).map(|_| ()))
             .await
     }
@@ -1601,6 +1617,41 @@ mod tests {
                 name: "MISSING".into()
             }
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ssh_connections_reject_unusable_private_keys_at_the_backend_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = backend(&dir).await;
+        let spec = ConnectionSpec {
+            name: "production ssh".into(),
+            config: ConnectionConfig::Ssh {
+                destination: Some("deploy@prod.example.com".into()),
+                host: "prod.example.com".into(),
+                port: 22,
+                user: "deploy".into(),
+                host_key_fingerprint: String::new(),
+            },
+            secrets: vec![],
+        };
+        let error = backend
+            .add_connection_with_secret(
+                "SSH_KEY".into(),
+                Zeroizing::new("not a private key".into()),
+                spec,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ManageError::InvalidConnectionConfig { ref message }
+                    if message.contains("private key")
+            ),
+            "{error:?}"
+        );
+        assert!(backend.list_connections().await.unwrap().is_empty());
+        assert!(backend.list_secrets().await.unwrap().is_empty());
     }
 
     #[test]

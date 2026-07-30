@@ -864,6 +864,35 @@ impl Broker {
         Ok(conn)
     }
 
+    /// Validate an SSH connection's credential at the management boundary,
+    /// before any configuration mutation or confirmation. `provided` is the
+    /// credential arriving atomically with a new connection; otherwise read
+    /// the already-bound vault item without projecting it outside the core.
+    pub(crate) async fn validate_ssh_connection_credential(
+        &self,
+        spec: &ConnectionSpec,
+        provided: Option<&SecretValue>,
+    ) -> Result<()> {
+        if !matches!(spec.config, ConnectionConfig::Ssh { .. }) {
+            return Ok(());
+        }
+        let stored;
+        let value = match provided {
+            Some(value) => value,
+            None => {
+                let Some(secret_id) = spec.secrets.first() else {
+                    // The store's ordinary connection validation reports the
+                    // missing binding with its established field-level error.
+                    return Ok(());
+                };
+                stored = self.vault.get(secret_id).await?;
+                &stored
+            }
+        };
+        crate::capability::ssh::validate_private_key(value.as_bytes())
+            .map_err(CoreError::InvalidConnectionConfig)
+    }
+
     /// One connection-first setup action: save a new credential and bind it
     /// without exposing an intermediate, partially configured state. The
     /// credential arrives with the form (or was just minted by an OAuth

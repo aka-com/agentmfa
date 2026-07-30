@@ -45,6 +45,10 @@ impl TauriEvents {
 }
 
 impl BrokerEvents for TauriEvents {
+    fn has_approval_surface(&self) -> bool {
+        true
+    }
+
     fn sessions_changed(&self) {
         let _ = self.app.emit(EVT_SESSIONS, ());
     }

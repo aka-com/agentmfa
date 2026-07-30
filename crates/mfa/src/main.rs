@@ -97,13 +97,17 @@ enum Command {
         #[arg(long)]
         write: bool,
         /// Override the output path used with --write.
-        #[arg(long, conflicts_with = "user")]
+        #[arg(long, conflicts_with = "user", requires = "write")]
         path: Option<PathBuf>,
         /// With --write, target the user-level skills directory
         /// (~/.claude/skills/mfa/SKILL.md) instead of the repo-local
         /// default, so every project's agents see it.
-        #[arg(long)]
+        #[arg(long, requires = "write")]
         user: bool,
+        /// Overwrite a non-AgentMFA skill file. Generated AgentMFA skill
+        /// files can be refreshed without this flag.
+        #[arg(long, requires = "write")]
+        force: bool,
         /// Render the document for a broker rooted here (`serve --root`)
         /// instead of the production layout, so a dev harness's skill file
         /// names the socket it actually serves.
@@ -296,6 +300,10 @@ enum SecretCommand {
         /// Read the value from this environment variable instead of stdin.
         #[arg(long, value_name = "VAR")]
         value_env: Option<String>,
+        /// Preserve the input byte-for-byte. By default one trailing CRLF,
+        /// LF, or CR (commonly added by echo or a heredoc) is removed.
+        #[arg(long)]
+        raw: bool,
         /// Operate on a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
@@ -337,6 +345,10 @@ enum SecretCommand {
         /// Read the value from this environment variable instead of stdin.
         #[arg(long, value_name = "VAR")]
         value_env: Option<String>,
+        /// Preserve the input byte-for-byte. By default one trailing CRLF,
+        /// LF, or CR (commonly added by echo or a heredoc) is removed.
+        #[arg(long)]
+        raw: bool,
         /// Operate on a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
@@ -371,6 +383,7 @@ enum ManageCommand {
         #[arg(long)]
         broker: Option<String>,
         /// Read the token from this environment variable instead of stdin.
+        /// For CI, prefer AKA_MANAGE_TOKEN so the token is not persisted.
         #[arg(long, value_name = "VAR")]
         token_env: Option<String>,
         /// Operate on a broker rooted here instead of the default layout.
@@ -514,9 +527,9 @@ enum ConnCommand {
     },
     /// Print the connection's already-issued direct endpoint: the pasteable
     /// address and its endpoint secret. Read-only — issue or rotate the
-    /// endpoint from the desktop app. Like the other `conn` subcommands this
-    /// reads the offline store, so stop the broker first. Exits nonzero when
-    /// no endpoint has been issued yet.
+    /// endpoint from the desktop app. Works against a running local or remote
+    /// broker as well as an offline store. Exits nonzero when no endpoint has
+    /// been issued yet.
     Endpoint {
         /// The connection whose endpoint to print.
         name: String,
@@ -672,8 +685,9 @@ fn main() {
             write,
             path,
             user,
+            force,
             root,
-        } => cmd_skill(write, path, user, root),
+        } => cmd_skill(write, path, user, force, root),
         Command::Instructions { root } => {
             print!(
                 "{}",
@@ -720,9 +734,10 @@ fn main() {
             SecretCommand::Add {
                 name,
                 value_env,
+                raw,
                 root,
                 broker,
-            } => cmd_secret_add(name, value_env, root, broker),
+            } => cmd_secret_add(name, value_env, raw, root, broker),
             SecretCommand::List { root, broker } => cmd_secret_list(root, broker),
             SecretCommand::Rename {
                 name,
@@ -733,9 +748,10 @@ fn main() {
             SecretCommand::Replace {
                 name,
                 value_env,
+                raw,
                 root,
                 broker,
-            } => cmd_secret_replace(name, value_env, root, broker),
+            } => cmd_secret_replace(name, value_env, raw, root, broker),
             SecretCommand::Rm { name, root, broker } => cmd_secret_rm(name, root, broker),
         },
         Command::Conn { command } => match command {
@@ -804,7 +820,29 @@ fn die(message: impl std::fmt::Display) -> ! {
 fn store_paths(root: Option<&Path>) -> Paths {
     match root {
         Some(root) => Paths::under(root),
-        None => Paths::default_locations().expect("default paths"),
+        None => Paths::default_locations().unwrap_or_else(|error| {
+            die(format!(
+                "could not determine the per-user data and socket directories: {error}; \
+                 set HOME (and, where applicable, XDG_DATA_HOME), or pass --root"
+            ))
+        }),
+    }
+}
+
+/// A typo in `--root` must not make a read-only command silently create and
+/// report on a brand-new empty broker. Remote reads use the root only as an
+/// optional management-token location, so the broker URL remains authoritative.
+fn require_existing_root_for_read(root: Option<&Path>, remote: bool) {
+    let Some(root) = root.filter(|_| !remote) else {
+        return;
+    };
+    let data_dir = Paths::under(root).data_dir;
+    if !data_dir.is_dir() {
+        die(format!(
+            "{} is not an existing broker root (expected its data directory at {})",
+            root.display(),
+            data_dir.display()
+        ));
     }
 }
 
@@ -872,12 +910,30 @@ fn acquire_offline_store_lock(paths: &Paths) -> Result<BrokerInstanceLock, CoreE
     Ok(instance_lock)
 }
 
+/// Remove exactly the one line ending normally contributed by `echo`, a
+/// terminal paste, or a heredoc. Environment and stdin inputs deliberately
+/// share this rule; `--raw` preserves every byte.
+fn normalize_secret_input(mut value: String, raw: bool) -> String {
+    if raw {
+        return value;
+    }
+    let trim = if value.ends_with("\r\n") {
+        2
+    } else if value.ends_with('\n') || value.ends_with('\r') {
+        1
+    } else {
+        0
+    };
+    value.truncate(value.len() - trim);
+    value
+}
+
 /// Read a secret value from `--value-env` or stdin — never argv, where it
 /// would sit in `ps` output and shell history.
-fn read_secret_value(value_env: &Option<String>) -> SecretValue {
-    let value: SecretValue = match value_env {
+fn read_secret_value(value_env: &Option<String>, raw: bool) -> SecretValue {
+    let value = match value_env {
         Some(var) => match std::env::var(var) {
-            Ok(value) => Zeroizing::new(value),
+            Ok(value) => value,
             Err(_) => die(format!("environment variable {var} is not set")),
         },
         None => {
@@ -885,14 +941,12 @@ fn read_secret_value(value_env: &Option<String>) -> SecretValue {
                 eprintln!("  reading the secret value from stdin; end with Ctrl-D");
             }
             match std::io::read_to_string(std::io::stdin()) {
-                // Strip the line ending an `echo`/heredoc appends; a real
-                // trailing newline in a secret is vanishingly rarer than an
-                // accidental one.
-                Ok(text) => Zeroizing::new(text.trim_end_matches(['\r', '\n']).to_string()),
+                Ok(text) => text,
                 Err(e) => die(format!("could not read the value from stdin: {e}")),
             }
         }
     };
+    let value = Zeroizing::new(normalize_secret_input(value, raw));
     if value.is_empty() {
         die("the secret value is empty");
     }
@@ -902,16 +956,19 @@ fn read_secret_value(value_env: &Option<String>) -> SecretValue {
 fn cmd_secret_add(
     name: String,
     value_env: Option<String>,
+    raw: bool,
     root: Option<PathBuf>,
     url: Option<String>,
 ) {
-    let value = read_secret_value(&value_env);
+    let value = read_secret_value(&value_env, raw);
+    let byte_len = value.len();
     let managed = management_backend(root, url);
     managed.run(managed.backend.add_secret(name.clone(), value));
-    eprintln!("added secret {name}");
+    eprintln!("added secret {name} ({byte_len} bytes)");
 }
 
 fn cmd_secret_list(root: Option<PathBuf>, url: Option<String>) {
+    require_existing_root_for_read(root.as_deref(), url.is_some());
     let managed = management_backend(root, url);
     let secrets = managed.run(managed.backend.list_secrets());
     if secrets.is_empty() {
@@ -933,6 +990,8 @@ fn cmd_secret_list(root: Option<PathBuf>, url: Option<String>) {
 struct Managed {
     runtime: tokio::runtime::Runtime,
     backend: Arc<dyn ManagementBackend>,
+    remote: Option<Arc<RemoteBackend>>,
+    profile: Option<serde_json::Value>,
 }
 
 impl Managed {
@@ -943,6 +1002,50 @@ impl Managed {
             Ok(value) => value,
             Err(e) => die(e),
         }
+    }
+
+    /// A live desktop-owned broker may show a native confirmation outside
+    /// this terminal. Make that wait visible before the request blocks.
+    fn run_gated<T>(&self, call: impl std::future::Future<Output = ManageResult<T>>) -> T {
+        if self.approval_surface_attached() {
+            eprintln!("  waiting for confirmation in the AgentMFA app…");
+        }
+        self.run(call)
+    }
+
+    fn approval_surface_attached(&self) -> bool {
+        self.profile
+            .as_ref()
+            .and_then(|profile| profile["approval_surface_attached"].as_bool())
+            .unwrap_or(false)
+    }
+
+    fn require_approval_surface(&self) {
+        if self.remote.is_none() {
+            die(
+                "cannot enable traffic confirmation in an offline/headless edit: no approval \
+                 surface is attached",
+            );
+        }
+        if !self.approval_surface_attached() {
+            die(
+                "cannot enable traffic confirmation: no approval surface is attached; open the \
+                 AgentMFA app and keep its request inbox connected, then retry",
+            );
+        }
+    }
+}
+
+fn warn_version_skew(profile: &serde_json::Value) {
+    let Some(broker_version) = profile["version"].as_str() else {
+        return;
+    };
+    let cli_version = env!("CARGO_PKG_VERSION");
+    if broker_version != cli_version {
+        eprintln!(
+            "warning: broker version {broker_version} differs from mfa CLI version {cli_version}; \
+             update them together before making changes"
+        );
     }
 }
 
@@ -994,9 +1097,14 @@ fn management_backend(root: Option<PathBuf>, url: Option<String>) -> Managed {
             Err(e) => die(e),
         };
         eprintln!("  managing the broker at {url}");
+        let remote = Arc::new(RemoteBackend::new(config));
+        let profile = runtime.block_on(remote.whoami()).unwrap_or_else(|error| die(error));
+        warn_version_skew(&profile);
         return Managed {
             runtime,
-            backend: Arc::new(RemoteBackend::new(config)),
+            backend: remote.clone(),
+            remote: Some(remote),
+            profile: Some(profile),
         };
     }
     let socket = paths.socket_file();
@@ -1015,9 +1123,14 @@ fn management_backend(root: Option<PathBuf>, url: Option<String>) -> Managed {
             ));
         };
         eprintln!("  managing the running broker over {key}");
+        let remote = Arc::new(RemoteBackend::over_unix_socket(socket, &token));
+        let profile = runtime.block_on(remote.whoami()).unwrap_or_else(|error| die(error));
+        warn_version_skew(&profile);
         return Managed {
             runtime,
-            backend: Arc::new(RemoteBackend::over_unix_socket(socket, &token)),
+            backend: remote.clone(),
+            remote: Some(remote),
+            profile: Some(profile),
         };
     }
     let vault = match open_vault(&paths, root.as_deref()) {
@@ -1042,6 +1155,8 @@ fn management_backend(root: Option<PathBuf>, url: Option<String>) -> Managed {
     Managed {
         runtime,
         backend: Arc::new(LocalBackend::new(broker)),
+        remote: None,
+        profile: None,
     }
 }
 
@@ -1121,10 +1236,12 @@ fn cmd_secret_rename(name: String, new_name: String, root: Option<PathBuf>, url:
 fn cmd_secret_replace(
     name: String,
     value_env: Option<String>,
+    raw: bool,
     root: Option<PathBuf>,
     url: Option<String>,
 ) {
-    let value = read_secret_value(&value_env);
+    let value = read_secret_value(&value_env, raw);
+    let byte_len = value.len();
     let managed = management_backend(root, url);
     let dto = secret_dto(&managed, &name);
     managed.run(
@@ -1132,7 +1249,7 @@ fn cmd_secret_replace(
             .backend
             .edit_secret(dto_id(&dto.id), None, Some(value)),
     );
-    eprintln!("replaced the value of secret {name}");
+    eprintln!("replaced the value of secret {name} ({byte_len} bytes)");
 }
 
 fn cmd_secret_rm(name: String, root: Option<PathBuf>, url: Option<String>) {
@@ -1156,7 +1273,7 @@ fn cmd_conn_add(args: ConnAdd) {
         (None, _) => Vec::new(),
     };
     let name = args.name.clone();
-    managed.run(managed.backend.add_connection(ConnectionSpec {
+    managed.run_gated(managed.backend.add_connection(ConnectionSpec {
         name: name.clone(),
         config,
         secrets,
@@ -1261,6 +1378,7 @@ fn parse_sslmode(value: Option<&str>) -> Result<PgSslMode, String> {
 }
 
 fn cmd_conn_list(root: Option<PathBuf>, url: Option<String>) {
+    require_existing_root_for_read(root.as_deref(), url.is_some());
     let managed = management_backend(root, url);
     let connections = managed.run(managed.backend.list_connections());
     if connections.is_empty() {
@@ -1268,12 +1386,28 @@ fn cmd_conn_list(root: Option<PathBuf>, url: Option<String>) {
         return;
     }
     for dto in connections {
-        let state = if dto.agent_access.enabled {
-            ""
-        } else {
-            "  disabled"
-        };
-        println!("{}  {}  {}{}", dto.name, dto.kind, dto.target, state);
+        let mut state = Vec::new();
+        if !dto.agent_access.enabled {
+            state.push("disabled");
+        }
+        if dto.agent_access.confirm {
+            state.push(if managed.approval_surface_attached() {
+                "confirm: on"
+            } else {
+                "confirm: on (no approval surface attached — traffic will be refused)"
+            });
+        }
+        println!(
+            "{}  {}  {}{}",
+            dto.name,
+            dto.kind,
+            dto.target,
+            if state.is_empty() {
+                String::new()
+            } else {
+                format!("  {}", state.join(" · "))
+            }
+        );
     }
 }
 
@@ -1461,7 +1595,7 @@ fn cmd_conn_update(args: ConnUpdate) {
         (Some(name), _) => vec![dto_id(&secret_dto(&managed, name).id)],
         (None, _) => secret_ids_by_names(&managed, &dto.secret_names),
     };
-    managed.run(managed.backend.update_connection(
+    managed.run_gated(managed.backend.update_connection(
         dto_id(&dto.id),
         ConnectionSpec {
             name: dto.name.clone(),
@@ -1523,9 +1657,16 @@ fn cmd_conn_access(name: String, root: Option<PathBuf>, url: Option<String>, ena
 
 fn cmd_conn_confirm(name: String, root: Option<PathBuf>, url: Option<String>, on: bool) {
     let managed = management_backend(root, url);
+    if on {
+        managed.require_approval_surface();
+    }
     let dto = conn_dto(&managed, &name);
     let state = if on { "on" } else { "off" };
-    let changed = managed.run(managed.backend.set_confirm_mode(dto_id(&dto.id), on));
+    let changed = if on {
+        managed.run(managed.backend.set_confirm_mode(dto_id(&dto.id), on))
+    } else {
+        managed.run_gated(managed.backend.set_confirm_mode(dto_id(&dto.id), on))
+    };
     if changed {
         eprintln!("traffic confirmation {state} for {name}");
         if on {
@@ -1539,7 +1680,7 @@ fn cmd_conn_confirm(name: String, root: Option<PathBuf>, url: Option<String>, on
 fn cmd_conn_test(name: String, root: Option<PathBuf>, url: Option<String>) {
     let managed = management_backend(root, url);
     let dto = conn_dto(&managed, &name);
-    let report = managed.run(managed.backend.test_connection(dto_id(&dto.id)));
+    let report = managed.run_gated(managed.backend.test_connection(dto_id(&dto.id)));
     if report.ok {
         eprintln!("ok: {}", report.detail);
     } else {
@@ -1564,6 +1705,7 @@ fn cmd_conn_endpoint(
     root: Option<PathBuf>,
     broker: Option<String>,
 ) {
+    require_existing_root_for_read(root.as_deref(), broker.is_some());
     let managed = management_backend(root, broker);
     let dto = conn_dto(&managed, &name);
     let info = match managed.run(managed.backend.get_endpoint(dto_id(&dto.id))) {
@@ -1603,11 +1745,22 @@ fn cmd_conn_endpoint(
 fn doc_paths(root: Option<PathBuf>) -> Paths {
     match root {
         Some(root) => Paths::under(&root),
-        None => Paths::default_locations().expect("default paths"),
+        None => Paths::default_locations().unwrap_or_else(|error| {
+            die(format!(
+                "could not determine the per-user data and socket directories: {error}; \
+                 set HOME (and, where applicable, XDG_DATA_HOME), or pass --root"
+            ))
+        }),
     }
 }
 
-fn cmd_skill(write: bool, path: Option<PathBuf>, user: bool, root: Option<PathBuf>) {
+const GENERATED_SKILL_MARKER: &str = "<!-- Generated by `mfa skill`. Do not edit:";
+
+fn generated_skill_file(content: &str) -> bool {
+    content.contains(GENERATED_SKILL_MARKER)
+}
+
+fn cmd_skill(write: bool, path: Option<PathBuf>, user: bool, force: bool, root: Option<PathBuf>) {
     let content = wellknown::skill_file(&BrokerConfig::default(), &doc_paths(root));
     if !write {
         print!("{content}");
@@ -1616,10 +1769,26 @@ fn cmd_skill(write: bool, path: Option<PathBuf>, user: bool, root: Option<PathBu
     let path = match (path, user) {
         (Some(path), _) => path,
         (None, true) => dirs::home_dir()
-            .expect("home directory")
+            .unwrap_or_else(|| {
+                die("could not determine the home directory; set HOME or pass --path")
+            })
             .join(".claude/skills/mfa/SKILL.md"),
         (None, false) => PathBuf::from(".claude/skills/mfa/SKILL.md"),
     };
+    if path.exists() && !force {
+        let existing = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+            die(format!(
+                "could not inspect existing skill file {}: {error}",
+                path.display()
+            ))
+        });
+        if !generated_skill_file(&existing) {
+            die(format!(
+                "refusing to overwrite non-AgentMFA skill file {}; pass --force to replace it",
+                path.display()
+            ));
+        }
+    }
     if let Some(dir) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(dir) {
             eprintln!("error: could not create {}: {e}", dir.display());
@@ -1665,7 +1834,7 @@ fn cmd_manage_login(url: Option<String>, token_env: Option<String>, root: Option
     if std::io::IsTerminal::is_terminal(&std::io::stdin()) && token_env.is_none() {
         eprintln!("  paste the management token (akamgr_…); end with Ctrl-D");
     }
-    let token = read_secret_value(&token_env);
+    let token = read_secret_value(&token_env, false);
     let paths = store_paths(root.as_deref());
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -1690,11 +1859,14 @@ fn cmd_manage_login(url: Option<String>, token_env: Option<String>, root: Option
         }
     };
     match runtime.block_on(backend.whoami()) {
-        Ok(_) => eprintln!("token verified against the running broker"),
-        Err(ManageError::InvalidManageToken) => die(
-            "the broker rejected this management token — issue a fresh one \
-             with `mfa manage token`",
-        ),
+        Ok(profile) => {
+            warn_version_skew(&profile);
+            eprintln!("token verified against the running broker");
+        }
+        Err(ManageError::InvalidManageToken { detail }) => die(detail.unwrap_or_else(|| {
+            "the broker rejected this management token — issue a fresh one with `mfa manage token`"
+                .into()
+        })),
         Err(ManageError::Unreachable { .. }) => {
             eprintln!("the broker is not reachable right now; storing the token unverified");
         }
@@ -1990,6 +2162,7 @@ fn cmd_ssh(connection: String, root: Option<PathBuf>, client: Option<String>) {
 /// token; rotation and remote reads go through the management backend.
 fn cmd_key(rotate: bool, root: Option<PathBuf>, url: Option<String>) {
     if url.is_none() && !rotate {
+        require_existing_root_for_read(root.as_deref(), false);
         let paths = store_paths(root.as_deref());
         let token_file = paths.token_file();
         match std::fs::read_to_string(&token_file) {
@@ -2003,7 +2176,7 @@ fn cmd_key(rotate: bool, root: Option<PathBuf>, url: Option<String>) {
     }
     let managed = management_backend(root, url);
     if rotate {
-        managed.run(managed.backend.rotate_key());
+        managed.run_gated(managed.backend.rotate_key());
         eprintln!("key rotated; agents that read the token file reconnect on their own");
     }
     let key = managed.run(managed.backend.agent_key());
@@ -2011,15 +2184,24 @@ fn cmd_key(rotate: bool, root: Option<PathBuf>, url: Option<String>) {
 }
 
 /// The tools listing shared by local and remote status output.
-fn print_tools(connections: &[ConnectionDto]) {
+fn print_tools(connections: &[ConnectionDto], approval_surface_attached: bool) {
     if connections.is_empty() {
         println!("  tools: none configured");
         return;
     }
     println!("  tools:");
     for dto in connections {
+        let confirm = if dto.agent_access.confirm {
+            if approval_surface_attached {
+                " · confirm: on"
+            } else {
+                " · confirm: on (no approval surface attached — traffic will be refused)"
+            }
+        } else {
+            ""
+        };
         println!(
-            "    {}  {}  {}  {}",
+            "    {}  {}  {}  {}{}",
             dto.name,
             dto.kind,
             dto.target,
@@ -2027,16 +2209,19 @@ fn print_tools(connections: &[ConnectionDto]) {
                 "enabled"
             } else {
                 "disabled"
-            }
+            },
+            confirm,
         );
     }
-    if let Some(warning) = headless_confirmation_warning(
-        connections
-            .iter()
-            .filter(|connection| connection.agent_access.confirm)
-            .count(),
-    ) {
-        println!("  {warning}");
+    if !approval_surface_attached {
+        if let Some(warning) = headless_confirmation_warning(
+            connections
+                .iter()
+                .filter(|connection| connection.agent_access.confirm)
+                .count(),
+        ) {
+            println!("  {warning}");
+        }
     }
 }
 
@@ -2058,12 +2243,19 @@ fn cmd_status_remote(root: Option<PathBuf>, url: String) {
     let identity = managed.run(managed.backend.identity());
     let connections = managed.run(managed.backend.list_connections());
     println!("broker reachable at {url} (manage API)");
+    if let Some(profile) = &managed.profile {
+        println!(
+            "  version: broker {}, mfa CLI {}",
+            profile["version"].as_str().unwrap_or("unknown"),
+            env!("CARGO_PKG_VERSION")
+        );
+    }
     println!("  client id: {}", identity.client_id);
     println!(
         "  agent key file (on the broker host): {}",
         identity.token_path
     );
-    print_tools(&connections);
+    print_tools(&connections, managed.approval_surface_attached());
 }
 
 /// Report the backend that owns this store's secrets. On macOS, include which
@@ -2109,6 +2301,7 @@ fn print_vault_line(paths: &Paths) {
 }
 
 fn cmd_status(root: Option<PathBuf>, url: Option<String>) {
+    require_existing_root_for_read(root.as_deref(), url.is_some());
     if let Some(url) = url {
         cmd_status_remote(root, url);
         return;
@@ -2155,7 +2348,11 @@ fn cmd_status(root: Option<PathBuf>, url: Option<String>) {
         manifest["version"].as_str(),
         manifest["protocol_version"].as_u64(),
     ) {
-        println!("  version: {version} (protocol {protocol})");
+        println!(
+            "  version: broker {version}, mfa CLI {} (protocol {protocol})",
+            env!("CARGO_PKG_VERSION")
+        );
+        warn_version_skew(&manifest);
     }
     match manifest["mcp_url"].as_str() {
         Some(url) => println!("  MCP host: {url}"),
@@ -2174,6 +2371,23 @@ fn cmd_status(root: Option<PathBuf>, url: Option<String>) {
     // as a listing by mfa-status).
     let listing = runtime.block_on(async {
         let key = client::shared_key(&paths, Some("mfa-status")).await?;
+        let approval_surface_attached = client::unix_http(
+            &socket,
+            "GET",
+            "/v1/whoami",
+            None,
+            Some(&key),
+            Some("mfa-status"),
+        )
+        .await
+        .ok()
+        .and_then(|(status, body)| {
+            (status == 200)
+                .then(|| serde_json::from_str::<serde_json::Value>(&body).ok())
+                .flatten()
+        })
+        .and_then(|body| body["approval_surface_attached"].as_bool())
+        .unwrap_or(false);
         let (status, body) = client::unix_http(
             &socket,
             "GET",
@@ -2187,10 +2401,12 @@ fn cmd_status(root: Option<PathBuf>, url: Option<String>) {
         if status != 200 {
             return Err(format!("HTTP {status}"));
         }
-        serde_json::from_str::<serde_json::Value>(&body).map_err(|e| e.to_string())
+        serde_json::from_str::<serde_json::Value>(&body)
+            .map(|listing| (listing, approval_surface_attached))
+            .map_err(|e| e.to_string())
     });
     match listing {
-        Ok(listing) => {
+        Ok((listing, approval_surface_attached)) => {
             let rows = listing["connections"]
                 .as_array()
                 .cloned()
@@ -2201,8 +2417,17 @@ fn cmd_status(root: Option<PathBuf>, url: Option<String>) {
             } else {
                 println!("  tools:");
                 for row in &rows {
+                    let confirm = if row["confirm"].as_bool().unwrap_or(false) {
+                        if approval_surface_attached {
+                            " · confirm: on"
+                        } else {
+                            " · confirm: on (no approval surface attached — traffic will be refused)"
+                        }
+                    } else {
+                        ""
+                    };
                     println!(
-                        "    {}  {}  {}  {}",
+                        "    {}  {}  {}  {}{}",
                         row["name"].as_str().unwrap_or("?"),
                         row["type"].as_str().unwrap_or("?"),
                         row["target"].as_str().unwrap_or("?"),
@@ -2210,7 +2435,8 @@ fn cmd_status(root: Option<PathBuf>, url: Option<String>) {
                             "enabled"
                         } else {
                             "disabled"
-                        }
+                        },
+                        confirm,
                     );
                 }
             }
@@ -2218,8 +2444,10 @@ fn cmd_status(root: Option<PathBuf>, url: Option<String>) {
                 .iter()
                 .filter(|row| row["confirm"].as_bool().unwrap_or(false))
                 .count();
-            if let Some(warning) = headless_confirmation_warning(confirm_count) {
-                println!("  {warning}");
+            if !approval_surface_attached {
+                if let Some(warning) = headless_confirmation_warning(confirm_count) {
+                    println!("  {warning}");
+                }
             }
         }
         Err(e) => println!("  tools: could not list ({e})"),
@@ -2270,6 +2498,7 @@ fn cmd_activity_remote(limit: usize, json: bool, root: Option<PathBuf>, url: Str
 }
 
 fn cmd_activity(limit: usize, json: bool, root: Option<PathBuf>, url: Option<String>) {
+    require_existing_root_for_read(root.as_deref(), url.is_some());
     if let Some(url) = url {
         cmd_activity_remote(limit, json, root, url);
         return;
@@ -2687,6 +2916,28 @@ mod tests {
     #[test]
     fn shell_exports_quote_broker_controlled_values() {
         assert_eq!(shell_quote("a'b"), "'a'\"'\"'b'");
+    }
+
+    #[test]
+    fn secret_input_strips_one_line_ending_unless_raw() {
+        assert_eq!(normalize_secret_input("secret\n".into(), false), "secret");
+        assert_eq!(normalize_secret_input("secret\r\n".into(), false), "secret");
+        assert_eq!(
+            normalize_secret_input("secret\n\n".into(), false),
+            "secret\n"
+        );
+        assert_eq!(normalize_secret_input("secret\n".into(), true), "secret\n");
+    }
+
+    #[test]
+    fn skill_write_options_are_not_silently_ignored() {
+        assert!(Cli::try_parse_from(["mfa", "skill", "--path", "SKILL.md"]).is_err());
+        assert!(Cli::try_parse_from(["mfa", "skill", "--user"]).is_err());
+        assert!(Cli::try_parse_from(["mfa", "skill", "--write", "--path", "SKILL.md"]).is_ok());
+        assert!(generated_skill_file(&format!(
+            "---\nname: mfa\n---\n{GENERATED_SKILL_MARKER} generated -->"
+        )));
+        assert!(!generated_skill_file("# A hand-written skill\n"));
     }
 
     fn args(kind: ConnKind) -> ConnAdd {

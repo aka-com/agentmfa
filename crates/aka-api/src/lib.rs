@@ -118,9 +118,14 @@ pub enum ManageError {
     RemoteUnsupported {
         feature: String,
     },
-    /// The remote broker rejected the management token (revoked or
-    /// rotated). Local backends never produce this.
-    InvalidManageToken,
+    /// The remote broker rejected the management token. The optional
+    /// broker-supplied detail distinguishes expiry from a bad, revoked, or
+    /// rotated token without collapsing every 401 to the same advice.
+    /// Local backends never produce this.
+    InvalidManageToken {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
     /// The remote broker could not be reached (or answered outside the
     /// protocol). Local backends never produce this.
     Unreachable {
@@ -196,7 +201,8 @@ impl std::fmt::Display for ManageError {
                 f,
                 "{feature} is not available while managing a remote broker"
             ),
-            Self::InvalidManageToken => write!(
+            Self::InvalidManageToken { detail: Some(detail) } => f.write_str(detail),
+            Self::InvalidManageToken { detail: None } => write!(
                 f,
                 "the broker rejected the management token; re-issue it with `mfa manage token` and enter the new one"
             ),

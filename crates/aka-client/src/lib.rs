@@ -198,7 +198,15 @@ impl Transport {
                     .send()
                     .await
                     .map_err(|error| ManageError::Unreachable {
-                        message: error.to_string(),
+                        message: if error.is_timeout() {
+                            format!(
+                                "no answer from the broker within {}s; if the command was waiting \
+                                 on a gated action, confirm it in the AgentMFA app",
+                                REQUEST_TIMEOUT.as_secs()
+                            )
+                        } else {
+                            error.to_string()
+                        },
                     })?;
                 if response.status().is_redirection() {
                     return Err(ManageError::Unreachable {
@@ -221,7 +229,8 @@ impl Transport {
             .await
             .map_err(|_| ManageError::Unreachable {
                 message: format!(
-                    "no answer from the broker socket within {}s",
+                    "no answer from the broker socket within {}s; if the command was waiting on a \
+                     gated action, confirm it in the AgentMFA app",
                     REQUEST_TIMEOUT.as_secs()
                 ),
             })?,
@@ -451,7 +460,10 @@ impl RemoteBackend {
             return Err(error);
         }
         if status == 401 {
-            return Err(ManageError::InvalidManageToken);
+            let detail = serde_json::from_slice::<serde_json::Value>(&bytes)
+                .ok()
+                .and_then(|body| body["detail"].as_str().map(str::to_string));
+            return Err(ManageError::InvalidManageToken { detail });
         }
         Err(ManageError::Internal {
             message: format!(
@@ -1078,7 +1090,10 @@ mod tests {
             if !check_auth(&headers).await {
                 return (
                     axum::http::StatusCode::UNAUTHORIZED,
-                    "missing token".to_string(),
+                    axum::Json(serde_json::json!({
+                        "reason": "invalid_manage_token",
+                        "detail": "the management token has expired",
+                    })),
                 )
                     .into_response();
             }
@@ -1192,11 +1207,14 @@ mod tests {
             "{error:?}"
         );
 
-        // The wrong token maps to InvalidManageToken.
+        // The wrong token maps to InvalidManageToken and retains structured
+        // server detail instead of collapsing an expiry into a generic 401.
         let wrong = RemoteBackend::over_unix_socket(socket, "akamgr_wrong");
         assert!(matches!(
             wrong.list_secrets().await.unwrap_err(),
-            ManageError::InvalidManageToken
+            ManageError::InvalidManageToken {
+                detail: Some(ref detail)
+            } if detail == "the management token has expired"
         ));
     }
 }

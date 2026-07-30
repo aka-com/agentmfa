@@ -115,7 +115,7 @@ fn manage_error_response(error: ManageError) -> Response {
             StatusCode::FORBIDDEN
         }
         ManageError::RemoteUnsupported { .. } => StatusCode::NOT_IMPLEMENTED,
-        ManageError::InvalidManageToken => StatusCode::UNAUTHORIZED,
+        ManageError::InvalidManageToken { .. } => StatusCode::UNAUTHORIZED,
         ManageError::Unreachable { .. } => StatusCode::BAD_GATEWAY,
         ManageError::OAuth { .. } | ManageError::Vault { .. } | ManageError::Internal { .. } => {
             StatusCode::INTERNAL_SERVER_ERROR
@@ -194,6 +194,7 @@ async fn whoami(State(state): State<AppState>, _authed: ManageAuthed) -> Respons
         "version": state.broker.config.version,
         "client_id": state.broker.identity.client_id(),
         "capabilities": [aka_api::APPROVAL_SURFACE_CAPABILITY],
+        "approval_surface_attached": state.broker.events.has_approval_surface(),
     }))
 }
 
