@@ -30,13 +30,13 @@ export function SharedKeyCard({ identity }: { identity: IdentityInfo }): ReactNo
         </button>
         <div className="agent-menu-wrap">
           <button className={`icon-btn agent-menu-btn ${menuOpen ? 'on' : ''}`}
-            title="Key options" aria-label="Key options" aria-haspopup="menu"
+            title="Key options" aria-label="Key options"
             aria-expanded={menuOpen} data-act="toggle-agent-menu" data-id="identity">
             <AppIcon icon={ICONS.ellipsis} />
           </button>
           {menuOpen
-            ? <div className="agent-menu" role="menu" aria-label="Key options">
-                <button className="menu-item danger" role="menuitem" data-act="rotate-key-ask">
+            ? <div className="agent-menu" aria-label="Key options">
+                <button className="menu-item danger" data-act="rotate-key-ask">
                   <AppIcon icon={ICONS.unplug} /> Rotate key…
                 </button>
               </div>

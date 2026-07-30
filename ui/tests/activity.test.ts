@@ -49,8 +49,8 @@ test('activity identity treats absent optional metadata consistently', () => {
 });
 
 test('a view read does not ask for more of the log than the broker will return', async () => {
-  const [app, mock, command, route] = await Promise.all([
-    readFile(new URL('../app.tsx', import.meta.url), 'utf8'),
+  const [activityRefresh, mock, command, route] = await Promise.all([
+    readFile(new URL('../src/activity-refresh.ts', import.meta.url), 'utf8'),
     readFile(new URL('../src/mock-bridge.ts', import.meta.url), 'utf8'),
     readFile(new URL('../../src-tauri/src/commands.rs', import.meta.url), 'utf8'),
     readFile(new URL('../../crates/aka-core/src/daemon/manage.rs', import.meta.url), 'utf8'),
@@ -59,7 +59,7 @@ test('a view read does not ask for more of the log than the broker will return',
   // The Tauri command clamps to its own ceiling, so a UI asking for more would
   // silently get less: the tail would be shorter than the code above believes,
   // and the filters would quietly search a smaller window than intended.
-  const requested = constant(app, 'ACTIVITY_PAGE_LIMIT');
+  const requested = constant(activityRefresh, 'ACTIVITY_PAGE_LIMIT');
   assert.ok(
     requested <= constant(command, 'ACTIVITY_VIEW_LIMIT'),
     'ACTIVITY_PAGE_LIMIT exceeds the ceiling list_activity clamps to',

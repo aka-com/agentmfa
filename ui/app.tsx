@@ -51,10 +51,16 @@ import {
   sentenceCase,
 } from '/src/form-errors';
 import {
+  retargetsIssuedEndpoint,
+  validateConnectionForm,
+  validateSecretForm,
+} from '/src/form-validation';
+import {
   LOCAL_BROKER, brokerLabel, brokerTakeover, brokerTone, remoteEndpointCaution,
 } from '/src/broker';
 import { sameBrokerScope } from '/src/broker-scope';
 import { activityIdentity } from '/src/activity';
+import { ACTIVITY_PAGE_LIMIT, refreshActivityPages } from '/src/activity-refresh';
 import { activeRequestCount, activeRequests, anchorExpiry, recentRequests } from '/src/requests';
 import { anchorEndpointExpiries } from '/src/endpoint-expiry';
 import { APP_VERSION } from '/src/version';
@@ -97,9 +103,6 @@ import { SharedKeyCard } from '/src/features/identity-card';
 import { Sheet } from '/src/sheet';
 
 const EDIT_SECRET_MASK = '••••••••••••';
-/** One activity page. Matches the broker's per-request ceiling; users can
- * load subsequent stable pages without imposing an unbounded IPC read. */
-const ACTIVITY_PAGE_LIMIT = 500;
 /** Rows kept mounted past each edge of the activity window. Enough that a
  * flick of the wheel, or a row that turns out taller than its estimate, never
  * exposes a blank strip before the next frame. */
@@ -305,9 +308,7 @@ async function refresh(which: RefreshTarget = 'all'): Promise<boolean> {
   if (which === 'all' || which === 'elicitations') jobs.push(load('elicitations', 'list_elicitations'));
   if (which === 'all' || which === 'approvals') jobs.push(load('approvals', 'list_approvals'));
   if (which === 'all' || which === 'requests') jobs.push(load('requests', 'list_requests'));
-  if (which === 'all' || which === 'activity') {
-    jobs.push(load('activity', 'list_activity', { limit: ACTIVITY_PAGE_LIMIT }));
-  }
+  if (which === 'all' || which === 'activity') jobs.push(loadActivity(true));
   if (which === 'all' || which === 'settings') jobs.push(loadSettings());
   const succeeded = (await Promise.all(jobs)).every(Boolean);
   // Connections is the local broker's liveness signal. A peripheral read can
@@ -324,6 +325,35 @@ async function refresh(which: RefreshTarget = 'all'): Promise<boolean> {
   }
   render();
   return succeeded;
+}
+
+async function loadActivity(preserveDepth: boolean): Promise<boolean> {
+  const broker = state.broker;
+  const epoch = brokerEpoch;
+  state.loadStatus.activity = { status: 'loading' };
+  try {
+    const page = await refreshActivityPages(
+      state.activity.length,
+      preserveDepth,
+      (before, limit) => refetchBrokerQuery(
+        broker,
+        'list_activity',
+        before != null ? { before, limit } : { limit },
+      ),
+    );
+    if (!brokerEpochIsCurrent(epoch)) return false;
+    state.activity = page.entries;
+    state.activityNextBefore = page.next_before ?? null;
+    state.activityLoadingOlder = false;
+    state.activityOlderError = null;
+    state.loadStatus.activity = { status: 'ready' };
+    return true;
+  } catch (error) {
+    console.error('list_activity', error);
+    if (!brokerEpochIsCurrent(epoch)) return false;
+    state.loadStatus.activity = { status: 'error', error: errorMessage(error) };
+    return false;
+  }
 }
 async function load<K extends CommandName>(
   key: LoadKey,
@@ -778,8 +808,9 @@ function RequestInbox(): ReactNode {
   });
   const count = active.length;
   const empty = count === 0 && allRecent.length === 0;
-  const unavailableRefusals = state.activity.filter((entry) =>
-    entry.text.startsWith('Refused (nobody could confirm):')).length;
+  const unavailableRefusals = state.requests.filter((record) =>
+    record.kind === 'approval'
+    && (record.status === 'unavailable' || record.resolution === 'unavailable')).length;
   return (
     <div className="request-inbox">
       {unavailableRefusals > 0
@@ -787,7 +818,7 @@ function RequestInbox(): ReactNode {
             <b>{unavailableRefusals} traffic confirmation
               {unavailableRefusals === 1 ? ' was' : 's were'} refused</b>
             <span>
-              No approval surface was attached. This durable count comes from the Activity Log.
+              No approval surface was attached. This count comes from structured request outcomes.
             </span>
           </div>
         : null}
@@ -1331,18 +1362,18 @@ function CatalogRow({ entry }: { entry: CatalogEntry }): ReactNode {
           <button className="btn cat-add cat-connect-menu-btn"
             data-act="toggle-catalog-connect-menu" data-id={entry.id}
             title={`More ways to connect ${entry.name}`} aria-label={`More ways to connect ${entry.name}`}
-            aria-haspopup="menu" aria-expanded={actionMenuOpen}>
+            aria-expanded={actionMenuOpen}>
             <Icon markup={ICONS.chevronDown} />
           </button>
         </div>
         {actionMenuOpen
-          ? <div className="cat-connect-menu" role="menu" aria-label={`Connect ${entry.name}`}>
-              <button className="menu-item" role="menuitem" data-act="catalog-connect-oauth"
+          ? <div className="cat-connect-menu" aria-label={`Connect ${entry.name}`}>
+              <button className="menu-item" data-act="catalog-connect-oauth"
                 data-id={entry.id}>Connect</button>
-              <button className="menu-item" role="menuitem" data-act="catalog-connect-manual"
+              <button className="menu-item" data-act="catalog-connect-manual"
                 data-id={entry.id}>Connect via custom URL</button>
               {entry.preset
-                ? <button className="menu-item" role="menuitem" data-act="catalog-connect-api"
+                ? <button className="menu-item" data-act="catalog-connect-api"
                     data-id={entry.id}>Connect custom API</button>
                 : null}
             </div>
@@ -1444,30 +1475,30 @@ function ConnectionMenuItems({ connection: c }: {
       && new Date(c.agent_access.endpoint.expires_at).getTime() <= Date.now(),
     );
   return <>
-    <button className="menu-item" role="menuitem"
+    <button className="menu-item"
       data-act={c.mcp_path ? 'mcp-status' : 'test-conn'} data-id={c.id} disabled={running}>
       <Icon markup={ICONS.flaskConical} /> {running ? 'Testing…' : 'Test connection'}
     </button>
-    <button className="menu-item" role="menuitem" data-act="edit-conn" data-id={c.id}>
+    <button className="menu-item" data-act="edit-conn" data-id={c.id}>
       <Icon markup={ICONS.pencil} /> Edit tool
     </button>
-    <button className="menu-item danger" role="menuitem" data-act="del-conn-ask" data-id={c.id}>
+    <button className="menu-item danger" data-act="del-conn-ask" data-id={c.id}>
       <Icon markup={ICONS.trash} /> Delete tool
     </button>
     {c.agent_access.enabled && c.agent_access.endpoint
       ? <>
           <div className="menu-divider" role="separator"></div>
           {c.agent_access.endpoint.expires_at
-            ? <button className="menu-item" role="menuitem" data-act="renew-endpoint"
+            ? <button className="menu-item" data-act="renew-endpoint"
                 data-conn={c.id}>
                 <Icon markup={ICONS.clockAlert} /> Renew connection address
               </button>
             : null}
           {!endpointExpired
-            ? <button className="menu-item" role="menuitem" data-act="reissue-endpoint-ask"
+            ? <button className="menu-item" data-act="reissue-endpoint-ask"
                 data-conn={c.id}><Icon markup={ICONS.refresh} /> Rotate connection address</button>
             : null}
-          <button className="menu-item danger" role="menuitem" data-act="revoke-endpoint-ask"
+          <button className="menu-item danger" data-act="revoke-endpoint-ask"
             data-conn={c.id}><Icon markup={ICONS.x} /> Revoke connection address</button>
         </>
       : null}
@@ -1677,12 +1708,12 @@ function ConnectionDetail({ connection: c }: {
         <ConnectionToggle connection={c} />
         <div className="tile-menu-wrap">
           <button className={`icon-btn tile-menu-btn ${menuOpen ? 'on' : ''}`}
-            title="Tool options" aria-label={`Options for ${c.name}`} aria-haspopup="menu"
+            title="Tool options" aria-label={`Options for ${c.name}`}
             aria-expanded={menuOpen} data-act="toggle-conn-menu" data-id={c.id}>
             <Icon markup={ICONS.ellipsis} />
           </button>
           {menuOpen
-            ? <div className="tile-menu" role="menu" aria-label={`Options for ${c.name}`}>
+            ? <div className="tile-menu" aria-label={`Options for ${c.name}`}>
                 <ConnectionMenuItems connection={c} />
               </div>
             : null}
@@ -2377,7 +2408,7 @@ function ActivityView(): ReactNode {
 
 async function receiveActivity(entry: ActivityEntry | null | undefined): Promise<void> {
   if (!entry || !entry.at || !entry.text) {
-    await load('activity', 'list_activity', { limit: ACTIVITY_PAGE_LIMIT });
+    await loadActivity(true);
     if (state.tab === 'activity' && !state.sheet && !state.menuOpen) render();
     return;
   }
@@ -2456,16 +2487,16 @@ function BrokerSwitch(): ReactNode {
   return (
     <div className="broker-switch-wrap">
       <button className={`broker-btn ${state.brokerMenuOpen ? 'on' : ''}`} data-act="broker-menu"
-        aria-haspopup="menu" aria-expanded={state.brokerMenuOpen} title="Which broker this app manages">
+        aria-expanded={state.brokerMenuOpen} title="Which broker this app manages">
         <span className={`broker-dot ${tone}`}></span><span className="broker-label">{label}</span>
         <span className="broker-caret" aria-hidden="true"><Icon markup={ICONS.chevronDown} /></span>
       </button>
       {state.brokerMenuOpen
-        ? <div className="broker-menu" role="menu">
-            <button className="menu-item" role="menuitem" data-act="broker-pick-local">
+        ? <div className="broker-menu">
+            <button className="menu-item" data-act="broker-pick-local">
               <span className="broker-check">{state.broker.mode === 'local' ? '✓' : ''}</span> Local
             </button>
-            <button className="menu-item" role="menuitem" data-act="broker-pick-remote">
+            <button className="menu-item" data-act="broker-pick-remote">
               <span className="broker-check">{state.broker.mode === 'remote' ? '✓' : ''}</span> Connect remote…
             </button>
           </div>
@@ -2774,7 +2805,7 @@ function ConnectionContextMenu(): ReactNode {
   if (!connection) return null;
   return createPortal(
     <div className="tile-menu-wrap conn-context-menu-wrap">
-      <div className="tile-menu" role="menu" aria-label={`Options for ${connection.name}`}>
+      <div className="tile-menu" aria-label={`Options for ${connection.name}`}>
         <ConnectionMenuItems connection={connection} />
       </div>
     </div>,
@@ -3773,6 +3804,51 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
   const conn = editing ? state.connections.find((c) => c.id === sheetId) : null;
   const editPresentation = conn ? connectionEditPresentation(conn) : null;
   const managedMcpOAuth = Boolean(editPresentation?.managedMcpOAuth);
+  let draftTarget = null;
+  if (editing && conn) {
+    if (t === 'pg' || t === 'ssh') {
+      draftTarget = {
+        type: t,
+        host: (d.host || '').trim(),
+        port: Number((d.port || '').trim() || (t === 'ssh' ? 22 : 5432)),
+        user: (d.user || '').trim() || state.localUsername.trim(),
+        dbname: t === 'pg' ? (d.dbname || '').trim() : null,
+        destination: t === 'ssh' ? (d.destination || '').trim() || null : null,
+        hostKeyFingerprint: t === 'ssh'
+          ? (d.hostKeyFingerprint || '').trim()
+          : null,
+      };
+    } else if (t === 'api') {
+      try {
+        const parsed = isMcpDraft(d)
+          ? parseMcpServerUrl(d.origin || '')
+          : { ...parseApiOrigin(d.origin || ''), mcpPath: null };
+        draftTarget = {
+          type: t,
+          scheme: parsed.scheme,
+          host: parsed.host,
+          port: parsed.port,
+          mcpPath: parsed.mcpPath,
+        };
+      } catch {
+        // Validation owns the malformed URL; do not add a misleading
+        // endpoint warning until the draft names a real target.
+      }
+    }
+  }
+  const endpointWillBeRevoked = Boolean(
+    conn?.agent_access.endpoint && retargetsIssuedEndpoint({
+      type: conn.type,
+      scheme: conn.scheme,
+      host: conn.host,
+      port: conn.port,
+      dbname: conn.dbname,
+      user: conn.user,
+      destination: conn.destination,
+      mcpPath: conn.mcp_path,
+      hostKeyFingerprint: conn.host_key_fingerprint,
+    }, draftTarget),
+  );
   // Identity fields keep deriving the automatic name until the user edits
   // the name directly; a pg host may keep adjusting the TLS prefill.
   const onIdentityField = (key: 'user' | 'host' | 'port', errKey: string) =>
@@ -4257,6 +4333,13 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
     <>
       <h3 id="conn-sheet-title">{title}</h3>
       {fields}
+      {endpointWillBeRevoked
+        ? <div className="pair-identity-warning retarget-warning" role="status">
+            <b>Saving will revoke this tool’s direct endpoint.</b><br />
+            <span>Its current address grants access only to the existing target.
+              Issue a new address after saving.</span>
+          </div>
+        : null}
       <FormGlobalError />
       {draftTest}
       <div className="sheet-actions">
@@ -4270,12 +4353,12 @@ function ConnSheet({ editing }: { editing: boolean }): ReactNode {
               ? <div className="tile-menu-wrap sheet-conn-menu">
                   <button className={`icon-btn tile-menu-btn ${menuOpen ? 'on' : ''}`}
                     title="More options" aria-label={`More options for ${conn.name}`}
-                    aria-haspopup="menu" aria-expanded={menuOpen}
+                    aria-expanded={menuOpen}
                     data-act="toggle-conn-menu" data-id={`sheet:${conn.id}`}>
                     <Icon markup={ICONS.ellipsis} /></button>
                   {menuOpen && (
-                    <div className="tile-menu" role="menu" aria-label={`More options for ${conn.name}`}>
-                      <button className="menu-item" role="menuitem"
+                    <div className="tile-menu" aria-label={`More options for ${conn.name}`}>
+                      <button className="menu-item"
                         data-act={conn.mcp_path ? 'reconnect-mcp' : 'oauth-reconnect'}
                         data-id={conn.id}>
                         <Icon markup={ICONS.refresh} /> Reconnect (sign in again)</button>
@@ -4542,11 +4625,24 @@ function SettingsSheet(): ReactNode {
     <button className={`switch ${s.confirm_ssh_host_keys ? 'on' : ''}`}
       data-act="toggle-confirm-host-keys" role="checkbox"
       aria-checked={s.confirm_ssh_host_keys}></button></div>;
+  const brokerKeyRow = <div className="set-row"><div className="set-txt">
+      <div className="st-title">
+        {state.broker.mode === 'local' ? 'This computer’s agent key' : 'Broker agent key'}
+      </div>
+      <div className="st-sub">
+        {state.identity?.token_path
+          ? `Stored at ${state.identity.token_path}. `
+          : ''}
+        Rotating it disconnects every agent using the current key.
+      </div></div>
+      <button className="btn danger sm" data-act="rotate-key-ask">Rotate key…</button>
+    </div>;
   return (
     <>
       <h3 id="settings-title">Settings</h3>
       {notificationRow}{notificationWarning}{notificationPreviewRow}
       {notificationSoundRow}{notificationFocusRow}{notificationEscalationRow}
+      {brokerKeyRow}
       {settingsFailed ? settingsFailureRow : <>{authenticationRows}{hostKeyRow}{dockRow}</>}
       <div className="sheet-actions"><button className="btn primary" data-act="sheet-cancel">Done</button></div>
     </>
@@ -4935,9 +5031,12 @@ async function saveSecret(): Promise<void> {
   const name = (state.draft.name || '').trim();
   const value = state.draft.value || '';
   let dependentConnectionIds: string[] = [];
-  const errs: Record<string, string> = {};
-  if (!name) errs.name = 'Name is required';
-  if (sheet.kind === 'add-secret' && !value) errs.value = 'Value is required';
+  const errs = validateSecretForm({
+    adding: sheet.kind === 'add-secret',
+    name,
+    value,
+    valueModified: Boolean(state.draft.secretValueModified),
+  });
   if (Object.keys(errs).length) { state.sheetErrors = errs; render(); return; }
   if (sheet.kind === 'add-secret') {
     try { await invoke('add_secret', { name, value }); }
@@ -4948,11 +5047,6 @@ async function saveSecret(): Promise<void> {
     if (!brokerEpochIsCurrent(epoch)) return;
     toast('🔑 Saved to macOS Keychain');
   } else {
-    if (state.draft.secretValueModified && !value) {
-      state.sheetErrors = { value: 'Invalid value' };
-      render();
-      return;
-    }
     const usedBy = state.secrets.find((secret) => secret.id === sheet.id)?.used_by_names ?? [];
     dependentConnectionIds = state.connections
       .filter((connection) => usedBy.includes(connection.name))
@@ -5007,22 +5101,6 @@ async function saveConn(): Promise<void> {
     ? catalogEntryById(d.entryId)?.oauthPreset : undefined;
   const byoOauth = !!oauthPreset && authMode === 'oauth';
   const errs: Record<string, string> = {};
-  if (!name) errs.name = 'Name is required';
-  if (t === 'api' || t === 'pg' || t === 'ssh') {
-    if (t !== 'api' && !(d.host || '').trim()) errs.host = 'Host is required';
-  }
-  let port = t === 'ssh' ? 22 : 5432;
-  if (t === 'pg' || t === 'ssh') {
-    const portStr = (d.port ?? '').trim() || String(port);
-    port = Number(portStr);
-    if (!/^\d+$/.test(portStr) || !Number.isInteger(port) || port < 1 || port > 65535) {
-      errs.port = 'Port must be 1–65535';
-    }
-    if (t === 'pg' && !(d.dbname || '').trim()) errs.dbname = 'Database is required';
-    if (!user) errs.user = 'User is required';
-    // The SSH host key fingerprint is optional: empty saves the service
-    // unpinned, and the key is confirmed at the first agent connection.
-  }
   let apiOrigin: { scheme: string; host: string; port: number | null } | null = null;
   let mcpPath: string | null = null;
   if (t === 'api' && isMcpDraft(d)) {
@@ -5037,18 +5115,6 @@ async function saveConn(): Promise<void> {
   }
   const mcpOauthApp = usesOauth && d.entryId
     ? catalogEntryById(d.entryId)?.mcpTemplate?.oauthApp : undefined;
-  if (mcpOauthApp && !(d.oauthClientId || '').trim()) {
-    errs.oauthClientId = 'The OAuth client ID is required';
-  }
-  if (byoOauth) {
-    if (!(d.oauthClientId || '').trim()) errs.oauthClientId = 'The OAuth client ID is required';
-    for (const [key, value] of [
-      ['oauthAuthUrl', d.oauthAuthUrl ?? oauthPreset!.authUrl],
-      ['oauthTokenUrl', d.oauthTokenUrl ?? oauthPreset!.tokenUrl],
-    ] as const) {
-      if (!/^https:\/\//.test((value || '').trim())) errs[key] = 'Must be a complete https:// URL';
-    }
-  }
   const usesRecipe = adding && t === 'api'
     && authMode !== 'advanced' && !usesOauth && !byoOauth;
   const needsCredentialChoice = !usesOauth && !byoOauth && (
@@ -5062,29 +5128,46 @@ async function saveConn(): Promise<void> {
   let newSecretNameTaken = false;
   if (needsCredentialChoice && secretSource === 'existing') {
     selectedSecret = state.secrets.find((secret) => secret.id === d.secretId) || null;
-    if (!selectedSecret) errs.secret = 'Choose a saved credential or save a new one';
   } else if (needsCredentialChoice && secretSource === 'new') {
     newSecretName = (d.newSecretName || suggestedSecretName(name, t)).trim();
-    const hasImportedIdentity = t === 'ssh' && d.sshImportId && d.identityFile;
-    const newSecretValue = d.newSecretValue ?? d.importedCredential ?? '';
-    if (!/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(newSecretName)) {
-      errs.newSecretName = 'Use letters, numbers, and underscores; start with a letter or underscore';
-    }
     newSecretNameTaken = credentialNameIsTaken(newSecretName);
-    if (!newSecretValue && !hasImportedIdentity) errs.newSecretValue = 'Credential value is required';
   }
   const templateSecretName = selectedSecret ? selectedSecret.name : newSecretName;
   let injectionTemplate = (d.template || '').trim();
   if (usesRecipe && secretSource !== 'none') {
     try { injectionTemplate = authTemplate(t, authMode, templateSecretName || '', (d.authDetail || '').trim()); }
     catch (error) { errs.authDetail = errorMessage(error); }
-  } else if (t === 'api' && authMode === 'advanced' && !injectionTemplate) {
-    errs.template = 'Credential template is required';
-  } else if (!adding && t === 'api' && !injectionTemplate
-      && (Boolean(existingConnection?.secret_names.length)
-        || d.template !== existingConnection?.template)) {
-    errs.template = 'Credential template is required';
   }
+  const validation = validateConnectionForm({
+    adding,
+    type: t,
+    name,
+    host: d.host,
+    port: d.port,
+    dbname: d.dbname,
+    user,
+    oauthClientRequired: Boolean(mcpOauthApp) || byoOauth,
+    oauthClientId: d.oauthClientId,
+    oauthUrls: byoOauth
+      ? {
+          auth: d.oauthAuthUrl ?? oauthPreset!.authUrl,
+          token: d.oauthTokenUrl ?? oauthPreset!.tokenUrl,
+        }
+      : undefined,
+    needsCredentialChoice,
+    secretSource,
+    selectedSecretPresent: Boolean(selectedSecret),
+    newSecretName,
+    newSecretValue: d.newSecretValue ?? d.importedCredential,
+    hasImportedIdentity: Boolean(t === 'ssh' && d.sshImportId && d.identityFile),
+    advancedTemplateRequired: t === 'api' && authMode === 'advanced',
+    injectionTemplate,
+    editingTemplateRequired: !adding && t === 'api'
+      && (Boolean(existingConnection?.secret_names.length)
+        || d.template !== existingConnection?.template),
+  });
+  Object.assign(errs, validation.errors);
+  const port = validation.port;
   if (Object.keys(errs).length || toolNameTaken || newSecretNameTaken) {
     state.sheetErrors = errs;
     render();
@@ -7083,6 +7166,13 @@ async function boot() {
   // A core-side connection change (a trust-on-first-use host-key pin) has no
   // originating UI command to refresh after; reload the services list.
   await listen('aka://connections-changed', () => refresh('connections'));
+  await listen('aka://secrets-changed', async () => {
+    await Promise.all([
+      load('secrets', 'list_secrets'),
+      load('connections', 'list_connections'),
+    ]);
+    render();
+  });
   await listen('aka://activity-appended', (ev) => receiveActivity(ev.payload));
   await listen('aka://mcp-auth-changed', (ev) => receiveMcpAuth(ev.payload));
   await listen('aka://connect-requested', (ev) => {
@@ -7095,7 +7185,9 @@ async function boot() {
     toast(`🤖 ${agent} asked to connect “${service}”`);
     render();
   });
-  await listen('aka://activity-changed', () => refresh('activity'));
+  // This precise event means the log was cleared, so retaining the previous
+  // pagination depth would only issue empty historical reads.
+  await listen('aka://activity-changed', () => loadActivity(false).then(() => render()));
   await listen('aka://open-settings', () => {
     if (isProtectedFormSheet()) return;
     setSheet({ kind: 'settings' });

@@ -731,6 +731,11 @@ impl crate::events::BrokerEvents for FanoutEvents {
         self.bus.emit(aka_api::ManageEvent::ConnectionsChanged);
     }
 
+    fn secrets_changed(&self) {
+        self.inner.secrets_changed();
+        self.bus.emit(aka_api::ManageEvent::SecretsChanged);
+    }
+
     fn audit_appended(&self, entry: &AuditEntry) {
         self.inner.audit_appended(entry);
         self.bus.emit(aka_api::ManageEvent::ActivityAppended {
@@ -1969,6 +1974,18 @@ mod tests {
     }
 
     #[test]
+    fn fanout_publishes_structured_secret_changes() {
+        let bus = Arc::new(ManageBus::new());
+        let mut events = bus.subscribe();
+        let fanout = FanoutEvents::new(Arc::new(NoopEvents), bus);
+        crate::events::BrokerEvents::secrets_changed(&fanout);
+        assert!(matches!(
+            events.try_recv().unwrap().event,
+            aka_api::ManageEvent::SecretsChanged
+        ));
+    }
+
+    #[test]
     fn a_fresh_lease_carries_confirmed_traffic_through_the_handshake() {
         // A reconnect or broker restart costs one ready-comment plus
         // heartbeat round trip. Refusing confirmed traffic during it would
@@ -2028,11 +2045,20 @@ mod tests {
     async fn local_backend_round_trips_secrets_and_connections() {
         let dir = tempfile::tempdir().unwrap();
         let backend = backend(&dir).await;
+        let mut events = backend.broker.manage_bus().subscribe();
 
         backend
             .add_secret("GITHUB_KEY".into(), Zeroizing::new("ghp_test".into()))
             .await
             .unwrap();
+        let mut saw_secrets_changed = false;
+        while let Ok(item) = events.try_recv() {
+            saw_secrets_changed |= matches!(item.event, aka_api::ManageEvent::SecretsChanged);
+        }
+        assert!(
+            saw_secrets_changed,
+            "a management mutation must refresh every attached secret view"
+        );
         backend.add_connection(api_spec("github")).await.unwrap();
 
         let secrets = backend.list_secrets().await.unwrap();

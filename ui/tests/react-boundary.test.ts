@@ -452,6 +452,29 @@ test('dropdown hide clears credential-shaped elicitation answers', async () => {
   assert.match(cleanup, /state\.elicitValues = \{\}/);
 });
 
+test('popover disclosures do not claim an unimplemented ARIA menu model', async () => {
+  const sources = await Promise.all([
+    readFile(new URL('../app.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/features/getting-started-view.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/features/identity-card.tsx', import.meta.url), 'utf8'),
+  ]);
+  const popovers = sources.join('\n');
+  assert.doesNotMatch(popovers, /role="menu(?:item|itemradio)?"/);
+  assert.doesNotMatch(popovers, /aria-haspopup="menu"/);
+});
+
+test('broker truth drives secret refreshes and request refusal counts', async () => {
+  const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+  const secretListener = app.match(
+    /listen\('aka:\/\/secrets-changed',[\s\S]*?\n  \}\);/,
+  )?.[0];
+  assert.ok(secretListener);
+  assert.match(secretListener, /load\('secrets', 'list_secrets'\)/);
+  assert.match(secretListener, /load\('connections', 'list_connections'\)/);
+  assert.match(app, /record\.status === 'unavailable'/);
+  assert.doesNotMatch(app, /startsWith\('Refused \(nobody could confirm\):'\)/);
+});
+
 test('failed broker reads stay visible and never trigger empty-vault onboarding', async () => {
   const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
   const appState = await readFile(new URL('../src/app-state.ts', import.meta.url), 'utf8');

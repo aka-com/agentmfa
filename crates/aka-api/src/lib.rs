@@ -721,6 +721,7 @@ pub enum ManageEvent {
     ElicitationsChanged,
     WiringsChanged,
     ConnectionsChanged,
+    SecretsChanged,
     ActivityAppended {
         entry: ActivityDto,
     },
@@ -854,5 +855,8 @@ mod tests {
         .unwrap();
         assert_eq!(expiry["event"], "approval_expired");
         assert_eq!(expiry["id"], "request-id");
+
+        let secrets = serde_json::to_value(ManageEvent::SecretsChanged).unwrap();
+        assert_eq!(secrets["event"], "secrets_changed");
     }
 }

@@ -643,6 +643,7 @@ export interface EventMap {
   'aka://activity-changed': Record<string, never>;
   'aka://agents-changed': Record<string, never>;
   'aka://connections-changed': Record<string, never>;
+  'aka://secrets-changed': Record<string, never>;
   'aka://wirings-changed': Record<string, never>;
   'aka://sessions-changed': Record<string, never>;
   'aka://elicitations-changed': Record<string, never>;

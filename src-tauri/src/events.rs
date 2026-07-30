@@ -17,6 +17,7 @@ pub const EVT_SESSIONS: &str = "aka://sessions-changed";
 pub const EVT_AGENTS: &str = "aka://agents-changed";
 pub const EVT_WIRINGS: &str = "aka://wirings-changed";
 pub const EVT_CONNECTIONS: &str = "aka://connections-changed";
+pub const EVT_SECRETS: &str = "aka://secrets-changed";
 pub const EVT_ACTIVITY: &str = "aka://activity-appended";
 pub const EVT_ACTIVITY_CHANGED: &str = "aka://activity-changed";
 pub const EVT_MCP_AUTH: &str = "aka://mcp-auth-changed";
@@ -68,6 +69,10 @@ impl BrokerEvents for TauriEvents {
 
     fn connections_changed(&self) {
         let _ = self.app.emit(EVT_CONNECTIONS, ());
+    }
+
+    fn secrets_changed(&self) {
+        let _ = self.app.emit(EVT_SECRETS, ());
     }
 
     fn audit_appended(&self, entry: &AuditEntry) {
@@ -210,6 +215,9 @@ pub fn emit_manage_event(app: &AppHandle, event: aka_api::ManageEvent) {
         ManageEvent::ConnectionsChanged => {
             let _ = app.emit(EVT_CONNECTIONS, ());
         }
+        ManageEvent::SecretsChanged => {
+            let _ = app.emit(EVT_SECRETS, ());
+        }
         ManageEvent::ActivityAppended { entry } => {
             let _ = app.emit(EVT_ACTIVITY, entry);
         }
@@ -239,6 +247,7 @@ pub fn emit_manage_event(app: &AppHandle, event: aka_api::ManageEvent) {
         ManageEvent::Resync => {
             for topic in [
                 EVT_CONNECTIONS,
+                EVT_SECRETS,
                 EVT_SESSIONS,
                 EVT_WIRINGS,
                 EVT_AGENTS,

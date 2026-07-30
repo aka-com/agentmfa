@@ -75,12 +75,11 @@ function clientSeenAt(connectMode: ConnectModeId): string | null {
 
 function ToolMenu({ option }: { option: StartOption }): ReactNode {
   return (
-    <div className="start-menu" role="menu" aria-label="What to connect">
+    <div className="start-menu" aria-label="What to connect">
       {START_OPTIONS.map((candidate) => {
         const entry = candidate.catalogId ? catalogEntryById(candidate.catalogId) : undefined;
         return (
-          <button key={candidate.id} role="menuitemradio"
-            aria-checked={candidate.id === option.id}
+          <button key={candidate.id} aria-pressed={candidate.id === option.id}
             className={`start-menu-item ${candidate.id === option.id ? 'on' : ''}`}
             data-act="start-option" data-id={candidate.id}>
             <span className="start-menu-ico" aria-hidden="true">
@@ -101,7 +100,7 @@ function ClientMenu({ option, connectMode }: {
   connectMode: ConnectModeId;
 }): ReactNode {
   return (
-    <div className="start-menu start-menu-clients" role="menu" aria-label="How your agent connects">
+    <div className="start-menu start-menu-clients" aria-label="How your agent connects">
       {connectModesFor(option).map((mode) => {
         const client = connectClientById(mode);
         const sub = mode === 'direct'
@@ -110,7 +109,7 @@ function ClientMenu({ option, connectMode }: {
               : 'A Postgres DSN — any client works')
           : client?.sub;
         return (
-          <button key={mode} role="menuitemradio" aria-checked={mode === connectMode}
+          <button key={mode} aria-pressed={mode === connectMode}
             className={`start-menu-item ${mode === connectMode ? 'on' : ''}`}
             data-act="start-mode" data-id={mode}>
             <span className="start-menu-tx">
@@ -133,7 +132,7 @@ function SentenceBlank({ kind, label, menu }: {
   return (
     <span className="start-blank-wrap">
       <button className={`start-blank ${open ? 'on' : ''}`} data-act="start-menu" data-id={kind}
-        aria-haspopup="menu" aria-expanded={open}>
+        aria-expanded={open}>
         {label}
         <span className="start-blank-chev" aria-hidden="true">
           <AppIcon icon={ICONS.chevronDown} />

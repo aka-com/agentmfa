@@ -220,6 +220,14 @@ pub struct Broker {
     _instance_lock: BrokerInstanceLock,
 }
 
+/// OAuth connect/reconnect mutates one stored secret and its owning
+/// connection as one user-visible action. Publish both resources together so
+/// every management surface refreshes the same atomic change.
+fn publish_oauth_change(events: &dyn BrokerEvents) {
+    events.secrets_changed();
+    events.connections_changed();
+}
+
 impl Broker {
     /// Must be constructed inside a tokio runtime (executions spawn tasks;
     /// the integrity key loads through the async vault read path).
@@ -665,6 +673,7 @@ impl Broker {
             AuditKind::SecretAdded,
             format!("Secret added: {name}"),
         ));
+        self.events.secrets_changed();
         Ok(meta)
     }
 
@@ -744,6 +753,7 @@ impl Broker {
                 entry = entry.confirmation(confirmation);
             }
             self.audit.append(entry);
+            self.events.secrets_changed();
         }
         Ok(meta)
     }
@@ -765,6 +775,7 @@ impl Broker {
             )
             .detail("Removed from Keychain"),
         );
+        self.events.secrets_changed();
         Ok(meta)
     }
 
@@ -970,6 +981,7 @@ impl Broker {
             AuditKind::SecretAdded,
             format!("Secret added: {}", secret.name),
         ));
+        self.events.secrets_changed();
         let mut entry = AuditEntry::new(
             AuditKind::ConnectionAdded,
             format!("Tool added: {}", conn.name),
@@ -1576,7 +1588,7 @@ impl Broker {
                     .field("target", conn.target())
                     .field("oauth", true),
                 );
-                self.events.connections_changed();
+                publish_oauth_change(self.events.as_ref());
             }
             ManageOAuthPlan::Reconnect {
                 connection_id,
@@ -1599,7 +1611,7 @@ impl Broker {
                     .connection(conn.name.clone())
                     .field("oauth", true),
                 );
-                self.events.connections_changed();
+                publish_oauth_change(self.events.as_ref());
             }
         }
         Ok(())
@@ -1665,7 +1677,7 @@ impl Broker {
             .field("target", conn.target())
             .field("oauth", true),
         );
-        self.events.connections_changed();
+        publish_oauth_change(self.events.as_ref());
         Ok(conn)
     }
 
@@ -1725,7 +1737,7 @@ impl Broker {
             .connection(conn.name.clone())
             .field("oauth", true),
         );
-        self.events.connections_changed();
+        publish_oauth_change(self.events.as_ref());
         Ok(conn)
     }
 
@@ -3333,10 +3345,36 @@ async fn reject_legacy_live_socket(paths: &Paths) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        remember_connect_request, ssh_endpoint_invocation, MAX_CONNECT_REQUEST_DEBOUNCE_KEYS,
+        publish_oauth_change, remember_connect_request, ssh_endpoint_invocation,
+        MAX_CONNECT_REQUEST_DEBOUNCE_KEYS,
     };
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
+
+    #[derive(Default)]
+    struct OAuthEvents {
+        secrets: AtomicUsize,
+        connections: AtomicUsize,
+    }
+
+    impl crate::events::BrokerEvents for OAuthEvents {
+        fn secrets_changed(&self) {
+            self.secrets.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn connections_changed(&self) {
+            self.connections.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn oauth_changes_publish_both_mutated_resources() {
+        let events = OAuthEvents::default();
+        publish_oauth_change(&events);
+        assert_eq!(events.secrets.load(Ordering::Relaxed), 1);
+        assert_eq!(events.connections.load(Ordering::Relaxed), 1);
+    }
 
     #[test]
     fn connect_request_debounce_is_hard_bounded() {
@@ -3406,7 +3444,7 @@ mod tests {
         let configuration_gate = ["confirm_configuration_", "action("].concat();
         assert_eq!(source.matches(&fresh_gate).count(), 14);
         assert_eq!(source.matches(&windowed_gate).count(), 6);
-        assert_eq!(source.matches(&configuration_gate).count(), 2);
+        assert_eq!(source.matches(&configuration_gate).count(), 3);
 
         for reason in [
             "Replace the stored value of secret",
