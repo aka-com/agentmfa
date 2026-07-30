@@ -1404,6 +1404,27 @@ fn mcp_elicitation_tool(body: &[u8]) -> Option<String> {
     }
 }
 
+/// Parse every `data:` frame of an SSE body into JSON, skipping frames that
+/// are comments, empty, or not JSON. Mirrors the sidecar's `relayMessages`
+/// and the broker's `find_sse_response`, but returns all frames rather than
+/// matching one id.
+fn sse_data_frames(body: &str) -> Vec<serde_json::Value> {
+    body.replace("\r\n", "\n")
+        .split("\n\n")
+        .filter_map(|frame| {
+            let data: String = frame
+                .lines()
+                .filter_map(|line| line.strip_prefix("data:"))
+                .map(|line| line.strip_prefix(' ').unwrap_or(line))
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!data.is_empty())
+                .then(|| serde_json::from_str::<serde_json::Value>(&data).ok())
+                .flatten()
+        })
+        .collect()
+}
+
 fn attach_elicitation_permits(
     permits: &crate::elicitations::ElicitationPermits,
     client_id: uuid::Uuid,
@@ -1424,15 +1445,24 @@ fn attach_elicitation_permits(
     let Some(body) = outcome.body.get("body").and_then(|body| body.as_str()) else {
         return;
     };
-    let Ok(response) = serde_json::from_str::<serde_json::Value>(body) else {
-        return;
-    };
-    let Some(requests) = response
-        .pointer("/result/inputRequests")
-        .and_then(|requests| requests.as_object())
+    // A streamable-HTTP upstream answers over SSE, relayed here verbatim as
+    // utf8, so a plain JSON parse fails — the sidecar's own consumer scans SSE
+    // frames, and this must too, or every interactive tool call against such a
+    // server mints no permit and the elicitation is refused as uncorrelated.
+    let Some(requests) = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .into_iter()
+        .chain(sse_data_frames(body))
+        .find_map(|value| {
+            value
+                .pointer("/result/inputRequests")
+                .and_then(|requests| requests.as_object())
+                .cloned()
+        })
     else {
         return;
     };
+    let requests = &requests;
     let mut tokens = serde_json::Map::new();
     for (key, request) in requests.iter().take(MAX_PER_RESPONSE) {
         if request.get("method").and_then(|method| method.as_str()) != Some("elicitation/create") {
