@@ -208,7 +208,9 @@ export interface AppState {
   agentMenuOpen: string | null;
   connMenuOpen: string | null;
   connMenuPoint: ConnMenuPoint | null;
-  addToolOpen: boolean;
+  /** The Add-a-tool palette: open when non-null, with its typed query and
+   * the keyboard-selected result index. */
+  addPalette: { query: string; index: number } | null;
   selectedConn: string | null;
   connDetailOpen: boolean;
   copied: string | null;
@@ -314,7 +316,7 @@ function createInitialState(): AppState {
     agentMenuOpen: null,
     connMenuOpen: null,
     connMenuPoint: null,
-    addToolOpen: false,
+    addPalette: null,
     selectedConn: null,
     connDetailOpen: false,
     copied: null,

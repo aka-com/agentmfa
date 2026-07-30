@@ -252,6 +252,7 @@ function showRequestInbox(): void {
   state.menuOpen = false;
   state.agentMenuOpen = null;
   state.startMenuOpen = null;
+  state.addPalette = null;
   state.catalogActionMenuOpen = null;
   state.connMenuOpen = null;
   state.connMenuPoint = null;
@@ -1275,6 +1276,30 @@ function CredentialsExpansion(): ReactNode {
   );
 }
 
+/** The primary action label a catalog entry carries wherever it can be added. */
+function catalogAddLabel(entry: CatalogEntry): string {
+  return entry.requiresSetup || ['mcp', 'http'].includes(entry.id) || entry.preset
+    ? 'Configure'
+    : entry.mcp && !entry.mcpTemplate?.serverUrl
+    ? 'Add custom app'
+    : entry.mcp
+    ? 'Connect now'
+    : 'Add';
+}
+
+/** Open the right add form for a catalog row — the shared behavior behind
+ * the catalog Add button and the palette's Enter. */
+async function addCatalogEntry(entry: CatalogEntry): Promise<void> {
+  if (entry.via !== 'connection' || !entry.connType) return;
+  // "Add another" on a dual-mode row should match what is already
+  // there: if every existing connection under it is a plain API
+  // (no MCP path), open the API form rather than jumping to MCP.
+  const existing = connectionsForEntry(entry, state.connections);
+  const asApi = Boolean(entry.mcp && entry.preset && existing.length > 0
+    && existing.every((connection) => !connection.mcp_path));
+  await openCatalogConnectionForm(entry, asApi ? 'bearer' : 'oauth', asApi);
+}
+
 function CatalogRow({ entry }: { entry: CatalogEntry }): ReactNode {
   if (entry.disabled) {
     return (
@@ -1290,13 +1315,7 @@ function CatalogRow({ entry }: { entry: CatalogEntry }): ReactNode {
   const builtin = entry.via === 'builtin';
   const quickConnect = canQuickConnectMcp(entry);
   const actionMenuOpen = state.catalogActionMenuOpen === entry.id;
-  const addLabel = entry.requiresSetup || ['mcp', 'http'].includes(entry.id) || entry.preset
-    ? 'Configure'
-    : entry.mcp && !entry.mcpTemplate?.serverUrl
-    ? 'Add custom app'
-    : entry.mcp
-    ? 'Connect now'
-    : 'Add';
+  const addLabel = catalogAddLabel(entry);
   let action: ReactNode = null;
   if (!builtin && quickConnect) {
     action = (
@@ -1752,6 +1771,138 @@ function ConnectionReadyCard(): ReactNode {
   </div>;
 }
 
+/* ---- Add-a-tool palette -------------------------------------------------- */
+// Adding a tool is a search, not a place: the catalog never renders inline
+// once a tool exists. One button opens this palette, typing filters the
+// full catalog, ↑↓ selects, Enter adds. The empty state is the exception —
+// with nothing connected yet, the directory is the page (see ConnectionsView).
+
+const PALETTE_SECTIONS = [
+  'Infrastructure',
+  ...CATALOG_SECTIONS.filter((section) => section !== 'Infrastructure' && section !== 'Secrets'),
+];
+
+interface PaletteGroup { section: string; entries: CatalogEntry[]; }
+
+/** The palette's result groups: every addable catalog row matching the
+ * query, in the catalog's section order. Connected rows drop out unless
+ * the kind supports several (databases, servers, custom endpoints). */
+function paletteGroups(query: string): PaletteGroup[] {
+  const entries = visibleCatalog(query);
+  const isConnected = (entry: CatalogEntry): boolean =>
+    connectionsForEntry(entry, state.connections).length > 0;
+  const alwaysAddable = (entry: CatalogEntry): boolean =>
+    entry.section === 'Infrastructure' || ['http', 'mcp'].includes(entry.id);
+  return PALETTE_SECTIONS.flatMap((section) => {
+    const rows = entries.filter((entry) => entry.section === section
+      && !entry.disabled
+      && entry.via === 'connection'
+      && (!isConnected(entry) || alwaysAddable(entry)));
+    return rows.length ? [{ section, entries: rows }] : [];
+  });
+}
+
+/** The palette's add: OAuth-capable rows connect immediately, everything
+ * else opens the same form the catalog's Add button would. */
+async function activatePaletteEntry(entryId: string): Promise<void> {
+  const entry = catalogEntryById(entryId);
+  state.addPalette = null;
+  render();
+  if (!entry) return;
+  if (canQuickConnectMcp(entry)) {
+    await quickConnectCatalogMcp(entry);
+    return;
+  }
+  await addCatalogEntry(entry);
+}
+
+function AddToolPalette(): ReactNode {
+  const palette = state.addPalette;
+  if (!palette) return null;
+  const groups = paletteGroups(palette.query);
+  const flat = groups.flatMap((group) => group.entries);
+  const index = Math.max(0, Math.min(palette.index, flat.length - 1));
+  const move = (delta: number): void => {
+    if (!flat.length) return;
+    palette.index = (index + delta + flat.length) % flat.length;
+    const targetId = `palette-row-${flat[palette.index].id}`;
+    render();
+    requestAnimationFrame(() => {
+      document.getElementById(targetId)?.scrollIntoView({ block: 'nearest' });
+    });
+  };
+  let flatIndex = -1;
+  return (
+    <div className="palette-layer">
+      <button className="palette-backdrop" data-act="close-add-palette" tabIndex={-1}
+        aria-label="Close the tool palette"></button>
+      <div className="add-palette" role="dialog" aria-modal="true" aria-label="Add a tool">
+        <div className="palette-search">
+          <span className="palette-search-ico" aria-hidden="true">
+            <Icon markup={ICONS.scanSearch} />
+          </span>
+          <input id="add-palette-input" type="text" placeholder="Search tools to add…"
+            role="combobox" aria-expanded="true" aria-controls="palette-listbox"
+            aria-activedescendant={flat[index] ? `palette-row-${flat[index].id}` : undefined}
+            autoComplete="off" spellCheck={false}
+            value={palette.query}
+            onChange={(e) => {
+              palette.query = e.currentTarget.value;
+              palette.index = 0;
+              render();
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'ArrowDown') { e.preventDefault(); move(1); }
+              else if (e.key === 'ArrowUp') { e.preventDefault(); move(-1); }
+              else if (e.key === 'Enter' && flat[index]) {
+                e.preventDefault();
+                void activatePaletteEntry(flat[index].id);
+              } else if (e.key === 'Escape') {
+                e.preventDefault();
+                e.stopPropagation();
+                state.addPalette = null;
+                render();
+              }
+            }} />
+        </div>
+        <div className="palette-list" role="listbox" id="palette-listbox"
+          aria-label="Tools that can be added">
+          {groups.map((group) => (
+            <div key={group.section} className="palette-group">
+              <div className="palette-sec" aria-hidden="true">{group.section.toUpperCase()}</div>
+              {group.entries.map((entry) => {
+                flatIndex += 1;
+                const selected = flatIndex === index;
+                return (
+                  <button key={entry.id} id={`palette-row-${entry.id}`} role="option"
+                    aria-selected={selected}
+                    className={`palette-row ${selected ? 'sel' : ''}`}
+                    data-act="palette-add" data-id={entry.id}>
+                    <span className="cat-ico" aria-hidden="true">
+                      <Icon markup={ICONS[entry.icon] || ''} />
+                    </span>
+                    <span className="palette-tx"><b>{entry.name}</b>
+                      <span className="palette-desc">{entry.description}</span></span>
+                    <span className="palette-verb">
+                      {canQuickConnectMcp(entry) ? 'Connect' : catalogAddLabel(entry)}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          ))}
+          {!flat.length ? <div className="muted-note">No tools match your search.</div> : null}
+        </div>
+        <div className="palette-hints" aria-hidden="true">
+          <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
+          <span><kbd>↵</kbd> add</span>
+          <span><kbd>esc</kbd> close</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ConnectionsView({ withReadyCard = true }: { withReadyCard?: boolean }): ReactNode {
   const byId = new Map(state.connections.map((connection) => [connection.id, connection] as const));
   const orderedConnections = dragConnOrder
@@ -1778,14 +1929,13 @@ function ConnectionsView({ withReadyCard = true }: { withReadyCard?: boolean }):
       || entryMatches;
   });
   const reorderable = !needle && matching.length > 1;
-  const addOpen = state.addToolOpen || !state.connections.length;
+  // The directory renders inline only while nothing is connected — with
+  // nothing to manage, browsing is the page. Once a tool exists, adding
+  // moves to the palette and the list shows only what agents can reach.
+  const showDirectory = !state.connections.length;
   const alwaysAddable = (entry: CatalogEntry): boolean =>
     entry.section === 'Infrastructure' || ['http', 'mcp'].includes(entry.id);
-  const addSections = [
-    'Infrastructure',
-    ...CATALOG_SECTIONS.filter((section) => section !== 'Infrastructure' && section !== 'Secrets'),
-  ];
-  const sections = !addOpen ? [] : addSections.flatMap((section) => {
+  const sections = !showDirectory ? [] : PALETTE_SECTIONS.flatMap((section) => {
     const sectionEntries = entries.filter(
       (entry) => entry.section === section && (!isConnected(entry) || alwaysAddable(entry)),
     );
@@ -1821,19 +1971,17 @@ function ConnectionsView({ withReadyCard = true }: { withReadyCard?: boolean }):
                 </div>
               </div>
             : null}
-          {state.connections.length
+          {mode === 'dropdown' && state.connections.length
             ? <div className="cat-section"><div className="cat-rows">
                 <div className="cat-row is-toggle add-tools-row" role="button" tabIndex={0}
-                  data-act="toggle-add-tools" aria-expanded={addOpen}
-                  aria-label={`${addOpen ? 'Hide' : 'Show'} tools that can be added`}>
+                  data-act="open-add-palette" aria-haspopup="dialog"
+                  aria-label="Add a tool">
                   <span className="cat-ico" aria-hidden="true"><Icon markup={ICONS.plus} /></span>
                   <div className="cat-tx"><b>Add a tool</b></div>
-                  <span className={`cat-chev group-chev ${addOpen ? 'open' : ''}`}
-                    aria-hidden="true"><Icon markup={ICONS.chevronDown} /></span>
                 </div>
               </div></div>
             : null}
-          {addOpen && !sections.length
+          {showDirectory && !sections.length
             ? <div className="muted-note">No tools match your search.</div>
             : sections.map(({ section, rows, expanded, hiddenCount }) =>
                 <div key={section} className="cat-section add-section">
@@ -2467,6 +2615,10 @@ function MainWindow(): ReactNode {
         <input id="tool-search" className="cat-search" type="search" placeholder="Search tools…"
           aria-label="Search tools" value={state.toolSearch}
           onChange={(e) => { state.toolSearch = e.currentTarget.value; render(); }} />
+        <button className="btn primary add-tool-btn" data-act="open-add-palette"
+          aria-haspopup="dialog">
+          <Icon markup={ICONS.plus} /> Add a tool
+        </button>
       </div>
     : state.tab === 'secrets'
       ? <div className="dw-head-actions">
@@ -2551,7 +2703,7 @@ function MainWindow(): ReactNode {
         </div>
       </div>
       {!takeover && (
-        <><Sheets /><ConfirmSheet /></>
+        <><AddToolPalette /><Sheets /><ConfirmSheet /></>
       )}
     </>
   );
@@ -2602,7 +2754,7 @@ function DropdownWindow(): ReactNode {
         <LoadFailureBand />
         <div className="content dd-content"><TabContent /></div>
       </div>
-      <><Sheets /><ConfirmSheet /></>
+      <><AddToolPalette /><Sheets /><ConfirmSheet /></>
     </>
   );
 }
@@ -5063,8 +5215,6 @@ async function saveConn(): Promise<void> {
       // The first tool added gets a compact success message.
       if (!hadConnections) {
         state.connectionReady = { name };
-        // A finished add lands back on the flat list, where the new tool is.
-        state.addToolOpen = false;
       }
     }
     closeSheet();
@@ -5279,6 +5429,7 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       state.confirm = null;
       state.agentMenuOpen = null;
       state.startMenuOpen = null;
+      state.addPalette = null;
       state.catalogActionMenuOpen = null;
       state.connMenuOpen = null;
       state.connMenuPoint = null;
@@ -5557,7 +5708,7 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       break;
     case 'show-connection':
       state.tab = 'connections';
-      state.addToolOpen = false;
+      state.addPalette = null;
       state.selectedConn = id;
       state.connDetailOpen = true;
       state.confirm = null;
@@ -5565,7 +5716,7 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       break;
     case 'delete-using-connection':
       state.tab = 'connections';
-      state.addToolOpen = false;
+      state.addPalette = null;
       state.selectedConn = id;
       state.connDetailOpen = true;
       state.confirm = { kind: 'del-conn', id };
@@ -5679,9 +5830,17 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       state.connDetailOpen = false;
       render();
       break;
-    case 'toggle-add-tools':
-      state.addToolOpen = !state.addToolOpen;
+    case 'open-add-palette':
+      state.addPalette = { query: '', index: 0 };
       render();
+      focusField('add-palette-input');
+      break;
+    case 'close-add-palette':
+      state.addPalette = null;
+      render();
+      break;
+    case 'palette-add':
+      await activatePaletteEntry(id);
       break;
     case 'toggle-section-expanded':
       state.sectionsExpanded = state.sectionsExpanded.includes(id)
@@ -5716,14 +5875,7 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
     }
     case 'catalog-add': {
       const entry = catalogEntryById(id);
-      if (!entry || entry.via !== 'connection' || !entry.connType) break;
-      // "Add another" on a dual-mode row should match what is already
-      // there: if every existing connection under it is a plain API
-      // (no MCP path), open the API form rather than jumping to MCP.
-      const existing = connectionsForEntry(entry, state.connections);
-      const asApi = Boolean(entry.mcp && entry.preset && existing.length > 0
-        && existing.every((connection) => !connection.mcp_path));
-      await openCatalogConnectionForm(entry, asApi ? 'bearer' : 'oauth', asApi);
+      if (entry) await addCatalogEntry(entry);
       break;
     }
     case 'edit-conn': {
@@ -5994,7 +6146,7 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       break;
     case 'request-open-connection':
       state.tab = 'connections';
-      state.addToolOpen = false;
+      state.addPalette = null;
       state.selectedConn = id;
       state.connDetailOpen = true;
       render();
@@ -6632,6 +6784,7 @@ function handleAppKeyDown(e: KeyboardEvent): void {
     return;
   }
   if (e.key === 'Escape') {
+    if (state.addPalette) { state.addPalette = null; render(); return; }
     if (state.catalogActionMenuOpen) { state.catalogActionMenuOpen = null; render(); return; }
     if (state.agentMenuOpen) { state.agentMenuOpen = null; render(); return; }
     if (state.startMenuOpen) { state.startMenuOpen = null; render(); return; }
@@ -6949,6 +7102,7 @@ async function boot() {
     state.catalogActionMenuOpen = null;
     state.agentMenuOpen = null;
     state.startMenuOpen = null;
+    state.addPalette = null;
     state.connMenuOpen = null;
     state.connMenuPoint = null;
     render();
