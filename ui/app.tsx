@@ -1392,7 +1392,7 @@ function connectKeyCardHTML(identity: IdentityInfo): string {
       <span class="agent-avatar" role="img" aria-label="This computer's key">${ICONS.fileKey}</span>
       <div class="agent-id"><div class="c-name">This computer’s key</div>
         <div class="s-sub agent-sub">${esc(identity.token_path)}${identity.legacy_aliases
-          ? ` · ${identity.legacy_aliases} legacy token${identity.legacy_aliases === 1 ? '' : 's'} still accepted`
+          ? ` · ${identity.legacy_aliases} older key${identity.legacy_aliases === 1 ? '' : 's'} still accepted briefly`
           : ''}</div></div>
       <button class="btn sm" data-act="copy-key">${copied ? `${ICONS.check} Copied` : 'Copy key'}</button>
       <div class="agent-menu-wrap">
@@ -1521,7 +1521,11 @@ function connectionIssues(
     issues.push({
       text: c.sslmode === 'disable'
         ? 'TLS is disabled for this connection.'
-        : `TLS is relaxed to ${c.sslmode}.`,
+        : c.sslmode === 'prefer'
+          ? 'TLS prefers encryption but may fall back to plaintext; the server identity is not verified.'
+          : c.sslmode === 'require'
+            ? 'TLS encrypts this connection, but the server identity is not verified.'
+            : `TLS is relaxed to ${c.sslmode}.`,
       fix: editFix(c),
     });
   }
@@ -3815,7 +3819,8 @@ function draftUsesAdvancedFields(d: ConnectionDraft, t: ConnectionType): boolean
 
 const PG_SSL_OPTIONS: Array<[string, string]> = [
   ['verify-full', 'Require TLS (verify certificate)'],
-  ['require', 'Require encrypted connection'],
+  ['require', 'Require TLS (server not verified)'],
+  ['prefer', 'Prefer TLS (may use plaintext; server not verified)'],
   ['disable', 'Disable'],
 ];
 

@@ -373,8 +373,8 @@ pub struct IdentityDto {
     pub socket_path: String,
     pub minted_at: String,
     pub last_used: String,
-    /// How many legacy per-agent tokens still work as aliases (cleared by
-    /// the first rotation).
+    /// How many older agent keys still work inside a bounded recovery window.
+    /// Rotating the current key revokes them immediately.
     pub legacy_aliases: usize,
 }
 

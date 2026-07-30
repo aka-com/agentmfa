@@ -703,8 +703,16 @@ impl crate::events::BrokerEvents for FanoutEvents {
         self.inner.confirm_secret_read(secret)
     }
 
+    fn secret_read_authority(&self) -> crate::events::PresenceAuthority {
+        self.inner.secret_read_authority()
+    }
+
     fn confirm_secret_copy(&self, secret: &SecretMeta, duration: std::time::Duration) -> bool {
         self.inner.confirm_secret_copy(secret, duration)
+    }
+
+    fn secret_copy_authority(&self) -> crate::events::PresenceAuthority {
+        self.inner.secret_copy_authority()
     }
 
     fn open_external_url(&self, url: &str) -> bool {
@@ -713,6 +721,13 @@ impl crate::events::BrokerEvents for FanoutEvents {
 
     fn confirm_action(&self, description: &str) -> Option<crate::types::ConfirmationMethod> {
         self.inner.confirm_action(description)
+    }
+
+    fn action_authority(
+        &self,
+        method: crate::types::ConfirmationMethod,
+    ) -> crate::events::PresenceAuthority {
+        self.inner.action_authority(method)
     }
 
     fn approval_requested(

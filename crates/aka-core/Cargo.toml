@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "AKA broker core: secret store, policy, approvals, audit, and the agent-facing daemon"
 
+[features]
+test-harness = []
+
 [dependencies]
 aka-api = { workspace = true }
 async-trait = { workspace = true }

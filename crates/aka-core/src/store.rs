@@ -20,7 +20,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::{ConnectionField, CoreError};
-use crate::events::{BrokerEvents, NoopEvents};
+use crate::events::BrokerEvents;
+#[cfg(any(test, feature = "test-harness"))]
+use crate::events::NoopEvents;
 use crate::integrity::StateIntegrity;
 use crate::paths::Paths;
 use crate::template::{is_valid_secret_name, Template};
@@ -249,6 +251,7 @@ pub struct Store {
 }
 
 impl Store {
+    #[cfg(any(test, feature = "test-harness"))]
     pub async fn open(paths: Paths, vault: Arc<dyn SecretVault>) -> Result<Self> {
         let integrity = Arc::new(StateIntegrity::open_for_paths(&*vault, &paths).await?);
         Self::open_with_events(paths, vault, Arc::new(NoopEvents), integrity)
@@ -374,7 +377,9 @@ impl Store {
             .events
             .confirm_action(description)
             .ok_or(CoreError::NotConfirmed)?;
-        self.note_configuration_presence();
+        if self.events.action_authority(method).establishes_presence() {
+            self.note_configuration_presence();
+        }
         Ok(method)
     }
 
@@ -392,7 +397,9 @@ impl Store {
             .events
             .confirm_action(description)
             .ok_or(CoreError::NotConfirmed)?;
-        self.note_configuration_presence();
+        if self.events.action_authority(method).establishes_presence() {
+            self.note_configuration_presence();
+        }
         Ok(method)
     }
 
@@ -424,10 +431,12 @@ impl Store {
             if !events.confirm_secret_copy(&meta, window) {
                 return Err(CoreError::SecretReadNotAuthenticated);
             }
-            let grant = PresenceGrant::new(std::time::Instant::now(), Utc::now(), window);
-            let mut state = presence.state.lock().unwrap();
-            state.secret_read = Some(grant);
-            state.configuration = Some(grant);
+            if events.secret_copy_authority().establishes_presence() {
+                let grant = PresenceGrant::new(std::time::Instant::now(), Utc::now(), window);
+                let mut state = presence.state.lock().unwrap();
+                state.secret_read = Some(grant);
+                state.configuration = Some(grant);
+            }
             Ok(())
         })
         .await
@@ -733,11 +742,13 @@ impl Store {
                 if !events.confirm_secret_read(&meta) {
                     return Err(CoreError::SecretReadNotAuthenticated);
                 }
-                presence.state.lock().unwrap().secret_read = Some(PresenceGrant::new(
-                    std::time::Instant::now(),
-                    Utc::now(),
-                    window,
-                ));
+                if events.secret_read_authority().establishes_presence() {
+                    presence.state.lock().unwrap().secret_read = Some(PresenceGrant::new(
+                        std::time::Instant::now(),
+                        Utc::now(),
+                        window,
+                    ));
+                }
                 Ok(())
             })
             .await

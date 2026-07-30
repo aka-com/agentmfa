@@ -505,6 +505,32 @@ async fn remove_stale_socket(
     }
 }
 
+/// Bind the unauthenticated local control plane without ever publishing a
+/// permissive socket node. The containing directory is private too, but the
+/// socket itself is a key-dispenser boundary and should be 0600 from the first
+/// instant its final name is visible.
+fn bind_private_control_socket(path: &std::path::Path) -> io::Result<UnixListener> {
+    static NEXT_STAGING_SOCKET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = NEXT_STAGING_SOCKET.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let staging = path.with_extension(format!("binding-{}-{sequence}", std::process::id()));
+    let listener = UnixListener::bind(&staging)?;
+    if let Err(error) = std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o600)) {
+        let _ = std::fs::remove_file(&staging);
+        return Err(error);
+    }
+    // Linking publishes the already-private inode atomically and, unlike
+    // rename, refuses to overwrite a path another broker just established.
+    if let Err(error) = std::fs::hard_link(&staging, path) {
+        let _ = std::fs::remove_file(&staging);
+        return Err(error);
+    }
+    if let Err(error) = std::fs::remove_file(&staging) {
+        let _ = std::fs::remove_file(path);
+        return Err(error);
+    }
+    Ok(listener)
+}
+
 pub fn router(broker: Arc<Broker>) -> Router {
     router_for(broker, Transport::Uds)
 }
@@ -600,9 +626,8 @@ pub async fn serve_with(broker: Arc<Broker>, options: ServeOptions) -> crate::Re
         ))));
     }
     remove_stale_socket(&socket_path, paths.socket_display()).await?;
-    let listener = UnixListener::bind(&socket_path)?;
+    let listener = bind_private_control_socket(&socket_path)?;
     let socket_guard = SocketGuard::capture(socket_path.clone())?;
-    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
     // Per-open SSH agent sockets self-clean on their deadline; sweep any a
     // crashed broker left behind, mirroring the stale control-socket check
     // above.

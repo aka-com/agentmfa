@@ -234,6 +234,18 @@ impl DataPlane {
         endpoint_id: Uuid,
         kind: ConnectionKind,
     ) -> Result<SessionHandle, RedeemError> {
+        self.start_endpoint_session_with_fields(agent, connection, endpoint_id, kind, &[])
+    }
+
+    /// Endpoint-session registration with protocol-specific audit metadata.
+    pub fn start_endpoint_session_with_fields(
+        &self,
+        agent: &str,
+        connection: &Connection,
+        endpoint_id: Uuid,
+        kind: ConnectionKind,
+        fields: &[(&str, &str)],
+    ) -> Result<SessionHandle, RedeemError> {
         let inner = self.inner.clone();
         let mut state = inner.state.lock().unwrap();
         Self::sweep(&inner, &mut state);
@@ -264,19 +276,21 @@ impl DataPlane {
             },
         );
         drop(state);
-        inner.audit.append(
-            AuditEntry::new(
-                AuditKind::SessionOpened,
-                format!("{} session opened: {}", kind_label(kind), info.connection),
-            )
-            .agent(info.agent.clone())
-            .connection(info.connection.clone())
-            .detail(info.detail.clone())
-            .field("kind", kind.as_str())
-            .field("target", info.detail.clone())
-            .field("session_id", id)
-            .field("via", "endpoint"),
-        );
+        let mut audit = AuditEntry::new(
+            AuditKind::SessionOpened,
+            format!("{} session opened: {}", kind_label(kind), info.connection),
+        )
+        .agent(info.agent.clone())
+        .connection(info.connection.clone())
+        .detail(info.detail.clone())
+        .field("kind", kind.as_str())
+        .field("target", info.detail.clone())
+        .field("session_id", id)
+        .field("via", "endpoint");
+        for (key, value) in fields {
+            audit = audit.field(*key, *value);
+        }
+        inner.audit.append(audit);
         inner.events.sessions_changed();
         Ok(SessionHandle {
             plane: inner,
@@ -405,7 +419,16 @@ impl DataPlane {
 
 impl Redemption {
     /// Establishments succeeded: register the live session.
-    pub fn start(mut self, kind: ConnectionKind) -> SessionHandle {
+    pub fn start(self, kind: ConnectionKind) -> SessionHandle {
+        self.start_with_fields(kind, &[])
+    }
+
+    /// Register a ticket session with protocol-specific audit metadata.
+    pub fn start_with_fields(
+        mut self,
+        kind: ConnectionKind,
+        fields: &[(&str, &str)],
+    ) -> SessionHandle {
         self.started = true;
         let inner = self.plane.clone();
         let mut state = inner.state.lock().unwrap();
@@ -433,18 +456,20 @@ impl Redemption {
             },
         );
         drop(state);
-        inner.audit.append(
-            AuditEntry::new(
-                AuditKind::SessionOpened,
-                format!("{} session opened: {}", kind_label(kind), info.connection),
-            )
-            .agent(info.agent.clone())
-            .connection(info.connection.clone())
-            .detail(info.detail.clone())
-            .field("kind", kind.as_str())
-            .field("target", info.detail.clone())
-            .field("session_id", id),
-        );
+        let mut audit = AuditEntry::new(
+            AuditKind::SessionOpened,
+            format!("{} session opened: {}", kind_label(kind), info.connection),
+        )
+        .agent(info.agent.clone())
+        .connection(info.connection.clone())
+        .detail(info.detail.clone())
+        .field("kind", kind.as_str())
+        .field("target", info.detail.clone())
+        .field("session_id", id);
+        for (key, value) in fields {
+            audit = audit.field(*key, *value);
+        }
+        inner.audit.append(audit);
         inner.events.sessions_changed();
         SessionHandle {
             plane: inner,

@@ -8,9 +8,12 @@ use aka_core::broker::Broker;
 use aka_core::config::BrokerConfig;
 use aka_core::daemon;
 use aka_core::error::CoreError;
-use aka_core::events::NoopEvents;
+use aka_core::events::BrokerEvents;
 use aka_core::paths::Paths;
 use aka_core::vault::MemoryVault;
+
+struct NoopEvents;
+impl BrokerEvents for NoopEvents {}
 
 async fn broker(paths: Paths, vault: Arc<MemoryVault>) -> Arc<Broker> {
     Broker::new(paths, vault, BrokerConfig::default(), Arc::new(NoopEvents))
@@ -35,6 +38,11 @@ async fn stale_control_socket_is_rebound_and_cleaned_on_drop() {
     let handle = daemon::serve(broker(paths, Arc::new(MemoryVault::new())).await)
         .await
         .unwrap();
+    assert_eq!(
+        std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777,
+        0o600,
+        "the published control socket is private"
+    );
     tokio::net::UnixStream::connect(&socket).await.unwrap();
 
     drop(handle);

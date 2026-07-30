@@ -19,7 +19,7 @@ use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
 use crate::integrity::StateIntegrity;
-use crate::types::BrokerIdentity;
+use crate::types::{BrokerIdentity, SupersededTokenHash};
 use crate::wire::ErrorReason;
 use crate::Result;
 
@@ -59,10 +59,11 @@ struct State {
     /// The plaintext key. Held in memory so `/v1/pair` and the UI can hand
     /// it out; on disk it exists only in the 0600 token file.
     token: String,
-    /// The previous primary hash after a rotation, kept as an in-memory
-    /// hint so a stale holder gets `token_superseded`, not `invalid_token`.
-    rotated_out: Option<String>,
 }
+
+const RECOVERY_ALIAS_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+const MAX_SUPERSEDED_TOKEN_HASHES: usize = 8;
+const SUPERSEDED_TOKEN_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 pub struct IdentityStore {
     path: PathBuf,
@@ -148,13 +149,14 @@ impl IdentityStore {
                     token_hash: String::new(),
                     alias_hashes: Vec::new(),
                     alias_last_used: std::collections::HashMap::new(),
+                    alias_expires_at: std::collections::HashMap::new(),
+                    superseded_token_hashes: Vec::new(),
                     minted_at: Utc::now(),
                     last_used: Utc::now(),
                     manage_token_hash: None,
                     manage_token_expires_at: None,
                 },
                 token: String::new(),
-                rotated_out: None,
             }),
         };
 
@@ -181,9 +183,17 @@ impl IdentityStore {
                         );
                         let mut aliases = identity.alias_hashes.clone();
                         let mut alias_last_used = identity.alias_last_used.clone();
+                        let mut alias_expires_at = identity.alias_expires_at.clone();
+                        let now = Utc::now();
                         if !identity.token_hash.is_empty() {
                             aliases.push(identity.token_hash.clone());
-                            alias_last_used.insert(identity.token_hash.clone(), identity.last_used);
+                            alias_last_used.insert(identity.token_hash.clone(), now);
+                            let recovery_ttl = RECOVERY_ALIAS_TTL.min(ttl);
+                            alias_expires_at.insert(
+                                identity.token_hash.clone(),
+                                now + chrono::Duration::from_std(recovery_ttl)
+                                    .unwrap_or_else(|_| chrono::Duration::hours(6)),
+                            );
                         }
                         let token = mint_token();
                         let next = BrokerIdentity {
@@ -191,6 +201,8 @@ impl IdentityStore {
                             token_hash: hash_token(&token),
                             alias_hashes: aliases,
                             alias_last_used,
+                            alias_expires_at,
+                            superseded_token_hashes: identity.superseded_token_hashes.clone(),
                             minted_at: Utc::now(),
                             last_used: Utc::now(),
                             // The manage token is independent of the agent
@@ -220,12 +232,19 @@ impl IdentityStore {
                 let now = Utc::now();
                 let mut alias_hashes = Vec::new();
                 let mut alias_last_used = std::collections::HashMap::new();
+                let mut alias_expires_at = std::collections::HashMap::new();
                 for agent in legacy_agents {
                     let age = now.signed_duration_since(agent.last_used);
                     if age.num_seconds() > ttl.as_secs() as i64 {
                         continue;
                     }
                     alias_last_used.insert(agent.token_hash.clone(), agent.last_used);
+                    alias_expires_at.insert(
+                        agent.token_hash.clone(),
+                        agent.last_used
+                            + chrono::Duration::from_std(ttl)
+                                .unwrap_or_else(|_| chrono::Duration::days(30)),
+                    );
                     alias_hashes.push(agent.token_hash);
                 }
                 let token = mint_token();
@@ -234,6 +253,8 @@ impl IdentityStore {
                     token_hash: hash_token(&token),
                     alias_hashes,
                     alias_last_used,
+                    alias_expires_at,
+                    superseded_token_hashes: Vec::new(),
                     minted_at: Utc::now(),
                     last_used: Utc::now(),
                     manage_token_hash: None,
@@ -291,8 +312,15 @@ impl IdentityStore {
                     .alias_last_used
                     .get(*hash)
                     .is_some_and(|last_used| {
-                        now.signed_duration_since(*last_used).num_seconds()
-                            <= self.ttl.as_secs() as i64
+                        let within_sliding_ttl =
+                            now.signed_duration_since(*last_used).num_seconds()
+                                <= self.ttl.as_secs() as i64;
+                        let before_absolute_deadline = state
+                            .identity
+                            .alias_expires_at
+                            .get(*hash)
+                            .is_none_or(|expires_at| now < *expires_at);
+                        within_sliding_ttl && before_absolute_deadline
                     })
             })
             .count()
@@ -310,8 +338,22 @@ impl IdentityStore {
             let Some(last_used) = state.identity.alias_last_used.get(&hash).copied() else {
                 return Err(TokenError::Expired);
             };
+            if state
+                .identity
+                .alias_expires_at
+                .get(&hash)
+                .is_some_and(|expires_at| Utc::now() >= *expires_at)
+            {
+                return Err(TokenError::Expired);
+            }
             (true, last_used)
-        } else if state.rotated_out.as_deref() == Some(hash.as_str()) {
+        } else if state.identity.superseded_token_hashes.iter().any(|entry| {
+            entry.token_hash == hash
+                && Utc::now()
+                    .signed_duration_since(entry.superseded_at)
+                    .num_seconds()
+                    <= SUPERSEDED_TOKEN_TTL.as_secs() as i64
+        }) {
             return Err(TokenError::Superseded);
         } else {
             return Err(TokenError::Invalid);
@@ -433,20 +475,36 @@ impl IdentityStore {
     pub fn rotate(&self) -> Result<String> {
         let mut state = self.state.lock().unwrap();
         let token = mint_token();
+        let now = Utc::now();
+        let mut superseded_token_hashes = state.identity.superseded_token_hashes.clone();
+        superseded_token_hashes.retain(|entry| {
+            now.signed_duration_since(entry.superseded_at).num_seconds()
+                <= SUPERSEDED_TOKEN_TTL.as_secs() as i64
+        });
+        superseded_token_hashes.retain(|entry| entry.token_hash != state.identity.token_hash);
+        superseded_token_hashes.push(SupersededTokenHash {
+            token_hash: state.identity.token_hash.clone(),
+            superseded_at: now,
+        });
+        if superseded_token_hashes.len() > MAX_SUPERSEDED_TOKEN_HASHES {
+            let excess = superseded_token_hashes.len() - MAX_SUPERSEDED_TOKEN_HASHES;
+            superseded_token_hashes.drain(..excess);
+        }
         let next = BrokerIdentity {
             id: state.identity.id,
             token_hash: hash_token(&token),
             alias_hashes: Vec::new(),
             alias_last_used: std::collections::HashMap::new(),
-            minted_at: Utc::now(),
-            last_used: Utc::now(),
+            alias_expires_at: std::collections::HashMap::new(),
+            superseded_token_hashes,
+            minted_at: now,
+            last_used: now,
             // Rotating the agent key deliberately leaves the management
             // token alone: they authorize different planes.
             manage_token_hash: state.identity.manage_token_hash.clone(),
             manage_token_expires_at: state.identity.manage_token_expires_at,
         };
         self.persist_and_write_file(&next, &token)?;
-        state.rotated_out = Some(state.identity.token_hash.clone());
         state.identity = next;
         state.token = token.clone();
         Ok(token)
@@ -573,6 +631,12 @@ mod tests {
         let verified = s.verify(&old).expect("old key stays valid as an alias");
         assert!(verified.via_alias);
         assert!(!s.verify(&s.token()).unwrap().via_alias);
+        let info = s.info();
+        let expiry = info
+            .alias_expires_at
+            .get(&hash_token(&old))
+            .expect("recovery alias has an absolute deadline");
+        assert!(*expiry <= Utc::now() + chrono::Duration::hours(6));
     }
 
     #[test]
@@ -588,6 +652,39 @@ mod tests {
             new
         );
         assert!(s.info().alias_hashes.is_empty());
+    }
+
+    #[test]
+    fn several_rotated_keys_remain_superseded_across_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let integrity = integrity();
+        let mut old = Vec::new();
+        {
+            let store = IdentityStore::open(
+                dir.path().join("identity.json"),
+                dir.path().join("token"),
+                None,
+                Duration::from_secs(3600),
+                integrity.clone(),
+            )
+            .unwrap();
+            for _ in 0..3 {
+                old.push(store.token());
+                store.rotate().unwrap();
+            }
+            assert_eq!(store.info().superseded_token_hashes.len(), 3);
+        }
+        let reopened = IdentityStore::open(
+            dir.path().join("identity.json"),
+            dir.path().join("token"),
+            None,
+            Duration::from_secs(3600),
+            integrity,
+        )
+        .unwrap();
+        for token in old {
+            assert_eq!(reopened.verify(&token).unwrap_err(), TokenError::Superseded);
+        }
     }
 
     #[test]
@@ -645,7 +742,7 @@ mod tests {
             dir.path().join("identity.json"),
             dir.path().join("token"),
             Some(&agents_path),
-            Duration::ZERO,
+            Duration::from_secs(1),
             integrity,
         )
         .unwrap();

@@ -35,6 +35,21 @@ pub enum ElicitationHandling {
     Unavailable,
 }
 
+/// Whether a successful shell gate proved fresh user presence or merely
+/// substituted another authority (management bearer, terminal intent, or a
+/// test waiver). Only the former may establish the reusable presence window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresenceAuthority {
+    Authenticated,
+    Substituted,
+}
+
+impl PresenceAuthority {
+    pub fn establishes_presence(self) -> bool {
+        self == Self::Authenticated
+    }
+}
+
 pub trait BrokerEvents: Send + Sync {
     /// Live session set changed.
     fn sessions_changed(&self) {}
@@ -68,11 +83,21 @@ pub trait BrokerEvents: Send + Sync {
         false
     }
 
+    /// Classify the authority behind [`Self::confirm_secret_read`].
+    fn secret_read_authority(&self) -> PresenceAuthority {
+        PresenceAuthority::Authenticated
+    }
+
     /// A user-initiated clipboard copy is about to open a short authorization
     /// window for more copies. The default delegates to the ordinary secret
     /// read gate so existing shells remain fail-closed and compatible.
     fn confirm_secret_copy(&self, secret: &SecretMeta, _duration: Duration) -> bool {
         self.confirm_secret_read(secret)
+    }
+
+    /// Classify the authority behind [`Self::confirm_secret_copy`].
+    fn secret_copy_authority(&self) -> PresenceAuthority {
+        self.secret_read_authority()
     }
 
     /// An agent asked (via the sidecar's `agentmfa_connect` tool) for a
@@ -95,6 +120,17 @@ pub trait BrokerEvents: Send + Sync {
     /// fails closed.
     fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
         None
+    }
+
+    /// Only native OS authentication proves reusable presence. Terminal
+    /// intent, management-token authority, and test waivers may authorize the
+    /// requested operation but must not silently unlock later operations.
+    fn action_authority(&self, method: ConfirmationMethod) -> PresenceAuthority {
+        if method == ConfirmationMethod::OsAuthentication {
+            PresenceAuthority::Authenticated
+        } else {
+            PresenceAuthority::Substituted
+        }
     }
 
     /// Agent traffic is parked on a connection whose confirmation switch is
@@ -132,8 +168,10 @@ pub trait BrokerEvents: Send + Sync {
 
 /// Default observer: nothing to notify. Confirmation gates are explicitly
 /// waived — this observer is for tests and dev harnesses, not products.
+#[cfg(any(test, feature = "test-harness"))]
 pub struct NoopEvents;
 
+#[cfg(any(test, feature = "test-harness"))]
 impl BrokerEvents for NoopEvents {
     fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
         true
@@ -141,6 +179,10 @@ impl BrokerEvents for NoopEvents {
 
     fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
         Some(ConfirmationMethod::Waived)
+    }
+
+    fn secret_read_authority(&self) -> PresenceAuthority {
+        PresenceAuthority::Substituted
     }
 
     fn approval_requested(&self, _pending: &PendingApproval) -> ApprovalHandling {

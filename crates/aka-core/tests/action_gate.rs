@@ -53,7 +53,7 @@ impl BrokerEvents for CountingEvents {
 
     fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
         self.action_confirms.fetch_add(1, Ordering::SeqCst);
-        Some(ConfirmationMethod::Waived)
+        Some(ConfirmationMethod::OsAuthentication)
     }
 }
 
@@ -103,7 +103,7 @@ impl BrokerEvents for GateEvents {
 
     fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
         self.confirms.fetch_add(1, Ordering::SeqCst);
-        self.allow.then_some(ConfirmationMethod::Waived)
+        self.allow.then_some(ConfirmationMethod::OsAuthentication)
     }
 }
 
@@ -351,6 +351,43 @@ async fn an_action_gate_prompt_opens_the_user_plane_presence_window() {
 }
 
 #[tokio::test]
+async fn substituted_action_authority_does_not_open_the_presence_window() {
+    struct SubstitutedEvents {
+        action_confirms: AtomicUsize,
+        secret_read_confirms: AtomicUsize,
+    }
+    impl BrokerEvents for SubstitutedEvents {
+        fn confirm_secret_read(&self, _secret: &aka_core::types::SecretMeta) -> bool {
+            self.secret_read_confirms.fetch_add(1, Ordering::SeqCst);
+            true
+        }
+
+        fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
+            self.action_confirms.fetch_add(1, Ordering::SeqCst);
+            Some(ConfirmationMethod::ManagementToken)
+        }
+    }
+
+    let events = Arc::new(SubstitutedEvents {
+        action_confirms: AtomicUsize::new(0),
+        secret_read_confirms: AtomicUsize::new(0),
+    });
+    let (broker, _dir) = broker_with(events.clone()).await;
+    add_github(&broker);
+    let secret = broker.store.secret_by_name("GITHUB_API_KEY").unwrap();
+
+    broker.ui_rotate_key().unwrap();
+    broker.ui_reveal_secret_prefix(&secret.id).await.unwrap();
+
+    assert_eq!(events.action_confirms.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        events.secret_read_confirms.load(Ordering::SeqCst),
+        1,
+        "a management bearer may authorize its action but cannot stand in for user presence"
+    );
+}
+
+#[tokio::test]
 async fn a_copy_authentication_unlocks_nearby_config_actions() {
     let events = Arc::new(GateEvents {
         allow: true,
@@ -570,7 +607,10 @@ async fn config_actions_confirm_and_record_the_method() {
         .into_iter()
         .find(|e| e.kind == aka_core::audit::AuditKind::ConnectionUpdated)
         .unwrap();
-    assert_eq!(updated.confirmation, Some(ConfirmationMethod::Waived));
+    assert_eq!(
+        updated.confirmation,
+        Some(ConfirmationMethod::OsAuthentication)
+    );
 
     // Deletions only remove the user's own material: neither the tool nor
     // the (then-unused) secret takes an OS gate, and their audit entries
@@ -901,7 +941,10 @@ async fn connection_renames_skip_confirmation_but_capability_changes_do_not() {
         .into_iter()
         .find(|entry| entry.kind == aka_core::audit::AuditKind::ConnectionUpdated)
         .unwrap();
-    assert_eq!(changed_entry.confirmation, Some(ConfirmationMethod::Waived));
+    assert_eq!(
+        changed_entry.confirmation,
+        Some(ConfirmationMethod::OsAuthentication)
+    );
     assert_eq!(changed_entry.fields["capability_changed"], true);
 }
 
@@ -1389,7 +1432,9 @@ async fn kinds_with_no_traffic_unit_cannot_be_confirmed() {
 
     // SSH confirms per login: the gate sits in the agent's SIGN_REQUEST, so
     // the switch is real here like everywhere else.
-    assert!(broker.ui_set_confirm_mode(&ssh.id, ConfirmMode::On).unwrap());
+    assert!(broker
+        .ui_set_confirm_mode(&ssh.id, ConfirmMode::On)
+        .unwrap());
     assert_eq!(broker.access.confirm_mode(&ssh.id), ConfirmMode::On);
 }
 

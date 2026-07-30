@@ -428,6 +428,16 @@ pub struct BrokerIdentity {
     /// discarded the legacy clock must fail closed rather than revive it.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub alias_last_used: std::collections::HashMap<String, DateTime<Utc>>,
+    /// Absolute recovery deadlines for accepted aliases. Legacy records
+    /// without this map retain their independently bounded compatibility
+    /// clock; newly demoted keys never remain valid indefinitely through use.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub alias_expires_at: std::collections::HashMap<String, DateTime<Utc>>,
+    /// Recently rotated primary hashes. These do not authenticate; retaining
+    /// a bounded history only lets stale holders receive the precise
+    /// `token_superseded` recovery response across restarts and rotations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub superseded_token_hashes: Vec<SupersededTokenHash>,
     pub minted_at: DateTime<Utc>,
     /// Refreshed on use; the key expires 30 days after this (re-minted at
     /// the next broker start, or refreshed by a compat `/v1/pair`).
@@ -444,6 +454,12 @@ pub struct BrokerIdentity {
     /// deployments.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manage_token_expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SupersededTokenHash {
+    pub token_hash: String,
+    pub superseded_at: DateTime<Utc>,
 }
 
 /// Whether agent traffic on a connection is confirmed with the user before

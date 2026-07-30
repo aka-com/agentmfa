@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use aka_core::broker::Broker;
 use aka_core::config::BrokerConfig;
-use aka_core::events::NoopEvents;
+use aka_core::events::{ApprovalHandling, BrokerEvents};
 use aka_core::mcp::McpCheckOptions;
 use aka_core::mcp_auth::{McpAuthDraft, McpAuthPhase, McpAuthState};
 use aka_core::paths::Paths;
@@ -33,6 +33,24 @@ const RENEWED_TOKEN: &str = "test-token-renewed-by-refresh";
 const REFRESH_TOKEN: &str = "test-refresh-token-1";
 const ROTATED_REFRESH_TOKEN: &str = "test-refresh-token-2";
 const AUTH_CODE: &str = "test-code-1";
+
+struct NoopEvents;
+impl BrokerEvents for NoopEvents {
+    fn confirm_secret_read(&self, _secret: &aka_core::types::SecretMeta) -> bool {
+        true
+    }
+
+    fn confirm_action(&self, _description: &str) -> Option<aka_core::types::ConfirmationMethod> {
+        Some(aka_core::types::ConfirmationMethod::Waived)
+    }
+
+    fn approval_requested(
+        &self,
+        _pending: &aka_core::approvals::PendingApproval,
+    ) -> ApprovalHandling {
+        ApprovalHandling::Waived
+    }
+}
 
 struct MockAuthServer {
     code_challenge: Option<String>,

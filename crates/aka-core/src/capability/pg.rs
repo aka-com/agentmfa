@@ -795,11 +795,17 @@ where
 
     // Reserve the live-session slot (global backstop) before committing the
     // downstream handshake, so exhaustion is a clean pre-ReadyForQuery error.
-    let session = match state.broker.data_plane.start_endpoint_session(
+    let configured_sslmode = sslmode_name(sslmode);
+    let upstream_tls = effective_tls_mode(sslmode, upstream.tls_downgraded);
+    let session = match state.broker.data_plane.start_endpoint_session_with_fields(
         "endpoint",
         &connection,
         endpoint_id,
         ConnectionKind::Pg,
+        &[
+            ("sslmode", configured_sslmode),
+            ("upstream_tls", upstream_tls),
+        ],
     ) {
         Ok(session) => session,
         Err(_) => {
@@ -1362,7 +1368,15 @@ async fn handle_conn(state: Arc<ProxyState>, stream: TcpStream) -> io::Result<()
     // window was seen by neither — leaving a session running for up to
     // `session_max_ttl` against authority that had just been withdrawn.
     let agent = redemption.agent.clone();
-    let session = redemption.start(ConnectionKind::Pg);
+    let configured_sslmode = sslmode_name(sslmode);
+    let upstream_tls = effective_tls_mode(sslmode, upstream.tls_downgraded);
+    let session = redemption.start_with_fields(
+        ConnectionKind::Pg,
+        &[
+            ("sslmode", configured_sslmode),
+            ("upstream_tls", upstream_tls),
+        ],
+    );
     let still_current = state.broker.access.allows(&connection.id)
         && state
             .broker
@@ -1609,6 +1623,20 @@ fn sslmode_name(sslmode: PgSslMode) -> &'static str {
         PgSslMode::Require => "require",
         PgSslMode::VerifyCa => "verify-ca",
         PgSslMode::VerifyFull => "verify-full",
+    }
+}
+
+/// Human-readable security property of the transport that was actually
+/// established. `require` and `prefer` encrypt without authenticating the
+/// server; only the verifying modes establish a verified peer identity.
+fn effective_tls_mode(sslmode: PgSslMode, tls_downgraded: bool) -> &'static str {
+    if tls_downgraded || sslmode == PgSslMode::Disable {
+        return "plaintext";
+    }
+    match sslmode {
+        PgSslMode::Disable | PgSslMode::Prefer | PgSslMode::Require => "tls_unverified",
+        PgSslMode::VerifyCa => "tls_verified_ca",
+        PgSslMode::VerifyFull => "tls_verified_full",
     }
 }
 
@@ -2649,6 +2677,28 @@ async fn splice<C>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effective_tls_mode_distinguishes_encryption_from_peer_verification() {
+        assert_eq!(
+            effective_tls_mode(PgSslMode::Require, false),
+            "tls_unverified"
+        );
+        assert_eq!(
+            effective_tls_mode(PgSslMode::Prefer, false),
+            "tls_unverified"
+        );
+        assert_eq!(
+            effective_tls_mode(PgSslMode::VerifyCa, false),
+            "tls_verified_ca"
+        );
+        assert_eq!(
+            effective_tls_mode(PgSslMode::VerifyFull, false),
+            "tls_verified_full"
+        );
+        assert_eq!(effective_tls_mode(PgSslMode::Disable, false), "plaintext");
+        assert_eq!(effective_tls_mode(PgSslMode::Prefer, true), "plaintext");
+    }
 
     #[test]
     fn frames_and_cstrings_round_trip() {

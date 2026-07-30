@@ -113,7 +113,7 @@ export interface IdentityInfo {
   socket_path: string;
   minted_at: string;
   last_used: string;
-  /** Legacy per-agent tokens still working as aliases (cleared by rotation). */
+  /** Older keys still accepted inside a bounded recovery window. */
   legacy_aliases: number;
 }
 

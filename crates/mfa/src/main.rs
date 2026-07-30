@@ -38,7 +38,7 @@ use aka_core::config::BrokerConfig;
 use aka_core::daemon;
 use aka_core::daemon::wellknown;
 use aka_core::error::CoreError;
-use aka_core::events::BrokerEvents;
+use aka_core::events::{BrokerEvents, PresenceAuthority};
 use aka_core::manage::{LocalBackend, ManageResult, ManagementBackend};
 use aka_core::paths::{BrokerInstanceLock, Paths};
 use aka_core::store::ConnectionSpec;
@@ -1050,6 +1050,10 @@ impl BrokerEvents for OfflineEvents {
     fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
         Some(ConfirmationMethod::Terminal)
     }
+
+    fn secret_read_authority(&self) -> PresenceAuthority {
+        PresenceAuthority::Substituted
+    }
 }
 
 /// Parse an id the broker handed out; it minted it, so failure is a wire
@@ -1634,6 +1638,10 @@ impl BrokerEvents for CliEvents {
 
     fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
         Some(ConfirmationMethod::ManagementToken)
+    }
+
+    fn secret_read_authority(&self) -> PresenceAuthority {
+        PresenceAuthority::Substituted
     }
 }
 
@@ -2413,18 +2421,26 @@ async fn wait_for_shutdown_signal() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aka_core::events::NoopEvents;
     use aka_core::vault::MemoryVault;
     use chrono::TimeZone as _;
+
+    struct TestEvents;
+    impl BrokerEvents for TestEvents {
+        fn confirm_secret_read(&self, _secret: &SecretMeta) -> bool {
+            true
+        }
+        fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
+            Some(ConfirmationMethod::Waived)
+        }
+    }
 
     #[test]
     fn management_tokens_default_to_a_bounded_ttl() {
         let cli = Cli::try_parse_from(["mfa", "manage", "token"]).unwrap();
         let Command::Manage {
-            command:
-                ManageCommand::Token {
-                    ttl_days, revoke, ..
-                },
+            command: ManageCommand::Token {
+                ttl_days, revoke, ..
+            },
         } = cli.command
         else {
             panic!("wrong command");
@@ -2517,7 +2533,7 @@ mod tests {
                 paths.clone(),
                 Arc::new(MemoryVault::new()),
                 BrokerConfig::default(),
-                Arc::new(NoopEvents),
+                Arc::new(TestEvents),
             ))
             .unwrap();
 
