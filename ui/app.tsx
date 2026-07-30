@@ -626,7 +626,16 @@ async function refresh(which: RefreshTarget = 'all'): Promise<boolean> {
   }
   if (which === 'all' || which === 'settings') jobs.push(loadSettings());
   const succeeded = (await Promise.all(jobs)).every(Boolean);
-  if (which === 'all' && succeeded && state.broker.mode === 'local' && !state.broker.connected) {
+  // Connections is the local broker's liveness signal. A peripheral read can
+  // fail independently and already has a per-view error band; it must not
+  // blank the whole app or prevent recovery from the takeover screen.
+  const touchedConnections = which === 'all' || which === 'connections';
+  if (
+    touchedConnections
+    && state.broker.mode === 'local'
+    && !state.broker.connected
+    && state.loadStatus.connections.status === 'ready'
+  ) {
     setBrokerProfile({ ...state.broker, connected: true, error: null });
   }
   render();
@@ -667,7 +676,7 @@ async function load<K extends CommandName>(
     console.error(cmd, error);
     if (!brokerEpochIsCurrent(epoch)) return false;
     state.loadStatus[key] = { status: 'error', error: errorMessage(error) };
-    markLocalBrokerUnavailable();
+    if (key === 'connections') markLocalBrokerUnavailable();
     return false;
   }
 }
@@ -744,7 +753,6 @@ async function loadSettings(): Promise<boolean> {
     console.error(error);
     if (!brokerEpochIsCurrent(epoch)) return false;
     state.loadStatus.settings = { status: 'error', error: errorMessage(error) };
-    markLocalBrokerUnavailable();
     return false;
   }
 }
@@ -774,7 +782,6 @@ async function loadIdentity(): Promise<boolean> {
     console.error('get_identity', error);
     if (!brokerEpochIsCurrent(epoch)) return false;
     state.loadStatus.identity = { status: 'error', error: errorMessage(error) };
-    markLocalBrokerUnavailable();
     return false;
   }
 }
@@ -4770,7 +4777,6 @@ async function answerApproval(
   const ok = await run(async () => {
     answered = await invoke('respond_approval', { id, decision });
   });
-  if (decision === 'approve_all') releaseDropdownForm();
   if (state.approvalAnswering === id) state.approvalAnswering = null;
   if (!ok) {
     render();
