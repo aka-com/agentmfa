@@ -888,6 +888,7 @@ impl Store {
         if existing.kind() != spec.config.kind() {
             return Err(CoreError::KindChange);
         }
+        inherit_oauth_spec(&existing.config, &mut spec.config);
         inherit_oauth_token_secret_id(&existing.config, &mut spec.config);
         let broker_managed_oauth = existing.oauth.is_some()
             && matches!(
@@ -1536,6 +1537,31 @@ fn validate_config_and_bind_secrets(
             bind_optional_secret(state, spec)
         }
     }
+}
+
+/// A BYO-OAuth config's `oauth` section is rename-proof state, not form
+/// input: the desktop app's edit sheet never round-trips it (there is nothing
+/// editable in it — OAuth connections are rename-only), so an incoming
+/// `oauth: None` on a connection that has one means "unspecified", not
+/// "remove". Inherit the whole spec so a name-only edit compares equal to the
+/// stored config and takes the rename path instead of being refused. An
+/// actual removal was never expressible here: any config change on an OAuth
+/// connection is refused wholesale by `update_connection`.
+fn inherit_oauth_spec(existing: &ConnectionConfig, incoming: &mut ConnectionConfig) {
+    let (
+        ConnectionConfig::Api {
+            oauth: Some(existing_spec),
+            ..
+        },
+        ConnectionConfig::Api {
+            oauth: incoming_oauth @ None,
+            ..
+        },
+    ) = (existing, incoming)
+    else {
+        return;
+    };
+    *incoming_oauth = Some(existing_spec.clone());
 }
 
 fn inherit_oauth_token_secret_id(existing: &ConnectionConfig, incoming: &mut ConnectionConfig) {
