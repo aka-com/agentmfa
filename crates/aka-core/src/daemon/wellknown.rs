@@ -296,8 +296,10 @@ not extend its lifetime. Retry the same `request_id` only during the returned
       "connection": "github",
       "method": "GET",
       "path": "/user/repos",
-      "headers": {{"Accept": "application/vnd.github+json"}},
+      "headers": [["Accept", "application/vnd.github+json"],
+                  ["X-Tag", "first"], ["X-Tag", "second"]],
       "body": null,
+      "body_base64": null,
       "request_id": "req-<uuid>"        // mutating calls
     }}
 
@@ -307,12 +309,14 @@ not extend its lifetime. Retry the same `request_id` only during the returned
 
 You supply the method, path (query string included; there is no separate
 query field), headers and body; the connection supplies the host and the
-credential. You cannot name a host. Paths must start with `/`. The broker
-controls `Host`, `Content-Length`, `Transfer-Encoding`, the hop-by-hop
-headers and the injected credential header; naming one of those is
-rejected with `400 {{"reason": "reserved_header"}}`. Bodies may be a JSON
-string, a JSON object/array (serialized for you), or `body_base64` for
-binary. Non-UTF-8 response bodies come back base64-encoded with
+credential. Headers may be a string-valued object or an ordered array of
+`[name, value]` pairs; use the pair form for repeated fields. You cannot name
+a host. Paths must start with `/`. The broker controls `Host`,
+`Content-Length`, `Transfer-Encoding`, the hop-by-hop headers and the injected
+credential header; naming one of those is rejected with
+`400 {{"reason": "reserved_header"}}`. Bodies may be a JSON string, a JSON
+object/array (serialized for you), or `body_base64` for binary; send only one
+body form. Non-UTF-8 response bodies come back base64-encoded with
 `"body_encoding": "base64"`. Redirects are followed only within the
 connection's pinned host, up to {max_redirects} hops; a cross-host redirect is
 returned to you as the raw 3xx. The `/v1/http` request body cap is
@@ -321,9 +325,9 @@ returned to you as the raw 3xx. The `/v1/http` request body cap is
 {response_cap} bytes. `Accept-Encoding` is broker-controlled because the
 upstream leg is HTTP/1.1-only and does not decompress responses.
 
-ABP/0 represents headers as JSON objects with string values. Repeated upstream
-response fields are combined with `, `. `Set-Cookie` is the exception: its
-distinct values are also preserved in `set_cookie_headers`; use that array
+ABP/0 represents response headers as JSON objects with string values. Repeated
+upstream response fields are combined with `, `. `Set-Cookie` is the exception:
+its distinct values are also preserved in `set_cookie_headers`; use that array
 rather than the lossy combined `headers["set-cookie"]` value.
 
 ## 5. Postgres: POST /v1/pg/open

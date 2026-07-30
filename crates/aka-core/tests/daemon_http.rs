@@ -161,10 +161,17 @@ async fn upstream() -> Upstream {
                         )
                     })
                     .collect();
+                let repeated: Vec<String> = parts
+                    .headers
+                    .get_all("x-repeat")
+                    .iter()
+                    .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
+                    .collect();
                 axum::Json(json!({
                     "method": parts.method.as_str(),
                     "uri": parts.uri.to_string(),
                     "headers": headers,
+                    "x_repeat": repeated,
                     "body": String::from_utf8_lossy(&bytes),
                 }))
             }),
@@ -745,6 +752,34 @@ async fn http_get_executes_and_injects_credential() {
     // The raw secret never appears in the agent-visible envelope.
     assert!(envelope["headers"].get("authorization").is_none());
     assert!(!envelope.to_string().contains("ghp_test_secret_value"));
+}
+
+#[tokio::test]
+async fn request_contract_accepts_repeated_headers_and_base64_bodies() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let up = upstream().await;
+    api_connection(&h, "github", up.port);
+    let token = h.pair("claude-code").await;
+    let auth = format!("Bearer {token}");
+
+    let (status, envelope) = uds_request(
+        &h.socket,
+        "POST",
+        "/v1/http",
+        &[("authorization", &auth)],
+        Some(json!({
+            "connection": "github",
+            "method": "POST",
+            "path": "/echo",
+            "headers": [["X-Repeat", "first"], ["X-Repeat", "second"]],
+            "body_base64": "AQID",
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "{envelope}");
+    let echoed: Value = serde_json::from_str(envelope["body"].as_str().unwrap()).unwrap();
+    assert_eq!(echoed["x_repeat"], json!(["first", "second"]));
+    assert_eq!(echoed["body"].as_str().unwrap().as_bytes(), &[1, 2, 3]);
 }
 
 #[tokio::test]

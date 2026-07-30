@@ -11,7 +11,6 @@
 pub mod manage;
 pub mod wellknown;
 
-use std::collections::HashMap;
 use std::io;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::PathBuf;
@@ -909,12 +908,49 @@ async fn get_whoami(State(state): State<AppState>, authed: Authed) -> Response {
 /* ------------------------------ HTTP call --------------------------------- */
 
 #[derive(Deserialize)]
+#[serde(untagged)]
+enum HttpHeaders {
+    Object(std::collections::HashMap<String, String>),
+    Pairs(Vec<(String, String)>),
+}
+
+impl Default for HttpHeaders {
+    fn default() -> Self {
+        Self::Pairs(Vec::new())
+    }
+}
+
+impl HttpHeaders {
+    fn iter(&self) -> Box<dyn Iterator<Item = (&str, &str)> + '_> {
+        match self {
+            Self::Object(headers) => Box::new(
+                headers
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value.as_str())),
+            ),
+            Self::Pairs(headers) => Box::new(
+                headers
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value.as_str())),
+            ),
+        }
+    }
+
+    fn into_pairs(self) -> Vec<(String, String)> {
+        match self {
+            Self::Object(headers) => headers.into_iter().collect(),
+            Self::Pairs(headers) => headers,
+        }
+    }
+}
+
+#[derive(Deserialize)]
 struct HttpCallBody {
     connection: String,
     method: String,
     path: String,
     #[serde(default)]
-    headers: HashMap<String, String>,
+    headers: HttpHeaders,
     /// JSON string → raw bytes; object/array → serialized JSON.
     #[serde(default)]
     body: Option<serde_json::Value>,
@@ -1008,7 +1044,7 @@ async fn post_http(
             }
         }
     };
-    let wire_headers: Vec<(String, String)> = call.headers.clone().into_iter().collect();
+    let wire_headers = call.headers.into_pairs();
     let header_map = match validate_headers(&wire_headers, credential_header.as_deref()) {
         Ok(map) => map,
         Err(e) => {
@@ -1551,7 +1587,7 @@ fn is_mcp_envelope_candidate(broker: &Broker, call: &HttpCallBody) -> bool {
             .as_deref()
             .is_none_or(|body| body.is_empty());
     let mut headers = http::HeaderMap::new();
-    for (name, value) in &call.headers {
+    for (name, value) in call.headers.iter() {
         let (Ok(name), Ok(value)) = (
             http::HeaderName::from_bytes(name.as_bytes()),
             http::HeaderValue::from_str(value),

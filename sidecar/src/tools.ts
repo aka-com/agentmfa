@@ -31,7 +31,9 @@ export function describe(connection: BrokerConnection): string {
     case 'api':
       return (
         `Make an HTTP request to ${connection.target} through AgentMFA. ` +
-        'The API credential is injected by the broker and never exposed here.'
+        'The API credential is injected by the broker and never exposed here. ' +
+        'The result is {status, headers, body, body_encoding}; body is a string and ' +
+        'body_encoding is utf8 or base64. Response cookies are omitted from this MCP view.'
       );
     case 'pg':
       return (
@@ -65,10 +67,33 @@ export function schemaFor(connection: BrokerConnection): Record<string, z.ZodTyp
     };
   }
   return {
-    method: z.string().describe('HTTP method, e.g. GET or POST'),
-    path: z.string().describe('Path and query, e.g. /repos/owner/name/issues?state=open'),
-    headers: z.record(z.string(), z.string()).optional().describe('Extra request headers'),
-    body: z.unknown().optional().describe('JSON body; a string is sent as raw bytes'),
+    method: z
+      .enum(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'])
+      .describe('HTTP method'),
+    path: z
+      .string()
+      .regex(/^\/(?!\/)[^\\#\x00-\x1f\x7f]*$/)
+      .describe('Absolute path and optional query, e.g. /repos/owner/name/issues?state=open'),
+    headers: z
+      .union([
+        z.record(z.string(), z.string()),
+        z.array(z.tuple([z.string(), z.string()])),
+      ])
+      .optional()
+      .describe(
+        'Extra headers as an object or [name, value] pairs (pairs preserve repeats). ' +
+          'Reserved: authorization, host, content-length, transfer-encoding, connection, ' +
+          'upgrade, proxy-authorization, proxy-authenticate, proxy-connection, keep-alive, ' +
+          'te, trailer, expect, accept-encoding, content-encoding, and the connection credential header.',
+      ),
+    body: z
+      .unknown()
+      .optional()
+      .describe('JSON body; a string is sent as raw bytes. Do not combine with body_base64'),
+    body_base64: z
+      .string()
+      .optional()
+      .describe('Base64-encoded binary body. Do not combine with body'),
     request_id: z
       .string()
       .optional()
@@ -82,11 +107,12 @@ export function callFor(
   args: Record<string, unknown>,
 ): { path: string; body: Record<string, unknown> } {
   if (connection.type === 'api') {
-    const { method, path, headers, body, request_id: requestId } = args as {
+    const { method, path, headers, body, body_base64: bodyBase64, request_id: requestId } = args as {
       method: string;
       path: string;
-      headers?: Record<string, string>;
+      headers?: Record<string, string> | Array<[string, string]>;
       body?: unknown;
+      body_base64?: string;
       request_id?: string;
     };
     return {
@@ -97,6 +123,7 @@ export function callFor(
         path,
         ...(headers ? { headers } : {}),
         ...(body === undefined ? {} : { body }),
+        ...(bodyBase64 === undefined ? {} : { body_base64: bodyBase64 }),
         ...(requestId ? { request_id: requestId } : {}),
       },
     };
@@ -129,6 +156,34 @@ function text(value: unknown): ToolResult {
   };
 }
 
+const COOKIE_PLACEHOLDER = '[OMITTED BY AGENTMFA]';
+
+/** Remove HTTP cookie material that has no legitimate MCP use before the
+ * broker envelope is serialized into agent context. */
+export function projectForMcp(connection: BrokerConnection, value: unknown): unknown {
+  if (
+    connection.type !== 'api' ||
+    value === null ||
+    typeof value !== 'object' ||
+    Array.isArray(value)
+  ) {
+    return value;
+  }
+  const source = value as Record<string, unknown>;
+  const projected: Record<string, unknown> = { ...source };
+  delete projected.set_cookie_headers;
+  if (source.headers && typeof source.headers === 'object' && !Array.isArray(source.headers)) {
+    const headers: Record<string, unknown> = { ...(source.headers as Record<string, unknown>) };
+    for (const name of Object.keys(headers)) {
+      if (name.toLowerCase() === 'set-cookie' || name.toLowerCase() === 'cookie') {
+        headers[name] = COOKIE_PLACEHOLDER;
+      }
+    }
+    projected.headers = headers;
+  }
+  return projected;
+}
+
 export function toolError(message: string): ToolResult {
   return { isError: true, content: [{ type: 'text', text: message }] };
 }
@@ -148,7 +203,7 @@ export async function invoke(
 ): Promise<ToolResult> {
   const { path, body } = callFor(connection, args);
   try {
-    return text(await broker.invoke(path, auth, body));
+    return text(projectForMcp(connection, await broker.invoke(path, auth, body)));
   } catch (error) {
     const failure = error as {
       status?: number;
