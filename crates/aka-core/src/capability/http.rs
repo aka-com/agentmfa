@@ -2594,6 +2594,12 @@ async fn proxy_handler(
     session
         .bytes_up
         .fetch_add(spooled.len(), Ordering::Relaxed);
+    // These permits bound only concurrently received uploads. Once the body
+    // is safely spooled, the registered data-plane session is the independent
+    // bound on the upstream leg; holding upload permits through a slow
+    // response would let unrelated endpoints starve.
+    drop(_listener_upload);
+    drop(_global_upload);
 
     // Receiving a request body can take arbitrarily long. Reauthenticate and
     // re-check access immediately before dispatch so a disable, revoke, or

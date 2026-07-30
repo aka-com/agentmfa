@@ -82,6 +82,13 @@ const MAX_TEST_QUERY_BYTES: usize = 64 * 1024;
 /// forwards bytes without parsing them; the observational scanner uses this
 /// only to notice that it has lost the message boundary.
 const MAX_SPLICE_MESSAGE: usize = 0x3fff_ffff;
+/// A peer that stops draining must not suspend revocation forever. This is
+/// deliberately independent of the idle timer: a backend can be legitimately
+/// busy while the transport write itself is wedged.
+const SPLICE_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+const SPLICE_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+const ACCEPT_ERROR_BACKOFF_MIN: Duration = Duration::from_millis(100);
+const ACCEPT_ERROR_BACKOFF_MAX: Duration = Duration::from_secs(5);
 
 /* ---------------------------- framing helpers ----------------------------- */
 
@@ -571,9 +578,11 @@ pub async fn start_proxy(broker: Arc<Broker>) -> io::Result<(u16, tokio::task::J
     let port = listener.local_addr()?.port();
     let state = Arc::new(ProxyState::new(broker));
     let task = tokio::spawn(async move {
+        let mut accept_backoff = ACCEPT_ERROR_BACKOFF_MIN;
         loop {
             match listener.accept().await {
                 Ok((stream, peer)) => {
+                    accept_backoff = ACCEPT_ERROR_BACKOFF_MIN;
                     let state = state.clone();
                     tokio::spawn(async move {
                         if let Err(e) = handle_conn(state, stream, peer).await {
@@ -583,7 +592,12 @@ pub async fn start_proxy(broker: Arc<Broker>) -> io::Result<(u16, tokio::task::J
                 }
                 Err(e) => {
                     tracing::error!("pg proxy accept failed: {e}");
-                    break;
+                    if accept_error_is_fatal(&e) {
+                        break;
+                    }
+                    tokio::time::sleep(accept_backoff).await;
+                    accept_backoff =
+                        (accept_backoff * 2).min(ACCEPT_ERROR_BACKOFF_MAX);
                 }
             }
         }
@@ -690,11 +704,13 @@ pub async fn bind_endpoint(
     let shutdown = Arc::new(Notify::new());
     let sd = shutdown.clone();
     let task = tokio::spawn(async move {
+        let mut accept_backoff = ACCEPT_ERROR_BACKOFF_MIN;
         loop {
             tokio::select! {
                 _ = sd.notified() => break,
                 accepted = listener.accept() => match accepted {
                     Ok((stream, _)) => {
+                        accept_backoff = ACCEPT_ERROR_BACKOFF_MIN;
                         let state = state.clone();
                         tokio::spawn(async move {
                             if let Err(e) =
@@ -706,11 +722,17 @@ pub async fn bind_endpoint(
                     }
                     Err(e) => {
                         tracing::error!("pg endpoint accept failed: {e}");
-                        break;
+                        if accept_error_is_fatal(&e) {
+                            break;
+                        }
+                        tokio::time::sleep(accept_backoff).await;
+                        accept_backoff =
+                            (accept_backoff * 2).min(ACCEPT_ERROR_BACKOFF_MAX);
                     }
                 },
                 accepted = tcp.accept() => match accepted {
                     Ok((stream, peer)) => {
+                        accept_backoff = ACCEPT_ERROR_BACKOFF_MIN;
                         let _ = stream.set_nodelay(true);
                         let state = state.clone();
                         tokio::spawn(async move {
@@ -728,13 +750,25 @@ pub async fn bind_endpoint(
                     }
                     Err(e) => {
                         tracing::error!("pg endpoint tcp accept failed: {e}");
-                        break;
+                        if accept_error_is_fatal(&e) {
+                            break;
+                        }
+                        tokio::time::sleep(accept_backoff).await;
+                        accept_backoff =
+                            (accept_backoff * 2).min(ACCEPT_ERROR_BACKOFF_MAX);
                     }
                 }
             }
         }
     });
     Ok((EndpointListenerHandle { shutdown, task }, port))
+}
+
+fn accept_error_is_fatal(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::InvalidInput | io::ErrorKind::NotConnected | io::ErrorKind::Unsupported
+    )
 }
 
 /// One accepted endpoint connection: probes → startup (or cancel) → endpoint
@@ -2905,6 +2939,40 @@ fn plural(n: u64) -> &'static str {
 
 /* --------------------------------- splice --------------------------------- */
 
+/// Finish one splice write without suspending session control. The caller can
+/// still revoke the session, its absolute TTL still wins, an armed idle
+/// deadline still wins, and a peer that simply never drains is bounded.
+async fn splice_write<W, F>(
+    writer: &mut W,
+    bytes: &[u8],
+    close: F,
+    ttl_deadline: tokio::time::Instant,
+    idle_deadline: Option<tokio::time::Instant>,
+    write_timeout: Duration,
+    peer_closed_reason: &'static str,
+    write_timeout_reason: &'static str,
+) -> Result<(), &'static str>
+where
+    W: AsyncWrite + Unpin,
+    F: std::future::Future<Output = &'static str>,
+{
+    tokio::select! {
+        reason = close => Err(reason),
+        _ = tokio::time::sleep_until(ttl_deadline) => Err("session_ttl"),
+        _ = async {
+            match idle_deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => std::future::pending::<()>().await,
+            }
+        } => Err("idle_timeout"),
+        result = tokio::time::timeout(write_timeout, writer.write_all(bytes)) => match result {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => Err(peer_closed_reason),
+            Err(_) => Err(write_timeout_reason),
+        },
+    }
+}
+
 /// Byte-forward the established session in both directions with the session
 /// lifetime rules: max TTL, idle timeout, user close, and either leg closing
 /// tears down both. The copy is seeded with any residual bytes each leg's
@@ -2983,8 +3051,19 @@ async fn splice<C>(
             &mut statement_count,
         );
         backend_idle = false;
-        if upstream_tx.write_all(&client_residual).await.is_err() {
-            early = Some("upstream_closed");
+        if let Err(reason) = splice_write(
+            &mut upstream_tx,
+            &client_residual,
+            close_signal.reason(),
+            ttl_deadline,
+            None,
+            SPLICE_WRITE_TIMEOUT,
+            "upstream_closed",
+            "upstream_write_timeout",
+        )
+        .await
+        {
+            early = Some(reason);
         }
     }
     if early.is_none() && !upstream_residual.is_empty() {
@@ -2996,8 +3075,19 @@ async fn splice<C>(
                 backend_idle = true;
             }
         });
-        if client_tx.write_all(&upstream_residual).await.is_err() {
-            early = Some("client_closed");
+        if let Err(reason) = splice_write(
+            &mut client_tx,
+            &upstream_residual,
+            close_signal.reason(),
+            ttl_deadline,
+            backend_idle.then_some(idle_deadline),
+            SPLICE_WRITE_TIMEOUT,
+            "client_closed",
+            "client_write_timeout",
+        )
+        .await
+        {
+            early = Some(reason);
         }
     }
 
@@ -3031,8 +3121,17 @@ async fn splice<C>(
                         // Whatever it sent, the client is now waiting on the
                         // backend even if the scanner could not classify it.
                         backend_idle = false;
-                        if upstream_tx.write_all(&client_buf[..n]).await.is_err() {
-                            break "upstream_closed";
+                        if let Err(reason) = splice_write(
+                            &mut upstream_tx,
+                            &client_buf[..n],
+                            close_signal.reason(),
+                            ttl_deadline,
+                            None,
+                            SPLICE_WRITE_TIMEOUT,
+                            "upstream_closed",
+                            "upstream_write_timeout",
+                        ).await {
+                            break reason;
                         }
                     }
                     _ => break "client_closed",
@@ -3048,8 +3147,17 @@ async fn splice<C>(
                         if backend_idle {
                             idle_deadline = tokio::time::Instant::now() + idle;
                         }
-                        if client_tx.write_all(&upstream_buf[..n]).await.is_err() {
-                            break "client_closed";
+                        if let Err(reason) = splice_write(
+                            &mut client_tx,
+                            &upstream_buf[..n],
+                            close_signal.reason(),
+                            ttl_deadline,
+                            backend_idle.then_some(idle_deadline),
+                            SPLICE_WRITE_TIMEOUT,
+                            "client_closed",
+                            "client_write_timeout",
+                        ).await {
+                            break reason;
                         }
                     }
                     _ => break "upstream_closed",
@@ -3063,13 +3171,18 @@ async fn splice<C>(
     // driver already recognize, so the reason arrives as a real error rather
     // than only in the activity log the client cannot read.
     if matches!(reason, "closed_by_user" | "session_ttl" | "idle_timeout") {
-        let _ = client_tx
-            .write_all(&error_response("FATAL", "57P01", &format!("AKA: {reason}")))
-            .await;
+        let _ = tokio::time::timeout(
+            SPLICE_TEARDOWN_TIMEOUT,
+            client_tx.write_all(&error_response("FATAL", "57P01", &format!("AKA: {reason}"))),
+        )
+        .await;
     }
     // Tear down both legs whatever the reason.
-    let _ = client_tx.shutdown().await;
-    let _ = upstream_tx.shutdown().await;
+    let _ = tokio::time::timeout(SPLICE_TEARDOWN_TIMEOUT, async {
+        let _ = client_tx.shutdown().await;
+        let _ = upstream_tx.shutdown().await;
+    })
+    .await;
     audit.finish(statements, statement_count);
     session.finish(reason);
 }
@@ -3097,6 +3210,55 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    #[test]
+    fn transient_accept_errors_do_not_kill_the_listener() {
+        assert!(!accept_error_is_fatal(&io::Error::from(
+            io::ErrorKind::WouldBlock
+        )));
+        assert!(!accept_error_is_fatal(&io::Error::from(
+            io::ErrorKind::OutOfMemory
+        )));
+        assert!(accept_error_is_fatal(&io::Error::from(
+            io::ErrorKind::InvalidInput
+        )));
+    }
+
+    #[tokio::test]
+    async fn a_blocked_splice_write_still_observes_revocation() {
+        let (mut writer, _reader) = tokio::io::duplex(1);
+        writer.write_all(b"x").await.unwrap();
+        let result = splice_write(
+            &mut writer,
+            b"blocked",
+            std::future::ready("access_disabled"),
+            tokio::time::Instant::now() + Duration::from_secs(10),
+            None,
+            Duration::from_secs(10),
+            "client_closed",
+            "client_write_timeout",
+        )
+        .await;
+        assert_eq!(result, Err("access_disabled"));
+    }
+
+    #[tokio::test]
+    async fn a_blocked_splice_write_has_its_own_deadline() {
+        let (mut writer, _reader) = tokio::io::duplex(1);
+        writer.write_all(b"x").await.unwrap();
+        let result = splice_write(
+            &mut writer,
+            b"blocked",
+            std::future::pending(),
+            tokio::time::Instant::now() + Duration::from_secs(10),
+            None,
+            Duration::from_millis(10),
+            "client_closed",
+            "client_write_timeout",
+        )
+        .await;
+        assert_eq!(result, Err("client_write_timeout"));
     }
 
     #[test]

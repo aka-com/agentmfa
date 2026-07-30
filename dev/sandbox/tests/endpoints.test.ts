@@ -11,7 +11,7 @@ import { existsSync } from 'node:fs';
 import test, { after, before } from 'node:test';
 
 import { Broker, connectionNames, type IssuedEndpointDto } from './lib/broker';
-import { request } from './lib/http';
+import { request, waitFor } from './lib/http';
 import { parseDsn, queryOnce } from './lib/pgwire';
 import { requireFixture, sandbox } from './lib/sandbox';
 import { listIdentities } from './lib/sshagent';
@@ -56,6 +56,32 @@ test('an API endpoint is a loopback address plus its own secret', async () => {
   // The endpoint secret is what the caller holds; the upstream credential
   // is swapped in on the way out and never comes back.
   assert.ok(!response.text.includes(sandbox.httpToken));
+});
+
+test('slow upstream responses release endpoint upload permits after spooling', async () => {
+  const endpoint = await issue(connectionNames.http);
+  // Fill the listener's four upload slots with calls whose empty request
+  // bodies spool immediately but whose upstream responses stay open.
+  const slow = Array.from({ length: 4 }, () =>
+    callEndpoint(endpoint.dsn, endpoint.secret, '/delay/2'),
+  );
+  await waitFor('all four slow endpoint calls to register', async () => {
+    const active = (await broker.sessions()).filter(
+      (session) =>
+        session.type === 'api' &&
+        session.agent === 'endpoint' &&
+        session.connection === connectionNames.http,
+    );
+    return active.length === 4 ? true : undefined;
+  });
+
+  const independent = await callEndpoint(endpoint.dsn, endpoint.secret);
+  assert.equal(
+    independent.status,
+    200,
+    'a slow upstream leg must not retain a permit reserved for request uploads',
+  );
+  for (const response of await Promise.all(slow)) assert.equal(response.status, 200);
 });
 
 test('the endpoint secret is not the broker key, and neither substitutes', async () => {

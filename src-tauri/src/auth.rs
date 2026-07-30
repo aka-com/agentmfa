@@ -11,10 +11,20 @@
 //! The read-time secret setting uses this same `LAContext` gate before
 //! broker-side vault reads.
 
+use std::sync::Mutex;
+
+/// LocalAuthentication does not provide a useful experience when independent
+/// callers stack sheets. Keep one process-wide prompt in flight; every caller
+/// still authenticates separately and still fails closed.
+static CONFIRM_LOCK: Mutex<()> = Mutex::new(());
+
 /// Prompt for the native OS confirmation with `reason` shown to the user.
 /// Returns Ok(()) only when the user authenticated. Non-macOS builds fail
 /// closed because the product currently relies on macOS LocalAuthentication.
 pub fn confirm(reason: &str) -> Result<(), String> {
+    let _guard = CONFIRM_LOCK
+        .lock()
+        .map_err(|_| "native confirmation coordinator is unavailable".to_string())?;
     #[cfg(target_os = "macos")]
     {
         macos::confirm(reason)

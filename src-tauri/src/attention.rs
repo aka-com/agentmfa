@@ -6,7 +6,8 @@
 //! refetches from the broker.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::sync::{mpsc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use aka_api::{ApprovalDto, ApprovalSnapshotDto, ElicitationDto};
@@ -23,7 +24,30 @@ const NOTIFICATION_RESPONSE_DEADLINE: Duration = Duration::from_secs(5 * 60);
 const NOTIFICATION_QUEUE_DEPTH: usize = 2;
 const NOTIFICATION_RATE_WINDOW: Duration = Duration::from_secs(60);
 const NOTIFICATION_RATE_LIMIT: usize = 4;
+/// Four admitted banners per minute with a five-minute watchdog can have at
+/// most twenty legitimate observers live at once. Keep that as a hard cap too
+/// so a broken platform callback cannot leak response threads indefinitely.
+const NOTIFICATION_OBSERVER_LIMIT: usize = 20;
 const OPEN_INBOX_ACTION: &str = "open_request_inbox";
+
+struct NotificationObserverPermit(Arc<AtomicUsize>);
+
+impl Drop for NotificationObserverPermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn try_notification_observer(
+    observers: &Arc<AtomicUsize>,
+) -> Option<NotificationObserverPermit> {
+    observers
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+            (active < NOTIFICATION_OBSERVER_LIMIT).then_some(active + 1)
+        })
+        .ok()
+        .map(|_| NotificationObserverPermit(observers.clone()))
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ElicitationSummary {
@@ -810,15 +834,6 @@ impl RequestAttention {
     fn notification_finished(&self, key: &str) {
         self.inner.lock().unwrap().notification_finished(key);
     }
-
-    fn take_native_notification(&self, key: &str) -> Option<NativeNotificationId> {
-        self.inner
-            .lock()
-            .unwrap()
-            .tracked_notifications
-            .remove(key)
-            .and_then(|tracked| tracked.native_id)
-    }
 }
 
 fn schedule_generation(inner: &mut AttentionInner, notification_added: bool) -> Option<u64> {
@@ -1098,9 +1113,9 @@ fn request_delivery_plan(
     DeliveryPlan::Notify(notification_content(settings, title, body))
 }
 
-/// Queue one native notification. One worker owns delivery and interaction
-/// observation for the process, so an unacknowledged banner cannot leak one
-/// blocked thread and one platform timer per request.
+/// Queue one native notification. A dispatcher owns the bounded queue and
+/// gives each admitted banner an independent, watchdog-bounded response
+/// observer, so one ignored banner never serializes later requests.
 fn deliver_notification(
     app: &AppHandle,
     content: &NotificationContent,
@@ -1173,6 +1188,7 @@ fn deliver_with_sink(
 }
 
 fn notification_worker(rx: mpsc::Receiver<NotificationJob>) {
+    let observers = Arc::new(AtomicUsize::new(0));
     while let Ok(job) = rx.recv() {
         let Some(attention) = job.app.try_state::<RequestAttention>() else {
             continue;
@@ -1181,7 +1197,31 @@ fn notification_worker(rx: mpsc::Receiver<NotificationJob>) {
             attention.notification_finished(&job.key);
             continue;
         }
-        deliver_notification_job(job);
+        let Some(observer_permit) = try_notification_observer(&observers) else {
+            attention.notification_finished(&job.key);
+            crate::windows::surface_for_approval(&job.app);
+            continue;
+        };
+        // `wait_for_response` remains parked for the banner's lifetime. Give
+        // each admitted banner its own bounded-lived observer so an ignored
+        // request cannot hold every later notification behind it.
+        let fallback_app = job.app.clone();
+        let fallback_key = job.key.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("aka-notification-response".into())
+            .spawn(move || {
+                let _observer_permit = observer_permit;
+                deliver_notification_job(job);
+            })
+        {
+            if let Some(attention) = fallback_app.try_state::<RequestAttention>() {
+                attention.notification_finished(&fallback_key);
+            }
+            notification_delivery_failed(
+                &fallback_app,
+                format!("could not start native notification observer: {error}"),
+            );
+        }
     }
 }
 
@@ -1202,6 +1242,11 @@ fn deliver_notification_job(job: NotificationJob) {
     if job.time_sensitive {
         notification.urgency(notify_rust::Urgency::Critical);
     }
+    // This is a platform-owned timeout, not a detached watchdog. On macOS
+    // notify-rust forwards it to mac-usernotifications, whose response future
+    // resolves with a synthetic expiry and removes the delivered banner. The
+    // blocking observer therefore always returns and releases its permit.
+    notification.timeout(NOTIFICATION_RESPONSE_DEADLINE);
     #[cfg(target_os = "macos")]
     notification.id(job.key.as_str());
     // XDG servers only emit body activation when the special default action
@@ -1251,38 +1296,6 @@ fn deliver_notification_job(job: NotificationJob) {
         return;
     }
 
-    // Interaction may remain open until a banner is acted on. One short-lived
-    // watchdog guards the single worker; on timeout delivery is disabled for
-    // the session, so this worker is the only thread that can remain parked
-    // and no further platform timers are created.
-    let (done_tx, done_rx) = mpsc::sync_channel(1);
-    let watchdog_app = job.app.clone();
-    let watchdog_key = job.key.clone();
-    let _ = std::thread::Builder::new()
-        .name("aka-notification-watchdog".into())
-        .spawn(move || {
-            if done_rx
-                .recv_timeout(NOTIFICATION_RESPONSE_DEADLINE)
-                .is_err()
-            {
-                if let Some(attention) = watchdog_app.try_state::<RequestAttention>() {
-                    if let Some(native_id) = attention.take_native_notification(&watchdog_key) {
-                        if let Err(error) = withdraw_native_notification(&native_id) {
-                            tracing::warn!(
-                                %error,
-                                "could not withdraw a timed-out native notification"
-                            );
-                        }
-                    }
-                }
-                notification_delivery_failed(
-                    &watchdog_app,
-                    "native notification interaction timed out; using the Request Inbox instead"
-                        .into(),
-                );
-            }
-        });
-
     let response_app = job.app.clone();
     let result = handle.wait_for_response(move |response: &notify_rust::NotificationResponse| {
         if notification_opens_inbox(response) {
@@ -1299,7 +1312,6 @@ fn deliver_notification_job(job: NotificationJob) {
             );
         }
     });
-    let _ = done_tx.try_send(());
     if let Some(attention) = job.app.try_state::<RequestAttention>() {
         attention.notification_finished(&job.key);
     }
@@ -2279,6 +2291,18 @@ mod tests {
             inner.admit_notification(start + NOTIFICATION_RATE_WINDOW),
             NotificationAdmission::Normal
         );
+    }
+
+    #[test]
+    fn notification_response_observers_have_a_hard_cap_and_release_slots() {
+        let observers = Arc::new(AtomicUsize::new(0));
+        let permits = (0..NOTIFICATION_OBSERVER_LIMIT)
+            .map(|_| try_notification_observer(&observers).expect("slot"))
+            .collect::<Vec<_>>();
+        assert!(try_notification_observer(&observers).is_none());
+
+        drop(permits);
+        assert!(try_notification_observer(&observers).is_some());
     }
 
     #[test]
