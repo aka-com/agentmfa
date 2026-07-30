@@ -263,6 +263,9 @@ enum Command {
     /// Report whether a broker is running on this layout and what it
     /// serves (MCP host, tools, key file). Exits nonzero when none is up.
     Status {
+        /// Emit one machine-readable status object.
+        #[arg(long)]
+        json: bool,
         /// Check a broker rooted here instead of the default layout.
         #[arg(long)]
         root: Option<PathBuf>,
@@ -802,7 +805,7 @@ fn main() {
             root,
             broker,
         } => cmd_key(rotate, root, broker),
-        Command::Status { root, broker } => cmd_status(root, broker),
+        Command::Status { json, root, broker } => cmd_status(json, root, broker),
         Command::Activity {
             limit,
             json,
@@ -2203,15 +2206,109 @@ fn cmd_key(rotate: bool, root: Option<PathBuf>, url: Option<String>) {
     println!("{key}");
 }
 
-/// The tools listing shared by local and remote status output.
-fn print_tools(connections: &[ConnectionDto], approval_surface_attached: bool) {
-    if connections.is_empty() {
+#[derive(Debug, serde::Serialize)]
+struct StatusTool {
+    name: String,
+    #[serde(rename = "type")]
+    kind: String,
+    target: String,
+    enabled: bool,
+    confirm: bool,
+}
+
+impl From<&ConnectionDto> for StatusTool {
+    fn from(connection: &ConnectionDto) -> Self {
+        Self {
+            name: connection.name.clone(),
+            kind: connection.kind.clone(),
+            target: connection.target.clone(),
+            enabled: connection.agent_access.enabled,
+            confirm: connection.agent_access.confirm,
+        }
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct StatusReport {
+    running: bool,
+    transport: String,
+    location: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    broker_version: Option<String>,
+    cli_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    protocol_version: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mcp_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shared_key_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shared_key_present: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vault: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    approval_surface_attached: Option<bool>,
+    tools: Vec<StatusTool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools_error: Option<String>,
+}
+
+fn status_tools(connections: &[ConnectionDto]) -> Vec<StatusTool> {
+    connections.iter().map(StatusTool::from).collect()
+}
+
+fn print_status_report(report: &StatusReport) {
+    let location_note = if report.transport == "manage_api" {
+        " (manage API)"
+    } else {
+        ""
+    };
+    println!("broker running on {}{}", report.location, location_note);
+    if let Some(version) = &report.broker_version {
+        match report.protocol_version {
+            Some(protocol) => println!(
+                "  version: broker {version}, mfa CLI {} (protocol {protocol})",
+                report.cli_version
+            ),
+            None => println!(
+                "  version: broker {version}, mfa CLI {}",
+                report.cli_version
+            ),
+        }
+    }
+    if let Some(url) = &report.mcp_url {
+        println!("  MCP host: {url}");
+    } else if report.transport == "unix" {
+        println!("  MCP host: not running");
+    }
+    if let Some(client_id) = &report.client_id {
+        println!("  client id: {client_id}");
+    }
+    if let Some(path) = &report.shared_key_path {
+        let qualifier = match report.shared_key_present {
+            Some(true) => "",
+            Some(false) => " (not minted yet)",
+            None => " (on the broker host)",
+        };
+        println!("  shared key: {path}{qualifier}");
+    }
+    if let Some(vault) = &report.vault {
+        println!("  vault: {vault}");
+    }
+    if let Some(error) = &report.tools_error {
+        println!("  tools: unavailable ({error})");
+        return;
+    }
+    if report.tools.is_empty() {
         println!("  tools: none configured");
         return;
     }
     println!("  tools:");
-    for dto in connections {
-        let confirm = if dto.agent_access.confirm {
+    let approval_surface_attached = report.approval_surface_attached.unwrap_or(false);
+    for tool in &report.tools {
+        let confirm = if tool.confirm {
             if approval_surface_attached {
                 " · confirm: on"
             } else {
@@ -2222,25 +2319,18 @@ fn print_tools(connections: &[ConnectionDto], approval_surface_attached: bool) {
         };
         println!(
             "    {}  {}  {}  {}{}",
-            dto.name,
-            dto.kind,
-            dto.target,
-            if dto.agent_access.enabled {
-                "enabled"
-            } else {
-                "disabled"
-            },
+            tool.name,
+            tool.kind,
+            tool.target,
+            if tool.enabled { "enabled" } else { "disabled" },
             confirm,
         );
     }
     if !approval_surface_attached {
-        if let Some(warning) = headless_confirmation_warning(
-            connections
-                .iter()
-                .filter(|connection| connection.agent_access.confirm)
-                .count(),
-        ) {
-            println!("  {warning}");
+        if let Some(warning) =
+            headless_confirmation_warning(report.tools.iter().filter(|tool| tool.confirm).count())
+        {
+            eprintln!("warning: {warning}");
         }
     }
 }
@@ -2257,46 +2347,56 @@ fn headless_confirmation_warning(count: usize) -> Option<String> {
     })
 }
 
-/// `status --url`: the broker as its manage API reports it.
-fn cmd_status_remote(root: Option<PathBuf>, url: String) {
+/// `status --broker`: the broker as its manage API reports it.
+fn remote_status(root: Option<PathBuf>, url: String) -> StatusReport {
     let managed = management_backend(root, Some(url.clone()));
     let identity = managed.run(managed.backend.identity());
     let connections = managed.run(managed.backend.list_connections());
-    println!("broker reachable at {url} (manage API)");
-    if let Some(profile) = &managed.profile {
-        println!(
-            "  version: broker {}, mfa CLI {}",
-            profile["version"].as_str().unwrap_or("unknown"),
-            env!("CARGO_PKG_VERSION")
-        );
+    StatusReport {
+        running: true,
+        transport: "manage_api".into(),
+        location: url,
+        broker_version: managed
+            .profile
+            .as_ref()
+            .and_then(|profile| profile["version"].as_str())
+            .map(str::to_string),
+        cli_version: env!("CARGO_PKG_VERSION").into(),
+        protocol_version: managed
+            .profile
+            .as_ref()
+            .and_then(|profile| profile["protocol_version"].as_u64()),
+        mcp_url: managed
+            .profile
+            .as_ref()
+            .and_then(|profile| profile["mcp_url"].as_str())
+            .map(str::to_string),
+        client_id: Some(identity.client_id),
+        shared_key_path: Some(identity.token_path),
+        shared_key_present: None,
+        vault: None,
+        approval_surface_attached: Some(managed.approval_surface_attached()),
+        tools: status_tools(&connections),
+        tools_error: None,
     }
-    println!("  client id: {}", identity.client_id);
-    println!(
-        "  agent key file (on the broker host): {}",
-        identity.token_path
-    );
-    print_tools(&connections, managed.approval_surface_attached());
 }
 
 /// Report the backend that owns this store's secrets. On macOS, include which
 /// keychain controls prompts; on Linux, make encrypted versus plaintext
 /// fallback (and a missing configured master key) explicit.
-fn print_vault_line(paths: &Paths) {
+fn vault_description(paths: &Paths) -> String {
     #[cfg(target_os = "macos")]
     if let Some(keychain) = aka_core::keychain::read_record(&paths.keychain_file()) {
         let note = match keychain {
             aka_core::keychain::Keychain::DataProtection => "no prompts",
             aka_core::keychain::Keychain::Login => "prompts per secret; build is unsigned",
         };
-        println!("  vault: macOS {keychain} keychain ({note})");
-        return;
+        return format!("macOS {keychain} keychain ({note})");
     }
     let backend = recorded_platform_vault_backend(paths)
         .unwrap_or_else(|| selected_platform_vault_backend(paths));
     match backend {
-        PlatformVaultBackend::MacosKeychain => {
-            println!("  vault: macOS Keychain (not initialized yet)");
-        }
+        PlatformVaultBackend::MacosKeychain => "macOS Keychain (not initialized yet)".into(),
         PlatformVaultBackend::EncryptedFile => {
             let configured =
                 selected_platform_vault_backend(paths) == PlatformVaultBackend::EncryptedFile;
@@ -2305,172 +2405,191 @@ fn print_vault_line(paths: &Paths) {
             } else {
                 "set AKA_VAULT_KEY or AKA_VAULT_KEY_FILE"
             };
-            println!(
-                "  vault: encrypted file at {} ({note})",
+            format!(
+                "encrypted file at {} ({note})",
                 paths.encrypted_vault_file().display()
-            );
+            )
         }
-        PlatformVaultBackend::PlaintextDevFile => {
-            println!(
-                "  vault: plaintext dev fallback at {} (set AKA_VAULT_KEY or \
-                 AKA_VAULT_KEY_FILE)",
-                paths.dev_vault_file().display()
-            );
-        }
+        PlatformVaultBackend::PlaintextDevFile => format!(
+            "plaintext dev fallback at {} (set AKA_VAULT_KEY or AKA_VAULT_KEY_FILE)",
+            paths.dev_vault_file().display()
+        ),
     }
 }
 
-fn cmd_status(root: Option<PathBuf>, url: Option<String>) {
-    require_existing_root_for_read(root.as_deref(), url.is_some());
-    if let Some(url) = url {
-        cmd_status_remote(root, url);
-        return;
+fn socket_status_error(socket: &Path, error: &std::io::Error) -> String {
+    if error.raw_os_error() == Some(libc::ENOTSOCK) {
+        return format!("{} exists but is not a Unix socket", socket.display());
     }
+    match error.kind() {
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
+            format!("no broker is running at {}", socket.display())
+        }
+        std::io::ErrorKind::PermissionDenied => format!(
+            "permission denied opening broker socket {}; check its owner and mode",
+            socket.display()
+        ),
+        _ => format!(
+            "could not inspect broker socket {}: {error}",
+            socket.display()
+        ),
+    }
+}
+
+fn local_status(root: Option<PathBuf>) -> Result<StatusReport, (StatusReport, String)> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("tokio runtime");
     let paths = store_paths(root.as_deref());
     let socket = paths.socket_file();
-    let key_present = std::fs::read_to_string(paths.token_file())
-        .map(|t| !t.trim().is_empty())
+    let key_present = std::fs::metadata(paths.token_file())
+        .map(|metadata| metadata.len() > 0)
         .unwrap_or(false);
-    let manifest = runtime.block_on(client::unix_http(
+    let base = || StatusReport {
+        running: false,
+        transport: "unix".into(),
+        location: socket.display().to_string(),
+        broker_version: None,
+        cli_version: env!("CARGO_PKG_VERSION").into(),
+        protocol_version: None,
+        mcp_url: None,
+        client_id: None,
+        shared_key_path: Some(paths.token_file().display().to_string()),
+        shared_key_present: Some(key_present),
+        vault: Some(vault_description(&paths)),
+        approval_surface_attached: None,
+        tools: Vec::new(),
+        tools_error: None,
+    };
+    let manifest = match runtime.block_on(client::unix_http(
         &socket,
         "GET",
         "/.well-known/agent-broker.json",
         None,
         None,
         None,
-    ));
-    let manifest: serde_json::Value = match manifest {
-        Ok((200, body)) => serde_json::from_str(&body).unwrap_or_default(),
+    )) {
+        Ok((200, body)) => {
+            serde_json::from_str::<serde_json::Value>(&body).unwrap_or_else(|error| {
+                die(format!("the broker returned malformed discovery: {error}"))
+            })
+        }
         Ok((status, _)) => die(format!(
             "the broker at {} answered discovery with HTTP {status}",
             socket.display()
         )),
-        Err(_) => {
-            println!("no broker is running at {}", socket.display());
-            print_vault_line(&paths);
-            println!(
-                "  shared key: {}",
-                if key_present {
-                    format!("present at {}", paths.token_file().display())
-                } else {
-                    "not minted yet (starts with the broker)".to_string()
-                }
-            );
-            std::process::exit(1);
+        Err(error) => {
+            let report = base();
+            return Err((report, socket_status_error(&socket, &error)));
         }
     };
-    println!("broker running on {}", socket.display());
-    if let (Some(version), Some(protocol)) = (
-        manifest["version"].as_str(),
-        manifest["protocol_version"].as_u64(),
-    ) {
-        println!(
-            "  version: broker {version}, mfa CLI {} (protocol {protocol})",
-            env!("CARGO_PKG_VERSION")
-        );
-        warn_version_skew(&manifest);
-    }
-    match manifest["mcp_url"].as_str() {
-        Some(url) => println!("  MCP host: {url}"),
-        None => println!("  MCP host: not running"),
-    }
-    println!(
-        "  shared key: {}",
-        if key_present {
-            format!("{}", paths.token_file().display())
-        } else {
-            "not minted yet".to_string()
-        }
-    );
-    print_vault_line(&paths);
-    // The tools, as an agent sees them (this appears in the activity log
-    // as a listing by mfa-status).
-    let listing = runtime.block_on(async {
-        let key = client::shared_key(&paths, Some("mfa-status")).await?;
-        let approval_surface_attached = client::unix_http(
-            &socket,
-            "GET",
-            "/v1/whoami",
-            None,
-            Some(&key),
-            Some("mfa-status"),
-        )
-        .await
-        .ok()
-        .and_then(|(status, body)| {
-            (status == 200)
-                .then(|| serde_json::from_str::<serde_json::Value>(&body).ok())
-                .flatten()
-        })
-        .and_then(|body| body["approval_surface_attached"].as_bool())
-        .unwrap_or(false);
-        let (status, body) = client::unix_http(
-            &socket,
-            "GET",
-            "/v1/connections",
-            None,
-            Some(&key),
-            Some("mfa-status"),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-        if status != 200 {
-            return Err(format!("HTTP {status}"));
-        }
-        serde_json::from_str::<serde_json::Value>(&body)
-            .map(|listing| (listing, approval_surface_attached))
-            .map_err(|e| e.to_string())
-    });
-    match listing {
-        Ok((listing, approval_surface_attached)) => {
-            let rows = listing["connections"]
-                .as_array()
-                .cloned()
-                .or_else(|| listing.as_array().cloned())
-                .unwrap_or_default();
-            if rows.is_empty() {
-                println!("  tools: none configured");
+
+    // Status never authenticates as an agent and never pairs. If an existing
+    // management credential is available, use the read-only manage plane for
+    // tool detail; otherwise report that subsection as unavailable.
+    let manage_key = socket.display().to_string();
+    let (client_id, approval_surface_attached, tools, tools_error) =
+        match manage_token(&paths, &manage_key) {
+            Some(token) => {
+                let backend = RemoteBackend::over_unix_socket(socket.clone(), &token);
+                match runtime.block_on(async {
+                    let profile = backend.whoami().await?;
+                    let connections = backend.list_connections().await?;
+                    Ok::<_, ManageError>((profile, connections))
+                }) {
+                    Ok((profile, connections)) => (
+                        profile["client_id"].as_str().map(str::to_string),
+                        profile["approval_surface_attached"].as_bool(),
+                        status_tools(&connections),
+                        None,
+                    ),
+                    Err(error) => (
+                        None,
+                        None,
+                        Vec::new(),
+                        Some(format!("manage API read failed: {error}")),
+                    ),
+                }
+            }
+            None => (
+                None,
+                None,
+                Vec::new(),
+                Some(
+                    "no management token configured; run `mfa manage login` to include tools"
+                        .into(),
+                ),
+            ),
+        };
+    Ok(StatusReport {
+        running: true,
+        transport: "unix".into(),
+        location: socket.display().to_string(),
+        broker_version: manifest["version"].as_str().map(str::to_string),
+        cli_version: env!("CARGO_PKG_VERSION").into(),
+        protocol_version: manifest["protocol_version"].as_u64(),
+        mcp_url: manifest["mcp_url"].as_str().map(str::to_string),
+        client_id,
+        shared_key_path: Some(paths.token_file().display().to_string()),
+        shared_key_present: Some(key_present),
+        vault: Some(vault_description(&paths)),
+        approval_surface_attached,
+        tools,
+        tools_error,
+    })
+}
+
+fn cmd_status(json: bool, root: Option<PathBuf>, url: Option<String>) {
+    require_existing_root_for_read(root.as_deref(), url.is_some());
+    let result = match url {
+        Some(url) => Ok(remote_status(root, url)),
+        None => local_status(root),
+    };
+    match result {
+        Ok(report) => {
+            if report.transport == "unix"
+                && report
+                    .broker_version
+                    .as_deref()
+                    .is_some_and(|version| version != report.cli_version)
+            {
+                eprintln!(
+                    "warning: broker version {} differs from mfa CLI version {}; update them together before making changes",
+                    report.broker_version.as_deref().unwrap_or("unknown"),
+                    report.cli_version
+                );
+            }
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&report).expect("status report is serializable")
+                );
             } else {
-                println!("  tools:");
-                for row in &rows {
-                    let confirm = if row["confirm"].as_bool().unwrap_or(false) {
-                        if approval_surface_attached {
-                            " · confirm: on"
-                        } else {
-                            " · confirm: on (no approval surface attached — traffic will be refused)"
-                        }
-                    } else {
-                        ""
-                    };
-                    println!(
-                        "    {}  {}  {}  {}{}",
-                        row["name"].as_str().unwrap_or("?"),
-                        row["type"].as_str().unwrap_or("?"),
-                        row["target"].as_str().unwrap_or("?"),
-                        if row["wired"].as_bool().unwrap_or(false) {
-                            "enabled"
-                        } else {
-                            "disabled"
-                        },
-                        confirm,
-                    );
-                }
-            }
-            let confirm_count = rows
-                .iter()
-                .filter(|row| row["confirm"].as_bool().unwrap_or(false))
-                .count();
-            if !approval_surface_attached {
-                if let Some(warning) = headless_confirmation_warning(confirm_count) {
-                    println!("  {warning}");
-                }
+                print_status_report(&report);
             }
         }
-        Err(e) => println!("  tools: could not list ({e})"),
+        Err((report, diagnostic)) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&report).expect("status report is serializable")
+                );
+            } else {
+                if let Some(vault) = &report.vault {
+                    eprintln!("  vault: {vault}");
+                }
+                if let Some(path) = &report.shared_key_path {
+                    let state = if report.shared_key_present == Some(true) {
+                        "present"
+                    } else {
+                        "not minted yet"
+                    };
+                    eprintln!("  shared key: {state} at {path}");
+                }
+            }
+            die(diagnostic);
+        }
     }
 }
 
@@ -2959,6 +3078,82 @@ mod tests {
             "secret\n"
         );
         assert_eq!(normalize_secret_input("secret\n".into(), true), "secret\n");
+    }
+
+    #[test]
+    fn status_json_is_an_explicit_machine_readable_mode() {
+        let cli = Cli::try_parse_from(["mfa", "status", "--json"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Status {
+                json: true,
+                root: None,
+                broker: None,
+            }
+        ));
+    }
+
+    #[test]
+    fn status_distinguishes_socket_failure_classes() {
+        let socket = Path::new("/tmp/aka.sock");
+        assert!(
+            socket_status_error(socket, &std::io::Error::from_raw_os_error(libc::ENOTSOCK))
+                .contains("not a Unix socket")
+        );
+        assert!(socket_status_error(
+            socket,
+            &std::io::Error::from(std::io::ErrorKind::PermissionDenied)
+        )
+        .contains("permission denied"));
+        assert!(socket_status_error(
+            socket,
+            &std::io::Error::from(std::io::ErrorKind::ConnectionRefused)
+        )
+        .contains("no broker is running"));
+    }
+
+    #[test]
+    fn local_status_does_not_pair_or_authenticate_as_an_agent() {
+        use std::io::{Read as _, Write as _};
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        paths.ensure().unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(paths.socket_file()).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let read = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..read]).into_owned();
+            let body = serde_json::json!({
+                "version": env!("CARGO_PKG_VERSION"),
+                "protocol_version": 1,
+                "mcp_url": null,
+            })
+            .to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+            request
+        });
+
+        let report = local_status(Some(dir.path().to_path_buf())).unwrap();
+        let request = server.join().unwrap();
+        assert!(request.starts_with("GET /.well-known/agent-broker.json "));
+        assert!(!request.contains("/v1/pair"));
+        assert!(report.running);
+        assert!(report.tools.is_empty());
+        assert!(report
+            .tools_error
+            .as_deref()
+            .is_some_and(|error| error.contains("no management token")));
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["running"], true);
+        assert_eq!(json["transport"], "unix");
     }
 
     #[test]
