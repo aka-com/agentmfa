@@ -68,6 +68,8 @@ export interface IssuedEndpoint {
 export interface ConnectionSummary {
   id: string;
   name: string;
+  /** Opaque version returned unchanged when replacing this connection. */
+  updated_at: string;
   type: ConnectionType;
   /** Set when an API upstream speaks MCP at that path. */
   mcp_path?: string | null;
@@ -493,7 +495,11 @@ export interface CommandMap {
   reveal_secret_prefix: CommandSpec<{ id: string }, string>;
   copy_secret: CommandSpec<{ id: string }, void>;
   add_connection: CommandSpec<{ input: ConnectionInput }, void>;
-  edit_connection: CommandSpec<{ id: string; input: ConnectionInput }, void>;
+  edit_connection: CommandSpec<{
+    id: string;
+    expectedUpdatedAt: string;
+    input: ConnectionInput;
+  }, void>;
   delete_connection: CommandSpec<{ id: string }, void>;
   reorder_connections: CommandSpec<{ orderedIds: string[] }, void>;
   test_connection: CommandSpec<{ id: string }, ConnectionTestReport>;

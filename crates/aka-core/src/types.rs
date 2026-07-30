@@ -403,6 +403,30 @@ impl Connection {
     pub fn target(&self) -> String {
         self.config.target()
     }
+    /// Opaque optimistic-concurrency token exposed by the management API.
+    /// It covers the last mutation time *and* the client-visible state a
+    /// spec echoes back (name, config, secrets): a write that deliberately
+    /// leaves `updated_at` alone — pinning a host key on first use — must
+    /// still invalidate tokens read before it, or a stale editor would
+    /// silently un-pin the learned key. Display metadata (`account`) and
+    /// the OAuth grant linkage stay out so background refreshes cannot
+    /// conflict an open editor.
+    pub fn version(&self) -> String {
+        use sha2::{Digest as _, Sha256};
+        let spec_visible = serde_json::to_vec(&(&self.name, &self.config, &self.secrets))
+            .expect("connection state serializes");
+        let mut hasher = Sha256::new();
+        hasher.update(
+            self.updated_at
+                .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+                .as_bytes(),
+        );
+        hasher.update(&spec_visible);
+        hasher.finalize()[..16]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
 }
 
 /// The single local broker identity — "this computer's key". Every local

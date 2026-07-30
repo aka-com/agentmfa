@@ -943,7 +943,31 @@ impl Broker {
     /// are revoked as well: a pasted address granted for one destination must
     /// not silently cover another.
     pub fn ui_update_connection(&self, id: &Uuid, spec: ConnectionSpec) -> Result<Connection> {
+        self.ui_update_connection_inner(id, None, spec)
+    }
+
+    /// Optimistic-concurrency variant used by every management client. The
+    /// expected version is the `updated_at` token returned with the DTO the
+    /// caller edited.
+    pub fn ui_update_connection_if_current(
+        &self,
+        id: &Uuid,
+        expected_updated_at: &str,
+        spec: ConnectionSpec,
+    ) -> Result<Connection> {
+        self.ui_update_connection_inner(id, Some(expected_updated_at), spec)
+    }
+
+    fn ui_update_connection_inner(
+        &self,
+        id: &Uuid,
+        expected_updated_at: Option<&str>,
+        spec: ConnectionSpec,
+    ) -> Result<Connection> {
         let old = self.store.connection_by_id(id)?;
+        if expected_updated_at.is_some_and(|expected| old.version() != expected) {
+            return Err(CoreError::ConnectionChanged);
+        }
         let explicit_secrets_changed =
             old.kind() != ConnectionKind::Api && old.secrets != spec.secrets;
         let capability_changed = old.config != spec.config || explicit_secrets_changed;
@@ -957,12 +981,29 @@ impl Broker {
         };
         let _gate = self.config_gate.lock().unwrap();
         if self.store.connection_by_id(id)?.updated_at != old.updated_at {
-            return Err(CoreError::ApprovalConnectionChanged);
+            return Err(if confirmation.is_some() {
+                CoreError::ApprovalConnectionChanged
+            } else {
+                CoreError::ConnectionChanged
+            });
         }
         let (conn, target_changed) = if capability_changed {
-            self.store.update_connection(id, spec)?
+            match expected_updated_at {
+                Some(expected) => self
+                    .store
+                    .update_connection_if_current(id, expected, spec)?,
+                None => self.store.update_connection(id, spec)?,
+            }
         } else {
-            (self.store.rename_connection(id, spec.name)?, false)
+            (
+                match expected_updated_at {
+                    Some(expected) => self
+                        .store
+                        .rename_connection_if_current(id, expected, spec.name)?,
+                    None => self.store.rename_connection(id, spec.name)?,
+                },
+                false,
+            )
         };
         // A live session was authenticated with the *old* configuration and
         // the *old* credential, and it keeps carrying traffic after the user

@@ -70,6 +70,7 @@ pub enum ManageError {
     },
     SecretNotFound,
     ConnectionNotFound,
+    ConnectionChanged,
     ApprovalConnectionChanged,
     SecretInUse {
         connections: Vec<String>,
@@ -151,6 +152,10 @@ impl std::fmt::Display for ManageError {
             }
             Self::SecretNotFound => write!(f, "no such secret"),
             Self::ConnectionNotFound => write!(f, "no such tool"),
+            Self::ConnectionChanged => write!(
+                f,
+                "the tool changed after you read it; review the latest settings and try again"
+            ),
             Self::ApprovalConnectionChanged => write!(
                 f,
                 "the tool changed while you were confirming; review it and save again"
@@ -314,6 +319,13 @@ pub struct IssuedEndpointDto {
 pub struct ConnectionDto {
     pub id: String,
     pub name: String,
+    /// Opaque optimistic-concurrency token. Clients must return the value
+    /// from the version they edited when replacing the connection. Defaulted
+    /// on deserialization so a newer client can still *read* connections
+    /// from an older broker that predates the token; updates stay fail-closed
+    /// because the update body requires the field.
+    #[serde(default)]
+    pub updated_at: String,
     #[serde(rename = "type")]
     pub kind: String,
     pub target: String,
@@ -663,6 +675,7 @@ mod tests {
         let dto = ConnectionDto {
             id: "id".into(),
             name: "github".into(),
+            updated_at: "2026-07-29T12:00:00.000000000Z".into(),
             kind: "api".into(),
             target: "https://api.github.com".into(),
             secret_names: vec![],
@@ -695,6 +708,7 @@ mod tests {
         };
         let value = serde_json::to_value(&dto).unwrap();
         assert_eq!(value["type"], "api");
+        assert_eq!(value["updated_at"], "2026-07-29T12:00:00.000000000Z");
         // Optional config fields serialize as null (the webview relies on
         // their presence), while agent_access omits its absent options.
         assert!(value.as_object().unwrap().contains_key("host"));

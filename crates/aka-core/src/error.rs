@@ -24,6 +24,9 @@ pub enum CoreError {
     #[error("no such tool")]
     ConnectionNotFound,
 
+    #[error("the tool changed after you read it; review the latest settings and try again")]
+    ConnectionChanged,
+
     #[error("the tool changed while you were confirming; review it and save again")]
     ApprovalConnectionChanged,
 

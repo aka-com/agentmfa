@@ -40,6 +40,7 @@ impl From<CoreError> for ManageError {
             CoreError::ConnectionTargetTaken(name) => Self::ConnectionTargetTaken { name },
             CoreError::SecretNotFound => Self::SecretNotFound,
             CoreError::ConnectionNotFound => Self::ConnectionNotFound,
+            CoreError::ConnectionChanged => Self::ConnectionChanged,
             CoreError::ApprovalConnectionChanged => Self::ApprovalConnectionChanged,
             CoreError::SecretInUse(connections) => Self::SecretInUse { connections },
             CoreError::InvalidSecretName(name) => Self::InvalidSecretName { name },
@@ -144,6 +145,7 @@ pub fn connection_dto(broker: &Broker, conn: &Connection) -> ConnectionDto {
     let mut dto = ConnectionDto {
         id: conn.id.to_string(),
         name: conn.name.clone(),
+        updated_at: conn.version(),
         kind: conn.kind().as_str().to_string(),
         target: conn.target(),
         secret_names,
@@ -839,6 +841,10 @@ pub struct ConnectionAddBody {
 /// `PUT /v1/manage/connections/{id}`.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ConnectionUpdateBody {
+    /// Version returned by the GET that supplied `spec`. This is deliberately
+    /// required: older clients must fail closed instead of overwriting a
+    /// connection they cannot prove is still current.
+    pub expected_updated_at: String,
     pub spec: ConnectionSpec,
 }
 
@@ -992,7 +998,12 @@ pub trait ManagementBackend: Send + Sync {
         value: SecretValue,
         spec: ConnectionSpec,
     ) -> ManageResult<()>;
-    async fn update_connection(&self, id: Uuid, spec: ConnectionSpec) -> ManageResult<()>;
+    async fn update_connection(
+        &self,
+        id: Uuid,
+        expected_updated_at: String,
+        spec: ConnectionSpec,
+    ) -> ManageResult<()>;
     async fn delete_connection(&self, id: Uuid) -> ManageResult<()>;
     /// Persist a user-chosen order for the Tools list. `ordered_ids` is the
     /// full desired front-to-back order.
@@ -1215,15 +1226,27 @@ impl ManagementBackend for LocalBackend {
         .await
     }
 
-    async fn update_connection(&self, id: Uuid, spec: ConnectionSpec) -> ManageResult<()> {
+    async fn update_connection(
+        &self,
+        id: Uuid,
+        expected_updated_at: String,
+        spec: ConnectionSpec,
+    ) -> ManageResult<()> {
         let old = self.broker.store.connection_by_id(&id)?;
+        if old.version() != expected_updated_at {
+            return Err(ManageError::ConnectionChanged);
+        }
         if old.config != spec.config || old.secrets != spec.secrets {
             self.broker
                 .validate_ssh_connection_credential(&spec, None)
                 .await?;
         }
-        self.blocking(move |broker| broker.ui_update_connection(&id, spec).map(|_| ()))
-            .await
+        self.blocking(move |broker| {
+            broker
+                .ui_update_connection_if_current(&id, &expected_updated_at, spec)
+                .map(|_| ())
+        })
+        .await
     }
 
     async fn delete_connection(&self, id: Uuid) -> ManageResult<()> {

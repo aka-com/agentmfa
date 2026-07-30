@@ -665,10 +665,18 @@ impl ManagementBackend for RemoteBackend {
         .await
     }
 
-    async fn update_connection(&self, id: Uuid, spec: ConnectionSpec) -> ManageResult<()> {
+    async fn update_connection(
+        &self,
+        id: Uuid,
+        expected_updated_at: String,
+        spec: ConnectionSpec,
+    ) -> ManageResult<()> {
         self.put(
             &format!("/v1/manage/connections/{id}"),
-            &ConnectionUpdateBody { spec },
+            &ConnectionUpdateBody {
+                expected_updated_at,
+                spec,
+            },
         )
         .await
     }

@@ -158,6 +158,42 @@ async fn the_remote_backend_manages_a_tcp_broker_end_to_end() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn stale_connection_replacements_are_rejected_without_losing_the_newer_edit() {
+    let h = harness().await;
+    let backend = &h.backend;
+    backend
+        .add_connection(api_spec("github", ""))
+        .await
+        .unwrap();
+
+    let stale = backend.list_connections().await.unwrap().remove(0);
+    let id = stale.id.parse().unwrap();
+    backend
+        .update_connection(
+            id,
+            stale.updated_at.clone(),
+            api_spec("github from app", ""),
+        )
+        .await
+        .unwrap();
+
+    let current = backend.list_connections().await.unwrap().remove(0);
+    assert_ne!(
+        current.updated_at, stale.updated_at,
+        "every edit must advance the optimistic-lock version"
+    );
+    let error = backend
+        .update_connection(id, stale.updated_at, api_spec("github from stale cli", ""))
+        .await
+        .unwrap_err();
+    assert_eq!(error, ManageError::ConnectionChanged);
+
+    let preserved = backend.list_connections().await.unwrap().remove(0);
+    assert_eq!(preserved.name, "github from app");
+    assert_eq!(preserved.updated_at, current.updated_at);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn bad_tokens_and_dead_brokers_map_to_distinct_errors() {
     let h = harness().await;
 

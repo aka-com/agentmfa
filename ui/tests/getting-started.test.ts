@@ -31,7 +31,8 @@ function conn(
   enabled = false,
 ): ConnectionSummary {
   return {
-    id: name, name, type, target: name, secret_names: [], oauth: false,
+    id: name, name, updated_at: '2026-07-29T12:00:00.000Z',
+    type, target: name, secret_names: [], oauth: false,
     agent_access: { enabled },
     host: null, scheme: null, port: null, template: null, dbname: null, user: null,
     host_key_fingerprint: null, destination: null, sslmode: null,

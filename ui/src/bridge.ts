@@ -117,6 +117,12 @@ async function mockListen<K extends EventName>(
 let seq = 1;
 const uid = () => `id-${seq++}`;
 const now = () => new Date().toISOString();
+const nextVersion = (current?: string): string => {
+  const candidate = now();
+  return !current || candidate > current
+    ? candidate
+    : new Date(new Date(current).getTime() + 1).toISOString();
+};
 const formError = (
   kind: string,
   code: string,
@@ -148,6 +154,7 @@ interface MockSecret {
 interface MockConnection {
   id: string;
   name: string;
+  updated_at?: string;
   type: ConnectionType;
   secret_names: string[];
   secret_ids: string[];
@@ -226,6 +233,7 @@ interface MockArgs {
   options?: { whoami_tool?: string | null } | null;
   newName?: string | null;
   newValue?: string | null;
+  expectedUpdatedAt: string;
   input: ConnectionInput & Partial<McpAuthDraft>;
   limit: number;
   on: boolean;
@@ -562,8 +570,9 @@ function resolveMockRequest(
   request.resolved_at = now();
 }
 function connDto(c: MockConnection): ConnectionSummary {
+  c.updated_at = c.updated_at ?? nextVersion();
   return {
-    id: c.id, name: c.name, type: c.type, target: connTarget(c),
+    id: c.id, name: c.name, updated_at: c.updated_at, type: c.type, target: connTarget(c),
     secret_names: c.secret_names,
     oauth: c.oauth ?? false,
     agent_access: (() => {
@@ -950,6 +959,10 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       if (!c) {
         throw formError('conflict', 'connection_not_found', null, 'This tool was removed elsewhere');
       }
+      if (args.expectedUpdatedAt !== c.updated_at) {
+        throw formError('conflict', 'connection_changed', null,
+          'This tool changed elsewhere. Review the latest settings and try again.');
+      }
       const i = args.input;
       // Clearing the fingerprint un-pins (re-trusted at the next connection).
       if (i.type === 'ssh' && i.host_key_fingerprint && !/^SHA(?:256|512):\S+$/.test(i.host_key_fingerprint)) {
@@ -970,6 +983,7 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
           : [];
         c.secret_ids = i.secret_id ? [i.secret_id] : [];
       }
+      c.updated_at = nextVersion(c.updated_at);
       audit('connectionUpdated', `Tool updated: ${i.name}`); return;
     }
     case 'delete_connection': {

@@ -1601,6 +1601,7 @@ fn cmd_conn_update(args: ConnUpdate) {
     };
     managed.run_gated(managed.backend.update_connection(
         dto_id(&dto.id),
+        dto.updated_at.clone(),
         ConnectionSpec {
             name: dto.name.clone(),
             config,
@@ -1631,6 +1632,7 @@ fn cmd_conn_rename(name: String, new_name: String, root: Option<PathBuf>, url: O
     };
     managed.run(managed.backend.update_connection(
         dto_id(&dto.id),
+        dto.updated_at,
         ConnectionSpec {
             name: new_name.clone(),
             config,
@@ -3078,6 +3080,7 @@ mod tests {
         let dto = ConnectionDto {
             id: Uuid::new_v4().to_string(),
             name: "calendar".into(),
+            updated_at: "2026-07-29T12:00:00.000000000Z".into(),
             kind: "api".into(),
             target: "https://api.example.com".into(),
             secret_names: vec!["CALENDAR_OAUTH".into()],

@@ -59,3 +59,7 @@ export function formErrorToast(error: unknown): string {
 export function formErrorKind(error: unknown): string | null {
   return structuredError(error)?.kind || null;
 }
+
+export function formErrorCode(error: unknown): string | null {
+  return structuredError(error)?.code || null;
+}

@@ -99,6 +99,7 @@ fn manage_error_response(error: ManageError) -> Response {
         ManageError::SecretNameTaken { .. }
         | ManageError::ConnectionNameTaken { .. }
         | ManageError::ConnectionTargetTaken { .. }
+        | ManageError::ConnectionChanged
         | ManageError::ApprovalConnectionChanged
         | ManageError::SecretInUse { .. }
         | ManageError::KindChange
@@ -533,7 +534,12 @@ async fn update_connection(
     Path(id): Path<Uuid>,
     ApiJson(body): ApiJson<ConnectionUpdateBody>,
 ) -> Response {
-    respond(state.manage.update_connection(id, body.spec).await)
+    respond(
+        state
+            .manage
+            .update_connection(id, body.expected_updated_at, body.spec)
+            .await,
+    )
 }
 
 async fn delete_connection(

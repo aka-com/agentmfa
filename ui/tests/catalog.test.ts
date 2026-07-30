@@ -24,7 +24,8 @@ import { ICONS } from '../src/util';
 
 function conn(type: ConnectionType, host: string | null, name = 'x'): ConnectionSummary {
   return {
-    id: name, name, type, target: host || '', secret_names: [], oauth: false, agent_access: { enabled: true },
+    id: name, name, updated_at: '2026-07-29T12:00:00.000Z',
+    type, target: host || '', secret_names: [], oauth: false, agent_access: { enabled: true },
     host, scheme: null, port: null, template: null, dbname: null, user: null,
     host_key_fingerprint: null, destination: null, sslmode: null,
     trusted_ca_bundle_path: null,

@@ -45,7 +45,8 @@ import {
 } from '/src/connection-input';
 import { ENDPOINT_FORMATS } from '/src/endpoint-formats';
 import {
-  formErrorDetail, formErrorKind, formErrorMessage, formErrorToast, inlineFormError, sentenceCase,
+  formErrorCode, formErrorDetail, formErrorKind, formErrorMessage, formErrorToast, inlineFormError,
+  sentenceCase,
 } from '/src/form-errors';
 import {
   LOCAL_BROKER, brokerLabel, brokerTakeover, brokerTone, remoteEndpointCaution,
@@ -114,6 +115,8 @@ interface SheetState {
   kind: 'add-secret' | 'edit-secret' | 'add-conn' | 'edit-conn' | 'settings' | 'clear-activity'
     | 'elicitation' | 'approval' | 'mcp-auth' | 'wiring-tools' | 'endpoint-issued';
   id?: string;
+  /** Version of the connection whose values seeded an edit draft. */
+  expectedUpdatedAt?: string;
   /** The issue result, for the 'endpoint-issued' sheet. */
   endpoint?: IssuedEndpoint;
 }
@@ -5228,7 +5231,13 @@ async function saveConn(): Promise<void> {
   const createdCredential = adding && newSecretName !== null;
   try {
     if (adding) await invoke('add_connection', { input });
-    else await invoke('edit_connection', { id: sheet.id ?? '', input });
+    else {
+      await invoke('edit_connection', {
+        id: sheet.id ?? '',
+        expectedUpdatedAt: sheet.expectedUpdatedAt ?? '',
+        input,
+      });
+    }
     if (!brokerEpochIsCurrent(epoch)) return;
     toast(adding ? '🔌 Tool saved' : '✏️ Tool updated');
     if (adding) {
@@ -5275,7 +5284,13 @@ async function saveConn(): Promise<void> {
       void runConnectionTest(sheet.id ?? '');
     }
   } catch (e) {
-    if (brokerEpochIsCurrent(epoch)) showFormError(e);
+    if (!brokerEpochIsCurrent(epoch)) return;
+    // A version conflict means this sheet's token is stale. Re-read the
+    // list so the current row (and its fresh token) is there the moment
+    // the sheet is reopened — recovery must not depend on the
+    // connections-changed event stream being up.
+    if (formErrorCode(e) === 'connection_changed') void refresh('connections');
+    showFormError(e);
   }
 }
 
@@ -5862,7 +5877,7 @@ document.addEventListener('click', async (e) => {
       state.connMenuOpen = null;
       state.connMenuPoint = null;
       if (!await holdDropdownFormOpen()) break;
-      setSheet({ kind: 'edit-conn', id }); state.connType = c.type;
+      setSheet({ kind: 'edit-conn', id, expectedUpdatedAt: c.updated_at }); state.connType = c.type;
       state.connEntryName = entry?.name ?? null;
       state.connPreset = null;
       state.sheetErrors = {};

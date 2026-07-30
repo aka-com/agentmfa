@@ -34,6 +34,17 @@ use crate::Result;
 
 const PRESENCE_ABSOLUTE_MAX: std::time::Duration = std::time::Duration::from_secs(12 * 60 * 60);
 
+/// Every persisted connection mutation must advance its optimistic-lock
+/// version, even when the wall clock has not ticked (or moves backwards).
+fn next_connection_updated_at(previous: &chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
+    let now = Utc::now();
+    if now > *previous {
+        now
+    } else {
+        previous.to_owned() + chrono::Duration::nanoseconds(1)
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct PresenceGrant {
     idle_until: std::time::Instant,
@@ -557,7 +568,7 @@ impl Store {
                 let parsed = Template::parse(template)?;
                 if parsed.refs().contains(&old_name) {
                     *template = parsed.rename_ref(&old_name, new_name);
-                    conn.updated_at = Utc::now();
+                    conn.updated_at = next_connection_updated_at(&conn.updated_at);
                     rewritten += 1;
                 }
             }
@@ -866,13 +877,38 @@ impl Store {
     /// updated connection and whether its pinned target changed, the caller
     /// must revoke the connection's direct endpoints when it did (a pasted
     /// address granted for one destination must not silently cover another).
-    pub fn update_connection(
+    pub fn update_connection(&self, id: &Uuid, spec: ConnectionSpec) -> Result<(Connection, bool)> {
+        self.update_connection_inner(id, None, spec)
+    }
+
+    /// Replace a connection only when it is still the version the caller
+    /// read. The comparison and mutation share the store lock, so another
+    /// editor cannot write between the check and persistence.
+    pub fn update_connection_if_current(
         &self,
         id: &Uuid,
+        expected_updated_at: &str,
+        spec: ConnectionSpec,
+    ) -> Result<(Connection, bool)> {
+        self.update_connection_inner(id, Some(expected_updated_at), spec)
+    }
+
+    fn update_connection_inner(
+        &self,
+        id: &Uuid,
+        expected_updated_at: Option<&str>,
         mut spec: ConnectionSpec,
     ) -> Result<(Connection, bool)> {
         validate_connection_name(&spec.name)?;
         let mut state = self.state.lock().unwrap();
+        let existing = state
+            .connections
+            .iter()
+            .find(|c| &c.id == id)
+            .ok_or(CoreError::ConnectionNotFound)?;
+        if expected_updated_at.is_some_and(|expected| existing.version() != expected) {
+            return Err(CoreError::ConnectionChanged);
+        }
         if state
             .connections
             .iter()
@@ -880,11 +916,6 @@ impl Store {
         {
             return Err(CoreError::ConnectionNameTaken(spec.name));
         }
-        let existing = state
-            .connections
-            .iter()
-            .find(|c| &c.id == id)
-            .ok_or(CoreError::ConnectionNotFound)?;
         if existing.kind() != spec.config.kind() {
             return Err(CoreError::KindChange);
         }
@@ -925,7 +956,7 @@ impl Store {
         conn.name = spec.name;
         conn.config = spec.config;
         conn.secrets = secrets;
-        conn.updated_at = Utc::now();
+        conn.updated_at = next_connection_updated_at(&conn.updated_at);
         let updated = conn.clone();
         let ssh_host_key_changed = matches!(
             (&old_config, &updated.config),
@@ -949,8 +980,35 @@ impl Store {
     /// fields. This is the metadata-only update path used when native
     /// authentication is intentionally skipped.
     pub fn rename_connection(&self, id: &Uuid, name: String) -> Result<Connection> {
+        self.rename_connection_inner(id, None, name)
+    }
+
+    /// Rename a connection only if the caller's DTO is still current.
+    pub fn rename_connection_if_current(
+        &self,
+        id: &Uuid,
+        expected_updated_at: &str,
+        name: String,
+    ) -> Result<Connection> {
+        self.rename_connection_inner(id, Some(expected_updated_at), name)
+    }
+
+    fn rename_connection_inner(
+        &self,
+        id: &Uuid,
+        expected_updated_at: Option<&str>,
+        name: String,
+    ) -> Result<Connection> {
         validate_connection_name(&name)?;
         let mut state = self.state.lock().unwrap();
+        let existing = state
+            .connections
+            .iter()
+            .find(|connection| &connection.id == id)
+            .ok_or(CoreError::ConnectionNotFound)?;
+        if expected_updated_at.is_some_and(|expected| existing.version() != expected) {
+            return Err(CoreError::ConnectionChanged);
+        }
         if state
             .connections
             .iter()
@@ -963,9 +1021,9 @@ impl Store {
             .connections
             .iter_mut()
             .find(|connection| &connection.id == id)
-            .ok_or(CoreError::ConnectionNotFound)?;
+            .expect("checked above");
         connection.name = name;
-        connection.updated_at = Utc::now();
+        connection.updated_at = next_connection_updated_at(&connection.updated_at);
         let renamed = connection.clone();
         self.commit(&mut state, next)?;
         Ok(renamed)
@@ -2835,6 +2893,72 @@ mod tests {
             )
             .unwrap();
         assert!(changed);
+    }
+
+    #[tokio::test]
+    async fn conditional_connection_updates_preserve_the_newer_version() {
+        let (store, _, _dir) = store().await;
+        let stale = store
+            .add_connection(api_spec("github", "api.github.com", ""))
+            .unwrap();
+        let stale_version = stale.version();
+
+        let current = store
+            .rename_connection_if_current(&stale.id, &stale_version, "github from app".into())
+            .unwrap();
+        assert_ne!(current.version(), stale_version);
+
+        let error = store
+            .update_connection_if_current(
+                &stale.id,
+                &stale_version,
+                api_spec("github from stale cli", "api.github.com", ""),
+            )
+            .unwrap_err();
+        assert!(matches!(error, CoreError::ConnectionChanged));
+        assert_eq!(
+            store.connection_by_id(&stale.id).unwrap(),
+            current,
+            "a rejected stale replacement must not modify active state"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_host_key_pin_invalidates_stale_edit_tokens() {
+        let (store, _, _dir) = store().await;
+        let key = store.add_secret("DEPLOY_SSH_KEY", val("k")).unwrap();
+        let ssh_spec = |port: u16, fingerprint: &str| ConnectionSpec {
+            name: "prod-ssh".into(),
+            config: ConnectionConfig::Ssh {
+                destination: None,
+                host: "prod.example.com".into(),
+                port,
+                user: "deploy".into(),
+                host_key_fingerprint: fingerprint.into(),
+            },
+            secrets: vec![key.id],
+        };
+        let conn = store.add_connection(ssh_spec(22, "")).unwrap();
+        let stale_version = conn.version();
+        let observed: ssh_key::Fingerprint = SSH_HOST_FP.parse().unwrap();
+        store.pin_ssh_host_key(&conn.id, &observed).unwrap();
+
+        // The pin leaves `updated_at` alone (it is the retarget signal live
+        // executions compare), but the edit token must still move: a spec
+        // read before the pin carries an empty fingerprint, and writing it
+        // back would silently un-pin the learned key.
+        let pinned = store.connection_by_id(&conn.id).unwrap();
+        assert_eq!(pinned.updated_at, conn.updated_at);
+        assert_ne!(pinned.version(), stale_version);
+        let error = store
+            .update_connection_if_current(&conn.id, &stale_version, ssh_spec(2222, ""))
+            .unwrap_err();
+        assert!(matches!(error, CoreError::ConnectionChanged));
+
+        // A fresh read that carries the pin forward still writes.
+        store
+            .update_connection_if_current(&conn.id, &pinned.version(), ssh_spec(2222, SSH_HOST_FP))
+            .unwrap();
     }
 
     #[tokio::test]

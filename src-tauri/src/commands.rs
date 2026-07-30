@@ -299,6 +299,12 @@ impl FormError {
                 "The tool changed while you were confirming. Review it and save again.",
                 None,
             ),
+            ManageError::ConnectionChanged => Self::global(
+                "conflict",
+                "connection_changed",
+                "This tool changed elsewhere. Review the latest settings and try again.",
+                None,
+            ),
             ManageError::Vault { message } => Self::global(
                 "system",
                 "keychain_unavailable",
@@ -838,6 +844,7 @@ pub async fn add_connection(
 pub async fn edit_connection(
     state: State<'_, AppState>,
     id: String,
+    expected_updated_at: String,
     input: ConnectionInput,
 ) -> FormResult<()> {
     let kind = input.kind.clone();
@@ -853,7 +860,7 @@ pub async fn edit_connection(
     state
         .brokers
         .backend()
-        .update_connection(id, spec)
+        .update_connection(id, expected_updated_at, spec)
         .await
         .map_err(|error| {
             FormError::from_manage(
@@ -1966,6 +1973,11 @@ mod tests {
         assert_eq!(target.code, "connection_target_taken");
         assert_eq!(target.field, Some("name"));
         assert!(target.message.contains("production"));
+
+        let stale = FormError::from_manage(ManageError::ConnectionChanged, FormContext::Secret);
+        assert_eq!(stale.kind, "conflict");
+        assert_eq!(stale.code, "connection_changed");
+        assert!(stale.message.contains("changed elsewhere"));
 
         let wiring =
             FormError::from_manage(ManageError::EndpointRequiresWiring, FormContext::Secret);
