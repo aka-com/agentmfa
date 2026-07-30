@@ -31,11 +31,11 @@ export interface BrokerConnection {
   target: string;
   /** Control-plane path a call against this connection goes to. */
   endpoint: string;
-  /** Whether *this* agent may use it. The broker decides; we only report. */
+  /** Whether agents may use it. Access is connection-wide; we only report. */
   wired: boolean;
   /** Set when this upstream speaks MCP at that path, e.g. `/mcp`. */
   mcp_path?: string | null;
-  /** Curated upstream MCP tool subset for this agent; absent means all. */
+  /** Curated upstream MCP tool subset for this connection; absent means all. */
   allowed_tools?: string[] | null;
   /** Whether this connection asks a human to confirm traffic. */
   confirm?: boolean;
@@ -189,8 +189,8 @@ export class BrokerClient {
   /**
    * Call a data plane on the agent's behalf.
    *
-   * The wiring check happens on the far side of this call, which is the
-   * point: the sidecar cannot skip it, and a bug here cannot widen access.
+   * The connection-access check happens on the far side of this call. The
+   * sidecar cannot skip it, and a bug here cannot widen access.
    */
   async invoke(path: string, auth: AgentAuth, body: unknown): Promise<unknown> {
     return this.json<unknown>('POST', path, auth, body);
@@ -202,7 +202,7 @@ export class BrokerClient {
    * An upstream MCP server that needs interactive input mid tool call
    * (SEP-2322) cannot be answered by the sidecar or the agent — the user
    * answers it in the AgentMFA app. This call blocks until they do (or it
-   * lapses), and returns the answer as an MCP `ElicitResult`. The wiring
+   * lapses), and returns the answer as an MCP `ElicitResult`. The access
    * check is the broker's, like every other call here.
    */
   async elicit(

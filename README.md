@@ -14,20 +14,46 @@ into its environment, whether through a `.env` file or global
 environment variables. That means:
 
 - Every agent holds every secret in plaintext, in context.
-- One prompt injection can read all of them at once.
+- A prompt injection can copy those plaintext credentials and use them
+  outside the intended service.
 - Rotating a key means hunting down every config that copied it.
-- There's no record of which agent used which credential, or when.
+- Use may leave no central record.
 
 AgentMFA sits between your agents and everything they reach. Agents
 talk to services through a local proxied endpoint to make API calls or
-open database connections, Credentials are injected on the upstream
-leg only, and never enter an agent's context.
+open database connections. The real upstream credential is injected on
+the upstream leg only and never enters agent context. AgentMFA records
+brokered use and lets you disable a connection centrally instead of
+redistributing its upstream credential.
 
 AgentMFA is primarily tested locally today, but a hosted version has
-been implemented, that can be used with a shared vault. We also
-support limited audit logging, and team management is coming soon.
+been implemented for a shared vault. Hosted mode is one broker per trust
+domain, not a multi-user authorization system: see [HOSTING.md](HOSTING.md)
+before exposing it to a network. We also support limited audit logging,
+and team management is coming soon.
 
-## How it works
+### Security boundary
+
+AgentMFA keeps the real API token, database password, or SSH private key
+out of the agent's files and context. It does not sandbox agents from one
+another. Every process running as the same local user can read the shared
+0600 broker key (or pair over the private local socket) and can use every
+connection currently enabled for agents. Client labels are self-reported
+audit attribution, not identities or authorization boundaries.
+
+Connections are enabled for agents by default when added. Turning one off
+prevents new calls and closes broker-owned HTTP/Postgres sessions; an SSH
+login that already authenticated is between the SSH client and server and
+cannot be terminated by the broker. Rotating the broker key is the broad
+revocation action: it revokes tickets and standing endpoints and closes
+broker-owned sessions, but it still cannot kill an already-authenticated SSH
+process.
+
+Direct endpoints deliberately expose a separate broker credential to their
+client. Treat that endpoint secret like any other standing credential and
+revoke or rotate it if copied somewhere untrusted. Response scrubbing removes
+recognized reflections of injected credentials, but cannot guarantee that an
+upstream will not transform or encode credential material into a new form.
 
 1. **Create a connection.** Select a destination to connect to: an API
    host, Postgres database, SSH server, or MCP server.
@@ -46,9 +72,9 @@ support limited audit logging, and team management is coming soon.
    ```
 
    For each connection type, the broker injects the real credential on
-   the upstream connection, and strips it from anything the agent sees
-   coming downstream. Revoking access is easy - just turn off the
-   connection inside the app.
+   the upstream connection. Turn the connection off in the app to refuse
+   new use; rotate the broker key for broad revocation, subject to the
+   already-authenticated SSH limitation above.
 
 ## Supported agents
 
@@ -105,7 +131,13 @@ exposed as `agentmfa_<name>_request`, and databases/servers as
 `agentmfa_<name>_open`, which returns a ready-to-use local endpoint.
 
 Upstream MCP servers are proxied through the same broker, so their
-credentials stay in the vault too.
+credentials stay in the vault too. HTTP/Postgres/SSH connections are
+registered as one native AgentMFA tool each. Streamable-HTTP MCP upstreams
+contribute their own bounded tool names and may be limited to a curated
+subset in the app; upstream stdio servers are not supported. Native
+connection enable/rename changes are announced during a session, while an
+upstream MCP catalog is discovered at session start—reconnect to refresh it.
+Use `agentmfa_status` first when a tool is missing or an upstream failed.
 
 **Claude Code**:
 

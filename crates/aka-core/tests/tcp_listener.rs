@@ -10,7 +10,7 @@ use aka_core::config::BrokerConfig;
 use aka_core::daemon::{self, ServeOptions};
 use aka_core::events::BrokerEvents;
 use aka_core::paths::Paths;
-use aka_core::types::{ConfirmationMethod, SecretMeta};
+use aka_core::types::{ConfirmationMethod, DecisionSurface, SecretMeta};
 use aka_core::vault::MemoryVault;
 use serde_json::{json, Value};
 
@@ -162,6 +162,40 @@ async fn both_planes_authenticate_over_tcp() {
     )
     .await;
     assert_eq!(status, 200, "{body}");
+
+    // A successful manage mutation records the directly connected TCP peer
+    // as remote decision provenance. It remains socket attribution, not a
+    // claim that the peer is the human who possessed the management token.
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{}/v1/manage/secrets", h.base))
+        .header("authorization", format!("Bearer {}", h.manage_token))
+        .json(&json!({ "name": "REMOTE_TEST", "value": "secret" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let entry = h
+        .broker
+        .audit
+        .recent(20)
+        .into_iter()
+        .find(|entry| entry.kind == aka_core::audit::AuditKind::SecretAdded)
+        .expect("the remote mutation is audited");
+    assert!(matches!(
+        entry.surface,
+        Some(DecisionSurface::Remote {
+            peer: Some(peer)
+        }) if peer.ip().is_loopback()
+    ));
+    assert!(
+        entry
+            .approver
+            .as_deref()
+            .is_some_and(|value| value.starts_with("127.0.0.1:")),
+        "{entry:?}"
+    );
+
     let (status, _) = get_json(&format!("{}/v1/manage/whoami", h.base), Some(&agent_key)).await;
     assert_eq!(status, 401);
 

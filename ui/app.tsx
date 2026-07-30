@@ -2173,8 +2173,9 @@ function secretsHTML(): string {
 function ActivityRow({ entry }: { entry: ActivityEntry }): ReactNode {
   // Attribution and timing stay under the message. The tool gets its own
   // right-side column so it can be scanned independently across rows.
+  const remotePeer = entry.surface === 'remote' ? (entry.approver || 'local socket') : null;
   const hasChips = Boolean(entry.agent) || typeof entry.duration_ms === 'number'
-    || entry.confirmation === 'management_token';
+    || entry.confirmation === 'management_token' || Boolean(remotePeer);
   return (
     <div className="act-row">
       <span className="act-gutter">
@@ -2197,6 +2198,8 @@ function ActivityRow({ entry }: { entry: ActivityEntry }): ReactNode {
                 Touch-ID-confirmed rows. */}
             {entry.confirmation === 'management_token'
               ? <span className="act-chip act-chip-manage" title="Authorized by the management token">via manage token</span> : null}
+            {remotePeer
+              ? <span className="act-chip" title="Direct socket peer; not an authenticated human identity">remote: {remotePeer}</span> : null}
           </div>
         )}
       </div>
@@ -2231,7 +2234,8 @@ function activityRowEstimate(entry: ActivityEntry): number {
   let height = 34;
   if (entry.detail) height += 19;
   if (entry.agent || typeof entry.duration_ms === 'number'
-    || entry.confirmation === 'management_token') height += 21;
+    || entry.confirmation === 'management_token'
+    || entry.surface === 'remote') height += 21;
   return height;
 }
 

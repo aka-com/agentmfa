@@ -2148,7 +2148,7 @@ mod tests {
                 },
                 secrets: vec![],
             })
-            .expect("postgres may use trust or certificate authentication");
+            .expect("postgres may use trust authentication");
         assert!(passwordless.secrets.is_empty());
 
         let other = store.add_secret("OTHER_PASSWORD", val("pw2")).unwrap();

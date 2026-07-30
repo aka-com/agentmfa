@@ -15,8 +15,10 @@ import { UNTRUSTED_BEGIN, UNTRUSTED_END } from '../src/untrusted';
 
 const SUPERVISOR_TOKEN = 'a'.repeat(64);
 
-// Two agents: one wired to `prod-db`, one wired to nothing. This is the
-// whole point of the phase — the broker decides, the sidecar reports.
+// Synthetic broker principals used to exercise translation seams. Production
+// resolves every local agent's shared key to one client_id and one
+// connection-wide access table; distinct ids here model distinct broker
+// identities, not per-agent authorization.
 const AGENTS: Record<string, { client_id: string; agent: string }> = {
   'token-wired': { client_id: 'client-wired', agent: 'claude-code' },
   'token-bare': { client_id: 'client-bare', agent: 'other-agent' },
@@ -385,7 +387,7 @@ function fakeBroker(socketPath: string): Promise<Server> {
       return;
     }
     // Data planes: echo what arrived so the test can assert on it, but
-    // only for a connection this agent is actually wired to.
+    // only for a connection currently enabled for agents.
     if (req.method === 'POST' && req.url?.startsWith('/v1/')) {
       const chunks: Buffer[] = [];
       req.on('data', (chunk: Buffer) => chunks.push(chunk));
@@ -517,12 +519,12 @@ test('wired connections appear in tools/list as real tools', async () => {
   }
 });
 
-test('an agent wired to nothing is told so, not left guessing', async () => {
+test('an empty connection-wide access set is explained', async () => {
   const app = await harness();
   try {
     const client = await app.connect('token-bare');
     const { tools } = await client.listTools();
-    // Even an unwired agent can ask for tools by name (agentmfa_connect);
+    // Even with no enabled tools, an agent can request one by name;
     // status remains the "why can't I see it?" explainer.
     assert.deepEqual(tools.map((tool) => tool.name).sort(), [
       'agentmfa_connect',
@@ -533,7 +535,7 @@ test('an agent wired to nothing is told so, not left guessing', async () => {
       await client.callTool({ name: 'agentmfa_status', arguments: {} }),
     ) as { tools: unknown[]; hint?: string };
     assert.deepEqual(status.tools, []);
-    assert.match(status.hint ?? '', /wire this agent/i);
+    assert.match(status.hint ?? '', /No tools are enabled for agents/i);
   } finally {
     await app.close();
   }
@@ -997,7 +999,7 @@ test('invoking a tool proxies to the broker data plane', async () => {
   }
 });
 
-test("one agent cannot ride another agent's session id", async () => {
+test('a session id cannot cross broker client identities', async () => {
   const app = await harness();
   try {
     const owner = await app.connect('token-wired');
@@ -1016,7 +1018,7 @@ test("one agent cannot ride another agent's session id", async () => {
       },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
     });
-    assert.equal(stolen.status, 404, "another agent's session must not be usable");
+    assert.equal(stolen.status, 404, "another broker identity's session must not be usable");
     const error = (await stolen.json()) as { id?: number | null };
     assert.equal(error.id, 1, 'the rejection must resolve the tools/list request');
   } finally {

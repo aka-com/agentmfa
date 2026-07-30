@@ -26,7 +26,7 @@ use crate::audit::AuditEntry;
 use crate::broker::{Broker, ConnectionTestReport, IssuedEndpointInfo};
 use crate::error::CoreError;
 use crate::store::ConnectionSpec;
-use crate::types::{Connection, SecretMeta, SecretValue};
+use crate::types::{Connection, DecisionSurface, SecretMeta, SecretValue};
 
 /// A management call's result: the value, or the wire-shaped error the
 /// shell maps onto form fields.
@@ -343,6 +343,12 @@ fn approval_decision(decision: ApprovalDecisionDto) -> crate::approvals::Approva
 }
 
 pub fn activity_dto(entry: &AuditEntry) -> ActivityDto {
+    let surface = entry.surface.map(|surface| match surface {
+        DecisionSurface::AppWindow => "app_window",
+        DecisionSurface::Cli => "cli",
+        DecisionSurface::Remote { .. } => "remote",
+        DecisionSurface::Harness => "harness",
+    });
     ActivityDto {
         icon: entry.kind.icon().to_string(),
         tone: entry.kind.tone().to_string(),
@@ -351,6 +357,8 @@ pub fn activity_dto(entry: &AuditEntry) -> ActivityDto {
         agent: entry.agent.clone(),
         connection: entry.connection.clone(),
         duration_ms: entry.duration_ms,
+        approver: entry.approver.clone(),
+        surface: surface.map(str::to_string),
         confirmation: entry.confirmation.and_then(|method| {
             serde_json::to_value(method)
                 .ok()
@@ -1108,12 +1116,15 @@ impl LocalBackend {
         F: FnOnce(Arc<Broker>) -> crate::Result<T> + Send + 'static,
     {
         let broker = self.broker.clone();
-        tokio::task::spawn_blocking(move || call(broker))
-            .await
-            .map_err(|join| ManageError::Internal {
-                message: format!("management call stopped: {join}"),
-            })?
-            .map_err(ManageError::from)
+        let context = crate::audit::current_decision_context();
+        tokio::task::spawn_blocking(move || {
+            crate::audit::with_blocking_decision_context(context, || call(broker))
+        })
+        .await
+        .map_err(|join| ManageError::Internal {
+            message: format!("management call stopped: {join}"),
+        })?
+        .map_err(ManageError::from)
     }
 }
 
@@ -1470,10 +1481,11 @@ impl ManagementBackend for LocalBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audit::AuditKind;
     use crate::config::BrokerConfig;
     use crate::events::NoopEvents;
     use crate::paths::Paths;
-    use crate::types::ConnectionConfig;
+    use crate::types::{ConfirmationMethod, ConnectionConfig};
     use crate::vault::MemoryVault;
     use zeroize::Zeroizing;
 
@@ -1676,6 +1688,20 @@ mod tests {
         assert!(text.contains("https://broker.example.dev/mcp"));
         assert!(text.contains("Authorization: Bearer"));
         assert!(!text.contains("--unix-socket"));
+    }
+
+    #[test]
+    fn management_token_authority_survives_the_activity_projection() {
+        let context =
+            crate::types::DecisionContext::remote(Some("192.0.2.7:4242".parse().unwrap()));
+        let dto = activity_dto(
+            &AuditEntry::new(AuditKind::SettingsChanged, "Remote setting changed")
+                .confirmation(ConfirmationMethod::ManagementToken)
+                .context(&context),
+        );
+        assert_eq!(dto.confirmation.as_deref(), Some("management_token"));
+        assert_eq!(dto.surface.as_deref(), Some("remote"));
+        assert_eq!(dto.approver.as_deref(), Some("192.0.2.7:4242"));
     }
 
     #[tokio::test(flavor = "multi_thread")]

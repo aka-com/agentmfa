@@ -17,6 +17,7 @@ use aka_api::{ManageError, ManageEvent};
 use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::request::Parts;
 use axum::http::StatusCode;
+use axum::middleware::Next;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post, put};
@@ -187,6 +188,24 @@ pub fn router() -> Router<AppState> {
         .route("/activity", get(activity).delete(clear_activity))
         .route("/settings", get(settings).patch(patch_settings))
         .route("/agent-setup", get(agent_setup))
+        .layer(axum::middleware::from_fn(remote_decision_context))
+}
+
+/// Everything under `/v1/manage` is a management-token surface, including
+/// requests arriving over the local control socket. Scope its direct socket
+/// peer across the handler so every audit entry produced by the core carries
+/// honest remote attribution. A reverse proxy remains the observed peer; this
+/// is operational provenance, not a human identity.
+async fn remote_decision_context(request: axum::extract::Request, next: Next) -> Response {
+    let peer = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|info| info.0);
+    crate::audit::with_request_decision_context(
+        crate::types::DecisionContext::remote(peer),
+        next.run(request),
+    )
+    .await
 }
 
 async fn whoami(State(state): State<AppState>, _authed: ManageAuthed) -> Response {

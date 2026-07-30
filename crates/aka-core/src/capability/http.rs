@@ -5,8 +5,8 @@
 //! upstream URL is built from parsed components, a broker-controlled header
 //! denylist is non-overridable, and redirects are followed by a hand-rolled
 //! loop only when the resolved hop matches the connection's pinned
-//! scheme/host/port, re-rendering the injection template onto every hop
-//! from scratch.
+//! scheme/host/port, re-applying the one freshly rendered injection to every
+//! permitted hop.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -295,7 +295,7 @@ fn endpoint_forward_headers(
     Ok(forwarded)
 }
 
-/// The rendered credential, applied fresh to every hop.
+/// The rendered credential, re-applied to every permitted redirect hop.
 pub(crate) enum RenderedInjection {
     /// A credential-less connection: nothing is injected onto the request.
     None,
@@ -887,9 +887,9 @@ impl HttpExecution {
                                 let clean =
                                     resolved.username().is_empty() && resolved.password().is_none();
                                 if clean && same_pinned_authority(&resolved, &scheme, &host, port) {
-                                    // Same pinned upstream: follow, with the
-                                    // credential re-rendered onto the new
-                                    // request from scratch.
+                                    // Same pinned upstream: follow and
+                                    // re-apply the already-rendered credential
+                                    // to the new request.
                                     hops += 1;
                                     match status.as_u16() {
                                         303 => {

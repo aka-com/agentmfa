@@ -121,10 +121,14 @@ pub trait BrokerEvents: Send + Sync {
         false
     }
 
-    /// A high-consequence configuration action — creating/deleting a
-    /// connection, changing its capability, or deleting a secret — is about
-    /// to take effect. The core demands it, `None` aborts, and the default
-    /// fails closed.
+    /// A core-classified gated action is about to take effect. Fresh gates
+    /// cover full-authority operations such as enabling explicitly disabled
+    /// agent access, removing a confirmation/read gate, rotating or copying
+    /// broker credentials, and clearing audit history. Configuration-presence
+    /// gates cover capability edits and stored-value replacement. Creating a
+    /// tool prompts only when it extends an existing secret to a new target;
+    /// deleting a tool or an unused secret only narrows authority and does not
+    /// call this hook. `None` aborts, and the default fails closed.
     fn confirm_action(&self, _description: &str) -> Option<ConfirmationMethod> {
         None
     }

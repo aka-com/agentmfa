@@ -536,8 +536,10 @@ impl Broker {
 
     /// Demand the shell's native confirmation, regardless of the presence
     /// window. Fails closed when the shell refuses or does not implement the
-    /// gate. Every action that grants an agent new authority goes through
-    /// here; async callers run this same serialized store gate off-runtime.
+    /// gate. Operations explicitly classified as full-authority go through
+    /// here; creating an enabled-by-default tool is separately gated only
+    /// when it extends an existing credential to a new target. Async callers
+    /// run this same serialized store gate off-runtime.
     /// A successful prompt opens the user-plane presence window (see
     /// `Store::confirm_action`), so a following read or config change rides it.
     fn confirm_action(&self, description: &str) -> Result<crate::types::ConfirmationMethod> {
@@ -2888,5 +2890,46 @@ mod tests {
             assert!(example.contains(&format!("-o {option}")), "{example}");
         }
         assert!(!example.contains("IdentitiesOnly"), "{example}");
+    }
+
+    /// SEC-45. Confirmation policy is intentionally asymmetric, so keep an
+    /// explicit source inventory beside the comments maintainers rely on.
+    /// Adding or removing a gate changes these counts and forces this list to
+    /// be reviewed in the same patch.
+    #[test]
+    fn confirmation_call_site_inventory_is_explicit() {
+        let source = include_str!("broker.rs");
+        let fresh_gate = ["confirm_", "action("].concat();
+        let windowed_gate = ["confirm_user_", "action("].concat();
+        let configuration_gate = ["confirm_configuration_", "action("].concat();
+        assert_eq!(source.matches(&fresh_gate).count(), 11);
+        assert_eq!(source.matches(&windowed_gate).count(), 6);
+        assert_eq!(source.matches(&configuration_gate).count(), 2);
+
+        for reason in [
+            "Replace the stored value of secret",
+            "Copy secret",
+            "Copy the shared agent key through management",
+            "Add tool",
+            "Change security settings for tool",
+            "Test newly retargeted tool",
+            "Issue a direct endpoint",
+            "Copy the direct endpoint",
+            "Let agents use",
+            "stop confirming traffic",
+            "rotate this computer's key",
+            "Clear AgentMFA activity history",
+            "Disable OS authentication requirement",
+            "Change how long AgentMFA stays unlocked",
+        ] {
+            assert!(
+                source.contains(reason),
+                "missing confirmation inventory item: {reason}"
+            );
+        }
+        assert!(
+            source.contains("pins it *without asking*"),
+            "SSH trust-on-first-use must remain documented as prompt-free"
+        );
     }
 }

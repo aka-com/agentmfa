@@ -224,9 +224,9 @@ async function handleMcp(
       return;
     }
 
-    // A session id we do not recognize — or one belonging to another agent —
-    // is refused rather than silently reopened, so a leaked id cannot be
-    // turned into a working session by anyone else.
+    // A session id we do not recognize — or one belonging to another broker
+    // identity — is refused rather than silently reopened. All local agents
+    // share one broker client id, so this is not per-agent isolation.
     if (typeof sessionId === 'string') {
       rpcError(res, 404, -32001, 'Unknown or expired session', id);
       return;

@@ -407,6 +407,13 @@ pub struct ActivityDto {
     pub connection: Option<String>,
     /// How long a brokered call or session took, when measured.
     pub duration_ms: Option<u64>,
+    /// The decision surface and its directly observed principal, when the
+    /// core could attribute one. A remote approver is a socket peer, not an
+    /// authenticated human identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approver: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<String>,
     /// How a confirmation-required action was authorized, when one was
     /// (e.g. "os_authentication", "management_token"). Lets the activity
     /// view mark actions a hosted broker authorized by token possession.
@@ -709,6 +716,8 @@ mod tests {
                 agent: None,
                 connection: None,
                 duration_ms: None,
+                approver: None,
+                surface: None,
                 confirmation: None,
                 at: "2026-01-01T00:00:00Z".into(),
             },

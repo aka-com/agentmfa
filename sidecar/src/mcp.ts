@@ -10,9 +10,10 @@
 //
 // Ours is deliberately thinner than theirs because our authorization story
 // is simpler and stricter: there is no org/tenant model, and no decision is
-// ever made here. `tools/list` reports what the broker says this agent is
-// wired to; `tools/call` refuses anything the broker has not wired. The
-// sidecar cannot grant access it was not handed.
+// ever made here. `tools/list` reports connections the broker says are
+// enabled for agents; `tools/call` refuses anything the broker has disabled
+// or excluded from a curated subset. The sidecar cannot grant access it was
+// not handed.
 
 import { randomUUID } from 'node:crypto';
 
@@ -58,7 +59,7 @@ export const MCP_PATH = '/mcp';
  * the rest become searchable-only. Big catalogs must not flood an agent's
  * context: beyond the budget, tools stay in the search index and are
  * callable through `agentmfa_call_tool` — enforcement is unchanged, the
- * broker still checks the wiring and any curated subset on every call.
+ * broker still checks connection access and any curated subset on every call.
  */
 function upstreamToolBudget(): number {
   // Read per session build (not at import) so tests and operators can
@@ -152,7 +153,7 @@ export class BrokerAuthProvider {
   }
 }
 
-/** Sessions belong to the principal that created them. */
+/** Sessions belong to the broker identity that created them. */
 interface Session {
   transport: StreamableHTTPServerTransport;
   clientId: string;
@@ -167,9 +168,10 @@ export const SESSION_LIMIT = 256;
 /**
  * Seam 2 — the serving-session lifecycle.
  *
- * Ownership is checked on every reuse: a leaked `mcp-session-id` is useless
- * to another agent, because the token still has to resolve to the client id
- * that opened it.
+ * Ownership is checked on every reuse against the broker's `client_id`.
+ * Production has one shared client id for every local agent, so this prevents
+ * cross-broker reuse, not reuse by another process holding the same machine
+ * key. Treat the session id as machine-scoped, not per-agent isolation.
  *
  * Sessions are also evicted when idle or when too many pile up. Only a
  * clean shutdown closes a transport, and agents crash — without eviction a
@@ -255,10 +257,10 @@ interface Registration {
 /**
  * Build the tool surface for one agent.
  *
- * Every connection the broker reports as wired becomes a tool; unwired
- * ones are never registered. The list is fixed for the life of the
- * session — a wiring changed in the app takes effect when the agent
- * reconnects, and the broker refuses anything stale in the meantime.
+ * Every connection the broker reports as enabled becomes a tool; disabled
+ * ones are never registered. Native connection tools reconcile during the
+ * session. Upstream MCP catalogs are discovered once at session open and
+ * require a reconnect to refresh.
  */
 /// How often a session re-reads the wiring so its tool list can follow it.
 /// Short enough that a user who switches a tool off sees the agent lose it
@@ -294,18 +296,27 @@ export async function createToolServer(
     { name: 'agentmfa', version: SIDECAR_VERSION },
     {
       // Declared up front rather than implied by the first `registerTool`.
-      // An agent wired to nothing has zero tools, and without this it would
+      // A broker with no enabled tools has zero tools, and without this it would
       // meet `Method not found` on `tools/list` instead of an empty list.
       //
       // `listChanged` is real: the per-connection tools below track the user's
-      // wiring for the life of the session (see `refreshWiring`), so a tool
+      // access state for the life of the session (see `refreshWiring`), so a tool
       // that has been renamed away or switched off stops being offered instead
       // of sitting there answering 404 or 403 until the agent reconnects.
       capabilities: { tools: { listChanged: true } },
       instructions:
-        'AgentMFA brokers database, SSH and API access. Tools appear ' +
-        'here only when the user has enabled them for agents in the AgentMFA ' +
-        'app. Credentials are injected by the broker and never visible to you.',
+        'AgentMFA brokers API, database, SSH, and Streamable-HTTP MCP access. ' +
+        'Connections are enabled for all local agents by default when added; ' +
+        'the user can disable them or curate an upstream MCP subset in the app. ' +
+        'Credentials are injected by the broker and never visible to you. A ' +
+        '`_request` tool accepts method, pinned-origin path, repeated headers, ' +
+        'and either a UTF-8/JSON or base64 body; authentication, cookie, and ' +
+        'hop-by-hop headers are reserved. Its bounded result is ' +
+        '{status, headers, body, body_encoding}; use request_id on mutating ' +
+        'retries. A `_open` tool returns a short-lived ticket and local endpoint. ' +
+        'Native connection tools refresh during this session; reconnect to ' +
+        'refresh an upstream MCP catalog. Use agentmfa_status first when a tool ' +
+        'is missing, and search/call meta-tools for catalog overflow.',
     },
   );
 
@@ -334,9 +345,9 @@ export async function createToolServer(
 
   // Always registered, for two reasons. It is what installs the MCP tool
   // handlers at all — a server with no tools answers `tools/list` with
-  // "Method not found", which is a baffling thing for an agent wired to
-  // nothing to meet. And it gives that agent somewhere to look: the reply
-  // says who it is and what to ask the user for.
+  // "Method not found", which is a baffling result when no connections are
+  // enabled. It also gives the agent somewhere to look: the reply says what
+  // is available and what to ask the user for.
   server.registerTool(
     'agentmfa_status',
     {
@@ -348,10 +359,10 @@ export async function createToolServer(
     },
     async () => {
       // Deliberately re-queried rather than reported from the list captured
-      // at session open: the user may have wired something since, and the
-      // whole point of this tool is to answer "why can't I see it?". Asking
-      // also reconciles the tool list, so an agent that noticed something was
-      // wrong does not have to wait for the next tick to have it fixed.
+      // at session open: the user may have changed connection access since,
+      // and the whole point of this tool is to answer "why can't I see it?".
+      // Asking also reconciles the tool list, so an agent that noticed
+      // something was wrong does not wait for the next tick to have it fixed.
       if (await refreshWiring()) server.sendToolListChanged();
       let live = wired;
       try {
@@ -368,10 +379,10 @@ export async function createToolServer(
         registrations.map((registration) => registration.connection.name),
       );
 
-      // Report the tools actually registered for connections that are still
-      // wired — an MCP upstream by each of its own tool names, a plain
-      // connection by its one. A connection unwired since session open drops
-      // out (the broker would refuse it now); one wired since shows as pending.
+      // Report the tools actually registered for connections still enabled
+      // for agents — an MCP upstream by each of its own tool names, a plain
+      // connection by its one. A connection disabled since session open drops
+      // out; one enabled since shows as pending.
       const tools = registrations
         .filter((registration) => liveNames.has(registration.connection.name))
         .flatMap((registration) =>
@@ -442,16 +453,15 @@ export async function createToolServer(
           'the broker is reachable or its retry delay has elapsed.';
       } else if (live.length === 0) {
         hint =
-          'This agent is not wired to any tools yet. Ask the user to open ' +
-          'AgentMFA, find the tool under Tools, and wire this agent ' +
-          `("${principal.agent}") to it.`;
+          'No tools are enabled for agents. Ask the user to open AgentMFA ' +
+          'and enable or add the needed tool under Tools.';
       } else if (pending.length) {
         hint =
-          `Wired since this session started: ${pending.join(', ')}. ` +
-          'Reconnect to AgentMFA to use them.';
+          `Enabled since this session started: ${pending.join(', ')}. ` +
+          'Native tools refresh automatically; reconnect to refresh an upstream MCP catalog.';
       } else if (errors.length) {
         hint =
-          `Wired but unreachable this session: ${errors
+          `Enabled but unreachable this session: ${errors
             .map((entry) => entry.name)
             .join(', ')}. Reconnect once the server is reachable to use ` +
           'their tools.';
@@ -574,7 +584,7 @@ export async function createToolServer(
   registerMetaTools(server, broker, principal, upstreamIndex);
 
   /**
-   * Bring the per-connection tools back in line with the user's wiring.
+   * Bring the native per-connection tools back in line with current access.
    *
    * The surface used to be a snapshot taken at session open, so renaming a
    * connection left a tool whose calls 404 and switching one off left a tool
@@ -582,7 +592,7 @@ export async function createToolServer(
    * out short of reconnecting. Only the native `_request`/`_open` tools are
    * reconciled: re-running MCP upstream discovery would cost several round
    * trips per connection per tick, and its tools are keyed on the upstream's
-   * own catalogue rather than on the wiring.
+   * own catalogue rather than on connection access alone.
    *
    * Returns whether anything changed, so callers can decide about notifying.
    */
@@ -660,7 +670,7 @@ export async function createToolServer(
  * Search and the generic invoker appear once any upstream tool was
  * withheld over the registration budget, so big catalogs stay reachable
  * without flooding the agent's context. Every call still crosses the
- * broker's wiring and allowed-tools checks — these tools change
+ * broker's access and allowed-tools checks — these tools change
  * discovery, never authorization.
  */
 function registerMetaTools(
@@ -676,7 +686,7 @@ function registerMetaTools(
       description:
         'Ask the user to connect a service that is not configured (for example ' +
         '"linear" or "https://mcp.example.com/mcp"). This only files a request in ' +
-        'the AgentMFA app — the user adds and wires the tool there, and its ' +
+        'the AgentMFA app — the user adds and enables the tool there, and its ' +
         'tools appear on your next session (check with agentmfa_status).',
       inputSchema: { service: z.string().min(1).max(120) },
     },
@@ -689,9 +699,9 @@ function registerMetaTools(
             text:
               outcome.status === 'already_requested'
                 ? `Already requested. Ask the user to approve "${service}" in AgentMFA; ` +
-                  'its tools appear once they wire it to you.'
+                  'its tools appear once they add and enable it for agents.'
                 : `Requested. Ask the user to add "${service}" in the AgentMFA app and ` +
-                  'wire it to you; then reconnect or call agentmfa_status.',
+                  'enable it for agents; then reconnect or call agentmfa_status.',
           }],
         };
       } catch (error) {
@@ -770,7 +780,7 @@ function registerMetaTools(
       title: 'Call a searchable tool',
       description:
         'Invoke an upstream tool found via agentmfa_search_tools, by connection ' +
-        'and tool name. Subject to the same wiring and tool-selection checks as ' +
+        'and tool name. Subject to the same access and tool-selection checks as ' +
         'every other call.',
       inputSchema: {
         connection: z.string().min(1),
@@ -922,7 +932,7 @@ async function registerUpstream(
   } else if (tools.length === 0) {
     status = 'empty_tools';
   }
-  // A curated wiring lists only its allowed subset. This mirrors what the
+  // A curated connection lists only its allowed subset. This mirrors what the
   // broker enforces on tools/call; hiding the rest keeps the agent's tool
   // budget honest and its failures unconfusing.
   if (connection.allowed_tools) {

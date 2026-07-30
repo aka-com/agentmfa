@@ -53,6 +53,7 @@ pub fn manifest(
             "whoami": "/v1/whoami",
             "connections": "/v1/connections",
             "http": "/v1/http",
+            "elicit": "/v1/elicit",
             "pg_open": "/v1/pg/open",
             "ssh_open": "/v1/ssh/open",
             "instructions": "/instructions",
@@ -64,6 +65,10 @@ pub fn manifest(
     // client) bridges to, authenticated with the same shared key. The port
     // is dynamic, so bridges discover it here instead of pinning it.
     if let Some(url) = mcp_url {
+        m["capabilities"]
+            .as_array_mut()
+            .expect("manifest capabilities are an array")
+            .push(json!("mcp"));
         m["mcp_url"] = json!(url);
     }
     m
@@ -105,6 +110,7 @@ pub fn manifest_remote(
             "whoami": "/v1/whoami",
             "connections": "/v1/connections",
             "http": "/v1/http",
+            "elicit": "/v1/elicit",
             "pg_open": "/v1/pg/open",
             "instructions": "/instructions",
         },
@@ -114,6 +120,10 @@ pub fn manifest_remote(
         m["base_url"] = json!(base);
     }
     if mcp_available {
+        m["capabilities"]
+            .as_array_mut()
+            .expect("manifest capabilities are an array")
+            .push(json!("mcp"));
         m["mcp_path"] = json!("/mcp");
         if let Some(base) = public_url {
             m["mcp_url"] = json!(format!("{}/mcp", base.trim_end_matches('/')));
@@ -176,6 +186,7 @@ on the upstream leg. Authorization is per **tool**: the user enables or
 disables each connection for agents in the AgentMFA app. An enabled call
 executes immediately; a disabled call is refused with
 `403 denied_by_policy` — ask your user to enable the tool in the app. A
+new connection starts enabled for agents. A
 tool may additionally be set to **confirm its traffic**, which holds each
 call while the user answers (see §3).
 Relayed HTTP responses are scrubbed for recognized credential material, but
@@ -222,8 +233,9 @@ identities. It lives in plaintext at `{token_file}` (mode 0600).
 The key lasts {token_days} days, refreshed on use; the broker rewrites
 `{token_file}` whenever it re-mints, so re-reading the file is always the
 first recovery step. Rotating the key (user-initiated) invalidates
-outstanding data-plane capabilities and closes live Postgres and SSH
-connections for every agent at once.
+outstanding data-plane capabilities, closes broker-owned Postgres sessions,
+and closes SSH agent sockets for every agent at once. It cannot terminate an
+SSH transport that already authenticated.
 
 **Label yourself.** Optionally send `X-AgentMFA-Client: <your-name>`
 (1-64 chars of `[A-Za-z0-9._-]`) on every call. It names you in the user's
@@ -234,7 +246,10 @@ authorization.
 
     GET /v1/connections
     → [{{"name": "github", "type": "api", "target": "https://api.github.com",
-         "endpoint": "/v1/http", "wired": true}}, …]
+         "endpoint": "/v1/http", "wired": true}},
+       {{"name": "notion", "type": "api", "target": "https://mcp.notion.com",
+         "endpoint": "/v1/http", "wired": true, "mcp_path": "/mcp",
+         "allowed_tools": ["search", "fetch"]}}, …]
 
 Connections name a destination. Secret names and values are never
 exposed. `endpoint` is where a call naming this connection goes (POST
@@ -434,7 +449,48 @@ explicit `-o PubkeyAuthentication=host-bound` is optional. Clients without
 those OpenSSH extensions fail closed because the broker refuses unbound or
 host-key-mismatched signing requests.
 
-## 7. Other errors
+## 7. MCP tool routing
+
+`mfa mcp` is a stdio adapter for MCP clients. It discovers the broker's
+Streamable HTTP MCP endpoint and authenticates every request with this
+machine's shared key. The manifest advertises `mcp_url` while the sidecar is
+running (or `mcp_path` on a remotely served broker). Upstream MCP connections
+must themselves speak Streamable HTTP at their configured `mcp_path`;
+upstream stdio servers are not supported.
+
+Plain API connections appear as `agentmfa_<connection>_request`; Postgres and
+SSH connections appear as `agentmfa_<connection>_open`. An upstream MCP
+connection contributes bounded names derived from both the connection and
+the upstream tool name. Its `allowed_tools` field, when present, is the
+curated upstream subset the broker enforces on every `tools/call`; absence
+means all advertised upstream tools.
+
+Use `agentmfa_status` first when a tool is absent or an upstream failed.
+Large upstream catalogs keep overflow tools behind `agentmfa_search_tools`
+and `agentmfa_call_tool` rather than flooding `tools/list`.
+`agentmfa_connect` only files a request for the user to configure a service;
+it grants nothing.
+
+Native AgentMFA tools follow connection enable/disable and rename changes
+during a serving session and send `tools/list_changed`. Upstream MCP catalogs
+are discovered when the serving session starts; reconnect to refresh an
+upstream's tools, schemas, resources, or curated subset. Each upstream
+operation creates and then closes its own upstream MCP session.
+
+An upstream elicitation is relayed through the authenticated `/v1/elicit`
+callback and waits only when an AgentMFA request surface can display it.
+There is no generic agent reason to call that callback directly. Serving
+session ids are bound to the broker's `client_id`, which is one shared
+machine identity—not a boundary between local agents. Treat a leaked
+`mcp-session-id` as usable by another process that already holds the same
+machine key.
+
+The native `_request` shape and response envelope follow §4, including
+repeated headers, `body_base64`, path/header restrictions, response bounds,
+and mutating-call `request_id` semantics. `_open` tools follow the ticket and
+expiry rules in §§3, 5, and 6.
+
+## 8. Other errors
 
 - `400 {{"reason": "invalid_json"}}`: the request body was not valid JSON
   for the endpoint (wrong/missing Content-Type, malformed JSON, or a
@@ -487,11 +543,11 @@ pub fn skill_file(config: &BrokerConfig, paths: &Paths) -> String {
         r#"---
 name: mfa
 description: >-
-  Broker credentialed HTTP, Postgres and SSH access through the local
-  AgentMFA daemon. Use when a task needs an API key, database, or SSH key
-  the developer has configured. The broker does not directly expose
-  the stored secret; access is authorization-gated. Start by reading the live
-  instructions over the broker socket.
+  Broker credentialed HTTP, Postgres, SSH and upstream MCP access through the
+  local AgentMFA daemon. Use when a task needs an API key, database, SSH key,
+  or MCP server the developer has configured. The broker does not directly
+  expose the stored secret; access is authorization-gated. Start by reading
+  the live instructions over the broker socket.
 ---
 
 <!-- Generated by `mfa skill`. Do not edit: regenerate instead.
@@ -546,6 +602,7 @@ mod tests {
         assert_eq!(m["http_max_redirects"], config.max_redirects);
         assert_eq!(m["endpoints"]["pair"], "/v1/pair");
         assert_eq!(m["endpoints"]["whoami"], "/v1/whoami");
+        assert_eq!(m["endpoints"]["elicit"], "/v1/elicit");
         assert_eq!(m["endpoints"]["ssh_open"], "/v1/ssh/open");
         assert_eq!(m["socket"], "~/.aka/broker.sock");
         assert_eq!(m["token_file"], "~/.aka/token");
@@ -614,12 +671,35 @@ mod tests {
     fn manifest_advertises_the_mcp_endpoint_only_while_one_runs() {
         let absent = manifest(&BrokerConfig::default(), &paths(), None);
         assert!(absent.get("mcp_url").is_none());
+        assert!(!absent["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|capability| capability == "mcp"));
         let present = manifest(
             &BrokerConfig::default(),
             &paths(),
             Some("http://127.0.0.1:42117/mcp".into()),
         );
         assert_eq!(present["mcp_url"], "http://127.0.0.1:42117/mcp");
+        assert!(present["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|capability| capability == "mcp"));
+
+        let remote = manifest_remote(
+            &BrokerConfig::default(),
+            Some("https://b.example.dev"),
+            true,
+        );
+        assert_eq!(remote["mcp_path"], "/mcp");
+        assert_eq!(remote["endpoints"]["elicit"], "/v1/elicit");
+        assert!(remote["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|capability| capability == "mcp"));
     }
 
     #[test]
@@ -639,6 +719,8 @@ mod tests {
             "at least 600 seconds",
             "denied_by_policy",
             "\"wired\": true",
+            "\"mcp_path\": \"/mcp\"",
+            "\"allowed_tools\": [\"search\", \"fetch\"]",
             "request_id_mismatch",
             "outcome_not_replayable",
             "idempotency_capacity",
@@ -651,6 +733,13 @@ mod tests {
             "distinct values are also preserved",
             "/v1/pg/open",
             "/v1/ssh/open",
+            "## 7. MCP tool routing",
+            "agentmfa_status",
+            "agentmfa_search_tools",
+            "agentmfa_call_tool",
+            "upstream stdio servers are not supported",
+            "reconnect to refresh",
+            "`mcp-session-id` as usable",
             "SSH_AUTH_SOCK",
             "session binding and host-bound authentication automatically",
             "host-key-mismatched signing requests",

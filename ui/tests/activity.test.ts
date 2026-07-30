@@ -20,6 +20,8 @@ const base: ActivityEntry = {
   agent: 'agent-a',
   connection: 'tool-a',
   duration_ms: 12,
+  approver: 'local-user',
+  surface: 'app_window',
   confirmation: 'os_authentication',
 };
 
@@ -31,6 +33,8 @@ test('activity identity includes attribution and event metadata', () => {
     { ...base, connection: 'tool-b' },
     { ...base, tone: 'warning' },
     { ...base, duration_ms: 13 },
+    { ...base, approver: '192.0.2.7:4242' },
+    { ...base, surface: 'remote' as const },
     { ...base, confirmation: 'management_token' },
   ]) {
     assert.notEqual(activityIdentity(changed), identity);

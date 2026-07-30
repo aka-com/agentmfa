@@ -13,7 +13,8 @@
 //! - **Upstream** the proxy *is* a Postgres client: its own TCP connection,
 //!   its own TLS per the connection's `sslmode`, and SCRAM-SHA-256 (or
 //!   md5/cleartext) with the configured user and optional stored password.
-//!   Servers using trust or certificate authentication need no secret.
+//!   Servers using trust authentication need no secret. Client-certificate
+//!   authentication is not implemented.
 //! - Once both complete, the two legs speak byte-identical Postgres v3
 //!   framing and are spliced with a plain bidirectional copy, seeded with
 //!   any residual bytes the handshake readers buffered, so a pipelined

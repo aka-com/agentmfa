@@ -136,6 +136,10 @@ export interface ActivityEntry {
   connection?: string | null;
   /** Brokered call / session duration, when measured. */
   duration_ms?: number | null;
+  /** Decision provenance. A remote approver is the directly connected
+   * socket peer (often a reverse proxy), not an authenticated person. */
+  approver?: string | null;
+  surface?: 'app_window' | 'cli' | 'remote' | 'harness' | null;
   /** How a gated action was authorized ("os_authentication",
    * "management_token", …), when one was. */
   confirmation?: string | null;

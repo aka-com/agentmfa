@@ -33,6 +33,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
+use std::future::Future;
 use std::io::{BufRead as _, BufReader, Read as _, Seek as _, SeekFrom, Write as _};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -48,6 +49,54 @@ use crate::Result;
 
 const TAIL_CHUNK_BYTES: usize = 16 * 1024;
 const MAX_AUDIT_LINE_BYTES: usize = 1024 * 1024;
+
+tokio::task_local! {
+    static REQUEST_DECISION_CONTEXT: DecisionContext;
+}
+
+thread_local! {
+    static BLOCKING_DECISION_CONTEXT: std::cell::RefCell<Option<DecisionContext>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Attribute audit entries emitted while one management request is being
+/// handled. The scope follows async work; [`with_blocking_decision_context`]
+/// carries the same value across the explicit `spawn_blocking` backend seam.
+pub(crate) async fn with_request_decision_context<F>(
+    context: DecisionContext,
+    future: F,
+) -> F::Output
+where
+    F: Future,
+{
+    REQUEST_DECISION_CONTEXT.scope(context, future).await
+}
+
+pub(crate) fn current_decision_context() -> Option<DecisionContext> {
+    BLOCKING_DECISION_CONTEXT
+        .with(|slot| slot.borrow().clone())
+        .or_else(|| REQUEST_DECISION_CONTEXT.try_with(Clone::clone).ok())
+}
+
+/// Carry a request's attribution onto a blocking worker and restore any
+/// prior value even if the operation unwinds.
+pub(crate) fn with_blocking_decision_context<T>(
+    context: Option<DecisionContext>,
+    call: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<DecisionContext>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            BLOCKING_DECISION_CONTEXT.with(|slot| {
+                slot.replace(self.0.take());
+            });
+        }
+    }
+
+    let previous = BLOCKING_DECISION_CONTEXT.with(|slot| slot.replace(context));
+    let _restore = Restore(previous);
+    call()
+}
 
 /// Schema version written on every new entry. Entries with no `v` field
 /// predate versioning and read back as version 1.
@@ -587,6 +636,12 @@ impl AuditLog {
     /// log is an operator aid, so a failure here never fails the operation
     /// being described — but what does land is chained, so it can be checked.
     pub fn append(&self, mut entry: AuditEntry) {
+        if entry.surface.is_none() {
+            if let Some(context) = current_decision_context() {
+                entry.approver = context.approver;
+                entry.surface = Some(context.surface);
+            }
+        }
         {
             let mut file = self.file.lock().unwrap();
             // A caller must not be able to dictate its own entry's MAC.

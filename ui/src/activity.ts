@@ -16,6 +16,8 @@ export function activityIdentity(entry: ActivityEntry): string {
     entry.agent ?? null,
     entry.connection ?? null,
     entry.duration_ms ?? null,
+    entry.approver ?? null,
+    entry.surface ?? null,
     entry.confirmation ?? null,
   ]);
 }

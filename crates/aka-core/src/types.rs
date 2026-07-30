@@ -564,6 +564,10 @@ pub enum DecisionSurface {
     AppWindow,
     /// The headless CLI's terminal approver.
     Cli,
+    /// A management-API caller. The peer is the socket endpoint directly
+    /// connected to the broker, so behind a reverse proxy it identifies the
+    /// proxy—not a human identity.
+    Remote { peer: Option<std::net::SocketAddr> },
     /// Test harnesses and dev tooling.
     Harness,
 }
@@ -605,13 +609,28 @@ impl DecisionContext {
             surface,
         }
     }
+
+    /// A management-API call authorized by the management token. The socket
+    /// peer is useful operational attribution, but is not authenticated as a
+    /// person and must never be treated as authorization.
+    pub fn remote(peer: Option<std::net::SocketAddr>) -> Self {
+        Self {
+            approver: Some(
+                peer.map(|value| value.to_string())
+                    .unwrap_or_else(|| "local_socket".to_string()),
+            ),
+            surface: DecisionSurface::Remote { peer },
+        }
+    }
 }
 
 /// User settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Settings {
-    /// "Require OS authentication to read secrets", default on. The macOS
-    /// app gates each broker-side vault read with LocalAuthentication.
+    /// "Require OS authentication to read secrets", default on. This gates
+    /// user-plane reveals and copies in the macOS app. Agent-plane injection
+    /// is authorized by the connection's access policy and deliberately does
+    /// not put LocalAuthentication in every request path.
     pub reauth_on_read: bool,
     /// Read-only migration source for pre-connection-scoped CA settings.
     #[serde(
@@ -626,10 +645,12 @@ pub struct Settings {
     /// Dock icon (accessory activation) until the window is reopened.
     #[serde(default)]
     pub menu_bar_hides_dock: bool,
-    /// How long one successful OS authentication keeps AgentMFA unlocked
-    /// for user-plane actions (reads, copies, tool edits), in seconds; each
-    /// such action slides the window forward. Granting an agent new
-    /// authority always re-prompts regardless. Default 15 minutes.
+    /// How long one successful OS authentication keeps AgentMFA unlocked for
+    /// user-plane reads, copies, and configuration edits, in seconds; each
+    /// such action slides the window forward. Operations classified as
+    /// full-authority use a fresh gate instead. New tools are enabled by
+    /// default and creating one prompts only when it extends an already-stored
+    /// secret to a new target. Default 15 minutes.
     #[serde(default = "default_presence_window_secs")]
     pub presence_window_secs: u64,
 }

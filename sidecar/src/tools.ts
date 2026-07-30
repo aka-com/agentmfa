@@ -12,7 +12,7 @@
 //     password-less DSN and ticket, or an `SSH_AUTH_SOCK` path, which the
 //     agent then uses with stock tools.
 //
-// No authorization happens here. An unwired connection never becomes a
+// No authorization happens here. A disabled connection never becomes a
 // tool, and if one slipped through, the broker would still refuse it.
 
 import { z } from 'zod';
