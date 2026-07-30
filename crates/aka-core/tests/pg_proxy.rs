@@ -830,6 +830,23 @@ async fn get_endpoint_reads_back_the_issued_address_without_rotating() {
 }
 
 #[tokio::test]
+async fn renewing_endpoint_extends_expiry_without_changing_client_configuration() {
+    let mut h = harness(BrokerConfig::default()).await;
+    let fake = fake_pg(FakeAuth::Cleartext).await;
+    add_pg_connection(&h.broker, fake.port);
+    h.pair().await;
+    let conn = h.broker.store.connection_by_name("prod-db").unwrap();
+    let issued = h.issue_endpoint().await;
+
+    let renewed = h.broker.ui_renew_endpoint(&conn.id).await.unwrap();
+    assert_eq!(renewed.endpoint_id, issued.endpoint_id);
+    assert_eq!(renewed.dsn, issued.dsn);
+    assert_eq!(renewed.tcp_dsn, issued.tcp_dsn);
+    assert_eq!(renewed.secret, issued.secret);
+    assert!(renewed.expires_at >= issued.expires_at);
+}
+
+#[tokio::test]
 async fn wrong_endpoint_secret_is_rejected() {
     let mut h = harness(BrokerConfig::default()).await;
     let fake = fake_pg(FakeAuth::Cleartext).await;

@@ -66,6 +66,9 @@ export interface AgentAccess {
      * `IdentityAgent` straight at the path.
      */
     require_auth?: boolean;
+    /** Absolute deadline plus broker-clock remainder for remote brokers. */
+    expires_at: string;
+    expires_in_secs?: number | null;
   } | null;
 }
 
@@ -83,6 +86,8 @@ export interface IssuedEndpoint {
   tcp_dsn?: string | null;
   secret: string;
   example: string;
+  expires_at: string;
+  expires_in_secs?: number | null;
 }
 
 export interface ConnectionSummary {
@@ -595,6 +600,7 @@ export interface CommandMap {
   list_requests: CommandSpec<undefined, RequestRecord[]>;
   respond_approval: CommandSpec<{ id: string; decision: ApprovalDecision }, boolean>;
   issue_endpoint: CommandSpec<{ connectionId: string }, IssuedEndpoint>;
+  renew_endpoint: CommandSpec<{ connectionId: string }, IssuedEndpoint>;
   get_endpoint: CommandSpec<{ connectionId: string }, IssuedEndpoint | null>;
   copy_endpoint_text: CommandSpec<{ connectionId: string; format: string }, void>;
   revoke_endpoint: CommandSpec<{ endpointId: string }, boolean>;

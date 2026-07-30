@@ -1369,6 +1369,22 @@ pub async fn issue_endpoint(
         .map_err(|e| e.to_string())
 }
 
+/// Renew a direct endpoint without rotating its address or secret. The broker
+/// performs the native confirmation because this extends standing access.
+#[tauri::command]
+pub async fn renew_endpoint(
+    state: State<'_, AppState>,
+    connection_id: String,
+) -> CmdResult<IssuedEndpointDto> {
+    let connection_id = parse_id(&connection_id)?;
+    state
+        .brokers
+        .backend()
+        .renew_endpoint(connection_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Read a connection's already-issued direct endpoint (address, retained
 /// secret, example) without minting or rotating; `None` when none is issued.
 /// The address embeds a standing credential, so the read-back takes a fresh
@@ -1893,6 +1909,7 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Syn
         set_endpoint_require_auth,
         list_mcp_tools,
         issue_endpoint,
+        renew_endpoint,
         get_endpoint,
         copy_endpoint_text,
         revoke_endpoint,

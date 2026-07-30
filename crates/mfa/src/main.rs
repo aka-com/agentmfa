@@ -696,7 +696,7 @@ enum ConnCommand {
         #[arg(long)]
         broker: Option<String>,
     },
-    /// Print, issue/rotate, or revoke a connection's direct endpoint.
+    /// Print, issue/rotate, renew, or revoke a connection's direct endpoint.
     /// Issuance requires a running local or remote broker to own the listener;
     /// reads and revocation also work as offline edits.
     Endpoint {
@@ -706,9 +706,13 @@ enum ConnCommand {
         /// The broker must be running so it can own the endpoint listener.
         #[arg(long, conflicts_with = "revoke")]
         issue: bool,
+        /// Extend the existing endpoint for 30 days without changing its
+        /// address or secret. The broker must be running.
+        #[arg(long, conflicts_with_all = ["issue", "revoke"])]
+        renew: bool,
         /// Revoke this connection's issued endpoint. Unlike issuance, this
         /// can be performed as an offline edit while the broker is stopped.
-        #[arg(long, conflicts_with_all = ["issue", "url", "secret"])]
+        #[arg(long, conflicts_with_all = ["issue", "renew", "url", "secret"])]
         revoke: bool,
         /// ssh: make the agent socket refuse to list or sign until the caller
         /// presents the endpoint secret, so finding the socket is no longer
@@ -816,15 +820,21 @@ enum DsnFormat {
 enum EndpointAction {
     Read,
     Issue,
+    Renew,
     Revoke,
 }
 
-fn endpoint_action(issue: bool, revoke: bool) -> Result<EndpointAction, &'static str> {
-    match (issue, revoke) {
-        (false, false) => Ok(EndpointAction::Read),
-        (true, false) => Ok(EndpointAction::Issue),
-        (false, true) => Ok(EndpointAction::Revoke),
-        (true, true) => Err("--issue and --revoke are mutually exclusive"),
+fn endpoint_action(
+    issue: bool,
+    renew: bool,
+    revoke: bool,
+) -> Result<EndpointAction, &'static str> {
+    match (issue, renew, revoke) {
+        (false, false, false) => Ok(EndpointAction::Read),
+        (true, false, false) => Ok(EndpointAction::Issue),
+        (false, true, false) => Ok(EndpointAction::Renew),
+        (false, false, true) => Ok(EndpointAction::Revoke),
+        _ => Err("--issue, --renew, and --revoke are mutually exclusive"),
     }
 }
 
@@ -839,9 +849,9 @@ fn endpoint_require_auth(require_auth: bool, no_require_auth: bool) -> Option<bo
 }
 
 fn endpoint_action_supported(action: EndpointAction, online: bool) -> Result<(), &'static str> {
-    if action == EndpointAction::Issue && !online {
+    if matches!(action, EndpointAction::Issue | EndpointAction::Renew) && !online {
         Err(
-            "direct endpoint issuance requires a running broker to own the listener; \
+            "direct endpoint issuance and renewal require a running broker to own the listener; \
              start AgentMFA or `mfa serve`, then retry",
         )
     } else {
@@ -1052,6 +1062,7 @@ fn run_cli() {
             ConnCommand::Endpoint {
                 name,
                 issue,
+                renew,
                 revoke,
                 require_auth,
                 no_require_auth,
@@ -1062,6 +1073,7 @@ fn run_cli() {
             } => cmd_conn_endpoint(
                 name,
                 issue,
+                renew,
                 revoke,
                 endpoint_require_auth(require_auth, no_require_auth),
                 url,
@@ -1176,6 +1188,7 @@ fn manage_error_exit_code(error: &ManageError) -> ExitCode {
         | ManageError::InvalidSetting { .. }
         | ManageError::InvalidConnectionField { .. }
         | ManageError::KindChange
+        | ManageError::EndpointExpired
         | ManageError::EndpointRequiresWiring => ExitCode::Usage,
         ManageError::SecretReadNotAuthenticated
         | ManageError::NotConfirmed
@@ -1899,22 +1912,30 @@ fn cmd_conn_show(name: String, root: Option<PathBuf>, url: Option<String>, json:
             .unwrap_or_else(|| "all".into())
     );
     match &dto.agent_access.endpoint {
-        Some(endpoint) => println!(
-            "direct endpoint: {} ({}){}",
-            endpoint
-                .dsn
-                .as_deref()
-                .unwrap_or("issued; use `mfa conn endpoint` to copy"),
-            endpoint.kind,
-            // Whether the socket is a standing signing oracle for anything
-            // that can open it is the most consequential fact about an SSH
-            // endpoint, so it belongs on the line that reports one.
-            if endpoint.require_auth {
-                ", authenticated"
+        Some(endpoint) => {
+            let expiry = if endpoint.expires_at.is_empty() {
+                String::new()
             } else {
-                ""
-            }
-        ),
+                format!(", expires {}", endpoint.expires_at)
+            };
+            println!(
+                "direct endpoint: {} ({}){}{}",
+                endpoint
+                    .dsn
+                    .as_deref()
+                    .unwrap_or("issued; use `mfa conn endpoint` to copy"),
+                endpoint.kind,
+                // Whether the socket is a standing signing oracle for anything
+                // that can open it is the most consequential fact about an SSH
+                // endpoint, so it belongs on the line that reports one.
+                if endpoint.require_auth {
+                    ", authenticated"
+                } else {
+                    ""
+                },
+                expiry,
+            )
+        }
         None => println!("direct endpoint: none"),
     }
     match (&dto.last_status, &dto.last_detail, &dto.last_checked_at) {
@@ -2374,13 +2395,14 @@ fn cmd_conn_test(name: String, root: Option<PathBuf>, url: Option<String>, json:
     }
 }
 
-/// Read, issue/rotate, or revoke a direct endpoint through the same management
+/// Read, issue/rotate, renew, or revoke a direct endpoint through the same management
 /// backend as the app. Issuance is deliberately online-only: a short-lived
 /// offline broker would drop the newly bound listener as soon as this command
 /// exits. Revocation only narrows access, so it remains a safe offline edit.
 fn cmd_conn_endpoint(
     name: String,
     issue: bool,
+    renew: bool,
     revoke: bool,
     require_auth: Option<bool>,
     url: bool,
@@ -2389,8 +2411,8 @@ fn cmd_conn_endpoint(
     broker: Option<String>,
     json: bool,
 ) {
-    let action =
-        endpoint_action(issue, revoke).unwrap_or_else(|message| die_with(ExitCode::Usage, message));
+    let action = endpoint_action(issue, renew, revoke)
+        .unwrap_or_else(|message| die_with(ExitCode::Usage, message));
     if json && (url || secret) {
         die_with(
             ExitCode::Usage,
@@ -2438,6 +2460,7 @@ fn cmd_conn_endpoint(
 
     let mut info = match action {
         EndpointAction::Issue => managed.run_gated(managed.backend.issue_endpoint(connection_id)),
+        EndpointAction::Renew => managed.run_gated(managed.backend.renew_endpoint(connection_id)),
         EndpointAction::Read => match managed.run(managed.backend.get_endpoint(connection_id)) {
             Some(info) => info,
             None => die_with(
@@ -2482,8 +2505,26 @@ fn cmd_conn_endpoint(
         print_json(&info);
         return;
     }
+    let expired = info.expires_in_secs == Some(0);
+    if expired && (url || secret) {
+        die_with(
+            ExitCode::Usage,
+            format!(
+                "the direct endpoint for {name} has expired — renew it with \
+                 `mfa conn endpoint {name} --renew`"
+            ),
+        );
+    }
+    if expired {
+        eprintln!(
+            "expired — renew without changing this address with \
+             `mfa conn endpoint {name} --renew`"
+        );
+    }
     if action == EndpointAction::Issue {
         eprintln!("issued direct endpoint for {name}");
+    } else if action == EndpointAction::Renew {
+        eprintln!("renewed direct endpoint for {name}");
     }
     // Selectors print exactly one field with no decoration, so a `$(...)`
     // capture carries only the value. `--url` prefers the TCP form when the
@@ -2508,6 +2549,9 @@ fn cmd_conn_endpoint(
     }
     if !info.secret.is_empty() {
         eprintln!("endpoint secret: {}", info.secret);
+    }
+    if !info.expires_at.is_empty() {
+        eprintln!("expires: {}", info.expires_at);
     }
 }
 
@@ -3047,6 +3091,15 @@ fn cmd_ssh_agent(
             ),
         );
     };
+    if info.expires_in_secs == Some(0) {
+        die_with(
+            ExitCode::Usage,
+            format!(
+                "the direct endpoint for {connection} has expired — renew it with \
+                 `mfa conn endpoint {connection} --renew`"
+            ),
+        );
+    }
     // A secret on an SSH endpoint *is* the require-auth flag: the broker
     // surfaces it only for a socket that will demand it.
     let secret = if info.secret.is_empty() {
@@ -4255,20 +4308,41 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_issuance_requires_online_broker_but_revocation_does_not() {
-        assert_eq!(endpoint_action(false, false).unwrap(), EndpointAction::Read);
-        assert_eq!(endpoint_action(true, false).unwrap(), EndpointAction::Issue);
+    fn endpoint_issuance_and_renewal_require_online_broker_but_revocation_does_not() {
         assert_eq!(
-            endpoint_action(false, true).unwrap(),
+            endpoint_action(false, false, false).unwrap(),
+            EndpointAction::Read
+        );
+        assert_eq!(
+            endpoint_action(true, false, false).unwrap(),
+            EndpointAction::Issue
+        );
+        assert_eq!(
+            endpoint_action(false, true, false).unwrap(),
+            EndpointAction::Renew
+        );
+        assert_eq!(
+            endpoint_action(false, false, true).unwrap(),
             EndpointAction::Revoke
         );
-        assert!(endpoint_action(true, true).is_err());
+        assert!(endpoint_action(true, true, false).is_err());
 
         let error = endpoint_action_supported(EndpointAction::Issue, false).unwrap_err();
         assert!(error.contains("running broker"));
         assert!(endpoint_action_supported(EndpointAction::Issue, true).is_ok());
+        assert!(endpoint_action_supported(EndpointAction::Renew, false).is_err());
+        assert!(endpoint_action_supported(EndpointAction::Renew, true).is_ok());
         assert!(endpoint_action_supported(EndpointAction::Read, false).is_ok());
         assert!(endpoint_action_supported(EndpointAction::Revoke, false).is_ok());
+        assert!(Cli::try_parse_from([
+            "mfa",
+            "conn",
+            "endpoint",
+            "production",
+            "--renew",
+            "--issue",
+        ])
+        .is_err());
     }
 
     /// SSH-1 / SEC-28. The two flags are opposites rather than a tri-state,

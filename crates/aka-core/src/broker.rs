@@ -73,6 +73,9 @@ pub struct IssuedEndpointInfo {
     /// (`DATABASE_URL="…"`) rather than a shell command, so the embedded
     /// secret is not steered toward argv/shell history.
     pub example: String,
+    /// Absolute endpoint deadline. Renewal extends this without changing the
+    /// address or secret.
+    pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// A begun remotely-relayed OAuth flow: what the shell needs to open the
@@ -1854,6 +1857,13 @@ impl Broker {
         if !self.access.allows(connection_id) {
             return Err(CoreError::EndpointRequiresWiring);
         }
+        if self
+            .endpoints
+            .get_for_connection(connection_id)
+            .is_some_and(|endpoint| endpoint.is_expired())
+        {
+            return Err(CoreError::EndpointExpired);
+        }
 
         // First issuance mints standing access, so it takes the native gate.
         // A *reissue* only rotates the secret of an endpoint the user already
@@ -1887,6 +1897,12 @@ impl Broker {
                 return Err(CoreError::EndpointRequiresWiring);
             }
             let existing = self.endpoints.get_for_connection(connection_id);
+            if existing
+                .as_ref()
+                .is_some_and(|endpoint| endpoint.is_expired())
+            {
+                return Err(CoreError::EndpointExpired);
+            }
             let listener_already_live = existing.as_ref().is_some_and(|endpoint| {
                 self.endpoint_listeners
                     .lock()
@@ -1986,6 +2002,7 @@ impl Broker {
                     tcp_dsn,
                     secret: recovered.clone(),
                     example,
+                    expires_at: endpoint.expires_at,
                 }
             }
             ConnectionConfig::Ssh {
@@ -2027,6 +2044,7 @@ impl Broker {
                     } else {
                         format!("SSH_AUTH_SOCK=\"{sock}\" {target}")
                     },
+                    expires_at: endpoint.expires_at,
                 }
             }
             ConnectionConfig::Api { .. } => {
@@ -2049,6 +2067,7 @@ impl Broker {
                     // an upstream route goes, since the proxy forwards the
                     // path through and the bare root 404s on most APIs.
                     example: format!("curl -H \"Authorization: Bearer {secret}\" {base}/"),
+                    expires_at: endpoint.expires_at,
                 }
             }
         };
@@ -2073,6 +2092,79 @@ impl Broker {
         Ok(Some(self.endpoint_info(&connection, &endpoint).await?))
     }
 
+    /// Extend an endpoint's deadline without changing its id, address, or
+    /// secret. Renewal is an explicit expansion of standing authority and
+    /// therefore takes the same native configuration gate as first issuance.
+    /// An expired endpoint remains in the registry precisely so this operation
+    /// can preserve a long-lived client configuration.
+    pub async fn ui_renew_endpoint(
+        self: &Arc<Self>,
+        connection_id: &Uuid,
+    ) -> Result<IssuedEndpointInfo> {
+        let connection = self.store.connection_by_id(connection_id)?;
+        if !self.access.allows(connection_id) {
+            return Err(CoreError::EndpointRequiresWiring);
+        }
+        let endpoint = self
+            .endpoints
+            .get_for_connection(connection_id)
+            .ok_or(CoreError::EndpointNotFound)?;
+        let store = self.store.clone();
+        let description = format!("Renew the direct endpoint for {}", connection.name);
+        let confirmation =
+            tokio::task::spawn_blocking(move || store.confirm_configuration_action(&description))
+                .await
+                .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))??;
+
+        // Expired endpoints are not rebound at startup. Reclaim their stable
+        // socket/port before making the credential valid again, so renewal can
+        // never send a still-configured client to a listener another process
+        // has taken over.
+        let listener_live = self
+            .endpoint_listeners
+            .lock()
+            .unwrap()
+            .contains_key(&endpoint.id);
+        if !listener_live {
+            self.bind_endpoint_listener(&endpoint, &connection).await?;
+        }
+
+        let renewed = {
+            let _gate = self.config_gate.lock().unwrap();
+            if !self.access.allows(connection_id) {
+                return Err(CoreError::EndpointRequiresWiring);
+            }
+            let current = self.endpoints.get_for_connection(connection_id);
+            if current
+                .as_ref()
+                .is_none_or(|current| current.id != endpoint.id)
+            {
+                if !listener_live {
+                    if let Some(handle) =
+                        self.endpoint_listeners.lock().unwrap().remove(&endpoint.id)
+                    {
+                        handle.stop();
+                    }
+                }
+                return Err(CoreError::EndpointNotFound);
+            }
+            self.endpoints.renew(&endpoint.id)?
+        };
+        let info = self.endpoint_info(&connection, &renewed).await?;
+        self.audit.append(
+            AuditEntry::new(
+                AuditKind::Wired,
+                format!("Direct endpoint renewed: {}", connection.name),
+            )
+            .connection(connection.name)
+            .confirmation(confirmation)
+            .field("endpoint_id", renewed.id.to_string())
+            .field("expires_at", renewed.expires_at.to_rfc3339()),
+        );
+        self.events.wirings_changed();
+        Ok(info)
+    }
+
     /// Read an existing direct endpoint for a copy-to-clipboard: same address
     /// as `ui_get_endpoint`, but the address embeds a standing credential, so
     /// this takes a fresh native gate and is audited just like copying a
@@ -2085,11 +2177,21 @@ impl Broker {
         let Some(endpoint) = self.endpoints.get_for_connection(connection_id) else {
             return Ok(None);
         };
+        if endpoint.is_expired() {
+            return Err(CoreError::EndpointExpired);
+        }
         let store = self.store.clone();
         let description = format!("Copy the direct endpoint for “{}”", connection.name);
         let confirmation = tokio::task::spawn_blocking(move || store.confirm_action(&description))
             .await
             .map_err(|e| CoreError::Vault(format!("confirmation task failed: {e}")))??;
+        if self
+            .endpoints
+            .get(&endpoint.id)
+            .is_none_or(|current| current.is_expired())
+        {
+            return Err(CoreError::EndpointExpired);
+        }
         let info = self.endpoint_info(&connection, &endpoint).await?;
         self.audit.append(
             AuditEntry::new(
@@ -2244,6 +2346,13 @@ impl Broker {
     /// stale and dropped rather than rebound.
     pub async fn rebind_endpoints(self: &Arc<Self>) {
         for endpoint in self.endpoints.list() {
+            if endpoint.is_expired() {
+                tracing::info!(
+                    "leaving expired endpoint {} inactive until it is renewed or revoked",
+                    endpoint.id
+                );
+                continue;
+            }
             if self
                 .endpoint_listeners
                 .lock()

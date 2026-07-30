@@ -574,8 +574,10 @@ pub struct ToolAccess {
 /// every agent shares. The plaintext is retained only in the vault so a
 /// pasteable address can be reconstructed after a gated, audited copy-back;
 /// `endpoints.json` carries only its hash. Revoke or reissue invalidates it
-/// instantly. The listener re-checks the connection's agent access on every
-/// request/connection, exactly as the control plane does.
+/// instantly, and every endpoint expires on its persisted deadline unless the
+/// user explicitly renews it. The listener re-checks both that deadline and
+/// the connection's agent access on every request/connection, exactly as the
+/// control plane does.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DirectEndpoint {
     pub id: Uuid,
@@ -623,6 +625,22 @@ pub struct DirectEndpoint {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub require_auth: bool,
     pub created_at: DateTime<Utc>,
+    /// Absolute, restart-safe deadline for accepting this endpoint
+    /// credential. Records from before endpoint expiry was introduced receive
+    /// a one-time compatibility grace period when they are first loaded.
+    #[serde(default = "legacy_direct_endpoint_expiry")]
+    pub expires_at: DateTime<Utc>,
+}
+
+fn legacy_direct_endpoint_expiry() -> DateTime<Utc> {
+    Utc::now() + chrono::Duration::days(7)
+}
+
+impl DirectEndpoint {
+    /// Whether this endpoint may no longer authenticate a new connection.
+    pub fn is_expired(&self) -> bool {
+        Utc::now() >= self.expires_at
+    }
 }
 
 /// The surface a human decision came from (audit attribution).

@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { state } from '../app-state';
 import { ENDPOINT_FORMATS } from '../endpoint-formats';
+import { endpointExpired } from '../endpoint-expiry';
 import { directEndpointAddress, sshDirectCommand } from '../getting-started';
 import { AppIcon } from '../icon';
 import type { ConnectionSummary, ConnectionType } from '../types';
@@ -66,6 +67,18 @@ export function EndpointStrip({ connection: c, withFormats = false }: {
     </div>;
   }
   const copied = state.copied === `ep:${c.id}`;
+  const expired = endpointExpired(endpoint.expires_at, endpoint.expires_in_secs);
+  const expiryDate = new Date(endpoint.expires_at);
+  const expiryKnown = !Number.isNaN(expiryDate.getTime());
+  const expiryLabel = expired
+    ? 'Expired'
+    : !expiryKnown
+      ? 'Expiry unavailable'
+      : `Expires ${expiryDate.toLocaleDateString(undefined, {
+          year: 'numeric',
+          month: 'short',
+          day: 'numeric',
+        })}`;
   const expanded = Boolean(state.epExpanded[c.id]);
   const endpointAddress = directEndpointAddress(c.type, endpoint, state.sshSockets[c.id]);
   const endpointText = endpointAddress
@@ -74,7 +87,7 @@ export function EndpointStrip({ connection: c, withFormats = false }: {
       : endpointAddress
     : null;
   const copyTitle = c.type === 'ssh' ? 'Copy the SSH command' : 'Copy the connection command';
-  const copyButton = endpointText
+  const copyButton = endpointText && !expired
     ? <button className="btn sm ep-copy" title={copyTitle}
         aria-label={`${copyTitle} for ${c.name}`} data-act="copy-endpoint-dsn" data-conn={c.id}>
         {copied
@@ -102,7 +115,15 @@ export function EndpointStrip({ connection: c, withFormats = false }: {
   }
   return <>
     <div className="ep-strip">{address}</div>
-    {withFormats && endpointText && endpointAddress
+    <div className={`ep-expiry ${expired ? 'expired' : ''}`}>
+      <span>{expiryLabel}</span>
+      {expiryKnown
+        ? <button className="btn ghost sm" data-act="renew-endpoint" data-conn={c.id}>
+            {expired ? 'Renew address' : 'Renew'}
+          </button>
+        : null}
+    </div>
+    {withFormats && !expired && endpointText && endpointAddress
       ? <EndpointFormatRow connection={c} address={endpointAddress} />
       : null}
     <EndpointAuthRow connection={c} />

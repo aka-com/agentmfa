@@ -173,6 +173,7 @@ interface MockAccess {
     sshDsn?: string;
     /** SSH only: the socket makes callers present the endpoint secret. */
     require_auth?: boolean;
+    expires_at: string;
   };
 }
 
@@ -578,6 +579,11 @@ function connDto(c: MockConnection): ConnectionSummary {
               type: record.endpoint.type,
               dsn: record.endpoint.dsn ?? null,
               require_auth: record.endpoint.require_auth ?? false,
+              expires_at: record.endpoint.expires_at,
+              expires_in_secs: Math.max(
+                0,
+                Math.ceil((new Date(record.endpoint.expires_at).getTime() - Date.now()) / 1000),
+              ),
             }
           : null,
       };
@@ -1210,6 +1216,12 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
         db.access.push(record);
       }
       const kind = connection.type;
+      if (
+        record.endpoint
+        && new Date(record.endpoint.expires_at).getTime() <= Date.now()
+      ) {
+        throw 'this direct endpoint has expired; renew it before rotating it';
+      }
       const endpointId = record.endpoint?.endpoint_id ?? `mock-endpoint-${connection.id}`;
       const secret = MOCK_ENDPOINT_SECRET;
       const dir = `~/.aka/endpoints/${endpointId}`;
@@ -1238,16 +1250,43 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
       // A reissue rotates the secret without deciding anything about whether
       // the socket is authenticated, so the flag rides through it.
       const requireAuth = record.endpoint?.require_auth ?? false;
+      const expiresAt = record.endpoint?.expires_at
+        ?? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
       if (kind === 'ssh' && requireAuth) {
         shownSecret = secret;
         example = `mfa ssh-agent ${connection.name}`;
       }
       record.endpoint = kind === 'ssh'
-        ? { endpoint_id: endpointId, type: kind, sshDsn: dsn, require_auth: requireAuth }
-        : { endpoint_id: endpointId, type: kind, dsn };
+        ? {
+            endpoint_id: endpointId,
+            type: kind,
+            sshDsn: dsn,
+            require_auth: requireAuth,
+            expires_at: expiresAt,
+          }
+        : { endpoint_id: endpointId, type: kind, dsn, expires_at: expiresAt };
       audit('wired', `Direct endpoint issued: ${connection.name}`);
       emit('aka://wirings-changed', {});
-      return { endpoint_id: endpointId, type: kind, dsn, secret: shownSecret, example };
+      return {
+        endpoint_id: endpointId,
+        type: kind,
+        dsn,
+        secret: shownSecret,
+        example,
+        expires_at: expiresAt,
+        expires_in_secs: 30 * 24 * 60 * 60,
+      };
+    }
+    case 'renew_endpoint': {
+      const record = db.access.find((a) => a.connection_id === args.connectionId);
+      if (!record?.endpoint) throw 'this tool has no direct endpoint';
+      record.endpoint.expires_at =
+        new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+      const info = await mockInvoke('get_endpoint', args);
+      const connection = db.connections.find((c) => c.id === args.connectionId);
+      audit('wired', `Direct endpoint renewed${connection ? `: ${connection.name}` : ''}`);
+      emit('aka://wirings-changed', {});
+      return info;
     }
     case 'get_endpoint': {
       // A no-gate read-back of the issued endpoint. The mock's secret is a
@@ -1265,7 +1304,18 @@ async function mockInvoke(cmd: CommandName, args: MockArgs): Promise<unknown> {
             ? `mfa ssh-agent ${connection.name}`
             : `SSH_AUTH_SOCK="${dsn}" ${sshInvocationCommand({ ...connection, target: connTarget(connection) })}`
         : `curl -H "Authorization: Bearer ${secret}" ${dsn}/`;
-      return { endpoint_id: endpoint.endpoint_id, type: connection.type, dsn, secret, example };
+      return {
+        endpoint_id: endpoint.endpoint_id,
+        type: connection.type,
+        dsn,
+        secret,
+        example,
+        expires_at: endpoint.expires_at,
+        expires_in_secs: Math.max(
+          0,
+          Math.ceil((new Date(endpoint.expires_at).getTime() - Date.now()) / 1000),
+        ),
+      };
     }
     case 'set_endpoint_require_auth': {
       const record = db.access.find((a) => a.connection_id === args.connectionId);

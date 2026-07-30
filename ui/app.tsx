@@ -56,6 +56,7 @@ import {
 import { sameBrokerScope } from '/src/broker-scope';
 import { activityIdentity } from '/src/activity';
 import { activeRequestCount, activeRequests, anchorExpiry, recentRequests } from '/src/requests';
+import { anchorEndpointExpiries } from '/src/endpoint-expiry';
 import { APP_VERSION } from '/src/version';
 import { virtualListWindow } from '/src/virtual-list';
 import type {
@@ -337,6 +338,7 @@ async function load<K extends CommandName>(
     switch (key) {
       case 'secrets': break;
       case 'connections':
+        state.connections = anchorEndpointExpiries(result as ConnectionSummary[]);
         // Not awaited: the list paints immediately and the SSH addresses fill
         // in behind it. Each is a vault read, so this must not gate a refresh.
         void resolveSshEndpointSockets(broker, epoch);
@@ -1412,6 +1414,11 @@ function ConnectionMenuItems({ connection: c }: {
   const test = state.connTests[c.id];
   const mcpStatus = c.mcp_path ? state.mcpStatus[c.id] : undefined;
   const running = c.mcp_path ? Boolean(mcpStatus?.running) : Boolean(test?.running);
+  const endpointExpired = c.agent_access.endpoint?.expires_in_secs === 0
+    || Boolean(
+      c.agent_access.endpoint?.expires_at
+      && new Date(c.agent_access.endpoint.expires_at).getTime() <= Date.now(),
+    );
   return <>
     <button className="menu-item" role="menuitem"
       data-act={c.mcp_path ? 'mcp-status' : 'test-conn'} data-id={c.id} disabled={running}>
@@ -1426,8 +1433,16 @@ function ConnectionMenuItems({ connection: c }: {
     {c.agent_access.enabled && c.agent_access.endpoint
       ? <>
           <div className="menu-divider" role="separator"></div>
-          <button className="menu-item" role="menuitem" data-act="reissue-endpoint-ask"
-            data-conn={c.id}><Icon markup={ICONS.refresh} /> Rotate connection address</button>
+          {c.agent_access.endpoint.expires_at
+            ? <button className="menu-item" role="menuitem" data-act="renew-endpoint"
+                data-conn={c.id}>
+                <Icon markup={ICONS.clockAlert} /> Renew connection address
+              </button>
+            : null}
+          {!endpointExpired
+            ? <button className="menu-item" role="menuitem" data-act="reissue-endpoint-ask"
+                data-conn={c.id}><Icon markup={ICONS.refresh} /> Rotate connection address</button>
+            : null}
           <button className="menu-item danger" role="menuitem" data-act="revoke-endpoint-ask"
             data-conn={c.id}><Icon markup={ICONS.x} /> Revoke connection address</button>
         </>
@@ -2698,6 +2713,12 @@ function EndpointIssuedSheet(): ReactNode {
       {field(addressLabel, info.dsn, 'dsn')}
       {info.secret ? field('Secret', info.secret, 'secret') : null}
       {field('Example', info.example, 'example')}
+      {Number.isNaN(new Date(info.expires_at).getTime())
+        ? null
+        : <div className="rule-note">
+            This address expires {new Date(info.expires_at).toLocaleString()}. Renewing it later
+            keeps the same address and secret.
+          </div>}
       {remoteCaution ? <div className="rule-note ep-remote-note">{remoteCaution}</div> : null}
       <div className="sheet-actions"><button className="btn" data-act="sheet-cancel">Done</button></div>
     </>
@@ -5414,6 +5435,18 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       state.confirm = { kind: 'reissue-endpoint', id: btn.dataset.conn || '' };
       render();
       break;
+    case 'renew-endpoint': {
+      state.connMenuOpen = null;
+      state.connMenuPoint = null;
+      const connectionId = btn.dataset.conn || '';
+      if (await run(() => invoke('renew_endpoint', { connectionId }))) {
+        toast('Connection address renewed for 30 days');
+        await refresh('all');
+      } else {
+        render();
+      }
+      break;
+    }
     case 'revoke-endpoint-ask':
       state.connMenuOpen = null;
       state.connMenuPoint = null;

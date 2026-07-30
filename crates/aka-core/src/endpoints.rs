@@ -9,13 +9,14 @@
 //! Because a stable endpoint is standing access, the security model differs
 //! from a ticket in exactly two ways, both enforced here plus at the listener:
 //!
-//! - **The secret is the capability.** A loopback port is reachable by any
+//! - **The secret is a bounded capability.** A loopback port is reachable by any
 //!   local process, so the endpoint carries its own secret the caller presents
 //!   — deliberately not the shared broker key, so one pasted config can be
 //!   revoked alone. This file persists only a SHA-256 hash of it; the plaintext
 //!   lives in the vault under the endpoint's id, put there by the broker.
 //!   [`EndpointRegistry::resolve_secret`] is how a listener authenticates a
-//!   presented secret back to its endpoint.
+//!   presented secret back to its endpoint, and refuses it after the persisted
+//!   deadline. Renewal extends that deadline without changing client config.
 //! - **Revocation must be prompt and total.** Endpoints die with their
 //!   connection:
 //!   [`remove_for_connection`](EndpointRegistry::remove_for_connection)
@@ -30,13 +31,21 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::integrity::StateIntegrity;
 use crate::types::{ConnectionKind, DirectEndpoint};
 use crate::{CoreError, Result};
+
+/// Direct endpoints are deliberately longer-lived than tickets so they remain
+/// practical in ordinary client configuration, but they are not perpetual
+/// bearer credentials.
+pub const ENDPOINT_LIFETIME: Duration = Duration::days(30);
+/// Existing installations get one bounded renewal window rather than having
+/// every previously perpetual endpoint fail immediately after an upgrade.
+pub const LEGACY_ENDPOINT_GRACE: Duration = Duration::days(7);
 
 /// A minted endpoint plus its plaintext secret.
 ///
@@ -76,10 +85,30 @@ impl EndpointRegistry {
     /// Per-agent-era duplicates for one connection collapse to the newest
     /// record (their other secrets stop resolving).
     pub fn open(path: PathBuf, max_total: usize, integrity: Arc<StateIntegrity>) -> Result<Self> {
-        let mut endpoints: Vec<DirectEndpoint> = match integrity.read_verified(&path)? {
-            Some(bytes) => serde_json::from_slice(&bytes)?,
-            None => Vec::new(),
-        };
+        let (mut endpoints, migrated_legacy_expiry): (Vec<DirectEndpoint>, bool) =
+            match integrity.read_verified(&path)? {
+                Some(bytes) => {
+                    let mut value: serde_json::Value = serde_json::from_slice(&bytes)?;
+                    let deadline = (Utc::now() + LEGACY_ENDPOINT_GRACE).to_rfc3339();
+                    let mut migrated = false;
+                    if let Some(records) = value.as_array_mut() {
+                        for record in records {
+                            let Some(record) = record.as_object_mut() else {
+                                continue;
+                            };
+                            if !record.contains_key("expires_at") {
+                                record.insert(
+                                    "expires_at".to_string(),
+                                    serde_json::Value::String(deadline.clone()),
+                                );
+                                migrated = true;
+                            }
+                        }
+                    }
+                    (serde_json::from_value(value)?, migrated)
+                }
+                None => (Vec::new(), false),
+            };
         let before = endpoints.len();
         endpoints.sort_by_key(|e| std::cmp::Reverse(e.created_at));
         let mut seen: Vec<Uuid> = Vec::new();
@@ -91,7 +120,7 @@ impl EndpointRegistry {
                 true
             }
         });
-        if endpoints.len() != before {
+        if migrated_legacy_expiry || endpoints.len() != before {
             integrity.write(&path, &serde_json::to_vec_pretty(&endpoints)?)?;
         }
         Ok(Self {
@@ -120,6 +149,9 @@ impl EndpointRegistry {
         let mut next = endpoints.clone();
 
         if let Some(existing) = next.iter_mut().find(|e| e.connection_id == connection_id) {
+            if existing.is_expired() {
+                return Err(CoreError::EndpointExpired);
+            }
             existing.secret_hash = secret_hash;
             existing.secret = secret.clone();
             existing.kind = kind;
@@ -145,11 +177,28 @@ impl EndpointRegistry {
             port: None,
             require_auth: false,
             created_at: Utc::now(),
+            expires_at: Utc::now() + ENDPOINT_LIFETIME,
         };
         next.push(endpoint.clone());
         self.persist(&next)?;
         *endpoints = next;
         Ok(IssuedEndpoint { endpoint, secret })
+    }
+
+    /// Extend one endpoint without changing its id, address, or secret. This
+    /// is intentionally separate from `issue`: renewing existing client
+    /// configuration must not rotate the credential it is trying to preserve.
+    pub fn renew(&self, id: &Uuid) -> Result<DirectEndpoint> {
+        let mut endpoints = self.endpoints.lock().unwrap();
+        let Some(pos) = endpoints.iter().position(|endpoint| &endpoint.id == id) else {
+            return Err(CoreError::EndpointNotFound);
+        };
+        let mut next = endpoints.clone();
+        next[pos].expires_at = Utc::now() + ENDPOINT_LIFETIME;
+        let renewed = next[pos].clone();
+        self.persist(&next)?;
+        *endpoints = next;
+        Ok(renewed)
     }
 
     /// Require (or stop requiring) the `authenticate@agentmfa.dev` extension
@@ -241,16 +290,16 @@ impl EndpointRegistry {
     }
 
     /// Authenticate a presented secret back to its endpoint. The comparison is
-    /// over the stored hash; an unknown secret resolves to `None`. This is the
-    /// listener's attribution entry point (the caller still confirms the
-    /// connection's agent access is enabled before serving).
+    /// over the stored hash; an unknown or expired secret resolves to `None`.
+    /// This is the listener's attribution entry point (the caller still
+    /// confirms the connection's agent access is enabled before serving).
     pub fn resolve_secret(&self, presented: &str) -> Option<DirectEndpoint> {
         let hash = hash_secret(presented);
         self.endpoints
             .lock()
             .unwrap()
             .iter()
-            .find(|e| e.secret_hash == hash)
+            .find(|e| e.secret_hash == hash && !e.is_expired())
             .cloned()
     }
 
@@ -330,6 +379,8 @@ mod tests {
             "the plaintext endpoint secret must not be persisted"
         );
         assert!(on_disk.contains(&issued.endpoint.secret_hash));
+        assert!(issued.endpoint.expires_at > Utc::now() + Duration::days(29));
+        assert!(on_disk.contains("\"expires_at\""));
     }
 
     /// A record written before the secret moved to the vault still loads its
@@ -369,6 +420,43 @@ mod tests {
     }
 
     #[test]
+    fn expired_secret_stops_resolving_and_renewal_preserves_it() {
+        let (r, _dir) = registry();
+        let issued = r.issue(Uuid::new_v4(), ConnectionKind::Pg).unwrap();
+        {
+            let mut endpoints = r.endpoints.lock().unwrap();
+            endpoints[0].expires_at = Utc::now() - Duration::seconds(1);
+        }
+        assert!(r.resolve_secret(&issued.secret).is_none());
+
+        let renewed = r.renew(&issued.endpoint.id).unwrap();
+        assert_eq!(renewed.id, issued.endpoint.id);
+        assert_eq!(renewed.secret_hash, issued.endpoint.secret_hash);
+        assert!(renewed.expires_at > Utc::now() + Duration::days(29));
+        assert!(r.resolve_secret(&issued.secret).is_some());
+    }
+
+    #[test]
+    fn rotating_cannot_reactivate_an_expired_endpoint() {
+        let (r, _dir) = registry();
+        let connection_id = Uuid::new_v4();
+        let issued = r.issue(connection_id, ConnectionKind::Pg).unwrap();
+        {
+            let mut endpoints = r.endpoints.lock().unwrap();
+            endpoints[0].expires_at = Utc::now() - Duration::seconds(1);
+        }
+
+        assert!(matches!(
+            r.issue(connection_id, ConnectionKind::Pg),
+            Err(CoreError::EndpointExpired)
+        ));
+        assert_eq!(
+            r.get(&issued.endpoint.id).unwrap().secret_hash,
+            issued.endpoint.secret_hash
+        );
+    }
+
+    #[test]
     fn issue_rotates_in_place_for_an_existing_connection() {
         let (r, _dir) = registry();
         let conn = Uuid::new_v4();
@@ -377,6 +465,7 @@ mod tests {
         // Same endpoint id (stable listener path) …
         assert_eq!(first.endpoint.id, second.endpoint.id);
         assert_ne!(first.secret, second.secret);
+        assert_eq!(first.endpoint.expires_at, second.endpoint.expires_at);
         assert_eq!(r.list().len(), 1);
         // … but the old secret no longer resolves.
         assert!(r.resolve_secret(&first.secret).is_none());
@@ -474,6 +563,9 @@ mod tests {
         let r = EndpointRegistry::open(path, 64, integrity).unwrap();
         assert_eq!(r.list().len(), 1);
         assert_eq!(r.list()[0].id, newer);
+        assert!(r.list()[0].expires_at <= Utc::now() + LEGACY_ENDPOINT_GRACE);
+        let migrated = std::fs::read_to_string(r.path.clone()).unwrap();
+        assert!(migrated.contains("\"expires_at\""));
     }
 
     #[test]

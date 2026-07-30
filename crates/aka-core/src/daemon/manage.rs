@@ -98,6 +98,7 @@ fn manage_error_response(error: ManageError) -> Response {
         ManageError::SecretNotFound
         | ManageError::ConnectionNotFound
         | ManageError::EndpointNotFound => StatusCode::NOT_FOUND,
+        ManageError::EndpointExpired => StatusCode::GONE,
         ManageError::SecretNameTaken { .. }
         | ManageError::ConnectionNameTaken { .. }
         | ManageError::ConnectionTargetTaken { .. }
@@ -178,6 +179,7 @@ pub fn router() -> Router<AppState> {
             post(issue_endpoint).get(get_endpoint),
         )
         .route("/connections/{id}/endpoint/copy", post(copy_endpoint))
+        .route("/connections/{id}/endpoint/renew", post(renew_endpoint))
         .route(
             "/connections/{id}/endpoint/require-auth",
             post(set_endpoint_require_auth),
@@ -810,6 +812,14 @@ async fn issue_endpoint(
     Path(id): Path<Uuid>,
 ) -> Response {
     respond(state.manage.issue_endpoint(id).await)
+}
+
+async fn renew_endpoint(
+    State(state): State<AppState>,
+    _authed: ManageAuthed,
+    Path(id): Path<Uuid>,
+) -> Response {
+    respond(state.manage.renew_endpoint(id).await)
 }
 
 async fn get_endpoint(

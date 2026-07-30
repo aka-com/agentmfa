@@ -68,6 +68,9 @@ pub enum CoreError {
     #[error("no such endpoint")]
     EndpointNotFound,
 
+    #[error("this direct endpoint has expired; renew it before using or rotating it")]
+    EndpointExpired,
+
     #[error("too many direct endpoints ({0}); revoke one before issuing another")]
     EndpointLimit(usize),
 

@@ -1829,6 +1829,12 @@
 .ep-strip .ep-field .ep-addr-masked:hover{ color: var(--ink); }
 .ep-strip .ep-field.collapsed .ep-copy{ align-self: center; }
 .ep-strip .ep-addr-hidden{ color: var(--muted); font-size: 0.75rem; }
+.ep-expiry{
+  display: flex; align-items: center; gap: 8px; margin-top: 6px;
+  color: var(--muted); font-size: 0.75rem;
+}
+.ep-expiry.expired{ color: var(--danger); font-weight: 600; }
+.ep-expiry .btn{ min-height: 24px; padding: 2px 7px; }
 /* Per-application copy row under the detail pane's endpoint field: each
    button copies the same endpoint rendered for one common client (psql,
    libpq keywords, .env, ssh config, …). */

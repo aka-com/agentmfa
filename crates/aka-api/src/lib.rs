@@ -107,6 +107,7 @@ pub enum ManageError {
     },
     KindChange,
     EndpointNotFound,
+    EndpointExpired,
     EndpointLimit {
         max: usize,
     },
@@ -192,6 +193,10 @@ impl std::fmt::Display for ManageError {
             }
             Self::KindChange => write!(f, "a tool's type is fixed after creation"),
             Self::EndpointNotFound => write!(f, "no such endpoint"),
+            Self::EndpointExpired => write!(
+                f,
+                "this direct endpoint has expired; renew it before using or rotating it"
+            ),
             Self::EndpointLimit { max } => write!(
                 f,
                 "too many direct endpoints ({max}); revoke one before issuing another"
@@ -320,6 +325,12 @@ pub struct EndpointChip {
     /// through `mfa ssh-agent`, not by pointing `IdentityAgent` at the path.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub require_auth: bool,
+    /// Restart-safe endpoint deadline, plus broker-clock remaining seconds for
+    /// clients whose clock differs from a remote broker.
+    #[serde(default)]
+    pub expires_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in_secs: Option<u64>,
 }
 
 /// The result of issuing a direct endpoint: the pasteable address, a
@@ -338,6 +349,10 @@ pub struct IssuedEndpointDto {
     pub tcp_dsn: Option<String>,
     pub secret: String,
     pub example: String,
+    #[serde(default)]
+    pub expires_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

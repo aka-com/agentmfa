@@ -1624,9 +1624,19 @@ async fn handle_endpoint_conn(
     ctx: SshEndpointCtx,
     mut stream: UnixStream,
 ) -> std::io::Result<()> {
-    // Authorization is enforced here, at connect time: a disabled tool is
-    // refused even if a stale listener briefly outlived its teardown.
-    if !state.broker.access.allows(&ctx.connection_id) {
+    // Authorization is enforced here, at connect time: a disabled, revoked,
+    // or expired endpoint is refused even if a stale listener briefly
+    // outlived its teardown. This explicit endpoint check is essential for
+    // unauthenticated SSH sockets, which do not otherwise present a secret to
+    // the shared resolver.
+    let endpoint_is_active = state
+        .broker
+        .endpoints
+        .get(&ctx.endpoint_id)
+        .is_some_and(|endpoint| {
+            endpoint.connection_id == ctx.connection_id && !endpoint.is_expired()
+        });
+    if !endpoint_is_active || !state.broker.access.allows(&ctx.connection_id) {
         let _ = stream.shutdown().await;
         return Ok(());
     }
@@ -1657,7 +1667,9 @@ async fn handle_endpoint_conn(
         .broker
         .endpoints
         .get(&ctx.endpoint_id)
-        .is_some_and(|endpoint| endpoint.connection_id == ctx.connection_id);
+        .is_some_and(|endpoint| {
+            endpoint.connection_id == ctx.connection_id && !endpoint.is_expired()
+        });
     if !endpoint_still_valid || !state.broker.access.allows(&ctx.connection_id) {
         session.finish("access_revoked");
         let _ = stream.shutdown().await;

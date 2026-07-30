@@ -50,10 +50,13 @@ broker-owned sessions, but it still cannot kill an already-authenticated SSH
 process.
 
 Direct endpoints deliberately expose a separate broker credential to their
-client. Treat that endpoint secret like any other standing credential and
-revoke or rotate it if copied somewhere untrusted. Response scrubbing removes
-recognized reflections of injected credentials, but cannot guarantee that an
-upstream will not transform or encode credential material into a new form.
+client. Each one expires after 30 days; renewal preserves the address and
+secret so long-lived client configuration does not need to change, while
+rotation invalidates the old secret immediately. Treat that endpoint secret
+like any other standing credential and revoke or rotate it if copied somewhere
+untrusted. Response scrubbing removes recognized reflections of injected
+credentials, but cannot guarantee that an upstream will not transform or
+encode credential material into a new form.
 
 1. **Create a connection.** Select a destination to connect to: an API
    host, Postgres database, SSH server, or MCP server.

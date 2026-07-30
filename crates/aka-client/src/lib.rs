@@ -996,6 +996,13 @@ impl ManagementBackend for RemoteBackend {
             .await
     }
 
+    async fn renew_endpoint(&self, connection_id: Uuid) -> ManageResult<IssuedEndpointDto> {
+        self.post_empty(&format!(
+            "/v1/manage/connections/{connection_id}/endpoint/renew"
+        ))
+        .await
+    }
+
     async fn get_endpoint(&self, connection_id: Uuid) -> ManageResult<Option<IssuedEndpointDto>> {
         self.get(&format!("/v1/manage/connections/{connection_id}/endpoint"))
             .await
