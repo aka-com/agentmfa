@@ -677,6 +677,16 @@ struct ConnUpdate {
 }
 
 fn main() {
+    match std::panic::catch_unwind(run_cli) {
+        Ok(()) => {}
+        Err(payload) => match payload.downcast::<CliExit>() {
+            Ok(exit) => std::process::exit(exit.code as i32),
+            Err(payload) => std::panic::resume_unwind(payload),
+        },
+    }
+}
+
+fn run_cli() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -831,9 +841,21 @@ enum ExitCode {
     TestFailed = 8,
 }
 
+#[derive(Debug)]
+struct CliExit {
+    code: ExitCode,
+}
+
+/// Unwind the active command before the process exits. In particular, this
+/// gives every `Zeroizing<String>` holding a secret, management token, or
+/// short-lived credential a chance to scrub its allocation.
+fn exit_with(code: ExitCode) -> ! {
+    std::panic::resume_unwind(Box::new(CliExit { code }))
+}
+
 fn die_with(code: ExitCode, message: impl std::fmt::Display) -> ! {
     eprintln!("error: {message}");
-    std::process::exit(code as i32);
+    exit_with(code);
 }
 
 fn die(message: impl std::fmt::Display) -> ! {
@@ -1135,9 +1157,9 @@ fn manage_token_store(paths: &Paths) -> TokenStore {
 /// token stored by `mfa manage login`.
 fn manage_token(paths: &Paths, key: &str) -> Option<Zeroizing<String>> {
     if let Ok(token) = std::env::var("AKA_MANAGE_TOKEN") {
-        let token = token.trim().to_string();
-        if !token.is_empty() {
-            return Some(Zeroizing::new(token));
+        let token = Zeroizing::new(token);
+        if !token.trim().is_empty() {
+            return Some(Zeroizing::new(token.trim().to_string()));
         }
     }
     manage_token_store(paths).load(key)
@@ -1799,7 +1821,7 @@ fn cmd_conn_test(name: String, root: Option<PathBuf>, url: Option<String>, json:
                 None => eprintln!("failed: {}", report.detail),
             }
         }
-        std::process::exit(ExitCode::TestFailed as i32);
+        exit_with(ExitCode::TestFailed);
     }
 }
 
@@ -1914,13 +1936,11 @@ fn cmd_skill(write: bool, path: Option<PathBuf>, user: bool, force: bool, root: 
     }
     if let Some(dir) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(dir) {
-            eprintln!("error: could not create {}: {e}", dir.display());
-            std::process::exit(1);
+            die(format!("could not create {}: {e}", dir.display()));
         }
     }
     if let Err(e) = std::fs::write(&path, content) {
-        eprintln!("error: could not write {}: {e}", path.display());
-        std::process::exit(1);
+        die(format!("could not write {}: {e}", path.display()));
     }
     eprintln!("wrote {}", path.display());
 }
@@ -2096,6 +2116,7 @@ fn cmd_manage_token(revoke: bool, ttl_days: Option<u64>, root: Option<PathBuf>) 
     let ttl = ttl_days.map(|days| std::time::Duration::from_secs(days * 86400));
     match identity.issue_manage_token_with_ttl(ttl) {
         Ok(token) => {
+            let token = Zeroizing::new(token);
             let mut entry = aka_core::audit::AuditEntry::new(
                 aka_core::audit::AuditKind::ManagementTokenIssued,
                 "Management token issued",
@@ -2106,7 +2127,7 @@ fn cmd_manage_token(revoke: bool, ttl_days: Option<u64>, root: Option<PathBuf>) 
             }
             audit.append(entry);
             eprintln!("management token (shown once — only its hash is stored):\n");
-            println!("{token}");
+            println!("{}", token.as_str());
             eprintln!("\nEnter it in the AgentMFA app to manage this broker remotely.");
             match ttl_days {
                 Some(days) => eprintln!(
@@ -2332,7 +2353,10 @@ fn cmd_key(rotate: bool, root: Option<PathBuf>, url: Option<String>, json: bool)
         let paths = store_paths(root.as_deref());
         let token_file = paths.token_file();
         match std::fs::read_to_string(&token_file) {
-            Ok(token) if !token.trim().is_empty() => print_key(token.trim(), json),
+            Ok(token) if !token.trim().is_empty() => {
+                let token = Zeroizing::new(token);
+                print_key(token.trim(), json);
+            }
             _ => die(format!(
                 "no shared key at {} — the broker mints it when it first starts",
                 token_file.display()
@@ -2345,7 +2369,7 @@ fn cmd_key(rotate: bool, root: Option<PathBuf>, url: Option<String>, json: bool)
         managed.run_gated(managed.backend.rotate_key());
         eprintln!("key rotated; agents that read the token file reconnect on their own");
     }
-    let key = managed.run(managed.backend.agent_key());
+    let key = Zeroizing::new(managed.run(managed.backend.agent_key()));
     print_key(&key, json);
 }
 
@@ -2901,8 +2925,7 @@ fn cmd_serve(args: ServeArgs) {
     // the sun_path limit, an unreadable root, a vault that won't open) —
     // diagnose in one line rather than panicking with a backtrace.
     let fail = |what: &str, e: &dyn std::fmt::Display| -> ! {
-        eprintln!("error: {what}: {e}");
-        std::process::exit(1);
+        die(format!("{what}: {e}"));
     };
     let paths = store_paths(root.as_deref());
     let vault = match open_vault(&paths, root.as_deref()) {
@@ -3071,6 +3094,34 @@ mod tests {
         for code in 1..=8 {
             assert!(help.contains(&format!("  {code}  ")), "{help}");
         }
+    }
+
+    #[test]
+    fn cli_failures_unwind_sensitive_command_state_before_exiting() {
+        struct DropProbe(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let failure = std::panic::catch_unwind({
+            let dropped = dropped.clone();
+            move || {
+                let _sensitive_state = DropProbe(dropped);
+                exit_with(ExitCode::Authentication);
+            }
+        })
+        .expect_err("CLI exit should unwind to the process boundary");
+        let exit = failure
+            .downcast::<CliExit>()
+            .expect("CLI exit carries its typed status");
+        assert_eq!(exit.code, ExitCode::Authentication);
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "sensitive command state must be dropped before process exit"
+        );
     }
 
     #[test]
