@@ -32,9 +32,6 @@ export const TABS = ['start', 'connections', 'secrets', 'inbox', 'activity'] as 
 export const DROPDOWN_TABS = TABS.filter((tab) => tab !== 'start');
 export type Tab = typeof TABS[number];
 
-export const START_VIEWS = ['walkthrough', 'guides'] as const;
-export type StartView = typeof START_VIEWS[number];
-
 export interface SheetState {
   kind: 'add-secret' | 'edit-secret' | 'add-conn' | 'edit-conn' | 'settings'
     | 'clear-activity' | 'elicitation' | 'approval' | 'mcp-auth' | 'wiring-tools'
@@ -198,12 +195,14 @@ export interface AppState {
   catalogActionMenuOpen: string | null;
   sectionsExpanded: string[];
   startOption: string;
-  startView: StartView;
   connectMode: string;
+  /** Which hero-sentence blank has its menu open. */
+  startMenuOpen: 'tool' | 'client' | null;
+  /** A completed walkthrough step re-opened to show its body again. */
+  startStepOpen: number | null;
   connImportSource: string;
   connImportError: string | null;
   menuOpen: boolean;
-  connectOpen: string | null;
   agentMenuOpen: string | null;
   connMenuOpen: string | null;
   connMenuPoint: ConnMenuPoint | null;
@@ -305,12 +304,12 @@ function createInitialState(): AppState {
     catalogActionMenuOpen: null,
     sectionsExpanded: [],
     startOption: 'postgres',
-    startView: 'walkthrough',
     connectMode: 'direct',
+    startMenuOpen: null,
+    startStepOpen: null,
     connImportSource: '',
     connImportError: null,
     menuOpen: false,
-    connectOpen: 'claude-code',
     agentMenuOpen: null,
     connMenuOpen: null,
     connMenuPoint: null,

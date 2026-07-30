@@ -25,7 +25,6 @@ import {
 } from '/src/catalog';
 import {
   DROPDOWN_TABS,
-  START_VIEWS,
   TABS,
   defaultLoadStatus,
   state,
@@ -35,7 +34,6 @@ import type {
   ConnectionDraft,
   LoadKey,
   SheetState,
-  StartView,
   Tab,
 } from '/src/app-state';
 import { START_OPTIONS } from '/src/getting-started';
@@ -94,6 +92,7 @@ import {
   EndpointStrip,
 } from '/src/features/endpoint-view';
 import { StartViewPage } from '/src/features/getting-started-view';
+import { SharedKeyCard } from '/src/features/identity-card';
 import { Sheet } from '/src/sheet';
 
 const EDIT_SECRET_MASK = '••••••••••••';
@@ -251,6 +250,7 @@ function showRequestInbox(): void {
   state.confirm = null;
   state.menuOpen = false;
   state.agentMenuOpen = null;
+  state.startMenuOpen = null;
   state.catalogActionMenuOpen = null;
   state.connMenuOpen = null;
   state.connMenuPoint = null;
@@ -724,26 +724,22 @@ function LiveSessions({ extraClass = '' }: { extraClass?: string }): ReactNode {
 
 function GlobalSections({ embeddedInStart = false }: { embeddedInStart?: boolean }): ReactNode {
   const requestCount = activeRequestCount(state.approvals, state.elicitations);
-  const hasLiveSessions = state.tab === 'start'
-    && state.startView === 'guides'
-    && state.sessions.length > 0;
   const showRequests = requestCount > 0 && state.tab !== 'inbox';
-  if (!showRequests && !hasLiveSessions) return null;
-  let requestBanner: ReactNode = null;
-  if (showRequests) {
-    const requests = activeRequests(state.approvals, state.elicitations);
-    const next = requests[0];
-    const label = requestCount === 1 ? '1 request needs attention'
-      : `${requestCount} requests need attention`;
-    const kinds = [
-      state.approvals.length
-        ? `${state.approvals.length} approval${state.approvals.length === 1 ? '' : 's'}`
-        : '',
-      state.elicitations.length
-        ? `${state.elicitations.length} input request${state.elicitations.length === 1 ? '' : 's'}`
-        : '',
-    ].filter(Boolean).join(' · ');
-    requestBanner = (
+  if (!showRequests) return null;
+  const requests = activeRequests(state.approvals, state.elicitations);
+  const next = requests[0];
+  const label = requestCount === 1 ? '1 request needs attention'
+    : `${requestCount} requests need attention`;
+  const kinds = [
+    state.approvals.length
+      ? `${state.approvals.length} approval${state.approvals.length === 1 ? '' : 's'}`
+      : '',
+    state.elicitations.length
+      ? `${state.elicitations.length} input request${state.elicitations.length === 1 ? '' : 's'}`
+      : '',
+  ].filter(Boolean).join(' · ');
+  return (
+    <div className={`dd-global ${embeddedInStart ? 'start-global' : ''} request-route-only`}>
       <button className="request-banner" data-act="open-inbox"
         aria-label={`${label}. Open the Request Inbox.`}>
         <span className="request-banner-ico">
@@ -753,13 +749,6 @@ function GlobalSections({ embeddedInStart = false }: { embeddedInStart?: boolean
           <span>{kinds} · next expires {timeLeft(next.expiresAt)}</span></span>
         <span className="request-banner-cta">Open Inbox</span>
       </button>
-    );
-  }
-  return (
-    <div className={`dd-global ${embeddedInStart ? 'start-global' : ''}${
-      showRequests && !hasLiveSessions ? ' request-route-only' : ''}`}>
-      {requestBanner}
-      {hasLiveSessions ? <LiveSessions /> : null}
     </div>
   );
 }
@@ -1875,8 +1864,14 @@ function SecretsView(): ReactNode {
     return entryMatch || savedSecretMatch;
   });
   const rows = connectedCatalogFirst(entries, state.connections);
+  // This computer's shared broker key lives here with the other credentials;
+  // the Get started walkthrough stays focused on the next action.
+  const keyCard = !needle && state.identity
+    ? <SharedKeyCard identity={state.identity} />
+    : null;
   return (
     <div className="catalog">
+      {keyCard}
       {rows.length
         ? rows.map((entry) => (
             <div key={entry.id} className="cat-section">
@@ -2430,7 +2425,7 @@ function viewLoadKeys(tab: Tab): LoadKey[] {
   switch (tab) {
     case 'start': return ['connections', 'identity', 'settings'];
     case 'connections': return ['connections'];
-    case 'secrets': return ['secrets'];
+    case 'secrets': return ['secrets', 'identity'];
     case 'activity': return ['activity', 'sessions'];
     case 'inbox': return ['approvals', 'elicitations', 'requests'];
   }
@@ -5236,6 +5231,11 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
     if (!btn) { render(); return; }
     // fall through: the clicked action runs and its render reflects the close
   }
+  if (state.startMenuOpen && !target?.closest('.start-blank-wrap')) {
+    state.startMenuOpen = null;
+    if (!btn) { render(); return; }
+    // fall through: the clicked action runs and its render reflects the close
+  }
   if (state.catalogActionMenuOpen && !target?.closest('.cat-connect-wrap')) {
     state.catalogActionMenuOpen = null;
     if (!btn) { render(); return; }
@@ -5262,6 +5262,7 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       if (tab && TABS.includes(tab as Tab)) state.tab = tab as Tab;
       state.confirm = null;
       state.agentMenuOpen = null;
+      state.startMenuOpen = null;
       state.catalogActionMenuOpen = null;
       state.connMenuOpen = null;
       state.connMenuPoint = null;
@@ -5379,10 +5380,6 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
       render();
       break;
     }
-    case 'connect-toggle':
-      state.connectOpen = state.connectOpen === id ? null : id;
-      render();
-      break;
     case 'copy-key':
       if (await run(() => invoke('copy_key'))) {
         toast('📋 Copied for 30s');
@@ -5611,21 +5608,30 @@ async function handleActionClick(e: ReactMouseEvent<HTMLDivElement>): Promise<vo
     case 'start-option':
       if (id && START_OPTIONS.some((option) => option.id === id)) {
         state.startOption = id;
+        state.startMenuOpen = null;
+        state.startStepOpen = null;
         render();
       }
       break;
     case 'start-mode':
       if (id) {
         state.connectMode = id;
+        state.startMenuOpen = null;
+        state.startStepOpen = null;
         render();
       }
       break;
-    case 'start-view':
-      if (START_VIEWS.includes(id as StartView)) {
-        state.startView = id as StartView;
-        render();
-      }
+    case 'start-menu':
+      state.startMenuOpen = state.startMenuOpen === id ? null
+        : id === 'tool' || id === 'client' ? id : null;
+      render();
       break;
+    case 'start-step-toggle': {
+      const step = Number(id);
+      state.startStepOpen = state.startStepOpen === step ? null : step;
+      render();
+      break;
+    }
     case 'copy-text': {
       const text = btn.dataset.text ?? '';
       if (!text) break;
@@ -6598,6 +6604,7 @@ function handleAppKeyDown(e: KeyboardEvent): void {
   if (e.key === 'Escape') {
     if (state.catalogActionMenuOpen) { state.catalogActionMenuOpen = null; render(); return; }
     if (state.agentMenuOpen) { state.agentMenuOpen = null; render(); return; }
+    if (state.startMenuOpen) { state.startMenuOpen = null; render(); return; }
     if (state.connMenuOpen) {
       state.connMenuOpen = null;
       state.connMenuPoint = null;
@@ -6911,6 +6918,7 @@ async function boot() {
     state.confirm = null;
     state.catalogActionMenuOpen = null;
     state.agentMenuOpen = null;
+    state.startMenuOpen = null;
     state.connMenuOpen = null;
     state.connMenuPoint = null;
     render();

@@ -11,12 +11,13 @@ import {
   connectModesFor,
   directEndpointAddress,
   directStartTask,
+  redactedStartTask,
   resolveConnectMode,
   sshAuthSockCommand,
   sshBrokerFlags,
   sshDirectCommand,
   sshInvocationCommand,
-  startKindLabel,
+  startKindTag,
   startOptionById,
   startProgress,
   startTask,
@@ -236,18 +237,34 @@ test('Direct is offered first, and only for kinds with a direct endpoint', () =>
   for (const mode of connectModesFor(startOptionById('postgres'))) {
     assert.ok(CONNECT_MODE_LABELS[mode], mode);
   }
-  // Other MCP client stays a guides card, not a step-2 mode.
-  assert.equal(connectModesFor(startOptionById('postgres')).includes('mcp'), false);
-  assert.equal(connectModesFor(startOptionById('notion')).includes('mcp'), false);
+  // With the guides tab gone, Other MCP client is offered as a step-2 mode.
+  assert.ok(connectModesFor(startOptionById('postgres')).includes('mcp'));
+  assert.ok(connectModesFor(startOptionById('notion')).includes('mcp'));
 });
 
-test('picker kind labels: MCP for MCP-backed, API for plain APIs, none otherwise', () => {
-  assert.equal(startKindLabel(startOptionById('postgres')), '');
-  assert.equal(startKindLabel(startOptionById('ssh')), '');
-  assert.equal(startKindLabel(startOptionById('slack')), 'API');
-  assert.equal(startKindLabel(startOptionById('github')), 'MCP');
+test('picker kind tags name the family: database, server, MCP, or API', () => {
+  assert.equal(startKindTag(startOptionById('postgres')), 'database');
+  assert.equal(startKindTag(startOptionById('ssh')), 'server');
+  assert.equal(startKindTag(startOptionById('slack')), 'API');
+  assert.equal(startKindTag(startOptionById('github')), 'MCP');
   // Custom MCP already says MCP in its name.
-  assert.equal(startKindLabel(startOptionById('mcp')), '');
+  assert.equal(startKindTag(startOptionById('mcp')), '');
+});
+
+test('the on-screen task redacts the DSN password and the socket filename', () => {
+  const dsn = 'Connect to this Postgres DSN: postgresql://app:end_s3cret@/app?host=~/.aka/endpoints/e1&port=5432\n\nThen list tables.';
+  assert.equal(
+    redactedStartTask(dsn),
+    'Connect to this Postgres DSN: postgresql://app:••••••@/app?host=~/.aka/endpoints/e1&port=5432\n\nThen list tables.',
+  );
+  const sock = 'Use this SSH agent socket: SSH_AUTH_SOCK="/u/.aka/endpoints/e1/agent-3f1c9a2b04d7e685.sock"';
+  assert.equal(
+    redactedStartTask(sock),
+    'Use this SSH agent socket: SSH_AUTH_SOCK="/u/.aka/endpoints/e1/agent-••••••.sock"',
+  );
+  // A brokered task carries no secret and passes through untouched.
+  const brokered = 'Using my AgentMFA connection "prod-db", list tables.';
+  assert.equal(redactedStartTask(brokered), brokered);
 });
 
 test('the picked mode survives while offered and falls back when not', () => {

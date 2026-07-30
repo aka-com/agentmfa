@@ -1,37 +1,40 @@
+// The Get started walkthrough. The hero is an editable sentence — “Connect
+// <tool> to <client>” — whose two blanks are the only choices the page asks
+// for. Below it, the same three steps as always (add the tool, connect the
+// agent, ask for something useful), but state-aware: completed steps
+// collapse to a checked line, upcoming steps dim to a title, and the page
+// has exactly one primary action at a time.
+
 import type { ReactNode } from 'react';
 import { state } from '../app-state';
-import type { StartView } from '../app-state';
 import { canQuickConnectMcp, catalogEntryById } from '../catalog';
 import { EndpointStrip } from './endpoint-view';
 import {
   CLI_INSTALL_COMMAND,
-  CONNECT_CLIENTS,
   CONNECT_MODE_LABELS,
+  CONNECT_MODE_SENTENCE_LABELS,
   START_OPTIONS,
   clientMatchesLabel,
   connectClientById,
-  connectGuideSteps,
   connectModesFor,
   directEndpointAddress,
   directStartTask,
+  redactedStartTask,
   resolveConnectMode,
   sshInvocationCommand,
-  startKindLabel,
+  startKindTag,
   startOptionById,
   startProgress,
   startTask,
 } from '../getting-started';
 import type {
-  ConnectClient,
   ConnectClientEnv,
   ConnectModeId,
-  ConnectStep,
   Platform,
   StartOption,
   StartProgress,
 } from '../getting-started';
 import { AppIcon } from '../icon';
-import type { IdentityInfo } from '../types';
 import { ICONS, relTime } from '../util';
 
 function detectPlatform(): Platform {
@@ -49,6 +52,7 @@ function connectClientEnv(): ConnectClientEnv {
   };
 }
 
+/** The latest activity timestamp per self-reported client label. */
 function recentClients(): Array<{ name: string; at: string }> {
   const latest = new Map<string, string>();
   for (const entry of state.activity) {
@@ -60,130 +64,109 @@ function recentClients(): Array<{ name: string; at: string }> {
     .slice(0, 6);
 }
 
-function ConnectKeyCard({ identity }: { identity: IdentityInfo }): ReactNode {
-  const menuOpen = state.agentMenuOpen === 'identity';
-  const copied = state.copied === 'shared-key';
-  return (
-    <div className="agent-block">
-      <div className="agent-card">
-        <span className="agent-avatar" role="img" aria-label="This computer's key">
-          <AppIcon icon={ICONS.fileKey} />
-        </span>
-        <div className="agent-id"><div className="c-name">This computer’s key</div>
-          <div className="s-sub agent-sub">{identity.token_path}
-            {identity.legacy_aliases
-              ? ` · ${identity.legacy_aliases} older key${identity.legacy_aliases === 1 ? '' : 's'} still accepted briefly`
-              : ''}
-          </div>
-        </div>
-        <button className="btn sm" data-act="copy-key">
-          {copied ? <><AppIcon icon={ICONS.check} /> Copied</> : 'Copy key'}
-        </button>
-        <div className="agent-menu-wrap">
-          <button className={`icon-btn agent-menu-btn ${menuOpen ? 'on' : ''}`}
-            title="Key options" aria-label="Key options" aria-haspopup="menu"
-            aria-expanded={menuOpen} data-act="toggle-agent-menu" data-id="identity">
-            <AppIcon icon={ICONS.ellipsis} />
-          </button>
-          {menuOpen
-            ? <div className="agent-menu" role="menu" aria-label="Key options">
-                <button className="menu-item danger" role="menuitem" data-act="rotate-key-ask">
-                  <AppIcon icon={ICONS.unplug} /> Rotate key…
-                </button>
-              </div>
-            : null}
-        </div>
-      </div>
-      <div className="connect-keynote">One shared key for everything that runs as you on this
-        computer. Rotating it disconnects every agent at once.</div>
-    </div>
-  );
-}
-
-function ConnectStepView({ step, number }: {
-  step: ConnectStep;
-  number: number;
-}): ReactNode {
-  return (
-    <div className="connect-step">
-      <span className="connect-step-n" aria-hidden="true">{number}</span>
-      <div className="connect-step-bd"><b>{step.title}</b>
-        {step.detail ? <div className="connect-step-d">{step.detail}</div> : null}
-        {step.snippet
-          ? <div className="connect-snip"><pre><code>{step.snippet}</code></pre>
-              <button className="btn sm connect-copy" data-act="copy-text"
-                data-text={step.snippet}>Copy</button>
-            </div>
-          : null}
-        {step.followup
-          ? <div className="connect-step-d connect-step-followup">{step.followup}</div>
-          : null}
-      </div>
-    </div>
-  );
-}
-
-function ConnectCard({ client, env }: {
-  client: ConnectClient;
-  env: ConnectClientEnv;
-}): ReactNode {
-  const open = state.connectOpen === client.id;
+/** When the chosen client last reached the broker, if it ever has. */
+function clientSeenAt(connectMode: ConnectModeId): string | null {
+  const client = connectClientById(connectMode);
+  if (!client) return null;
   const seen = recentClients().find((recent) => clientMatchesLabel(client, recent.name));
+  return seen ? seen.at : null;
+}
+
+/* ---- the hero sentence -------------------------------------------------- */
+
+function ToolMenu({ option }: { option: StartOption }): ReactNode {
   return (
-    <div className={`agent-block connect-card ${open ? 'open' : ''}`}>
-      <button className="connect-row" data-act="connect-toggle" data-id={client.id}
-        aria-expanded={open}>
-        <span className={`connect-mark ${client.id}`} aria-hidden="true">
-          {client.icon ? <AppIcon icon={ICONS[client.icon]} /> : client.mark}
-        </span>
-        <span className="connect-tx"><b>{client.name}</b><span>{client.sub}</span></span>
-        {seen
-          ? <span className="connect-seen" title="An agent using this label reached the broker">
-              ● seen {relTime(seen.at)}
+    <div className="start-menu" role="menu" aria-label="What to connect">
+      {START_OPTIONS.map((candidate) => {
+        const entry = candidate.catalogId ? catalogEntryById(candidate.catalogId) : undefined;
+        const kind = startKindTag(candidate);
+        return (
+          <button key={candidate.id} role="menuitemradio"
+            aria-checked={candidate.id === option.id}
+            className={`start-menu-item ${candidate.id === option.id ? 'on' : ''}`}
+            data-act="start-option" data-id={candidate.id}>
+            <span className="start-menu-ico" aria-hidden="true">
+              <AppIcon icon={ICONS[candidate.icon]} />
             </span>
-          : null}
-        <span className={`cat-chev ${open ? 'open' : ''}`}>
+            <span className="start-menu-name">{candidate.label}</span>
+            {entry?.limitedSupport
+              ? <span className="start-menu-limited">Limited</span> : null}
+            {kind ? <span className="start-menu-kind">{kind}</span> : null}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function ClientMenu({ option, connectMode }: {
+  option: StartOption;
+  connectMode: ConnectModeId;
+}): ReactNode {
+  return (
+    <div className="start-menu start-menu-clients" role="menu" aria-label="How your agent connects">
+      {connectModesFor(option).map((mode) => {
+        const client = connectClientById(mode);
+        const sub = mode === 'direct'
+          ? (option.connType === 'ssh'
+              ? 'An SSH agent socket — plain ssh works'
+              : 'A Postgres DSN — any client works')
+          : client?.sub;
+        return (
+          <button key={mode} role="menuitemradio" aria-checked={mode === connectMode}
+            className={`start-menu-item ${mode === connectMode ? 'on' : ''}`}
+            data-act="start-mode" data-id={mode}>
+            <span className="start-menu-tx">
+              <span className="start-menu-name">{CONNECT_MODE_LABELS[mode]}</span>
+              {sub ? <span className="start-menu-sub">{sub}</span> : null}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function SentenceBlank({ kind, label, menu }: {
+  kind: 'tool' | 'client';
+  label: string;
+  menu: ReactNode;
+}): ReactNode {
+  const open = state.startMenuOpen === kind;
+  return (
+    <span className="start-blank-wrap">
+      <button className={`start-blank ${open ? 'on' : ''}`} data-act="start-menu" data-id={kind}
+        aria-haspopup="menu" aria-expanded={open}>
+        <span className="start-blank-tx">{label}</span>
+        <span className="start-blank-chev" aria-hidden="true">
           <AppIcon icon={ICONS.chevronDown} />
         </span>
       </button>
-      {open
-        ? <div className="connect-steps">
-            {connectGuideSteps(client, env).map((step, index) =>
-              <ConnectStepView key={`${client.id}:${index}`} step={step} number={index + 1} />)}
-            {client.note ? <div className="connect-note">{client.note}</div> : null}
-          </div>
-        : null}
+      {open ? menu : null}
+    </span>
+  );
+}
+
+function StartSentence({ option, connectMode }: {
+  option: StartOption;
+  connectMode: ConnectModeId;
+}): ReactNode {
+  return (
+    <div className="start-hero">
+      <h3 className="start-sentence">
+        {'Connect '}
+        <SentenceBlank kind="tool" label={option.label} menu={<ToolMenu option={option} />} />
+        {' to '}
+        <SentenceBlank kind="client" label={CONNECT_MODE_SENTENCE_LABELS[connectMode]}
+          menu={<ClientMenu option={option} connectMode={connectMode} />} />
+      </h3>
+      <p className="start-hero-sub">Real credentials stay in the vault. Agents get brokered
+        access you can watch and revoke.</p>
     </div>
   );
 }
 
-function RecentClients(): ReactNode {
-  const clients = recentClients();
-  if (!clients.length) return null;
-  return <>
-    <div className="connect-sec-lbl">Recently seen</div>
-    <div className="agent-block"><div className="connect-recent">
-      {clients.map((client) => <div key={client.name} className="connect-recent-row">
-        <code>{client.name}</code><span className="grow"></span>
-        <span className="s-sub">{relTime(client.at)}</span>
-      </div>)}
-    </div>
-    <div className="connect-keynote">Names are labels agents report about themselves for the
-      activity log — they aren’t identities, and access doesn’t depend on them.</div></div>
-  </>;
-}
-
-function ConnectGuides(): ReactNode {
-  const identity = state.identity;
-  if (!identity) return null;
-  const env = connectClientEnv();
-  return <>
-    <ConnectKeyCard identity={identity} />
-    <div className="connect-sec-lbl">Connect an agent</div>
-    {CONNECT_CLIENTS.map((client) => <ConnectCard key={client.id} client={client} env={env} />)}
-    <RecentClients />
-  </>;
-}
+/* ---- step 2's connect pane ---------------------------------------------- */
 
 function StartConnectPane({ mode: connectMode, option, progress }: {
   mode: ConnectModeId;
@@ -247,15 +230,43 @@ function StartConnectPane({ mode: connectMode, option, progress }: {
     <div className="start-actions">{copyButton(text, client.copyLabel)}</div></>;
 }
 
-function StartViewToggle(): ReactNode {
-  const button = (view: StartView, label: string): ReactNode => (
-    <button className={`seg-btn ${state.startView === view ? 'on' : ''}`}
-      aria-pressed={state.startView === view} data-act="start-view" data-id={view}>{label}</button>
+/* ---- the steps ----------------------------------------------------------- */
+
+type StepStatus = 'done' | 'now' | 'todo';
+
+function StartStep({ number, status, title, body }: {
+  number: number;
+  status: StepStatus;
+  title: ReactNode;
+  body: ReactNode;
+}): ReactNode {
+  const open = status === 'done' && state.startStepOpen === number;
+  const badge = status === 'done'
+    ? <span className="start-num" aria-hidden="true"><AppIcon icon={ICONS.check} /></span>
+    : <span className="start-num" aria-hidden="true">{number}</span>;
+  if (status === 'done') {
+    return (
+      <li className={`start-step done ${open ? 'open' : ''}`}>
+        {badge}
+        <div className="start-body">
+          <button className="start-step-head" data-act="start-step-toggle"
+            data-id={String(number)} aria-expanded={open}>
+            <b>{title}</b>
+            <span className={`cat-chev ${open ? 'open' : ''}`}>
+              <AppIcon icon={ICONS.chevronDown} />
+            </span>
+          </button>
+          {open ? body : null}
+        </div>
+      </li>
+    );
+  }
+  return (
+    <li className={`start-step ${status}`}>
+      {badge}
+      <div className="start-body"><b>{title}</b>{status === 'now' ? body : null}</div>
+    </li>
   );
-  return <div className="start-view-toggle"><div className="seg" role="group"
-    aria-label="Get started view">
-    {button('walkthrough', 'Quick start')}{button('guides', 'Agent guides')}
-  </div></div>;
 }
 
 function StartWalkthrough(): ReactNode {
@@ -265,9 +276,8 @@ function StartWalkthrough(): ReactNode {
   const connectMode = resolveConnectMode(state.connectMode, option);
   const addAction = catalogEntry && canQuickConnectMcp(catalogEntry)
     ? 'catalog-connect-oauth' : 'catalog-add';
-  const optionKind = startKindLabel(option);
-  const optionName = optionKind ? `${option.label} ${optionKind}` : option.label;
-  const addLabel = progress.added ? `${optionName} Connected` : `Add ${optionName}`;
+  const addVerb = addAction === 'catalog-connect-oauth' ? 'Connect' : 'Add';
+
   const directConnection = progress.toolName
     ? state.connections.find((candidate) => candidate.name === progress.toolName) ?? null
     : null;
@@ -279,6 +289,12 @@ function StartWalkthrough(): ReactNode {
         state.sshSockets[directConnection.id],
       )
     : null;
+
+  const seenAt = connectMode === 'direct' ? null : clientSeenAt(connectMode);
+  const step1Done = progress.added;
+  const step2Done = connectMode === 'direct' ? Boolean(directEndpoint) : Boolean(seenAt);
+  const clientLabel = CONNECT_MODE_LABELS[connectMode];
+
   const task = connectMode === 'direct'
     ? directStartTask(
         option,
@@ -294,59 +310,55 @@ function StartWalkthrough(): ReactNode {
           : null,
       )
     : startTask(option, progress);
-  const step = (number: number, title: string, done: boolean, body: ReactNode): ReactNode => (
-    <li className={`start-step ${done ? 'done' : ''}`}>
-      <span className="start-num" aria-hidden="true">{number}</span>
-      <div className="start-body"><b>{title}</b>{body}</div>
-    </li>
-  );
+  const shownTask = redactedStartTask(task);
+
+  const addBody = <>
+    <p>The real credential goes in the vault. Your agent only ever sees brokered access.</p>
+    <div className="start-actions">
+      <button className="btn primary sm" data-act={addAction} data-id={option.catalogId}>
+        {step1Done ? `${addVerb} another` : `${addVerb} ${option.label}`}
+      </button>
+    </div>
+  </>;
+
+  const connectBody = <>
+    <StartConnectPane mode={connectMode} option={option} progress={progress} />
+    {connectMode !== 'direct' && step1Done && !step2Done
+      ? <div className="start-waiting">
+          <span className="start-pulse" aria-hidden="true"></span>
+          Waiting for {clientLabel} to reach the broker…
+        </div>
+      : null}
+  </>;
+
   return (
     <ol className="start-steps">
-      {step(1, 'Select a tool to connect', progress.added, <>
-        <p>AgentMFA supports databases, SSH, APIs, and MCPs.</p>
-        <div className="start-picker" role="group" aria-label="What to connect">
-          {START_OPTIONS.map((candidate) => {
-            const candidateEntry = candidate.catalogId
-              ? catalogEntryById(candidate.catalogId) : undefined;
-            const kind = startKindLabel(candidate);
-            const fullLabel = kind ? `${candidate.label} ${kind}` : candidate.label;
-            return <button key={candidate.id}
-              className={`start-pick ${candidate.showPickerLabel ? 'has-label' : ''} ${
-                candidate.id === option.id ? 'on' : ''}`}
-              aria-pressed={candidate.id === option.id} aria-label={fullLabel} title={fullLabel}
-              data-act="start-option" data-id={candidate.id}>
-              <span className="start-pick-icon" aria-hidden="true">
-                <AppIcon icon={ICONS[candidate.icon]} />
-              </span>
-              {candidate.showPickerLabel
-                ? <span className="start-pick-label">{candidate.label}</span> : null}
-              {candidateEntry?.limitedSupport
-                ? <span className="start-pick-limited">Limited</span> : null}
-            </button>;
-          })}
-        </div>
-        <div className="start-actions">
-          <button className="btn primary sm" data-act={addAction} data-id={option.catalogId}
-            disabled={progress.added}>{addLabel}</button>
-        </div>
-      </>)}
-      {step(2, 'Connect your agent', recentClients().length > 0, <>
-        <div className="start-picker" role="group" aria-label="How your agent connects">
-          {connectModesFor(option).map((candidate) => (
-            <button key={candidate}
-              className={`start-pick has-label ${candidate === connectMode ? 'on' : ''}`}
-              aria-pressed={candidate === connectMode} data-act="start-mode" data-id={candidate}>
-              <span className="start-pick-label">{CONNECT_MODE_LABELS[candidate]}</span>
-            </button>
-          ))}
-        </div>
-        <StartConnectPane mode={connectMode} option={option} progress={progress} />
-      </>)}
-      {step(3, 'Ask for something useful', progress.wired, <>
-        <pre className="setup-instructions"><code>{task}</code></pre>
-        <div className="start-actions"><button className="btn primary sm"
-          data-act="copy-text" data-text={task}>Copy</button></div>
-      </>)}
+      <StartStep number={1} status={step1Done ? 'done' : 'now'}
+        title={step1Done
+          ? <>{option.label} connected · <code>{progress.toolName}</code></>
+          : `${addVerb} ${option.label}`}
+        body={addBody} />
+      <StartStep number={2}
+        status={step2Done ? 'done' : step1Done ? 'now' : 'todo'}
+        title={step2Done
+          ? connectMode === 'direct'
+            ? <>Direct address issued · <code>{progress.toolName}</code></>
+            : <>{clientLabel} connected · seen {relTime(seenAt as string)}</>
+          : connectMode === 'direct'
+            ? 'Connect your agent directly'
+            : `Connect ${clientLabel}`}
+        body={connectBody} />
+      <StartStep number={3} status={step1Done && step2Done ? 'now' : 'todo'}
+        title="Ask for something useful"
+        body={<>
+          <pre className="setup-instructions"><code>{shownTask}</code></pre>
+          {shownTask !== task
+            ? <p className="start-redact-note">The address stays redacted on screen — Copy
+                carries the real one.</p>
+            : null}
+          <div className="start-actions"><button className="btn primary sm"
+            data-act="copy-text" data-text={task}>Copy prompt</button></div>
+        </>} />
     </ol>
   );
 }
@@ -354,15 +366,14 @@ function StartWalkthrough(): ReactNode {
 export function StartViewPage({ globalSections }: {
   globalSections?: ReactNode;
 }): ReactNode {
+  const option = startOptionById(state.startOption);
+  const connectMode = resolveConnectMode(state.connectMode, option);
   return (
     <div className="start">
-      <div className="start-hero"><h3>Connect your agent to tools and services</h3></div>
-      <StartViewToggle />
+      <StartSentence option={option} connectMode={connectMode} />
       {globalSections}
       <div className="start-view-body">
-        {state.startView === 'guides'
-          ? <ConnectGuides />
-          : <StartWalkthrough />}
+        <StartWalkthrough />
       </div>
     </div>
   );

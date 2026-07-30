@@ -691,12 +691,62 @@
      document rather than a dashboard. */
   .start{ max-width: 620px; margin: 0 auto; padding: 20px 0 24px; }
   .start-hero{ text-align: center; }
-  .start-hero h3{ font-size: 1.1875rem; }
-  /* The view switch follows the shared heading; both views begin on the
-     same content line below it. */
-  .start-view-toggle{ display: flex; justify-content: center; margin-top: 14px; }
-  .start-view-toggle .seg{ display: inline-flex; margin: 0; }
-  .start-view-toggle .seg-btn{ flex: none; padding: 5px 16px; }
+  /* The hero is an editable sentence: two blanks, each a menu. */
+  .start-sentence{
+    margin: 0; font-size: 1.375rem; font-weight: 700; letter-spacing: -0.014em;
+    line-height: 1.55; text-wrap: balance;
+  }
+  .start-hero-sub{
+    margin: 7px auto 0; max-width: 52ch;
+    color: var(--muted); font-size: 0.8125rem; line-height: 1.5;
+  }
+  .start-blank-wrap{ position: relative; display: inline-block; }
+  .start-blank{
+    font: inherit; letter-spacing: inherit; color: var(--accent-ink);
+    background: var(--accent-wash); border: none; border-radius: 8px;
+    padding: 1px 7px 2px 9px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 5px; vertical-align: baseline;
+  }
+  /* The affordance is a light underline on the text itself, not a border on
+     the chip. */
+  .start-blank-tx{
+    border-bottom: 1.5px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    padding-bottom: 1px;
+  }
+  .start-blank:hover .start-blank-tx,
+  .start-blank.on .start-blank-tx{ border-bottom-color: var(--accent); }
+  .start-blank-chev{ display: inline-flex; opacity: .65; }
+  .start-blank-chev svg{ width: 13px; height: 13px; }
+  .start-menu{
+    position: absolute; left: 50%; top: calc(100% + 6px); transform: translateX(-50%);
+    z-index: 16; min-width: 232px; max-height: 324px; overflow: auto;
+    display: flex; flex-direction: column; gap: 1px; padding: 4px;
+    background: var(--panel); border: 1px solid var(--line-mid); border-radius: 9px;
+    box-shadow: 0 10px 28px rgba(10,15,40,.22);
+    font-size: 0.8125rem; font-weight: 400; letter-spacing: normal;
+    line-height: 1.4; text-align: left;
+  }
+  .start-menu-clients{ min-width: 276px; }
+  .start-menu-item{
+    display: flex; align-items: center; gap: 9px; width: 100%;
+    border: none; background: none; cursor: pointer; text-align: left;
+    padding: 6px 9px; border-radius: 6px; color: var(--ink-2);
+  }
+  .start-menu-item:hover{ background: var(--hover); }
+  .start-menu-item.on{ background: var(--accent-wash); color: var(--accent-ink); }
+  .start-menu-ico{ display: inline-flex; line-height: 0; flex: 0 0 auto; }
+  .start-menu-ico svg{ width: 15px; height: 15px; }
+  .start-menu-name{ font-weight: 600; font-size: 0.8125rem; }
+  .start-menu-tx{ display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  .start-menu-sub{ font-size: 0.71875rem; color: var(--muted); }
+  .start-menu-kind{
+    margin-left: auto; flex: 0 0 auto; font-size: 0.625rem; font-weight: 650;
+    letter-spacing: .07em; text-transform: uppercase; color: var(--muted-2);
+  }
+  .start-menu-limited{
+    padding: 1px 4px; border-radius: 4px; background: var(--amber-wash);
+    color: var(--amber-ink); font-size: 0.5625rem; font-weight: 700;
+  }
   .dd-global.start-global{
   width: 100%; max-width: none; max-height: none; overflow: visible;
   margin: 8px 0 0; padding: 0; border-bottom: 0;
@@ -711,23 +761,6 @@
   .start-view-body{ margin-top: 18px; }
   .start-global + .start-view-body{ margin-top: 14px; }
   .start-view-body > .agent-block:first-child{ margin-top: 0; }
-  /* Small toggle row: which tool the walkthrough is written for. */
-  .start-picker{ display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
-  .start-pick{
-    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-    min-width: 32px; height: 32px; padding: 5px 7px; border: 1px solid var(--line); border-radius: 8px;
-    background: var(--btn-bg); color: var(--ink-3);
-    font-size: 0.78125rem; font-weight: 600; cursor: pointer;
-  }
-  .start-pick.has-label{ padding-inline: 10px; }
-  .start-pick-icon{ display: inline-flex; align-items: center; justify-content: center; line-height: 0; }
-  .start-pick-icon svg{ width: 16px; height: 16px; }
-  .start-pick-limited{
-  padding: 1px 4px; border-radius: 4px; background: var(--amber-wash);
-  color: var(--amber-ink); font-size: 0.5625rem; font-weight: 700;
-}
-  .start-pick:hover{ background: var(--btn-hover); }
-  .start-pick.on{ border-color: var(--accent); background: var(--accent-wash); color: var(--accent-ink); }
   .start-steps{ margin: 0; padding: 0; list-style: none; }
   .start-step{ display: flex; gap: 12px; padding: 14px 0; border-top: 1px solid var(--line); }
   .start-num{
@@ -735,11 +768,49 @@
     width: 24px; height: 24px; margin-top: 1px; border-radius: 50%;
     background: var(--chip-bg); color: var(--ink-2); font-size: 0.78125rem; font-weight: 700;
   }
+  /* One step at a time: the current step carries the page's only primary
+     action, finished steps collapse to a checked line that can be reopened,
+     upcoming steps dim to a title. */
+  .start-step.now .start-num{ background: var(--accent); color: #fff; }
+  .start-step.done .start-num{
+    background: var(--ok-wash); border: 1px solid var(--ok-border); color: var(--ok-ink);
+  }
+  .start-step.done .start-num svg{ width: 13px; height: 13px; }
+  .start-step.todo .start-num{
+    background: transparent; border: 1.5px dashed var(--line-mid); color: var(--muted);
+  }
+  .start-step.todo .start-body > b{ color: var(--muted); font-weight: 600; }
+  .start-step-head{
+    display: flex; align-items: center; gap: 7px; width: 100%;
+    border: none; background: none; cursor: pointer; text-align: left;
+    padding: 0; font: inherit; color: inherit;
+  }
+  .start-step-head b{ font-size: 0.875rem; }
+  .start-step-head code{ font-size: 0.8125rem; }
+  .start-step-head .cat-chev svg{ width: 14px; height: 14px; }
+  .start-step-head .cat-chev.open{ transform: rotate(180deg); }
+  .start-step.done .start-step-head .cat-chev{ opacity: 0; }
+  .start-step.done:hover .start-step-head .cat-chev,
+  .start-step.done.open .start-step-head .cat-chev,
+  .start-step.done .start-step-head:focus-visible .cat-chev{ opacity: 1; }
+  .start-waiting{
+    display: flex; align-items: center; gap: 8px; margin-top: 12px;
+    font-size: 0.78125rem; color: var(--muted);
+  }
+  .start-pulse{
+    width: 8px; height: 8px; border-radius: 50%; background: var(--accent);
+    animation: start-pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes start-pulse{
+    0%, 100%{ opacity: 1; transform: scale(1); }
+    50%{ opacity: .35; transform: scale(.75); }
+  }
+  @media (prefers-reduced-motion: reduce){ .start-pulse{ animation: none; } }
+  .start-redact-note{ font-size: 0.71875rem; color: var(--muted); margin-top: 6px; }
   .start-body{ flex: 1; min-width: 0; }
   .start-body > b:first-child{ display: block; font-size: 0.875rem; }
   .start-body p{ margin-top: 4px; color: var(--muted); font-size: 0.78125rem; line-height: 1.5; }
   .start-body > b:first-child + p{ margin-top: 3px; }
-  .start-body > .start-picker + p{ margin-top: 10px; }
   .start-actions{ display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 9px; }
   .start-body .start-pane-next{ margin-top: 16px; color: var(--muted); }
   .start .setup-instructions{ margin-top: 9px; }
@@ -1689,57 +1760,11 @@
 }
 .act-chip-time { font-variant-numeric: tabular-nums; }
 
-/* ------------------------------ Connect page ----------------------------- */
-/* The Agents tab reborn: a key card, one guide card per agent family with
-   copyable setup snippets, and the cosmetic recently-seen list. Cards reuse
-   .agent-block; everything below is the guide anatomy. */
+/* --------------------------- Shared key card ----------------------------- */
+/* This computer's broker key, shown on the Secrets page. Reuses .agent-block. */
 .connect-keynote{ font-size: 0.78125rem; color: var(--muted); border-top: 1px solid var(--line);
   padding: 10px 16px 11px; line-height: 1.55; }
-.connect-sec-lbl{ font-size: 0.6875rem; letter-spacing: .11em; text-transform: uppercase;
-  font-weight: 700; color: var(--muted); margin: 18px 2px 8px; }
-.connect-card{ margin-bottom: 10px; }
-.connect-row{ display: flex; align-items: center; gap: 12px; width: 100%;
-  padding: 12px 16px; background: none; border: none; text-align: left;
-  color: var(--ink); cursor: pointer; border-radius: 11px; }
-.connect-row:hover{ background: var(--hover); }
-.connect-card.open .connect-row{ border-radius: 11px 11px 0 0; }
-.connect-mark{ width: 30px; height: 30px; border-radius: 8px; display: flex;
-  align-items: center; justify-content: center; font-weight: 700; font-size: 0.8125rem;
-  flex: 0 0 auto; background: var(--b-agent-bg); color: var(--b-agent-ink); }
-.connect-mark svg{ width: 16px; height: 16px; }
-.connect-mark.claude-code, .connect-mark.claude-desktop{
-  background: var(--brand-claude-bg); color: var(--brand-claude-ink); }
-.connect-mark.codex{ background: var(--brand-openai-bg); color: var(--brand-openai-ink); }
-.connect-mark.cli{ background: var(--b-ssh-bg); color: var(--b-ssh-ink); }
-.connect-tx{ display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
-.connect-tx b{ font-size: 0.84375rem; font-weight: 650; }
-.connect-tx span{ font-size: 0.75rem; color: var(--muted); }
-.connect-seen{ display: inline-flex; align-items: center; gap: 6px; font-size: 0.71875rem;
-  font-weight: 600; color: var(--ok-ink); background: var(--ok-wash);
-  border: 1px solid var(--ok-border); border-radius: 999px; padding: 2.5px 9px;
-  white-space: nowrap; }
-.connect-steps{ border-top: 1px solid var(--line); padding: 4px 16px 14px 20px; }
-.connect-step{ display: flex; gap: 12px; margin-top: 12px; }
-.connect-step-n{ width: 20px; height: 20px; border-radius: 50%; background: var(--chip-bg);
-  color: var(--ink-3); font-size: 0.6875rem; font-weight: 700; display: flex;
-  align-items: center; justify-content: center; flex: 0 0 auto; margin-top: 1px; }
-.connect-step-bd{ flex: 1; min-width: 0; }
-.connect-step-bd b{ font-size: 0.8125rem; font-weight: 600; }
-.connect-step-d{ font-size: 0.78125rem; color: var(--muted); margin-top: 1px; line-height: 1.5; }
-.connect-step-followup{ margin-top: 8px; }
-.connect-snip{ position: relative; margin-top: 8px; background: var(--code-block-bg);
-  border: 1px solid var(--line); border-radius: 7px; padding: 9px 12px; overflow-x: auto; }
-.connect-snip pre{ box-sizing: border-box; margin: 0; padding-right: 52px; }
-.connect-snip code{ font-size: 0.75rem; line-height: 1.6; white-space: pre-wrap;
-  overflow-wrap: anywhere; color: var(--ink-2); }
-.connect-copy{ position: absolute; top: 6px; right: 6px; }
-.connect-note{ font-size: 0.75rem; color: var(--muted); margin-top: 12px; }
-.connect-recent{ display: flex; flex-direction: column; }
-.connect-recent-row{ display: flex; align-items: center; gap: 10px; padding: 10px 16px;
-  border-bottom: 1px solid var(--line); font-size: 0.8125rem; }
-.connect-recent-row:last-child{ border-bottom: none; }
-.connect-recent-row code{ font-size: 0.78125rem; font-weight: 600; }
-.connect-recent-row .grow{ flex: 1; }
+.shared-key-card{ margin-bottom: 14px; }
 
 /* Connection state at a glance: green = agents on, grey = off, amber = needs attention. */
 /* The enable/disable switch — the detail header's master control. */

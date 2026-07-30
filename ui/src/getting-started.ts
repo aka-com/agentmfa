@@ -108,13 +108,16 @@ export function startOptionById(id: string): StartOption {
 }
 
 /**
- * The kind suffix folded into the tool's name (the Add button, aria labels):
- * MCP-backed tools say MCP, plain API integrations say API, databases and SSH
- * say nothing. Skipped when the name already carries it (Custom MCP).
+ * The kind tag beside a tool's name in the picker menu: databases and
+ * servers say what they are, API-backed rows say whether the broker speaks
+ * MCP or plain HTTP for them. Skipped when the name already carries it
+ * (Custom MCP).
  */
-export function startKindLabel(option: StartOption): string {
-  const kind = option.mcp ? 'MCP' : option.connType === 'api' ? 'API' : '';
-  return kind && !option.label.includes(kind) ? kind : '';
+export function startKindTag(option: StartOption): string {
+  const tag = option.connType === 'pg' ? 'database'
+    : option.connType === 'ssh' ? 'server'
+    : option.mcp ? 'MCP' : 'API';
+  return option.label.includes(tag) ? '' : tag;
 }
 
 /**
@@ -134,9 +137,19 @@ export const CONNECT_MODE_LABELS: Record<ConnectModeId, string> = {
   cli: 'Anything else (HTTP API)',
 };
 
-// Other MCP clients still have a guides card; step 2 keeps to named clients.
+/** How the hero sentence names each mode: “Connect Postgres to <this>.” */
+export const CONNECT_MODE_SENTENCE_LABELS: Record<ConnectModeId, string> = {
+  direct: 'your agent, directly',
+  'claude-code': 'Claude Code',
+  'claude-desktop': 'Claude Desktop',
+  codex: 'Codex',
+  mcp: 'another MCP client',
+  cli: 'anything else',
+};
+
+// Every way an agent can ride the shared key, in display order.
 const SHARED_KEY_MODES: ConnectModeId[] =
-  ['claude-code', 'claude-desktop', 'codex', 'cli'];
+  ['claude-code', 'claude-desktop', 'codex', 'mcp', 'cli'];
 
 /* ---- per-client definitions -------------------------------------------- */
 // One definition per client drives both step 2 of the walkthrough (the
@@ -564,4 +577,15 @@ export function directStartTask(
     ? `Connect to this Postgres DSN: ${endpoint.dsn}`
     : `Connect to the direct endpoint AgentMFA issued.`;
   return `${lead}\n\nThen ${option.taskBody}`;
+}
+
+/**
+ * The on-screen form of a task that embeds a direct endpoint: the DSN
+ * password and the unguessable agent-socket filename become bullets. The
+ * Copy button carries the real text — the screen never has to show it.
+ */
+export function redactedStartTask(task: string): string {
+  return task
+    .replace(/(:\/\/[^:@/\s]*:)[^@\s]+(?=@)/g, '$1••••••')
+    .replace(/(agent-)[0-9a-f]{6,}(\.sock)/gi, '$1••••••$2');
 }
